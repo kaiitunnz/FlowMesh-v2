@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import yaml
 
-from shared.schemas.result import BaseExecutorResult
+from shared.schemas.result import OmniResult
 from shared.tasks.specs import TaskSpecStrictBase
 from shared.utils.parsing import to_bool, to_int
 from worker.config import WorkerConfig
@@ -59,13 +59,6 @@ except Exception:
     _HAS_OMNI = False
 
 logger = logging.getLogger(__name__)
-
-
-class OmniResult(BaseExecutorResult):
-    executor: str
-    mode: str
-    model: str | None
-    items: list[dict[str, Any]]
 
 
 class OmniExecutorBase(InferenceMixin, Executor):

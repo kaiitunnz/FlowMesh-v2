@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from shared.schemas.artifact import ArtifactRef
+from shared.schemas.result import OmniText2SpeechResult, OmniSpeechItem
 from shared.schemas.governance import SpanType
 from shared.tasks.specs import TaskSpecStrictBase
 from shared.tasks.specs.omni import OmniText2SpeechSpecStrict
@@ -19,7 +20,6 @@ from .omni_executor_base import (
     Omni,
     OmniExecutorBase,
     OmniRequestOutput,
-    OmniResult,
     extract_audio_from_mm,
     extract_multimodal_output,
     save_audio,
@@ -27,14 +27,6 @@ from .omni_executor_base import (
 
 logger = logging.getLogger(__name__)
 EXECUTOR_NAME = "omni_text2speech"
-
-
-class OmniText2SpeechResult(OmniResult):
-    executor: str = EXECUTOR_NAME
-    mode: str = "tts"
-    audio: ArtifactRef | None
-    sample_rate: int
-    storyboard: dict[str, Any] | None = None
 
 
 class OmniText2SpeechExecutor(OmniExecutorBase):
@@ -108,7 +100,7 @@ class OmniText2SpeechExecutor(OmniExecutorBase):
 
         return OmniText2SpeechResult(
             model=self._model_name,
-            items=items,
+            items=[OmniSpeechItem.model_validate(it) for it in items],
             audio=items[0]["audio"] if items else None,
             sample_rate=sample_rate,
             storyboard=spec_dict.get("storyboard"),

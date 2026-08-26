@@ -22,7 +22,15 @@ from shared.utils.time import now_iso
 
 from ..artifact import ArtifactRef
 from ._base import BaseExecutorResult
-from ._payloads import EmbeddingUsage, GenerationUsage, InferenceItem
+from ._payloads import (
+    EmbeddingUsage,
+    GenerationUsage,
+    InferenceItem,
+    OmniAudioItem,
+    OmniGeneralItem,
+    OmniImageItem,
+    OmniSpeechItem,
+)
 
 
 class InferenceResult(BaseExecutorResult):
@@ -133,6 +141,64 @@ class ImageClassificationTrainingResult(_TrainingResult):
     final_model_archive: ArtifactRef | None = None
 
 
+class OmniResult(BaseExecutorResult):
+    """Fields common to every Omni-family executor's result."""
+
+    model_config = ConfigDict(extra="forbid", serialize_by_alias=True)
+
+    executor: str
+    mode: str
+    model: str | None
+
+
+class OmniText2ImageResult(OmniResult):
+    """Text-to-image generation output."""
+
+    task_type: Literal[TaskType.OMNI_TEXT2IMAGE] = TaskType.OMNI_TEXT2IMAGE
+    executor: str = "omni_text2image"
+    mode: str = "image"
+    image: ArtifactRef | None
+    items: list[OmniImageItem]
+
+
+class OmniText2SpeechResult(OmniResult):
+    """Text-to-speech generation output."""
+
+    task_type: Literal[TaskType.OMNI_TEXT2SPEECH] = TaskType.OMNI_TEXT2SPEECH
+    executor: str = "omni_text2speech"
+    mode: str = "tts"
+    audio: ArtifactRef | None
+    sample_rate: int
+    storyboard: dict[str, Any] | None = None
+    items: list[OmniSpeechItem]
+
+
+class OmniText2AudioResult(OmniResult):
+    """Text-to-audio (BGM) generation output."""
+
+    task_type: Literal[TaskType.OMNI_TEXT2AUDIO] = TaskType.OMNI_TEXT2AUDIO
+    executor: str = "omni_text2audio"
+    mode: str = "bgm"
+    audio: ArtifactRef | None
+    sample_rate: int
+    num_waveforms: int
+    audio_length: float
+    storyboard: dict[str, Any] | None = None
+    items: list[OmniAudioItem]
+
+
+class OmniText2GeneralResult(OmniResult):
+    """Text-to-general (narration) generation output."""
+
+    task_type: Literal[TaskType.OMNI_TEXT2GENERAL] = TaskType.OMNI_TEXT2GENERAL
+    executor: str = "omni_text2general"
+    mode: str = "narration"
+    audio: ArtifactRef | None
+    sample_rate: int
+    storyboard: dict[str, Any] | None = None
+    items: list[OmniGeneralItem]
+
+
 _BASE_TAG = "__base__"
 
 # Concrete result classes keyed by their ``task_type`` discriminator tag. New
@@ -147,6 +213,10 @@ _RESULT_CLASSES: dict[str, type[BaseExecutorResult]] = {
     TaskType.PPO.value: PPOResult,
     TaskType.DPO.value: DPOResult,
     TaskType.IMAGE_CLASSIFICATION_TRAINING.value: ImageClassificationTrainingResult,
+    TaskType.OMNI_TEXT2IMAGE.value: OmniText2ImageResult,
+    TaskType.OMNI_TEXT2SPEECH.value: OmniText2SpeechResult,
+    TaskType.OMNI_TEXT2AUDIO.value: OmniText2AudioResult,
+    TaskType.OMNI_TEXT2GENERAL.value: OmniText2GeneralResult,
 }
 
 _RESULT_TAGS: frozenset[str] = frozenset(_RESULT_CLASSES)
@@ -183,6 +253,10 @@ AnyExecutorResult = Annotated[
             ImageClassificationTrainingResult,
             Tag(TaskType.IMAGE_CLASSIFICATION_TRAINING.value),
         ]
+        | Annotated[OmniText2ImageResult, Tag(TaskType.OMNI_TEXT2IMAGE.value)]
+        | Annotated[OmniText2SpeechResult, Tag(TaskType.OMNI_TEXT2SPEECH.value)]
+        | Annotated[OmniText2AudioResult, Tag(TaskType.OMNI_TEXT2AUDIO.value)]
+        | Annotated[OmniText2GeneralResult, Tag(TaskType.OMNI_TEXT2GENERAL.value)]
         | Annotated[BaseExecutorResult, Tag(_BASE_TAG)]
     ),
     Discriminator(_result_discriminator),

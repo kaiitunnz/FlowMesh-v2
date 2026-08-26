@@ -29,6 +29,7 @@ except Exception:
         current_omni_platform = None
 
 from shared.schemas.artifact import ArtifactRef
+from shared.schemas.result import OmniText2AudioResult, OmniAudioItem
 from shared.schemas.governance import SpanType
 from shared.tasks.specs import TaskSpecStrictBase
 from shared.tasks.specs.omni import OmniText2AudioSpecStrict
@@ -41,22 +42,11 @@ from .omni_executor_base import (
     Omni,
     OmniExecutorBase,
     OmniRequestOutput,
-    OmniResult,
     extract_multimodal_output,
 )
 
 logger = logging.getLogger(__name__)
 EXECUTOR_NAME = "omni_text2audio"
-
-
-class OmniText2AudioResult(OmniResult):
-    executor: str = EXECUTOR_NAME
-    mode: str = "bgm"
-    audio: ArtifactRef | None
-    sample_rate: int
-    num_waveforms: int
-    audio_length: float
-    storyboard: dict[str, Any] | None = None
 
 
 class OmniText2AudioExecutor(OmniExecutorBase):
@@ -204,7 +194,7 @@ class OmniText2AudioExecutor(OmniExecutorBase):
         return OmniText2AudioResult(
             model=self._model_name,
             audio=items[0]["audio"] if items else None,
-            items=items,
+            items=[OmniAudioItem.model_validate(it) for it in items],
             sample_rate=sample_rate,
             num_waveforms=len(items),
             audio_length=audio_length,

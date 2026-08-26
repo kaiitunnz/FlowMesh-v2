@@ -22,6 +22,7 @@ else:
     OmniTextPrompt = object
 
 from shared.schemas.artifact import ArtifactRef
+from shared.schemas.result import OmniText2GeneralResult, OmniGeneralItem
 from shared.schemas.governance import SpanType
 from shared.tasks.specs import TaskSpecStrictBase
 from shared.tasks.specs.omni import OmniText2GeneralSpecStrict
@@ -35,7 +36,6 @@ from .omni_executor_base import (
     Omni,
     OmniExecutorBase,
     OmniRequestOutput,
-    OmniResult,
     RequestOutput,
     extract_audio_from_mm,
     extract_multimodal_output,
@@ -50,14 +50,6 @@ _DEFAULT_SYSTEM_PROMPT = (
     "Alibaba Group, capable of perceiving auditory and visual inputs, "
     "as well as generating text and speech."
 )
-
-
-class OmniText2GeneralResult(OmniResult):
-    executor: str = EXECUTOR_NAME
-    mode: str = "narration"
-    audio: ArtifactRef | None
-    sample_rate: int
-    storyboard: dict[str, Any] | None = None
 
 
 class OmniText2GeneralExecutor(OmniExecutorBase):
@@ -206,7 +198,7 @@ class OmniText2GeneralExecutor(OmniExecutorBase):
 
         return OmniText2GeneralResult(
             model=self._model_name,
-            items=items,
+            items=[OmniGeneralItem.model_validate(it) for it in items],
             audio=items[0]["audio"] if items else None,
             sample_rate=sample_rate,
             storyboard=spec_dict.get("storyboard"),

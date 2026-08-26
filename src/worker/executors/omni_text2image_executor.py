@@ -8,6 +8,7 @@ from typing import Any
 from PIL import Image
 
 from shared.schemas.artifact import ArtifactRef
+from shared.schemas.result import OmniText2ImageResult, OmniImageItem
 from shared.schemas.governance import SpanType
 from shared.tasks.specs import TaskSpecStrictBase
 from shared.tasks.specs.omni import OmniText2ImageSpecStrict
@@ -19,17 +20,10 @@ from .omni_executor_base import (
     Omni,
     OmniExecutorBase,
     OmniRequestOutput,
-    OmniResult,
 )
 
 logger = logging.getLogger(__name__)
 EXECUTOR_NAME = "omni_text2image"
-
-
-class OmniText2ImageResult(OmniResult):
-    executor: str = EXECUTOR_NAME
-    mode: str = "image"
-    image: ArtifactRef | None
 
 
 class OmniText2ImageExecutor(OmniExecutorBase):
@@ -101,7 +95,7 @@ class OmniText2ImageExecutor(OmniExecutorBase):
         return OmniText2ImageResult(
             model=self._model_name,
             image=items[0]["image"] if items else None,
-            items=items,
+            items=[OmniImageItem.model_validate(it) for it in items],
         )
 
     # ── model ────────────────────────────────────────────────────────────
