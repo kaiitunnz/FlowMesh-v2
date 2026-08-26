@@ -94,7 +94,12 @@ from shared.schemas.result import ResultEnvelope as SrvResultEnvelope
 from shared.schemas.worker import SSHLimits as SrvSSHLimits
 from shared.tasks.task_type import TaskType as SrvTaskType
 
-from .helpers import assert_enum_members_match, assert_fields_match
+from .helpers import (
+    assert_enum_members_match,
+    assert_extra_policy_matches,
+    assert_field_aliases_match,
+    assert_fields_match,
+)
 
 # Exact per-task-type result subclasses and their nested payload models. Each
 # name must resolve to the same-named model on both the shared and SDK sides;
@@ -207,6 +212,26 @@ MODEL_PAIRS = [
 def test_model_fields_match(server_model: type, sdk_model: type) -> None:
     """SDK model must contain all fields from the server model."""
     assert_fields_match(server_model, sdk_model)
+
+
+@pytest.mark.parametrize(
+    "server_model,sdk_model",
+    RESULT_MODEL_PAIRS,
+    ids=[f"{h.__name__}->{s.__name__}" for h, s in RESULT_MODEL_PAIRS],
+)
+def test_result_field_aliases_match(server_model: type, sdk_model: type) -> None:
+    """SDK result models must use the same wire aliases as the shared models."""
+    assert_field_aliases_match(server_model, sdk_model)
+
+
+@pytest.mark.parametrize(
+    "server_model,sdk_model",
+    RESULT_MODEL_PAIRS,
+    ids=[f"{h.__name__}->{s.__name__}" for h, s in RESULT_MODEL_PAIRS],
+)
+def test_result_extra_policy_matches(server_model: type, sdk_model: type) -> None:
+    """SDK result models must mirror the shared models' ``extra`` policy."""
+    assert_extra_policy_matches(server_model, sdk_model)
 
 
 def test_task_info_fields() -> None:
