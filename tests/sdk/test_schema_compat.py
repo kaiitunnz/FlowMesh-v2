@@ -5,6 +5,7 @@ then compares ``model_fields`` to detect drift.
 """
 
 import pytest
+from flowmesh import models as sdk_models
 
 # SDK-side imports
 from flowmesh.models import (
@@ -46,6 +47,8 @@ from flowmesh.models import (
     WorkflowValidateResponse,
     WorkflowValidateTaskEntry,
 )
+
+import shared.schemas.result as srv_results
 
 # Server-side imports (stubs installed by conftest.py)
 from server.config import NodeRole as SrvNodeRole
@@ -93,6 +96,60 @@ from shared.tasks.task_type import TaskType as SrvTaskType
 
 from .helpers import assert_enum_members_match, assert_fields_match
 
+# Exact per-task-type result subclasses and their nested payload models. Each
+# name must resolve to the same-named model on both the shared and SDK sides;
+# this list is the authoritative drift guard for the result schemas.
+_RESULT_MODEL_NAMES = [
+    # concrete result subclasses
+    "InferenceResult",
+    "EmbeddingResult",
+    "DiffusionResult",
+    "ServeResult",
+    "SFTResult",
+    "LoRAResult",
+    "PPOResult",
+    "DPOResult",
+    "ImageClassificationTrainingResult",
+    "OmniResult",
+    "OmniText2ImageResult",
+    "OmniText2SpeechResult",
+    "OmniText2AudioResult",
+    "OmniText2GeneralResult",
+    "DataProfilingResult",
+    "DataRetrievalResult",
+    "AgentResult",
+    "RAGResult",
+    "EchoResult",
+    "APIResult",
+    "SSHResult",
+    # nested payload models
+    "GenerationUsage",
+    "EmbeddingUsage",
+    "InferenceItem",
+    "OmniImageItem",
+    "OmniSpeechItem",
+    "OmniAudioItem",
+    "OmniGeneralItem",
+    "CostEstimates",
+    "DataRetrievalItem",
+    "AgentItem",
+    "AgentUsage",
+    "AgentBatchSummary",
+    "AgentMetadata",
+    "RagQdrant",
+    "RagEmbedding",
+    "RagSearch",
+    "RagUsage",
+    "RagHit",
+    "RagQuery",
+    "EchoItem",
+]
+
+RESULT_MODEL_PAIRS = [
+    (getattr(srv_results, name), getattr(sdk_models, name))
+    for name in _RESULT_MODEL_NAMES
+]
+
 # ------------------------------------------------------------------ #
 # Parametrized model-pair tests
 # ------------------------------------------------------------------ #
@@ -137,6 +194,8 @@ MODEL_PAIRS = [
     # Artifacts
     (SrvArtifactContext, ArtifactContext),
     (SrvArtifactRef, ArtifactRef),
+    # Exact result subclasses + nested payload models
+    *RESULT_MODEL_PAIRS,
 ]
 
 
