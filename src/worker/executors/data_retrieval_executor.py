@@ -17,7 +17,11 @@ import pandas as pd
 from PIL import Image
 
 from shared.schemas.artifact import ArtifactRef
-from shared.schemas.result import BaseExecutorResult
+from shared.schemas.result import (
+    BaseExecutorResult,
+    DataRetrievalItem,
+    DataRetrievalResult,
+)
 from shared.tasks.specs import DataRetrievalSpecStrict
 from shared.tasks.task_type import TaskType
 from shared.utils.json import validate_keys
@@ -30,13 +34,6 @@ from .utils.checkpoints import maybe_upload_artifacts, maybe_upload_traces
 from .utils.graph_templates import _render_template, _resolve_columns
 
 logger = logging.getLogger(__name__)
-
-
-class DataRetrievalResult(BaseExecutorResult):
-    type: str | None = None
-    items: list[dict[str, Any]] = []
-    count: int | None = None
-    metadata: dict[str, Any] | None = None
 
 
 class DataRetrievalExecutor(DataMixin, Executor):
@@ -157,7 +154,7 @@ class DataRetrievalExecutor(DataMixin, Executor):
                 )
 
         return DataRetrievalResult(
-            items=items,
+            items=[DataRetrievalItem.model_validate(it) for it in items],
             count=len(items),
         )
 
@@ -222,7 +219,7 @@ class DataRetrievalExecutor(DataMixin, Executor):
 
         return DataRetrievalResult(
             type="s3",
-            items=items,
+            items=[DataRetrievalItem.model_validate(it) for it in items],
             metadata=s3_result["metadata"],  # type: ignore
         )
 
@@ -470,7 +467,7 @@ class DataRetrievalExecutor(DataMixin, Executor):
 
         return DataRetrievalResult(
             type="lumid",
-            items=items,
+            items=[DataRetrievalItem.model_validate(it) for it in items],
             count=len(items),
         )
 

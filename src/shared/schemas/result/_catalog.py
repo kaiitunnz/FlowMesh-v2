@@ -23,6 +23,12 @@ from shared.utils.time import now_iso
 from ..artifact import ArtifactRef
 from ._base import BaseExecutorResult
 from ._payloads import (
+    AgentItem,
+    AgentMetadata,
+    AgentUsage,
+    CostEstimates,
+    DataRetrievalItem,
+    EchoItem,
     EmbeddingUsage,
     GenerationUsage,
     InferenceItem,
@@ -30,6 +36,11 @@ from ._payloads import (
     OmniGeneralItem,
     OmniImageItem,
     OmniSpeechItem,
+    RagEmbedding,
+    RagQdrant,
+    RagQuery,
+    RagSearch,
+    RagUsage,
 )
 
 
@@ -199,6 +210,100 @@ class OmniText2GeneralResult(OmniResult):
     items: list[OmniGeneralItem]
 
 
+class DataProfilingResult(BaseExecutorResult):
+    """Data-profiling output."""
+
+    model_config = ConfigDict(extra="forbid", serialize_by_alias=True)
+
+    task_type: Literal[TaskType.DATA_PROFILING] = TaskType.DATA_PROFILING
+    type: str = "sql"
+    template: str | None = None
+    cost_estimates: CostEstimates | None = None
+
+
+class DataRetrievalResult(BaseExecutorResult):
+    """Data-retrieval output. ``metadata`` is connector-specific passthrough."""
+
+    model_config = ConfigDict(extra="forbid", serialize_by_alias=True)
+
+    task_type: Literal[TaskType.DATA_RETRIEVAL] = TaskType.DATA_RETRIEVAL
+    type: str | None = None
+    items: list[DataRetrievalItem] = Field(default_factory=list)
+    count: int | None = None
+    metadata: dict[str, Any] | None = None
+
+
+class AgentResult(BaseExecutorResult):
+    """Agent execution output."""
+
+    model_config = ConfigDict(extra="forbid", serialize_by_alias=True)
+
+    task_type: Literal[TaskType.AGENT] = TaskType.AGENT
+    model: str
+    items: list[AgentItem] = Field(default_factory=list)
+    usage: AgentUsage | None = None
+    metadata: AgentMetadata | None = None
+    agent_output: ArtifactRef | None = None
+    batch_summary_file: ArtifactRef | None = None
+
+
+class RAGResult(BaseExecutorResult):
+    """RAG query output."""
+
+    model_config = ConfigDict(extra="forbid", serialize_by_alias=True)
+
+    task_type: Literal[TaskType.RAG] = TaskType.RAG
+    executor: str = "rag"
+    qdrant: RagQdrant
+    embedding: RagEmbedding
+    search: RagSearch
+    queries: list[RagQuery] = Field(default_factory=list)
+    usage: RagUsage | None = None
+
+
+class EchoResult(BaseExecutorResult):
+    """Echo output."""
+
+    model_config = ConfigDict(extra="forbid", serialize_by_alias=True)
+
+    task_type: Literal[TaskType.ECHO] = TaskType.ECHO
+    items: list[EchoItem] = Field(default_factory=list)
+    count: int = 0
+
+
+class APIResult(BaseExecutorResult):
+    """HTTP request output. ``response_json``/``usage``/``headers`` are the
+    upstream API's own payloads and stay open mappings."""
+
+    model_config = ConfigDict(extra="forbid", serialize_by_alias=True)
+
+    task_type: Literal[TaskType.API] = TaskType.API
+    executor: str
+    method: str
+    url: str
+    status_code: int
+    truncated: bool = False
+    headers: dict[str, str] | None = None
+    response_json: Any = Field(default=None, alias="json")
+    usage: dict[str, Any] | None = None
+    text: str | None = None
+
+
+class SSHResult(BaseExecutorResult):
+    """SSH session output."""
+
+    model_config = ConfigDict(extra="forbid", serialize_by_alias=True)
+
+    task_type: Literal[TaskType.SSH] = TaskType.SSH
+    session_id: str
+    exit_code: int
+    command: list[str] | None = None
+    entrypoint: list[str] | None = None
+    expires_at: str | None = None
+    host: str | None = None
+    port: int | None = None
+
+
 _BASE_TAG = "__base__"
 
 # Concrete result classes keyed by their ``task_type`` discriminator tag. New
@@ -217,6 +322,13 @@ _RESULT_CLASSES: dict[str, type[BaseExecutorResult]] = {
     TaskType.OMNI_TEXT2SPEECH.value: OmniText2SpeechResult,
     TaskType.OMNI_TEXT2AUDIO.value: OmniText2AudioResult,
     TaskType.OMNI_TEXT2GENERAL.value: OmniText2GeneralResult,
+    TaskType.DATA_PROFILING.value: DataProfilingResult,
+    TaskType.DATA_RETRIEVAL.value: DataRetrievalResult,
+    TaskType.AGENT.value: AgentResult,
+    TaskType.RAG.value: RAGResult,
+    TaskType.ECHO.value: EchoResult,
+    TaskType.API.value: APIResult,
+    TaskType.SSH.value: SSHResult,
 }
 
 _RESULT_TAGS: frozenset[str] = frozenset(_RESULT_CLASSES)
@@ -257,6 +369,13 @@ AnyExecutorResult = Annotated[
         | Annotated[OmniText2SpeechResult, Tag(TaskType.OMNI_TEXT2SPEECH.value)]
         | Annotated[OmniText2AudioResult, Tag(TaskType.OMNI_TEXT2AUDIO.value)]
         | Annotated[OmniText2GeneralResult, Tag(TaskType.OMNI_TEXT2GENERAL.value)]
+        | Annotated[DataProfilingResult, Tag(TaskType.DATA_PROFILING.value)]
+        | Annotated[DataRetrievalResult, Tag(TaskType.DATA_RETRIEVAL.value)]
+        | Annotated[AgentResult, Tag(TaskType.AGENT.value)]
+        | Annotated[RAGResult, Tag(TaskType.RAG.value)]
+        | Annotated[EchoResult, Tag(TaskType.ECHO.value)]
+        | Annotated[APIResult, Tag(TaskType.API.value)]
+        | Annotated[SSHResult, Tag(TaskType.SSH.value)]
         | Annotated[BaseExecutorResult, Tag(_BASE_TAG)]
     ),
     Discriminator(_result_discriminator),

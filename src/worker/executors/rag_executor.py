@@ -16,7 +16,14 @@ from urllib.parse import urlparse
 from datasets import load_dataset
 from qdrant_client import QdrantClient, models
 
-from shared.schemas.result import BaseExecutorResult
+from shared.schemas.result import (
+    RagEmbedding,
+    RagQdrant,
+    RagQuery,
+    RAGResult,
+    RagSearch,
+    RagUsage,
+)
 from shared.tasks.specs import RagSpecStrict
 from shared.tasks.task_type import TaskType
 
@@ -25,15 +32,6 @@ from .utils.graph_templates import Message, build_prompts_from_graph_template
 
 logger = logging.getLogger("worker.rag")
 EXECUTOR_NAME = "rag"
-
-
-class RAGResult(BaseExecutorResult):
-    executor: str = EXECUTOR_NAME
-    qdrant: dict[str, Any]
-    embedding: dict[str, Any]
-    search: dict[str, Any]
-    queries: list[dict[str, Any]] = []
-    usage: dict[str, Any] | None = None
 
 
 class RAGExecutor(Executor):
@@ -197,13 +195,13 @@ class RAGExecutor(Executor):
             "RAG query completed queries=%d total_results=%d", len(queries), total_items
         )
         return RAGResult(
-            qdrant={"collection": collection, "url": url},
-            embedding={"model": model_name},
-            search={"top_k": top_k},
-            queries=results_per_query,
-            usage={
-                "latency_sec": round(time.time() - start_ts, 4),
-                "num_queries": len(queries),
-                "total_results": total_items,
-            },
+            qdrant=RagQdrant(collection=collection, url=url),
+            embedding=RagEmbedding(model=model_name),
+            search=RagSearch(top_k=top_k),
+            queries=[RagQuery.model_validate(q) for q in results_per_query],
+            usage=RagUsage(
+                latency_sec=round(time.time() - start_ts, 4),
+                num_queries=len(queries),
+                total_results=total_items,
+            ),
         )

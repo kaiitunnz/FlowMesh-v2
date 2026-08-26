@@ -2,7 +2,13 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from shared.schemas.result import BaseExecutorResult
+from shared.schemas.result import (
+    BaseExecutorResult,
+)
+from shared.schemas.result import EchoItem as EchoResultItem
+from shared.schemas.result import (
+    EchoResult,
+)
 from shared.tasks.specs import EchoSpecStrict
 from shared.tasks.task_type import TaskType
 
@@ -14,11 +20,6 @@ from .utils.graph_templates import _evaluate_expr
 logger = logging.getLogger(__name__)
 
 type EchoItem = str | dict[str, str]
-
-
-class EchoResult(BaseExecutorResult):
-    items: list[dict[str, Any]] = []
-    count: int = 0
 
 
 class EchoExecutor(DataMixin, Executor):
@@ -93,7 +94,10 @@ class EchoExecutor(DataMixin, Executor):
                 resolved = self._resolve_item(item, context)
                 self._append_outputs(merged_items, resolved)
 
-            result = EchoResult(items=merged_items, count=len(merged_items))
+            result = EchoResult(
+                items=[EchoResultItem.model_validate(it) for it in merged_items],
+                count=len(merged_items),
+            )
             deps = self._extract_source_data_ids(spec)
             dependencies_by_task = {task_id: deps}
 
