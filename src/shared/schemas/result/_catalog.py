@@ -1,9 +1,7 @@
 """Concrete per-task-type result models and the ``task_type`` union.
 
-Importing ``TaskType`` here pulls ``shared.tasks`` (via ``specs.common``,
-which imports ``BaseExecutorResult`` back). The package ``__init__`` imports
-``_base`` first, so the base is already bound in the package namespace when
-that re-entrant import happens.
+Importing ``TaskType`` re-enters the package through ``shared.tasks.specs.common``;
+``__init__`` binds ``_base`` first so ``BaseExecutorResult`` is available then.
 """
 
 from typing import Annotated, Any, Literal
@@ -306,32 +304,30 @@ class SSHResult(BaseExecutorResult):
 
 _BASE_TAG = "__base__"
 
-# Concrete result classes keyed by their ``task_type`` discriminator tag. New
-# task-type families extend this map; the union and tag set derive from it.
-_RESULT_CLASSES: dict[str, type[BaseExecutorResult]] = {
-    TaskType.INFERENCE.value: InferenceResult,
-    TaskType.EMBEDDING.value: EmbeddingResult,
-    TaskType.DIFFUSION.value: DiffusionResult,
-    TaskType.SERVE.value: ServeResult,
-    TaskType.SFT.value: SFTResult,
-    TaskType.LORA_SFT.value: LoRAResult,
-    TaskType.PPO.value: PPOResult,
-    TaskType.DPO.value: DPOResult,
-    TaskType.IMAGE_CLASSIFICATION_TRAINING.value: ImageClassificationTrainingResult,
-    TaskType.OMNI_TEXT2IMAGE.value: OmniText2ImageResult,
-    TaskType.OMNI_TEXT2SPEECH.value: OmniText2SpeechResult,
-    TaskType.OMNI_TEXT2AUDIO.value: OmniText2AudioResult,
-    TaskType.OMNI_TEXT2GENERAL.value: OmniText2GeneralResult,
-    TaskType.DATA_PROFILING.value: DataProfilingResult,
-    TaskType.DATA_RETRIEVAL.value: DataRetrievalResult,
-    TaskType.AGENT.value: AgentResult,
-    TaskType.RAG.value: RAGResult,
-    TaskType.ECHO.value: EchoResult,
-    TaskType.API.value: APIResult,
-    TaskType.SSH.value: SSHResult,
-}
-
-_RESULT_TAGS: frozenset[str] = frozenset(_RESULT_CLASSES)
+_RESULT_TAGS: frozenset[str] = frozenset(
+    {
+        TaskType.INFERENCE.value,
+        TaskType.EMBEDDING.value,
+        TaskType.DIFFUSION.value,
+        TaskType.SERVE.value,
+        TaskType.SFT.value,
+        TaskType.LORA_SFT.value,
+        TaskType.PPO.value,
+        TaskType.DPO.value,
+        TaskType.IMAGE_CLASSIFICATION_TRAINING.value,
+        TaskType.OMNI_TEXT2IMAGE.value,
+        TaskType.OMNI_TEXT2SPEECH.value,
+        TaskType.OMNI_TEXT2AUDIO.value,
+        TaskType.OMNI_TEXT2GENERAL.value,
+        TaskType.DATA_PROFILING.value,
+        TaskType.DATA_RETRIEVAL.value,
+        TaskType.AGENT.value,
+        TaskType.RAG.value,
+        TaskType.ECHO.value,
+        TaskType.API.value,
+        TaskType.SSH.value,
+    }
+)
 
 
 def _result_discriminator(value: Any) -> str:
