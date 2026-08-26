@@ -20,12 +20,12 @@ pytest.importorskip("datasets", reason="datasets not installed (needs worker run
 import torch
 from safetensors.torch import load_file
 
+from shared.schemas.result import EmbeddingResult
 from shared.tasks.components.model import ModelConfig, ModelSource
 from shared.tasks.specs import EmbeddingSpecStrict
 from shared.tasks.task_type import TaskType
 from tests.worker.factories import DEFAULT_WORKER_CONFIG, make_worker_task_message
 from worker.executors.base_executor import ExecutionError
-from shared.schemas.result import EmbeddingResult
 from worker.executors.vllm_embedding_executor import VLLMEmbeddingExecutor
 from worker.runner import Runner
 

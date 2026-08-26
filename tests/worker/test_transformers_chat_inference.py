@@ -9,6 +9,7 @@ torch = pytest.importorskip(
     "torch", reason="torch not installed (needs --extra inference)"
 )
 
+from shared.schemas.result import InferenceResult
 from shared.tasks.components import (
     JsonlExportSpec,
     PostprocessSpec,
@@ -116,6 +117,7 @@ def test_transformers_executor_supports_chat_prompts_and_jsonl_export(
         result = executor.run(task, tmp_path)
     mock_ensure_model.assert_called_once_with(spec)
 
+    assert isinstance(result, InferenceResult)
     assert [item.output for item in result.items] == [
         "first answer",
         "second answer",
@@ -124,7 +126,7 @@ def test_transformers_executor_supports_chat_prompts_and_jsonl_export(
         "<chat>hello</chat>",
         "<chat>world</chat>",
     ]
-    assert [item.metadata["row_id"] for item in result.items] == ["a", "b"]
+    assert [(item.metadata or {})["row_id"] for item in result.items] == ["a", "b"]
     assert result.usage is not None
     assert result.usage.num_requests == 2
     assert result.usage.latency_sec >= 0.0

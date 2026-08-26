@@ -330,8 +330,9 @@ class TestDataRetrievalExecutorLumidBranch:
         assert result.type == "lumid"
         assert result.count == 1
         item = result.items[0]
-        assert "NVDA" in item.description
+        assert item.description is not None and "NVDA" in item.description
         assert item.run_id == "run-abc"
+        assert item.transcript_url is not None
         assert item.transcript_url.endswith("transcript")
         assert item.table is not None
 

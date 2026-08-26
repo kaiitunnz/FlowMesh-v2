@@ -29,8 +29,8 @@ except Exception:
         current_omni_platform = None
 
 from shared.schemas.artifact import ArtifactRef
-from shared.schemas.result import OmniText2AudioResult, OmniAudioItem
 from shared.schemas.governance import SpanType
+from shared.schemas.result import OmniAudioItem, OmniText2AudioResult
 from shared.tasks.specs import TaskSpecStrictBase
 from shared.tasks.specs.omni import OmniText2AudioSpecStrict
 from shared.tasks.task_type import TaskType

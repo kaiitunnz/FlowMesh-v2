@@ -22,8 +22,8 @@ else:
     OmniTextPrompt = object
 
 from shared.schemas.artifact import ArtifactRef
-from shared.schemas.result import OmniText2GeneralResult, OmniGeneralItem
 from shared.schemas.governance import SpanType
+from shared.schemas.result import OmniGeneralItem, OmniText2GeneralResult
 from shared.tasks.specs import TaskSpecStrictBase
 from shared.tasks.specs.omni import OmniText2GeneralSpecStrict
 from shared.tasks.task_type import TaskType

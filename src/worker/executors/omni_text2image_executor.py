@@ -8,8 +8,8 @@ from typing import Any
 from PIL import Image
 
 from shared.schemas.artifact import ArtifactRef
-from shared.schemas.result import OmniText2ImageResult, OmniImageItem
 from shared.schemas.governance import SpanType
+from shared.schemas.result import OmniImageItem, OmniText2ImageResult
 from shared.tasks.specs import TaskSpecStrictBase
 from shared.tasks.specs.omni import OmniText2ImageSpecStrict
 from shared.tasks.task_type import TaskType

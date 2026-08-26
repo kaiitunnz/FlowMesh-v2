@@ -6,8 +6,8 @@ from pathlib import Path
 from typing import Any
 
 from shared.schemas.artifact import ArtifactRef
-from shared.schemas.result import OmniText2SpeechResult, OmniSpeechItem
 from shared.schemas.governance import SpanType
+from shared.schemas.result import OmniSpeechItem, OmniText2SpeechResult
 from shared.tasks.specs import TaskSpecStrictBase
 from shared.tasks.specs.omni import OmniText2SpeechSpecStrict
 from shared.tasks.task_type import TaskType
