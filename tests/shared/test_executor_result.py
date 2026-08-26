@@ -94,4 +94,4 @@ def test_upstream_results_preserve_subclass_payload_over_the_wire() -> None:
     reloaded = EchoSpecStrict.model_validate_json(spec.model_dump_json(by_alias=True))
     assert reloaded.upstreamResults is not None
     injected = reloaded.upstreamResults["echo-a"]
-    assert getattr(injected, "items")[0]["output"] == "literal_from_a"
+    assert injected.model_dump()["items"][0]["output"] == "literal_from_a"

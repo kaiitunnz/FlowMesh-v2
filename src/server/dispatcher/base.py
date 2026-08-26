@@ -1001,9 +1001,10 @@ class Dispatcher:
         value = self._dig_path(envelope.result, path.split("."))
         if value is None:
             raise ValueError(f"Missing value for reference '{expr}'")
-        # If the referenced value is an artifact ref ({path: "..."}), render
-        # it as a full URL (when base_url is set) or an absolute filesystem
-        # path using the producing stage's top-level _artifacts context.
+        # If the referenced value is an artifact ref (an ``ArtifactRef`` or a
+        # legacy ``{path: ...}`` dict), render it as a full URL (when base_url
+        # is set) or an absolute filesystem path using the producing stage's
+        # top-level _artifacts context.
         if rendered := self._render_artifact_ref(value, envelope):
             return rendered
         return value
