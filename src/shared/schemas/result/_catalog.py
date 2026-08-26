@@ -69,6 +69,70 @@ class ServeResult(BaseExecutorResult):
     port: int
 
 
+class _TrainingResult(BaseExecutorResult):
+    """Fields common to every training executor's result."""
+
+    model_config = ConfigDict(extra="forbid", serialize_by_alias=True)
+
+    training_time_seconds: float | None = None
+    error_message: str | None = None
+    model_name: str | None = None
+    dataset_size: int = 0
+    output_dir: str | None = None
+    checkpoints_dir: ArtifactRef | None = None
+
+
+class SFTResult(_TrainingResult):
+    """Supervised fine-tuning output."""
+
+    task_type: Literal[TaskType.SFT] = TaskType.SFT
+    resume_from_path: str | None = None
+    final_model: ArtifactRef | None = None
+    final_model_archive: ArtifactRef | None = None
+    spawned_torchrun: bool = False
+
+
+class LoRAResult(_TrainingResult):
+    """LoRA supervised fine-tuning output."""
+
+    task_type: Literal[TaskType.LORA_SFT] = TaskType.LORA_SFT
+    resume_from_path: str | None = None
+    final_lora: ArtifactRef | None = None
+    final_lora_archive: ArtifactRef | None = None
+
+
+class PPOResult(_TrainingResult):
+    """PPO training output."""
+
+    task_type: Literal[TaskType.PPO] = TaskType.PPO
+    final_model: ArtifactRef | None = None
+    final_model_archive: ArtifactRef | None = None
+    spawned_torchrun: bool = False
+
+
+class DPOResult(_TrainingResult):
+    """DPO training output."""
+
+    task_type: Literal[TaskType.DPO] = TaskType.DPO
+    final_model: ArtifactRef | None = None
+    final_model_archive: ArtifactRef | None = None
+    spawned_torchrun: bool = False
+
+
+class ImageClassificationTrainingResult(_TrainingResult):
+    """Image-classification training output."""
+
+    task_type: Literal[TaskType.IMAGE_CLASSIFICATION_TRAINING] = (
+        TaskType.IMAGE_CLASSIFICATION_TRAINING
+    )
+    num_labels: int = 0
+    eval_accuracy: float | None = None
+    train_losses: list[float] = Field(default_factory=list)
+    resume_from_path: str | None = None
+    final_model: ArtifactRef | None = None
+    final_model_archive: ArtifactRef | None = None
+
+
 _BASE_TAG = "__base__"
 
 # Concrete result classes keyed by their ``task_type`` discriminator tag. New
@@ -78,6 +142,11 @@ _RESULT_CLASSES: dict[str, type[BaseExecutorResult]] = {
     TaskType.EMBEDDING.value: EmbeddingResult,
     TaskType.DIFFUSION.value: DiffusionResult,
     TaskType.SERVE.value: ServeResult,
+    TaskType.SFT.value: SFTResult,
+    TaskType.LORA_SFT.value: LoRAResult,
+    TaskType.PPO.value: PPOResult,
+    TaskType.DPO.value: DPOResult,
+    TaskType.IMAGE_CLASSIFICATION_TRAINING.value: ImageClassificationTrainingResult,
 }
 
 _RESULT_TAGS: frozenset[str] = frozenset(_RESULT_CLASSES)
@@ -106,6 +175,14 @@ AnyExecutorResult = Annotated[
         | Annotated[EmbeddingResult, Tag(TaskType.EMBEDDING.value)]
         | Annotated[DiffusionResult, Tag(TaskType.DIFFUSION.value)]
         | Annotated[ServeResult, Tag(TaskType.SERVE.value)]
+        | Annotated[SFTResult, Tag(TaskType.SFT.value)]
+        | Annotated[LoRAResult, Tag(TaskType.LORA_SFT.value)]
+        | Annotated[PPOResult, Tag(TaskType.PPO.value)]
+        | Annotated[DPOResult, Tag(TaskType.DPO.value)]
+        | Annotated[
+            ImageClassificationTrainingResult,
+            Tag(TaskType.IMAGE_CLASSIFICATION_TRAINING.value),
+        ]
         | Annotated[BaseExecutorResult, Tag(_BASE_TAG)]
     ),
     Discriminator(_result_discriminator),

@@ -16,10 +16,15 @@ from ._base import BaseExecutorResult
 from ._catalog import (
     AnyExecutorResult,
     DiffusionResult,
+    DPOResult,
     EmbeddingResult,
+    ImageClassificationTrainingResult,
     InferenceResult,
+    LoRAResult,
+    PPOResult,
     ResultEnvelope,
     ServeResult,
+    SFTResult,
 )
 from ._io import read_result, result_file_path, write_result
 from ._payloads import (
@@ -36,6 +41,11 @@ _RESULT_MODELS: tuple[type[BaseModel], ...] = (
     EmbeddingResult,
     DiffusionResult,
     ServeResult,
+    SFTResult,
+    LoRAResult,
+    PPOResult,
+    DPOResult,
+    ImageClassificationTrainingResult,
     ResultEnvelope,
 )
 for _model in _RESULT_MODELS:
@@ -44,13 +54,18 @@ for _model in _RESULT_MODELS:
 __all__ = [
     "AnyExecutorResult",
     "BaseExecutorResult",
+    "DPOResult",
     "DiffusionResult",
     "EmbeddingResult",
     "EmbeddingUsage",
     "GenerationUsage",
+    "ImageClassificationTrainingResult",
     "InferenceItem",
     "InferenceResult",
+    "LoRAResult",
+    "PPOResult",
     "ResultEnvelope",
+    "SFTResult",
     "ServeResult",
     "read_result",
     "result_file_path",
