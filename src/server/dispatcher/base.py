@@ -8,6 +8,7 @@ from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
+from shared.schemas.artifact import ArtifactRef
 from shared.schemas.event import TaskEvent
 from shared.schemas.result import (
     BaseExecutorResult,
@@ -1009,9 +1010,12 @@ class Dispatcher:
 
     @staticmethod
     def _render_artifact_ref(value: Any, stage_result: ResultEnvelope) -> str | None:
-        if not isinstance(value, dict):
+        if isinstance(value, ArtifactRef):
+            path_value: str | None = value.path
+        elif isinstance(value, dict):
+            path_value = value.get("path")
+        else:
             return None
-        path_value = value.get("path")
         if not isinstance(path_value, str) or not path_value:
             return None
         ctx = stage_result.result.artifacts_
