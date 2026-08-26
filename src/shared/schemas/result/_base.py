@@ -1,10 +1,8 @@
 """Base executor-result model.
 
-Kept free of any ``shared.tasks`` import so it can be bound into the package
-namespace before the concrete catalog pulls ``TaskType`` (which transitively
-imports ``shared.tasks.specs.common``, and that imports this base back).
-``children`` is a forward reference to ``AnyExecutorResult``; the package
-``__init__`` rebuilds this model once the union exists.
+Free of any ``shared.tasks`` import so it binds before ``_catalog`` pulls
+``TaskType``, whose import chain re-enters this module. ``children`` is a forward
+reference to ``AnyExecutorResult``, resolved when ``__init__`` rebuilds the model.
 """
 
 # Necessary for the recursive ``children`` forward reference.

@@ -1,9 +1,9 @@
 """Stage-reference artifact rendering in the dispatcher.
 
-A cross-stage reference like ``${lora-train.final_lora_archive}`` resolves to a
-result field that the typed-result schema now models as an ``ArtifactRef``. The
-dispatcher must render it to a URL just as it did for the legacy ``{"path": ...}``
-dict, or the downstream task's spec fails validation with the raw object.
+A cross-stage reference like ``${lora-train.final_lora_archive}`` resolves to an
+``ArtifactRef`` result field. The dispatcher renders it to a URL; a bare
+``{"path": ...}`` dict renders the same way. An unrenderable value fails the
+downstream task's spec validation.
 """
 
 from server.dispatcher.base import Dispatcher
@@ -39,7 +39,7 @@ def test_render_typed_artifact_ref_to_filesystem_path() -> None:
     assert rendered == "/data/results/tsk-abc/artifacts/final_lora.tar"
 
 
-def test_render_legacy_dict_ref_still_supported() -> None:
+def test_render_dict_ref_to_url() -> None:
     result = LoRAResult(
         _artifacts=ArtifactContext(
             base_dir="/data/results/tsk-abc", base_url="http://srv:8000"

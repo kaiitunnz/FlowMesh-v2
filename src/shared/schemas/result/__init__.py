@@ -1,13 +1,10 @@
-"""Executor result schemas: base, exact per-task-type models, and the
-``task_type`` discriminated union used to deserialize ``results.json``
-end-to-end.
+"""Executor result schemas: the base model, exact per-task-type models, and the
+``task_type`` discriminated union that deserializes ``results.json``.
 
-Import order matters. ``_base`` binds ``BaseExecutorResult`` into this package
-namespace first, so the re-entrant ``from shared.schemas.result import
-BaseExecutorResult`` performed by ``shared.tasks.specs.common`` (pulled in when
-``_catalog`` imports ``TaskType``) resolves. The recursive ``children`` field
-is a forward reference to ``AnyExecutorResult``; every model carrying it is
-rebuilt below once the union exists.
+``_base`` imports before ``_catalog``: importing ``TaskType`` re-enters this
+package through ``shared.tasks.specs.common``, which needs ``BaseExecutorResult``
+already bound. Models carrying the recursive ``children`` field are rebuilt below
+once ``AnyExecutorResult`` exists.
 """
 
 from pydantic import BaseModel
