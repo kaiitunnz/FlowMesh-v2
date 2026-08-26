@@ -6,7 +6,14 @@ from typing import Any
 from pydantic import Field
 
 from shared.schemas.artifact import ArtifactContext, ArtifactRef
-from shared.schemas.result import BaseExecutorResult, ResultEnvelope
+from shared.schemas.result import (
+    BaseExecutorResult,
+    EchoItem,
+    EchoResult,
+    ResultEnvelope,
+)
+from shared.tasks.specs import EchoSpecStrict
+from shared.tasks.task_type import TaskType
 
 
 class _SampleResult(BaseExecutorResult):
@@ -69,3 +76,22 @@ def test_envelope_round_trip_preserves_subclass_payload() -> None:
     dumped = parsed.result.model_dump()
     assert dumped["items"] == [{"output": "hello"}]
     assert dumped["usage"] == {"total_tokens": 7}
+
+
+def test_upstream_results_preserve_subclass_payload_over_the_wire() -> None:
+    """A server-injected upstream result keeps its subclass payload when the
+    task spec is serialized to the worker.
+
+    ``upstreamResults`` is typed with the base class, so without
+    ``SerializeAsAny`` the subclass fields a downstream graph node reads
+    (e.g. ``items[0].output``) would be stripped on the wire and arrive empty.
+    """
+    upstream = EchoResult(items=[EchoItem(output="literal_from_a")])
+    spec = EchoSpecStrict(taskType=TaskType.ECHO).model_copy(
+        update={"upstreamResults": {"echo-a": upstream}}
+    )
+
+    reloaded = EchoSpecStrict.model_validate_json(spec.model_dump_json(by_alias=True))
+    assert reloaded.upstreamResults is not None
+    injected = reloaded.upstreamResults["echo-a"]
+    assert getattr(injected, "items")[0]["output"] == "literal_from_a"
