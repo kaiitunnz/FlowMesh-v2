@@ -17,12 +17,7 @@ from typing import Any
 from datasets import load_dataset
 
 from shared.schemas.artifact import ArtifactRef
-from shared.schemas.result import (
-    AgentItem,
-    AgentMetadata,
-    AgentResult,
-    AgentUsage,
-)
+from shared.schemas.result import AgentItem, AgentMetadata, AgentResult, AgentUsage
 from shared.tasks.specs import AgentSpecStrict
 from shared.tasks.task_type import TaskType
 

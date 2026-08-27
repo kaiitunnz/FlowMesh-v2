@@ -2,13 +2,9 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from shared.schemas.result import (
-    BaseExecutorResult,
-)
+from shared.schemas.result import BaseExecutorResult
 from shared.schemas.result import EchoItem as EchoResultItem
-from shared.schemas.result import (
-    EchoResult,
-)
+from shared.schemas.result import EchoResult
 from shared.tasks.specs import EchoSpecStrict
 from shared.tasks.task_type import TaskType
 
