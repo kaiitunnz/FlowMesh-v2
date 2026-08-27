@@ -56,7 +56,9 @@ The runtime is two top-level processes:
 ## Object IDs
 
 3-char prefixes: `wfl-` workflows, `tsk-` tasks, `ssn-` SSH sessions,
-`scn-` SSH connection rows, `cmd-` supervisor commands. Always use
+`scn-` SSH connection rows, `cmd-` supervisor commands. The v2 orchestration
+ledger adds `act-` activations, `scp-` scopes, `wki-` work items, `att-`
+attempts, `inv-` invocations, and `agr-` authority grants. Always use
 `new_*_id()` helpers in `src/shared/utils/ids.py`. Never use `uuid4()` or
 `secrets.token_hex` for IDs.
 
@@ -88,6 +90,8 @@ src/
     services/             monitoring, log streaming, ssh forwarding, runtime
     supervisor/           Per-node agent (gRPC server, adapters, lifecycle)
     task/                 parser, runtime, models, merge / epoch helpers
+      v2/                   versioned representations, compiler
+        orchestration/        durable orchestration ledger (DS), engine, outcomes
     utils/                concurrent, helpers, logging, misc, time
   shared/
     grpc/supervisor/v1/   Generated proto stubs (server + worker)
@@ -112,6 +116,19 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
 
 ## Key runtime behavior
 
+- **v2 orchestration ledger (`DS`).** A submission with `apiVersion:
+  flowmesh/v2` compiles to a `PhysicalExecutionPlan` and runs through a durable
+  orchestration ledger (`src/server/task/v2/orchestration/`) that owns semantic
+  readiness: it turns settled records into ready work items over the acyclic
+  compatibility plan, incrementally materializing the activation graph instead of
+  precreating attempts. A ready work item dispatches through the existing
+  `TaskRuntime`/dispatcher, so scheduler placement stays physical and cannot
+  change logical readiness. Retries create new attempts under the same work item
+  and reuse its `invocation_id`; declared outputs publish idempotently to result
+  slots keyed by `(instance, declaration, logical key)`, and the legacy per-task
+  result adapter resolves the induced `legacy:<task>` slot. The ledger snapshot
+  is persisted at `workflow:{id}:ds` and rebuilt on restart by
+  `TaskRuntime.rehydrate`. The default v1 static-DAG path is unchanged.
 - **Task merging.** Compatible adjacent tasks in a DAG (same `taskType`,
   model, hardware shape, and merge key) coalesce into a single dispatch.
   Merged children ride on `WorkerTaskMessage.merged_children`; the worker
