@@ -163,7 +163,7 @@ class OmniText2GeneralExecutor(OmniExecutorBase):
             )
 
         artifacts_dir = out_dir / "artifacts"
-        items: list[dict[str, Any]] = []
+        items: list[OmniGeneralItem] = []
         multi = len(audio_results) > 1
         with self._span(
             "output postprocessing",
@@ -183,23 +183,22 @@ class OmniText2GeneralExecutor(OmniExecutorBase):
                 )
                 save_path.parent.mkdir(parents=True, exist_ok=True)
                 save_audio(audio_obj, save_path, sample_rate=sample_rate)
-                item: dict[str, Any] = {
-                    "index": idx,
-                    "request_id": rid,
-                    "prompt": texts[idx] if idx < len(texts) else None,
-                    "audio": ArtifactRef(
-                        path=self.relative_to(save_path, artifacts_dir)
-                    ),
-                }
-                text_out = text_results.get(rid)
-                if text_out:
-                    item["text"] = text_out
-                items.append(item)
+                items.append(
+                    OmniGeneralItem(
+                        index=idx,
+                        request_id=rid,
+                        prompt=texts[idx] if idx < len(texts) else None,
+                        audio=ArtifactRef(
+                            path=self.relative_to(save_path, artifacts_dir)
+                        ),
+                        text=text_results.get(rid) or None,
+                    )
+                )
 
         return OmniText2GeneralResult(
             model=self._model_name,
-            items=[OmniGeneralItem.model_validate(it) for it in items],
-            audio=items[0]["audio"] if items else None,
+            items=items,
+            audio=items[0].audio if items else None,
             sample_rate=sample_rate,
             storyboard=spec_dict.get("storyboard"),
         )

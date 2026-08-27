@@ -18,6 +18,7 @@ from qdrant_client import QdrantClient, models
 
 from shared.schemas.result import (
     RagEmbedding,
+    RagHit,
     RagQdrant,
     RagQuery,
     RAGResult,
@@ -136,7 +137,7 @@ class RAGExecutor(Executor):
             QdrantClient(url=url, api_key=api_key) if api_key else QdrantClient(url=url)
         )
 
-        results_per_query: list[dict[str, Any]] = []
+        results_per_query: list[RagQuery] = []
         total_items = 0
         for i, q in enumerate(queries):
             try:
@@ -173,22 +174,22 @@ class RAGExecutor(Executor):
                 )
                 raise ExecutionError(f"{err_msg}. {ctx_msg}")
 
-            items: list[dict[str, Any]] = []
+            items: list[RagHit] = []
             for p in points:
                 items.append(
-                    {
-                        "id": getattr(p, "id", None),
-                        "score": getattr(p, "score", None),
-                        "payload": getattr(p, "payload", None),
-                    }
+                    RagHit(
+                        id=getattr(p, "id", None),
+                        score=getattr(p, "score", None),
+                        payload=getattr(p, "payload", None),
+                    )
                 )
             total_items += len(items)
             results_per_query.append(
-                {
-                    "index": i,
-                    "query": str(q),
-                    "items": items,
-                }
+                RagQuery(
+                    index=i,
+                    query=str(q),
+                    items=items,
+                )
             )
 
         logger.info(
@@ -198,7 +199,7 @@ class RAGExecutor(Executor):
             qdrant=RagQdrant(collection=collection, url=url),
             embedding=RagEmbedding(model=model_name),
             search=RagSearch(top_k=top_k),
-            queries=[RagQuery.model_validate(q) for q in results_per_query],
+            queries=results_per_query,
             usage=RagUsage(
                 latency_sec=round(time.time() - start_ts, 4),
                 num_queries=len(queries),

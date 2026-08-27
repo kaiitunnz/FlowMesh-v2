@@ -148,7 +148,7 @@ class OmniText2AudioExecutor(OmniExecutorBase):
                 per_prompt_outputs.append((prompt_idx, prompt, outputs))
 
         artifacts_dir = out_dir / "artifacts"
-        items: list[dict[str, Any]] = []
+        items: list[OmniAudioItem] = []
         global_index = 0
         with self._span(
             "output postprocessing",
@@ -176,15 +176,15 @@ class OmniText2AudioExecutor(OmniExecutorBase):
                         audio_entry["waveform"], save_path, sample_rate=sample_rate
                     )
                     items.append(
-                        {
-                            "index": global_index,
-                            "prompt_index": prompt_idx,
-                            "waveform_index": local_idx,
-                            "prompt": prompt,
-                            "audio": ArtifactRef(
+                        OmniAudioItem(
+                            index=global_index,
+                            prompt_index=prompt_idx,
+                            waveform_index=local_idx,
+                            prompt=prompt,
+                            audio=ArtifactRef(
                                 path=self.relative_to(save_path, artifacts_dir)
                             ),
-                        }
+                        )
                     )
                     global_index += 1
 
@@ -193,8 +193,8 @@ class OmniText2AudioExecutor(OmniExecutorBase):
 
         return OmniText2AudioResult(
             model=self._model_name,
-            audio=items[0]["audio"] if items else None,
-            items=[OmniAudioItem.model_validate(it) for it in items],
+            audio=items[0].audio if items else None,
+            items=items,
             sample_rate=sample_rate,
             num_waveforms=len(items),
             audio_length=audio_length,

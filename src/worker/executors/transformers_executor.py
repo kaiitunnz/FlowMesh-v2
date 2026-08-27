@@ -577,7 +577,8 @@ class HFTransformersExecutor(InferenceMixin, Executor):
                     )
         latency = time.time() - t0
 
-        items: list[dict[str, Any]] = []
+        items: list[InferenceItem] = []
+        export_items: list[dict[str, Any]] = []
         prompt_tokens = 0
         completion_tokens = 0
 
@@ -604,38 +605,48 @@ class HFTransformersExecutor(InferenceMixin, Executor):
                         cut = min(cut, idx)
                 text = text[:cut]
 
-            payload = {
+            finish_reason = self._detect_finish_reason(
+                raw_text=raw_text,
+                final_text=text,
+                gen_ids=gen_part,
+                max_new_tokens=max_new_tokens,
+                stop_strings=stops,
+            )
+            items.append(
+                InferenceItem(
+                    index=i,
+                    prompt=prompt_text,
+                    output=text,
+                    finish_reason=finish_reason,
+                    metadata=metadata_entry or None,
+                )
+            )
+            payload: dict[str, Any] = {
                 "index": i,
                 "prompt": prompt_text,
                 "output": text,
-                "finish_reason": self._detect_finish_reason(
-                    raw_text=raw_text,
-                    final_text=text,
-                    gen_ids=gen_part,
-                    max_new_tokens=max_new_tokens,
-                    stop_strings=stops,
-                ),
+                "finish_reason": finish_reason,
             }
             if metadata_entry:
                 payload["metadata"] = metadata_entry
-            items.append(payload)
-            prompt_tokens += int(input_len)
+            export_items.append(payload)
+            prompt_tokens += input_len
             completion_tokens += int(gen_part.shape[0])
 
         result = InferenceResult(
             model=self._model_name,
-            items=[InferenceItem.model_validate(it) for it in items],
+            items=items,
             usage=GenerationUsage(
-                prompt_tokens=int(prompt_tokens),
-                completion_tokens=int(completion_tokens),
-                total_tokens=int(prompt_tokens + completion_tokens),
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=prompt_tokens + completion_tokens,
                 num_requests=len(self._prompts),
                 latency_sec=latency,
             ),
         )
 
         if isinstance(spec, InferenceSpecStrict):
-            self._maybe_export_jsonl(spec, task_id, items, out_dir)
+            self._maybe_export_jsonl(spec, task_id, export_items, out_dir)
 
         self._dump_to_governance(
             task_id=task_id,

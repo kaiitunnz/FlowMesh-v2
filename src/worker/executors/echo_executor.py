@@ -22,12 +22,12 @@ class EchoExecutor(DataMixin, Executor):
     name = "echo"
     supported_task_types = frozenset({TaskType.ECHO})
 
-    def _append_outputs(self, out_items: list[dict[str, Any]], value: Any) -> None:
+    def _append_outputs(self, out_items: list[EchoResultItem], value: Any) -> None:
         if isinstance(value, list):
             for item in value:
                 self._append_outputs(out_items, item)
             return
-        out_items.append({"output": value})
+        out_items.append(EchoResultItem(output=value))
 
     @staticmethod
     def _resolve_expr_item(
@@ -85,13 +85,13 @@ class EchoExecutor(DataMixin, Executor):
                     "echo executor requires spec._upstreamResults to be a mapping"
                 )
 
-            merged_items: list[dict[str, Any]] = []
+            merged_items: list[EchoResultItem] = []
             for item in items_cfg:
                 resolved = self._resolve_item(item, context)
                 self._append_outputs(merged_items, resolved)
 
             result = EchoResult(
-                items=[EchoResultItem.model_validate(it) for it in merged_items],
+                items=merged_items,
                 count=len(merged_items),
             )
             deps = self._extract_source_data_ids(spec)

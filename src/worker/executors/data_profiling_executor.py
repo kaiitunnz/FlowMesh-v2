@@ -103,7 +103,7 @@ class DataProfilingExecutor(DataMixin, Executor):
             ok=True,
             type="sql",
             template=template_str,
-            cost_estimates=CostEstimates.model_validate(cost_estimates),
+            cost_estimates=cost_estimates,
         )
 
     def _sample_template_queries(
@@ -263,7 +263,7 @@ class DataProfilingExecutor(DataMixin, Executor):
         connection_string: str,
         queries: list[str],
         params_rows: list[dict[str, Any]] | None = None,
-    ) -> dict[str, Any]:
+    ) -> CostEstimates:
         results: list[dict[str, Any]] = []
         query_costs: list[float] = []
         query_rows: list[int] = []
@@ -299,13 +299,13 @@ class DataProfilingExecutor(DataMixin, Executor):
         min_rows = min(query_rows)
         max_rows = max(query_rows)
 
-        return {
-            "ok": True,
-            "num_queries": len(queries),
-            "avg_estimated_cost": avg_cost,
-            "min_estimated_cost": min_cost,
-            "max_estimated_cost": max_cost,
-            "avg_estimated_rows": avg_rows,
-            "min_estimated_rows": min_rows,
-            "max_estimated_rows": max_rows,
-        }
+        return CostEstimates(
+            ok=True,
+            num_queries=len(queries),
+            avg_estimated_cost=avg_cost,
+            min_estimated_cost=min_cost,
+            max_estimated_cost=max_cost,
+            avg_estimated_rows=avg_rows,
+            min_estimated_rows=min_rows,
+            max_estimated_rows=max_rows,
+        )

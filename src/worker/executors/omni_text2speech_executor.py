@@ -71,7 +71,7 @@ class OmniText2SpeechExecutor(OmniExecutorBase):
                 self._generate_single(t, spec_dict=spec_dict) for t in texts
             ]
         artifacts_dir = out_dir / "artifacts"
-        items: list[dict[str, Any]] = []
+        items: list[OmniSpeechItem] = []
         with self._span(
             "output postprocessing",
             span_type=SpanType.COMPUTE,
@@ -89,19 +89,19 @@ class OmniText2SpeechExecutor(OmniExecutorBase):
                 save_path.parent.mkdir(parents=True, exist_ok=True)
                 save_audio(audio_obj, save_path, sample_rate=sample_rate)
                 items.append(
-                    {
-                        "index": idx,
-                        "text": text,
-                        "audio": ArtifactRef(
+                    OmniSpeechItem(
+                        index=idx,
+                        text=text,
+                        audio=ArtifactRef(
                             path=self.relative_to(save_path, artifacts_dir)
                         ),
-                    }
+                    )
                 )
 
         return OmniText2SpeechResult(
             model=self._model_name,
-            items=[OmniSpeechItem.model_validate(it) for it in items],
-            audio=items[0]["audio"] if items else None,
+            items=items,
+            audio=items[0].audio if items else None,
             sample_rate=sample_rate,
             storyboard=spec_dict.get("storyboard"),
         )

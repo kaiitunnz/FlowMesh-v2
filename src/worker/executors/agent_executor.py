@@ -17,7 +17,13 @@ from typing import Any
 from datasets import load_dataset
 
 from shared.schemas.artifact import ArtifactRef
-from shared.schemas.result import AgentItem, AgentMetadata, AgentResult, AgentUsage
+from shared.schemas.result import (
+    AgentBatchSummary,
+    AgentItem,
+    AgentMetadata,
+    AgentResult,
+    AgentUsage,
+)
 from shared.tasks.specs import AgentSpecStrict
 from shared.tasks.task_type import TaskType
 
@@ -285,24 +291,24 @@ class AgentExecutor(Executor):
                 )
 
                 # Transform batch results to standard format
-                items = []
+                items: list[AgentItem] = []
                 for item in results.get("items", []):
                     items.append(
-                        {
-                            "index": item["index"],
-                            "output": item["response"],
-                            "finish_reason": (
+                        AgentItem(
+                            index=item["index"],
+                            output=item["response"],
+                            finish_reason=(
                                 "completed"
                                 if item["status"] == "completed"
                                 else "failed"
                             ),
-                        }
+                        )
                     )
 
                 batch_summary_ref = results.get("_batch_summary_ref")
                 output = AgentResult(
                     model=agent_config_name,
-                    items=[AgentItem.model_validate(it) for it in items],
+                    items=items,
                     usage=AgentUsage(
                         execution_time_sec=results.get("usage", {}).get(
                             "execution_time_sec", 0
@@ -310,12 +316,12 @@ class AgentExecutor(Executor):
                         num_requests=len(self._tasks),
                         agent_config=agent_config_name,
                     ),
-                    metadata=AgentMetadata.model_validate(
-                        {
-                            "tasks_count": len(self._tasks),
-                            "execution_log": results.get("log", []),
-                            "batch_summary": results.get("batch_summary", {}),
-                        }
+                    metadata=AgentMetadata(
+                        tasks_count=len(self._tasks),
+                        execution_log=results.get("log", []),
+                        batch_summary=AgentBatchSummary(
+                            **results.get("batch_summary", {})
+                        ),
                     ),
                     batch_summary_file=(
                         None
