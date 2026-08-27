@@ -14,6 +14,7 @@ from shared.schemas.result import (
     EchoItem,
     EchoResult,
     InferenceResult,
+    OmniText2ImageResult,
     ResultEnvelope,
 )
 from shared.tasks.specs import EchoSpecStrict
@@ -123,6 +124,17 @@ def test_extra_passthrough_nulls_survive_but_declared_none_drops() -> None:
     assert "tokens_out" not in dumped
     assert dumped["connector_extra"] is None
     assert dumped["keep"] == 1
+
+
+def test_required_nullable_fields_survive_serialization() -> None:
+    """Required-but-nullable fields (declared without a default, e.g. the Omni
+    modality outputs) keep their ``null`` so the payload still re-validates."""
+    result = OmniText2ImageResult(model=None, image=None, items=[])
+    dumped = result.model_dump(by_alias=True)
+    assert dumped["model"] is None
+    assert dumped["image"] is None
+    reloaded = OmniText2ImageResult.model_validate_json(result.model_dump_json())
+    assert reloaded == result
 
 
 def test_drop_none_round_trip_is_lossless() -> None:

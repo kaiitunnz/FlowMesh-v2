@@ -26,13 +26,15 @@ class DropNoneModel(BaseModel):
         dumped = handler(self)
         if not isinstance(dumped, dict):
             return dumped
-        declared = {
-            field.alias or name for name, field in type(self).model_fields.items()
+        optional = {
+            field.alias or name
+            for name, field in type(self).model_fields.items()
+            if not field.is_required()
         }
         return {
             key: value
             for key, value in dumped.items()
-            if value is not None or key not in declared
+            if value is not None or key not in optional
         }
 
 

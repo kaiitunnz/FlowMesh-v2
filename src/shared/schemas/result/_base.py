@@ -22,10 +22,11 @@ if TYPE_CHECKING:
 
 
 class DropNoneModel(BaseModel):
-    """Omits declared fields whose value is ``None`` from the serialized output.
+    """Omits optional declared fields whose value is ``None`` from the output.
 
-    Unset optionals drop out of the payload instead of emitting ``null``.
-    Only declared fields are dropped; extra passthrough keys are kept as-is, so
+    An optional field left unset drops out of the payload instead of emitting
+    ``null``. Required fields (no default) are always kept, even when ``None``,
+    so the payload still round-trips. Extra passthrough keys are kept as-is, so
     an explicit ``null`` in an open payload (API bodies, connector rows) stays.
     """
 
@@ -36,13 +37,15 @@ class DropNoneModel(BaseModel):
         dumped = handler(self)
         if not isinstance(dumped, dict):
             return dumped
-        declared = {
-            field.alias or name for name, field in type(self).model_fields.items()
+        optional = {
+            field.alias or name
+            for name, field in type(self).model_fields.items()
+            if not field.is_required()
         }
         return {
             key: value
             for key, value in dumped.items()
-            if value is not None or key not in declared
+            if value is not None or key not in optional
         }
 
 
