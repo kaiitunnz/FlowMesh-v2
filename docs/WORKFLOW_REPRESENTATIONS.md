@@ -56,6 +56,40 @@ to logical output slots.
 A legacy `serve` task maps to a residency-administration node with a
 `ResidencyIntent`, not a result-owning leaf.
 
+## Compilation
+
+`compile_workflow` (in `src/server/task/v2/compiler.py`) lowers a parsed
+workflow into the logical template and physical plan. It lowers legacy tasks
+into leaf/agent/residency operators, normalizes structured regions and
+`spec.v2` leaf declarations into the canonical operator/region form, builds one
+physical boundary per legacy task/executor boundary, and runs the validation
+passes. It runs before any scheduler state is created, so a rejected submission
+mutates nothing.
+
+The `taskType → Executor` mapping is a binding adapter in `bindings.py`: it
+translates each legacy task type into a generic `Leaf`/`Agent` profile.
+`agent` binds to the opaque-body `Agent`; `serve` binds to a residency request
+surface; every other type binds to a generic `Leaf`. The legacy task-type set
+is not the v2 operator vocabulary.
+
+## Validation
+
+`validate_compilation` runs passes over the compiled template and plan, each
+emitting a diagnostic with a readable source location: ports, regions, tool
+declarations, authority ceilings (delegate attenuated by invoke, declared
+tools, spawn-site derivation), recompute legality (recompute requires a pure,
+deterministic operation over pinned inputs), effect boundaries, result
+declarations, source-map completeness, and unstructured cycles. An unpinned
+live read is legal latitude; only a contradictory declaration fails. Structural
+frontend errors and any error-severity diagnostic raise `CompileError`.
+
+## Inspection
+
+`build_inspection` compiles a submission into an `InspectionReport` carrying the
+template, plan, and diagnostics, with a text rendering of the compiled
+structure. `POST /api/v1/workflows/validate` returns it for a `flowmesh/v2`
+submission without persisting or executing it.
+
 ## Versioning
 
 `VersionId` identifies one immutable revision by `lineage`, `revision`, and

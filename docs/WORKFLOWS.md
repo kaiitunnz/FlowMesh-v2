@@ -80,6 +80,82 @@ compiles the submission into versioned plan-time representations
 workflow. It is off by default — any other `apiVersion` keeps the v1 path.
 See [`WORKFLOW_REPRESENTATIONS.md`](WORKFLOW_REPRESENTATIONS.md).
 
+Existing single-task, `spec.stages`, and `spec.graph.nodes` forms compile
+unchanged under v2. The constructs below are opt-in and provisional; they
+require `apiVersion: flowmesh/v2` and are rejected under v1.
+
+### Leaf declarations (`spec.v2`)
+
+A task carries v2 declarations in a `spec.v2` sub-block, leaving legacy spec
+keys untouched:
+
+```yaml
+- name: research
+  spec:
+    taskType: agent
+    configName: default
+    task: gather sources
+    v2:
+      authority: { invoke: [web_search], delegate: [] }
+      tools:
+        - { name: web_search, interface: search/v1 }
+      boundary: [invocation, external_effect, yield]
+```
+
+`authority`, `tools`, and `boundary` apply to `agent` leaves. Any leaf may
+declare `provenance` (`pinned` | `live`) and `determinism` / `effect` /
+`recovery` overrides, and a `result: { visibility: published }` to publish its
+induced output.
+
+### Structured regions
+
+In the graph form, a node carries a `region` instead of a `spec`. Regions wire
+through `dependsOn` like tasks:
+
+```yaml
+spec:
+  graph:
+    nodes:
+      - name: classify
+        spec: { taskType: inference, ... }
+      - name: route
+        dependsOn: [classify]
+        region: { kind: branch, selection: "{{classify.output.label}}", ports: [accept, revise] }
+      - name: fanout
+        dependsOn: [route]
+        region: { kind: spawn, child: worker, authority: { invoke: [search] } }
+      - name: collect
+        dependsOn: [fanout]
+        region: { kind: join, completion: all_settled, residual: cancel }
+      - name: refine
+        dependsOn: [collect]
+        region:
+          kind: loop
+          coordinate: refine
+          carried:
+            - name: model
+              kind: model_ref
+              modelRef: { architecture: llama, version: base }
+      - name: train
+        dependsOn: [refine]
+        spec: { taskType: lora_sft, ... }
+        feedback: { to: refine, port: model }
+```
+
+Region kinds are `branch`, `merge`, `spawn`, `join`, `loop`, and `call`
+(`call` normalizes to a `spawn`/`join` pair). A `feedback` edge is a structured
+back-edge into a `loop` region; it is excluded from acyclic-topology checks, so
+an unstructured `dependsOn` cycle is still rejected. Region-bearing workflows
+are inspect-only in this release and are rejected at submit.
+
+### Dry-run inspection
+
+`POST /api/v1/workflows/validate` compiles a `flowmesh/v2` submission and
+returns the logical template, physical plan, and validation diagnostics in the
+`inspection` field without persisting or executing it. Compilation errors
+return `422` with readable source locations. Region-bearing workflows are
+inspectable here even though they cannot yet be submitted.
+
 ## data_retrieval: type lumid
 
 `type: lumid` routes the retrieval through lumid-data-app (HTTP). Three
