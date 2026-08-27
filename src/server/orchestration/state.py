@@ -20,6 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from ..task.v2.representations.operators import (
     EffectClass,
     EffectReplayContract,
+    ModelRef,
     RecoveryClass,
 )
 from ..utils.time import now_iso
@@ -109,12 +110,17 @@ class CapabilityStatus(StrEnum):
 
 
 class ValueRef(BaseModel):
-    """A durable reference to a logical output value, never the value itself."""
+    """A durable reference to a logical output value, never the value itself.
+
+    A loop-carried value may reference a versioned ``ModelRef`` so an iteration pins the
+    model version it observes without pinning a physical replica.
+    """
 
     model_config = ConfigDict(frozen=True)
 
-    kind: str  # "legacy_task_result" | "empty"
+    kind: str  # "legacy_task_result" | "empty" | "join_result" | "model_ref"
     legacy_task_id: str | None = None
+    model_ref: ModelRef | None = None
 
 
 class AuthorityGrant(BaseModel):

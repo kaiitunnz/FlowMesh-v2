@@ -597,6 +597,21 @@ class OrchestrationLedger:
             )
         return self._maybe_release_join(spawn_op)
 
+    def revoke_spawn(self, spawn_op: str) -> None:
+        """Revoke a spawn's child-init capability as a progress transition.
+
+        Distinct from sealing: revocation withdraws the capability (its cancellation
+        outcome is settled by the cancellation event), while sealing marks a producer
+        done. Both close the child-init axis once outstanding children drain.
+        """
+        scope_id = self._require_child_init_scope(spawn_op)
+        cap = self._capability(scope_id, ProgressAxis.CHILD_INIT)
+        if cap.status is CapabilityStatus.OPEN:
+            cap.status = CapabilityStatus.REVOKED
+            self._emit(
+                "child_init_revoked", operator_id=spawn_op, detail={"scope": scope_id}
+            )
+
     def settle_child(
         self,
         child_activation_id: str,
@@ -993,7 +1008,9 @@ class OrchestrationLedger:
             if cont is not None and not cont.waiting_on and wi.legacy_task_id:
                 self._admit(wi.work_item_id, advance)
         for op_id in self._operators:
-            if not self._is_control(op_id):
+            # A child-template region opens only when its parent spawn materializes it,
+            # so it nests under the parent scope rather than firing at the root.
+            if not self._is_control(op_id) or op_id in self._child_templates:
                 continue
             cont = self._continuations.get(_control_key(op_id))
             if cont is not None and not cont.waiting_on:
@@ -1188,9 +1205,9 @@ class OrchestrationLedger:
         ]
 
     def capability(
-        self, scope_id: str, axis: ProgressAxis
+        self, scope_id: str | None, axis: ProgressAxis
     ) -> ProgressCapability | None:
-        return self._capabilities.get((scope_id, axis))
+        return self._capabilities.get((scope_id, axis)) if scope_id else None
 
     def scope_for(self, region_op: str) -> str | None:
         return self._scope_by_owner.get(region_op)

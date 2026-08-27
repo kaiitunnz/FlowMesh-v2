@@ -60,7 +60,9 @@ class InspectionReport(BaseModel):
             for diag in self.diagnostics:
                 lines.append(f"    {diag.severity.value}: {diag.render()}")
         if self.region_bearing:
-            lines.append("  note: structured regions are inspect-only in this release")
+            lines.append(
+                "  note: structured regions are inspect-only via this endpoint"
+            )
         return "\n".join(lines)
 
 
