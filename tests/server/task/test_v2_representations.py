@@ -240,14 +240,29 @@ spec:
           data: { type: list, items: ["x"] }
 """
     bundle = _project(payload)
+    op_ids = {op.operator_id for op in bundle.template.operators}
     guarded = [
         op
         for op in bundle.template.operators
         if isinstance(op, LeafOperator) and op.guard is not None
     ]
     assert len(guarded) == 1
-    assert guarded[0].guard is not None
-    assert guarded[0].guard.equals == "run-me"
+    guard = guarded[0].guard
+    assert guard is not None
+    assert guard.equals == "run-me"
+    # guard.node is remapped from the source name "up" to a real operator id.
+    assert guard.node != "up"
+    assert guard.node in op_ids
+    up = next(
+        op
+        for op in bundle.template.operators
+        if any(
+            e.source_id == "up"
+            for e in bundle.template.source_map
+            if e.logical_ref == op.operator_id
+        )
+    )
+    assert guard.node == up.operator_id
 
 
 # --------------------------------------------------------------------------- #

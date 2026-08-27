@@ -113,12 +113,21 @@ def _model_ref(task: ParsedTask) -> ModelRef | None:
     return ModelRef(architecture=name, version=spec.model_revision)
 
 
-def _condition_guard(task: ParsedTask) -> ConditionGuard | None:
+def _condition_guard(
+    task: ParsedTask, name_to_op: dict[str, str], operator_ids: set[str]
+) -> ConditionGuard | None:
     condition = task.task.spec.condition
     if condition is None:
         return None
+    raw = condition.node.strip()
+    operator_id = name_to_op.get(raw, raw)
+    if operator_id not in operator_ids:
+        raise ValueError(
+            f"conditional guard on task {task.task_id!r} references upstream "
+            f"{condition.node!r}, which resolves to no operator."
+        )
     return ConditionGuard(
-        node=condition.node, field=condition.field, equals=condition.equals
+        node=operator_id, field=condition.field, equals=condition.equals
     )
 
 
@@ -158,7 +167,12 @@ def _ports(
     return tuple(inputs), tuple(outputs)
 
 
-def _leaf_operator(task: ParsedTask, task_type: TaskType) -> LeafOperator:
+def _leaf_operator(
+    task: ParsedTask,
+    task_type: TaskType,
+    name_to_op: dict[str, str],
+    operator_ids: set[str],
+) -> LeafOperator:
     inputs, outputs = _ports(task, task_type)
     return LeafOperator(
         operator_id=task.task_id,
@@ -166,12 +180,14 @@ def _leaf_operator(task: ParsedTask, task_type: TaskType) -> LeafOperator:
         inputs=inputs,
         outputs=outputs,
         profile=_leaf_profile(task_type),
-        guard=_condition_guard(task),
+        guard=_condition_guard(task, name_to_op, operator_ids),
         residency_only=task_type == TaskType.SERVE,
     )
 
 
-def _agent_operator(task: ParsedTask) -> AgentOperator:
+def _agent_operator(
+    task: ParsedTask, name_to_op: dict[str, str], operator_ids: set[str]
+) -> AgentOperator:
     inputs, outputs = _ports(task, TaskType.AGENT)
     return AgentOperator(
         operator_id=task.task_id,
@@ -189,7 +205,7 @@ def _agent_operator(task: ParsedTask) -> AgentOperator:
                 BoundaryEventKind.STATE_ACCESS,
             )
         ),
-        guard=_condition_guard(task),
+        guard=_condition_guard(task, name_to_op, operator_ids),
     )
 
 
@@ -213,14 +229,20 @@ def project_acyclic(
     source_map: list[SourceMapEntry] = []
     nodes: list[PhysicalNode] = []
 
-    operator_ids: set[str] = set()
+    operator_ids: set[str] = {task.task_id for task in parsed.tasks}
+    name_to_op: dict[str, str] = {}
+    for task in parsed.tasks:
+        if task.graph_node_name:
+            name_to_op[task.graph_node_name] = task.task_id
+        if task.local_name:
+            name_to_op[task.local_name] = task.task_id
+
     for task in parsed.tasks:
         task_type = task.task.spec.taskType
         if task_type == TaskType.AGENT:
-            operators.append(_agent_operator(task))
+            operators.append(_agent_operator(task, name_to_op, operator_ids))
         else:
-            operators.append(_leaf_operator(task, task_type))
-        operator_ids.add(task.task_id)
+            operators.append(_leaf_operator(task, task_type, name_to_op, operator_ids))
         source_map.append(_source_map_entry(task))
 
     for task in parsed.tasks:
