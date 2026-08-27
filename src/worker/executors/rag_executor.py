@@ -184,13 +184,7 @@ class RAGExecutor(Executor):
                     )
                 )
             total_items += len(items)
-            results_per_query.append(
-                RagQuery(
-                    index=i,
-                    query=str(q),
-                    items=items,
-                )
-            )
+            results_per_query.append(RagQuery(index=i, query=str(q), items=items))
 
         logger.info(
             "RAG query completed queries=%d total_results=%d", len(queries), total_items
