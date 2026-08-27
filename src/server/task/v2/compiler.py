@@ -3,6 +3,7 @@ from .bundle import PersistedV2Workflow
 from .diagnostics import CompileError
 from .plan import PhysicalExecutionPlan, PhysicalNode
 from .project import LoweringAccumulator, build_name_map, lower_tasks
+from .regions import lower_frontend_v2
 from .source import FrontendWorkflowSource
 from .template import LogicalWorkflowTemplate
 from .validation import has_errors, validate_compilation
@@ -67,6 +68,7 @@ def compile_workflow(
     acc = LoweringAccumulator()
     name_to_op = build_name_map(parsed)
     lower_tasks(parsed, name_to_op, acc)
+    lower_frontend_v2(parsed, acc)
     template = _assemble_template(workflow_id, source, acc)
     plan = _finalize_plan(workflow_id, template.version, tuple(acc.nodes))
     if validate:

@@ -127,6 +127,12 @@ class TaskRuntime:
         if ExecutionMode.from_api_version(api_version) is ExecutionMode.V2:
             source = FrontendWorkflowSource.capture(yaml_text, format)
             v2_bundle = compile_bundle(workflow_id, parsed_workflow, source)
+            if parsed_workflow.regions:
+                raise ValueError(
+                    "Structured regions are inspect-only in this release and not "
+                    "yet executable. Use POST /api/v1/workflows/validate to inspect "
+                    "the compiled template."
+                )
 
         with self._cv:
             if (
