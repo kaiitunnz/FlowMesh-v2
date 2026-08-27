@@ -74,7 +74,7 @@ def check_admissible(
     if residency_only:
         raise AdmissionError(
             f"operator {operator_id!r} administers resident capacity, which the v2 "
-            "compatibility path does not orchestrate resident capacity"
+            "compatibility path does not orchestrate"
         )
     if effect is EffectClass.PURE:
         return

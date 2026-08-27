@@ -117,19 +117,18 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
 ## Key runtime behavior
 
 - **v2 orchestration ledger (`DS`).** A submission with `apiVersion:
-  flowmesh/v2` compiles to a `PhysicalExecutionPlan` and runs through a durable
-  orchestration ledger (`src/server/orchestration/`, a peer of the dispatcher) that
-  owns semantic
-  readiness: it turns settled records into ready work items over the acyclic
-  compatibility plan, incrementally materializing the activation graph instead of
-  precreating attempts. A ready work item dispatches through the existing
-  `TaskRuntime`/dispatcher, so scheduler placement stays physical and cannot
-  change logical readiness. Retries create new attempts under the same work item
-  and reuse its `invocation_id`; declared outputs publish idempotently to result
-  slots keyed by `(instance, declaration, logical key)`, and the legacy per-task
-  result adapter resolves the induced `legacy:<task>` slot. The ledger snapshot
-  is persisted at `workflow:{id}:ds` and rebuilt on restart by
-  `TaskRuntime.rehydrate`. The default v1 static-DAG path is unchanged.
+  flowmesh/v2` compiles to a `PhysicalExecutionPlan` and runs through the durable
+  orchestration ledger (`src/server/orchestration/`, a peer of the dispatcher),
+  which owns semantic readiness: it turns settled records into ready work items
+  over the acyclic compatibility plan, materializing the activation graph as work
+  becomes ready. A ready work item dispatches through the existing
+  `TaskRuntime`/dispatcher, so scheduler placement stays physical and cannot change
+  logical readiness. A retry is a new attempt under the same work item and reuses
+  its `invocation_id`; declared outputs publish idempotently to result slots keyed
+  by `(instance, declaration, logical key)`, and the legacy per-task result adapter
+  resolves the induced `legacy:<task>` slot. The snapshot persists at
+  `workflow:{id}:ds`, after the terminal task records, and `TaskRuntime.rehydrate`
+  rebuilds and reconciles it on restart. A v1 submission keeps the static-DAG path.
 - **Task merging.** Compatible adjacent tasks in a DAG (same `taskType`,
   model, hardware shape, and merge key) coalesce into a single dispatch.
   Merged children ride on `WorkerTaskMessage.merged_children`; the worker

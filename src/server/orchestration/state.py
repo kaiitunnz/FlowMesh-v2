@@ -6,6 +6,11 @@ work item owns an optional invocation and one or more physical attempts. The led
 persists grant/policy identity and authorization decisions, never bearer credentials,
 and links to the separate control facts (`CS`) only through a stable
 ``invocation_id``.
+
+A few fields of the note-21 object set — a grant's ``delegate`` face and ``epoch``, a
+``Scope.parent_scope_id``, an ``Activation.kind`` beyond ``leaf``, and a
+``Record.loop_time`` beyond zero — carry no meaning in the acyclic subset; they are
+part of the durable object set but the acyclic path never sets them off their default.
 """
 
 from enum import StrEnum
@@ -100,6 +105,8 @@ class AuthorityGrant(BaseModel):
 
 class AuthorityDecision(BaseModel):
     """A durable grant-check fact recorded before (or denying) an invocation."""
+
+    model_config = ConfigDict(frozen=True)
 
     work_item_id: str
     grant_id: str
