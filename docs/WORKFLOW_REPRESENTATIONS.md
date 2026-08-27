@@ -2,7 +2,8 @@
 
 FlowMesh builds three durable plan-time representations and a gate that selects
 them, decoupling author intent, legal workflow semantics, and physical
-realization. The models live in `src/server/task/v2/`.
+realization. The models live in `src/server/task/v2/representations/`; the
+compiler that produces them lives in `src/server/task/v2/compiler/`.
 
 ## Selecting the v2 track
 
@@ -55,6 +56,37 @@ to logical output slots.
 
 A legacy `serve` task maps to a residency-administration node with a
 `ResidencyIntent`, not a result-owning leaf.
+
+## Compilation
+
+`compile_workflow` (in `src/server/task/v2/compiler/pipeline.py`) lowers a parsed
+workflow into the logical template and physical plan. It lowers legacy tasks
+into leaf/agent/residency operators, normalizes structured regions and
+`spec.v2` leaf declarations into the canonical operator/region form, builds one
+physical boundary per legacy task/executor boundary, and runs the validation
+passes. It runs before any scheduler state is created, so a rejected submission
+mutates nothing.
+
+The binding adapter in `bindings.py` translates each legacy task type into a
+generic `Leaf`/`Agent` profile. `agent` binds to the opaque-body `Agent`;
+`serve` binds to a residency request surface; every other type binds to a
+generic `Leaf`.
+
+## Validation
+
+`validate_compilation` runs consistency passes over the compiled template and
+plan and reports each finding as a diagnostic with a readable source location.
+It checks port wiring, region and authority-ceiling well-formedness,
+recovery/effect/provenance consistency, result declarations, source-map
+completeness, and unstructured cycles. An error-severity diagnostic — or a
+malformed template — raises `CompileError`.
+
+## Inspection
+
+`build_inspection` compiles a submission into an `InspectionReport` carrying the
+template, plan, and diagnostics, with a text rendering of the compiled
+structure. `POST /api/v1/workflows/validate` returns it for a `flowmesh/v2`
+submission without persisting or executing it.
 
 ## Versioning
 

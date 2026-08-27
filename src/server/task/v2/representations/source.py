@@ -1,6 +1,6 @@
 from pydantic import BaseModel, ConfigDict, Field
 
-from ...utils.time import now_iso
+from ....utils.time import now_iso
 from .versioning import content_digest
 
 

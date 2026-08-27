@@ -1,5 +1,7 @@
 """Workflow-related models."""
 
+from typing import Any
+
 from pydantic import BaseModel
 
 from .common import TaskStatus, WorkflowStatus
@@ -30,10 +32,35 @@ class WorkflowValidateTaskEntry(BaseModel):
     depends_on: list[str]
 
 
+class SourceLocation(BaseModel):
+    source_kind: str
+    source_id: str
+    detail: str | None = None
+
+
+class Diagnostic(BaseModel):
+    code: str
+    message: str
+    severity: str
+    location: SourceLocation | None = None
+
+
+class InspectionReport(BaseModel):
+    workflow_id: str
+    # The compiled logical template and physical plan are provisional internal
+    # representations; kept as raw mappings rather than mirroring the full
+    # operator tree into the published SDK.
+    template: dict[str, Any]
+    plan: dict[str, Any]
+    diagnostics: list[Diagnostic] = []
+    region_bearing: bool = False
+
+
 class WorkflowValidateResponse(BaseModel):
     ok: bool
     count: int
     tasks: list[WorkflowValidateTaskEntry]
+    inspection: InspectionReport | None = None
 
 
 class Workflow(BaseModel):

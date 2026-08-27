@@ -46,6 +46,7 @@ from ...schemas.workflow import (
 )
 from ...services.metrics import MetricsRecorder
 from ...task.runtime import TaskRuntime
+from ...task.v2 import CompileError, Diagnostic
 from ...utils.misc import filter_models_by_queries
 
 _WORKFLOW_REQUEST_BODY_FORMAT = {
@@ -69,6 +70,16 @@ _WORKFLOW_REQUEST_BODY_FORMAT = {
     },
 }
 router = APIRouter(prefix="/workflows", tags=["Workflows"])
+
+
+def _compilation_failed(diagnostics: tuple[Diagnostic, ...]) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        detail={
+            "message": "Workflow compilation failed",
+            "diagnostics": [diag.render() for diag in diagnostics],
+        },
+    )
 
 
 def _parse_submission_body(raw_body: bytes, content_type: str) -> str:
@@ -241,6 +252,14 @@ async def validate_workflow(
             detail=f"Workflow validation failed: {exc}",
         ) from exc
 
+    try:
+        inspection = runtime.inspect_v2(payload, format=workflow_format)
+    except CompileError as exc:
+        raise _compilation_failed(exc.diagnostics) from exc
+
+    if inspection is not None and not inspection.ok:
+        raise _compilation_failed(inspection.diagnostics)
+
     return WorkflowValidateResponse(
         ok=True,
         count=len(results),
@@ -252,6 +271,7 @@ async def validate_workflow(
             )
             for entry in results
         ],
+        inspection=inspection,
     )
 
 

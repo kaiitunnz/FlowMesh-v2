@@ -1,5 +1,7 @@
 from pydantic import BaseModel, Field
 
+from server.task.v2 import InspectionReport
+
 
 class WorkflowSubmitTaskEntry(BaseModel):
     task_id: str = Field(description="Task identifier.")
@@ -39,4 +41,8 @@ class WorkflowValidateResponse(BaseModel):
     count: int = Field(description="Number of validated tasks.")
     tasks: list[WorkflowValidateTaskEntry] = Field(
         description="Validated task entries."
+    )
+    inspection: InspectionReport | None = Field(
+        default=None,
+        description="Compiled v2 template/plan inspection (v2 submissions only).",
     )

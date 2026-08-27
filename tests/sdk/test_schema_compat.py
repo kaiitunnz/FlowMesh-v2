@@ -13,9 +13,11 @@ from flowmesh.models import (
     ArtifactRef,
     BaseExecutorResult,
     CPUInfo,
+    Diagnostic,
     GpuInfo,
     GpuPlatformInfo,
     HostInfo,
+    InspectionReport,
     LogEntry,
     LogEvent,
     LogLevel,
@@ -29,6 +31,7 @@ from flowmesh.models import (
     NodeWorkerInfo,
     OkResponse,
     ResultEnvelope,
+    SourceLocation,
     SSHLimits,
     StorageInfo,
     TaskInfo,
@@ -87,6 +90,9 @@ from server.schemas.workflow import (
 )
 from server.task.models import TaskInfo as SrvTaskInfo
 from server.task.models import TaskUsage as SrvTaskUsage
+from server.task.v2 import Diagnostic as SrvDiagnostic
+from server.task.v2 import InspectionReport as SrvInspectionReport
+from server.task.v2 import SourceLocation as SrvSourceLocation
 from shared.schemas.artifact import ArtifactContext as SrvArtifactContext
 from shared.schemas.artifact import ArtifactRef as SrvArtifactRef
 from shared.schemas.result import BaseExecutorResult as SrvBaseExecutorResult
@@ -165,6 +171,9 @@ MODEL_PAIRS = [
     (SrvWorkflowSubmitTaskEntry, WorkflowSubmitTaskEntry),
     (SrvWorkflowValidateResponse, WorkflowValidateResponse),
     (SrvWorkflowValidateTaskEntry, WorkflowValidateTaskEntry),
+    (SrvInspectionReport, InspectionReport),
+    (SrvDiagnostic, Diagnostic),
+    (SrvSourceLocation, SourceLocation),
     # Workflow registry
     (SrvWorkflow, Workflow),
     # Task models (last_queue_ts is server-internal scheduling field)

@@ -94,6 +94,9 @@ from .workers import (
     WorkerInfo,
 )
 from .workflows import (
+    Diagnostic,
+    InspectionReport,
+    SourceLocation,
     Workflow,
     WorkflowSubmitResponse,
     WorkflowSubmitTaskEntry,
@@ -118,6 +121,7 @@ __all__ = [
     "CostEstimates",
     "DPOResult",
     "DataProfilingResult",
+    "Diagnostic",
     "DataRetrievalItem",
     "DataRetrievalResult",
     "DiffusionResult",
@@ -157,6 +161,7 @@ __all__ = [
     "GpuPlatformInfo",
     "HardwareUsage",
     "HostInfo",
+    "InspectionReport",
     "LineageEdge",
     "LogEntry",
     "LogEvent",
@@ -174,6 +179,7 @@ __all__ = [
     "ProfileSummary",
     "ResultEnvelope",
     "SSHLimits",
+    "SourceLocation",
     "StorageInfo",
     "TaskInfo",
     "TaskStatus",

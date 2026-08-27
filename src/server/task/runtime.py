@@ -28,8 +28,10 @@ from .parser import parse_workflow
 from .v2 import (
     ExecutionMode,
     FrontendWorkflowSource,
+    InspectionReport,
     PersistedV2Workflow,
-    project_acyclic,
+    build_inspection,
+    compile_bundle,
 )
 
 
@@ -110,6 +112,20 @@ class TaskRuntime:
             )
         return results
 
+    def inspect_v2(
+        self, payload: str, format: str = "native"
+    ) -> InspectionReport | None:
+        """Compile a v2 submission into an inspection report without executing.
+
+        Returns ``None`` for a non-v2 submission. Structural frontend errors raise
+        ``CompileError``; semantic findings ride on the report's diagnostics.
+        """
+        parsed_workflow = parse_workflow(payload, format)
+        if not ExecutionMode.is_v2(parsed_workflow.api_version):
+            return None
+        source = FrontendWorkflowSource.capture(payload, format)
+        return build_inspection(new_workflow_id(), parsed_workflow, source)
+
     async def register(
         self, owner_id: str, org_id: str, payload: str, format: str = "native"
     ) -> tuple[str, list[TaskParsingResult]]:
@@ -121,6 +137,16 @@ class TaskRuntime:
         task_records: list[TaskRecord] = []
         candidate_ready: list[str] = []
         graph_task_ids: dict[str, str] = {}
+
+        v2_bundle: PersistedV2Workflow | None = None
+        if ExecutionMode.is_v2(parsed_workflow.api_version):
+            if parsed_workflow.regions:
+                raise ValueError(
+                    "Structured regions are inspect-only. Use "
+                    "POST /api/v1/workflows/validate to inspect the compiled template."
+                )
+            source = FrontendWorkflowSource.capture(yaml_text, format)
+            v2_bundle = compile_bundle(workflow_id, parsed_workflow, source)
 
         with self._cv:
             if (
@@ -223,13 +249,6 @@ class TaskRuntime:
                 if has_epoch_tasks:
                     self._workflow_epoch_tasks[workflow_id] = epoch_queue
                     self._workflow_epoch_frontier[workflow_id] = 0
-
-        v2_bundle: PersistedV2Workflow | None = None
-        api_version = specs[0].task.apiVersion if specs else None
-        if ExecutionMode.from_api_version(api_version) is ExecutionMode.V2:
-            source = FrontendWorkflowSource.capture(yaml_text, format)
-            template, plan = project_acyclic(workflow_id, parsed_workflow, source)
-            v2_bundle = PersistedV2Workflow(source=source, template=template, plan=plan)
 
         await self._workflow_registry.register_workflow_async(
             workflow_id, task_records, v2=v2_bundle

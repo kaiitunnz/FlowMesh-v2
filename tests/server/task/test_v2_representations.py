@@ -23,10 +23,10 @@ from server.task.v2 import (
     RecoveryClass,
     ResultDeclaration,
     VersionId,
-    project_acyclic,
+    compile_workflow,
 )
-from server.task.v2.operators import EqualityRelationKind
-from server.task.v2.project import _leaf_profile
+from server.task.v2.compiler.bindings import leaf_profile as _leaf_profile
+from server.task.v2.representations.operators import EqualityRelationKind
 from shared.tasks import TaskType
 
 DAG_V2 = """
@@ -103,7 +103,7 @@ def _runtime(registry: _CapturingRegistry) -> TaskRuntime:
 def _project(payload: str) -> PersistedV2Workflow:
     parsed = parse_workflow(payload, "native")
     source = FrontendWorkflowSource.capture(payload, "native", name="wf")
-    template, plan = project_acyclic("wfl-test", parsed, source)
+    template, plan = compile_workflow("wfl-test", parsed, source)
     return PersistedV2Workflow(source=source, template=template, plan=plan)
 
 
@@ -174,7 +174,7 @@ def test_version_successor_rules() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_project_acyclic_dag_shape() -> None:
+def test_compile_dag_shape() -> None:
     bundle = _project(DAG_V2)
     kinds = [op.kind.value for op in bundle.template.operators]
     assert kinds == ["leaf", "leaf"]

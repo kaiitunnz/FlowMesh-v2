@@ -1,6 +1,6 @@
 import copy
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import yaml
@@ -43,6 +43,8 @@ class _WorkflowNodeInput(BaseModel):
     id: Any | None = None
     spec: dict[str, Any] | None = None
     dependsOn: list[Any] | None = None
+    region: dict[str, Any] | None = None
+    feedback: dict[str, Any] | None = None
 
 
 @dataclass
@@ -54,6 +56,16 @@ class ParsedTaskSpec:
     load: int
     position_in_epoch: int | None = None
     selected_worker: list[str] | None = None
+    v2: dict[str, Any] | None = None
+    feedback: dict[str, Any] | None = None
+
+
+@dataclass
+class ParsedRegion:
+    name: str
+    region: dict[str, Any]
+    depends_on: list[str]
+    feedback: dict[str, Any] | None = None
 
 
 @dataclass
@@ -61,6 +73,8 @@ class ParsedWorkflow:
     tasks: list["ParsedTask"]
     schedule_in_epoch_order: bool | None
     epoch_groups: list[list[str]] | None
+    regions: list[ParsedRegion] = field(default_factory=list)
+    api_version: Any | None = None
 
 
 @dataclass
@@ -73,6 +87,8 @@ class ParsedTask:
     load: int
     position_in_epoch: int | None = None
     selected_worker: list[str] | None = None
+    v2: dict[str, Any] | None = None
+    feedback: dict[str, Any] | None = None
 
 
 def parse_workflow(payload: str, format: str) -> ParsedWorkflow:
@@ -106,16 +122,33 @@ def _build_workflow(
     specs: list[ParsedTaskSpec],
     schedule_in_epoch_order: bool | None,
     epoch_groups: list[list[str]] | None,
+    region_specs: list[ParsedRegion] | None = None,
+    api_version: Any | None = None,
 ) -> ParsedWorkflow:
+    region_specs = region_specs or []
     results: list[ParsedTask] = []
     local_ids: dict[str, str] = {}
+    # Region operator ids are their source names; pre-register them so tasks and
+    # regions may reference each other regardless of resolution order.
+    for region_spec in region_specs:
+        local_ids[region_spec.name] = region_spec.name
+
+    def _resolve_feedback(
+        feedback: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if not feedback:
+            return None
+        resolved = dict(feedback)
+        target = feedback.get("to")
+        if isinstance(target, str) and (to := target.strip()):
+            resolved["to"] = local_ids.get(to, to)
+        return resolved
+
     for spec in specs:
         _validate_condition_depends_on(spec)
         task_id = new_task_id()
         depends_on = [
-            local_ids.get(dep.strip(), dep.strip())
-            for dep in spec.depends_on
-            if dep and dep.strip()
+            local_ids.get(s, s) for dep in spec.depends_on if dep and (s := dep.strip())
         ]
         results.append(
             ParsedTask(
@@ -127,24 +160,56 @@ def _build_workflow(
                 load=spec.load,
                 position_in_epoch=spec.position_in_epoch,
                 selected_worker=spec.selected_worker,
+                v2=spec.v2,
+                feedback=spec.feedback,
             )
         )
         if spec.local_name:
             local_ids[spec.local_name] = task_id
+    for task in results:
+        task.feedback = _resolve_feedback(task.feedback)
+    regions = [
+        ParsedRegion(
+            name=region_spec.name,
+            region=region_spec.region,
+            depends_on=[
+                local_ids.get(s, s)
+                for dep in region_spec.depends_on
+                if dep and (s := dep.strip())
+            ],
+            feedback=_resolve_feedback(region_spec.feedback),
+        )
+        for region_spec in region_specs
+    ]
     return ParsedWorkflow(
         tasks=results,
         schedule_in_epoch_order=schedule_in_epoch_order,
         epoch_groups=epoch_groups,
+        regions=regions,
+        api_version=api_version,
     )
+
+
+def _is_v2_mode(api_version: Any) -> bool:
+    # Inline import breaks a parser <-> v2 package import cycle.
+    from .v2.mode import ExecutionMode
+
+    return ExecutionMode.is_v2(api_version)
 
 
 def _build_task_template(
     payload: _WorkflowRootInput,
     local_name: str | None = None,
     graph_node_name: str | None = None,
-) -> TaskEnvelopeTemplate:
+) -> tuple[TaskEnvelopeTemplate, dict[str, Any] | None]:
     context = _task_context_label(local_name, graph_node_name)
     task_spec = payload.spec
+    v2_block = task_spec.pop("v2", None) if isinstance(task_spec, dict) else None
+    if v2_block is not None and not _is_v2_mode(payload.apiVersion):
+        raise ValueError(
+            f"Invalid task payload{context}: spec.v2 requires apiVersion "
+            "'flowmesh/v2'"
+        )
     task_type = task_spec.get("taskType")
     if not isinstance(task_type, str) or not task_type.strip():
         raise ValueError(f"Invalid task payload{context}: spec.taskType is required")
@@ -167,7 +232,7 @@ def _build_task_template(
         task.spec.validate_dispatchable()
     except ValueError as exc:
         raise ValueError(f"Invalid task payload{context}: {exc}") from exc
-    return task
+    return task, v2_block if isinstance(v2_block, dict) else None
 
 
 def _task_context_label(local_name: str | None, graph_node_name: str | None) -> str:
@@ -214,7 +279,7 @@ def _expand_specs(data: Any) -> ParsedWorkflow:
 
     depends_on_raw = root.spec.get("dependsOn") or []
     depends_on = _normalize_dep_list(depends_on_raw)
-    task = _build_task_template(root)
+    task, v2_block = _build_task_template(root)
     return _build_workflow(
         specs=[
             ParsedTaskSpec(
@@ -223,10 +288,12 @@ def _expand_specs(data: Any) -> ParsedWorkflow:
                 local_name=None,
                 graph_node_name=None,
                 load=_compute_task_load(task),
+                v2=v2_block,
             )
         ],
         schedule_in_epoch_order=None,
         epoch_groups=None,
+        api_version=root.apiVersion,
     )
 
 
@@ -240,6 +307,18 @@ def _expand_graph_nodes(
 
     for idx, node in enumerate(nodes):
         node = _validate_workflow_node(node, f"graph.nodes[{idx}]")
+
+        if (node.region is not None or node.feedback is not None) and not _is_v2_mode(
+            base.apiVersion
+        ):
+            raise ValueError(
+                f"graph.nodes[{idx}]: region/feedback require apiVersion 'flowmesh/v2'"
+            )
+        if node.region is not None and node.spec is not None:
+            raise ValueError(
+                f"graph.nodes[{idx}]: a node declares either 'spec' (a task) or "
+                "'region' (a structured region), not both"
+            )
 
         name = node.name or node.id or f"node-{idx+1}"
         name = str(name).strip()
@@ -261,6 +340,7 @@ def _expand_graph_nodes(
 
     unresolved = dict(indexed)
     results: list[ParsedTaskSpec] = []
+    region_specs: list[ParsedRegion] = []
 
     while unresolved:
         progressed = False
@@ -278,7 +358,20 @@ def _expand_graph_nodes(
             if unresolved_internal:
                 continue
 
-            eff = _merge_workflow_task(
+            if node.region is not None:
+                region_specs.append(
+                    ParsedRegion(
+                        name=name,
+                        region=node.region,
+                        depends_on=pending,
+                        feedback=node.feedback,
+                    )
+                )
+                unresolved.pop(name)
+                progressed = True
+                continue
+
+            eff, v2_block = _merge_workflow_task(
                 base_clean, node.spec, f"{base_name}:{name}", graph_node_name=name
             )
 
@@ -291,6 +384,8 @@ def _expand_graph_nodes(
                     load=_compute_task_load(eff),
                     position_in_epoch=node_position_in_epoch.get(name),
                     selected_worker=selected_workers.get(name),
+                    v2=v2_block,
+                    feedback=node.feedback,
                 )
             )
             unresolved.pop(name)
@@ -306,6 +401,8 @@ def _expand_graph_nodes(
         specs=results,
         schedule_in_epoch_order=schedule_in_epoch_order,
         epoch_groups=epoch_groups,
+        region_specs=region_specs,
+        api_version=base.apiVersion,
     )
 
 
@@ -325,7 +422,7 @@ def _merge_workflow_task(
     metadata_name: str,
     local_name: str | None = None,
     graph_node_name: str | None = None,
-) -> TaskEnvelopeTemplate:
+) -> tuple[TaskEnvelopeTemplate, dict[str, Any] | None]:
     merged = base.model_copy(deep=True)
     merged.spec = _deep_merge(merged.spec, spec_overrides or {})
     if merged.metadata is None:
@@ -339,7 +436,7 @@ def _normalize_dep_list(raw: Any) -> list[str]:
         return []
     if not isinstance(raw, list):
         raise ValueError("dependsOn must be a list")
-    return [str(dep).strip() for dep in raw if str(dep).strip()]
+    return [s for dep in raw if (s := str(dep).strip())]
 
 
 def _expand_stages(
@@ -354,6 +451,11 @@ def _expand_stages(
 
     for idx, stage in enumerate(stages):
         stage = _validate_workflow_node(stage, f"spec.stages[{idx}]")
+        if stage.region is not None or stage.feedback is not None:
+            raise ValueError(
+                f"spec.stages[{idx}]: structured regions are only supported in "
+                "the graph form (spec.graph.nodes)"
+            )
         name = stage.name or stage.id or f"stage-{idx+1}"
         name = str(name).strip()
         if not name:
@@ -373,7 +475,7 @@ def _expand_stages(
     ordered_names = list(indexed.keys())
     for idx, name in enumerate(ordered_names):
         stage = indexed[name]
-        eff = _merge_workflow_task(
+        eff, v2_block = _merge_workflow_task(
             base_clean, stage.spec, f"{base_name}:{name}", local_name=name
         )
 
@@ -391,6 +493,7 @@ def _expand_stages(
                 load=_compute_task_load(eff),
                 position_in_epoch=node_position_in_epoch.get(name),
                 selected_worker=selected_workers.get(name),
+                v2=v2_block,
             )
         )
 
@@ -398,6 +501,7 @@ def _expand_stages(
         specs=results,
         schedule_in_epoch_order=schedule_in_epoch_order,
         epoch_groups=epoch_groups,
+        api_version=base.apiVersion,
     )
 
 
@@ -434,7 +538,7 @@ def _parse_schedule_hint(
                 raise ValueError(f"{path} must be a non-empty string")
             return [selected]
         if isinstance(value, list):
-            candidates = [str(item).strip() for item in value if str(item).strip()]
+            candidates = [s for item in value if (s := str(item).strip())]
             if not candidates:
                 raise ValueError(f"{path} list must contain non-empty strings")
             return list(dict.fromkeys(candidates))
@@ -622,7 +726,7 @@ def _validate_condition_depends_on(spec: ParsedTaskSpec) -> None:
     if condition is None:
         return
     node = condition.node.strip()
-    deps = {dep.strip() for dep in spec.depends_on if dep and dep.strip()}
+    deps = {s for dep in spec.depends_on if dep and (s := dep.strip())}
     if node in deps:
         return
     node_label = spec.graph_node_name or spec.local_name or "<task>"

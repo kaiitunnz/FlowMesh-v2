@@ -24,7 +24,7 @@ self-authenticate the same way, sending `FLOWMESH_API_KEY` as the bearer.
 | Method | Path | Description |
 |--------|------|-------------|
 | POST | `/api/v1/workflows` | Submit a workflow. Body is YAML (`text/plain`) or JSON; set `Workflow-Format: n8n` for n8n graphs. |
-| POST | `/api/v1/workflows/validate` | Parse without executing. |
+| POST | `/api/v1/workflows/validate` | Parse without executing; for `flowmesh/v2` returns the compiled template/plan inspection. |
 | GET | `/api/v1/workflows` | List workflows (`workflow_id`, `owner`, `status`, cursor pagination). |
 | GET | `/api/v1/workflows/{id}` | Workflow details + per-task summary. |
 | GET | `/api/v1/workflows/{id}/logs` | Query logs (`limit`, `before`/`after` cursors). |

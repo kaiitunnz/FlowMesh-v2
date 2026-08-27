@@ -1,12 +1,12 @@
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, model_validator
 
 from .operators import EffectBoundary, LogicalOperator
 from .results import LegacyLogicalTaskProjection, ResultDeclaration
 from .versioning import VersionId
 
-type SourceKind = Literal["legacy_task", "stage", "graph_node", "root"]
+type SourceKind = Literal["legacy_task", "stage", "graph_node", "region", "root"]
 
 
 class TemplateEdge(BaseModel):
@@ -18,6 +18,9 @@ class TemplateEdge(BaseModel):
     to_op: str
     from_port: str | None = None
     to_port: str | None = None
+    # A feedback edge is a structured back-edge into a LoopContext region,
+    # excluded from the forward topology that unstructured-cycle detection rejects.
+    feedback: bool = False
 
 
 class ToolDeclaration(BaseModel):
@@ -67,7 +70,7 @@ class LogicalWorkflowTemplate(BaseModel):
     result_declarations: tuple[ResultDeclaration, ...] = ()
     legacy_projection: tuple[LegacyLogicalTaskProjection, ...] = ()
     effect_boundaries: tuple[EffectBoundary, ...] = ()
-    source_map: tuple[SourceMapEntry, ...] = Field(default=())
+    source_map: tuple[SourceMapEntry, ...] = ()
 
     @property
     def operator_ids(self) -> frozenset[str]:

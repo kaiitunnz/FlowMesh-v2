@@ -1,7 +1,9 @@
-from pydantic import BaseModel, ConfigDict
-
+from .compiler.diagnostics import CompileError, Diagnostic, Severity, SourceLocation
+from .compiler.inspect import InspectionReport, build_inspection
+from .compiler.pipeline import compile_bundle, compile_workflow
 from .mode import V2_API_VERSION, ExecutionMode
-from .operators import (
+from .representations.bundle import PersistedV2Workflow
+from .representations.operators import (
     AgentOperator,
     AuthorityCeiling,
     BindingKey,
@@ -31,45 +33,28 @@ from .operators import (
     SpawnRegion,
     StateReference,
 )
-from .plan import (
+from .representations.plan import (
     PhysicalExecutionPlan,
     PhysicalNode,
     ResidencyIntent,
     ServiceFamilyRequirement,
 )
-from .project import project_acyclic
-from .results import (
+from .representations.results import (
     CardinalityKind,
     LegacyLogicalTaskProjection,
     ReleaseConditionKind,
     ResultDeclaration,
     Visibility,
 )
-from .source import FrontendWorkflowSource
-from .template import (
+from .representations.source import FrontendWorkflowSource
+from .representations.template import (
     LogicalWorkflowTemplate,
     ResourceDeclaration,
     SourceMapEntry,
     TemplateEdge,
     ToolDeclaration,
 )
-from .versioning import VersionId, content_digest
-
-
-class PersistedV2Workflow(BaseModel):
-    """The durable plan-time bundle for a v2 workflow submission.
-
-    Bundles the immutable frontend source with the logical template and physical
-    plan. Persisted as one immutable record and never rewritten in place; a
-    revision is a compatible successor.
-    """
-
-    model_config = ConfigDict(frozen=True)
-
-    source: FrontendWorkflowSource
-    template: LogicalWorkflowTemplate
-    plan: PhysicalExecutionPlan
-
+from .representations.versioning import VersionId, content_digest
 
 __all__ = [
     "AgentOperator",
@@ -79,8 +64,10 @@ __all__ = [
     "BoundarySignature",
     "BranchRegion",
     "CardinalityKind",
+    "CompileError",
     "ConditionGuard",
     "DeterminismClass",
+    "Diagnostic",
     "EffectBoundary",
     "EffectClass",
     "EffectReplayContract",
@@ -89,6 +76,7 @@ __all__ = [
     "ExecutionMode",
     "FrontendWorkflowSource",
     "InputProvenanceKind",
+    "InspectionReport",
     "JoinCompletion",
     "JoinRegion",
     "LeafOperator",
@@ -111,6 +99,8 @@ __all__ = [
     "ResourceDeclaration",
     "ResultDeclaration",
     "ServiceFamilyRequirement",
+    "Severity",
+    "SourceLocation",
     "SourceMapEntry",
     "SpawnRegion",
     "StateReference",
@@ -119,6 +109,8 @@ __all__ = [
     "V2_API_VERSION",
     "VersionId",
     "Visibility",
+    "build_inspection",
+    "compile_bundle",
+    "compile_workflow",
     "content_digest",
-    "project_acyclic",
 ]
