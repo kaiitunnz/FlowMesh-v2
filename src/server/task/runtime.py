@@ -33,6 +33,13 @@ from .v2 import (
     build_inspection,
     compile_bundle,
 )
+from .v2.orchestration import (
+    Advance,
+    LedgerSnapshot,
+    OrchestrationLedger,
+    RecoveryDisposition,
+    ResultPublication,
+)
 
 
 def _sanitize_merge_spec(spec: dict[str, Any]) -> dict[str, Any]:
@@ -88,6 +95,7 @@ class TaskRuntime:
         self._workflow_in_epoch_order: dict[str, bool] = {}
         self._task_epoch_index: dict[str, int] = {}
         self._rehydrated_dispatched: dict[str, float] = {}
+        self._ledgers: dict[str, OrchestrationLedger] = {}
 
         self._lock = threading.RLock()
         self._cv = threading.Condition(self._lock)
@@ -139,6 +147,7 @@ class TaskRuntime:
         graph_task_ids: dict[str, str] = {}
 
         v2_bundle: PersistedV2Workflow | None = None
+        v2_ledger: OrchestrationLedger | None = None
         if ExecutionMode.is_v2(parsed_workflow.api_version):
             if parsed_workflow.regions:
                 raise ValueError(
@@ -147,6 +156,9 @@ class TaskRuntime:
                 )
             source = FrontendWorkflowSource.capture(yaml_text, format)
             v2_bundle = compile_bundle(workflow_id, parsed_workflow, source)
+            v2_ledger = OrchestrationLedger.build(
+                workflow_id, owner_id, org_id, v2_bundle
+            )
 
         with self._cv:
             if (
@@ -199,31 +211,34 @@ class TaskRuntime:
                 )
                 task_records.append(record)
                 record.last_queue_ts = record.submitted_ts
-                merge_key = _compute_merge_key(task)
-                record.merge_key = merge_key
-                selected_worker_hint = (
-                    record.selected_worker[0]
-                    if record.selected_worker and len(record.selected_worker) == 1
-                    else None
-                )
-                self._merge_key_by_task[task_id] = (merge_key, selected_worker_hint)
+                if v2_ledger is None:
+                    merge_key = _compute_merge_key(task)
+                    record.merge_key = merge_key
+                    selected_worker_hint = (
+                        record.selected_worker[0]
+                        if record.selected_worker and len(record.selected_worker) == 1
+                        else None
+                    )
+                    self._merge_key_by_task[task_id] = (merge_key, selected_worker_hint)
 
                 self._tasks[task_id] = record
                 if record.graph_node_name:
                     graph_task_ids[record.graph_node_name] = task_id
                 self._original_deps[task_id] = original
-                self._pending_deps[task_id] = pending
                 self._failed.discard(task_id)
                 if record.status == TaskStatus.DONE:
                     self._completed.add(task_id)
                 else:
                     self._completed.discard(task_id)
 
-                for dep in original:
-                    self._dependents[dep].add(task_id)
-
-                if not pending and record.status == TaskStatus.PENDING:
-                    candidate_ready.append(task_id)
+                # v2 readiness is owned by the orchestration ledger; the legacy
+                # dependency machinery stays unwired so it cannot admit v2 work.
+                if v2_ledger is None:
+                    self._pending_deps[task_id] = pending
+                    for dep in original:
+                        self._dependents[dep].add(task_id)
+                    if not pending and record.status == TaskStatus.PENDING:
+                        candidate_ready.append(task_id)
 
                 results.append(
                     TaskParsingResult(
@@ -233,7 +248,7 @@ class TaskRuntime:
                     )
                 )
             epoch_groups = parsed_workflow.epoch_groups
-            if epoch_groups:
+            if epoch_groups and v2_ledger is None:
                 epoch_queue: deque[set[str]] = deque()
                 has_epoch_tasks = False
                 for epoch_idx, epoch_nodes in enumerate(epoch_groups):
@@ -266,9 +281,17 @@ class TaskRuntime:
         await self._workflow_registry.save_workflow_sched_async(
             workflow_id, in_epoch_order, frontier
         )
+        if v2_ledger is not None:
+            await self._workflow_registry.save_ledger_snapshot_async(
+                workflow_id, v2_ledger.to_snapshot()
+            )
 
         new_ready = False
         with self._cv:
+            if v2_ledger is not None:
+                self._ledgers[workflow_id] = v2_ledger
+                if self._apply_advance_locked(workflow_id, v2_ledger.initial_advance()):
+                    new_ready = True
             for task_id in candidate_ready:
                 maybe_record = self._tasks.get(task_id)
                 if not maybe_record or maybe_record.status != TaskStatus.PENDING:
@@ -314,10 +337,23 @@ class TaskRuntime:
             if not tasks:
                 continue
             sched = await self._workflow_registry.load_workflow_sched_async(workflow_id)
+            snapshot = await self._workflow_registry.load_ledger_snapshot_async(
+                workflow_id
+            )
+            bundle = (
+                await self._workflow_registry.get_v2_workflow_async(workflow_id)
+                if snapshot is not None
+                else None
+            )
             with self._cv:
-                self._install_rehydrated_workflow_locked(
-                    workflow_id, tasks, sched, rehydrated_at
-                )
+                if snapshot is not None and bundle is not None:
+                    self._install_rehydrated_v2_workflow_locked(
+                        workflow_id, tasks, snapshot, bundle, rehydrated_at
+                    )
+                else:
+                    self._install_rehydrated_workflow_locked(
+                        workflow_id, tasks, sched, rehydrated_at
+                    )
                 self._cv.notify_all()
             restored += 1
         if restored:
@@ -390,6 +426,50 @@ class TaskRuntime:
             if self._pending_deps.get(record.task_id):
                 continue
             self._enqueue_ready_locked(record.task_id)
+
+    def _install_rehydrated_v2_workflow_locked(
+        self,
+        workflow_id: str,
+        tasks: list[PersistedTask],
+        snapshot: LedgerSnapshot,
+        bundle: PersistedV2Workflow,
+        rehydrated_at: float,
+    ) -> None:
+        """Rebuild a v2 workflow: restore the ledger and re-admit ready work items.
+
+        The legacy dependency machinery stays unwired; the orchestration ledger is the
+        readiness authority. Terminal task facts reconcile the ledger idempotently, so a
+        crash between a task's terminal write and its ledger snapshot never loses a
+        settlement and never duplicates a publication or effect receipt.
+        """
+        for persisted in tasks:
+            record = persisted.record
+            task_id = record.task_id
+            self._tasks[task_id] = record
+            self._original_deps[task_id] = set(persisted.depends_on)
+            if record.status == TaskStatus.DONE:
+                self._completed.add(task_id)
+            elif record.status == TaskStatus.FAILED:
+                self._failed.add(task_id)
+            elif record.status in (TaskStatus.DISPATCHED, TaskStatus.CANCELLING):
+                self._rehydrated_dispatched[task_id] = rehydrated_at
+
+        ledger = OrchestrationLedger(snapshot, bundle)
+        self._ledgers[workflow_id] = ledger
+        for persisted in tasks:
+            record = persisted.record
+            if record.status == TaskStatus.DONE:
+                ledger.on_succeeded(record.task_id)
+            elif record.status == TaskStatus.FAILED:
+                ledger.on_failed(
+                    record.task_id, record.error or "task failed", retryable=False
+                )
+
+        for task_id in ledger.resume_ready_task_ids():
+            ready_record = self._tasks.get(task_id)
+            if ready_record and ready_record.status == TaskStatus.PENDING:
+                self._enqueue_ready_locked(task_id)
+        self._save_ledger_locked(workflow_id)
 
     # ------------------------------------------------------------------ #
     # Durable state persistence
@@ -726,6 +806,13 @@ class TaskRuntime:
                 records=self._records_locked(task_id),
                 pending=[task_id],
             )
+            if increment_retry and (ledger := self._ledgers.get(record.workflow_id)):
+                # A retry reuses the work item and its invocation; the ledger records
+                # the failed attempt and readies the work item for a fresh one.
+                ledger.on_failed(
+                    task_id, record.last_error or "task failed", retryable=True
+                )
+                self._save_ledger_locked(record.workflow_id)
 
     def requeue(self, task_id: str, *, front: bool = False) -> bool:
         """Reinsert a task into the ready queue."""
@@ -734,6 +821,118 @@ class TaskRuntime:
             if added:
                 self._cv.notify_all()
             return added
+
+    # ------------------------------------------------------------------ #
+    # v2 orchestration ledger (`DS`)
+    # ------------------------------------------------------------------ #
+
+    def is_v2_workflow(self, workflow_id: str) -> bool:
+        return workflow_id in self._ledgers
+
+    def orchestration_ledger(self, workflow_id: str) -> OrchestrationLedger | None:
+        with self._lock:
+            return self._ledgers.get(workflow_id)
+
+    def resolve_v2_output(
+        self, workflow_id: str, output_id: str
+    ) -> ResultPublication | None:
+        """Resolve a declared logical output to its terminal publication."""
+        with self._lock:
+            ledger = self._ledgers.get(workflow_id)
+            return ledger.resolve_output(output_id) if ledger else None
+
+    def resolve_v2_legacy_result(
+        self, workflow_id: str, task_id: str
+    ) -> ResultPublication | None:
+        """Resolve a legacy task's induced output slot (compatibility adapter)."""
+        with self._lock:
+            ledger = self._ledgers.get(workflow_id)
+            return ledger.resolve_legacy_task(task_id) if ledger else None
+
+    def recovery_disposition(
+        self, workflow_id: str, task_id: str
+    ) -> RecoveryDisposition | None:
+        """Whether a settled v2 operation may be recomputed or must be restored."""
+        with self._lock:
+            ledger = self._ledgers.get(workflow_id)
+            return ledger.recovery_disposition(task_id) if ledger else None
+
+    def mark_v2_uncertain(self, task_id: str) -> Advance:
+        """Resolve a lost acknowledgement or route loss for an in-flight v2 work item.
+
+        A replayable invocation is reissued through its stable identity as a fresh
+        attempt; a non-replayable one becomes ambiguity-terminal and never silently
+        retries or reports success.
+        """
+        with self._cv:
+            record = self._tasks.get(task_id)
+            if (
+                record is None
+                or (ledger := self._ledgers.get(record.workflow_id)) is None
+            ):
+                return Advance()
+            advance = ledger.on_uncertain(task_id)
+            if advance.retry:
+                self.mark_pending(task_id, increment_retry=False)
+                self.requeue(task_id, front=True)
+            elif advance.failed:
+                self._fail_v2_records_locked(
+                    advance.failed, "ambiguity-terminal effect"
+                )
+            self._save_ledger_locked(record.workflow_id)
+            return advance
+
+    def _save_ledger_locked(self, workflow_id: str) -> None:
+        if (ledger := self._ledgers.get(workflow_id)) is not None:
+            self._workflow_registry.save_ledger_snapshot(
+                workflow_id, ledger.to_snapshot()
+            )
+
+    def _apply_advance_locked(self, workflow_id: str, advance: Advance) -> bool:
+        changed = False
+        for task_id in advance.ready:
+            if self._enqueue_ready_locked(task_id):
+                changed = True
+        if advance.failed:
+            self._fail_v2_records_locked(advance.failed, "declared-failure obligation")
+            changed = True
+        return changed
+
+    def _fail_v2_records_locked(self, task_ids: list[str], reason: str) -> None:
+        failed_now: list[str] = []
+        for task_id in task_ids:
+            record = self._tasks.get(task_id)
+            if not record or record.status in TERMINAL_TASK_STATUSES:
+                continue
+            record.status = TaskStatus.FAILED
+            record.error = reason
+            record.assigned_worker = None
+            record.finished_ts = time.time()
+            self._failed.add(task_id)
+            self._remove_from_ready_locked(task_id)
+            failed_now.append(task_id)
+        if failed_now:
+            self._persist_terminal_locked(*failed_now)
+
+    def _fail_v2_cascade_locked(
+        self, primary: str, cascade: list[str]
+    ) -> list[tuple[str, str]]:
+        impacted: list[tuple[str, str]] = []
+        reason = f"Dependency {primary} failed"
+        for task_id in cascade:
+            if task_id == primary:
+                continue
+            record = self._tasks.get(task_id)
+            if not record or record.status in TERMINAL_TASK_STATUSES:
+                continue
+            record.status = TaskStatus.FAILED
+            record.error = reason
+            record.assigned_worker = None
+            record.finished_ts = time.time()
+            self._failed.add(task_id)
+            self._remove_from_ready_locked(task_id)
+            impacted.append((task_id, reason))
+        return impacted
 
     def plan_merge(
         self, task_id: str, max_batch_size: int, assigned_worker: str
@@ -959,6 +1158,9 @@ class TaskRuntime:
                 records=self._records_locked(task_id),
                 dispatched=[task_id],
             )
+            if ledger := self._ledgers.get(record.workflow_id):
+                ledger.on_dispatched(task_id, worker.id)
+                self._save_ledger_locked(record.workflow_id)
 
     def mark_started(
         self,
@@ -984,6 +1186,9 @@ class TaskRuntime:
                 records=self._records_locked(task_id),
                 dispatched=[task_id],
             )
+            if ledger := self._ledgers.get(record.workflow_id):
+                ledger.on_started(task_id)
+                self._save_ledger_locked(record.workflow_id)
 
     def mark_updated(self, task_id: str, payload: dict[str, Any]) -> None:
         with self._lock:
@@ -1000,10 +1205,14 @@ class TaskRuntime:
         worker_id: str | None,
         payload: dict[str, Any],
         ts: str,
+        *,
+        empty: bool = False,
     ) -> list[tuple[str, TaskUsage]]:
         """
         Mark a task as completed and enqueue any dependents that have become ready.
-        Returns the per-task usage rows produced by the completion.
+        Returns the per-task usage rows produced by the completion. ``empty`` records a
+        conditional-skip settlement, which resolves a v2 output to an explicit-empty
+        publication.
         """
         finished_ts = parse_iso_ts(str(payload.get("finished_at") or ts))
         maybe_started = payload.get("started_at")
@@ -1078,6 +1287,13 @@ class TaskRuntime:
                 )
 
             self._persist_terminal_locked(task_id, *merged_children_ids)
+
+            if record is not None and (ledger := self._ledgers.get(record.workflow_id)):
+                if self._apply_advance_locked(
+                    record.workflow_id, ledger.on_succeeded(task_id, empty=empty)
+                ):
+                    ready_children.append(task_id)
+                self._save_ledger_locked(record.workflow_id)
 
             if ready_children:
                 self._cv.notify_all()
@@ -1161,6 +1377,11 @@ class TaskRuntime:
                 self._pending_deps.pop(child, None)
                 self._remove_from_ready_locked(child)
                 impacted.append((child, reason))
+
+            if record is not None and (ledger := self._ledgers.get(record.workflow_id)):
+                advance = ledger.on_failed(task_id, message, retryable=False)
+                impacted.extend(self._fail_v2_cascade_locked(task_id, advance.failed))
+                self._save_ledger_locked(record.workflow_id)
 
             for merged_child in merged_children_ids:
                 impacted.extend(

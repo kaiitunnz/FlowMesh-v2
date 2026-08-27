@@ -20,11 +20,36 @@ class FakeWorkflowRegistry:
         self.task_blobs: dict[str, str] = {}
         self.sched: dict[str, str] = {}
         self.workflow_task_ids: dict[str, list[str]] = {}
+        self.v2_blobs: dict[str, str] = {}
+        self.ledger_blobs: dict[str, str] = {}
 
     async def register_workflow_async(
         self, workflow_id: str, tasks: list[Any], v2: Any = None
     ) -> None:
         self.workflow_task_ids[workflow_id] = [t.task_id for t in tasks]
+        if v2 is not None:
+            self.v2_blobs[workflow_id] = v2.model_dump_json()
+
+    async def get_v2_workflow_async(self, workflow_id: str) -> Any:
+        from server.task.v2 import PersistedV2Workflow
+
+        blob = self.v2_blobs.get(workflow_id)
+        return PersistedV2Workflow.model_validate_json(blob) if blob else None
+
+    def save_ledger_snapshot(self, workflow_id: str, snapshot: Any) -> None:
+        self.ledger_blobs[workflow_id] = snapshot.model_dump_json()
+
+    async def save_ledger_snapshot_async(self, workflow_id: str, snapshot: Any) -> None:
+        self.save_ledger_snapshot(workflow_id, snapshot)
+
+    def load_ledger_snapshot(self, workflow_id: str) -> Any:
+        from server.task.v2.orchestration import LedgerSnapshot
+
+        blob = self.ledger_blobs.get(workflow_id)
+        return LedgerSnapshot.model_validate_json(blob) if blob else None
+
+    async def load_ledger_snapshot_async(self, workflow_id: str) -> Any:
+        return self.load_ledger_snapshot(workflow_id)
 
     def get_workflow_ids(self) -> set[str]:
         return set(self.workflow_task_ids)
