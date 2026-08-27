@@ -1,6 +1,7 @@
 from .bundle import PersistedV2Workflow
 from .compiler import compile_bundle, compile_workflow, project_acyclic
 from .diagnostics import CompileError, Diagnostic, Severity, SourceLocation
+from .inspect import InspectionReport, build_inspection
 from .mode import V2_API_VERSION, ExecutionMode
 from .operators import (
     AgentOperator,
@@ -75,6 +76,7 @@ __all__ = [
     "ExecutionMode",
     "FrontendWorkflowSource",
     "InputProvenanceKind",
+    "InspectionReport",
     "JoinCompletion",
     "JoinRegion",
     "LeafOperator",
@@ -107,6 +109,7 @@ __all__ = [
     "V2_API_VERSION",
     "VersionId",
     "Visibility",
+    "build_inspection",
     "compile_bundle",
     "compile_workflow",
     "content_digest",

@@ -28,7 +28,9 @@ from .parser import parse_workflow
 from .v2 import (
     ExecutionMode,
     FrontendWorkflowSource,
+    InspectionReport,
     PersistedV2Workflow,
+    build_inspection,
     compile_bundle,
 )
 
@@ -109,6 +111,22 @@ class TaskRuntime:
                 )
             )
         return results
+
+    def inspect_v2(
+        self, payload: str, format: str = "native"
+    ) -> InspectionReport | None:
+        """Compile a v2 submission into an inspection report without executing.
+
+        Returns ``None`` for a non-v2 submission. Structural frontend errors raise
+        ``CompileError``; semantic findings ride on the report's diagnostics.
+        """
+        parsed_workflow = parse_workflow(payload, format)
+        specs = parsed_workflow.tasks
+        api_version = specs[0].task.apiVersion if specs else None
+        if ExecutionMode.from_api_version(api_version) is not ExecutionMode.V2:
+            return None
+        source = FrontendWorkflowSource.capture(payload, format)
+        return build_inspection(new_workflow_id(), parsed_workflow, source)
 
     async def register(
         self, owner_id: str, org_id: str, payload: str, format: str = "native"
