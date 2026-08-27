@@ -36,6 +36,23 @@ spec:
           v2: {recovery: recompute}
 """
 
+_V2_GUARD_ON_REGION = """
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {name: t}
+spec:
+  graph:
+    nodes:
+      - name: gate
+        region: {kind: branch, selection: "x", ports: [p, q]}
+      - name: gated
+        dependsOn: [gate]
+        spec:
+          taskType: echo
+          condition: {node: gate, field: items.0.output, equals: run}
+          data: {type: list, items: [x]}
+"""
+
 _V2_REGIONS = """
 apiVersion: flowmesh/v2
 kind: Workflow
@@ -115,3 +132,13 @@ def test_v2_invalid_returns_422_with_diagnostics(client: TestClient) -> None:
     assert resp.status_code == 422
     detail = resp.json()["detail"]
     assert any("recovery.illegal-recompute" in d for d in detail["diagnostics"])
+
+
+def test_v2_guard_on_region_returns_422_with_location(client: TestClient) -> None:
+    # A structural guard error is a 422 with a readable location, not a 500.
+    resp = _post(client, _V2_GUARD_ON_REGION)
+    assert resp.status_code == 422
+    diagnostics = resp.json()["detail"]["diagnostics"]
+    assert any(
+        "guard.unknown-node" in d and "graph node 'gated'" in d for d in diagnostics
+    )

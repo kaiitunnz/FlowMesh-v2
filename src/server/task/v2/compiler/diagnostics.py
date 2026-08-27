@@ -62,3 +62,19 @@ class CompileError(Exception):
             diag.render() for diag in diagnostics if diag.severity is Severity.ERROR
         )
         super().__init__(rendered or "workflow compilation failed")
+
+
+def compile_error(
+    code: str, message: str, source_id: str, source_kind: str = "region"
+) -> CompileError:
+    """Build a single-diagnostic :class:`CompileError` with a source location."""
+    return CompileError(
+        (
+            Diagnostic(
+                code=code,
+                message=message,
+                severity=Severity.ERROR,
+                location=SourceLocation(source_kind=source_kind, source_id=source_id),
+            ),
+        )
+    )

@@ -31,6 +31,7 @@ from ..representations.results import (
 )
 from ..representations.template import (
     ResourceDeclaration,
+    SourceKind,
     SourceMapEntry,
     TemplateEdge,
     ToolDeclaration,
@@ -41,6 +42,7 @@ from .bindings import (
     is_training,
     leaf_profile,
 )
+from .diagnostics import compile_error
 
 
 def _model_ref(task: ParsedTask) -> ModelRef | None:
@@ -53,6 +55,14 @@ def _model_ref(task: ParsedTask) -> ModelRef | None:
     return ModelRef(architecture=name, version=spec.model_revision)
 
 
+def _task_source(task: ParsedTask) -> tuple[SourceKind, str]:
+    if task.graph_node_name:
+        return "graph_node", task.graph_node_name
+    if task.local_name:
+        return "stage", task.local_name
+    return "legacy_task", task.task_id
+
+
 def _condition_guard(
     task: ParsedTask, name_to_op: dict[str, str], operator_ids: set[str]
 ) -> ConditionGuard | None:
@@ -62,9 +72,13 @@ def _condition_guard(
     raw = condition.node.strip()
     operator_id = name_to_op.get(raw, raw)
     if operator_id not in operator_ids:
-        raise ValueError(
-            f"conditional guard on task {task.task_id!r} references upstream "
-            f"{condition.node!r}, which resolves to no operator."
+        source_kind, source_id = _task_source(task)
+        raise compile_error(
+            "guard.unknown-node",
+            f"conditional guard references upstream {condition.node!r}, "
+            "which resolves to no operator",
+            source_id,
+            source_kind,
         )
     return ConditionGuard(
         node=operator_id, field=condition.field, equals=condition.equals
@@ -72,18 +86,9 @@ def _condition_guard(
 
 
 def _source_map_entry(task: ParsedTask) -> SourceMapEntry:
-    if task.graph_node_name:
-        return SourceMapEntry(
-            logical_ref=task.task_id,
-            source_kind="graph_node",
-            source_id=task.graph_node_name,
-        )
-    if task.local_name:
-        return SourceMapEntry(
-            logical_ref=task.task_id, source_kind="stage", source_id=task.local_name
-        )
+    source_kind, source_id = _task_source(task)
     return SourceMapEntry(
-        logical_ref=task.task_id, source_kind="legacy_task", source_id=task.task_id
+        logical_ref=task.task_id, source_kind=source_kind, source_id=source_id
     )
 
 

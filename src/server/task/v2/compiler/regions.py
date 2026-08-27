@@ -31,9 +31,7 @@ from ..representations.template import (
     TemplateEdge,
     ToolDeclaration,
 )
-from .diagnostics import CompileError, Diagnostic
-from .diagnostics import Severity as _Severity
-from .diagnostics import SourceLocation
+from .diagnostics import compile_error
 from .project import LoweringAccumulator
 
 # Friendly aliases for the two provenance values authors write in spec.v2.
@@ -50,37 +48,27 @@ def _enum_or_none[E: Enum](enum_cls: type[E], value: str) -> E | None:
         return None
 
 
-def _fail(
-    code: str, message: str, name: str, source_kind: str = "region"
-) -> CompileError:
-    return CompileError(
-        (
-            Diagnostic(
-                code=code,
-                message=message,
-                severity=_Severity.ERROR,
-                location=SourceLocation(source_kind=source_kind, source_id=name),
-            ),
-        )
-    )
-
-
-def _str_list(value: Any) -> tuple[str, ...]:
+def _str_list(value: Any, name: str, source_kind: str = "region") -> tuple[str, ...]:
     if value is None:
         return ()
     if isinstance(value, str):
         return (value,)
     if isinstance(value, list):
         return tuple(str(item) for item in value)
-    return ()
+    raise compile_error(
+        "v2.not-string-list",
+        f"expected a string or list of strings, got {type(value).__name__}",
+        name,
+        source_kind,
+    )
 
 
-def _authority(raw: Any) -> AuthorityCeiling:
+def _authority(raw: Any, name: str, source_kind: str = "region") -> AuthorityCeiling:
     if not isinstance(raw, dict):
         return AuthorityCeiling()
     return AuthorityCeiling(
-        invoke=_str_list(raw.get("invoke")),
-        delegate=_str_list(raw.get("delegate")),
+        invoke=_str_list(raw.get("invoke"), name, source_kind),
+        delegate=_str_list(raw.get("delegate"), name, source_kind),
     )
 
 
@@ -118,12 +106,12 @@ def _apply_one(
     tools = v2.get("tools")
     if tools is not None:
         if not isinstance(tools, list):
-            raise _fail(
+            raise compile_error(
                 "v2.tools-not-list", "spec.v2.tools must be a list", name, "graph_node"
             )
         for tool in tools:
             if not isinstance(tool, dict) or not tool.get("name"):
-                raise _fail(
+                raise compile_error(
                     "v2.tool-no-name",
                     "each spec.v2.tool needs a name",
                     name,
@@ -158,7 +146,7 @@ def _apply_one(
         return _apply_agent_v2(op, v2, name)
     if isinstance(op, LeafOperator):
         return _apply_leaf_v2(op, v2, name)
-    raise _fail(
+    raise compile_error(
         "v2.unsupported-operator",
         "spec.v2 applies only to task/agent leaves",
         name,
@@ -169,14 +157,14 @@ def _apply_one(
 def _apply_agent_v2(op: AgentOperator, v2: dict[str, Any], name: str) -> AgentOperator:
     updates: dict[str, Any] = {}
     if "authority" in v2:
-        updates["authority"] = _authority(v2["authority"])
+        updates["authority"] = _authority(v2["authority"], name, "graph_node")
     boundary = v2.get("boundary")
     if boundary is not None:
         events = []
-        for event in _str_list(boundary):
+        for event in _str_list(boundary, name, "graph_node"):
             member = _enum_or_none(BoundaryEventKind, event)
             if member is None:
-                raise _fail(
+                raise compile_error(
                     "v2.bad-boundary-event",
                     f"unknown boundary event {event!r}",
                     name,
@@ -189,7 +177,7 @@ def _apply_agent_v2(op: AgentOperator, v2: dict[str, Any], name: str) -> AgentOp
 
 def _apply_leaf_v2(op: LeafOperator, v2: dict[str, Any], name: str) -> LeafOperator:
     if "authority" in v2 or "tools" in v2 or "boundary" in v2:
-        raise _fail(
+        raise compile_error(
             "v2.authority-on-leaf",
             "authority/tools/boundary apply only to agent leaves",
             name,
@@ -200,7 +188,7 @@ def _apply_leaf_v2(op: LeafOperator, v2: dict[str, Any], name: str) -> LeafOpera
     if "provenance" in v2:
         member = _PROVENANCE.get(str(v2["provenance"]))
         if member is None:
-            raise _fail(
+            raise compile_error(
                 "v2.bad-provenance",
                 f"unknown provenance {v2['provenance']!r}",
                 name,
@@ -215,7 +203,7 @@ def _apply_leaf_v2(op: LeafOperator, v2: dict[str, Any], name: str) -> LeafOpera
         if key in v2:
             profile_value = _enum_or_none(enum_cls, str(v2[key]))
             if profile_value is None:
-                raise _fail(
+                raise compile_error(
                     "v2.bad-profile",
                     f"unknown {key} {v2[key]!r}",
                     name,
@@ -266,7 +254,9 @@ def _lower_region(region: ParsedRegion, acc: LoweringAccumulator) -> None:
         _lower_call(region, acc)
         return
     else:
-        raise _fail("region.unknown-kind", f"unknown region kind {kind!r}", name)
+        raise compile_error(
+            "region.unknown-kind", f"unknown region kind {kind!r}", name
+        )
 
     for dep in region.depends_on:
         acc.edges.append(TemplateEdge(from_op=dep, to_op=name))
@@ -295,7 +285,7 @@ def _inputs(has_input: bool, name: str = "in") -> tuple[Port, ...]:
 
 
 def _branch(region: ParsedRegion, has_input: bool) -> BranchRegion:
-    ports = _str_list(region.region.get("ports"))
+    ports = _str_list(region.region.get("ports"), region.name)
     return BranchRegion(
         operator_id=region.name,
         source_ref=region.name,
@@ -328,7 +318,7 @@ def _spawn(region: ParsedRegion, has_input: bool) -> SpawnRegion:
         inputs=_inputs(has_input),
         outputs=(Port(name="children"),),
         child_template_ref=str(child) if child else None,
-        authority=_authority(region.region.get("authority")),
+        authority=_authority(region.region.get("authority"), region.name),
     )
 
 
@@ -337,7 +327,7 @@ def _join(region: ParsedRegion, has_input: bool) -> JoinRegion:
     try:
         completion = JoinCompletion(completion_raw)
     except ValueError as exc:
-        raise _fail(
+        raise compile_error(
             "region.bad-completion",
             f"unknown join completion {completion_raw!r}",
             region.name,
@@ -356,7 +346,7 @@ def _join(region: ParsedRegion, has_input: bool) -> JoinRegion:
 def _loop(region: ParsedRegion, has_input: bool) -> LoopContextRegion:
     coordinate = str(region.region.get("coordinate", "")).strip()
     if not coordinate:
-        raise _fail(
+        raise compile_error(
             "region.loop-no-coordinate",
             "loop region requires a coordinate",
             region.name,
@@ -364,7 +354,7 @@ def _loop(region: ParsedRegion, has_input: bool) -> LoopContextRegion:
     carried: list[Port] = []
     for entry in region.region.get("carried", []) or []:
         if not isinstance(entry, dict) or not entry.get("name"):
-            raise _fail(
+            raise compile_error(
                 "region.loop-bad-carried",
                 "each carried entry needs a name",
                 region.name,
@@ -401,7 +391,7 @@ def _loop(region: ParsedRegion, has_input: bool) -> LoopContextRegion:
 def _lower_call(region: ParsedRegion, acc: LoweringAccumulator) -> None:
     """Normalize a ``call`` into a structured ``Spawn(1)`` then ``Join`` pair."""
     child = region.region.get("child")
-    returns = _str_list(region.region.get("returns"))
+    returns = _str_list(region.region.get("returns"), region.name)
     spawn_id = region.name
     join_id = f"{region.name}:join"
     spawn = SpawnRegion(
@@ -410,7 +400,7 @@ def _lower_call(region: ParsedRegion, acc: LoweringAccumulator) -> None:
         inputs=_inputs(bool(region.depends_on)),
         outputs=(Port(name="child"),),
         child_template_ref=str(child) if child else None,
-        authority=_authority(region.region.get("authority")),
+        authority=_authority(region.region.get("authority"), region.name),
     )
     join = JoinRegion(
         operator_id=join_id,
@@ -434,13 +424,13 @@ def _lower_feedback(parsed: ParsedWorkflow, acc: LoweringAccumulator) -> None:
     for source_id, feedback, label in _feedback_sources(parsed):
         target = str(feedback.get("to", "")).strip()
         if target not in operator_ids:
-            raise _fail(
+            raise compile_error(
                 "feedback.unknown-target",
                 f"feedback targets unknown operator {target!r}",
                 label,
             )
         if target not in loop_ids:
-            raise _fail(
+            raise compile_error(
                 "feedback.not-loop",
                 f"feedback target {target!r} is not a LoopContext region",
                 label,

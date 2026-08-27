@@ -6,6 +6,7 @@ import pytest
 from server.task.parser import parse_workflow
 from server.task.runtime import TaskRuntime
 from server.task.v2 import (
+    CompileError,
     FrontendWorkflowSource,
     PersistedV2Workflow,
     build_inspection,
@@ -242,8 +243,6 @@ spec:
 
 
 def test_duplicate_operator_id_is_a_compile_error() -> None:
-    from server.task.v2 import CompileError, build_inspection
-
     text = """
 apiVersion: flowmesh/v2
 kind: Workflow
@@ -260,6 +259,22 @@ spec:
     source = FrontendWorkflowSource.capture(text, "native", name="wf")
     with pytest.raises(CompileError):
         build_inspection("wfl", parsed, source)
+
+
+def test_non_string_authority_list_is_rejected() -> None:
+    text = """
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {name: t}
+spec:
+  graph:
+    nodes:
+      - name: sp
+        region: {kind: spawn, child: c, authority: {invoke: 42}}
+"""
+    with pytest.raises(CompileError) as exc:
+        _compile(text)
+    assert "v2.not-string-list" in {d.code for d in exc.value.diagnostics}
 
 
 def test_spec_v2_under_v1_rejected_by_parser() -> None:
