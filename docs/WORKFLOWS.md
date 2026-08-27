@@ -77,9 +77,8 @@ contract.
 `apiVersion: flowmesh/v2` selects the v2 representation track: the server
 compiles the submission into versioned plan-time representations
 (logical template and physical plan) and persists them alongside the
-workflow. It is off by default — any other `apiVersion` keeps the v1 path
-and changes nothing about parsing, scheduling, dispatch, or results. See
-[`WORKFLOW_REPRESENTATIONS.md`](WORKFLOW_REPRESENTATIONS.md).
+workflow. It is off by default — any other `apiVersion` keeps the v1 path.
+See [`WORKFLOW_REPRESENTATIONS.md`](WORKFLOW_REPRESENTATIONS.md).
 
 ## data_retrieval: type lumid
 

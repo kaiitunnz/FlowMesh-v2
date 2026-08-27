@@ -1,12 +1,8 @@
 # Workflow representations (v2)
 
-FlowMesh separates a submission into distinct plan-time representations that
-decouple author intent, legal workflow semantics, and physical realization. This
-page documents the three durable plan-time representations and the gate that
-selects them. They are built and persisted only for v2 submissions; the default
-v1 path is unchanged.
-
-The models live in `src/server/task/v2/`.
+FlowMesh builds three durable plan-time representations and a gate that selects
+them, decoupling author intent, legal workflow semantics, and physical
+realization. The models live in `src/server/task/v2/`.
 
 ## Selecting the v2 track
 
@@ -16,9 +12,8 @@ The workflow-root `apiVersion` selects the track:
 - Any other value — `flowmesh/v1`, omitted, or unrecognized — stays on the v1
   path and writes no v2 record.
 
-`flowmesh/v2` selects the v2 representation track. The document schema is
-unchanged in this state: existing task, `spec.stages`, and `spec.graph.nodes`
-forms project to the acyclic subset of a logical template.
+Existing task, `spec.stages`, and `spec.graph.nodes` forms project to the
+acyclic subset of a logical template.
 
 ## The three plan-time representations
 
