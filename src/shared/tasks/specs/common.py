@@ -39,8 +39,8 @@ class ConditionSpec(StrictBaseModel):
 
     node: str = Field(description="Upstream task ID whose result to check.")
     field: str = Field(
-        description="Dot-separated path into the upstream result "
-        "(e.g. ``result.verdict``)."
+        description="Dot-separated path into the upstream result payload "
+        "(e.g. ``items.0.output``)."
     )
     equals: str = Field(
         description="Expected value. Task only dispatches if ``actual == equals``."

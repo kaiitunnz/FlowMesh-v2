@@ -998,7 +998,7 @@ class Dispatcher:
         if stage_record.status != "DONE":
             raise StageReferenceNotReady(f"Stage '{stage_name}' has not completed")
         envelope = self._load_stage_result(stage_record.task_id)
-        value = self._dig_path(envelope.result, path.split("."))
+        value = self._dig_result_path(envelope.result, path.split("."))
         if value is None:
             raise ValueError(f"Missing value for reference '{expr}'")
         # If the referenced value is an artifact ref (an ``ArtifactRef`` or a
@@ -1092,8 +1092,8 @@ class Dispatcher:
         content = json.loads(path.read_text(encoding="utf-8"))
         return ResultEnvelope.model_validate(content)
 
-    def _dig_path(self, data: Any, parts: list[str]) -> Any:
-        current = data
+    def _dig_result_path(self, result: BaseExecutorResult, parts: list[str]) -> Any:
+        current: Any = result
         for part in parts:
             part = part.strip()
             if part == "":
@@ -1151,7 +1151,9 @@ class Dispatcher:
                     f"(status={upstream_record.status})"
                 )
             upstream_result = self._load_stage_result(upstream_record.task_id)
-            actual_value = self._dig_path(upstream_result, condition.field.split("."))
+            actual_value = self._dig_result_path(
+                upstream_result.result, condition.field.split(".")
+            )
             if str(actual_value) == condition.equals:
                 return False  # Condition met — proceed with dispatch
 
