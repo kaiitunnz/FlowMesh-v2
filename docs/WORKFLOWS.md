@@ -64,10 +64,22 @@ upstream stage's result.
 
 ## Graph DAG
 
-`taskType: graph_template` — topology-aware multi-input prompts with
-parent output substitution and validation. See
+`spec.graph.nodes[]` — each node carries a `name`, an optional
+`dependsOn`, and a task `spec` (with its own `taskType`). Dependencies
+are explicit per node, and cycles are rejected. Multi-input prompts use
+`spec.data.type: graph_template` on a downstream node to combine parent
+outputs by node name and path; see
 `src/worker/executors/utils/graph_templates.py` for the templating
 contract.
+
+## v2 execution mode (experimental)
+
+`apiVersion: flowmesh/v2` selects the v2 representation track: the server
+compiles the submission into versioned plan-time representations
+(logical template and physical plan) and persists them alongside the
+workflow. It is off by default — any other `apiVersion` keeps the v1 path
+and changes nothing about parsing, scheduling, dispatch, or results. See
+[`WORKFLOW_REPRESENTATIONS.md`](WORKFLOW_REPRESENTATIONS.md).
 
 ## data_retrieval: type lumid
 
