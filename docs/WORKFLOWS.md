@@ -145,16 +145,15 @@ spec:
 Region kinds are `branch`, `merge`, `spawn`, `join`, `loop`, and `call`
 (`call` normalizes to a `spawn`/`join` pair). A `feedback` edge is a structured
 back-edge into a `loop` region; it is excluded from acyclic-topology checks, so
-an unstructured `dependsOn` cycle is still rejected. Region-bearing workflows
-are inspect-only in this release and are rejected at submit.
+an unstructured `dependsOn` cycle is still rejected.
 
 ### Dry-run inspection
 
-`POST /api/v1/workflows/validate` compiles a `flowmesh/v2` submission and
-returns the logical template, physical plan, and validation diagnostics in the
-`inspection` field without persisting or executing it. Compilation errors
-return `422` with readable source locations. Region-bearing workflows are
-inspectable here even though they cannot yet be submitted.
+`POST /api/v1/workflows/validate` parses a workflow without executing it. For a
+`flowmesh/v2` submission it also compiles the workflow and returns the logical
+template, physical plan, and validation diagnostics in the `inspection` field;
+compilation errors return `422` with readable source locations. For any other
+`apiVersion` it returns the parsed task list with no `inspection`.
 
 ## data_retrieval: type lumid
 

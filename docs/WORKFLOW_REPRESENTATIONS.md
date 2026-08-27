@@ -75,14 +75,12 @@ is not the v2 operator vocabulary.
 
 ## Validation
 
-`validate_compilation` runs passes over the compiled template and plan, each
-emitting a diagnostic with a readable source location: ports, regions, tool
-declarations, authority ceilings (delegate attenuated by invoke, declared
-tools, spawn-site derivation), recompute legality (recompute requires a pure,
-deterministic operation over pinned inputs), effect boundaries, result
-declarations, source-map completeness, and unstructured cycles. An unpinned
-live read is legal latitude; only a contradictory declaration fails. Structural
-frontend errors and any error-severity diagnostic raise `CompileError`.
+`validate_compilation` runs consistency passes over the compiled template and
+plan and reports each finding as a diagnostic with a readable source location.
+It checks port wiring, region and authority-ceiling well-formedness,
+recovery/effect/provenance consistency, result declarations, source-map
+completeness, and unstructured cycles. An error-severity diagnostic — or a
+malformed template — raises `CompileError`.
 
 ## Inspection
 
