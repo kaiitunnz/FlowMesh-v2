@@ -1,5 +1,7 @@
 """Workflow-related models."""
 
+from typing import Any
+
 from pydantic import BaseModel
 
 from .common import TaskStatus, WorkflowStatus
@@ -34,6 +36,7 @@ class WorkflowValidateResponse(BaseModel):
     ok: bool
     count: int
     tasks: list[WorkflowValidateTaskEntry]
+    inspection: dict[str, Any] | None = None
 
 
 class Workflow(BaseModel):
