@@ -202,12 +202,7 @@ def _is_v2_mode(api_version: Any) -> bool:
     # Inline import breaks a parser <-> v2 package import cycle.
     from .v2.mode import ExecutionMode
 
-    return (
-        ExecutionMode.from_api_version(
-            api_version if isinstance(api_version, str) else None
-        )
-        is ExecutionMode.V2
-    )
+    return ExecutionMode.is_v2(api_version)
 
 
 def _build_task_template(

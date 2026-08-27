@@ -1,4 +1,5 @@
 from enum import StrEnum
+from typing import Any
 
 V2_API_VERSION = "flowmesh/v2"
 
@@ -19,3 +20,12 @@ class ExecutionMode(StrEnum):
         if api_version is not None and api_version.strip() == V2_API_VERSION:
             return cls.V2
         return cls.V1
+
+    @classmethod
+    def is_v2(cls, api_version: Any) -> bool:
+        """Whether a submission's ``apiVersion`` selects the v2 track.
+
+        Accepts any parsed value; a non-string is treated as an absent version.
+        """
+        normalized = api_version if isinstance(api_version, str) else None
+        return cls.from_api_version(normalized) is cls.V2

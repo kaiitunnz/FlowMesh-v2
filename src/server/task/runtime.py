@@ -121,10 +121,7 @@ class TaskRuntime:
         ``CompileError``; semantic findings ride on the report's diagnostics.
         """
         parsed_workflow = parse_workflow(payload, format)
-        api_version = parsed_workflow.api_version
-        if not isinstance(api_version, str):
-            api_version = None
-        if ExecutionMode.from_api_version(api_version) is not ExecutionMode.V2:
+        if not ExecutionMode.is_v2(parsed_workflow.api_version):
             return None
         source = FrontendWorkflowSource.capture(payload, format)
         return build_inspection(new_workflow_id(), parsed_workflow, source)
@@ -142,18 +139,14 @@ class TaskRuntime:
         graph_task_ids: dict[str, str] = {}
 
         v2_bundle: PersistedV2Workflow | None = None
-        api_version = parsed_workflow.api_version
-        if not isinstance(api_version, str):
-            api_version = None
-        if ExecutionMode.from_api_version(api_version) is ExecutionMode.V2:
-            source = FrontendWorkflowSource.capture(yaml_text, format)
-            v2_bundle = compile_bundle(workflow_id, parsed_workflow, source)
+        if ExecutionMode.is_v2(parsed_workflow.api_version):
             if parsed_workflow.regions:
                 raise ValueError(
-                    "Structured regions are inspect-only in this release and not "
-                    "yet executable. Use POST /api/v1/workflows/validate to inspect "
-                    "the compiled template."
+                    "Structured regions are inspect-only. Use "
+                    "POST /api/v1/workflows/validate to inspect the compiled template."
                 )
+            source = FrontendWorkflowSource.capture(yaml_text, format)
+            v2_bundle = compile_bundle(workflow_id, parsed_workflow, source)
 
         with self._cv:
             if (
