@@ -174,7 +174,7 @@ def test_version_successor_rules() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_project_acyclic_dag_shape() -> None:
+def test_compile_dag_shape() -> None:
     bundle = _project(DAG_V2)
     kinds = [op.kind.value for op in bundle.template.operators]
     assert kinds == ["leaf", "leaf"]
