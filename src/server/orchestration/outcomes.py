@@ -103,8 +103,8 @@ def check_admissible(
         )
     if effect is EffectClass.PRIVATE_STATE:
         raise AdmissionError(
-            f"operator {operator_id!r} declares private-state effect, whose recovery "
-            "boundary the orchestration path does not yet run"
+            f"operator {operator_id!r} declares private-state effect, whose sandbox "
+            "recovery boundary the orchestration path does not run"
         )
 
 
