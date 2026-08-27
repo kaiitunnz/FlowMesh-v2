@@ -246,7 +246,7 @@ async def validate_workflow(
         inspection = runtime.inspect_v2(payload, format=workflow_format)
     except CompileError as exc:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={
                 "message": "Workflow compilation failed",
                 "diagnostics": [diag.render() for diag in exc.diagnostics],
@@ -255,7 +255,7 @@ async def validate_workflow(
 
     if inspection is not None and not inspection.ok:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={
                 "message": "Workflow compilation failed",
                 "diagnostics": [diag.render() for diag in inspection.diagnostics],
