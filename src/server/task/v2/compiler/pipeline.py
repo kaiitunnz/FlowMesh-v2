@@ -98,12 +98,3 @@ def compile_bundle(
     """Compile a parsed workflow into the durable plan-time bundle."""
     template, plan = compile_workflow(workflow_id, parsed, source)
     return PersistedV2Workflow(source=source, template=template, plan=plan)
-
-
-def project_acyclic(
-    workflow_id: str,
-    parsed: ParsedWorkflow,
-    source: FrontendWorkflowSource,
-) -> tuple[LogicalWorkflowTemplate, PhysicalExecutionPlan]:
-    """Compile a parsed workflow into the logical template and physical plan."""
-    return compile_workflow(workflow_id, parsed, source)

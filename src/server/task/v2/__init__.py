@@ -1,6 +1,6 @@
 from .compiler.diagnostics import CompileError, Diagnostic, Severity, SourceLocation
 from .compiler.inspect import InspectionReport, build_inspection
-from .compiler.pipeline import compile_bundle, compile_workflow, project_acyclic
+from .compiler.pipeline import compile_bundle, compile_workflow
 from .mode import V2_API_VERSION, ExecutionMode
 from .representations.bundle import PersistedV2Workflow
 from .representations.operators import (
@@ -113,5 +113,4 @@ __all__ = [
     "compile_bundle",
     "compile_workflow",
     "content_digest",
-    "project_acyclic",
 ]
