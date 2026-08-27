@@ -61,14 +61,6 @@ class ParsedTaskSpec:
 
 
 @dataclass
-class ParsedRegionSpec:
-    name: str
-    region: dict[str, Any]
-    depends_on: list[str]
-    feedback: dict[str, Any] | None = None
-
-
-@dataclass
 class ParsedRegion:
     name: str
     region: dict[str, Any]
@@ -130,7 +122,7 @@ def _build_workflow(
     specs: list[ParsedTaskSpec],
     schedule_in_epoch_order: bool | None,
     epoch_groups: list[list[str]] | None,
-    region_specs: list[ParsedRegionSpec] | None = None,
+    region_specs: list[ParsedRegion] | None = None,
     api_version: Any | None = None,
 ) -> ParsedWorkflow:
     region_specs = region_specs or []
@@ -348,7 +340,7 @@ def _expand_graph_nodes(
 
     unresolved = dict(indexed)
     results: list[ParsedTaskSpec] = []
-    region_specs: list[ParsedRegionSpec] = []
+    region_specs: list[ParsedRegion] = []
 
     while unresolved:
         progressed = False
@@ -368,7 +360,7 @@ def _expand_graph_nodes(
 
             if node.region is not None:
                 region_specs.append(
-                    ParsedRegionSpec(
+                    ParsedRegion(
                         name=name,
                         region=node.region,
                         depends_on=pending,
