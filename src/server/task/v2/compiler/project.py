@@ -3,14 +3,8 @@ from dataclasses import dataclass, field
 from shared.tasks import TaskType
 from shared.tasks.specs.common import ModelSpecTemplate
 
-from ..parser import ParsedTask, ParsedWorkflow
-from .bindings import (
-    default_agent_authority,
-    default_agent_boundary,
-    is_training,
-    leaf_profile,
-)
-from .operators import (
+from ...parser import ParsedTask, ParsedWorkflow
+from ..representations.operators import (
     AgentOperator,
     BindingKey,
     ConditionGuard,
@@ -23,19 +17,29 @@ from .operators import (
     Port,
     PortKind,
 )
-from .plan import PhysicalNode, ResidencyIntent, ServiceFamilyRequirement
-from .results import (
+from ..representations.plan import (
+    PhysicalNode,
+    ResidencyIntent,
+    ServiceFamilyRequirement,
+)
+from ..representations.results import (
     CardinalityKind,
     LegacyLogicalTaskProjection,
     ReleaseConditionKind,
     ResultDeclaration,
     Visibility,
 )
-from .template import (
+from ..representations.template import (
     ResourceDeclaration,
     SourceMapEntry,
     TemplateEdge,
     ToolDeclaration,
+)
+from .bindings import (
+    default_agent_authority,
+    default_agent_boundary,
+    is_training,
+    leaf_profile,
 )
 
 

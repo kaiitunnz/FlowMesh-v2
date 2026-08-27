@@ -2,7 +2,7 @@ from enum import StrEnum
 
 from shared.tasks import TaskType
 
-from .operators import (
+from ..representations.operators import (
     AuthorityCeiling,
     BindingKey,
     BoundaryEventKind,

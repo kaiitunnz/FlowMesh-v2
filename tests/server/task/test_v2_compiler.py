@@ -12,7 +12,7 @@ from server.task.v2 import (
     PersistedV2Workflow,
     compile_workflow,
 )
-from server.task.v2.bindings import BindingClass, binding_class
+from server.task.v2.compiler.bindings import BindingClass, binding_class
 from shared.tasks import TaskType
 
 _EXAMPLES = pathlib.Path(__file__).parents[3] / "examples" / "templates"

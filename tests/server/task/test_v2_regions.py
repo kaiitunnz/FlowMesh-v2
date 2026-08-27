@@ -11,7 +11,7 @@ from server.task.v2 import (
     build_inspection,
     compile_workflow,
 )
-from server.task.v2.operators import LoopContextRegion, PortKind
+from server.task.v2.representations.operators import LoopContextRegion, PortKind
 
 REGIONS_WF = """
 apiVersion: flowmesh/v2

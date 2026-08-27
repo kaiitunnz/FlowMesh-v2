@@ -1,9 +1,9 @@
-from .bundle import PersistedV2Workflow
-from .compiler import compile_bundle, compile_workflow, project_acyclic
-from .diagnostics import CompileError, Diagnostic, Severity, SourceLocation
-from .inspect import InspectionReport, build_inspection
+from .compiler.diagnostics import CompileError, Diagnostic, Severity, SourceLocation
+from .compiler.inspect import InspectionReport, build_inspection
+from .compiler.pipeline import compile_bundle, compile_workflow, project_acyclic
 from .mode import V2_API_VERSION, ExecutionMode
-from .operators import (
+from .representations.bundle import PersistedV2Workflow
+from .representations.operators import (
     AgentOperator,
     AuthorityCeiling,
     BindingKey,
@@ -33,28 +33,28 @@ from .operators import (
     SpawnRegion,
     StateReference,
 )
-from .plan import (
+from .representations.plan import (
     PhysicalExecutionPlan,
     PhysicalNode,
     ResidencyIntent,
     ServiceFamilyRequirement,
 )
-from .results import (
+from .representations.results import (
     CardinalityKind,
     LegacyLogicalTaskProjection,
     ReleaseConditionKind,
     ResultDeclaration,
     Visibility,
 )
-from .source import FrontendWorkflowSource
-from .template import (
+from .representations.source import FrontendWorkflowSource
+from .representations.template import (
     LogicalWorkflowTemplate,
     ResourceDeclaration,
     SourceMapEntry,
     TemplateEdge,
     ToolDeclaration,
 )
-from .versioning import VersionId, content_digest
+from .representations.versioning import VersionId, content_digest
 
 __all__ = [
     "AgentOperator",

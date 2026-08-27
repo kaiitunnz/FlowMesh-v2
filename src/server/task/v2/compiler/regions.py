@@ -1,10 +1,7 @@
 from typing import Any
 
-from ..parser import ParsedRegion, ParsedTask, ParsedWorkflow
-from .diagnostics import CompileError, Diagnostic
-from .diagnostics import Severity as _Severity
-from .diagnostics import SourceLocation
-from .operators import (
+from ...parser import ParsedRegion, ParsedTask, ParsedWorkflow
+from ..representations.operators import (
     AgentOperator,
     AuthorityCeiling,
     BoundaryEventKind,
@@ -25,15 +22,18 @@ from .operators import (
     RecoveryClass,
     SpawnRegion,
 )
-from .plan import PhysicalNode
-from .project import LoweringAccumulator
-from .results import Visibility
-from .template import (
+from ..representations.plan import PhysicalNode
+from ..representations.results import Visibility
+from ..representations.template import (
     ResourceDeclaration,
     SourceMapEntry,
     TemplateEdge,
     ToolDeclaration,
 )
+from .diagnostics import CompileError, Diagnostic
+from .diagnostics import Severity as _Severity
+from .diagnostics import SourceLocation
+from .project import LoweringAccumulator
 
 _PROVENANCE = {
     "live": InputProvenanceKind.LIVE_INPUT,

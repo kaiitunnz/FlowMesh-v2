@@ -1,5 +1,4 @@
-from .diagnostics import Diagnostic, Severity, SourceLocation
-from .operators import (
+from ..representations.operators import (
     AgentOperator,
     AuthorityCeiling,
     BranchRegion,
@@ -15,9 +14,10 @@ from .operators import (
     RecoveryClass,
     SpawnRegion,
 )
-from .plan import PhysicalExecutionPlan
-from .results import CardinalityKind, ReleaseConditionKind
-from .template import LogicalWorkflowTemplate
+from ..representations.plan import PhysicalExecutionPlan
+from ..representations.results import CardinalityKind, ReleaseConditionKind
+from ..representations.template import LogicalWorkflowTemplate
+from .diagnostics import Diagnostic, Severity, SourceLocation
 
 _DETERMINISTIC = (
     DeterminismClass.DETERMINISTIC_BITWISE,

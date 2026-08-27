@@ -1,15 +1,15 @@
 from pydantic import ValidationError
 
-from ..parser import ParsedWorkflow
-from .bundle import PersistedV2Workflow
+from ...parser import ParsedWorkflow
+from ..representations.bundle import PersistedV2Workflow
+from ..representations.plan import PhysicalExecutionPlan, PhysicalNode
+from ..representations.source import FrontendWorkflowSource
+from ..representations.template import LogicalWorkflowTemplate
+from ..representations.versioning import VersionId, content_digest
 from .diagnostics import CompileError, Diagnostic
-from .plan import PhysicalExecutionPlan, PhysicalNode
 from .project import LoweringAccumulator, build_name_map, lower_tasks
 from .regions import lower_frontend_v2
-from .source import FrontendWorkflowSource
-from .template import LogicalWorkflowTemplate
 from .validation import has_errors, validate_compilation
-from .versioning import VersionId, content_digest
 
 
 def _assemble_template(

@@ -1,11 +1,11 @@
 from pydantic import BaseModel, ConfigDict
 
-from ..parser import ParsedWorkflow
-from .compiler import compile_workflow
+from ...parser import ParsedWorkflow
+from ..representations.plan import PhysicalExecutionPlan
+from ..representations.source import FrontendWorkflowSource
+from ..representations.template import LogicalWorkflowTemplate
 from .diagnostics import Diagnostic, Severity
-from .plan import PhysicalExecutionPlan
-from .source import FrontendWorkflowSource
-from .template import LogicalWorkflowTemplate
+from .pipeline import compile_workflow
 from .validation import validate_compilation
 
 
