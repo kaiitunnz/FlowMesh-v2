@@ -25,8 +25,8 @@ from server.task.v2 import (
     VersionId,
     project_acyclic,
 )
+from server.task.v2.bindings import leaf_profile as _leaf_profile
 from server.task.v2.operators import EqualityRelationKind
-from server.task.v2.project import _leaf_profile
 from shared.tasks import TaskType
 
 DAG_V2 = """

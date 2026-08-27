@@ -2,27 +2,24 @@ from shared.tasks import TaskType
 from shared.tasks.specs.common import ModelSpecTemplate
 
 from ..parser import ParsedTask, ParsedWorkflow
+from .bindings import (
+    default_agent_authority,
+    default_agent_boundary,
+    is_training,
+    leaf_profile,
+)
 from .operators import (
     AgentOperator,
-    AuthorityCeiling,
     BindingKey,
-    BoundaryEventKind,
-    BoundarySignature,
     ConditionGuard,
-    DeterminismClass,
     EffectBoundary,
     EffectClass,
     EffectReplayContract,
-    EqualityRelation,
-    EqualityRelationKind,
-    InputProvenanceKind,
     LeafOperator,
-    LeafProfile,
     LogicalOperator,
     ModelRef,
     Port,
     PortKind,
-    RecoveryClass,
 )
 from .plan import (
     PhysicalExecutionPlan,
@@ -40,82 +37,6 @@ from .results import (
 from .source import FrontendWorkflowSource
 from .template import LogicalWorkflowTemplate, SourceMapEntry, TemplateEdge
 from .versioning import VersionId, content_digest
-
-_TRAINING_TYPES: frozenset[TaskType] = frozenset(
-    {
-        TaskType.SFT,
-        TaskType.LORA_SFT,
-        TaskType.PPO,
-        TaskType.DPO,
-        TaskType.IMAGE_CLASSIFICATION_TRAINING,
-    }
-)
-
-_SEMANTIC = EqualityRelation(kind=EqualityRelationKind.SEMANTIC)
-_BITWISE = EqualityRelation(kind=EqualityRelationKind.BITWISE)
-
-
-def _leaf_profile(task_type: TaskType) -> LeafProfile:
-    """Return the indicative binding profile for a legacy task type."""
-    binding = BindingKey(task_type=task_type)
-    det = DeterminismClass.SAMPLED
-    effect = EffectClass.PURE
-    recovery = RecoveryClass.RECORD
-    provenance = InputProvenanceKind.EXTERNAL_PINNED
-    equality: EqualityRelation | None = None
-
-    match task_type:
-        case TaskType.EMBEDDING:
-            det, recovery, equality = (
-                DeterminismClass.DETERMINISTIC_SEMANTIC,
-                RecoveryClass.RECOMPUTE,
-                _SEMANTIC,
-            )
-        case TaskType.RAG:
-            det, recovery, equality, provenance = (
-                DeterminismClass.DETERMINISTIC_SEMANTIC,
-                RecoveryClass.RECORD,
-                _SEMANTIC,
-                InputProvenanceKind.LIVE_INPUT,
-            )
-        case TaskType.DATA_PROFILING:
-            det, recovery, equality = (
-                DeterminismClass.DETERMINISTIC_SEMANTIC,
-                RecoveryClass.RECOMPUTE,
-                _SEMANTIC,
-            )
-        case TaskType.ECHO:
-            det, recovery, equality = (
-                DeterminismClass.DETERMINISTIC_BITWISE,
-                RecoveryClass.RECOMPUTE,
-                _BITWISE,
-            )
-        case TaskType.DATA_RETRIEVAL:
-            provenance = InputProvenanceKind.LIVE_INPUT
-        case TaskType.API | TaskType.SSH | TaskType.SERVE:
-            effect, provenance = (
-                EffectClass.EXTERNAL_EFFECT,
-                InputProvenanceKind.LIVE_INPUT,
-            )
-        case (
-            TaskType.SFT
-            | TaskType.LORA_SFT
-            | TaskType.PPO
-            | TaskType.DPO
-            | TaskType.IMAGE_CLASSIFICATION_TRAINING
-        ):
-            effect = EffectClass.PRIVATE_STATE
-        case _:
-            pass
-
-    return LeafProfile(
-        determinism=det,
-        effect=effect,
-        recovery=recovery,
-        input_provenance=provenance,
-        binding=binding,
-        output_equality=equality,
-    )
 
 
 def _model_ref(task: ParsedTask) -> ModelRef | None:
@@ -171,7 +92,7 @@ def _ports(
         inputs.append(Port(name="in"))
     model_ref = _model_ref(task)
     if model_ref is not None:
-        if task_type in _TRAINING_TYPES:
+        if is_training(task_type):
             produced = ModelRef(
                 architecture=model_ref.architecture,
                 version=f"trained:{task.task_id}",
@@ -198,7 +119,7 @@ def _leaf_operator(
         source_ref=task.task_id,
         inputs=inputs,
         outputs=outputs,
-        profile=_leaf_profile(task_type),
+        profile=leaf_profile(task_type),
         guard=_condition_guard(task, name_to_op, operator_ids),
         residency_only=task_type == TaskType.SERVE,
     )
@@ -214,16 +135,8 @@ def _agent_operator(
         inputs=inputs,
         outputs=outputs,
         binding=BindingKey(task_type=TaskType.AGENT),
-        authority=AuthorityCeiling(),
-        boundary=BoundarySignature(
-            events=(
-                BoundaryEventKind.INVOCATION,
-                BoundaryEventKind.SPAWN,
-                BoundaryEventKind.YIELD,
-                BoundaryEventKind.EXTERNAL_EFFECT,
-                BoundaryEventKind.STATE_ACCESS,
-            )
-        ),
+        authority=default_agent_authority(),
+        boundary=default_agent_boundary(),
         guard=_condition_guard(task, name_to_op, operator_ids),
     )
 
