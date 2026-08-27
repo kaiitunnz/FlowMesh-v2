@@ -29,7 +29,7 @@ from transformers import (
 )
 
 from shared.schemas.artifact import ArtifactRef
-from shared.schemas.result import BaseExecutorResult
+from shared.schemas.result import ImageClassificationTrainingResult
 from shared.tasks.specs import ImageClassificationTrainingSpecStrict
 from shared.tasks.task_type import TaskType
 
@@ -46,21 +46,6 @@ from .utils.checkpoints import (
 from .utils.huggingface import pick_torch_dtype
 
 logger = logging.getLogger("worker.image_classification")
-
-
-class ImageClassificationTrainingResult(BaseExecutorResult):
-    training_time_seconds: float | None = None
-    error_message: str | None = None
-    model_name: str | None = None
-    dataset_size: int = 0
-    num_labels: int = 0
-    eval_accuracy: float | None = None
-    train_losses: list[float] = []
-    output_dir: str | None = None
-    checkpoints_dir: ArtifactRef | None = None
-    resume_from_path: str | None = None
-    final_model: ArtifactRef | None = None
-    final_model_archive: ArtifactRef | None = None
 
 
 class ImageClassificationTrainingExecutor(TrainingMixin, Executor):
