@@ -23,7 +23,7 @@ class Results(SyncResource):
     """Synchronous result operations."""
 
     def retrieve(self, task_id: str) -> AnyExecutorResult:
-        """Retrieve the result for a completed task as its exact subclass."""
+        """Retrieve the result for a completed task."""
         data = self._client._request("GET", f"/results/{task_id}")
         return _RESULT_ADAPTER.validate_python(data)
 
@@ -95,7 +95,7 @@ class AsyncResults(AsyncResource):
     """Asynchronous result operations."""
 
     async def retrieve(self, task_id: str) -> AnyExecutorResult:
-        """Retrieve the result for a completed task as its exact subclass."""
+        """Retrieve the result for a completed task."""
         data = await self._client._request("GET", f"/results/{task_id}")
         return _RESULT_ADAPTER.validate_python(data)
 

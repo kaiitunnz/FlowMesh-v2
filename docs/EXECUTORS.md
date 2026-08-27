@@ -36,13 +36,13 @@ package. The base class carries two cross-cutting fields:
 - `artifacts: ArtifactContext | None` (wire key `_artifacts`) —
   resolution context for relative artifact refs.
 
-Each subclass declares its exact fields (typed nested payloads, not loose
-dicts) and tags itself with a `task_type` discriminator — e.g.
-`InferenceResult`, `LoRAResult`, `AgentResult`, `SSHResult`. The
-`AnyExecutorResult` discriminated union in the same package deserializes a
-`results.json` back into its exact subclass end-to-end (worker envelope →
-server ingest and `GET /results/{id}` → SDK). Results without a `task_type`
-(legacy files, condition-skips) fall back to the permissive base.
+Each subclass declares its exact fields (typed nested payloads) and tags itself
+with a `task_type` discriminator — e.g. `InferenceResult`, `LoRAResult`,
+`AgentResult`, `SSHResult`. The `AnyExecutorResult` discriminated union in
+the same package deserializes a `results.json` back into its exact subclass
+end-to-end (worker envelope → server ingest and `GET /results/{id}` → SDK).
+Results without a `task_type` (legacy files, condition-skips) fall back to
+the permissive base.
 
 Artifact-bearing fields use `ArtifactRef` (`{"path": rel_path}`);
 relative paths resolve against the producer's `_artifacts` context via

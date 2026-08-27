@@ -1,9 +1,8 @@
 """Result-related models.
 
-Mirrors ``shared.schemas.result`` (the SDK cannot import ``src/shared``). The
-per-task-type subclasses and the ``AnyExecutorResult`` discriminated union let
-``Results.retrieve()`` deserialize a result into its exact subclass. Drift
-against the shared definitions is guarded by
+Mirrors ``shared.schemas.result``. The per-task-type subclasses and the
+``AnyExecutorResult`` discriminated union let ``Results.retrieve()`` deserialize a
+result into its exact subclass. Drift against the shared definitions is guarded by
 ``tests/sdk/test_schema_compat.py``.
 """
 
