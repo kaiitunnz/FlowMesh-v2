@@ -600,9 +600,8 @@ class OrchestrationLedger:
     def revoke_spawn(self, spawn_op: str) -> None:
         """Revoke a spawn's child-init capability as a progress transition.
 
-        Distinct from sealing: revocation withdraws the capability (its cancellation
-        outcome is settled by the cancellation event), while sealing marks a producer
-        done. Both close the child-init axis once outstanding children drain.
+        Distinct from sealing: revocation withdraws the capability, while sealing marks
+        a producer done. Both close the child-init axis once outstanding children drain.
         """
         scope_id = self._require_child_init_scope(spawn_op)
         cap = self._capability(scope_id, ProgressAxis.CHILD_INIT)
@@ -1091,22 +1090,7 @@ class OrchestrationLedger:
         self, operator_id: str, outcome: PublicationOutcome, value_ref: ValueRef | None
     ) -> None:
         for slot_key in self._slots_by_operator.get(operator_id, ()):
-            if slot_key in self._publications:
-                continue
-            slot = self._slots[slot_key]
-            self._slots[slot_key] = slot.model_copy(update={"published": True})
-            self._publications[slot_key] = ResultPublication(
-                slot_key=slot_key,
-                output_id=slot.output_id,
-                outcome=outcome,
-                value_ref=value_ref,
-            )
-            self._emit(
-                "result_published",
-                operator_id=operator_id,
-                slot_key=slot_key,
-                outcome=outcome.value,
-            )
+            self._write_publication(self._slots[slot_key], outcome, value_ref)
 
     def _publish_keyed(
         self,
@@ -1121,28 +1105,36 @@ class OrchestrationLedger:
                 or decl.cardinality is not CardinalityKind.KEYED_COLLECTION
             ):
                 continue
-            slot = ResultSlot(
-                instance_id=self._instance.instance_id,
-                output_id=decl.output_id,
-                source_operator_id=spawn_op,
-                scope_id=activation.scope_id,
-                logical_key=str(activation.child_index),
+            self._write_publication(
+                ResultSlot(
+                    instance_id=self._instance.instance_id,
+                    output_id=decl.output_id,
+                    source_operator_id=spawn_op,
+                    scope_id=activation.scope_id,
+                    logical_key=str(activation.child_index),
+                ),
+                outcome,
+                value_ref,
             )
-            if slot.slot_key in self._publications:
-                continue
-            self._slots[slot.slot_key] = slot.model_copy(update={"published": True})
-            self._publications[slot.slot_key] = ResultPublication(
-                slot_key=slot.slot_key,
-                output_id=decl.output_id,
-                outcome=outcome,
-                value_ref=value_ref,
-            )
-            self._emit(
-                "result_published",
-                operator_id=spawn_op,
-                slot_key=slot.slot_key,
-                outcome=outcome.value,
-            )
+
+    def _write_publication(
+        self, slot: ResultSlot, outcome: PublicationOutcome, value_ref: ValueRef | None
+    ) -> None:
+        if slot.slot_key in self._publications:
+            return
+        self._slots[slot.slot_key] = slot.model_copy(update={"published": True})
+        self._publications[slot.slot_key] = ResultPublication(
+            slot_key=slot.slot_key,
+            output_id=slot.output_id,
+            outcome=outcome,
+            value_ref=value_ref,
+        )
+        self._emit(
+            "result_published",
+            operator_id=slot.source_operator_id,
+            slot_key=slot.slot_key,
+            outcome=outcome.value,
+        )
 
     def _record_receipt(self, wi: WorkItem, outcome: PublicationOutcome) -> None:
         if wi.invocation_id is None or wi.invocation_id in self._receipts:
