@@ -1,9 +1,6 @@
-"""Concrete per-task-type result models and the ``task_type`` union.
-
-Importing ``TaskType`` re-enters the package through ``shared.tasks.specs.common``;
-``__init__`` binds ``_base`` first so ``BaseExecutorResult`` is available then.
-"""
-
+# Concrete per-task-type result models and the ``task_type`` union. Importing
+# ``TaskType`` re-enters the package through ``shared.tasks.specs.common``;
+# ``__init__`` binds ``_base`` first so ``BaseExecutorResult`` is available then.
 from typing import Annotated, Any, Literal
 
 from pydantic import (

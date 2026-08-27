@@ -1,14 +1,12 @@
 """Executor result schemas: the base model, exact per-task-type models, and the
 ``task_type`` discriminated union that deserializes ``results.json``.
-
-``_base`` imports before ``_catalog``: importing ``TaskType`` re-enters this
-package through ``shared.tasks.specs.common``, which needs ``BaseExecutorResult``
-already bound. Models carrying the recursive ``children`` field are rebuilt below
-once ``AnyExecutorResult`` exists.
 """
 
 from pydantic import BaseModel
 
+# ``_base`` must import before ``catalog``: importing ``TaskType`` re-enters this
+# package through ``shared.tasks.specs.common``, which needs ``BaseExecutorResult``
+# already bound.
 from ._base import BaseExecutorResult
 from .catalog import (
     AgentResult,

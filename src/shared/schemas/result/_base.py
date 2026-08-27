@@ -1,11 +1,7 @@
-"""Base executor-result model.
-
-Free of any ``shared.tasks`` import so it binds before ``_catalog`` pulls
-``TaskType``, whose import chain re-enters this module. ``children`` is a forward
-reference to ``AnyExecutorResult``, resolved when ``__init__`` rebuilds the model.
-"""
-
-# Necessary for the recursive ``children`` forward reference.
+# Base executor-result models. This module avoids importing ``shared.tasks`` so
+# it binds before ``catalog`` pulls ``TaskType`` (whose import chain re-enters
+# this module). ``children`` is a forward reference to ``AnyExecutorResult``,
+# resolved when ``__init__`` rebuilds the model — hence the future import below.
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any

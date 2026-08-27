@@ -1,12 +1,5 @@
-"""Typed nested payload models for executor results.
-
-These models describe the exact shape each executor emits inside its result
-fields (items, usage, cost estimates, ...). They are standalone — they do not
-depend on ``BaseExecutorResult`` — so ``result.py`` imports them without a
-cycle. Fields whose interior is genuinely open (arbitrary dataset columns,
-Qdrant documents, opaque provenance) stay declared mappings, typed as narrowly
-as the emitter allows.
-"""
+"""Typed nested payload models describing the exact shape each executor emits
+inside its result fields (items, usage, cost estimates, ...)."""
 
 from typing import Any
 
