@@ -26,9 +26,9 @@ from ..clients.redis import (
     workflow_tasks_key,
     workflow_v2_key,
 )
+from ..orchestration.state import LedgerSnapshot
 from ..task.models import TaskRecord, TaskStatus
 from ..task.v2 import PersistedV2Workflow
-from ..task.v2.orchestration.state import LedgerSnapshot
 from ..utils.time import now_iso
 
 

@@ -43,7 +43,7 @@ class FakeWorkflowRegistry:
         self.save_ledger_snapshot(workflow_id, snapshot)
 
     def load_ledger_snapshot(self, workflow_id: str) -> Any:
-        from server.task.v2.orchestration import LedgerSnapshot
+        from server.orchestration import LedgerSnapshot
 
         blob = self.ledger_blobs.get(workflow_id)
         return LedgerSnapshot.model_validate_json(blob) if blob else None

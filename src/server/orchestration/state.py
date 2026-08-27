@@ -12,8 +12,12 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ....utils.time import now_iso
-from ..representations.operators import EffectClass, EffectReplayContract, RecoveryClass
+from ..task.v2.representations.operators import (
+    EffectClass,
+    EffectReplayContract,
+    RecoveryClass,
+)
+from ..utils.time import now_iso
 
 
 class WorkItemStatus(StrEnum):

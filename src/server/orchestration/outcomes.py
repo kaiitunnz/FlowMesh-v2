@@ -6,7 +6,7 @@ minimal durable invocation state machine that keeps an uncertain non-replayable
 effect from silently retrying or reporting success.
 """
 
-from ..representations.operators import (
+from ..task.v2.representations.operators import (
     DeterminismClass,
     EffectClass,
     EffectReplayContract,

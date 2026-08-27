@@ -84,6 +84,7 @@ src/
     governance/           Governance schemas and trace analysis
     hooks/                Plugin extension ABCs + registries
     main.py               Entrypoint, FLOWMESH_PLUGINS loader, EventMonitor wiring
+    orchestration/        Durable orchestration ledger (DS), engine, outcomes
     registries/           Worker / Node registries (Redis-backed)
     routers/v1/           workflows, tasks, results, workers, nodes, ssh, stack, system
     schemas/              REST API request and response schemas
@@ -91,7 +92,6 @@ src/
     supervisor/           Per-node agent (gRPC server, adapters, lifecycle)
     task/                 parser, runtime, models, merge / epoch helpers
       v2/                   versioned representations, compiler
-        orchestration/        durable orchestration ledger (DS), engine, outcomes
     utils/                concurrent, helpers, logging, misc, time
   shared/
     grpc/supervisor/v1/   Generated proto stubs (server + worker)
@@ -118,7 +118,8 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
 
 - **v2 orchestration ledger (`DS`).** A submission with `apiVersion:
   flowmesh/v2` compiles to a `PhysicalExecutionPlan` and runs through a durable
-  orchestration ledger (`src/server/task/v2/orchestration/`) that owns semantic
+  orchestration ledger (`src/server/orchestration/`, a peer of the dispatcher) that
+  owns semantic
   readiness: it turns settled records into ready work items over the acyclic
   compatibility plan, incrementally materializing the activation graph instead of
   precreating attempts. A ready work item dispatches through the existing

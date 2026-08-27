@@ -17,14 +17,14 @@ from shared.utils import (
     new_work_item_id,
 )
 
-from ....utils.time import now_iso
-from ..representations.bundle import PersistedV2Workflow
-from ..representations.operators import (
+from ..task.v2.representations.bundle import PersistedV2Workflow
+from ..task.v2.representations.operators import (
     AgentOperator,
     EffectClass,
     LeafOperator,
     LeafProfile,
 )
+from ..utils.time import now_iso
 from .outcomes import (
     AdmissionError,
     check_admissible,
