@@ -349,6 +349,36 @@ async def test_linear_dag_runs_via_v2_path_with_same_dependency_semantics() -> N
         assert pub.value_ref is not None
         assert pub.value_ref.legacy_task_id == ids[name]
 
+    # The contract-relevant trace records the semantic seams for inspection.
+    kinds = {kind for kind, _ in ledger.contract_trace()}
+    assert {
+        "work_item_ready",
+        "attempt_issued",
+        "invocation_acknowledged",
+        "effect_receipt",
+        "result_published",
+        "record_delivered",
+    } <= kinds
+
+
+@pytest.mark.anyio
+async def test_conditional_skip_publishes_explicit_empty() -> None:
+    registry = FakeRegistry()
+    runtime = _runtime(registry)
+    workflow_id, ids = await _register(runtime, LINEAR)
+    a, b = ids["a"], ids["b"]
+    stop = threading.Event()
+
+    runtime.next_ready(stop, timeout=0.01)
+    runtime.mark_dispatched(a, cast(Any, _worker()))
+    # A conditional skip settles the declared output as explicit-empty, yet still
+    # releases the successor (matching the v1 skip-as-success behavior).
+    runtime.mark_succeeded(a, None, {}, "2026-06-01T00:00:00Z", empty=True)
+    pub = runtime.resolve_v2_legacy_result(workflow_id, a)
+    assert pub is not None and pub.outcome is PublicationOutcome.EXPLICIT_EMPTY
+    assert pub.value_ref is not None and pub.value_ref.kind == "empty"
+    assert runtime.next_ready(stop, timeout=0.01) == b
+
 
 @pytest.mark.anyio
 async def test_diamond_dag_joins_on_both_predecessors() -> None:
@@ -513,9 +543,64 @@ async def test_lost_ack_replayable_retried_through_stable_invocation() -> None:
     assert ledger.invocation_for_task(a).invocation_id == invocation_id  # type: ignore[union-attr]
 
 
+@pytest.mark.anyio
+async def test_worker_loss_recovery_routes_through_uncertainty_fsm() -> None:
+    registry = FakeRegistry()
+    runtime = _runtime(registry)
+    workflow_id, ids = await _register(runtime, LINEAR)
+    a = ids["a"]
+    stop = threading.Event()
+
+    runtime.next_ready(stop, timeout=0.01)
+    runtime.mark_dispatched(a, cast(Any, _worker("wkr-dead")))
+    ledger = runtime.orchestration_ledger(workflow_id)
+    invocation_id = ledger.invocation_for_task(a).invocation_id  # type: ignore[union-attr]
+
+    # The worker departs: recovery resolves the in-flight v2 work item through the
+    # uncertainty FSM itself, so it is not returned for a synthetic failure.
+    assert runtime.recover_tasks_for_worker("wkr-dead") == []
+    assert runtime.get_record(a).status == TaskStatus.PENDING  # type: ignore[union-attr]
+    assert runtime.next_ready(stop, timeout=0.01) == a
+    runtime.mark_dispatched(a, cast(Any, _worker("wkr-2")))
+    assert ledger.invocation_for_task(a).invocation_id == invocation_id  # type: ignore[union-attr]
+
+
 # --------------------------------------------------------------------------- #
 # Restart / rehydration
 # --------------------------------------------------------------------------- #
+
+
+@pytest.mark.anyio
+async def test_rehydration_heals_when_ledger_snapshot_lags_terminal_records() -> None:
+    registry = FakeRegistry()
+    runtime = _runtime(registry)
+    workflow_id, ids = await _register(runtime, LINEAR)
+    a, b, c = ids["a"], ids["b"], ids["c"]
+    # Snapshot the ledger as it stood at submission, before any settlement.
+    stale_ledger = registry.ledger_blobs[workflow_id]
+    stop = threading.Event()
+
+    runtime.next_ready(stop, timeout=0.01)
+    runtime.mark_dispatched(a, cast(Any, _worker()))
+    runtime.mark_failed(a, "wkr-1", {}, "2026-06-01T00:00:00Z", error="boom")
+    # Simulate a crash after the terminal task records committed but before the ledger
+    # snapshot: the ledger lags durable task state (never ahead, per the write order).
+    registry.ledger_blobs[workflow_id] = stale_ledger
+
+    restored = _runtime(registry)
+    await restored.rehydrate()
+    # Rehydration reconciles the lagging ledger from terminal task facts: all three
+    # settle declared-failure exactly once, and nothing is left ready.
+    snap = restored.orchestration_ledger(workflow_id).to_snapshot()  # type: ignore[union-attr]
+    for name in (a, b, c):
+        assert restored.get_record(name).status == TaskStatus.FAILED  # type: ignore[union-attr]
+        pub = restored.resolve_v2_legacy_result(workflow_id, name)
+        assert pub is not None and pub.outcome is PublicationOutcome.DECLARED_FAILURE
+        matched = [
+            p for p in snap.result_publications if p.output_id == f"legacy:{name}"
+        ]
+        assert len(matched) == 1
+    assert restored.ready_queue_length() == 0
 
 
 @pytest.mark.anyio
