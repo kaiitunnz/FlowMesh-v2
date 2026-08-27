@@ -23,8 +23,10 @@ from ..clients.redis import (
     workflow_key,
     workflow_sched_key,
     workflow_tasks_key,
+    workflow_v2_key,
 )
 from ..task.models import TaskRecord, TaskStatus
+from ..task.v2 import PersistedV2Workflow
 from ..utils.time import now_iso
 
 
@@ -137,7 +139,12 @@ class WorkflowRegistry:
     def __init__(self, rds: RedisClient) -> None:
         self._rds = rds
 
-    def register_workflow(self, workflow_id: str, tasks: list[TaskRecord]) -> None:
+    def register_workflow(
+        self,
+        workflow_id: str,
+        tasks: list[TaskRecord],
+        v2: PersistedV2Workflow | None = None,
+    ) -> None:
         record, remaining_tasks, failed_tasks = _create_workflow_record(
             workflow_id, tasks
         )
@@ -147,10 +154,15 @@ class WorkflowRegistry:
             pipe.sadd(workflow_tasks_key(workflow_id), *remaining_tasks)
             if failed_tasks:
                 pipe.sadd(workflow_failed_tasks_key(workflow_id), *failed_tasks)
+            if v2 is not None:
+                pipe.set(workflow_v2_key(workflow_id), v2.model_dump_json())
             pipe.execute()
 
     async def register_workflow_async(
-        self, workflow_id: str, tasks: list[TaskRecord]
+        self,
+        workflow_id: str,
+        tasks: list[TaskRecord],
+        v2: PersistedV2Workflow | None = None,
     ) -> None:
         record, remaining_tasks, failed_tasks = _create_workflow_record(
             workflow_id, tasks
@@ -161,6 +173,8 @@ class WorkflowRegistry:
             pipe.sadd(workflow_tasks_key(workflow_id), *remaining_tasks)
             if failed_tasks:
                 pipe.sadd(workflow_failed_tasks_key(workflow_id), *failed_tasks)
+            if v2 is not None:
+                pipe.set(workflow_v2_key(workflow_id), v2.model_dump_json())
             await pipe.execute()
 
     def unregister_workflows(self, *workflow_ids: str) -> None:
@@ -173,6 +187,7 @@ class WorkflowRegistry:
             pipe.delete(*(workflow_failed_tasks_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_cancelled_tasks_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_sched_key(wid) for wid in workflow_ids))
+            pipe.delete(*(workflow_v2_key(wid) for wid in workflow_ids))
             for task_id in task_ids:
                 pipe.delete(task_state_key(task_id))
             pipe.execute()
@@ -187,6 +202,7 @@ class WorkflowRegistry:
             pipe.delete(*(workflow_failed_tasks_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_cancelled_tasks_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_sched_key(wid) for wid in workflow_ids))
+            pipe.delete(*(workflow_v2_key(wid) for wid in workflow_ids))
             for task_id in task_ids:
                 pipe.delete(task_state_key(task_id))
             await pipe.execute()
@@ -343,6 +359,16 @@ class WorkflowRegistry:
     async def load_workflow_sched_async(self, workflow_id: str) -> WorkflowSched | None:
         blob = await self._rds.asyncio.get(workflow_sched_key(workflow_id))
         return WorkflowSched.model_validate_json(blob) if blob else None
+
+    def get_v2_workflow(self, workflow_id: str) -> PersistedV2Workflow | None:
+        blob = self._rds.sync.get(workflow_v2_key(workflow_id))
+        return PersistedV2Workflow.model_validate_json(blob) if blob else None
+
+    async def get_v2_workflow_async(
+        self, workflow_id: str
+    ) -> PersistedV2Workflow | None:
+        blob = await self._rds.asyncio.get(workflow_v2_key(workflow_id))
+        return PersistedV2Workflow.model_validate_json(blob) if blob else None
 
     def get_remaining_tasks(self, workflow_id: str) -> set[str]:
         return self._rds.sync.set_members(workflow_tasks_key(workflow_id))

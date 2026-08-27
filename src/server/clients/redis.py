@@ -86,6 +86,10 @@ def workflow_sched_key(workflow_id: str) -> str:
     return f"workflow:{workflow_id}:sched"
 
 
+def workflow_v2_key(workflow_id: str) -> str:
+    return f"workflow:{workflow_id}:v2"
+
+
 def task_state_key(task_id: str) -> str:
     return f"task:{task_id}:state"
 
