@@ -25,6 +25,12 @@ from .models import (
     categorize_task_type,
 )
 from .parser import parse_workflow
+from .v2 import (
+    ExecutionMode,
+    FrontendWorkflowSource,
+    PersistedV2Workflow,
+    project_acyclic,
+)
 
 
 def _sanitize_merge_spec(spec: dict[str, Any]) -> dict[str, Any]:
@@ -218,7 +224,16 @@ class TaskRuntime:
                     self._workflow_epoch_tasks[workflow_id] = epoch_queue
                     self._workflow_epoch_frontier[workflow_id] = 0
 
-        await self._workflow_registry.register_workflow_async(workflow_id, task_records)
+        v2_bundle: PersistedV2Workflow | None = None
+        api_version = specs[0].task.apiVersion if specs else None
+        if ExecutionMode.from_api_version(api_version) is ExecutionMode.V2:
+            source = FrontendWorkflowSource.capture(yaml_text, format)
+            template, plan = project_acyclic(workflow_id, parsed_workflow, source)
+            v2_bundle = PersistedV2Workflow(source=source, template=template, plan=plan)
+
+        await self._workflow_registry.register_workflow_async(
+            workflow_id, task_records, v2=v2_bundle
+        )
 
         with self._cv:
             persisted = [

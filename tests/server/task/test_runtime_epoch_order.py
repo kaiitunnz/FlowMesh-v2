@@ -12,7 +12,9 @@ from server.task.runtime import TaskRuntime
 
 
 class _WorkflowRegistryStub:
-    async def register_workflow_async(self, workflow_id: str, tasks: list[Any]) -> None:
+    async def register_workflow_async(
+        self, workflow_id: str, tasks: list[Any], v2: Any = None
+    ) -> None:
         return None
 
     def commit_transition(

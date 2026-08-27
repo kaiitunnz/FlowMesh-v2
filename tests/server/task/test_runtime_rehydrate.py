@@ -21,7 +21,9 @@ class FakeWorkflowRegistry:
         self.sched: dict[str, str] = {}
         self.workflow_task_ids: dict[str, list[str]] = {}
 
-    async def register_workflow_async(self, workflow_id: str, tasks: list[Any]) -> None:
+    async def register_workflow_async(
+        self, workflow_id: str, tasks: list[Any], v2: Any = None
+    ) -> None:
         self.workflow_task_ids[workflow_id] = [t.task_id for t in tasks]
 
     def get_workflow_ids(self) -> set[str]:
