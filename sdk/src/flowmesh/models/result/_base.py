@@ -3,7 +3,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializeAsAny,
+    SerializerFunctionWrapHandler,
+    model_serializer,
+)
 
 from ..artifacts import ArtifactContext
 
@@ -11,11 +18,29 @@ if TYPE_CHECKING:
     from .catalog import AnyExecutorResult
 
 
-class StrictModel(BaseModel):
+class DropNoneModel(BaseModel):
+    @model_serializer(mode="wrap")
+    def _drop_none_fields(
+        self, handler: SerializerFunctionWrapHandler
+    ) -> dict[str, Any]:
+        dumped = handler(self)
+        if not isinstance(dumped, dict):
+            return dumped
+        declared = {
+            field.alias or name for name, field in type(self).model_fields.items()
+        }
+        return {
+            key: value
+            for key, value in dumped.items()
+            if value is not None or key not in declared
+        }
+
+
+class StrictModel(DropNoneModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class BaseExecutorResult(BaseModel):
+class BaseExecutorResult(DropNoneModel):
     model_config = ConfigDict(extra="allow", serialize_by_alias=True)
 
     ok: bool = True

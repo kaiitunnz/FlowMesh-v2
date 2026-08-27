@@ -5,7 +5,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from ..artifacts import ArtifactRef
-from ._base import StrictModel
+from ._base import DropNoneModel, StrictModel
 
 
 class PathResponse(BaseModel):
@@ -76,7 +76,7 @@ class CostEstimates(StrictModel):
     max_estimated_rows: int
 
 
-class DataRetrievalItem(BaseModel):
+class DataRetrievalItem(DropNoneModel):
     model_config = ConfigDict(extra="allow")
 
     index: int | None = None

@@ -6,7 +6,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializeAsAny,
+    SerializerFunctionWrapHandler,
+    model_serializer,
+)
 
 from ..artifact import ArtifactContext
 
@@ -14,13 +21,38 @@ if TYPE_CHECKING:
     from .catalog import AnyExecutorResult
 
 
-class StrictModel(BaseModel):
+class DropNoneModel(BaseModel):
+    """Omits declared fields whose value is ``None`` from the serialized output.
+
+    Unset optionals drop out of the payload instead of emitting ``null``.
+    Only declared fields are dropped; extra passthrough keys are kept as-is, so
+    an explicit ``null`` in an open payload (API bodies, connector rows) stays.
+    """
+
+    @model_serializer(mode="wrap")
+    def _drop_none_fields(
+        self, handler: SerializerFunctionWrapHandler
+    ) -> dict[str, Any]:
+        dumped = handler(self)
+        if not isinstance(dumped, dict):
+            return dumped
+        declared = {
+            field.alias or name for name, field in type(self).model_fields.items()
+        }
+        return {
+            key: value
+            for key, value in dumped.items()
+            if value is not None or key not in declared
+        }
+
+
+class StrictModel(DropNoneModel):
     """Base for exact nested payload models; rejects unknown keys."""
 
     model_config = ConfigDict(extra="forbid")
 
 
-class BaseExecutorResult(BaseModel):
+class BaseExecutorResult(DropNoneModel):
     """Common shape for every executor's result payload.
 
     ``extra="allow"`` keeps this the permissive fallback of the discriminated

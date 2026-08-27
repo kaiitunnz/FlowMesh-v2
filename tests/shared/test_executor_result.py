@@ -7,9 +7,13 @@ from pydantic import Field
 
 from shared.schemas.artifact import ArtifactContext, ArtifactRef
 from shared.schemas.result import (
+    APIResult,
     BaseExecutorResult,
+    DataRetrievalItem,
+    DataRetrievalResult,
     EchoItem,
     EchoResult,
+    InferenceResult,
     ResultEnvelope,
 )
 from shared.tasks.specs import EchoSpecStrict
@@ -76,6 +80,59 @@ def test_envelope_round_trip_preserves_subclass_payload() -> None:
     dumped = parsed.result.model_dump()
     assert dumped["items"] == [{"output": "hello"}]
     assert dumped["usage"] == {"total_tokens": 7}
+
+
+def test_none_declared_fields_are_dropped_from_serialization() -> None:
+    """Optional declared fields that are ``None`` are omitted, not emitted as
+    ``null``, while set fields survive."""
+    result = InferenceResult(model=None, usage=None)
+    dumped = result.model_dump(by_alias=True)
+    assert "model" not in dumped
+    assert "usage" not in dumped
+    assert dumped["task_type"] == TaskType.INFERENCE
+    assert dumped["items"] == []
+
+
+def test_open_passthrough_nulls_are_preserved() -> None:
+    """The drop-``None`` filter does not recurse into open mapping fields, so an
+    explicit ``null`` inside a passthrough payload survives."""
+    result = APIResult.model_validate(
+        {
+            "executor": "api",
+            "method": "GET",
+            "url": "http://h",
+            "status_code": 200,
+            "json": {"present": None, "value": 1},
+            "usage": {"cost": None},
+            "text": None,
+        }
+    )
+    dumped = result.model_dump(by_alias=True)
+    assert dumped["json"] == {"present": None, "value": 1}
+    assert dumped["usage"] == {"cost": None}
+    assert "text" not in dumped
+
+
+def test_extra_passthrough_nulls_survive_but_declared_none_drops() -> None:
+    """An ``extra='allow'`` item drops its declared ``None`` fields but keeps
+    connector-specific extra keys, even when their value is ``null``."""
+    item = DataRetrievalItem.model_validate(
+        {"index": 0, "tokens_out": None, "connector_extra": None, "keep": 1}
+    )
+    dumped = item.model_dump()
+    assert "tokens_out" not in dumped
+    assert dumped["connector_extra"] is None
+    assert dumped["keep"] == 1
+
+
+def test_drop_none_round_trip_is_lossless() -> None:
+    """Dropping ``None`` on the wire round-trips: absent optionals reload as
+    their ``None`` defaults."""
+    original = DataRetrievalResult(type="sql", count=None, metadata=None)
+    reloaded = DataRetrievalResult.model_validate_json(original.model_dump_json())
+    assert reloaded.count is None
+    assert reloaded.metadata is None
+    assert reloaded == original
 
 
 def test_upstream_results_preserve_subclass_payload_over_the_wire() -> None:

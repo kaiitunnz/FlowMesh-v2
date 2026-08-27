@@ -102,9 +102,9 @@ def test_embedding_writes_tensor_artifact_and_metadata(tmp_path: Path) -> None:
     dumped = result.model_dump()
     assert "items" not in dumped
     # count / image_group_sizes belong to the unified EmbeddingResult but the
-    # vLLM embedding path does not populate them.
-    assert dumped["count"] is None
-    assert dumped["image_group_sizes"] is None
+    # vLLM embedding path does not populate them, so they drop from the payload.
+    assert "count" not in dumped
+    assert "image_group_sizes" not in dumped
     assert "dim" not in dumped
     assert "prompts_file" not in dumped
     assert not any(

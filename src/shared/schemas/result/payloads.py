@@ -3,10 +3,10 @@ inside its result fields (items, usage, cost estimates, ...)."""
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue
+from pydantic import ConfigDict, Field, JsonValue
 
 from ..artifact import ArtifactRef
-from ._base import StrictModel
+from ._base import DropNoneModel, StrictModel
 
 
 class GenerationUsage(StrictModel):
@@ -93,7 +93,7 @@ class CostEstimates(StrictModel):
     max_estimated_rows: int
 
 
-class DataRetrievalItem(BaseModel):
+class DataRetrievalItem(DropNoneModel):
     """One retrieved row/object.
 
     Shapes differ across the SQL, S3, and Lumid (sql/agent) connectors, and
