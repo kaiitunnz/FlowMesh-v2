@@ -19,12 +19,14 @@ from ..clients.redis import (
     task_state_key,
     workflow_cancelled_tasks_key,
     workflow_dispatched_tasks_key,
+    workflow_ds_key,
     workflow_failed_tasks_key,
     workflow_key,
     workflow_sched_key,
     workflow_tasks_key,
     workflow_v2_key,
 )
+from ..orchestration.state import LedgerSnapshot
 from ..task.models import TaskRecord, TaskStatus
 from ..task.v2 import PersistedV2Workflow
 from ..utils.time import now_iso
@@ -188,6 +190,7 @@ class WorkflowRegistry:
             pipe.delete(*(workflow_cancelled_tasks_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_sched_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_v2_key(wid) for wid in workflow_ids))
+            pipe.delete(*(workflow_ds_key(wid) for wid in workflow_ids))
             for task_id in task_ids:
                 pipe.delete(task_state_key(task_id))
             pipe.execute()
@@ -203,6 +206,7 @@ class WorkflowRegistry:
             pipe.delete(*(workflow_cancelled_tasks_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_sched_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_v2_key(wid) for wid in workflow_ids))
+            pipe.delete(*(workflow_ds_key(wid) for wid in workflow_ids))
             for task_id in task_ids:
                 pipe.delete(task_state_key(task_id))
             await pipe.execute()
@@ -369,6 +373,30 @@ class WorkflowRegistry:
     ) -> PersistedV2Workflow | None:
         blob = await self._rds.asyncio.get(workflow_v2_key(workflow_id))
         return PersistedV2Workflow.model_validate_json(blob) if blob else None
+
+    # ---- Durable orchestration ledger (`DS`) -------------------------- #
+
+    def save_ledger_snapshot(self, workflow_id: str, snapshot: LedgerSnapshot) -> None:
+        self._rds.sync.set_value(
+            workflow_ds_key(workflow_id), snapshot.model_dump_json()
+        )
+
+    async def save_ledger_snapshot_async(
+        self, workflow_id: str, snapshot: LedgerSnapshot
+    ) -> None:
+        await self._rds.asyncio.set_value(
+            workflow_ds_key(workflow_id), snapshot.model_dump_json()
+        )
+
+    def load_ledger_snapshot(self, workflow_id: str) -> LedgerSnapshot | None:
+        blob = self._rds.sync.get(workflow_ds_key(workflow_id))
+        return LedgerSnapshot.model_validate_json(blob) if blob else None
+
+    async def load_ledger_snapshot_async(
+        self, workflow_id: str
+    ) -> LedgerSnapshot | None:
+        blob = await self._rds.asyncio.get(workflow_ds_key(workflow_id))
+        return LedgerSnapshot.model_validate_json(blob) if blob else None
 
     def get_remaining_tasks(self, workflow_id: str) -> set[str]:
         return self._rds.sync.set_members(workflow_tasks_key(workflow_id))

@@ -56,7 +56,9 @@ The runtime is two top-level processes:
 ## Object IDs
 
 3-char prefixes: `wfl-` workflows, `tsk-` tasks, `ssn-` SSH sessions,
-`scn-` SSH connection rows, `cmd-` supervisor commands. Always use
+`scn-` SSH connection rows, `cmd-` supervisor commands. The v2 orchestration
+ledger adds `act-` activations, `scp-` scopes, `wki-` work items, `att-`
+attempts, `inv-` invocations, and `agr-` authority grants. Always use
 `new_*_id()` helpers in `src/shared/utils/ids.py`. Never use `uuid4()` or
 `secrets.token_hex` for IDs.
 
@@ -82,12 +84,14 @@ src/
     governance/           Governance schemas and trace analysis
     hooks/                Plugin extension ABCs + registries
     main.py               Entrypoint, FLOWMESH_PLUGINS loader, EventMonitor wiring
+    orchestration/        Durable orchestration ledger (DS), engine, outcomes
     registries/           Worker / Node registries (Redis-backed)
     routers/v1/           workflows, tasks, results, workers, nodes, ssh, stack, system
     schemas/              REST API request and response schemas
     services/             monitoring, log streaming, ssh forwarding, runtime
     supervisor/           Per-node agent (gRPC server, adapters, lifecycle)
     task/                 parser, runtime, models, merge / epoch helpers
+      v2/                   versioned representations, compiler
     utils/                concurrent, helpers, logging, misc, time
   shared/
     grpc/supervisor/v1/   Generated proto stubs (server + worker)
@@ -112,6 +116,19 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
 
 ## Key runtime behavior
 
+- **v2 orchestration ledger (`DS`).** A submission with `apiVersion:
+  flowmesh/v2` compiles to a `PhysicalExecutionPlan` and runs through the durable
+  orchestration ledger (`src/server/orchestration/`, a peer of the dispatcher),
+  which owns semantic readiness: it turns settled records into ready work items
+  over the acyclic compatibility plan, materializing the activation graph as work
+  becomes ready. A ready work item dispatches through the existing
+  `TaskRuntime`/dispatcher, so scheduler placement stays physical and cannot change
+  logical readiness. A retry is a new attempt under the same work item and reuses
+  its `invocation_id`; declared outputs publish idempotently to result slots keyed
+  by `(instance, declaration, logical key)`, and the legacy per-task result adapter
+  resolves the induced `legacy:<task>` slot. The snapshot persists at
+  `workflow:{id}:ds`, after the terminal task records, and `TaskRuntime.rehydrate`
+  rebuilds and reconciles it on restart. A v1 submission keeps the static-DAG path.
 - **Task merging.** Compatible adjacent tasks in a DAG (same `taskType`,
   model, hardware shape, and merge key) coalesce into a single dispatch.
   Merged children ride on `WorkerTaskMessage.merged_children`; the worker

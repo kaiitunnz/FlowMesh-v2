@@ -90,6 +90,10 @@ def workflow_v2_key(workflow_id: str) -> str:
     return f"workflow:{workflow_id}:v2"
 
 
+def workflow_ds_key(workflow_id: str) -> str:
+    return f"workflow:{workflow_id}:ds"
+
+
 def task_state_key(task_id: str) -> str:
     return f"task:{task_id}:state"
 

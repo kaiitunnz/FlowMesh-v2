@@ -1185,6 +1185,7 @@ class Dispatcher:
                 worker_id=None,
                 payload={"finished_at": ts, "started_at": ts},
                 ts=ts,
+                empty=True,
             )
             return True
         except StageReferenceNotReady as exc:
