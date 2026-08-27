@@ -121,8 +121,9 @@ class TaskRuntime:
         ``CompileError``; semantic findings ride on the report's diagnostics.
         """
         parsed_workflow = parse_workflow(payload, format)
-        specs = parsed_workflow.tasks
-        api_version = specs[0].task.apiVersion if specs else None
+        api_version = parsed_workflow.api_version
+        if not isinstance(api_version, str):
+            api_version = None
         if ExecutionMode.from_api_version(api_version) is not ExecutionMode.V2:
             return None
         source = FrontendWorkflowSource.capture(payload, format)
@@ -141,7 +142,9 @@ class TaskRuntime:
         graph_task_ids: dict[str, str] = {}
 
         v2_bundle: PersistedV2Workflow | None = None
-        api_version = specs[0].task.apiVersion if specs else None
+        api_version = parsed_workflow.api_version
+        if not isinstance(api_version, str):
+            api_version = None
         if ExecutionMode.from_api_version(api_version) is ExecutionMode.V2:
             source = FrontendWorkflowSource.capture(yaml_text, format)
             v2_bundle = compile_bundle(workflow_id, parsed_workflow, source)

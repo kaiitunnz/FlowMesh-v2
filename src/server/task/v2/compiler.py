@@ -1,6 +1,8 @@
+from pydantic import ValidationError
+
 from ..parser import ParsedWorkflow
 from .bundle import PersistedV2Workflow
-from .diagnostics import CompileError
+from .diagnostics import CompileError, Diagnostic
 from .plan import PhysicalExecutionPlan, PhysicalNode
 from .project import LoweringAccumulator, build_name_map, lower_tasks
 from .regions import lower_frontend_v2
@@ -14,17 +16,27 @@ def _assemble_template(
     workflow_id: str, source: FrontendWorkflowSource, acc: LoweringAccumulator
 ) -> LogicalWorkflowTemplate:
     lineage = f"{workflow_id}:template"
-    provisional = LogicalWorkflowTemplate(
-        version=VersionId(lineage=lineage, content_digest=""),
-        operators=tuple(acc.operators),
-        edges=tuple(acc.edges),
-        tool_declarations=tuple(acc.tool_declarations),
-        resource_declarations=tuple(acc.resource_declarations),
-        result_declarations=tuple(acc.result_declarations),
-        legacy_projection=tuple(acc.legacy_projection),
-        effect_boundaries=tuple(acc.effect_boundaries),
-        source_map=tuple(acc.source_map),
-    )
+    try:
+        provisional = LogicalWorkflowTemplate(
+            version=VersionId(lineage=lineage, content_digest=""),
+            operators=tuple(acc.operators),
+            edges=tuple(acc.edges),
+            tool_declarations=tuple(acc.tool_declarations),
+            resource_declarations=tuple(acc.resource_declarations),
+            result_declarations=tuple(acc.result_declarations),
+            legacy_projection=tuple(acc.legacy_projection),
+            effect_boundaries=tuple(acc.effect_boundaries),
+            source_map=tuple(acc.source_map),
+        )
+    except ValidationError as exc:
+        raise CompileError(
+            (
+                Diagnostic(
+                    code="template.malformed",
+                    message="; ".join(e["msg"] for e in exc.errors()),
+                ),
+            )
+        ) from exc
     digest = content_digest(
         source.digest + provisional.model_dump_json(exclude={"version"})
     )

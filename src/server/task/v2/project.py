@@ -182,6 +182,8 @@ def lower_tasks(
     carries worker/replica/endpoint bindings or activation tags.
     """
     task_ids: set[str] = {task.task_id for task in parsed.tasks}
+    # A task may depend on a region node, whose operator id is its source name.
+    known_ids: set[str] = task_ids | {region.name for region in parsed.regions}
 
     for task in parsed.tasks:
         task_type = task.task.spec.taskType
@@ -195,7 +197,7 @@ def lower_tasks(
         task_type = task.task.spec.taskType
         operator_id = task.task_id
         for dep in task.depends_on:
-            if dep in task_ids:
+            if dep in known_ids:
                 acc.edges.append(TemplateEdge(from_op=dep, to_op=operator_id))
 
         if task_type == TaskType.SERVE:

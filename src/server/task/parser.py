@@ -82,6 +82,7 @@ class ParsedWorkflow:
     schedule_in_epoch_order: bool | None
     epoch_groups: list[list[str]] | None
     regions: list[ParsedRegion] = field(default_factory=list)
+    api_version: Any | None = None
 
 
 @dataclass
@@ -130,6 +131,7 @@ def _build_workflow(
     schedule_in_epoch_order: bool | None,
     epoch_groups: list[list[str]] | None,
     region_specs: list[ParsedRegionSpec] | None = None,
+    api_version: Any | None = None,
 ) -> ParsedWorkflow:
     region_specs = region_specs or []
     results: list[ParsedTask] = []
@@ -194,6 +196,7 @@ def _build_workflow(
         schedule_in_epoch_order=schedule_in_epoch_order,
         epoch_groups=epoch_groups,
         regions=regions,
+        api_version=api_version,
     )
 
 
@@ -305,6 +308,7 @@ def _expand_specs(data: Any) -> ParsedWorkflow:
         ],
         schedule_in_epoch_order=None,
         epoch_groups=None,
+        api_version=root.apiVersion,
     )
 
 
@@ -413,6 +417,7 @@ def _expand_graph_nodes(
         schedule_in_epoch_order=schedule_in_epoch_order,
         epoch_groups=epoch_groups,
         region_specs=region_specs,
+        api_version=base.apiVersion,
     )
 
 
@@ -511,6 +516,7 @@ def _expand_stages(
         specs=results,
         schedule_in_epoch_order=schedule_in_epoch_order,
         epoch_groups=epoch_groups,
+        api_version=base.apiVersion,
     )
 
 

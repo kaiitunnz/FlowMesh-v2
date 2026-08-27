@@ -194,6 +194,74 @@ def test_region_under_v1_rejected_by_parser() -> None:
         parse_workflow(v1, "native")
 
 
+_REGION_ONLY = """
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {name: t}
+spec:
+  graph:
+    nodes:
+      - name: only
+        region: {kind: spawn, child: c, authority: {invoke: []}}
+"""
+
+
+@pytest.mark.anyio
+async def test_region_only_workflow_is_gated_as_v2() -> None:
+    # A workflow whose graph is all regions has no leaf tasks; the v2 gate must
+    # still classify it from the root apiVersion and reject it at submit.
+    runtime = _runtime()
+    with pytest.raises(ValueError, match="inspect-only"):
+        await runtime.register("owner", "org", _REGION_ONLY, format="native")
+    report = runtime.inspect_v2(_REGION_ONLY, format="native")
+    assert report is not None and report.region_bearing
+
+
+def test_region_to_task_edge_is_preserved() -> None:
+    text = """
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {name: t}
+spec:
+  graph:
+    nodes:
+      - name: a
+        spec: {taskType: echo, data: {type: list, items: [x]}}
+      - name: route
+        dependsOn: [a]
+        region: {kind: branch, selection: s, ports: [p]}
+      - name: after
+        dependsOn: [route]
+        spec: {taskType: echo, data: {type: list, items: [y]}}
+"""
+    parsed = parse_workflow(text, "native")
+    source = FrontendWorkflowSource.capture(text, "native", name="wf")
+    template, _ = compile_workflow("wfl", parsed, source)
+    after_id = next(t.task_id for t in parsed.tasks if t.graph_node_name == "after")
+    assert ("route", after_id) in {(e.from_op, e.to_op) for e in template.edges}
+
+
+def test_duplicate_operator_id_is_a_compile_error() -> None:
+    from server.task.v2 import CompileError, build_inspection
+
+    text = """
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {name: t}
+spec:
+  graph:
+    nodes:
+      - name: verify
+        region: {kind: call, child: c}
+      - name: 'verify:join'
+        region: {kind: merge}
+"""
+    parsed = parse_workflow(text, "native")
+    source = FrontendWorkflowSource.capture(text, "native", name="wf")
+    with pytest.raises(CompileError):
+        build_inspection("wfl", parsed, source)
+
+
 def test_spec_v2_under_v1_rejected_by_parser() -> None:
     text = """
 apiVersion: flowmesh/v1
