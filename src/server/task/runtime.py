@@ -281,10 +281,6 @@ class TaskRuntime:
         await self._workflow_registry.save_workflow_sched_async(
             workflow_id, in_epoch_order, frontier
         )
-        if v2_ledger is not None:
-            await self._workflow_registry.save_ledger_snapshot_async(
-                workflow_id, v2_ledger.to_snapshot()
-            )
 
         new_ready = False
         with self._cv:
@@ -302,6 +298,13 @@ class TaskRuntime:
                     new_ready = True
             if new_ready:
                 self._cv.notify_all()
+
+        # Snapshot last, after the initial advance has persisted any authority-denied
+        # roots, so the ledger never leads durable task state.
+        if v2_ledger is not None:
+            await self._workflow_registry.save_ledger_snapshot_async(
+                workflow_id, v2_ledger.to_snapshot()
+            )
 
         return workflow_id, results
 
@@ -465,10 +468,16 @@ class TaskRuntime:
                     record.task_id, record.error or "task failed", retryable=False
                 )
 
-        for task_id in ledger.resume_ready_task_ids():
-            ready_record = self._tasks.get(task_id)
-            if ready_record and ready_record.status == TaskStatus.PENDING:
-                self._enqueue_ready_locked(task_id)
+        # Re-derive readiness for every PENDING task from the ledger rather than
+        # trusting the cached work-item status: a crash mid-retry can leave a task
+        # PENDING while the snapshot still shows its work item in flight, and only a
+        # re-derivation re-admits it instead of orphaning the workflow.
+        for persisted in tasks:
+            record = persisted.record
+            if record.status == TaskStatus.PENDING and ledger.reconcile_pending(
+                record.task_id
+            ):
+                self._enqueue_ready_locked(record.task_id)
         self._save_ledger_locked(workflow_id)
 
     # ------------------------------------------------------------------ #
@@ -827,7 +836,8 @@ class TaskRuntime:
     # ------------------------------------------------------------------ #
 
     def is_v2_workflow(self, workflow_id: str) -> bool:
-        return workflow_id in self._ledgers
+        with self._lock:
+            return workflow_id in self._ledgers
 
     def orchestration_ledger(self, workflow_id: str) -> OrchestrationLedger | None:
         with self._lock:
@@ -889,14 +899,18 @@ class TaskRuntime:
             )
 
     def _apply_advance_locked(self, workflow_id: str, advance: Advance) -> bool:
+        # A ready/settle advance never carries a retry; the failure path drives those.
+        assert not advance.retry, "retry is applied by the failure path"
         changed = False
         for task_id in advance.ready:
             if self._enqueue_ready_locked(task_id):
                 changed = True
-        if advance.failed:
-            self._fail_v2_records_locked(
-                advance.failed, "declared-failure obligation", persist=True
-            )
+        ledger = self._ledgers.get(workflow_id)
+        for task_id in advance.failed:
+            reason = (
+                ledger and ledger.failure_reason(task_id)
+            ) or "declared-failure obligation"
+            self._fail_v2_records_locked([task_id], reason, persist=True)
             changed = True
         return changed
 
@@ -1286,14 +1300,15 @@ class TaskRuntime:
 
             self._persist_terminal_locked(task_id, *merged_children_ids)
 
+            notify = bool(ready_children)
             if record is not None and (ledger := self._ledgers.get(record.workflow_id)):
                 if self._apply_advance_locked(
                     record.workflow_id, ledger.on_succeeded(task_id, empty=empty)
                 ):
-                    ready_children.append(task_id)
+                    notify = True
                 self._save_ledger_locked(record.workflow_id)
 
-            if ready_children:
+            if notify:
                 self._cv.notify_all()
 
             return usages

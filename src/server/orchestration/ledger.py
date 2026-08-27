@@ -528,6 +528,19 @@ class OrchestrationLedger:
         """Resolve a legacy task id's induced output slot (compatibility adapter)."""
         return self.resolve_output(f"legacy:{task_id}")
 
+    def failure_reason(self, task_id: str) -> str | None:
+        """The recorded authority-denial reason for a task, when one settled it."""
+        wi_id = self._wi_by_task.get(task_id)
+        if wi_id is None:
+            return None
+        for decision in reversed(self._decisions):
+            if (
+                decision.work_item_id == wi_id
+                and decision.kind is AuthorityDecisionKind.DENIED
+            ):
+                return f"authority denied: {decision.reason or decision.interface}"
+        return None
+
     def recovery_disposition(self, task_id: str) -> RecoveryDisposition | None:
         """Whether the task's operation may be recomputed or must be restored."""
         profile = self._profiles.get(self._operator_for_task(task_id) or "")
@@ -576,13 +589,33 @@ class OrchestrationLedger:
             next_seq=self._next_seq,
         )
 
-    def resume_ready_task_ids(self) -> list[str]:
-        """Legacy task ids still READY after a rehydration and needing re-admission."""
-        return [
-            wi.legacy_task_id
-            for wi in self._work_items.values()
-            if wi.status is WorkItemStatus.READY
-        ]
+    def reconcile_pending(self, task_id: str) -> bool:
+        """Re-derive readiness for a task whose durable record shows PENDING.
+
+        Returns whether the work item is ready to admit. A work item the snapshot
+        still shows in flight — a crash after a retry persisted the PENDING record but
+        before the ledger caught up — is reset to ready with its lost attempt marked,
+        so the retry is not orphaned; a work item whose predecessors have not all
+        settled stays blocked.
+        """
+        wi = self._work_item_for_task(task_id)
+        if wi is None or wi.status is WorkItemStatus.SETTLED:
+            return False
+        cont = self._continuations.get(wi.work_item_id)
+        if cont is not None and cont.waiting_on:
+            wi.status = WorkItemStatus.BLOCKED
+            return False
+        if wi.status is WorkItemStatus.DISPATCHED:
+            if attempt := self._latest_attempt(wi):
+                attempt.status = AttemptStatus.LOST
+                attempt.finished_at = now_iso()
+            self._emit(
+                "attempt_lost_on_restart",
+                work_item_id=wi.work_item_id,
+                operator_id=wi.operator_id,
+            )
+        wi.status = WorkItemStatus.READY
+        return True
 
     # ------------------------------------------------------------------ #
     # Internal helpers

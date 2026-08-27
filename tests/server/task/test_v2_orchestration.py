@@ -349,6 +349,10 @@ async def test_linear_dag_runs_via_v2_path_with_same_dependency_semantics() -> N
         assert pub.value_ref is not None
         assert pub.value_ref.legacy_task_id == ids[name]
 
+    # The internal logical-output query resolves by declared output id too.
+    by_output = runtime.resolve_v2_output(workflow_id, f"legacy:{ids['a']}")
+    assert by_output is not None and by_output.outcome is PublicationOutcome.SUCCESS
+
     # The contract-relevant trace records the semantic seams for inspection.
     kinds = {kind for kind, _ in ledger.contract_trace()}
     assert {
@@ -601,6 +605,36 @@ async def test_rehydration_heals_when_ledger_snapshot_lags_terminal_records() ->
         ]
         assert len(matched) == 1
     assert restored.ready_queue_length() == 0
+
+
+@pytest.mark.anyio
+async def test_rehydration_readmits_task_orphaned_by_a_mid_retry_crash() -> None:
+    registry = FakeRegistry()
+    runtime = _runtime(registry)
+    workflow_id, ids = await _register(runtime, LINEAR)
+    a, b = ids["a"], ids["b"]
+    stop = threading.Event()
+
+    runtime.next_ready(stop, timeout=0.01)
+    runtime.mark_dispatched(a, cast(Any, _worker()))
+    # Snapshot the ledger while a's work item is in flight (DISPATCHED).
+    dispatched_ledger = registry.ledger_blobs[workflow_id]
+    # A retry persists a's record PENDING and readies the ledger work item, but
+    # simulate a crash before that ledger snapshot committed: the durable snapshot
+    # still shows the work item DISPATCHED while the task record is PENDING.
+    runtime.mark_pending(a, increment_retry=True)
+    registry.ledger_blobs[workflow_id] = dispatched_ledger
+
+    restored = _runtime(registry)
+    await restored.rehydrate()
+    # Rehydration re-derives readiness and re-admits a rather than orphaning it.
+    assert restored.get_record(a).status == TaskStatus.PENDING  # type: ignore[union-attr]
+    assert restored.ready_queue_length() == 1
+    assert restored.next_ready(stop, timeout=0.01) == a
+    # The workflow makes progress from there.
+    restored.mark_dispatched(a, cast(Any, _worker("wkr-2")))
+    restored.mark_succeeded(a, "wkr-2", {}, "2026-06-01T00:00:00Z")
+    assert restored.next_ready(stop, timeout=0.01) == b
 
 
 @pytest.mark.anyio
