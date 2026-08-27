@@ -8,6 +8,7 @@ from server.task.parser import parse_workflow
 from server.task.runtime import TaskRuntime
 from server.task.v2 import (
     CompileError,
+    EffectClass,
     FrontendWorkflowSource,
     PersistedV2Workflow,
     compile_workflow,
@@ -79,6 +80,48 @@ def test_binding_registry_is_an_adapter() -> None:
     assert binding_class(TaskType.SERVE) is BindingClass.RESIDENCY
     assert binding_class(TaskType.INFERENCE) is BindingClass.LEAF
     assert binding_class(TaskType.SFT) is BindingClass.LEAF
+
+
+def test_effect_override_to_external_induces_boundary() -> None:
+    text = """
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {name: t}
+spec:
+  graph:
+    nodes:
+      - name: n
+        spec:
+          taskType: echo
+          data: {type: list, items: [x]}
+          v2: {effect: external_effect, recovery: record}
+"""
+    _, template, _ = _compile(text)
+    (op,) = template.operators
+    assert op.profile.effect is EffectClass.EXTERNAL_EFFECT
+    # The boundary is induced from the overridden profile, so validation passes.
+    assert {b.source_ref for b in template.effect_boundaries} == {op.operator_id}
+
+
+def test_effect_override_to_pure_drops_boundary() -> None:
+    text = """
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {name: t}
+spec:
+  graph:
+    nodes:
+      - name: n
+        spec:
+          taskType: api
+          api: {url: 'http://x', method: GET}
+          v2: {effect: pure}
+"""
+    _, template, _ = _compile(text)
+    (op,) = template.operators
+    assert op.profile.effect is EffectClass.PURE
+    # No orphan boundary survives an override away from external effect.
+    assert template.effect_boundaries == ()
 
 
 def test_readable_source_location_in_error() -> None:

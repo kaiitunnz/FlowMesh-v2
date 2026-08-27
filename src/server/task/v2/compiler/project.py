@@ -248,15 +248,6 @@ def lower_tasks(
                 source_ref=operator_id,
             )
         )
-        # An external-effect leaf declares an effect boundary.
-        if leaf_profile(task_type).effect == EffectClass.EXTERNAL_EFFECT:
-            acc.effect_boundaries.append(
-                EffectBoundary(
-                    effect_class=EffectClass.EXTERNAL_EFFECT,
-                    replay_contract=EffectReplayContract.AMBIGUITY_TERMINAL,
-                    source_ref=operator_id,
-                )
-            )
         acc.nodes.append(
             PhysicalNode(
                 node_id=f"phys:{operator_id}",
@@ -264,3 +255,24 @@ def lower_tasks(
                 logical_ref=operator_id,
             )
         )
+
+
+def induce_effect_boundaries(acc: LoweringAccumulator) -> None:
+    """Declare one effect boundary per external-effect leaf, from its final profile.
+
+    Runs after ``spec.v2`` overrides apply, so a leaf whose effect is overridden to
+    or from ``external_effect`` gets its boundary set induced consistently.
+    """
+    for op in acc.operators:
+        if (
+            isinstance(op, LeafOperator)
+            and not op.residency_only
+            and op.profile.effect == EffectClass.EXTERNAL_EFFECT
+        ):
+            acc.effect_boundaries.append(
+                EffectBoundary(
+                    effect_class=EffectClass.EXTERNAL_EFFECT,
+                    replay_contract=EffectReplayContract.AMBIGUITY_TERMINAL,
+                    source_ref=op.operator_id,
+                )
+            )

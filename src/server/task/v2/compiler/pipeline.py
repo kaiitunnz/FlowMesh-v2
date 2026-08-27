@@ -7,7 +7,12 @@ from ..representations.source import FrontendWorkflowSource
 from ..representations.template import LogicalWorkflowTemplate
 from ..representations.versioning import VersionId, content_digest
 from .diagnostics import CompileError, Diagnostic
-from .project import LoweringAccumulator, build_name_map, lower_tasks
+from .project import (
+    LoweringAccumulator,
+    build_name_map,
+    induce_effect_boundaries,
+    lower_tasks,
+)
 from .regions import lower_frontend_v2
 from .validation import has_errors, validate_compilation
 
@@ -81,6 +86,7 @@ def compile_workflow(
     name_to_op = build_name_map(parsed)
     lower_tasks(parsed, name_to_op, acc)
     lower_frontend_v2(parsed, acc)
+    induce_effect_boundaries(acc)
     template = _assemble_template(workflow_id, source, acc)
     plan = _finalize_plan(workflow_id, template.version, tuple(acc.nodes))
     if validate:
