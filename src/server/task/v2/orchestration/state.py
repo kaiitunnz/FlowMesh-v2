@@ -4,7 +4,7 @@ These model the semantic hierarchy of note 21 §7: a workflow instance owns resu
 slots and activations; an activation owns records, continuations, and work items; a
 work item owns an optional invocation and one or more physical attempts. The ledger
 persists grant/policy identity and authorization decisions, never bearer credentials,
-and links to the separate control facts (`CS`, PR 6) only through a stable
+and links to the separate control facts (`CS`) only through a stable
 ``invocation_id``.
 """
 
@@ -19,7 +19,7 @@ from ..representations.operators import EffectClass, EffectReplayContract, Recov
 class WorkItemStatus(StrEnum):
     """Lifecycle of a stable semantic work item."""
 
-    BLOCKED = "blocked"  # predecessors not yet settled
+    BLOCKED = "blocked"  # predecessors not settled
     READY = "ready"  # admissible for a physical attempt
     DISPATCHED = "dispatched"  # an attempt is in flight
     SETTLED = "settled"  # terminal, carries a settled outcome
@@ -39,7 +39,7 @@ class InvocationState(StrEnum):
     """Durable outcome state of a work item's request identity.
 
     ``ACKNOWLEDGED`` is the generic engine/worker enqueue acknowledgement, distinct
-    from a resident ``ServiceClaim.ACCEPTED`` (a `CS` control fact, PR 6).
+    from a resident ``ServiceClaim.ACCEPTED`` (a `CS` control fact).
     """
 
     UNISSUED = "unissued"
@@ -157,7 +157,7 @@ class Continuation(BaseModel):
     """Suspended logical progress waiting on predecessor records."""
 
     work_item_id: str
-    waiting_on: set[str] = Field(default_factory=set)  # operator ids not yet settled
+    waiting_on: set[str] = Field(default_factory=set)  # operator ids not settled
 
 
 class WorkItem(BaseModel):
@@ -184,8 +184,8 @@ class WorkItem(BaseModel):
 class Invocation(BaseModel):
     """Causal `invocation_id` linkage and terminal state held by `DS`.
 
-    The request/admission record itself lives in `CS` (PR 6); `DS` retains only this
-    stable identity and its terminal semantics.
+    The request/admission record itself lives in the separate control facts (`CS`);
+    `DS` retains only this stable identity and its terminal semantics.
     """
 
     invocation_id: str

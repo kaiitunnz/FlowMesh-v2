@@ -865,22 +865,22 @@ class TaskRuntime:
         retries or reports success.
         """
         with self._cv:
-            record = self._tasks.get(task_id)
-            if (
-                record is None
-                or (ledger := self._ledgers.get(record.workflow_id)) is None
-            ):
-                return Advance()
-            advance = ledger.on_uncertain(task_id)
-            if advance.retry:
-                self.mark_pending(task_id, increment_retry=False)
-                self.requeue(task_id, front=True)
-            elif advance.failed:
-                self._fail_v2_records_locked(
-                    advance.failed, "ambiguity-terminal effect"
-                )
-            self._save_ledger_locked(record.workflow_id)
-            return advance
+            return self._resolve_uncertain_locked(task_id)
+
+    def _resolve_uncertain_locked(self, task_id: str) -> Advance:
+        record = self._tasks.get(task_id)
+        if record is None or (ledger := self._ledgers.get(record.workflow_id)) is None:
+            return Advance()
+        advance = ledger.on_uncertain(task_id)
+        if advance.retry:
+            self.mark_pending(task_id, increment_retry=False)
+            self.requeue(task_id, front=True)
+        elif advance.failed:
+            self._fail_v2_records_locked(
+                advance.failed, "ambiguity-terminal effect", persist=True
+            )
+        self._save_ledger_locked(record.workflow_id)
+        return advance
 
     def _save_ledger_locked(self, workflow_id: str) -> None:
         if (ledger := self._ledgers.get(workflow_id)) is not None:
@@ -894,11 +894,20 @@ class TaskRuntime:
             if self._enqueue_ready_locked(task_id):
                 changed = True
         if advance.failed:
-            self._fail_v2_records_locked(advance.failed, "declared-failure obligation")
+            self._fail_v2_records_locked(
+                advance.failed, "declared-failure obligation", persist=True
+            )
             changed = True
         return changed
 
-    def _fail_v2_records_locked(self, task_ids: list[str], reason: str) -> None:
+    def _fail_v2_records_locked(
+        self, task_ids: list[str], reason: str, *, persist: bool
+    ) -> list[str]:
+        """Fail the non-terminal task records terminally; returns the ones changed.
+
+        Persists them here when ``persist`` is set; the failure cascade instead lets
+        the caller's single terminal-persist cover them.
+        """
         failed_now: list[str] = []
         for task_id in task_ids:
             record = self._tasks.get(task_id)
@@ -911,28 +920,17 @@ class TaskRuntime:
             self._failed.add(task_id)
             self._remove_from_ready_locked(task_id)
             failed_now.append(task_id)
-        if failed_now:
+        if persist and failed_now:
             self._persist_terminal_locked(*failed_now)
+        return failed_now
 
     def _fail_v2_cascade_locked(
         self, primary: str, cascade: list[str]
     ) -> list[tuple[str, str]]:
-        impacted: list[tuple[str, str]] = []
         reason = f"Dependency {primary} failed"
-        for task_id in cascade:
-            if task_id == primary:
-                continue
-            record = self._tasks.get(task_id)
-            if not record or record.status in TERMINAL_TASK_STATUSES:
-                continue
-            record.status = TaskStatus.FAILED
-            record.error = reason
-            record.assigned_worker = None
-            record.finished_ts = time.time()
-            self._failed.add(task_id)
-            self._remove_from_ready_locked(task_id)
-            impacted.append((task_id, reason))
-        return impacted
+        downstream = [task_id for task_id in cascade if task_id != primary]
+        failed = self._fail_v2_records_locked(downstream, reason, persist=False)
+        return [(task_id, reason) for task_id in failed]
 
     def plan_merge(
         self, task_id: str, max_batch_size: int, assigned_worker: str
@@ -1381,7 +1379,6 @@ class TaskRuntime:
             if record is not None and (ledger := self._ledgers.get(record.workflow_id)):
                 advance = ledger.on_failed(task_id, message, retryable=False)
                 impacted.extend(self._fail_v2_cascade_locked(task_id, advance.failed))
-                self._save_ledger_locked(record.workflow_id)
 
             for merged_child in merged_children_ids:
                 impacted.extend(
@@ -1407,6 +1404,11 @@ class TaskRuntime:
             self._persist_terminal_locked(
                 task_id, *merged_children_ids, *(dep_id for dep_id, _ in impacted)
             )
+            # The ledger snapshot writes last, after the task terminal records, so a
+            # crash can only leave the ledger behind — never ahead — of durable task
+            # state, which rehydration then reconciles.
+            if record is not None and record.workflow_id in self._ledgers:
+                self._save_ledger_locked(record.workflow_id)
 
             return impacted, merged_children_ids, usages
 
@@ -1574,12 +1576,21 @@ class TaskRuntime:
         """
         recovered: list[str] = []
         with self._cv:
-            for task_id, record in self._tasks.items():
+            for task_id, record in list(self._tasks.items()):
                 if record.assigned_worker != worker_id:
                     continue
                 if record.status not in (TaskStatus.DISPATCHED, TaskStatus.CANCELLING):
                     continue
                 self._rehydrated_dispatched.pop(task_id, None)
+                # v2 route/worker loss resolves through the uncertainty FSM: a
+                # replayable invocation reissues under its stable id; the caller does
+                # not also fail or requeue it.
+                if (
+                    record.status == TaskStatus.DISPATCHED
+                    and record.workflow_id in self._ledgers
+                ):
+                    self._resolve_uncertain_locked(task_id)
+                    continue
                 recovered.append(task_id)
         return recovered
 

@@ -1,6 +1,6 @@
 """Invocation/effect outcome semantics for the acyclic compatibility path.
 
-Three concerns live here as pure logic: which operators the initial v2 runtime
+Three concerns live here as pure logic: which operators the v2 compatibility path
 admits, whether a settled work item may be recomputed or must be restored, and the
 minimal durable invocation state machine that keeps an uncertain non-replayable
 effect from silently retrying or reporting success.
@@ -65,16 +65,16 @@ def check_admissible(
     replay_contract: EffectReplayContract | None,
     residency_only: bool,
 ) -> None:
-    """Reject an operator the initial v2 runtime cannot honor.
+    """Reject an operator the v2 compatibility path cannot run.
 
     The compatibility path runs effect-free operations, or external effects declared
     safely replayable with a deduplication boundary. Private-state operations,
-    non-replayable external effects, and residency administration wait for later PRs.
+    non-replayable external effects, and residency administration are not admitted.
     """
     if residency_only:
         raise AdmissionError(
             f"operator {operator_id!r} administers resident capacity, which the v2 "
-            "compatibility path does not orchestrate yet"
+            "compatibility path does not orchestrate resident capacity"
         )
     if effect is EffectClass.PURE:
         return

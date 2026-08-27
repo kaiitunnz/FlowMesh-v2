@@ -261,7 +261,7 @@ class OrchestrationLedger:
     def on_dispatched(self, task_id: str, worker_id: str | None) -> None:
         """Record a physical attempt and issue or reissue the work item's invocation."""
         wi = self._work_item_for_task(task_id)
-        if wi is None:
+        if wi is None or wi.status is WorkItemStatus.SETTLED:
             return
         if wi.invocation_id is None:
             invocation = Invocation(
