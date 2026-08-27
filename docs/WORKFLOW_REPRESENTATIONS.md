@@ -67,11 +67,10 @@ physical boundary per legacy task/executor boundary, and runs the validation
 passes. It runs before any scheduler state is created, so a rejected submission
 mutates nothing.
 
-The `taskType → Executor` mapping is a binding adapter in `bindings.py`: it
-translates each legacy task type into a generic `Leaf`/`Agent` profile.
-`agent` binds to the opaque-body `Agent`; `serve` binds to a residency request
-surface; every other type binds to a generic `Leaf`. The legacy task-type set
-is not the v2 operator vocabulary.
+The binding adapter in `bindings.py` translates each legacy task type into a
+generic `Leaf`/`Agent` profile. `agent` binds to the opaque-body `Agent`;
+`serve` binds to a residency request surface; every other type binds to a
+generic `Leaf`.
 
 ## Validation
 
