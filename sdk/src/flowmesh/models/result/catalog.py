@@ -1,11 +1,3 @@
-"""Result-related models.
-
-Mirrors ``shared.schemas.result``. The per-task-type subclasses and the
-``AnyExecutorResult`` discriminated union let ``Results.retrieve()`` deserialize a
-result into its exact subclass. Drift against the shared definitions is guarded by
-``tests/sdk/test_schema_compat.py``.
-"""
-
 # Necessary for the recursive ``children`` forward reference.
 from __future__ import annotations
 
@@ -16,227 +8,33 @@ from pydantic import (
     ConfigDict,
     Discriminator,
     Field,
-    JsonValue,
     SerializeAsAny,
     Tag,
 )
 
-from .artifacts import ArtifactContext, ArtifactRef
-from .common import TaskType
-
-
-class PathResponse(BaseModel):
-    ok: bool
-    path: str
-
-
-# --------------------------------------------------------------------------- #
-# Nested payload models
-# --------------------------------------------------------------------------- #
-class GenerationUsage(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    prompt_tokens: int
-    completion_tokens: int
-    total_tokens: int
-    num_requests: int
-    latency_sec: float
-
-
-class EmbeddingUsage(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    prompt_tokens: int
-    total_tokens: int
-    num_requests: int
-    latency_sec: float
-    embedding_dim: int
-
-
-class InferenceItem(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    index: int | None = None
-    prompt: str | None = None
-    output: JsonValue = None
-    finish_reason: str | list[str | None] | None = None
-    metadata: dict[str, Any] | None = None
-
-
-class OmniImageItem(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    index: int
-    prompt: str
-    image: ArtifactRef
-
-
-class OmniSpeechItem(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    index: int
-    text: str
-    audio: ArtifactRef
-
-
-class OmniAudioItem(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    index: int
-    prompt_index: int
-    waveform_index: int
-    prompt: str
-    audio: ArtifactRef
-
-
-class OmniGeneralItem(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    index: int
-    request_id: str
-    prompt: str | None = None
-    audio: ArtifactRef
-    text: str | None = None
-
-
-class CostEstimates(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    ok: bool
-    num_queries: int
-    avg_estimated_cost: float
-    min_estimated_cost: float
-    max_estimated_cost: float
-    avg_estimated_rows: float
-    min_estimated_rows: int
-    max_estimated_rows: int
-
-
-class DataRetrievalItem(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-    index: int | None = None
-    query: str | None = None
-    description: str | None = None
-    params: Any = None
-    table: dict[str, str] | None = None
-    rows: int | None = None
-    keys: list[str] | None = None
-    content: list[Any] | None = None
-    run_id: str | None = None
-    access_chain: Any = None
-    materialized_uri: str | None = None
-    size_bytes: int | None = None
-    transcript_url: str | None = None
-    tokens_in: int | None = None
-    tokens_out: int | None = None
-    steps_taken: int | None = None
-    replay_latency_ms: int | float | None = None
-
-
-class AgentItem(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    index: int
-    output: str
-    finish_reason: str
-
-
-class AgentUsage(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    execution_time_sec: float
-    num_requests: int
-    agent_config: str
-
-
-class AgentBatchSummary(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    total_tasks: int = 0
-    completed: int = 0
-    failed: int = 0
-
-
-class AgentMetadata(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    task: str | None = None
-    tasks_count: int | None = None
-    execution_log: list[str] = Field(default_factory=list)
-    error: str | None = None
-    batch_summary: AgentBatchSummary | None = None
-
-
-class RagQdrant(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    collection: str
-    url: str
-
-
-class RagEmbedding(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    model: str
-
-
-class RagSearch(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    top_k: int
-
-
-class RagUsage(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    latency_sec: float
-    num_queries: int
-    total_results: int
-
-
-class RagHit(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    id: int | str | None = None
-    score: float | None = None
-    payload: dict[str, Any] | None = None
-
-
-class RagQuery(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    index: int
-    query: str
-    items: list[RagHit] = Field(default_factory=list)
-
-
-class EchoItem(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    output: JsonValue = None
-
-
-# --------------------------------------------------------------------------- #
-# Base + concrete result models
-# --------------------------------------------------------------------------- #
-class BaseExecutorResult(BaseModel):
-    model_config = ConfigDict(extra="allow", serialize_by_alias=True)
-
-    ok: bool = True
-    children: dict[str, SerializeAsAny[AnyExecutorResult]] = Field(
-        default_factory=dict, exclude_if=lambda v: not v
-    )
-    artifacts_: ArtifactContext | None = Field(default=None, alias="_artifacts")
-
-    @classmethod
-    def __pydantic_init_subclass__(cls, **kwargs: Any) -> None:
-        super().__pydantic_init_subclass__(**kwargs)
-        if "artifacts_" in cls.__annotations__:
-            raise TypeError(
-                f"{cls.__name__} may not redefine the internal "
-                "BaseExecutorResult.artifacts_ field"
-            )
+from ..artifacts import ArtifactRef
+from ..common import TaskType
+from ._base import BaseExecutorResult
+from .payloads import (
+    AgentItem,
+    AgentMetadata,
+    AgentUsage,
+    CostEstimates,
+    DataRetrievalItem,
+    EchoItem,
+    EmbeddingUsage,
+    GenerationUsage,
+    InferenceItem,
+    OmniAudioItem,
+    OmniGeneralItem,
+    OmniImageItem,
+    OmniSpeechItem,
+    RagEmbedding,
+    RagQdrant,
+    RagQuery,
+    RagSearch,
+    RagUsage,
+)
 
 
 class InferenceResult(BaseExecutorResult):
@@ -532,31 +330,3 @@ class ResultEnvelope(BaseModel):
     worker_id: str | None = None
     metadata: dict[str, Any] | None = None
     received_at: str | None = Field(default=None)
-
-
-_RESULT_MODELS: tuple[type[BaseModel], ...] = (
-    BaseExecutorResult,
-    InferenceResult,
-    EmbeddingResult,
-    DiffusionResult,
-    ServeResult,
-    SFTResult,
-    LoRAResult,
-    PPOResult,
-    DPOResult,
-    ImageClassificationTrainingResult,
-    OmniText2ImageResult,
-    OmniText2SpeechResult,
-    OmniText2AudioResult,
-    OmniText2GeneralResult,
-    DataProfilingResult,
-    DataRetrievalResult,
-    AgentResult,
-    RAGResult,
-    EchoResult,
-    APIResult,
-    SSHResult,
-    ResultEnvelope,
-)
-for _model in _RESULT_MODELS:
-    _model.model_rebuild()

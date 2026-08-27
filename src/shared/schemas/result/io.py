@@ -5,7 +5,7 @@ from pathlib import Path
 from shared.utils.atomic import atomic_write_text
 from shared.utils.manifest import prepare_output_dir
 
-from ._catalog import ResultEnvelope
+from .catalog import ResultEnvelope
 
 
 def _sanitize_task_id(task_id: str) -> str:

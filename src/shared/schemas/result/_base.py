@@ -15,7 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny
 from ..artifact import ArtifactContext
 
 if TYPE_CHECKING:
-    from ._catalog import AnyExecutorResult
+    from .catalog import AnyExecutorResult
 
 
 class BaseExecutorResult(BaseModel):

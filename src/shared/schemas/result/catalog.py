@@ -20,7 +20,7 @@ from shared.utils.time import now_iso
 
 from ..artifact import ArtifactRef
 from ._base import BaseExecutorResult
-from ._payloads import (
+from .payloads import (
     AgentItem,
     AgentMetadata,
     AgentUsage,

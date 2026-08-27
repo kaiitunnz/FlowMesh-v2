@@ -1,10 +1,9 @@
-"""Executor result schemas: the base model, exact per-task-type models, and the
-``task_type`` discriminated union that deserializes ``results.json``.
+"""Result-related models.
 
-``_base`` imports before ``_catalog``: importing ``TaskType`` re-enters this
-package through ``shared.tasks.specs.common``, which needs ``BaseExecutorResult``
-already bound. Models carrying the recursive ``children`` field are rebuilt below
-once ``AnyExecutorResult`` exists.
+Mirrors ``shared.schemas.result``. The per-task-type subclasses and the
+``AnyExecutorResult`` discriminated union let ``Results.retrieve()`` deserialize
+a result into its exact subclass. Drift against the shared definitions is
+guarded by ``tests/sdk/test_schema_compat.py``.
 """
 
 from pydantic import BaseModel
@@ -35,7 +34,6 @@ from .catalog import (
     SFTResult,
     SSHResult,
 )
-from .io import read_result, result_file_path, write_result
 from .payloads import (
     AgentBatchSummary,
     AgentItem,
@@ -51,6 +49,7 @@ from .payloads import (
     OmniGeneralItem,
     OmniImageItem,
     OmniSpeechItem,
+    PathResponse,
     RagEmbedding,
     RagHit,
     RagQdrant,
@@ -122,6 +121,7 @@ __all__ = [
     "OmniText2ImageResult",
     "OmniText2SpeechResult",
     "PPOResult",
+    "PathResponse",
     "RAGResult",
     "RagEmbedding",
     "RagHit",
@@ -133,7 +133,4 @@ __all__ = [
     "SFTResult",
     "SSHResult",
     "ServeResult",
-    "read_result",
-    "result_file_path",
-    "write_result",
 ]
