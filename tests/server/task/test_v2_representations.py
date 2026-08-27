@@ -11,16 +11,23 @@ from server.task.runtime import TaskRuntime
 from server.task.v2 import (
     AgentOperator,
     BoundaryEventKind,
+    DeterminismClass,
+    EffectClass,
     ExecutionMode,
     FrontendWorkflowSource,
+    InputProvenanceKind,
     LeafOperator,
     LogicalWorkflowTemplate,
     PersistedV2Workflow,
     PortKind,
+    RecoveryClass,
     ResultDeclaration,
     VersionId,
     project_acyclic,
 )
+from server.task.v2.operators import EqualityRelationKind
+from server.task.v2.project import _leaf_profile
+from shared.tasks import TaskType
 
 DAG_V2 = """
 apiVersion: flowmesh/v2
@@ -196,6 +203,64 @@ def test_project_agent_carries_authority_and_boundary() -> None:
     assert agent.authority.invoke == ()
     # Agent is result-owning: it induces one logical output slot.
     assert len(bundle.template.legacy_projection) == 1
+
+
+def test_training_leaf_profile() -> None:
+    for task_type in (
+        TaskType.SFT,
+        TaskType.LORA_SFT,
+        TaskType.PPO,
+        TaskType.DPO,
+        TaskType.IMAGE_CLASSIFICATION_TRAINING,
+    ):
+        profile = _leaf_profile(task_type)
+        assert profile.determinism is DeterminismClass.SAMPLED
+        assert profile.effect is EffectClass.PRIVATE_STATE
+        assert profile.recovery is RecoveryClass.RECORD
+        assert profile.input_provenance is InputProvenanceKind.EXTERNAL_PINNED
+        assert profile.output_equality is None
+
+
+def test_rag_leaf_profile_reads_live() -> None:
+    profile = _leaf_profile(TaskType.RAG)
+    assert profile.determinism is DeterminismClass.DETERMINISTIC_SEMANTIC
+    assert profile.effect is EffectClass.PURE
+    assert profile.recovery is RecoveryClass.RECORD
+    assert profile.input_provenance is InputProvenanceKind.LIVE_INPUT
+    assert profile.output_equality is not None
+    assert profile.output_equality.kind is EqualityRelationKind.SEMANTIC
+    # embedding stays a pinned, recomputable candidate.
+    embedding = _leaf_profile(TaskType.EMBEDDING)
+    assert embedding.recovery is RecoveryClass.RECOMPUTE
+    assert embedding.input_provenance is InputProvenanceKind.EXTERNAL_PINNED
+
+
+def test_training_mints_new_model_ref_on_output() -> None:
+    payload = """
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: { name: train }
+spec:
+  taskType: sft
+  model:
+    source: { type: huggingface, identifier: org/base, revision: base-rev-1 }
+  data: {}
+  training: {}
+"""
+    bundle = _project(payload)
+    (leaf,) = bundle.template.operators
+    assert isinstance(leaf, LeafOperator)
+    model_out = next(p for p in leaf.outputs if p.kind is PortKind.MODEL_REF)
+    assert model_out.model_ref is not None
+    # The produced ModelRef keeps the base architecture but is a new identity,
+    # not an echo of the input revision.
+    assert model_out.model_ref.architecture == "org/base"
+    assert model_out.model_ref.version != "base-rev-1"
+    assert model_out.model_ref.version is not None
+    # No input model_ref port is emitted for a training op.
+    assert not any(
+        p.kind is PortKind.MODEL_REF and p.name == "model_in" for p in leaf.inputs
+    )
 
 
 def test_serve_is_residency_not_result_owning() -> None:

@@ -65,11 +65,18 @@ def _leaf_profile(task_type: TaskType) -> LeafProfile:
     equality: EqualityRelation | None = None
 
     match task_type:
-        case TaskType.EMBEDDING | TaskType.RAG:
+        case TaskType.EMBEDDING:
             det, recovery, equality = (
                 DeterminismClass.DETERMINISTIC_SEMANTIC,
                 RecoveryClass.RECOMPUTE,
                 _SEMANTIC,
+            )
+        case TaskType.RAG:
+            det, recovery, equality, provenance = (
+                DeterminismClass.DETERMINISTIC_SEMANTIC,
+                RecoveryClass.RECORD,
+                _SEMANTIC,
+                InputProvenanceKind.LIVE_INPUT,
             )
         case TaskType.DATA_PROFILING:
             det, recovery, equality = (
@@ -90,6 +97,14 @@ def _leaf_profile(task_type: TaskType) -> LeafProfile:
                 EffectClass.EXTERNAL_EFFECT,
                 InputProvenanceKind.LIVE_INPUT,
             )
+        case (
+            TaskType.SFT
+            | TaskType.LORA_SFT
+            | TaskType.PPO
+            | TaskType.DPO
+            | TaskType.IMAGE_CLASSIFICATION_TRAINING
+        ):
+            effect = EffectClass.PRIVATE_STATE
         case _:
             pass
 
@@ -157,8 +172,12 @@ def _ports(
     model_ref = _model_ref(task)
     if model_ref is not None:
         if task_type in _TRAINING_TYPES:
+            produced = ModelRef(
+                architecture=model_ref.architecture,
+                version=f"trained:{task.task_id}",
+            )
             outputs.append(
-                Port(name="model_out", kind=PortKind.MODEL_REF, model_ref=model_ref)
+                Port(name="model_out", kind=PortKind.MODEL_REF, model_ref=produced)
             )
         else:
             inputs.append(
