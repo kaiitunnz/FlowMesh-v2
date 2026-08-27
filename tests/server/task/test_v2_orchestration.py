@@ -258,19 +258,23 @@ def test_uncertain_non_replayable_is_ambiguity_terminal() -> None:
     )
 
 
-def test_admission_rejects_non_replayable_and_residency() -> None:
-    with pytest.raises(AdmissionError):
-        check_admissible(
-            "op",
-            EffectClass.EXTERNAL_EFFECT,
-            EffectReplayContract.AMBIGUITY_TERMINAL,
-            False,
-        )
+def test_admission_rejects_residency_and_private_state() -> None:
     with pytest.raises(AdmissionError):
         check_admissible("op", EffectClass.PRIVATE_STATE, None, False)
     with pytest.raises(AdmissionError):
         check_admissible("op", EffectClass.PURE, None, residency_only=True)
     check_admissible("op", EffectClass.PURE, None, False)  # effect-free is admissible
+    # An external effect of any replay contract is admitted; its uncertainty is handled
+    # by the FSM without inferring success.
+    check_admissible(
+        "op",
+        EffectClass.EXTERNAL_EFFECT,
+        EffectReplayContract.AMBIGUITY_TERMINAL,
+        False,
+    )
+    check_admissible(
+        "op", EffectClass.EXTERNAL_EFFECT, EffectReplayContract.COMPENSABLE, False
+    )
 
 
 def test_classify_recovery_pure_deterministic_pinned_recomputes() -> None:
@@ -292,7 +296,7 @@ def test_classify_recovery_pure_deterministic_pinned_recomputes() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_effectful_plan_is_rejected_at_build() -> None:
+def test_effectful_plan_builds_and_is_admitted() -> None:
     text = """
 apiVersion: flowmesh/v2
 kind: Workflow
@@ -306,8 +310,11 @@ spec:
           api: {url: 'http://x', method: GET}
 """
     bundle = _bundle(text)
-    with pytest.raises(AdmissionError):
-        OrchestrationLedger.build("wfl-x", "owner", "org", bundle)
+    # An external effect (ambiguity-terminal by default) builds; its uncertainty is
+    # handled by the FSM rather than rejected at admission.
+    led = OrchestrationLedger.build("wfl-x", "owner", "org", bundle)
+    caller = bundle.template.operators[0].operator_id
+    assert led.work_item(caller) is not None
 
 
 def test_identity_hierarchy_is_one_per_operator() -> None:
