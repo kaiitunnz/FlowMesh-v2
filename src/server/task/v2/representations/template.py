@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, model_validator
 
 from .operators import EffectBoundary, LogicalOperator
 from .results import LegacyLogicalTaskProjection, ResultDeclaration
@@ -70,7 +70,7 @@ class LogicalWorkflowTemplate(BaseModel):
     result_declarations: tuple[ResultDeclaration, ...] = ()
     legacy_projection: tuple[LegacyLogicalTaskProjection, ...] = ()
     effect_boundaries: tuple[EffectBoundary, ...] = ()
-    source_map: tuple[SourceMapEntry, ...] = Field(default=())
+    source_map: tuple[SourceMapEntry, ...] = ()
 
     @property
     def operator_ids(self) -> frozenset[str]:

@@ -37,6 +37,8 @@ from ..representations.template import (
     ToolDeclaration,
 )
 from .bindings import (
+    BindingClass,
+    binding_class,
     default_agent_authority,
     default_agent_boundary,
     is_training,
@@ -130,7 +132,7 @@ def _leaf_operator(
         outputs=outputs,
         profile=leaf_profile(task_type),
         guard=_condition_guard(task, name_to_op, operator_ids),
-        residency_only=task_type == TaskType.SERVE,
+        residency_only=binding_class(task_type) is BindingClass.RESIDENCY,
     )
 
 
@@ -197,23 +199,22 @@ def lower_tasks(
     # Pass 1: one operator + source-map entry per task.
     for task in parsed.tasks:
         task_type = task.task.spec.taskType
-        if task_type == TaskType.AGENT:
+        if binding_class(task_type) is BindingClass.AGENT:
             acc.operators.append(_agent_operator(task, name_to_op, task_ids))
         else:
             acc.operators.append(_leaf_operator(task, task_type, name_to_op, task_ids))
         acc.source_map.append(_source_map_entry(task))
 
-    # Pass 2: wiring, induced outputs, effect boundaries, and physical nodes.
+    # Pass 2: wiring, induced outputs, and physical nodes.
     for task in parsed.tasks:
         task_type = task.task.spec.taskType
         operator_id = task.task_id
-        # dependsOn becomes port wiring.
         for dep in task.depends_on:
             if dep in known_ids:
                 acc.edges.append(TemplateEdge(from_op=dep, to_op=operator_id))
 
         # serve administers resident capacity: a residency node, no result slot.
-        if task_type == TaskType.SERVE:
+        if binding_class(task_type) is BindingClass.RESIDENCY:
             model_ref = _model_ref(task)
             family = model_ref.architecture if model_ref else task_type.value
             acc.nodes.append(
@@ -227,7 +228,6 @@ def lower_tasks(
             )
             continue
 
-        # Every result-owning task induces one singleton logical-output slot.
         output_id = f"legacy:{operator_id}"
         acc.result_declarations.append(
             ResultDeclaration(

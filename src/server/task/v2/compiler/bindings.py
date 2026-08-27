@@ -33,10 +33,8 @@ _BITWISE = EqualityRelation(kind=EqualityRelationKind.BITWISE)
 class BindingClass(StrEnum):
     """How the compiler lowers a legacy task type into the operator vocabulary.
 
-    The legacy ``taskType`` set is a binding registry over the small v2 operator
-    vocabulary, not a proliferation of logical leaf kinds: most types lower to a
-    generic ``Leaf``, ``agent`` lowers to the opaque-body ``Agent``, and ``serve``
-    lowers to a residency request surface rather than a result-owning leaf.
+    Most types lower to a generic ``Leaf``, ``agent`` to the opaque-body
+    ``Agent``, and ``serve`` to a residency request surface.
     """
 
     LEAF = "leaf"
