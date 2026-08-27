@@ -2,7 +2,8 @@
 
 FlowMesh builds three durable plan-time representations and a gate that selects
 them, decoupling author intent, legal workflow semantics, and physical
-realization. The models live in `src/server/task/v2/`.
+realization. The models live in `src/server/task/v2/representations/`; the
+compiler that produces them lives in `src/server/task/v2/compiler/`.
 
 ## Selecting the v2 track
 
@@ -58,7 +59,7 @@ A legacy `serve` task maps to a residency-administration node with a
 
 ## Compilation
 
-`compile_workflow` (in `src/server/task/v2/compiler.py`) lowers a parsed
+`compile_workflow` (in `src/server/task/v2/compiler/pipeline.py`) lowers a parsed
 workflow into the logical template and physical plan. It lowers legacy tasks
 into leaf/agent/residency operators, normalizes structured regions and
 `spec.v2` leaf declarations into the canonical operator/region form, builds one
