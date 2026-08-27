@@ -6,11 +6,16 @@ from .operators import EffectBoundary, LogicalOperator
 from .results import LegacyLogicalTaskProjection, ResultDeclaration
 from .versioning import VersionId
 
-type SourceKind = Literal["legacy_task", "stage", "graph_node", "root"]
+type SourceKind = Literal["legacy_task", "stage", "graph_node", "region", "root"]
 
 
 class TemplateEdge(BaseModel):
-    """A symbolic wiring edge between two logical operators."""
+    """A symbolic wiring edge between two logical operators.
+
+    A ``feedback`` edge is a structured back-edge into a ``LoopContext`` region; it
+    is excluded from the acyclic forward-topology that unstructured-cycle detection
+    rejects.
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -18,6 +23,7 @@ class TemplateEdge(BaseModel):
     to_op: str
     from_port: str | None = None
     to_port: str | None = None
+    feedback: bool = False
 
 
 class ToolDeclaration(BaseModel):

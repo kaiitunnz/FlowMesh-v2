@@ -1,3 +1,5 @@
+from dataclasses import dataclass, field
+
 from shared.tasks import TaskType
 from shared.tasks.specs.common import ModelSpecTemplate
 
@@ -21,12 +23,7 @@ from .operators import (
     Port,
     PortKind,
 )
-from .plan import (
-    PhysicalExecutionPlan,
-    PhysicalNode,
-    ResidencyIntent,
-    ServiceFamilyRequirement,
-)
+from .plan import PhysicalNode, ResidencyIntent, ServiceFamilyRequirement
 from .results import (
     CardinalityKind,
     LegacyLogicalTaskProjection,
@@ -34,9 +31,12 @@ from .results import (
     ResultDeclaration,
     Visibility,
 )
-from .source import FrontendWorkflowSource
-from .template import LogicalWorkflowTemplate, SourceMapEntry, TemplateEdge
-from .versioning import VersionId, content_digest
+from .template import (
+    ResourceDeclaration,
+    SourceMapEntry,
+    TemplateEdge,
+    ToolDeclaration,
+)
 
 
 def _model_ref(task: ParsedTask) -> ModelRef | None:
@@ -141,53 +141,67 @@ def _agent_operator(
     )
 
 
-def project_acyclic(
-    workflow_id: str,
-    parsed: ParsedWorkflow,
-    source: FrontendWorkflowSource,
-) -> tuple[LogicalWorkflowTemplate, PhysicalExecutionPlan]:
-    """Project an acyclic parsed workflow into symbolic v2 representations.
+@dataclass
+class LoweringAccumulator:
+    """Mutable collector the compiler fills from tasks and structured regions."""
 
-    Each legacy task becomes a symbolic leaf (an ``Agent`` for ``agent`` tasks; a
-    residency-only leaf for ``serve``), ``dependsOn`` becomes port wiring, and
-    each result-owning task induces one singleton logical-output slot. The result
-    carries no worker/replica/endpoint bindings and no activation tags.
-    """
-    operators: list[LogicalOperator] = []
-    edges: list[TemplateEdge] = []
-    result_declarations: list[ResultDeclaration] = []
-    legacy_projection: list[LegacyLogicalTaskProjection] = []
-    effect_boundaries: list[EffectBoundary] = []
-    source_map: list[SourceMapEntry] = []
-    nodes: list[PhysicalNode] = []
+    operators: list[LogicalOperator] = field(default_factory=list)
+    edges: list[TemplateEdge] = field(default_factory=list)
+    result_declarations: list[ResultDeclaration] = field(default_factory=list)
+    legacy_projection: list[LegacyLogicalTaskProjection] = field(default_factory=list)
+    effect_boundaries: list[EffectBoundary] = field(default_factory=list)
+    tool_declarations: list[ToolDeclaration] = field(default_factory=list)
+    resource_declarations: list[ResourceDeclaration] = field(default_factory=list)
+    source_map: list[SourceMapEntry] = field(default_factory=list)
+    nodes: list[PhysicalNode] = field(default_factory=list)
 
-    operator_ids: set[str] = {task.task_id for task in parsed.tasks}
+    @property
+    def operator_ids(self) -> set[str]:
+        return {op.operator_id for op in self.operators}
+
+
+def build_name_map(parsed: ParsedWorkflow) -> dict[str, str]:
+    """Map source-visible task names to their stable operator ids."""
     name_to_op: dict[str, str] = {}
     for task in parsed.tasks:
         if task.graph_node_name:
             name_to_op[task.graph_node_name] = task.task_id
         if task.local_name:
             name_to_op[task.local_name] = task.task_id
+    return name_to_op
+
+
+def lower_tasks(
+    parsed: ParsedWorkflow, name_to_op: dict[str, str], acc: LoweringAccumulator
+) -> None:
+    """Lower each legacy task into a symbolic leaf/agent/residency operator.
+
+    Each legacy task becomes a symbolic leaf (an ``Agent`` for ``agent`` tasks; a
+    residency-only leaf for ``serve``), ``dependsOn`` becomes port wiring, and each
+    result-owning task induces one singleton logical-output slot. Nothing here
+    carries worker/replica/endpoint bindings or activation tags.
+    """
+    task_ids: set[str] = {task.task_id for task in parsed.tasks}
 
     for task in parsed.tasks:
         task_type = task.task.spec.taskType
         if task_type == TaskType.AGENT:
-            operators.append(_agent_operator(task, name_to_op, operator_ids))
+            acc.operators.append(_agent_operator(task, name_to_op, task_ids))
         else:
-            operators.append(_leaf_operator(task, task_type, name_to_op, operator_ids))
-        source_map.append(_source_map_entry(task))
+            acc.operators.append(_leaf_operator(task, task_type, name_to_op, task_ids))
+        acc.source_map.append(_source_map_entry(task))
 
     for task in parsed.tasks:
         task_type = task.task.spec.taskType
         operator_id = task.task_id
         for dep in task.depends_on:
-            if dep in operator_ids:
-                edges.append(TemplateEdge(from_op=dep, to_op=operator_id))
+            if dep in task_ids:
+                acc.edges.append(TemplateEdge(from_op=dep, to_op=operator_id))
 
         if task_type == TaskType.SERVE:
             model_ref = _model_ref(task)
             family = model_ref.architecture if model_ref else task_type.value
-            nodes.append(
+            acc.nodes.append(
                 PhysicalNode(
                     node_id=f"phys:{operator_id}",
                     source_ref=operator_id,
@@ -199,7 +213,7 @@ def project_acyclic(
             continue
 
         output_id = f"legacy:{operator_id}"
-        result_declarations.append(
+        acc.result_declarations.append(
             ResultDeclaration(
                 output_id=output_id,
                 source_ref=operator_id,
@@ -209,7 +223,7 @@ def project_acyclic(
                 value_type=task_type.value,
             )
         )
-        legacy_projection.append(
+        acc.legacy_projection.append(
             LegacyLogicalTaskProjection(
                 legacy_task_id=operator_id,
                 operator_id=operator_id,
@@ -218,52 +232,18 @@ def project_acyclic(
                 source_ref=operator_id,
             )
         )
-        if task_type in (TaskType.API, TaskType.SSH):
-            effect_boundaries.append(
+        if leaf_profile(task_type).effect == EffectClass.EXTERNAL_EFFECT:
+            acc.effect_boundaries.append(
                 EffectBoundary(
                     effect_class=EffectClass.EXTERNAL_EFFECT,
                     replay_contract=EffectReplayContract.AMBIGUITY_TERMINAL,
                     source_ref=operator_id,
                 )
             )
-        nodes.append(
+        acc.nodes.append(
             PhysicalNode(
                 node_id=f"phys:{operator_id}",
                 source_ref=operator_id,
                 logical_ref=operator_id,
             )
         )
-
-    lineage = f"{workflow_id}:template"
-    provisional = LogicalWorkflowTemplate(
-        version=VersionId(lineage=lineage, content_digest=""),
-        operators=tuple(operators),
-        edges=tuple(edges),
-        result_declarations=tuple(result_declarations),
-        legacy_projection=tuple(legacy_projection),
-        effect_boundaries=tuple(effect_boundaries),
-        source_map=tuple(source_map),
-    )
-    digest = content_digest(
-        source.digest + provisional.model_dump_json(exclude={"version"})
-    )
-    template = provisional.model_copy(
-        update={"version": VersionId(lineage=lineage, content_digest=digest)}
-    )
-    plan = _finalize_plan(workflow_id, template.version, tuple(nodes))
-    return template, plan
-
-
-def _finalize_plan(
-    workflow_id: str, template_version: VersionId, nodes: tuple[PhysicalNode, ...]
-) -> PhysicalExecutionPlan:
-    lineage = f"{workflow_id}:plan"
-    provisional = PhysicalExecutionPlan(
-        plan_version=VersionId(lineage=lineage, content_digest=""),
-        template_version=template_version,
-        nodes=nodes,
-    )
-    digest = content_digest(provisional.model_dump_json(exclude={"plan_version"}))
-    return provisional.model_copy(
-        update={"plan_version": VersionId(lineage=lineage, content_digest=digest)}
-    )

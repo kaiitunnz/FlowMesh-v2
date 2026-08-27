@@ -29,7 +29,7 @@ from .v2 import (
     ExecutionMode,
     FrontendWorkflowSource,
     PersistedV2Workflow,
-    project_acyclic,
+    compile_bundle,
 )
 
 
@@ -121,6 +121,12 @@ class TaskRuntime:
         task_records: list[TaskRecord] = []
         candidate_ready: list[str] = []
         graph_task_ids: dict[str, str] = {}
+
+        v2_bundle: PersistedV2Workflow | None = None
+        api_version = specs[0].task.apiVersion if specs else None
+        if ExecutionMode.from_api_version(api_version) is ExecutionMode.V2:
+            source = FrontendWorkflowSource.capture(yaml_text, format)
+            v2_bundle = compile_bundle(workflow_id, parsed_workflow, source)
 
         with self._cv:
             if (
@@ -223,13 +229,6 @@ class TaskRuntime:
                 if has_epoch_tasks:
                     self._workflow_epoch_tasks[workflow_id] = epoch_queue
                     self._workflow_epoch_frontier[workflow_id] = 0
-
-        v2_bundle: PersistedV2Workflow | None = None
-        api_version = specs[0].task.apiVersion if specs else None
-        if ExecutionMode.from_api_version(api_version) is ExecutionMode.V2:
-            source = FrontendWorkflowSource.capture(yaml_text, format)
-            template, plan = project_acyclic(workflow_id, parsed_workflow, source)
-            v2_bundle = PersistedV2Workflow(source=source, template=template, plan=plan)
 
         await self._workflow_registry.register_workflow_async(
             workflow_id, task_records, v2=v2_bundle

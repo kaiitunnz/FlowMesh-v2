@@ -1,5 +1,6 @@
-from pydantic import BaseModel, ConfigDict
-
+from .bundle import PersistedV2Workflow
+from .compiler import compile_bundle, compile_workflow, project_acyclic
+from .diagnostics import CompileError, Diagnostic, Severity, SourceLocation
 from .mode import V2_API_VERSION, ExecutionMode
 from .operators import (
     AgentOperator,
@@ -37,7 +38,6 @@ from .plan import (
     ResidencyIntent,
     ServiceFamilyRequirement,
 )
-from .project import project_acyclic
 from .results import (
     CardinalityKind,
     LegacyLogicalTaskProjection,
@@ -55,22 +55,6 @@ from .template import (
 )
 from .versioning import VersionId, content_digest
 
-
-class PersistedV2Workflow(BaseModel):
-    """The durable plan-time bundle for a v2 workflow submission.
-
-    Bundles the immutable frontend source with the logical template and physical
-    plan. Persisted as one immutable record and never rewritten in place; a
-    revision is a compatible successor.
-    """
-
-    model_config = ConfigDict(frozen=True)
-
-    source: FrontendWorkflowSource
-    template: LogicalWorkflowTemplate
-    plan: PhysicalExecutionPlan
-
-
 __all__ = [
     "AgentOperator",
     "AuthorityCeiling",
@@ -79,8 +63,10 @@ __all__ = [
     "BoundarySignature",
     "BranchRegion",
     "CardinalityKind",
+    "CompileError",
     "ConditionGuard",
     "DeterminismClass",
+    "Diagnostic",
     "EffectBoundary",
     "EffectClass",
     "EffectReplayContract",
@@ -111,6 +97,8 @@ __all__ = [
     "ResourceDeclaration",
     "ResultDeclaration",
     "ServiceFamilyRequirement",
+    "Severity",
+    "SourceLocation",
     "SourceMapEntry",
     "SpawnRegion",
     "StateReference",
@@ -119,6 +107,8 @@ __all__ = [
     "V2_API_VERSION",
     "VersionId",
     "Visibility",
+    "compile_bundle",
+    "compile_workflow",
     "content_digest",
     "project_acyclic",
 ]
