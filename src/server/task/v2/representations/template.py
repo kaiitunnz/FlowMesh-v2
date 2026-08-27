@@ -10,12 +10,7 @@ type SourceKind = Literal["legacy_task", "stage", "graph_node", "region", "root"
 
 
 class TemplateEdge(BaseModel):
-    """A symbolic wiring edge between two logical operators.
-
-    A ``feedback`` edge is a structured back-edge into a ``LoopContext`` region; it
-    is excluded from the acyclic forward-topology that unstructured-cycle detection
-    rejects.
-    """
+    """A symbolic wiring edge between two logical operators."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -23,6 +18,8 @@ class TemplateEdge(BaseModel):
     to_op: str
     from_port: str | None = None
     to_port: str | None = None
+    # A feedback edge is a structured back-edge into a LoopContext region,
+    # excluded from the forward topology that unstructured-cycle detection rejects.
     feedback: bool = False
 
 

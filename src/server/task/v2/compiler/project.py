@@ -189,6 +189,7 @@ def lower_tasks(
     # A task may depend on a region node, whose operator id is its source name.
     known_ids: set[str] = task_ids | {region.name for region in parsed.regions}
 
+    # Pass 1: one operator + source-map entry per task.
     for task in parsed.tasks:
         task_type = task.task.spec.taskType
         if task_type == TaskType.AGENT:
@@ -197,13 +198,16 @@ def lower_tasks(
             acc.operators.append(_leaf_operator(task, task_type, name_to_op, task_ids))
         acc.source_map.append(_source_map_entry(task))
 
+    # Pass 2: wiring, induced outputs, effect boundaries, and physical nodes.
     for task in parsed.tasks:
         task_type = task.task.spec.taskType
         operator_id = task.task_id
+        # dependsOn becomes port wiring.
         for dep in task.depends_on:
             if dep in known_ids:
                 acc.edges.append(TemplateEdge(from_op=dep, to_op=operator_id))
 
+        # serve administers resident capacity: a residency node, no result slot.
         if task_type == TaskType.SERVE:
             model_ref = _model_ref(task)
             family = model_ref.architecture if model_ref else task_type.value
@@ -218,6 +222,7 @@ def lower_tasks(
             )
             continue
 
+        # Every result-owning task induces one singleton logical-output slot.
         output_id = f"legacy:{operator_id}"
         acc.result_declarations.append(
             ResultDeclaration(
@@ -238,6 +243,7 @@ def lower_tasks(
                 source_ref=operator_id,
             )
         )
+        # An external-effect leaf declares an effect boundary.
         if leaf_profile(task_type).effect == EffectClass.EXTERNAL_EFFECT:
             acc.effect_boundaries.append(
                 EffectBoundary(

@@ -1,3 +1,4 @@
+from enum import Enum
 from typing import Any
 
 from ...parser import ParsedRegion, ParsedTask, ParsedWorkflow
@@ -35,14 +36,18 @@ from .diagnostics import Severity as _Severity
 from .diagnostics import SourceLocation
 from .project import LoweringAccumulator
 
+# Friendly aliases for the two provenance values authors write in spec.v2.
 _PROVENANCE = {
     "live": InputProvenanceKind.LIVE_INPUT,
     "pinned": InputProvenanceKind.EXTERNAL_PINNED,
 }
-_DETERMINISM = {member.value: member for member in DeterminismClass}
-_EFFECT = {member.value: member for member in EffectClass}
-_RECOVERY = {member.value: member for member in RecoveryClass}
-_BOUNDARY_EVENTS = {member.value: member for member in BoundaryEventKind}
+
+
+def _enum_or_none[E: Enum](enum_cls: type[E], value: str) -> E | None:
+    try:
+        return enum_cls(value)
+    except ValueError:
+        return None
 
 
 def _fail(
@@ -128,7 +133,7 @@ def _apply_one(
                 ToolDeclaration(
                     name=str(tool["name"]),
                     interface=(
-                        str(tool["interface"]) if tool.get("interface") else None
+                        str(iface) if (iface := tool.get("interface")) else None
                     ),
                     authority_ref=(
                         str(tool["authority_ref"])
@@ -143,7 +148,7 @@ def _apply_one(
             acc.resource_declarations.append(
                 ResourceDeclaration(
                     name=str(resource["name"]),
-                    kind=str(resource["kind"]) if resource.get("kind") else None,
+                    kind=str(k) if (k := resource.get("kind")) else None,
                 )
             )
 
@@ -169,7 +174,7 @@ def _apply_agent_v2(op: AgentOperator, v2: dict[str, Any], name: str) -> AgentOp
     if boundary is not None:
         events = []
         for event in _str_list(boundary):
-            member = _BOUNDARY_EVENTS.get(event)
+            member = _enum_or_none(BoundaryEventKind, event)
             if member is None:
                 raise _fail(
                     "v2.bad-boundary-event",
@@ -202,13 +207,13 @@ def _apply_leaf_v2(op: LeafOperator, v2: dict[str, Any], name: str) -> LeafOpera
                 "graph_node",
             )
         overrides["input_provenance"] = member
-    for key, table, field in (
-        ("determinism", _DETERMINISM, "determinism"),
-        ("effect", _EFFECT, "effect"),
-        ("recovery", _RECOVERY, "recovery"),
+    for key, enum_cls, field in (
+        ("determinism", DeterminismClass, "determinism"),
+        ("effect", EffectClass, "effect"),
+        ("recovery", RecoveryClass, "recovery"),
     ):
         if key in v2:
-            profile_value = table.get(str(v2[key]))
+            profile_value = _enum_or_none(enum_cls, str(v2[key]))
             if profile_value is None:
                 raise _fail(
                     "v2.bad-profile",
@@ -296,9 +301,7 @@ def _branch(region: ParsedRegion, has_input: bool) -> BranchRegion:
         source_ref=region.name,
         inputs=_inputs(has_input),
         outputs=tuple(Port(name=port) for port in ports),
-        selection=(
-            str(region.region["selection"]) if region.region.get("selection") else None
-        ),
+        selection=(str(sel) if (sel := region.region.get("selection")) else None),
     )
 
 
@@ -372,7 +375,7 @@ def _loop(region: ParsedRegion, has_input: bool) -> LoopContextRegion:
             ref = entry.get("modelRef") or {}
             model_ref = ModelRef(
                 architecture=str(ref.get("architecture", entry["name"])),
-                version=str(ref["version"]) if ref.get("version") else None,
+                version=str(v) if (v := ref.get("version")) else None,
             )
         carried.append(
             Port(

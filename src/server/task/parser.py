@@ -148,17 +148,15 @@ def _build_workflow(
             return None
         resolved = dict(feedback)
         target = feedback.get("to")
-        if isinstance(target, str) and target.strip():
-            resolved["to"] = local_ids.get(target.strip(), target.strip())
+        if isinstance(target, str) and (to := target.strip()):
+            resolved["to"] = local_ids.get(to, to)
         return resolved
 
     for spec in specs:
         _validate_condition_depends_on(spec)
         task_id = new_task_id()
         depends_on = [
-            local_ids.get(dep.strip(), dep.strip())
-            for dep in spec.depends_on
-            if dep and dep.strip()
+            local_ids.get(s, s) for dep in spec.depends_on if dep and (s := dep.strip())
         ]
         results.append(
             ParsedTask(
@@ -183,9 +181,9 @@ def _build_workflow(
             name=region_spec.name,
             region=region_spec.region,
             depends_on=[
-                local_ids.get(dep.strip(), dep.strip())
+                local_ids.get(s, s)
                 for dep in region_spec.depends_on
-                if dep and dep.strip()
+                if dep and (s := dep.strip())
             ],
             feedback=_resolve_feedback(region_spec.feedback),
         )
@@ -451,7 +449,7 @@ def _normalize_dep_list(raw: Any) -> list[str]:
         return []
     if not isinstance(raw, list):
         raise ValueError("dependsOn must be a list")
-    return [str(dep).strip() for dep in raw if str(dep).strip()]
+    return [s for dep in raw if (s := str(dep).strip())]
 
 
 def _expand_stages(
@@ -553,7 +551,7 @@ def _parse_schedule_hint(
                 raise ValueError(f"{path} must be a non-empty string")
             return [selected]
         if isinstance(value, list):
-            candidates = [str(item).strip() for item in value if str(item).strip()]
+            candidates = [s for item in value if (s := str(item).strip())]
             if not candidates:
                 raise ValueError(f"{path} list must contain non-empty strings")
             return list(dict.fromkeys(candidates))
@@ -741,7 +739,7 @@ def _validate_condition_depends_on(spec: ParsedTaskSpec) -> None:
     if condition is None:
         return
     node = condition.node.strip()
-    deps = {dep.strip() for dep in spec.depends_on if dep and dep.strip()}
+    deps = {s for dep in spec.depends_on if dep and (s := dep.strip())}
     if node in deps:
         return
     node_label = spec.graph_node_name or spec.local_name or "<task>"
