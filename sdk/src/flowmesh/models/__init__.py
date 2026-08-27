@@ -21,7 +21,7 @@ from .nodes import (
     NodeWorkerInfo,
     WorkerRegisterResponse,
 )
-from .results import (
+from .result import (
     AgentBatchSummary,
     AgentItem,
     AgentMetadata,

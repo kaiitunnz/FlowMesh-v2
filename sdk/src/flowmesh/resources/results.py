@@ -9,7 +9,7 @@ from typing import Any, Literal
 
 from pydantic import TypeAdapter
 
-from ..models.results import AnyExecutorResult, ResultEnvelope
+from ..models.result import AnyExecutorResult, ResultEnvelope
 from ._base import AsyncResource, SyncResource
 
 type BundleSection = Literal["results", "artifacts", "logs", "all"]
