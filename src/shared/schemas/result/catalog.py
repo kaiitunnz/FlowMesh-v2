@@ -8,7 +8,6 @@ from typing import Annotated, Any, Literal
 
 from pydantic import (
     BaseModel,
-    ConfigDict,
     Discriminator,
     Field,
     SerializeAsAny,
@@ -19,7 +18,7 @@ from shared.tasks.task_type import TaskType
 from shared.utils.time import now_iso
 
 from ..artifact import ArtifactRef
-from ._base import BaseExecutorResult
+from ._base import BaseExecutorResult, StrictExecutorResult
 from .payloads import (
     AgentItem,
     AgentMetadata,
@@ -42,10 +41,8 @@ from .payloads import (
 )
 
 
-class InferenceResult(BaseExecutorResult):
+class InferenceResult(StrictExecutorResult):
     """Text-generation inference output (vLLM / HF Transformers)."""
-
-    model_config = ConfigDict(extra="forbid", serialize_by_alias=True)
 
     task_type: Literal[TaskType.INFERENCE] = TaskType.INFERENCE
     model: str | None = None
@@ -53,10 +50,8 @@ class InferenceResult(BaseExecutorResult):
     usage: GenerationUsage | None = None
 
 
-class EmbeddingResult(BaseExecutorResult):
+class EmbeddingResult(StrictExecutorResult):
     """Embedding inference output (vLLM / HF visual-embedding)."""
-
-    model_config = ConfigDict(extra="forbid", serialize_by_alias=True)
 
     task_type: Literal[TaskType.EMBEDDING] = TaskType.EMBEDDING
     model: str | None = None
@@ -66,30 +61,24 @@ class EmbeddingResult(BaseExecutorResult):
     image_group_sizes: list[int] | None = None
 
 
-class DiffusionResult(BaseExecutorResult):
+class DiffusionResult(StrictExecutorResult):
     """Diffusion image-generation output."""
-
-    model_config = ConfigDict(extra="forbid", serialize_by_alias=True)
 
     task_type: Literal[TaskType.DIFFUSION] = TaskType.DIFFUSION
     model: str | None = None
     images: list[ArtifactRef] = Field(default_factory=list)
 
 
-class ServeResult(BaseExecutorResult):
+class ServeResult(StrictExecutorResult):
     """Model-serving endpoint descriptor."""
-
-    model_config = ConfigDict(extra="forbid", serialize_by_alias=True)
 
     task_type: Literal[TaskType.SERVE] = TaskType.SERVE
     model: str
     port: int
 
 
-class _TrainingResult(BaseExecutorResult):
+class _TrainingResult(StrictExecutorResult):
     """Fields common to every training executor's result."""
-
-    model_config = ConfigDict(extra="forbid", serialize_by_alias=True)
 
     training_time_seconds: float | None = None
     error_message: str | None = None
@@ -150,10 +139,8 @@ class ImageClassificationTrainingResult(_TrainingResult):
     final_model_archive: ArtifactRef | None = None
 
 
-class OmniResult(BaseExecutorResult):
+class OmniResult(StrictExecutorResult):
     """Fields common to every Omni-family executor's result."""
-
-    model_config = ConfigDict(extra="forbid", serialize_by_alias=True)
 
     executor: str
     mode: str
@@ -208,10 +195,8 @@ class OmniText2GeneralResult(OmniResult):
     items: list[OmniGeneralItem]
 
 
-class DataProfilingResult(BaseExecutorResult):
+class DataProfilingResult(StrictExecutorResult):
     """Data-profiling output."""
-
-    model_config = ConfigDict(extra="forbid", serialize_by_alias=True)
 
     task_type: Literal[TaskType.DATA_PROFILING] = TaskType.DATA_PROFILING
     type: str = "sql"
@@ -219,10 +204,8 @@ class DataProfilingResult(BaseExecutorResult):
     cost_estimates: CostEstimates | None = None
 
 
-class DataRetrievalResult(BaseExecutorResult):
+class DataRetrievalResult(StrictExecutorResult):
     """Data-retrieval output. ``metadata`` is connector-specific passthrough."""
-
-    model_config = ConfigDict(extra="forbid", serialize_by_alias=True)
 
     task_type: Literal[TaskType.DATA_RETRIEVAL] = TaskType.DATA_RETRIEVAL
     type: str | None = None
@@ -231,10 +214,8 @@ class DataRetrievalResult(BaseExecutorResult):
     metadata: dict[str, Any] | None = None
 
 
-class AgentResult(BaseExecutorResult):
+class AgentResult(StrictExecutorResult):
     """Agent execution output."""
-
-    model_config = ConfigDict(extra="forbid", serialize_by_alias=True)
 
     task_type: Literal[TaskType.AGENT] = TaskType.AGENT
     model: str
@@ -245,10 +226,8 @@ class AgentResult(BaseExecutorResult):
     batch_summary_file: ArtifactRef | None = None
 
 
-class RAGResult(BaseExecutorResult):
+class RAGResult(StrictExecutorResult):
     """RAG query output."""
-
-    model_config = ConfigDict(extra="forbid", serialize_by_alias=True)
 
     task_type: Literal[TaskType.RAG] = TaskType.RAG
     executor: str = "rag"
@@ -259,21 +238,17 @@ class RAGResult(BaseExecutorResult):
     usage: RagUsage | None = None
 
 
-class EchoResult(BaseExecutorResult):
+class EchoResult(StrictExecutorResult):
     """Echo output."""
-
-    model_config = ConfigDict(extra="forbid", serialize_by_alias=True)
 
     task_type: Literal[TaskType.ECHO] = TaskType.ECHO
     items: list[EchoItem] = Field(default_factory=list)
     count: int = 0
 
 
-class APIResult(BaseExecutorResult):
+class APIResult(StrictExecutorResult):
     """HTTP request output. ``response_json``/``usage``/``headers`` are the
     upstream API's own payloads and stay open mappings."""
-
-    model_config = ConfigDict(extra="forbid", serialize_by_alias=True)
 
     task_type: Literal[TaskType.API] = TaskType.API
     executor: str
@@ -287,10 +262,8 @@ class APIResult(BaseExecutorResult):
     text: str | None = None
 
 
-class SSHResult(BaseExecutorResult):
+class SSHResult(StrictExecutorResult):
     """SSH session output."""
-
-    model_config = ConfigDict(extra="forbid", serialize_by_alias=True)
 
     task_type: Literal[TaskType.SSH] = TaskType.SSH
     session_id: str

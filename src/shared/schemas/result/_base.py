@@ -18,6 +18,12 @@ if TYPE_CHECKING:
     from .catalog import AnyExecutorResult
 
 
+class StrictModel(BaseModel):
+    """Base for exact nested payload models; rejects unknown keys."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class BaseExecutorResult(BaseModel):
     """Common shape for every executor's result payload.
 
@@ -48,3 +54,9 @@ class BaseExecutorResult(BaseModel):
                 f"{cls.__name__} may not redefine the internal "
                 "BaseExecutorResult.artifacts_ field"
             )
+
+
+class StrictExecutorResult(BaseExecutorResult):
+    """Base for concrete per-task-type results; exact fields, alias output."""
+
+    model_config = ConfigDict(extra="forbid", serialize_by_alias=True)

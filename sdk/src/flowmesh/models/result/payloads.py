@@ -5,6 +5,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from ..artifacts import ArtifactRef
+from ._base import StrictModel
 
 
 class PathResponse(BaseModel):
@@ -12,9 +13,7 @@ class PathResponse(BaseModel):
     path: str
 
 
-class GenerationUsage(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class GenerationUsage(StrictModel):
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int
@@ -22,9 +21,7 @@ class GenerationUsage(BaseModel):
     latency_sec: float
 
 
-class EmbeddingUsage(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class EmbeddingUsage(StrictModel):
     prompt_tokens: int
     total_tokens: int
     num_requests: int
@@ -32,9 +29,7 @@ class EmbeddingUsage(BaseModel):
     embedding_dim: int
 
 
-class InferenceItem(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class InferenceItem(StrictModel):
     index: int | None = None
     prompt: str | None = None
     output: JsonValue = None
@@ -42,25 +37,19 @@ class InferenceItem(BaseModel):
     metadata: dict[str, Any] | None = None
 
 
-class OmniImageItem(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class OmniImageItem(StrictModel):
     index: int
     prompt: str
     image: ArtifactRef
 
 
-class OmniSpeechItem(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class OmniSpeechItem(StrictModel):
     index: int
     text: str
     audio: ArtifactRef
 
 
-class OmniAudioItem(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class OmniAudioItem(StrictModel):
     index: int
     prompt_index: int
     waveform_index: int
@@ -68,9 +57,7 @@ class OmniAudioItem(BaseModel):
     audio: ArtifactRef
 
 
-class OmniGeneralItem(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class OmniGeneralItem(StrictModel):
     index: int
     request_id: str
     prompt: str | None = None
@@ -78,9 +65,7 @@ class OmniGeneralItem(BaseModel):
     text: str | None = None
 
 
-class CostEstimates(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class CostEstimates(StrictModel):
     ok: bool
     num_queries: int
     avg_estimated_cost: float
@@ -113,33 +98,25 @@ class DataRetrievalItem(BaseModel):
     replay_latency_ms: int | float | None = None
 
 
-class AgentItem(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class AgentItem(StrictModel):
     index: int
     output: str
     finish_reason: str
 
 
-class AgentUsage(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class AgentUsage(StrictModel):
     execution_time_sec: float
     num_requests: int
     agent_config: str
 
 
-class AgentBatchSummary(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class AgentBatchSummary(StrictModel):
     total_tasks: int = 0
     completed: int = 0
     failed: int = 0
 
 
-class AgentMetadata(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class AgentMetadata(StrictModel):
     task: str | None = None
     tasks_count: int | None = None
     execution_log: list[str] = Field(default_factory=list)
@@ -147,50 +124,36 @@ class AgentMetadata(BaseModel):
     batch_summary: AgentBatchSummary | None = None
 
 
-class RagQdrant(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class RagQdrant(StrictModel):
     collection: str
     url: str
 
 
-class RagEmbedding(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class RagEmbedding(StrictModel):
     model: str
 
 
-class RagSearch(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class RagSearch(StrictModel):
     top_k: int
 
 
-class RagUsage(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class RagUsage(StrictModel):
     latency_sec: float
     num_queries: int
     total_results: int
 
 
-class RagHit(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class RagHit(StrictModel):
     id: int | str | None = None
     score: float | None = None
     payload: dict[str, Any] | None = None
 
 
-class RagQuery(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class RagQuery(StrictModel):
     index: int
     query: str
     items: list[RagHit] = Field(default_factory=list)
 
 
-class EchoItem(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class EchoItem(StrictModel):
     output: JsonValue = None

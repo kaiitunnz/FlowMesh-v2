@@ -11,6 +11,10 @@ if TYPE_CHECKING:
     from .catalog import AnyExecutorResult
 
 
+class StrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
 class BaseExecutorResult(BaseModel):
     model_config = ConfigDict(extra="allow", serialize_by_alias=True)
 
@@ -28,3 +32,7 @@ class BaseExecutorResult(BaseModel):
                 f"{cls.__name__} may not redefine the internal "
                 "BaseExecutorResult.artifacts_ field"
             )
+
+
+class StrictExecutorResult(BaseExecutorResult):
+    model_config = ConfigDict(extra="forbid", serialize_by_alias=True)

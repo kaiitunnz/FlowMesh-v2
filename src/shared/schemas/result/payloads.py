@@ -13,12 +13,11 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from ..artifact import ArtifactRef
+from ._base import StrictModel
 
 
-class GenerationUsage(BaseModel):
+class GenerationUsage(StrictModel):
     """Token/latency accounting for text-generation inference."""
-
-    model_config = ConfigDict(extra="forbid")
 
     prompt_tokens: int
     completion_tokens: int
@@ -27,10 +26,8 @@ class GenerationUsage(BaseModel):
     latency_sec: float
 
 
-class EmbeddingUsage(BaseModel):
+class EmbeddingUsage(StrictModel):
     """Token/latency accounting for embedding inference."""
-
-    model_config = ConfigDict(extra="forbid")
 
     prompt_tokens: int
     total_tokens: int
@@ -39,15 +36,13 @@ class EmbeddingUsage(BaseModel):
     embedding_dim: int
 
 
-class InferenceItem(BaseModel):
+class InferenceItem(StrictModel):
     """One prompt's generation output.
 
     ``output`` is polymorphic: a plain string, a structured JSON value when a
     template schema is applied, or a list of grouped outputs (table / grouped-
     image modes). ``metadata`` is open dataset/user passthrough.
     """
-
-    model_config = ConfigDict(extra="forbid")
 
     index: int | None = None
     prompt: str | None = None
@@ -56,30 +51,24 @@ class InferenceItem(BaseModel):
     metadata: dict[str, Any] | None = None
 
 
-class OmniImageItem(BaseModel):
+class OmniImageItem(StrictModel):
     """One text-to-image generation."""
-
-    model_config = ConfigDict(extra="forbid")
 
     index: int
     prompt: str
     image: ArtifactRef
 
 
-class OmniSpeechItem(BaseModel):
+class OmniSpeechItem(StrictModel):
     """One text-to-speech generation."""
-
-    model_config = ConfigDict(extra="forbid")
 
     index: int
     text: str
     audio: ArtifactRef
 
 
-class OmniAudioItem(BaseModel):
+class OmniAudioItem(StrictModel):
     """One text-to-audio (BGM) waveform."""
-
-    model_config = ConfigDict(extra="forbid")
 
     index: int
     prompt_index: int
@@ -88,10 +77,8 @@ class OmniAudioItem(BaseModel):
     audio: ArtifactRef
 
 
-class OmniGeneralItem(BaseModel):
+class OmniGeneralItem(StrictModel):
     """One text-to-general (narration) segment."""
-
-    model_config = ConfigDict(extra="forbid")
 
     index: int
     request_id: str
@@ -100,10 +87,8 @@ class OmniGeneralItem(BaseModel):
     text: str | None = None
 
 
-class CostEstimates(BaseModel):
+class CostEstimates(StrictModel):
     """Aggregated query cost/row estimates for data profiling."""
-
-    model_config = ConfigDict(extra="forbid")
 
     ok: bool
     num_queries: int
@@ -146,40 +131,32 @@ class DataRetrievalItem(BaseModel):
     replay_latency_ms: int | float | None = None
 
 
-class AgentItem(BaseModel):
+class AgentItem(StrictModel):
     """One agent task's final output."""
-
-    model_config = ConfigDict(extra="forbid")
 
     index: int
     output: str
     finish_reason: str
 
 
-class AgentUsage(BaseModel):
+class AgentUsage(StrictModel):
     """Agent execution accounting."""
-
-    model_config = ConfigDict(extra="forbid")
 
     execution_time_sec: float
     num_requests: int
     agent_config: str
 
 
-class AgentBatchSummary(BaseModel):
+class AgentBatchSummary(StrictModel):
     """Per-batch agent completion counts."""
-
-    model_config = ConfigDict(extra="forbid")
 
     total_tasks: int = 0
     completed: int = 0
     failed: int = 0
 
 
-class AgentMetadata(BaseModel):
+class AgentMetadata(StrictModel):
     """Agent run metadata (single, batch, or error variant)."""
-
-    model_config = ConfigDict(extra="forbid")
 
     task: str | None = None
     tasks_count: int | None = None
@@ -188,64 +165,50 @@ class AgentMetadata(BaseModel):
     batch_summary: AgentBatchSummary | None = None
 
 
-class RagQdrant(BaseModel):
+class RagQdrant(StrictModel):
     """Qdrant collection the RAG query ran against."""
-
-    model_config = ConfigDict(extra="forbid")
 
     collection: str
     url: str
 
 
-class RagEmbedding(BaseModel):
+class RagEmbedding(StrictModel):
     """Embedding model used for the RAG query."""
-
-    model_config = ConfigDict(extra="forbid")
 
     model: str
 
 
-class RagSearch(BaseModel):
+class RagSearch(StrictModel):
     """RAG search parameters."""
-
-    model_config = ConfigDict(extra="forbid")
 
     top_k: int
 
 
-class RagUsage(BaseModel):
+class RagUsage(StrictModel):
     """RAG query accounting."""
-
-    model_config = ConfigDict(extra="forbid")
 
     latency_sec: float
     num_queries: int
     total_results: int
 
 
-class RagHit(BaseModel):
+class RagHit(StrictModel):
     """One Qdrant search hit. ``payload`` is the arbitrary stored document."""
-
-    model_config = ConfigDict(extra="forbid")
 
     id: int | str | None = None
     score: float | None = None
     payload: dict[str, Any] | None = None
 
 
-class RagQuery(BaseModel):
+class RagQuery(StrictModel):
     """Hits for one RAG query."""
-
-    model_config = ConfigDict(extra="forbid")
 
     index: int
     query: str
     items: list[RagHit] = Field(default_factory=list)
 
 
-class EchoItem(BaseModel):
+class EchoItem(StrictModel):
     """One echoed value."""
-
-    model_config = ConfigDict(extra="forbid")
 
     output: JsonValue = None
