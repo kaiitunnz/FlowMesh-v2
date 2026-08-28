@@ -287,8 +287,13 @@ class TaskRuntime:
                     self._workflow_epoch_tasks[workflow_id] = epoch_queue
                     self._workflow_epoch_frontier[workflow_id] = 0
 
+        exclude_remaining = (
+            frozenset(v2_engine.child_template_ids())
+            if v2_engine is not None
+            else frozenset()
+        )
         await self._workflow_registry.register_workflow_async(
-            workflow_id, task_records, v2=v2_bundle
+            workflow_id, task_records, v2=v2_bundle, exclude_remaining=exclude_remaining
         )
 
         with self._cv:

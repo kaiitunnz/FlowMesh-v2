@@ -74,7 +74,11 @@ class _CapturingRegistry:
         self.v2: dict[str, PersistedV2Workflow | None] = {}
 
     async def register_workflow_async(
-        self, workflow_id: str, tasks: list[Any], v2: PersistedV2Workflow | None = None
+        self,
+        workflow_id: str,
+        tasks: list[Any],
+        v2: PersistedV2Workflow | None = None,
+        exclude_remaining: Any = frozenset(),
     ) -> None:
         self.v2[workflow_id] = v2
 

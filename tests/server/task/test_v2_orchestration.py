@@ -53,11 +53,17 @@ class FakeRegistry:
         self.v2_blobs: dict[str, str] = {}
         self.ledger_blobs: dict[str, str] = {}
         self.dynamic_task_ids: dict[str, set[str]] = {}
+        self.excluded_remaining: dict[str, set[str]] = {}
 
     async def register_workflow_async(
-        self, workflow_id: str, tasks: list[Any], v2: Any = None
+        self,
+        workflow_id: str,
+        tasks: list[Any],
+        v2: Any = None,
+        exclude_remaining: Any = frozenset(),
     ) -> None:
         self.workflow_task_ids[workflow_id] = [t.task_id for t in tasks]
+        self.excluded_remaining[workflow_id] = set(exclude_remaining)
         if v2 is not None:
             self.v2_blobs[workflow_id] = v2.model_dump_json()
 
@@ -446,6 +452,28 @@ async def test_zero_element_fan_out_seals_and_closes_the_join_empty(
     assert engine is not None
     assert _pop_ready(runtime) == [] and _child_count(engine) == 0
     assert engine.region_closed("collect")
+
+
+@pytest.mark.anyio
+async def test_child_template_leaf_is_excluded_from_workflow_remaining(
+    tmp_path: Any,
+) -> None:
+    registry = FakeRegistry()
+    runtime = TaskRuntime(
+        cast(Any, registry),
+        cast(Any, _WorkerRegistryStub()),
+        OrchestrationConfig(),
+        tmp_path,
+        logging.getLogger("live"),
+    )
+    workflow_id, ids = await _register(runtime, AUTORESEARCH)
+    engine = runtime.orchestration_engine(workflow_id)
+    assert engine is not None
+    # The spawn's child template is a leaf that only ever runs as a materialized child;
+    # it is named as such and kept out of the workflow's remaining-work accounting, so a
+    # region-bearing workflow can reach terminal completion.
+    assert engine.child_template_ids() == {ids["trial"]}
+    assert registry.excluded_remaining[workflow_id] == {ids["trial"]}
 
 
 @pytest.mark.anyio

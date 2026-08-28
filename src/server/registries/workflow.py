@@ -111,14 +111,23 @@ class Workflow(BaseModel):
 
 
 def _create_workflow_record(
-    workflow_id: str, tasks: list[TaskRecord]
+    workflow_id: str,
+    tasks: list[TaskRecord],
+    exclude_remaining: "frozenset[str]" = frozenset(),
 ) -> tuple[WorkflowRecord, list[str], list[str]]:
-    """Return (WorkflowRecord, remaining_task_ids, failed_task_ids)"""
+    """Return (WorkflowRecord, remaining_task_ids, failed_task_ids).
+
+    ``exclude_remaining`` names tasks that carry a record but are never dispatched on
+    their own (a spawn's child template), so they stay in ``task_ids`` for rehydration
+    yet do not hold the workflow short of completion.
+    """
     task_ids: list[str] = []
     remaining_tasks: list[str] = []
     failed_tasks: list[str] = []
     for task in tasks:
         task_ids.append(task.task_id)
+        if task.task_id in exclude_remaining:
+            continue
         match task.status:
             case TaskStatus.DONE:
                 continue
@@ -147,14 +156,16 @@ class WorkflowRegistry:
         workflow_id: str,
         tasks: list[TaskRecord],
         v2: PersistedV2Workflow | None = None,
+        exclude_remaining: "frozenset[str]" = frozenset(),
     ) -> None:
         record, remaining_tasks, failed_tasks = _create_workflow_record(
-            workflow_id, tasks
+            workflow_id, tasks, exclude_remaining
         )
         with self._rds.sync.control_pipeline() as pipe:
             pipe.sadd(WORKFLOWS_SET_KEY, workflow_id)
             pipe.hset(workflow_key(workflow_id), mapping=record.model_dump())
-            pipe.sadd(workflow_tasks_key(workflow_id), *remaining_tasks)
+            if remaining_tasks:
+                pipe.sadd(workflow_tasks_key(workflow_id), *remaining_tasks)
             if failed_tasks:
                 pipe.sadd(workflow_failed_tasks_key(workflow_id), *failed_tasks)
             if v2 is not None:
@@ -166,14 +177,16 @@ class WorkflowRegistry:
         workflow_id: str,
         tasks: list[TaskRecord],
         v2: PersistedV2Workflow | None = None,
+        exclude_remaining: "frozenset[str]" = frozenset(),
     ) -> None:
         record, remaining_tasks, failed_tasks = _create_workflow_record(
-            workflow_id, tasks
+            workflow_id, tasks, exclude_remaining
         )
         async with self._rds.asyncio.control_pipeline() as pipe:
             pipe.sadd(WORKFLOWS_SET_KEY, workflow_id)
             pipe.hset(workflow_key(workflow_id), mapping=record.model_dump())
-            pipe.sadd(workflow_tasks_key(workflow_id), *remaining_tasks)
+            if remaining_tasks:
+                pipe.sadd(workflow_tasks_key(workflow_id), *remaining_tasks)
             if failed_tasks:
                 pipe.sadd(workflow_failed_tasks_key(workflow_id), *failed_tasks)
             if v2 is not None:

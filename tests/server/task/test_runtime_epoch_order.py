@@ -16,7 +16,11 @@ from server.task.runtime import TaskRuntime
 
 class _WorkflowRegistryStub:
     async def register_workflow_async(
-        self, workflow_id: str, tasks: list[Any], v2: Any = None
+        self,
+        workflow_id: str,
+        tasks: list[Any],
+        v2: Any = None,
+        exclude_remaining: Any = frozenset(),
     ) -> None:
         return None
 

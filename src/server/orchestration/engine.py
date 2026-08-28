@@ -1767,6 +1767,18 @@ class OrchestrationEngine:
         op = self._operators.get(spawn_op)
         return op.child_template_ref if isinstance(op, SpawnRegion) else None
 
+    def child_template_ids(self) -> set[str]:
+        """Operator ids spawn regions instantiate as child templates.
+
+        These leaves dispatch only as materialized children, never on their own, so
+        they are not outstanding workflow work.
+        """
+        return {
+            op.child_template_ref
+            for op in self._operators.values()
+            if isinstance(op, SpawnRegion) and op.child_template_ref
+        }
+
     def episode_spec(self, task_id: str) -> EpisodeSpec | None:
         """The run-to-yield episode a task's operator lowers to, if the plan cut it."""
         wi = self._work_item_for_task(task_id)
