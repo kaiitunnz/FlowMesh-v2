@@ -680,6 +680,73 @@ async def test_rehydration_preserves_publications_without_duplication() -> None:
 
 
 @pytest.mark.anyio
+async def test_static_v2_cancel_is_ledger_consistent_and_survives_rehydration() -> None:
+    registry = FakeRegistry()
+    runtime = _runtime(registry)
+    workflow_id, ids = await _register(runtime, LINEAR)
+    a, b, c = ids["a"], ids["b"], ids["c"]
+
+    runtime.cancel_workflow(workflow_id, reason="user cancelled")
+
+    # The ledger's work items settle CANCELLED in lockstep with the task records.
+    engine = runtime.orchestration_engine(workflow_id)
+    assert engine is not None
+    statuses = {
+        w.legacy_task_id: w.status.value for w in engine.to_snapshot().work_items
+    }
+    assert all(statuses[name] == "cancelled" for name in (a, b, c))
+    assert all(
+        runtime.get_record(name).status == TaskStatus.CANCELLED  # type: ignore[union-attr]
+        for name in (a, b, c)
+    )
+    assert runtime.ready_queue_length() == 0
+
+    # A cancelled workflow survives a rehydration round-trip: no cancelled work is
+    # re-admitted, and the restored engine view is not left stale-inconsistent.
+    restored = _runtime(registry)
+    assert await restored.rehydrate() == 1
+    assert restored.ready_queue_length() == 0
+    restored_engine = restored.orchestration_engine(workflow_id)
+    assert restored_engine is not None
+    restored_statuses = {
+        w.legacy_task_id: w.status.value
+        for w in restored_engine.to_snapshot().work_items
+    }
+    assert all(restored_statuses[name] == "cancelled" for name in (a, b, c))
+    for name in (a, b, c):
+        assert restored.get_record(name).status == TaskStatus.CANCELLED  # type: ignore[union-attr]
+
+
+@pytest.mark.anyio
+async def test_cancel_after_partial_completion_preserves_settled_output() -> None:
+    registry = FakeRegistry()
+    runtime = _runtime(registry)
+    workflow_id, ids = await _register(runtime, LINEAR)
+    a, b, c = ids["a"], ids["b"], ids["c"]
+    stop = threading.Event()
+
+    # a completes; b and c are still pending behind it, then the workflow is cancelled.
+    assert runtime.next_ready(stop, timeout=0.01) == a
+    runtime.mark_dispatched(a, cast(Any, _worker()))
+    runtime.mark_succeeded(a, "wkr-1", {}, "2026-06-01T00:00:00Z")
+    runtime.cancel_workflow(workflow_id, reason="user cancelled")
+
+    restored = _runtime(registry)
+    assert await restored.rehydrate() == 1
+    # A settled outcome survives the cancellation replay; the pending work is cancelled.
+    assert restored.get_record(a).status == TaskStatus.DONE  # type: ignore[union-attr]
+    pub = restored.resolve_v2_legacy_result(workflow_id, a)
+    assert pub is not None and pub.outcome is PublicationOutcome.SUCCESS
+    statuses = {
+        w.legacy_task_id: w.status.value
+        for w in restored.orchestration_engine(workflow_id).to_snapshot().work_items  # type: ignore[union-attr]
+    }
+    assert statuses[a] == "settled"
+    assert statuses[b] == "cancelled" and statuses[c] == "cancelled"
+    assert restored.ready_queue_length() == 0
+
+
+@pytest.mark.anyio
 async def test_rehydration_distinguishes_recompute_from_restore() -> None:
     text = """
 apiVersion: flowmesh/v2
