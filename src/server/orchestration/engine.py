@@ -34,6 +34,7 @@ from ..task.v2.representations.operators import (
     LeafProfile,
     LogicalOperator,
     OperatorKind,
+    RecoveryClass,
     ResidualPolicy,
     SpawnRegion,
 )
@@ -176,6 +177,11 @@ class OrchestrationEngine:
             for op in bundle.template.operators
             if isinstance(op, LeafOperator)
         }
+        self._replay = {
+            b.source_ref: b.replay_contract
+            for b in bundle.template.effect_boundaries
+            if b.source_ref
+        }
         self._child_templates = {
             op.child_template_ref
             for op in bundle.template.operators
@@ -186,10 +192,13 @@ class OrchestrationEngine:
             for w in self._work_items.values()
             if w.legacy_task_id
         }
+        # The operator index resolves a static leaf's forward-record successor; a
+        # dispatched child or iteration shares its body operator across instances, so it
+        # is addressed by task or activation, never by operator.
         self._wi_by_operator = {
             w.operator_id: w.work_item_id
             for w in self._work_items.values()
-            if w.legacy_task_id
+            if w.legacy_task_id and not self._is_dynamic_activation(w.activation_id)
         }
         self._wi_by_activation = {
             w.activation_id: w.work_item_id for w in self._work_items.values()
@@ -259,6 +268,10 @@ class OrchestrationEngine:
 
     def _is_control(self, operator_id: str) -> bool:
         return self._kind(operator_id) in _CONTROL_KINDS
+
+    def _is_dynamic_activation(self, activation_id: str) -> bool:
+        act = self._activations.get(activation_id)
+        return act is not None and act.kind in ("child", "iteration")
 
     # ------------------------------------------------------------------ #
     # Construction
@@ -481,6 +494,20 @@ class OrchestrationEngine:
             if empty
             else ValueRef(kind="legacy_task_result", legacy_task_id=wi.legacy_task_id)
         )
+        self._settle_attempt_terminal(wi, outcome)
+        activation = self._activations[wi.activation_id]
+        if activation.kind == "child":
+            # A dispatched spawn child settles through its scope's child-init account,
+            # never as a static forward record: the join closes on capability drain.
+            return self._settle_child_wi(wi, activation, outcome, value_ref)
+        wi.status = WorkItemStatus.SETTLED
+        wi.outcome = outcome
+        self._publish(wi.operator_id, outcome, value_ref)
+        return self._deliver_record(wi.operator_id, wi.activation_id, value_ref)
+
+    def _settle_attempt_terminal(
+        self, wi: WorkItem, outcome: PublicationOutcome
+    ) -> None:
         if attempt := self._latest_attempt(wi):
             attempt.status = AttemptStatus.SUCCEEDED
             attempt.finished_at = now_iso()
@@ -488,10 +515,6 @@ class OrchestrationEngine:
             invocation = self._invocations[wi.invocation_id]
             invocation.state = next_on_terminal(invocation.state)
             self._record_receipt(wi, outcome)
-        wi.status = WorkItemStatus.SETTLED
-        wi.outcome = outcome
-        self._publish(wi.operator_id, outcome, value_ref)
-        return self._deliver_record(wi.operator_id, wi.activation_id, value_ref)
 
     def on_failed(self, task_id: str, error: str, *, retryable: bool) -> Advance:
         """Retry a work item as a fresh attempt, or settle it and cascade failure."""
@@ -510,6 +533,15 @@ class OrchestrationEngine:
                 operator_id=wi.operator_id,
             )
             return Advance(retry=[wi.legacy_task_id])
+        activation = self._activations[wi.activation_id]
+        if activation.kind == "child":
+            # A child's terminal failure drains its scope account and lets an
+            # all-succeed join fail; it does not cascade over static successors.
+            advance = self._settle_child_wi(
+                wi, activation, PublicationOutcome.DECLARED_FAILURE, None
+            )
+            advance.failed.append(wi.legacy_task_id)
+            return advance
         return Advance(failed=self._settle_failure(wi.work_item_id))
 
     def on_uncertain(self, task_id: str) -> Advance:
@@ -561,6 +593,40 @@ class OrchestrationEngine:
         re-entries) attenuate from the child grant at ``depth+1``. Returns the child
         activation id, which addresses that nested scope.
         """
+        activation, _ = self._create_child(
+            spawn, operator_id, dispatchable=False, value_ref=None
+        )
+        return activation.activation_id
+
+    def materialize_child(
+        self,
+        spawn: str,
+        *,
+        operator_id: str | None = None,
+        value_ref: ValueRef | None = None,
+    ) -> Advance:
+        """Materialize one dispatchable child leaf and admit it as ready work.
+
+        Unlike :meth:`spawn_child`, the child is given a stable dispatchable identity,
+        carries its child-init input as ``value_ref``, and is readied for a physical
+        attempt. The child body must be a plain leaf; a scope-opening child body is not
+        live-dispatchable and stays a trace-level :meth:`spawn_child`.
+        """
+        advance = Advance()
+        _, wi = self._create_child(
+            spawn, operator_id, dispatchable=True, value_ref=value_ref
+        )
+        self._admit(wi.work_item_id, advance)
+        return advance
+
+    def _create_child(
+        self,
+        spawn: str,
+        operator_id: str | None,
+        *,
+        dispatchable: bool,
+        value_ref: ValueRef | None,
+    ) -> tuple[Activation, WorkItem]:
         spawn_op = self._handle_operator(spawn)
         spawn_op_obj = self._operators[spawn_op]
         child_ref = (
@@ -569,6 +635,7 @@ class OrchestrationEngine:
             else None
         )
         body_ref = operator_id or child_ref or spawn_op
+        body_op = self._operators.get(body_ref)
         if spawn_op in self._denied_spawns:
             self._emit(
                 "child_rejected", operator_id=spawn_op, detail={"reason": "denied"}
@@ -586,12 +653,17 @@ class OrchestrationEngine:
                 f"spawn {spawn_op!r} child-init capability is {cap.status.value}; "
                 "no child may be created"
             )
-        # Validate every budget before materializing, so a rejected child leaves no
-        # half-open region whose join could never drain.
-        self._charge_activation()
         body_opens_scope = self._kind(body_ref) in _CHILD_INIT_OPENERS or (
             self._kind(body_ref) is OperatorKind.LOOP_CONTEXT
         )
+        if dispatchable and (body_opens_scope or not isinstance(body_op, LeafOperator)):
+            raise RegionError(
+                f"child body {body_ref!r} opens a scope; only a leaf body is "
+                "live-dispatchable"
+            )
+        # Validate every budget before materializing, so a rejected child leaves no
+        # half-open region whose join could never drain.
+        self._charge_activation()
         if body_opens_scope:
             self._check_scope_depth(scope_id)
         index = sum(1 for a in self._activations.values() if a.scope_id == scope_id)
@@ -604,14 +676,21 @@ class OrchestrationEngine:
             child_index=index,
         )
         self._activations[activation.activation_id] = activation
+        profile = body_op.profile if isinstance(body_op, LeafOperator) else None
         child_wi = WorkItem(
             work_item_id=new_work_item_id(),
             activation_id=activation.activation_id,
             operator_id=body_ref,
-            legacy_task_id="",
+            legacy_task_id=activation.activation_id if dispatchable else "",
+            value_ref=value_ref,
+            effect_class=profile.effect if profile else EffectClass.PURE,
+            recovery=profile.recovery if profile else RecoveryClass.RECOMPUTE,
+            replay_contract=self._replay.get(body_ref),
         )
         self._work_items[child_wi.work_item_id] = child_wi
         self._wi_by_activation[activation.activation_id] = child_wi.work_item_id
+        if dispatchable:
+            self._wi_by_task[child_wi.legacy_task_id] = child_wi.work_item_id
         cap.outstanding += 1
         self._emit(
             "child_spawned",
@@ -624,7 +703,7 @@ class OrchestrationEngine:
             )
         elif self._kind(body_ref) is OperatorKind.LOOP_CONTEXT:
             self._open_loop(activation.activation_id, parent_scope_id=scope_id)
-        return activation.activation_id
+        return activation, child_wi
 
     def seal_spawn(self, spawn: str) -> Advance:
         """Seal a spawn's child-init capability; no further children may be created."""
@@ -667,6 +746,15 @@ class OrchestrationEngine:
         if activation is None or activation.kind != "child":
             raise RegionError(f"unknown child activation {child_activation_id!r}")
         wi = self._work_items[self._wi_by_activation[child_activation_id]]
+        return self._settle_child_wi(wi, activation, outcome, value_ref)
+
+    def _settle_child_wi(
+        self,
+        wi: WorkItem,
+        activation: Activation,
+        outcome: PublicationOutcome,
+        value_ref: ValueRef | None,
+    ) -> Advance:
         if wi.status in _TERMINAL_WI:
             return Advance()
         wi.status = WorkItemStatus.SETTLED
@@ -674,8 +762,7 @@ class OrchestrationEngine:
         wi.value_ref = value_ref
         cap = self._capability(activation.scope_id, ProgressAxis.CHILD_INIT)
         cap.outstanding = max(0, cap.outstanding - 1)
-        scope = self._scopes[activation.scope_id]
-        spawn_op = scope.owner_operator_id or ""
+        spawn_op = self._scopes[activation.scope_id].owner_operator_id or ""
         self._publish_keyed(spawn_op, activation, outcome, value_ref)
         self._emit(
             "child_settled",
