@@ -38,6 +38,7 @@ from .v2 import (
     ExecutionMode,
     FrontendWorkflowSource,
     InspectionReport,
+    LoweringStrategy,
     PersistedV2Workflow,
     build_inspection,
     compile_bundle,
@@ -79,6 +80,11 @@ class TaskRuntime:
         self._worker_registry = worker_registry
         self._logger = logger
         self._scope_budget = ScopeBudget.from_config(orchestration)
+        self._lowering_strategy = (
+            LoweringStrategy.EPISODE_CUT
+            if orchestration.episode_lowering
+            else LoweringStrategy.TRANSPARENT
+        )
         self._tasks: dict[str, TaskRecord] = {}
         self._original_deps: dict[str, set[str]] = {}
         self._pending_deps: dict[str, set[str]] = {}
@@ -159,7 +165,9 @@ class TaskRuntime:
                     "POST /api/v1/workflows/validate to inspect the compiled template."
                 )
             source = FrontendWorkflowSource.capture(yaml_text, format)
-            v2_bundle = compile_bundle(workflow_id, parsed_workflow, source)
+            v2_bundle = compile_bundle(
+                workflow_id, parsed_workflow, source, strategy=self._lowering_strategy
+            )
             v2_engine = OrchestrationEngine.build(
                 workflow_id, owner_id, org_id, v2_bundle, budget=self._scope_budget
             )

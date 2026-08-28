@@ -251,6 +251,12 @@ STACK_ENV_SCHEMA = EnvSchema(
                     var_type=EnvVarType.INT,
                     min_value=1,
                 ),
+                EnvVar(
+                    "ORCHESTRATOR_EPISODE_LOWERING",
+                    "0",
+                    description="Lower v2 templates into run-to-yield episodes.",
+                    var_type=EnvVarType.BOOL,
+                ),
             ],
         ),
         EnvSection(
