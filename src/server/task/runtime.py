@@ -5,9 +5,11 @@ import logging
 import threading
 import time
 from collections import defaultdict, deque
+from pathlib import Path
 from typing import Any
 
 from shared.schemas.command import InterruptMessage
+from shared.schemas.result import ResultEnvelope, result_file_path
 from shared.tasks import TaskEnvelopeTemplate
 from shared.utils import new_workflow_id
 
@@ -18,8 +20,10 @@ from ..orchestration import (
     LedgerSnapshot,
     OrchestrationEngine,
     RecoveryDisposition,
+    RegionError,
     ResultPublication,
     ScopeBudget,
+    ValueRef,
 )
 from ..registries.worker import Worker, WorkerRegistry
 from ..registries.workflow import PersistedTask, WorkflowRegistry, WorkflowSched
@@ -75,10 +79,12 @@ class TaskRuntime:
         worker_registry: WorkerRegistry,
         orchestration: OrchestrationConfig,
         logger: logging.Logger,
+        results_dir: Path | None = None,
     ) -> None:
         self._workflow_registry = workflow_registry
         self._worker_registry = worker_registry
         self._logger = logger
+        self._results_dir = Path(results_dir) if results_dir is not None else None
         self._scope_budget = ScopeBudget.from_config(orchestration)
         self._lowering_strategy = (
             LoweringStrategy.EPISODE_CUT
@@ -159,11 +165,6 @@ class TaskRuntime:
         v2_bundle: PersistedV2Workflow | None = None
         v2_engine: OrchestrationEngine | None = None
         if ExecutionMode.is_v2(parsed_workflow.api_version):
-            if parsed_workflow.regions:
-                raise ValueError(
-                    "Structured regions are inspect-only. Use "
-                    "POST /api/v1/workflows/validate to inspect the compiled template."
-                )
             source = FrontendWorkflowSource.capture(yaml_text, format)
             v2_bundle = compile_bundle(
                 workflow_id, parsed_workflow, source, strategy=self._lowering_strategy
@@ -342,10 +343,14 @@ class TaskRuntime:
             )
             if wf_record is None:
                 continue
+            dynamic_ids = await self._workflow_registry.get_dynamic_task_ids_async(
+                workflow_id
+            )
+            task_ids = list(dict.fromkeys([*wf_record.task_ids, *sorted(dynamic_ids)]))
             tasks: list[PersistedTask] = [
                 state
                 for state in await self._workflow_registry.load_task_states_async(
-                    *wf_record.task_ids
+                    *task_ids
                 )
                 if state
             ]
@@ -933,6 +938,98 @@ class TaskRuntime:
             changed = True
         return changed
 
+    def _fan_out_children_locked(
+        self, workflow_id: str, engine: OrchestrationEngine, producer_task_id: str
+    ) -> Advance:
+        """Materialize one dispatchable child per element of a producer's fan-out.
+
+        When the settled producer feeds a spawn whose child template is a dispatchable
+        leaf, its result collection drives the child cardinality: each element mints a
+        child work item with a synthesized task record, the child-init authority is then
+        sealed, and the new records persist durably ahead of the ledger snapshot. A
+        producer that feeds no spawn, or a spawn whose child body is not a leaf task,
+        yields no children.
+        """
+        advance = Advance()
+        spawn_op = engine.spawn_successor(producer_task_id)
+        if spawn_op is None:
+            return advance
+        child_template_id = engine.child_template_of(spawn_op)
+        template_record = (
+            self._tasks.get(child_template_id) if child_template_id else None
+        )
+        if template_record is None:
+            return advance
+        value_ref = ValueRef(kind="legacy_task_result", legacy_task_id=producer_task_id)
+        new_children: list[str] = []
+        for element in self._load_fanout_elements(producer_task_id):
+            try:
+                child_advance = engine.materialize_child(spawn_op, value_ref=value_ref)
+            except RegionError:
+                break  # a budget, seal, or denial stops further children
+            for child_task_id in child_advance.ready:
+                self._tasks[child_task_id] = self._synthesize_child_record(
+                    template_record, child_task_id, element
+                )
+                self._original_deps[child_task_id] = set()
+                new_children.append(child_task_id)
+            advance.extend(child_advance)
+        advance.extend(engine.seal_spawn(spawn_op))
+        if new_children:
+            self._workflow_registry.commit_dynamic_tasks(
+                workflow_id, self._records_locked(*new_children)
+            )
+        return advance
+
+    def _load_fanout_elements(self, producer_task_id: str) -> list[Any]:
+        """The producer result's fan-out collection: a ``fanout`` or ``items`` list."""
+        if self._results_dir is None:
+            return []
+        path = result_file_path(self._results_dir, producer_task_id)
+        if not path.exists():
+            return []
+        try:
+            envelope = ResultEnvelope.model_validate_json(path.read_text("utf-8"))
+        except (ValueError, OSError):
+            return []
+        payload = envelope.result.model_dump()
+        collection = payload.get("fanout")
+        if not isinstance(collection, list):
+            collection = payload.get("items")
+        return list(collection) if isinstance(collection, list) else []
+
+    def _synthesize_child_record(
+        self, template: TaskRecord, child_task_id: str, element: Any
+    ) -> TaskRecord:
+        """Clone a child-template record for one materialized child, injecting input."""
+        task = template.task
+        spec = task.spec
+        if "data" in type(spec).model_fields:
+            spec = spec.model_copy(
+                update={"data": {"type": "list", "items": [element]}}
+            )
+            task = task.model_copy(update={"spec": spec})
+        return template.model_copy(
+            deep=True,
+            update={
+                "task_id": child_task_id,
+                "task": task,
+                "status": TaskStatus.PENDING,
+                "assigned_worker": None,
+                "started_ts": None,
+                "finished_ts": None,
+                "error": None,
+                "usages": [],
+                "position_in_epoch": None,
+                "graph_node_name": None,
+                "local_name": None,
+                "merge_key": None,
+                "merged_children": None,
+                "selected_worker": None,
+                "submitted_ts": time.time(),
+            },
+        )
+
     def _fail_v2_records_locked(
         self, task_ids: list[str], reason: str, *, persist: bool
     ) -> list[str]:
@@ -1321,9 +1418,11 @@ class TaskRuntime:
 
             notify = bool(ready_children)
             if record is not None and (engine := self._engines.get(record.workflow_id)):
-                if self._apply_advance_locked(
-                    record.workflow_id, engine.on_succeeded(task_id, empty=empty)
-                ):
+                advance = engine.on_succeeded(task_id, empty=empty)
+                advance.extend(
+                    self._fan_out_children_locked(record.workflow_id, engine, task_id)
+                )
+                if self._apply_advance_locked(record.workflow_id, advance):
                     notify = True
                 self._save_ledger_locked(record.workflow_id)
 

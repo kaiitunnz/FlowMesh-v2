@@ -33,7 +33,7 @@ from ..representations.template import (
     ToolDeclaration,
 )
 from .diagnostics import compile_error
-from .project import LoweringAccumulator
+from .project import LoweringAccumulator, build_name_map
 
 # Friendly aliases for the two provenance values authors write in spec.v2.
 _PROVENANCE = {
@@ -232,11 +232,14 @@ def _apply_result_visibility(
 
 
 def _lower_regions(parsed: ParsedWorkflow, acc: LoweringAccumulator) -> None:
+    name_to_op = build_name_map(parsed)
     for region in parsed.regions:
-        _lower_region(region, acc)
+        _lower_region(region, name_to_op, acc)
 
 
-def _lower_region(region: ParsedRegion, acc: LoweringAccumulator) -> None:
+def _lower_region(
+    region: ParsedRegion, name_to_op: dict[str, str], acc: LoweringAccumulator
+) -> None:
     kind = str(region.region.get("kind", "")).strip()
     name = region.name
     has_input = bool(region.depends_on)
@@ -246,13 +249,13 @@ def _lower_region(region: ParsedRegion, acc: LoweringAccumulator) -> None:
     elif kind == "merge":
         _add_operator(_merge(region, has_input), region, acc)
     elif kind == "spawn":
-        _add_operator(_spawn(region, has_input), region, acc)
+        _add_operator(_spawn(region, name_to_op, has_input), region, acc)
     elif kind == "join":
         _add_operator(_join(region, has_input), region, acc)
     elif kind == "loop":
         _add_operator(_loop(region, has_input), region, acc)
     elif kind == "call":
-        _lower_call(region, acc)
+        _lower_call(region, name_to_op, acc)
         return
     else:
         raise compile_error(
@@ -311,14 +314,20 @@ def _merge(region: ParsedRegion, has_input: bool) -> MergeRegion:
     )
 
 
-def _spawn(region: ParsedRegion, has_input: bool) -> SpawnRegion:
+def _spawn(
+    region: ParsedRegion, name_to_op: dict[str, str], has_input: bool
+) -> SpawnRegion:
     child = region.region.get("child")
+    # Resolve the child's frontend name to its operator id so the engine both excludes
+    # the child leaf from eager dispatch and finds its body when materializing a child;
+    # an unresolved name (no such graph node) is kept as written.
+    child_ref = name_to_op.get(str(child), str(child)) if child else None
     return SpawnRegion(
         operator_id=region.name,
         source_ref=region.name,
         inputs=_inputs(has_input),
         outputs=(Port(name="children"),),
-        child_template_ref=str(child) if child else None,
+        child_template_ref=child_ref,
         authority=_authority(region.region.get("authority"), region.name),
     )
 
@@ -400,9 +409,12 @@ def _loop(region: ParsedRegion, has_input: bool) -> LoopContextRegion:
     )
 
 
-def _lower_call(region: ParsedRegion, acc: LoweringAccumulator) -> None:
+def _lower_call(
+    region: ParsedRegion, name_to_op: dict[str, str], acc: LoweringAccumulator
+) -> None:
     """Normalize a ``call`` into a structured ``Spawn(1)`` then ``Join`` pair."""
     child = region.region.get("child")
+    child_ref = name_to_op.get(str(child), str(child)) if child else None
     returns = _str_list(region.region.get("returns"), region.name)
     spawn_id = region.name
     join_id = f"{region.name}:join"
@@ -411,7 +423,7 @@ def _lower_call(region: ParsedRegion, acc: LoweringAccumulator) -> None:
         source_ref=region.name,
         inputs=_inputs(bool(region.depends_on)),
         outputs=(Port(name="child"),),
-        child_template_ref=str(child) if child else None,
+        child_template_ref=child_ref,
         authority=_authority(region.region.get("authority"), region.name),
     )
     join = JoinRegion(

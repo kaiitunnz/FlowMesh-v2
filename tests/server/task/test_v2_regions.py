@@ -161,6 +161,9 @@ class _CapturingRegistry:
     ) -> None:
         return None
 
+    async def save_ledger_snapshot_async(self, workflow_id: str, snapshot: Any) -> None:
+        return None
+
 
 def _runtime() -> TaskRuntime:
     from types import SimpleNamespace
@@ -178,11 +181,13 @@ def _runtime() -> TaskRuntime:
 
 
 @pytest.mark.anyio
-async def test_region_bearing_submit_is_rejected() -> None:
+async def test_region_bearing_submit_is_admitted() -> None:
+    # Region-bearing v2 workflows now run: the submit path admits them and builds the
+    # orchestration engine rather than rejecting them as inspect-only.
     runtime = _runtime()
-    with pytest.raises(ValueError, match="inspect-only"):
-        await runtime.register("owner", "org", REGIONS_WF, format="native")
-    assert runtime.list_tasks() == []
+    workflow_id, _ = await runtime.register("owner", "org", REGIONS_WF, format="native")
+    assert runtime.is_v2_workflow(workflow_id)
+    assert runtime.orchestration_engine(workflow_id) is not None
 
 
 def test_region_bearing_inspect_succeeds() -> None:
@@ -210,12 +215,14 @@ spec:
 
 
 @pytest.mark.anyio
-async def test_region_only_workflow_is_gated_as_v2() -> None:
-    # A workflow whose graph is all regions has no leaf tasks; the v2 gate must
-    # still classify it from the root apiVersion and reject it at submit.
+async def test_region_only_workflow_is_admitted_as_v2() -> None:
+    # A workflow whose graph is all regions has no leaf tasks; the v2 gate still
+    # classifies it from the root apiVersion and admits it.
     runtime = _runtime()
-    with pytest.raises(ValueError, match="inspect-only"):
-        await runtime.register("owner", "org", _REGION_ONLY, format="native")
+    workflow_id, _ = await runtime.register(
+        "owner", "org", _REGION_ONLY, format="native"
+    )
+    assert runtime.is_v2_workflow(workflow_id)
     report = runtime.inspect_v2(_REGION_ONLY, format="native")
     assert report is not None and report.region_bearing
 

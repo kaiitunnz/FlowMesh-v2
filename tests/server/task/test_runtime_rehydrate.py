@@ -23,6 +23,7 @@ class FakeWorkflowRegistry:
         self.workflow_task_ids: dict[str, list[str]] = {}
         self.v2_blobs: dict[str, str] = {}
         self.ledger_blobs: dict[str, str] = {}
+        self.dynamic_task_ids: dict[str, set[str]] = {}
 
     async def register_workflow_async(
         self, workflow_id: str, tasks: list[Any], v2: Any = None
@@ -119,6 +120,18 @@ class FakeWorkflowRegistry:
             self.task_blobs[item.record.task_id] = item.model_dump_json()
         if sched is not None:
             self.sched[workflow_id] = sched.model_dump_json()
+
+    def commit_dynamic_tasks(
+        self, workflow_id: str, records: Sequence[PersistedTask]
+    ) -> None:
+        for item in records:
+            self.task_blobs[item.record.task_id] = item.model_dump_json()
+            self.dynamic_task_ids.setdefault(workflow_id, set()).add(
+                item.record.task_id
+            )
+
+    async def get_dynamic_task_ids_async(self, workflow_id: str) -> set[str]:
+        return set(self.dynamic_task_ids.get(workflow_id, set()))
 
 
 class _WorkerRegistryStub:

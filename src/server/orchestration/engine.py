@@ -1676,6 +1676,18 @@ class OrchestrationEngine:
         )
         return scope_id in self._released_scopes if scope_id else False
 
+    def spawn_successor(self, operator_id: str) -> str | None:
+        """The spawn region an operator feeds via a forward edge, if any."""
+        for successor in self._forward.get(operator_id, ()):
+            if self._kind(successor) is OperatorKind.SPAWN:
+                return successor
+        return None
+
+    def child_template_of(self, spawn_op: str) -> str | None:
+        """The operator id of a spawn's child template, if it declares one."""
+        op = self._operators.get(spawn_op)
+        return op.child_template_ref if isinstance(op, SpawnRegion) else None
+
     def work_item(self, task_id: str) -> WorkItem | None:
         return self._work_item_for_task(task_id)
 
