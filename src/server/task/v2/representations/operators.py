@@ -286,8 +286,7 @@ class JoinPredicate(BaseModel):
     """A join's declared early-release predicate over its settled qualifiers.
 
     A count threshold with a monotonicity flag: a monotone predicate releases on the
-    first witness, a non-monotone one waits for frontier closure. A richer witness kind
-    can extend this without reshaping the join.
+    first witness, a non-monotone one waits for frontier closure.
     """
 
     model_config = ConfigDict(frozen=True)
