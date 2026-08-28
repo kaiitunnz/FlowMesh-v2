@@ -68,8 +68,7 @@ class FakeRegistry:
         self.remaining[workflow_id] = {
             t.task_id
             for t in tasks
-            if t.status
-            not in (TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.CANCELLED)
+            if t.status not in (TaskStatus.DONE, TaskStatus.FAILED)
         }
         if v2 is not None:
             self.v2_blobs[workflow_id] = v2.model_dump_json()

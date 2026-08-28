@@ -1770,12 +1770,12 @@ class OrchestrationEngine:
     def spawn_is_open(self, spawn_op: str) -> bool:
         """Whether a spawn's child-init capability still admits new children.
 
-        False once the spawn has sealed or revoked (or has no child-init scope yet), so
-        a re-driven fan-out over an already-closed spawn is a clean no-op.
+        False once the spawn has sealed or revoked, or before its child-init scope
+        opens, so a re-driven fan-out over an already-closed spawn is a clean no-op. A
+        read-only query: it never opens a scope.
         """
-        try:
-            scope_id = self._require_child_init_scope(spawn_op)
-        except RegionError:
+        scope_id = self._scope_id_for(spawn_op)
+        if scope_id is None:
             return False
         cap = self._capability(scope_id, ProgressAxis.CHILD_INIT)
         return cap.status is CapabilityStatus.OPEN
