@@ -5,6 +5,7 @@ import logging
 import threading
 import time
 from collections import defaultdict, deque
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +48,11 @@ from .v2 import (
     build_inspection,
     compile_bundle,
 )
+from .v2.representations.plan import EpisodeSpec
+
+# A live-feasibility check: whether a lowered episode's declared alternative can be
+# placed now. It resolves no resident capacity and admits no capacity object.
+EpisodeFeasibility = Callable[[EpisodeSpec], bool]
 
 
 def _sanitize_merge_spec(spec: dict[str, Any]) -> dict[str, Any]:
@@ -80,11 +86,13 @@ class TaskRuntime:
         orchestration: OrchestrationConfig,
         logger: logging.Logger,
         results_dir: Path | None = None,
+        feasibility_check: EpisodeFeasibility | None = None,
     ) -> None:
         self._workflow_registry = workflow_registry
         self._worker_registry = worker_registry
         self._logger = logger
         self._results_dir = Path(results_dir) if results_dir is not None else None
+        self._feasibility_check = feasibility_check
         self._scope_budget = ScopeBudget.from_config(orchestration)
         self._lowering_strategy = (
             LoweringStrategy.EPISODE_CUT
@@ -866,6 +874,22 @@ class TaskRuntime:
     def orchestration_engine(self, workflow_id: str) -> OrchestrationEngine | None:
         with self._lock:
             return self._engines.get(workflow_id)
+
+    def episode_feasible(self, task_id: str) -> bool:
+        """Whether a ready episode's declared alternative can be placed now.
+
+        The generic live-feasibility handoff from the lowerer's episode annotation to
+        the scheduler: an infeasible alternative is deferred by the dispatcher, holding
+        no worker. Absent a configured check, or for a task the plan did not cut into an
+        episode, placement is always feasible.
+        """
+        if self._feasibility_check is None:
+            return True
+        with self._lock:
+            record = self._tasks.get(task_id)
+            engine = self._engines.get(record.workflow_id) if record else None
+            spec = engine.episode_spec(task_id) if engine else None
+        return True if spec is None else self._feasibility_check(spec)
 
     def resolve_v2_output(
         self, workflow_id: str, output_id: str

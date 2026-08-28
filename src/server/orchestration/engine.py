@@ -38,6 +38,7 @@ from ..task.v2.representations.operators import (
     ResidualPolicy,
     SpawnRegion,
 )
+from ..task.v2.representations.plan import EpisodeSpec
 from ..task.v2.representations.results import CardinalityKind
 from ..utils.time import now_iso
 from .guardrails import ScopeBudget
@@ -1687,6 +1688,20 @@ class OrchestrationEngine:
         """The operator id of a spawn's child template, if it declares one."""
         op = self._operators.get(spawn_op)
         return op.child_template_ref if isinstance(op, SpawnRegion) else None
+
+    def episode_spec(self, task_id: str) -> EpisodeSpec | None:
+        """The run-to-yield episode a task's operator lowers to, if the plan cut it."""
+        wi = self._work_item_for_task(task_id)
+        if wi is None:
+            return None
+        for node in self._bundle.plan.nodes:
+            if node.episode is None:
+                continue
+            if node.logical_ref == wi.operator_id or (
+                wi.operator_id in node.episode.fused_refs
+            ):
+                return node.episode
+        return None
 
     def work_item(self, task_id: str) -> WorkItem | None:
         return self._work_item_for_task(task_id)

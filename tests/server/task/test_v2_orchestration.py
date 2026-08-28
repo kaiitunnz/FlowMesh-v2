@@ -324,6 +324,41 @@ async def test_live_spawn_fans_out_children_to_real_dispatch(tmp_path: Any) -> N
     assert engine.region_closed("collect")
 
 
+_INFEASIBLE = """
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {name: feas}
+spec:
+  graph:
+    nodes:
+      - name: gen
+        spec: {taskType: inference, inference: {model: m, prompt: p}}
+      - name: loc
+        spec: {taskType: echo, data: {type: list, items: [x]}}
+"""
+
+
+@pytest.mark.anyio
+async def test_scheduler_rejects_an_infeasible_episode_alternative() -> None:
+    from server.task.v2.representations.plan import EpisodeBoundaryKind
+
+    registry = FakeRegistry()
+    runtime = TaskRuntime(
+        cast(Any, registry),
+        cast(Any, _WorkerRegistryStub()),
+        OrchestrationConfig(episode_lowering=True),
+        logging.getLogger("feas"),
+        feasibility_check=lambda spec: spec.boundary
+        is not EpisodeBoundaryKind.SERVICE_ISSUE,
+    )
+    _, ids = await _register(runtime, _INFEASIBLE)
+    # A sampled model call lowers to a service-issue episode the check rejects; the
+    # scheduler defers it, holding no worker (resident admission is PR 6).
+    assert runtime.episode_feasible(ids["gen"]) is False
+    # A local deterministic echo episode stays feasible.
+    assert runtime.episode_feasible(ids["loc"]) is True
+
+
 # --------------------------------------------------------------------------- #
 # Outcome model (pure)
 # --------------------------------------------------------------------------- #
