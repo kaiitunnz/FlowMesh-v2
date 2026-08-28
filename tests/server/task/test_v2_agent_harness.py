@@ -291,8 +291,11 @@ def test_injected_outcome_resumes_the_episode_to_completion() -> None:
     assert result.kind is HarnessResultKind.COMPLETION
     # The resumed episode received the injected outcome at its originating call.
     assert adapter.injected[-1][0].value == "answer"
-    adv = eng.on_succeeded("A")
-    _ = adv
+    eng.on_succeeded("A")
+    # Observable end-to-end outcome: the episode settles terminally and the declared
+    # output is readable, driven the whole way by the test-double adapter.
+    wi = eng.work_item("A")
+    assert wi is not None and wi.status is WorkItemStatus.SETTLED
     pub = eng.resolve_output("out:A")
     assert pub is not None and pub.outcome.value == "success"
 
