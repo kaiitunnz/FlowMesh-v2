@@ -1087,6 +1087,13 @@ class TaskRuntime:
         try:
             envelope = ResultEnvelope.model_validate_json(path.read_text("utf-8"))
         except (ValueError, OSError):
+            # A present-but-unreadable result is an anomaly, not a not-yet-delivered
+            # one; surface it and defer rather than seal a wrong empty fan-out.
+            self._logger.error(
+                "Fan-out producer %s has an unreadable result at %s",
+                producer_task_id,
+                path,
+            )
             return None
         payload = envelope.result.model_dump()
         collection = payload.get("fanout")
