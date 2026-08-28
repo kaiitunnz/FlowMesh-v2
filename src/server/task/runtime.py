@@ -1065,7 +1065,14 @@ class TaskRuntime:
         collection = payload.get("fanout")
         if not isinstance(collection, list):
             collection = payload.get("items")
-        return list(collection) if isinstance(collection, list) else []
+        if not isinstance(collection, list):
+            return []
+        # Unwrap a producer element's carried value (an echo item is ``{output: v}``)
+        # so it is a valid child input rather than the producer's own result shape.
+        return [
+            item["output"] if isinstance(item, dict) and "output" in item else item
+            for item in collection
+        ]
 
     def _synthesize_child_record(
         self, template: TaskRecord, child_task_id: str, element: Any
