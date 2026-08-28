@@ -588,14 +588,18 @@ class OrchestrationEngine:
         activation's scope. An invocation or effect records durable request state before
         the work item suspends, so waiting holds no worker. A yield persists the opaque
         continuation and suspends. A state access records the declared reference; its
-        value is resolved by query. The reply that resumes a suspended work item arrives
-        with the episode worker runner.
+        value is resolved by query.
         """
         wi = self._work_item_for_task(task_id)
         if wi is None or wi.status in _TERMINAL_WI:
             return Advance()
         match event.kind:
             case BoundaryEventKind.SPAWN:
+                if self._kind(wi.operator_id) not in _CHILD_INIT_OPENERS:
+                    raise RegionError(
+                        f"{wi.operator_id!r} is not a spawn/agent scope opener; "
+                        "it cannot yield a spawn boundary"
+                    )
                 return self.materialize_child(
                     wi.activation_id,
                     operator_id=event.child_ref,

@@ -122,13 +122,14 @@ class FakeWorkflowRegistry:
             self.sched[workflow_id] = sched.model_dump_json()
 
     def commit_dynamic_tasks(
-        self, workflow_id: str, records: Sequence[PersistedTask]
+        self, workflow_id: str, records: Sequence[PersistedTask], snapshot: Any
     ) -> None:
         for item in records:
             self.task_blobs[item.record.task_id] = item.model_dump_json()
             self.dynamic_task_ids.setdefault(workflow_id, set()).add(
                 item.record.task_id
             )
+        self.ledger_blobs[workflow_id] = snapshot.model_dump_json()
 
     async def get_dynamic_task_ids_async(self, workflow_id: str) -> set[str]:
         return set(self.dynamic_task_ids.get(workflow_id, set()))

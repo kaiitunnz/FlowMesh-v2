@@ -137,13 +137,17 @@ class FakeRegistry:
             self.sched[workflow_id] = sched.model_dump_json()
 
     def commit_dynamic_tasks(
-        self, workflow_id: str, records: Sequence[PersistedTask]
+        self,
+        workflow_id: str,
+        records: Sequence[PersistedTask],
+        snapshot: LedgerSnapshot,
     ) -> None:
         for item in records:
             self.task_blobs[item.record.task_id] = item.model_dump_json()
             self.dynamic_task_ids.setdefault(workflow_id, set()).add(
                 item.record.task_id
             )
+        self.ledger_blobs[workflow_id] = snapshot.model_dump_json()
 
     async def get_dynamic_task_ids_async(self, workflow_id: str) -> set[str]:
         return set(self.dynamic_task_ids.get(workflow_id, set()))
@@ -325,6 +329,62 @@ async def test_live_spawn_fans_out_children_to_real_dispatch(tmp_path: Any) -> N
         runtime.mark_succeeded(child, "wkr-1", {}, _TS)
     # The join closes over the drained child-init account, not an observed set.
     assert engine.region_closed("collect")
+
+
+def _child_count(engine: Any) -> int:
+    return len([a for a in engine.to_snapshot().activations if a.kind == "child"])
+
+
+@pytest.mark.anyio
+async def test_fan_out_is_idempotent_across_a_producer_replay(tmp_path: Any) -> None:
+    registry = FakeRegistry()
+    runtime = TaskRuntime(
+        cast(Any, registry),
+        cast(Any, _WorkerRegistryStub()),
+        OrchestrationConfig(),
+        logging.getLogger("live"),
+        tmp_path,
+    )
+    workflow_id, ids = await _register(runtime, AUTORESEARCH)
+    planner = ids["planner"]
+    _write_result(tmp_path, planner, ["h1", "h2", "h3"])
+    runtime.mark_dispatched(planner, cast(Any, _worker()))
+    runtime.mark_succeeded(planner, "wkr-1", {}, _TS)
+    first = _pop_ready(runtime)
+    engine = runtime.orchestration_engine(workflow_id)
+    assert engine is not None and len(first) == 3 and _child_count(engine) == 3
+    # Replaying the producer's terminal event re-drives the fan-out as a no-op: the
+    # sealed spawn admits no new child.
+    runtime.mark_succeeded(planner, "wkr-1", {}, _TS)
+    assert _pop_ready(runtime) == [] and _child_count(engine) == 3
+
+
+@pytest.mark.anyio
+async def test_deferred_fan_out_recovers_on_replay_when_result_lands(
+    tmp_path: Any,
+) -> None:
+    registry = FakeRegistry()
+    runtime = TaskRuntime(
+        cast(Any, registry),
+        cast(Any, _WorkerRegistryStub()),
+        OrchestrationConfig(),
+        logging.getLogger("live"),
+        tmp_path,
+    )
+    workflow_id, ids = await _register(runtime, AUTORESEARCH)
+    planner = ids["planner"]
+    # The producer settles before its result is on this node: the fan-out defers,
+    # sealing no spurious zero-child spawn.
+    runtime.mark_dispatched(planner, cast(Any, _worker()))
+    runtime.mark_succeeded(planner, "wkr-1", {}, _TS)
+    engine = runtime.orchestration_engine(workflow_id)
+    assert engine is not None
+    assert _pop_ready(runtime) == [] and _child_count(engine) == 0
+    assert not engine.region_closed("collect")
+    # The result lands; a replay of the producer's terminal event recovers the fan-out.
+    _write_result(tmp_path, planner, ["h1", "h2", "h3"])
+    runtime.mark_succeeded(planner, "wkr-1", {}, _TS)
+    assert len(_pop_ready(runtime)) == 3 and _child_count(engine) == 3
 
 
 _INFEASIBLE = """

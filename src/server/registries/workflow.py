@@ -326,13 +326,18 @@ class WorkflowRegistry:
             pipe.execute()
 
     def commit_dynamic_tasks(
-        self, workflow_id: str, records: Sequence[PersistedTask]
+        self,
+        workflow_id: str,
+        records: Sequence[PersistedTask],
+        snapshot: LedgerSnapshot,
     ) -> None:
-        """Persist newly materialized dynamic-child records and register their ids.
+        """Persist newly materialized dynamic-child records with the ledger snapshot.
 
-        The ids join a durable dynamic-tasks set so restart rehydration reloads them
-        alongside the statically registered tasks. The records and set membership
-        commit atomically, ahead of the ledger snapshot that references them.
+        The child records, their dynamic-tasks set membership, and the ledger snapshot
+        that carries their work items commit in one atomic transaction, so a crash can
+        never leave the ledger's dynamic children without their durable task records or
+        vice versa. The ids join the dynamic-tasks set so restart rehydration reloads
+        them alongside the statically registered tasks.
         """
         if not records:
             return
@@ -342,6 +347,7 @@ class WorkflowRegistry:
                 pipe.set(task_state_key(item.record.task_id), item.model_dump_json())
             pipe.sadd(workflow_dynamic_tasks_key(workflow_id), *ids)
             pipe.sadd(workflow_tasks_key(workflow_id), *ids)
+            pipe.set(workflow_ds_key(workflow_id), snapshot.model_dump_json())
             pipe.hset(workflow_key(workflow_id), mapping=_workflow_update())
             pipe.execute()
 

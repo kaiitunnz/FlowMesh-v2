@@ -52,7 +52,7 @@ from .v2 import (
 from .v2.representations.plan import EpisodeSpec
 
 # A live-feasibility check: whether a lowered episode's declared alternative can be
-# placed now. It resolves no resident capacity and admits no capacity object.
+# placed now.
 EpisodeFeasibility = Callable[[EpisodeSpec], bool]
 
 
@@ -881,9 +881,7 @@ class TaskRuntime:
 
         Routes the event into the engine, synthesizes a task record for any dispatchable
         child it materializes, applies the advance, and writes the ledger snapshot after
-        the task records so the ledger never leads durable state. The worker path that
-        produces the event and resumes a suspended work item arrives with the episode
-        worker runner.
+        the task records so the ledger never leads durable state.
         """
         with self._cv:
             record = self._tasks.get(task_id)
@@ -908,16 +906,36 @@ class TaskRuntime:
                 continue
             wi = engine.work_item(child_task_id)
             template = self._tasks.get(wi.operator_id) if wi else None
-            if template is None:
-                continue
-            self._tasks[child_task_id] = self._synthesize_child_record(
-                template, child_task_id, None
-            )
-            self._original_deps[child_task_id] = set()
-            new_children.append(child_task_id)
-        if new_children:
+            if template is not None:
+                self._register_child_locked(child_task_id, template, None)
+                new_children.append(child_task_id)
+        self._commit_new_children_locked(workflow_id, engine, new_children)
+
+    def _register_child_locked(
+        self, child_task_id: str, template: TaskRecord, element: Any
+    ) -> None:
+        """Install a self-contained task record for one materialized child."""
+        self._tasks[child_task_id] = self._synthesize_child_record(
+            template, child_task_id, element
+        )
+        self._original_deps[child_task_id] = set()
+
+    def _commit_new_children_locked(
+        self,
+        workflow_id: str,
+        engine: OrchestrationEngine,
+        child_task_ids: list[str],
+    ) -> None:
+        """Persist new child records atomically with the ledger snapshot they belong to.
+
+        Persisting the child records and the snapshot in one transaction keeps a
+        dynamically materialized child from being durably half-recorded — a ledger work
+        item without its task record, or a task record with no ledger work item — across
+        a crash.
+        """
+        if child_task_ids:
             self._workflow_registry.commit_dynamic_tasks(
-                workflow_id, self._records_locked(*new_children)
+                workflow_id, self._records_locked(*child_task_ids), engine.to_snapshot()
             )
 
     def episode_feasible(self, task_id: str) -> bool:
@@ -1029,38 +1047,47 @@ class TaskRuntime:
         )
         if template_record is None:
             return advance
+        elements = self._load_fanout_elements(producer_task_id)
+        if elements is None:
+            # The producer's result is not yet on this node: defer rather than seal a
+            # spurious zero-child spawn. A later replay re-drives the fan-out once the
+            # result lands, and the spawn stays open until then.
+            self._logger.warning(
+                "Deferring fan-out for %s: its result is not available yet",
+                producer_task_id,
+            )
+            return advance
         value_ref = ValueRef(kind="legacy_task_result", legacy_task_id=producer_task_id)
         new_children: list[str] = []
-        for element in self._load_fanout_elements(producer_task_id):
+        for element in elements:
             try:
                 child_advance = engine.materialize_child(spawn_op, value_ref=value_ref)
             except RegionError:
                 break  # a budget, seal, or denial stops further children
             for child_task_id in child_advance.ready:
-                self._tasks[child_task_id] = self._synthesize_child_record(
-                    template_record, child_task_id, element
-                )
-                self._original_deps[child_task_id] = set()
+                self._register_child_locked(child_task_id, template_record, element)
                 new_children.append(child_task_id)
             advance.extend(child_advance)
         advance.extend(engine.seal_spawn(spawn_op))
-        if new_children:
-            self._workflow_registry.commit_dynamic_tasks(
-                workflow_id, self._records_locked(*new_children)
-            )
+        self._commit_new_children_locked(workflow_id, engine, new_children)
         return advance
 
-    def _load_fanout_elements(self, producer_task_id: str) -> list[Any]:
-        """The producer result's fan-out collection: a ``fanout`` or ``items`` list."""
+    def _load_fanout_elements(self, producer_task_id: str) -> list[Any] | None:
+        """The producer result's fan-out collection: a ``fanout`` or ``items`` list.
+
+        Returns ``None`` when the producer result is not yet readable on this node — a
+        distinct signal from an empty collection, so a not-yet-delivered result is
+        deferred rather than mistaken for a zero-child fan-out.
+        """
         if self._results_dir is None:
-            return []
+            return None
         path = result_file_path(self._results_dir, producer_task_id)
         if not path.exists():
-            return []
+            return None
         try:
             envelope = ResultEnvelope.model_validate_json(path.read_text("utf-8"))
         except (ValueError, OSError):
-            return []
+            return None
         payload = envelope.result.model_dump()
         collection = payload.get("fanout")
         if not isinstance(collection, list):
@@ -1437,6 +1464,15 @@ class TaskRuntime:
                     # re-persist in case the original completion's write failed
                     # after its in-memory commit.
                     self._repersist_terminal_workflow_locked(record.workflow_id)
+                    # Recover a fan-out lost to a crash between the producer's terminal
+                    # persist and its children: re-driving is a no-op once the spawn has
+                    # sealed, so replaying an already-materialized fan-out does nothing.
+                    if engine := self._engines.get(record.workflow_id):
+                        advance = self._fan_out_children_locked(
+                            record.workflow_id, engine, task_id
+                        )
+                        if self._apply_advance_locked(record.workflow_id, advance):
+                            self._cv.notify_all()
                     return []
                 if record.status == TaskStatus.FAILED:
                     self._logger.warning(

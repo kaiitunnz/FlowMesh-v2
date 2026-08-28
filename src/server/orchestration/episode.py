@@ -4,8 +4,7 @@ An episode consumes inputs and state references and returns an :class:`EpisodeOu
 completion, a cancellation-safe outcome, failure, or a durable tagged
 :class:`BoundaryEvent`. The semantic handling of a boundary event lives in the
 orchestration engine; the physical layer carries the event across the episode boundary
-and routes it back in. The worker that produces these outcomes arrives with the episode
-worker-runner refactor; here they are the server-side contract the engine consumes.
+and routes it back in.
 """
 
 from enum import StrEnum

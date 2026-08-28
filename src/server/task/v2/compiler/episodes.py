@@ -60,6 +60,15 @@ def _is_fusible(op: LogicalOperator | None) -> bool:
     )
 
 
+def _resource_class_for(op: LogicalOperator | None) -> str | None:
+    """The episode's resource class: its executor-binding family, when it binds one."""
+    if isinstance(op, LeafOperator):
+        return op.profile.binding.task_type.value
+    if isinstance(op, AgentOperator):
+        return op.binding.task_type.value
+    return None
+
+
 def lower_to_episodes(
     template: LogicalWorkflowTemplate, nodes: tuple[PhysicalNode, ...]
 ) -> tuple[PhysicalNode, ...]:
@@ -86,7 +95,13 @@ def lower_to_episodes(
         folded = tuple(k for k, head in fused_into.items() if head == ref)
         rewritten.append(
             node.model_copy(
-                update={"episode": EpisodeSpec(boundary=boundary, fused_refs=folded)}
+                update={
+                    "episode": EpisodeSpec(
+                        boundary=boundary,
+                        fused_refs=folded,
+                        resource_class=_resource_class_for(op),
+                    )
+                }
             )
         )
     return tuple(rewritten)
