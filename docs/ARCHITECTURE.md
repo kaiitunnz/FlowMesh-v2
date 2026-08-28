@@ -150,6 +150,22 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
 - **Live-feasibility handoff.** A ready episode carries the lowerer's declared
   alternative; a feasibility check lets the scheduler defer an infeasible alternative,
   holding no worker, rather than dispatching it. It resolves no resident capacity.
+- **Agent-harness substrate.** The logical `Agent` is a dispatchable run-to-yield
+  episode and a scope owner, driven through a generic `HarnessAdapter` contract
+  (`src/server/orchestration/harness/`) of named fabric-owned facade tools, a stable
+  per-call correlation, an opaque durable continuation capsule, and per-call outcome
+  injection, below the Agent boundary signature. Each mediated boundary is validated
+  against the operator's signature and effective `AuthorityGrant` before work is created
+  — an undeclared tool, model interface, or child target settles as a durable
+  `AuthorityDenied`/`PolicyDenied` outcome injected into the continuation. The engine
+  records a durable correlation envelope with a fabric-assigned `idempotency_key` (the
+  sole dedupe authority for a mediated effect, distinct from `invocation_id`) before the
+  lane releases, so a re-driven facade call maps to its recorded key and never duplicates
+  a target effect. A fabric-owned `spawn_agent` facade emits a `SpawnRequest` the engine
+  turns into one attenuated child activation; a `SpawnSeal` (or terminal completion)
+  closes the child-init producer. The legacy UTU agent executor stays a compatibility
+  path. The concrete backend binding and the model gateway are physical bindings below
+  this contract.
 - **Task merging.** Compatible adjacent tasks in a DAG (same `taskType`,
   model, hardware shape, and merge key) coalesce into a single dispatch.
   Merged children ride on `WorkerTaskMessage.merged_children`; the worker
