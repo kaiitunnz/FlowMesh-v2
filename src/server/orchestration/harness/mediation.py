@@ -61,8 +61,15 @@ class AgentEpisode:
         )
         self._capsule = result.capsule
         if result.kind is HarnessResultKind.BOUNDARY and result.request is not None:
-            self._engine.route_boundary_event(task_id, result.request)
-            self._queue_immediate(activation_id, result.request)
+            request = result.request
+            if result.capsule is not None and request.continuation is None:
+                # The capsule is the request's next continuation; persist its ref on the
+                # durable envelope so the lane can resume from it.
+                request = request.model_copy(
+                    update={"continuation": result.capsule.blob}
+                )
+            self._engine.route_boundary_event(task_id, request)
+            self._queue_immediate(activation_id, request)
         return result
 
     def deliver(self, outcome: DeliveredOutcome) -> None:

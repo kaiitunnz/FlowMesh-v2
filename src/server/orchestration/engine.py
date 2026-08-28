@@ -674,6 +674,28 @@ class OrchestrationEngine:
                 return Advance()
         return Advance()
 
+    def deliver_boundary_outcome(self, task_id: str, call_correlation: str) -> Advance:
+        """Re-ready a boundary-suspended work item once its outcome is durable.
+
+        A mediated request's durable outcome — a model or tool result, or a denial —
+        lets the episode resume: the work item returns to READY for a fresh attempt that
+        injects the outcome at its originating call. Only a work item that suspended on
+        the recorded call is resumed, so a stray delivery is a no-op.
+        """
+        wi = self._work_item_for_task(task_id)
+        if wi is None or wi.status is not WorkItemStatus.BLOCKED:
+            return Advance()
+        if (wi.activation_id, call_correlation) not in self._boundary_events:
+            return Advance()
+        wi.status = WorkItemStatus.READY
+        self._emit(
+            "episode_resumed",
+            work_item_id=wi.work_item_id,
+            operator_id=wi.operator_id,
+            detail={"call": call_correlation},
+        )
+        return Advance(ready=[wi.legacy_task_id])
+
     def _is_boundary_redrive(self, wi: WorkItem, event: BoundaryEvent) -> bool:
         """Whether a boundary reissues a recorded facade call under its stable id."""
         if event.call_correlation is None:
