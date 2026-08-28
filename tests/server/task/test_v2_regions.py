@@ -46,6 +46,10 @@ spec:
       - name: brief
         dependsOn: [deep, quick]
         region: {kind: merge, combination: concat}
+      - name: verify_child
+        spec: {taskType: echo, data: {type: list, items: [verdict]}}
+      - name: search_child
+        spec: {taskType: echo, data: {type: list, items: [hit]}}
       - name: verify
         dependsOn: [brief]
         region: {kind: call, child: verify_child, returns: [verdict]}
@@ -205,28 +209,29 @@ def test_region_under_v1_rejected_by_parser() -> None:
         parse_workflow(v1, "native")
 
 
-_REGION_ONLY = """
+_SPAWN_ONLY = """
 apiVersion: flowmesh/v2
 kind: Workflow
 metadata: {name: t}
 spec:
   graph:
     nodes:
+      - name: c
+        spec: {taskType: echo, data: {type: list, items: [x]}}
       - name: only
         region: {kind: spawn, child: c, authority: {invoke: []}}
 """
 
 
 @pytest.mark.anyio
-async def test_region_only_workflow_is_admitted_as_v2() -> None:
-    # A workflow whose graph is all regions has no leaf tasks; the v2 gate still
-    # classifies it from the root apiVersion and admits it.
+async def test_spawn_bearing_workflow_is_admitted_as_v2() -> None:
+    # A region-bearing workflow is classified v2 from the root apiVersion and admitted.
     runtime = _runtime()
     workflow_id, _ = await runtime.register(
-        "owner", "org", _REGION_ONLY, format="native"
+        "owner", "org", _SPAWN_ONLY, format="native"
     )
     assert runtime.is_v2_workflow(workflow_id)
-    report = runtime.inspect_v2(_REGION_ONLY, format="native")
+    report = runtime.inspect_v2(_SPAWN_ONLY, format="native")
     assert report is not None and report.region_bearing
 
 
