@@ -3,7 +3,7 @@
 Dynamic regions can nest scopes (call/spawn), iterate a loop, and fan out children
 without a static bound. These conservative per-instance caps turn an unbounded region
 into a durable ``scope_budget_exhausted`` failure rather than an unbounded materializing
-ledger. They are env-configurable and injectable so tests can drive small budgets.
+engine. They are env-configurable and injectable so tests can drive small budgets.
 """
 
 import os

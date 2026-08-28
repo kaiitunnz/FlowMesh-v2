@@ -8,7 +8,7 @@ the ledger and never dispatch; spawn children and loop iterations materialize as
 flow. Progress capabilities (child-init and loop-time) are the closure authority — a
 region closes only when its combined account seals and drains, never on an observed
 empty set. Scheduler/worker placement stays a physical decision that never changes what
-the ledger considers ready.
+the engine considers ready.
 """
 
 from dataclasses import dataclass, field
@@ -108,7 +108,7 @@ def _control_key(operator_id: str) -> str:
 
 @dataclass
 class Advance:
-    """Runtime-visible effect of a ledger transition, in legacy task ids.
+    """Runtime-visible effect of an engine transition, in legacy task ids.
 
     ``ready`` work items become admissible for a new attempt, ``failed`` ones settle
     terminally and cascade, and ``retry`` reissues an existing work item as a fresh
@@ -269,7 +269,7 @@ class OrchestrationEngine:
         granted_interfaces: frozenset[str] | None = None,
         budget: ScopeBudget | None = None,
     ) -> "OrchestrationEngine":
-        """Materialize a ledger from a compiled bundle.
+        """Materialize an engine from a compiled bundle.
 
         Eagerly materializes the static prefix (top-level leaf operators that are not
         spawn child templates) as one activation, work item, and continuation each, plus
@@ -394,9 +394,9 @@ class OrchestrationEngine:
             continuations=continuations,
             result_slots=slots,
         )
-        ledger = cls(snapshot, bundle, budget=budget)
-        ledger._initial = ledger._open_roots()
-        return ledger
+        engine = cls(snapshot, bundle, budget=budget)
+        engine._initial = engine._open_roots()
+        return engine
 
     def initial_advance(self) -> Advance:
         """Ready/failed roots admitted at submission time."""

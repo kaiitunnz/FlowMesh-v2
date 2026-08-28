@@ -118,7 +118,7 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
 
 - **v2 orchestration ledger (`DS`).** A submission with `apiVersion:
   flowmesh/v2` compiles to a `PhysicalExecutionPlan` and runs through the durable
-  orchestration ledger (`src/server/orchestration/`, a peer of the dispatcher),
+  orchestration engine (`src/server/orchestration/`, a peer of the dispatcher),
   which owns semantic readiness: it turns settled records into ready work items
   over the acyclic compatibility plan, materializing the activation graph as work
   becomes ready. A ready work item dispatches through the existing
@@ -129,7 +129,7 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   resolves the induced `legacy:<task>` slot. The snapshot persists at
   `workflow:{id}:ds`, after the terminal task records, and `TaskRuntime.rehydrate`
   rebuilds and reconciles it on restart. A v1 submission keeps the static-DAG path.
-- **Structured dynamic regions.** The ledger executes the semi-static regions the
+- **Structured dynamic regions.** The engine executes the semi-static regions the
   compiler normalizes: control operators (`Branch`/`Merge`/`Spawn`/`Join`/`LoopContext`)
   settle in-ledger and never dispatch, while spawn children and loop iterations
   materialize incrementally, keyed by activation identity. Closure is a progress
@@ -140,7 +140,7 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   `AuthorityDenied`/`PolicyDenied` that creates no child. `FLOWMESH_V2_MAX_SCOPE_DEPTH`,
   `FLOWMESH_V2_MAX_LOOP_ITERATIONS`, and `FLOWMESH_V2_MAX_ACTIVATIONS` bound recursion,
   iteration, and fan-out. The REST submit path admits the acyclic subset; structured
-  regions are inspect-only there and drive the ledger through its structured-region API.
+  regions are inspect-only there and drive the engine through its structured-region API.
 - **Task merging.** Compatible adjacent tasks in a DAG (same `taskType`,
   model, hardware shape, and merge key) coalesce into a single dispatch.
   Merged children ride on `WorkerTaskMessage.merged_children`; the worker
