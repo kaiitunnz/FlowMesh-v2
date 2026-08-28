@@ -83,13 +83,13 @@ def test_spawn_child_unresolved_rejected() -> None:
     assert any(d.code == "region.spawn-child-unresolved" for d in err.diagnostics)
 
 
-def test_spawn_child_non_leaf_rejected() -> None:
+def test_spawn_child_non_dispatchable_rejected() -> None:
     err = _reject("""      - name: inner
         region: {kind: branch, selection: s, ports: [p]}
       - name: s
         region: {kind: spawn, child: inner, authority: {invoke: []}}
 """)
-    assert any(d.code == "region.spawn-child-not-leaf" for d in err.diagnostics)
+    assert any(d.code == "region.spawn-child-not-dispatchable" for d in err.diagnostics)
 
 
 def test_authority_on_non_agent_leaf_rejected() -> None:
