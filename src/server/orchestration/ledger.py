@@ -12,6 +12,7 @@ the ledger considers ready.
 """
 
 from dataclasses import dataclass, field
+from typing import Self
 
 from shared.utils import (
     new_activation_id,
@@ -24,6 +25,8 @@ from shared.utils import (
 
 from ..task.v2.representations.bundle import PersistedV2Workflow
 from ..task.v2.representations.operators import (
+    AgentOperator,
+    BranchRegion,
     EffectClass,
     JoinCompletion,
     JoinRegion,
@@ -117,7 +120,7 @@ class Advance:
     failed: list[str] = field(default_factory=list)
     retry: list[str] = field(default_factory=list)
 
-    def extend(self, other: "Advance") -> "Advance":
+    def extend(self, other: "Advance") -> Self:
         self.ready.extend(other.ready)
         self.failed.extend(other.failed)
         self.retry.extend(other.retry)
@@ -210,13 +213,21 @@ class OrchestrationLedger:
             for owner, scope_id in self._scope_by_owner.items()
             if self._kind(owner) is OperatorKind.LOOP_CONTEXT
         }
+        # A region's release/egress record is delivered at the root scope; a loop's
+        # feedback records sit at the loop scope, so gate on the root scope to avoid
+        # treating a mid-loop snapshot as already egressed.
         self._released_regions = {
             r.operator_id
             for r in self._records
-            if self._kind(r.operator_id)
+            if r.scope_id == self._root_scope.scope_id
+            and self._kind(r.operator_id)
             in (OperatorKind.JOIN, OperatorKind.LOOP_CONTEXT)
         }
-        self._denied_spawns: set[str] = set()
+        self._denied_spawns = {
+            d.operator_id
+            for d in self._decisions
+            if d.kind is AuthorityDecisionKind.DENIED and d.operator_id
+        }
 
     def _build_topology(self) -> dict[str, list[str]]:
         """Forward successor edges, excluding feedback and spawn->join binding edges."""
@@ -544,19 +555,35 @@ class OrchestrationLedger:
         opener, opens a nested scope so grandchildren attenuate from the child grant.
         Returns the child activation id.
         """
+        spawn = self._operators[spawn_op]
+        child_ref = spawn.child_template_ref if isinstance(spawn, SpawnRegion) else None
+        body_ref = operator_id or child_ref or spawn_op
         if spawn_op in self._denied_spawns:
+            self._emit(
+                "child_rejected", operator_id=spawn_op, detail={"reason": "denied"}
+            )
             raise RegionError(f"spawn {spawn_op!r} was denied; no child may be created")
         scope_id = self._require_child_init_scope(spawn_op)
         cap = self._capability(scope_id, ProgressAxis.CHILD_INIT)
         if cap.status is not CapabilityStatus.OPEN:
+            self._emit(
+                "child_rejected",
+                operator_id=spawn_op,
+                detail={"reason": cap.status.value},
+            )
             raise RegionError(
                 f"spawn {spawn_op!r} child-init capability is {cap.status.value}; "
                 "no child may be created"
             )
+        # Validate every budget before materializing, so a rejected child leaves no
+        # half-open region whose join could never drain.
         self._charge_activation()
+        body_opens_scope = self._kind(body_ref) in _CHILD_INIT_OPENERS or (
+            self._kind(body_ref) is OperatorKind.LOOP_CONTEXT
+        )
+        if body_opens_scope:
+            self._check_scope_depth(scope_id)
         index = sum(1 for a in self._activations.values() if a.scope_id == scope_id)
-        spawn = self._operators[spawn_op]
-        body_ref = operator_id or getattr(spawn, "child_template_ref", None) or spawn_op
         activation = Activation(
             activation_id=new_activation_id(),
             instance_id=self._instance.instance_id,
@@ -670,9 +697,7 @@ class OrchestrationLedger:
             )
         next_time = self._loop_time.get(loop_op, 0) + 1
         if next_time > self._budget.max_loop_iterations:
-            raise RegionError(
-                f"loop {loop_op!r} exceeded {self._budget.max_loop_iterations} iters"
-            )
+            self._exhaust_budget("loop_iterations", self._budget.max_loop_iterations)
         self._charge_activation()
         self._loop_time[loop_op] = next_time
         cap.coordinate = next_time
@@ -735,6 +760,7 @@ class OrchestrationLedger:
                 grant_id=self._grant_for_scope(scope_id or "").grant_id,
                 interface=interface,
                 kind=AuthorityDecisionKind.DENIED,
+                operator_id=spawn_op,
                 scope_id=scope_id,
                 denial_kind=kind,
                 reason=f"interface {interface!r} outside spawn-site {kind.value} face",
@@ -806,7 +832,8 @@ class OrchestrationLedger:
                 )
             )
         elif kind is OperatorKind.BRANCH:
-            selection = getattr(self._operators[operator_id], "selection", None)
+            branch = self._operators[operator_id]
+            selection = branch.selection if isinstance(branch, BranchRegion) else None
             if selection and any(
                 self._edge_from_port(operator_id, s) == selection
                 for s in self._forward.get(operator_id, ())
@@ -919,13 +946,13 @@ class OrchestrationLedger:
             raise RegionError(f"scope {scope_id!r} holds no {axis.value} capability")
         return cap
 
+    def _check_scope_depth(self, parent_scope_id: str) -> None:
+        if self._scopes[parent_scope_id].depth + 1 > self._budget.max_scope_depth:
+            self._exhaust_budget("scope_depth", self._budget.max_scope_depth)
+
     def _new_child_scope(self, owner_op: str, parent_scope_id: str | None) -> Scope:
         parent = self._scopes[parent_scope_id or self._root_scope.scope_id]
-        depth = parent.depth + 1
-        if depth > self._budget.max_scope_depth:
-            raise RegionError(
-                f"scope depth {depth} exceeds limit {self._budget.max_scope_depth}"
-            )
+        self._check_scope_depth(parent.scope_id)
         grant = self._mint_delegated_grant(owner_op, parent.scope_id)
         scope = Scope(
             scope_id=new_scope_id(),
@@ -933,7 +960,7 @@ class OrchestrationLedger:
             parent_scope_id=parent.scope_id,
             owner_operator_id=owner_op,
             grant_id=grant.grant_id,
-            depth=depth,
+            depth=parent.depth + 1,
         )
         self._scopes[scope.scope_id] = scope
         self._grants[grant.grant_id] = grant.model_copy(
@@ -949,9 +976,14 @@ class OrchestrationLedger:
             1 for a in self._activations.values() if a.kind in ("child", "iteration")
         )
         if dynamic >= self._budget.max_activations:
-            raise RegionError(
-                f"activation budget {self._budget.max_activations} exhausted"
-            )
+            self._exhaust_budget("activations", self._budget.max_activations)
+
+    def _exhaust_budget(self, budget: str, limit: int) -> None:
+        """Record a durable scope-budget breach, distinct from an authority denial."""
+        self._emit(
+            "scope_budget_exhausted", detail={"budget": budget, "limit": str(limit)}
+        )
+        raise RegionError(f"{budget} budget {limit} exhausted")
 
     # ------------------------------------------------------------------ #
     # Authority: delegated-grant minting with monotone attenuation
@@ -961,7 +993,12 @@ class OrchestrationLedger:
         self, opener_op: str, parent_scope_id: str
     ) -> DelegatedAuthorityGrant:
         parent = self._grant_for_scope(parent_scope_id)
-        ceiling = getattr(self._operators[opener_op], "authority", None)
+        opener = self._operators[opener_op]
+        ceiling = (
+            opener.authority
+            if isinstance(opener, (SpawnRegion, AgentOperator))
+            else None
+        )
         ceiling_invoke = ceiling.invoke if ceiling else parent.delegate
         ceiling_delegate = ceiling.delegate if ceiling else parent.delegate
         envelope = self._policy_interfaces()
@@ -1056,20 +1093,32 @@ class OrchestrationLedger:
         advance.ready.append(wi.legacy_task_id)
 
     def _settle_empty_successor(self, operator_id: str, advance: Advance) -> None:
-        wi_id = self._wi_by_operator.get(operator_id)
-        if wi_id is None:
-            return
-        wi = self._work_items[wi_id]
-        if wi.status is WorkItemStatus.SETTLED:
-            return
-        wi.status = WorkItemStatus.SETTLED
-        wi.outcome = PublicationOutcome.EXPLICIT_EMPTY
-        self._publish(
-            operator_id, PublicationOutcome.EXPLICIT_EMPTY, ValueRef(kind="empty")
-        )
-        advance.extend(
-            self._deliver_record(operator_id, wi.activation_id, ValueRef(kind="empty"))
-        )
+        """Skip a non-selected branch successor and its whole subtree.
+
+        A leaf resolves empty; a control successor clears its pending inputs and is
+        skipped so a downstream join never waits on an untaken path. A join itself is
+        left to its own scope closure.
+        """
+        if self._is_control(operator_id):
+            if self._kind(operator_id) is OperatorKind.JOIN:
+                return
+            if (cont := self._continuations.get(_control_key(operator_id))) is not None:
+                cont.waiting_on.clear()
+            self._emit("region_skipped", operator_id=operator_id)
+        else:
+            wi_id = self._wi_by_operator.get(operator_id)
+            if wi_id is None:
+                return
+            wi = self._work_items[wi_id]
+            if wi.status is WorkItemStatus.SETTLED:
+                return
+            wi.status = WorkItemStatus.SETTLED
+            wi.outcome = PublicationOutcome.EXPLICIT_EMPTY
+            self._publish(
+                operator_id, PublicationOutcome.EXPLICIT_EMPTY, ValueRef(kind="empty")
+            )
+        for successor in sorted(self._forward.get(operator_id, ())):
+            self._settle_empty_successor(successor, advance)
 
     def _settle_failure(self, work_item_id: str) -> list[str]:
         wi = self._work_items[work_item_id]

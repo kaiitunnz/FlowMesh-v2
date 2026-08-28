@@ -8,6 +8,7 @@ ledger. They are env-configurable and injectable so tests can drive small budget
 
 import os
 from dataclasses import dataclass
+from typing import Self
 
 
 @dataclass(frozen=True)
@@ -17,7 +18,7 @@ class ScopeBudget:
     max_activations: int = 10_000  # total dynamic activations per instance
 
     @classmethod
-    def from_env(cls) -> "ScopeBudget":
+    def from_env(cls) -> Self:
         return cls(
             max_scope_depth=_int_env(
                 "FLOWMESH_V2_MAX_SCOPE_DEPTH", cls.max_scope_depth
@@ -32,5 +33,4 @@ class ScopeBudget:
 
 
 def _int_env(name: str, default: int) -> int:
-    value = os.getenv(name, "").strip()
-    return int(value) if value else default
+    return int(value) if (value := os.getenv(name, "").strip()) else default

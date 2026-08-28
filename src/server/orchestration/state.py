@@ -167,6 +167,7 @@ class AuthorityDecision(BaseModel):
     interface: str
     kind: AuthorityDecisionKind
     work_item_id: str | None = None
+    operator_id: str | None = None  # the spawn/agent site, for a dynamic denial
     scope_id: str | None = None
     denial_kind: DenialKind | None = None
     reason: str | None = None
