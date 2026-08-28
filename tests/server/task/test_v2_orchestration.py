@@ -10,7 +10,7 @@ import pytest
 
 from server.orchestration import (
     InvocationState,
-    OrchestrationLedger,
+    OrchestrationEngine,
     PublicationOutcome,
     RecoveryDisposition,
 )
@@ -312,13 +312,13 @@ spec:
     bundle = _bundle(text)
     # An external effect (ambiguity-terminal by default) builds; its uncertainty is
     # handled by the FSM rather than rejected at admission.
-    led = OrchestrationLedger.build("wfl-x", "owner", "org", bundle)
+    led = OrchestrationEngine.build("wfl-x", "owner", "org", bundle)
     caller = bundle.template.operators[0].operator_id
     assert led.work_item(caller) is not None
 
 
 def test_identity_hierarchy_is_one_per_operator() -> None:
-    led = OrchestrationLedger.build("wfl-x", "owner", "org", _bundle(DIAMOND))
+    led = OrchestrationEngine.build("wfl-x", "owner", "org", _bundle(DIAMOND))
     snap = led.to_snapshot()
     # activation -> work item -> continuation, one each per result-owning operator.
     assert len(snap.activations) == 4
@@ -746,7 +746,7 @@ spec:
     template = bundle.template.model_copy(update={"effect_boundaries": boundaries})
     bundle = bundle.model_copy(update={"template": template})
 
-    led = OrchestrationLedger.build(
+    led = OrchestrationEngine.build(
         "wfl-x", "owner", "org", bundle, granted_interfaces=frozenset()
     )
     snap = led.to_snapshot()

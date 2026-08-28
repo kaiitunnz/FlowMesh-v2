@@ -15,7 +15,7 @@ from ..hooks import SUPPLIER_RESOLVERS
 from ..orchestration import (
     Advance,
     LedgerSnapshot,
-    OrchestrationLedger,
+    OrchestrationEngine,
     RecoveryDisposition,
     ResultPublication,
 )
@@ -95,7 +95,7 @@ class TaskRuntime:
         self._workflow_in_epoch_order: dict[str, bool] = {}
         self._task_epoch_index: dict[str, int] = {}
         self._rehydrated_dispatched: dict[str, float] = {}
-        self._ledgers: dict[str, OrchestrationLedger] = {}
+        self._ledgers: dict[str, OrchestrationEngine] = {}
 
         self._lock = threading.RLock()
         self._cv = threading.Condition(self._lock)
@@ -147,7 +147,7 @@ class TaskRuntime:
         graph_task_ids: dict[str, str] = {}
 
         v2_bundle: PersistedV2Workflow | None = None
-        v2_ledger: OrchestrationLedger | None = None
+        v2_ledger: OrchestrationEngine | None = None
         if ExecutionMode.is_v2(parsed_workflow.api_version):
             if parsed_workflow.regions:
                 raise ValueError(
@@ -156,7 +156,7 @@ class TaskRuntime:
                 )
             source = FrontendWorkflowSource.capture(yaml_text, format)
             v2_bundle = compile_bundle(workflow_id, parsed_workflow, source)
-            v2_ledger = OrchestrationLedger.build(
+            v2_ledger = OrchestrationEngine.build(
                 workflow_id, owner_id, org_id, v2_bundle
             )
 
@@ -457,7 +457,7 @@ class TaskRuntime:
             elif record.status in (TaskStatus.DISPATCHED, TaskStatus.CANCELLING):
                 self._rehydrated_dispatched[task_id] = rehydrated_at
 
-        ledger = OrchestrationLedger(snapshot, bundle)
+        ledger = OrchestrationEngine(snapshot, bundle)
         self._ledgers[workflow_id] = ledger
         for persisted in tasks:
             record = persisted.record
@@ -839,7 +839,7 @@ class TaskRuntime:
         with self._lock:
             return workflow_id in self._ledgers
 
-    def orchestration_ledger(self, workflow_id: str) -> OrchestrationLedger | None:
+    def orchestration_ledger(self, workflow_id: str) -> OrchestrationEngine | None:
         with self._lock:
             return self._ledgers.get(workflow_id)
 

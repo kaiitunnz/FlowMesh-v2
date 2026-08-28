@@ -10,7 +10,7 @@ import pytest
 
 from server.orchestration import (
     CapabilityStatus,
-    OrchestrationLedger,
+    OrchestrationEngine,
     ProgressAxis,
     PublicationOutcome,
     RegionError,
@@ -138,8 +138,8 @@ def _ledger(
     *,
     budget: ScopeBudget | None = None,
     granted_interfaces: frozenset[str] | None = None,
-) -> OrchestrationLedger:
-    return OrchestrationLedger.build(
+) -> OrchestrationEngine:
+    return OrchestrationEngine.build(
         "wfl-x",
         "owner",
         "org",
@@ -149,7 +149,7 @@ def _ledger(
     )
 
 
-def _kinds(led: OrchestrationLedger) -> set[str]:
+def _kinds(led: OrchestrationEngine) -> set[str]:
     return {kind for kind, _ in led.contract_trace()}
 
 
@@ -642,7 +642,7 @@ def test_mid_loop_snapshot_rehydrates_and_egresses() -> None:
     led.settle_iteration(first)
     # Rebuild from a snapshot taken after feedback but before egress: the per-iteration
     # feedback records must not be mistaken for an already-egressed loop.
-    restored = OrchestrationLedger(led.to_snapshot(), bundle)
+    restored = OrchestrationEngine(led.to_snapshot(), bundle)
     assert not restored.region_closed("L")
     restored.settle_iteration(second)
     restored.loop_seal("L")
@@ -659,13 +659,13 @@ def test_denied_spawn_survives_rehydration() -> None:
     led = _ledger(bundle)
     led.deny_spawn("S", "x")
     # The denial is reconstructed from durable facts, so no child appears after restart.
-    restored = OrchestrationLedger(led.to_snapshot(), bundle)
+    restored = OrchestrationEngine(led.to_snapshot(), bundle)
     with pytest.raises(RegionError):
         restored.spawn_child("S")
 
 
 def _collection_publications(
-    led: OrchestrationLedger, output_id: str
+    led: OrchestrationEngine, output_id: str
 ) -> list[tuple[str | None, ResultPublication]]:
     snap = led.to_snapshot()
     return [

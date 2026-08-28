@@ -1,6 +1,6 @@
 """The orchestration engine over the transparent structured-region physical plan.
 
-The ledger owns semantic readiness (note 21 §8.3): it turns settled records into ready
+The engine owns semantic readiness (note 21 §8.3): it turns settled records into ready
 work items, incrementally materializing the activation graph rather than precreating
 attempts. Static top-level leaf operators materialize eagerly and dispatch through the
 runtime; control operators (branch, merge, spawn, join, loop) and agents settle inside
@@ -127,7 +127,7 @@ class Advance:
         return self
 
 
-class OrchestrationLedger:
+class OrchestrationEngine:
     """In-memory view of one workflow instance's durable orchestration ledger."""
 
     def __init__(
@@ -268,7 +268,7 @@ class OrchestrationLedger:
         policy_envelope: str | None = None,
         granted_interfaces: frozenset[str] | None = None,
         budget: ScopeBudget | None = None,
-    ) -> "OrchestrationLedger":
+    ) -> "OrchestrationEngine":
         """Materialize a ledger from a compiled bundle.
 
         Eagerly materializes the static prefix (top-level leaf operators that are not
