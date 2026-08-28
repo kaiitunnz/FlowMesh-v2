@@ -227,6 +227,33 @@ STACK_ENV_SCHEMA = EnvSchema(
             ],
         ),
         EnvSection(
+            title="v2 Orchestration Guardrails",
+            description=["Backstops bounding structured dynamic regions."],
+            vars=[
+                EnvVar(
+                    "FLOWMESH_V2_MAX_SCOPE_DEPTH",
+                    "64",
+                    description="Max nested call/spawn/recursion scope depth.",
+                    var_type=EnvVarType.INT,
+                    min_value=1,
+                ),
+                EnvVar(
+                    "FLOWMESH_V2_MAX_LOOP_ITERATIONS",
+                    "1000",
+                    description="Max loop-time iterations per LoopContext activation.",
+                    var_type=EnvVarType.INT,
+                    min_value=1,
+                ),
+                EnvVar(
+                    "FLOWMESH_V2_MAX_ACTIVATIONS",
+                    "10000",
+                    description="Max dynamic activations per workflow instance.",
+                    var_type=EnvVarType.INT,
+                    min_value=1,
+                ),
+            ],
+        ),
+        EnvSection(
             title="Redis Access",
             vars=[
                 EnvVar("REDIS_ACL_ENABLED", "1", var_type=EnvVarType.BOOL),
