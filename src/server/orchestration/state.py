@@ -18,6 +18,7 @@ from enum import StrEnum
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..task.v2.representations.operators import (
+    BoundaryEventKind,
     EffectClass,
     EffectReplayContract,
     ModelRef,
@@ -122,6 +123,38 @@ class ValueRef(BaseModel):
     kind: str  # "legacy_task_result" | "empty" | "join_result" | "model_ref"
     legacy_task_id: str | None = None
     model_ref: ModelRef | None = None
+
+
+class BoundaryEvent(BaseModel):
+    """A durable correlation envelope for one mediated run-to-yield boundary.
+
+    An episode yields this at a boundary; the physical layer carries it across the
+    episode boundary and the engine applies its semantics. Beyond the request itself
+    (``kind`` plus ``interface``/``child_ref``/``state_ref``/``value_ref``), it carries
+    the correlation the fabric needs to keep a re-drive exactly-once: the ``activation``
+    it belongs to, the adapter-local ``call_correlation`` that stays stable across a
+    re-drive, the fabric-assigned ``idempotency_key`` (the sole dedupe authority for a
+    mediated facade effect, distinct from ``invocation_id`` and any harness/cell-local
+    id), the causal ``invocation_id``, the ``injection_target`` the outcome returns at,
+    and the opaque ``continuation`` capsule for the next resume. ``denial`` records a
+    definitive authority/policy denial injected back into the continuation.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: BoundaryEventKind
+    activation: str | None = None
+    call_correlation: str | None = None
+    idempotency_key: str | None = None
+    interface: str | None = None
+    child_ref: str | None = None
+    request_payload: str | None = None
+    injection_target: str | None = None
+    continuation: str | None = None
+    state_ref: str | None = None
+    value_ref: ValueRef | None = None
+    invocation_id: str | None = None
+    denial: DenialKind | None = None
 
 
 class AuthorityGrant(BaseModel):
@@ -381,6 +414,7 @@ class LedgerSnapshot(BaseModel):
     records: list[Record] = Field(default_factory=list)
     invocations: list[Invocation] = Field(default_factory=list)
     attempts: list[Attempt] = Field(default_factory=list)
+    boundary_events: list[BoundaryEvent] = Field(default_factory=list)
     effect_receipts: list[EffectReceipt] = Field(default_factory=list)
     authority_decisions: list[AuthorityDecision] = Field(default_factory=list)
     delegated_grants: list[DelegatedAuthorityGrant] = Field(default_factory=list)

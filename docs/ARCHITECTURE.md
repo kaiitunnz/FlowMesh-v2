@@ -58,7 +58,8 @@ The runtime is two top-level processes:
 3-char prefixes: `wfl-` workflows, `tsk-` tasks, `ssn-` SSH sessions,
 `scn-` SSH connection rows, `cmd-` supervisor commands. The v2 orchestration
 ledger adds `act-` activations, `scp-` scopes, `wki-` work items, `att-`
-attempts, `inv-` invocations, and `agr-` authority grants. Always use
+attempts, `inv-` invocations, `agr-` authority grants, and `idm-` idempotency
+keys (the fabric-assigned dedupe authority for a mediated boundary). Always use
 `new_*_id()` helpers in `src/shared/utils/ids.py`. Never use `uuid4()` or
 `secrets.token_hex` for IDs.
 
