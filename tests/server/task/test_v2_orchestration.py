@@ -1,8 +1,10 @@
 """Durable orchestration ledger (`DS`) over the acyclic compatibility plan."""
 
 import logging
+import tempfile
 import threading
 from collections.abc import Sequence
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -166,6 +168,7 @@ def _runtime(registry: FakeRegistry) -> TaskRuntime:
         cast(Any, registry),
         cast(Any, _WorkerRegistryStub()),
         OrchestrationConfig(),
+        Path(tempfile.gettempdir()),
         logging.getLogger("v2-test"),
     )
 
@@ -293,8 +296,8 @@ async def test_live_spawn_fans_out_children_to_real_dispatch(tmp_path: Any) -> N
         cast(Any, registry),
         cast(Any, _WorkerRegistryStub()),
         OrchestrationConfig(),
-        logging.getLogger("live"),
         tmp_path,
+        logging.getLogger("live"),
     )
     workflow_id, ids = await _register(runtime, AUTORESEARCH)
     planner = ids["planner"]
@@ -342,8 +345,8 @@ async def test_fan_out_is_idempotent_across_a_producer_replay(tmp_path: Any) -> 
         cast(Any, registry),
         cast(Any, _WorkerRegistryStub()),
         OrchestrationConfig(),
-        logging.getLogger("live"),
         tmp_path,
+        logging.getLogger("live"),
     )
     workflow_id, ids = await _register(runtime, AUTORESEARCH)
     planner = ids["planner"]
@@ -368,8 +371,8 @@ async def test_deferred_fan_out_recovers_on_replay_when_result_lands(
         cast(Any, registry),
         cast(Any, _WorkerRegistryStub()),
         OrchestrationConfig(),
-        logging.getLogger("live"),
         tmp_path,
+        logging.getLogger("live"),
     )
     workflow_id, ids = await _register(runtime, AUTORESEARCH)
     planner = ids["planner"]
@@ -410,6 +413,7 @@ async def test_scheduler_rejects_an_infeasible_episode_alternative() -> None:
         cast(Any, registry),
         cast(Any, _WorkerRegistryStub()),
         OrchestrationConfig(episode_lowering=True),
+        Path(tempfile.gettempdir()),
         logging.getLogger("feas"),
         feasibility_check=lambda spec: spec.boundary
         is not EpisodeBoundaryKind.SERVICE_ISSUE,

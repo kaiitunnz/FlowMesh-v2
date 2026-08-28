@@ -85,14 +85,14 @@ class TaskRuntime:
         workflow_registry: WorkflowRegistry,
         worker_registry: WorkerRegistry,
         orchestration: OrchestrationConfig,
+        results_dir: Path,
         logger: logging.Logger,
-        results_dir: Path | None = None,
         feasibility_check: EpisodeFeasibility | None = None,
     ) -> None:
         self._workflow_registry = workflow_registry
         self._worker_registry = worker_registry
         self._logger = logger
-        self._results_dir = Path(results_dir) if results_dir is not None else None
+        self._results_dir = results_dir
         self._feasibility_check = feasibility_check
         self._scope_budget = ScopeBudget.from_config(orchestration)
         self._lowering_strategy = (
@@ -1079,8 +1079,6 @@ class TaskRuntime:
         distinct signal from an empty collection, so a not-yet-delivered result is
         deferred rather than mistaken for a zero-child fan-out.
         """
-        if self._results_dir is None:
-            return None
         path = result_file_path(self._results_dir, producer_task_id)
         if not path.exists():
             return None

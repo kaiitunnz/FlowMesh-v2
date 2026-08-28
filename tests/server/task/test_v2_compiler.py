@@ -1,5 +1,6 @@
 import logging
 import pathlib
+import tempfile
 from typing import Any, cast
 
 import pytest
@@ -179,6 +180,7 @@ def _runtime() -> TaskRuntime:
         cast(Any, _CapturingRegistry()),
         cast(Any, worker_stub),
         OrchestrationConfig(),
+        pathlib.Path(tempfile.gettempdir()),
         logging.getLogger("v2-compiler-test"),
     )
 

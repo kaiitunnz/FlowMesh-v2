@@ -1,6 +1,8 @@
 """Versioned v2 plan-time representations and the compatibility gate."""
 
 import logging
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -104,6 +106,7 @@ def _runtime(registry: _CapturingRegistry) -> TaskRuntime:
         cast(Any, registry),
         cast(Any, _WorkerRegistryStub()),
         OrchestrationConfig(),
+        Path(tempfile.gettempdir()),
         logging.getLogger("v2-test"),
     )
 

@@ -117,7 +117,7 @@ if IS_ROOT_NODE:
     WORKFLOW_REGISTRY = WorkflowRegistry(REDIS_CLIENT)
     WORKER_REGISTRY = WorkerRegistry(REDIS_CLIENT)
     RUNTIME = TaskRuntime(
-        WORKFLOW_REGISTRY, WORKER_REGISTRY, config.orchestration, logger, RESULTS_DIR
+        WORKFLOW_REGISTRY, WORKER_REGISTRY, config.orchestration, RESULTS_DIR, logger
     )
 
     DISPATCHER = create_dispatcher(

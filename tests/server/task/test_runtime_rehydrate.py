@@ -1,8 +1,10 @@
 """Durable persistence and restart rehydration of TaskRuntime."""
 
 import logging
+import tempfile
 import threading
 from collections.abc import Sequence
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -148,6 +150,7 @@ def _runtime(registry: FakeWorkflowRegistry) -> TaskRuntime:
         cast(Any, registry),
         cast(Any, _WorkerRegistryStub()),
         OrchestrationConfig(),
+        Path(tempfile.gettempdir()),
         logging.getLogger("rehydrate-test"),
     )
 

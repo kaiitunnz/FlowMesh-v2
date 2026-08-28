@@ -1,4 +1,6 @@
 import logging
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -83,6 +85,7 @@ def _runtime() -> TaskRuntime:
         cast(Any, registry),
         cast(Any, worker_stub),
         OrchestrationConfig(),
+        Path(tempfile.gettempdir()),
         logging.getLogger("v2-endpoint-test"),
     )
 
