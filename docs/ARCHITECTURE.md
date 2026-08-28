@@ -133,10 +133,8 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   denial records a durable `AuthorityDenied`/`PolicyDenied` that creates no child. An
   early join may release before full closure per its declared rule, with a residual
   policy governing children still running. Scope, loop, and activation budgets bound
-  recursion. When a producer feeding a spawn settles, its result collection drives the
-  child cardinality: each element materializes a dispatchable child that fans out to a
-  worker under the same persist-then-snapshot durability as a static leaf, then the
-  child-init authority seals.
+  recursion. A spawn fans out to one child per element of its producer's result, and
+  each child dispatches to a worker like any other task.
 - **Cancellation.** A `flowmesh/v2` workflow cancels through the orchestration engine as
   a durable semantic event, so the ledger stays consistent with the task records and a
   cancelled workflow survives a restart without re-admitting cancelled work.
@@ -166,9 +164,6 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   `WorkerHardware`. The dispatcher's `_cached_worker_candidates` filters
   to workers whose cache covers the task's references; entries older
   than `WORKER_CACHE_TTL_SEC` are ignored.
-- Task merging, stage stickiness, and context reuse are physical-plan placement
-  mechanisms; the physical execution plan's episode annotations (resource class,
-  liveness) are their eventual home.
 - **Worker capabilities.** Beyond hardware fit, each worker advertises the set
   of task types it can service, and the dispatcher routes a task only to workers
   that advertise its type. A worker advertises a type only when its executor came
