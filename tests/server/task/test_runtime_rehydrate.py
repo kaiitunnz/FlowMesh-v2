@@ -32,7 +32,6 @@ class FakeWorkflowRegistry:
         workflow_id: str,
         tasks: list[Any],
         v2: Any = None,
-        exclude_remaining: Any = frozenset(),
     ) -> None:
         self.workflow_task_ids[workflow_id] = [t.task_id for t in tasks]
         if v2 is not None:
@@ -128,7 +127,11 @@ class FakeWorkflowRegistry:
             self.sched[workflow_id] = sched.model_dump_json()
 
     def commit_dynamic_tasks(
-        self, workflow_id: str, records: Sequence[PersistedTask], snapshot: Any
+        self,
+        workflow_id: str,
+        records: Sequence[PersistedTask],
+        snapshot: Any,
+        retire: Sequence[str] = (),
     ) -> None:
         for item in records:
             self.task_blobs[item.record.task_id] = item.model_dump_json()

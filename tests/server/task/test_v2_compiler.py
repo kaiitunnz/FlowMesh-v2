@@ -160,7 +160,6 @@ class _CapturingRegistry:
         workflow_id: str,
         tasks: list[Any],
         v2: Any = None,
-        exclude_remaining: Any = frozenset(),
     ) -> None:
         self.v2[workflow_id] = v2
 

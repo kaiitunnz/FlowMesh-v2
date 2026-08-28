@@ -111,23 +111,14 @@ class Workflow(BaseModel):
 
 
 def _create_workflow_record(
-    workflow_id: str,
-    tasks: list[TaskRecord],
-    exclude_remaining: "frozenset[str]" = frozenset(),
+    workflow_id: str, tasks: list[TaskRecord]
 ) -> tuple[WorkflowRecord, list[str], list[str]]:
-    """Return (WorkflowRecord, remaining_task_ids, failed_task_ids).
-
-    ``exclude_remaining`` names tasks that carry a record but are never dispatched on
-    their own (a spawn's child template), so they stay in ``task_ids`` for rehydration
-    yet do not hold the workflow short of completion.
-    """
+    """Return (WorkflowRecord, remaining_task_ids, failed_task_ids)"""
     task_ids: list[str] = []
     remaining_tasks: list[str] = []
     failed_tasks: list[str] = []
     for task in tasks:
         task_ids.append(task.task_id)
-        if task.task_id in exclude_remaining:
-            continue
         match task.status:
             case TaskStatus.DONE:
                 continue
@@ -156,10 +147,9 @@ class WorkflowRegistry:
         workflow_id: str,
         tasks: list[TaskRecord],
         v2: PersistedV2Workflow | None = None,
-        exclude_remaining: "frozenset[str]" = frozenset(),
     ) -> None:
         record, remaining_tasks, failed_tasks = _create_workflow_record(
-            workflow_id, tasks, exclude_remaining
+            workflow_id, tasks
         )
         with self._rds.sync.control_pipeline() as pipe:
             pipe.sadd(WORKFLOWS_SET_KEY, workflow_id)
@@ -177,10 +167,9 @@ class WorkflowRegistry:
         workflow_id: str,
         tasks: list[TaskRecord],
         v2: PersistedV2Workflow | None = None,
-        exclude_remaining: "frozenset[str]" = frozenset(),
     ) -> None:
         record, remaining_tasks, failed_tasks = _create_workflow_record(
-            workflow_id, tasks, exclude_remaining
+            workflow_id, tasks
         )
         async with self._rds.asyncio.control_pipeline() as pipe:
             pipe.sadd(WORKFLOWS_SET_KEY, workflow_id)
@@ -343,6 +332,7 @@ class WorkflowRegistry:
         workflow_id: str,
         records: Sequence[PersistedTask],
         snapshot: LedgerSnapshot,
+        retire: Sequence[str] = (),
     ) -> None:
         """Persist newly materialized dynamic-child records with the ledger snapshot.
 
@@ -350,16 +340,23 @@ class WorkflowRegistry:
         that carries their work items commit in one atomic transaction, so a crash can
         never leave the ledger's dynamic children without their durable task records or
         vice versa. The ids join the dynamic-tasks set so restart rehydration reloads
-        them alongside the statically registered tasks.
+        them alongside the statically registered tasks. ``retire`` drops tasks from the
+        remaining set as the spawn seals — the child template that has finished
+        instantiating children and no longer holds the workflow short of completion —
+        so the children replace the template atomically and never leave it transiently
+        empty.
         """
-        if not records:
+        if not records and not retire:
             return
         ids = [item.record.task_id for item in records]
         with self._rds.sync.control_pipeline() as pipe:
             for item in records:
                 pipe.set(task_state_key(item.record.task_id), item.model_dump_json())
-            pipe.sadd(workflow_dynamic_tasks_key(workflow_id), *ids)
-            pipe.sadd(workflow_tasks_key(workflow_id), *ids)
+            if ids:
+                pipe.sadd(workflow_dynamic_tasks_key(workflow_id), *ids)
+                pipe.sadd(workflow_tasks_key(workflow_id), *ids)
+            if retire:
+                pipe.srem(workflow_tasks_key(workflow_id), *retire)
             pipe.set(workflow_ds_key(workflow_id), snapshot.model_dump_json())
             pipe.hset(workflow_key(workflow_id), mapping=_workflow_update())
             pipe.execute()

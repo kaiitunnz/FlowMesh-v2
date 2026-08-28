@@ -20,7 +20,6 @@ class _WorkflowRegistryStub:
         workflow_id: str,
         tasks: list[Any],
         v2: Any = None,
-        exclude_remaining: Any = frozenset(),
     ) -> None:
         return None
 

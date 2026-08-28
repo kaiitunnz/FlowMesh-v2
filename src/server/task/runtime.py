@@ -5,7 +5,7 @@ import logging
 import threading
 import time
 from collections import defaultdict, deque
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -287,13 +287,8 @@ class TaskRuntime:
                     self._workflow_epoch_tasks[workflow_id] = epoch_queue
                     self._workflow_epoch_frontier[workflow_id] = 0
 
-        exclude_remaining = (
-            frozenset(v2_engine.child_template_ids())
-            if v2_engine is not None
-            else frozenset()
-        )
         await self._workflow_registry.register_workflow_async(
-            workflow_id, task_records, v2=v2_bundle, exclude_remaining=exclude_remaining
+            workflow_id, task_records, v2=v2_bundle
         )
 
         with self._cv:
@@ -941,17 +936,23 @@ class TaskRuntime:
         workflow_id: str,
         engine: OrchestrationEngine,
         child_task_ids: list[str],
+        retire: Sequence[str] = (),
     ) -> None:
         """Persist new child records atomically with the ledger snapshot they belong to.
 
         Persisting the child records and the snapshot in one transaction keeps a
         dynamically materialized child from being durably half-recorded — a ledger work
         item without its task record, or a task record with no ledger work item — across
-        a crash.
+        a crash. ``retire`` drops the sealed spawn's child template from the remaining
+        set in the same transaction, so the children replace it without a window in
+        which the workflow reads as complete.
         """
-        if child_task_ids:
+        if child_task_ids or retire:
             self._workflow_registry.commit_dynamic_tasks(
-                workflow_id, self._records_locked(*child_task_ids), engine.to_snapshot()
+                workflow_id,
+                self._records_locked(*child_task_ids),
+                engine.to_snapshot(),
+                retire=retire,
             )
 
     def episode_feasible(self, task_id: str) -> bool:
@@ -1078,11 +1079,13 @@ class TaskRuntime:
         spawn_op = engine.spawn_successor(producer_task_id)
         if spawn_op is None:
             return advance
+        if not engine.spawn_is_open(spawn_op):
+            return advance  # already sealed: a re-driven fan-out is a no-op
         child_template_id = engine.child_template_of(spawn_op)
         template_record = (
             self._tasks.get(child_template_id) if child_template_id else None
         )
-        if template_record is None:
+        if child_template_id is None or template_record is None:
             # Compile-time validation rejects an unresolved or non-leaf child template,
             # so reaching here is an internal inconsistency; fail the workflow rather
             # than defer a join that could never close.
@@ -1119,7 +1122,9 @@ class TaskRuntime:
                 new_children.append(child_task_id)
             advance.extend(child_advance)
         advance.extend(engine.seal_spawn(spawn_op))
-        self._commit_new_children_locked(workflow_id, engine, new_children)
+        self._commit_new_children_locked(
+            workflow_id, engine, new_children, retire=[child_template_id]
+        )
         return advance
 
     def _load_fanout_elements(self, producer_task_id: str) -> list[Any] | None:

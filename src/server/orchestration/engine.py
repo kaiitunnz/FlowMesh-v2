@@ -1767,17 +1767,18 @@ class OrchestrationEngine:
         op = self._operators.get(spawn_op)
         return op.child_template_ref if isinstance(op, SpawnRegion) else None
 
-    def child_template_ids(self) -> set[str]:
-        """Operator ids spawn regions instantiate as child templates.
+    def spawn_is_open(self, spawn_op: str) -> bool:
+        """Whether a spawn's child-init capability still admits new children.
 
-        These leaves dispatch only as materialized children, never on their own, so
-        they are not outstanding workflow work.
+        False once the spawn has sealed or revoked (or has no child-init scope yet), so
+        a re-driven fan-out over an already-closed spawn is a clean no-op.
         """
-        return {
-            op.child_template_ref
-            for op in self._operators.values()
-            if isinstance(op, SpawnRegion) and op.child_template_ref
-        }
+        try:
+            scope_id = self._require_child_init_scope(spawn_op)
+        except RegionError:
+            return False
+        cap = self._capability(scope_id, ProgressAxis.CHILD_INIT)
+        return cap.status is CapabilityStatus.OPEN
 
     def episode_spec(self, task_id: str) -> EpisodeSpec | None:
         """The run-to-yield episode a task's operator lowers to, if the plan cut it."""

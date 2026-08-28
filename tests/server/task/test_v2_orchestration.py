@@ -53,17 +53,24 @@ class FakeRegistry:
         self.v2_blobs: dict[str, str] = {}
         self.ledger_blobs: dict[str, str] = {}
         self.dynamic_task_ids: dict[str, set[str]] = {}
-        self.excluded_remaining: dict[str, set[str]] = {}
+        self.remaining: dict[str, set[str]] = {}
+
+    def remaining_of(self, workflow_id: str) -> set[str]:
+        return set(self.remaining.get(workflow_id, set()))
 
     async def register_workflow_async(
         self,
         workflow_id: str,
         tasks: list[Any],
         v2: Any = None,
-        exclude_remaining: Any = frozenset(),
     ) -> None:
         self.workflow_task_ids[workflow_id] = [t.task_id for t in tasks]
-        self.excluded_remaining[workflow_id] = set(exclude_remaining)
+        self.remaining[workflow_id] = {
+            t.task_id
+            for t in tasks
+            if t.status
+            not in (TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.CANCELLED)
+        }
         if v2 is not None:
             self.v2_blobs[workflow_id] = v2.model_dump_json()
 
@@ -141,6 +148,9 @@ class FakeRegistry:
     ) -> None:
         for item in records:
             self.task_blobs[item.record.task_id] = item.model_dump_json()
+        self.remaining.setdefault(workflow_id, set()).difference_update(
+            {*done, *failed, *cancelled}
+        )
         if sched is not None:
             self.sched[workflow_id] = sched.model_dump_json()
 
@@ -149,12 +159,16 @@ class FakeRegistry:
         workflow_id: str,
         records: Sequence[PersistedTask],
         snapshot: LedgerSnapshot,
+        retire: Sequence[str] = (),
     ) -> None:
+        remaining = self.remaining.setdefault(workflow_id, set())
         for item in records:
             self.task_blobs[item.record.task_id] = item.model_dump_json()
             self.dynamic_task_ids.setdefault(workflow_id, set()).add(
                 item.record.task_id
             )
+            remaining.add(item.record.task_id)
+        remaining.difference_update(retire)
         self.ledger_blobs[workflow_id] = snapshot.model_dump_json()
 
     async def get_dynamic_task_ids_async(self, workflow_id: str) -> set[str]:
@@ -452,10 +466,12 @@ async def test_zero_element_fan_out_seals_and_closes_the_join_empty(
     assert engine is not None
     assert _pop_ready(runtime) == [] and _child_count(engine) == 0
     assert engine.region_closed("collect")
+    # The sealed spawn retires its child template, so a zero-child fan-out completes.
+    assert registry.remaining_of(workflow_id) == set()
 
 
 @pytest.mark.anyio
-async def test_child_template_leaf_is_excluded_from_workflow_remaining(
+async def test_child_template_holds_completion_until_the_spawn_seals(
     tmp_path: Any,
 ) -> None:
     registry = FakeRegistry()
@@ -467,13 +483,28 @@ async def test_child_template_leaf_is_excluded_from_workflow_remaining(
         logging.getLogger("live"),
     )
     workflow_id, ids = await _register(runtime, AUTORESEARCH)
-    engine = runtime.orchestration_engine(workflow_id)
-    assert engine is not None
-    # The spawn's child template is a leaf that only ever runs as a materialized child;
-    # it is named as such and kept out of the workflow's remaining-work accounting, so a
-    # region-bearing workflow can reach terminal completion.
-    assert engine.child_template_ids() == {ids["trial"]}
-    assert registry.excluded_remaining[workflow_id] == {ids["trial"]}
+    planner, trial = ids["planner"], ids["trial"]
+    # The child template is in the remaining set at registration; it only runs as a
+    # materialized child but represents the unsealed spawn until then.
+    assert registry.remaining_of(workflow_id) == {planner, trial}
+
+    # The producer settles before its result is on the node: the fan-out defers. The
+    # template keeps the workflow open — remaining is not empty — so a fan-out-terminal
+    # workflow never reads as done while its children do not yet exist.
+    runtime.mark_dispatched(planner, cast(Any, _worker()))
+    runtime.mark_succeeded(planner, "wkr-1", {}, _TS)
+    assert registry.remaining_of(workflow_id) == {trial}
+
+    # The result lands and the spawn seals: the children replace the retired template
+    # in the remaining set atomically, and the workflow completes once they settle.
+    _write_result(tmp_path, planner, ["h1", "h2", "h3"])
+    runtime.retry_deferred_fanout(planner)
+    rem = registry.remaining_of(workflow_id)
+    assert trial not in rem and len(rem) == 3
+    for child in _pop_ready(runtime):
+        runtime.mark_dispatched(child, cast(Any, _worker()))
+        runtime.mark_succeeded(child, "wkr-1", {}, _TS)
+    assert registry.remaining_of(workflow_id) == set()
 
 
 @pytest.mark.anyio
