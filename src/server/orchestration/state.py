@@ -386,4 +386,5 @@ class LedgerSnapshot(BaseModel):
     result_slots: list[ResultSlot] = Field(default_factory=list)
     result_publications: list[ResultPublication] = Field(default_factory=list)
     trace: list[OrchestrationEvent] = Field(default_factory=list)
+    released_scopes: list[str] = Field(default_factory=list)
     next_seq: int = 0

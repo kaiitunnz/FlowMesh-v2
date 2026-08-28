@@ -226,19 +226,10 @@ class OrchestrationEngine:
                     ),
                     default=0,
                 )
-        # A region's release/egress record is delivered at the root scope; a loop's
-        # feedback records sit at the loop scope, so a root-scope join/loop record marks
-        # the owning scope released, without treating a mid-loop snapshot as egressed.
-        self._released_scopes: set[str] = set()
-        for r in self._records:
-            if r.scope_id != self._root_scope.scope_id:
-                continue
-            if self._kind(r.operator_id) is OperatorKind.JOIN:
-                if (scope_id := self._scope_for_join(r.operator_id)) is not None:
-                    self._released_scopes.add(scope_id)
-            elif self._kind(r.operator_id) is OperatorKind.LOOP_CONTEXT:
-                if (scope_id := self._scope_id_for(r.operator_id)) is not None:
-                    self._released_scopes.add(scope_id)
+        # Released scopes are authoritative scope-level state, restored directly rather
+        # than re-derived from records: a recursive region's levels share one join/loop
+        # operator, so a record could not attribute a release to the right level.
+        self._released_scopes: set[str] = set(snapshot.released_scopes)
         self._denied_spawns = {
             d.operator_id
             for d in self._decisions
@@ -890,11 +881,7 @@ class OrchestrationEngine:
         owner_op = self._scopes[scope_id].owner_operator_id or ""
         join = self._join_of_scope(scope_id)
         if join is not None:
-            outcome = (
-                PublicationOutcome.DECLARED_FAILURE
-                if join.no_winner_failure
-                else PublicationOutcome.EXPLICIT_EMPTY
-            )
+            outcome = self._no_winner_outcome(join)
             release_op = join.operator_id
         elif self._kind(owner_op) is OperatorKind.LOOP_CONTEXT:
             outcome = PublicationOutcome.EXPLICIT_EMPTY
@@ -914,6 +901,8 @@ class OrchestrationEngine:
         )
 
     def _cancel_work_item(self, wi: WorkItem) -> None:
+        # A cancelled in-flight external effect is not compensated here; compensation on
+        # cancel rides with the deferred effect-commit machinery.
         if wi.status in _TERMINAL_WI:
             return
         wi.status = WorkItemStatus.CANCELLED
@@ -1126,12 +1115,7 @@ class OrchestrationEngine:
                 return PublicationOutcome.SUCCESS, (
                     winner.value_ref or ValueRef(kind="join_result")
                 )
-            outcome = (
-                PublicationOutcome.DECLARED_FAILURE
-                if join.no_winner_failure
-                else PublicationOutcome.EXPLICIT_EMPTY
-            )
-            return outcome, ValueRef(kind="empty")
+            return self._no_winner_outcome(join), ValueRef(kind="empty")
         outcomes = [
             self._work_items[self._wi_by_activation[c.activation_id]].outcome
             for c in self._materialized_children(scope_id)
@@ -1139,6 +1123,13 @@ class OrchestrationEngine:
         return (
             self._join_outcome(join, [o for o in outcomes if o is not None]),
             ValueRef(kind="join_result"),
+        )
+
+    def _no_winner_outcome(self, join: JoinRegion) -> PublicationOutcome:
+        return (
+            PublicationOutcome.DECLARED_FAILURE
+            if join.no_winner_failure
+            else PublicationOutcome.EXPLICIT_EMPTY
         )
 
     def _join_outcome(
@@ -1215,15 +1206,15 @@ class OrchestrationEngine:
         cap = self._capabilities.get((scope_id, ProgressAxis.CHILD_INIT))
         if policy is ResidualPolicy.CONTINUE or cap is None:
             return
+        cancel = policy is ResidualPolicy.CANCEL
         if cap.status is CapabilityStatus.OPEN:
-            cancel = policy is ResidualPolicy.CANCEL
             cap.status = CapabilityStatus.REVOKED if cancel else CapabilityStatus.SEALED
             self._emit(
                 "child_init_revoked" if cancel else "child_init_sealed",
                 operator_id=self._scopes[scope_id].owner_operator_id,
                 detail={"scope": scope_id, "residual": policy.value},
             )
-        if policy is ResidualPolicy.CANCEL:
+        if cancel:
             self._cancel_residual_children(scope_id)
 
     def _maybe_egress_loop(self, scope_id: str) -> Advance:
@@ -1634,6 +1625,7 @@ class OrchestrationEngine:
             result_slots=list(self._slots.values()),
             result_publications=list(self._publications.values()),
             trace=list(self._trace),
+            released_scopes=sorted(self._released_scopes),
             next_seq=self._next_seq,
         )
 
