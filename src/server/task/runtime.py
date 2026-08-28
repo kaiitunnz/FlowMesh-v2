@@ -1567,10 +1567,15 @@ class TaskRuntime:
             self._merge_key_by_task.pop(task_id, None)
             self._merge_children_map.pop(task_id, None)
             record.assigned_worker = None
-            if (engine := self._engines.get(record.workflow_id)) is not None:
-                engine.on_cancelled(task_id)
-                self._save_ledger_locked(record.workflow_id)
+            # Persist the task terminal record first, then mirror the cancellation
+            # into the ledger and snapshot last, so the ledger never leads task state.
             self._persist_terminal_locked(task_id, sched=False)
+            if (engine := self._engines.get(record.workflow_id)) is not None:
+                advance = engine.on_cancelled(task_id)
+                assert not (
+                    advance.ready or advance.retry
+                ), "a whole-instance cancel readies no work"
+                self._save_ledger_locked(record.workflow_id)
             return usages
 
     def get_record(self, task_id: str) -> TaskRecord | None:
