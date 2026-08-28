@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from server.app_state import get_runtime
 from server.auth.security import authenticate_connection
+from server.config import OrchestrationConfig
 from server.routers.v1 import workflows as workflows_router
 from server.task.runtime import TaskRuntime
 
@@ -81,6 +82,7 @@ def _runtime() -> TaskRuntime:
     return TaskRuntime(
         cast(Any, registry),
         cast(Any, worker_stub),
+        OrchestrationConfig(),
         logging.getLogger("v2-endpoint-test"),
     )
 

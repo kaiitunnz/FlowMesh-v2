@@ -116,19 +116,23 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
 
 ## Key runtime behavior
 
-- **v2 orchestration ledger (`DS`).** A submission with `apiVersion:
-  flowmesh/v2` compiles to a `PhysicalExecutionPlan` and runs through the durable
-  orchestration ledger (`src/server/orchestration/`, a peer of the dispatcher),
-  which owns semantic readiness: it turns settled records into ready work items
-  over the acyclic compatibility plan, materializing the activation graph as work
-  becomes ready. A ready work item dispatches through the existing
-  `TaskRuntime`/dispatcher, so scheduler placement stays physical and cannot change
-  logical readiness. A retry is a new attempt under the same work item and reuses
-  its `invocation_id`; declared outputs publish idempotently to result slots keyed
-  by `(instance, declaration, logical key)`, and the legacy per-task result adapter
-  resolves the induced `legacy:<task>` slot. The snapshot persists at
-  `workflow:{id}:ds`, after the terminal task records, and `TaskRuntime.rehydrate`
-  rebuilds and reconciles it on restart. A v1 submission keeps the static-DAG path.
+- **v2 orchestration ledger (`DS`).** A `flowmesh/v2` submission compiles to a
+  `PhysicalExecutionPlan` and runs through the durable orchestration engine
+  (`src/server/orchestration/`), which owns semantic readiness: it turns settled
+  records into ready work items over the acyclic plan and dispatches them through the
+  `TaskRuntime`/dispatcher, so placement stays physical. Retries reuse the work item and
+  its `invocation_id`; outputs publish idempotently to logical result slots. The snapshot
+  persists at `workflow:{id}:ds` and `TaskRuntime.rehydrate` rebuilds it on restart; a v1
+  submission keeps the static-DAG path.
+- **Structured dynamic regions.** The engine executes the compiler's semi-static
+  regions: control operators (`Branch`/`Merge`/`Spawn`/`Join`/`LoopContext`) settle
+  in-ledger and never dispatch, while spawn children and loop iterations materialize
+  incrementally by activation identity. A region closes on its child-init and loop-time
+  capability account — sealed or revoked and drained — never on an observed-empty set.
+  Every spawn site mints a monotonically attenuated `DelegatedAuthorityGrant`, and a
+  denial records a durable `AuthorityDenied`/`PolicyDenied` that creates no child. Scope,
+  loop, and activation budgets bound recursion; the REST submit path admits only the
+  acyclic subset, with regions inspect-only there.
 - **Task merging.** Compatible adjacent tasks in a DAG (same `taskType`,
   model, hardware shape, and merge key) coalesce into a single dispatch.
   Merged children ride on `WorkerTaskMessage.merged_children`; the worker

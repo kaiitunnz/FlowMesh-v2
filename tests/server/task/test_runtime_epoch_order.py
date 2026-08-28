@@ -6,6 +6,7 @@ import threading
 from collections.abc import Sequence
 from typing import Any, cast
 
+from server.config import OrchestrationConfig
 from server.registries.workflow import PersistedTask, WorkflowSched
 from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime
@@ -52,6 +53,15 @@ class _WorkerRegistryStub:
         return 0
 
 
+def _runtime(worker_registry: Any = None) -> TaskRuntime:
+    return TaskRuntime(
+        cast(Any, _WorkflowRegistryStub()),
+        cast(Any, worker_registry or _WorkerRegistryStub()),
+        OrchestrationConfig(),
+        logging.getLogger("runtime-test"),
+    )
+
+
 def _register(runtime: TaskRuntime, payload: str) -> tuple[str, dict[str, str]]:
     """Register a workflow and return workflow id and graph-node task ids."""
     workflow_id, results = asyncio.run(
@@ -68,11 +78,7 @@ def test_runtime_epoch_mode_enforces_frontier_order() -> None:
     - in-epoch ordering follows position_in_epoch.
     - frontier advances after all tasks in the epoch complete.
     """
-    runtime = TaskRuntime(
-        cast(Any, _WorkflowRegistryStub()),
-        cast(Any, _WorkerRegistryStub()),
-        logging.getLogger("runtime-test"),
-    )
+    runtime = _runtime()
     payload = """
 apiVersion: mloc/v1
 kind: Workflow
@@ -127,11 +133,7 @@ def test_runtime_unordered_in_epoch_allows_any_order() -> None:
     - frontier gating still applies.
     - tasks inside the epoch can be scheduled in any order.
     """
-    runtime = TaskRuntime(
-        cast(Any, _WorkflowRegistryStub()),
-        cast(Any, _WorkerRegistryStub()),
-        logging.getLogger("runtime-test"),
-    )
+    runtime = _runtime()
     payload = """
 apiVersion: mloc/v1
 kind: Workflow
@@ -173,11 +175,7 @@ def test_runtime_epoch_mode_fails_later_epochs_when_frontier_task_fails() -> Non
     - failure in a frontier epoch fails tasks in later epochs.
     - impacted tasks are marked FAILED with a blocking reason.
     """
-    runtime = TaskRuntime(
-        cast(Any, _WorkflowRegistryStub()),
-        cast(Any, _WorkerRegistryStub()),
-        logging.getLogger("runtime-test"),
-    )
+    runtime = _runtime()
     payload = """
 apiVersion: mloc/v1
 kind: Workflow
@@ -230,11 +228,7 @@ def test_cancel_workflow_marks_dispatched_task_cancelling_and_publishes_interrup
     None
 ):
     worker_registry = _WorkerRegistryStub()
-    runtime = TaskRuntime(
-        cast(Any, _WorkflowRegistryStub()),
-        cast(Any, worker_registry),
-        logging.getLogger("runtime-test"),
-    )
+    runtime = _runtime(worker_registry)
     payload = """
 apiVersion: mloc/v1
 kind: Workflow
@@ -265,11 +259,7 @@ spec:
 
 def test_cancel_workflow_skips_interruptive_cancellation_for_merged_tasks() -> None:
     worker_registry = _WorkerRegistryStub()
-    runtime = TaskRuntime(
-        cast(Any, _WorkflowRegistryStub()),
-        cast(Any, worker_registry),
-        logging.getLogger("runtime-test"),
-    )
+    runtime = _runtime(worker_registry)
     payload = """
 apiVersion: mloc/v1
 kind: Workflow

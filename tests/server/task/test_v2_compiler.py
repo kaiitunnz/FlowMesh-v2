@@ -4,6 +4,7 @@ from typing import Any, cast
 
 import pytest
 
+from server.config import OrchestrationConfig
 from server.task.parser import parse_workflow
 from server.task.runtime import TaskRuntime
 from server.task.v2 import (
@@ -177,6 +178,7 @@ def _runtime() -> TaskRuntime:
     return TaskRuntime(
         cast(Any, _CapturingRegistry()),
         cast(Any, worker_stub),
+        OrchestrationConfig(),
         logging.getLogger("v2-compiler-test"),
     )
 

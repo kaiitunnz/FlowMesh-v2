@@ -33,6 +33,9 @@ listed here is in `.env.example`.
 | `WORKER_CACHE_TTL_SEC` | `3600` | Cache metadata TTL |
 | `ENABLE_STAGE_WEIGHT_STICKINESS` | `false` | Pin stages to checkpoint-producing workers |
 | `TASK_NO_WORKER_GRACE_SEC` | `60` | Grace before failing a task no worker can satisfy |
+| `ORCHESTRATOR_MAX_SCOPE_DEPTH` | `64` | Max nested call/spawn/recursion depth for v2 dynamic regions |
+| `ORCHESTRATOR_MAX_LOOP_ITERATIONS` | `1000` | Max loop iterations per v2 `LoopContext` |
+| `ORCHESTRATOR_MAX_ACTIVATIONS` | `10000` | Max dynamic activations per v2 workflow instance |
 | `ENABLE_WORKER_WATCHDOG` | `true` | Worker death detection |
 | `WORKER_DEATH_GRACE_SEC` | `60` | Grace period before marking dead |
 | `WORKER_REHYDRATION_GRACE_SEC` | `120` | Extra grace for a worker's rehydrated in-flight tasks after the root restarts, before the watchdog may reclaim them |

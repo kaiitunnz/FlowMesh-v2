@@ -1,16 +1,16 @@
 """Durable orchestration-ledger (`DS`) state objects.
 
-These model the semantic hierarchy of note 21 §7: a workflow instance owns result
-slots and activations; an activation owns records, continuations, and work items; a
-work item owns an optional invocation and one or more physical attempts. The ledger
-persists grant/policy identity and authorization decisions, never bearer credentials,
-and links to the separate control facts (`CS`) only through a stable
-``invocation_id``.
+These model the durable semantic hierarchy: a workflow instance owns result
+slots and activations; an activation owns records, continuations, work items, and its
+scope's progress capabilities; a work item owns an optional invocation and one or more
+physical attempts. The ledger persists grant/policy identity and authorization
+decisions, never bearer credentials, and links to the separate control facts (`CS`)
+only through a stable ``invocation_id``.
 
-A few fields of the note-21 object set — a grant's ``delegate`` face and ``epoch``, a
-``Scope.parent_scope_id``, an ``Activation.kind`` beyond ``leaf``, and a
-``Record.loop_time`` beyond zero — carry no meaning in the acyclic subset; they are
-part of the durable object set but the acyclic path never sets them off their default.
+Structured dynamic regions populate the lineage fields the acyclic subset leaves at
+their defaults: a child ``Scope.parent_scope_id`` and ``depth``, an ``Activation``'s
+``kind``/``loop_time``/``child_index``, a grant's ``delegate`` face and ``epoch``, and
+per-scope ``ProgressCapability`` accounting on the child-init and loop-time axes.
 """
 
 from enum import StrEnum
@@ -20,6 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from ..task.v2.representations.operators import (
     EffectClass,
     EffectReplayContract,
+    ModelRef,
     RecoveryClass,
 )
 from ..utils.time import now_iso
@@ -56,6 +57,7 @@ class InvocationState(StrEnum):
     ACKNOWLEDGED = "acknowledged"
     TERMINAL = "terminal"
     UNCERTAIN = "uncertain"
+    COMPENSATION_REQUIRED = "compensation_required"  # compensable effect left uncertain
     AMBIGUITY_TERMINAL = "ambiguity_terminal"
 
 
@@ -75,19 +77,50 @@ class RecoveryDisposition(StrEnum):
 
 
 class AuthorityDecisionKind(StrEnum):
-    """Result of validating a pinned grant before an invocation."""
+    """Result of validating a pinned grant before an invocation or child scope."""
 
     GRANTED = "granted"
     DENIED = "denied"
 
 
+class DenialKind(StrEnum):
+    """Why a definitive dynamic authorization failed, distinct from admission outcomes.
+
+    A denial creates neither a child activation nor a resident claim, and is separate
+    from quota/rate/capacity/transport outcomes.
+    """
+
+    AUTHORITY = "authority"  # interface outside the effective grant's invoke/delegate
+    POLICY = "policy"  # blocked by the pinned policy envelope
+
+
+class ProgressAxis(StrEnum):
+    """The axis of a scope's outstanding-capability account."""
+
+    CHILD_INIT = "child_init"  # whether a spawn producer can still introduce a child
+    LOOP_TIME = "loop_time"  # feedback that can still arrive at a loop coordinate
+
+
+class CapabilityStatus(StrEnum):
+    """Lifecycle of a progress capability."""
+
+    OPEN = "open"  # more records may still arrive on this axis
+    SEALED = "sealed"  # producer will emit no more; drains as outstanding settles
+    REVOKED = "revoked"  # cancellation withdrew the capability
+
+
 class ValueRef(BaseModel):
-    """A durable reference to a logical output value, never the value itself."""
+    """A durable reference to a logical output value, never the value itself.
+
+    A loop-carried value may reference a versioned ``ModelRef`` so an iteration pins the
+    model version it observes without pinning a physical replica.
+    """
 
     model_config = ConfigDict(frozen=True)
 
-    kind: str  # "legacy_task_result" | "empty"
+    kind: str  # "legacy_task_result" | "empty" | "join_result" | "model_ref"
     legacy_task_id: str | None = None
+    model_ref: ModelRef | None = None
 
 
 class AuthorityGrant(BaseModel):
@@ -103,15 +136,39 @@ class AuthorityGrant(BaseModel):
     epoch: int = 0
 
 
-class AuthorityDecision(BaseModel):
-    """A durable grant-check fact recorded before (or denying) an invocation."""
+class DelegatedAuthorityGrant(BaseModel):
+    """A child scope's grant, minted at a spawn site and attenuated by its parent.
+
+    Both faces are bounded by the parent delegate face, the child region's ceiling, the
+    spawn-site restriction, and the policy envelope. Snapshotted at child creation with
+    its own epoch — grant minting/revocation is distinct from child-init sealing.
+    """
 
     model_config = ConfigDict(frozen=True)
 
-    work_item_id: str
+    grant_id: str
+    instance_id: str
+    scope_id: str
+    parent_grant_id: str
+    policy_id: str
+    invoke: tuple[str, ...] = ()
+    delegate: tuple[str, ...] = ()
+    epoch: int = 0
+    revoked: bool = False
+
+
+class AuthorityDecision(BaseModel):
+    """A durable grant-check fact recorded before or denying an invocation or spawn."""
+
+    model_config = ConfigDict(frozen=True)
+
     grant_id: str
     interface: str
     kind: AuthorityDecisionKind
+    work_item_id: str | None = None
+    operator_id: str | None = None  # the spawn/agent site, for a dynamic denial
+    scope_id: str | None = None
+    denial_kind: DenialKind | None = None
     reason: str | None = None
     at: str = Field(default_factory=now_iso)
 
@@ -137,7 +194,10 @@ class Scope(BaseModel):
 
     scope_id: str
     instance_id: str
-    parent_scope_id: str | None = None
+    parent_scope_id: str | None = None  # None for the root scope
+    owner_operator_id: str | None = None  # spawn/call/loop that opened it; None at root
+    grant_id: str | None = None  # the scope's effective (delegated) grant
+    depth: int = 0  # bounds recursion
 
 
 class Activation(BaseModel):
@@ -147,9 +207,11 @@ class Activation(BaseModel):
 
     activation_id: str
     instance_id: str
-    scope_id: str
+    scope_id: str  # with loop_time/child_index, separates child vs iteration vs call
     operator_id: str
     kind: str = "leaf"
+    loop_time: int = 0  # orders loop-body re-materializations
+    child_index: int | None = None  # distinguishes spawned siblings
 
 
 class Record(BaseModel):
@@ -169,6 +231,24 @@ class Continuation(BaseModel):
 
     work_item_id: str
     waiting_on: set[str] = Field(default_factory=set)  # operator ids not settled
+
+
+class ProgressCapability(BaseModel):
+    """One scope's outstanding-capability account on a single progress axis."""
+
+    scope_id: str
+    axis: ProgressAxis
+    coordinate: int | None = None  # loop_time for the LOOP_TIME axis
+    outstanding: int = 0  # records that can still arrive on this axis
+    status: CapabilityStatus = CapabilityStatus.OPEN
+
+    # Closure needs a sealed or revoked capability drained to zero, never an empty set.
+    @property
+    def closed(self) -> bool:
+        return (
+            self.status in (CapabilityStatus.SEALED, CapabilityStatus.REVOKED)
+            and self.outstanding == 0
+        )
 
 
 class WorkItem(BaseModel):
@@ -203,6 +283,7 @@ class Invocation(BaseModel):
     work_item_id: str
     state: InvocationState = InvocationState.ISSUED
     replayable: bool = True
+    compensable: bool = False
 
 
 class Attempt(BaseModel):
@@ -242,13 +323,16 @@ class ResultSlot(BaseModel):
     instance_id: str
     output_id: str
     source_operator_id: str
+    scope_id: str | None = None
+    logical_key: str | None = None  # collection key for a keyed-collection output
     sequence: int | None = None
     published: bool = False
 
     @property
     def slot_key(self) -> str:
+        key = "" if self.logical_key is None else f":{self.logical_key}"
         seq = "" if self.sequence is None else f"#{self.sequence}"
-        return f"{self.instance_id}:{self.output_id}{seq}"
+        return f"{self.instance_id}:{self.output_id}{key}{seq}"
 
 
 class ResultPublication(BaseModel):
@@ -285,6 +369,7 @@ class LedgerSnapshot(BaseModel):
     instance: WorkflowInstance
     root_scope: Scope
     root_grant: AuthorityGrant
+    scopes: list[Scope] = Field(default_factory=list)
     activations: list[Activation] = Field(default_factory=list)
     work_items: list[WorkItem] = Field(default_factory=list)
     continuations: list[Continuation] = Field(default_factory=list)
@@ -293,6 +378,8 @@ class LedgerSnapshot(BaseModel):
     attempts: list[Attempt] = Field(default_factory=list)
     effect_receipts: list[EffectReceipt] = Field(default_factory=list)
     authority_decisions: list[AuthorityDecision] = Field(default_factory=list)
+    delegated_grants: list[DelegatedAuthorityGrant] = Field(default_factory=list)
+    progress_capabilities: list[ProgressCapability] = Field(default_factory=list)
     result_slots: list[ResultSlot] = Field(default_factory=list)
     result_publications: list[ResultPublication] = Field(default_factory=list)
     trace: list[OrchestrationEvent] = Field(default_factory=list)

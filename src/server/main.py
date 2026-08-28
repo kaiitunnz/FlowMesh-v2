@@ -116,7 +116,9 @@ LOG_ARCHIVER = None
 if IS_ROOT_NODE:
     WORKFLOW_REGISTRY = WorkflowRegistry(REDIS_CLIENT)
     WORKER_REGISTRY = WorkerRegistry(REDIS_CLIENT)
-    RUNTIME = TaskRuntime(WORKFLOW_REGISTRY, WORKER_REGISTRY, logger)
+    RUNTIME = TaskRuntime(
+        WORKFLOW_REGISTRY, WORKER_REGISTRY, config.orchestration, logger
+    )
 
     DISPATCHER = create_dispatcher(
         config.dispatch,

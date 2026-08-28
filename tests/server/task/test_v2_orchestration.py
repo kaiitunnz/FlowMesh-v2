@@ -8,9 +8,10 @@ from typing import Any, cast
 
 import pytest
 
+from server.config import OrchestrationConfig
 from server.orchestration import (
     InvocationState,
-    OrchestrationLedger,
+    OrchestrationEngine,
     PublicationOutcome,
     RecoveryDisposition,
 )
@@ -144,6 +145,7 @@ def _runtime(registry: FakeRegistry) -> TaskRuntime:
     return TaskRuntime(
         cast(Any, registry),
         cast(Any, _WorkerRegistryStub()),
+        OrchestrationConfig(),
         logging.getLogger("v2-test"),
     )
 
@@ -258,19 +260,23 @@ def test_uncertain_non_replayable_is_ambiguity_terminal() -> None:
     )
 
 
-def test_admission_rejects_non_replayable_and_residency() -> None:
-    with pytest.raises(AdmissionError):
-        check_admissible(
-            "op",
-            EffectClass.EXTERNAL_EFFECT,
-            EffectReplayContract.AMBIGUITY_TERMINAL,
-            False,
-        )
+def test_admission_rejects_residency_and_private_state() -> None:
     with pytest.raises(AdmissionError):
         check_admissible("op", EffectClass.PRIVATE_STATE, None, False)
     with pytest.raises(AdmissionError):
         check_admissible("op", EffectClass.PURE, None, residency_only=True)
     check_admissible("op", EffectClass.PURE, None, False)  # effect-free is admissible
+    # An external effect of any replay contract is admitted; its uncertainty is handled
+    # by the FSM without inferring success.
+    check_admissible(
+        "op",
+        EffectClass.EXTERNAL_EFFECT,
+        EffectReplayContract.AMBIGUITY_TERMINAL,
+        False,
+    )
+    check_admissible(
+        "op", EffectClass.EXTERNAL_EFFECT, EffectReplayContract.COMPENSABLE, False
+    )
 
 
 def test_classify_recovery_pure_deterministic_pinned_recomputes() -> None:
@@ -288,11 +294,11 @@ def test_classify_recovery_pure_deterministic_pinned_recomputes() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Ledger construction and admission
+# Engine construction and admission
 # --------------------------------------------------------------------------- #
 
 
-def test_effectful_plan_is_rejected_at_build() -> None:
+def test_effectful_plan_builds_and_is_admitted() -> None:
     text = """
 apiVersion: flowmesh/v2
 kind: Workflow
@@ -306,12 +312,15 @@ spec:
           api: {url: 'http://x', method: GET}
 """
     bundle = _bundle(text)
-    with pytest.raises(AdmissionError):
-        OrchestrationLedger.build("wfl-x", "owner", "org", bundle)
+    # An external effect (ambiguity-terminal by default) builds; its uncertainty is
+    # handled by the FSM rather than rejected at admission.
+    led = OrchestrationEngine.build("wfl-x", "owner", "org", bundle)
+    caller = bundle.template.operators[0].operator_id
+    assert led.work_item(caller) is not None
 
 
 def test_identity_hierarchy_is_one_per_operator() -> None:
-    led = OrchestrationLedger.build("wfl-x", "owner", "org", _bundle(DIAMOND))
+    led = OrchestrationEngine.build("wfl-x", "owner", "org", _bundle(DIAMOND))
     snap = led.to_snapshot()
     # activation -> work item -> continuation, one each per result-owning operator.
     assert len(snap.activations) == 4
@@ -338,8 +347,8 @@ async def test_linear_dag_runs_via_v2_path_with_same_dependency_semantics() -> N
     # Dependency order preserved: a before b before c.
     assert order == [ids["a"], ids["b"], ids["c"]]
 
-    ledger = runtime.orchestration_ledger(workflow_id)
-    assert ledger is not None
+    engine = runtime.orchestration_engine(workflow_id)
+    assert engine is not None
     for name in ("a", "b", "c"):
         pub = runtime.resolve_v2_legacy_result(workflow_id, ids[name])
         assert pub is not None
@@ -354,7 +363,7 @@ async def test_linear_dag_runs_via_v2_path_with_same_dependency_semantics() -> N
     assert by_output is not None and by_output.outcome is PublicationOutcome.SUCCESS
 
     # The contract-relevant trace records the semantic seams for inspection.
-    kinds = {kind for kind, _ in ledger.contract_trace()}
+    kinds = {kind for kind, _ in engine.contract_trace()}
     assert {
         "work_item_ready",
         "attempt_issued",
@@ -445,12 +454,12 @@ async def test_retry_creates_new_attempt_same_work_item_and_invocation() -> None
 
     assert runtime.next_ready(stop, timeout=0.01) == a
     runtime.mark_dispatched(a, cast(Any, _worker()))
-    ledger = runtime.orchestration_ledger(workflow_id)
-    assert ledger is not None
-    wi = ledger.work_item(a)
+    engine = runtime.orchestration_engine(workflow_id)
+    assert engine is not None
+    wi = engine.work_item(a)
     assert wi is not None
     work_item_id = wi.work_item_id
-    invocation_id = ledger.invocation_for_task(a).invocation_id  # type: ignore[union-attr]
+    invocation_id = engine.invocation_for_task(a).invocation_id  # type: ignore[union-attr]
 
     # A retryable failure requeues the SAME task as a fresh attempt.
     runtime.mark_pending(a, increment_retry=True)
@@ -459,14 +468,14 @@ async def test_retry_creates_new_attempt_same_work_item_and_invocation() -> None
     runtime.mark_dispatched(a, cast(Any, _worker("wkr-2")))
     runtime.mark_succeeded(a, "wkr-2", {}, "2026-06-01T00:00:00Z")
 
-    snap = ledger.to_snapshot()
+    snap = engine.to_snapshot()
     same_wi = [w for w in snap.work_items if w.legacy_task_id == a]
     assert len(same_wi) == 1  # no new logical work item
     assert same_wi[0].work_item_id == work_item_id
     attempts = [att for att in snap.attempts if att.work_item_id == work_item_id]
     assert len(attempts) == 2  # retry created a second physical attempt
     # The stable invocation identity is reused across attempts.
-    assert ledger.invocation_for_task(a).invocation_id == invocation_id  # type: ignore[union-attr]
+    assert engine.invocation_for_task(a).invocation_id == invocation_id  # type: ignore[union-attr]
 
 
 @pytest.mark.anyio
@@ -485,7 +494,7 @@ async def test_declared_output_one_publication_across_retries() -> None:
     runtime.mark_dispatched(a, cast(Any, _worker("wkr-2")))
     runtime.mark_succeeded(a, "wkr-2", {}, "2026-06-01T00:00:00Z")
 
-    snap = runtime.orchestration_ledger(workflow_id).to_snapshot()  # type: ignore[union-attr]
+    snap = runtime.orchestration_engine(workflow_id).to_snapshot()  # type: ignore[union-attr]
     pubs = [p for p in snap.result_publications if p.output_id == f"legacy:{a}"]
     assert len(pubs) == 1
     assert pubs[0].outcome is PublicationOutcome.SUCCESS
@@ -534,8 +543,8 @@ async def test_lost_ack_replayable_retried_through_stable_invocation() -> None:
 
     runtime.next_ready(stop, timeout=0.01)
     runtime.mark_dispatched(a, cast(Any, _worker()))
-    ledger = runtime.orchestration_ledger(workflow_id)
-    invocation_id = ledger.invocation_for_task(a).invocation_id  # type: ignore[union-attr]
+    engine = runtime.orchestration_engine(workflow_id)
+    invocation_id = engine.invocation_for_task(a).invocation_id  # type: ignore[union-attr]
 
     # A lost acknowledgement for a replayable (pure) invocation: reissued through the
     # same invocation identity, not reported as success.
@@ -544,7 +553,7 @@ async def test_lost_ack_replayable_retried_through_stable_invocation() -> None:
     assert runtime.resolve_v2_legacy_result(workflow_id, a) is None  # not published
     assert runtime.next_ready(stop, timeout=0.01) == a
     runtime.mark_dispatched(a, cast(Any, _worker("wkr-2")))
-    assert ledger.invocation_for_task(a).invocation_id == invocation_id  # type: ignore[union-attr]
+    assert engine.invocation_for_task(a).invocation_id == invocation_id  # type: ignore[union-attr]
 
 
 @pytest.mark.anyio
@@ -557,8 +566,8 @@ async def test_worker_loss_recovery_routes_through_uncertainty_fsm() -> None:
 
     runtime.next_ready(stop, timeout=0.01)
     runtime.mark_dispatched(a, cast(Any, _worker("wkr-dead")))
-    ledger = runtime.orchestration_ledger(workflow_id)
-    invocation_id = ledger.invocation_for_task(a).invocation_id  # type: ignore[union-attr]
+    engine = runtime.orchestration_engine(workflow_id)
+    invocation_id = engine.invocation_for_task(a).invocation_id  # type: ignore[union-attr]
 
     # The worker departs: recovery resolves the in-flight v2 work item through the
     # uncertainty FSM itself, so it is not returned for a synthetic failure.
@@ -566,7 +575,7 @@ async def test_worker_loss_recovery_routes_through_uncertainty_fsm() -> None:
     assert runtime.get_record(a).status == TaskStatus.PENDING  # type: ignore[union-attr]
     assert runtime.next_ready(stop, timeout=0.01) == a
     runtime.mark_dispatched(a, cast(Any, _worker("wkr-2")))
-    assert ledger.invocation_for_task(a).invocation_id == invocation_id  # type: ignore[union-attr]
+    assert engine.invocation_for_task(a).invocation_id == invocation_id  # type: ignore[union-attr]
 
 
 # --------------------------------------------------------------------------- #
@@ -595,7 +604,7 @@ async def test_rehydration_heals_when_ledger_snapshot_lags_terminal_records() ->
     await restored.rehydrate()
     # Rehydration reconciles the lagging ledger from terminal task facts: all three
     # settle declared-failure exactly once, and nothing is left ready.
-    snap = restored.orchestration_ledger(workflow_id).to_snapshot()  # type: ignore[union-attr]
+    snap = restored.orchestration_engine(workflow_id).to_snapshot()  # type: ignore[union-attr]
     for name in (a, b, c):
         assert restored.get_record(name).status == TaskStatus.FAILED  # type: ignore[union-attr]
         pub = restored.resolve_v2_legacy_result(workflow_id, name)
@@ -651,11 +660,11 @@ async def test_rehydration_preserves_publications_without_duplication() -> None:
 
     restored = _runtime(registry)
     assert await restored.rehydrate() == 1
-    ledger = restored.orchestration_ledger(workflow_id)
-    assert ledger is not None
+    engine = restored.orchestration_engine(workflow_id)
+    assert engine is not None
 
     # a's publication is restored exactly once; the settled attempt is not re-run.
-    snap = ledger.to_snapshot()
+    snap = engine.to_snapshot()
     assert (
         len([p for p in snap.result_publications if p.output_id == f"legacy:{a}"]) == 1
     )
@@ -739,7 +748,7 @@ spec:
     template = bundle.template.model_copy(update={"effect_boundaries": boundaries})
     bundle = bundle.model_copy(update={"template": template})
 
-    led = OrchestrationLedger.build(
+    led = OrchestrationEngine.build(
         "wfl-x", "owner", "org", bundle, granted_interfaces=frozenset()
     )
     snap = led.to_snapshot()

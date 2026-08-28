@@ -35,6 +35,7 @@ from server.auth.security import (
     require_permission,
     resolve_accessible_ids,
 )
+from server.config import OrchestrationConfig
 from server.hooks import (
     IDENTITY_PROVIDERS,
     PERMISSION_CHECKERS,
@@ -535,6 +536,7 @@ def _make_runtime_with_record(task_id: str) -> tuple[TaskRuntime, TaskRecord]:
     runtime = TaskRuntime(
         workflow_registry=MagicMock(),
         worker_registry=MagicMock(),
+        orchestration=OrchestrationConfig(),
         logger=logging.getLogger("test.supplier"),
     )
     env = TaskEnvelopeTemplate.model_validate(

@@ -273,6 +273,21 @@ class LogStreamConfig:
 
 
 @dataclass
+class OrchestrationConfig:
+    max_scope_depth: int | None = None
+    max_loop_iterations: int | None = None
+    max_activations: int | None = None
+
+    @classmethod
+    def from_env(cls) -> "OrchestrationConfig":
+        return cls(
+            max_scope_depth=parse_int_env("ORCHESTRATOR_MAX_SCOPE_DEPTH"),
+            max_loop_iterations=parse_int_env("ORCHESTRATOR_MAX_LOOP_ITERATIONS"),
+            max_activations=parse_int_env("ORCHESTRATOR_MAX_ACTIVATIONS"),
+        )
+
+
+@dataclass
 class ServerConfig:
     logging: LoggingConfig
     redis: RedisConfig
@@ -285,6 +300,7 @@ class ServerConfig:
     metrics: MetricsConfig
     worker_management: WorkerManagementConfig
     log_stream: LogStreamConfig
+    orchestration: OrchestrationConfig
     results_dir: Path = Path("./results")
     plugins: list[str] = field(default_factory=list)
 
@@ -312,6 +328,7 @@ class ServerConfig:
             metrics=MetricsConfig.from_env(results_dir),
             worker_management=WorkerManagementConfig.from_env(),
             log_stream=LogStreamConfig.from_env(),
+            orchestration=OrchestrationConfig.from_env(),
             results_dir=results_dir,
             plugins=plugins,
         )

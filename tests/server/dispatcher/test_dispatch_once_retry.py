@@ -5,6 +5,7 @@ import logging
 from typing import Any, cast
 from unittest import mock
 
+from server.config import OrchestrationConfig
 from server.task.runtime import TaskRuntime
 from tests.server.dispatcher.helpers import (
     CapturingDispatcher,
@@ -34,6 +35,7 @@ def _setup(
     runtime = TaskRuntime(
         cast(Any, WorkflowRegistryStub()),
         cast(Any, mock.Mock()),
+        OrchestrationConfig(),
         logging.getLogger("test_dispatch_once_retry"),
     )
     _, results = asyncio.run(
