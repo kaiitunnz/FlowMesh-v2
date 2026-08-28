@@ -29,6 +29,7 @@ from server.task.v2.representations.operators import (
     EffectReplayContract,
     InputProvenanceKind,
     JoinCompletion,
+    JoinPredicate,
     JoinRegion,
     LeafOperator,
     LeafProfile,
@@ -482,6 +483,32 @@ def test_uncertain_compensable_effect_is_compensation_required() -> None:
     assert pub is not None and pub.outcome is PublicationOutcome.DECLARED_FAILURE
 
 
+def test_replayable_effect_reissues_same_invocation_and_records_one_receipt() -> None:
+    leaf, boundary = _external_leaf("eff", EffectReplayContract.REPLAYABLE_DEDUP)
+    eng = _engine(
+        _bundle(
+            [leaf], [], results=(_decl("legacy:eff", "eff"),), boundaries=(boundary,)
+        )
+    )
+    eng.on_dispatched("eff", None)
+    invocation = eng.invocation_for_task("eff")
+    assert invocation is not None
+    invocation_id = invocation.invocation_id
+    eng.on_started("eff")
+    adv = eng.on_uncertain("eff")  # a replayable effect reissues, never infers success
+    assert adv.retry == ["eff"] and adv.failed == []
+    eng.on_dispatched("eff", None)  # reissue as a fresh attempt under the same identity
+    assert eng.invocation_for_task("eff").invocation_id == invocation_id  # type: ignore[union-attr]
+    eng.on_succeeded("eff")
+    snap = eng.to_snapshot()
+    wi = eng.work_item("eff")
+    assert wi is not None
+    receipts = [r for r in snap.effect_receipts if r.work_item_id == wi.work_item_id]
+    assert len(receipts) == 1  # the recorded outcome is preserved exactly once
+    pub = eng.resolve_legacy_task("eff")
+    assert pub is not None and pub.outcome is PublicationOutcome.SUCCESS
+
+
 def test_uncertain_ambiguity_terminal_effect_never_succeeds() -> None:
     leaf, boundary = _external_leaf("eff", EffectReplayContract.AMBIGUITY_TERMINAL)
     eng = _engine(_bundle([leaf], [], boundaries=(boundary,)))
@@ -706,3 +733,367 @@ def _collection_publications(
         for pub in snap.result_publications
         if pub.slot_key == slot.slot_key
     ]
+
+
+# --------------------------------------------------------------------------- #
+# Early-join completion (any / first-k / predicate)
+# --------------------------------------------------------------------------- #
+
+
+def _early_join(
+    completion: JoinCompletion,
+    *,
+    first_k: int | None = None,
+    predicate: JoinPredicate | None = None,
+    residual: str = "continue",
+    no_winner_failure: bool = False,
+) -> PersistedV2Workflow:
+    spawn = SpawnRegion(operator_id="S", source_ref="S", child_template_ref="body")
+    join = JoinRegion(
+        operator_id="J",
+        source_ref="J",
+        completion=completion,
+        residual_policy=residual,
+        first_k=first_k,
+        predicate=predicate,
+        no_winner_failure=no_winner_failure,
+    )
+    return _bundle(
+        [spawn, join, _leaf("body")],
+        [TemplateEdge(from_op="S", to_op="J")],
+        results=(_decl("out:J", "J", release=ReleaseConditionKind.JOIN_WINNER),),
+    )
+
+
+def _value(tag: str) -> ValueRef:
+    return ValueRef(kind="legacy_task_result", legacy_task_id=tag)
+
+
+def _child_status(eng: OrchestrationEngine, activation_id: str) -> str:
+    snap = eng.to_snapshot()
+    wi = next(w for w in snap.work_items if w.activation_id == activation_id)
+    return wi.status.value
+
+
+def test_any_join_releases_on_first_qualifier_and_ignores_residual() -> None:
+    eng = _engine(_early_join(JoinCompletion.ANY, residual="continue"))
+    a = eng.spawn_child("S")
+    b = eng.spawn_child("S")
+    eng.settle_child(a, value_ref=_value("a"))
+    # An early join releases before the producer seals, on the first qualifier.
+    assert eng.region_closed("J")
+    pub = eng.resolve_output("out:J")
+    assert pub is not None and pub.outcome is PublicationOutcome.SUCCESS
+    assert pub.value_ref is not None and pub.value_ref.legacy_task_id == "a"
+    # A residual child keeps settling into the ledger but never becomes the output.
+    eng.settle_child(b, value_ref=_value("b"))
+    again = eng.resolve_output("out:J")
+    assert again is not None and again.value_ref is not None
+    assert again.value_ref.legacy_task_id == "a"
+
+
+def test_first_k_releases_at_threshold_with_lowest_index_winner() -> None:
+    eng = _engine(_early_join(JoinCompletion.FIRST_K, first_k=2, residual="continue"))
+    eng.spawn_child("S")  # index 0, never settles
+    b = eng.spawn_child("S")  # index 1
+    c = eng.spawn_child("S")  # index 2
+    eng.settle_child(c, value_ref=_value("c"))
+    assert not eng.region_closed("J")  # one qualifier, threshold is two
+    eng.settle_child(b, value_ref=_value("b"))
+    assert eng.region_closed("J")
+    pub = eng.resolve_output("out:J")
+    # Winner is the lowest child_index among the qualifiers {b: 1, c: 2}.
+    assert pub is not None and pub.value_ref is not None
+    assert pub.value_ref.legacy_task_id == "b"
+
+
+def test_predicate_monotone_releases_on_witness() -> None:
+    eng = _engine(
+        _early_join(
+            JoinCompletion.PREDICATE,
+            predicate=JoinPredicate(min_qualifiers=2, monotone=True),
+            residual="drain",
+        )
+    )
+    a = eng.spawn_child("S")
+    b = eng.spawn_child("S")
+    eng.spawn_child("S")
+    eng.settle_child(a)
+    assert not eng.region_closed("J")
+    eng.settle_child(b)
+    assert eng.region_closed("J")  # monotone witness at the threshold releases
+
+
+def test_predicate_non_monotone_waits_for_frontier_closure() -> None:
+    eng = _engine(
+        _early_join(
+            JoinCompletion.PREDICATE,
+            predicate=JoinPredicate(min_qualifiers=2, monotone=False),
+            residual="continue",
+        )
+    )
+    a = eng.spawn_child("S")
+    b = eng.spawn_child("S")
+    eng.settle_child(a)
+    eng.settle_child(b)
+    # A non-monotone predicate never releases early even once its threshold is met.
+    assert not eng.region_closed("J")
+    eng.seal_spawn("S")
+    assert eng.region_closed("J")  # evaluated once at frontier closure
+    pub = eng.resolve_output("out:J")
+    assert pub is not None and pub.outcome is PublicationOutcome.SUCCESS
+
+
+def test_early_join_no_winner_is_explicit_empty() -> None:
+    eng = _engine(_early_join(JoinCompletion.ANY, residual="continue"))
+    a = eng.spawn_child("S")
+    eng.settle_child(a, outcome=PublicationOutcome.DECLARED_FAILURE)
+    assert not eng.region_closed("J")  # a failed child is not a qualifier
+    eng.seal_spawn("S")
+    assert eng.region_closed("J")
+    pub = eng.resolve_output("out:J")
+    assert pub is not None and pub.outcome is PublicationOutcome.EXPLICIT_EMPTY
+
+
+def test_early_join_no_winner_declared_failure_when_opted_in() -> None:
+    eng = _engine(
+        _early_join(JoinCompletion.ANY, residual="continue", no_winner_failure=True)
+    )
+    a = eng.spawn_child("S")
+    eng.settle_child(a, outcome=PublicationOutcome.DECLARED_FAILURE)
+    eng.seal_spawn("S")
+    pub = eng.resolve_output("out:J")
+    assert pub is not None and pub.outcome is PublicationOutcome.DECLARED_FAILURE
+
+
+def test_residual_continue_leaves_child_init_open() -> None:
+    eng = _engine(_early_join(JoinCompletion.ANY, residual="continue"))
+    a = eng.spawn_child("S")
+    eng.settle_child(a, value_ref=_value("a"))
+    cap = eng.capability(eng.scope_for("S"), ProgressAxis.CHILD_INIT)
+    assert cap is not None and cap.status is CapabilityStatus.OPEN
+    late = eng.spawn_child("S")  # a late child is still legal under continue
+    eng.settle_child(late, value_ref=_value("late"))
+    pub = eng.resolve_output("out:J")
+    assert pub is not None and pub.value_ref is not None
+    assert pub.value_ref.legacy_task_id == "a"  # residual never overtakes the winner
+
+
+def test_residual_drain_seals_child_init() -> None:
+    eng = _engine(_early_join(JoinCompletion.ANY, residual="drain"))
+    a = eng.spawn_child("S")
+    b = eng.spawn_child("S")
+    eng.settle_child(a)
+    cap = eng.capability(eng.scope_for("S"), ProgressAxis.CHILD_INIT)
+    assert cap is not None and cap.status is CapabilityStatus.SEALED
+    with pytest.raises(RegionError):
+        eng.spawn_child("S")  # no new child after a drain seal
+    eng.settle_child(b)  # a materialized residual still settles
+
+
+def test_residual_cancel_revokes_and_cancels_residual_children() -> None:
+    eng = _engine(_early_join(JoinCompletion.ANY, residual="cancel"))
+    a = eng.spawn_child("S")
+    b = eng.spawn_child("S")
+    eng.settle_child(a)
+    cap = eng.capability(eng.scope_for("S"), ProgressAxis.CHILD_INIT)
+    assert cap is not None and cap.status is CapabilityStatus.REVOKED
+    assert _child_status(eng, b) == "cancelled"  # residual child withdrawn
+    assert _child_status(eng, a) == "settled"  # the qualifier stands
+
+
+# --------------------------------------------------------------------------- #
+# Recursive-region entry
+# --------------------------------------------------------------------------- #
+
+
+def _recursive_bundle() -> PersistedV2Workflow:
+    spawn = SpawnRegion(operator_id="R", source_ref="R", child_template_ref="leaf")
+    join = JoinRegion(
+        operator_id="Rj", source_ref="Rj", completion=JoinCompletion.ALL_SETTLED
+    )
+    return _bundle(
+        [spawn, join, _leaf("leaf")],
+        [TemplateEdge(from_op="R", to_op="Rj")],
+        results=(_decl("out:Rj", "Rj", release=ReleaseConditionKind.SCOPE_CLOSED),),
+    )
+
+
+def test_recursion_nests_scopes_at_increasing_depth() -> None:
+    eng = _engine(_recursive_bundle(), budget=ScopeBudget(max_scope_depth=4))
+    lvl2 = eng.spawn_child("R", operator_id="R")  # re-enters R one level down
+    lvl3 = eng.spawn_child(lvl2, operator_id="R")
+    # A recursive operator owns a scope per level, addressed by the entry activation.
+    s2 = eng.scope_for(lvl2)
+    s3 = eng.scope_for(lvl3)
+    assert s2 is not None and s3 is not None
+    snap = eng.to_snapshot()
+    by_id = {s.scope_id: s for s in snap.scopes}
+    s2_parent = by_id[s2].parent_scope_id
+    assert s2_parent is not None
+    # Each recursive entry nests one scope deeper over the finite template topology:
+    # the top R scope is depth 1, then the two nested re-entries at depth 2 and 3.
+    assert by_id[s2_parent].depth == 1
+    assert by_id[s2].depth == 2
+    assert by_id[s3].depth == 3
+    assert by_id[s3].parent_scope_id == s2
+
+
+def test_recursion_depth_limit_is_scope_budget_exhausted() -> None:
+    eng = _engine(_recursive_bundle(), budget=ScopeBudget(max_scope_depth=3))
+    lvl2 = eng.spawn_child("R", operator_id="R")
+    lvl3 = eng.spawn_child(lvl2, operator_id="R")
+    before = len(eng.to_snapshot().activations)
+    with pytest.raises(RegionError):
+        eng.spawn_child(lvl3, operator_id="R")  # a fourth level breaches the depth cap
+    assert "scope_budget_exhausted" in _kinds(eng)
+    assert "authority_denied" not in _kinds(eng)  # distinct from an authority denial
+    assert len(eng.to_snapshot().activations) == before  # nothing half-materialized
+
+
+def test_recursion_preserves_identity_across_rehydration() -> None:
+    bundle = _recursive_bundle()
+    eng = _engine(bundle, budget=ScopeBudget(max_scope_depth=5))
+    lvl2 = eng.spawn_child("R", operator_id="R")
+    lvl3 = eng.spawn_child(lvl2, operator_id="R")
+    scope3 = eng.scope_for(lvl3)
+    # A mid-recursion snapshot round-trips: recursive scopes and their opener
+    # activations survive, and recursion continues from the restored deepest level.
+    restored = OrchestrationEngine(
+        eng.to_snapshot(), bundle, budget=ScopeBudget(max_scope_depth=5)
+    )
+    assert restored.scope_for(lvl3) == scope3
+    lvl4 = restored.spawn_child(lvl3, operator_id="R")
+    assert restored.scope_for(lvl4) is not None
+    # Re-settling a materialized child is idempotent, never a second logical child.
+    child = restored.spawn_child(lvl4, operator_id="leaf")
+    restored.settle_child(child)
+    restored.settle_child(child)
+    matching = [
+        a for a in restored.to_snapshot().activations if a.activation_id == child
+    ]
+    assert len(matching) == 1
+
+
+def test_recursive_cross_level_join_release_survives_rehydration() -> None:
+    bundle = _recursive_bundle()
+    eng = _engine(bundle, budget=ScopeBudget(max_scope_depth=5))
+    outer_scope = eng.scope_for("R")
+    assert outer_scope is not None
+    outer_owner = next(
+        s.owner_activation_id
+        for s in eng.to_snapshot().scopes
+        if s.scope_id == outer_scope
+    )
+    assert outer_owner is not None
+    # Re-enter R one level down and close the inner level's join.
+    lvl2 = eng.spawn_child("R", operator_id="R")
+    inner_scope = eng.scope_for(lvl2)
+    assert inner_scope is not None
+    inner_child = eng.spawn_child(lvl2, operator_id="leaf")
+    eng.settle_child(inner_child)
+    eng.seal_spawn(lvl2)
+    # Close the outer level's join (lvl2 is the outer scope's child).
+    eng.settle_child(lvl2)
+    eng.seal_spawn(outer_owner)
+    assert {outer_scope, inner_scope} <= set(eng.to_snapshot().released_scopes)
+    releases = [k for k, _ in eng.contract_trace() if k == "join_released"]
+
+    # Both levels of the one recursive join operator are restored directly, not
+    # misattributed to the deepest scope, so neither released level is lost or re-run.
+    restored = OrchestrationEngine(
+        eng.to_snapshot(), bundle, budget=ScopeBudget(max_scope_depth=5)
+    )
+    assert {outer_scope, inner_scope} <= set(restored.to_snapshot().released_scopes)
+    assert [k for k, _ in restored.contract_trace() if k == "join_released"] == releases
+
+
+# --------------------------------------------------------------------------- #
+# Cancellation as a durable semantic event
+# --------------------------------------------------------------------------- #
+
+
+def test_cancellation_revokes_child_init_distinct_from_seal() -> None:
+    eng = _engine(_spawn_join())
+    child = eng.spawn_child("S")
+    scope = eng.scope_for("S")
+    eng.on_cancelled(scope)  # type: ignore[arg-type]
+    cap = eng.capability(scope, ProgressAxis.CHILD_INIT)
+    assert cap is not None and cap.status is CapabilityStatus.REVOKED
+    kinds = _kinds(eng)
+    assert "scope_cancelled" in kinds
+    assert "child_init_revoked" in kinds
+    assert "child_init_sealed" not in kinds  # revoke is never conflated with seal
+    assert _child_status(eng, child) == "cancelled"  # default residual cancels children
+
+
+def test_cancellation_revokes_grant_distinct_from_child_init_revoke() -> None:
+    eng = _engine(_spawn_join())
+    eng.spawn_child("S")
+    grant_before = eng.grant_for("S")
+    assert grant_before is not None and not grant_before.revoked
+    eng.on_cancelled("S")
+    grant_after = eng.grant_for("S")
+    assert grant_after is not None and grant_after.revoked
+    kinds = [k for k, _ in eng.contract_trace()]
+    # Grant revocation and child-init revocation are separate, ordered transitions.
+    assert "child_init_revoked" in kinds and "grant_revoked" in kinds
+    assert kinds.index("child_init_revoked") < kinds.index("grant_revoked")
+
+
+def test_cancellation_recorded_before_join_release() -> None:
+    eng = _engine(_spawn_join())
+    eng.spawn_child("S")
+    eng.on_cancelled("S")
+    kinds = [k for k, _ in eng.contract_trace()]
+    assert kinds.index("scope_cancelled") < kinds.index("join_released")
+    pub = eng.resolve_output("out:J")
+    assert pub is not None and pub.outcome is PublicationOutcome.EXPLICIT_EMPTY
+
+
+def test_inner_scope_cancel_resolves_join_and_readies_downstream() -> None:
+    spawn = SpawnRegion(operator_id="S", source_ref="S", child_template_ref="body")
+    join = JoinRegion(
+        operator_id="J", source_ref="J", completion=JoinCompletion.ALL_SETTLED
+    )
+    eng = _engine(
+        _bundle(
+            [spawn, join, _leaf("body"), _leaf("D", deps=True)],
+            [
+                TemplateEdge(from_op="S", to_op="J"),
+                TemplateEdge(from_op="J", to_op="D"),
+            ],
+            results=(_decl("out:J", "J", release=ReleaseConditionKind.SCOPE_CLOSED),),
+        )
+    )
+    eng.spawn_child("S")
+    advance = eng.on_cancelled("S")
+    assert eng.region_closed("J")
+    pub = eng.resolve_output("out:J")
+    assert pub is not None and pub.outcome is PublicationOutcome.EXPLICIT_EMPTY
+    # The join's no-winner record readies the downstream leaf: the outer flow continues.
+    assert advance.ready == ["D"]
+    assert eng.work_item("D").status.value == "ready"  # type: ignore[union-attr]
+
+
+def test_cancellation_residual_drain_lets_materialized_children_settle() -> None:
+    spawn = SpawnRegion(operator_id="S", source_ref="S", child_template_ref="body")
+    join = JoinRegion(
+        operator_id="J",
+        source_ref="J",
+        completion=JoinCompletion.ANY,
+        residual_policy="drain",
+    )
+    eng = _engine(
+        _bundle(
+            [spawn, join, _leaf("body")],
+            [TemplateEdge(from_op="S", to_op="J")],
+            results=(_decl("out:J", "J", release=ReleaseConditionKind.JOIN_WINNER),),
+        )
+    )
+    child = eng.spawn_child("S")
+    eng.on_cancelled("S")
+    # A drain residual policy leaves a materialized child to settle, not cancelled.
+    assert _child_status(eng, child) != "cancelled"
+    eng.settle_child(child)
+    assert _child_status(eng, child) == "settled"

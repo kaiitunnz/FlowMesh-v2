@@ -130,9 +130,14 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   incrementally by activation identity. A region closes on its child-init and loop-time
   capability account — sealed or revoked and drained — never on an observed-empty set.
   Every spawn site mints a monotonically attenuated `DelegatedAuthorityGrant`, and a
-  denial records a durable `AuthorityDenied`/`PolicyDenied` that creates no child. Scope,
-  loop, and activation budgets bound recursion; the REST submit path admits only the
-  acyclic subset, with regions inspect-only there.
+  denial records a durable `AuthorityDenied`/`PolicyDenied` that creates no child. An
+  early join may release before full closure per its declared rule, with a residual
+  policy governing children still running. Scope, loop, and activation budgets bound
+  recursion; the REST submit path admits only the acyclic subset, with regions
+  inspect-only there.
+- **Cancellation.** A `flowmesh/v2` workflow cancels through the orchestration engine as
+  a durable semantic event, so the ledger stays consistent with the task records and a
+  cancelled workflow survives a restart without re-admitting cancelled work.
 - **Task merging.** Compatible adjacent tasks in a DAG (same `taskType`,
   model, hardware shape, and merge key) coalesce into a single dispatch.
   Merged children ride on `WorkerTaskMessage.merged_children`; the worker

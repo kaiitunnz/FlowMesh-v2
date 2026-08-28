@@ -12,6 +12,7 @@ from ..representations.operators import (
     LoopContextRegion,
     MergeRegion,
     RecoveryClass,
+    ResidualPolicy,
     SpawnRegion,
 )
 from ..representations.plan import PhysicalExecutionPlan
@@ -242,6 +243,34 @@ def _check_region(
                         f"early join ({op.completion.value}) declares no "
                         "residual-child policy"
                     ),
+                    location=location,
+                )
+            )
+        if op.completion is JoinCompletion.FIRST_K and (
+            op.first_k is None or op.first_k < 1
+        ):
+            diags.append(
+                Diagnostic(
+                    code="region.join-bad-k",
+                    message="first_k join needs k >= 1",
+                    location=location,
+                )
+            )
+        if op.completion is JoinCompletion.PREDICATE and (
+            op.predicate is None or op.predicate.min_qualifiers < 1
+        ):
+            diags.append(
+                Diagnostic(
+                    code="region.join-bad-predicate",
+                    message="predicate join needs min_qualifiers >= 1",
+                    location=location,
+                )
+            )
+        if op.residual_policy and op.residual_policy not in ResidualPolicy:
+            diags.append(
+                Diagnostic(
+                    code="region.bad-residual",
+                    message=f"unknown residual-child policy {op.residual_policy!r}",
                     location=location,
                 )
             )

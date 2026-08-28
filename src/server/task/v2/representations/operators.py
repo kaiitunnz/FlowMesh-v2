@@ -81,6 +81,19 @@ class JoinCompletion(StrEnum):
     PREDICATE = "predicate"
 
 
+class ResidualPolicy(StrEnum):
+    """Fate of a spawn scope's materialized children when an early join releases.
+
+    ``CONTINUE`` leaves the child-init capability open (late children stay legal);
+    ``DRAIN`` seals it so materialized children still settle but no new one is created;
+    ``CANCEL`` revokes it and cancels every not-yet-settled materialized child.
+    """
+
+    CONTINUE = "continue"
+    DRAIN = "drain"
+    CANCEL = "cancel"
+
+
 class OperatorKind(StrEnum):
     """Discriminates the logical operator vocabulary."""
 
@@ -269,12 +282,33 @@ class SpawnRegion(_OperatorBase):
     authority: AuthorityCeiling = AuthorityCeiling()
 
 
+class JoinPredicate(BaseModel):
+    """A join's declared early-release predicate over its settled qualifiers.
+
+    A count threshold with a monotonicity flag: a monotone predicate releases on the
+    first witness, a non-monotone one waits for frontier closure.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    min_qualifiers: int = 1
+    monotone: bool = True
+
+
 class JoinRegion(_OperatorBase):
-    """A child-collection region with a declared completion policy."""
+    """A child-collection region with a declared completion policy.
+
+    ``first_k`` and ``predicate`` parametrize the early-completion policies; a no-winner
+    early join resolves ``EXPLICIT_EMPTY`` unless ``no_winner_failure`` opts into
+    ``DECLARED_FAILURE``.
+    """
 
     kind: Literal[OperatorKind.JOIN] = OperatorKind.JOIN
     completion: JoinCompletion
     residual_policy: str | None = None
+    first_k: int | None = None
+    predicate: JoinPredicate | None = None
+    no_winner_failure: bool = False
 
 
 class LoopContextRegion(_OperatorBase):

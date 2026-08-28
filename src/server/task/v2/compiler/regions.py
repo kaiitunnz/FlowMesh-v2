@@ -12,6 +12,7 @@ from ..representations.operators import (
     EffectClass,
     InputProvenanceKind,
     JoinCompletion,
+    JoinPredicate,
     JoinRegion,
     LeafOperator,
     LogicalOperator,
@@ -333,6 +334,14 @@ def _join(region: ParsedRegion, has_input: bool) -> JoinRegion:
             region.name,
         ) from exc
     residual = region.region.get("residual")
+    predicate_raw = region.region.get("predicate")
+    predicate = None
+    if isinstance(predicate_raw, dict):
+        predicate = JoinPredicate(
+            min_qualifiers=int(predicate_raw.get("min_qualifiers", 1)),
+            monotone=bool(predicate_raw.get("monotone", True)),
+        )
+    k = region.region.get("k")
     return JoinRegion(
         operator_id=region.name,
         source_ref=region.name,
@@ -340,6 +349,9 @@ def _join(region: ParsedRegion, has_input: bool) -> JoinRegion:
         outputs=(Port(name="out"),),
         completion=completion,
         residual_policy=str(residual) if residual else None,
+        first_k=int(k) if k is not None else None,
+        predicate=predicate,
+        no_winner_failure=bool(region.region.get("no_winner_failure", False)),
     )
 
 

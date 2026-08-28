@@ -463,6 +463,7 @@ class TaskRuntime:
 
         engine = OrchestrationEngine(snapshot, bundle, budget=self._scope_budget)
         self._engines[workflow_id] = engine
+        cancelled = False
         for persisted in tasks:
             record = persisted.record
             if record.status == TaskStatus.DONE:
@@ -471,6 +472,12 @@ class TaskRuntime:
                 engine.on_failed(
                     record.task_id, record.error or "task failed", retryable=False
                 )
+            elif record.status == TaskStatus.CANCELLED:
+                cancelled = True
+        # Replay cancellation after the settled facts so a settled outcome is never
+        # overwritten; a cancelled workflow is then never re-admitted below.
+        if cancelled:
+            engine.cancel_instance()
 
         # Re-derive readiness for every PENDING task from the engine rather than
         # trusting the cached work-item status: a crash mid-retry can leave a task
@@ -1497,6 +1504,12 @@ class TaskRuntime:
                 cancelled=cancelled,
                 sched=self._sched_locked(workflow_id),
             )
+            # Mirror the cancellation into the orchestration ledger so a v2 workflow's
+            # work items settle CANCELLED in lockstep with its task records; the
+            # snapshot follows the committed task state so the ledger never leads it.
+            if workflow_id in self._engines:
+                self._engines[workflow_id].cancel_instance()
+                self._save_ledger_locked(workflow_id)
 
         for interrupt in interrupts:
             worker = self._worker_registry.get_worker(interrupt.worker_id)
@@ -1554,7 +1567,15 @@ class TaskRuntime:
             self._merge_key_by_task.pop(task_id, None)
             self._merge_children_map.pop(task_id, None)
             record.assigned_worker = None
+            # Persist the task terminal record first, then mirror the cancellation
+            # into the ledger and snapshot last, so the ledger never leads task state.
             self._persist_terminal_locked(task_id, sched=False)
+            if (engine := self._engines.get(record.workflow_id)) is not None:
+                advance = engine.on_cancelled(task_id)
+                assert not (
+                    advance.ready or advance.retry
+                ), "a whole-instance cancel readies no work"
+                self._save_ledger_locked(record.workflow_id)
             return usages
 
     def get_record(self, task_id: str) -> TaskRecord | None:
