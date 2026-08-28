@@ -128,7 +128,7 @@ class Advance:
 
 
 class OrchestrationEngine:
-    """In-memory view of one workflow instance's durable orchestration ledger."""
+    """Drives one workflow instance's semantic readiness over its durable ledger."""
 
     def __init__(
         self,
@@ -671,12 +671,13 @@ class OrchestrationEngine:
         if self._kind(branch_op) is not OperatorKind.BRANCH:
             raise RegionError(f"{branch_op!r} is not a branch region")
         advance = Advance()
+        skipped: set[str] = set()
         for successor in sorted(self._forward.get(branch_op, ())):
             from_port = self._edge_from_port(branch_op, successor)
             if from_port in (selected_port, None):
                 self._release_one(successor, branch_op, advance)
             else:
-                self._settle_empty_successor(successor, advance)
+                self._settle_empty_successor(successor, skipped)
         self._emit(
             "branch_routed", operator_id=branch_op, detail={"port": selected_port}
         )
@@ -1092,13 +1093,20 @@ class OrchestrationEngine:
         )
         advance.ready.append(wi.legacy_task_id)
 
-    def _settle_empty_successor(self, operator_id: str, advance: Advance) -> None:
+    def _settle_empty_successor(
+        self, operator_id: str, visited: set[str] | None = None
+    ) -> None:
         """Skip a non-selected branch successor and its whole subtree.
 
         A leaf resolves empty; a control successor clears its pending inputs and is
         skipped so a downstream join never waits on an untaken path. A join itself is
-        left to its own scope closure.
+        left to its own scope closure. Two non-selected ports can share a downstream
+        operator, so the walk is idempotent per operator.
         """
+        visited = visited if visited is not None else set()
+        if operator_id in visited:
+            return
+        visited.add(operator_id)
         if self._is_control(operator_id):
             if self._kind(operator_id) is OperatorKind.JOIN:
                 return
@@ -1118,7 +1126,7 @@ class OrchestrationEngine:
                 operator_id, PublicationOutcome.EXPLICIT_EMPTY, ValueRef(kind="empty")
             )
         for successor in sorted(self._forward.get(operator_id, ())):
-            self._settle_empty_successor(successor, advance)
+            self._settle_empty_successor(successor, visited)
 
     def _settle_failure(self, work_item_id: str) -> list[str]:
         wi = self._work_items[work_item_id]

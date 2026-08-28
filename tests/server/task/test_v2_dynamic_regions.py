@@ -619,6 +619,37 @@ def test_branch_skips_a_non_selected_control_subtree() -> None:
     assert eng.work_item("x").status.value == "ready"  # type: ignore[union-attr]
 
 
+def test_branch_skips_a_shared_downstream_op_once() -> None:
+    branch = BranchRegion(operator_id="B", source_ref="B", selection=None)
+    spawn = SpawnRegion(operator_id="Z", source_ref="Z", child_template_ref="body")
+    eng = _engine(
+        _bundle(
+            [
+                _leaf("A"),
+                branch,
+                _leaf("x", deps=True),
+                _leaf("m", deps=True),
+                _leaf("n", deps=True),
+                spawn,
+                _leaf("body"),
+            ],
+            [
+                TemplateEdge(from_op="A", to_op="B"),
+                TemplateEdge(from_op="B", to_op="x", from_port="p1"),
+                TemplateEdge(from_op="B", to_op="m", from_port="p2"),
+                TemplateEdge(from_op="B", to_op="n", from_port="p3"),
+                TemplateEdge(from_op="m", to_op="Z"),
+                TemplateEdge(from_op="n", to_op="Z"),
+            ],
+        )
+    )
+    eng.on_succeeded("A")
+    eng.route_branch("B", "p1")
+    skips = [op for kind, op in eng.contract_trace() if kind == "region_skipped"]
+    assert skips.count("Z") == 1  # both non-selected ports reach Z; it skips once
+    assert eng.work_item("x").status.value == "ready"  # type: ignore[union-attr]
+
+
 # --------------------------------------------------------------------------- #
 # Rehydration of a mid-flight dynamic region
 # --------------------------------------------------------------------------- #
