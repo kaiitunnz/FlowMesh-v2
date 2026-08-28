@@ -31,7 +31,10 @@ class WorkflowRegistryStub:
     """Minimal workflow registry for driving TaskRuntime.register in tests."""
 
     async def register_workflow_async(
-        self, workflow_id: str, tasks: list[Any], v2: Any = None
+        self,
+        workflow_id: str,
+        tasks: list[Any],
+        v2: Any = None,
     ) -> None:
         return None
 

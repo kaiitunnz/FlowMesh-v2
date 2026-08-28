@@ -1,12 +1,14 @@
 from pydantic import ValidationError
 
 from ...parser import ParsedWorkflow
+from ..mode import LoweringStrategy
 from ..representations.bundle import PersistedV2Workflow
 from ..representations.plan import PhysicalExecutionPlan, PhysicalNode
 from ..representations.source import FrontendWorkflowSource
 from ..representations.template import LogicalWorkflowTemplate
 from ..representations.versioning import VersionId, content_digest
 from .diagnostics import CompileError, Diagnostic
+from .episodes import lower_to_episodes
 from .project import (
     LoweringAccumulator,
     build_name_map,
@@ -72,15 +74,16 @@ def compile_workflow(
     parsed: ParsedWorkflow,
     source: FrontendWorkflowSource,
     validate: bool = True,
+    strategy: LoweringStrategy = LoweringStrategy.TRANSPARENT,
 ) -> tuple[LogicalWorkflowTemplate, PhysicalExecutionPlan]:
     """Compile a parsed workflow into symbolic v2 representations.
 
     Lowers legacy tasks (and, when present, structured regions) into the acyclic
-    subset of a logical template, builds a transparent compatibility physical plan
-    with one boundary per legacy task/executor boundary, and runs the validation
-    passes. Raises :class:`CompileError` when any error-severity diagnostic is
-    produced. The result carries no worker/replica/endpoint bindings and no
-    activation tags.
+    subset of a logical template, then builds a physical plan under ``strategy``: the
+    transparent lowering mints one boundary per legacy task/executor, while the
+    episode-cut lowering rewrites that into run-to-yield episodes. Raises
+    :class:`CompileError` when any error-severity diagnostic is produced. The result
+    carries no worker/replica/endpoint bindings and no activation tags.
     """
     acc = LoweringAccumulator()
     name_to_op = build_name_map(parsed)
@@ -88,7 +91,10 @@ def compile_workflow(
     lower_frontend_v2(parsed, acc)
     induce_effect_boundaries(acc)
     template = _assemble_template(workflow_id, source, acc)
-    plan = _finalize_plan(workflow_id, template.version, tuple(acc.nodes))
+    nodes = tuple(acc.nodes)
+    if strategy is LoweringStrategy.EPISODE_CUT:
+        nodes = lower_to_episodes(template, nodes)
+    plan = _finalize_plan(workflow_id, template.version, nodes)
     if validate:
         diagnostics = validate_compilation(template, plan)
         if has_errors(diagnostics):
@@ -100,7 +106,8 @@ def compile_bundle(
     workflow_id: str,
     parsed: ParsedWorkflow,
     source: FrontendWorkflowSource,
+    strategy: LoweringStrategy = LoweringStrategy.TRANSPARENT,
 ) -> PersistedV2Workflow:
     """Compile a parsed workflow into the durable plan-time bundle."""
-    template, plan = compile_workflow(workflow_id, parsed, source)
+    template, plan = compile_workflow(workflow_id, parsed, source, strategy=strategy)
     return PersistedV2Workflow(source=source, template=template, plan=plan)

@@ -76,6 +76,22 @@ def test_spawn_site_authority_rejected() -> None:
     assert any(d.code == "authority.delegate-exceeds-invoke" for d in err.diagnostics)
 
 
+def test_spawn_child_unresolved_rejected() -> None:
+    err = _reject("""      - name: s
+        region: {kind: spawn, child: ghost, authority: {invoke: []}}
+""")
+    assert any(d.code == "region.spawn-child-unresolved" for d in err.diagnostics)
+
+
+def test_spawn_child_non_leaf_rejected() -> None:
+    err = _reject("""      - name: inner
+        region: {kind: branch, selection: s, ports: [p]}
+      - name: s
+        region: {kind: spawn, child: inner, authority: {invoke: []}}
+""")
+    assert any(d.code == "region.spawn-child-not-leaf" for d in err.diagnostics)
+
+
 def test_authority_on_non_agent_leaf_rejected() -> None:
     err = _reject("""      - name: e
         spec:

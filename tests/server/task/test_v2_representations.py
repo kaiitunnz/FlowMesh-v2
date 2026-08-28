@@ -1,6 +1,8 @@
 """Versioned v2 plan-time representations and the compatibility gate."""
 
 import logging
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -72,7 +74,10 @@ class _CapturingRegistry:
         self.v2: dict[str, PersistedV2Workflow | None] = {}
 
     async def register_workflow_async(
-        self, workflow_id: str, tasks: list[Any], v2: PersistedV2Workflow | None = None
+        self,
+        workflow_id: str,
+        tasks: list[Any],
+        v2: PersistedV2Workflow | None = None,
     ) -> None:
         self.v2[workflow_id] = v2
 
@@ -104,6 +109,7 @@ def _runtime(registry: _CapturingRegistry) -> TaskRuntime:
         cast(Any, registry),
         cast(Any, _WorkerRegistryStub()),
         OrchestrationConfig(),
+        Path(tempfile.gettempdir()),
         logging.getLogger("v2-test"),
     )
 

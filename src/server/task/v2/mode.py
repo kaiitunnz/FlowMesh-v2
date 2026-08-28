@@ -4,6 +4,18 @@ from typing import Any
 V2_API_VERSION = "flowmesh/v2"
 
 
+class LoweringStrategy(StrEnum):
+    """Physical lowering chosen for a v2 template.
+
+    ``TRANSPARENT`` mints one physical node per operator (the compatibility baseline
+    and contract oracle); ``EPISODE_CUT`` rewrites that into run-to-yield episodes with
+    boundary annotations and fused local chains.
+    """
+
+    TRANSPARENT = "transparent"
+    EPISODE_CUT = "episode_cut"
+
+
 class ExecutionMode(StrEnum):
     """Execution track selected for a submission."""
 

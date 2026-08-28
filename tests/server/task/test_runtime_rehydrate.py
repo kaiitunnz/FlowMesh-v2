@@ -1,8 +1,10 @@
 """Durable persistence and restart rehydration of TaskRuntime."""
 
 import logging
+import tempfile
 import threading
 from collections.abc import Sequence
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -23,9 +25,13 @@ class FakeWorkflowRegistry:
         self.workflow_task_ids: dict[str, list[str]] = {}
         self.v2_blobs: dict[str, str] = {}
         self.ledger_blobs: dict[str, str] = {}
+        self.dynamic_task_ids: dict[str, set[str]] = {}
 
     async def register_workflow_async(
-        self, workflow_id: str, tasks: list[Any], v2: Any = None
+        self,
+        workflow_id: str,
+        tasks: list[Any],
+        v2: Any = None,
     ) -> None:
         self.workflow_task_ids[workflow_id] = [t.task_id for t in tasks]
         if v2 is not None:
@@ -120,6 +126,23 @@ class FakeWorkflowRegistry:
         if sched is not None:
             self.sched[workflow_id] = sched.model_dump_json()
 
+    def commit_dynamic_tasks(
+        self,
+        workflow_id: str,
+        records: Sequence[PersistedTask],
+        snapshot: Any,
+        retire: Sequence[str] = (),
+    ) -> None:
+        for item in records:
+            self.task_blobs[item.record.task_id] = item.model_dump_json()
+            self.dynamic_task_ids.setdefault(workflow_id, set()).add(
+                item.record.task_id
+            )
+        self.ledger_blobs[workflow_id] = snapshot.model_dump_json()
+
+    async def get_dynamic_task_ids_async(self, workflow_id: str) -> set[str]:
+        return set(self.dynamic_task_ids.get(workflow_id, set()))
+
 
 class _WorkerRegistryStub:
     def get_worker(self, worker_id: str) -> Any:
@@ -134,6 +157,7 @@ def _runtime(registry: FakeWorkflowRegistry) -> TaskRuntime:
         cast(Any, registry),
         cast(Any, _WorkerRegistryStub()),
         OrchestrationConfig(),
+        Path(tempfile.gettempdir()),
         logging.getLogger("rehydrate-test"),
     )
 

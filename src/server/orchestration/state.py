@@ -272,6 +272,8 @@ class WorkItem(BaseModel):
     effect_class: EffectClass = EffectClass.PURE
     recovery: RecoveryClass = RecoveryClass.RECOMPUTE
     replay_contract: EffectReplayContract | None = None
+    # opaque durable continuation of a yielded episode
+    continuation_ref: str | None = None
     attempt_ids: list[str] = Field(default_factory=list)
 
 

@@ -2,8 +2,10 @@
 
 import asyncio
 import logging
+import tempfile
 import threading
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any, cast
 
 from server.config import OrchestrationConfig
@@ -14,7 +16,10 @@ from server.task.runtime import TaskRuntime
 
 class _WorkflowRegistryStub:
     async def register_workflow_async(
-        self, workflow_id: str, tasks: list[Any], v2: Any = None
+        self,
+        workflow_id: str,
+        tasks: list[Any],
+        v2: Any = None,
     ) -> None:
         return None
 
@@ -58,6 +63,7 @@ def _runtime(worker_registry: Any = None) -> TaskRuntime:
         cast(Any, _WorkflowRegistryStub()),
         cast(Any, worker_registry or _WorkerRegistryStub()),
         OrchestrationConfig(),
+        Path(tempfile.gettempdir()),
         logging.getLogger("runtime-test"),
     )
 

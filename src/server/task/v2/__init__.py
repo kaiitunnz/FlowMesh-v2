@@ -1,7 +1,7 @@
 from .compiler.diagnostics import CompileError, Diagnostic, Severity, SourceLocation
 from .compiler.inspect import InspectionReport, build_inspection
 from .compiler.pipeline import compile_bundle, compile_workflow
-from .mode import V2_API_VERSION, ExecutionMode
+from .mode import V2_API_VERSION, ExecutionMode, LoweringStrategy
 from .representations.bundle import PersistedV2Workflow
 from .representations.operators import (
     AgentOperator,
@@ -88,6 +88,7 @@ __all__ = [
     "LogicalOperator",
     "LogicalWorkflowTemplate",
     "LoopContextRegion",
+    "LoweringStrategy",
     "MergeRegion",
     "ModelRef",
     "OperatorKind",

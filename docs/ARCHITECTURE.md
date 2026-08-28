@@ -133,11 +133,22 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   denial records a durable `AuthorityDenied`/`PolicyDenied` that creates no child. An
   early join may release before full closure per its declared rule, with a residual
   policy governing children still running. Scope, loop, and activation budgets bound
-  recursion; the REST submit path admits only the acyclic subset, with regions
-  inspect-only there.
+  recursion. A spawn fans out to one child per element of its producer's result, and
+  each child dispatches to a worker like any other task.
 - **Cancellation.** A `flowmesh/v2` workflow cancels through the orchestration engine as
   a durable semantic event, so the ledger stays consistent with the task records and a
   cancelled workflow survives a restart without re-admitting cancelled work.
+- **Physical episode lowering.** The compiler lowers a v2 template either transparently
+  (one physical node per operator, the compatibility baseline) or into run-to-yield
+  **episodes**: each node is annotated with the boundary that closes it (service issue,
+  effect, durable checkpoint, continuation, region-blocking) and a chain of
+  pure deterministic local leaves fuses into one episode. The two lowerings are
+  contract-equivalent — an episode cut changes only where work yields, never a declared
+  output, effect visibility, or progress closure. `ORCHESTRATOR_EPISODE_LOWERING=true`
+  selects the episode-cut lowering.
+- **Live-feasibility handoff.** A ready episode carries the lowerer's declared
+  alternative; a feasibility check lets the scheduler defer an infeasible alternative,
+  holding no worker, rather than dispatching it. It resolves no resident capacity.
 - **Task merging.** Compatible adjacent tasks in a DAG (same `taskType`,
   model, hardware shape, and merge key) coalesce into a single dispatch.
   Merged children ride on `WorkerTaskMessage.merged_children`; the worker

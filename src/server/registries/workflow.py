@@ -20,6 +20,7 @@ from ..clients.redis import (
     workflow_cancelled_tasks_key,
     workflow_dispatched_tasks_key,
     workflow_ds_key,
+    workflow_dynamic_tasks_key,
     workflow_failed_tasks_key,
     workflow_key,
     workflow_sched_key,
@@ -153,7 +154,8 @@ class WorkflowRegistry:
         with self._rds.sync.control_pipeline() as pipe:
             pipe.sadd(WORKFLOWS_SET_KEY, workflow_id)
             pipe.hset(workflow_key(workflow_id), mapping=record.model_dump())
-            pipe.sadd(workflow_tasks_key(workflow_id), *remaining_tasks)
+            if remaining_tasks:
+                pipe.sadd(workflow_tasks_key(workflow_id), *remaining_tasks)
             if failed_tasks:
                 pipe.sadd(workflow_failed_tasks_key(workflow_id), *failed_tasks)
             if v2 is not None:
@@ -172,7 +174,8 @@ class WorkflowRegistry:
         async with self._rds.asyncio.control_pipeline() as pipe:
             pipe.sadd(WORKFLOWS_SET_KEY, workflow_id)
             pipe.hset(workflow_key(workflow_id), mapping=record.model_dump())
-            pipe.sadd(workflow_tasks_key(workflow_id), *remaining_tasks)
+            if remaining_tasks:
+                pipe.sadd(workflow_tasks_key(workflow_id), *remaining_tasks)
             if failed_tasks:
                 pipe.sadd(workflow_failed_tasks_key(workflow_id), *failed_tasks)
             if v2 is not None:
@@ -186,6 +189,7 @@ class WorkflowRegistry:
             pipe.delete(*(workflow_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_tasks_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_dispatched_tasks_key(wid) for wid in workflow_ids))
+            pipe.delete(*(workflow_dynamic_tasks_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_failed_tasks_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_cancelled_tasks_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_sched_key(wid) for wid in workflow_ids))
@@ -202,6 +206,7 @@ class WorkflowRegistry:
             pipe.delete(*(workflow_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_tasks_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_dispatched_tasks_key(wid) for wid in workflow_ids))
+            pipe.delete(*(workflow_dynamic_tasks_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_failed_tasks_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_cancelled_tasks_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_sched_key(wid) for wid in workflow_ids))
@@ -321,6 +326,45 @@ class WorkflowRegistry:
             if sched is not None:
                 pipe.set(workflow_sched_key(workflow_id), sched.model_dump_json())
             pipe.execute()
+
+    def commit_dynamic_tasks(
+        self,
+        workflow_id: str,
+        records: Sequence[PersistedTask],
+        snapshot: LedgerSnapshot,
+        retire: Sequence[str] = (),
+    ) -> None:
+        """Persist newly materialized dynamic-child records with the ledger snapshot.
+
+        The child records, their dynamic-tasks set membership, and the ledger snapshot
+        that carries their work items commit in one atomic transaction, so a crash can
+        never leave the ledger's dynamic children without their durable task records or
+        vice versa. The ids join the dynamic-tasks set so restart rehydration reloads
+        them alongside the statically registered tasks. ``retire`` drops tasks from the
+        remaining set as the spawn seals — the child template that has finished
+        instantiating children and no longer holds the workflow short of completion —
+        so the children replace the template atomically and never leave it transiently
+        empty.
+        """
+        if not records and not retire:
+            return
+        ids = [item.record.task_id for item in records]
+        with self._rds.sync.control_pipeline() as pipe:
+            for item in records:
+                pipe.set(task_state_key(item.record.task_id), item.model_dump_json())
+            if ids:
+                pipe.sadd(workflow_dynamic_tasks_key(workflow_id), *ids)
+                pipe.sadd(workflow_tasks_key(workflow_id), *ids)
+            if retire:
+                pipe.srem(workflow_tasks_key(workflow_id), *retire)
+            pipe.set(workflow_ds_key(workflow_id), snapshot.model_dump_json())
+            pipe.hset(workflow_key(workflow_id), mapping=_workflow_update())
+            pipe.execute()
+
+    async def get_dynamic_task_ids_async(self, workflow_id: str) -> set[str]:
+        return await self._rds.asyncio.set_members(
+            workflow_dynamic_tasks_key(workflow_id)
+        )
 
     # ---- Durable task state (for restart rehydration) ----------------- #
 
@@ -445,4 +489,5 @@ class WorkflowRegistry:
             record = self.get_workflow_record(wid)
             if record:
                 task_ids.extend(record.task_ids)
+            task_ids.extend(self._rds.sync.set_members(workflow_dynamic_tasks_key(wid)))
         return task_ids

@@ -7,9 +7,11 @@ disconnected from a call site.
 """
 
 import logging
+import tempfile
 from collections.abc import Iterable, Iterator, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -537,6 +539,7 @@ def _make_runtime_with_record(task_id: str) -> tuple[TaskRuntime, TaskRecord]:
         workflow_registry=MagicMock(),
         worker_registry=MagicMock(),
         orchestration=OrchestrationConfig(),
+        results_dir=Path(tempfile.gettempdir()),
         logger=logging.getLogger("test.supplier"),
     )
     env = TaskEnvelopeTemplate.model_validate(

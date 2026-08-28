@@ -2,6 +2,8 @@
 
 import asyncio
 import logging
+import tempfile
+from pathlib import Path
 from typing import Any, cast
 from unittest import mock
 
@@ -36,6 +38,7 @@ def _setup(
         cast(Any, WorkflowRegistryStub()),
         cast(Any, mock.Mock()),
         OrchestrationConfig(),
+        Path(tempfile.gettempdir()),
         logging.getLogger("test_dispatch_once_retry"),
     )
     _, results = asyncio.run(

@@ -74,6 +74,10 @@ def workflow_dispatched_tasks_key(workflow_id: str) -> str:
     return f"workflow:{workflow_id}:dispatched_tasks"
 
 
+def workflow_dynamic_tasks_key(workflow_id: str) -> str:
+    return f"workflow:{workflow_id}:dynamic_tasks"
+
+
 def workflow_failed_tasks_key(workflow_id: str) -> str:
     return f"workflow:{workflow_id}:failed_tasks"
 

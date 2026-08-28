@@ -1,8 +1,10 @@
 """Durable orchestration ledger (`DS`) over the acyclic compatibility plan."""
 
 import logging
+import tempfile
 import threading
 from collections.abc import Sequence
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -10,10 +12,12 @@ import pytest
 
 from server.config import OrchestrationConfig
 from server.orchestration import (
+    BoundaryEvent,
     InvocationState,
     OrchestrationEngine,
     PublicationOutcome,
     RecoveryDisposition,
+    WorkItemStatus,
 )
 from server.orchestration.outcomes import (
     AdmissionError,
@@ -29,6 +33,7 @@ from server.task.parser import parse_workflow
 from server.task.runtime import TaskRuntime
 from server.task.v2 import FrontendWorkflowSource, compile_bundle
 from server.task.v2.representations.operators import (
+    BoundaryEventKind,
     EffectClass,
     EffectReplayContract,
 )
@@ -47,11 +52,24 @@ class FakeRegistry:
         self.workflow_task_ids: dict[str, list[str]] = {}
         self.v2_blobs: dict[str, str] = {}
         self.ledger_blobs: dict[str, str] = {}
+        self.dynamic_task_ids: dict[str, set[str]] = {}
+        self.remaining: dict[str, set[str]] = {}
+
+    def remaining_of(self, workflow_id: str) -> set[str]:
+        return set(self.remaining.get(workflow_id, set()))
 
     async def register_workflow_async(
-        self, workflow_id: str, tasks: list[Any], v2: Any = None
+        self,
+        workflow_id: str,
+        tasks: list[Any],
+        v2: Any = None,
     ) -> None:
         self.workflow_task_ids[workflow_id] = [t.task_id for t in tasks]
+        self.remaining[workflow_id] = {
+            t.task_id
+            for t in tasks
+            if t.status not in (TaskStatus.DONE, TaskStatus.FAILED)
+        }
         if v2 is not None:
             self.v2_blobs[workflow_id] = v2.model_dump_json()
 
@@ -129,8 +147,31 @@ class FakeRegistry:
     ) -> None:
         for item in records:
             self.task_blobs[item.record.task_id] = item.model_dump_json()
+        self.remaining.setdefault(workflow_id, set()).difference_update(
+            {*done, *failed, *cancelled}
+        )
         if sched is not None:
             self.sched[workflow_id] = sched.model_dump_json()
+
+    def commit_dynamic_tasks(
+        self,
+        workflow_id: str,
+        records: Sequence[PersistedTask],
+        snapshot: LedgerSnapshot,
+        retire: Sequence[str] = (),
+    ) -> None:
+        remaining = self.remaining.setdefault(workflow_id, set())
+        for item in records:
+            self.task_blobs[item.record.task_id] = item.model_dump_json()
+            self.dynamic_task_ids.setdefault(workflow_id, set()).add(
+                item.record.task_id
+            )
+            remaining.add(item.record.task_id)
+        remaining.difference_update(retire)
+        self.ledger_blobs[workflow_id] = snapshot.model_dump_json()
+
+    async def get_dynamic_task_ids_async(self, workflow_id: str) -> set[str]:
+        return set(self.dynamic_task_ids.get(workflow_id, set()))
 
 
 class _WorkerRegistryStub:
@@ -146,6 +187,7 @@ def _runtime(registry: FakeRegistry) -> TaskRuntime:
         cast(Any, registry),
         cast(Any, _WorkerRegistryStub()),
         OrchestrationConfig(),
+        Path(tempfile.gettempdir()),
         logging.getLogger("v2-test"),
     )
 
@@ -205,6 +247,9 @@ spec:
 """
 
 
+_TS = "2026-06-01T00:00:00Z"
+
+
 def _drain(runtime: TaskRuntime, worker_id: str = "wkr-1") -> list[str]:
     """Dispatch and complete every ready task until the queue drains; returns order."""
     stop = threading.Event()
@@ -215,9 +260,341 @@ def _drain(runtime: TaskRuntime, worker_id: str = "wkr-1") -> list[str]:
             break
         order.append(task_id)
         runtime.mark_dispatched(task_id, cast(Any, _worker(worker_id)))
-        runtime.mark_started(task_id, worker_id, {}, "2026-06-01T00:00:00Z")
-        runtime.mark_succeeded(task_id, worker_id, {}, "2026-06-01T00:00:00Z")
+        runtime.mark_started(task_id, worker_id, {}, _TS)
+        runtime.mark_succeeded(task_id, worker_id, {}, _TS)
     return order
+
+
+def _pop_ready(runtime: TaskRuntime) -> list[str]:
+    """Pop every currently-ready task id without completing them."""
+    stop = threading.Event()
+    ready: list[str] = []
+    while runtime.ready_queue_length() > 0:
+        task_id = runtime.next_ready(stop, timeout=0.01)
+        if task_id is None:
+            break
+        ready.append(task_id)
+    return ready
+
+
+def _write_result(results_dir: Any, task_id: str, items: list[str]) -> None:
+    from shared.schemas.result import ResultEnvelope, result_file_path
+
+    envelope = ResultEnvelope.model_validate(
+        {"task_id": task_id, "result": {"ok": True, "items": items}}
+    )
+    path = result_file_path(results_dir, task_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(envelope.model_dump_json(), encoding="utf-8")
+
+
+AUTORESEARCH = """
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {name: autoresearch}
+spec:
+  graph:
+    nodes:
+      - name: planner
+        spec: {taskType: echo, data: {type: list, items: [seed]}}
+      - name: trial
+        spec: {taskType: echo, data: {type: list, items: [tmpl]}}
+      - name: fanout
+        dependsOn: [planner]
+        region: {kind: spawn, child: trial, authority: {invoke: []}}
+      - name: collect
+        dependsOn: [fanout]
+        region: {kind: join, completion: all_settled}
+"""
+
+
+@pytest.mark.anyio
+async def test_live_spawn_fans_out_children_to_real_dispatch(tmp_path: Any) -> None:
+    registry = FakeRegistry()
+    runtime = TaskRuntime(
+        cast(Any, registry),
+        cast(Any, _WorkerRegistryStub()),
+        OrchestrationConfig(),
+        tmp_path,
+        logging.getLogger("live"),
+    )
+    workflow_id, ids = await _register(runtime, AUTORESEARCH)
+    planner = ids["planner"]
+    engine = runtime.orchestration_engine(workflow_id)
+    assert engine is not None
+    # The child template is excluded from eager dispatch: only the planner is ready.
+    assert runtime.ready_queue_length() == 1
+
+    # The planner's result carries a three-element fan-out collection.
+    _write_result(tmp_path, planner, ["h1", "h2", "h3"])
+    runtime.mark_dispatched(planner, cast(Any, _worker()))
+    runtime.mark_started(planner, "wkr-1", {}, _TS)
+    runtime.mark_succeeded(planner, "wkr-1", {}, _TS)
+
+    children = _pop_ready(runtime)
+    assert len(children) == 3
+    injected: list[list[str]] = []
+    for child in children:
+        assert child.startswith("act-")
+        record = runtime._tasks[child]  # noqa: SLF001 - inspects the synthesized record
+        assert record.status is TaskStatus.PENDING
+        assert child in registry.dynamic_task_ids[workflow_id]  # persisted durably
+        data = getattr(record.task.spec, "data", None)
+        assert isinstance(data, dict)
+        injected.append(data["items"])
+    # Each child is self-contained: its own element is injected into its spec.
+    assert sorted(items for (items,) in injected) == ["h1", "h2", "h3"]
+
+    for child in children:
+        runtime.mark_dispatched(child, cast(Any, _worker()))
+        runtime.mark_started(child, "wkr-1", {}, _TS)
+        runtime.mark_succeeded(child, "wkr-1", {}, _TS)
+    # The join closes over the drained child-init account, not an observed set.
+    assert engine.region_closed("collect")
+
+
+def _child_count(engine: Any) -> int:
+    return len([a for a in engine.to_snapshot().activations if a.kind == "child"])
+
+
+@pytest.mark.anyio
+async def test_fan_out_is_idempotent_across_a_producer_replay(tmp_path: Any) -> None:
+    registry = FakeRegistry()
+    runtime = TaskRuntime(
+        cast(Any, registry),
+        cast(Any, _WorkerRegistryStub()),
+        OrchestrationConfig(),
+        tmp_path,
+        logging.getLogger("live"),
+    )
+    workflow_id, ids = await _register(runtime, AUTORESEARCH)
+    planner = ids["planner"]
+    _write_result(tmp_path, planner, ["h1", "h2", "h3"])
+    runtime.mark_dispatched(planner, cast(Any, _worker()))
+    runtime.mark_succeeded(planner, "wkr-1", {}, _TS)
+    first = _pop_ready(runtime)
+    engine = runtime.orchestration_engine(workflow_id)
+    assert engine is not None and len(first) == 3 and _child_count(engine) == 3
+    # Replaying the producer's terminal event re-drives the fan-out as a no-op: the
+    # sealed spawn admits no new child.
+    runtime.mark_succeeded(planner, "wkr-1", {}, _TS)
+    assert _pop_ready(runtime) == [] and _child_count(engine) == 3
+
+
+@pytest.mark.anyio
+async def test_deferred_fan_out_recovers_on_replay_when_result_lands(
+    tmp_path: Any,
+) -> None:
+    registry = FakeRegistry()
+    runtime = TaskRuntime(
+        cast(Any, registry),
+        cast(Any, _WorkerRegistryStub()),
+        OrchestrationConfig(),
+        tmp_path,
+        logging.getLogger("live"),
+    )
+    workflow_id, ids = await _register(runtime, AUTORESEARCH)
+    planner = ids["planner"]
+    # The producer settles before its result is on this node: the fan-out defers,
+    # sealing no spurious zero-child spawn.
+    runtime.mark_dispatched(planner, cast(Any, _worker()))
+    runtime.mark_succeeded(planner, "wkr-1", {}, _TS)
+    engine = runtime.orchestration_engine(workflow_id)
+    assert engine is not None
+    assert _pop_ready(runtime) == [] and _child_count(engine) == 0
+    assert not engine.region_closed("collect")
+    # The result lands; a replay of the producer's terminal event recovers the fan-out.
+    _write_result(tmp_path, planner, ["h1", "h2", "h3"])
+    runtime.mark_succeeded(planner, "wkr-1", {}, _TS)
+    assert len(_pop_ready(runtime)) == 3 and _child_count(engine) == 3
+
+
+@pytest.mark.anyio
+async def test_deferred_fan_out_recovers_on_result_ingest_without_a_second_event(
+    tmp_path: Any,
+) -> None:
+    registry = FakeRegistry()
+    runtime = TaskRuntime(
+        cast(Any, registry),
+        cast(Any, _WorkerRegistryStub()),
+        OrchestrationConfig(),
+        tmp_path,
+        logging.getLogger("live"),
+    )
+    workflow_id, ids = await _register(runtime, AUTORESEARCH)
+    planner = ids["planner"]
+    runtime.mark_dispatched(planner, cast(Any, _worker()))
+    runtime.mark_succeeded(planner, "wkr-1", {}, _TS)
+    engine = runtime.orchestration_engine(workflow_id)
+    assert engine is not None
+    assert _pop_ready(runtime) == [] and _child_count(engine) == 0
+
+    # In a multi-node deployment the result reaches this node out of band through
+    # result ingest, unordered against the single terminal event; the ingest nudge
+    # re-drives the fan-out with no second terminal event to lean on.
+    _write_result(tmp_path, planner, ["h1", "h2", "h3"])
+    runtime.retry_deferred_fanout(planner)
+    children = _pop_ready(runtime)
+    assert len(children) == 3 and _child_count(engine) == 3
+    for child in children:
+        runtime.mark_dispatched(child, cast(Any, _worker()))
+        runtime.mark_succeeded(child, "wkr-1", {}, _TS)
+    assert engine.region_closed("collect")
+
+
+@pytest.mark.anyio
+async def test_zero_element_fan_out_seals_and_closes_the_join_empty(
+    tmp_path: Any,
+) -> None:
+    registry = FakeRegistry()
+    runtime = TaskRuntime(
+        cast(Any, registry),
+        cast(Any, _WorkerRegistryStub()),
+        OrchestrationConfig(),
+        tmp_path,
+        logging.getLogger("live"),
+    )
+    workflow_id, ids = await _register(runtime, AUTORESEARCH)
+    planner = ids["planner"]
+    # A present-but-empty collection seals the spawn with zero children — an explicit
+    # seal, not an observed-empty inference — and the all-settled join closes empty.
+    _write_result(tmp_path, planner, [])
+    runtime.mark_dispatched(planner, cast(Any, _worker()))
+    runtime.mark_succeeded(planner, "wkr-1", {}, _TS)
+    engine = runtime.orchestration_engine(workflow_id)
+    assert engine is not None
+    assert _pop_ready(runtime) == [] and _child_count(engine) == 0
+    assert engine.region_closed("collect")
+    # The sealed spawn retires its child template, so a zero-child fan-out completes.
+    assert registry.remaining_of(workflow_id) == set()
+
+
+@pytest.mark.anyio
+async def test_child_template_holds_completion_until_the_spawn_seals(
+    tmp_path: Any,
+) -> None:
+    registry = FakeRegistry()
+    runtime = TaskRuntime(
+        cast(Any, registry),
+        cast(Any, _WorkerRegistryStub()),
+        OrchestrationConfig(),
+        tmp_path,
+        logging.getLogger("live"),
+    )
+    workflow_id, ids = await _register(runtime, AUTORESEARCH)
+    planner, trial = ids["planner"], ids["trial"]
+    # The child template is in the remaining set at registration; it only runs as a
+    # materialized child but represents the unsealed spawn until then.
+    assert registry.remaining_of(workflow_id) == {planner, trial}
+
+    # The producer settles before its result is on the node: the fan-out defers. The
+    # template keeps the workflow open — remaining is not empty — so a fan-out-terminal
+    # workflow never reads as done while its children do not yet exist.
+    runtime.mark_dispatched(planner, cast(Any, _worker()))
+    runtime.mark_succeeded(planner, "wkr-1", {}, _TS)
+    assert registry.remaining_of(workflow_id) == {trial}
+
+    # The result lands and the spawn seals: the children replace the retired template
+    # in the remaining set atomically, and the workflow completes once they settle.
+    _write_result(tmp_path, planner, ["h1", "h2", "h3"])
+    runtime.retry_deferred_fanout(planner)
+    rem = registry.remaining_of(workflow_id)
+    assert trial not in rem and len(rem) == 3
+    for child in _pop_ready(runtime):
+        runtime.mark_dispatched(child, cast(Any, _worker()))
+        runtime.mark_succeeded(child, "wkr-1", {}, _TS)
+    assert registry.remaining_of(workflow_id) == set()
+
+
+@pytest.mark.anyio
+async def test_rehydration_re_drives_a_deferred_fan_out(tmp_path: Any) -> None:
+    registry = FakeRegistry()
+    runtime = TaskRuntime(
+        cast(Any, registry),
+        cast(Any, _WorkerRegistryStub()),
+        OrchestrationConfig(),
+        tmp_path,
+        logging.getLogger("live"),
+    )
+    workflow_id, ids = await _register(runtime, AUTORESEARCH)
+    planner = ids["planner"]
+    # The producer settles before its result is on the node: the persisted snapshot
+    # holds it DONE with the spawn unsealed and no children committed — the
+    # crash-between state.
+    runtime.mark_dispatched(planner, cast(Any, _worker()))
+    runtime.mark_succeeded(planner, "wkr-1", {}, _TS)
+    assert registry.dynamic_task_ids.get(workflow_id, set()) == set()
+
+    # The result lands, then the process restarts: rehydration re-drives the fan-out.
+    _write_result(tmp_path, planner, ["h1", "h2", "h3"])
+    restored = TaskRuntime(
+        cast(Any, registry),
+        cast(Any, _WorkerRegistryStub()),
+        OrchestrationConfig(),
+        tmp_path,
+        logging.getLogger("rehydrate"),
+    )
+    assert await restored.rehydrate() == 1
+    engine = restored.orchestration_engine(workflow_id)
+    assert engine is not None
+    assert len(_pop_ready(restored)) == 3 and _child_count(engine) == 3
+
+
+_INFEASIBLE = """
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {name: feas}
+spec:
+  graph:
+    nodes:
+      - name: gen
+        spec: {taskType: inference, inference: {model: m, prompt: p}}
+      - name: loc
+        spec: {taskType: echo, data: {type: list, items: [x]}}
+"""
+
+
+@pytest.mark.anyio
+async def test_scheduler_rejects_an_infeasible_episode_alternative() -> None:
+    from server.task.v2.representations.plan import EpisodeBoundaryKind
+
+    registry = FakeRegistry()
+    runtime = TaskRuntime(
+        cast(Any, registry),
+        cast(Any, _WorkerRegistryStub()),
+        OrchestrationConfig(episode_lowering=True),
+        Path(tempfile.gettempdir()),
+        logging.getLogger("feas"),
+        feasibility_check=lambda spec: spec.boundary
+        is not EpisodeBoundaryKind.SERVICE_ISSUE,
+    )
+    _, ids = await _register(runtime, _INFEASIBLE)
+    # A sampled model call lowers to a service-issue episode the check rejects; the
+    # scheduler defers it, holding no worker and admitting no capacity object.
+    assert runtime.episode_feasible(ids["gen"]) is False
+    # A local deterministic echo episode stays feasible.
+    assert runtime.episode_feasible(ids["loc"]) is True
+
+
+@pytest.mark.anyio
+async def test_boundary_event_carries_into_the_ledger_and_persists() -> None:
+    registry = FakeRegistry()
+    runtime = _runtime(registry)
+    workflow_id, ids = await _register(runtime, LINEAR)
+    a = ids["a"]
+    runtime.mark_dispatched(a, cast(Any, _worker()))
+    runtime.mark_started(a, "wkr-1", {}, _TS)
+    engine = runtime.orchestration_engine(workflow_id)
+    assert engine is not None
+    # The worker's episode yields a service-invocation boundary; carrying it into the
+    # ledger suspends the work item without readying new work, and persists a snapshot.
+    changed = runtime.apply_boundary_event(
+        a, BoundaryEvent(kind=BoundaryEventKind.INVOCATION, interface="tool")
+    )
+    assert changed is False
+    wi = engine.work_item(a)
+    assert wi is not None and wi.status is WorkItemStatus.BLOCKED
+    assert workflow_id in registry.ledger_blobs
 
 
 # --------------------------------------------------------------------------- #

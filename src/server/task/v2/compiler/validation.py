@@ -286,6 +286,46 @@ def _check_region(
     return diags
 
 
+def _check_spawn_child_targets(
+    template: LogicalWorkflowTemplate, loc: dict[str, SourceLocation]
+) -> list[Diagnostic]:
+    """A spawn child template must resolve to a dispatchable leaf task.
+
+    An unresolved reference or a non-leaf body materializes no dispatchable child at
+    runtime and leaves the join unable to close; rejecting it at compile time turns a
+    runtime hang into a submit-time error.
+    """
+    diags: list[Diagnostic] = []
+    op_by_id = {op.operator_id: op for op in template.operators}
+    for op in template.operators:
+        if not isinstance(op, SpawnRegion) or not op.child_template_ref:
+            continue
+        target = op_by_id.get(op.child_template_ref)
+        if target is None:
+            diags.append(
+                Diagnostic(
+                    code="region.spawn-child-unresolved",
+                    message=(
+                        f"spawn child template {op.child_template_ref!r} resolves to "
+                        "no operator"
+                    ),
+                    location=loc.get(op.operator_id),
+                )
+            )
+        elif not isinstance(target, LeafOperator):
+            diags.append(
+                Diagnostic(
+                    code="region.spawn-child-not-leaf",
+                    message=(
+                        f"spawn child template {op.child_template_ref!r} is not a "
+                        "dispatchable leaf task"
+                    ),
+                    location=loc.get(op.operator_id),
+                )
+            )
+    return diags
+
+
 def _check_result_declarations(
     template: LogicalWorkflowTemplate, loc: dict[str, SourceLocation]
 ) -> list[Diagnostic]:
@@ -379,6 +419,7 @@ def validate_compilation(
 
     diags.extend(_check_source_map(template, plan, loc))
     diags.extend(_check_ports(template, loc))
+    diags.extend(_check_spawn_child_targets(template, loc))
     diags.extend(_check_result_declarations(template, loc))
     diags.extend(_check_cycles(template, loc))
 

@@ -190,6 +190,14 @@ class Dispatcher:
         if not record:
             return True
 
+        # Live-feasibility handoff: defer an episode whose declared alternative is not
+        # feasible to place now, holding no worker. It admits no capacity object.
+        if not self._runtime.episode_feasible(task_id):
+            self.requeue_task(
+                task_id, reason="infeasible_alternative", count_retry=False
+            )
+            return False
+
         task = record.task
 
         model_names, dataset_names = extract_model_dataset_names(task)

@@ -277,6 +277,7 @@ class OrchestrationConfig:
     max_scope_depth: int | None = None
     max_loop_iterations: int | None = None
     max_activations: int | None = None
+    episode_lowering: bool = False
 
     @classmethod
     def from_env(cls) -> "OrchestrationConfig":
@@ -284,6 +285,7 @@ class OrchestrationConfig:
             max_scope_depth=parse_int_env("ORCHESTRATOR_MAX_SCOPE_DEPTH"),
             max_loop_iterations=parse_int_env("ORCHESTRATOR_MAX_LOOP_ITERATIONS"),
             max_activations=parse_int_env("ORCHESTRATOR_MAX_ACTIVATIONS"),
+            episode_lowering=parse_bool_env("ORCHESTRATOR_EPISODE_LOWERING", False),
         )
 
 
