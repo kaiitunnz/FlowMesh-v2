@@ -5,6 +5,8 @@ from pathlib import Path
 
 from shared.utils.parsing import parse_bool_env, parse_float_env, parse_int_env
 
+from .orchestration.guardrails import ScopeBudget
+
 
 class NodeRole(StrEnum):
     ROOT = "root"
@@ -285,6 +287,7 @@ class ServerConfig:
     metrics: MetricsConfig
     worker_management: WorkerManagementConfig
     log_stream: LogStreamConfig
+    scope_budget: ScopeBudget = field(default_factory=ScopeBudget)
     results_dir: Path = Path("./results")
     plugins: list[str] = field(default_factory=list)
 
@@ -300,6 +303,18 @@ class ServerConfig:
             for raw in os.getenv("FLOWMESH_PLUGINS", "").split(",")
             if (p := raw.strip())
         ]
+        budget = ScopeBudget()
+        scope_budget = ScopeBudget(
+            max_scope_depth=parse_int_env(
+                "FLOWMESH_V2_MAX_SCOPE_DEPTH", budget.max_scope_depth
+            ),
+            max_loop_iterations=parse_int_env(
+                "FLOWMESH_V2_MAX_LOOP_ITERATIONS", budget.max_loop_iterations
+            ),
+            max_activations=parse_int_env(
+                "FLOWMESH_V2_MAX_ACTIVATIONS", budget.max_activations
+            ),
+        )
         return cls(
             logging=LoggingConfig.from_env(),
             redis=RedisConfig.from_env(),
@@ -312,6 +327,7 @@ class ServerConfig:
             metrics=MetricsConfig.from_env(results_dir),
             worker_management=WorkerManagementConfig.from_env(),
             log_stream=LogStreamConfig.from_env(),
+            scope_budget=scope_budget,
             results_dir=results_dir,
             plugins=plugins,
         )

@@ -141,7 +141,7 @@ class OrchestrationEngine:
         self._root_scope = snapshot.root_scope
         self._root_grant = snapshot.root_grant
         self._bundle = bundle
-        self._budget = budget or ScopeBudget.from_env()
+        self._budget = budget or ScopeBudget()
         self._next_seq = snapshot.next_seq
         self._initial = Advance()
 

@@ -18,6 +18,7 @@ from ..orchestration import (
     OrchestrationEngine,
     RecoveryDisposition,
     ResultPublication,
+    ScopeBudget,
 )
 from ..registries.worker import Worker, WorkerRegistry
 from ..registries.workflow import PersistedTask, WorkflowRegistry, WorkflowSched
@@ -71,10 +72,12 @@ class TaskRuntime:
         workflow_registry: WorkflowRegistry,
         worker_registry: WorkerRegistry,
         logger: logging.Logger,
+        scope_budget: ScopeBudget | None = None,
     ) -> None:
         self._workflow_registry = workflow_registry
         self._worker_registry = worker_registry
         self._logger = logger
+        self._scope_budget = scope_budget
         self._tasks: dict[str, TaskRecord] = {}
         self._original_deps: dict[str, set[str]] = {}
         self._pending_deps: dict[str, set[str]] = {}
@@ -157,7 +160,7 @@ class TaskRuntime:
             source = FrontendWorkflowSource.capture(yaml_text, format)
             v2_bundle = compile_bundle(workflow_id, parsed_workflow, source)
             v2_engine = OrchestrationEngine.build(
-                workflow_id, owner_id, org_id, v2_bundle
+                workflow_id, owner_id, org_id, v2_bundle, budget=self._scope_budget
             )
 
         with self._cv:
@@ -457,7 +460,7 @@ class TaskRuntime:
             elif record.status in (TaskStatus.DISPATCHED, TaskStatus.CANCELLING):
                 self._rehydrated_dispatched[task_id] = rehydrated_at
 
-        engine = OrchestrationEngine(snapshot, bundle)
+        engine = OrchestrationEngine(snapshot, bundle, budget=self._scope_budget)
         self._engines[workflow_id] = engine
         for persisted in tasks:
             record = persisted.record
