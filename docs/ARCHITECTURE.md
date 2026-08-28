@@ -141,7 +141,7 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
 - **Physical episode lowering.** The compiler lowers a v2 template either transparently
   (one physical node per operator, the compatibility baseline) or into run-to-yield
   **episodes**: each node is annotated with the boundary that closes it (service issue,
-  effect, durable checkpoint, isolation, continuation, region-blocking) and a chain of
+  effect, durable checkpoint, continuation, region-blocking) and a chain of
   pure deterministic local leaves fuses into one episode. The two lowerings are
   contract-equivalent — an episode cut changes only where work yields, never a declared
   output, effect visibility, or progress closure. `ORCHESTRATOR_EPISODE_LOWERING=true`
