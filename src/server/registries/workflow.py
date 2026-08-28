@@ -20,6 +20,7 @@ from ..clients.redis import (
     workflow_cancelled_tasks_key,
     workflow_dispatched_tasks_key,
     workflow_ds_key,
+    workflow_dynamic_tasks_key,
     workflow_failed_tasks_key,
     workflow_key,
     workflow_sched_key,
@@ -186,6 +187,7 @@ class WorkflowRegistry:
             pipe.delete(*(workflow_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_tasks_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_dispatched_tasks_key(wid) for wid in workflow_ids))
+            pipe.delete(*(workflow_dynamic_tasks_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_failed_tasks_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_cancelled_tasks_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_sched_key(wid) for wid in workflow_ids))
@@ -202,6 +204,7 @@ class WorkflowRegistry:
             pipe.delete(*(workflow_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_tasks_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_dispatched_tasks_key(wid) for wid in workflow_ids))
+            pipe.delete(*(workflow_dynamic_tasks_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_failed_tasks_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_cancelled_tasks_key(wid) for wid in workflow_ids))
             pipe.delete(*(workflow_sched_key(wid) for wid in workflow_ids))
@@ -321,6 +324,31 @@ class WorkflowRegistry:
             if sched is not None:
                 pipe.set(workflow_sched_key(workflow_id), sched.model_dump_json())
             pipe.execute()
+
+    def commit_dynamic_tasks(
+        self, workflow_id: str, records: Sequence[PersistedTask]
+    ) -> None:
+        """Persist newly materialized dynamic-child records and register their ids.
+
+        The ids join a durable dynamic-tasks set so restart rehydration reloads them
+        alongside the statically registered tasks. The records and set membership
+        commit atomically, ahead of the ledger snapshot that references them.
+        """
+        if not records:
+            return
+        ids = [item.record.task_id for item in records]
+        with self._rds.sync.control_pipeline() as pipe:
+            for item in records:
+                pipe.set(task_state_key(item.record.task_id), item.model_dump_json())
+            pipe.sadd(workflow_dynamic_tasks_key(workflow_id), *ids)
+            pipe.sadd(workflow_tasks_key(workflow_id), *ids)
+            pipe.hset(workflow_key(workflow_id), mapping=_workflow_update())
+            pipe.execute()
+
+    async def get_dynamic_task_ids_async(self, workflow_id: str) -> set[str]:
+        return await self._rds.asyncio.set_members(
+            workflow_dynamic_tasks_key(workflow_id)
+        )
 
     # ---- Durable task state (for restart rehydration) ----------------- #
 
@@ -445,4 +473,5 @@ class WorkflowRegistry:
             record = self.get_workflow_record(wid)
             if record:
                 task_ids.extend(record.task_ids)
+            task_ids.extend(self._rds.sync.set_members(workflow_dynamic_tasks_key(wid)))
         return task_ids
