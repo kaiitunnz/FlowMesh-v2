@@ -33,6 +33,7 @@ class WorkItemStatus(StrEnum):
     READY = "ready"  # admissible for a physical attempt
     DISPATCHED = "dispatched"  # an attempt is in flight
     SETTLED = "settled"  # terminal, carries a settled outcome
+    CANCELLED = "cancelled"  # terminal, withdrawn by cancellation
 
 
 class AttemptStatus(StrEnum):
@@ -196,6 +197,7 @@ class Scope(BaseModel):
     instance_id: str
     parent_scope_id: str | None = None  # None for the root scope
     owner_operator_id: str | None = None  # spawn/call/loop that opened it; None at root
+    owner_activation_id: str | None = None  # the opener activation; separates recursion
     grant_id: str | None = None  # the scope's effective (delegated) grant
     depth: int = 0  # bounds recursion
 
@@ -265,6 +267,7 @@ class WorkItem(BaseModel):
     legacy_task_id: str
     status: WorkItemStatus = WorkItemStatus.BLOCKED
     outcome: PublicationOutcome | None = None
+    value_ref: ValueRef | None = None  # a settled child's value, for a join winner
     invocation_id: str | None = None
     effect_class: EffectClass = EffectClass.PURE
     recovery: RecoveryClass = RecoveryClass.RECOMPUTE

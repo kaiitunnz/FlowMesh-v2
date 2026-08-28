@@ -34,6 +34,7 @@ from ..task.v2.representations.operators import (
     LeafProfile,
     LogicalOperator,
     OperatorKind,
+    ResidualPolicy,
     SpawnRegion,
 )
 from ..task.v2.representations.results import CardinalityKind
@@ -96,6 +97,10 @@ _REGION_KINDS = frozenset(
 # boundary-signature site, not an eagerly dispatchable leaf.
 _CONTROL_KINDS = _REGION_KINDS | {OperatorKind.AGENT}
 _CHILD_INIT_OPENERS = frozenset({OperatorKind.SPAWN, OperatorKind.AGENT})
+_EARLY_JOINS = frozenset(
+    {JoinCompletion.ANY, JoinCompletion.FIRST_K, JoinCompletion.PREDICATE}
+)
+_TERMINAL_WI = frozenset({WorkItemStatus.SETTLED, WorkItemStatus.CANCELLED})
 
 
 class RegionError(ValueError):
@@ -196,33 +201,44 @@ class OrchestrationEngine:
             )
 
         self._forward = self._build_topology()
-        self._scope_by_owner = {
-            s.owner_operator_id: s.scope_id
+        # Scope ownership is keyed on the opener activation, so one operator can own a
+        # scope per recursion level; an operator handle resolves through the index.
+        self._scope_by_activation = {
+            s.owner_activation_id: s.scope_id
             for s in self._scopes.values()
-            if s.owner_operator_id
+            if s.owner_activation_id
         }
-        self._loop_time = {
-            owner: max(
-                (
-                    a.loop_time
-                    for a in self._activations.values()
-                    if a.scope_id == scope_id
-                ),
-                default=0,
-            )
-            for owner, scope_id in self._scope_by_owner.items()
-            if self._kind(owner) is OperatorKind.LOOP_CONTEXT
-        }
+        self._owner_acts_by_operator: dict[str, list[str]] = {}
+        for s in self._scopes.values():
+            if s.owner_operator_id and s.owner_activation_id:
+                self._owner_acts_by_operator.setdefault(s.owner_operator_id, []).append(
+                    s.owner_activation_id
+                )
+        self._loop_time: dict[str, int] = {}
+        for scope in self._scopes.values():
+            owner = scope.owner_operator_id
+            if owner and self._kind(owner) is OperatorKind.LOOP_CONTEXT:
+                self._loop_time[scope.scope_id] = max(
+                    (
+                        a.loop_time
+                        for a in self._activations.values()
+                        if a.scope_id == scope.scope_id
+                    ),
+                    default=0,
+                )
         # A region's release/egress record is delivered at the root scope; a loop's
-        # feedback records sit at the loop scope, so gate on the root scope to avoid
-        # treating a mid-loop snapshot as already egressed.
-        self._released_regions = {
-            r.operator_id
-            for r in self._records
-            if r.scope_id == self._root_scope.scope_id
-            and self._kind(r.operator_id)
-            in (OperatorKind.JOIN, OperatorKind.LOOP_CONTEXT)
-        }
+        # feedback records sit at the loop scope, so a root-scope join/loop record marks
+        # the owning scope released, without treating a mid-loop snapshot as egressed.
+        self._released_scopes: set[str] = set()
+        for r in self._records:
+            if r.scope_id != self._root_scope.scope_id:
+                continue
+            if self._kind(r.operator_id) is OperatorKind.JOIN:
+                if (scope_id := self._scope_for_join(r.operator_id)) is not None:
+                    self._released_scopes.add(scope_id)
+            elif self._kind(r.operator_id) is OperatorKind.LOOP_CONTEXT:
+                if (scope_id := self._scope_id_for(r.operator_id)) is not None:
+                    self._released_scopes.add(scope_id)
         self._denied_spawns = {
             d.operator_id
             for d in self._decisions
@@ -409,7 +425,7 @@ class OrchestrationEngine:
     def on_dispatched(self, task_id: str, worker_id: str | None) -> None:
         """Record a physical attempt and issue or reissue the work item's invocation."""
         wi = self._work_item_for_task(task_id)
-        if wi is None or wi.status is WorkItemStatus.SETTLED:
+        if wi is None or wi.status in _TERMINAL_WI:
             return
         if wi.invocation_id is None:
             invocation = Invocation(
@@ -464,7 +480,7 @@ class OrchestrationEngine:
         an explicit-empty publication rather than a value.
         """
         wi = self._work_item_for_task(task_id)
-        if wi is None or wi.status is WorkItemStatus.SETTLED:
+        if wi is None or wi.status in _TERMINAL_WI:
             return Advance()
         outcome = (
             PublicationOutcome.EXPLICIT_EMPTY if empty else PublicationOutcome.SUCCESS
@@ -489,7 +505,7 @@ class OrchestrationEngine:
     def on_failed(self, task_id: str, error: str, *, retryable: bool) -> Advance:
         """Retry a work item as a fresh attempt, or settle it and cascade failure."""
         wi = self._work_item_for_task(task_id)
-        if wi is None or wi.status is WorkItemStatus.SETTLED:
+        if wi is None or wi.status in _TERMINAL_WI:
             return Advance()
         if attempt := self._latest_attempt(wi):
             attempt.status = AttemptStatus.FAILED
@@ -508,11 +524,7 @@ class OrchestrationEngine:
     def on_uncertain(self, task_id: str) -> Advance:
         """Resolve a lost acknowledgement or route loss for an in-flight work item."""
         wi = self._work_item_for_task(task_id)
-        if (
-            wi is None
-            or wi.status is WorkItemStatus.SETTLED
-            or wi.invocation_id is None
-        ):
+        if wi is None or wi.status in _TERMINAL_WI or wi.invocation_id is None:
             return Advance()
         invocation = self._invocations[wi.invocation_id]
         invocation.state = next_on_uncertain(
@@ -547,23 +559,31 @@ class OrchestrationEngine:
     # cardinality is controller-driven over generic regions)
     # ------------------------------------------------------------------ #
 
-    def spawn_child(self, spawn_op: str, *, operator_id: str | None = None) -> str:
+    def spawn_child(self, spawn: str, *, operator_id: str | None = None) -> str:
         """Materialize one child activation under a spawn/agent's open child scope.
 
-        Rejects a child after a definitive denial, or after the child-init capability is
-        sealed or revoked (late-child prevention). When the child body is itself a scope
-        opener, opens a nested scope so grandchildren attenuate from the child grant.
-        Returns the child activation id.
+        ``spawn`` is a region handle — an operator id for the non-recursive case, or an
+        opener activation id for a specific recursion level. Rejects a child after a
+        definitive denial, or after the child-init capability is sealed or revoked
+        (late-child prevention). When the child body is itself a scope opener, opens a
+        nested scope owned by the child activation, so grandchildren (and recursive
+        re-entries) attenuate from the child grant at ``depth+1``. Returns the child
+        activation id, which addresses that nested scope.
         """
-        spawn = self._operators[spawn_op]
-        child_ref = spawn.child_template_ref if isinstance(spawn, SpawnRegion) else None
+        spawn_op = self._handle_operator(spawn)
+        spawn_op_obj = self._operators[spawn_op]
+        child_ref = (
+            spawn_op_obj.child_template_ref
+            if isinstance(spawn_op_obj, SpawnRegion)
+            else None
+        )
         body_ref = operator_id or child_ref or spawn_op
         if spawn_op in self._denied_spawns:
             self._emit(
                 "child_rejected", operator_id=spawn_op, detail={"reason": "denied"}
             )
             raise RegionError(f"spawn {spawn_op!r} was denied; no child may be created")
-        scope_id = self._require_child_init_scope(spawn_op)
+        scope_id = self._require_child_init_scope(spawn)
         cap = self._capability(scope_id, ProgressAxis.CHILD_INIT)
         if cap.status is not CapabilityStatus.OPEN:
             self._emit(
@@ -608,34 +628,40 @@ class OrchestrationEngine:
             detail={"scope": scope_id, "index": str(index)},
         )
         if self._kind(body_ref) in _CHILD_INIT_OPENERS:
-            self._open_child_init_scope(body_ref, parent_scope_id=scope_id)
+            self._open_child_init_scope(
+                activation.activation_id, parent_scope_id=scope_id
+            )
         elif self._kind(body_ref) is OperatorKind.LOOP_CONTEXT:
-            self._open_loop(body_ref, parent_scope_id=scope_id)
+            self._open_loop(activation.activation_id, parent_scope_id=scope_id)
         return activation.activation_id
 
-    def seal_spawn(self, spawn_op: str) -> Advance:
+    def seal_spawn(self, spawn: str) -> Advance:
         """Seal a spawn's child-init capability; no further children may be created."""
-        scope_id = self._require_child_init_scope(spawn_op)
+        scope_id = self._require_child_init_scope(spawn)
         cap = self._capability(scope_id, ProgressAxis.CHILD_INIT)
         if cap.status is CapabilityStatus.OPEN:
             cap.status = CapabilityStatus.SEALED
             self._emit(
-                "child_init_sealed", operator_id=spawn_op, detail={"scope": scope_id}
+                "child_init_sealed",
+                operator_id=self._scopes[scope_id].owner_operator_id,
+                detail={"scope": scope_id},
             )
-        return self._maybe_release_join(spawn_op)
+        return self._maybe_release_join(scope_id)
 
-    def revoke_spawn(self, spawn_op: str) -> None:
+    def revoke_spawn(self, spawn: str) -> None:
         """Revoke a spawn's child-init capability as a progress transition.
 
         Distinct from sealing: revocation withdraws the capability, while sealing marks
         a producer done. Both close the child-init axis once outstanding children drain.
         """
-        scope_id = self._require_child_init_scope(spawn_op)
+        scope_id = self._require_child_init_scope(spawn)
         cap = self._capability(scope_id, ProgressAxis.CHILD_INIT)
         if cap.status is CapabilityStatus.OPEN:
             cap.status = CapabilityStatus.REVOKED
             self._emit(
-                "child_init_revoked", operator_id=spawn_op, detail={"scope": scope_id}
+                "child_init_revoked",
+                operator_id=self._scopes[scope_id].owner_operator_id,
+                detail={"scope": scope_id},
             )
 
     def settle_child(
@@ -650,10 +676,11 @@ class OrchestrationEngine:
         if activation is None or activation.kind != "child":
             raise RegionError(f"unknown child activation {child_activation_id!r}")
         wi = self._work_items[self._wi_by_activation[child_activation_id]]
-        if wi.status is WorkItemStatus.SETTLED:
+        if wi.status in _TERMINAL_WI:
             return Advance()
         wi.status = WorkItemStatus.SETTLED
         wi.outcome = outcome
+        wi.value_ref = value_ref
         cap = self._capability(activation.scope_id, ProgressAxis.CHILD_INIT)
         cap.outstanding = max(0, cap.outstanding - 1)
         scope = self._scopes[activation.scope_id]
@@ -664,7 +691,7 @@ class OrchestrationEngine:
             operator_id=activation.operator_id,
             detail={"scope": activation.scope_id, "outcome": outcome.value},
         )
-        return self._maybe_release_join(spawn_op)
+        return self._maybe_release_join(activation.scope_id)
 
     def route_branch(self, branch_op: str, selected_port: str) -> Advance:
         """Route a branch record to the selected port; settle the other ports empty."""
@@ -683,24 +710,27 @@ class OrchestrationEngine:
         )
         return advance
 
-    def loop_feedback(self, loop_op: str, *, value_ref: ValueRef | None = None) -> str:
+    def loop_feedback(self, loop: str, *, value_ref: ValueRef | None = None) -> str:
         """Re-materialize a loop body at the next loop-time coordinate.
 
         Enforces well-founded logical time: loop_time strictly increases and stays under
         the iteration budget, so a finite prefix is acyclic after time unrolling.
         Returns the iteration activation id.
         """
-        scope_id = self._require_loop_scope(loop_op)
+        scope_id = self._require_loop_scope(loop)
+        loop_op = self._scopes[scope_id].owner_operator_id or self._handle_operator(
+            loop
+        )
         cap = self._capability(scope_id, ProgressAxis.LOOP_TIME)
         if cap.status is not CapabilityStatus.OPEN:
             raise RegionError(
                 f"loop {loop_op!r} is {cap.status.value}; no feedback may arrive"
             )
-        next_time = self._loop_time.get(loop_op, 0) + 1
+        next_time = self._loop_time.get(scope_id, 0) + 1
         if next_time > self._budget.max_loop_iterations:
             self._exhaust_budget("loop_iterations", self._budget.max_loop_iterations)
         self._charge_activation()
-        self._loop_time[loop_op] = next_time
+        self._loop_time[scope_id] = next_time
         cap.coordinate = next_time
         cap.outstanding += 1
         activation = Activation(
@@ -733,17 +763,20 @@ class OrchestrationEngine:
             raise RegionError(f"unknown loop iteration {iteration_activation_id!r}")
         cap = self._capability(activation.scope_id, ProgressAxis.LOOP_TIME)
         cap.outstanding = max(0, cap.outstanding - 1)
-        owner = self._scopes[activation.scope_id].owner_operator_id or ""
-        return self._maybe_egress_loop(owner)
+        return self._maybe_egress_loop(activation.scope_id)
 
-    def loop_seal(self, loop_op: str) -> Advance:
+    def loop_seal(self, loop: str) -> Advance:
         """Seal a loop: no further feedback; egress once pending iterations drain."""
-        scope_id = self._require_loop_scope(loop_op)
+        scope_id = self._require_loop_scope(loop)
         cap = self._capability(scope_id, ProgressAxis.LOOP_TIME)
         if cap.status is CapabilityStatus.OPEN:
             cap.status = CapabilityStatus.SEALED
-            self._emit("loop_sealed", operator_id=loop_op, detail={"scope": scope_id})
-        return self._maybe_egress_loop(loop_op)
+            self._emit(
+                "loop_sealed",
+                operator_id=self._scopes[scope_id].owner_operator_id,
+                detail={"scope": scope_id},
+            )
+        return self._maybe_egress_loop(scope_id)
 
     def deny_spawn(
         self, spawn_op: str, interface: str, *, kind: DenialKind = DenialKind.AUTHORITY
@@ -755,7 +788,7 @@ class OrchestrationEngine:
         capability: grant denial and cardinality sealing stay distinct.
         """
         self._denied_spawns.add(spawn_op)
-        scope_id = self._scope_by_owner.get(spawn_op)
+        scope_id = self._scope_id_for(spawn_op)
         self._decisions.append(
             AuthorityDecision(
                 grant_id=self._grant_for_scope(scope_id or "").grant_id,
@@ -774,11 +807,163 @@ class OrchestrationEngine:
 
     def can_delegate(self, region_op: str, interface: str) -> bool:
         """Whether a child of ``region_op`` may itself delegate ``interface``."""
-        scope_id = self._scope_by_owner.get(region_op)
+        scope_id = self._scope_id_for(region_op)
         return (
             scope_id is not None
             and interface in self._grant_for_scope(scope_id).delegate
         )
+
+    # ------------------------------------------------------------------ #
+    # Cancellation (a durable semantic event)
+    # ------------------------------------------------------------------ #
+
+    def cancel_instance(self) -> Advance:
+        """Cancel the whole workflow instance: the root scope and every descendant."""
+        return self.on_cancelled(self._root_scope.scope_id)
+
+    def on_cancelled(self, scope_or_task: str) -> Advance:
+        """Cancel a scope subtree as a durable, recorded-before-terminal event.
+
+        ``scope_or_task`` resolves to a scope by scope id, opener activation, region
+        handle, or a settled task's owning scope. Over that scope and each descendant,
+        in order: record the cancellation; revoke the child-init (and loop-time)
+        capability — a transition distinct from sealing; apply the residual-child policy
+        to materialized children; transition the remaining in-flight work items to
+        ``CANCELLED``; revoke the scope's authority grant — distinct from the child-init
+        revoke; and resolve declared outputs to their cancellation / no-winner outcome.
+        """
+        scope_id = self._resolve_scope(scope_or_task)
+        if scope_id is None:
+            raise RegionError(f"{scope_or_task!r} resolves to no cancellable scope")
+        advance = Advance()
+        for sid in self._scope_subtree(scope_id):
+            advance.extend(self._cancel_scope(sid))
+        return advance
+
+    def _cancel_scope(self, scope_id: str) -> Advance:
+        scope = self._scopes[scope_id]
+        self._emit("scope_cancelled", detail={"scope": scope_id})
+        for axis in (ProgressAxis.CHILD_INIT, ProgressAxis.LOOP_TIME):
+            cap = self._capabilities.get((scope_id, axis))
+            if cap is not None and cap.status is CapabilityStatus.OPEN:
+                cap.status = CapabilityStatus.REVOKED
+                self._emit(
+                    (
+                        "child_init_revoked"
+                        if axis is ProgressAxis.CHILD_INIT
+                        else "loop_revoked"
+                    ),
+                    operator_id=scope.owner_operator_id,
+                    detail={"scope": scope_id},
+                )
+        self._apply_cancellation_residual(scope_id)
+        for wi in self._scope_work_items(scope_id, kinds=("leaf", "agent")):
+            if wi.status not in _TERMINAL_WI:
+                self._cancel_work_item(wi)
+        if scope.grant_id and scope.grant_id in self._grants:
+            grant = self._grants[scope.grant_id]
+            if not grant.revoked:
+                self._grants[scope.grant_id] = grant.model_copy(
+                    update={"revoked": True}
+                )
+                self._emit(
+                    "grant_revoked",
+                    operator_id=scope.owner_operator_id,
+                    detail={"scope": scope_id},
+                )
+        return self._resolve_cancelled_outputs(scope_id)
+
+    def _apply_cancellation_residual(self, scope_id: str) -> None:
+        """Apply a cancelled scope's join residual policy to its materialized children.
+
+        A declared ``drain``/``continue`` leaves materialized children to settle; the
+        default (``cancel``, and any scope without a declared policy) cancels every
+        not-yet-settled child.
+        """
+        join = self._join_of_scope(scope_id)
+        if self._residual_policy(join, ResidualPolicy.CANCEL) is ResidualPolicy.CANCEL:
+            self._cancel_residual_children(scope_id)
+
+    def _resolve_cancelled_outputs(self, scope_id: str) -> Advance:
+        if scope_id in self._released_scopes:
+            return Advance()
+        owner_op = self._scopes[scope_id].owner_operator_id or ""
+        join = self._join_of_scope(scope_id)
+        if join is not None:
+            outcome = (
+                PublicationOutcome.DECLARED_FAILURE
+                if join.no_winner_failure
+                else PublicationOutcome.EXPLICIT_EMPTY
+            )
+            release_op = join.operator_id
+        elif self._kind(owner_op) is OperatorKind.LOOP_CONTEXT:
+            outcome = PublicationOutcome.EXPLICIT_EMPTY
+            release_op = owner_op
+        else:
+            return Advance()
+        self._released_scopes.add(scope_id)
+        self._emit(
+            "join_released" if join is not None else "loop_egress",
+            operator_id=release_op,
+            detail={"outcome": outcome.value, "cancelled": "true"},
+        )
+        self._frontier_closed(scope_id)
+        self._publish(release_op, outcome, ValueRef(kind="empty"))
+        return self._deliver_record(
+            release_op, self._control_activation(release_op), ValueRef(kind="empty")
+        )
+
+    def _cancel_work_item(self, wi: WorkItem) -> None:
+        if wi.status in _TERMINAL_WI:
+            return
+        wi.status = WorkItemStatus.CANCELLED
+        self._publish(
+            wi.operator_id, PublicationOutcome.EXPLICIT_EMPTY, ValueRef(kind="empty")
+        )
+        self._emit(
+            "work_item_cancelled",
+            work_item_id=wi.work_item_id,
+            operator_id=wi.operator_id,
+        )
+
+    def _resolve_scope(self, handle: str) -> str | None:
+        if handle in self._scopes:
+            return handle
+        if handle in self._scope_by_activation:
+            return self._scope_by_activation[handle]
+        if (wi_id := self._wi_by_task.get(handle)) is not None:
+            act = self._activations.get(self._work_items[wi_id].activation_id)
+            return act.scope_id if act else None
+        return self._scope_id_for(handle)
+
+    def _scope_subtree(self, root: str) -> list[str]:
+        order = [root]
+        seen = {root}
+        cursor = 0
+        while cursor < len(order):
+            current = order[cursor]
+            cursor += 1
+            for scope in self._scopes.values():
+                if scope.parent_scope_id == current and scope.scope_id not in seen:
+                    seen.add(scope.scope_id)
+                    order.append(scope.scope_id)
+        return order
+
+    def _scope_work_items(
+        self, scope_id: str, *, kinds: tuple[str, ...]
+    ) -> list[WorkItem]:
+        return [
+            wi
+            for a in self._activations.values()
+            if a.scope_id == scope_id
+            and a.kind in kinds
+            and (
+                wi := self._work_items.get(
+                    self._wi_by_activation.get(a.activation_id, "")
+                )
+            )
+            is not None
+        ]
 
     # ------------------------------------------------------------------ #
     # Record delivery, control firing, and closure
@@ -822,9 +1007,9 @@ class OrchestrationEngine:
     def _fire_control(self, operator_id: str, advance: Advance) -> None:
         kind = self._kind(operator_id)
         if kind in _CHILD_INIT_OPENERS:
-            self._open_child_init_scope(operator_id)
+            self._open_child_init_scope(self._control_activation(operator_id))
         elif kind is OperatorKind.LOOP_CONTEXT:
-            self._open_loop(operator_id)
+            self._open_loop(self._control_activation(operator_id))
         elif kind is OperatorKind.MERGE:
             self._emit("merge_combined", operator_id=operator_id)
             advance.extend(
@@ -843,63 +1028,117 @@ class OrchestrationEngine:
         # JOIN is released by scope closure, never by an input record.
 
     def _open_child_init_scope(
-        self, opener_op: str, *, parent_scope_id: str | None = None
+        self, opener_activation: str, *, parent_scope_id: str | None = None
     ) -> str:
-        if opener_op in self._scope_by_owner:
-            return self._scope_by_owner[opener_op]
-        scope = self._new_child_scope(opener_op, parent_scope_id)
-        self._scope_by_owner[opener_op] = scope.scope_id
+        if opener_activation in self._scope_by_activation:
+            return self._scope_by_activation[opener_activation]
+        scope = self._new_child_scope(opener_activation, parent_scope_id)
+        self._register_scope_owner(scope)
         self._acquire_capability(scope.scope_id, ProgressAxis.CHILD_INIT)
         self._emit(
             "child_init_acquired",
-            operator_id=opener_op,
+            operator_id=scope.owner_operator_id,
             detail={"scope": scope.scope_id},
         )
         return scope.scope_id
 
-    def _open_loop(self, loop_op: str, *, parent_scope_id: str | None = None) -> str:
-        if loop_op in self._scope_by_owner:
-            return self._scope_by_owner[loop_op]
-        scope = self._new_child_scope(loop_op, parent_scope_id)
-        self._scope_by_owner[loop_op] = scope.scope_id
-        self._loop_time[loop_op] = 0
+    def _open_loop(
+        self, opener_activation: str, *, parent_scope_id: str | None = None
+    ) -> str:
+        if opener_activation in self._scope_by_activation:
+            return self._scope_by_activation[opener_activation]
+        scope = self._new_child_scope(opener_activation, parent_scope_id)
+        self._register_scope_owner(scope)
+        self._loop_time[scope.scope_id] = 0
         self._acquire_capability(scope.scope_id, ProgressAxis.LOOP_TIME, coordinate=0)
         self._emit(
-            "loop_ingress", operator_id=loop_op, detail={"scope": scope.scope_id}
+            "loop_ingress",
+            operator_id=scope.owner_operator_id,
+            detail={"scope": scope.scope_id},
         )
         return scope.scope_id
 
-    def _maybe_release_join(self, spawn_op: str) -> Advance:
-        join_op = self._join_for_spawn(spawn_op)
-        if join_op is None or join_op in self._released_regions:
+    def _maybe_release_join(self, scope_id: str) -> Advance:
+        scope = self._scopes.get(scope_id)
+        if scope is None or scope.owner_operator_id is None:
             return Advance()
-        scope_id = self._scope_by_owner.get(spawn_op)
-        if (
-            scope_id is None
-            or not self._capability(scope_id, ProgressAxis.CHILD_INIT).closed
-        ):
+        join_op = self._join_for_spawn(scope.owner_operator_id)
+        if join_op is None or scope_id in self._released_scopes:
+            return Advance()
+        cap = self._capabilities.get((scope_id, ProgressAxis.CHILD_INIT))
+        if cap is None:
+            return Advance()
+        if (early := self._maybe_early_release(join_op, scope_id, cap)) is not None:
+            return early
+        if not cap.closed:
             return Advance()
         return self._release_join(join_op, scope_id)
 
+    def _maybe_early_release(
+        self, join_op: str, scope_id: str, cap: ProgressCapability
+    ) -> Advance | None:
+        """Release an early join once its qualifier threshold is met, per its rule.
+
+        A monotone rule (``any``/``first_k``/a monotone predicate) releases on the first
+        witness; a non-monotone predicate never releases early, waiting for closure.
+        """
+        join = self._operators[join_op]
+        if not isinstance(join, JoinRegion) or join.completion not in _EARLY_JOINS:
+            return None
+        threshold, monotone = self._early_rule(join)
+        if not monotone or len(self._qualifiers(scope_id)) < threshold:
+            return None
+        return self._release_join(join_op, scope_id)
+
     def _release_join(self, join_op: str, scope_id: str) -> Advance:
-        self._released_regions.add(join_op)
+        self._released_scopes.add(scope_id)
         join = self._operators[join_op]
         assert isinstance(join, JoinRegion)
-        outcomes = [
-            self._work_items[self._wi_by_activation[a.activation_id]].outcome
-            for a in self._activations.values()
-            if a.scope_id == scope_id and a.kind == "child"
-        ]
-        outcome = self._join_outcome(join, [o for o in outcomes if o is not None])
+        outcome, value_ref = self._join_result(join, scope_id)
+        children = self._materialized_children(scope_id)
         self._emit(
             "join_released",
             operator_id=join_op,
-            detail={"outcome": outcome.value, "children": str(len(outcomes))},
+            detail={"outcome": outcome.value, "children": str(len(children))},
         )
         self._frontier_closed(scope_id)
-        self._publish(join_op, outcome, ValueRef(kind="join_result"))
+        self._apply_residual_policy(join, scope_id)
+        self._publish(join_op, outcome, value_ref)
         return self._deliver_record(
-            join_op, self._control_activation(join_op), ValueRef(kind="join_result")
+            join_op, self._control_activation(join_op), value_ref
+        )
+
+    def _join_result(
+        self, join: JoinRegion, scope_id: str
+    ) -> tuple[PublicationOutcome, ValueRef | None]:
+        """A join's published outcome and value: a winner's value, or a no-winner mark.
+
+        An early join publishes its lowest-``child_index`` qualifier's value, or its
+        declared no-winner outcome; a full-closure join aggregates over its children.
+        """
+        if join.completion in _EARLY_JOINS:
+            qualifiers = self._qualifiers(scope_id)
+            threshold, _ = self._early_rule(join)
+            if len(qualifiers) >= threshold:
+                winner = self._work_items[
+                    self._wi_by_activation[qualifiers[0].activation_id]
+                ]
+                return PublicationOutcome.SUCCESS, (
+                    winner.value_ref or ValueRef(kind="join_result")
+                )
+            outcome = (
+                PublicationOutcome.DECLARED_FAILURE
+                if join.no_winner_failure
+                else PublicationOutcome.EXPLICIT_EMPTY
+            )
+            return outcome, ValueRef(kind="empty")
+        outcomes = [
+            self._work_items[self._wi_by_activation[c.activation_id]].outcome
+            for c in self._materialized_children(scope_id)
+        ]
+        return (
+            self._join_outcome(join, [o for o in outcomes if o is not None]),
+            ValueRef(kind="join_result"),
         )
 
     def _join_outcome(
@@ -914,19 +1153,90 @@ class OrchestrationEngine:
             return PublicationOutcome.DECLARED_FAILURE
         return PublicationOutcome.SUCCESS
 
-    def _maybe_egress_loop(self, loop_op: str) -> Advance:
-        if not loop_op or loop_op in self._released_regions:
+    def _early_rule(self, join: JoinRegion) -> tuple[int, bool]:
+        """The (qualifier threshold, monotone) of an early join's release rule."""
+        if join.completion is JoinCompletion.ANY:
+            return 1, True
+        if join.completion is JoinCompletion.FIRST_K:
+            return join.first_k or 1, True
+        pred = join.predicate
+        return (pred.min_qualifiers if pred else 1), (pred.monotone if pred else True)
+
+    def _qualifiers(self, scope_id: str) -> list[Activation]:
+        """A scope's settled children that succeeded, ordered by ``child_index``."""
+        return [
+            child
+            for child in self._materialized_children(scope_id)
+            if self._work_items[self._wi_by_activation[child.activation_id]].outcome
+            is PublicationOutcome.SUCCESS
+        ]
+
+    def _materialized_children(self, scope_id: str) -> list[Activation]:
+        return sorted(
+            (
+                a
+                for a in self._activations.values()
+                if a.scope_id == scope_id and a.kind == "child"
+            ),
+            key=lambda a: a.child_index if a.child_index is not None else 0,
+        )
+
+    def _residual_policy(
+        self, join: JoinRegion | None, default: ResidualPolicy
+    ) -> ResidualPolicy:
+        if join is not None and join.residual_policy:
+            return ResidualPolicy(join.residual_policy)
+        return default
+
+    def _join_of_scope(self, scope_id: str) -> JoinRegion | None:
+        join_op = self._join_for_spawn(self._scopes[scope_id].owner_operator_id or "")
+        join = self._operators.get(join_op) if join_op else None
+        return join if isinstance(join, JoinRegion) else None
+
+    def _cancel_residual_children(self, scope_id: str) -> None:
+        cap = self._capabilities.get((scope_id, ProgressAxis.CHILD_INIT))
+        for child in self._materialized_children(scope_id):
+            wi = self._work_items[self._wi_by_activation[child.activation_id]]
+            if wi.status not in _TERMINAL_WI:
+                self._cancel_work_item(wi)
+                if cap is not None:
+                    cap.outstanding = max(0, cap.outstanding - 1)
+
+    def _apply_residual_policy(self, join: JoinRegion, scope_id: str) -> None:
+        """Govern a released early join's not-yet-settled materialized children.
+
+        ``continue`` leaves child-init open; ``drain`` seals it; ``cancel`` revokes it
+        and cancels the residual children. Residual settlements stay ledger-visible but
+        never become the join's implicit winner output.
+        """
+        if join.completion not in _EARLY_JOINS:
+            return
+        policy = self._residual_policy(join, ResidualPolicy.CONTINUE)
+        cap = self._capabilities.get((scope_id, ProgressAxis.CHILD_INIT))
+        if policy is ResidualPolicy.CONTINUE or cap is None:
+            return
+        if cap.status is CapabilityStatus.OPEN:
+            cancel = policy is ResidualPolicy.CANCEL
+            cap.status = CapabilityStatus.REVOKED if cancel else CapabilityStatus.SEALED
+            self._emit(
+                "child_init_revoked" if cancel else "child_init_sealed",
+                operator_id=self._scopes[scope_id].owner_operator_id,
+                detail={"scope": scope_id, "residual": policy.value},
+            )
+        if policy is ResidualPolicy.CANCEL:
+            self._cancel_residual_children(scope_id)
+
+    def _maybe_egress_loop(self, scope_id: str) -> Advance:
+        if not scope_id or scope_id in self._released_scopes:
             return Advance()
-        scope_id = self._scope_by_owner.get(loop_op)
-        if (
-            scope_id is None
-            or not self._capability(scope_id, ProgressAxis.LOOP_TIME).closed
-        ):
+        cap = self._capabilities.get((scope_id, ProgressAxis.LOOP_TIME))
+        if cap is None or not cap.closed:
             return Advance()
-        self._released_regions.add(loop_op)
+        self._released_scopes.add(scope_id)
         self._frontier_closed(scope_id)
+        loop_op = self._scopes[scope_id].owner_operator_id or ""
         self._emit("loop_egress", operator_id=loop_op, detail={"scope": scope_id})
-        carried = self._latest_carried(loop_op)
+        carried = self._latest_carried(scope_id)
         self._publish(loop_op, PublicationOutcome.SUCCESS, carried)
         return self._deliver_record(loop_op, self._control_activation(loop_op), carried)
 
@@ -951,15 +1261,19 @@ class OrchestrationEngine:
         if self._scopes[parent_scope_id].depth + 1 > self._budget.max_scope_depth:
             self._exhaust_budget("scope_depth", self._budget.max_scope_depth)
 
-    def _new_child_scope(self, owner_op: str, parent_scope_id: str | None) -> Scope:
+    def _new_child_scope(
+        self, opener_activation: str, parent_scope_id: str | None
+    ) -> Scope:
+        opener_op = self._activations[opener_activation].operator_id
         parent = self._scopes[parent_scope_id or self._root_scope.scope_id]
         self._check_scope_depth(parent.scope_id)
-        grant = self._mint_delegated_grant(owner_op, parent.scope_id)
+        grant = self._mint_delegated_grant(opener_op, parent.scope_id)
         scope = Scope(
             scope_id=new_scope_id(),
             instance_id=self._instance.instance_id,
             parent_scope_id=parent.scope_id,
-            owner_operator_id=owner_op,
+            owner_operator_id=opener_op,
+            owner_activation_id=opener_activation,
             grant_id=grant.grant_id,
             depth=parent.depth + 1,
         )
@@ -968,6 +1282,14 @@ class OrchestrationEngine:
             update={"scope_id": scope.scope_id}
         )
         return scope
+
+    def _register_scope_owner(self, scope: Scope) -> None:
+        if scope.owner_activation_id:
+            self._scope_by_activation[scope.owner_activation_id] = scope.scope_id
+        if scope.owner_operator_id and scope.owner_activation_id:
+            self._owner_acts_by_operator.setdefault(scope.owner_operator_id, []).append(
+                scope.owner_activation_id
+            )
 
     def _frontier_closed(self, scope_id: str) -> None:
         self._emit("frontier_closed", detail={"scope": scope_id})
@@ -1118,7 +1440,7 @@ class OrchestrationEngine:
             if wi_id is None:
                 return
             wi = self._work_items[wi_id]
-            if wi.status is WorkItemStatus.SETTLED:
+            if wi.status in _TERMINAL_WI:
                 return
             wi.status = WorkItemStatus.SETTLED
             wi.outcome = PublicationOutcome.EXPLICIT_EMPTY
@@ -1130,7 +1452,7 @@ class OrchestrationEngine:
 
     def _settle_failure(self, work_item_id: str) -> list[str]:
         wi = self._work_items[work_item_id]
-        if wi.status is WorkItemStatus.SETTLED:
+        if wi.status in _TERMINAL_WI:
             return []
         wi.status = WorkItemStatus.SETTLED
         wi.outcome = PublicationOutcome.DECLARED_FAILURE
@@ -1259,17 +1581,22 @@ class OrchestrationEngine:
         return self._capabilities.get((scope_id, axis)) if scope_id else None
 
     def scope_for(self, region_op: str) -> str | None:
-        return self._scope_by_owner.get(region_op)
+        return self._scope_id_for(region_op)
 
     def grant_for(self, region_op: str) -> DelegatedAuthorityGrant | None:
-        scope_id = self._scope_by_owner.get(region_op)
+        scope_id = self._scope_id_for(region_op)
         if scope_id is None:
             return None
         grant_id = self._scopes[scope_id].grant_id
         return self._grants.get(grant_id) if grant_id else None
 
     def region_closed(self, region_op: str) -> bool:
-        return region_op in self._released_regions
+        scope_id = (
+            self._scope_for_join(region_op)
+            if self._kind(region_op) is OperatorKind.JOIN
+            else self._scope_id_for(region_op)
+        )
+        return scope_id in self._released_scopes if scope_id else False
 
     def work_item(self, task_id: str) -> WorkItem | None:
         return self._work_item_for_task(task_id)
@@ -1320,7 +1647,7 @@ class OrchestrationEngine:
         blocked.
         """
         wi = self._work_item_for_task(task_id)
-        if wi is None or wi.status is WorkItemStatus.SETTLED:
+        if wi is None or wi.status in _TERMINAL_WI:
             return False
         cont = self._continuations.get(wi.work_item_id)
         if cont is not None and cont.waiting_on:
@@ -1354,31 +1681,68 @@ class OrchestrationEngine:
                 return edge.to_op
         return None
 
+    def _scope_for_join(self, join_op: str) -> str | None:
+        for edge in self._bundle.template.edges:
+            if edge.to_op == join_op and self._kind(edge.from_op) is OperatorKind.SPAWN:
+                return self._scope_id_for(edge.from_op)
+        return None
+
     def _edge_from_port(self, from_op: str, to_op: str) -> str | None:
         for edge in self._bundle.template.edges:
             if edge.from_op == from_op and edge.to_op == to_op:
                 return edge.from_port
         return None
 
-    def _require_child_init_scope(self, opener_op: str) -> str:
-        return self._scope_by_owner.get(opener_op) or self._open_child_init_scope(
-            opener_op
-        )
+    def _handle_operator(self, handle: str) -> str:
+        """The operator id a region handle names: the handle, or its activation's."""
+        act = self._activations.get(handle)
+        return act.operator_id if act else handle
 
-    def _require_loop_scope(self, loop_op: str) -> str:
-        return self._scope_by_owner.get(loop_op) or self._open_loop(loop_op)
+    def _resolve_opener_activation(self, handle: str) -> str | None:
+        """The opener activation a region handle resolves to.
 
-    def _latest_carried(self, loop_op: str) -> ValueRef | None:
+        An activation-id handle is its own opener (a recursive level); an operator-id
+        handle resolves to its scope-owning activation, or, before the scope opens, its
+        control activation.
+        """
+        if handle in self._activations:
+            return handle
+        if acts := self._owner_acts_by_operator.get(handle):
+            return acts[-1]
+        ctrl = self._control_activation(handle)
+        return ctrl if ctrl in self._activations else None
+
+    def _scope_id_for(self, handle: str) -> str | None:
+        opener = self._resolve_opener_activation(handle)
+        return self._scope_by_activation.get(opener) if opener else None
+
+    def _require_child_init_scope(self, handle: str) -> str:
+        if (scope_id := self._scope_id_for(handle)) is not None:
+            return scope_id
+        opener = self._resolve_opener_activation(handle)
+        if opener is None:
+            raise RegionError(f"{handle!r} has no opener activation")
+        return self._open_child_init_scope(opener)
+
+    def _require_loop_scope(self, handle: str) -> str:
+        if (scope_id := self._scope_id_for(handle)) is not None:
+            return scope_id
+        opener = self._resolve_opener_activation(handle)
+        if opener is None:
+            raise RegionError(f"{handle!r} has no opener activation")
+        return self._open_loop(opener)
+
+    def _latest_carried(self, scope_id: str) -> ValueRef | None:
         latest: ValueRef | None = None
         best = -1
         for record in self._records:
-            if record.operator_id == loop_op and record.loop_time >= best:
+            if record.scope_id == scope_id and record.loop_time >= best:
                 best = record.loop_time
                 latest = record.value_ref
         return latest
 
     def _emit(
-        self, kind: str, *, detail: dict[str, str] | None = None, **fields: str
+        self, kind: str, *, detail: dict[str, str] | None = None, **fields: str | None
     ) -> None:
         self._trace.append(
             OrchestrationEvent(
@@ -1390,7 +1754,11 @@ class OrchestrationEngine:
                 invocation_id=fields.get("invocation_id"),
                 slot_key=fields.get("slot_key"),
                 detail=detail
-                or {k: v for k, v in fields.items() if k not in _EVENT_FIELDS},
+                or {
+                    k: v
+                    for k, v in fields.items()
+                    if k not in _EVENT_FIELDS and v is not None
+                },
             )
         )
         self._next_seq += 1
