@@ -58,7 +58,7 @@ def attenuate(
     """Intersect an authority face with each bound, monotonically shrinking it.
 
     A child face can only lose interfaces relative to its parent, so a spawn site can
-    never widen what an ancestor forbids (§6.5).
+    never widen what an ancestor forbids.
     """
     face = set(parent_face)
     for bound in bounds:
@@ -70,8 +70,8 @@ def classify_recovery(profile: LeafProfile) -> RecoveryDisposition:
     """Whether a settled operation may be recomputed within one execution.
 
     Only a pure/hermetic deterministic operation over a complete pinned input cone
-    may recompute (§5.5.4); sampling, unpinned reads, and effects must restore their
-    recorded outcome before later work relies on them.
+    may recompute; sampling, unpinned reads, and effects must restore their recorded
+    outcome before later work relies on them.
     """
     if (
         profile.effect is EffectClass.PURE

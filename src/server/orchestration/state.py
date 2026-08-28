@@ -1,6 +1,6 @@
 """Durable orchestration-ledger (`DS`) state objects.
 
-These model the semantic hierarchy of note 21 §7: a workflow instance owns result
+These model the durable semantic hierarchy: a workflow instance owns result
 slots and activations; an activation owns records, continuations, work items, and its
 scope's progress capabilities; a work item owns an optional invocation and one or more
 physical attempts. The ledger persists grant/policy identity and authorization
@@ -87,7 +87,7 @@ class DenialKind(StrEnum):
     """Why a definitive dynamic authorization failed, distinct from admission outcomes.
 
     A denial creates neither a child activation nor a resident claim, and is separate
-    from quota/rate/capacity/transport outcomes (§6.5).
+    from quota/rate/capacity/transport outcomes.
     """
 
     AUTHORITY = "authority"  # interface outside the effective grant's invoke/delegate
@@ -95,7 +95,7 @@ class DenialKind(StrEnum):
 
 
 class ProgressAxis(StrEnum):
-    """The axis of a scope's outstanding-capability account (§6.3)."""
+    """The axis of a scope's outstanding-capability account."""
 
     CHILD_INIT = "child_init"  # whether a spawn producer can still introduce a child
     LOOP_TIME = "loop_time"  # feedback that can still arrive at a loop coordinate
@@ -140,9 +140,8 @@ class DelegatedAuthorityGrant(BaseModel):
     """A child scope's grant, minted at a spawn site and attenuated by its parent.
 
     Both faces are bounded by the parent delegate face, the child region's ceiling, the
-    spawn-site restriction, and the policy envelope (§6.5). Snapshotted at child
-    creation with its own epoch — grant minting/revocation is distinct from child-init
-    sealing.
+    spawn-site restriction, and the policy envelope. Snapshotted at child creation with
+    its own epoch — grant minting/revocation is distinct from child-init sealing.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -189,40 +188,30 @@ class WorkflowInstance(BaseModel):
 
 
 class Scope(BaseModel):
-    """Ownership, cancellation, and progress namespace for a lineage region.
-
-    ``owner_operator_id`` is the region operator that opened the scope (a spawn, call,
-    or loop); ``depth`` bounds recursion. The root scope has neither a parent nor an
-    owner.
-    """
+    """Ownership, cancellation, and progress namespace for a lineage region."""
 
     model_config = ConfigDict(frozen=True)
 
     scope_id: str
     instance_id: str
-    parent_scope_id: str | None = None
-    owner_operator_id: str | None = None
+    parent_scope_id: str | None = None  # None for the root scope
+    owner_operator_id: str | None = None  # spawn/call/loop that opened it; None at root
     grant_id: str | None = None  # the scope's effective (delegated) grant
-    depth: int = 0
+    depth: int = 0  # bounds recursion
 
 
 class Activation(BaseModel):
-    """A lineage-level semantic instance of an operator or region.
-
-    ``child_index`` distinguishes spawned siblings; ``loop_time`` orders loop-body
-    re-materializations. Together with ``scope_id`` they separate a spawned child from
-    an iteration from a recursive call.
-    """
+    """A lineage-level semantic instance of an operator or region."""
 
     model_config = ConfigDict(frozen=True)
 
     activation_id: str
     instance_id: str
-    scope_id: str
+    scope_id: str  # with loop_time/child_index, separates child vs iteration vs call
     operator_id: str
     kind: str = "leaf"
-    loop_time: int = 0
-    child_index: int | None = None
+    loop_time: int = 0  # orders loop-body re-materializations
+    child_index: int | None = None  # distinguishes spawned siblings
 
 
 class Record(BaseModel):
@@ -245,20 +234,15 @@ class Continuation(BaseModel):
 
 
 class ProgressCapability(BaseModel):
-    """One scope's outstanding-capability account on a single progress axis.
-
-    ``outstanding`` counts records that can still arrive (unsettled children on the
-    child-init axis, pending feedback on the loop-time axis). A region closes on an axis
-    only when the capability is sealed or revoked and ``outstanding`` reaches zero — an
-    observed-empty set is never closure by itself (§4.3, §6.3).
-    """
+    """One scope's outstanding-capability account on a single progress axis."""
 
     scope_id: str
     axis: ProgressAxis
     coordinate: int | None = None  # loop_time for the LOOP_TIME axis
-    outstanding: int = 0
+    outstanding: int = 0  # records that can still arrive on this axis
     status: CapabilityStatus = CapabilityStatus.OPEN
 
+    # Closure needs a sealed or revoked capability drained to zero, never an empty set.
     @property
     def closed(self) -> bool:
         return (

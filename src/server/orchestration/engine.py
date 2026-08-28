@@ -1,6 +1,6 @@
 """The orchestration engine over the transparent structured-region physical plan.
 
-The engine owns semantic readiness (note 21 §8.3): it turns settled records into ready
+The engine owns semantic readiness: it turns settled records into ready
 work items, incrementally materializing the activation graph rather than precreating
 attempts. Static top-level leaf operators materialize eagerly and dispatch through the
 runtime; control operators (branch, merge, spawn, join, loop) and agents settle inside
@@ -752,7 +752,7 @@ class OrchestrationEngine:
 
         A denial creates no child activation and no resident claim, and is separate
         from quota/rate/capacity/transport outcomes. It does not seal the child-init
-        capability: grant denial and cardinality sealing stay distinct (§6.5).
+        capability: grant denial and cardinality sealing stay distinct.
         """
         self._denied_spawns.add(spawn_op)
         scope_id = self._scope_by_owner.get(spawn_op)

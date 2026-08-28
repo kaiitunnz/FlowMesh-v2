@@ -1,4 +1,4 @@
-"""Deterministic trace tests for structured dynamic regions (note 21 §6).
+"""Deterministic trace tests for structured dynamic regions.
 
 These drive the orchestration engine directly over hand-built transparent-region
 bundles. They prove closure from combined child-init and loop-time capability
