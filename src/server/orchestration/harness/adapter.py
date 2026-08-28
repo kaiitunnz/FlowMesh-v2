@@ -36,9 +36,8 @@ FACADE_TOOLS = frozenset(FacadeTool)
 class HarnessBackendKey(BaseModel):
     """A versioned identity for one harness binding.
 
-    ``backend`` names the harness (a test double here; a concrete app-server binding
-    later) and ``version`` pins the adapter/protocol so a capsule is only resumed by a
-    compatible binding.
+    ``backend`` names the harness binding and ``version`` pins the adapter/protocol so a
+    capsule is only resumed by a compatible binding.
     """
 
     model_config = ConfigDict(frozen=True)

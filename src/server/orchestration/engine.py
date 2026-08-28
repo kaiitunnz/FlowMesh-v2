@@ -46,7 +46,6 @@ from ..task.v2.representations.operators import (
 from ..task.v2.representations.plan import EpisodeSpec
 from ..task.v2.representations.results import CardinalityKind
 from ..utils.time import now_iso
-from .episode import BoundaryEvent
 from .guardrails import ScopeBudget
 from .outcomes import (
     attenuate,
@@ -66,6 +65,7 @@ from .state import (
     AuthorityDecision,
     AuthorityDecisionKind,
     AuthorityGrant,
+    BoundaryEvent,
     CapabilityStatus,
     Continuation,
     DelegatedAuthorityGrant,
@@ -118,6 +118,17 @@ class RegionError(ValueError):
 
 def _control_key(operator_id: str) -> str:
     return f"control:{operator_id}"
+
+
+def _effect_recovery(op: LogicalOperator | None) -> tuple[EffectClass, RecoveryClass]:
+    """A dispatchable operator's effect/recovery: a leaf's profile, else pure/recompute.
+
+    An agent episode is itself pure and recomputable; its mediated effects flow through
+    boundary events rather than the episode's own effect class.
+    """
+    if isinstance(op, LeafOperator):
+        return op.profile.effect, op.profile.recovery
+    return EffectClass.PURE, RecoveryClass.RECOMPUTE
 
 
 @dataclass
@@ -319,9 +330,9 @@ class OrchestrationEngine:
             if b.source_ref
         }
         kind_by_id = {op.operator_id: op.kind for op in template.operators}
-        # A child body declared by another operator, with no normal predecessor, is
-        # materialized dynamically rather than dispatched eagerly. A self-recursive
-        # agent names itself and stays a normal dispatchable entry.
+        # A child body another operator declares is materialized dynamically per spawn,
+        # never dispatched eagerly. A self-recursive agent names itself and stays a
+        # normal dispatchable entry.
         child_body_refs = {
             op.child_template_ref
             for op in template.operators
@@ -372,7 +383,6 @@ class OrchestrationEngine:
             ):
                 continue  # spawn->join binding, not a record edge
             preds[edge.to_op].add(edge.from_op)
-        eager_excluded = {ref for ref in child_body_refs if not preds.get(ref)}
 
         activations: list[Activation] = []
         work_items: list[WorkItem] = []
@@ -388,7 +398,7 @@ class OrchestrationEngine:
             activations.append(activation)
             dispatchable = (
                 isinstance(op, (LeafOperator, AgentOperator))
-                and op.operator_id not in eager_excluded
+                and op.operator_id not in child_body_refs
             )
             if not dispatchable:
                 if op.kind in _CONTROL_KINDS:
@@ -399,14 +409,7 @@ class OrchestrationEngine:
                         )
                     )
                 continue
-            effect = (
-                op.profile.effect if isinstance(op, LeafOperator) else EffectClass.PURE
-            )
-            recovery = (
-                op.profile.recovery
-                if isinstance(op, LeafOperator)
-                else RecoveryClass.RECOMPUTE
-            )
+            effect, recovery = _effect_recovery(op)
             work_item = WorkItem(
                 work_item_id=new_work_item_id(),
                 activation_id=activation.activation_id,
@@ -633,12 +636,14 @@ class OrchestrationEngine:
         wi = self._work_item_for_task(task_id)
         if wi is None or wi.status in _TERMINAL_WI:
             return Advance()
+        # A recorded call is a re-drive whether it was granted or denied: it maps to its
+        # key and creates no new work, so re-validation and duplicate records are cut.
+        if self._is_boundary_redrive(wi, event):
+            return Advance()
         op = self._operators.get(wi.operator_id)
         if isinstance(op, AgentOperator):
             if (denial := self._validate_agent_boundary(op, wi, event)) is not None:
                 return self._record_boundary_denial(wi, event, denial)
-        if self._is_boundary_redrive(wi, event):
-            return Advance()
         match event.kind:
             case BoundaryEventKind.SPAWN:
                 if self._kind(wi.operator_id) not in _CHILD_INIT_OPENERS:
@@ -679,8 +684,10 @@ class OrchestrationEngine:
 
         A mediated request's durable outcome — a model or tool result, or a denial —
         lets the episode resume: the work item returns to READY for a fresh attempt that
-        injects the outcome at its originating call. Only a work item that suspended on
-        the recorded call is resumed, so a stray delivery is a no-op.
+        injects the outcome at its originating call. Only a boundary-suspended work item
+        with a recorded envelope for the call is resumed — a delivery to a running or
+        settled item, or for an unrecorded call, is a no-op. An episode has one
+        outstanding boundary at a time, so the recorded call is the one it awaits.
         """
         wi = self._work_item_for_task(task_id)
         if wi is None or wi.status is not WorkItemStatus.BLOCKED:
@@ -800,10 +807,11 @@ class OrchestrationEngine:
         outcome; it creates neither an invocation nor a child, and the episode suspends
         to receive it rather than silently proceeding.
         """
+        subject = event.interface or event.child_ref or ""
         self._decisions.append(
             AuthorityDecision(
                 grant_id=self._root_grant.grant_id,
-                interface=event.interface or event.child_ref or "",
+                interface=subject,
                 kind=AuthorityDecisionKind.DENIED,
                 work_item_id=wi.work_item_id,
                 operator_id=wi.operator_id,
@@ -816,7 +824,7 @@ class OrchestrationEngine:
             "authority_denied" if denial is DenialKind.AUTHORITY else "policy_denied",
             work_item_id=wi.work_item_id,
             operator_id=wi.operator_id,
-            detail={"interface": event.interface or event.child_ref or ""},
+            detail={"interface": subject},
         )
         self._suspend_work_item(wi, "episode_suspended")
         return Advance()
@@ -962,15 +970,15 @@ class OrchestrationEngine:
             child_index=index,
         )
         self._activations[activation.activation_id] = activation
-        profile = body_op.profile if isinstance(body_op, LeafOperator) else None
+        effect, recovery = _effect_recovery(body_op)
         child_wi = WorkItem(
             work_item_id=new_work_item_id(),
             activation_id=activation.activation_id,
             operator_id=body_ref,
             legacy_task_id=activation.activation_id if dispatchable else "",
             value_ref=value_ref,
-            effect_class=profile.effect if profile else EffectClass.PURE,
-            recovery=profile.recovery if profile else RecoveryClass.RECOMPUTE,
+            effect_class=effect,
+            recovery=recovery,
             replay_contract=self._replay.get(body_ref),
         )
         self._work_items[child_wi.work_item_id] = child_wi

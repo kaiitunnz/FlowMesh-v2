@@ -372,6 +372,21 @@ def test_undeclared_tool_is_denied_without_creating_work() -> None:
     assert "authority_denied" in {k for k, _ in eng.contract_trace()}
 
 
+def test_denied_boundary_redrive_is_idempotent() -> None:
+    eng = _engine(_solo_agent())
+    _dispatch_agent(eng)
+    request = BoundaryEvent(
+        kind=BoundaryEventKind.INVOCATION, call_correlation="c0", interface="danger"
+    )
+    eng.route_boundary_event("A", request)
+    decisions = len(eng._decisions)  # type: ignore[attr-defined]
+    # A re-driven denial maps to the recorded call rather than re-denying it.
+    eng.on_dispatched("A", "w2")
+    eng.route_boundary_event("A", request)
+    assert len(eng._decisions) == decisions  # type: ignore[attr-defined]
+    assert "boundary_redriven" in {k for k, _ in eng.contract_trace()}
+
+
 def test_undeclared_boundary_kind_is_denied() -> None:
     # An agent whose signature omits SPAWN cannot yield a spawn boundary.
     agent = _agent("A", child_ref="child")
