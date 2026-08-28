@@ -1,4 +1,5 @@
 from .engine import Advance, OrchestrationEngine, RegionError
+from .episode import BoundaryEvent, EpisodeOutcome, EpisodeOutcomeKind
 from .guardrails import ScopeBudget
 from .outcomes import (
     AdmissionError,
@@ -44,6 +45,9 @@ __all__ = [
     "Attempt",
     "AttemptStatus",
     "AuthorityDecision",
+    "BoundaryEvent",
+    "EpisodeOutcome",
+    "EpisodeOutcomeKind",
     "AuthorityDecisionKind",
     "AuthorityGrant",
     "CapabilityStatus",

@@ -191,7 +191,7 @@ class Dispatcher:
             return True
 
         # Live-feasibility handoff: defer an episode whose declared alternative is not
-        # feasible to place now, holding no worker. Resident-capacity admission is PR 6.
+        # feasible to place now, holding no worker. It admits no capacity object.
         if not self._runtime.episode_feasible(task_id):
             self.requeue_task(
                 task_id, reason="infeasible_alternative", count_retry=False

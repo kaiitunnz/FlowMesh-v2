@@ -7,15 +7,17 @@ publication versus the trace-level ``spawn_child``/``settle_child`` driving.
 """
 
 from server.orchestration import (
+    BoundaryEvent,
     OrchestrationEngine,
     PublicationOutcome,
     ScopeBudget,
     WorkItemStatus,
 )
-from server.orchestration.state import ValueRef
+from server.orchestration.state import InvocationState, ValueRef
 from server.task.v2 import FrontendWorkflowSource, PersistedV2Workflow
 from server.task.v2.compiler.bindings import leaf_profile
 from server.task.v2.representations.operators import (
+    BoundaryEventKind,
     JoinCompletion,
     JoinRegion,
     LeafOperator,
@@ -200,6 +202,57 @@ def test_child_retry_preserves_work_item_and_invocation_identity() -> None:
     assert wi_after is not None
     assert wi_after.work_item_id == wi_id and wi_after.invocation_id == inv_id
     assert len(wi_after.attempt_ids) == 2  # a second attempt under the same identity
+
+
+def _leaf_engine() -> OrchestrationEngine:
+    bundle = _bundle([_leaf("solo")], [], (_decl("legacy:solo", "solo"),))
+    eng = OrchestrationEngine.build("wfl-x", "o", "g", bundle)
+    eng.on_dispatched("solo", "w1")  # an attempt is in flight, about to yield
+    return eng
+
+
+def _trace_kinds(eng: OrchestrationEngine) -> set[str]:
+    return {kind for kind, _ in eng.contract_trace()}
+
+
+def test_invocation_boundary_records_durable_state_before_suspending() -> None:
+    eng = _leaf_engine()
+    before = len(eng._invocations)  # type: ignore[attr-defined]
+    adv = eng.route_boundary_event(
+        "solo", BoundaryEvent(kind=BoundaryEventKind.INVOCATION, interface="search")
+    )
+    assert adv.ready == [] and adv.failed == []
+    wi = eng.work_item("solo")
+    assert wi is not None and wi.status is WorkItemStatus.BLOCKED  # worker released
+    # A durable invocation is recorded ISSUED before the work item suspends.
+    issued = [
+        i
+        for i in eng._invocations.values()  # type: ignore[attr-defined]
+        if i.state is InvocationState.ISSUED and i.work_item_id == wi.work_item_id
+    ]
+    assert len(eng._invocations) == before + 1  # type: ignore[attr-defined]
+    assert issued
+
+
+def test_yield_boundary_persists_the_continuation_and_suspends() -> None:
+    eng = _leaf_engine()
+    eng.route_boundary_event(
+        "solo", BoundaryEvent(kind=BoundaryEventKind.YIELD, continuation="cont-blob")
+    )
+    wi = eng.work_item("solo")
+    assert wi is not None
+    assert wi.status is WorkItemStatus.BLOCKED and wi.continuation_ref == "cont-blob"
+
+
+def test_state_access_boundary_records_without_suspending() -> None:
+    eng = _leaf_engine()
+    adv = eng.route_boundary_event(
+        "solo", BoundaryEvent(kind=BoundaryEventKind.STATE_ACCESS, state_ref="ref-1")
+    )
+    assert adv.ready == []
+    assert "state_access" in _trace_kinds(eng)
+    wi = eng.work_item("solo")  # a state access is a query, not a suspension
+    assert wi is not None and wi.status is WorkItemStatus.DISPATCHED
 
 
 def test_child_failure_fails_all_succeed_join_without_static_cascade() -> None:

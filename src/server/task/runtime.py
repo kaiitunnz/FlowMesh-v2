@@ -26,6 +26,7 @@ from ..orchestration import (
     ScopeBudget,
     ValueRef,
 )
+from ..orchestration.episode import BoundaryEvent
 from ..registries.worker import Worker, WorkerRegistry
 from ..registries.workflow import PersistedTask, WorkflowRegistry, WorkflowSched
 from ..utils.time import parse_iso_ts
@@ -875,6 +876,50 @@ class TaskRuntime:
         with self._lock:
             return self._engines.get(workflow_id)
 
+    def apply_boundary_event(self, task_id: str, event: BoundaryEvent) -> bool:
+        """Carry an episode's boundary event into the ledger and dispatch its effect.
+
+        Routes the event into the engine, synthesizes a task record for any dispatchable
+        child it materializes, applies the advance, and writes the ledger snapshot after
+        the task records so the ledger never leads durable state. The worker path that
+        produces the event and resumes a suspended work item arrives with the episode
+        worker runner.
+        """
+        with self._cv:
+            record = self._tasks.get(task_id)
+            engine = self._engines.get(record.workflow_id) if record else None
+            if record is None or engine is None:
+                return False
+            advance = engine.route_boundary_event(task_id, event)
+            self._synthesize_ready_children_locked(record.workflow_id, engine, advance)
+            changed = self._apply_advance_locked(record.workflow_id, advance)
+            self._save_ledger_locked(record.workflow_id)
+            if changed:
+                self._cv.notify_all()
+            return changed
+
+    def _synthesize_ready_children_locked(
+        self, workflow_id: str, engine: OrchestrationEngine, advance: Advance
+    ) -> None:
+        """Give any newly ready child a dispatchable, durably persisted task record."""
+        new_children: list[str] = []
+        for child_task_id in advance.ready:
+            if child_task_id in self._tasks:
+                continue
+            wi = engine.work_item(child_task_id)
+            template = self._tasks.get(wi.operator_id) if wi else None
+            if template is None:
+                continue
+            self._tasks[child_task_id] = self._synthesize_child_record(
+                template, child_task_id, None
+            )
+            self._original_deps[child_task_id] = set()
+            new_children.append(child_task_id)
+        if new_children:
+            self._workflow_registry.commit_dynamic_tasks(
+                workflow_id, self._records_locked(*new_children)
+            )
+
     def episode_feasible(self, task_id: str) -> bool:
         """Whether a ready episode's declared alternative can be placed now.
 
@@ -1028,7 +1073,7 @@ class TaskRuntime:
         """Clone a child-template record for one materialized child, injecting input."""
         task = template.task
         spec = task.spec
-        if "data" in type(spec).model_fields:
+        if element is not None and "data" in type(spec).model_fields:
             spec = spec.model_copy(
                 update={"data": {"type": "list", "items": [element]}}
             )

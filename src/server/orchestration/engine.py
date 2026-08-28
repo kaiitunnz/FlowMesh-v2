@@ -26,6 +26,7 @@ from shared.utils import (
 from ..task.v2.representations.bundle import PersistedV2Workflow
 from ..task.v2.representations.operators import (
     AgentOperator,
+    BoundaryEventKind,
     BranchRegion,
     EffectClass,
     JoinCompletion,
@@ -41,6 +42,7 @@ from ..task.v2.representations.operators import (
 from ..task.v2.representations.plan import EpisodeSpec
 from ..task.v2.representations.results import CardinalityKind
 from ..utils.time import now_iso
+from .episode import BoundaryEvent
 from .guardrails import ScopeBudget
 from .outcomes import (
     attenuate,
@@ -577,6 +579,78 @@ class OrchestrationEngine:
             invocation_id=wi.invocation_id,
         )
         return Advance(failed=self._settle_failure(wi.work_item_id))
+
+    def route_boundary_event(self, task_id: str, event: BoundaryEvent) -> Advance:
+        """Route an episode's durable boundary event back into the ledger semantics.
+
+        The physical layer carries the event across the episode boundary; the engine
+        applies the settled semantics. A spawn materializes a child under the yielding
+        activation's scope. An invocation or effect records durable request state before
+        the work item suspends, so waiting holds no worker. A yield persists the opaque
+        continuation and suspends. A state access records the declared reference; its
+        value is resolved by query. The reply that resumes a suspended work item arrives
+        with the episode worker runner.
+        """
+        wi = self._work_item_for_task(task_id)
+        if wi is None or wi.status in _TERMINAL_WI:
+            return Advance()
+        match event.kind:
+            case BoundaryEventKind.SPAWN:
+                return self.materialize_child(
+                    wi.activation_id,
+                    operator_id=event.child_ref,
+                    value_ref=event.value_ref,
+                )
+            case BoundaryEventKind.INVOCATION:
+                return self._suspend_on_request(wi, event.interface, effect=False)
+            case BoundaryEventKind.EXTERNAL_EFFECT:
+                return self._suspend_on_request(wi, event.interface, effect=True)
+            case BoundaryEventKind.YIELD:
+                wi.continuation_ref = event.continuation
+                self._suspend_work_item(wi, "episode_yielded")
+                return Advance()
+            case BoundaryEventKind.STATE_ACCESS:
+                self._emit(
+                    "state_access",
+                    work_item_id=wi.work_item_id,
+                    operator_id=wi.operator_id,
+                    detail={"state_ref": event.state_ref or ""},
+                )
+                return Advance()
+        return Advance()
+
+    def _suspend_on_request(
+        self, wi: WorkItem, interface: str | None, *, effect: bool
+    ) -> Advance:
+        invocation = Invocation(
+            invocation_id=new_invocation_id(),
+            work_item_id=wi.work_item_id,
+            state=InvocationState.ISSUED,
+            replayable=(
+                is_replayable(wi.effect_class, wi.replay_contract) if effect else True
+            ),
+            compensable=(
+                is_compensable(wi.effect_class, wi.replay_contract) if effect else False
+            ),
+        )
+        self._invocations[invocation.invocation_id] = invocation
+        self._emit(
+            "effect_requested" if effect else "invocation_issued",
+            work_item_id=wi.work_item_id,
+            invocation_id=invocation.invocation_id,
+            operator_id=wi.operator_id,
+            detail={"interface": interface or ""},
+        )
+        self._suspend_work_item(wi, "episode_suspended")
+        return Advance()
+
+    def _suspend_work_item(self, wi: WorkItem, kind: str) -> None:
+        """Release the worker and suspend a work item awaiting a boundary reply."""
+        if attempt := self._latest_attempt(wi):
+            attempt.status = AttemptStatus.SUCCEEDED
+            attempt.finished_at = now_iso()
+        wi.status = WorkItemStatus.BLOCKED
+        self._emit(kind, work_item_id=wi.work_item_id, operator_id=wi.operator_id)
 
     # ------------------------------------------------------------------ #
     # Structured-region API (control settlement is internal; dynamic

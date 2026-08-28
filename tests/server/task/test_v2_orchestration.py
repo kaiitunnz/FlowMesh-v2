@@ -10,10 +10,12 @@ import pytest
 
 from server.config import OrchestrationConfig
 from server.orchestration import (
+    BoundaryEvent,
     InvocationState,
     OrchestrationEngine,
     PublicationOutcome,
     RecoveryDisposition,
+    WorkItemStatus,
 )
 from server.orchestration.outcomes import (
     AdmissionError,
@@ -29,6 +31,7 @@ from server.task.parser import parse_workflow
 from server.task.runtime import TaskRuntime
 from server.task.v2 import FrontendWorkflowSource, compile_bundle
 from server.task.v2.representations.operators import (
+    BoundaryEventKind,
     EffectClass,
     EffectReplayContract,
 )
@@ -353,10 +356,31 @@ async def test_scheduler_rejects_an_infeasible_episode_alternative() -> None:
     )
     _, ids = await _register(runtime, _INFEASIBLE)
     # A sampled model call lowers to a service-issue episode the check rejects; the
-    # scheduler defers it, holding no worker (resident admission is PR 6).
+    # scheduler defers it, holding no worker and admitting no capacity object.
     assert runtime.episode_feasible(ids["gen"]) is False
     # A local deterministic echo episode stays feasible.
     assert runtime.episode_feasible(ids["loc"]) is True
+
+
+@pytest.mark.anyio
+async def test_boundary_event_carries_into_the_ledger_and_persists() -> None:
+    registry = FakeRegistry()
+    runtime = _runtime(registry)
+    workflow_id, ids = await _register(runtime, LINEAR)
+    a = ids["a"]
+    runtime.mark_dispatched(a, cast(Any, _worker()))
+    runtime.mark_started(a, "wkr-1", {}, _TS)
+    engine = runtime.orchestration_engine(workflow_id)
+    assert engine is not None
+    # The worker's episode yields a service-invocation boundary; carrying it into the
+    # ledger suspends the work item without readying new work, and persists a snapshot.
+    changed = runtime.apply_boundary_event(
+        a, BoundaryEvent(kind=BoundaryEventKind.INVOCATION, interface="tool")
+    )
+    assert changed is False
+    wi = engine.work_item(a)
+    assert wi is not None and wi.status is WorkItemStatus.BLOCKED
+    assert workflow_id in registry.ledger_blobs
 
 
 # --------------------------------------------------------------------------- #
