@@ -147,6 +147,13 @@ Region kinds are `branch`, `merge`, `spawn`, `join`, `loop`, and `call`
 back-edge into a `loop` region; it is excluded from acyclic-topology checks, so
 an unstructured `dependsOn` cycle is still rejected.
 
+A `join` `completion` is `all_settled`, `all_succeed`, `any`, `first_k` (with
+`k`), or `predicate` (with `predicate: { min_qualifiers, monotone }`). An early
+completion (`any`/`first_k`/`predicate`) declares a `residual` policy
+(`continue`, `drain`, `cancel`) for children still running when it releases, and
+may set `no_winner_failure: true` to resolve a no-winner join as a failure rather
+than empty. The winner is the lowest-`child_index` child that qualifies.
+
 ### Dry-run inspection
 
 `POST /api/v1/workflows/validate` parses a workflow without executing it. For a

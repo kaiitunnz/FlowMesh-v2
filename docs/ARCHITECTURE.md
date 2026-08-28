@@ -130,9 +130,20 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   incrementally by activation identity. A region closes on its child-init and loop-time
   capability account — sealed or revoked and drained — never on an observed-empty set.
   Every spawn site mints a monotonically attenuated `DelegatedAuthorityGrant`, and a
-  denial records a durable `AuthorityDenied`/`PolicyDenied` that creates no child. Scope,
-  loop, and activation budgets bound recursion; the REST submit path admits only the
-  acyclic subset, with regions inspect-only there.
+  denial records a durable `AuthorityDenied`/`PolicyDenied` that creates no child. An
+  early join (`any`/`first-k`/`predicate`) releases before closure per its declared rule,
+  applying a residual-child policy (`continue`/`drain`/`cancel`) to children still
+  running; residual children keep settling but never become implicit outputs. Recursion
+  nests a scope per re-entry at `depth+1`, bounded by the scope/loop/activation budgets
+  (a breach is the durable `scope_budget_exhausted` terminal); the REST submit path admits
+  only the acyclic subset, with regions inspect-only there.
+- **Cancellation.** `OrchestrationEngine.on_cancelled` is a durable semantic event over a
+  scope subtree: it revokes the child-init capability and the authority grant (distinct
+  transitions from sealing), applies the residual-child policy, transitions in-flight work
+  items to `CANCELLED`, and resolves declared outputs to their cancellation/no-winner
+  outcome — recorded before it makes any join or the workflow terminal. A cancelled
+  `flowmesh/v2` workflow is ledger-consistent and replays on rehydration, so cancelled
+  work is never re-admitted.
 - **Task merging.** Compatible adjacent tasks in a DAG (same `taskType`,
   model, hardware shape, and merge key) coalesce into a single dispatch.
   Merged children ride on `WorkerTaskMessage.merged_children`; the worker
