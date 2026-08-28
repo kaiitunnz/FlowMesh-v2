@@ -511,6 +511,17 @@ class TaskRuntime:
                 record.task_id
             ):
                 self._enqueue_ready_locked(record.task_id)
+
+        # Re-drive fan-out for any DONE producer whose spawn never sealed before a
+        # crash: its terminal event will not replay, so nothing else materializes the
+        # children. Re-driving is idempotent once the spawn has sealed.
+        for persisted in tasks:
+            if persisted.record.status != TaskStatus.DONE:
+                continue
+            advance = self._fan_out_children_locked(
+                workflow_id, engine, persisted.record.task_id
+            )
+            self._apply_advance_locked(workflow_id, advance)
         self._save_ledger_locked(workflow_id)
 
     # ------------------------------------------------------------------ #
@@ -954,6 +965,27 @@ class TaskRuntime:
             spec = engine.episode_spec(task_id) if engine else None
         return True if spec is None else self._feasibility_check(spec)
 
+    def retry_deferred_fanout(self, producer_task_id: str) -> None:
+        """Re-drive a producer's deferred fan-out once its result lands out-of-band.
+
+        A producer's terminal event is processed once; in a multi-node deployment its
+        result reaches this node through result ingest, unordered against that event, so
+        a fan-out deferred for a not-yet-readable result has no later event to re-drive
+        it. Re-driving is idempotent: a sealed spawn admits no new child.
+        """
+        with self._cv:
+            record = self._tasks.get(producer_task_id)
+            if record is None or record.status != TaskStatus.DONE:
+                return
+            engine = self._engines.get(record.workflow_id)
+            if engine is None:
+                return
+            advance = self._fan_out_children_locked(
+                record.workflow_id, engine, producer_task_id
+            )
+            if self._apply_advance_locked(record.workflow_id, advance):
+                self._cv.notify_all()
+
     def resolve_v2_output(
         self, workflow_id: str, output_id: str
     ) -> ResultPublication | None:
@@ -1046,6 +1078,19 @@ class TaskRuntime:
             self._tasks.get(child_template_id) if child_template_id else None
         )
         if template_record is None:
+            # Compile-time validation rejects an unresolved or non-leaf child template,
+            # so reaching here is an internal inconsistency; fail the workflow rather
+            # than defer a join that could never close.
+            self._logger.error(
+                "Spawn %s child template %r is unresolvable; failing the workflow",
+                spawn_op,
+                child_template_id,
+            )
+            self._fail_workflow_locked(
+                workflow_id,
+                f"spawn child template {child_template_id!r} is not a "
+                "dispatchable leaf",
+            )
             return advance
         elements = self._load_fanout_elements(producer_task_id)
         if elements is None:
@@ -1161,6 +1206,18 @@ class TaskRuntime:
         if persist and failed_now:
             self._persist_terminal_locked(*failed_now)
         return failed_now
+
+    def _fail_workflow_locked(self, workflow_id: str, reason: str) -> None:
+        """Fail every non-terminal task of a workflow and persist the terminal facts."""
+        non_terminal = [
+            task_id
+            for task_id, record in self._tasks.items()
+            if record.workflow_id == workflow_id
+            and record.status not in TERMINAL_TASK_STATUSES
+        ]
+        if self._fail_v2_records_locked(non_terminal, reason, persist=True):
+            self._save_ledger_locked(workflow_id)
+            self._cv.notify_all()
 
     def _fail_v2_cascade_locked(
         self, primary: str, cascade: list[str]

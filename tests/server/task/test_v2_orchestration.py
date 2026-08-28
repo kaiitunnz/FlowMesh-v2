@@ -390,6 +390,98 @@ async def test_deferred_fan_out_recovers_on_replay_when_result_lands(
     assert len(_pop_ready(runtime)) == 3 and _child_count(engine) == 3
 
 
+@pytest.mark.anyio
+async def test_deferred_fan_out_recovers_on_result_ingest_without_a_second_event(
+    tmp_path: Any,
+) -> None:
+    registry = FakeRegistry()
+    runtime = TaskRuntime(
+        cast(Any, registry),
+        cast(Any, _WorkerRegistryStub()),
+        OrchestrationConfig(),
+        tmp_path,
+        logging.getLogger("live"),
+    )
+    workflow_id, ids = await _register(runtime, AUTORESEARCH)
+    planner = ids["planner"]
+    runtime.mark_dispatched(planner, cast(Any, _worker()))
+    runtime.mark_succeeded(planner, "wkr-1", {}, _TS)
+    engine = runtime.orchestration_engine(workflow_id)
+    assert engine is not None
+    assert _pop_ready(runtime) == [] and _child_count(engine) == 0
+
+    # In a multi-node deployment the result reaches this node out of band through
+    # result ingest, unordered against the single terminal event; the ingest nudge
+    # re-drives the fan-out with no second terminal event to lean on.
+    _write_result(tmp_path, planner, ["h1", "h2", "h3"])
+    runtime.retry_deferred_fanout(planner)
+    children = _pop_ready(runtime)
+    assert len(children) == 3 and _child_count(engine) == 3
+    for child in children:
+        runtime.mark_dispatched(child, cast(Any, _worker()))
+        runtime.mark_succeeded(child, "wkr-1", {}, _TS)
+    assert engine.region_closed("collect")
+
+
+@pytest.mark.anyio
+async def test_zero_element_fan_out_seals_and_closes_the_join_empty(
+    tmp_path: Any,
+) -> None:
+    registry = FakeRegistry()
+    runtime = TaskRuntime(
+        cast(Any, registry),
+        cast(Any, _WorkerRegistryStub()),
+        OrchestrationConfig(),
+        tmp_path,
+        logging.getLogger("live"),
+    )
+    workflow_id, ids = await _register(runtime, AUTORESEARCH)
+    planner = ids["planner"]
+    # A present-but-empty collection seals the spawn with zero children — an explicit
+    # seal, not an observed-empty inference — and the all-settled join closes empty.
+    _write_result(tmp_path, planner, [])
+    runtime.mark_dispatched(planner, cast(Any, _worker()))
+    runtime.mark_succeeded(planner, "wkr-1", {}, _TS)
+    engine = runtime.orchestration_engine(workflow_id)
+    assert engine is not None
+    assert _pop_ready(runtime) == [] and _child_count(engine) == 0
+    assert engine.region_closed("collect")
+
+
+@pytest.mark.anyio
+async def test_rehydration_re_drives_a_deferred_fan_out(tmp_path: Any) -> None:
+    registry = FakeRegistry()
+    runtime = TaskRuntime(
+        cast(Any, registry),
+        cast(Any, _WorkerRegistryStub()),
+        OrchestrationConfig(),
+        tmp_path,
+        logging.getLogger("live"),
+    )
+    workflow_id, ids = await _register(runtime, AUTORESEARCH)
+    planner = ids["planner"]
+    # The producer settles before its result is on the node: the persisted snapshot
+    # holds it DONE with the spawn unsealed and no children committed — the
+    # crash-between state.
+    runtime.mark_dispatched(planner, cast(Any, _worker()))
+    runtime.mark_succeeded(planner, "wkr-1", {}, _TS)
+    assert registry.dynamic_task_ids.get(workflow_id, set()) == set()
+
+    # The result lands, then the process restarts: rehydration re-drives the fan-out.
+    _write_result(tmp_path, planner, ["h1", "h2", "h3"])
+    restored = TaskRuntime(
+        cast(Any, registry),
+        cast(Any, _WorkerRegistryStub()),
+        OrchestrationConfig(),
+        tmp_path,
+        logging.getLogger("rehydrate"),
+    )
+    assert await restored.rehydrate() == 1
+    engine = restored.orchestration_engine(workflow_id)
+    assert engine is not None
+    assert len(_pop_ready(restored)) == 3 and _child_count(engine) == 3
+
+
 _INFEASIBLE = """
 apiVersion: flowmesh/v2
 kind: Workflow
