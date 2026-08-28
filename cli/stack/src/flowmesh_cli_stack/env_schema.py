@@ -231,21 +231,21 @@ STACK_ENV_SCHEMA = EnvSchema(
             description=["Backstops bounding structured dynamic regions."],
             vars=[
                 EnvVar(
-                    "FLOWMESH_V2_MAX_SCOPE_DEPTH",
+                    "ORCHESTRATOR_MAX_SCOPE_DEPTH",
                     "64",
                     description="Max nested call/spawn/recursion scope depth.",
                     var_type=EnvVarType.INT,
                     min_value=1,
                 ),
                 EnvVar(
-                    "FLOWMESH_V2_MAX_LOOP_ITERATIONS",
+                    "ORCHESTRATOR_MAX_LOOP_ITERATIONS",
                     "1000",
                     description="Max loop-time iterations per LoopContext activation.",
                     var_type=EnvVarType.INT,
                     min_value=1,
                 ),
                 EnvVar(
-                    "FLOWMESH_V2_MAX_ACTIVATIONS",
+                    "ORCHESTRATOR_MAX_ACTIVATIONS",
                     "10000",
                     description="Max dynamic activations per workflow instance.",
                     var_type=EnvVarType.INT,

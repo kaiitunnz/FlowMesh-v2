@@ -6,6 +6,7 @@ from typing import Any, cast
 
 import pytest
 
+from server.config import OrchestrationConfig
 from server.task.parser import parse_workflow
 from server.task.runtime import TaskRuntime
 from server.task.v2 import (
@@ -102,6 +103,7 @@ def _runtime(registry: _CapturingRegistry) -> TaskRuntime:
     return TaskRuntime(
         cast(Any, registry),
         cast(Any, _WorkerRegistryStub()),
+        OrchestrationConfig(),
         logging.getLogger("v2-test"),
     )
 

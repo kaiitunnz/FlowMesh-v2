@@ -8,6 +8,7 @@ from typing import Any, cast
 
 import pytest
 
+from server.config import OrchestrationConfig
 from server.registries.workflow import PersistedTask, WorkflowSched
 from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime
@@ -132,6 +133,7 @@ def _runtime(registry: FakeWorkflowRegistry) -> TaskRuntime:
     return TaskRuntime(
         cast(Any, registry),
         cast(Any, _WorkerRegistryStub()),
+        OrchestrationConfig(),
         logging.getLogger("rehydrate-test"),
     )
 

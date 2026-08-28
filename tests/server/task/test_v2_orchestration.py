@@ -8,6 +8,7 @@ from typing import Any, cast
 
 import pytest
 
+from server.config import OrchestrationConfig
 from server.orchestration import (
     InvocationState,
     OrchestrationEngine,
@@ -144,6 +145,7 @@ def _runtime(registry: FakeRegistry) -> TaskRuntime:
     return TaskRuntime(
         cast(Any, registry),
         cast(Any, _WorkerRegistryStub()),
+        OrchestrationConfig(),
         logging.getLogger("v2-test"),
     )
 

@@ -11,6 +11,7 @@ from shared.schemas.command import InterruptMessage
 from shared.tasks import TaskEnvelopeTemplate
 from shared.utils import new_workflow_id
 
+from ..config import OrchestrationConfig
 from ..hooks import SUPPLIER_RESOLVERS
 from ..orchestration import (
     Advance,
@@ -71,13 +72,13 @@ class TaskRuntime:
         self,
         workflow_registry: WorkflowRegistry,
         worker_registry: WorkerRegistry,
+        orchestration: OrchestrationConfig,
         logger: logging.Logger,
-        scope_budget: ScopeBudget | None = None,
     ) -> None:
         self._workflow_registry = workflow_registry
         self._worker_registry = worker_registry
         self._logger = logger
-        self._scope_budget = scope_budget
+        self._scope_budget = ScopeBudget.from_config(orchestration)
         self._tasks: dict[str, TaskRecord] = {}
         self._original_deps: dict[str, set[str]] = {}
         self._pending_deps: dict[str, set[str]] = {}
