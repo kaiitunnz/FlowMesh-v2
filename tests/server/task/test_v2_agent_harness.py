@@ -278,7 +278,14 @@ def test_injected_outcome_resumes_the_episode_to_completion() -> None:
     ep.resume("A", act)
     env = eng.boundary_envelope(act, "c0")
     assert env is not None
-    # The model result lands: the fabric re-readies the lane and the episode resumes.
+    # Safety: the suspend released the lane — the work item holds no worker (its attempt
+    # finished) and is not occupying a ready/dispatched slot while it waits.
+    wi = eng.work_item("A")
+    assert wi is not None and wi.status is WorkItemStatus.BLOCKED
+    attempt = eng._attempts[wi.attempt_ids[-1]]  # type: ignore[attr-defined]
+    assert attempt.status.value == "succeeded" and attempt.finished_at is not None
+    # Liveness gate: only the durable outcome re-readies the lane — the work item stays
+    # suspended until the mediated outcome is delivered.
     resumed = eng.deliver_boundary_outcome("A", "c0")
     assert resumed.ready == ["A"]
     ep.deliver(
