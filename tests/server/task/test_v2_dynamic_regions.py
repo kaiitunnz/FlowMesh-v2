@@ -975,6 +975,39 @@ def test_recursion_preserves_identity_across_rehydration() -> None:
     assert len(matching) == 1
 
 
+def test_recursive_cross_level_join_release_survives_rehydration() -> None:
+    bundle = _recursive_bundle()
+    eng = _engine(bundle, budget=ScopeBudget(max_scope_depth=5))
+    outer_scope = eng.scope_for("R")
+    assert outer_scope is not None
+    outer_owner = next(
+        s.owner_activation_id
+        for s in eng.to_snapshot().scopes
+        if s.scope_id == outer_scope
+    )
+    assert outer_owner is not None
+    # Re-enter R one level down and close the inner level's join.
+    lvl2 = eng.spawn_child("R", operator_id="R")
+    inner_scope = eng.scope_for(lvl2)
+    assert inner_scope is not None
+    inner_child = eng.spawn_child(lvl2, operator_id="leaf")
+    eng.settle_child(inner_child)
+    eng.seal_spawn(lvl2)
+    # Close the outer level's join (lvl2 is the outer scope's child).
+    eng.settle_child(lvl2)
+    eng.seal_spawn(outer_owner)
+    assert {outer_scope, inner_scope} <= set(eng.to_snapshot().released_scopes)
+    releases = [k for k, _ in eng.contract_trace() if k == "join_released"]
+
+    # Both levels of the one recursive join operator are restored directly, not
+    # misattributed to the deepest scope, so neither released level is lost or re-run.
+    restored = OrchestrationEngine(
+        eng.to_snapshot(), bundle, budget=ScopeBudget(max_scope_depth=5)
+    )
+    assert {outer_scope, inner_scope} <= set(restored.to_snapshot().released_scopes)
+    assert [k for k, _ in restored.contract_trace() if k == "join_released"] == releases
+
+
 # --------------------------------------------------------------------------- #
 # Cancellation as a durable semantic event
 # --------------------------------------------------------------------------- #

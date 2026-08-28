@@ -93,6 +93,31 @@ def test_early_join_without_residual_rejected() -> None:
     assert any(d.code == "region.join-no-residual" for d in err.diagnostics)
 
 
+def test_first_k_join_without_k_rejected() -> None:
+    err = _reject("""      - name: j
+        region: {kind: join, completion: first_k, residual: continue}
+""")
+    assert any(d.code == "region.join-bad-k" for d in err.diagnostics)
+
+
+def test_first_k_join_negative_k_rejected() -> None:
+    err = _reject("""      - name: j
+        region: {kind: join, completion: first_k, residual: continue, k: -1}
+""")
+    assert any(d.code == "region.join-bad-k" for d in err.diagnostics)
+
+
+def test_predicate_join_non_positive_threshold_rejected() -> None:
+    err = _reject("""      - name: j
+        region:
+          kind: join
+          completion: predicate
+          residual: continue
+          predicate: {min_qualifiers: 0}
+""")
+    assert any(d.code == "region.join-bad-predicate" for d in err.diagnostics)
+
+
 def test_unknown_region_kind_rejected() -> None:
     err = _reject("""      - name: r
         region: {kind: frobnicate}
