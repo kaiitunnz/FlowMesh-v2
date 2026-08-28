@@ -16,7 +16,7 @@ from server.orchestration import (
     RegionError,
     ScopeBudget,
 )
-from server.orchestration.state import ValueRef
+from server.orchestration.state import ResultPublication, ValueRef
 from server.task.v2 import FrontendWorkflowSource, PersistedV2Workflow
 from server.task.v2.compiler.bindings import leaf_profile
 from server.task.v2.representations.operators import (
@@ -32,6 +32,7 @@ from server.task.v2.representations.operators import (
     JoinRegion,
     LeafOperator,
     LeafProfile,
+    LogicalOperator,
     LoopContextRegion,
     MergeRegion,
     ModelRef,
@@ -95,7 +96,7 @@ def _decl(
 
 
 def _bundle(
-    ops: list,
+    ops: list[LogicalOperator],
     edges: list[TemplateEdge],
     *,
     results: tuple[ResultDeclaration, ...] = (),
@@ -132,8 +133,20 @@ def _bundle(
     return PersistedV2Workflow(source=source, template=template, plan=plan)
 
 
-def _ledger(bundle: PersistedV2Workflow, **kwargs) -> OrchestrationLedger:
-    return OrchestrationLedger.build("wfl-x", "owner", "org", bundle, **kwargs)
+def _ledger(
+    bundle: PersistedV2Workflow,
+    *,
+    budget: ScopeBudget | None = None,
+    granted_interfaces: frozenset[str] | None = None,
+) -> OrchestrationLedger:
+    return OrchestrationLedger.build(
+        "wfl-x",
+        "owner",
+        "org",
+        bundle,
+        budget=budget,
+        granted_interfaces=granted_interfaces,
+    )
 
 
 def _kinds(led: OrchestrationLedger) -> set[str]:
@@ -336,7 +349,7 @@ def test_denied_spawn_creates_no_child_and_seal_stays_separate() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def _loop_bundle(**kwargs) -> PersistedV2Workflow:
+def _loop_bundle() -> PersistedV2Workflow:
     loop = LoopContextRegion(operator_id="L", source_ref="L", loop_coordinate="t")
     return _bundle(
         [loop],
@@ -552,7 +565,108 @@ def test_rlvr_loop_pins_model_version_per_round() -> None:
     )
 
 
-def _collection_publications(led: OrchestrationLedger, output_id: str):
+# --------------------------------------------------------------------------- #
+# Guardrails and skipped subtrees
+# --------------------------------------------------------------------------- #
+
+
+def test_activation_budget_breach_is_scope_budget_exhausted() -> None:
+    led = _ledger(_spawn_join(), budget=ScopeBudget(max_activations=1))
+    led.spawn_child("S")
+    with pytest.raises(RegionError):
+        led.spawn_child("S")  # exceeds the activation budget
+    # A budget breach is a durable terminal distinct from an authority denial.
+    assert "scope_budget_exhausted" in _kinds(led)
+    assert "authority_denied" not in _kinds(led)
+
+
+def test_depth_budget_breach_leaves_no_half_open_child() -> None:
+    # A nested opener child would breach the depth cap; the child must not materialize.
+    outer = SpawnRegion(operator_id="So", source_ref="So", child_template_ref="Si")
+    inner = SpawnRegion(operator_id="Si", source_ref="Si", child_template_ref="leaf")
+    led = _ledger(
+        _bundle(
+            [outer, inner, _leaf("leaf")],
+            [],
+        ),
+        budget=ScopeBudget(max_scope_depth=1),
+    )
+    before = len(led.to_snapshot().activations)
+    with pytest.raises(RegionError):
+        led.spawn_child("So", operator_id="Si")  # opening Si's scope would be depth 2
+    cap = led.capability(led.scope_for("So"), ProgressAxis.CHILD_INIT)
+    assert cap is not None and cap.outstanding == 0  # nothing half-materialized
+    assert len(led.to_snapshot().activations) == before
+
+
+def test_branch_skips_a_non_selected_control_subtree() -> None:
+    branch = BranchRegion(operator_id="B", source_ref="B", selection=None)
+    spawn = SpawnRegion(operator_id="Sk", source_ref="Sk", child_template_ref="body")
+    led = _ledger(
+        _bundle(
+            [_leaf("A"), branch, _leaf("x", deps=True), spawn, _leaf("body")],
+            [
+                TemplateEdge(from_op="A", to_op="B"),
+                TemplateEdge(from_op="B", to_op="x", from_port="p1"),
+                TemplateEdge(from_op="B", to_op="Sk", from_port="p2"),
+            ],
+        )
+    )
+    led.on_succeeded("A")
+    led.route_branch("B", "p1")
+    # The non-selected spawn subtree is skipped, not left waiting on the branch.
+    assert "region_skipped" in _kinds(led)
+    assert led.work_item("x").status.value == "ready"  # type: ignore[union-attr]
+
+
+# --------------------------------------------------------------------------- #
+# Rehydration of a mid-flight dynamic region
+# --------------------------------------------------------------------------- #
+
+
+def test_mid_loop_snapshot_rehydrates_and_egresses() -> None:
+    bundle = _loop_bundle()
+    led = _ledger(bundle)
+    first = led.loop_feedback(
+        "L",
+        value_ref=ValueRef(
+            kind="model_ref", model_ref=ModelRef(architecture="m", version="v1")
+        ),
+    )
+    second = led.loop_feedback(
+        "L",
+        value_ref=ValueRef(
+            kind="model_ref", model_ref=ModelRef(architecture="m", version="v2")
+        ),
+    )
+    led.settle_iteration(first)
+    # Rebuild from a snapshot taken after feedback but before egress: the per-iteration
+    # feedback records must not be mistaken for an already-egressed loop.
+    restored = OrchestrationLedger(led.to_snapshot(), bundle)
+    assert not restored.region_closed("L")
+    restored.settle_iteration(second)
+    restored.loop_seal("L")
+    assert restored.region_closed("L")
+    pub = restored.resolve_output("out:L")
+    assert pub is not None and pub.value_ref is not None
+    assert (
+        pub.value_ref.model_ref is not None and pub.value_ref.model_ref.version == "v2"
+    )
+
+
+def test_denied_spawn_survives_rehydration() -> None:
+    bundle = _spawn_join()
+    led = _ledger(bundle)
+    led.deny_spawn("S", "x")
+    # The denial is reconstructed from durable facts, so no child appears after restart.
+    restored = OrchestrationLedger(led.to_snapshot(), bundle)
+    with pytest.raises(RegionError):
+        restored.spawn_child("S")
+
+
+def _collection_publications(
+    led: OrchestrationLedger, output_id: str
+) -> list[tuple[str | None, ResultPublication]]:
     snap = led.to_snapshot()
     return [
         (slot.logical_key, pub)
