@@ -130,6 +130,9 @@ class TaskRuntime:
         self._task_epoch_index: dict[str, int] = {}
         self._rehydrated_dispatched: dict[str, float] = {}
         self._engines: dict[str, OrchestrationEngine] = {}
+        # Settles a mediated model/effect boundary off the caller's lane; the gateway
+        # installs it, and it is absent (agent stays suspended) until then.
+        self._settler: Callable[[str, str, str | None], None] | None = None
 
         self._lock = threading.RLock()
         self._cv = threading.Condition(self._lock)
@@ -974,7 +977,14 @@ class TaskRuntime:
         elif request.kind in (BoundaryEventKind.STATE_ACCESS, BoundaryEventKind.YIELD):
             self._reenqueue_episode_locked(task_id)
             changed = True
-        # An invocation or external effect stays suspended until the gateway settles it.
+        elif (
+            corr is not None
+            and self._settler is not None
+            and request.kind
+            in (BoundaryEventKind.INVOCATION, BoundaryEventKind.EXTERNAL_EFFECT)
+        ):
+            # A model or effect boundary suspends until the gateway settles it off-lane.
+            self._settler(task_id, corr, event.request_payload)
         self._save_ledger_locked(record.workflow_id)
         if changed:
             self._cv.notify_all()
@@ -1012,6 +1022,12 @@ class TaskRuntime:
             if changed:
                 self._cv.notify_all()
             return changed
+
+    def set_invocation_settler(
+        self, settler: Callable[[str, str, str | None], None]
+    ) -> None:
+        """Install the off-lane settler for mediated model and effect boundaries."""
+        self._settler = settler
 
     def agent_episode_dispatch(self, task_id: str) -> AgentEpisodeDispatch | None:
         """The agent-episode context to ship with a dispatch, or None for the UTU path.
