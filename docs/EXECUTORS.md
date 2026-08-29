@@ -72,7 +72,7 @@ run-to-yield step of the named `HarnessAdapter` binding, resumed from the durabl
 and delivered outcomes the fabric ships. The executor advertises the `agent` capability
 even on a worker that cannot import the UTU dependencies, so a CPU worker services agent
 episodes. A backend binding is imported lazily from the worker adapter registry
-(`src/worker/harness/`) only when its key is selected.
+(`src/worker/executors/harness/`) only when its key is selected.
 
 Declared per agent under `spec.harness`:
 

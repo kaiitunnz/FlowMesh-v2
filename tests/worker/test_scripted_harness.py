@@ -17,7 +17,7 @@ from shared.harness import (
 )
 from shared.tasks.task_type import TaskType
 from tests.worker.factories import make_worker_config, make_worker_task_message
-from worker.harness.scripted import (
+from worker.executors.harness.scripted import (
     ScriptedHarnessAdapter,
     ScriptedStep,
     build_scripted_adapter,

@@ -27,7 +27,7 @@ from worker.executors.agent_episode_executor import (
     AgentEpisodeResult,
 )
 from worker.executors.base_executor import ExecutionError, Executor
-from worker.harness import UnknownHarnessBackendError, register_adapter
+from worker.executors.harness import UnknownHarnessBackendError, register_adapter
 from worker.main import build_capabilities
 from worker.runner import Runner
 

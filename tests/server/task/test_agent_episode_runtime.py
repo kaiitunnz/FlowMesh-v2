@@ -13,7 +13,7 @@ from server.orchestration import ProgressAxis, WorkItemStatus
 from server.task.models import TaskStatus
 from shared.harness import BoundaryEventKind, HarnessCapsule, OutcomeKind
 from tests.server.task.test_v2_orchestration import FakeRegistry, _register, _runtime
-from worker.harness.scripted import ScriptedHarnessAdapter, ScriptedStep
+from worker.executors.harness.scripted import ScriptedHarnessAdapter, ScriptedStep
 
 _TS = "2026-08-29T00:00:00Z"
 

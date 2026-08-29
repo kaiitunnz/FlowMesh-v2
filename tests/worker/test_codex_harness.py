@@ -22,7 +22,7 @@ from shared.harness import (
     HarnessResultKind,
     OutcomeKind,
 )
-from worker.harness.codex import (
+from worker.executors.harness.codex import (
     CodexAppServerHarnessAdapter,
     CodexEvent,
     CodexInjectItem,

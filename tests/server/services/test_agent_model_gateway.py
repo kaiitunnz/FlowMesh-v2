@@ -21,7 +21,7 @@ from server.services.agent_model_gateway import (
 )
 from shared.harness import BoundaryEventKind, HarnessCapsule
 from tests.server.task.test_v2_orchestration import FakeRegistry, _register, _runtime
-from worker.harness.scripted import ScriptedHarnessAdapter, ScriptedStep
+from worker.executors.harness.scripted import ScriptedHarnessAdapter, ScriptedStep
 
 _TS = "2026-08-29T00:00:00Z"
 

@@ -102,6 +102,7 @@ src/
   worker/
     docker/               Worker Dockerfiles (CPU + GPU)
     executors/            Executor implementations
+      harness/              agent-episode harness backends (scripted, codex) + registry
       mixins/               data, governance, inference, training
       utils/                artifacts, checkpoints, data_utils, distributed,
                             graph_templates, huggingface, safe_eval

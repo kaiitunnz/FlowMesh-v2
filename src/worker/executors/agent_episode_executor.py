@@ -18,9 +18,9 @@ from shared.harness import (
 )
 from shared.schemas.result import BaseExecutorResult
 from shared.tasks.task_type import TaskType
-from worker.harness import build_adapter
 
 from .base_executor import ExecutionError, Executor, ExecutorTask
+from .harness import build_adapter
 
 
 class AgentEpisodeResult(BaseExecutorResult):
