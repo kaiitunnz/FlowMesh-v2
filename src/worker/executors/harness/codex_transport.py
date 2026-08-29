@@ -154,10 +154,12 @@ class RealCodexAppServerTransport:
         if self._client is None:
             self._config.codex_home.mkdir(parents=True, exist_ok=True)
             client = CodexClient(self._config.to_codex_config())
+            # Arm teardown before the process spawns, so a failure during start or
+            # initialize still reaps the app-server rather than leaking it.
+            self._finalizer = weakref.finalize(self, _close_client, client)
             client.start()
             client.initialize()
             self._client = client
-            self._finalizer = weakref.finalize(self, _close_client, client)
         return self._client
 
     def thread_start(self) -> str:
@@ -187,7 +189,7 @@ class RealCodexAppServerTransport:
             if isinstance(payload, ItemCompletedNotification):
                 if isinstance(root := payload.item.root, AgentMessageThreadItem):
                     agent_texts.append(root.text)
-            elif isinstance(payload, ErrorNotification):
+            elif isinstance(payload, ErrorNotification) and not payload.will_retry:
                 return CodexEvent(kind="error", value=payload.error.message)
             elif isinstance(payload, TurnCompletedNotification):
                 turn = payload.turn

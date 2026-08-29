@@ -233,10 +233,6 @@ def build_codex_adapter(
     spec = task.spec
     if not isinstance(spec, AgentSpecStrict) or spec.harness is None:
         raise ValueError("the codex backend requires an agent harness spec")
-    # The live binding pulls in the openai-codex SDK and its bundled app-server binary;
-    # keep both off the import path of a worker that never selects the codex backend.
-    from .codex_transport import CodexTransportConfig, RealCodexAppServerTransport
-
     params = spec.harness.params
     base_url, model = params.get("base_url"), params.get("model")
     if not isinstance(base_url, str) or not isinstance(model, str):
@@ -244,6 +240,10 @@ def build_codex_adapter(
             "the codex backend requires string 'base_url' and 'model' harness params"
         )
     codex_home = Path(params.get("codex_home") or config.results_dir / "codex_home")
+    # The live binding pulls in the openai-codex SDK and its bundled app-server binary;
+    # keep both off the import path of a worker that never selects the codex backend.
+    from .codex_transport import CodexTransportConfig, RealCodexAppServerTransport
+
     transport = RealCodexAppServerTransport(
         CodexTransportConfig(base_url=base_url, model=model, codex_home=codex_home)
     )
