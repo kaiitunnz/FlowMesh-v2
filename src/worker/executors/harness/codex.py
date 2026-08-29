@@ -15,6 +15,7 @@ injected outcome is, so a reissued facade call maps to its key and runs exactly 
 The binding supports one single-forward facade call per defer unit.
 """
 
+import re
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Protocol
@@ -239,7 +240,12 @@ def build_codex_adapter(
         raise ValueError(
             "the codex backend requires string 'base_url' and 'model' harness params"
         )
-    codex_home = Path(params.get("codex_home") or config.results_dir / "codex_home")
+    override = params.get("codex_home")
+    codex_home = (
+        Path(override)
+        if isinstance(override, str)
+        else _isolated_codex_home(config.results_dir, task.workflow_id, task.task_id)
+    )
     # The live binding pulls in the openai-codex SDK and its bundled app-server binary;
     # keep both off the import path of a worker that never selects the codex backend.
     from .codex_transport import CodexTransportConfig, RealCodexAppServerTransport
@@ -248,3 +254,14 @@ def build_codex_adapter(
         CodexTransportConfig(base_url=base_url, model=model, codex_home=codex_home)
     )
     return CodexAppServerHarnessAdapter(transport, backend.version)
+
+
+def _isolated_codex_home(results_dir: Path, workflow_id: str, task_id: str) -> Path:
+    """The rollout home for one agent activation: isolated per workflow and task.
+
+    ``workflow_id`` and ``task_id`` are stable across an agent's run-to-yield steps and
+    restart, so the rollout resumes; distinct activations never co-mingle rollouts, so a
+    leaked thread id cannot reattach another activation's thread under a shared home.
+    """
+    safe = (re.sub(r"[^A-Za-z0-9._-]", "_", part) for part in (workflow_id, task_id))
+    return results_dir.joinpath("codex_home", *safe)

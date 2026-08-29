@@ -81,18 +81,16 @@ Declared per agent under `spec.harness`:
   app-server binding).
 - `version` — pins the adapter/protocol so a capsule resumes only on a match.
 - `params` — backend-specific configuration. The `codex` backend reads `base_url` and
-  `model` (the Responses gateway it drives) and an optional `codex_home` (the stable
-  per-worker rollout directory, under the results dir by default).
+  `model` (the Responses gateway it drives) and an optional `codex_home` override (the
+  rollout directory, by default isolated per workflow and agent under the results dir).
 
 The `codex` backend binds a live `codex app-server` through the `openai-codex` SDK
-(`runtime-harness-codex` dependency group), which bundles a ~247 MB `codex` binary. It
-maps `thread/resume`, `thread/inject_items`, and `turn/start` onto the adapter: a step runs
-against an on-disk rollout under `CODEX_HOME`, and a settled outcome injects back as raw
-Responses items the next turn sees, so a held facade call recovers across an app-server loss
-on the same rollout. `tests/worker/test_codex_integration.py` exercises this against a live
-app-server and a local Responses backend, including a `kill -9` recovery trace; it is marked
-`codex_integration` and needs the dependency, so it runs in the dev/CI gate and is excluded
-from the CPU Docker end-to-end suite, whose environment lacks the Codex binary.
+(`runtime-harness-codex` dependency group). It maps `thread/resume`, `thread/inject_items`,
+and `turn/start` onto the adapter: a step runs against an on-disk rollout under
+`CODEX_HOME`, and a settled outcome injects back as raw Responses items the next turn sees,
+so a held facade call recovers across an app-server loss on the same rollout.
+`tests/worker/test_codex_integration.py` exercises this against a live app-server and a
+local Responses backend, including a `kill -9` recovery trace.
 
 A mediated model request the agent defers is settled by the **agent-model gateway**, not a
 raw model endpoint. The gateway implements the OpenAI Responses API (`POST /v1/responses`)

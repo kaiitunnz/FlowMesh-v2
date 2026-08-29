@@ -41,8 +41,10 @@ from .codex import CodexEvent, CodexInjectItem
 _FACADE_ENVELOPE_KEY = "facade"
 _INJECT_CALL_PREFIX = "fab-"
 _INJECT_TOOL = "fabric_mediated"
-# Credential resolution (secret_ref -> server-side key) lands with the per-workflow
-# binding; the gateway trusts the caller, so a placeholder satisfies the provider here.
+# Codex authenticates to the internal FlowMesh Responses gateway with this trusted
+# placeholder token (requires_openai_auth=false). The user's model credential is
+# supplied at the gateway from the per-workflow secret_ref, resolved server-side, and
+# never passes through Codex — so the placeholder is correct here, not a missing one.
 _KEY_ENV = "FLOWMESH_CODEX_API_KEY"
 
 

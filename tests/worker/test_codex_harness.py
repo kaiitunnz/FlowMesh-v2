@@ -11,6 +11,7 @@ Codex-local call id.
 import json
 from collections import defaultdict
 from collections.abc import Sequence
+from pathlib import Path
 
 import pytest
 
@@ -26,6 +27,7 @@ from worker.executors.harness.codex import (
     CodexAppServerHarnessAdapter,
     CodexEvent,
     CodexInjectItem,
+    _isolated_codex_home,
 )
 
 
@@ -230,6 +232,22 @@ def test_a_recommitted_outcome_is_not_reinjected() -> None:
     # Re-ship the identical keyed outcome against the advanced capsule.
     adapter.start("a", capsule=resumed.capsule, outcomes=[outcome])
     assert fake.received_keys.count(outcome.idempotency_key) == 1
+
+
+def test_codex_home_isolates_activations_but_is_stable() -> None:
+    root = Path("/results")
+    home = _isolated_codex_home(root, "wfl-1", "act-1")
+    # Stable across steps of the same activation, so its rollout resumes.
+    assert home == _isolated_codex_home(root, "wfl-1", "act-1")
+    # Distinct per workflow and per task, so rollouts never co-mingle on disk.
+    assert home != _isolated_codex_home(root, "wfl-2", "act-1")
+    assert home != _isolated_codex_home(root, "wfl-1", "act-2")
+
+
+def test_codex_home_sanitizes_path_separators() -> None:
+    home = _isolated_codex_home(Path("/results"), "wfl-1", "op/../escape")
+    assert home == Path("/results/codex_home/wfl-1/op_.._escape")
+    assert Path("/results/codex_home") in home.parents
 
 
 def _codex_call_id(capsule: HarnessCapsule | None) -> str | None:
