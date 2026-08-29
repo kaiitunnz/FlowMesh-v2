@@ -7,7 +7,8 @@ through the runtime; control operators (branch, merge, spawn, join, loop) settle
 the ledger and never dispatch; spawn children and loop iterations materialize as records
 flow. An agent is both dispatchable (a run-to-yield episode) and a scope owner: it
 yields validated boundary requests the engine turns into durable work, and its
-spawn_agent facade opens a child-init scope lazily on the first child. Progress
+spawn_agent facade opens a child-init scope per selected child region, keyed by
+(agent activation, region), lazily on that region's first child. Progress
 capabilities (child-init and loop-time) are the closure authority — a
 region closes only when its combined account seals and drains, never on an observed
 empty set. Scheduler/worker placement stays a physical decision that never changes what
@@ -213,7 +214,22 @@ class OrchestrationEngine:
         self._child_templates = {
             op.child_template_ref
             for op in bundle.template.operators
-            if isinstance(op, (SpawnRegion, AgentOperator)) and op.child_template_ref
+            if isinstance(op, SpawnRegion) and op.child_template_ref
+        }
+        # Spawn regions an agent selects by role: entered through the agent-request
+        # path, not auto-fired at the root like a producer-driven region.
+        self._agent_region_spawns = {
+            ref.spawn_ref
+            for op in bundle.template.operators
+            if isinstance(op, AgentOperator)
+            for ref in op.child_region_refs
+        }
+        # (agent activation, region operator) -> the synthetic opener activation that
+        # owns that region's child-init scope, rebuilt from the persisted openers.
+        self._region_openers: dict[tuple[str, str], str] = {
+            (a.parent_activation_id, a.operator_id): a.activation_id
+            for a in self._activations.values()
+            if a.kind == "region" and a.parent_activation_id
         }
         # Mediated boundaries, keyed by (activation, adapter-local call correlation):
         # the correlation rule that maps a re-driven facade call to its recorded key.
@@ -339,15 +355,23 @@ class OrchestrationEngine:
             if b.source_ref
         }
         kind_by_id = {op.operator_id: op.kind for op in template.operators}
-        # A child body another operator declares is materialized dynamically per spawn,
-        # never dispatched eagerly. A self-recursive agent names itself and stays a
-        # normal dispatchable entry.
+        # The agent that declares each spawn region as one of its child regions.
+        region_owner = {
+            ref.spawn_ref: op.operator_id
+            for op in template.operators
+            if isinstance(op, AgentOperator)
+            for ref in op.child_region_refs
+        }
+        # A region's entry body is materialized dynamically per spawn, never dispatched
+        # eagerly. A region whose entry is its enclosing agent is explicit recursion:
+        # that agent stays a normal dispatchable entry rather than a materialized body.
         child_body_refs = {
             op.child_template_ref
             for op in template.operators
-            if isinstance(op, (SpawnRegion, AgentOperator))
+            if isinstance(op, SpawnRegion)
             and op.child_template_ref
             and op.child_template_ref != op.operator_id
+            and region_owner.get(op.operator_id) != op.child_template_ref
         }
         requested: set[str] = set()
         for op in template.operators:
@@ -537,11 +561,9 @@ class OrchestrationEngine:
         )
         self._settle_attempt_terminal(wi, outcome)
         activation = self._activations[wi.activation_id]
-        # An agent's terminal completion seals its own child-init producer, so a
+        # An agent's terminal completion settles every declared child region, so a
         # spawn_agent scope closes even without an explicit SpawnSeal.
-        released = Advance()
-        if isinstance(self._operators.get(wi.operator_id), AgentOperator):
-            released = self._seal_owned_child_init(wi.activation_id)
+        released = self._agent_terminal_regions(wi.operator_id, wi.activation_id)
         if activation.kind == "child":
             # A dispatched spawn child settles through its scope's child-init account,
             # never as a static forward record: the join closes on capability drain.
@@ -584,6 +606,7 @@ class OrchestrationEngine:
             )
             return Advance(retry=[wi.legacy_task_id])
         activation = self._activations[wi.activation_id]
+        released = self._agent_terminal_regions(wi.operator_id, wi.activation_id)
         if activation.kind == "child":
             # A child's terminal failure drains its scope account and lets an
             # all-succeed join fail; it does not cascade over static successors.
@@ -591,8 +614,8 @@ class OrchestrationEngine:
                 wi, activation, PublicationOutcome.DECLARED_FAILURE, None
             )
             advance.failed.append(wi.legacy_task_id)
-            return advance
-        return Advance(failed=self._settle_failure(wi.work_item_id))
+            return advance.extend(released)
+        return Advance(failed=self._settle_failure(wi.work_item_id)).extend(released)
 
     def on_uncertain(self, task_id: str) -> Advance:
         """Resolve a lost acknowledgement or route loss for an in-flight work item."""
@@ -625,22 +648,23 @@ class OrchestrationEngine:
             work_item_id=wi.work_item_id,
             invocation_id=wi.invocation_id,
         )
-        return Advance(failed=self._settle_failure(wi.work_item_id))
+        released = self._agent_terminal_regions(wi.operator_id, wi.activation_id)
+        return Advance(failed=self._settle_failure(wi.work_item_id)).extend(released)
 
     def route_boundary_event(self, task_id: str, event: BoundaryEvent) -> Advance:
         """Route an episode's boundary request back into the ledger, validated first.
 
         For an agent operator the engine validates the request against the operator's
         boundary signature and effective authority before it creates any work; an
-        undeclared event, tool, model interface, or child target settles as a durable
+        undeclared event, tool, model interface, or child region settles as a durable
         typed denial injected into the continuation, never a silent no-op. A recorded
         (activation, call correlation) is a re-drive: it maps to its fabric-assigned
         idempotency key and creates no second request, so a fresh harness call id can
-        never duplicate a target effect. A spawn materializes one declared child under
-        the agent's lazily opened child-init scope; a spawn seal closes that producer;
-        an invocation or effect records durable request state before the work item
-        suspends, so waiting holds no worker; a yield persists the capsule; a state
-        access records the declared reference.
+        never duplicate a target effect. A spawn selects one declared region by role and
+        materializes one child under that region's child-init scope; a spawn seal closes
+        that region; an invocation or effect records durable request state before the
+        work item suspends, so waiting holds no worker; a yield persists the capsule; a
+        state access records the declared reference.
         """
         wi = self._work_item_for_task(task_id)
         if wi is None or wi.status in _TERMINAL_WI:
@@ -660,22 +684,16 @@ class OrchestrationEngine:
                 )
         match event.kind:
             case BoundaryEventKind.SPAWN:
-                if self._kind(wi.operator_id) not in _CHILD_INIT_OPENERS:
-                    raise RegionError(
-                        f"{wi.operator_id!r} is not a spawn/agent scope opener; "
-                        "it cannot yield a spawn boundary"
-                    )
+                opener = self._agent_spawn_opener(op, wi, event)
                 # Record only after the child materializes: a budget/depth rejection
-                # raises and must leave no phantom-accepted envelope to re-drive.
-                advance = self.materialize_child(
-                    wi.activation_id,
-                    operator_id=event.child_ref,
-                    value_ref=event.value_ref,
-                )
+                # raises and must leave no phantom-accepted envelope to re-drive. The
+                # region selects the entry body; a raw child_ref never names a body.
+                advance = self.materialize_child(opener, value_ref=event.value_ref)
                 self._record_boundary(wi, event)
                 return advance
             case BoundaryEventKind.SPAWN_SEAL:
-                advance = self.seal_spawn(wi.activation_id)
+                opener = self._agent_spawn_opener(op, wi, event)
+                advance = self.seal_spawn(opener)
                 self._record_boundary(wi, event)
                 return advance
             case BoundaryEventKind.INVOCATION:
@@ -741,9 +759,11 @@ class OrchestrationEngine:
         """Check an agent boundary against its signature and effective authority.
 
         A kind outside the declared signature, a tool/model interface outside the
-        effective invoke face, or a child target outside the declared child region is a
-        definitive denial: authority when the request is undeclared, policy when the
-        pinned envelope blocks a declared one. None means admissible.
+        effective invoke face, or a spawn/seal that names no declared child region — a
+        raw operator id or an undeclared role — is a definitive denial: authority when
+        the request is undeclared, policy when the pinned envelope blocks a declared
+        one.
+        None means admissible.
         """
         if event.kind not in op.boundary.events:
             return DenialKind.AUTHORITY
@@ -758,23 +778,86 @@ class OrchestrationEngine:
                     if event.interface in op.authority.invoke
                     else DenialKind.AUTHORITY
                 )
-        elif event.kind is BoundaryEventKind.SPAWN:
-            target = event.child_ref or op.child_template_ref
-            if target is None or target != op.child_template_ref:
+        elif event.kind in (BoundaryEventKind.SPAWN, BoundaryEventKind.SPAWN_SEAL):
+            if self._agent_region_op(op, event.child_region_ref) is None:
                 return DenialKind.AUTHORITY
         return None
+
+    def _agent_region_op(self, op: AgentOperator, role: str | None) -> str | None:
+        """The spawn region operator a declared role selects, or None if undeclared."""
+        if role is None:
+            return None
+        return next(
+            (ref.spawn_ref for ref in op.child_region_refs if ref.name == role), None
+        )
+
+    def _agent_spawn_opener(
+        self, op: LogicalOperator | None, wi: WorkItem, event: BoundaryEvent
+    ) -> str:
+        """The opener activation for the agent's selected region, minted on first use.
+
+        Validation admitted the role, so it resolves to a declared spawn region; the
+        opener owns that region's child-init scope keyed by (agent activation, region).
+        """
+        if not isinstance(op, AgentOperator):
+            raise RegionError(
+                f"{wi.operator_id!r} is not an agent; it cannot yield a spawn boundary"
+            )
+        region_op = self._agent_region_op(op, event.child_region_ref)
+        assert region_op is not None  # admitted by _validate_agent_boundary
+        return self._region_opener(wi.activation_id, region_op)
+
+    def _region_opener(self, agent_activation: str, region_op: str) -> str:
+        """Mint or reuse the (agent activation, region) opener that owns its scope.
+
+        Reuses the recursion opener machinery: a synthetic ``region`` activation of the
+        spawn region owns a child-init scope nested under the agent's own scope, so the
+        scope, its delegated grant, its progress, and its matched join resolve through
+        the existing region path. The grant attenuates from the agent's delegate face
+        and the region's per-site ceiling, never the agent's blanket ceiling.
+        """
+        key = (agent_activation, region_op)
+        if (opener := self._region_openers.get(key)) is not None:
+            return opener
+        agent = self._activations[agent_activation]
+        agent_op = self._operators[agent.operator_id]
+        assert isinstance(agent_op, AgentOperator)
+        _, agent_delegate = self._agent_face_tuples(agent_op, agent.scope_id)
+        opener_act = Activation(
+            activation_id=new_activation_id(),
+            instance_id=self._instance.instance_id,
+            scope_id=agent.scope_id,
+            operator_id=region_op,
+            kind="region",
+            parent_activation_id=agent_activation,
+        )
+        self._activations[opener_act.activation_id] = opener_act
+        self._region_openers[key] = opener_act.activation_id
+        self._open_child_init_scope(
+            opener_act.activation_id,
+            parent_scope_id=agent.scope_id,
+            parent_delegate=agent_delegate,
+        )
+        return opener_act.activation_id
 
     def _agent_faces(
         self, op: AgentOperator, wi: WorkItem
     ) -> tuple[frozenset[str], frozenset[str]]:
         """The agent's effective invoke/delegate faces: its ceiling under policy."""
-        scope_grant = self._grant_for_scope(
-            self._activations[wi.activation_id].scope_id
+        invoke, delegate = self._agent_face_tuples(
+            op, self._activations[wi.activation_id].scope_id
         )
+        return frozenset(invoke), frozenset(delegate)
+
+    def _agent_face_tuples(
+        self, op: AgentOperator, agent_scope_id: str
+    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """The agent's invoke/delegate faces: the scope grant under ceiling+policy."""
+        scope_grant = self._grant_for_scope(agent_scope_id)
         envelope = self._policy_interfaces()
         invoke = attenuate(scope_grant.invoke, op.authority.invoke, envelope)
         delegate = attenuate(invoke, op.authority.delegate, envelope)
-        return frozenset(invoke), frozenset(delegate)
+        return invoke, delegate
 
     def _record_boundary(
         self,
@@ -825,7 +908,7 @@ class OrchestrationEngine:
         outcome; it creates neither an invocation nor a child, and the episode suspends
         to receive it rather than silently proceeding.
         """
-        subject = event.interface or event.child_ref or ""
+        subject = event.interface or event.child_region_ref or event.child_ref or ""
         self._decisions.append(
             AuthorityDecision(
                 grant_id=self._root_grant.grant_id,
@@ -1032,25 +1115,61 @@ class OrchestrationEngine:
             )
         return self._maybe_release_join(scope_id)
 
-    def _seal_owned_child_init(self, activation_id: str) -> Advance:
-        """Seal an agent's own child-init capability on terminal completion.
+    def _settle_agent_regions(self, activation_id: str) -> Advance:
+        """Settle every declared child region of a terminal agent under its residual.
 
-        An agent that opened a child-init scope for spawn_agent children but never
-        emitted an explicit seal has it sealed here, so terminal completion supplies the
-        closure a SpawnSeal otherwise would. A non-spawning agent owns no such scope.
+        Each entered region seals its open child-init capability so its join releases on
+        drain; a declared-but-never-entered region opens as a zero-child region and
+        seals, so its join releases empty. A cancel residual revokes and cancels the
+        region's children instead. Opening an unused region is skipped when it would
+        exceed the scope-depth budget, since the agent could never have entered it. A
+        non-spawning agent owns no region.
         """
-        scope_id = self._scope_by_activation.get(activation_id)
+        advance = Advance()
+        agent = self._activations.get(activation_id)
+        op = self._operators.get(agent.operator_id) if agent else None
+        if not isinstance(op, AgentOperator) or agent is None:
+            return advance
+        room = self._scopes[agent.scope_id].depth + 1 <= self._budget.max_scope_depth
+        for ref in op.child_region_refs:
+            opener = self._region_openers.get((activation_id, ref.spawn_ref))
+            if opener is None:
+                if not room:
+                    continue
+                opener = self._region_opener(activation_id, ref.spawn_ref)
+            advance.extend(self._settle_owned_region(opener))
+        return advance
+
+    def _agent_terminal_regions(self, operator_id: str, activation_id: str) -> Advance:
+        """Settle an agent's declared regions when the agent terminates, else no-op."""
+        if isinstance(self._operators.get(operator_id), AgentOperator):
+            return self._settle_agent_regions(activation_id)
+        return Advance()
+
+    def _settle_owned_region(self, opener: str) -> Advance:
+        scope_id = self._scope_by_activation.get(opener)
         if scope_id is None:
             return Advance()
         cap = self._capabilities.get((scope_id, ProgressAxis.CHILD_INIT))
         if cap is None or cap.status is not CapabilityStatus.OPEN:
             return Advance()
-        cap.status = CapabilityStatus.SEALED
-        self._emit(
-            "child_init_sealed",
-            operator_id=self._scopes[scope_id].owner_operator_id,
-            detail={"scope": scope_id, "reason": "agent_terminal"},
-        )
+        owner = self._scopes[scope_id].owner_operator_id
+        join = self._join_of_scope(scope_id)
+        if self._residual_policy(join, ResidualPolicy.DRAIN) is ResidualPolicy.CANCEL:
+            cap.status = CapabilityStatus.REVOKED
+            self._emit(
+                "child_init_revoked",
+                operator_id=owner,
+                detail={"scope": scope_id, "reason": "agent_terminal"},
+            )
+            self._cancel_residual_children(scope_id)
+        else:
+            cap.status = CapabilityStatus.SEALED
+            self._emit(
+                "child_init_sealed",
+                operator_id=owner,
+                detail={"scope": scope_id, "reason": "agent_terminal"},
+            )
         return self._maybe_release_join(scope_id)
 
     def revoke_spawn(self, spawn: str) -> None:
@@ -1439,11 +1558,17 @@ class OrchestrationEngine:
         # JOIN is released by scope closure, never by an input record.
 
     def _open_child_init_scope(
-        self, opener_activation: str, *, parent_scope_id: str | None = None
+        self,
+        opener_activation: str,
+        *,
+        parent_scope_id: str | None = None,
+        parent_delegate: tuple[str, ...] | None = None,
     ) -> str:
         if opener_activation in self._scope_by_activation:
             return self._scope_by_activation[opener_activation]
-        scope = self._new_child_scope(opener_activation, parent_scope_id)
+        scope = self._new_child_scope(
+            opener_activation, parent_scope_id, parent_delegate=parent_delegate
+        )
         self._register_scope_owner(scope)
         self._acquire_capability(scope.scope_id, ProgressAxis.CHILD_INIT)
         self._emit(
@@ -1675,12 +1800,18 @@ class OrchestrationEngine:
             self._exhaust_budget("scope_depth", self._budget.max_scope_depth)
 
     def _new_child_scope(
-        self, opener_activation: str, parent_scope_id: str | None
+        self,
+        opener_activation: str,
+        parent_scope_id: str | None,
+        *,
+        parent_delegate: tuple[str, ...] | None = None,
     ) -> Scope:
         opener_op = self._activations[opener_activation].operator_id
         parent = self._scopes[parent_scope_id or self._root_scope.scope_id]
         self._check_scope_depth(parent.scope_id)
-        grant = self._mint_delegated_grant(opener_op, parent.scope_id)
+        grant = self._mint_delegated_grant(
+            opener_op, parent.scope_id, parent_delegate=parent_delegate
+        )
         scope = Scope(
             scope_id=new_scope_id(),
             instance_id=self._instance.instance_id,
@@ -1726,19 +1857,26 @@ class OrchestrationEngine:
     # ------------------------------------------------------------------ #
 
     def _mint_delegated_grant(
-        self, opener_op: str, parent_scope_id: str
+        self,
+        opener_op: str,
+        parent_scope_id: str,
+        *,
+        parent_delegate: tuple[str, ...] | None = None,
     ) -> DelegatedAuthorityGrant:
         parent = self._grant_for_scope(parent_scope_id)
+        # An agent-selected region attenuates from the agent's delegate face, supplied
+        # here, rather than the enclosing scope's raw delegate face.
+        base = parent.delegate if parent_delegate is None else parent_delegate
         opener = self._operators[opener_op]
         ceiling = (
             opener.authority
             if isinstance(opener, (SpawnRegion, AgentOperator))
             else None
         )
-        ceiling_invoke = ceiling.invoke if ceiling else parent.delegate
-        ceiling_delegate = ceiling.delegate if ceiling else parent.delegate
+        ceiling_invoke = ceiling.invoke if ceiling else base
+        ceiling_delegate = ceiling.delegate if ceiling else base
         envelope = self._policy_interfaces()
-        invoke = attenuate(parent.delegate, ceiling_invoke, envelope)
+        invoke = attenuate(base, ceiling_invoke, envelope)
         delegate = attenuate(invoke, ceiling_delegate, envelope)
         grant = DelegatedAuthorityGrant(
             grant_id=new_authority_grant_id(),
@@ -1781,8 +1919,13 @@ class OrchestrationEngine:
                 self._admit(wi.work_item_id, advance)
         for op_id in self._operators:
             # A child-template region opens only when its parent spawn materializes it,
-            # so it nests under the parent scope rather than firing at the root.
-            if not self._is_control(op_id) or op_id in self._child_templates:
+            # and an agent-selected region only when the agent requests it, so neither
+            # fires at the root.
+            if (
+                not self._is_control(op_id)
+                or op_id in self._child_templates
+                or op_id in self._agent_region_spawns
+            ):
                 continue
             cont = self._continuations.get(_control_key(op_id))
             if cont is not None and not cont.waiting_on:
@@ -2006,6 +2149,16 @@ class OrchestrationEngine:
     def scope_for(self, region_op: str) -> str | None:
         return self._scope_id_for(region_op)
 
+    def region_scope_for(self, agent_activation: str, role: str) -> str | None:
+        """The child-init scope an agent's declared role region opened, if entered."""
+        agent = self._activations.get(agent_activation)
+        op = self._operators.get(agent.operator_id) if agent else None
+        if not isinstance(op, AgentOperator):
+            return None
+        region_op = self._agent_region_op(op, role)
+        opener = self._region_openers.get((agent_activation, region_op or ""))
+        return self._scope_by_activation.get(opener) if opener else None
+
     def grant_for(self, region_op: str) -> DelegatedAuthorityGrant | None:
         scope_id = self._scope_id_for(region_op)
         if scope_id is None:
@@ -2135,7 +2288,11 @@ class OrchestrationEngine:
 
     def _control_activation(self, operator_id: str) -> str:
         for a in self._activations.values():
-            if a.operator_id == operator_id and a.kind not in ("child", "iteration"):
+            if a.operator_id == operator_id and a.kind not in (
+                "child",
+                "iteration",
+                "region",
+            ):
                 return a.activation_id
         return operator_id
 

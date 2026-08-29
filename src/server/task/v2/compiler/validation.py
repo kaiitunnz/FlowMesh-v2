@@ -330,6 +330,103 @@ def _check_spawn_child_targets(
     return diags
 
 
+def _check_child_regions(
+    template: LogicalWorkflowTemplate, loc: dict[str, SourceLocation]
+) -> list[Diagnostic]:
+    """An agent's declared child regions must be finite, unique, and well-wired.
+
+    Each named role resolves to a declared spawn region matched to a join; a region's
+    per-site invoke ceiling stays within the agent's delegate face; and the legacy
+    single target and the region set are mutually exclusive. A region's entry target and
+    recursion are checked by the shared spawn-child-target pass and bounded by the
+    runtime scope-depth budget.
+    """
+    diags: list[Diagnostic] = []
+    op_by_id = {op.operator_id: op for op in template.operators}
+    matched_joins = {
+        edge.from_op
+        for edge in template.edges
+        if isinstance(op_by_id.get(edge.from_op), SpawnRegion)
+        and isinstance(op_by_id.get(edge.to_op), JoinRegion)
+    }
+    producer_fed = {
+        edge.to_op
+        for edge in template.edges
+        if not edge.feedback and isinstance(op_by_id.get(edge.to_op), SpawnRegion)
+    }
+    for op in template.operators:
+        if not isinstance(op, AgentOperator):
+            continue
+        location = loc.get(op.operator_id)
+        if op.child_template_ref and op.child_region_refs:
+            diags.append(
+                Diagnostic(
+                    code="region.child-both-forms",
+                    message=(
+                        f"agent {op.operator_id!r} declares both child_template_ref "
+                        "and child_region_refs; declare one"
+                    ),
+                    location=location,
+                )
+            )
+        seen: set[str] = set()
+        for ref in op.child_region_refs:
+            if ref.name in seen:
+                diags.append(
+                    Diagnostic(
+                        code="region.duplicate-role",
+                        message=f"agent {op.operator_id!r} repeats child-region role "
+                        f"{ref.name!r}",
+                        location=location,
+                    )
+                )
+            seen.add(ref.name)
+            target = op_by_id.get(ref.spawn_ref)
+            if not isinstance(target, SpawnRegion):
+                diags.append(
+                    Diagnostic(
+                        code="region.unresolved-region-ref",
+                        message=f"child-region role {ref.name!r} resolves to no spawn "
+                        f"region {ref.spawn_ref!r}",
+                        location=location,
+                    )
+                )
+                continue
+            if ref.spawn_ref not in matched_joins:
+                diags.append(
+                    Diagnostic(
+                        code="region.region-no-join",
+                        message=f"child region {ref.spawn_ref!r} has no matched join",
+                        location=location,
+                    )
+                )
+            if ref.spawn_ref in producer_fed:
+                diags.append(
+                    Diagnostic(
+                        code="region.region-dual-entry",
+                        message=(
+                            f"child region {ref.spawn_ref!r} is both agent-selected "
+                            "and producer-fed; a region is entered one way"
+                        ),
+                        location=location,
+                    )
+                )
+            over = set(target.authority.invoke) - set(op.authority.delegate)
+            if over:
+                diags.append(
+                    Diagnostic(
+                        code="region.region-exceeds-delegate",
+                        message=(
+                            "child-region invoke ceiling "
+                            + ", ".join(sorted(over))
+                            + f" exceeds agent {op.operator_id!r} delegate face"
+                        ),
+                        location=location,
+                    )
+                )
+    return diags
+
+
 def _check_result_declarations(
     template: LogicalWorkflowTemplate, loc: dict[str, SourceLocation]
 ) -> list[Diagnostic]:
@@ -424,6 +521,7 @@ def validate_compilation(
     diags.extend(_check_source_map(template, plan, loc))
     diags.extend(_check_ports(template, loc))
     diags.extend(_check_spawn_child_targets(template, loc))
+    diags.extend(_check_child_regions(template, loc))
     diags.extend(_check_result_declarations(template, loc))
     diags.extend(_check_cycles(template, loc))
 

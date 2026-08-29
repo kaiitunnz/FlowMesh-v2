@@ -192,6 +192,22 @@ class BoundarySignature(BaseModel):
     events: tuple[BoundaryEventKind, ...] = ()
 
 
+class ChildRegionRef(BaseModel):
+    """A named reference from an agent's spawn seam to one declared child region.
+
+    ``name`` is the stable role a ``SpawnRequest`` selects; ``spawn_ref`` is the
+    operator id of the matched ``Spawn`` region it resolves to. The role name differs
+    from the operator id so a request names a role without knowing compiled ids. A
+    region's entry target, per-site authority ceiling, and completion/residual contract
+    live on the referenced ``Spawn``/``Join`` region, never inline here.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    name: str
+    spawn_ref: str
+
+
 class EffectBoundary(BaseModel):
     """A source-mapped declared external-effect obligation."""
 
@@ -263,9 +279,10 @@ class AgentOperator(_OperatorBase):
     authority: AuthorityCeiling = AuthorityCeiling()
     boundary: BoundarySignature = BoundarySignature()
     guard: ConditionGuard | None = None
-    # The finite declared child region a spawn_agent may target; names this operator
-    # itself for a recursive agent, so recursion reuses the topology rather than growing
-    # it.
+    # The finite, uniquely named set of declared child regions a spawn_agent may select.
+    child_region_refs: tuple[ChildRegionRef, ...] = ()
+    # Legacy single-target shorthand the compiler normalizes into one declared region;
+    # a declaration that sets both this and child_region_refs is rejected.
     child_template_ref: str | None = None
 
 
