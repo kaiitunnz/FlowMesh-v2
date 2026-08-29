@@ -11,6 +11,7 @@ import pytest
 from shared.harness import (
     BoundaryEventKind,
     DeliveredOutcome,
+    HarnessBackendKey,
     HarnessResultKind,
     OutcomeKind,
 )
@@ -113,9 +114,7 @@ def test_build_from_spec_reads_the_script() -> None:
     assert adapter.backend_key().version == "v2"
 
 
-def _key():
-    from shared.harness import HarnessBackendKey
-
+def _key() -> HarnessBackendKey:
     return HarnessBackendKey(backend="scripted", version="v2")
 
 

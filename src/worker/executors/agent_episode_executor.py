@@ -8,7 +8,7 @@ the server routes any boundary and re-dispatches with the next capsule and outco
 """
 
 from pathlib import Path
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from shared.harness import (
     HarnessAdapter,
@@ -40,8 +40,8 @@ class AgentEpisodeExecutor(Executor):
     name = "agent_episode"
     supported_task_types: ClassVar[frozenset[TaskType]] = frozenset({TaskType.AGENT})
 
-    def __init__(self, *args: object, **kwargs: object) -> None:
-        super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
         self._adapter: HarnessAdapter | None = None
 
     def run(self, task: ExecutorTask, out_dir: Path) -> AgentEpisodeResult:

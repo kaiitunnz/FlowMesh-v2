@@ -11,18 +11,16 @@ from shared.harness import (
     OutcomeKind,
 )
 
-from .mediation import AgentEpisode, HarnessConfigError, to_boundary_event
+from .mediation import to_boundary_event
 
 __all__ = [
     "FACADE_TOOLS",
-    "AgentEpisode",
     "BoundaryRequest",
     "DeliveredOutcome",
     "FacadeTool",
     "HarnessAdapter",
     "HarnessBackendKey",
     "HarnessCapsule",
-    "HarnessConfigError",
     "HarnessResult",
     "HarnessResultKind",
     "OutcomeKind",

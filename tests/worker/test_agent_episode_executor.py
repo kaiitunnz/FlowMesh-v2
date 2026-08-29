@@ -26,9 +26,10 @@ from worker.executors.agent_episode_executor import (
     AgentEpisodeExecutor,
     AgentEpisodeResult,
 )
-from worker.executors.base_executor import ExecutionError
-from worker.harness import register_adapter
+from worker.executors.base_executor import ExecutionError, Executor
+from worker.harness import UnknownHarnessBackendError, register_adapter
 from worker.main import build_capabilities
+from worker.runner import Runner
 
 
 class _FakeAdapter(HarnessAdapter):
@@ -119,8 +120,6 @@ def test_missing_dispatch_context_is_an_error(tmp_path: Path) -> None:
 
 
 def test_unknown_backend_has_no_binding(tmp_path: Path) -> None:
-    from worker.harness import UnknownHarnessBackendError
-
     ex = AgentEpisodeExecutor(make_worker_config())
     msg = make_worker_task_message(
         {"taskType": "agent"},
@@ -129,3 +128,69 @@ def test_unknown_backend_has_no_binding(tmp_path: Path) -> None:
     )
     with pytest.raises(UnknownHarnessBackendError):
         ex.run(msg, tmp_path)
+
+
+class _RecordingExecutor(Executor):
+    def __init__(self, result: object) -> None:
+        super().__init__(make_worker_config())
+        self._result = result
+        self.ran = False
+
+    def run(self, task, out_dir):  # type: ignore[no-untyped-def]
+        self.ran = True
+        return self._result
+
+
+def _runner(tmp_path: Path, executors: dict[str, Executor]) -> Runner:
+    from unittest.mock import MagicMock
+
+    from tests.worker.factories import make_worker_hardware
+
+    lifecycle = MagicMock()
+    lifecycle.worker_id = "wrk-test"
+    lifecycle.cost_per_hour = 1.0
+    lifecycle.client.create_task_log_emitter.return_value = None
+    lifecycle.client.iter_interrupts.return_value = []
+    lifecycle.client.iter_stops.return_value = []
+    return Runner(
+        lifecycle=lifecycle,
+        task_stream=[],
+        results_dir=tmp_path,
+        hardware=make_worker_hardware(),
+        executors=executors,
+        default_executor=executors["agent"],
+        logger=MagicMock(),
+    )
+
+
+def _agent_result() -> AgentEpisodeResult:
+    return AgentEpisodeResult(
+        harness_result=HarnessResult(kind=HarnessResultKind.COMPLETION, value="done"),
+        value="done",
+    )
+
+
+def test_runner_routes_an_episode_message_to_the_episode_executor(
+    tmp_path: Path,
+) -> None:
+    # An agent message carrying an agent-episode dispatch routes to the episode
+    # executor; a bare agent message routes to the UTU executor. This is the production
+    # seam the dispatcher and runner select, exercised end-to-end on the real stack.
+    episode = _RecordingExecutor(_agent_result())
+    utu = _RecordingExecutor(_agent_result())
+    runner = _runner(tmp_path, {"agent_episode": episode, "agent": utu})
+
+    with_episode = make_worker_task_message(
+        {"taskType": "agent"},
+        task_type=TaskType.AGENT,
+        agent_episode={"backend": {"backend": "scripted", "version": "v1"}},
+    )
+    runner.task_stream = [with_episode]
+    runner.start()
+    assert episode.ran and not utu.ran
+
+    episode.ran = utu.ran = False
+    bare = make_worker_task_message({"taskType": "agent"}, task_type=TaskType.AGENT)
+    runner.task_stream = [bare]
+    runner.start()
+    assert utu.ran and not episode.ran
