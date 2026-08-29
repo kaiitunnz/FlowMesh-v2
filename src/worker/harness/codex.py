@@ -82,7 +82,7 @@ class CodexAppServerTransport(Protocol):
 
 
 class RealCodexAppServerTransport:
-    """The seam a live app-server binding fills; not exercised in this slice."""
+    """The seam a live app-server binding fills; unbound here."""
 
     def thread_start(self) -> str:
         raise NotImplementedError("a live Codex app-server transport is not bound here")

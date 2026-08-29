@@ -6,8 +6,7 @@ runs the configured upstream, and injects the result back at the originating cal
 implements the OpenAI Responses API so a harness whose provider targets it (Codex, say)
 crosses the same seam; a generic endpoint without this conversion is not valid.
 
-Resident-capacity admission is out of scope — the invocation settles directly, and PR 6
-inserts admission in front of the resident-lowered alternative later.
+Resident-capacity admission is not part of this path: the invocation settles directly.
 """
 
 import json
