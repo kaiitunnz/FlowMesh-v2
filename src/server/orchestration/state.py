@@ -130,8 +130,9 @@ class BoundaryEvent(BaseModel):
 
     An episode yields this at a boundary; the physical layer carries it across the
     episode boundary and the engine applies its semantics. Beyond the request itself
-    (``kind`` plus ``interface``/``child_ref``/``state_ref``/``value_ref`` and the
-    ``request_payload`` value or reference), it carries the correlation the fabric needs
+    (``kind`` plus ``interface``/``child_ref``/``child_region_ref``/``state_ref``/
+    ``value_ref`` and the ``request_payload`` value or reference), it carries the
+    correlation the fabric needs
     to keep a re-drive exactly-once: the ``activation`` it belongs to, the adapter-local
     ``call_correlation`` that stays stable across a re-drive, the fabric-assigned
     ``idempotency_key`` (the sole dedupe authority for a mediated effect, distinct from
@@ -149,6 +150,7 @@ class BoundaryEvent(BaseModel):
     idempotency_key: str | None = None
     interface: str | None = None
     child_ref: str | None = None
+    child_region_ref: str | None = None  # role a spawn/seal selects; never a raw op id
     request_payload: str | None = None
     injection_target: str | None = None
     continuation: str | None = None
@@ -248,6 +250,7 @@ class Activation(BaseModel):
     kind: str = "leaf"
     loop_time: int = 0  # orders loop-body re-materializations
     child_index: int | None = None  # distinguishes spawned siblings
+    parent_activation_id: str | None = None  # agent that owns a "region" opener
 
 
 class Record(BaseModel):

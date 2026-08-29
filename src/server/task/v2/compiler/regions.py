@@ -8,6 +8,7 @@ from ..representations.operators import (
     BoundaryEventKind,
     BoundarySignature,
     BranchRegion,
+    ChildRegionRef,
     DeterminismClass,
     EffectClass,
     InputProvenanceKind,
@@ -77,13 +78,74 @@ def lower_frontend_v2(parsed: ParsedWorkflow, acc: LoweringAccumulator) -> None:
     """Normalize v2 frontend constructs into the canonical template form.
 
     Applies ``spec.v2`` leaf declarations to already-lowered task operators, lowers
-    structured regions into canonical operators/ports/regions, and adds structured
-    feedback edges. Malformed constructs raise :class:`CompileError` with a source
-    location; semantic checks are left to the validation passes.
+    structured regions into canonical operators/ports/regions, adds structured feedback
+    edges, and normalizes a legacy agent child target into one declared child region.
+    Malformed constructs raise :class:`CompileError` with a source location; semantic
+    checks are left to the validation passes.
     """
     _apply_leaf_declarations(parsed, acc)
     _lower_regions(parsed, acc)
     _lower_feedback(parsed, acc)
+    normalize_agent_child_regions(acc)
+
+
+def normalize_agent_child_regions(acc: LoweringAccumulator) -> None:
+    """Normalize an agent's legacy single child target into one declared region.
+
+    A pure-legacy agent (a ``child_template_ref`` and no ``child_region_refs``) gains a
+    matched ``Spawn``/``Join`` pair over that entry, keyed by a role named for the
+    entry, with the agent's own ceiling as the region's per-site authority. An agent
+    declaring both forms is left untouched for the validation pass to reject.
+    """
+    for idx, op in enumerate(acc.operators):
+        if not isinstance(op, AgentOperator) or op.child_template_ref is None:
+            continue
+        if op.child_region_refs:
+            continue
+        entry = op.child_template_ref
+        spawn_id = f"{op.operator_id}:child"
+        join_id = f"{spawn_id}:join"
+        spawn = SpawnRegion(
+            operator_id=spawn_id,
+            source_ref=op.source_ref,
+            outputs=(Port(name="children"),),
+            child_template_ref=entry,
+            authority=op.authority,
+        )
+        join = JoinRegion(
+            operator_id=join_id,
+            source_ref=op.source_ref,
+            inputs=(Port(name="children"),),
+            outputs=(Port(name="out"),),
+            completion=JoinCompletion.ALL_SETTLED,
+        )
+        acc.operators[idx] = op.model_copy(
+            update={
+                "child_region_refs": (ChildRegionRef(name=entry, spawn_ref=spawn_id),),
+                "child_template_ref": None,
+            }
+        )
+        _add_synth_operator(spawn, op.operator_id, acc)
+        _add_synth_operator(join, op.operator_id, acc)
+        acc.edges.append(TemplateEdge(from_op=spawn_id, to_op=join_id))
+
+
+def _add_synth_operator(
+    op: LogicalOperator, source_id: str, acc: LoweringAccumulator
+) -> None:
+    acc.operators.append(op)
+    acc.source_map.append(
+        SourceMapEntry(
+            logical_ref=op.operator_id, source_kind="region", source_id=source_id
+        )
+    )
+    acc.nodes.append(
+        PhysicalNode(
+            node_id=f"phys:{op.operator_id}",
+            source_ref=op.operator_id,
+            logical_ref=op.operator_id,
+        )
+    )
 
 
 def _apply_leaf_declarations(parsed: ParsedWorkflow, acc: LoweringAccumulator) -> None:

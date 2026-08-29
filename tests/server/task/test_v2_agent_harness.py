@@ -5,9 +5,10 @@ mediated model or tool action, releasing its lane until its durable outcome is i
 the durable boundary envelope persists the capsule, causal invocation id, and
 fabric-assigned idempotency key atomically before the lane releases, and a forced
 re-drive maps a reissued facade call to its recorded key; signature and authority checks
-reject undeclared tools, model interfaces, and child targets through a durable typed
-outcome; and a facade spawn_agent creates exactly one attenuated child with an explicit
-seal, with recursive agent children reusing the finite declared region.
+reject undeclared tools, model interfaces, and child regions through a durable typed
+outcome; and a facade spawn_agent selects one of an agent's finite declared child
+regions, creating one child attenuated from that region's entry, sealed per region, with
+recursive agent children reusing the finite declared region.
 """
 
 from collections.abc import Sequence
@@ -41,10 +42,14 @@ from server.task.v2.representations.operators import (
     BindingKey,
     BoundaryEventKind,
     BoundarySignature,
+    ChildRegionRef,
+    JoinCompletion,
+    JoinRegion,
     LeafOperator,
     LogicalOperator,
     OperatorKind,
     Port,
+    SpawnRegion,
 )
 from server.task.v2.representations.plan import PhysicalExecutionPlan, PhysicalNode
 from server.task.v2.representations.results import (
@@ -89,7 +94,7 @@ _REGION_KINDS = {
 def _agent(
     op_id: str,
     *,
-    child_ref: str | None = None,
+    regions: tuple[ChildRegionRef, ...] = (),
     invoke: tuple[str, ...] = ("model", "search"),
     delegate: tuple[str, ...] = ("model",),
 ) -> AgentOperator:
@@ -99,9 +104,38 @@ def _agent(
         binding=BindingKey(task_type=TaskType.AGENT),
         authority=AuthorityCeiling(invoke=invoke, delegate=delegate),
         boundary=_SIGNATURE,
-        child_template_ref=child_ref,
+        child_region_refs=regions,
         outputs=(Port(name="out"),),
     )
+
+
+def _region(
+    role: str,
+    entry: str,
+    *,
+    spawn_id: str | None = None,
+    invoke: tuple[str, ...] = ("model", "search"),
+    delegate: tuple[str, ...] = ("model",),
+) -> tuple[ChildRegionRef, list[LogicalOperator], TemplateEdge]:
+    """One declared role region: a matched Spawn/Join pair over an entry target."""
+    spawn_id = spawn_id or f"{role}:spawn"
+    join_id = f"{spawn_id}:join"
+    spawn = SpawnRegion(
+        operator_id=spawn_id,
+        source_ref=spawn_id,
+        outputs=(Port(name="children"),),
+        child_template_ref=entry,
+        authority=AuthorityCeiling(invoke=invoke, delegate=delegate),
+    )
+    join = JoinRegion(
+        operator_id=join_id,
+        source_ref=join_id,
+        inputs=(Port(name="children"),),
+        outputs=(Port(name="out"),),
+        completion=JoinCompletion.ALL_SETTLED,
+    )
+    ref = ChildRegionRef(name=role, spawn_ref=spawn_id)
+    return ref, [spawn, join], TemplateEdge(from_op=spawn_id, to_op=join_id)
 
 
 def _leaf(op_id: str) -> LeafOperator:
@@ -158,9 +192,32 @@ def _bundle(
     return PersistedV2Workflow(source=source, template=template, plan=plan)
 
 
-def _engine(bundle: PersistedV2Workflow, *, budget: ScopeBudget | None = None):
+def _engine(
+    bundle: PersistedV2Workflow,
+    *,
+    budget: ScopeBudget | None = None,
+    granted: frozenset[str] = _GRANTED,
+):
     return OrchestrationEngine.build(
-        "wfl-x", "owner", "org", bundle, granted_interfaces=_GRANTED, budget=budget
+        "wfl-x", "owner", "org", bundle, granted_interfaces=granted, budget=budget
+    )
+
+
+def _multi_region_agent() -> PersistedV2Workflow:
+    """An agent with two independent role regions: distinct authority and join."""
+    r_ref, r_ops, r_edge = _region("researcher", "rbody")
+    v_ref, v_ops, v_edge = _region("reviewer", "vbody", invoke=("model",), delegate=())
+    v_ops[1] = v_ops[1].model_copy(update={"completion": JoinCompletion.ALL_SUCCEED})
+    return _bundle(
+        [
+            _agent("A", regions=(r_ref, v_ref)),
+            _leaf("rbody"),
+            _leaf("vbody"),
+            *r_ops,
+            *v_ops,
+        ],
+        [r_edge, v_edge],
+        (_decl("out:A", "A"),),
     )
 
 
@@ -168,10 +225,22 @@ def _solo_agent() -> PersistedV2Workflow:
     return _bundle([_agent("A")], [], (_decl("out:A", "A"),))
 
 
-def _spawning_agent(*, child: LogicalOperator) -> PersistedV2Workflow:
+def _spawning_agent(
+    *,
+    child: LogicalOperator,
+    role: str = "worker",
+    region_invoke: tuple[str, ...] = ("model", "search"),
+    region_delegate: tuple[str, ...] = ("model",),
+) -> PersistedV2Workflow:
+    ref, region_ops, edge = _region(
+        role,
+        child.operator_id,
+        invoke=region_invoke,
+        delegate=region_delegate,
+    )
     return _bundle(
-        [_agent("A", child_ref=child.operator_id), child],
-        [],
+        [_agent("A", regions=(ref,)), child, *region_ops],
+        [edge],
         (_decl("out:A", "A"),),
     )
 
@@ -391,29 +460,50 @@ def test_denied_boundary_redrive_is_idempotent() -> None:
 
 def test_undeclared_boundary_kind_is_denied() -> None:
     # An agent whose signature omits SPAWN cannot yield a spawn boundary.
-    agent = _agent("A", child_ref="child")
-    narrow = agent.model_copy(
+    ref, region_ops, edge = _region("worker", "child")
+    narrow = _agent("A", regions=(ref,)).model_copy(
         update={"boundary": BoundarySignature(events=(BoundaryEventKind.INVOCATION,))}
     )
-    eng = _engine(_bundle([narrow, _leaf("child")], [], (_decl("out:A", "A"),)))
+    eng = _engine(
+        _bundle([narrow, _leaf("child"), *region_ops], [edge], (_decl("out:A", "A"),))
+    )
     act = _dispatch_agent(eng)
     eng.route_boundary_event(
         "A",
         BoundaryEvent(
-            kind=BoundaryEventKind.SPAWN, call_correlation="c0", child_ref="child"
+            kind=BoundaryEventKind.SPAWN,
+            call_correlation="c0",
+            child_region_ref="worker",
         ),
     )
     env = eng.boundary_envelope(act, "c0")
     assert env is not None and env.denial is DenialKind.AUTHORITY
 
 
-def test_undeclared_child_target_is_denied() -> None:
+def test_undeclared_region_is_denied() -> None:
     eng = _engine(_spawning_agent(child=_leaf("child")))
     act = _dispatch_agent(eng)
     eng.route_boundary_event(
         "A",
         BoundaryEvent(
-            kind=BoundaryEventKind.SPAWN, call_correlation="c0", child_ref="other"
+            kind=BoundaryEventKind.SPAWN,
+            call_correlation="c0",
+            child_region_ref="other",
+        ),
+    )
+    env = eng.boundary_envelope(act, "c0")
+    assert env is not None and env.denial is DenialKind.AUTHORITY
+
+
+def test_raw_operator_id_cannot_select_a_region() -> None:
+    # A spawn that names a raw operator id rather than a declared role is denied: it
+    # cannot install topology or reach a target the agent did not declare a region for.
+    eng = _engine(_spawning_agent(child=_leaf("child")))
+    act = _dispatch_agent(eng)
+    eng.route_boundary_event(
+        "A",
+        BoundaryEvent(
+            kind=BoundaryEventKind.SPAWN, call_correlation="c0", child_ref="child"
         ),
     )
     env = eng.boundary_envelope(act, "c0")
@@ -455,59 +545,80 @@ def test_mediation_refuses_a_native_bypass_adapter() -> None:
 
 def test_spawn_agent_creates_one_attenuated_child_with_a_seal() -> None:
     eng = _engine(_spawning_agent(child=_leaf("child")))
-    _dispatch_agent(eng)
+    act = _dispatch_agent(eng)
     adv = eng.route_boundary_event(
         "A",
         BoundaryEvent(
-            kind=BoundaryEventKind.SPAWN, call_correlation="c0", child_ref="child"
+            kind=BoundaryEventKind.SPAWN,
+            call_correlation="c0",
+            child_region_ref="worker",
         ),
     )
     # Exactly one declared child activation with a dispatchable identity.
     assert len(adv.ready) == 1 and adv.ready[0].startswith("act-")
-    grant = eng.grant_for("A")
+    grant = eng.grant_for("worker:spawn")
     assert grant is not None and grant.parent_grant_id == eng.instance.root_grant_id
     # The delegated grant is attenuated: it cannot widen the pinned envelope, and its
     # delegate face cannot widen its own invoke face.
     assert set(grant.invoke) <= _GRANTED
     assert set(grant.delegate) <= set(grant.invoke)
-    # A spawn does not seal child-init; an explicit spawn seal closes the producer.
-
-    cap = eng.capability(eng.scope_for("A"), ProgressAxis.CHILD_INIT)
+    # A spawn does not seal child-init; an explicit spawn seal for the region closes it.
+    region_scope = eng.region_scope_for(act, "worker")
+    cap = eng.capability(region_scope, ProgressAxis.CHILD_INIT)
     assert cap is not None and cap.status.value == "open"
     eng.route_boundary_event(
-        "A", BoundaryEvent(kind=BoundaryEventKind.SPAWN_SEAL, call_correlation="c1")
+        "A",
+        BoundaryEvent(
+            kind=BoundaryEventKind.SPAWN_SEAL,
+            call_correlation="c1",
+            child_region_ref="worker",
+        ),
     )
-    cap = eng.capability(eng.scope_for("A"), ProgressAxis.CHILD_INIT)
+    cap = eng.capability(region_scope, ProgressAxis.CHILD_INIT)
     assert cap is not None and cap.status.value == "sealed"
 
 
 def test_agent_terminal_completion_seals_its_child_init() -> None:
     eng = _engine(_spawning_agent(child=_leaf("child")))
-    _dispatch_agent(eng)
+    act = _dispatch_agent(eng)
     child = eng.route_boundary_event(
         "A",
         BoundaryEvent(
-            kind=BoundaryEventKind.SPAWN, call_correlation="c0", child_ref="child"
+            kind=BoundaryEventKind.SPAWN,
+            call_correlation="c0",
+            child_region_ref="worker",
         ),
     ).ready[0]
 
     eng.on_dispatched(child, "w1")
     eng.on_succeeded(child)
     eng.on_succeeded("A")  # terminal completion supplies the seal
-    cap = eng.capability(eng.scope_for("A"), ProgressAxis.CHILD_INIT)
+    cap = eng.capability(eng.region_scope_for(act, "worker"), ProgressAxis.CHILD_INIT)
     assert cap is not None and cap.closed
 
 
+def _recursive_agent_bundle() -> PersistedV2Workflow:
+    # A declares a region whose entry is agent ``child``; ``child`` declares a region
+    # whose entry is itself, so each spawn re-enters the finite declared region.
+    child = _agent("child", regions=(ChildRegionRef(name="self", spawn_ref="rec"),))
+    child_ref, child_region, child_edge = _region("self", "child", spawn_id="rec")
+    a_ref, a_region, a_edge = _region("worker", "child")
+    return _bundle(
+        [_agent("A", regions=(a_ref,)), child, *a_region, *child_region],
+        [a_edge, child_edge],
+        (_decl("out:A", "A"),),
+    )
+
+
 def test_recursive_agent_child_reuses_the_declared_region() -> None:
-    # An agent whose declared child region is another agent that recurses into itself:
-    # each spawn re-enters the finite declared region, nesting scopes by depth.
-    child = _agent("child", child_ref="child")
-    eng = _engine(_spawning_agent(child=child), budget=ScopeBudget(max_scope_depth=8))
-    _dispatch_agent(eng)
+    eng = _engine(_recursive_agent_bundle(), budget=ScopeBudget(max_scope_depth=8))
+    act = _dispatch_agent(eng)
     lvl1 = eng.route_boundary_event(
         "A",
         BoundaryEvent(
-            kind=BoundaryEventKind.SPAWN, call_correlation="c0", child_ref="child"
+            kind=BoundaryEventKind.SPAWN,
+            call_correlation="c0",
+            child_region_ref="worker",
         ),
     ).ready[0]
     # The materialized child agent is itself dispatchable and can spawn its own child.
@@ -515,32 +626,41 @@ def test_recursive_agent_child_reuses_the_declared_region() -> None:
     lvl2 = eng.route_boundary_event(
         lvl1,
         BoundaryEvent(
-            kind=BoundaryEventKind.SPAWN, call_correlation="c0", child_ref="child"
+            kind=BoundaryEventKind.SPAWN, call_correlation="c0", child_region_ref="self"
         ),
     ).ready[0]
     assert lvl2.startswith("act-") and lvl2 != lvl1
-    # The template still holds exactly the two declared operators: recursion reused the
+    # The template still holds exactly the declared operators: recursion reused the
     # region rather than growing the topology.
-    assert {op.operator_id for op in eng._bundle.template.operators} == {"A", "child"}  # type: ignore[attr-defined]
-    # A owns a child-init scope (for lvl1); lvl1 owns a nested one (for lvl2), one
-    # level deeper — recursion nests scopes over the finite topology.
-    sa = eng.scope_for("A")
-    s1 = eng.scope_for(lvl1)
+    assert {op.operator_id for op in eng._bundle.template.operators} == {  # type: ignore[attr-defined]
+        "A",
+        "child",
+        "worker:spawn",
+        "worker:spawn:join",
+        "rec",
+        "rec:join",
+    }
+    # A's worker region owns a child-init scope (for lvl1); lvl1's self region owns a
+    # nested one (for lvl2), one level deeper — recursion nests scopes by depth.
+    sa = eng.region_scope_for(act, "worker")
+    s1 = eng.region_scope_for(lvl1, "self")
     assert sa is not None and s1 is not None and sa != s1
     by_id = {s.scope_id: s for s in eng.to_snapshot().scopes}
     assert by_id[s1].depth == by_id[sa].depth + 1
 
 
 def test_recursive_agent_depth_budget_is_enforced() -> None:
-    child = _agent("child", child_ref="child")
-    eng = _engine(_spawning_agent(child=child), budget=ScopeBudget(max_scope_depth=1))
+    eng = _engine(_recursive_agent_bundle(), budget=ScopeBudget(max_scope_depth=1))
     _dispatch_agent(eng)
-
+    # The finite SCC / depth budget trips: materializing a recursive agent child
+    # reserves a level for the child's own region scope, exceeding the depth budget.
     try:
         eng.route_boundary_event(
             "A",
             BoundaryEvent(
-                kind=BoundaryEventKind.SPAWN, call_correlation="c0", child_ref="child"
+                kind=BoundaryEventKind.SPAWN,
+                call_correlation="c0",
+                child_region_ref="worker",
             ),
         )
     except RegionError:
@@ -557,11 +677,10 @@ def test_recursive_agent_depth_budget_is_enforced() -> None:
 def test_rejected_spawn_records_no_envelope_and_no_phantom_ack() -> None:
     # The depth budget rejects the nested agent scope: the spawn raises, records no
     # envelope, and queues no phantom success ack for a later re-drive to deliver.
-    child = _agent("child", child_ref="child")
-    eng = _engine(_spawning_agent(child=child), budget=ScopeBudget(max_scope_depth=1))
+    eng = _engine(_recursive_agent_bundle(), budget=ScopeBudget(max_scope_depth=1))
     act = _dispatch_agent(eng)
     adapter = _DoubleAdapter(
-        [_boundary(BoundaryEventKind.SPAWN, "c0", child_ref="child")]
+        [_boundary(BoundaryEventKind.SPAWN, "c0", child_region_ref="worker")]
     )
     ep = AgentEpisode(eng, adapter)
     with pytest.raises(RegionError):
@@ -573,7 +692,9 @@ def test_rejected_spawn_records_no_envelope_and_no_phantom_ack() -> None:
         eng.route_boundary_event(
             "A",
             BoundaryEvent(
-                kind=BoundaryEventKind.SPAWN, call_correlation="c0", child_ref="child"
+                kind=BoundaryEventKind.SPAWN,
+                call_correlation="c0",
+                child_region_ref="worker",
             ),
         )
 
@@ -606,7 +727,7 @@ def test_dedup_capable_boundary_without_correlation_is_rejected() -> None:
     # A mediated dedup-capable boundary must carry a stable correlation, or a re-drive
     # could duplicate a target effect; the engine refuses one without it.
     for event in (
-        BoundaryEvent(kind=BoundaryEventKind.SPAWN, child_ref="child"),
+        BoundaryEvent(kind=BoundaryEventKind.SPAWN, child_region_ref="worker"),
         BoundaryEvent(kind=BoundaryEventKind.INVOCATION, interface="model"),
         BoundaryEvent(kind=BoundaryEventKind.EXTERNAL_EFFECT, interface="search"),
     ):
@@ -628,3 +749,103 @@ def test_request_payload_round_trips_on_the_envelope() -> None:
     )
     env = eng.boundary_envelope(act, "c0")
     assert env is not None and env.request_payload == '{"q": "hi"}'
+
+
+# --------------------------------------------------------------------------- #
+# Finite child-region contract: multiple roles, per-entry attenuation, per-
+# region seal
+# --------------------------------------------------------------------------- #
+
+
+def _spawn(role: str, call: str) -> BoundaryEvent:
+    return BoundaryEvent(
+        kind=BoundaryEventKind.SPAWN, call_correlation=call, child_region_ref=role
+    )
+
+
+def test_multiple_role_regions_each_spawn_and_settle_with_the_agent() -> None:
+    eng = _engine(_multi_region_agent())
+    act = _dispatch_agent(eng)
+    # One child per declared role, selected by role rather than a raw operator id.
+    c1 = eng.route_boundary_event("A", _spawn("researcher", "c0")).ready[0]
+    c2 = eng.route_boundary_event("A", _spawn("reviewer", "c1")).ready[0]
+    assert c1 != c2
+    for child in (c1, c2):
+        eng.on_dispatched(child, "w1")
+        eng.on_succeeded(child)
+    eng.on_succeeded("A")  # terminal completion settles every still-open region
+    # Observable end-to-end outcome: the agent's declared output resolves SUCCESS ...
+    pub = eng.resolve_output("out:A")
+    assert pub is not None and pub.outcome.value == "success"
+    # ... and each role region's child-init progress closes independently.
+    for role in ("researcher", "reviewer"):
+        cap = eng.capability(eng.region_scope_for(act, role), ProgressAxis.CHILD_INIT)
+        assert cap is not None and cap.closed
+
+
+def test_authority_attenuates_from_the_selected_region_not_the_parent() -> None:
+    # The parent broadly holds "broad"; the narrow region's ceiling does not. A child
+    # spawned through that region is denied "broad" even though it declares it — the
+    # attenuation comes from the selected entry, not the parent's blanket ceiling.
+    granted = frozenset({"model", "search", "broad"})
+    sub = _agent("sub", invoke=("model", "broad"), delegate=("model",))
+    ref, region_ops, edge = _region(
+        "narrow", "sub", invoke=("model",), delegate=("model",)
+    )
+    agent = _agent(
+        "A", invoke=("model", "search", "broad"), delegate=("model", "broad")
+    )
+    agent = agent.model_copy(update={"child_region_refs": (ref,)})
+    bundle = _bundle([agent, sub, *region_ops], [edge], (_decl("out:A", "A"),))
+    eng = _engine(bundle, granted=granted)
+    _dispatch_agent(eng)
+    child = eng.route_boundary_event("A", _spawn("narrow", "c0")).ready[0]
+    # The region's delegated grant is attenuated below the parent: it drops "broad".
+    grant = eng.grant_for("narrow:spawn")
+    assert grant is not None and "broad" not in grant.invoke and "model" in grant.invoke
+    eng.on_dispatched(child, "w1")
+    eng.route_boundary_event(
+        child,
+        BoundaryEvent(
+            kind=BoundaryEventKind.INVOCATION, call_correlation="i0", interface="broad"
+        ),
+    )
+    denied = eng.boundary_envelope(child, "i0")
+    assert denied is not None and denied.denial is not None
+    # An interface the region does grant is admitted for the same child.
+    eng.route_boundary_event(
+        child,
+        BoundaryEvent(
+            kind=BoundaryEventKind.INVOCATION, call_correlation="i1", interface="model"
+        ),
+    )
+    admitted = eng.boundary_envelope(child, "i1")
+    assert admitted is not None and admitted.denial is None
+
+
+def test_spawn_seal_closes_only_its_region() -> None:
+    eng = _engine(_multi_region_agent())
+    act = _dispatch_agent(eng)
+    eng.route_boundary_event("A", _spawn("researcher", "r0"))
+    eng.route_boundary_event("A", _spawn("reviewer", "v0"))
+    eng.route_boundary_event(
+        "A",
+        BoundaryEvent(
+            kind=BoundaryEventKind.SPAWN_SEAL,
+            call_correlation="rs",
+            child_region_ref="researcher",
+        ),
+    )
+    # A late child in the sealed region is rejected (per-region late-child prevention).
+    with pytest.raises(RegionError):
+        eng.route_boundary_event("A", _spawn("researcher", "r1"))
+    # The other region is untouched: it still admits a child.
+    assert len(eng.route_boundary_event("A", _spawn("reviewer", "v1")).ready) == 1
+    researcher = eng.capability(
+        eng.region_scope_for(act, "researcher"), ProgressAxis.CHILD_INIT
+    )
+    reviewer = eng.capability(
+        eng.region_scope_for(act, "reviewer"), ProgressAxis.CHILD_INIT
+    )
+    assert researcher is not None and researcher.status.value == "sealed"
+    assert reviewer is not None and reviewer.status.value == "open"
