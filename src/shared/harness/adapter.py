@@ -7,8 +7,8 @@ per-call correlation; and per-call outcome injection. The fabric persists and di
 the mediated work and the engine owns durable request creation; the adapter owns only
 harness-local session, checkpoint, export/import, cancellation, and injection mechanics.
 
-The contract is harness-agnostic and worker-safe (no server imports); concrete backend
-bindings live behind their own versioned backend key.
+The contract is harness-agnostic; concrete backend bindings live behind their own
+versioned backend key.
 """
 
 from abc import ABC, abstractmethod
