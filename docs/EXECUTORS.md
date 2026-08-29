@@ -87,15 +87,20 @@ Declared per agent under `spec.harness`:
 The `codex` backend binds a live `codex app-server` through the `openai-codex` SDK
 (`runtime-harness-codex` dependency group). It maps `thread/resume`, `thread/inject_items`,
 and `turn/start` onto the adapter: a step runs against an on-disk rollout under
-`CODEX_HOME`, and a settled outcome injects back as raw Responses items the next turn sees,
-so a held facade call recovers across an app-server loss on the same rollout.
-`tests/worker/test_codex_integration.py` exercises this against a live app-server and a
-local Responses backend, including a `kill -9` recovery trace.
+`CODEX_HOME`, and a settled outcome injects back as raw Responses items the next turn sees.
+A mediated facade originates at the agent-model gateway, which is the episode's model
+provider: it captures the model's native facade call and returns the app-server a clean
+turn-completing message, so the adapter itself only completes or fails and durability is
+fabric-side. `tests/worker/test_codex_integration.py` exercises this against a live
+app-server driven through the real gateway, including a `kill -9` recovery trace.
 
 A mediated model request the agent defers is settled by the **agent-model gateway**, not a
 raw model endpoint. The gateway implements the OpenAI Responses API (`POST /v1/responses`)
-so a harness whose provider targets it crosses the same seam. Its upstream is configured
-on the server under the `AGENT_MODEL_GATEWAY_*` env family (see
+so a harness whose provider targets it crosses the same seam; an agent episode targets a
+per-episode surface (`POST /agent/{task_id}/v1/responses`) where the gateway injects the
+facade tool and captures a native facade call, keyed to the episode by the task id in the
+path. Its upstream is configured on the server under the `AGENT_MODEL_GATEWAY_*` env
+family (see
 [`ENV.md`](ENV.md)); the default `canned` mode is deterministic and credential-free, while
 `openai` forwards to an OpenAI-compatible endpoint, reusing the `UTU_LLM_*` provider path
 when its own values are unset.

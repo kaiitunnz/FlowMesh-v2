@@ -3,6 +3,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, computed_field
 
+from shared.harness import BoundaryRequest
 from shared.tasks import TaskEnvelopeTemplate
 from shared.tasks.worker_message import HardwareUsage
 
@@ -153,6 +154,11 @@ class TaskRecord(BaseModel):
     merge_key: str | None = Field(default=None, description="Merge grouping key.")
     latest_update: dict[str, Any] | None = Field(
         default=None, description="Latest mid-task update payload."
+    )
+    pending_origination: BoundaryRequest | None = Field(
+        default=None,
+        description="A facade boundary the gateway captured for this agent episode, "
+        "durable so a restart-replayed completion still reroutes into it.",
     )
 
     @computed_field  # type: ignore[prop-decorator]

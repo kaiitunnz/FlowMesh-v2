@@ -1,11 +1,11 @@
 """The Codex app-server adapter maps the harness contract and recovers on the rollout.
 
-A fake app-server scripts turn/item events so the binding runs without a live Codex: a
-facade tool defers as a generic boundary, an injected outcome resumes the turn, and a
-finished turn completes. The load-bearing part is crash recovery — across an app-server
-loss against the same persisted rollout, a held single-forward facade call re-drives and
-its mediated effect runs exactly once, gated by the fabric idempotency key rather than a
-Codex-local call id.
+A fake app-server scripts terminal turns so the binding runs without a live Codex: each
+turn completes or fails, and a delivered outcome injects back and resumes the rollout.
+A facade originates at the gateway, not the adapter, so the adapter never observes one.
+The load-bearing part is crash recovery — across an app-server loss against the same
+persisted rollout, a re-delivered outcome injects at most once, gated by the committed
+fabric idempotency key rather than a Codex-local call id.
 """
 
 from collections import defaultdict

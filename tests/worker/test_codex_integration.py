@@ -15,8 +15,8 @@ Exactly-once of the mediated *effect* under a lost capsule is the fabric idempot
 property, proven at the engine level; it is not claimed here.
 
 This is a live process, not a fake transport, and not a CPU Docker end-to-end test,
-whose environment lacks the Codex binary. The proof is bounded to single-forward,
-single-facade recovery.
+whose environment lacks the Codex binary. The proof is bounded to single-facade
+recovery.
 """
 
 import json

@@ -10,6 +10,7 @@ conversion for a harness whose provider targets the gateway directly.
 import asyncio
 from typing import Any
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -262,7 +263,7 @@ def test_proxy_mode_streams_the_upstream_turn_verbatim(monkeypatch: Any) -> None
 
 
 def _facade_index() -> tuple[dict[str, Any], int]:
-    from server.services.agent_model_gateway import _facade_call, _forward_index
+    from server.services.agent_model_gateway import _facade_calls, _forward_index
 
     output = [
         {"type": "reasoning", "content": []},
@@ -273,13 +274,13 @@ def _facade_index() -> tuple[dict[str, Any], int]:
             "arguments": '{"region": "reviewer", "args": {"focus": "security"}}',
         },
     ]
-    call = _facade_call(output)
-    assert call is not None
+    facades = _facade_calls(output)
+    assert len(facades) == 1
     history = [
         {"type": "message", "role": "user"},
         {"type": "function_call_output", "call_id": "fab-x:0", "output": "r"},
     ]
-    return call, _forward_index(history)
+    return facades[0], _forward_index(history)
 
 
 def test_facade_capture_maps_the_native_call_to_a_boundary() -> None:
@@ -382,3 +383,73 @@ def test_agent_turn_without_a_facade_passes_through(monkeypatch: Any) -> None:
 
     assert resp.status_code == 200 and not originated
     assert "just reasoning" in resp.content.decode()
+
+
+def test_facade_turn_preserves_co_emitted_reasoning(monkeypatch: Any) -> None:
+    # A reasoning item co-emitted with the facade is kept for continuity; only the
+    # facade call becomes the dispatch message.
+    output: list[dict[str, Any]] = [
+        {"type": "reasoning", "id": "rs_1", "content": []},
+        {
+            "type": "function_call",
+            "name": "spawn_agent",
+            "call_id": "call_1",
+            "arguments": '{"region": "reviewer"}',
+        },
+    ]
+    _upstream_client(monkeypatch, output)
+    gateway, originated = _agent_gateway()
+    app = FastAPI()
+    app.include_router(build_agent_model_router(gateway))
+    request = {"model": "gpt-5-codex", "input": [], "tools": [], "stream": True}
+    resp = TestClient(app).post("/agent/tsk-1/v1/responses", json=request)
+
+    body = resp.content.decode()
+    assert len(originated) == 1
+    assert '"reasoning"' in body and "rs_1" in body  # reasoning preserved
+    assert "Dispatched spawn_agent" in body
+    assert '"function_call"' not in body  # the facade call itself is not surfaced
+
+
+def test_a_multi_facade_or_mixed_turn_is_denied(monkeypatch: Any) -> None:
+    # Two facade calls, or a facade co-emitted with a real tool call, must not silently
+    # collapse to one boundary — the turn is denied.
+    two_facades: list[dict[str, Any]] = [
+        {
+            "type": "function_call",
+            "name": "spawn_agent",
+            "call_id": "c1",
+            "arguments": '{"region": "a"}',
+        },
+        {
+            "type": "function_call",
+            "name": "spawn_agent",
+            "call_id": "c2",
+            "arguments": '{"region": "b"}',
+        },
+    ]
+    facade_plus_real: list[dict[str, Any]] = [
+        {
+            "type": "function_call",
+            "name": "spawn_agent",
+            "call_id": "c1",
+            "arguments": '{"region": "a"}',
+        },
+        {
+            "type": "function_call",
+            "name": "exec_command",
+            "call_id": "c2",
+            "arguments": "{}",
+        },
+    ]
+    for output in (two_facades, facade_plus_real):
+        _upstream_client(monkeypatch, output)
+        gateway, originated = _agent_gateway()
+        app = FastAPI()
+        app.include_router(build_agent_model_router(gateway))
+        request = {"model": "gpt-5-codex", "input": [], "tools": [], "stream": True}
+        with pytest.raises(RuntimeError, match="exactly one facade call"):
+            TestClient(app, raise_server_exceptions=True).post(
+                "/agent/tsk-1/v1/responses", json=request
+            )
+        assert not originated

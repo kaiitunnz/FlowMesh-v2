@@ -196,15 +196,28 @@ class AgentModelGateway:
             upstream.raise_for_status()
             data = upstream.json()
         output = data.get("output", []) if isinstance(data, dict) else []
-        call = _facade_call(output)
-        if call is not None and self._originator is not None:
+        facades = _facade_calls(output)
+        if facades and self._originator is not None:
+            others = _other_tool_calls(output)
+            if len(facades) > 1 or others:
+                # The single-forward binding lifts exactly one facade call carrying no
+                # other tool call; a multi-facade or mixed turn is denied loudly rather
+                # than silently dropping a call the harness expects to run.
+                raise RuntimeError(
+                    "a facade turn must carry exactly one facade call and no other "
+                    f"tool call; got {len(facades)} facade(s), {len(others)} other(s)"
+                )
+            call = facades[0]
             corr = f"{task_id}:{_forward_index(body.get('input'))}"
             request = _facade_boundary(call, corr)
             self._originator(task_id, request)
-            output = _message_output(
+            # Preserve the turn's non-facade items (reasoning, messages) so reasoning
+            # continuity is not broken; only the facade call becomes the dispatch.
+            kept = [item for item in output if item is not call]
+            output = kept + _message_output(
                 _dispatched_message(call, request.child_region_ref)
             )
-        elif call is not None:
+        elif facades:
             self._logger.warning(
                 "agent-model gateway captured a facade call with no originator "
                 "installed; passing it through to the harness"
@@ -313,17 +326,28 @@ def _spawn_agent_tool() -> dict[str, Any]:
     }
 
 
-def _facade_call(output: Any) -> dict[str, Any] | None:
+def _facade_calls(output: Any) -> list[dict[str, Any]]:
     if not isinstance(output, list):
-        return None
-    for item in output:
-        if (
-            isinstance(item, dict)
-            and item.get("type") == "function_call"
-            and item.get("name") in _FACADE_TOOLS
-        ):
-            return item
-    return None
+        return []
+    return [
+        item
+        for item in output
+        if isinstance(item, dict)
+        and item.get("type") == "function_call"
+        and item.get("name") in _FACADE_TOOLS
+    ]
+
+
+def _other_tool_calls(output: Any) -> list[dict[str, Any]]:
+    if not isinstance(output, list):
+        return []
+    return [
+        item
+        for item in output
+        if isinstance(item, dict)
+        and item.get("type") == "function_call"
+        and item.get("name") not in _FACADE_TOOLS
+    ]
 
 
 def _forward_index(history: Any) -> int:

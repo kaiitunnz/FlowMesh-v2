@@ -280,7 +280,7 @@ def test_a_denied_boundary_re_readies_with_a_denied_outcome() -> None:
 
 
 class _AlwaysCompleteAdapter(HarnessAdapter):
-    """A harness whose every turn completes cleanly, as a Codex turn does under G.
+    """A harness whose every turn completes cleanly, as a gateway-driven turn does.
 
     Origination is not the adapter's job here: a facade is captured at the gateway,
     which clean-completes the turn, so the adapter only ever reports a completion.
@@ -381,6 +381,51 @@ def test_gateway_originated_spawn_reroutes_a_clean_completion() -> None:
         assert closed is not None and closed.closed
         pub = engine.resolve_output(f"legacy:{writer}")
         assert pub is not None and pub.outcome.value == "success"
+
+    asyncio.run(run())
+
+
+def test_gateway_origination_survives_a_restart_replay() -> None:
+    # The captured boundary must be durable. If the server crashes after the gateway
+    # clean-completes the turn but before the completion reroutes (so the child never
+    # materializes), the durably-persisted origination must let the replayed completion
+    # still route the spawn rather than settling the agent DONE with its region missing.
+    async def run() -> None:
+        runtime = _runtime(FakeRegistry())
+        workflow_id, ids = await _register(runtime, _AGENT_WF)
+        writer = ids["writer"]
+        adapter = _AlwaysCompleteAdapter()
+        engine = runtime.orchestration_engine(workflow_id)
+        assert engine is not None
+
+        dispatch = runtime.agent_episode_dispatch(writer)
+        assert dispatch is not None
+        engine.on_dispatched(writer, "wkr-1")
+        result = adapter.start(
+            writer, capsule=None, outcomes=dispatch.delivered_outcomes
+        )
+        runtime.originate_episode_boundary(writer, _spawn_reviewer(writer))
+        # The origination is durable on the record, not only in the volatile stash.
+        record = runtime.get_record(writer)
+        assert record is not None and record.pending_origination is not None
+
+        # Crash before the reroute: the in-memory stash is lost, as on a restart.
+        runtime._pending_originations.clear()
+
+        # The completion replays from the durable stream (at-least-once).
+        runtime.mark_succeeded(
+            writer, "wkr-1", {"agent_episode": result.model_dump(mode="json")}, _TS
+        )
+
+        # The spawn still routes: a child materialized and the agent is not DONE.
+        children = [
+            w.legacy_task_id
+            for w in engine.to_snapshot().work_items
+            if w.legacy_task_id.startswith("act-")
+        ]
+        assert len(children) == 1
+        assert str(record.status) != "DONE"
+        assert record.pending_origination is None  # consumed once
 
     asyncio.run(run())
 
