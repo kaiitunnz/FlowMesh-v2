@@ -561,11 +561,9 @@ class OrchestrationEngine:
         )
         self._settle_attempt_terminal(wi, outcome)
         activation = self._activations[wi.activation_id]
-        # An agent's terminal completion seals its own child-init producer, so a
+        # An agent's terminal completion settles every declared child region, so a
         # spawn_agent scope closes even without an explicit SpawnSeal.
-        released = Advance()
-        if isinstance(self._operators.get(wi.operator_id), AgentOperator):
-            released = self._seal_owned_child_init(wi.activation_id)
+        released = self._agent_terminal_regions(wi.operator_id, wi.activation_id)
         if activation.kind == "child":
             # A dispatched spawn child settles through its scope's child-init account,
             # never as a static forward record: the join closes on capability drain.
@@ -608,6 +606,7 @@ class OrchestrationEngine:
             )
             return Advance(retry=[wi.legacy_task_id])
         activation = self._activations[wi.activation_id]
+        released = self._agent_terminal_regions(wi.operator_id, wi.activation_id)
         if activation.kind == "child":
             # A child's terminal failure drains its scope account and lets an
             # all-succeed join fail; it does not cascade over static successors.
@@ -615,8 +614,8 @@ class OrchestrationEngine:
                 wi, activation, PublicationOutcome.DECLARED_FAILURE, None
             )
             advance.failed.append(wi.legacy_task_id)
-            return advance
-        return Advance(failed=self._settle_failure(wi.work_item_id))
+            return advance.extend(released)
+        return Advance(failed=self._settle_failure(wi.work_item_id)).extend(released)
 
     def on_uncertain(self, task_id: str) -> Advance:
         """Resolve a lost acknowledgement or route loss for an in-flight work item."""
@@ -649,7 +648,8 @@ class OrchestrationEngine:
             work_item_id=wi.work_item_id,
             invocation_id=wi.invocation_id,
         )
-        return Advance(failed=self._settle_failure(wi.work_item_id))
+        released = self._agent_terminal_regions(wi.operator_id, wi.activation_id)
+        return Advance(failed=self._settle_failure(wi.work_item_id)).extend(released)
 
     def route_boundary_event(self, task_id: str, event: BoundaryEvent) -> Advance:
         """Route an episode's boundary request back into the ledger, validated first.
@@ -664,8 +664,7 @@ class OrchestrationEngine:
         materializes one child under that region's child-init scope; a spawn seal closes
         that region; an invocation or effect records durable request state before the
         work item suspends, so waiting holds no worker; a yield persists the capsule; a
-        state
-        access records the declared reference.
+        state access records the declared reference.
         """
         wi = self._work_item_for_task(task_id)
         if wi is None or wi.status in _TERMINAL_WI:
@@ -1116,32 +1115,62 @@ class OrchestrationEngine:
             )
         return self._maybe_release_join(scope_id)
 
-    def _seal_owned_child_init(self, activation_id: str) -> Advance:
-        """Seal every open child region an agent owns on terminal completion.
+    def _settle_agent_regions(self, activation_id: str) -> Advance:
+        """Settle every declared child region of a terminal agent under its residual.
 
-        Each region the agent entered has its own child-init capability; an agent that
-        never emitted an explicit seal for one has it sealed here, so terminal
-        completion settles every still-open region the way a SpawnSeal would. A
-        non-spawning agent owns no such region.
+        Each entered region seals its open child-init capability so its join releases on
+        drain; a declared-but-never-entered region opens as a zero-child region and
+        seals, so its join releases empty. A cancel residual revokes and cancels the
+        region's children instead. Opening an unused region is skipped when it would
+        exceed the scope-depth budget, since the agent could never have entered it. A
+        non-spawning agent owns no region.
         """
         advance = Advance()
-        for (agent_act, _), opener in list(self._region_openers.items()):
-            if agent_act != activation_id:
-                continue
-            scope_id = self._scope_by_activation.get(opener)
-            if scope_id is None:
-                continue
-            cap = self._capabilities.get((scope_id, ProgressAxis.CHILD_INIT))
-            if cap is None or cap.status is not CapabilityStatus.OPEN:
-                continue
+        agent = self._activations.get(activation_id)
+        op = self._operators.get(agent.operator_id) if agent else None
+        if not isinstance(op, AgentOperator) or agent is None:
+            return advance
+        room = self._scopes[agent.scope_id].depth + 1 <= self._budget.max_scope_depth
+        for ref in op.child_region_refs:
+            opener = self._region_openers.get((activation_id, ref.spawn_ref))
+            if opener is None:
+                if not room:
+                    continue
+                opener = self._region_opener(activation_id, ref.spawn_ref)
+            advance.extend(self._settle_owned_region(opener))
+        return advance
+
+    def _agent_terminal_regions(self, operator_id: str, activation_id: str) -> Advance:
+        """Settle an agent's declared regions when the agent terminates, else no-op."""
+        if isinstance(self._operators.get(operator_id), AgentOperator):
+            return self._settle_agent_regions(activation_id)
+        return Advance()
+
+    def _settle_owned_region(self, opener: str) -> Advance:
+        scope_id = self._scope_by_activation.get(opener)
+        if scope_id is None:
+            return Advance()
+        cap = self._capabilities.get((scope_id, ProgressAxis.CHILD_INIT))
+        if cap is None or cap.status is not CapabilityStatus.OPEN:
+            return Advance()
+        owner = self._scopes[scope_id].owner_operator_id
+        join = self._join_of_scope(scope_id)
+        if self._residual_policy(join, ResidualPolicy.DRAIN) is ResidualPolicy.CANCEL:
+            cap.status = CapabilityStatus.REVOKED
+            self._emit(
+                "child_init_revoked",
+                operator_id=owner,
+                detail={"scope": scope_id, "reason": "agent_terminal"},
+            )
+            self._cancel_residual_children(scope_id)
+        else:
             cap.status = CapabilityStatus.SEALED
             self._emit(
                 "child_init_sealed",
-                operator_id=self._scopes[scope_id].owner_operator_id,
+                operator_id=owner,
                 detail={"scope": scope_id, "reason": "agent_terminal"},
             )
-            advance.extend(self._maybe_release_join(scope_id))
-        return advance
+        return self._maybe_release_join(scope_id)
 
     def revoke_spawn(self, spawn: str) -> None:
         """Revoke a spawn's child-init capability as a progress transition.

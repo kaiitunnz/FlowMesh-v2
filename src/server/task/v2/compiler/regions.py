@@ -94,8 +94,9 @@ def normalize_agent_child_regions(acc: LoweringAccumulator) -> None:
 
     A pure-legacy agent (a ``child_template_ref`` and no ``child_region_refs``) gains a
     matched ``Spawn``/``Join`` pair over that entry, keyed by a role named for the
-    entry, with the agent's own ceiling as the region's per-site authority. An agent
-    declaring both forms is left untouched for the validation pass to reject.
+    entry. The region's per-site ceiling is the agent's delegate face — what it may hand
+    to a child — so a child grant stays bounded by the delegate face, and the region
+    stays within it. An agent declaring both forms is left untouched for validation.
     """
     for idx, op in enumerate(acc.operators):
         if not isinstance(op, AgentOperator) or op.child_template_ref is None:
@@ -105,12 +106,13 @@ def normalize_agent_child_regions(acc: LoweringAccumulator) -> None:
         entry = op.child_template_ref
         spawn_id = f"{op.operator_id}:child"
         join_id = f"{spawn_id}:join"
+        delegate = op.authority.delegate
         spawn = SpawnRegion(
             operator_id=spawn_id,
             source_ref=op.source_ref,
             outputs=(Port(name="children"),),
             child_template_ref=entry,
-            authority=op.authority,
+            authority=AuthorityCeiling(invoke=delegate, delegate=delegate),
         )
         join = JoinRegion(
             operator_id=join_id,

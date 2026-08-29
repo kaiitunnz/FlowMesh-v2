@@ -5,6 +5,8 @@ static validation of the declared region set: reject-both, unique roles, resolva
 references, matched joins, and per-region authority within the agent's delegate face.
 """
 
+from typing import Any
+
 from server.task.v2.compiler.bindings import leaf_profile
 from server.task.v2.compiler.project import LoweringAccumulator
 from server.task.v2.compiler.regions import normalize_agent_child_regions
@@ -31,13 +33,13 @@ from server.task.v2.representations.versioning import VersionId
 from shared.tasks import TaskType
 
 
-def _agent(op_id: str, **kw: object) -> AgentOperator:
+def _agent(op_id: str, **kw: Any) -> AgentOperator:
     return AgentOperator(
         operator_id=op_id,
         source_ref=op_id,
         binding=BindingKey(task_type=TaskType.AGENT),
         outputs=(Port(name="out"),),
-        **kw,  # type: ignore[arg-type]
+        **kw,
     )
 
 
@@ -51,7 +53,7 @@ def _leaf(op_id: str) -> LeafOperator:
 
 
 def _region(
-    role: str, entry: str, **kw: object
+    role: str, entry: str, **kw: Any
 ) -> tuple[list[LogicalOperator], TemplateEdge]:
     spawn_id = f"{role}:spawn"
     join_id = f"{spawn_id}:join"
@@ -60,7 +62,7 @@ def _region(
         source_ref=spawn_id,
         outputs=(Port(name="children"),),
         child_template_ref=entry,
-        **kw,  # type: ignore[arg-type]
+        **kw,
     )
     join = JoinRegion(
         operator_id=join_id,
@@ -225,3 +227,37 @@ def test_well_formed_region_set_passes() -> None:
     )
     codes = _diagnose([agent, _leaf("child"), *ops], [edge])
     assert not {c for c in codes if c.startswith("region.")}
+
+
+def test_legacy_agent_with_invoke_over_delegate_normalizes_and_compiles() -> None:
+    # A legacy agent that can invoke more than it delegates (the case the compat exists
+    # to preserve) must normalize to a region whose ceiling is the delegate face, so it
+    # passes the region-within-delegate check rather than tripping its own validation.
+    acc = LoweringAccumulator()
+    acc.operators.extend(
+        [
+            _agent(
+                "A",
+                authority=AuthorityCeiling(
+                    invoke=("model", "search"), delegate=("model",)
+                ),
+                child_template_ref="child",
+            ),
+            _leaf("child"),
+        ]
+    )
+    normalize_agent_child_regions(acc)
+    spawn = next(op for op in acc.operators if op.operator_id == "A:child")
+    assert isinstance(spawn, SpawnRegion) and spawn.authority.invoke == ("model",)
+    codes = _diagnose(acc.operators, acc.edges)
+    assert not {c for c in codes if c.startswith("region.")}
+
+
+def test_agent_selected_and_producer_fed_region_is_rejected() -> None:
+    ops, edge = _region("r", "child")
+    feed = TemplateEdge(from_op="producer", to_op="r:spawn")
+    agent = _agent(
+        "A", child_region_refs=(ChildRegionRef(name="r", spawn_ref="r:spawn"),)
+    )
+    codes = _diagnose([agent, _leaf("child"), _leaf("producer"), *ops], [edge, feed])
+    assert "region.region-dual-entry" in codes

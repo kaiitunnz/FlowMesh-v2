@@ -872,3 +872,69 @@ def test_region_state_survives_rehydration() -> None:
     )
     cap = restored.capability(scope, ProgressAxis.CHILD_INIT)
     assert cap is not None and cap.closed
+
+
+def _normalized_legacy_bundle(
+    *, invoke: tuple[str, ...], delegate: tuple[str, ...]
+) -> PersistedV2Workflow:
+    """A legacy child_template_ref agent, run through the compiler normalization."""
+    from server.task.v2.compiler.project import LoweringAccumulator
+    from server.task.v2.compiler.regions import normalize_agent_child_regions
+
+    legacy = AgentOperator(
+        operator_id="A",
+        source_ref="A",
+        binding=BindingKey(task_type=TaskType.AGENT),
+        authority=AuthorityCeiling(invoke=invoke, delegate=delegate),
+        boundary=_SIGNATURE,
+        child_template_ref="child",
+        outputs=(Port(name="out"),),
+    )
+    acc = LoweringAccumulator()
+    acc.operators.extend([legacy, _leaf("child")])
+    normalize_agent_child_regions(acc)
+    return _bundle(acc.operators, acc.edges, (_decl("out:A", "A"),))
+
+
+def test_normalized_legacy_agent_child_is_bounded_by_delegate() -> None:
+    # A legacy agent that invokes more than it delegates normalizes to a compat region
+    # whose child grant is bounded by the delegate face, never the fuller invoke face.
+    eng = _engine(
+        _normalized_legacy_bundle(invoke=("model", "search"), delegate=("model",))
+    )
+    _dispatch_agent(eng)
+    eng.route_boundary_event("A", _spawn("child", "c0"))
+    grant = eng.grant_for("A:child")
+    assert grant is not None
+    assert "model" in grant.invoke and "search" not in grant.invoke
+
+
+def test_terminal_completion_settles_a_never_entered_region() -> None:
+    eng = _engine(_multi_region_agent())
+    act = _dispatch_agent(eng)
+    child = eng.route_boundary_event("A", _spawn("researcher", "c0")).ready[0]
+    eng.on_dispatched(child, "w1")
+    eng.on_succeeded(child)
+    eng.on_succeeded("A")
+    # The entered region closes on drain; the never-entered region opens as zero-child
+    # and its join releases, so a declared region never hangs a downstream consumer.
+    for role in ("researcher", "reviewer"):
+        cap = eng.capability(eng.region_scope_for(act, role), ProgressAxis.CHILD_INIT)
+        assert cap is not None and cap.closed
+    assert eng.region_closed("reviewer:spawn:join")
+
+
+def test_terminal_failure_settles_an_open_region() -> None:
+    eng = _engine(_spawning_agent(child=_leaf("child")))
+    act = _dispatch_agent(eng)
+    child = eng.route_boundary_event("A", _spawn("worker", "c0")).ready[0]
+    eng.on_dispatched(child, "w1")
+    # The agent fails terminally while its region is open with an in-flight child.
+    eng.on_failed("A", "boom", retryable=False)
+    cap = eng.capability(eng.region_scope_for(act, "worker"), ProgressAxis.CHILD_INIT)
+    assert cap is not None and cap.status.value == "sealed" and not cap.closed
+    # The child drains and the region's join then releases.
+    eng.on_succeeded(child)
+    cap = eng.capability(eng.region_scope_for(act, "worker"), ProgressAxis.CHILD_INIT)
+    assert cap is not None and cap.closed
+    assert eng.region_closed("worker:spawn:join")

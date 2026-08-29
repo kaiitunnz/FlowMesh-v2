@@ -349,6 +349,11 @@ def _check_child_regions(
         if isinstance(op_by_id.get(edge.from_op), SpawnRegion)
         and isinstance(op_by_id.get(edge.to_op), JoinRegion)
     }
+    producer_fed = {
+        edge.to_op
+        for edge in template.edges
+        if not edge.feedback and isinstance(op_by_id.get(edge.to_op), SpawnRegion)
+    }
     for op in template.operators:
         if not isinstance(op, AgentOperator):
             continue
@@ -392,6 +397,17 @@ def _check_child_regions(
                     Diagnostic(
                         code="region.region-no-join",
                         message=f"child region {ref.spawn_ref!r} has no matched join",
+                        location=location,
+                    )
+                )
+            if ref.spawn_ref in producer_fed:
+                diags.append(
+                    Diagnostic(
+                        code="region.region-dual-entry",
+                        message=(
+                            f"child region {ref.spawn_ref!r} is both agent-selected "
+                            "and producer-fed; a region is entered one way"
+                        ),
                         location=location,
                     )
                 )
