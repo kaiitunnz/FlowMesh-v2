@@ -475,6 +475,44 @@ def test_a_post_reroute_completion_replay_is_a_noop() -> None:
     asyncio.run(run())
 
 
+def test_a_post_done_agent_completion_replay_reaches_the_done_heal() -> None:
+    # A terminal agent completion sets DONE and closes its attempt. A replay must still
+    # reach the idempotent done-branch (re-persist + fan-out heal), not be swallowed by
+    # the superseded-reroute guard — else a producer's fan-out children never recover.
+    async def run() -> None:
+        runtime = _runtime(FakeRegistry())
+        workflow_id, ids = await _register(runtime, _AGENT_WF)
+        writer = ids["writer"]
+        adapter = _AlwaysCompleteAdapter("done")
+        engine = runtime.orchestration_engine(workflow_id)
+        assert engine is not None
+
+        dispatch = runtime.agent_episode_dispatch(writer)
+        assert dispatch is not None
+        engine.on_dispatched(writer, "wkr-1")
+        result = adapter.start(
+            writer, capsule=None, outcomes=dispatch.delivered_outcomes
+        )
+        payload = {"agent_episode": result.model_dump(mode="json")}
+        runtime.mark_succeeded(writer, "wkr-1", payload, _TS)
+        record = runtime.get_record(writer)
+        assert record is not None and str(record.status) == "DONE"
+
+        # Spy the done-branch fan-out heal; it must run on the post-DONE replay.
+        healed: list[bool] = []
+        original = runtime._fan_out_children_locked
+
+        def _spy(*args: Any, **kwargs: Any) -> Any:
+            healed.append(True)
+            return original(*args, **kwargs)
+
+        runtime._fan_out_children_locked = _spy  # type: ignore[method-assign]
+        runtime.mark_succeeded(writer, "wkr-1", payload, _TS)  # replay
+        assert healed, "the post-DONE replay was swallowed, skipping the fan-out heal"
+
+    asyncio.run(run())
+
+
 def test_gateway_origination_redrive_creates_no_second_child() -> None:
     # A crash before the outcome injects re-dispatches the turn; the gateway re-captures
     # the same facade and re-originates the same stable correlation. The boundary
