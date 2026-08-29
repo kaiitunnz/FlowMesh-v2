@@ -173,12 +173,8 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   the same context. An agent without a declared backend stays on the legacy UTU executor,
   which remains the default execution path.
 - **Agent-model gateway.** A managed model request an agent defers becomes a durable
-  invocation the agent-model gateway settles off the agent's lane through a configurable
-  upstream — deterministic for tests, an OpenAI-compatible provider forward in production —
-  injecting the result back at the originating call. It implements the OpenAI Responses API
-  (`POST /v1/responses`) so a harness whose provider targets it crosses the same seam;
-  resident-capacity admission is not part of it. Configured under the
-  `ORCHESTRATOR_AGENT_MODEL_GATEWAY_*` env family.
+  invocation the agent-model gateway settles off the agent's lane, injecting the result
+  back at the originating call; resident-capacity admission is not part of it.
 - **Task merging.** Compatible adjacent tasks in a DAG (same `taskType`,
   model, hardware shape, and merge key) coalesce into a single dispatch.
   Merged children ride on `WorkerTaskMessage.merged_children`; the worker

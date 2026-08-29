@@ -83,8 +83,9 @@ Declared per agent under `spec.harness`:
 - `params` — backend-specific configuration.
 
 A mediated model request the agent defers is settled by the **agent-model gateway**, not a
-raw model endpoint. Its upstream is configured on the server under the
-`ORCHESTRATOR_AGENT_MODEL_GATEWAY_*` env family (see [`ENV.md`](ENV.md)); the default
-`canned` mode is deterministic and credential-free, while `openai` forwards to an
-OpenAI-compatible endpoint, reusing the `UTU_LLM_*` provider path when its own values are
-unset.
+raw model endpoint. The gateway implements the OpenAI Responses API (`POST /v1/responses`)
+so a harness whose provider targets it crosses the same seam. Its upstream is configured
+on the server under the `ORCHESTRATOR_AGENT_MODEL_GATEWAY_*` env family (see
+[`ENV.md`](ENV.md)); the default `canned` mode is deterministic and credential-free, while
+`openai` forwards to an OpenAI-compatible endpoint, reusing the `UTU_LLM_*` provider path
+when its own values are unset.
