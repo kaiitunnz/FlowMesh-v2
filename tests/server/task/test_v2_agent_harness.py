@@ -849,3 +849,26 @@ def test_spawn_seal_closes_only_its_region() -> None:
     )
     assert researcher is not None and researcher.status.value == "sealed"
     assert reviewer is not None and reviewer.status.value == "open"
+
+
+def test_region_state_survives_rehydration() -> None:
+    bundle = _spawning_agent(child=_leaf("child"))
+    eng = _engine(bundle)
+    act = _dispatch_agent(eng)
+    child = eng.route_boundary_event("A", _spawn("worker", "c0")).ready[0]
+    eng.on_dispatched(child, "w1")
+    eng.on_succeeded(child)
+    # The region opener, scope, and child-init account rebuild from the snapshot.
+    restored = OrchestrationEngine(eng.to_snapshot(), bundle)
+    scope = restored.region_scope_for(act, "worker")
+    assert scope is not None
+    restored.route_boundary_event(
+        "A",
+        BoundaryEvent(
+            kind=BoundaryEventKind.SPAWN_SEAL,
+            call_correlation="s0",
+            child_region_ref="worker",
+        ),
+    )
+    cap = restored.capability(scope, ProgressAxis.CHILD_INIT)
+    assert cap is not None and cap.closed

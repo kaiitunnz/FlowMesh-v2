@@ -1125,7 +1125,7 @@ class OrchestrationEngine:
         non-spawning agent owns no such region.
         """
         advance = Advance()
-        for (agent_act, _), opener in self._region_openers.items():
+        for (agent_act, _), opener in list(self._region_openers.items()):
             if agent_act != activation_id:
                 continue
             scope_id = self._scope_by_activation.get(opener)
