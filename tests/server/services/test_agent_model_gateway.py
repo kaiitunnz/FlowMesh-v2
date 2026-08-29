@@ -39,10 +39,12 @@ spec:
 
 def _canned_gateway(runtime) -> AgentModelGateway:
     gateway = AgentModelGateway(runtime, AgentModelGatewayConfig(mode="canned"))
+
     # A synchronous settle keeps the test deterministic; production submits off-lane.
-    runtime.set_invocation_settler(
-        lambda t, c, p: runtime.settle_episode_invocation(t, c, gateway.invoke(p))
-    )
+    def _settle(task: str, call: str, payload: str | None) -> None:
+        runtime.settle_episode_invocation(task, call, gateway.invoke(payload))
+
+    runtime.set_invocation_settler(_settle)
     return gateway
 
 

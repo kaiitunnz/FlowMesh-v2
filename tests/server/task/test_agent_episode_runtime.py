@@ -10,6 +10,7 @@ ledger and re-readies or suspends the lane.
 import asyncio
 
 from server.orchestration import ProgressAxis, WorkItemStatus
+from server.task.models import TaskStatus
 from shared.harness import BoundaryEventKind, HarnessCapsule
 from tests.server.task.test_v2_orchestration import FakeRegistry, _register, _runtime
 from worker.harness.scripted import ScriptedHarnessAdapter, ScriptedStep
@@ -110,6 +111,71 @@ def test_agent_episode_spawns_seals_and_settles_after_the_child() -> None:
         runtime.mark_succeeded(child, "wkr-1", {}, _TS)
         closed = engine.capability(region_scope, ProgressAxis.CHILD_INIT)
         assert closed is not None and closed.closed
+        writer_wi = engine.work_item(writer)
+        assert writer_wi is not None and writer_wi.status is WorkItemStatus.SETTLED
+        pub = engine.resolve_output(f"legacy:{writer}")
+        assert pub is not None and pub.outcome.value == "success"
+
+    asyncio.run(run())
+
+
+def test_model_boundary_settle_returns_the_record_to_pending() -> None:
+    # The wait-boundary settle must re-ready the record, not only the work item, or the
+    # dispatcher skips it (a ready task dispatches only from a pending record).
+    async def run() -> None:
+        runtime = _runtime(FakeRegistry())
+
+        def _settle(task: str, call: str, payload: str | None) -> None:
+            runtime.settle_episode_invocation(task, call, f"model:{payload}")
+
+        runtime.set_invocation_settler(_settle)
+        workflow_id, ids = await _register(runtime, _AGENT_WF)
+        writer = ids["writer"]
+        adapter = ScriptedHarnessAdapter(
+            [
+                ScriptedStep(
+                    op="boundary",
+                    kind=BoundaryEventKind.INVOCATION,
+                    call="m0",
+                    interface="model",
+                    payload="draft",
+                ),
+                ScriptedStep(
+                    op="boundary",
+                    kind=BoundaryEventKind.SPAWN,
+                    call="c0",
+                    region="reviewer",
+                ),
+                ScriptedStep(
+                    op="boundary",
+                    kind=BoundaryEventKind.SPAWN_SEAL,
+                    call="c1",
+                    region="reviewer",
+                ),
+                ScriptedStep(op="complete", value_from="m0"),
+            ],
+            "v1",
+        )
+        engine = runtime.orchestration_engine(workflow_id)
+        assert engine is not None
+
+        _step(runtime, adapter, writer)  # model boundary → suspend → canned settle
+        # The synchronous settle re-readied both the work item and the record.
+        assert runtime._tasks[writer].status is TaskStatus.PENDING
+        wi = engine.work_item(writer)
+        assert wi is not None and wi.status is WorkItemStatus.READY
+
+        _step(runtime, adapter, writer)  # injects the model result → spawns the child
+        child = [
+            w.legacy_task_id
+            for w in engine.to_snapshot().work_items
+            if w.legacy_task_id.startswith("act-")
+        ]
+        assert len(child) == 1
+        _step(runtime, adapter, writer)  # spawn seal
+        _step(runtime, adapter, writer)  # completion carries the injected model result
+        engine.on_dispatched(child[0], "wkr-1")
+        runtime.mark_succeeded(child[0], "wkr-1", {}, _TS)
         writer_wi = engine.work_item(writer)
         assert writer_wi is not None and writer_wi.status is WorkItemStatus.SETTLED
         pub = engine.resolve_output(f"legacy:{writer}")

@@ -963,12 +963,9 @@ class TaskRuntime:
         )
         if corr is not None and env is not None and env.denial is not None:
             engine.mark_pending_outcome(task_id, corr)
-            changed = (
-                self._apply_advance_locked(
-                    record.workflow_id, engine.deliver_boundary_outcome(task_id, corr)
-                )
-                or changed
-            )
+            engine.deliver_boundary_outcome(task_id, corr)
+            self._reenqueue_episode_locked(task_id)
+            changed = True
         elif request.kind in (BoundaryEventKind.SPAWN, BoundaryEventKind.SPAWN_SEAL):
             if corr is not None:
                 engine.mark_pending_outcome(task_id, corr)
@@ -1017,11 +1014,15 @@ class TaskRuntime:
             advance = engine.settle_boundary_outcome(
                 task_id, call_correlation, value=value
             )
-            changed = self._apply_advance_locked(record.workflow_id, advance)
+            # The work item re-readied; the record must return to PENDING too, or the
+            # dispatcher skips it (a ready task dispatches only from a pending record).
+            if advance.ready:
+                self._reenqueue_episode_locked(task_id)
+            else:
+                self._apply_advance_locked(record.workflow_id, advance)
             self._save_ledger_locked(record.workflow_id)
-            if changed:
-                self._cv.notify_all()
-            return changed
+            self._cv.notify_all()
+            return True
 
     def set_invocation_settler(
         self, settler: Callable[[str, str, str | None], None]
