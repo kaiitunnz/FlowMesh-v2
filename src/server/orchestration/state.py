@@ -304,6 +304,8 @@ class WorkItem(BaseModel):
     replay_contract: EffectReplayContract | None = None
     # opaque durable continuation of a yielded episode
     continuation_ref: str | None = None
+    # the settled boundary call whose outcome the next episode resume injects
+    pending_outcome_call: str | None = None
     attempt_ids: list[str] = Field(default_factory=list)
 
 

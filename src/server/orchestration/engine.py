@@ -18,6 +18,7 @@ the engine considers ready.
 from dataclasses import dataclass, field
 from typing import Self
 
+from shared.harness import DeliveredOutcome, OutcomeKind
 from shared.utils import (
     new_activation_id,
     new_attempt_id,
@@ -743,6 +744,66 @@ class OrchestrationEngine:
             detail={"call": call_correlation},
         )
         return Advance(ready=[wi.legacy_task_id])
+
+    def mark_pending_outcome(self, task_id: str, call_correlation: str) -> None:
+        """Record the settled boundary whose outcome the next episode resume injects."""
+        if (wi := self._work_item_for_task(task_id)) is not None:
+            wi.pending_outcome_call = call_correlation
+
+    def settle_boundary_outcome(
+        self, task_id: str, call_correlation: str, *, value: str | None = None
+    ) -> Advance:
+        """Persist a mediated outcome's value and re-ready the suspended episode.
+
+        The value lands durably on the boundary envelope so a re-dispatch injects it and
+        a restart rehydrates it; the item then returns to READY for a fresh attempt.
+        """
+        wi = self._work_item_for_task(task_id)
+        if wi is None:
+            return Advance()
+        corr = (wi.activation_id, call_correlation)
+        if (env := self._boundary_events.get(corr)) is not None and value is not None:
+            self._boundary_events[corr] = env.model_copy(
+                update={"outcome_value": value}
+            )
+        self.mark_pending_outcome(task_id, call_correlation)
+        return self.deliver_boundary_outcome(task_id, call_correlation)
+
+    def episode_context(
+        self, task_id: str
+    ) -> tuple[str | None, tuple[DeliveredOutcome, ...]]:
+        """The durable capsule and pending injected outcome for an agent's next step.
+
+        Rebuilt from the ledger, never in-memory episode state: the capsule is the work
+        item's continuation, and the one pending outcome is reconstructed from its
+        settled boundary envelope, so a re-dispatch after a restart carries it again.
+        """
+        wi = self._work_item_for_task(task_id)
+        if wi is None:
+            return None, ()
+        outcomes: tuple[DeliveredOutcome, ...] = ()
+        if wi.pending_outcome_call is not None:
+            env = self._boundary_events.get((wi.activation_id, wi.pending_outcome_call))
+            if env is not None:
+                outcomes = (self._delivered_outcome(env),)
+        return wi.continuation_ref, outcomes
+
+    @staticmethod
+    def _delivered_outcome(env: BoundaryEvent) -> DeliveredOutcome:
+        corr = env.call_correlation or ""
+        if env.denial is not None:
+            return DeliveredOutcome(
+                call_correlation=corr,
+                idempotency_key=env.idempotency_key,
+                kind=OutcomeKind.DENIED,
+                denial=env.denial,
+            )
+        return DeliveredOutcome(
+            call_correlation=corr,
+            idempotency_key=env.idempotency_key,
+            kind=OutcomeKind.RESULT,
+            value=env.outcome_value,
+        )
 
     def _is_boundary_redrive(self, wi: WorkItem, event: BoundaryEvent) -> bool:
         """Whether a boundary reissues a recorded facade call under its stable id."""
