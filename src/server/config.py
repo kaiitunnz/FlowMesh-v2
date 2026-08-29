@@ -305,7 +305,7 @@ class AgentModelGatewayConfig:
 
     @classmethod
     def from_env(cls) -> "AgentModelGatewayConfig":
-        prefix = "ORCHESTRATOR_AGENT_MODEL_GATEWAY_"
+        prefix = "AGENT_MODEL_GATEWAY_"
         raw_mode = (os.getenv(f"{prefix}MODE") or "canned").strip().lower()
         try:
             mode = GatewayMode(raw_mode)
