@@ -26,7 +26,6 @@ from worker.executors.harness.codex import (
     CodexAppServerHarnessAdapter,
     CodexEvent,
     CodexInjectItem,
-    RealCodexAppServerTransport,
 )
 
 
@@ -231,11 +230,6 @@ def test_a_recommitted_outcome_is_not_reinjected() -> None:
     # Re-ship the identical keyed outcome against the advanced capsule.
     adapter.start("a", capsule=resumed.capsule, outcomes=[outcome])
     assert fake.received_keys.count(outcome.idempotency_key) == 1
-
-
-def test_real_transport_is_an_unbound_seam() -> None:
-    with pytest.raises(NotImplementedError):
-        RealCodexAppServerTransport().thread_start()
 
 
 def _codex_call_id(capsule: HarnessCapsule | None) -> str | None:

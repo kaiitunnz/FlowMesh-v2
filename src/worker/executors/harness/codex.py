@@ -16,6 +16,7 @@ The binding supports one single-forward facade call per defer unit.
 """
 
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Protocol
 
 from pydantic import BaseModel
@@ -79,30 +80,6 @@ class CodexAppServerTransport(Protocol):
     def turn_start(self, thread_id: str) -> str: ...
     def next_event(self, thread_id: str, turn_id: str) -> CodexEvent: ...
     def cancel(self, thread_id: str) -> None: ...
-
-
-class RealCodexAppServerTransport:
-    """The seam a live app-server binding fills; unbound here."""
-
-    def thread_start(self) -> str:
-        raise NotImplementedError("a live Codex app-server transport is not bound here")
-
-    def thread_resume(self, thread_id: str, rollout_ref: str) -> None:
-        raise NotImplementedError("a live Codex app-server transport is not bound here")
-
-    def thread_inject_items(
-        self, thread_id: str, items: Sequence[CodexInjectItem]
-    ) -> None:
-        raise NotImplementedError("a live Codex app-server transport is not bound here")
-
-    def turn_start(self, thread_id: str) -> str:
-        raise NotImplementedError("a live Codex app-server transport is not bound here")
-
-    def next_event(self, thread_id: str, turn_id: str) -> CodexEvent:
-        raise NotImplementedError("a live Codex app-server transport is not bound here")
-
-    def cancel(self, thread_id: str) -> None:
-        raise NotImplementedError("a live Codex app-server transport is not bound here")
 
 
 class _Outstanding(BaseModel):
@@ -256,4 +233,18 @@ def build_codex_adapter(
     spec = task.spec
     if not isinstance(spec, AgentSpecStrict) or spec.harness is None:
         raise ValueError("the codex backend requires an agent harness spec")
-    return CodexAppServerHarnessAdapter(RealCodexAppServerTransport(), backend.version)
+    # The live binding pulls in the openai-codex SDK and its bundled app-server binary;
+    # keep both off the import path of a worker that never selects the codex backend.
+    from .codex_transport import CodexTransportConfig, RealCodexAppServerTransport
+
+    params = spec.harness.params
+    base_url, model = params.get("base_url"), params.get("model")
+    if not isinstance(base_url, str) or not isinstance(model, str):
+        raise ValueError(
+            "the codex backend requires string 'base_url' and 'model' harness params"
+        )
+    codex_home = Path(params.get("codex_home") or config.results_dir / "codex_home")
+    transport = RealCodexAppServerTransport(
+        CodexTransportConfig(base_url=base_url, model=model, codex_home=codex_home)
+    )
+    return CodexAppServerHarnessAdapter(transport, backend.version)
