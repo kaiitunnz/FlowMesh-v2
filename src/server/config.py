@@ -272,12 +272,61 @@ class LogStreamConfig:
         )
 
 
+class GatewayMode(StrEnum):
+    """How a mediated model invocation settles at the agent-model gateway."""
+
+    CANNED = "canned"
+    ECHO = "echo"
+    OPENAI = "openai"
+
+
+def _first_env(*names: str) -> str | None:
+    """The first non-empty, stripped value among the given env vars, else None."""
+    for name in names:
+        if value := (os.getenv(name) or "").strip():
+            return value
+    return None
+
+
+@dataclass
+class AgentModelGatewayConfig:
+    """The agent-model gateway's upstream binding for mediated model invocations.
+
+    ``mode`` selects how a durable model invocation settles: ``canned`` and ``echo`` are
+    deterministic and credential-free; ``openai`` forwards to an OpenAI-compatible
+    endpoint (reusing the ``UTU_LLM_*`` provider path when unset).
+    """
+
+    mode: GatewayMode = GatewayMode.CANNED
+    url: str | None = None
+    model: str | None = None
+    api_key: str | None = None
+    timeout_sec: float = 60.0
+
+    @classmethod
+    def from_env(cls) -> "AgentModelGatewayConfig":
+        prefix = "AGENT_MODEL_GATEWAY_"
+        raw_mode = (os.getenv(f"{prefix}MODE") or "canned").strip().lower()
+        try:
+            mode = GatewayMode(raw_mode)
+        except ValueError:
+            mode = GatewayMode.CANNED
+        return cls(
+            mode=mode,
+            url=_first_env(f"{prefix}URL", "UTU_LLM_BASE_URL"),
+            model=_first_env(f"{prefix}MODEL", "UTU_LLM_MODEL"),
+            api_key=_first_env(f"{prefix}API_KEY", "UTU_LLM_API_KEY"),
+            timeout_sec=parse_float_env(f"{prefix}TIMEOUT_SEC") or 60.0,
+        )
+
+
 @dataclass
 class OrchestrationConfig:
     max_scope_depth: int | None = None
     max_loop_iterations: int | None = None
     max_activations: int | None = None
     episode_lowering: bool = False
+    gateway: AgentModelGatewayConfig = field(default_factory=AgentModelGatewayConfig)
 
     @classmethod
     def from_env(cls) -> "OrchestrationConfig":
@@ -286,6 +335,7 @@ class OrchestrationConfig:
             max_loop_iterations=parse_int_env("ORCHESTRATOR_MAX_LOOP_ITERATIONS"),
             max_activations=parse_int_env("ORCHESTRATOR_MAX_ACTIVATIONS"),
             episode_lowering=parse_bool_env("ORCHESTRATOR_EPISODE_LOWERING", False),
+            gateway=AgentModelGatewayConfig.from_env(),
         )
 
 

@@ -9,9 +9,17 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
+from shared.harness import (
+    AgentEpisodeDispatch,
+    BoundaryEventKind,
+    HarnessBackendKey,
+    HarnessResult,
+    HarnessResultKind,
+)
 from shared.schemas.command import InterruptMessage
 from shared.schemas.result import ResultEnvelope, result_file_path
 from shared.tasks import TaskEnvelopeTemplate
+from shared.tasks.specs import AgentSpecStrict, AgentSpecTemplate
 from shared.utils import new_workflow_id
 
 from ..config import OrchestrationConfig
@@ -25,8 +33,10 @@ from ..orchestration import (
     ResultPublication,
     ScopeBudget,
     ValueRef,
+    WorkItemStatus,
 )
 from ..orchestration.episode import BoundaryEvent
+from ..orchestration.harness import to_boundary_event
 from ..registries.worker import Worker, WorkerRegistry
 from ..registries.workflow import PersistedTask, WorkflowRegistry, WorkflowSched
 from ..utils.time import parse_iso_ts
@@ -121,6 +131,9 @@ class TaskRuntime:
         self._task_epoch_index: dict[str, int] = {}
         self._rehydrated_dispatched: dict[str, float] = {}
         self._engines: dict[str, OrchestrationEngine] = {}
+        # Settles a mediated model/effect boundary off the caller's lane; the gateway
+        # installs it, and it is absent (agent stays suspended) until then.
+        self._settler: Callable[[str, str, str | None], None] | None = None
 
         self._lock = threading.RLock()
         self._cv = threading.Condition(self._lock)
@@ -522,6 +535,13 @@ class TaskRuntime:
                 workflow_id, engine, persisted.record.task_id
             )
             self._apply_advance_locked(workflow_id, advance)
+
+        # Re-issue the off-lane settle for any model/effect boundary suspended with no
+        # durable outcome: the settle ran on an in-memory executor a crash discarded, so
+        # nothing else resumes the agent; the request payload is on the envelope.
+        if self._settler is not None:
+            for settle_task, corr, payload in engine.stranded_model_settlements():
+                self._settler(settle_task, corr, payload)
         self._save_ledger_locked(workflow_id)
 
     # ------------------------------------------------------------------ #
@@ -906,6 +926,178 @@ class TaskRuntime:
             if changed:
                 self._cv.notify_all()
             return changed
+
+    def _apply_episode_step_locked(self, task_id: str, hr: HarnessResult) -> None:
+        """Route one non-terminal agent-episode step and re-dispatch or suspend.
+
+        A failure/cancellation settles the agent terminally. A boundary routes into the
+        ledger (validated, recorded, capsule persisted); a spawn/seal/state-access/yield
+        continues immediately with the ledger-recorded outcome, a denial re-readies with
+        its typed outcome, and a model or effect boundary suspends until its durable
+        outcome is settled. The record never goes DONE for a non-completion step.
+        """
+        record = self._tasks.get(task_id)
+        engine = self._engines.get(record.workflow_id) if record else None
+        if record is None or engine is None:
+            return
+        if hr.kind in (HarnessResultKind.FAILURE, HarnessResultKind.CANCELLATION):
+            reason = hr.error or (
+                "agent episode cancelled"
+                if hr.kind is HarnessResultKind.CANCELLATION
+                else "agent episode failed"
+            )
+            if self._apply_advance_locked(
+                record.workflow_id, engine.on_failed(task_id, reason, retryable=False)
+            ):
+                self._cv.notify_all()
+            self._save_ledger_locked(record.workflow_id)
+            return
+        request = hr.request
+        if request is None:
+            return
+        capsule = hr.capsule.blob if hr.capsule is not None else None
+        wi = engine.work_item(task_id)
+        if wi is not None and capsule is not None:
+            wi.continuation_ref = capsule
+        # The outcome that drove this step was consumed by its dispatch; clear it so a
+        # later step never re-injects it.
+        engine.mark_pending_outcome(task_id, None)
+        event = to_boundary_event(request, continuation=capsule)
+        advance = engine.route_boundary_event(task_id, event)
+        self._synthesize_ready_children_locked(record.workflow_id, engine, advance)
+        changed = self._apply_advance_locked(record.workflow_id, advance)
+        corr = request.call_correlation
+        env = (
+            engine.boundary_envelope(wi.activation_id, corr)
+            if wi is not None and corr is not None
+            else None
+        )
+        handled = False
+        if corr is not None and env is not None and env.denial is not None:
+            engine.mark_pending_outcome(task_id, corr)
+            engine.deliver_boundary_outcome(task_id, corr)
+            self._reenqueue_episode_locked(task_id)
+            changed = handled = True
+        elif request.kind in (BoundaryEventKind.SPAWN, BoundaryEventKind.SPAWN_SEAL):
+            if corr is not None:
+                engine.mark_pending_outcome(task_id, corr)
+            self._reenqueue_episode_locked(task_id)
+            changed = handled = True
+        elif request.kind in (BoundaryEventKind.STATE_ACCESS, BoundaryEventKind.YIELD):
+            self._reenqueue_episode_locked(task_id)
+            changed = handled = True
+        elif (
+            corr is not None
+            and self._settler is not None
+            and request.kind
+            in (BoundaryEventKind.INVOCATION, BoundaryEventKind.EXTERNAL_EFFECT)
+        ):
+            # A model or effect boundary suspends until the gateway settles it off-lane.
+            self._settler(task_id, corr, event.request_payload)
+            handled = True
+        if not handled:
+            # A blocked boundary no branch re-readied or handed off (a denial lacking a
+            # correlation) must not hang the episode; re-ready it so it can continue.
+            stuck = engine.work_item(task_id)
+            if stuck is not None and stuck.status is WorkItemStatus.BLOCKED:
+                self._reenqueue_episode_locked(task_id)
+                changed = True
+        self._save_ledger_locked(record.workflow_id)
+        if changed:
+            self._cv.notify_all()
+
+    def _reenqueue_episode_locked(self, task_id: str) -> None:
+        """Re-ready a still-running agent episode for its next run-to-yield step."""
+        record = self._tasks.get(task_id)
+        if record is None or record.status in TERMINAL_TASK_STATUSES:
+            return
+        # Settle the finished attempt so a long continuing episode's history stays
+        # bounded (a no-op when a suspend already closed it).
+        if engine := self._engines.get(record.workflow_id):
+            engine.close_latest_attempt(task_id)
+        record.status = TaskStatus.PENDING
+        record.assigned_worker = None
+        record.dispatched_ts = None
+        record.started_ts = None
+        self._enqueue_ready_locked(task_id, front=True)
+        self._persist_locked(task_id)
+
+    def settle_episode_invocation(
+        self,
+        task_id: str,
+        call_correlation: str,
+        value: str | None,
+        *,
+        error: str | None = None,
+    ) -> bool:
+        """Settle a suspended model/effect boundary and re-ready its episode.
+
+        A value lands durably on the boundary envelope and the work item returns to
+        READY for a re-dispatch that injects it at its originating call. An upstream
+        ``error`` instead fails the boundary terminally, so a gateway failure never
+        resumes the agent as a phantom empty success.
+        """
+        with self._cv:
+            record = self._tasks.get(task_id)
+            engine = self._engines.get(record.workflow_id) if record else None
+            if record is None or engine is None:
+                return False
+            if error is not None:
+                advance = engine.on_failed(
+                    task_id,
+                    f"agent-model gateway upstream failed: {error}",
+                    retryable=False,
+                )
+                changed = self._apply_advance_locked(record.workflow_id, advance)
+                self._save_ledger_locked(record.workflow_id)
+                if changed:
+                    self._cv.notify_all()
+                return changed
+            advance = engine.settle_boundary_outcome(
+                task_id, call_correlation, value=value
+            )
+            # The work item re-readied; the record must return to PENDING too, or the
+            # dispatcher skips it (a ready task dispatches only from a pending record).
+            if advance.ready:
+                self._reenqueue_episode_locked(task_id)
+            else:
+                self._apply_advance_locked(record.workflow_id, advance)
+            self._save_ledger_locked(record.workflow_id)
+            self._cv.notify_all()
+            return True
+
+    def set_invocation_settler(
+        self, settler: Callable[[str, str, str | None], None]
+    ) -> None:
+        """Install the off-lane settler for mediated model and effect boundaries."""
+        self._settler = settler
+
+    def agent_episode_dispatch(self, task_id: str) -> AgentEpisodeDispatch | None:
+        """The agent-episode context to ship with a dispatch, or None for the UTU path.
+
+        A v2 agent that declares a harness backend carries its durable capsule and one
+        pending injected outcome, rebuilt from the ledger; a bare agent carries nothing
+        and dispatches to the legacy executor unchanged.
+        """
+        with self._lock:
+            record = self._tasks.get(task_id)
+            engine = self._engines.get(record.workflow_id) if record else None
+            if record is None or engine is None:
+                return None
+            spec = record.task.spec
+            if (
+                not isinstance(spec, (AgentSpecStrict, AgentSpecTemplate))
+                or spec.harness is None
+            ):
+                return None
+            capsule_blob, outcomes = engine.episode_context(task_id)
+            return AgentEpisodeDispatch(
+                backend=HarnessBackendKey(
+                    backend=spec.harness.backend, version=spec.harness.version
+                ),
+                capsule_blob=capsule_blob,
+                delivered_outcomes=outcomes,
+            )
 
     def _synthesize_ready_children_locked(
         self, workflow_id: str, engine: OrchestrationEngine, advance: Advance
@@ -1528,6 +1720,14 @@ class TaskRuntime:
 
         with self._cv:
             record = self._tasks.get(task_id)
+            episode_step = payload.get("agent_episode")
+            if episode_step is not None and record is not None:
+                harness_result = HarnessResult.model_validate(episode_step)
+                if harness_result.kind is not HarnessResultKind.COMPLETION:
+                    # A non-terminal episode step routes its boundary and re-dispatches;
+                    # a completion falls through to the terminal path below.
+                    self._apply_episode_step_locked(task_id, harness_result)
+                    return usages
             if record:
                 if record.status == TaskStatus.CANCELLED:
                     return usages

@@ -1,6 +1,6 @@
-from shared.harness import (
+from .adapter import (
     FACADE_TOOLS,
-    BoundaryRequest,
+    AgentEpisodeDispatch,
     DeliveredOutcome,
     FacadeTool,
     HarnessAdapter,
@@ -10,13 +10,15 @@ from shared.harness import (
     HarnessResultKind,
     OutcomeKind,
 )
-
-from .mediation import to_boundary_event
+from .boundary import BoundaryEventKind, BoundaryRequest, DenialKind
 
 __all__ = [
     "FACADE_TOOLS",
+    "AgentEpisodeDispatch",
+    "BoundaryEventKind",
     "BoundaryRequest",
     "DeliveredOutcome",
+    "DenialKind",
     "FacadeTool",
     "HarnessAdapter",
     "HarnessBackendKey",
@@ -24,5 +26,4 @@ __all__ = [
     "HarnessResult",
     "HarnessResultKind",
     "OutcomeKind",
-    "to_boundary_event",
 ]

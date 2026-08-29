@@ -1,5 +1,7 @@
 from typing import Any, Literal
 
+from pydantic import BaseModel
+
 from ..task_type import TaskType
 from .common import (
     ModelSpecStrict,
@@ -7,6 +9,18 @@ from .common import (
     TaskSpecStrictBase,
     TaskSpecTemplateBase,
 )
+
+
+class AgentHarnessSpec(BaseModel):
+    """Declares the harness backend that drives an agent as a run-to-yield episode.
+
+    ``backend``/``version`` select and pin the adapter binding; ``params`` are its
+    backend-specific configuration. An agent without this runs the legacy UTU path.
+    """
+
+    backend: str
+    version: str = "v1"
+    params: dict[str, Any] = {}
 
 
 class ApiSpecStrict(TaskSpecStrictBase):
@@ -36,6 +50,7 @@ class AgentSpecStrict(TaskSpecStrictBase):
     task: str | None = None
     agent: dict[str, Any] | None = None
     data: dict[str, Any] | None = None
+    harness: AgentHarnessSpec | None = None
 
 
 class AgentSpecTemplate(TaskSpecTemplateBase):
@@ -45,6 +60,7 @@ class AgentSpecTemplate(TaskSpecTemplateBase):
     task: str | None = None
     agent: dict[str, Any] | None = None
     data: dict[str, Any] | None = None
+    harness: AgentHarnessSpec | None = None
 
 
 class DataProfilingSpecStrict(TaskSpecStrictBase):

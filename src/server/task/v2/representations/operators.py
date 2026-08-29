@@ -3,6 +3,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from shared.harness.boundary import BoundaryEventKind
 from shared.tasks import TaskType
 
 
@@ -44,21 +45,6 @@ class EffectReplayContract(StrEnum):
     REPLAYABLE_DEDUP = "replayable_dedup"
     COMPENSABLE = "compensable"
     AMBIGUITY_TERMINAL = "ambiguity_terminal"
-
-
-class BoundaryEventKind(StrEnum):
-    """A fabric-relevant event an operator's boundary signature may emit.
-
-    ``SPAWN_SEAL`` closes an agent's child-init producer: a ``SPAWN`` never seals it, so
-    an agent yields ``SPAWN_SEAL`` when it will issue no more children.
-    """
-
-    INVOCATION = "invocation"
-    SPAWN = "spawn"
-    SPAWN_SEAL = "spawn_seal"
-    YIELD = "yield"
-    EXTERNAL_EFFECT = "external_effect"
-    STATE_ACCESS = "state_access"
 
 
 class PortKind(StrEnum):

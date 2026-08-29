@@ -7,6 +7,7 @@ from .common import (
 from .diffusion import DiffusionSpecStrict, DiffusionSpecTemplate
 from .inference import InferenceBackend, InferenceSpecStrict, InferenceSpecTemplate
 from .misc import (
+    AgentHarnessSpec,
     AgentSpecStrict,
     AgentSpecTemplate,
     ApiSpecStrict,
@@ -47,6 +48,7 @@ from .training import (
 )
 
 __all__ = [
+    "AgentHarnessSpec",
     "ConditionSpec",
     "TaskSpecBase",
     "TaskSpecStrictBase",

@@ -28,6 +28,7 @@ from .hooks import register
 from .registries import WorkerRegistry, WorkflowRegistry
 from .registries.node import NodeRegistry
 from .routers import docs, health, v1
+from .services.agent_model_gateway import AgentModelGateway, build_agent_model_router
 from .services.log_archiver import TaskLogArchiver
 from .services.metrics import MetricsRecorder
 from .services.monitoring import EventMonitor
@@ -112,6 +113,7 @@ PORT_FORWARD_SERVICE = None
 WATCHDOG = None
 EVENT_MONITOR = None
 LOG_ARCHIVER = None
+AGENT_MODEL_GATEWAY = None
 
 if IS_ROOT_NODE:
     WORKFLOW_REGISTRY = WorkflowRegistry(REDIS_CLIENT)
@@ -119,6 +121,10 @@ if IS_ROOT_NODE:
     RUNTIME = TaskRuntime(
         WORKFLOW_REGISTRY, WORKER_REGISTRY, config.orchestration, RESULTS_DIR, logger
     )
+    AGENT_MODEL_GATEWAY = AgentModelGateway(
+        RUNTIME, config.orchestration.gateway, logger
+    )
+    RUNTIME.set_invocation_settler(AGENT_MODEL_GATEWAY.settle)
 
     DISPATCHER = create_dispatcher(
         config.dispatch,
@@ -393,6 +399,8 @@ async def _lifespan(_: FastAPI):
 
             # --- Root-only shutdown ---
             _stop_background()
+            if AGENT_MODEL_GATEWAY is not None:
+                AGENT_MODEL_GATEWAY.shutdown()
             if PORT_FORWARD_SERVICE is not None:
                 await PORT_FORWARD_SERVICE.stop()
 
@@ -444,6 +452,9 @@ if IS_ROOT_NODE:
     app.include_router(v1.serve.router, prefix=v1_prefix)
     app.include_router(v1.system.router, prefix=v1_prefix)
     app.include_router(v1.traces.router, prefix=v1_prefix)
+    if AGENT_MODEL_GATEWAY is not None:
+        # The agent-model gateway's Responses API surface a harness provider targets.
+        app.include_router(build_agent_model_router(AGENT_MODEL_GATEWAY))
 
 # Routers — supervisor (any node with worker management)
 if config.worker_management.enabled:

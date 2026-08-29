@@ -257,6 +257,36 @@ STACK_ENV_SCHEMA = EnvSchema(
                     description="Lower v2 templates into run-to-yield episodes.",
                     var_type=EnvVarType.BOOL,
                 ),
+                EnvVar(
+                    "AGENT_MODEL_GATEWAY_MODE",
+                    "canned",
+                    description="Agent-model gateway upstream mode.",
+                    choices=("canned", "echo", "openai"),
+                ),
+                EnvVar(
+                    "AGENT_MODEL_GATEWAY_URL",
+                    "",
+                    description="Upstream base URL for the openai gateway mode.",
+                    var_type=EnvVarType.URL,
+                ),
+                EnvVar(
+                    "AGENT_MODEL_GATEWAY_MODEL",
+                    "",
+                    description="Upstream model for the openai gateway mode.",
+                ),
+                EnvVar(
+                    "AGENT_MODEL_GATEWAY_API_KEY",
+                    "",
+                    description="Upstream API key for the openai gateway mode.",
+                ),
+                EnvVar(
+                    "AGENT_MODEL_GATEWAY_TIMEOUT_SEC",
+                    "60",
+                    description="Upstream request timeout in seconds for the gateway.",
+                    var_type=EnvVarType.FLOAT,
+                    min_value=0,
+                    min_inclusive=False,
+                ),
             ],
         ),
         EnvSection(

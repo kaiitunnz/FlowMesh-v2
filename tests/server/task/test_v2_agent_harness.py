@@ -1,17 +1,15 @@
-"""Engine-substrate tests for the agent-harness path, driven by a test-double adapter.
+"""Engine-substrate tests for the agent-harness boundary path.
 
-These prove a declared agent dispatches as a run-to-yield episode and suspends before a
-mediated model or tool action, releasing its lane until its durable outcome is injected;
-the durable boundary envelope persists the capsule, causal invocation id, and
-fabric-assigned idempotency key atomically before the lane releases, and a forced
-re-drive maps a reissued facade call to its recorded key; signature and authority checks
-reject undeclared tools, model interfaces, and child regions through a durable typed
-outcome; and a facade spawn_agent selects one of an agent's finite declared child
-regions, creating one child attenuated from that region's entry, sealed per region, with
-recursive agent children reusing the finite declared region.
+These prove a declared agent readies as a run-to-yield episode and, over the engine's
+boundary machinery, suspends before a mediated model or tool action, releasing its lane
+until its durable outcome is injected; the durable boundary envelope persists the
+capsule, causal invocation id, and fabric-assigned idempotency key atomically before the
+lane releases, and a forced re-drive maps a reissued facade call to its recorded key;
+signature and authority checks reject undeclared tools, model interfaces, and child
+regions through a durable typed outcome; and a facade spawn_agent selects one of an
+agent's finite declared child regions, creating one child attenuated from that region's
+entry, sealed per region, with recursive agent children reusing the declared region.
 """
-
-from collections.abc import Sequence
 
 import pytest
 
@@ -21,17 +19,6 @@ from server.orchestration import (
     RegionError,
     ScopeBudget,
     WorkItemStatus,
-)
-from server.orchestration.harness import (
-    AgentEpisode,
-    DeliveredOutcome,
-    HarnessAdapter,
-    HarnessBackendKey,
-    HarnessCapsule,
-    HarnessConfigError,
-    HarnessResult,
-    HarnessResultKind,
-    OutcomeKind,
 )
 from server.orchestration.state import BoundaryEvent, DenialKind, InvocationState
 from server.task.v2 import FrontendWorkflowSource, PersistedV2Workflow
@@ -245,56 +232,6 @@ def _spawning_agent(
     )
 
 
-# --------------------------------------------------------------------------- #
-# Test-double adapter
-# --------------------------------------------------------------------------- #
-
-
-def _capsule(blob: str) -> HarnessCapsule:
-    return HarnessCapsule(
-        backend=HarnessBackendKey(backend="test-double", version="v1"), blob=blob
-    )
-
-
-class _DoubleAdapter(HarnessAdapter):
-    """A scripted harness: each start returns the next result and records injections."""
-
-    def __init__(self, steps: Sequence[HarnessResult]) -> None:
-        self._steps = list(steps)
-        self.cursor = 0
-        self.injected: list[list[DeliveredOutcome]] = []
-        self.cancelled: list[str] = []
-
-    def backend_key(self) -> HarnessBackendKey:
-        return HarnessBackendKey(backend="test-double", version="v1")
-
-    def start(self, activation_id, *, capsule, outcomes):
-        self.injected.append(list(outcomes))
-        step = self._steps[self.cursor]
-        self.cursor += 1
-        return step
-
-    def cancel(self, activation_id: str) -> None:
-        self.cancelled.append(activation_id)
-
-
-class _NativeBypassAdapter(_DoubleAdapter):
-    def bypass_disabled(self) -> bool:
-        return False
-
-
-def _boundary(kind: BoundaryEventKind, call: str, **kw) -> HarnessResult:
-    return HarnessResult(
-        kind=HarnessResultKind.BOUNDARY,
-        request=BoundaryEvent(kind=kind, call_correlation=call, **kw),
-        capsule=_capsule(f"after:{call}"),
-    )
-
-
-def _completion(value: str = "done") -> HarnessResult:
-    return HarnessResult(kind=HarnessResultKind.COMPLETION, value=value)
-
-
 def _dispatch_agent(eng: OrchestrationEngine, task: str = "A") -> str:
     eng.on_dispatched(task, "w1")
     return eng.work_item(task).activation_id  # type: ignore[union-attr]
@@ -317,13 +254,15 @@ def test_agent_dispatches_as_ready_episode() -> None:
 def test_agent_suspends_before_a_mediated_model_action() -> None:
     eng = _engine(_solo_agent())
     act = _dispatch_agent(eng)
-    ep = AgentEpisode(
-        eng,
-        _DoubleAdapter(
-            [_boundary(BoundaryEventKind.INVOCATION, "c0", interface="model")]
+    eng.route_boundary_event(
+        "A",
+        BoundaryEvent(
+            kind=BoundaryEventKind.INVOCATION,
+            call_correlation="c0",
+            interface="model",
+            continuation="after:c0",
         ),
     )
-    ep.resume("A", act)
     wi = eng.work_item("A")
     # The lane releases: the work item suspends until the outcome is injected.
     assert wi is not None and wi.status is WorkItemStatus.BLOCKED
@@ -334,44 +273,47 @@ def test_agent_suspends_before_a_mediated_model_action() -> None:
     model_inv = eng._invocations[env.invocation_id]  # type: ignore[attr-defined]
     assert model_inv.state is InvocationState.ISSUED
     assert env.continuation == "after:c0"  # capsule persisted before the lane released
-
-
-def test_injected_outcome_resumes_the_episode_to_completion() -> None:
-    eng = _engine(_solo_agent())
-    act = _dispatch_agent(eng)
-    adapter = _DoubleAdapter(
-        [
-            _boundary(BoundaryEventKind.INVOCATION, "c0", interface="model"),
-            _completion(),
-        ]
-    )
-    ep = AgentEpisode(eng, adapter)
-    ep.resume("A", act)
-    env = eng.boundary_envelope(act, "c0")
-    assert env is not None
-    # Safety: the suspend released the lane — the work item holds no worker (its attempt
-    # finished) and is not occupying a ready/dispatched slot while it waits.
-    wi = eng.work_item("A")
-    assert wi is not None and wi.status is WorkItemStatus.BLOCKED
+    # The finished attempt is closed, so the work item holds no worker while it waits.
     attempt = eng._attempts[wi.attempt_ids[-1]]  # type: ignore[attr-defined]
     assert attempt.status.value == "succeeded" and attempt.finished_at is not None
-    # Liveness gate: only the durable outcome re-readies the lane — the work item stays
-    # suspended until the mediated outcome is delivered.
-    resumed = eng.deliver_boundary_outcome("A", "c0")
-    assert resumed.ready == ["A"]
-    ep.deliver(
-        DeliveredOutcome(
-            call_correlation="c0", idempotency_key=env.idempotency_key, value="answer"
-        )
+
+
+def test_stranded_model_boundary_is_listed_for_resettlement() -> None:
+    # A model boundary suspended with no durable outcome is stranded across a crash (the
+    # off-lane settle ran in memory), so a restart can re-issue it from the envelope.
+    eng = _engine(_solo_agent())
+    _dispatch_agent(eng)
+    eng.route_boundary_event(
+        "A",
+        BoundaryEvent(
+            kind=BoundaryEventKind.INVOCATION,
+            call_correlation="c0",
+            interface="model",
+            request_payload="q",
+        ),
     )
+    assert eng.stranded_model_settlements() == [("A", "c0", "q")]
+    # Once settled, it is no longer stranded.
+    eng.settle_boundary_outcome("A", "c0", value="answer")
+    assert eng.stranded_model_settlements() == []
+
+
+def test_only_the_durable_outcome_re_readies_a_suspended_episode() -> None:
+    eng = _engine(_solo_agent())
+    _dispatch_agent(eng)
+    eng.route_boundary_event(
+        "A",
+        BoundaryEvent(
+            kind=BoundaryEventKind.INVOCATION, call_correlation="c0", interface="model"
+        ),
+    )
+    wi = eng.work_item("A")
+    assert wi is not None and wi.status is WorkItemStatus.BLOCKED
+    # Only the durable outcome re-readies the lane; then the episode settles terminally
+    # and its declared output is readable.
+    assert eng.deliver_boundary_outcome("A", "c0").ready == ["A"]
     eng.on_dispatched("A", "w1")
-    result = ep.resume("A", act)
-    assert result.kind is HarnessResultKind.COMPLETION
-    # The resumed episode received the injected outcome at its originating call.
-    assert adapter.injected[-1][0].value == "answer"
     eng.on_succeeded("A")
-    # Observable end-to-end outcome: the episode settles terminally and the declared
-    # output is readable, driven the whole way by the test-double adapter.
     wi = eng.work_item("A")
     assert wi is not None and wi.status is WorkItemStatus.SETTLED
     pub = eng.resolve_output("out:A")
@@ -508,34 +450,6 @@ def test_raw_operator_id_cannot_select_a_region() -> None:
     )
     env = eng.boundary_envelope(act, "c0")
     assert env is not None and env.denial is DenialKind.AUTHORITY
-
-
-def test_denial_is_delivered_back_through_the_mediation() -> None:
-    eng = _engine(_solo_agent())
-    act = _dispatch_agent(eng)
-    adapter = _DoubleAdapter(
-        [
-            _boundary(BoundaryEventKind.INVOCATION, "c0", interface="danger"),
-            _completion(),
-        ]
-    )
-    ep = AgentEpisode(eng, adapter)
-    ep.resume("A", act)
-    eng.deliver_boundary_outcome("A", "c0")
-    eng.on_dispatched("A", "w1")
-    ep.resume("A", act)
-    injected = adapter.injected[-1]
-    assert injected and injected[0].kind is OutcomeKind.DENIED
-    assert injected[0].denial is DenialKind.AUTHORITY
-
-
-def test_mediation_refuses_a_native_bypass_adapter() -> None:
-    eng = _engine(_solo_agent())
-    try:
-        AgentEpisode(eng, _NativeBypassAdapter([_completion()]))
-    except HarnessConfigError:
-        return
-    raise AssertionError("expected a native-bypass adapter to be refused")
 
 
 # --------------------------------------------------------------------------- #
@@ -675,50 +589,37 @@ def test_recursive_agent_depth_budget_is_enforced() -> None:
 
 
 def test_rejected_spawn_records_no_envelope_and_no_phantom_ack() -> None:
-    # The depth budget rejects the nested agent scope: the spawn raises, records no
-    # envelope, and queues no phantom success ack for a later re-drive to deliver.
+    # The depth budget rejects the nested agent scope: the spawn raises and records no
+    # envelope, so a later re-drive has no phantom-accepted record to deliver.
     eng = _engine(_recursive_agent_bundle(), budget=ScopeBudget(max_scope_depth=1))
     act = _dispatch_agent(eng)
-    adapter = _DoubleAdapter(
-        [_boundary(BoundaryEventKind.SPAWN, "c0", child_region_ref="worker")]
+    spawn = BoundaryEvent(
+        kind=BoundaryEventKind.SPAWN, call_correlation="c0", child_region_ref="worker"
     )
-    ep = AgentEpisode(eng, adapter)
     with pytest.raises(RegionError):
-        ep.resume("A", act)
+        eng.route_boundary_event("A", spawn)
     assert eng.boundary_envelope(act, "c0") is None  # no phantom-accepted record
-    assert ep._pending == []  # type: ignore[attr-defined]  # no phantom ack queued
     # A re-drive is not short-circuited into a success — the rejection stands.
     with pytest.raises(RegionError):
-        eng.route_boundary_event(
-            "A",
-            BoundaryEvent(
-                kind=BoundaryEventKind.SPAWN,
-                call_correlation="c0",
-                child_region_ref="worker",
-            ),
-        )
+        eng.route_boundary_event("A", spawn)
 
 
-def test_state_access_through_mediation_queues_no_ack() -> None:
+def test_state_access_is_resolved_inline_without_suspending() -> None:
     eng = _engine(_solo_agent())
-    act = _dispatch_agent(eng)
-    adapter = _DoubleAdapter(
-        [
-            _boundary(BoundaryEventKind.STATE_ACCESS, "c0", state_ref="ref-1"),
-            _completion(),
-        ]
+    _dispatch_agent(eng)
+    eng.route_boundary_event(
+        "A",
+        BoundaryEvent(
+            kind=BoundaryEventKind.STATE_ACCESS,
+            call_correlation="c0",
+            state_ref="ref-1",
+        ),
     )
-    ep = AgentEpisode(eng, adapter)
-    ep.resume("A", act)
-    # A state access is a query the engine resolves inline, not a deferred boundary: no
-    # ack is queued and the lane is not suspended.
-    assert ep._pending == []  # type: ignore[attr-defined]
+    # A state access is a query the engine resolves inline, not a deferred boundary: the
+    # lane is not suspended and the access is traced.
     wi = eng.work_item("A")
     assert wi is not None and wi.status is WorkItemStatus.DISPATCHED
     assert "state_access" in {k for k, _ in eng.contract_trace()}
-    # The next resume injects nothing, since the query queued no outcome.
-    ep.resume("A", act)
-    assert adapter.injected[-1] == []
 
 
 def test_dedup_capable_boundary_without_correlation_is_rejected() -> None:

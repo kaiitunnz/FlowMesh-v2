@@ -22,6 +22,7 @@ from shared.tasks.worker_message import HardwareUsage, WorkerHardware, WorkerTas
 from shared.utils.manifest import prepare_output_dir, sync_manifest
 from shared.utils.time import now_iso
 
+from .executors.agent_episode_executor import AgentEpisodeResult
 from .executors.base_executor import ExecutionError, Executor, TaskCancelledError
 from .executors.utils.checkpoints import get_http_destination, write_executor_result
 from .lifecycle import Lifecycle
@@ -463,6 +464,10 @@ class Runner:
                         desired_key = self._select_embedding_executor_key(spec)
                     elif task_type == "serve":
                         desired_key = "vllm_serve"
+                    elif task_type == "agent" and msg.agent_episode is not None:
+                        # A v2 agent carrying a harness backend key runs the
+                        # run-to-yield episode path; a bare agent stays on UTU.
+                        desired_key = "agent_episode"
                     else:
                         desired_key = "default" if task_type is None else task_type
                     # Acquire lock before accessing/modifying active executor
@@ -519,6 +524,13 @@ class Runner:
                         shard_index=shard_index,
                         shard_total=shard_total,
                     )
+                    if isinstance(out, AgentEpisodeResult):
+                        # The step rides the success metadata so the server routes the
+                        # boundary and re-dispatches; the attempt still ends here, which
+                        # is what releases the lane.
+                        metadata["agent_episode"] = out.harness_result.model_dump(
+                            mode="json"
+                        )
                     self.lifecycle.set_succeeded(task_id, metadata=metadata)
                     self.logger.info("Task %s completed successfully", task_id)
                 except TaskCancelledError as e:

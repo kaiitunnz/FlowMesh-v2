@@ -490,6 +490,7 @@ class Dispatcher:
             upstream_task_ids=self._resolve_upstream_task_ids(
                 record, rendered_task.spec
             ),
+            agent_episode=self._runtime.agent_episode_dispatch(task_id),
         )
 
         # 8. Publish task
