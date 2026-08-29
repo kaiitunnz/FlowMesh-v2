@@ -21,12 +21,10 @@ from ..state import BoundaryEvent, DenialKind
 
 
 class FacadeTool(StrEnum):
-    """A named, fabric-owned facade tool an adapter exposes in place of a native path.
+    """Named, fabric-owned facade tools an adapter exposes in place of native paths."""
 
-    ``spawn_agent`` replaces native harness delegation: it emits a spawn request the
-    engine turns into one attenuated child activation, never a native subagent.
-    """
-
+    # Replaces native harness delegation: the engine turns it into one attenuated child
+    # activation, never a native subagent.
     SPAWN_AGENT = "spawn_agent"
 
 
@@ -34,33 +32,25 @@ FACADE_TOOLS = frozenset(FacadeTool)
 
 
 class HarnessBackendKey(BaseModel):
-    """A versioned identity for one harness binding.
-
-    ``backend`` names the harness binding and ``version`` pins the adapter/protocol so a
-    capsule is only resumed by a compatible binding.
-    """
+    """A versioned identity for one harness binding."""
 
     model_config = ConfigDict(frozen=True)
 
-    backend: str
-    version: str
+    backend: str  # the harness binding this key names
+    version: str  # pins the adapter/protocol so a capsule resumes only on a match
 
 
 class HarnessCapsule(BaseModel):
-    """An opaque, durable continuation of a harness session.
-
-    ``blob`` is adapter-owned serialized state the fabric never interprets. ``portable``
-    declares whether the capsule is restartable only against local durable state (the
-    default) or relocatable across a worker, which needs the exported ``state_ref``
-    backing rather than a bare session identifier.
-    """
+    """An opaque, durable continuation of a harness session."""
 
     model_config = ConfigDict(frozen=True)
 
     backend: HarnessBackendKey
-    blob: str
+    blob: str  # adapter-owned serialized state the fabric never interprets
+    # False: restartable only against local durable state; True: relocatable across a
+    # worker, which needs the exported state_ref rather than a bare session id.
     portable: bool = False
-    state_ref: str | None = None
+    state_ref: str | None = None  # exported state backing a relocatable capsule
 
 
 class OutcomeKind(StrEnum):
@@ -72,21 +62,15 @@ class OutcomeKind(StrEnum):
 
 
 class DeliveredOutcome(BaseModel):
-    """A durable outcome injected back into the harness at its originating call.
-
-    ``call_correlation`` is the stable adapter-local id the outcome returns at, and
-    ``idempotency_key`` is the fabric-assigned dedupe authority for the mediated effect.
-    A ``DENIED`` outcome carries its ``denial`` kind; a ``RESULT`` carries an opaque
-    ``value``.
-    """
+    """A durable outcome injected back into the harness at its originating call."""
 
     model_config = ConfigDict(frozen=True)
 
-    call_correlation: str
-    idempotency_key: str | None = None
+    call_correlation: str  # the stable adapter-local id the outcome returns at
+    idempotency_key: str | None = None  # fabric-assigned dedupe authority
     kind: OutcomeKind = OutcomeKind.RESULT
-    denial: DenialKind | None = None
-    value: str | None = None
+    denial: DenialKind | None = None  # set when kind is DENIED
+    value: str | None = None  # opaque result payload when kind is RESULT
 
 
 class HarnessResultKind(StrEnum):
@@ -100,18 +84,13 @@ class HarnessResultKind(StrEnum):
 
 
 class HarnessResult(BaseModel):
-    """The result of one harness step.
-
-    A ``BOUNDARY`` (or ``YIELD``) carries the ``request`` the adapter deferred before it
-    executed and the ``capsule`` to resume from; a terminal kind carries ``value`` or
-    ``error``.
-    """
+    """The result of one harness step."""
 
     model_config = ConfigDict(frozen=True)
 
     kind: HarnessResultKind
-    request: BoundaryEvent | None = None
-    capsule: HarnessCapsule | None = None
+    request: BoundaryEvent | None = None  # the deferred request, for a BOUNDARY/YIELD
+    capsule: HarnessCapsule | None = None  # the continuation to resume from
     value: str | None = None
     error: str | None = None
 
