@@ -9,14 +9,17 @@ turn sees, and a turn's notification stream collapses to one ``CodexEvent``. The
 backend is FlowMesh's Responses gateway, which is Codex's native wire.
 
 The 0.147.0 app-server exposes no client-registered tool whose output the fabric
-supplies, so a mediated facade call is signalled by the model as a small envelope on its
-turn output and resolved by injecting the settled result. The origination is the only
-stubbed edge; resolution, rollout persistence, resume, and the exactly-once boundary
-stay real. The untyped ``thread/inject_items`` RPC and the provider passthrough are
-isolated in ``_CodexExperimentalSurface`` and pinned to this Codex version.
+supplies, so a mediated facade call is detected as a small JSON envelope the model emits
+on its turn output — a convention layered on the text, not a native tool-call wire — and
+resolved by injecting the settled result. Origination is the only stubbed edge; the
+resolution RPC, rollout persistence, and resume are real. The adapter's committed-key
+dedup keeps the outcome injected at most once on a resume from the committed capsule.
+The untyped ``thread/inject_items`` RPC and provider passthrough are isolated in
+``_CodexExperimentalSurface`` and pinned to this Codex version.
 """
 
 import json
+import threading
 import weakref
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -38,6 +41,17 @@ from .codex import CodexEvent, CodexInjectItem
 _FACADE_ENVELOPE_KEY = "facade"
 _INJECT_CALL_PREFIX = "fab-"
 _INJECT_TOOL = "fabric_mediated"
+# Credential resolution (secret_ref -> server-side key) lands with the per-workflow
+# binding; the gateway trusts the caller, so a placeholder satisfies the provider here.
+_KEY_ENV = "FLOWMESH_CODEX_API_KEY"
+
+
+class CodexTransportError(RuntimeError):
+    """A transport-level failure of the live app-server, distinct from a model outcome.
+
+    A process death, a broken transport, or a turn that stalls past its bound raises
+    this rather than a completion, so a physical failure never reads as a result.
+    """
 
 
 @dataclass(frozen=True)
@@ -47,35 +61,38 @@ class CodexTransportConfig:
     base_url: str
     model: str
     codex_home: Path
-    api_key: str | None = None
-    api_key_env: str = "FLOWMESH_CODEX_API_KEY"
     provider_id: str = "flowmesh"
     approval_policy: str = "never"
     sandbox_mode: str = "read-only"
     turn_input: str = "continue"
+    turn_timeout_sec: float = 120.0
     cwd: Path | None = None
-    extra_config_overrides: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        # base_url and model reach the codex --config DSL as key="value" overrides, so a
+        # quote or newline would break the override; the URL must also stay http(s).
+        if not self.base_url.startswith(("http://", "https://")):
+            raise ValueError(f"the codex base_url must be http(s): {self.base_url!r}")
+        for name, value in (("base_url", self.base_url), ("model", self.model)):
+            if '"' in value or "\n" in value:
+                raise ValueError(f"the codex {name} may not contain a quote or newline")
 
     def to_codex_config(self) -> CodexConfig:
         p = self.provider_id
-        overrides = [
+        overrides = (
             f'model_providers.{p}.name="{p}"',
             f'model_providers.{p}.base_url="{self.base_url}"',
             f'model_providers.{p}.wire_api="responses"',
             f"model_providers.{p}.requires_openai_auth=false",
-            f'model_providers.{p}.env_key="{self.api_key_env}"',
+            f'model_providers.{p}.env_key="{_KEY_ENV}"',
             f'model_provider="{p}"',
             f'model="{self.model}"',
             f'approval_policy="{self.approval_policy}"',
             f'sandbox_mode="{self.sandbox_mode}"',
-            *self.extra_config_overrides,
-        ]
-        env = {
-            "CODEX_HOME": self.codex_home.as_posix(),
-            self.api_key_env: self.api_key or "x",
-        }
+        )
+        env = {"CODEX_HOME": self.codex_home.as_posix(), _KEY_ENV: "placeholder"}
         return CodexConfig(
-            config_overrides=tuple(overrides),
+            config_overrides=overrides,
             env=env,
             cwd=self.cwd.as_posix() if self.cwd is not None else None,
             experimental_api=True,
@@ -145,6 +162,7 @@ class RealCodexAppServerTransport:
 
     @property
     def pid(self) -> int:
+        # ``_proc`` is private to the SDK; the exact version pin keeps this stable.
         proc = self.client._proc
         if proc is None:
             raise RuntimeError("the Codex app-server is not running")
@@ -182,6 +200,32 @@ class RealCodexAppServerTransport:
         return started.turn.id
 
     def next_event(self, thread_id: str, turn_id: str) -> CodexEvent:
+        # Drain on a worker thread bounded by a deadline: a dead process makes the SDK
+        # reader fail the queue and re-raise (never a phantom completion), but a process
+        # that stalls mid-turn would block forever, so a timeout is a transport failure.
+        box: dict[str, Any] = {}
+
+        def _run() -> None:
+            try:
+                box["event"] = self._drain_turn(turn_id)
+            except BaseException as exc:  # noqa: BLE001 - relayed to the caller below
+                box["error"] = exc
+
+        worker = threading.Thread(target=_run, daemon=True)
+        worker.start()
+        worker.join(self._config.turn_timeout_sec)
+        if worker.is_alive():
+            self.close()  # unblock the stalled drain and reap the hung process
+            raise CodexTransportError(
+                f"the Codex turn {turn_id} produced no terminal event within "
+                f"{self._config.turn_timeout_sec}s"
+            )
+        if "error" in box:
+            raise box["error"]
+        event: CodexEvent = box["event"]
+        return event
+
+    def _drain_turn(self, turn_id: str) -> CodexEvent:
         client = self.client
         agent_texts: list[str] = []
         while True:
