@@ -279,6 +279,14 @@ STACK_ENV_SCHEMA = EnvSchema(
                     "",
                     description="Upstream API key for the openai gateway mode.",
                 ),
+                EnvVar(
+                    "AGENT_MODEL_GATEWAY_TIMEOUT_SEC",
+                    "60",
+                    description="Upstream request timeout in seconds for the gateway.",
+                    var_type=EnvVarType.FLOAT,
+                    min_value=0,
+                    min_inclusive=False,
+                ),
             ],
         ),
         EnvSection(

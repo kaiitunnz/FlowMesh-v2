@@ -41,6 +41,7 @@ listed here is in `.env.example`.
 | `AGENT_MODEL_GATEWAY_URL` | `UTU_LLM_BASE_URL` | Upstream base URL for `openai` mode |
 | `AGENT_MODEL_GATEWAY_MODEL` | `UTU_LLM_MODEL` | Upstream model for `openai` mode |
 | `AGENT_MODEL_GATEWAY_API_KEY` | `UTU_LLM_API_KEY` | Upstream API key for `openai` mode |
+| `AGENT_MODEL_GATEWAY_TIMEOUT_SEC` | `60` | Upstream request timeout (seconds) |
 | `ENABLE_WORKER_WATCHDOG` | `true` | Worker death detection |
 | `WORKER_DEATH_GRACE_SEC` | `60` | Grace period before marking dead |
 | `WORKER_REHYDRATION_GRACE_SEC` | `120` | Extra grace for a worker's rehydrated in-flight tasks after the root restarts, before the watchdog may reclaim them |
