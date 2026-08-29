@@ -8,6 +8,7 @@ conversion for a harness whose provider targets the gateway directly.
 """
 
 import asyncio
+from typing import Any
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -161,3 +162,100 @@ def test_responses_router_serves_the_openai_surface() -> None:
     resp = client.post("/v1/responses", json={"model": "m", "input": "ping"})
     assert resp.status_code == 200
     assert resp.json()["output"][0]["content"][0]["text"] == "ping"
+
+
+def _responses_object(text: str) -> dict[str, Any]:
+    return {
+        "object": "response",
+        "status": "completed",
+        "output": [
+            {"type": "reasoning", "content": [{"type": "text", "text": "..."}]},
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": text}],
+            },
+        ],
+    }
+
+
+def test_response_text_reads_the_message_ignoring_reasoning() -> None:
+    from server.services.agent_model_gateway import _response_text
+
+    assert _response_text(_responses_object("answer")) == "answer"
+    assert _response_text({"output": []}) == ""
+
+
+def test_proxy_mode_settles_a_facade_single_shot(monkeypatch: Any) -> None:
+    import server.services.agent_model_gateway as mod
+
+    cfg = AgentModelGatewayConfig(
+        mode=GatewayMode.PROXY, url="http://up/v1", model="qwen"
+    )
+    gateway = AgentModelGateway(None, cfg)  # type: ignore[arg-type]
+
+    class _Resp:
+        def raise_for_status(self) -> None: ...
+
+        @staticmethod
+        def json() -> dict[str, Any]:
+            return _responses_object("settled")
+
+    def _post(url: str, json: dict[str, Any], **_: Any) -> _Resp:
+        assert url == "http://up/v1/responses"
+        assert json["model"] == "qwen" and json["stream"] is False
+        return _Resp()
+
+    monkeypatch.setattr(mod.requests, "post", _post)
+    assert gateway.invoke("solve 2+2") == "settled"
+
+
+def test_proxy_mode_streams_the_upstream_turn_verbatim(monkeypatch: Any) -> None:
+    import server.services.agent_model_gateway as mod
+
+    cfg = AgentModelGatewayConfig(
+        mode=GatewayMode.PROXY, url="http://up/v1", model="qwen"
+    )
+    gateway = AgentModelGateway(None, cfg)  # type: ignore[arg-type]
+    sse = b"event: response.completed\ndata: {}\n\n"
+
+    class _Upstream:
+        async def __aenter__(self) -> "_Upstream":
+            return self
+
+        async def __aexit__(self, *exc: object) -> None: ...
+
+        def raise_for_status(self) -> None: ...
+
+        async def aiter_raw(self) -> Any:
+            yield sse
+
+    class _Client:
+        def __init__(self, **_: Any) -> None: ...
+
+        async def __aenter__(self) -> "_Client":
+            return self
+
+        async def __aexit__(self, *exc: object) -> None: ...
+
+        def stream(self, method: str, url: str, **kwargs: Any) -> _Upstream:
+            body = kwargs["json"]
+            assert url == "http://up/v1/responses" and body["stream"] is True
+            assert body["model"] == "qwen"
+            # The namespace tool is dropped; function tools pass through.
+            assert [t["name"] for t in body["tools"]] == ["exec_command"]
+            return _Upstream()
+
+    monkeypatch.setattr(mod.httpx, "AsyncClient", _Client)
+    app = FastAPI()
+    app.include_router(build_agent_model_router(gateway))
+    request = {
+        "model": "m",
+        "input": "hi",
+        "tools": [
+            {"type": "function", "name": "exec_command"},
+            {"type": "namespace", "name": "multi_agent_v1", "tools": []},
+        ],
+    }
+    resp = TestClient(app).post("/v1/responses", json=request)
+    assert resp.status_code == 200 and resp.content == sse

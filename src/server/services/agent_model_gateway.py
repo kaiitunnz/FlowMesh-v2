@@ -11,12 +11,15 @@ Resident-capacity admission is not part of this path: the invocation settles dir
 
 import json
 import logging
+from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Protocol
 from urllib.parse import urlparse
 
+import httpx
 import requests
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from ..config import AgentModelGatewayConfig, GatewayMode
@@ -90,30 +93,63 @@ class AgentModelGateway:
             return prompt
         if self._cfg.mode is GatewayMode.OPENAI:
             return self._forward_openai(prompt)
+        if self._cfg.mode is GatewayMode.PROXY:
+            return self._forward_responses(prompt)
         return f"canned-response:{prompt}" if prompt else "canned-response"
 
+    def is_proxy(self) -> bool:
+        """Whether a harness's own model turns proxy to an upstream Responses API."""
+        return self._cfg.mode is GatewayMode.PROXY
+
     def _forward_openai(self, prompt: str) -> str:
-        if not self._cfg.url:
-            raise RuntimeError("openai gateway mode needs a configured upstream url")
-        parsed = urlparse(self._cfg.url)
-        if parsed.scheme not in ("http", "https"):
-            raise RuntimeError(f"unsupported gateway url scheme {parsed.scheme!r}")
-        headers = {"Content-Type": "application/json"}
-        if self._cfg.api_key:
-            headers["Authorization"] = f"Bearer {self._cfg.api_key}"
         body = {
             "model": self._cfg.model or "gpt-4o-mini",
             "messages": [{"role": "user", "content": prompt}],
         }
         response = requests.post(
-            f"{self._cfg.url.rstrip('/')}/chat/completions",
+            f"{self._upstream_base()}/chat/completions",
             json=body,
-            headers=headers,
+            headers=self._headers(),
             timeout=self._cfg.timeout_sec,
         )
         response.raise_for_status()
         data = response.json()
         return str(data["choices"][0]["message"]["content"])
+
+    def _forward_responses(self, prompt: str) -> str:
+        body = {"model": self._cfg.model or "model", "input": prompt, "stream": False}
+        response = requests.post(
+            f"{self._upstream_base()}/responses",
+            json=body,
+            headers=self._headers(),
+            timeout=self._cfg.timeout_sec,
+        )
+        response.raise_for_status()
+        return _response_text(response.json())
+
+    async def proxy_responses(self, body: dict[str, Any]) -> StreamingResponse:
+        """Stream a harness's own model turn from the upstream Responses API verbatim.
+
+        Codex issues its reasoning turns at this surface; the request forwards to the
+        upstream ``/v1/responses`` and its SSE streams straight back, so a live model
+        drives the agent. The mediated facade a harness defers settles off this path.
+        """
+        url = f"{self._upstream_base()}/responses"
+        forward = {**body, "stream": True, "tools": _upstream_tools(body.get("tools"))}
+        if self._cfg.model:
+            forward["model"] = self._cfg.model
+        headers, timeout = self._headers(), self._cfg.timeout_sec
+
+        async def _stream() -> AsyncIterator[bytes]:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                async with client.stream(
+                    "POST", url, json=forward, headers=headers
+                ) as upstream:
+                    upstream.raise_for_status()
+                    async for chunk in upstream.aiter_raw():
+                        yield chunk
+
+        return StreamingResponse(_stream(), media_type="text/event-stream")
 
     def responses(self, request: ResponsesRequest) -> dict[str, Any]:
         """Convert one OpenAI Responses request and return its settled output."""
@@ -128,6 +164,20 @@ class AgentModelGateway:
                 }
             ],
         }
+
+    def _upstream_base(self) -> str:
+        if not self._cfg.url:
+            raise RuntimeError("this gateway mode needs a configured upstream url")
+        parsed = urlparse(self._cfg.url)
+        if parsed.scheme not in ("http", "https"):
+            raise RuntimeError(f"unsupported gateway url scheme {parsed.scheme!r}")
+        return self._cfg.url.rstrip("/")
+
+    def _headers(self) -> dict[str, str]:
+        headers = {"Content-Type": "application/json"}
+        if self._cfg.api_key:
+            headers["Authorization"] = f"Bearer {self._cfg.api_key}"
+        return headers
 
 
 def _extract_prompt(payload: str | None) -> str:
@@ -148,12 +198,39 @@ def _dump_input(value: Any) -> str:
     return value if isinstance(value, str) else json.dumps(value)
 
 
+def _upstream_tools(tools: Any) -> list[Any]:
+    """The tools an upstream Responses API accepts, dropping harness-specific types.
+
+    A standard Responses backend accepts the ``function`` tool; a harness may advertise
+    its own types (a namespace tool for native sub-agents) that the upstream rejects
+    and the fabric mediates through a facade instead.
+    """
+    if not isinstance(tools, list):
+        return []
+    return [t for t in tools if isinstance(t, dict) and t.get("type") == "function"]
+
+
+def _response_text(data: Any) -> str:
+    """The assistant text of a Responses object, ignoring reasoning and tool items."""
+    if not isinstance(data, dict):
+        return ""
+    for item in data.get("output", []):
+        if isinstance(item, dict) and item.get("type") == "message":
+            for part in item.get("content", []):
+                if isinstance(part, dict) and part.get("type") == "output_text":
+                    return str(part.get("text", ""))
+    return ""
+
+
 def build_agent_model_router(gateway: AgentModelGateway) -> APIRouter:
     """The Responses API surface a harness provider targets."""
     router = APIRouter()
 
     @router.post("/v1/responses")
-    async def create_response(body: ResponsesRequest) -> dict[str, Any]:
-        return gateway.responses(body)
+    async def create_response(request: Request) -> Any:
+        body = await request.json()
+        if gateway.is_proxy():
+            return await gateway.proxy_responses(body)
+        return gateway.responses(ResponsesRequest.model_validate(body))
 
     return router

@@ -261,23 +261,23 @@ STACK_ENV_SCHEMA = EnvSchema(
                     "AGENT_MODEL_GATEWAY_MODE",
                     "canned",
                     description="Agent-model gateway upstream mode.",
-                    choices=("canned", "echo", "openai"),
+                    choices=("canned", "echo", "openai", "proxy"),
                 ),
                 EnvVar(
                     "AGENT_MODEL_GATEWAY_URL",
                     "",
-                    description="Upstream base URL for the openai gateway mode.",
+                    description="Upstream base URL for the openai and proxy modes.",
                     var_type=EnvVarType.URL,
                 ),
                 EnvVar(
                     "AGENT_MODEL_GATEWAY_MODEL",
                     "",
-                    description="Upstream model for the openai gateway mode.",
+                    description="Upstream model for the openai and proxy modes.",
                 ),
                 EnvVar(
                     "AGENT_MODEL_GATEWAY_API_KEY",
                     "",
-                    description="Upstream API key for the openai gateway mode.",
+                    description="Upstream API key for the openai and proxy modes.",
                 ),
                 EnvVar(
                     "AGENT_MODEL_GATEWAY_TIMEOUT_SEC",
