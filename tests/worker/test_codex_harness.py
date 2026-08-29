@@ -23,10 +23,13 @@ from shared.harness import (
     HarnessResultKind,
     OutcomeKind,
 )
+from shared.tasks.specs import AgentSpecStrict
+from shared.tasks.task_type import TaskType
 from worker.executors.harness.codex import (
     CodexAppServerHarnessAdapter,
     CodexEvent,
     CodexInjectItem,
+    _agent_task,
     _isolated_codex_home,
 )
 
@@ -248,6 +251,22 @@ def test_codex_home_sanitizes_path_separators() -> None:
     home = _isolated_codex_home(Path("/results"), "wfl-1", "op/../escape")
     assert home == Path("/results/codex_home/wfl-1/op_.._escape")
     assert Path("/results/codex_home") in home.parents
+
+
+def _agent_spec(**fields: object) -> AgentSpecStrict:
+    return AgentSpecStrict(taskType=TaskType.AGENT, **fields)  # type: ignore[arg-type]
+
+
+def test_agent_task_reads_spec_task_then_data_task() -> None:
+    assert _agent_task(_agent_spec(task="solve it")) == "solve it"
+    assert _agent_task(_agent_spec(data={"task": "from data"})) == "from data"
+    # spec.task wins over spec.data.task.
+    assert _agent_task(_agent_spec(task="win", data={"task": "lose"})) == "win"
+
+
+def test_agent_task_requires_a_task() -> None:
+    with pytest.raises(ValueError, match="spec.task"):
+        _agent_task(_agent_spec())
 
 
 def _codex_call_id(capsule: HarnessCapsule | None) -> str | None:

@@ -251,9 +251,24 @@ def build_codex_adapter(
     from .codex_transport import CodexTransportConfig, RealCodexAppServerTransport
 
     transport = RealCodexAppServerTransport(
-        CodexTransportConfig(base_url=base_url, model=model, codex_home=codex_home)
+        CodexTransportConfig(
+            base_url=base_url,
+            model=model,
+            codex_home=codex_home,
+            initial_input=_agent_task(spec),
+        )
     )
     return CodexAppServerHarnessAdapter(transport, backend.version)
+
+
+def _agent_task(spec: AgentSpecStrict) -> str:
+    """The first-turn input driving a fresh Codex thread: the agent's task text."""
+    if spec.task:
+        return spec.task
+    data = spec.data or {}
+    if isinstance(task := data.get("task"), str) and task:
+        return task
+    raise ValueError("the codex backend requires 'spec.task' or 'spec.data.task'")
 
 
 def _isolated_codex_home(results_dir: Path, workflow_id: str, task_id: str) -> Path:

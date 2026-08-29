@@ -3,10 +3,11 @@
 ``RealCodexAppServerTransport`` drives an ``openai_codex.CodexClient``, a JSON-RPC/stdio
 client that spawns ``codex app-server``, behind the ``CodexAppServerTransport`` protocol
 the adapter already speaks. Each step runs against a persisted on-disk rollout under a
-stable ``CODEX_HOME``: ``thread/resume`` reattaches by thread id after the process is
-gone, ``thread/inject_items`` appends a settled outcome as raw Responses items the next
-turn sees, and a turn's notification stream collapses to one ``CodexEvent``. The model
-backend is FlowMesh's Responses gateway, which is Codex's native wire.
+stable ``CODEX_HOME``: a fresh thread's first turn carries the agent's task, ``thread/
+resume`` reattaches by thread id after the process is gone, ``thread/inject_items``
+appends a settled outcome as raw Responses items the next turn sees, and a turn's
+notification stream collapses to one ``CodexEvent``. The model backend is FlowMesh's
+Responses gateway, which is Codex's native wire.
 
 The 0.147.0 app-server exposes no client-registered tool whose output the fabric
 supplies, so a mediated facade call is detected as a small JSON envelope the model emits
@@ -63,6 +64,7 @@ class CodexTransportConfig:
     base_url: str
     model: str
     codex_home: Path
+    initial_input: str
     provider_id: str = "flowmesh"
     approval_policy: str = "never"
     sandbox_mode: str = "read-only"
@@ -155,6 +157,7 @@ class RealCodexAppServerTransport:
         self._config = config
         self._client: CodexClient | None = None
         self._finalizer: weakref.finalize | None = None
+        self._fresh_thread = False
 
     @property
     def client(self) -> CodexClient:
@@ -183,9 +186,11 @@ class RealCodexAppServerTransport:
         return self._client
 
     def thread_start(self) -> str:
+        self._fresh_thread = True
         return self._connect().thread_start().thread.id
 
     def thread_resume(self, thread_id: str, rollout_ref: str) -> None:
+        self._fresh_thread = False
         self._connect().thread_resume(thread_id)
 
     def thread_inject_items(
@@ -198,7 +203,11 @@ class RealCodexAppServerTransport:
             _CodexExperimentalSurface.inject_response_items(self.client, thread_id, raw)
 
     def turn_start(self, thread_id: str) -> str:
-        started = self.client.turn_start(thread_id, self._config.turn_input)
+        # A fresh thread's first turn carries the agent's task; a resume continues the
+        # persisted rollout, whose next turn advances past the injected outcome.
+        cfg = self._config
+        text = cfg.initial_input if self._fresh_thread else cfg.turn_input
+        started = self.client.turn_start(thread_id, text)
         return started.turn.id
 
     def next_event(self, thread_id: str, turn_id: str) -> CodexEvent:

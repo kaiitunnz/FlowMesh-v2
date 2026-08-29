@@ -199,10 +199,19 @@ TransportFactory = Callable[..., RealCodexAppServerTransport]
 def transports() -> Iterator[TransportFactory]:
     made: list[RealCodexAppServerTransport] = []
 
-    def _make(base_url: str, home: Path, **kwargs: Any) -> RealCodexAppServerTransport:
+    def _make(
+        base_url: str,
+        home: Path,
+        initial_input: str = "run the task",
+        **kwargs: Any,
+    ) -> RealCodexAppServerTransport:
         transport = RealCodexAppServerTransport(
             CodexTransportConfig(
-                base_url=base_url, model="gpt-5-codex", codex_home=home, **kwargs
+                base_url=base_url,
+                model="gpt-5-codex",
+                codex_home=home,
+                initial_input=initial_input,
+                **kwargs,
             )
         )
         made.append(transport)
