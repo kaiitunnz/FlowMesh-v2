@@ -104,6 +104,9 @@ runtime-agent = [
     "toml>=0.10.2",
     "wikipedia-api>=0.8.1",
 ]
+runtime-harness-codex = [
+    "openai-codex==0.147.0",
+]
 runtime-observability = [
     "arize-phoenix-client>=1.21.0",
     "arize-phoenix-otel>=0.13.1",
@@ -126,6 +129,7 @@ runtime-worker-cpu = [
     { include-group = "runtime-training" },
     { include-group = "runtime-rag" },
     { include-group = "runtime-agent" },
+    { include-group = "runtime-harness-codex" },
     { include-group = "runtime-observability" },
     { include-group = "runtime-analytics" },
 ]
@@ -189,6 +193,9 @@ extend-exclude = ["__init__.pyi", "*_pb2*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
+markers = [
+    "codex_integration: process-level Codex app-server integration test; needs the openai-codex dependency and its bundled binary, excluded from the CPU Docker end-to-end suite",
+]
 
 [tool.mypy]
 python_version = "3.12"
