@@ -20,13 +20,10 @@ from .adapter import (
     OutcomeKind,
 )
 
-_ACK_ON_ROUTE = frozenset(
-    {
-        BoundaryEventKind.SPAWN,
-        BoundaryEventKind.SPAWN_SEAL,
-        BoundaryEventKind.STATE_ACCESS,
-    }
-)
+# Boundaries whose durable outcome is immediate: a spawn's child creation and a seal
+# both ack on the routing turn. A state access is a query the engine resolves inline,
+# not a deferred boundary, so it carries no injected ack.
+_ACK_ON_ROUTE = frozenset({BoundaryEventKind.SPAWN, BoundaryEventKind.SPAWN_SEAL})
 
 
 class HarnessConfigError(RuntimeError):

@@ -106,6 +106,15 @@ _REGION_KINDS = frozenset(
 # spawn_agent children.
 _CONTROL_KINDS = _REGION_KINDS
 _CHILD_INIT_OPENERS = frozenset({OperatorKind.SPAWN, OperatorKind.AGENT})
+# Boundary kinds whose exactly-once rests on the durable correlation key, so a mediated
+# one must carry a call correlation or it could duplicate a target effect on re-drive.
+_DEDUP_CAPABLE = frozenset(
+    {
+        BoundaryEventKind.SPAWN,
+        BoundaryEventKind.INVOCATION,
+        BoundaryEventKind.EXTERNAL_EFFECT,
+    }
+)
 _EARLY_JOINS = frozenset(
     {JoinCompletion.ANY, JoinCompletion.FIRST_K, JoinCompletion.PREDICATE}
 )
@@ -644,6 +653,11 @@ class OrchestrationEngine:
         if isinstance(op, AgentOperator):
             if (denial := self._validate_agent_boundary(op, wi, event)) is not None:
                 return self._record_boundary_denial(wi, event, denial)
+            if event.kind in _DEDUP_CAPABLE and event.call_correlation is None:
+                raise RegionError(
+                    f"mediated {event.kind.value} boundary requires a call correlation "
+                    "for durable dedup"
+                )
         match event.kind:
             case BoundaryEventKind.SPAWN:
                 if self._kind(wi.operator_id) not in _CHILD_INIT_OPENERS:
@@ -651,15 +665,19 @@ class OrchestrationEngine:
                         f"{wi.operator_id!r} is not a spawn/agent scope opener; "
                         "it cannot yield a spawn boundary"
                     )
-                self._record_boundary(wi, event)
-                return self.materialize_child(
+                # Record only after the child materializes: a budget/depth rejection
+                # raises and must leave no phantom-accepted envelope to re-drive.
+                advance = self.materialize_child(
                     wi.activation_id,
                     operator_id=event.child_ref,
                     value_ref=event.value_ref,
                 )
-            case BoundaryEventKind.SPAWN_SEAL:
                 self._record_boundary(wi, event)
-                return self.seal_spawn(wi.activation_id)
+                return advance
+            case BoundaryEventKind.SPAWN_SEAL:
+                advance = self.seal_spawn(wi.activation_id)
+                self._record_boundary(wi, event)
+                return advance
             case BoundaryEventKind.INVOCATION:
                 return self._suspend_on_request(wi, event, effect=False)
             case BoundaryEventKind.EXTERNAL_EFFECT:

@@ -12,6 +12,8 @@ seal, with recursive agent children reusing the finite declared region.
 
 from collections.abc import Sequence
 
+import pytest
+
 from server.orchestration import (
     OrchestrationEngine,
     ProgressAxis,
@@ -545,3 +547,84 @@ def test_recursive_agent_depth_budget_is_enforced() -> None:
         assert "scope_budget_exhausted" in {k for k, _ in eng.contract_trace()}
         return
     raise AssertionError("expected the depth budget to reject the nested agent scope")
+
+
+# --------------------------------------------------------------------------- #
+# Latent-path safety: rejection, correlation, and query boundaries
+# --------------------------------------------------------------------------- #
+
+
+def test_rejected_spawn_records_no_envelope_and_no_phantom_ack() -> None:
+    # The depth budget rejects the nested agent scope: the spawn raises, records no
+    # envelope, and queues no phantom success ack for a later re-drive to deliver.
+    child = _agent("child", child_ref="child")
+    eng = _engine(_spawning_agent(child=child), budget=ScopeBudget(max_scope_depth=1))
+    act = _dispatch_agent(eng)
+    adapter = _DoubleAdapter(
+        [_boundary(BoundaryEventKind.SPAWN, "c0", child_ref="child")]
+    )
+    ep = AgentEpisode(eng, adapter)
+    with pytest.raises(RegionError):
+        ep.resume("A", act)
+    assert eng.boundary_envelope(act, "c0") is None  # no phantom-accepted record
+    assert ep._pending == []  # type: ignore[attr-defined]  # no phantom ack queued
+    # A re-drive is not short-circuited into a success — the rejection stands.
+    with pytest.raises(RegionError):
+        eng.route_boundary_event(
+            "A",
+            BoundaryEvent(
+                kind=BoundaryEventKind.SPAWN, call_correlation="c0", child_ref="child"
+            ),
+        )
+
+
+def test_state_access_through_mediation_queues_no_ack() -> None:
+    eng = _engine(_solo_agent())
+    act = _dispatch_agent(eng)
+    adapter = _DoubleAdapter(
+        [
+            _boundary(BoundaryEventKind.STATE_ACCESS, "c0", state_ref="ref-1"),
+            _completion(),
+        ]
+    )
+    ep = AgentEpisode(eng, adapter)
+    ep.resume("A", act)
+    # A state access is a query the engine resolves inline, not a deferred boundary: no
+    # ack is queued and the lane is not suspended.
+    assert ep._pending == []  # type: ignore[attr-defined]
+    wi = eng.work_item("A")
+    assert wi is not None and wi.status is WorkItemStatus.DISPATCHED
+    assert "state_access" in {k for k, _ in eng.contract_trace()}
+    # The next resume injects nothing, since the query queued no outcome.
+    ep.resume("A", act)
+    assert adapter.injected[-1] == []
+
+
+def test_dedup_capable_boundary_without_correlation_is_rejected() -> None:
+    eng = _engine(_spawning_agent(child=_leaf("child")))
+    _dispatch_agent(eng)
+    # A mediated dedup-capable boundary must carry a stable correlation, or a re-drive
+    # could duplicate a target effect; the engine refuses one without it.
+    for event in (
+        BoundaryEvent(kind=BoundaryEventKind.SPAWN, child_ref="child"),
+        BoundaryEvent(kind=BoundaryEventKind.INVOCATION, interface="model"),
+        BoundaryEvent(kind=BoundaryEventKind.EXTERNAL_EFFECT, interface="search"),
+    ):
+        with pytest.raises(RegionError):
+            eng.route_boundary_event("A", event)
+
+
+def test_request_payload_round_trips_on_the_envelope() -> None:
+    eng = _engine(_solo_agent())
+    act = _dispatch_agent(eng)
+    eng.route_boundary_event(
+        "A",
+        BoundaryEvent(
+            kind=BoundaryEventKind.INVOCATION,
+            call_correlation="c0",
+            interface="model",
+            request_payload='{"q": "hi"}',
+        ),
+    )
+    env = eng.boundary_envelope(act, "c0")
+    assert env is not None and env.request_payload == '{"q": "hi"}'

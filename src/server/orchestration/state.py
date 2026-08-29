@@ -130,14 +130,15 @@ class BoundaryEvent(BaseModel):
 
     An episode yields this at a boundary; the physical layer carries it across the
     episode boundary and the engine applies its semantics. Beyond the request itself
-    (``kind`` plus ``interface``/``child_ref``/``state_ref``/``value_ref``), it carries
-    the correlation the fabric needs to keep a re-drive exactly-once: the ``activation``
-    it belongs to, the adapter-local ``call_correlation`` that stays stable across a
-    re-drive, the fabric-assigned ``idempotency_key`` (the sole dedupe authority for a
-    mediated facade effect, distinct from ``invocation_id`` and any harness/cell-local
-    id), the causal ``invocation_id``, the ``injection_target`` the outcome returns at,
-    and the opaque ``continuation`` capsule for the next resume. ``denial`` records a
-    definitive authority/policy denial injected back into the continuation.
+    (``kind`` plus ``interface``/``child_ref``/``state_ref``/``value_ref`` and the
+    ``request_payload`` value or reference), it carries the correlation the fabric needs
+    to keep a re-drive exactly-once: the ``activation`` it belongs to, the adapter-local
+    ``call_correlation`` that stays stable across a re-drive, the fabric-assigned
+    ``idempotency_key`` (the sole dedupe authority for a mediated effect, distinct from
+    ``invocation_id`` and any harness/cell-local id), the causal ``invocation_id``,
+    the ``injection_target`` the outcome returns at, and the opaque ``continuation``
+    capsule for the next resume. ``denial`` records a definitive authority/policy denial
+    injected into the continuation.
     """
 
     model_config = ConfigDict(frozen=True)
