@@ -120,6 +120,7 @@ def initialize_executors(
         "echo",
         "rag",
         "agent",
+        "agent_episode",
         "sft",
         "lora_sft",
         "image_classification_training",

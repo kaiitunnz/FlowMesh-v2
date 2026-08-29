@@ -30,6 +30,7 @@ class TestExecutorRegistry:
             "default",
             "rag",
             "agent",
+            "agent_episode",
             "echo",
             "data_profiling",
             "data_retrieval",
