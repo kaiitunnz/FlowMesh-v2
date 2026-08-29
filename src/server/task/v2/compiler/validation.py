@@ -289,16 +289,20 @@ def _check_region(
 def _check_spawn_child_targets(
     template: LogicalWorkflowTemplate, loc: dict[str, SourceLocation]
 ) -> list[Diagnostic]:
-    """A spawn child template must resolve to a dispatchable leaf task.
+    """A spawn/agent child template must resolve to a dispatchable leaf or agent.
 
-    An unresolved reference or a non-leaf body materializes no dispatchable child at
-    runtime and leaves the join unable to close; rejecting it at compile time turns a
-    runtime hang into a submit-time error.
+    An unresolved reference or a non-dispatchable body materializes no dispatchable
+    child at runtime and leaves the region unable to close; rejecting it at compile time
+    turns a runtime hang into a submit-time error. An agent child body is permitted, so
+    a finite declared recursive agent region can be a spawn target.
     """
     diags: list[Diagnostic] = []
     op_by_id = {op.operator_id: op for op in template.operators}
     for op in template.operators:
-        if not isinstance(op, SpawnRegion) or not op.child_template_ref:
+        if (
+            not isinstance(op, (SpawnRegion, AgentOperator))
+            or not op.child_template_ref
+        ):
             continue
         target = op_by_id.get(op.child_template_ref)
         if target is None:
@@ -306,19 +310,19 @@ def _check_spawn_child_targets(
                 Diagnostic(
                     code="region.spawn-child-unresolved",
                     message=(
-                        f"spawn child template {op.child_template_ref!r} resolves to "
+                        f"child template {op.child_template_ref!r} resolves to "
                         "no operator"
                     ),
                     location=loc.get(op.operator_id),
                 )
             )
-        elif not isinstance(target, LeafOperator):
+        elif not isinstance(target, (LeafOperator, AgentOperator)):
             diags.append(
                 Diagnostic(
-                    code="region.spawn-child-not-leaf",
+                    code="region.spawn-child-not-dispatchable",
                     message=(
-                        f"spawn child template {op.child_template_ref!r} is not a "
-                        "dispatchable leaf task"
+                        f"child template {op.child_template_ref!r} is not a "
+                        "dispatchable leaf or agent"
                     ),
                     location=loc.get(op.operator_id),
                 )

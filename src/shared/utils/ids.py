@@ -20,6 +20,7 @@ PREFIX_WORK_ITEM = "wki"
 PREFIX_ATTEMPT = "att"
 PREFIX_INVOCATION = "inv"
 PREFIX_AUTHORITY_GRANT = "agr"
+PREFIX_IDEMPOTENCY_KEY = "idm"
 
 
 def _uuid_str() -> str:
@@ -82,10 +83,15 @@ def new_authority_grant_id() -> str:
     return f"{PREFIX_AUTHORITY_GRANT}-{_uuid_hex()}"
 
 
+def new_idempotency_key() -> str:
+    return f"{PREFIX_IDEMPOTENCY_KEY}-{_uuid_hex()}"
+
+
 __all__ = [
     "PREFIX_ACTIVATION",
     "PREFIX_ATTEMPT",
     "PREFIX_AUTHORITY_GRANT",
+    "PREFIX_IDEMPOTENCY_KEY",
     "PREFIX_INVOCATION",
     "PREFIX_NODE",
     "PREFIX_SCOPE",
@@ -99,6 +105,7 @@ __all__ = [
     "new_activation_id",
     "new_attempt_id",
     "new_authority_grant_id",
+    "new_idempotency_key",
     "new_invocation_id",
     "new_node_id",
     "new_scope_id",

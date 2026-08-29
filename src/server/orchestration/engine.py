@@ -2,10 +2,13 @@
 
 The engine owns semantic readiness: it turns settled records into ready
 work items, incrementally materializing the activation graph rather than precreating
-attempts. Static top-level leaf operators materialize eagerly and dispatch through the
-runtime; control operators (branch, merge, spawn, join, loop) and agents settle inside
+attempts. Static top-level leaf and agent operators materialize eagerly and dispatch
+through the runtime; control operators (branch, merge, spawn, join, loop) settle inside
 the ledger and never dispatch; spawn children and loop iterations materialize as records
-flow. Progress capabilities (child-init and loop-time) are the closure authority — a
+flow. An agent is both dispatchable (a run-to-yield episode) and a scope owner: it
+yields validated boundary requests the engine turns into durable work, and its
+spawn_agent facade opens a child-init scope lazily on the first child. Progress
+capabilities (child-init and loop-time) are the closure authority — a
 region closes only when its combined account seals and drains, never on an observed
 empty set. Scheduler/worker placement stays a physical decision that never changes what
 the engine considers ready.
@@ -18,6 +21,7 @@ from shared.utils import (
     new_activation_id,
     new_attempt_id,
     new_authority_grant_id,
+    new_idempotency_key,
     new_invocation_id,
     new_scope_id,
     new_work_item_id,
@@ -42,7 +46,6 @@ from ..task.v2.representations.operators import (
 from ..task.v2.representations.plan import EpisodeSpec
 from ..task.v2.representations.results import CardinalityKind
 from ..utils.time import now_iso
-from .episode import BoundaryEvent
 from .guardrails import ScopeBudget
 from .outcomes import (
     attenuate,
@@ -62,6 +65,7 @@ from .state import (
     AuthorityDecision,
     AuthorityDecisionKind,
     AuthorityGrant,
+    BoundaryEvent,
     CapabilityStatus,
     Continuation,
     DelegatedAuthorityGrant,
@@ -97,10 +101,20 @@ _REGION_KINDS = frozenset(
         OperatorKind.LOOP_CONTEXT,
     }
 )
-# Control operators settle in-ledger and never dispatch; an agent is a scope-opening
-# boundary-signature site, not an eagerly dispatchable leaf.
-_CONTROL_KINDS = _REGION_KINDS | {OperatorKind.AGENT}
+# Control operators settle in-ledger and never dispatch. An agent is not control: it is
+# a dispatchable run-to-yield episode that also owns a child-init scope for its
+# spawn_agent children.
+_CONTROL_KINDS = _REGION_KINDS
 _CHILD_INIT_OPENERS = frozenset({OperatorKind.SPAWN, OperatorKind.AGENT})
+# Boundary kinds whose exactly-once rests on the durable correlation key, so a mediated
+# one must carry a call correlation or it could duplicate a target effect on re-drive.
+_DEDUP_CAPABLE = frozenset(
+    {
+        BoundaryEventKind.SPAWN,
+        BoundaryEventKind.INVOCATION,
+        BoundaryEventKind.EXTERNAL_EFFECT,
+    }
+)
 _EARLY_JOINS = frozenset(
     {JoinCompletion.ANY, JoinCompletion.FIRST_K, JoinCompletion.PREDICATE}
 )
@@ -113,6 +127,17 @@ class RegionError(ValueError):
 
 def _control_key(operator_id: str) -> str:
     return f"control:{operator_id}"
+
+
+def _effect_recovery(op: LogicalOperator | None) -> tuple[EffectClass, RecoveryClass]:
+    """A dispatchable operator's effect/recovery: a leaf's profile, else pure/recompute.
+
+    An agent episode is itself pure and recomputable; its mediated effects flow through
+    boundary events rather than the episode's own effect class.
+    """
+    if isinstance(op, LeafOperator):
+        return op.profile.effect, op.profile.recovery
+    return EffectClass.PURE, RecoveryClass.RECOMPUTE
 
 
 @dataclass
@@ -188,7 +213,14 @@ class OrchestrationEngine:
         self._child_templates = {
             op.child_template_ref
             for op in bundle.template.operators
-            if isinstance(op, SpawnRegion) and op.child_template_ref
+            if isinstance(op, (SpawnRegion, AgentOperator)) and op.child_template_ref
+        }
+        # Mediated boundaries, keyed by (activation, adapter-local call correlation):
+        # the correlation rule that maps a re-driven facade call to its recorded key.
+        self._boundary_events = {
+            (b.activation, b.call_correlation): b
+            for b in snapshot.boundary_events
+            if b.activation and b.call_correlation
         }
         self._wi_by_task = {
             w.legacy_task_id: w.work_item_id
@@ -307,10 +339,15 @@ class OrchestrationEngine:
             if b.source_ref
         }
         kind_by_id = {op.operator_id: op.kind for op in template.operators}
-        child_templates = {
+        # A child body another operator declares is materialized dynamically per spawn,
+        # never dispatched eagerly. A self-recursive agent names itself and stays a
+        # normal dispatchable entry.
+        child_body_refs = {
             op.child_template_ref
             for op in template.operators
-            if isinstance(op, SpawnRegion) and op.child_template_ref
+            if isinstance(op, (SpawnRegion, AgentOperator))
+            and op.child_template_ref
+            and op.child_template_ref != op.operator_id
         }
         requested: set[str] = set()
         for op in template.operators:
@@ -369,7 +406,8 @@ class OrchestrationEngine:
             )
             activations.append(activation)
             dispatchable = (
-                isinstance(op, LeafOperator) and op.operator_id not in child_templates
+                isinstance(op, (LeafOperator, AgentOperator))
+                and op.operator_id not in child_body_refs
             )
             if not dispatchable:
                 if op.kind in _CONTROL_KINDS:
@@ -380,14 +418,14 @@ class OrchestrationEngine:
                         )
                     )
                 continue
-            assert isinstance(op, LeafOperator)
+            effect, recovery = _effect_recovery(op)
             work_item = WorkItem(
                 work_item_id=new_work_item_id(),
                 activation_id=activation.activation_id,
                 operator_id=op.operator_id,
                 legacy_task_id=op.operator_id,
-                effect_class=op.profile.effect,
-                recovery=op.profile.recovery,
+                effect_class=effect,
+                recovery=recovery,
                 replay_contract=replay.get(op.operator_id),
             )
             work_items.append(work_item)
@@ -499,14 +537,23 @@ class OrchestrationEngine:
         )
         self._settle_attempt_terminal(wi, outcome)
         activation = self._activations[wi.activation_id]
+        # An agent's terminal completion seals its own child-init producer, so a
+        # spawn_agent scope closes even without an explicit SpawnSeal.
+        released = Advance()
+        if isinstance(self._operators.get(wi.operator_id), AgentOperator):
+            released = self._seal_owned_child_init(wi.activation_id)
         if activation.kind == "child":
             # A dispatched spawn child settles through its scope's child-init account,
             # never as a static forward record: the join closes on capability drain.
-            return self._settle_child_wi(wi, activation, outcome, value_ref)
+            return self._settle_child_wi(wi, activation, outcome, value_ref).extend(
+                released
+            )
         wi.status = WorkItemStatus.SETTLED
         wi.outcome = outcome
         self._publish(wi.operator_id, outcome, value_ref)
-        return self._deliver_record(wi.operator_id, wi.activation_id, value_ref)
+        return self._deliver_record(wi.operator_id, wi.activation_id, value_ref).extend(
+            released
+        )
 
     def _settle_attempt_terminal(
         self, wi: WorkItem, outcome: PublicationOutcome
@@ -581,18 +628,36 @@ class OrchestrationEngine:
         return Advance(failed=self._settle_failure(wi.work_item_id))
 
     def route_boundary_event(self, task_id: str, event: BoundaryEvent) -> Advance:
-        """Route an episode's durable boundary event back into the ledger semantics.
+        """Route an episode's boundary request back into the ledger, validated first.
 
-        The physical layer carries the event across the episode boundary; the engine
-        applies the settled semantics. A spawn materializes a child under the yielding
-        activation's scope. An invocation or effect records durable request state before
-        the work item suspends, so waiting holds no worker. A yield persists the opaque
-        continuation and suspends. A state access records the declared reference; its
-        value is resolved by query.
+        For an agent operator the engine validates the request against the operator's
+        boundary signature and effective authority before it creates any work; an
+        undeclared event, tool, model interface, or child target settles as a durable
+        typed denial injected into the continuation, never a silent no-op. A recorded
+        (activation, call correlation) is a re-drive: it maps to its fabric-assigned
+        idempotency key and creates no second request, so a fresh harness call id can
+        never duplicate a target effect. A spawn materializes one declared child under
+        the agent's lazily opened child-init scope; a spawn seal closes that producer;
+        an invocation or effect records durable request state before the work item
+        suspends, so waiting holds no worker; a yield persists the capsule; a state
+        access records the declared reference.
         """
         wi = self._work_item_for_task(task_id)
         if wi is None or wi.status in _TERMINAL_WI:
             return Advance()
+        # A recorded call is a re-drive whether it was granted or denied: it maps to its
+        # key and creates no new work, so re-validation and duplicate records are cut.
+        if self._is_boundary_redrive(wi, event):
+            return Advance()
+        op = self._operators.get(wi.operator_id)
+        if isinstance(op, AgentOperator):
+            if (denial := self._validate_agent_boundary(op, wi, event)) is not None:
+                return self._record_boundary_denial(wi, event, denial)
+            if event.kind in _DEDUP_CAPABLE and event.call_correlation is None:
+                raise RegionError(
+                    f"mediated {event.kind.value} boundary requires a call correlation "
+                    "for durable dedup"
+                )
         match event.kind:
             case BoundaryEventKind.SPAWN:
                 if self._kind(wi.operator_id) not in _CHILD_INIT_OPENERS:
@@ -600,17 +665,26 @@ class OrchestrationEngine:
                         f"{wi.operator_id!r} is not a spawn/agent scope opener; "
                         "it cannot yield a spawn boundary"
                     )
-                return self.materialize_child(
+                # Record only after the child materializes: a budget/depth rejection
+                # raises and must leave no phantom-accepted envelope to re-drive.
+                advance = self.materialize_child(
                     wi.activation_id,
                     operator_id=event.child_ref,
                     value_ref=event.value_ref,
                 )
+                self._record_boundary(wi, event)
+                return advance
+            case BoundaryEventKind.SPAWN_SEAL:
+                advance = self.seal_spawn(wi.activation_id)
+                self._record_boundary(wi, event)
+                return advance
             case BoundaryEventKind.INVOCATION:
-                return self._suspend_on_request(wi, event.interface, effect=False)
+                return self._suspend_on_request(wi, event, effect=False)
             case BoundaryEventKind.EXTERNAL_EFFECT:
-                return self._suspend_on_request(wi, event.interface, effect=True)
+                return self._suspend_on_request(wi, event, effect=True)
             case BoundaryEventKind.YIELD:
                 wi.continuation_ref = event.continuation
+                self._record_boundary(wi, event)
                 self._suspend_work_item(wi, "episode_yielded")
                 return Advance()
             case BoundaryEventKind.STATE_ACCESS:
@@ -623,8 +697,158 @@ class OrchestrationEngine:
                 return Advance()
         return Advance()
 
+    def deliver_boundary_outcome(self, task_id: str, call_correlation: str) -> Advance:
+        """Re-ready a boundary-suspended work item once its outcome is durable.
+
+        A mediated request's durable outcome — a model or tool result, or a denial —
+        lets the episode resume: the work item returns to READY for a fresh attempt that
+        injects the outcome at its originating call. Only a boundary-suspended work item
+        with a recorded envelope for the call is resumed — a delivery to a running or
+        settled item, or for an unrecorded call, is a no-op. An episode has one
+        outstanding boundary at a time, so the recorded call is the one it awaits.
+        """
+        wi = self._work_item_for_task(task_id)
+        if wi is None or wi.status is not WorkItemStatus.BLOCKED:
+            return Advance()
+        if (wi.activation_id, call_correlation) not in self._boundary_events:
+            return Advance()
+        wi.status = WorkItemStatus.READY
+        self._emit(
+            "episode_resumed",
+            work_item_id=wi.work_item_id,
+            operator_id=wi.operator_id,
+            detail={"call": call_correlation},
+        )
+        return Advance(ready=[wi.legacy_task_id])
+
+    def _is_boundary_redrive(self, wi: WorkItem, event: BoundaryEvent) -> bool:
+        """Whether a boundary reissues a recorded facade call under its stable id."""
+        if event.call_correlation is None:
+            return False
+        if (wi.activation_id, event.call_correlation) not in self._boundary_events:
+            return False
+        self._emit(
+            "boundary_redriven",
+            work_item_id=wi.work_item_id,
+            operator_id=wi.operator_id,
+            detail={"call": event.call_correlation},
+        )
+        return True
+
+    def _validate_agent_boundary(
+        self, op: AgentOperator, wi: WorkItem, event: BoundaryEvent
+    ) -> DenialKind | None:
+        """Check an agent boundary against its signature and effective authority.
+
+        A kind outside the declared signature, a tool/model interface outside the
+        effective invoke face, or a child target outside the declared child region is a
+        definitive denial: authority when the request is undeclared, policy when the
+        pinned envelope blocks a declared one. None means admissible.
+        """
+        if event.kind not in op.boundary.events:
+            return DenialKind.AUTHORITY
+        if event.kind in (
+            BoundaryEventKind.INVOCATION,
+            BoundaryEventKind.EXTERNAL_EFFECT,
+        ):
+            invoke, _ = self._agent_faces(op, wi)
+            if event.interface is not None and event.interface not in invoke:
+                return (
+                    DenialKind.POLICY
+                    if event.interface in op.authority.invoke
+                    else DenialKind.AUTHORITY
+                )
+        elif event.kind is BoundaryEventKind.SPAWN:
+            target = event.child_ref or op.child_template_ref
+            if target is None or target != op.child_template_ref:
+                return DenialKind.AUTHORITY
+        return None
+
+    def _agent_faces(
+        self, op: AgentOperator, wi: WorkItem
+    ) -> tuple[frozenset[str], frozenset[str]]:
+        """The agent's effective invoke/delegate faces: its ceiling under policy."""
+        scope_grant = self._grant_for_scope(
+            self._activations[wi.activation_id].scope_id
+        )
+        envelope = self._policy_interfaces()
+        invoke = attenuate(scope_grant.invoke, op.authority.invoke, envelope)
+        delegate = attenuate(invoke, op.authority.delegate, envelope)
+        return frozenset(invoke), frozenset(delegate)
+
+    def _record_boundary(
+        self,
+        wi: WorkItem,
+        event: BoundaryEvent,
+        *,
+        invocation_id: str | None = None,
+        denial: DenialKind | None = None,
+    ) -> str | None:
+        """Persist the durable correlation envelope; return its idempotency key.
+
+        Keyed on (activation, call correlation): a re-driven facade call reuses the
+        recorded key rather than minting a new one, so a fresh harness call id never
+        duplicates a dedupe-capable target effect. A boundary without a call correlation
+        carries no durable dedupe handle and records nothing.
+        """
+        if event.call_correlation is None:
+            return None
+        corr = (wi.activation_id, event.call_correlation)
+        existing = self._boundary_events.get(corr)
+        key = existing.idempotency_key if existing else new_idempotency_key()
+        self._boundary_events[corr] = event.model_copy(
+            update={
+                "activation": wi.activation_id,
+                "idempotency_key": key,
+                "invocation_id": invocation_id,
+                "denial": denial,
+            }
+        )
+        detail = {"idempotency_key": key or "", "call": event.call_correlation}
+        if denial is not None:
+            detail["denial"] = denial.value
+        self._emit(
+            "boundary_recorded",
+            work_item_id=wi.work_item_id,
+            operator_id=wi.operator_id,
+            invocation_id=invocation_id,
+            detail=detail,
+        )
+        return key
+
+    def _record_boundary_denial(
+        self, wi: WorkItem, event: BoundaryEvent, denial: DenialKind
+    ) -> Advance:
+        """Settle a denied agent boundary as a durable typed continuation outcome.
+
+        The denial is recorded against the operator and injected back as the boundary's
+        outcome; it creates neither an invocation nor a child, and the episode suspends
+        to receive it rather than silently proceeding.
+        """
+        subject = event.interface or event.child_ref or ""
+        self._decisions.append(
+            AuthorityDecision(
+                grant_id=self._root_grant.grant_id,
+                interface=subject,
+                kind=AuthorityDecisionKind.DENIED,
+                work_item_id=wi.work_item_id,
+                operator_id=wi.operator_id,
+                denial_kind=denial,
+                reason=f"boundary {event.kind.value} denied",
+            )
+        )
+        self._record_boundary(wi, event, denial=denial)
+        self._emit(
+            "authority_denied" if denial is DenialKind.AUTHORITY else "policy_denied",
+            work_item_id=wi.work_item_id,
+            operator_id=wi.operator_id,
+            detail={"interface": subject},
+        )
+        self._suspend_work_item(wi, "episode_suspended")
+        return Advance()
+
     def _suspend_on_request(
-        self, wi: WorkItem, interface: str | None, *, effect: bool
+        self, wi: WorkItem, event: BoundaryEvent, *, effect: bool
     ) -> Advance:
         invocation = Invocation(
             invocation_id=new_invocation_id(),
@@ -638,12 +862,13 @@ class OrchestrationEngine:
             ),
         )
         self._invocations[invocation.invocation_id] = invocation
+        self._record_boundary(wi, event, invocation_id=invocation.invocation_id)
         self._emit(
             "effect_requested" if effect else "invocation_issued",
             work_item_id=wi.work_item_id,
             invocation_id=invocation.invocation_id,
             operator_id=wi.operator_id,
-            detail={"interface": interface or ""},
+            detail={"interface": event.interface or ""},
         )
         self._suspend_work_item(wi, "episode_suspended")
         return Advance()
@@ -688,8 +913,9 @@ class OrchestrationEngine:
 
         Unlike :meth:`spawn_child`, the child is given a stable dispatchable identity,
         carries its child-init input as ``value_ref``, and is readied for a physical
-        attempt. The child body must be a plain leaf; a scope-opening child body is not
-        live-dispatchable and stays a trace-level :meth:`spawn_child`.
+        attempt. The child body must be a leaf, or an agent that itself owns a
+        child-init scope; a spawn/loop child body is not live-dispatchable and stays a
+        trace-level :meth:`spawn_child`.
         """
         advance = Advance()
         _, wi = self._create_child(
@@ -710,7 +936,7 @@ class OrchestrationEngine:
         spawn_op_obj = self._operators[spawn_op]
         child_ref = (
             spawn_op_obj.child_template_ref
-            if isinstance(spawn_op_obj, SpawnRegion)
+            if isinstance(spawn_op_obj, (SpawnRegion, AgentOperator))
             else None
         )
         body_ref = operator_id or child_ref or spawn_op
@@ -735,9 +961,16 @@ class OrchestrationEngine:
         body_opens_scope = self._kind(body_ref) in _CHILD_INIT_OPENERS or (
             self._kind(body_ref) is OperatorKind.LOOP_CONTEXT
         )
-        if dispatchable and (body_opens_scope or not isinstance(body_op, LeafOperator)):
+        # A leaf child dispatches directly; an agent child dispatches and owns its own
+        # child-init scope (recursion). A spawn/loop child body stays trace-level.
+        if dispatchable and not isinstance(body_op, (LeafOperator, AgentOperator)):
             raise RegionError(
-                f"child body {body_ref!r} opens a scope; only a leaf body is "
+                f"child body {body_ref!r} is not live-dispatchable; only a leaf or "
+                "agent body is"
+            )
+        if dispatchable and body_opens_scope and not isinstance(body_op, AgentOperator):
+            raise RegionError(
+                f"child body {body_ref!r} opens a scope; only a leaf or agent body is "
                 "live-dispatchable"
             )
         # Validate every budget before materializing, so a rejected child leaves no
@@ -755,15 +988,15 @@ class OrchestrationEngine:
             child_index=index,
         )
         self._activations[activation.activation_id] = activation
-        profile = body_op.profile if isinstance(body_op, LeafOperator) else None
+        effect, recovery = _effect_recovery(body_op)
         child_wi = WorkItem(
             work_item_id=new_work_item_id(),
             activation_id=activation.activation_id,
             operator_id=body_ref,
             legacy_task_id=activation.activation_id if dispatchable else "",
             value_ref=value_ref,
-            effect_class=profile.effect if profile else EffectClass.PURE,
-            recovery=profile.recovery if profile else RecoveryClass.RECOMPUTE,
+            effect_class=effect,
+            recovery=recovery,
             replay_contract=self._replay.get(body_ref),
         )
         self._work_items[child_wi.work_item_id] = child_wi
@@ -776,7 +1009,9 @@ class OrchestrationEngine:
             operator_id=body_ref,
             detail={"scope": scope_id, "index": str(index)},
         )
-        if self._kind(body_ref) in _CHILD_INIT_OPENERS:
+        # A spawn/loop child body opens its nested scope eagerly; a dispatchable agent
+        # child opens its own child-init scope lazily, only when it first spawns.
+        if self._kind(body_ref) is OperatorKind.SPAWN:
             self._open_child_init_scope(
                 activation.activation_id, parent_scope_id=scope_id
             )
@@ -795,6 +1030,27 @@ class OrchestrationEngine:
                 operator_id=self._scopes[scope_id].owner_operator_id,
                 detail={"scope": scope_id},
             )
+        return self._maybe_release_join(scope_id)
+
+    def _seal_owned_child_init(self, activation_id: str) -> Advance:
+        """Seal an agent's own child-init capability on terminal completion.
+
+        An agent that opened a child-init scope for spawn_agent children but never
+        emitted an explicit seal has it sealed here, so terminal completion supplies the
+        closure a SpawnSeal otherwise would. A non-spawning agent owns no such scope.
+        """
+        scope_id = self._scope_by_activation.get(activation_id)
+        if scope_id is None:
+            return Advance()
+        cap = self._capabilities.get((scope_id, ProgressAxis.CHILD_INIT))
+        if cap is None or cap.status is not CapabilityStatus.OPEN:
+            return Advance()
+        cap.status = CapabilityStatus.SEALED
+        self._emit(
+            "child_init_sealed",
+            operator_id=self._scopes[scope_id].owner_operator_id,
+            detail={"scope": scope_id, "reason": "agent_terminal"},
+        )
         return self._maybe_release_join(scope_id)
 
     def revoke_spawn(self, spawn: str) -> None:
@@ -1725,6 +1981,16 @@ class OrchestrationEngine:
         profile = self._profiles.get(self._operator_for_task(task_id) or "")
         return classify_recovery(profile) if profile else None
 
+    def boundary_envelope(
+        self, activation_id: str, call_correlation: str
+    ) -> BoundaryEvent | None:
+        """The durable envelope recorded for one mediated facade call, if any.
+
+        Carries the fabric-assigned idempotency key, the causal invocation id, and the
+        outcome (or denial) the continuation resumes with.
+        """
+        return self._boundary_events.get((activation_id, call_correlation))
+
     def contract_trace(self) -> list[tuple[str, str]]:
         """A compact (kind, subject) projection of the trace for test inspection."""
         return [
@@ -1823,6 +2089,7 @@ class OrchestrationEngine:
             records=list(self._records),
             invocations=list(self._invocations.values()),
             attempts=list(self._attempts.values()),
+            boundary_events=list(self._boundary_events.values()),
             effect_receipts=list(self._receipts.values()),
             authority_decisions=list(self._decisions),
             delegated_grants=list(self._grants.values()),
@@ -1919,7 +2186,12 @@ class OrchestrationEngine:
         opener = self._resolve_opener_activation(handle)
         if opener is None:
             raise RegionError(f"{handle!r} has no opener activation")
-        return self._open_child_init_scope(opener)
+        # A lazily opened scope (an agent's first spawn) nests under the opener's own
+        # enclosing scope, so a nested agent's recursion depth is counted correctly.
+        parent = (
+            self._activations[opener].scope_id if opener in self._activations else None
+        )
+        return self._open_child_init_scope(opener, parent_scope_id=parent)
 
     def _require_loop_scope(self, handle: str) -> str:
         if (scope_id := self._scope_id_for(handle)) is not None:

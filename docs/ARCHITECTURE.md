@@ -58,7 +58,8 @@ The runtime is two top-level processes:
 3-char prefixes: `wfl-` workflows, `tsk-` tasks, `ssn-` SSH sessions,
 `scn-` SSH connection rows, `cmd-` supervisor commands. The v2 orchestration
 ledger adds `act-` activations, `scp-` scopes, `wki-` work items, `att-`
-attempts, `inv-` invocations, and `agr-` authority grants. Always use
+attempts, `inv-` invocations, `agr-` authority grants, and `idm-` idempotency
+keys (the fabric-assigned dedupe authority for a mediated boundary). Always use
 `new_*_id()` helpers in `src/shared/utils/ids.py`. Never use `uuid4()` or
 `secrets.token_hex` for IDs.
 
@@ -149,6 +150,15 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
 - **Live-feasibility handoff.** A ready episode carries the lowerer's declared
   alternative; a feasibility check lets the scheduler defer an infeasible alternative,
   holding no worker, rather than dispatching it. It resolves no resident capacity.
+- **Agent-harness substrate.** The logical `Agent` runs as a dispatchable run-to-yield
+  episode that also owns a scope for its children, driven through a generic
+  `HarnessAdapter` contract (`src/server/orchestration/harness/`). The engine validates
+  each boundary the episode emits — a model or tool invocation, an effect, or a
+  `spawn_agent` — against the operator's declared signature and authority before creating
+  work; an undeclared request settles as a durable denial instead of running, and a
+  re-driven boundary is deduplicated by its idempotency key rather than repeating its
+  effect. A `spawn_agent` creates one child activation, closed by a `SpawnSeal` or the
+  agent's completion. The legacy UTU agent executor remains the default execution path.
 - **Task merging.** Compatible adjacent tasks in a DAG (same `taskType`,
   model, hardware shape, and merge key) coalesce into a single dispatch.
   Merged children ride on `WorkerTaskMessage.merged_children`; the worker
