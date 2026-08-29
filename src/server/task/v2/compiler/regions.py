@@ -151,6 +151,7 @@ def _add_synth_operator(
 
 
 def _apply_leaf_declarations(parsed: ParsedWorkflow, acc: LoweringAccumulator) -> None:
+    name_to_op = build_name_map(parsed)
     by_id = {op.operator_id: idx for idx, op in enumerate(acc.operators)}
     for task in parsed.tasks:
         if not task.v2:
@@ -159,11 +160,14 @@ def _apply_leaf_declarations(parsed: ParsedWorkflow, acc: LoweringAccumulator) -
         if idx is None:
             continue
         op = acc.operators[idx]
-        acc.operators[idx] = _apply_one(task, op, acc)
+        acc.operators[idx] = _apply_one(task, op, name_to_op, acc)
 
 
 def _apply_one(
-    task: ParsedTask, op: LogicalOperator, acc: LoweringAccumulator
+    task: ParsedTask,
+    op: LogicalOperator,
+    name_to_op: dict[str, str],
+    acc: LoweringAccumulator,
 ) -> LogicalOperator:
     v2 = task.v2 or {}
     name = task.graph_node_name or task.local_name or task.task_id
@@ -208,7 +212,9 @@ def _apply_one(
     _apply_result_visibility(v2.get("result"), op.operator_id, acc)
 
     if isinstance(op, AgentOperator):
-        return _apply_agent_v2(op, v2, name)
+        return _apply_agent_child_regions(
+            _apply_agent_v2(op, v2, name), v2, name_to_op, acc
+        )
     if isinstance(op, LeafOperator):
         return _apply_leaf_v2(op, v2, name)
     raise compile_error(
@@ -217,6 +223,49 @@ def _apply_one(
         name,
         "graph_node",
     )
+
+
+def _apply_agent_child_regions(
+    op: AgentOperator,
+    v2: dict[str, Any],
+    name_to_op: dict[str, str],
+    acc: LoweringAccumulator,
+) -> AgentOperator:
+    """Build one declared child region per ``v2.child`` entry, keyed by the child name.
+
+    Each entry synthesizes a matched Spawn/Join pair over the resolved entry operator
+    and exposes it as a ``ChildRegionRef`` whose role is the author-facing child name,
+    so a ``spawn_agent`` selects the region by name without knowing the compiled ids.
+    """
+    children = v2.get("child")
+    if isinstance(children, str):
+        children = [children]
+    if not isinstance(children, list):
+        return op
+    refs: list[ChildRegionRef] = list(op.child_region_refs)
+    for child in children:
+        entry_op = name_to_op.get(str(child), str(child))
+        spawn_id = f"{op.operator_id}:{child}:spawn"
+        join_id = f"{spawn_id}:join"
+        spawn = SpawnRegion(
+            operator_id=spawn_id,
+            source_ref=op.source_ref,
+            outputs=(Port(name="children"),),
+            child_template_ref=entry_op,
+            authority=AuthorityCeiling(),
+        )
+        join = JoinRegion(
+            operator_id=join_id,
+            source_ref=op.source_ref,
+            inputs=(Port(name="children"),),
+            outputs=(Port(name="out"),),
+            completion=JoinCompletion.ALL_SETTLED,
+        )
+        _add_synth_operator(spawn, op.operator_id, acc)
+        _add_synth_operator(join, op.operator_id, acc)
+        acc.edges.append(TemplateEdge(from_op=spawn_id, to_op=join_id))
+        refs.append(ChildRegionRef(name=str(child), spawn_ref=spawn_id))
+    return op.model_copy(update={"child_region_refs": tuple(refs)})
 
 
 def _apply_agent_v2(op: AgentOperator, v2: dict[str, Any], name: str) -> AgentOperator:

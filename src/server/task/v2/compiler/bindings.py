@@ -125,6 +125,7 @@ def default_agent_boundary() -> BoundarySignature:
         events=(
             BoundaryEventKind.INVOCATION,
             BoundaryEventKind.SPAWN,
+            BoundaryEventKind.SPAWN_SEAL,
             BoundaryEventKind.YIELD,
             BoundaryEventKind.EXTERNAL_EFFECT,
             BoundaryEventKind.STATE_ACCESS,

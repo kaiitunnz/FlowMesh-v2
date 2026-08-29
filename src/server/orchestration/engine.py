@@ -384,6 +384,11 @@ class OrchestrationEngine:
                 )
                 if op.profile.effect is EffectClass.EXTERNAL_EFFECT:
                     requested.add(op.operator_id)
+            elif isinstance(op, (AgentOperator, SpawnRegion)):
+                # A declared authority ceiling is granted absent an explicit policy, so
+                # an agent's declared invoke/delegate faces survive attenuation.
+                requested.update(op.authority.invoke)
+                requested.update(op.authority.delegate)
 
         scope = Scope(scope_id=new_scope_id(), instance_id=instance_id, depth=0)
         invoke = requested if granted_interfaces is None else set(granted_interfaces)
