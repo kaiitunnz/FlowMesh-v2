@@ -13,7 +13,7 @@ The worker resolves `spec.taskType` against an executor registry in
 | `training` | `SFTExecutor` / `LoRASFTExecutor` / `DPOExecutor` / `PPOExecutor` | LLM fine-tuning |
 | `image_classification_training` | `ImageClassificationTrainingExecutor` | Vision classification fine-tuning (`AutoModelForImageClassification` + HF `Trainer`) |
 | `rag` | `RAGExecutor` | Retrieval-augmented generation |
-| `agent` | `AgentExecutor` | Tool-using LLM agent (utu / youtu-agent backend) |
+| `agent` | `AgentExecutor` / `AgentEpisodeExecutor` | Tool-using LLM agent — UTU / youtu-agent by default, or a run-to-yield harness episode when `spec.harness` names a backend |
 | `data_profiling` | `DataProfilingExecutor` | DataFrame profiling |
 | `data_retrieval` | `DataRetrievalExecutor` | DataFrame loading from sources (`type: sql`, `type: s3`, `type: lumid` with `mode: sql\|s3\|agent` via lumid-data-app; `type: lumid` (mode `sql`/`s3`/`agent`) requires `lumid_data_token`, the bearer forwarded to lumid-data-app) |
 | `ssh` | `SSHExecutor` | Interactive SSH session or non-interactive container job |
@@ -63,3 +63,28 @@ Optional, for the search tools:
 
 - `SERPER_API_KEY`
 - `JINA_API_KEY`
+
+## Agent-episode harness backends
+
+When an agent's spec declares `harness.backend`, the worker runs it through the
+dependency-light `AgentEpisodeExecutor` instead of the UTU path: one dispatch is one
+run-to-yield step of the named `HarnessAdapter` binding, resumed from the durable capsule
+and delivered outcomes the fabric ships. The executor advertises the `agent` capability
+even on a worker that cannot import the UTU dependencies, so a CPU worker services agent
+episodes. A backend binding is imported lazily from the worker adapter registry
+(`src/worker/harness/`) only when its key is selected.
+
+Declared per agent under `spec.harness`:
+
+- `backend` — the adapter binding: `scripted` (a deterministic backend that replays a
+  declared step sequence from `params.script`) or `codex` (the version-pinned Codex
+  app-server binding).
+- `version` — pins the adapter/protocol so a capsule resumes only on a match.
+- `params` — backend-specific configuration.
+
+A mediated model request the agent defers is settled by the **agent-model gateway**, not a
+raw model endpoint. Its upstream is configured on the server under the
+`ORCHESTRATOR_AGENT_MODEL_GATEWAY_*` env family (see [`ENV.md`](ENV.md)); the default
+`canned` mode is deterministic and credential-free, while `openai` forwards to an
+OpenAI-compatible endpoint, reusing the `UTU_LLM_*` provider path when its own values are
+unset.

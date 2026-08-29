@@ -152,13 +152,32 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   holding no worker, rather than dispatching it. It resolves no resident capacity.
 - **Agent-harness substrate.** The logical `Agent` runs as a dispatchable run-to-yield
   episode that also owns a scope for its children, driven through a generic
-  `HarnessAdapter` contract (`src/server/orchestration/harness/`). The engine validates
-  each boundary the episode emits — a model or tool invocation, an effect, or a
-  `spawn_agent` — against the operator's declared signature and authority before creating
-  work; an undeclared request settles as a durable denial instead of running, and a
-  re-driven boundary is deduplicated by its idempotency key rather than repeating its
-  effect. A `spawn_agent` creates one child activation, closed by a `SpawnSeal` or the
-  agent's completion. The legacy UTU agent executor remains the default execution path.
+  `HarnessAdapter` contract (`src/shared/harness/`). The engine validates each boundary
+  the episode emits — a model or tool invocation, an effect, or a `spawn_agent` — against
+  the operator's declared signature and authority before creating work; an undeclared
+  request settles as a durable denial instead of running, and a re-driven boundary is
+  deduplicated by its fabric-assigned idempotency key rather than repeating its effect. A
+  `spawn_agent` creates one child activation, closed by a `SpawnSeal` or the agent's
+  completion.
+- **Agent-episode dispatch seam.** An agent that declares a harness backend
+  (`spec.harness.backend`) dispatches through the worker runner to the `AgentEpisodeExecutor`,
+  which drives one adapter step per dispatch behind that backend key (the built-in
+  `scripted` backend, or the version-pinned `codex` app-server binding). Each step starts
+  or resumes from an opaque durable continuation capsule plus durably delivered outcomes
+  the fabric ships on `WorkerTaskMessage.agent_episode`, and returns a completion, failure,
+  cancellation, yield, or a typed boundary request emitted before it executes. The worker
+  reports the step; the server routes the boundary into the ledger and either re-dispatches
+  the agent for its next step or suspends its lane until a durable outcome is injected. The
+  capsule and its one pending outcome are rebuilt from the ledger, so a restart resumes with
+  the same context. An agent without a declared backend stays on the legacy UTU executor,
+  which remains the default execution path.
+- **Agent-model gateway.** A managed model request an agent defers becomes a durable
+  invocation the agent-model gateway settles off the agent's lane through a configurable
+  upstream — deterministic for tests, an OpenAI-compatible provider forward in production —
+  injecting the result back at the originating call. It implements the OpenAI Responses API
+  (`POST /v1/responses`) so a harness whose provider targets it crosses the same seam;
+  resident-capacity admission is not part of it. Configured under the
+  `ORCHESTRATOR_AGENT_MODEL_GATEWAY_*` env family.
 - **Task merging.** Compatible adjacent tasks in a DAG (same `taskType`,
   model, hardware shape, and merge key) coalesce into a single dispatch.
   Merged children ride on `WorkerTaskMessage.merged_children`; the worker
