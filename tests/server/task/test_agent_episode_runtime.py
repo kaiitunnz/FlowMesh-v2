@@ -430,6 +430,51 @@ def test_gateway_origination_survives_a_restart_replay() -> None:
     asyncio.run(run())
 
 
+def test_a_post_reroute_completion_replay_is_a_noop() -> None:
+    # After the reroute (child materialized, turn 2 pending), replaying the turn-1
+    # completion must not settle the agent: the reroute closed turn-1's attempt, so the
+    # stale completion is superseded and would otherwise publish the placeholder output.
+    async def run() -> None:
+        runtime = _runtime(FakeRegistry())
+        workflow_id, ids = await _register(runtime, _AGENT_WF)
+        writer = ids["writer"]
+        adapter = _AlwaysCompleteAdapter("Dispatched to reviewer; awaiting result.")
+        engine = runtime.orchestration_engine(workflow_id)
+        assert engine is not None
+
+        # Turn 1: dispatch, run, originate, and reroute into the spawn.
+        dispatch = runtime.agent_episode_dispatch(writer)
+        assert dispatch is not None
+        engine.on_dispatched(writer, "wkr-1")
+        result = adapter.start(
+            writer, capsule=None, outcomes=dispatch.delivered_outcomes
+        )
+        runtime.originate_episode_boundary(writer, _spawn_reviewer(writer))
+        payload = {"agent_episode": result.model_dump(mode="json")}
+        runtime.mark_succeeded(writer, "wkr-1", payload, _TS)
+        assert (
+            len(
+                [
+                    w
+                    for w in engine.to_snapshot().work_items
+                    if w.legacy_task_id.startswith("act-")
+                ]
+            )
+            == 1
+        )
+        record = runtime.get_record(writer)
+        assert record is not None and str(record.status) != "DONE"
+
+        # Replay the same turn-1 completion (at-least-once) without re-dispatching, so
+        # the latest attempt is still the closed turn-1 attempt.
+        runtime.mark_succeeded(writer, "wkr-1", payload, _TS)
+        assert str(record.status) != "DONE"
+        # The episode is not published with the intermediate dispatch placeholder.
+        assert engine.resolve_output(f"legacy:{writer}") is None
+
+    asyncio.run(run())
+
+
 def test_gateway_origination_redrive_creates_no_second_child() -> None:
     # A crash before the outcome injects re-dispatches the turn; the gateway re-captures
     # the same facade and re-originates the same stable correlation. The boundary

@@ -1774,6 +1774,12 @@ class TaskRuntime:
                         ),
                     )
                     return usages
+                engine = self._engines.get(record.workflow_id)
+                if engine is not None and not engine.latest_attempt_open(task_id):
+                    # A completion whose attempt the reroute already closed is a
+                    # superseded replay; settling it would preempt the live turn and
+                    # publish the episode with a stale intermediate result.
+                    return usages
             if record:
                 if record.status == TaskStatus.CANCELLED:
                     return usages
