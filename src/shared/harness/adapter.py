@@ -1,14 +1,14 @@
 """The generic harness-adapter contract below the agent boundary signature.
 
 A harness adapter is a physical binding that drives an agent's local turns for one
-backend. It is the reference form a concrete binding maps its own item/tool/call and
-injection surface onto: named, fabric-owned facade tools; a stable per-call correlation;
-and per-call outcome injection. The fabric persists and dispatches the mediated work and
-the engine owns durable request creation; the adapter owns only harness-local session,
-checkpoint, export/import, cancellation, and injection mechanics.
+backend, running on a worker. It is the reference form a concrete binding maps its own
+item/tool/call and injection surface onto: named, fabric-owned facade tools; a stable
+per-call correlation; and per-call outcome injection. The fabric persists and dispatches
+the mediated work and the engine owns durable request creation; the adapter owns only
+harness-local session, checkpoint, export/import, cancellation, and injection mechanics.
 
-The contract is defined here as a harness-agnostic ABC and exercised by a test-double;
-concrete backend bindings live behind their own versioned backend key.
+The contract is harness-agnostic and worker-safe (no server imports); concrete backend
+bindings live behind their own versioned backend key.
 """
 
 from abc import ABC, abstractmethod
@@ -17,7 +17,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict
 
-from ..state import BoundaryEvent, DenialKind
+from .boundary import BoundaryRequest, DenialKind
 
 
 class FacadeTool(StrEnum):
@@ -73,6 +73,21 @@ class DeliveredOutcome(BaseModel):
     value: str | None = None  # opaque result payload when kind is RESULT
 
 
+class AgentEpisodeDispatch(BaseModel):
+    """The agent-episode context the fabric ships to a worker for one run-to-yield step.
+
+    The backend key selects the adapter; ``capsule_blob`` resumes a prior step (None on
+    the first dispatch); ``delivered_outcomes`` are the durable outcomes to inject at
+    their originating calls before the adapter steps.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    backend: HarnessBackendKey
+    capsule_blob: str | None = None
+    delivered_outcomes: tuple[DeliveredOutcome, ...] = ()
+
+
 class HarnessResultKind(StrEnum):
     """What a harness step returned."""
 
@@ -89,7 +104,7 @@ class HarnessResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     kind: HarnessResultKind
-    request: BoundaryEvent | None = None  # the deferred request, for a BOUNDARY/YIELD
+    request: BoundaryRequest | None = None  # the deferred request, for a BOUNDARY/YIELD
     capsule: HarnessCapsule | None = None  # the continuation to resume from
     value: str | None = None
     error: str | None = None

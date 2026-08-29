@@ -17,6 +17,8 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from shared.harness.boundary import DenialKind
+
 from ..task.v2.representations.operators import (
     BoundaryEventKind,
     EffectClass,
@@ -85,17 +87,6 @@ class AuthorityDecisionKind(StrEnum):
     DENIED = "denied"
 
 
-class DenialKind(StrEnum):
-    """Why a definitive dynamic authorization failed, distinct from admission outcomes.
-
-    A denial creates neither a child activation nor a resident claim, and is separate
-    from quota/rate/capacity/transport outcomes.
-    """
-
-    AUTHORITY = "authority"  # interface outside the effective grant's invoke/delegate
-    POLICY = "policy"  # blocked by the pinned policy envelope
-
-
 class ProgressAxis(StrEnum):
     """The axis of a scope's outstanding-capability account."""
 
@@ -139,7 +130,8 @@ class BoundaryEvent(BaseModel):
     ``invocation_id`` and any harness/cell-local id), the causal ``invocation_id``,
     the ``injection_target`` the outcome returns at, and the opaque ``continuation``
     capsule for the next resume. ``denial`` records a definitive authority/policy denial
-    injected into the continuation.
+    and ``outcome_value`` the settled result payload — the durable outcome the fabric
+    injects back into the continuation at re-dispatch and rehydrates after a restart.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -158,6 +150,7 @@ class BoundaryEvent(BaseModel):
     value_ref: ValueRef | None = None
     invocation_id: str | None = None
     denial: DenialKind | None = None
+    outcome_value: str | None = None  # settled result payload injected at re-dispatch
 
 
 class AuthorityGrant(BaseModel):

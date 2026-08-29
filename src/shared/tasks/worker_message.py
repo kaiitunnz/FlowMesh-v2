@@ -9,6 +9,7 @@ from pydantic import (
     model_validator,
 )
 
+from shared.harness import AgentEpisodeDispatch
 from shared.schemas.worker import WorkerStatus
 from shared.tasks import (
     TaskEnvelopeStrict,
@@ -40,6 +41,10 @@ class WorkerTaskMessage(BaseModel):
     upstream_task_ids: dict[str, str] | None = Field(
         default=None,
         description="Optional mapping from upstream stage name to resolved task ID.",
+    )
+    agent_episode: AgentEpisodeDispatch | None = Field(
+        default=None,
+        description="Agent-episode continuation context for a run-to-yield step.",
     )
 
     @property

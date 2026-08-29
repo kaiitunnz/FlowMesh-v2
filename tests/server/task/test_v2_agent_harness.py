@@ -24,6 +24,7 @@ from server.orchestration import (
 )
 from server.orchestration.harness import (
     AgentEpisode,
+    BoundaryRequest,
     DeliveredOutcome,
     HarnessAdapter,
     HarnessBackendKey,
@@ -286,7 +287,7 @@ class _NativeBypassAdapter(_DoubleAdapter):
 def _boundary(kind: BoundaryEventKind, call: str, **kw) -> HarnessResult:
     return HarnessResult(
         kind=HarnessResultKind.BOUNDARY,
-        request=BoundaryEvent(kind=kind, call_correlation=call, **kw),
+        request=BoundaryRequest(kind=kind, call_correlation=call, **kw),
         capsule=_capsule(f"after:{call}"),
     )
 
