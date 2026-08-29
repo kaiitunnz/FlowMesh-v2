@@ -399,6 +399,8 @@ async def _lifespan(_: FastAPI):
 
             # --- Root-only shutdown ---
             _stop_background()
+            if AGENT_MODEL_GATEWAY is not None:
+                AGENT_MODEL_GATEWAY.shutdown()
             if PORT_FORWARD_SERVICE is not None:
                 await PORT_FORWARD_SERVICE.stop()
 

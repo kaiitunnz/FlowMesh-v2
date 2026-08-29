@@ -16,15 +16,20 @@ from typing import Any, Protocol
 from urllib.parse import urlparse
 
 import requests
-from fastapi import APIRouter, Request
+from fastapi import APIRouter
 from pydantic import BaseModel
 
-from ..config import AgentModelGatewayConfig
+from ..config import AgentModelGatewayConfig, GatewayMode
 
 
 class _EpisodeSettler(Protocol):
     def settle_episode_invocation(
-        self, task_id: str, call_correlation: str, value: str | None
+        self,
+        task_id: str,
+        call_correlation: str,
+        value: str | None,
+        *,
+        error: str | None = None,
     ) -> bool: ...
 
 
@@ -65,16 +70,25 @@ class AgentModelGateway:
         try:
             value = self.invoke(payload)
         except Exception as exc:
+            # A failed upstream fails the boundary rather than resuming the agent with a
+            # phantom empty success.
             self._logger.warning("agent-model gateway upstream failed: %s", exc)
-            value = None
+            self._settler.settle_episode_invocation(
+                task_id, call_correlation, None, error=str(exc)
+            )
+            return
         self._settler.settle_episode_invocation(task_id, call_correlation, value)
+
+    def shutdown(self) -> None:
+        """Stop accepting settles and release the off-lane executor."""
+        self._executor.shutdown(wait=False)
 
     def invoke(self, payload: str | None) -> str:
         """Run the configured upstream over a model request, returning its text."""
         prompt = _extract_prompt(payload)
-        if self._cfg.mode == "echo":
+        if self._cfg.mode is GatewayMode.ECHO:
             return prompt
-        if self._cfg.mode == "openai":
+        if self._cfg.mode is GatewayMode.OPENAI:
             return self._forward_openai(prompt)
         return f"canned-response:{prompt}" if prompt else "canned-response"
 
@@ -139,9 +153,7 @@ def build_agent_model_router(gateway: AgentModelGateway) -> APIRouter:
     router = APIRouter()
 
     @router.post("/v1/responses")
-    async def create_response(
-        body: ResponsesRequest, request: Request
-    ) -> dict[str, Any]:
+    async def create_response(body: ResponsesRequest) -> dict[str, Any]:
         return gateway.responses(body)
 
     return router

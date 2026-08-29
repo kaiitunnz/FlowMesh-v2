@@ -2,13 +2,17 @@
 
 A model request an agent defers becomes a durable invocation the gateway settles
 through its upstream, off the agent's lane; the outcome injects at the originating call
-so the episode resumes with the model result. The Responses API surface runs the same
+so the episode resumes with the model result. An upstream failure fails the boundary
+rather than resuming as a phantom empty success. The Responses API surface runs the same
 conversion for a harness whose provider targets the gateway directly.
 """
 
 import asyncio
 
-from server.config import AgentModelGatewayConfig
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from server.config import AgentModelGatewayConfig, GatewayMode
 from server.orchestration import WorkItemStatus
 from server.services.agent_model_gateway import (
     AgentModelGateway,
@@ -17,6 +21,7 @@ from server.services.agent_model_gateway import (
 )
 from shared.harness import BoundaryEventKind, HarnessCapsule
 from tests.server.task.test_v2_orchestration import FakeRegistry, _register, _runtime
+from worker.harness.scripted import ScriptedHarnessAdapter, ScriptedStep
 
 _TS = "2026-08-29T00:00:00Z"
 
@@ -38,7 +43,9 @@ spec:
 
 
 def _canned_gateway(runtime) -> AgentModelGateway:
-    gateway = AgentModelGateway(runtime, AgentModelGatewayConfig(mode="canned"))
+    gateway = AgentModelGateway(
+        runtime, AgentModelGatewayConfig(mode=GatewayMode.CANNED)
+    )
 
     # A synchronous settle keeps the test deterministic; production submits off-lane.
     def _settle(task: str, call: str, payload: str | None) -> None:
@@ -48,27 +55,29 @@ def _canned_gateway(runtime) -> AgentModelGateway:
     return gateway
 
 
-def test_model_boundary_settles_and_resumes_with_the_result() -> None:
-    from worker.harness.scripted import ScriptedHarnessAdapter, ScriptedStep
+def _model_boundary_adapter() -> ScriptedHarnessAdapter:
+    return ScriptedHarnessAdapter(
+        [
+            ScriptedStep(
+                op="boundary",
+                kind=BoundaryEventKind.INVOCATION,
+                call="c0",
+                interface="model",
+                payload="solve 2+2",
+            ),
+            ScriptedStep(op="complete", value_from="c0"),
+        ],
+        "v1",
+    )
 
+
+def test_model_boundary_settles_and_resumes_with_the_result() -> None:
     async def run() -> None:
         runtime = _runtime(FakeRegistry())
         _canned_gateway(runtime)
         workflow_id, ids = await _register(runtime, _MODEL_AGENT_WF)
         solver = ids["solver"]
-        adapter = ScriptedHarnessAdapter(
-            [
-                ScriptedStep(
-                    op="boundary",
-                    kind=BoundaryEventKind.INVOCATION,
-                    call="c0",
-                    interface="model",
-                    payload="solve 2+2",
-                ),
-                ScriptedStep(op="complete", value_from="c0"),
-            ],
-            "v1",
-        )
+        adapter = _model_boundary_adapter()
         engine = runtime.orchestration_engine(workflow_id)
         assert engine is not None
 
@@ -104,9 +113,38 @@ def test_model_boundary_settles_and_resumes_with_the_result() -> None:
     asyncio.run(run())
 
 
+def test_upstream_failure_fails_the_boundary_not_an_empty_success() -> None:
+    # A gateway/upstream error must not resume the agent with an empty RESULT; it fails
+    # the boundary so the workflow surfaces the failure.
+    async def run() -> None:
+        runtime = _runtime(FakeRegistry())
+
+        def _settle(task: str, call: str, payload: str | None) -> None:
+            runtime.settle_episode_invocation(task, call, None, error="upstream 503")
+
+        runtime.set_invocation_settler(_settle)
+        workflow_id, ids = await _register(runtime, _MODEL_AGENT_WF)
+        solver = ids["solver"]
+        adapter = _model_boundary_adapter()
+        engine = runtime.orchestration_engine(workflow_id)
+        assert engine is not None
+
+        engine.on_dispatched(solver, "wkr-1")
+        first = adapter.start(solver, capsule=None, outcomes=[])
+        runtime.mark_succeeded(
+            solver, "wkr-1", {"agent_episode": first.model_dump(mode="json")}, _TS
+        )
+        wi = engine.work_item(solver)
+        assert wi is not None and wi.status is not WorkItemStatus.READY
+        failed = runtime.get_record(solver)
+        assert failed is not None and str(failed.status) == "FAILED"
+
+    asyncio.run(run())
+
+
 def test_gateway_modes_and_responses_conversion() -> None:
-    canned = AgentModelGateway(None, AgentModelGatewayConfig(mode="canned"))  # type: ignore[arg-type]
-    echo = AgentModelGateway(None, AgentModelGatewayConfig(mode="echo"))  # type: ignore[arg-type]
+    canned = AgentModelGateway(None, AgentModelGatewayConfig(mode=GatewayMode.CANNED))  # type: ignore[arg-type]
+    echo = AgentModelGateway(None, AgentModelGatewayConfig(mode=GatewayMode.ECHO))  # type: ignore[arg-type]
     assert canned.invoke("hi") == "canned-response:hi"
     assert echo.invoke("hi") == "hi"
     # A JSON payload's prompt is extracted before the upstream runs.
@@ -116,10 +154,7 @@ def test_gateway_modes_and_responses_conversion() -> None:
 
 
 def test_responses_router_serves_the_openai_surface() -> None:
-    from fastapi import FastAPI
-    from fastapi.testclient import TestClient
-
-    gateway = AgentModelGateway(None, AgentModelGatewayConfig(mode="echo"))  # type: ignore[arg-type]
+    gateway = AgentModelGateway(None, AgentModelGatewayConfig(mode=GatewayMode.ECHO))  # type: ignore[arg-type]
     app = FastAPI()
     app.include_router(build_agent_model_router(gateway))
     client = TestClient(app)

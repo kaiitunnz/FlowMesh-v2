@@ -11,7 +11,7 @@ import asyncio
 
 from server.orchestration import ProgressAxis, WorkItemStatus
 from server.task.models import TaskStatus
-from shared.harness import BoundaryEventKind, HarnessCapsule
+from shared.harness import BoundaryEventKind, HarnessCapsule, OutcomeKind
 from tests.server.task.test_v2_orchestration import FakeRegistry, _register, _runtime
 from worker.harness.scripted import ScriptedHarnessAdapter, ScriptedStep
 
@@ -180,6 +180,91 @@ def test_model_boundary_settle_returns_the_record_to_pending() -> None:
         assert writer_wi is not None and writer_wi.status is WorkItemStatus.SETTLED
         pub = engine.resolve_output(f"legacy:{writer}")
         assert pub is not None and pub.outcome.value == "success"
+
+    asyncio.run(run())
+
+
+def _canned_settler(runtime):
+    def _settle(task: str, call: str, payload: str | None) -> None:
+        runtime.settle_episode_invocation(task, call, f"model:{payload}")
+
+    return _settle
+
+
+def test_a_consumed_outcome_is_not_reinjected_across_a_query_step() -> None:
+    # A state-access step between an outcome-bearing boundary and a later step must not
+    # re-ship the earlier outcome: pending_outcome_call is cleared as each step runs.
+    async def run() -> None:
+        runtime = _runtime(FakeRegistry())
+        runtime.set_invocation_settler(_canned_settler(runtime))
+        workflow_id, ids = await _register(runtime, _AGENT_WF)
+        writer = ids["writer"]
+        adapter = ScriptedHarnessAdapter(
+            [
+                ScriptedStep(
+                    op="boundary",
+                    kind=BoundaryEventKind.INVOCATION,
+                    call="m0",
+                    interface="model",
+                    payload="draft",
+                ),
+                ScriptedStep(
+                    op="boundary",
+                    kind=BoundaryEventKind.STATE_ACCESS,
+                    call="s0",
+                    payload="peek",
+                ),
+                ScriptedStep(op="complete", value_from="m0"),
+            ],
+            "v1",
+        )
+        engine = runtime.orchestration_engine(workflow_id)
+        assert engine is not None
+
+        _step(runtime, adapter, writer)  # model boundary → suspend → canned settle
+        after_model = runtime.agent_episode_dispatch(writer)
+        assert after_model is not None and len(after_model.delivered_outcomes) == 1
+        _step(runtime, adapter, writer)  # injects m0 → state-access (inline)
+        # The model outcome was consumed by the previous dispatch; it must not re-ship.
+        after_query = runtime.agent_episode_dispatch(writer)
+        assert after_query is not None and after_query.delivered_outcomes == ()
+        _step(runtime, adapter, writer)  # completion still reads the injected m0 value
+        wi = engine.work_item(writer)
+        assert wi is not None and wi.status is WorkItemStatus.SETTLED
+
+    asyncio.run(run())
+
+
+def test_a_denied_boundary_re_readies_with_a_denied_outcome() -> None:
+    async def run() -> None:
+        runtime = _runtime(FakeRegistry())
+        runtime.set_invocation_settler(_canned_settler(runtime))
+        workflow_id, ids = await _register(runtime, _AGENT_WF)
+        writer = ids["writer"]
+        # "danger" is outside the declared invoke face, so the boundary is denied.
+        adapter = ScriptedHarnessAdapter(
+            [
+                ScriptedStep(
+                    op="boundary",
+                    kind=BoundaryEventKind.INVOCATION,
+                    call="d0",
+                    interface="danger",
+                ),
+                ScriptedStep(op="complete", value="ok"),
+            ],
+            "v1",
+        )
+        engine = runtime.orchestration_engine(workflow_id)
+        assert engine is not None
+
+        _step(runtime, adapter, writer)  # denied boundary → re-ready with a denial
+        assert runtime._tasks[writer].status is TaskStatus.PENDING
+        dispatch = runtime.agent_episode_dispatch(writer)
+        assert dispatch is not None and len(dispatch.delivered_outcomes) == 1
+        assert dispatch.delivered_outcomes[0].kind is OutcomeKind.DENIED
+        _step(runtime, adapter, writer)  # the agent handles the denial and completes
+        wi = engine.work_item(writer)
+        assert wi is not None and wi.status is WorkItemStatus.SETTLED
 
     asyncio.run(run())
 

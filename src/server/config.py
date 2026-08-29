@@ -272,6 +272,22 @@ class LogStreamConfig:
         )
 
 
+class GatewayMode(StrEnum):
+    """How a mediated model invocation settles at the agent-model gateway."""
+
+    CANNED = "canned"
+    ECHO = "echo"
+    OPENAI = "openai"
+
+
+def _first_env(*names: str) -> str | None:
+    """The first non-empty, stripped value among the given env vars, else None."""
+    for name in names:
+        if value := (os.getenv(name) or "").strip():
+            return value
+    return None
+
+
 @dataclass
 class AgentModelGatewayConfig:
     """The agent-model gateway's upstream binding for mediated model invocations.
@@ -281,7 +297,7 @@ class AgentModelGatewayConfig:
     endpoint (reusing the ``UTU_LLM_*`` provider path when unset).
     """
 
-    mode: str = "canned"
+    mode: GatewayMode = GatewayMode.CANNED
     url: str | None = None
     model: str | None = None
     api_key: str | None = None
@@ -290,20 +306,16 @@ class AgentModelGatewayConfig:
     @classmethod
     def from_env(cls) -> "AgentModelGatewayConfig":
         prefix = "ORCHESTRATOR_AGENT_MODEL_GATEWAY_"
+        raw_mode = (os.getenv(f"{prefix}MODE") or "canned").strip().lower()
+        try:
+            mode = GatewayMode(raw_mode)
+        except ValueError:
+            mode = GatewayMode.CANNED
         return cls(
-            mode=(os.getenv(f"{prefix}MODE") or "canned").strip() or "canned",
-            url=(
-                os.getenv(f"{prefix}URL") or os.getenv("UTU_LLM_BASE_URL") or ""
-            ).strip()
-            or None,
-            model=(
-                os.getenv(f"{prefix}MODEL") or os.getenv("UTU_LLM_MODEL") or ""
-            ).strip()
-            or None,
-            api_key=(
-                os.getenv(f"{prefix}API_KEY") or os.getenv("UTU_LLM_API_KEY") or ""
-            ).strip()
-            or None,
+            mode=mode,
+            url=_first_env(f"{prefix}URL", "UTU_LLM_BASE_URL"),
+            model=_first_env(f"{prefix}MODEL", "UTU_LLM_MODEL"),
+            api_key=_first_env(f"{prefix}API_KEY", "UTU_LLM_API_KEY"),
             timeout_sec=parse_float_env(f"{prefix}TIMEOUT_SEC") or 60.0,
         )
 

@@ -8,6 +8,7 @@ its mediated effect runs exactly once, gated by the fabric idempotency key rathe
 Codex-local call id.
 """
 
+import json
 from collections import defaultdict
 from collections.abc import Sequence
 
@@ -41,6 +42,7 @@ class FakeCodexAppServer:
         self._call_seq = 0
         self.resumed = 0
         self.cancelled = 0
+        self.received_keys: list[str | None] = []
 
     def thread_start(self) -> str:
         return self._thread_id
@@ -53,6 +55,7 @@ class FakeCodexAppServer:
         self, thread_id: str, items: Sequence[CodexInjectItem]
     ) -> None:
         for item in items:
+            self.received_keys.append(item.idempotency_key)
             key = item.idempotency_key
             if key is not None and key not in self.committed_keys:
                 self.committed_keys.add(key)
@@ -217,13 +220,25 @@ def test_crash_after_injection_before_terminal_does_not_reexecute() -> None:
     assert fake.execution_count[corr] == 1
 
 
+def test_a_recommitted_outcome_is_not_reinjected() -> None:
+    # A re-dispatch re-ships the same pending outcome; the adapter dedupes injection by
+    # the committed fabric key, so it is not passed to the app-server twice.
+    fake = FakeCodexAppServer(_LIFECYCLE)
+    adapter = CodexAppServerHarnessAdapter(fake)
+    first = adapter.start("a", capsule=None, outcomes=[])
+    outcome = _settle(first)
+    resumed = adapter.start("a", capsule=first.capsule, outcomes=[outcome])
+    # Re-ship the identical keyed outcome against the advanced capsule.
+    adapter.start("a", capsule=resumed.capsule, outcomes=[outcome])
+    assert fake.received_keys.count(outcome.idempotency_key) == 1
+
+
 def test_real_transport_is_an_unbound_seam() -> None:
     with pytest.raises(NotImplementedError):
         RealCodexAppServerTransport().thread_start()
 
 
 def _codex_call_id(capsule: HarnessCapsule | None) -> str | None:
-    import json
 
     assert capsule is not None
     outstanding = json.loads(capsule.blob)["outstanding"]

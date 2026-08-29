@@ -745,10 +745,50 @@ class OrchestrationEngine:
         )
         return Advance(ready=[wi.legacy_task_id])
 
-    def mark_pending_outcome(self, task_id: str, call_correlation: str) -> None:
-        """Record the settled boundary whose outcome the next episode resume injects."""
+    def mark_pending_outcome(self, task_id: str, call_correlation: str | None) -> None:
+        """Record (or clear) the settled boundary whose outcome the next resume injects.
+
+        Cleared as each step is processed, so a step never re-injects a prior step's
+        already-consumed outcome.
+        """
         if (wi := self._work_item_for_task(task_id)) is not None:
             wi.pending_outcome_call = call_correlation
+
+    def close_latest_attempt(self, task_id: str) -> None:
+        """Settle a still-running attempt of a continuing episode, bounding its history.
+
+        A continue-boundary re-dispatches without suspending, so its finished attempt is
+        marked succeeded here rather than left perpetually running.
+        """
+        wi = self._work_item_for_task(task_id)
+        if wi is not None and (attempt := self._latest_attempt(wi)) is not None:
+            if attempt.status in (AttemptStatus.ISSUED, AttemptStatus.RUNNING):
+                attempt.status = AttemptStatus.SUCCEEDED
+                attempt.finished_at = now_iso()
+
+    def stranded_model_settlements(self) -> list[tuple[str, str, str | None]]:
+        """Model/effect boundaries suspended with no durable outcome, for a restart.
+
+        A model or effect boundary suspends off-lane while the gateway settles it; a
+        crash before that settle leaves the work item blocked with an issued
+        invocation and no recorded outcome. Returns each such boundary's (task, call,
+        payload) so the settle can be re-issued from the durable envelope.
+        """
+        stranded: list[tuple[str, str, str | None]] = []
+        for (activation, corr), env in self._boundary_events.items():
+            if env.kind not in (
+                BoundaryEventKind.INVOCATION,
+                BoundaryEventKind.EXTERNAL_EFFECT,
+            ):
+                continue
+            if env.denial is not None or env.outcome_value is not None:
+                continue
+            wi = self._wi_by_activation.get(activation)
+            work_item = self._work_items.get(wi) if wi else None
+            if work_item is None or work_item.status is not WorkItemStatus.BLOCKED:
+                continue
+            stranded.append((work_item.legacy_task_id, corr, env.request_payload))
+        return stranded
 
     def settle_boundary_outcome(
         self, task_id: str, call_correlation: str, *, value: str | None = None

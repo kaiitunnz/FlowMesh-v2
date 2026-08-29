@@ -12,7 +12,7 @@ persisted rollout, reattached through ``thread/resume``. The capsule carries the
 metadata and re-drive evidence — dangling call ids and the held facade call — but that
 evidence is never the dedupe authority; the fabric-assigned ``idempotency_key`` on an
 injected outcome is, so a reissued facade call maps to its key and runs exactly once.
-The initial binding supports one verified single-forward facade call per defer unit.
+The binding supports one single-forward facade call per defer unit.
 """
 
 from collections.abc import Sequence
@@ -165,6 +165,13 @@ class CodexAppServerHarnessAdapter(HarnessAdapter):
     def _inject(self, state: _CodexState, outcomes: Sequence[DeliveredOutcome]) -> None:
         items: list[CodexInjectItem] = []
         for outcome in outcomes:
+            # A re-dispatch after a crash re-ships the same pending outcome; dedupe
+            # by the fabric idempotency key so a held effect injects exactly once.
+            if (
+                outcome.idempotency_key is not None
+                and outcome.idempotency_key in state.committed_keys
+            ):
+                continue
             items.append(
                 CodexInjectItem(
                     call_correlation=outcome.call_correlation,
