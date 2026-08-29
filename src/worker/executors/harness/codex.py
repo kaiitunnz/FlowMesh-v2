@@ -1,18 +1,18 @@
 """The version-pinned Codex app-server harness backend.
 
-The Codex binding maps the app-server's dynamic item/tool/call and inject-items surface
-onto the generic harness contract: a facade tool the model emits defers as a boundary
-before it executes, a delivered outcome is injected back at that call, and a turn that
-finishes completes the episode. Native multi-agent mode is off and ``spawn_agent`` is a
-facade, so every side effect crosses the fabric's validation.
+The Codex binding maps the app-server's turn and inject-items surface onto the generic
+harness contract: a delivered outcome is injected back at its originating call, and a
+turn that finishes completes the episode. A mediated facade originates at the FlowMesh
+agent-model gateway — Codex's model provider — which captures the model's native facade
+call and clean-completes the turn, so the adapter here only ever completes or fails and
+never observes a facade. Native multi-agent mode is off, so every side effect crosses
+the fabric's validation.
 
-Durability is a turn-boundary property of the on-disk rollout: a live code-mode cell
-is an in-memory lease, not a checkpoint, so recovery is a restart against the same
-persisted rollout, reattached through ``thread/resume``. The capsule carries the rollout
-metadata and re-drive evidence — dangling call ids and the held facade call — but that
-evidence is never the dedupe authority; the fabric-assigned ``idempotency_key`` on an
-injected outcome is, so a reissued facade call maps to its key and runs exactly once.
-The binding supports one single-forward facade call per defer unit.
+Durability is a turn-boundary property of the on-disk rollout: recovery is a restart
+against the same persisted rollout, reattached through ``thread/resume``. The capsule
+carries the rollout metadata and the committed idempotency keys; a re-delivered outcome
+maps to its ``idempotency_key`` and injects at most once, so a settled effect never
+double-applies on a resume.
 """
 
 import re
@@ -23,8 +23,6 @@ from typing import Protocol
 from pydantic import BaseModel
 
 from shared.harness import (
-    BoundaryEventKind,
-    BoundaryRequest,
     DeliveredOutcome,
     HarnessAdapter,
     HarnessBackendKey,
@@ -40,24 +38,11 @@ from worker.config import WorkerConfig
 _BACKEND = "codex"
 _CODEX_ADAPTER_VERSION = "v1"
 
-# Facade tools whose boundary is a child-region spawn or seal rather than an invocation.
-_SPAWN_TOOLS = {
-    "spawn_agent": BoundaryEventKind.SPAWN,
-    "spawn_seal": BoundaryEventKind.SPAWN_SEAL,
-}
-
 
 class CodexEvent(BaseModel):
-    """One item the app-server emits while running a turn."""
+    """The terminal event of one app-server turn: a completion or a failure."""
 
-    kind: str  # "facade_call" | "completed" | "error"
-    call_id: str | None = (
-        None  # the model-visible Codex call id, re-drive evidence only
-    )
-    tool: str | None = None
-    interface: str | None = None
-    region: str | None = None
-    arguments: str | None = None
+    kind: str  # "completed" | "error"
     value: str | None = None
 
 
@@ -83,24 +68,11 @@ class CodexAppServerTransport(Protocol):
     def cancel(self, thread_id: str) -> None: ...
 
 
-class _Outstanding(BaseModel):
-    """The single held facade call awaiting its injected outcome."""
-
-    call_correlation: str  # the adapter's stable id, kept across a re-drive
-    codex_call_id: str | None = None  # the last Codex call id seen, evidence only
-    kind: BoundaryEventKind
-    interface: str | None = None
-    region: str | None = None
-    arguments: str | None = None
-
-
 class _CodexState(BaseModel):
-    """The opaque capsule: rollout metadata plus re-drive evidence."""
+    """The opaque capsule: rollout metadata plus committed inject-dedup keys."""
 
     thread_id: str
     rollout_ref: str
-    forward_index: int = 0
-    outstanding: _Outstanding | None = None
     committed_keys: list[str] = []
 
 
@@ -160,72 +132,20 @@ class CodexAppServerHarnessAdapter(HarnessAdapter):
             )
             if outcome.idempotency_key is not None:
                 state.committed_keys.append(outcome.idempotency_key)
-            if (
-                state.outstanding is not None
-                and state.outstanding.call_correlation == outcome.call_correlation
-            ):
-                # The held call is resolved; the next turn advances past its block.
-                state.outstanding = None
         if items:
             self._transport.thread_inject_items(state.thread_id, items)
 
     def _on_event(self, state: _CodexState, event: CodexEvent) -> HarnessResult:
-        capsule = HarnessCapsule(
-            backend=self.backend_key(), blob=state.model_dump_json()
-        )
         if event.kind == "completed":
+            capsule = HarnessCapsule(
+                backend=self.backend_key(), blob=state.model_dump_json()
+            )
             return HarnessResult(
                 kind=HarnessResultKind.COMPLETION, value=event.value, capsule=capsule
             )
         if event.kind == "error":
             return HarnessResult(kind=HarnessResultKind.FAILURE, error=event.value)
-        if event.kind != "facade_call":
-            raise ValueError(f"unexpected Codex event kind {event.kind!r}")
-        request = self._defer(state, event)
-        capsule = HarnessCapsule(
-            backend=self.backend_key(), blob=state.model_dump_json()
-        )
-        return HarnessResult(
-            kind=HarnessResultKind.BOUNDARY, request=request, capsule=capsule
-        )
-
-    def _defer(self, state: _CodexState, event: CodexEvent) -> BoundaryRequest:
-        kind = _SPAWN_TOOLS.get(event.tool or "", BoundaryEventKind.INVOCATION)
-        if state.outstanding is not None:
-            if state.outstanding.kind is not kind:
-                # A second, different facade call before the first resolves would be a
-                # multi-facade block; the single-forward binding does not lift one.
-                raise ValueError(
-                    "multi-facade code-mode block is unsupported; it needs the "
-                    "fabric idempotency-key correlation protocol"
-                )
-            # A re-drive of the held call reuses its stable correlation; the fresh Codex
-            # call id is recorded as evidence, never as the dedupe authority.
-            state.outstanding = state.outstanding.model_copy(
-                update={"codex_call_id": event.call_id}
-            )
-            correlation = state.outstanding.call_correlation
-        else:
-            correlation = f"{state.thread_id}:{state.forward_index}"
-            state.outstanding = _Outstanding(
-                call_correlation=correlation,
-                codex_call_id=event.call_id,
-                kind=kind,
-                interface=event.interface or event.tool,
-                region=event.region,
-                arguments=event.arguments,
-            )
-            state.forward_index += 1
-        interface = (
-            None if kind in _SPAWN_TOOLS.values() else (event.interface or event.tool)
-        )
-        return BoundaryRequest(
-            kind=kind,
-            call_correlation=correlation,
-            interface=interface,
-            child_region_ref=event.region,
-            request_payload=event.arguments,
-        )
+        raise ValueError(f"unexpected Codex event kind {event.kind!r}")
 
 
 def build_codex_adapter(
@@ -256,6 +176,7 @@ def build_codex_adapter(
             model=model,
             codex_home=codex_home,
             initial_input=_agent_task(spec),
+            task_id=task.task_id,
         )
     )
     return CodexAppServerHarnessAdapter(transport, backend.version)

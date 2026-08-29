@@ -8,10 +8,20 @@ ledger and re-readies or suspends the lane.
 """
 
 import asyncio
+from typing import Any
 
 from server.orchestration import ProgressAxis, WorkItemStatus
 from server.task.models import TaskStatus
-from shared.harness import BoundaryEventKind, HarnessCapsule, OutcomeKind
+from shared.harness import (
+    BoundaryEventKind,
+    BoundaryRequest,
+    HarnessAdapter,
+    HarnessBackendKey,
+    HarnessCapsule,
+    HarnessResult,
+    HarnessResultKind,
+    OutcomeKind,
+)
 from tests.server.task.test_v2_orchestration import FakeRegistry, _register, _runtime
 from worker.executors.harness.scripted import ScriptedHarnessAdapter, ScriptedStep
 
@@ -265,6 +275,136 @@ def test_a_denied_boundary_re_readies_with_a_denied_outcome() -> None:
         _step(runtime, adapter, writer)  # the agent handles the denial and completes
         wi = engine.work_item(writer)
         assert wi is not None and wi.status is WorkItemStatus.SETTLED
+
+    asyncio.run(run())
+
+
+class _AlwaysCompleteAdapter(HarnessAdapter):
+    """A harness whose every turn completes cleanly, as a Codex turn does under G.
+
+    Origination is not the adapter's job here: a facade is captured at the gateway,
+    which clean-completes the turn, so the adapter only ever reports a completion.
+    """
+
+    def __init__(self, value: str = "clean") -> None:
+        self._value = value
+
+    def backend_key(self) -> HarnessBackendKey:
+        return HarnessBackendKey(backend="scripted", version="v1")
+
+    def start(
+        self, activation_id: str, *, capsule: Any, outcomes: Any
+    ) -> HarnessResult:
+        return HarnessResult(
+            kind=HarnessResultKind.COMPLETION,
+            value=self._value,
+            capsule=HarnessCapsule(backend=self.backend_key(), blob="{}"),
+        )
+
+    def cancel(self, activation_id: str) -> None:
+        return None
+
+
+def _complete(
+    runtime: Any,
+    adapter: HarnessAdapter,
+    task_id: str,
+    *,
+    originate: BoundaryRequest | None = None,
+    worker: str = "wkr-1",
+) -> None:
+    """Drive one clean-completing turn, optionally originating a facade first."""
+    engine = runtime.orchestration_engine(runtime._tasks[task_id].workflow_id)
+    dispatch = runtime.agent_episode_dispatch(task_id)
+    capsule = (
+        HarnessCapsule(backend=dispatch.backend, blob=dispatch.capsule_blob)
+        if dispatch.capsule_blob is not None
+        else None
+    )
+    engine.on_dispatched(task_id, worker)
+    result = adapter.start(
+        task_id, capsule=capsule, outcomes=dispatch.delivered_outcomes
+    )
+    if originate is not None:
+        runtime.originate_episode_boundary(task_id, originate)
+    runtime.mark_succeeded(
+        task_id, worker, {"agent_episode": result.model_dump(mode="json")}, _TS
+    )
+
+
+def _spawn_reviewer(writer: str) -> BoundaryRequest:
+    return BoundaryRequest(
+        kind=BoundaryEventKind.SPAWN,
+        call_correlation=f"{writer}:0",
+        child_region_ref="reviewer",
+    )
+
+
+def test_gateway_originated_spawn_reroutes_a_clean_completion() -> None:
+    async def run() -> None:
+        runtime = _runtime(FakeRegistry())
+        workflow_id, ids = await _register(runtime, _AGENT_WF)
+        writer = ids["writer"]
+        adapter = _AlwaysCompleteAdapter()
+        engine = runtime.orchestration_engine(workflow_id)
+        assert engine is not None
+
+        # Turn 1: the model called spawn_agent; the gateway captured it server-side and
+        # clean-completed the turn. The guard reroutes the completion into the boundary
+        # instead of settling the episode, and a child materializes.
+        _complete(runtime, adapter, writer, originate=_spawn_reviewer(writer))
+        assert runtime._tasks[writer].status is TaskStatus.PENDING
+        children = [
+            w.legacy_task_id
+            for w in engine.to_snapshot().work_items
+            if w.legacy_task_id.startswith("act-")
+        ]
+        assert len(children) == 1
+        child = children[0]
+        writer_act = engine.work_item(writer)
+        assert writer_act is not None
+        region_scope = engine.region_scope_for(writer_act.activation_id, "reviewer")
+
+        # Turn 2: the next clean completion is terminal; it auto-seals child-init.
+        _complete(runtime, adapter, writer)
+        cap = engine.capability(region_scope, ProgressAxis.CHILD_INIT)
+        assert cap is not None and cap.status.value == "sealed"
+        # Premature-completion guard: the agent completed and sealed, but the region has
+        # not drained while the child is still in flight, so its scope is not released.
+        assert child not in engine.to_snapshot().released_scopes
+        assert not cap.closed
+
+        # The child settles: only now does the region drain and the workflow complete.
+        engine.on_dispatched(child, "wkr-1")
+        runtime.mark_succeeded(child, "wkr-1", {}, _TS)
+        closed = engine.capability(region_scope, ProgressAxis.CHILD_INIT)
+        assert closed is not None and closed.closed
+        pub = engine.resolve_output(f"legacy:{writer}")
+        assert pub is not None and pub.outcome.value == "success"
+
+    asyncio.run(run())
+
+
+def test_gateway_origination_redrive_creates_no_second_child() -> None:
+    # A crash before the outcome injects re-dispatches the turn; the gateway re-captures
+    # the same facade and re-originates the same stable correlation. The boundary
+    # machinery maps it to the recorded envelope, so no second child is materialized.
+    async def run() -> None:
+        runtime = _runtime(FakeRegistry())
+        workflow_id, ids = await _register(runtime, _AGENT_WF)
+        writer = ids["writer"]
+        adapter = _AlwaysCompleteAdapter()
+        engine = runtime.orchestration_engine(workflow_id)
+        assert engine is not None
+
+        _complete(runtime, adapter, writer, originate=_spawn_reviewer(writer))
+        _complete(runtime, adapter, writer, originate=_spawn_reviewer(writer))
+        children = [
+            w.legacy_task_id
+            for w in engine.to_snapshot().work_items
+            if w.legacy_task_id.startswith("act-")
+        ]
+        assert len(children) == 1
 
     asyncio.run(run())
 

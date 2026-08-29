@@ -8,7 +8,6 @@ its mediated effect runs exactly once, gated by the fabric idempotency key rathe
 Codex-local call id.
 """
 
-import json
 from collections import defaultdict
 from collections.abc import Sequence
 from pathlib import Path
@@ -16,10 +15,7 @@ from pathlib import Path
 import pytest
 
 from shared.harness import (
-    BoundaryEventKind,
     DeliveredOutcome,
-    HarnessCapsule,
-    HarnessResult,
     HarnessResultKind,
     OutcomeKind,
 )
@@ -35,7 +31,7 @@ from worker.executors.harness.codex import (
 
 
 class FakeCodexAppServer:
-    """A persisted rollout: it scripts blocks and dedupes injected effects by key."""
+    """A persisted rollout: it scripts terminal turns and dedupes injects by key."""
 
     def __init__(self, blocks: list[dict]) -> None:
         self._blocks = blocks
@@ -43,7 +39,6 @@ class FakeCodexAppServer:
         self.cursor = 0
         self.committed_keys: set[str] = set()
         self.execution_count: dict[str, int] = defaultdict(int)
-        self._call_seq = 0
         self.resumed = 0
         self.cancelled = 0
         self.received_keys: list[str | None] = []
@@ -62,48 +57,31 @@ class FakeCodexAppServer:
             self.received_keys.append(item.idempotency_key)
             key = item.idempotency_key
             if key is not None and key not in self.committed_keys:
+                # The persisted rollout records each keyed effect once, so a re-inject
+                # from a stale capsule is deduped here even if the adapter re-ships it.
                 self.committed_keys.add(key)
                 self.execution_count[item.call_correlation] += 1
-                self.cursor += 1
 
     def turn_start(self, thread_id: str) -> str:
         return f"turn-{self.cursor}"
 
     def next_event(self, thread_id: str, turn_id: str) -> CodexEvent:
-        block = self._blocks[self.cursor]
-        if block["kind"] == "facade_call":
-            self._call_seq += 1
-            return CodexEvent(
-                kind="facade_call",
-                call_id=f"call-{self._call_seq}",
-                tool=block["tool"],
-                interface=block.get("interface"),
-                region=block.get("region"),
-                arguments=block.get("arguments"),
-            )
+        block = self._blocks[min(self.cursor, len(self._blocks) - 1)]
+        self.cursor += 1
         return CodexEvent(kind=block["kind"], value=block.get("value"))
 
     def cancel(self, thread_id: str) -> None:
         self.cancelled += 1
 
 
-def _settle(result: HarnessResult, value: str = "ok") -> DeliveredOutcome:
-    """The fabric's role: record the boundary and inject its keyed outcome."""
-    assert result.request is not None and result.request.call_correlation is not None
-    corr = result.request.call_correlation
+def _outcome(corr: str, value: str = "child") -> DeliveredOutcome:
+    """A settled child outcome the fabric delivers back at its originating call."""
     return DeliveredOutcome(
         call_correlation=corr,
         idempotency_key=f"idm-{corr}",
         kind=OutcomeKind.RESULT,
         value=value,
     )
-
-
-_LIFECYCLE = [
-    {"kind": "facade_call", "tool": "spawn_agent", "region": "reviewer"},
-    {"kind": "facade_call", "tool": "ask", "interface": "model", "arguments": "q"},
-    {"kind": "completed", "value": "done"},
-]
 
 
 def test_backend_key_pins_the_version() -> None:
@@ -116,27 +94,10 @@ def test_bypass_paths_are_disabled() -> None:
     assert CodexAppServerHarnessAdapter(FakeCodexAppServer([])).bypass_disabled()
 
 
-def test_full_lifecycle_maps_onto_the_generic_contract() -> None:
-    fake = FakeCodexAppServer(_LIFECYCLE)
-    adapter = CodexAppServerHarnessAdapter(fake)
-
-    spawn = adapter.start("a", capsule=None, outcomes=[])
-    assert spawn.kind is HarnessResultKind.BOUNDARY
-    assert spawn.request is not None
-    assert spawn.request.kind is BoundaryEventKind.SPAWN
-    assert spawn.request.child_region_ref == "reviewer"
-
-    invocation = adapter.start("a", capsule=spawn.capsule, outcomes=[_settle(spawn)])
-    assert invocation.request is not None
-    assert invocation.request.kind is BoundaryEventKind.INVOCATION
-    assert invocation.request.interface == "model"
-
-    done = adapter.start(
-        "a", capsule=invocation.capsule, outcomes=[_settle(invocation, "answer")]
-    )
-    assert done.kind is HarnessResultKind.COMPLETION and done.value == "done"
-    # Each mediated facade effect committed exactly once.
-    assert dict(fake.execution_count) == {"thr-1:0": 1, "thr-1:1": 1}
+def test_a_completed_turn_completes_the_episode() -> None:
+    fake = FakeCodexAppServer([{"kind": "completed", "value": "done"}])
+    result = CodexAppServerHarnessAdapter(fake).start("a", capsule=None, outcomes=[])
+    assert result.kind is HarnessResultKind.COMPLETION and result.value == "done"
 
 
 def test_a_turn_error_fails_the_episode() -> None:
@@ -145,96 +106,68 @@ def test_a_turn_error_fails_the_episode() -> None:
     assert result.kind is HarnessResultKind.FAILURE and result.error == "boom"
 
 
-def test_multi_facade_block_is_rejected() -> None:
-    # An outstanding spawn followed by a different facade kind before it resolves is a
-    # multi-facade block the single-forward binding does not lift.
+def test_a_delivered_outcome_injects_and_resumes_the_rollout() -> None:
     fake = FakeCodexAppServer(
-        [{"kind": "facade_call", "tool": "spawn_agent", "region": "r"}]
+        [
+            {"kind": "completed", "value": "dispatched"},
+            {"kind": "completed", "value": "final"},
+        ]
     )
     adapter = CodexAppServerHarnessAdapter(fake)
+    # The turn that originated a facade (captured server-side) completes cleanly here.
     first = adapter.start("a", capsule=None, outcomes=[])
-    # Re-drive without resolving, but the rollout now scripts a different facade kind.
-    fake._blocks[0] = {"kind": "facade_call", "tool": "ask", "interface": "model"}
-    with pytest.raises(ValueError, match="multi-facade"):
-        adapter.start("a", capsule=first.capsule, outcomes=[])
-
-
-_HELD = [
-    {"kind": "facade_call", "tool": "spawn_agent", "region": "reviewer"},
-    {"kind": "completed", "value": "final"},
-]
-
-
-def test_crash_before_issue_redrives_on_the_same_rollout() -> None:
-    fake = FakeCodexAppServer(_HELD)
-    # The first attempt defers the facade call but the boundary is lost before issue.
-    CodexAppServerHarnessAdapter(fake).start("a", capsule=None, outcomes=[])
-    # A fresh adapter re-drives from the start against the same rollout.
-    adapter = CodexAppServerHarnessAdapter(fake)
-    redriven = adapter.start("a", capsule=None, outcomes=[])
-    assert redriven.request is not None
-    corr = redriven.request.call_correlation
-    assert corr is not None
-    done = adapter.start("a", capsule=redriven.capsule, outcomes=[_settle(redriven)])
-    assert done.kind is HarnessResultKind.COMPLETION
-    assert fake.execution_count[corr] == 1
-
-
-def test_crash_after_issue_before_injection_keeps_a_stable_correlation() -> None:
-    fake = FakeCodexAppServer(_HELD)
-    first = CodexAppServerHarnessAdapter(fake).start("a", capsule=None, outcomes=[])
-    assert first.request is not None
-    corr = first.request.call_correlation
-    assert corr is not None
-    codex_call_before = _codex_call_id(first.capsule)
-
-    # App-server loss before the outcome injects: a fresh adapter resumes and re-drives.
-    adapter = CodexAppServerHarnessAdapter(fake)
-    redriven = adapter.start("a", capsule=first.capsule, outcomes=[])
-    assert redriven.request is not None
-    # The correlation is stable across the re-drive even though Codex reissued the call.
-    assert redriven.request.call_correlation == corr
-    assert _codex_call_id(redriven.capsule) != codex_call_before
-    assert fake.resumed >= 1
-
-    done = adapter.start("a", capsule=redriven.capsule, outcomes=[_settle(redriven)])
-    assert done.kind is HarnessResultKind.COMPLETION
-    assert fake.execution_count[corr] == 1  # the mediated effect ran exactly once
-
-
-def test_crash_after_injection_before_terminal_does_not_reexecute() -> None:
-    fake = FakeCodexAppServer(_HELD)
-    first = CodexAppServerHarnessAdapter(fake).start("a", capsule=None, outcomes=[])
-    assert first.request is not None
-    corr = first.request.call_correlation
-    assert corr is not None
-    outcome = _settle(first)
-
-    # The outcome injects and the turn completes, but the completion is lost to a crash.
-    CodexAppServerHarnessAdapter(fake).start(
-        "a", capsule=first.capsule, outcomes=[outcome]
-    )
-    assert fake.execution_count[corr] == 1
-
-    # Recovery re-delivers the same keyed outcome against the same rollout; the
-    # effect is deduped, not re-executed, and the episode still completes.
-    adapter = CodexAppServerHarnessAdapter(fake)
-    done = adapter.start("a", capsule=first.capsule, outcomes=[outcome])
+    assert first.kind is HarnessResultKind.COMPLETION
+    # The fabric re-dispatches with the child's settled outcome; it injects and resumes.
+    done = adapter.start("a", capsule=first.capsule, outcomes=[_outcome("a:0")])
     assert done.kind is HarnessResultKind.COMPLETION and done.value == "final"
-    assert fake.execution_count[corr] == 1
+    assert fake.received_keys == ["idm-a:0"]
+    assert fake.execution_count["a:0"] == 1
+    assert fake.resumed == 1
 
 
 def test_a_recommitted_outcome_is_not_reinjected() -> None:
-    # A re-dispatch re-ships the same pending outcome; the adapter dedupes injection by
-    # the committed fabric key, so it is not passed to the app-server twice.
-    fake = FakeCodexAppServer(_LIFECYCLE)
+    # A re-dispatch re-ships the same pending outcome against the advanced capsule; the
+    # adapter dedupes injection by the committed fabric key, so it never injects twice.
+    fake = FakeCodexAppServer(
+        [
+            {"kind": "completed", "value": "dispatched"},
+            {"kind": "completed", "value": "more"},
+            {"kind": "completed", "value": "final"},
+        ]
+    )
     adapter = CodexAppServerHarnessAdapter(fake)
     first = adapter.start("a", capsule=None, outcomes=[])
-    outcome = _settle(first)
+    outcome = _outcome("a:0")
     resumed = adapter.start("a", capsule=first.capsule, outcomes=[outcome])
     # Re-ship the identical keyed outcome against the advanced capsule.
     adapter.start("a", capsule=resumed.capsule, outcomes=[outcome])
     assert fake.received_keys.count(outcome.idempotency_key) == 1
+    assert fake.execution_count["a:0"] == 1
+
+
+def test_crash_after_injection_before_terminal_does_not_reexecute() -> None:
+    fake = FakeCodexAppServer(
+        [
+            {"kind": "completed", "value": "dispatched"},
+            {"kind": "completed", "value": "final"},
+        ]
+    )
+    first = CodexAppServerHarnessAdapter(fake).start("a", capsule=None, outcomes=[])
+    outcome = _outcome("a:0")
+
+    # The outcome injects and the turn completes, but the completion is lost to a crash,
+    # so recovery re-dispatches from the pre-inject capsule with the same outcome.
+    CodexAppServerHarnessAdapter(fake).start(
+        "a", capsule=first.capsule, outcomes=[outcome]
+    )
+    assert fake.execution_count["a:0"] == 1
+
+    adapter = CodexAppServerHarnessAdapter(fake)
+    done = adapter.start("a", capsule=first.capsule, outcomes=[outcome])
+    # The stale capsule re-ships the inject, but the rollout dedupes it by key: the
+    # effect ran exactly once and the episode still completes.
+    assert done.kind is HarnessResultKind.COMPLETION and done.value == "final"
+    assert fake.execution_count["a:0"] == 1
 
 
 def test_codex_home_isolates_activations_but_is_stable() -> None:
@@ -267,10 +200,3 @@ def test_agent_task_reads_spec_task_then_data_task() -> None:
 def test_agent_task_requires_a_task() -> None:
     with pytest.raises(ValueError, match="spec.task"):
         _agent_task(_agent_spec())
-
-
-def _codex_call_id(capsule: HarnessCapsule | None) -> str | None:
-
-    assert capsule is not None
-    outstanding = json.loads(capsule.blob)["outstanding"]
-    return None if outstanding is None else outstanding["codex_call_id"]

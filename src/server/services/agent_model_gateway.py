@@ -11,7 +11,7 @@ Resident-capacity admission is not part of this path: the invocation settles dir
 
 import json
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Protocol
 from urllib.parse import urlparse
@@ -22,7 +22,20 @@ from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from shared.harness import BoundaryEventKind, BoundaryRequest
+
 from ..config import AgentModelGatewayConfig, GatewayMode
+
+_INJECT_CALL_PREFIX = "fab-"
+
+# Facade tools the gateway injects into a harness's model request; a call to one is
+# captured server-side and originated as a fabric boundary, never run by the harness.
+_FACADE_TOOLS: dict[str, BoundaryEventKind] = {
+    "spawn_agent": BoundaryEventKind.SPAWN,
+    "spawn_seal": BoundaryEventKind.SPAWN_SEAL,
+}
+
+BoundaryOriginator = Callable[[str, BoundaryRequest], None]
 
 
 class _EpisodeSettler(Protocol):
@@ -61,9 +74,14 @@ class AgentModelGateway:
         self._settler = settler
         self._cfg = config
         self._logger = logger or logging.getLogger("agent-model-gateway")
+        self._originator: BoundaryOriginator | None = None
         self._executor = ThreadPoolExecutor(
             max_workers=4, thread_name_prefix="agent-model-gateway"
         )
+
+    def set_boundary_originator(self, originator: BoundaryOriginator) -> None:
+        """Install the sink for facade boundaries captured on an episode turn."""
+        self._originator = originator
 
     def settle(self, task_id: str, call_correlation: str, payload: str | None) -> None:
         """Settle a suspended model boundary off the caller's lane, never inline."""
@@ -151,6 +169,53 @@ class AgentModelGateway:
 
         return StreamingResponse(_stream(), media_type="text/event-stream")
 
+    async def originate_or_forward(
+        self, task_id: str, body: dict[str, Any]
+    ) -> StreamingResponse:
+        """Run one agent-episode model turn, capturing a facade call server-side.
+
+        The gateway injects the facade tool schema into the turn's tools and runs the
+        upstream. If the model calls a facade, the gateway captures its faithful
+        structured args, originates the boundary keyed to the episode's task, and
+        returns the harness a clean turn-completing message so its rollout never records
+        the raw call — durability is fabric-side. An ordinary reasoning turn passes
+        through unchanged. The correlation is derived from the resolved-facade count in
+        the turn history, so a crash-before-inject re-drive re-derives the same
+        correlation and the boundary machinery dedups it.
+        """
+        tools = _upstream_tools(body.get("tools")) + [_spawn_agent_tool()]
+        forward = {**body, "stream": False, "tools": tools}
+        if self._cfg.model:
+            forward["model"] = self._cfg.model
+        async with httpx.AsyncClient(timeout=self._cfg.timeout_sec) as client:
+            upstream = await client.post(
+                f"{self._upstream_base()}/responses",
+                json=forward,
+                headers=self._headers(),
+            )
+            upstream.raise_for_status()
+            data = upstream.json()
+        output = data.get("output", []) if isinstance(data, dict) else []
+        call = _facade_call(output)
+        if call is not None and self._originator is not None:
+            corr = f"{task_id}:{_forward_index(body.get('input'))}"
+            request = _facade_boundary(call, corr)
+            self._originator(task_id, request)
+            output = _message_output(
+                _dispatched_message(call, request.child_region_ref)
+            )
+        elif call is not None:
+            self._logger.warning(
+                "agent-model gateway captured a facade call with no originator "
+                "installed; passing it through to the harness"
+            )
+        sse = _responses_sse(output)
+
+        async def _stream() -> AsyncIterator[bytes]:
+            yield sse
+
+        return StreamingResponse(_stream(), media_type="text/event-stream")
+
     def responses(self, request: ResponsesRequest) -> dict[str, Any]:
         """Convert one OpenAI Responses request and return its settled output."""
         text = self.invoke(_dump_input(request.input))
@@ -222,6 +287,118 @@ def _response_text(data: Any) -> str:
     return ""
 
 
+def _spawn_agent_tool() -> dict[str, Any]:
+    """The facade tool the gateway injects for a harness to delegate a child region."""
+    return {
+        "type": "function",
+        "name": "spawn_agent",
+        "description": (
+            "Delegate a subtask to a declared child agent region and await its "
+            "mediated result."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "region": {
+                    "type": "string",
+                    "description": "the declared child region role name",
+                },
+                "args": {
+                    "type": "object",
+                    "description": "structured input for the child agent",
+                },
+            },
+            "required": ["region"],
+        },
+    }
+
+
+def _facade_call(output: Any) -> dict[str, Any] | None:
+    if not isinstance(output, list):
+        return None
+    for item in output:
+        if (
+            isinstance(item, dict)
+            and item.get("type") == "function_call"
+            and item.get("name") in _FACADE_TOOLS
+        ):
+            return item
+    return None
+
+
+def _forward_index(history: Any) -> int:
+    """The resolved-facade count in the turn history, for a re-drive-stable correlation.
+
+    A harness posts its full turn history each turn, so a facade re-drive before its
+    outcome injects sees the same history and derives the same index, while a resolved
+    facade adds a ``fab-`` output that advances the next facade's index.
+    """
+    if not isinstance(history, list):
+        return 0
+    return sum(
+        1
+        for item in history
+        if isinstance(item, dict)
+        and item.get("type") == "function_call_output"
+        and str(item.get("call_id", "")).startswith(_INJECT_CALL_PREFIX)
+    )
+
+
+def _facade_boundary(call: dict[str, Any], call_correlation: str) -> BoundaryRequest:
+    raw = call.get("arguments")
+    payload = raw if isinstance(raw, str) else json.dumps(raw or {})
+    args: Any = raw
+    if isinstance(raw, str):
+        try:
+            args = json.loads(raw)
+        except json.JSONDecodeError:
+            args = {}
+    region = args.get("region") if isinstance(args, dict) else None
+    return BoundaryRequest(
+        kind=_FACADE_TOOLS[str(call.get("name"))],
+        call_correlation=call_correlation,
+        child_region_ref=region if isinstance(region, str) else None,
+        request_payload=payload,
+    )
+
+
+def _dispatched_message(call: dict[str, Any], region: str | None) -> str:
+    where = f" to the {region} region" if region else ""
+    return f"Dispatched {call.get('name')}{where}; awaiting the mediated result."
+
+
+def _message_output(text: str) -> list[dict[str, Any]]:
+    return [
+        {
+            "type": "message",
+            "id": "msg_fm",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": text}],
+        }
+    ]
+
+
+def _responses_sse(output: list[dict[str, Any]]) -> bytes:
+    """A minimal Responses SSE stream re-emitting a buffered turn's output items."""
+    events: list[dict[str, Any]] = [
+        {"type": "response.created", "response": {"id": "resp_fm"}}
+    ]
+    for index, item in enumerate(output):
+        events.append(
+            {"type": "response.output_item.done", "output_index": index, "item": item}
+        )
+    events.append(
+        {
+            "type": "response.completed",
+            "response": {"id": "resp_fm", "status": "completed", "output": output},
+        }
+    )
+    return b"".join(
+        f"event: {e['type']}\ndata: {json.dumps(e)}\n\n".encode() for e in events
+    )
+
+
 def build_agent_model_router(gateway: AgentModelGateway) -> APIRouter:
     """The Responses API surface a harness provider targets."""
     router = APIRouter()
@@ -232,5 +409,12 @@ def build_agent_model_router(gateway: AgentModelGateway) -> APIRouter:
         if gateway.is_proxy():
             return await gateway.proxy_responses(body)
         return gateway.responses(ResponsesRequest.model_validate(body))
+
+    @router.post("/agent/{task_id}/v1/responses")
+    async def agent_response(task_id: str, request: Request) -> Any:
+        # The per-episode provider surface a harness targets: the task id in the path
+        # correlates a captured facade to the awaiting agent activation.
+        body = await request.json()
+        return await gateway.originate_or_forward(task_id, body)
 
     return router

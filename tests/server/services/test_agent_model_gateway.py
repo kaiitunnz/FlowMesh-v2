@@ -259,3 +259,126 @@ def test_proxy_mode_streams_the_upstream_turn_verbatim(monkeypatch: Any) -> None
     }
     resp = TestClient(app).post("/v1/responses", json=request)
     assert resp.status_code == 200 and resp.content == sse
+
+
+def _facade_index() -> tuple[dict[str, Any], int]:
+    from server.services.agent_model_gateway import _facade_call, _forward_index
+
+    output = [
+        {"type": "reasoning", "content": []},
+        {
+            "type": "function_call",
+            "name": "spawn_agent",
+            "call_id": "call_1",
+            "arguments": '{"region": "reviewer", "args": {"focus": "security"}}',
+        },
+    ]
+    call = _facade_call(output)
+    assert call is not None
+    history = [
+        {"type": "message", "role": "user"},
+        {"type": "function_call_output", "call_id": "fab-x:0", "output": "r"},
+    ]
+    return call, _forward_index(history)
+
+
+def test_facade_capture_maps_the_native_call_to_a_boundary() -> None:
+    from server.services.agent_model_gateway import _facade_boundary
+
+    call, index = _facade_index()
+    # One fab- output already resolved in history advances the next facade's index.
+    assert index == 1
+    boundary = _facade_boundary(call, "tsk-1:1")
+    assert boundary.kind is BoundaryEventKind.SPAWN
+    assert boundary.child_region_ref == "reviewer"
+    assert boundary.call_correlation == "tsk-1:1"
+    assert (
+        boundary.request_payload is not None and "security" in boundary.request_payload
+    )
+
+
+def _upstream_client(monkeypatch: Any, output: list[dict[str, Any]]) -> None:
+    import server.services.agent_model_gateway as mod
+
+    class _Resp:
+        def raise_for_status(self) -> None: ...
+
+        @staticmethod
+        def json() -> dict[str, Any]:
+            return {"object": "response", "status": "completed", "output": output}
+
+    class _Client:
+        def __init__(self, **_: Any) -> None: ...
+
+        async def __aenter__(self) -> "_Client":
+            return self
+
+        async def __aexit__(self, *exc: object) -> None: ...
+
+        async def post(self, url: str, **kwargs: Any) -> _Resp:
+            assert url == "http://up/v1/responses"
+            body = kwargs["json"]
+            assert body["stream"] is False and body["model"] == "qwen"
+            # The facade tool is injected alongside the harness's function tools.
+            assert "spawn_agent" in [t.get("name") for t in body["tools"]]
+            return _Resp()
+
+    monkeypatch.setattr(mod.httpx, "AsyncClient", _Client)
+
+
+def _agent_gateway() -> tuple[AgentModelGateway, list[Any]]:
+    cfg = AgentModelGatewayConfig(
+        mode=GatewayMode.PROXY, url="http://up/v1", model="qwen"
+    )
+    gateway = AgentModelGateway(None, cfg)  # type: ignore[arg-type]
+    originated: list[Any] = []
+    gateway.set_boundary_originator(lambda task, req: originated.append((task, req)))
+    return gateway, originated
+
+
+def test_agent_turn_captures_a_facade_and_clean_completes(monkeypatch: Any) -> None:
+    output = [
+        {
+            "type": "function_call",
+            "name": "spawn_agent",
+            "call_id": "call_1",
+            "arguments": '{"region": "reviewer"}',
+        }
+    ]
+    _upstream_client(monkeypatch, output)
+    gateway, originated = _agent_gateway()
+    app = FastAPI()
+    app.include_router(build_agent_model_router(gateway))
+    request = {"model": "gpt-5-codex", "input": [], "tools": [], "stream": True}
+    resp = TestClient(app).post("/agent/tsk-1/v1/responses", json=request)
+
+    assert resp.status_code == 200
+    # The boundary is originated server-side, keyed to the episode's task.
+    assert len(originated) == 1
+    task_id, boundary = originated[0]
+    assert task_id == "tsk-1"
+    assert boundary.kind is BoundaryEventKind.SPAWN
+    assert boundary.call_correlation == "tsk-1:0"
+    # Codex sees a clean turn-completing message, never the raw tool call.
+    body = resp.content.decode()
+    assert "Dispatched spawn_agent to the reviewer region" in body
+    assert "function_call" not in body
+
+
+def test_agent_turn_without_a_facade_passes_through(monkeypatch: Any) -> None:
+    output = [
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "just reasoning"}],
+        }
+    ]
+    _upstream_client(monkeypatch, output)
+    gateway, originated = _agent_gateway()
+    app = FastAPI()
+    app.include_router(build_agent_model_router(gateway))
+    request = {"model": "gpt-5-codex", "input": [], "tools": [], "stream": True}
+    resp = TestClient(app).post("/agent/tsk-1/v1/responses", json=request)
+
+    assert resp.status_code == 200 and not originated
+    assert "just reasoning" in resp.content.decode()

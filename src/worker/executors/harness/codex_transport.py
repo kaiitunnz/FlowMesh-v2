@@ -9,17 +9,16 @@ appends a settled outcome as raw Responses items the next turn sees, and a turn'
 notification stream collapses to one ``CodexEvent``. The model backend is FlowMesh's
 Responses gateway, which is Codex's native wire.
 
-The 0.147.0 app-server exposes no client-registered tool whose output the fabric
-supplies, so a mediated facade call is detected as a small JSON envelope the model emits
-on its turn output — a convention layered on the text, not a native tool-call wire — and
-resolved by injecting the settled result. Origination is the only stubbed edge; the
-resolution RPC, rollout persistence, and resume are real. The adapter's committed-key
-dedup keeps the outcome injected at most once on a resume from the committed capsule.
-The untyped ``thread/inject_items`` RPC and provider passthrough are isolated in
+A mediated facade call originates at the FlowMesh agent-model gateway, Codex's model
+provider: the gateway injects the facade tool, captures the model's native call, and
+clean-completes the turn, so a turn here only ever completes or errors — the transport
+never parses the rollout for a facade. Resolution injects the settled result as raw
+Responses items the next turn sees; the adapter's committed-key dedup keeps the outcome
+injected at most once on a resume from the committed capsule. The untyped
+``thread/inject_items`` RPC and provider passthrough are isolated in
 ``_CodexExperimentalSurface`` and pinned to this Codex version.
 """
 
-import json
 import threading
 import weakref
 from collections.abc import Sequence
@@ -39,7 +38,6 @@ from openai_codex.generated.v2_all import (
 
 from .codex import CodexEvent, CodexInjectItem
 
-_FACADE_ENVELOPE_KEY = "facade"
 _INJECT_CALL_PREFIX = "fab-"
 _INJECT_TOOL = "fabric_mediated"
 # Codex authenticates to the internal FlowMesh Responses gateway with this trusted
@@ -65,6 +63,7 @@ class CodexTransportConfig:
     model: str
     codex_home: Path
     initial_input: str
+    task_id: str
     provider_id: str = "flowmesh"
     approval_policy: str = "never"
     sandbox_mode: str = "read-only"
@@ -81,11 +80,16 @@ class CodexTransportConfig:
             if '"' in value or "\n" in value:
                 raise ValueError(f"the codex {name} may not contain a quote or newline")
 
+    def provider_base_url(self) -> str:
+        # The per-episode gateway surface: the task id in the path correlates a facade
+        # the gateway captures on a turn to this agent activation.
+        return f"{self.base_url.rstrip('/')}/agent/{self.task_id}/v1"
+
     def to_codex_config(self) -> CodexConfig:
         p = self.provider_id
         overrides = (
             f'model_providers.{p}.name="{p}"',
-            f'model_providers.{p}.base_url="{self.base_url}"',
+            f'model_providers.{p}.base_url="{self.provider_base_url()}"',
             f'model_providers.{p}.wire_api="responses"',
             f"model_providers.{p}.requires_openai_auth=false",
             f'model_providers.{p}.env_key="{_KEY_ENV}"',
@@ -128,18 +132,6 @@ def _outcome_to_response_items(item: CodexInjectItem) -> list[dict[str, Any]]:
         },
         {"type": "function_call_output", "call_id": call_id, "output": output},
     ]
-
-
-def _parse_facade_envelope(text: str) -> dict[str, Any] | None:
-    stripped = text.strip()
-    if not stripped.startswith("{"):
-        return None
-    try:
-        obj = json.loads(stripped)
-    except json.JSONDecodeError:
-        return None
-    facade = obj.get(_FACADE_ENVELOPE_KEY) if isinstance(obj, dict) else None
-    return facade if isinstance(facade, dict) else None
 
 
 def _close_client(client: CodexClient) -> None:
@@ -251,20 +243,9 @@ class RealCodexAppServerTransport:
                 if turn.status is not TurnStatus.completed or turn.error is not None:
                     message = turn.error.message if turn.error else str(turn.status)
                     return CodexEvent(kind="error", value=message)
-                return self._event_from_output(agent_texts, turn_id)
-
-    def _event_from_output(self, agent_texts: list[str], turn_id: str) -> CodexEvent:
-        text = agent_texts[-1] if agent_texts else ""
-        if (facade := _parse_facade_envelope(text)) is not None:
-            return CodexEvent(
-                kind="facade_call",
-                call_id=turn_id,
-                tool=facade.get("tool"),
-                interface=facade.get("interface"),
-                region=facade.get("region"),
-                arguments=facade.get("arguments"),
-            )
-        return CodexEvent(kind="completed", value=text)
+                return CodexEvent(
+                    kind="completed", value=agent_texts[-1] if agent_texts else ""
+                )
 
     def cancel(self, thread_id: str) -> None:
         self.close()

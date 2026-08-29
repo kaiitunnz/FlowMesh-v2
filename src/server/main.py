@@ -125,6 +125,7 @@ if IS_ROOT_NODE:
         RUNTIME, config.orchestration.gateway, logger
     )
     RUNTIME.set_invocation_settler(AGENT_MODEL_GATEWAY.settle)
+    AGENT_MODEL_GATEWAY.set_boundary_originator(RUNTIME.originate_episode_boundary)
 
     DISPATCHER = create_dispatcher(
         config.dispatch,
