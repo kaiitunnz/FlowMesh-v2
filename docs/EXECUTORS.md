@@ -95,12 +95,10 @@ fabric-side. `tests/worker/test_codex_integration.py` exercises this against a l
 app-server driven through the real gateway, including a `kill -9` recovery trace.
 
 A mediated model request the agent defers is settled by the **agent-model gateway**, not a
-raw model endpoint. The gateway implements the OpenAI Responses API (`POST /v1/responses`)
-so a harness whose provider targets it crosses the same seam; an agent episode targets a
-per-episode surface (`POST /agent/{task_id}/v1/responses`) where the gateway injects the
-facade tool and captures a native facade call, keyed to the episode by the task id in the
-path. Its upstream is configured on the server under the `AGENT_MODEL_GATEWAY_*` env
-family (see
+raw model endpoint. The gateway implements the OpenAI Responses API so a harness whose
+provider targets it crosses the same seam, and for an agent episode it injects the facade
+tool and captures the model's native facade call. Its upstream is configured on the server
+under the `AGENT_MODEL_GATEWAY_*` env family (see
 [`ENV.md`](ENV.md)); the default `canned` mode is deterministic and credential-free, while
 `openai` forwards to an OpenAI-compatible endpoint, reusing the `UTU_LLM_*` provider path
 when its own values are unset.
