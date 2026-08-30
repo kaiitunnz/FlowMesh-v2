@@ -96,6 +96,13 @@ async def test_inline_key_is_vaulted_and_absent_from_every_persisted_surface():
     assert "***redacted***" in bundle.source.raw_payload
 
 
+def test_inspect_does_not_echo_the_raw_inline_key():
+    runtime = _runtime(_RecordingVault(), FakeRegistry())
+    report = runtime.inspect_v2(_WF, format="native")
+    assert report is not None
+    assert _RAW_KEY not in report.model_dump_json()
+
+
 @pytest.mark.anyio
 async def test_cancel_purges_the_workflow_vault():
     vault = _RecordingVault()

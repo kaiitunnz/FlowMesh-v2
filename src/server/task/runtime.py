@@ -192,7 +192,12 @@ class TaskRuntime:
         parsed_workflow = parse_workflow(payload, format)
         if not ExecutionMode.is_v2(parsed_workflow.api_version):
             return None
-        source = FrontendWorkflowSource.capture(payload, format)
+        # A dry run never vaults; drop any inline credential and redact the source so
+        # the inspection echoes no raw key back to the caller.
+        pop_inline_model_secrets(parsed_workflow)
+        source = FrontendWorkflowSource.capture(
+            redact_source_text(payload, format), format
+        )
         return build_inspection(
             new_workflow_id(),
             parsed_workflow,
