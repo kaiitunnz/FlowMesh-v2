@@ -5,10 +5,12 @@ metadata:
   owner: researcher
   annotations:
     description: >-
-      Agent episode bound to an external OpenAI-compatible upstream. The
-      managed model boundary forwards to the given url with the workflow's own
-      inline api_key, which is vaulted server-side at submission. Fill url,
-      model, and api_key with your provider's values.
+      Codex-harness agent bound to an external OpenAI-compatible model. Codex runs
+      a real agent turn; its model calls route through the FlowMesh agent-model
+      gateway, which forwards to model_binding.url with the workflow's own inline
+      api_key (vaulted server-side at submission). Fill model_binding url/model/
+      api_key with your provider's values; point harness.params.base_url at your
+      FlowMesh agent-model gateway.
 
 spec:
   taskType: agent
@@ -21,12 +23,11 @@ spec:
     boundary: [invocation, yield]
 
   harness:
-    backend: scripted
+    backend: codex
     version: v1
     params:
-      script:
-        - {op: boundary, kind: invocation, call: c0, interface: model, payload: "summarize"}
-        - {op: complete, value_from: c0}
+      base_url: http://FLOWMESH_GATEWAY_HOST:PORT
+      model: gpt-4o-mini
 
   model_binding:
     mode: openai
@@ -36,8 +37,8 @@ spec:
 
   resources:
     hardware:
-      cpu: 1
-      memory: 256Mi
+      cpu: 2
+      memory: 4Gi
       gpu:
         type: any
         count: 0

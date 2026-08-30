@@ -5,10 +5,11 @@ metadata:
   owner: researcher
   annotations:
     description: >-
-      Agent episode whose model binding fronts a GPU-free dev_model serve task.
-      The openai upstream url points at the dev_model endpoint, so the mediated
-      model boundary settles against a local serving worker with no GPU. Run a
-      dev_model serve task first and set the url to its published endpoint.
+      Codex-harness agent whose model boundary fronts a GPU-free dev_model serve
+      task. Codex runs a real agent turn; its model calls route through the
+      FlowMesh agent-model gateway, which forwards to the dev_model endpoint. Run a
+      dev_model serve task first and set model_binding.url to its published
+      endpoint; point harness.params.base_url at your FlowMesh agent-model gateway.
 
 spec:
   taskType: agent
@@ -21,23 +22,22 @@ spec:
     boundary: [invocation, yield]
 
   harness:
-    backend: scripted
+    backend: codex
     version: v1
     params:
-      script:
-        - {op: boundary, kind: invocation, call: c0, interface: model, payload: "summarize"}
-        - {op: complete, value_from: c0}
+      base_url: http://FLOWMESH_GATEWAY_HOST:PORT
+      model: dev-model
 
   model_binding:
     mode: openai
-    url: http://127.0.0.1:8190/v1
+    url: http://DEV_MODEL_HOST:PORT/v1
     model: dev-model
     api_key: "REPLACE_WITH_YOUR_DEV_MODEL_KEY"
 
   resources:
     hardware:
-      cpu: 1
-      memory: 256Mi
+      cpu: 2
+      memory: 4Gi
       gpu:
         type: any
         count: 0

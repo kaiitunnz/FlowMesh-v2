@@ -5,10 +5,11 @@ metadata:
   owner: researcher
   annotations:
     description: >-
-      Minimal agent episode with a credential-free canned model binding. The
-      scripted harness replays a declared step sequence and the managed model
-      boundary settles deterministically, so this runs with no GPU and no
-      external provider.
+      Agent driven by the Codex app-server harness with a credential-free canned
+      model binding. Codex runs a real agent turn; its model calls route through
+      the FlowMesh agent-model gateway, which settles the boundary deterministically
+      with no GPU and no external provider. Point harness.params.base_url at your
+      FlowMesh server's agent-model gateway.
 
 spec:
   taskType: agent
@@ -21,20 +22,19 @@ spec:
     boundary: [invocation, yield]
 
   harness:
-    backend: scripted
+    backend: codex
     version: v1
     params:
-      script:
-        - {op: boundary, kind: invocation, call: c0, interface: model, payload: "hello"}
-        - {op: complete, value_from: c0}
+      base_url: http://FLOWMESH_GATEWAY_HOST:PORT
+      model: gpt-4o-mini
 
   model_binding:
     mode: canned
 
   resources:
     hardware:
-      cpu: 1
-      memory: 256Mi
+      cpu: 2
+      memory: 4Gi
       gpu:
         type: any
         count: 0
