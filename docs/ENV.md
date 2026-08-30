@@ -44,6 +44,12 @@ listed here is in `.env.example`.
 | `AGENT_MODEL_GATEWAY_MODEL` | – | Upstream model (openai/proxy modes) |
 | `AGENT_MODEL_GATEWAY_TIMEOUT_SEC` | `60` | Upstream request timeout (seconds) |
 | `AGENT_MODEL_SECRET_TTL_SEC` | `86400` | Expiry for a workflow's vaulted model credential |
+| `WEB_SEARCH_PROVIDER` | `duckduckgo` | Fabric web-search backend |
+| `WEB_SEARCH_API_KEY` | – | Deployment key for a keyed search provider |
+| `WEB_SEARCH_MAX_RESULTS` | `5` | Results per search |
+| `WEB_SEARCH_TIMEOUT_SEC` | `20` | Search request timeout (seconds) |
+| `WEB_SEARCH_RESULT_CHAR_CAP` | `6000` | Injected result size cap |
+| `WEB_SEARCH_MAX_CALLS` | `8` | Searches per episode |
 | `ENABLE_WORKER_WATCHDOG` | `true` | Worker death detection |
 | `WORKER_DEATH_GRACE_SEC` | `60` | Grace period before marking dead |
 | `WORKER_REHYDRATION_GRACE_SEC` | `120` | Extra grace for a worker's rehydrated in-flight tasks after the root restarts, before the watchdog may reclaim them |
