@@ -117,7 +117,9 @@ class TestParseWorkflowNative:
         with pytest.raises(Exception):
             parse_workflow(doc, format="native")
 
-    def test_v1_agent_rejected_with_migration_diagnostic(self) -> None:
+    def test_v1_agent_rejected_as_unsupported(self) -> None:
+        # `agent` is a v2-only task type; a v1 payload rejects it exactly like any
+        # other unsupported taskType, with no migration guidance.
         doc = textwrap.dedent("""\
             apiVersion: flowmesh/v1
             kind: AgentTask
@@ -127,9 +129,7 @@ class TestParseWorkflowNative:
               taskType: agent
               task: do something
         """)
-        with pytest.raises(
-            ValueError, match="agent.*requires apiVersion 'flowmesh/v2'"
-        ):
+        with pytest.raises(ValueError, match="unsupported spec.taskType 'agent'"):
             parse_workflow(doc, format="native")
 
     def test_v2_agent_parses(self) -> None:
