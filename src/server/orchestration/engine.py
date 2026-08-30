@@ -15,6 +15,7 @@ empty set. Scheduler/worker placement stays a physical decision that never chang
 the engine considers ready.
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Self
 
@@ -90,7 +91,12 @@ from .state import (
     WorkItem,
     WorkItemStatus,
 )
-from .tool_dispatch import MODEL_INTERFACE, GrantSnapshot, ToolInvocationEnvelope
+from .tool_dispatch import (
+    MODEL_INTERFACE,
+    FacadeBatchMember,
+    GrantSnapshot,
+    ToolInvocationEnvelope,
+)
 
 _EVENT_FIELDS = frozenset(
     {"operator_id", "work_item_id", "attempt_id", "invocation_id", "slot_key"}
@@ -722,6 +728,97 @@ class OrchestrationEngine:
                 return Advance()
         return Advance()
 
+    def route_boundary_batch(
+        self, task_id: str, batch_id: str, members: Sequence[FacadeBatchMember]
+    ) -> Advance:
+        """Record a turn-scoped facade batch and suspend the episode once.
+
+        Each ordered member is authority-checked and recorded independently — its own
+        correlation, invocation, idempotency key, and injection target — under one
+        shared batch id and the work item's single continuation. A re-drive of the whole
+        batch is a no-op once its members are recorded. The lane suspends once; the
+        episode resumes only when every member is durable, injecting the ordered vector.
+        """
+        wi = self._work_item_for_task(task_id)
+        if wi is None or wi.status in _TERMINAL_WI:
+            return Advance()
+        op = self._operators.get(wi.operator_id)
+        for member in members:
+            corr = (wi.activation_id, member.call_correlation)
+            if corr in self._boundary_events:
+                continue  # a re-driven batch reuses its recorded members
+            event = BoundaryEvent(
+                kind=BoundaryEventKind.INVOCATION,
+                interface=member.interface,
+                call_correlation=member.call_correlation,
+                request_payload=member.request_payload,
+                injection_target=member.original_call_id,
+                injection_tool=member.tool_name,
+                batch_id=batch_id,
+                batch_ordinal=member.ordinal,
+            )
+            denial = (
+                self._validate_agent_boundary(op, wi, event)
+                if isinstance(op, AgentOperator)
+                else None
+            )
+            if denial is not None:
+                self._record_boundary(wi, event, denial=denial)
+                continue
+            invocation = Invocation(
+                invocation_id=new_invocation_id(),
+                work_item_id=wi.work_item_id,
+                state=InvocationState.ISSUED,
+                replayable=True,
+            )
+            self._invocations[invocation.invocation_id] = invocation
+            self._record_boundary(wi, event, invocation_id=invocation.invocation_id)
+        self._suspend_work_item(wi, "episode_batch_suspended")
+        return Advance()
+
+    def _batch_members(self, activation_id: str, batch_id: str) -> list[BoundaryEvent]:
+        members = [
+            env
+            for (act, _), env in self._boundary_events.items()
+            if act == activation_id and env.batch_id == batch_id
+        ]
+        members.sort(key=lambda e: e.batch_ordinal or 0)
+        return members
+
+    def _batch_resolved(self, members: Sequence[BoundaryEvent]) -> bool:
+        return all(e.outcome_value is not None or e.denial is not None for e in members)
+
+    def has_open_facade_batch(self, task_id: str) -> bool:
+        """Whether a recorded facade batch for this episode is not yet resolved."""
+        wi = self._work_item_for_task(task_id)
+        if wi is None:
+            return False
+        seen: set[str] = set()
+        for (act, _), env in self._boundary_events.items():
+            if act != wi.activation_id or env.batch_id is None:
+                continue
+            if env.batch_id in seen:
+                continue
+            seen.add(env.batch_id)
+            if not self._batch_resolved(self._batch_members(act, env.batch_id)):
+                return True
+        return False
+
+    def batch_dispatch_envelopes(
+        self, task_id: str, batch_id: str
+    ) -> list[ToolInvocationEnvelope]:
+        """The dispatch envelopes for a batch's still-unresolved members, in order."""
+        wi = self._work_item_for_task(task_id)
+        if wi is None:
+            return []
+        out: list[ToolInvocationEnvelope] = []
+        for env in self._batch_members(wi.activation_id, batch_id):
+            if env.outcome_value is not None or env.denial is not None:
+                continue
+            if (envelope := self._envelope_from(wi, env)) is not None:
+                out.append(envelope)
+        return out
+
     def deliver_boundary_outcome(self, task_id: str, call_correlation: str) -> Advance:
         """Re-ready a boundary-suspended work item once its outcome is durable.
 
@@ -754,6 +851,8 @@ class OrchestrationEngine:
         """
         if (wi := self._work_item_for_task(task_id)) is not None:
             wi.pending_outcome_call = call_correlation
+            if call_correlation is None:
+                wi.pending_outcome_batch = None
 
     def close_latest_attempt(self, task_id: str) -> None:
         """Settle a still-running attempt of a continuing episode, bounding its history.
@@ -843,10 +942,19 @@ class OrchestrationEngine:
         if wi is None:
             return Advance()
         corr = (wi.activation_id, call_correlation)
-        if (env := self._boundary_events.get(corr)) is not None and value is not None:
-            self._boundary_events[corr] = env.model_copy(
-                update={"outcome_value": value}
-            )
+        env = self._boundary_events.get(corr)
+        if env is not None and value is not None and env.outcome_value is None:
+            env = env.model_copy(update={"outcome_value": value})
+            self._boundary_events[corr] = env
+        if env is not None and env.batch_id is not None:
+            # A batch member settled: hold the resume until every member is resolved,
+            # then re-ready exactly once with the full ordered vector.
+            members = self._batch_members(wi.activation_id, env.batch_id)
+            if not self._batch_resolved(members):
+                return Advance()
+            wi.pending_outcome_batch = env.batch_id
+            wi.pending_outcome_call = None
+            return self.deliver_boundary_outcome(task_id, call_correlation)
         self.mark_pending_outcome(task_id, call_correlation)
         return self.deliver_boundary_outcome(task_id, call_correlation)
 
@@ -863,7 +971,10 @@ class OrchestrationEngine:
         if wi is None:
             return None, ()
         outcomes: tuple[DeliveredOutcome, ...] = ()
-        if wi.pending_outcome_call is not None:
+        if wi.pending_outcome_batch is not None:
+            members = self._batch_members(wi.activation_id, wi.pending_outcome_batch)
+            outcomes = tuple(self._delivered_outcome(env) for env in members)
+        elif wi.pending_outcome_call is not None:
             env = self._boundary_events.get((wi.activation_id, wi.pending_outcome_call))
             if env is not None:
                 outcomes = (self._delivered_outcome(env),)
@@ -878,12 +989,17 @@ class OrchestrationEngine:
                 idempotency_key=env.idempotency_key,
                 kind=OutcomeKind.DENIED,
                 denial=env.denial,
+                injection_target=env.injection_target,
+                injection_tool=env.injection_tool,
+                injection_arguments=env.request_payload,
             )
         return DeliveredOutcome(
             call_correlation=corr,
             idempotency_key=env.idempotency_key,
             kind=OutcomeKind.RESULT,
             value=env.outcome_value,
+            injection_target=env.injection_target,
+            injection_tool=env.injection_tool,
         )
 
     def _is_boundary_redrive(self, wi: WorkItem, event: BoundaryEvent) -> bool:

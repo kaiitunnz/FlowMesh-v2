@@ -42,13 +42,37 @@ from server.services.agent_model_gateway import (  # noqa: E402
     AgentModelGateway,
     build_agent_model_router,
 )
+from server.task.v2.representations.operators import (  # noqa: E402
+    FacadeDescriptor,
+)
 from shared.harness import (  # noqa: E402
+    BoundaryEventKind,
     BoundaryRequest,
     DeliveredOutcome,
     HarnessResultKind,
     OutcomeKind,
 )
 from worker.executors.harness.codex import CodexAppServerHarnessAdapter  # noqa: E402
+
+
+def _spawn_facade() -> FacadeDescriptor:
+    return FacadeDescriptor(
+        name="spawn_agent",
+        kind=BoundaryEventKind.SPAWN,
+        tool_schema=json.dumps(
+            {
+                "type": "function",
+                "name": "spawn_agent",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"region": {"type": "string"}},
+                    "required": ["region"],
+                },
+            }
+        ),
+    )
+
+
 from worker.executors.harness.codex_transport import (  # noqa: E402
     CodexTransportConfig,
     CodexTransportError,
@@ -205,6 +229,7 @@ class _GatewayServer:
         )
         gateway = AgentModelGateway(None, cfg)  # type: ignore[arg-type]
         gateway.set_boundary_originator(fabric.originate)
+        gateway.set_facade_resolver(lambda task: [_spawn_facade()])
         app = FastAPI()
         app.include_router(build_agent_model_router(gateway))
         self._port = _free_port()

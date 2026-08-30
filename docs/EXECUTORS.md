@@ -110,3 +110,10 @@ DuckDuckGo by default, or a keyed provider via `WEB_SEARCH_*` ([`ENV.md`](ENV.md
 are snippets only. A child region must declare the interface in its authority ceiling for a
 spawned child to invoke it — a child that declares a tool the region omits is a compile
 error.
+
+Search calls a model emits together in one turn form an ordered facade batch: each member
+is authority-checked and executed independently off the agent's lane, and the episode
+resumes once with the full ordered result vector injected back at each original call.
+Members beyond `WEB_SEARCH_MAX_PARALLEL_CALLS_PER_TURN` settle as typed quota outcomes in
+source order. Native shell runs in a no-network sandbox, so the fabric search facade is the
+only web egress.

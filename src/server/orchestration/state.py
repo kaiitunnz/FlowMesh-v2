@@ -144,11 +144,16 @@ class BoundaryEvent(BaseModel):
     child_ref: str | None = None
     child_region_ref: str | None = None  # role a spawn/seal selects; never a raw op id
     request_payload: str | None = None
-    injection_target: str | None = None
+    injection_target: str | None = None  # the harness call id the outcome returns at
+    injection_tool: str | None = None  # facade tool name, to rebuild the call
     continuation: str | None = None
     state_ref: str | None = None
     value_ref: ValueRef | None = None
     invocation_id: str | None = None
+    # A turn-scoped facade batch: members share one batch id and one continuation, are
+    # ordered by their source ordinal, and resume the episode once, together, in order.
+    batch_id: str | None = None
+    batch_ordinal: int | None = None
     denial: DenialKind | None = None
     outcome_value: str | None = None  # settled result payload injected at re-dispatch
 
@@ -306,6 +311,8 @@ class WorkItem(BaseModel):
     continuation_ref: str | None = None
     # the settled boundary call whose outcome the next episode resume injects
     pending_outcome_call: str | None = None
+    # the completed facade batch whose ordered outcome vector the next resume injects
+    pending_outcome_batch: str | None = None
     attempt_ids: list[str] = Field(default_factory=list)
 
 

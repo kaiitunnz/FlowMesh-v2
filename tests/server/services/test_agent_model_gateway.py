@@ -351,15 +351,28 @@ def _spawn_facade() -> FacadeDescriptor:
     )
 
 
-def _agent_gateway() -> tuple[AgentModelGateway, list[Any]]:
+def _search_facade() -> FacadeDescriptor:
+    return FacadeDescriptor(
+        name="web_search",
+        kind=BoundaryEventKind.INVOCATION,
+        interface="search/v1",
+        tool_schema=json.dumps({"type": "function", "name": "web_search"}),
+    )
+
+
+def _agent_gateway() -> tuple[AgentModelGateway, list[Any], list[Any]]:
     cfg = AgentModelGatewayConfig(
         mode=GatewayMode.PROXY, url="http://up/v1", model="qwen"
     )
     gateway = AgentModelGateway(None, cfg)  # type: ignore[arg-type]
     originated: list[Any] = []
+    batches: list[Any] = []
     gateway.set_boundary_originator(lambda task, req: originated.append((task, req)))
-    gateway.set_facade_resolver(lambda task: [_spawn_facade()])
-    return gateway, originated
+    gateway.set_batch_originator(
+        lambda task, bid, members: batches.append((task, bid, members))
+    )
+    gateway.set_facade_resolver(lambda task: [_spawn_facade(), _search_facade()])
+    return gateway, originated, batches
 
 
 def test_agent_turn_captures_a_facade_and_clean_completes(monkeypatch: Any) -> None:
@@ -372,7 +385,7 @@ def test_agent_turn_captures_a_facade_and_clean_completes(monkeypatch: Any) -> N
         }
     ]
     _upstream_client(monkeypatch, output)
-    gateway, originated = _agent_gateway()
+    gateway, originated, batches = _agent_gateway()
     app = FastAPI()
     app.include_router(build_agent_model_router(gateway))
     request = {"model": "gpt-5-codex", "input": [], "tools": [], "stream": True}
@@ -400,7 +413,7 @@ def test_agent_turn_without_a_facade_passes_through(monkeypatch: Any) -> None:
         }
     ]
     _upstream_client(monkeypatch, output)
-    gateway, originated = _agent_gateway()
+    gateway, originated, batches = _agent_gateway()
     app = FastAPI()
     app.include_router(build_agent_model_router(gateway))
     request = {"model": "gpt-5-codex", "input": [], "tools": [], "stream": True}
@@ -423,7 +436,7 @@ def test_facade_turn_preserves_co_emitted_reasoning(monkeypatch: Any) -> None:
         },
     ]
     _upstream_client(monkeypatch, output)
-    gateway, originated = _agent_gateway()
+    gateway, originated, batches = _agent_gateway()
     app = FastAPI()
     app.include_router(build_agent_model_router(gateway))
     request = {"model": "gpt-5-codex", "input": [], "tools": [], "stream": True}
@@ -436,45 +449,64 @@ def test_facade_turn_preserves_co_emitted_reasoning(monkeypatch: Any) -> None:
     assert '"function_call"' not in body  # the facade call itself is not surfaced
 
 
-def test_a_multi_facade_or_mixed_turn_is_denied(monkeypatch: Any) -> None:
-    # Two facade calls, or a facade co-emitted with a real tool call, must not silently
-    # collapse to one boundary — the turn is denied.
-    two_facades: list[dict[str, Any]] = [
-        {
-            "type": "function_call",
-            "name": "spawn_agent",
-            "call_id": "c1",
-            "arguments": '{"region": "a"}',
-        },
-        {
-            "type": "function_call",
-            "name": "spawn_agent",
-            "call_id": "c2",
-            "arguments": '{"region": "b"}',
-        },
+def _fn(name: str, call_id: str, args: str = "{}") -> dict[str, Any]:
+    return {
+        "type": "function_call",
+        "name": name,
+        "call_id": call_id,
+        "arguments": args,
+    }
+
+
+def test_mixed_or_multi_spawn_facade_turns_are_denied_fail_closed(
+    monkeypatch: Any,
+) -> None:
+    # Multiple spawns, or search co-emitted with spawn (mixed fabric interfaces), are
+    # denied fail-closed; only a same-interface search batch may fan out in one turn.
+    two_spawns = [_fn("spawn_agent", "c1", '{"region": "a"}'), _fn("spawn_agent", "c2")]
+    search_plus_spawn = [
+        _fn("web_search", "c1", '{"query": "x"}'),
+        _fn("spawn_agent", "c2", '{"region": "a"}'),
     ]
-    facade_plus_real: list[dict[str, Any]] = [
-        {
-            "type": "function_call",
-            "name": "spawn_agent",
-            "call_id": "c1",
-            "arguments": '{"region": "a"}',
-        },
-        {
-            "type": "function_call",
-            "name": "exec_command",
-            "call_id": "c2",
-            "arguments": "{}",
-        },
-    ]
-    for output in (two_facades, facade_plus_real):
+    for output, match in (
+        (two_spawns, "exactly one spawn call"),
+        (search_plus_spawn, "mixes search and spawn"),
+    ):
         _upstream_client(monkeypatch, output)
-        gateway, originated = _agent_gateway()
+        gateway, originated, batches = _agent_gateway()
         app = FastAPI()
         app.include_router(build_agent_model_router(gateway))
-        request = {"model": "gpt-5-codex", "input": [], "tools": [], "stream": True}
-        with pytest.raises(RuntimeError, match="exactly one facade call"):
+        request = {"model": "m", "input": [], "tools": [], "stream": True}
+        with pytest.raises(RuntimeError, match=match):
             TestClient(app, raise_server_exceptions=True).post(
                 "/agent/tsk-1/v1/responses", json=request
             )
-        assert not originated
+        assert not originated and not batches
+
+
+def test_parallel_search_facades_form_one_ordered_batch(monkeypatch: Any) -> None:
+    # Three web_search calls in one turn become one ordered batch; a co-emitted native
+    # tool call is preserved verbatim so the harness runs it.
+    output = [
+        _fn("web_search", "s0", '{"query": "retrieval"}'),
+        _fn("web_search", "s1", '{"query": "grounding"}'),
+        _fn("web_search", "s2", '{"query": "evaluation"}'),
+        _fn("exec_command", "n0", '{"cmd": "ls"}'),
+    ]
+    _upstream_client(monkeypatch, output)
+    gateway, originated, batches = _agent_gateway()
+    app = FastAPI()
+    app.include_router(build_agent_model_router(gateway))
+    request = {"model": "m", "input": [], "tools": [], "stream": True}
+    resp = TestClient(app).post("/agent/tsk-1/v1/responses", json=request)
+    assert resp.status_code == 200 and not originated
+    assert len(batches) == 1
+    task_id, batch_id, members = batches[0]
+    assert task_id == "tsk-1" and len(members) == 3
+    assert [m.ordinal for m in members] == [0, 1, 2]
+    assert [m.original_call_id for m in members] == ["s0", "s1", "s2"]
+    assert all(m.interface == "search/v1" for m in members)
+    assert members[0].call_correlation != members[1].call_correlation
+    body = resp.content.decode()
+    assert "exec_command" in body  # native call preserved verbatim
+    assert "Dispatched 3 web search" in body

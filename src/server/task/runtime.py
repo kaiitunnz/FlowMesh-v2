@@ -14,6 +14,7 @@ from shared.harness import (
     BoundaryEventKind,
     BoundaryRequest,
     HarnessBackendKey,
+    HarnessCapsule,
     HarnessResult,
     HarnessResultKind,
 )
@@ -41,6 +42,8 @@ from ..orchestration.harness import to_boundary_event
 from ..orchestration.tool_dispatch import (
     MODEL_INTERFACE,
     SEARCH_INTERFACE,
+    FacadeBatchMember,
+    FacadeBatchOrigination,
     ToolInvocationEnvelope,
     ToolOutcome,
     ToolOutcomeStatus,
@@ -130,6 +133,7 @@ class TaskRuntime:
         self._feasibility_check = feasibility_check
         self._secret_vault = secret_vault
         self._scope_budget = ScopeBudget.from_config(orchestration)
+        self._web_search = orchestration.web_search
         self._agent_binding_defaults = _binding_defaults(orchestration.agent_binding)
         self._lowering_strategy = (
             LoweringStrategy.EPISODE_CUT
@@ -166,6 +170,7 @@ class TaskRuntime:
         # episode's model turn, keyed by task; the completion path reroutes the clean
         # turn-completion into the pending boundary rather than settling it.
         self._pending_originations: dict[str, BoundaryRequest] = {}
+        self._pending_batch_originations: dict[str, FacadeBatchOrigination] = {}
 
         self._lock = threading.RLock()
         self._cv = threading.Condition(self._lock)
@@ -1088,6 +1093,46 @@ class TaskRuntime:
         if changed:
             self._cv.notify_all()
 
+    def _route_and_dispatch_batch_locked(
+        self,
+        task_id: str,
+        batch: FacadeBatchOrigination,
+        capsule: HarnessCapsule | None,
+    ) -> None:
+        """Route a facade batch into the ledger, suspend once, and dispatch its members.
+
+        The batch's single continuation is the clean turn's capsule. Members up to the
+        per-turn parallel cap dispatch concurrently to the broker; any beyond it settle
+        as typed quota outcomes in source order — never a 500, never truncation. The
+        episode resumes once, when every member is durably resolved.
+        """
+        record = self._tasks.get(task_id)
+        engine = self._engines.get(record.workflow_id) if record else None
+        if record is None or engine is None:
+            return
+        wi = engine.work_item(task_id)
+        if wi is not None and capsule is not None:
+            wi.continuation_ref = capsule.blob
+        engine.mark_pending_outcome(task_id, None)
+        advance = engine.route_boundary_batch(task_id, batch.batch_id, batch.members)
+        self._apply_advance_locked(record.workflow_id, advance)
+        cap = self._web_search.max_parallel
+        for index, envelope in enumerate(
+            engine.batch_dispatch_envelopes(task_id, batch.batch_id)
+        ):
+            if index < cap:
+                self._dispatch_boundary(envelope)
+            else:
+                overflow = ToolOutcome(
+                    status=ToolOutcomeStatus.QUOTA,
+                    value=f"web search parallel cap ({cap}) exceeded this turn",
+                )
+                self.settle_episode_invocation(
+                    task_id, envelope.call_correlation, overflow.model_dump_json()
+                )
+        self._save_ledger_locked(record.workflow_id)
+        self._cv.notify_all()
+
     def _reenqueue_episode_locked(self, task_id: str) -> None:
         """Re-ready a still-running agent episode for its next run-to-yield step."""
         record = self._tasks.get(task_id)
@@ -1205,6 +1250,45 @@ class TaskRuntime:
             if (record := self._tasks.get(task_id)) is not None:
                 record.pending_origination = request
                 self._persist_locked(task_id)
+
+    def originate_episode_batch(
+        self, task_id: str, batch_id: str, members: Sequence[FacadeBatchMember]
+    ) -> None:
+        """Record a turn-scoped facade batch the gateway captured, before it acks.
+
+        The ordered membership and its single continuation are persisted on the record
+        before the clean turn returns to the harness, so a restart-replayed completion
+        routes the whole batch. At most one batch is outstanding per episode; a second
+        capture while one is pending is refused by the gateway fence, not stored here.
+        """
+        origination = FacadeBatchOrigination(batch_id=batch_id, members=tuple(members))
+        with self._lock:
+            self._pending_batch_originations[task_id] = origination
+            if (record := self._tasks.get(task_id)) is not None:
+                record.pending_batch_origination = origination
+                self._persist_locked(task_id)
+
+    def has_pending_facade(self, task_id: str) -> bool:
+        """Whether a facade boundary or batch is already captured for this episode.
+
+        The gateway fence reads this to refuse a second facade group before the first is
+        delivered, so a batch is never overwritten or overlapped mid-flight.
+        """
+        with self._lock:
+            if task_id in self._pending_originations or (
+                task_id in self._pending_batch_originations
+            ):
+                return True
+            record = self._tasks.get(task_id)
+            engine = self._engines.get(record.workflow_id) if record else None
+            if record is not None and (
+                record.pending_origination is not None
+                or record.pending_batch_origination is not None
+            ):
+                return True
+            if engine is None:
+                return False
+            return engine.has_open_facade_batch(task_id)
 
     def resolve_model_binding(self, task_id: str) -> AgentModelGatewayBinding | None:
         """The pinned managed-model binding for a task's agent, for the gateway.
@@ -1907,10 +1991,21 @@ class TaskRuntime:
                 originated = self._pending_originations.pop(task_id, None)
                 if originated is None:
                     originated = record.pending_origination
+                batch = self._pending_batch_originations.pop(task_id, None)
+                if batch is None:
+                    batch = record.pending_batch_origination
                 if harness_result.kind is not HarnessResultKind.COMPLETION:
                     # A non-terminal episode step routes its boundary and re-dispatches;
                     # a completion falls through to the terminal path below.
                     self._apply_episode_step_locked(task_id, harness_result)
+                    return usages
+                if batch is not None:
+                    # The gateway captured a turn-scoped facade batch: route the whole
+                    # ordered membership, suspend once, and dispatch its members.
+                    record.pending_batch_origination = None
+                    self._route_and_dispatch_batch_locked(
+                        task_id, batch, harness_result.capsule
+                    )
                     return usages
                 if originated is not None:
                     # The gateway captured a facade during this turn: the clean

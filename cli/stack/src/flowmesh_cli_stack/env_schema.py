@@ -346,6 +346,13 @@ STACK_ENV_SCHEMA = EnvSchema(
                     var_type=EnvVarType.INT,
                     min_value=1,
                 ),
+                EnvVar(
+                    "WEB_SEARCH_MAX_PARALLEL_CALLS_PER_TURN",
+                    "4",
+                    description="Parallel searches per turn.",
+                    var_type=EnvVarType.INT,
+                    min_value=1,
+                ),
             ],
         ),
         EnvSection(

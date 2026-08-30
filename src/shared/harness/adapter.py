@@ -90,6 +90,11 @@ class DeliveredOutcome(BaseModel):
     kind: OutcomeKind = OutcomeKind.RESULT
     denial: DenialKind | None = None  # set when kind is DENIED
     value: str | None = None  # opaque result payload when kind is RESULT
+    # The original harness call this outcome injects back at, the tool the model called,
+    # and its arguments, so a captured facade result maps faithfully to its own call id.
+    injection_target: str | None = None
+    injection_tool: str | None = None
+    injection_arguments: str | None = None
 
 
 class AgentEpisodeDispatch(BaseModel):

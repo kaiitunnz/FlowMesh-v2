@@ -50,6 +50,7 @@ listed here is in `.env.example`.
 | `WEB_SEARCH_TIMEOUT_SEC` | `20` | Search request timeout (seconds) |
 | `WEB_SEARCH_RESULT_CHAR_CAP` | `6000` | Injected result size cap |
 | `WEB_SEARCH_MAX_CALLS` | `8` | Searches per episode |
+| `WEB_SEARCH_MAX_PARALLEL_CALLS_PER_TURN` | `4` | Parallel searches per turn |
 | `ENABLE_WORKER_WATCHDOG` | `true` | Worker death detection |
 | `WORKER_DEATH_GRACE_SEC` | `60` | Grace period before marking dead |
 | `WORKER_REHYDRATION_GRACE_SEC` | `120` | Extra grace for a worker's rehydrated in-flight tasks after the root restarts, before the watchdog may reclaim them |

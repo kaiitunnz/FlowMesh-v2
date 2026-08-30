@@ -7,6 +7,7 @@ from shared.harness import BoundaryRequest
 from shared.tasks import TaskEnvelopeTemplate
 from shared.tasks.worker_message import HardwareUsage
 
+from ..orchestration.tool_dispatch import FacadeBatchOrigination
 from ..utils.time import now_iso
 
 TRAINING_TASK_TYPES = {
@@ -159,6 +160,11 @@ class TaskRecord(BaseModel):
         default=None,
         description="A facade boundary the gateway captured for this agent episode, "
         "durable so a restart-replayed completion still reroutes into it.",
+    )
+    pending_batch_origination: FacadeBatchOrigination | None = Field(
+        default=None,
+        description="A turn-scoped facade batch the gateway captured, durable so a "
+        "restart-replayed completion still routes the whole ordered membership.",
     )
 
     @computed_field  # type: ignore[prop-decorator]

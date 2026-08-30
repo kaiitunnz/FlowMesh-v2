@@ -68,7 +68,9 @@ class CodexTransportConfig:
     task_id: str
     provider_id: str = "flowmesh"
     approval_policy: str = "never"
-    sandbox_mode: str = "read-only"
+    # Permit native shell in a workspace-write sandbox but deny it network egress, so
+    # the fabric search facade is the only web path (a native curl cannot bypass it).
+    sandbox_mode: str = "workspace-write"
     turn_input: str = "continue"
     turn_timeout_sec: float = 120.0
     cwd: Path | None = None
@@ -103,6 +105,9 @@ class CodexTransportConfig:
             # native codex web_search (provider-executed, unavailable on a self-hosted
             # model) stays off; the model sees only the fabric facade.
             "tools.web_search=false",
+            # Native shell is permitted but has no network, so it cannot egress around
+            # the mediated search facade.
+            "sandbox_workspace_write.network_access=false",
         )
         env = {"CODEX_HOME": self.codex_home.as_posix(), _KEY_ENV: "placeholder"}
         return CodexConfig(
@@ -127,13 +132,22 @@ class _CodexExperimentalSurface:
 
 
 def _outcome_to_response_items(item: CodexInjectItem) -> list[dict[str, Any]]:
-    call_id = f"{_INJECT_CALL_PREFIX}{item.call_correlation}"
     output = f"denied: {item.value or ''}" if item.denied else (item.value or "")
+    if item.injection_target is not None:
+        # A captured facade result maps back at the model's own call id under the tool
+        # it called, so the model consumes it as the answer to that exact call.
+        call_id = item.injection_target
+        name = item.injection_tool or _INJECT_TOOL
+        arguments = item.injection_arguments or "{}"
+    else:
+        call_id = f"{_INJECT_CALL_PREFIX}{item.call_correlation}"
+        name = _INJECT_TOOL
+        arguments = "{}"
     return [
         {
             "type": "function_call",
-            "name": _INJECT_TOOL,
-            "arguments": "{}",
+            "name": name,
+            "arguments": arguments,
             "call_id": call_id,
         },
         {"type": "function_call_output", "call_id": call_id, "output": output},

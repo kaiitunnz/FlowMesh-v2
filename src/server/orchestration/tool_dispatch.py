@@ -58,6 +58,33 @@ class ToolInvocationEnvelope(BaseModel):
     grant_snapshot: GrantSnapshot = GrantSnapshot()
 
 
+class FacadeBatchMember(BaseModel):
+    """One ordered member of a turn-scoped facade batch, captured at the gateway.
+
+    All members of a batch share one interface and one continuation; each keeps its own
+    stable ``call_correlation`` (turn base plus source ``ordinal``) and the harness call
+    it injects back at (``original_call_id`` under the ``tool_name`` the model called).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    interface: str
+    call_correlation: str
+    ordinal: int
+    original_call_id: str
+    tool_name: str
+    request_payload: str | None = None
+
+
+class FacadeBatchOrigination(BaseModel):
+    """A captured facade batch awaiting routing: its id and ordered membership."""
+
+    model_config = ConfigDict(frozen=True)
+
+    batch_id: str
+    members: tuple[FacadeBatchMember, ...]
+
+
 class ToolOutcomeStatus(StrEnum):
     """The typed result class of a fabric-served tool call, all durably injected."""
 

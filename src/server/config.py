@@ -386,6 +386,7 @@ class WebSearchConfig:
     timeout_sec: float = 20.0
     result_char_cap: int = 6000
     max_calls: int = 8
+    max_parallel: int = 4
 
     @classmethod
     def from_env(cls) -> "WebSearchConfig":
@@ -397,6 +398,7 @@ class WebSearchConfig:
             timeout_sec=parse_float_env(f"{prefix}TIMEOUT_SEC") or 20.0,
             result_char_cap=parse_int_env(f"{prefix}RESULT_CHAR_CAP") or 6000,
             max_calls=parse_int_env(f"{prefix}MAX_CALLS") or 8,
+            max_parallel=parse_int_env(f"{prefix}MAX_PARALLEL_CALLS_PER_TURN") or 4,
         )
 
 
