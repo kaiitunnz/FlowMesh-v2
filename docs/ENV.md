@@ -88,8 +88,8 @@ Spark), set `DOCKER_GPU_RUNTIME=` in the stack env.
 | `HEARTBEAT_INTERVAL_SEC` | `30` | Heartbeat cadence |
 | `SERVE_DEFAULT_TTL_SEC` | `3600` | Default vLLM serve session TTL when `spec.ttlSeconds` is unset |
 | `SERVE_MAX_TTL_SEC` | `86400` | Upper bound on vLLM serve session TTL, regardless of `spec.ttlSeconds` |
-| `WORKER_ENABLE_DEV_MODEL` | `false` | Advertise the GPU-free `dev_model` serving executor (development / test backend) |
-| `DEV_MODEL_FORWARD_URL` | – | Upstream OpenAI-compatible base URL `dev_model` forwards to; canned deterministic responses when unset |
+| `WORKER_ENABLE_DEV_MODEL` | `false` | Advertise the GPU-free `dev_model` executor |
+| `DEV_MODEL_FORWARD_URL` | – | Upstream URL `dev_model` forwards to; canned if unset |
 
 ## Supervisor
 
