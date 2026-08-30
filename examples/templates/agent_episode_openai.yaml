@@ -1,0 +1,50 @@
+apiVersion: flowmesh/v2
+kind: AgentTask
+metadata:
+  name: agent-episode-openai
+  owner: researcher
+  annotations:
+    description: >-
+      Agent episode bound to an external OpenAI-compatible upstream. The
+      managed model boundary forwards to the given url with the workflow's own
+      inline api_key, which is vaulted server-side at submission. Fill url,
+      model, and api_key with your provider's values.
+
+spec:
+  taskType: agent
+
+  task: Summarize the latest trends in artificial intelligence in three bullet points
+
+  v2:
+    authority: { invoke: [model], delegate: [] }
+    tools: [{ name: model }]
+    boundary: [invocation, yield]
+
+  harness:
+    backend: scripted
+    version: v1
+    params:
+      script:
+        - {op: boundary, kind: invocation, call: c0, interface: model, payload: "summarize"}
+        - {op: complete, value_from: c0}
+
+  model_binding:
+    mode: openai
+    url: https://api.openai.com/v1
+    model: gpt-4o-mini
+    api_key: "REPLACE_WITH_YOUR_OPENAI_KEY"
+
+  resources:
+    hardware:
+      cpu: 1
+      memory: 256Mi
+      gpu:
+        type: any
+        count: 0
+
+  output:
+    destination:
+      type: local
+    artifacts:
+      - results.json
+      - agent_output.txt

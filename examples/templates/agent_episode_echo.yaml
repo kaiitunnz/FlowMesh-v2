@@ -1,19 +1,18 @@
 apiVersion: flowmesh/v2
 kind: AgentTask
 metadata:
-  name: agent-episode
+  name: agent-episode-echo
   owner: researcher
   annotations:
     description: >-
-      Minimal agent episode with a credential-free canned model binding. The
-      scripted harness replays a declared step sequence and the managed model
-      boundary settles deterministically, so this runs with no GPU and no
-      external provider.
+      Agent episode with a credential-free echo model binding. The managed model
+      boundary settles by echoing the request, so this runs deterministically
+      with no GPU and no external provider.
 
 spec:
   taskType: agent
 
-  task: Say hello
+  task: Echo a greeting
 
   v2:
     authority: { invoke: [model], delegate: [] }
@@ -25,11 +24,11 @@ spec:
     version: v1
     params:
       script:
-        - {op: boundary, kind: invocation, call: c0, interface: model, payload: "hello"}
+        - {op: boundary, kind: invocation, call: c0, interface: model, payload: "echo me"}
         - {op: complete, value_from: c0}
 
   model_binding:
-    mode: canned
+    mode: echo
 
   resources:
     hardware:
