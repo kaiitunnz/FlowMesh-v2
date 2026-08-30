@@ -360,6 +360,13 @@ def _load_secret_refs(raw: str | None) -> dict[str, SecretStr]:
     return secrets
 
 
+def _parse_allowed_hosts(raw: str | None) -> frozenset[str]:
+    """Parse the comma-separated trusted upstream hostnames a credential may reach."""
+    return frozenset(
+        host.lower() for item in (raw or "").split(",") if (host := item.strip())
+    )
+
+
 def _parse_resident_models(raw: str | None) -> dict[str, ResidentModelConfig]:
     """Parse ``ref=family[:engine_batch[:isolation]]`` authorized resident entries."""
     catalog: dict[str, ResidentModelConfig] = {}
@@ -393,6 +400,7 @@ class AgentBindingConfig:
     default_model: str | None = None
     secrets: dict[str, SecretStr] = field(default_factory=dict)
     resident_models: dict[str, ResidentModelConfig] = field(default_factory=dict)
+    allowed_hosts: frozenset[str] = frozenset()
 
     @classmethod
     def from_env(cls) -> "AgentBindingConfig":
@@ -405,6 +413,7 @@ class AgentBindingConfig:
             default_url=_first_env(f"{prefix}URL"),
             default_model=_first_env(f"{prefix}MODEL"),
             secrets=_load_secret_refs(os.getenv(f"{prefix}SECRETS")),
+            allowed_hosts=_parse_allowed_hosts(os.getenv(f"{prefix}ALLOWED_HOSTS")),
             resident_models=_parse_resident_models(
                 os.getenv(f"{prefix}RESIDENT_MODELS")
             ),

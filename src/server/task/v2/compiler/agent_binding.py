@@ -1,5 +1,6 @@
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit
 
 from shared.tasks.specs import AgentHarnessSpec, AgentModelBindingSpec, ModelBindingMode
 
@@ -39,6 +40,7 @@ class AgentBindingDefaults:
     default_url: str | None = None
     default_model: str | None = None
     secret_allowlist: frozenset[str] = frozenset()
+    allowed_upstream_hosts: frozenset[str] = frozenset()
     resident_catalog: Mapping[str, ResidentModelEntry] = field(default_factory=dict)
 
 
@@ -59,6 +61,18 @@ def resident_entry(
 
 def secret_ref_authorized(defaults: AgentBindingDefaults, ref: str | None) -> bool:
     return ref is None or ref in defaults.secret_allowlist
+
+
+def upstream_host_allowed(defaults: AgentBindingDefaults, url: str | None) -> bool:
+    """Whether an external upstream url's host is a trusted egress target.
+
+    Default-deny: an empty allowlist trusts no host, so external egress is off until a
+    deployment authorizes each host a credential may reach.
+    """
+    if not url:
+        return False
+    host = (urlsplit(url).hostname or "").lower()
+    return host in defaults.allowed_upstream_hosts
 
 
 def _resolve_harness(

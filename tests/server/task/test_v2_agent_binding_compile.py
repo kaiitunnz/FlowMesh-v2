@@ -60,7 +60,12 @@ def test_source_harness_and_model_binding_pin_with_source_provenance():
         """        harness: {backend: scripted, version: v2, params: {script: []}}
         model_binding: {mode: openai, url: "https://api.src/v1", model: src-model}"""
     )
-    template, _ = _compile(text, AgentBindingDefaults(default_backend="codex"))
+    template, _ = _compile(
+        text,
+        AgentBindingDefaults(
+            default_backend="codex", allowed_upstream_hosts=frozenset({"api.src"})
+        ),
+    )
     agent = _agent(template)
     assert agent.harness_binding.backend == "scripted"
     assert agent.harness_binding.provenance.backend is BindingProvenance.SOURCE
@@ -74,6 +79,7 @@ def test_deployment_default_beats_fallback_but_loses_to_source():
         default_backend="codex",
         default_mode=ModelBindingMode.OPENAI,
         default_url="https://api.default/v1",
+        allowed_upstream_hosts=frozenset({"api.default"}),
     )
     template, _ = _compile(text, defaults)
     agent = _agent(template)
@@ -134,12 +140,19 @@ def test_unauthorized_secret_ref_is_rejected():
         'model_binding: {mode: openai, url: "https://a/v1", model: m, secret_ref: bad}'
     )
     with pytest.raises(CompileError, match="unauthorized_secret"):
-        _compile(text, AgentBindingDefaults(default_backend="codex"))
+        _compile(
+            text,
+            AgentBindingDefaults(
+                default_backend="codex", allowed_upstream_hosts=frozenset({"a"})
+            ),
+        )
 
 
 def test_authorized_secret_ref_compiles():
     defaults = AgentBindingDefaults(
-        default_backend="codex", secret_allowlist=frozenset({"team"})
+        default_backend="codex",
+        secret_allowlist=frozenset({"team"}),
+        allowed_upstream_hosts=frozenset({"a"}),
     )
     text = _agent_workflow(
         'model_binding: {mode: openai, url: "https://a/v1", model: m, secret_ref: team}'
@@ -148,11 +161,32 @@ def test_authorized_secret_ref_compiles():
     assert _agent(template).model_binding.secret_ref == "team"
 
 
+def test_external_url_off_the_allowlist_is_rejected():
+    text = _agent_workflow(
+        'model_binding: {mode: openai, url: "https://evil/v1", model: m}'
+    )
+    with pytest.raises(CompileError, match="upstream_not_allowed"):
+        _compile(text, AgentBindingDefaults(default_backend="codex"))
+
+
+def test_external_url_on_the_allowlist_compiles():
+    text = _agent_workflow(
+        'model_binding: {mode: openai, url: "https://trusted/v1", model: m}'
+    )
+    defaults = AgentBindingDefaults(
+        default_backend="codex", allowed_upstream_hosts=frozenset({"trusted"})
+    )
+    template, _ = _compile(text, defaults)
+    assert _agent(template).model_binding.url == "https://trusted/v1"
+
+
 def test_compat_sugar_normalizes_harness_params_to_openai_binding():
     text = _agent_workflow(
         "harness: {backend: codex, params: {base_url: 'https://a/v1', model: m}}"
     )
-    template, _ = _compile(text, AgentBindingDefaults())
+    template, _ = _compile(
+        text, AgentBindingDefaults(allowed_upstream_hosts=frozenset({"a"}))
+    )
     binding = _agent(template).model_binding
     assert binding.mode is ModelBindingMode.OPENAI
     assert binding.url == "https://a/v1" and binding.model == "m"

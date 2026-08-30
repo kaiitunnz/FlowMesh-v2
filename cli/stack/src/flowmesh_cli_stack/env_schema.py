@@ -296,6 +296,14 @@ STACK_ENV_SCHEMA = EnvSchema(
                     ),
                 ),
                 EnvVar(
+                    "AGENT_MODEL_GATEWAY_ALLOWED_HOSTS",
+                    "",
+                    description=(
+                        "Comma-separated trusted upstream hosts a model credential may "
+                        "reach; empty denies every external openai url (egress off)."
+                    ),
+                ),
+                EnvVar(
                     "AGENT_MODEL_GATEWAY_RESIDENT_MODELS",
                     "",
                     description=(

@@ -13,6 +13,7 @@ def _clear_env(monkeypatch):
         "AGENT_MODEL_GATEWAY_URL",
         "AGENT_MODEL_GATEWAY_MODEL",
         "AGENT_MODEL_GATEWAY_SECRETS",
+        "AGENT_MODEL_GATEWAY_ALLOWED_HOSTS",
         "AGENT_MODEL_GATEWAY_RESIDENT_MODELS",
         "UTU_LLM_BASE_URL",
         "UTU_LLM_MODEL",
@@ -54,6 +55,18 @@ def test_secret_refs_resolve_to_server_side_values_at_the_edge(monkeypatch):
     cfg = AgentBindingConfig.from_env()
     assert set(cfg.secrets) == {"team"}
     assert cfg.secrets["team"].get_secret_value() == "resolved-team-value"
+
+
+def test_allowed_hosts_parse_case_insensitively(monkeypatch):
+    monkeypatch.setenv(
+        "AGENT_MODEL_GATEWAY_ALLOWED_HOSTS", "api.OpenAI.com, gw.internal"
+    )
+    hosts = AgentBindingConfig.from_env().allowed_hosts
+    assert hosts == frozenset({"api.openai.com", "gw.internal"})
+
+
+def test_allowed_hosts_default_empty(monkeypatch):
+    assert AgentBindingConfig.from_env().allowed_hosts == frozenset()
 
 
 def test_resident_catalog_parses_family_and_qualifiers(monkeypatch):

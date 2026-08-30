@@ -77,6 +77,7 @@ def _binding_defaults(cfg: AgentBindingConfig) -> AgentBindingDefaults:
         default_url=cfg.default_url,
         default_model=cfg.default_model,
         secret_allowlist=frozenset(cfg.secrets),
+        allowed_upstream_hosts=cfg.allowed_hosts,
         resident_catalog={
             ref: ResidentModelEntry(
                 family=entry.family,

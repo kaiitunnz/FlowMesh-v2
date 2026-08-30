@@ -111,6 +111,9 @@ from the activation's pinned binding, never from the request body, so two workfl
 different upstreams without cross-talk. A credential never enters a workflow, worker,
 capsule, or log: a workflow names an authorized `secret_ref` that the server resolves to a
 secret registered under `AGENT_MODEL_GATEWAY_SECRETS` on the server-to-upstream path;
-otherwise the deployment `AGENT_MODEL_GATEWAY_API_KEY` may apply. The `AGENT_MODEL_GATEWAY_*`
+otherwise the deployment `AGENT_MODEL_GATEWAY_API_KEY` applies only to the deployment's own
+default url, never to a workflow-provided one. An external `openai` url validates only when
+its host is in `AGENT_MODEL_GATEWAY_ALLOWED_HOSTS`, so a credential can only reach a trusted
+upstream; the allowlist is empty by default, which denies all external egress. The `AGENT_MODEL_GATEWAY_*`
 env family (see [`ENV.md`](ENV.md)) supplies the deployment defaults; the `UTU_LLM_*`
 provider path remains available only to the legacy UTU executor.

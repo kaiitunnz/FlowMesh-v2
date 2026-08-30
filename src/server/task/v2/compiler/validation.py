@@ -25,6 +25,7 @@ from .agent_binding import (
     neutral_defaults,
     resident_entry,
     secret_ref_authorized,
+    upstream_host_allowed,
 )
 from .diagnostics import Diagnostic, Severity, SourceLocation
 
@@ -538,14 +539,26 @@ def _check_agent_binding(
     binding = op.model_binding
     if binding is None:
         return diags
-    if binding.mode is ModelBindingMode.OPENAI and not binding.url:
-        diags.append(
-            Diagnostic(
-                code="agent.model_binding.missing_url",
-                message="an openai model binding requires a url",
-                location=location,
+    if binding.mode is ModelBindingMode.OPENAI:
+        if not binding.url:
+            diags.append(
+                Diagnostic(
+                    code="agent.model_binding.missing_url",
+                    message="an openai model binding requires a url",
+                    location=location,
+                )
             )
-        )
+        elif not upstream_host_allowed(defaults, binding.url):
+            diags.append(
+                Diagnostic(
+                    code="agent.model_binding.upstream_not_allowed",
+                    message=(
+                        "the model binding url host is not a trusted upstream; add "
+                        "it to the deployment's allowed upstream hosts"
+                    ),
+                    location=location,
+                )
+            )
     if (
         binding.mode is ModelBindingMode.RESIDENT
         and resident_entry(defaults, binding.service_model_ref) is None

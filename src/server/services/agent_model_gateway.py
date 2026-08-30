@@ -27,7 +27,10 @@ from shared.harness import BoundaryEventKind, BoundaryRequest
 from shared.tasks.specs import ModelBindingMode
 
 from ..config import AgentModelGatewayConfig, GatewayMode
-from ..task.v2.representations.operators import AgentModelGatewayBinding
+from ..task.v2.representations.operators import (
+    AgentModelGatewayBinding,
+    BindingProvenance,
+)
 from .secret_ref import SecretRefResolver
 
 _INJECT_CALL_PREFIX = "fab-"
@@ -56,6 +59,10 @@ class ResolvedGatewayBinding:
 GatewayBindingResolver = Callable[[str], ResolvedGatewayBinding | None]
 
 
+class ResidentBindingNotServable(RuntimeError):
+    """A resident model binding needs capacity admission the external gateway lacks."""
+
+
 def to_gateway_binding(
     pinned: AgentModelGatewayBinding,
     secret_resolver: SecretRefResolver,
@@ -63,17 +70,24 @@ def to_gateway_binding(
 ) -> ResolvedGatewayBinding:
     """Map a pinned model binding to its effective upstream, resolving the credential.
 
-    A ``secret_ref`` selects a server-side secret; otherwise a deployment default
-    key may apply; otherwise the upstream is unauthenticated. A resident binding is
-    not served by the external gateway.
+    A ``secret_ref`` selects a server-side secret. Otherwise the deployment default
+    key applies only to the deployment's own default url — a workflow that brings its
+    own url must bring its own authorized ``secret_ref`` rather than inherit the
+    deployment key, so the shared key never reaches a workflow-chosen host. A resident
+    binding is not served by the external gateway.
     """
     mode = _BINDING_MODE_TO_GATEWAY.get(pinned.mode)
     if mode is None:
-        raise RuntimeError(
+        raise ResidentBindingNotServable(
             f"model binding mode {pinned.mode.value!r} is not served externally"
         )
     secret = secret_resolver.resolve(pinned.secret_ref)
-    api_key = secret.get_secret_value() if secret is not None else default_api_key
+    if secret is not None:
+        api_key: str | None = secret.get_secret_value()
+    elif pinned.provenance.url is BindingProvenance.DEFAULT:
+        api_key = default_api_key
+    else:
+        api_key = None
     return ResolvedGatewayBinding(
         mode=mode, url=pinned.url, model=pinned.model, api_key=api_key
     )
@@ -234,13 +248,19 @@ class AgentModelGateway:
         headers, timeout = self._headers(binding), self._cfg.timeout_sec
 
         async def _stream() -> AsyncIterator[bytes]:
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                async with client.stream(
-                    "POST", url, json=forward, headers=headers
-                ) as upstream:
-                    upstream.raise_for_status()
-                    async for chunk in upstream.aiter_raw():
-                        yield chunk
+            # The response status is already sent once streaming starts, so an upstream
+            # failure ends the stream gracefully rather than raising through the ASGI
+            # layer; the harness observes a truncated turn and fails cleanly.
+            try:
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    async with client.stream(
+                        "POST", url, json=forward, headers=headers
+                    ) as upstream:
+                        upstream.raise_for_status()
+                        async for chunk in upstream.aiter_raw():
+                            yield chunk
+            except Exception as exc:
+                self._logger.warning("agent-model gateway proxy stream failed: %s", exc)
 
         return StreamingResponse(_stream(), media_type="text/event-stream")
 
@@ -260,9 +280,10 @@ class AgentModelGateway:
         """
         try:
             binding = self._effective(task_id)
+        except ResidentBindingNotServable as exc:
+            # Detection-only in this transition: the external gateway cannot serve it.
+            raise HTTPException(status_code=501, detail=str(exc)) from exc
         except Exception as exc:
-            # A resident binding is not served here: surface a clean typed error rather
-            # than letting the resolver's failure render as an unhandled 500.
             self._logger.warning("agent-model gateway binding unavailable: %s", exc)
             raise HTTPException(status_code=502, detail=str(exc)) from exc
         if binding.mode in (GatewayMode.CANNED, GatewayMode.ECHO):
@@ -274,14 +295,20 @@ class AgentModelGateway:
         forward.pop("model", None)
         if binding.model:
             forward["model"] = binding.model
-        async with httpx.AsyncClient(timeout=self._cfg.timeout_sec) as client:
-            upstream = await client.post(
-                f"{self._upstream_base(binding)}/responses",
-                json=forward,
-                headers=self._headers(binding),
-            )
-            upstream.raise_for_status()
-            data = upstream.json()
+        try:
+            async with httpx.AsyncClient(timeout=self._cfg.timeout_sec) as client:
+                upstream = await client.post(
+                    f"{self._upstream_base(binding)}/responses",
+                    json=forward,
+                    headers=self._headers(binding),
+                )
+                upstream.raise_for_status()
+                data = upstream.json()
+        except Exception as exc:
+            # A failed or stalled upstream is not the server's fault; surface a clean
+            # typed error, never an unhandled 500 (the exception carries only the url).
+            self._logger.warning("agent-model gateway upstream failed: %s", exc)
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
         output = data.get("output", []) if isinstance(data, dict) else []
         facades = _facade_calls(output)
         if facades and self._originator is not None:

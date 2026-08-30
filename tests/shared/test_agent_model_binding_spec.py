@@ -51,11 +51,25 @@ def test_raw_api_key_in_model_binding_is_rejected():
 
 
 @pytest.mark.parametrize(
-    "key", ["api_key", "apiKey", "openai_token", "SECRET", "password"]
+    "key",
+    ["api_key", "apiKey", "auth_token", "access_key", "SECRET", "password", "auth"],
 )
 def test_credential_harness_params_are_rejected(key):
     with pytest.raises(ValidationError):
         AgentHarnessSpec(backend="codex", params={key: "sk-secret"})
+
+
+def test_nested_credential_harness_params_are_rejected():
+    with pytest.raises(ValidationError):
+        AgentHarnessSpec(backend="codex", params={"auth": {"token": "sk-secret"}})
+
+
+@pytest.mark.parametrize(
+    "key", ["max_tokens", "token_limit", "token_budget", "n_tokens", "model"]
+)
+def test_generation_params_are_not_mistaken_for_credentials(key):
+    spec = AgentHarnessSpec(backend="codex", params={key: 512})
+    assert spec.params == {key: 512}
 
 
 def test_non_secret_harness_params_are_allowed():

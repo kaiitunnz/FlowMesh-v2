@@ -9,6 +9,7 @@ import server.services.agent_model_gateway as gw
 from server.config import AgentModelGatewayConfig, GatewayMode
 from server.services.agent_model_gateway import (
     AgentModelGateway,
+    ResidentBindingNotServable,
     ResolvedGatewayBinding,
     to_gateway_binding,
 )
@@ -106,19 +107,34 @@ def test_to_gateway_binding_resolves_secret_ref_server_side():
     assert resolved.url == "https://h/v1" and resolved.model == "m"
 
 
-def test_to_gateway_binding_falls_back_to_deployment_key():
+def test_deployment_key_pairs_only_with_the_deployment_default_url():
+    prov = ModelBindingProvenance(
+        mode=BindingProvenance.DEFAULT,
+        url=BindingProvenance.DEFAULT,
+        model=BindingProvenance.DEFAULT,
+    )
     pinned = AgentModelGatewayBinding(
-        mode=ModelBindingMode.OPENAI, url="https://h/v1", model="m", provenance=_PROV
+        mode=ModelBindingMode.OPENAI, url="https://gw/v1", model="m", provenance=prov
     )
     resolved = to_gateway_binding(pinned, SecretRefResolver({}), "sk-default")
     assert resolved.api_key == "sk-default"
+
+
+def test_deployment_key_is_never_sent_to_a_workflow_provided_url():
+    # A workflow-provided (source) url with no secret_ref must not inherit the
+    # deployment key, or the shared key would leak to a workflow-chosen host.
+    pinned = AgentModelGatewayBinding(
+        mode=ModelBindingMode.OPENAI, url="https://byo/v1", model="m", provenance=_PROV
+    )
+    resolved = to_gateway_binding(pinned, SecretRefResolver({}), "sk-default")
+    assert resolved.api_key is None
 
 
 def test_to_gateway_binding_rejects_resident_for_external_gateway():
     pinned = AgentModelGatewayBinding(
         mode=ModelBindingMode.RESIDENT, service_model_ref="cat/x", provenance=_PROV
     )
-    with pytest.raises(RuntimeError, match="not served externally"):
+    with pytest.raises(ResidentBindingNotServable, match="not served externally"):
         to_gateway_binding(pinned, SecretRefResolver({}), None)
 
 
@@ -127,15 +143,27 @@ def test_secret_resolver_denies_unregistered_ref():
     assert SecretRefResolver({}).resolve(None) is None
 
 
-def test_originate_surfaces_a_clean_error_not_a_500():
-    # A resident binding is not served externally: the episode surface must fail with a
-    # typed error, not an unhandled exception the framework renders as a 500.
+def test_originate_reports_a_resident_binding_as_not_implemented():
+    # A resident binding is detection-only in this transition: the episode surface must
+    # fail with a typed 501, not an unhandled exception rendered as a 500.
     gateway = _gateway()
 
     def _resident(_task_id):
-        raise RuntimeError("model binding mode 'resident' is not served externally")
+        raise ResidentBindingNotServable("resident is not served externally")
 
     gateway.set_binding_resolver(_resident)
+    with pytest.raises(HTTPException) as excinfo:
+        asyncio.run(gateway.originate_or_forward("tsk", {"input": "hi"}))
+    assert excinfo.value.status_code == 501
+
+
+def test_originate_surfaces_a_resolution_failure_as_a_clean_502():
+    gateway = _gateway()
+
+    def _broken(_task_id):
+        raise RuntimeError("resolver blew up")
+
+    gateway.set_binding_resolver(_broken)
     with pytest.raises(HTTPException) as excinfo:
         asyncio.run(gateway.originate_or_forward("tsk", {"input": "hi"}))
     assert excinfo.value.status_code == 502

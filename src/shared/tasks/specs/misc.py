@@ -1,3 +1,4 @@
+import re
 from enum import StrEnum
 from typing import Any, Literal, Self
 from urllib.parse import urlsplit
@@ -12,16 +13,47 @@ from .common import (
     TaskSpecTemplateBase,
 )
 
-# Substrings that mark a harness/model-binding key as credential-bearing. Credentials
-# reach an upstream only through a server-side secret_ref, never through opaque config.
-_CREDENTIAL_KEY_MARKERS = (
+# A harness/model-binding key is credential-bearing when it contains one of these
+# substrings or is a segment-boundary credential word (so ``max_tokens`` is allowed
+# but ``auth_token`` is not). Credentials reach an upstream only through a server-side
+# secret_ref, never through opaque config.
+_CREDENTIAL_SUBSTRINGS = (
     "api_key",
     "apikey",
-    "token",
     "secret",
     "password",
     "credential",
+    "authorization",
+    "access_key",
+    "auth_token",
+    "access_token",
+    "bearer_token",
+    "session_token",
+    "refresh_token",
 )
+_CREDENTIAL_SEGMENTS = frozenset({"auth"})
+
+
+def _looks_credential(key: str) -> bool:
+    lowered = key.lower()
+    if any(sub in lowered for sub in _CREDENTIAL_SUBSTRINGS):
+        return True
+    return bool(_CREDENTIAL_SEGMENTS & set(re.split(r"[_\-\s]+", lowered)))
+
+
+def _find_credential_key(value: Any) -> str | None:
+    """The first credential-looking key anywhere in a nested params structure."""
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            if _looks_credential(str(key)):
+                return str(key)
+            if (found := _find_credential_key(nested)) is not None:
+                return found
+    elif isinstance(value, list):
+        for item in value:
+            if (found := _find_credential_key(item)) is not None:
+                return found
+    return None
 
 
 def _has_url_credentials(url: str | None) -> bool:
@@ -92,12 +124,10 @@ class AgentHarnessSpec(BaseModel):
     @field_validator("params")
     @classmethod
     def _reject_credential_params(cls, params: dict[str, Any]) -> dict[str, Any]:
-        for key in params:
-            lowered = key.lower()
-            if any(marker in lowered for marker in _CREDENTIAL_KEY_MARKERS):
-                raise ValueError(
-                    f"harness param {key!r} looks credential-bearing; use a secret_ref"
-                )
+        if (key := _find_credential_key(params)) is not None:
+            raise ValueError(
+                f"harness param {key!r} looks credential-bearing; use a secret_ref"
+            )
         return params
 
 
