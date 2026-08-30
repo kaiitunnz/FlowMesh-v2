@@ -84,16 +84,6 @@ Declared per agent under `spec.harness`:
   `model` (the Responses gateway it drives) and an optional `codex_home` override (the
   rollout directory, by default isolated per workflow and agent under the results dir).
 
-The `codex` backend binds a live `codex app-server` through the `openai-codex` SDK
-(`runtime-harness-codex` dependency group). It maps `thread/resume`, `thread/inject_items`,
-and `turn/start` onto the adapter: a step runs against an on-disk rollout under
-`CODEX_HOME`, and a settled outcome injects back as raw Responses items the next turn sees.
-A mediated facade originates at the agent-model gateway, which is the episode's model
-provider: it captures the model's native facade call and returns the app-server a clean
-turn-completing message, so the adapter itself only completes or fails and durability is
-fabric-side. `tests/worker/test_codex_integration.py` exercises this against a live
-app-server driven through the real gateway, including a `kill -9` recovery trace.
-
 A mediated model request the agent defers is settled by the **agent-model gateway**, not a
 raw model endpoint. The gateway implements the OpenAI Responses API so a harness whose
 provider targets it crosses the same seam, and for an agent episode it injects the facade
