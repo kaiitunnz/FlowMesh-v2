@@ -76,34 +76,6 @@ runtime-inference-gpu = [
 runtime-training-gpu = [
     "deepspeed>=0.19.1",
 ]
-runtime-agent = [
-    "aiofiles>=24.1.0",
-    "aiohttp>=3.14.3",
-    "art>=6.5",
-    "arxiv>=2.2.0",
-    "beautifulsoup4>=4.14.3",
-    "chunkr-ai>=0.3.7",
-    "crawl4ai>=0.9.0",
-    "ddgs>=9.10.0",
-    "google-genai>=1.47.0",
-    "hydra-core>=1.3.4",
-    "ipython>=9.5.0",
-    "jinja2>=3.1.6",
-    "matplotlib>=3.10.6",
-    "mcp>=1.28.1",
-    "openai>=2.9.0",
-    "openai-agents>=0.7.0",
-    "opencv-python-headless>=4.13.0.92",
-    "openpyxl>=3.1.5",
-    "pexpect>=4.9.0",
-    "prompt-toolkit>=3.0.52",
-    "pymupdf>=1.26.7",
-    "rich>=14.2.0",
-    "sqlmodel>=0.0.27",
-    "tiktoken>=0.12.0",
-    "toml>=0.10.2",
-    "wikipedia-api>=0.8.1",
-]
 runtime-harness-codex = [
     "openai-codex==0.147.0",
 ]
@@ -128,7 +100,6 @@ runtime-worker-cpu = [
     { include-group = "runtime-inference" },
     { include-group = "runtime-training" },
     { include-group = "runtime-rag" },
-    { include-group = "runtime-agent" },
     { include-group = "runtime-harness-codex" },
     { include-group = "runtime-observability" },
     { include-group = "runtime-analytics" },
