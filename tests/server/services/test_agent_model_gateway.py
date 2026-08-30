@@ -8,6 +8,7 @@ conversion for a harness whose provider targets the gateway directly.
 """
 
 import asyncio
+import json
 from typing import Any
 
 import pytest
@@ -21,6 +22,7 @@ from server.services.agent_model_gateway import (
     ResponsesRequest,
     build_agent_model_router,
 )
+from server.task.v2.representations.operators import FacadeDescriptor
 from shared.harness import BoundaryEventKind, HarnessCapsule
 from tests.server.task.test_v2_orchestration import FakeRegistry, _register, _runtime
 from worker.executors.harness.scripted import ScriptedHarnessAdapter, ScriptedStep
@@ -278,7 +280,7 @@ def _facade_index() -> tuple[dict[str, Any], int]:
             "arguments": '{"region": "reviewer", "args": {"focus": "security"}}',
         },
     ]
-    facades = _facade_calls(output)
+    facades = _facade_calls(output, {"spawn_agent": _spawn_facade()})
     assert len(facades) == 1
     history = [
         {"type": "message", "role": "user"},
@@ -293,7 +295,7 @@ def test_facade_capture_maps_the_native_call_to_a_boundary() -> None:
     call, index = _facade_index()
     # One fab- output already resolved in history advances the next facade's index.
     assert index == 1
-    boundary = _facade_boundary(call, "tsk-1:1")
+    boundary = _facade_boundary(call, _spawn_facade(), "tsk-1:1")
     assert boundary.kind is BoundaryEventKind.SPAWN
     assert boundary.child_region_ref == "reviewer"
     assert boundary.call_correlation == "tsk-1:1"
@@ -331,6 +333,24 @@ def _upstream_client(monkeypatch: Any, output: list[dict[str, Any]]) -> None:
     monkeypatch.setattr(mod.httpx, "AsyncClient", _Client)
 
 
+def _spawn_facade() -> FacadeDescriptor:
+    return FacadeDescriptor(
+        name="spawn_agent",
+        kind=BoundaryEventKind.SPAWN,
+        tool_schema=json.dumps(
+            {
+                "type": "function",
+                "name": "spawn_agent",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"region": {"type": "string"}},
+                    "required": ["region"],
+                },
+            }
+        ),
+    )
+
+
 def _agent_gateway() -> tuple[AgentModelGateway, list[Any]]:
     cfg = AgentModelGatewayConfig(
         mode=GatewayMode.PROXY, url="http://up/v1", model="qwen"
@@ -338,6 +358,7 @@ def _agent_gateway() -> tuple[AgentModelGateway, list[Any]]:
     gateway = AgentModelGateway(None, cfg)  # type: ignore[arg-type]
     originated: list[Any] = []
     gateway.set_boundary_originator(lambda task, req: originated.append((task, req)))
+    gateway.set_facade_resolver(lambda task: [_spawn_facade()])
     return gateway, originated
 
 

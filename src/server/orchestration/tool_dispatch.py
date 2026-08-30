@@ -19,6 +19,9 @@ from ..task.v2.representations.operators import BoundaryEventKind
 MODEL_INTERFACE = "model"
 SEARCH_INTERFACE = "search/v1"
 
+# The interfaces the fabric serves as an injected facade tool (never the model turn).
+FABRIC_TOOL_INTERFACES = frozenset({SEARCH_INTERFACE})
+
 
 class GrantSnapshot(BaseModel):
     """The pinned authorization a mediated boundary was recorded under.

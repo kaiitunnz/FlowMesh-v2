@@ -70,7 +70,7 @@ from .v2 import (
 )
 from .v2.compiler.agent_binding import AgentBindingDefaults
 from .v2.credentials import pop_inline_model_secrets, redact_source_text
-from .v2.representations.operators import AgentModelGatewayBinding
+from .v2.representations.operators import AgentModelGatewayBinding, FacadeDescriptor
 from .v2.representations.plan import EpisodeSpec
 
 # A live-feasibility check: whether a lowered episode's declared alternative can be
@@ -1220,6 +1220,20 @@ class TaskRuntime:
                 return None
             op = engine.agent_operator(task_id)
             return op.model_binding if op is not None else None
+
+    def agent_facade_descriptors(self, task_id: str) -> list[FacadeDescriptor]:
+        """The fabric facades pinned on a task's agent, for the gateway to inject.
+
+        Only an agent's compile-pinned facades are injectable, so the model can never be
+        offered a fabric tool the agent did not declare.
+        """
+        with self._lock:
+            record = self._tasks.get(task_id)
+            engine = self._engines.get(record.workflow_id) if record else None
+            if engine is None:
+                return []
+            op = engine.agent_operator(task_id)
+            return list(op.facades) if op is not None else []
 
     def gateway_binding_for(
         self, task_id: str

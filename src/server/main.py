@@ -142,6 +142,7 @@ if IS_ROOT_NODE:
     )
     RUNTIME.set_model_settler(AGENT_MODEL_GATEWAY.settle)
     AGENT_MODEL_GATEWAY.set_boundary_originator(RUNTIME.originate_episode_boundary)
+    AGENT_MODEL_GATEWAY.set_facade_resolver(RUNTIME.agent_facade_descriptors)
 
     def _settle_tool(task_id: str, call_correlation: str, value: str) -> None:
         assert RUNTIME is not None

@@ -238,6 +238,23 @@ class BoundarySignature(BaseModel):
     events: tuple[BoundaryEventKind, ...] = ()
 
 
+class FacadeDescriptor(BaseModel):
+    """A fabric-owned facade tool the model gateway injects for one agent.
+
+    ``name`` is the model-facing tool name whose call the gateway captures;
+    ``tool_schema`` is the function-tool JSON injected into the model turn; ``kind`` and
+    ``interface`` are the boundary the captured call originates. The compiler pins the
+    exact set an agent may use, so the gateway injects only its declared facades.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    name: str
+    kind: BoundaryEventKind
+    interface: str | None = None
+    tool_schema: str  # the injected function-tool schema, serialized
+
+
 class ChildRegionRef(BaseModel):
     """A named reference from an agent's spawn seam to one declared child region.
 
@@ -330,6 +347,9 @@ class AgentOperator(_OperatorBase):
     authority: AuthorityCeiling = AuthorityCeiling()
     boundary: BoundarySignature = BoundarySignature()
     guard: ConditionGuard | None = None
+    # The fabric-owned facade tools the gateway injects for this agent, pinned at
+    # compile time from its declared tools and child regions.
+    facades: tuple[FacadeDescriptor, ...] = ()
     # The finite, uniquely named set of declared child regions a spawn_agent may select.
     child_region_refs: tuple[ChildRegionRef, ...] = ()
     # Legacy single-target shorthand the compiler normalizes into one declared region;

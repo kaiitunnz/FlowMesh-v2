@@ -426,6 +426,27 @@ def _check_child_regions(
                         location=location,
                     )
                 )
+            entry = (
+                op_by_id.get(target.child_template_ref)
+                if target.child_template_ref
+                else None
+            )
+            if isinstance(entry, AgentOperator):
+                omitted = set(entry.authority.invoke) - set(target.authority.invoke)
+                if omitted:
+                    diags.append(
+                        Diagnostic(
+                            code="region.child-tool-omitted",
+                            message=(
+                                f"child agent {entry.operator_id!r} declares "
+                                "interface(s) "
+                                + ", ".join(sorted(omitted))
+                                + f" the region {ref.spawn_ref!r} ceiling omits; "
+                                "declare them on the region authority"
+                            ),
+                            location=location,
+                        )
+                    )
     return diags
 
 

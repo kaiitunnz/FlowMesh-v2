@@ -238,21 +238,28 @@ def _apply_agent_child_regions(
     so a ``spawn_agent`` selects the region by name without knowing the compiled ids.
     """
     children = v2.get("child")
-    if isinstance(children, str):
+    if isinstance(children, (str, dict)):
         children = [children]
     if not isinstance(children, list):
         return op
     refs: list[ChildRegionRef] = list(op.child_region_refs)
     for child in children:
-        entry_op = name_to_op.get(str(child), str(child))
-        spawn_id = f"{op.operator_id}:{child}:spawn"
+        # A child is a bare role name (empty region ceiling, fail-closed) or a mapping
+        # {name, authority} that declares the region's per-site invoke/delegate ceiling.
+        if isinstance(child, dict):
+            role = str(child.get("name"))
+            ceiling = _authority(child.get("authority"), role, "graph_node")
+        else:
+            role, ceiling = str(child), AuthorityCeiling()
+        entry_op = name_to_op.get(role, role)
+        spawn_id = f"{op.operator_id}:{role}:spawn"
         join_id = f"{spawn_id}:join"
         spawn = SpawnRegion(
             operator_id=spawn_id,
             source_ref=op.source_ref,
             outputs=(Port(name="children"),),
             child_template_ref=entry_op,
-            authority=AuthorityCeiling(),
+            authority=ceiling,
         )
         join = JoinRegion(
             operator_id=join_id,
@@ -264,7 +271,7 @@ def _apply_agent_child_regions(
         _add_synth_operator(spawn, op.operator_id, acc)
         _add_synth_operator(join, op.operator_id, acc)
         acc.edges.append(TemplateEdge(from_op=spawn_id, to_op=join_id))
-        refs.append(ChildRegionRef(name=str(child), spawn_ref=spawn_id))
+        refs.append(ChildRegionRef(name=role, spawn_ref=spawn_id))
     return op.model_copy(update={"child_region_refs": tuple(refs)})
 
 

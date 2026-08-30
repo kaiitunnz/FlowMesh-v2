@@ -24,12 +24,15 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from shared.harness import BoundaryEventKind, BoundaryRequest
+from shared.harness import BoundaryRequest
 from shared.tasks.specs import ModelBindingMode
 
 from ..config import AgentModelGatewayConfig, GatewayMode
 from ..orchestration.tool_dispatch import ToolInvocationEnvelope
-from ..task.v2.representations.operators import AgentModelGatewayBinding
+from ..task.v2.representations.operators import (
+    AgentModelGatewayBinding,
+    FacadeDescriptor,
+)
 from .model_secret_vault import ModelSecretVault
 
 _INJECT_CALL_PREFIX = "fab-"
@@ -86,14 +89,10 @@ def to_gateway_binding(
     )
 
 
-# Facade tools the gateway injects into a harness's model request; a call to one is
-# captured server-side and originated as a fabric boundary, never run by the harness.
-_FACADE_TOOLS: dict[str, BoundaryEventKind] = {
-    "spawn_agent": BoundaryEventKind.SPAWN,
-    "spawn_seal": BoundaryEventKind.SPAWN_SEAL,
-}
-
 BoundaryOriginator = Callable[[str, BoundaryRequest], None]
+# Resolves the facade tools the gateway may inject for one agent, keyed by its task id;
+# a call to one is captured server-side and originated as a fabric boundary.
+FacadeResolver = Callable[[str], list[FacadeDescriptor]]
 
 
 class _EpisodeSettler(Protocol):
@@ -134,6 +133,7 @@ class AgentModelGateway:
         self._logger = logger or logging.getLogger("agent-model-gateway")
         self._originator: BoundaryOriginator | None = None
         self._binding_resolver: GatewayBindingResolver | None = None
+        self._facade_resolver: FacadeResolver | None = None
         self._executor = ThreadPoolExecutor(
             max_workers=4, thread_name_prefix="agent-model-gateway"
         )
@@ -145,6 +145,15 @@ class AgentModelGateway:
     def set_binding_resolver(self, resolver: GatewayBindingResolver) -> None:
         """Install the per-invocation upstream resolver keyed by episode task id."""
         self._binding_resolver = resolver
+
+    def set_facade_resolver(self, resolver: FacadeResolver) -> None:
+        """Install the per-agent facade resolver keyed by episode task id."""
+        self._facade_resolver = resolver
+
+    def _facades_for(self, task_id: str) -> list[FacadeDescriptor]:
+        if self._facade_resolver is None:
+            return []
+        return self._facade_resolver(task_id)
 
     def _effective(self, task_id: str | None) -> ResolvedGatewayBinding:
         """The upstream for this invocation: the pinned binding, else the default.
@@ -286,7 +295,10 @@ class AgentModelGateway:
             # No live model to call a facade: settle the turn deterministically.
             text = self.invoke(_dump_input(body.get("input")), task_id)
             return _sse_response(_message_output(text))
-        tools = _upstream_tools(body.get("tools")) + [_spawn_agent_tool()]
+        descriptors = self._facades_for(task_id)
+        by_name = {d.name: d for d in descriptors}
+        injected = [json.loads(d.tool_schema) for d in descriptors]
+        tools = _upstream_tools(body.get("tools")) + injected
         forward = {**body, "stream": False, "tools": tools}
         forward.pop("model", None)
         if binding.model:
@@ -306,9 +318,9 @@ class AgentModelGateway:
             self._logger.warning("agent-model gateway upstream failed: %s", exc)
             raise HTTPException(status_code=502, detail=str(exc)) from exc
         output = data.get("output", []) if isinstance(data, dict) else []
-        facades = _facade_calls(output)
+        facades = _facade_calls(output, by_name)
         if facades and self._originator is not None:
-            others = _other_tool_calls(output)
+            others = _other_tool_calls(output, by_name)
             if len(facades) > 1 or others:
                 # The single-forward binding lifts exactly one facade call carrying no
                 # other tool call; a multi-facade or mixed turn is denied loudly rather
@@ -319,7 +331,7 @@ class AgentModelGateway:
                 )
             call = facades[0]
             corr = f"{task_id}:{_forward_index(body.get('input'))}"
-            request = _facade_boundary(call, corr)
+            request = _facade_boundary(call, by_name[str(call.get("name"))], corr)
             self._originator(task_id, request)
             # Preserve the turn's non-facade items (reasoning, messages) so reasoning
             # continuity is not broken; only the facade call becomes the dispatch.
@@ -405,33 +417,9 @@ def _response_text(data: Any) -> str:
     return ""
 
 
-def _spawn_agent_tool() -> dict[str, Any]:
-    """The facade tool the gateway injects for a harness to delegate a child region."""
-    return {
-        "type": "function",
-        "name": "spawn_agent",
-        "description": (
-            "Delegate a subtask to a declared child agent region and await its "
-            "mediated result."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "region": {
-                    "type": "string",
-                    "description": "the declared child region role name",
-                },
-                "args": {
-                    "type": "object",
-                    "description": "structured input for the child agent",
-                },
-            },
-            "required": ["region"],
-        },
-    }
-
-
-def _facade_calls(output: Any) -> list[dict[str, Any]]:
+def _facade_calls(
+    output: Any, by_name: dict[str, FacadeDescriptor]
+) -> list[dict[str, Any]]:
     if not isinstance(output, list):
         return []
     return [
@@ -439,11 +427,13 @@ def _facade_calls(output: Any) -> list[dict[str, Any]]:
         for item in output
         if isinstance(item, dict)
         and item.get("type") == "function_call"
-        and item.get("name") in _FACADE_TOOLS
+        and item.get("name") in by_name
     ]
 
 
-def _other_tool_calls(output: Any) -> list[dict[str, Any]]:
+def _other_tool_calls(
+    output: Any, by_name: dict[str, FacadeDescriptor]
+) -> list[dict[str, Any]]:
     if not isinstance(output, list):
         return []
     return [
@@ -451,7 +441,7 @@ def _other_tool_calls(output: Any) -> list[dict[str, Any]]:
         for item in output
         if isinstance(item, dict)
         and item.get("type") == "function_call"
-        and item.get("name") not in _FACADE_TOOLS
+        and item.get("name") not in by_name
     ]
 
 
@@ -473,7 +463,9 @@ def _forward_index(history: Any) -> int:
     )
 
 
-def _facade_boundary(call: dict[str, Any], call_correlation: str) -> BoundaryRequest:
+def _facade_boundary(
+    call: dict[str, Any], descriptor: FacadeDescriptor, call_correlation: str
+) -> BoundaryRequest:
     raw = call.get("arguments")
     payload = raw if isinstance(raw, str) else json.dumps(raw or {})
     args: Any = raw
@@ -484,7 +476,8 @@ def _facade_boundary(call: dict[str, Any], call_correlation: str) -> BoundaryReq
             args = {}
     region = args.get("region") if isinstance(args, dict) else None
     return BoundaryRequest(
-        kind=_FACADE_TOOLS[str(call.get("name"))],
+        kind=descriptor.kind,
+        interface=descriptor.interface,
         call_correlation=call_correlation,
         child_region_ref=region if isinstance(region, str) else None,
         request_payload=payload,
