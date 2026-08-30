@@ -39,7 +39,6 @@ WORKER_CPU_GROUPS: list[str] = [
     "runtime-inference",
     "runtime-training",
     "runtime-rag",
-    "runtime-agent",
     "runtime-harness-codex",
     "runtime-analytics",
     "runtime-observability",

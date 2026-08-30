@@ -696,44 +696,6 @@ STACK_ENV_SCHEMA = EnvSchema(
             ],
         ),
         EnvSection(
-            title="Agent Executor (youtu-agent / utu)",
-            description=[
-                "All four UTU_LLM_* are required for the agent executor to run."
-            ],
-            vars=[
-                EnvVar(
-                    "UTU_LLM_TYPE",
-                    description='utu LLM provider kind, e.g. "chat.completions"',
-                ),
-                EnvVar(
-                    "UTU_LLM_MODEL",
-                    description="utu model identifier, e.g. gpt-4o-mini",
-                ),
-                EnvVar(
-                    "UTU_LLM_BASE_URL",
-                    description="utu LLM base URL",
-                    var_type=EnvVarType.URL,
-                    url_schemes={"http", "https"},
-                ),
-                EnvVar(
-                    "UTU_LLM_API_KEY",
-                    description="utu LLM API key",
-                ),
-                EnvVar(
-                    "SERPER_API_KEY",
-                    description="Serper API key (optional, for agent search tools)",
-                ),
-                EnvVar(
-                    "JINA_API_KEY",
-                    description="Jina API key (optional, for agent search tools)",
-                ),
-                EnvVar(
-                    "DB_URL",
-                    description="Database URL for agent tracing (optional)",
-                ),
-            ],
-        ),
-        EnvSection(
             title="n8n Integration",
             vars=[
                 EnvVar(

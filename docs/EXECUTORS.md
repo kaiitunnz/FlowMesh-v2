@@ -13,7 +13,7 @@ The worker resolves `spec.taskType` against an executor registry in
 | `training` | `SFTExecutor` / `LoRASFTExecutor` / `DPOExecutor` / `PPOExecutor` | LLM fine-tuning |
 | `image_classification_training` | `ImageClassificationTrainingExecutor` | Vision classification fine-tuning (`AutoModelForImageClassification` + HF `Trainer`) |
 | `rag` | `RAGExecutor` | Retrieval-augmented generation |
-| `agent` | `AgentExecutor` / `AgentEpisodeExecutor` | Tool-using LLM agent — UTU / youtu-agent by default, or a run-to-yield harness episode when `spec.harness` names a backend |
+| `agent` | `AgentEpisodeExecutor` | Tool-using LLM agent run as a run-to-yield harness episode; requires a resolved harness binding (`spec.harness` or a deployment default) or fails validation |
 | `data_profiling` | `DataProfilingExecutor` | DataFrame profiling |
 | `data_retrieval` | `DataRetrievalExecutor` | DataFrame loading from sources (`type: sql`, `type: s3`, `type: lumid` with `mode: sql\|s3\|agent` via lumid-data-app; `type: lumid` (mode `sql`/`s3`/`agent`) requires `lumid_data_token`, the bearer forwarded to lumid-data-app) |
 | `ssh` | `SSHExecutor` | Interactive SSH session or non-interactive container job |
@@ -49,31 +49,14 @@ Artifact-bearing fields use `ArtifactRef` (`{"path": rel_path}`);
 relative paths resolve against the producer's `_artifacts` context via
 `artifact_to_source` / `_render_artifact_ref`.
 
-## Agent executor (utu / youtu-agent)
-
-`AgentExecutor` requires the following env vars to run; the executor
-asserts them at import time, so a worker without them fails the task
-immediately:
-
-- `UTU_LLM_TYPE` — provider kind (e.g. `chat.completions`).
-- `UTU_LLM_MODEL` — model identifier.
-- `UTU_LLM_BASE_URL` — LLM endpoint base URL.
-- `UTU_LLM_API_KEY` — LLM API key.
-
-Optional, for the search tools:
-
-- `SERPER_API_KEY`
-- `JINA_API_KEY`
-
 ## Agent-episode harness backends
 
-When an agent's spec declares `harness.backend`, the worker runs it through the
-dependency-light `AgentEpisodeExecutor` instead of the UTU path: one dispatch is one
+Every agent runs through the dependency-light `AgentEpisodeExecutor`: one dispatch is one
 run-to-yield step of the named `HarnessAdapter` binding, resumed from the durable capsule
-and delivered outcomes the fabric ships. The executor advertises the `agent` capability
-even on a worker that cannot import the UTU dependencies, so a CPU worker services agent
-episodes. A backend binding is imported lazily from the worker adapter registry
-(`src/worker/executors/harness/`) only when its key is selected.
+and delivered outcomes the fabric ships. The executor advertises the `agent` capability on
+any worker, so a CPU worker services agent episodes. A backend binding is imported lazily
+from the worker adapter registry (`src/worker/executors/harness/`) only when its key is
+selected.
 
 Declared per agent under `spec.harness`:
 
@@ -107,8 +90,7 @@ workflow's own binding. The deployment holds no model key: the credential is the
 inline `api_key`, vaulted server-side at submission so only a reference is stored and used on
 the server-to-upstream path — the raw key never persists in the source, template, ledger, or
 logs. A credential embedded in a `url` or a harness param is rejected. The
-`AGENT_MODEL_GATEWAY_*` defaults are in [`ENV.md`](ENV.md); the `UTU_LLM_*` path serves only
-the legacy UTU executor.
+`AGENT_MODEL_GATEWAY_*` defaults are in [`ENV.md`](ENV.md).
 
 Vaulted credentials live in the Redis control store's trust boundary (ACL, auth, TLS) and are
 not encrypted at rest, so the deployment operator owns that at-rest boundary.

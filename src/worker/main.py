@@ -119,7 +119,6 @@ def initialize_executors(
     for key in [
         "echo",
         "rag",
-        "agent",
         "agent_episode",
         "dev_model",
         "sft",

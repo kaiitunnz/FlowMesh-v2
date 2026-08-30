@@ -13,8 +13,6 @@ def _clear_env(monkeypatch):
         "AGENT_MODEL_GATEWAY_URL",
         "AGENT_MODEL_GATEWAY_MODEL",
         "AGENT_MODEL_SECRET_TTL_SEC",
-        "UTU_LLM_BASE_URL",
-        "UTU_LLM_MODEL",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -32,9 +30,7 @@ def test_gateway_env_values_become_binding_defaults(monkeypatch):
     assert cfg.default_model == "gpt-4o"
 
 
-def test_model_defaults_do_not_inherit_utu_fallback(monkeypatch):
-    monkeypatch.setenv("UTU_LLM_BASE_URL", "https://utu/v1")
-    monkeypatch.setenv("UTU_LLM_MODEL", "utu-model")
+def test_model_defaults_are_unset_without_gateway_env(monkeypatch):
     cfg = AgentBindingConfig.from_env()
     assert cfg.default_url is None
     assert cfg.default_model is None

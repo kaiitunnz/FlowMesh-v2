@@ -1,0 +1,46 @@
+apiVersion: flowmesh/v2
+kind: AgentTask
+metadata:
+  name: agent-episode-echo
+  owner: researcher
+  annotations:
+    description: >-
+      Agent episode with a credential-free echo model binding. The managed model
+      boundary settles by echoing the request, so this runs deterministically
+      with no GPU and no external provider.
+
+spec:
+  taskType: agent
+
+  task: Echo a greeting
+
+  v2:
+    authority: { invoke: [model], delegate: [] }
+    tools: [{ name: model }]
+    boundary: [invocation, yield]
+
+  harness:
+    backend: scripted
+    version: v1
+    params:
+      script:
+        - {op: boundary, kind: invocation, call: c0, interface: model, payload: "echo me"}
+        - {op: complete, value_from: c0}
+
+  model_binding:
+    mode: echo
+
+  resources:
+    hardware:
+      cpu: 1
+      memory: 256Mi
+      gpu:
+        type: any
+        count: 0
+
+  output:
+    destination:
+      type: local
+    artifacts:
+      - results.json
+      - agent_output.txt

@@ -32,7 +32,6 @@ spec:
       - name: a
         spec:
           taskType: agent
-          configName: default
           task: do
 {_indent(spec_body)}
 """

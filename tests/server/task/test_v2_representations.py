@@ -66,7 +66,6 @@ metadata:
   name: agent
 spec:
   taskType: agent
-  agent: {}
   data: { type: list, items: ["go"] }
 """
 

@@ -197,6 +197,13 @@ def _is_v2_mode(api_version: Any) -> bool:
     return ExecutionMode.is_v2(api_version)
 
 
+def _unsupported_task_type_error(context: str, task_type: str) -> ValueError:
+    return ValueError(
+        f"Invalid task payload{context}: unsupported spec.taskType "
+        f"{task_type!r}. Allowed values: {_ALLOWED_TASK_TYPES}"
+    )
+
+
 def _build_task_template(
     payload: _WorkflowRootInput,
     local_name: str | None = None,
@@ -213,6 +220,9 @@ def _build_task_template(
     task_type = task_spec.get("taskType")
     if not isinstance(task_type, str) or not task_type.strip():
         raise ValueError(f"Invalid task payload{context}: spec.taskType is required")
+    # `agent` is a v2-only task type; in a v1 payload it is unsupported like any other.
+    if task_type == TaskType.AGENT and not _is_v2_mode(payload.apiVersion):
+        raise _unsupported_task_type_error(context, task_type)
     try:
         task = TaskEnvelopeTemplate.model_validate(payload)
     except ValidationError as exc:
@@ -221,10 +231,7 @@ def _build_task_template(
             and tuple(err.get("loc", ())) == ("spec",)
             for err in exc.errors()
         ):
-            raise ValueError(
-                f"Invalid task payload{context}: unsupported spec.taskType "
-                f"{task_type!r}. Allowed values: {_ALLOWED_TASK_TYPES}"
-            ) from exc
+            raise _unsupported_task_type_error(context, task_type) from exc
         raise ValueError(f"Invalid task payload{context}: {exc}") from exc
     _validate_ssh_access_mode(task, context)
     _validate_serve_access_mode(task, context)

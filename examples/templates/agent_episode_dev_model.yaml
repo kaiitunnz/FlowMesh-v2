@@ -1,0 +1,50 @@
+apiVersion: flowmesh/v2
+kind: AgentTask
+metadata:
+  name: agent-episode-dev-model
+  owner: researcher
+  annotations:
+    description: >-
+      Codex-harness agent whose model boundary fronts a GPU-free dev_model serve
+      task. Codex runs a real agent turn; its model calls route through the
+      FlowMesh agent-model gateway, which forwards to the dev_model endpoint. Run a
+      dev_model serve task first and set model_binding.url to its published
+      endpoint; point harness.params.base_url at your FlowMesh agent-model gateway.
+
+spec:
+  taskType: agent
+
+  task: Summarize the latest trends in artificial intelligence in three bullet points
+
+  v2:
+    authority: { invoke: [model], delegate: [] }
+    tools: [{ name: model }]
+    boundary: [invocation, yield]
+
+  harness:
+    backend: codex
+    version: v1
+    params:
+      base_url: http://FLOWMESH_GATEWAY_HOST:PORT
+      model: dev-model
+
+  model_binding:
+    mode: openai
+    url: http://DEV_MODEL_HOST:PORT/v1
+    model: dev-model
+    api_key: "REPLACE_WITH_YOUR_DEV_MODEL_KEY"
+
+  resources:
+    hardware:
+      cpu: 2
+      memory: 4Gi
+      gpu:
+        type: any
+        count: 0
+
+  output:
+    destination:
+      type: local
+    artifacts:
+      - results.json
+      - agent_output.txt

@@ -93,8 +93,8 @@ keys untouched:
 - name: research
   spec:
     taskType: agent
-    configName: default
     task: gather sources
+    harness: { backend: scripted, version: v1 }
     v2:
       authority: { invoke: [web_search], delegate: [] }
       tools:

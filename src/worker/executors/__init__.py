@@ -35,7 +35,6 @@ EXECUTOR_MODULES: dict[str, tuple[str, str]] = {
     ),
     "default": ("HFTransformersExecutor", ".transformers_executor"),
     "rag": ("RAGExecutor", ".rag_executor"),
-    "agent": ("AgentExecutor", ".agent_executor"),
     "agent_episode": ("AgentEpisodeExecutor", ".agent_episode_executor"),
     "echo": ("EchoExecutor", ".echo_executor"),
     "data_profiling": ("DataProfilingExecutor", ".data_profiling_executor"),

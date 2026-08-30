@@ -1196,11 +1196,10 @@ class TaskRuntime:
             return record.workflow_id, op.model_binding
 
     def agent_episode_dispatch(self, task_id: str) -> AgentEpisodeDispatch | None:
-        """The agent-episode context to ship with a dispatch, or None for the UTU path.
+        """The agent-episode context to ship with a dispatch, or None for a non-agent.
 
-        The backend key comes from the operator's pinned harness binding, so a
-        later deployment-default change cannot move a live activation. A v1 agent
-        has no engine and dispatches to the legacy executor unchanged.
+        The backend key comes from the operator's pinned harness binding, so a later
+        deployment-default change cannot move a live activation.
         """
         with self._lock:
             record = self._tasks.get(task_id)

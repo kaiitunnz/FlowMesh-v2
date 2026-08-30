@@ -1,7 +1,7 @@
 """The run-to-yield agent-episode executor.
 
-A v2 agent whose dispatch carries a harness backend key runs here rather than through
-the legacy UTU path. One ``run`` is one adapter step: it resumes the backend from the
+Every agent dispatches here through its resolved harness backend key. One ``run`` is
+one adapter step: it resumes the backend from the
 durable capsule and delivered outcomes the fabric shipped, takes a single run-to-yield
 step, and returns the step's :class:`HarnessResult`. The lane releases after the step;
 the server routes any boundary and re-dispatches with the next capsule and outcomes.

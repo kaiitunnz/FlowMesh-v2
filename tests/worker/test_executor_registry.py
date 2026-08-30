@@ -30,7 +30,6 @@ class TestExecutorRegistry:
             "image_classification_training",
             "default",
             "rag",
-            "agent",
             "agent_episode",
             "echo",
             "data_profiling",

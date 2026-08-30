@@ -30,7 +30,6 @@ spec:
       - name: plan
         spec:
           taskType: agent
-          configName: default
           task: draft a research plan
           v2:
             authority: {invoke: [web_search], delegate: []}
@@ -41,7 +40,7 @@ spec:
         region: {kind: branch, selection: "{{plan.output.mode}}", ports: [deep, quick]}
       - name: deep
         dependsOn: [route]
-        spec: {taskType: agent, configName: default, task: deep dive}
+        spec: {taskType: agent, task: deep dive}
       - name: quick
         dependsOn: [route]
         spec: {taskType: echo, data: {type: list, items: [quick]}}

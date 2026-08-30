@@ -56,20 +56,6 @@ class WorkerConfig(BaseModel):
     """Comma-separated list of models to pre-download during worker startup"""
     nebula_api_token: SecretStr | None = env_to_secret_str("NEBULA_API_TOKEN")
     """Nebula API token"""
-    utu_llm_type: str | None = os.getenv("UTU_LLM_TYPE")
-    """Agent executor (utu) LLM provider kind, e.g. "chat.completions" """
-    utu_llm_model: str | None = os.getenv("UTU_LLM_MODEL")
-    """Agent executor (utu) model identifier"""
-    utu_llm_base_url: str | None = os.getenv("UTU_LLM_BASE_URL")
-    """Agent executor (utu) LLM base URL"""
-    utu_llm_api_key: SecretStr | None = env_to_secret_str("UTU_LLM_API_KEY")
-    """Agent executor (utu) LLM API key"""
-    serper_api_key: SecretStr | None = env_to_secret_str("SERPER_API_KEY")
-    """Serper API key for agent search tools"""
-    jina_api_key: SecretStr | None = env_to_secret_str("JINA_API_KEY")
-    """Jina API key for agent search tools"""
-    db_url: SecretStr | None = env_to_secret_str("DB_URL")
-    """Database URL for agent tracing (may contain credentials)"""
     upload_results: bool = env.WORKER_UPLOAD_RESULTS
     """Whether to always upload results to the server if spec.output.destination
     is unspecified."""
@@ -182,13 +168,6 @@ class WorkerAdapter(ABC):
             "PREDOWNLOAD_MODEL_LIST": config.predownload_model_list,
             "NEBULA_API_TOKEN": to_env_str(config.nebula_api_token),
             "NEBULA_API_BASE_URL": env.NEBULA_API_BASE_URL,
-            "UTU_LLM_TYPE": to_env_str(config.utu_llm_type),
-            "UTU_LLM_MODEL": to_env_str(config.utu_llm_model),
-            "UTU_LLM_BASE_URL": to_env_str(config.utu_llm_base_url),
-            "UTU_LLM_API_KEY": to_env_str(config.utu_llm_api_key),
-            "SERPER_API_KEY": to_env_str(config.serper_api_key),
-            "JINA_API_KEY": to_env_str(config.jina_api_key),
-            "DB_URL": to_env_str(config.db_url),
         }
 
 
