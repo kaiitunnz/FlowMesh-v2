@@ -60,11 +60,15 @@ class ResidencyIntent(BaseModel):
 
     Carries warmth/reuse/affinity/preemption intent for a node. It is a
     preference, not a command to pin a process; it encodes no lifecycle policy.
+    ``required`` marks a resident dependency the plan cannot run without (a resident
+    agent model binding), as opposed to an optional warmth preference; it still
+    triggers no allocation here.
     """
 
     model_config = ConfigDict(frozen=True)
 
     service_family: str | None = None
+    required: bool = False
     warmth: str | None = None
     reuse_domain: str | None = None
     affinity: str | None = None

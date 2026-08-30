@@ -20,10 +20,10 @@ from shared.harness import (
 from shared.schemas.command import InterruptMessage
 from shared.schemas.result import ResultEnvelope, result_file_path
 from shared.tasks import TaskEnvelopeTemplate
-from shared.tasks.specs import AgentSpecStrict, AgentSpecTemplate
 from shared.utils import new_workflow_id
+from shared.utils.ids import new_model_secret_ref
 
-from ..config import OrchestrationConfig
+from ..config import AgentBindingConfig, OrchestrationConfig
 from ..hooks import SUPPLIER_RESOLVERS
 from ..orchestration import (
     Advance,
@@ -40,6 +40,7 @@ from ..orchestration.episode import BoundaryEvent
 from ..orchestration.harness import to_boundary_event
 from ..registries.worker import Worker, WorkerRegistry
 from ..registries.workflow import PersistedTask, WorkflowRegistry, WorkflowSched
+from ..services.model_secret_vault import ModelSecretVault
 from ..utils.time import parse_iso_ts
 from .models import (
     TERMINAL_TASK_STATUSES,
@@ -50,7 +51,7 @@ from .models import (
     TaskUsage,
     categorize_task_type,
 )
-from .parser import parse_workflow
+from .parser import ParsedWorkflow, parse_workflow
 from .v2 import (
     ExecutionMode,
     FrontendWorkflowSource,
@@ -60,11 +61,25 @@ from .v2 import (
     build_inspection,
     compile_bundle,
 )
+from .v2.compiler.agent_binding import AgentBindingDefaults
+from .v2.credentials import pop_inline_model_secrets, redact_source_text
+from .v2.representations.operators import AgentModelGatewayBinding
 from .v2.representations.plan import EpisodeSpec
 
 # A live-feasibility check: whether a lowered episode's declared alternative can be
 # placed now.
 EpisodeFeasibility = Callable[[EpisodeSpec], bool]
+
+
+def _binding_defaults(cfg: AgentBindingConfig) -> AgentBindingDefaults:
+    """Convert the deployment binding config into the compiler's injected defaults."""
+    return AgentBindingDefaults(
+        default_backend=cfg.default_backend,
+        default_version=cfg.default_version,
+        default_mode=cfg.default_mode,
+        default_url=cfg.default_url,
+        default_model=cfg.default_model,
+    )
 
 
 def _sanitize_merge_spec(spec: dict[str, Any]) -> dict[str, Any]:
@@ -98,6 +113,7 @@ class TaskRuntime:
         orchestration: OrchestrationConfig,
         results_dir: Path,
         logger: logging.Logger,
+        secret_vault: ModelSecretVault,
         feasibility_check: EpisodeFeasibility | None = None,
     ) -> None:
         self._workflow_registry = workflow_registry
@@ -105,7 +121,9 @@ class TaskRuntime:
         self._logger = logger
         self._results_dir = results_dir
         self._feasibility_check = feasibility_check
+        self._secret_vault = secret_vault
         self._scope_budget = ScopeBudget.from_config(orchestration)
+        self._agent_binding_defaults = _binding_defaults(orchestration.agent_binding)
         self._lowering_strategy = (
             LoweringStrategy.EPISODE_CUT
             if orchestration.episode_lowering
@@ -174,15 +192,44 @@ class TaskRuntime:
         parsed_workflow = parse_workflow(payload, format)
         if not ExecutionMode.is_v2(parsed_workflow.api_version):
             return None
-        source = FrontendWorkflowSource.capture(payload, format)
-        return build_inspection(new_workflow_id(), parsed_workflow, source)
+        # A dry run never vaults; drop any inline credential and redact the source so
+        # the inspection echoes no raw key back to the caller.
+        pop_inline_model_secrets(parsed_workflow)
+        source = FrontendWorkflowSource.capture(
+            redact_source_text(payload, format), format
+        )
+        return build_inspection(
+            new_workflow_id(),
+            parsed_workflow,
+            source,
+            bindings=self._agent_binding_defaults,
+        )
+
+    async def _vault_inline_secrets(
+        self, workflow_id: str, parsed: ParsedWorkflow
+    ) -> dict[str, str]:
+        """Vault each agent's inline model credential, returning its generated ref.
+
+        The credential is stripped from the parsed spec and stored under the workflow,
+        so only the opaque ref reaches the compiled binding, the persisted record, and
+        every downstream surface.
+        """
+        secrets = pop_inline_model_secrets(parsed)
+        if not secrets:
+            return {}
+        secret_refs: dict[str, str] = {}
+        for task_id, secret in secrets.items():
+            ref = new_model_secret_ref()
+            await self._secret_vault.store(workflow_id, ref, secret)
+            secret_refs[task_id] = ref
+        return secret_refs
 
     async def register(
         self, owner_id: str, org_id: str, payload: str, format: str = "native"
     ) -> tuple[str, list[TaskParsingResult]]:
         parsed_workflow = parse_workflow(payload, format)
         specs = parsed_workflow.tasks
-        yaml_text = payload
+        yaml_text = redact_source_text(payload, format)
         results: list[TaskParsingResult] = []
         workflow_id = new_workflow_id()
         task_records: list[TaskRecord] = []
@@ -192,9 +239,15 @@ class TaskRuntime:
         v2_bundle: PersistedV2Workflow | None = None
         v2_engine: OrchestrationEngine | None = None
         if ExecutionMode.is_v2(parsed_workflow.api_version):
+            secret_refs = await self._vault_inline_secrets(workflow_id, parsed_workflow)
             source = FrontendWorkflowSource.capture(yaml_text, format)
             v2_bundle = compile_bundle(
-                workflow_id, parsed_workflow, source, strategy=self._lowering_strategy
+                workflow_id,
+                parsed_workflow,
+                source,
+                strategy=self._lowering_strategy,
+                bindings=self._agent_binding_defaults,
+                secret_refs=secret_refs,
             )
             v2_engine = OrchestrationEngine.build(
                 workflow_id, owner_id, org_id, v2_bundle, budget=self._scope_budget
@@ -654,6 +707,18 @@ class TaskRuntime:
                 workflow_id, sched=self._sched_locked(workflow_id)
             )
 
+    def _reclaim_vault_if_settled_locked(self, workflow_id: str) -> None:
+        """Purge a workflow's vaulted credentials once its last task has settled.
+
+        The primary reclaim on the terminal transition, for a workflow that completes
+        or fails; the vault's sliding TTL only backstops a submission that never
+        settles. Called after an event's advance materializes any new children, so a
+        producer that fans out is not reclaimed while its children are still pending.
+        """
+        records = [r for r in self._tasks.values() if r.workflow_id == workflow_id]
+        if records and all(r.status in TERMINAL_TASK_STATUSES for r in records):
+            self._secret_vault.purge(workflow_id)
+
     # ------------------------------------------------------------------ #
     # Ready queue helpers
     # ------------------------------------------------------------------ #
@@ -1097,28 +1162,59 @@ class TaskRuntime:
                 record.pending_origination = request
                 self._persist_locked(task_id)
 
-    def agent_episode_dispatch(self, task_id: str) -> AgentEpisodeDispatch | None:
-        """The agent-episode context to ship with a dispatch, or None for the UTU path.
+    def resolve_model_binding(self, task_id: str) -> AgentModelGatewayBinding | None:
+        """The pinned managed-model binding for a task's agent, for the gateway.
 
-        A v2 agent that declares a harness backend carries its durable capsule and one
-        pending injected outcome, rebuilt from the ledger; a bare agent carries nothing
-        and dispatches to the legacy executor unchanged.
+        Returns the effective binding frozen at submission so a mediated invocation
+        resolves its upstream from the activation, never from the request body or a
+        later environment change.
+        """
+        with self._lock:
+            record = self._tasks.get(task_id)
+            engine = self._engines.get(record.workflow_id) if record else None
+            if engine is None:
+                return None
+            op = engine.agent_operator(task_id)
+            return op.model_binding if op is not None else None
+
+    def gateway_binding_for(
+        self, task_id: str
+    ) -> tuple[str, AgentModelGatewayBinding] | None:
+        """The task's owning workflow and its pinned model binding, for the gateway.
+
+        The workflow id scopes the credential resolution so a vaulted ref yields a
+        secret only within the workflow that minted it.
         """
         with self._lock:
             record = self._tasks.get(task_id)
             engine = self._engines.get(record.workflow_id) if record else None
             if record is None or engine is None:
                 return None
-            spec = record.task.spec
-            if (
-                not isinstance(spec, (AgentSpecStrict, AgentSpecTemplate))
-                or spec.harness is None
-            ):
+            op = engine.agent_operator(task_id)
+            if op is None or op.model_binding is None:
+                return None
+            return record.workflow_id, op.model_binding
+
+    def agent_episode_dispatch(self, task_id: str) -> AgentEpisodeDispatch | None:
+        """The agent-episode context to ship with a dispatch, or None for the UTU path.
+
+        The backend key comes from the operator's pinned harness binding, so a
+        later deployment-default change cannot move a live activation. A v1 agent
+        has no engine and dispatches to the legacy executor unchanged.
+        """
+        with self._lock:
+            record = self._tasks.get(task_id)
+            engine = self._engines.get(record.workflow_id) if record else None
+            if engine is None:
+                return None
+            op = engine.agent_operator(task_id)
+            harness = op.harness_binding if op is not None else None
+            if harness is None:
                 return None
             capsule_blob, outcomes = engine.episode_context(task_id)
             return AgentEpisodeDispatch(
                 backend=HarnessBackendKey(
-                    backend=spec.harness.backend, version=spec.harness.version
+                    backend=harness.backend, version=harness.version
                 ),
                 capsule_blob=capsule_blob,
                 delivered_outcomes=outcomes,
@@ -1868,6 +1964,8 @@ class TaskRuntime:
                     notify = True
                 self._save_ledger_locked(record.workflow_id)
 
+            if record is not None:
+                self._reclaim_vault_if_settled_locked(record.workflow_id)
             if notify:
                 self._cv.notify_all()
 
@@ -1989,6 +2087,8 @@ class TaskRuntime:
             if record is not None and record.workflow_id in self._engines:
                 self._save_ledger_locked(record.workflow_id)
 
+            if record is not None:
+                self._reclaim_vault_if_settled_locked(record.workflow_id)
             return impacted, merged_children_ids, usages
 
     # ------------------------------------------------------------------ #
@@ -2074,6 +2174,7 @@ class TaskRuntime:
                 )
             else:
                 self._worker_registry.publish_interrupt(worker, interrupt)
+        self._secret_vault.purge(workflow_id)
         return touched
 
     def mark_cancelled(
@@ -2129,6 +2230,7 @@ class TaskRuntime:
                     advance.ready or advance.retry
                 ), "a whole-instance cancel readies no work"
                 self._save_ledger_locked(record.workflow_id)
+            self._reclaim_vault_if_settled_locked(record.workflow_id)
             return usages
 
     def get_record(self, task_id: str) -> TaskRecord | None:

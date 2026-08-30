@@ -4,6 +4,7 @@ from ...parser import ParsedWorkflow
 from ..representations.plan import PhysicalExecutionPlan
 from ..representations.source import FrontendWorkflowSource
 from ..representations.template import LogicalWorkflowTemplate
+from .agent_binding import AgentBindingDefaults, neutral_defaults
 from .diagnostics import Diagnostic, Severity
 from .pipeline import compile_workflow
 from .validation import validate_compilation
@@ -70,13 +71,19 @@ def build_inspection(
     workflow_id: str,
     parsed: ParsedWorkflow,
     source: FrontendWorkflowSource,
+    bindings: AgentBindingDefaults | None = None,
 ) -> InspectionReport:
     """Compile a parsed workflow into an inspection report.
 
     Structural frontend errors raise :class:`CompileError`; semantic validation
-    findings are returned as diagnostics on the report rather than raised.
+    findings, including agent-binding resolution failures, are returned as
+    diagnostics on the report rather than raised. ``bindings`` must match the
+    deployment defaults a real submission uses so a dry-run agrees with it.
     """
-    template, plan = compile_workflow(workflow_id, parsed, source, validate=False)
+    defaults = bindings if bindings is not None else neutral_defaults()
+    template, plan = compile_workflow(
+        workflow_id, parsed, source, validate=False, bindings=defaults
+    )
     diagnostics = validate_compilation(template, plan)
     return InspectionReport(
         workflow_id=workflow_id,

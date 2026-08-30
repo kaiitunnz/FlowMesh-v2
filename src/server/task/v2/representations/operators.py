@@ -1,10 +1,11 @@
 from enum import StrEnum
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from shared.harness.boundary import BoundaryEventKind
 from shared.tasks import TaskType
+from shared.tasks.specs import ModelBindingMode
 
 
 class DeterminismClass(StrEnum):
@@ -156,6 +157,65 @@ class BindingKey(BaseModel):
     backend: str | None = Field(default=None, description="Optional backend hint.")
 
 
+class BindingProvenance(StrEnum):
+    """Which resolution tier supplied an effective binding field at submission."""
+
+    SOURCE = "source"
+    DEFAULT = "default"
+    FALLBACK = "fallback"
+
+
+class HarnessBindingProvenance(BaseModel):
+    """Per-field provenance of the resolved harness binding."""
+
+    model_config = ConfigDict(frozen=True)
+
+    backend: BindingProvenance
+    version: BindingProvenance
+
+
+class AgentHarnessBinding(BaseModel):
+    """The resolved, submission-pinned harness binding for an agent.
+
+    ``params`` is a pinned copy of the source non-secret adapter configuration.
+    Kept version-pinned so a later deployment-default change cannot move a live
+    activation.
+    """
+
+    backend: str
+    version: str
+    params: dict[str, Any] = {}
+    provenance: HarnessBindingProvenance
+
+
+class ModelBindingProvenance(BaseModel):
+    """Per-field provenance of the resolved model-gateway binding."""
+
+    model_config = ConfigDict(frozen=True)
+
+    mode: BindingProvenance
+    url: BindingProvenance
+    model: BindingProvenance
+
+
+class AgentModelGatewayBinding(BaseModel):
+    """The resolved, submission-pinned managed-model dependency for an agent.
+
+    It names a model dependency, never a credential: ``secret_ref`` is an authorized
+    server-side reference, and no secret value is ever stored here. A ``resident``
+    binding carries a ``service_model_ref`` and no url/credential.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    mode: ModelBindingMode
+    url: str | None = None
+    model: str | None = None
+    secret_ref: str | None = None
+    service_model_ref: str | None = None
+    provenance: ModelBindingProvenance
+
+
 class AuthorityCeiling(BaseModel):
     """Declared authority bound for an operator.
 
@@ -262,6 +322,11 @@ class AgentOperator(_OperatorBase):
 
     kind: Literal[OperatorKind.AGENT] = OperatorKind.AGENT
     binding: BindingKey
+    # The resolved, submission-pinned harness and managed-model bindings. Both are set
+    # by the compiler for a v2 agent (or a diagnostic is recorded); None only when an
+    # operator is constructed outside compilation.
+    harness_binding: AgentHarnessBinding | None = None
+    model_binding: AgentModelGatewayBinding | None = None
     authority: AuthorityCeiling = AuthorityCeiling()
     boundary: BoundarySignature = BoundarySignature()
     guard: ConditionGuard | None = None

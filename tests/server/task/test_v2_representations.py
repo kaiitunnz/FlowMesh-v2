@@ -28,9 +28,13 @@ from server.task.v2 import (
     VersionId,
     compile_workflow,
 )
+from server.task.v2.compiler.agent_binding import AgentBindingDefaults
 from server.task.v2.compiler.bindings import leaf_profile as _leaf_profile
 from server.task.v2.representations.operators import EqualityRelationKind
 from shared.tasks import TaskType
+from tests.server.task.test_v2_orchestration import _NoopSecretVault
+
+_BINDINGS = AgentBindingDefaults(default_backend="codex")
 
 DAG_V2 = """
 apiVersion: flowmesh/v2
@@ -111,13 +115,14 @@ def _runtime(registry: _CapturingRegistry) -> TaskRuntime:
         OrchestrationConfig(),
         Path(tempfile.gettempdir()),
         logging.getLogger("v2-test"),
+        secret_vault=cast(Any, _NoopSecretVault()),
     )
 
 
 def _project(payload: str) -> PersistedV2Workflow:
     parsed = parse_workflow(payload, "native")
     source = FrontendWorkflowSource.capture(payload, "native", name="wf")
-    template, plan = compile_workflow("wfl-test", parsed, source)
+    template, plan = compile_workflow("wfl-test", parsed, source, bindings=_BINDINGS)
     return PersistedV2Workflow(source=source, template=template, plan=plan)
 
 

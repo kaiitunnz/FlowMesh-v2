@@ -1,3 +1,5 @@
+from shared.tasks.specs import ModelBindingMode
+
 from ..representations.operators import (
     AgentOperator,
     AuthorityCeiling,
@@ -505,8 +507,53 @@ def _check_cycles(
     return []
 
 
+def _check_agent_binding(
+    op: AgentOperator, loc: dict[str, SourceLocation]
+) -> list[Diagnostic]:
+    """Diagnose an agent whose resolved harness/model binding is unresolvable.
+
+    A bare agent with no source harness and no deployment default, an external binding
+    missing its url, and a resident binding missing its reference each fail here rather
+    than reaching a worker.
+    """
+    diags: list[Diagnostic] = []
+    location = loc.get(op.operator_id)
+    if op.harness_binding is None:
+        diags.append(
+            Diagnostic(
+                code="agent.harness.unresolved",
+                message=(
+                    "agent has no harness backend: declare spec.harness or configure a "
+                    "deployment default harness backend"
+                ),
+                location=location,
+            )
+        )
+    binding = op.model_binding
+    if binding is None:
+        return diags
+    if binding.mode is ModelBindingMode.OPENAI and not binding.url:
+        diags.append(
+            Diagnostic(
+                code="agent.model_binding.missing_url",
+                message="an openai model binding requires a url",
+                location=location,
+            )
+        )
+    if binding.mode is ModelBindingMode.RESIDENT and not binding.service_model_ref:
+        diags.append(
+            Diagnostic(
+                code="agent.model_binding.missing_resident_ref",
+                message="a resident model binding requires a service_model_ref",
+                location=location,
+            )
+        )
+    return diags
+
+
 def validate_compilation(
-    template: LogicalWorkflowTemplate, plan: PhysicalExecutionPlan
+    template: LogicalWorkflowTemplate,
+    plan: PhysicalExecutionPlan,
 ) -> list[Diagnostic]:
     """Run every validation pass over a compiled template and physical plan.
 
@@ -532,6 +579,7 @@ def validate_compilation(
             diags.extend(_check_effect_boundary(template, op, loc))
         elif isinstance(op, AgentOperator):
             diags.extend(_check_authority(op, op.authority, declared_tools, loc))
+            diags.extend(_check_agent_binding(op, loc))
         elif isinstance(op, SpawnRegion):
             diags.extend(_check_authority(op, op.authority, declared_tools, loc))
 

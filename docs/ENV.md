@@ -37,11 +37,13 @@ listed here is in `.env.example`.
 | `ORCHESTRATOR_MAX_LOOP_ITERATIONS` | `1000` | Max loop iterations per v2 `LoopContext` |
 | `ORCHESTRATOR_MAX_ACTIVATIONS` | `10000` | Max dynamic activations per v2 workflow instance |
 | `ORCHESTRATOR_EPISODE_LOWERING` | `false` | Lower v2 templates into run-to-yield episodes |
-| `AGENT_MODEL_GATEWAY_MODE` | `canned` | Agent-model gateway upstream: `canned`, `echo`, `openai`, or `proxy` (an upstream Responses API) |
-| `AGENT_MODEL_GATEWAY_URL` | `UTU_LLM_BASE_URL` | Upstream base URL for `openai` / `proxy` modes |
-| `AGENT_MODEL_GATEWAY_MODEL` | `UTU_LLM_MODEL` | Upstream model for `openai` / `proxy` modes |
-| `AGENT_MODEL_GATEWAY_API_KEY` | `UTU_LLM_API_KEY` | Upstream API key for `openai` / `proxy` modes |
+| `AGENT_HARNESS_DEFAULT_BACKEND` | – | Default agent harness backend when a workflow sets none |
+| `AGENT_HARNESS_DEFAULT_VERSION` | – | Default agent harness backend version |
+| `AGENT_MODEL_GATEWAY_MODE` | `canned` | Managed model upstream mode (`canned`/`echo`/`openai`/`proxy`) |
+| `AGENT_MODEL_GATEWAY_URL` | `UTU_LLM_BASE_URL` | Upstream base URL (openai/proxy modes) |
+| `AGENT_MODEL_GATEWAY_MODEL` | `UTU_LLM_MODEL` | Upstream model (openai/proxy modes) |
 | `AGENT_MODEL_GATEWAY_TIMEOUT_SEC` | `60` | Upstream request timeout (seconds) |
+| `AGENT_MODEL_SECRET_TTL_SEC` | `86400` | Expiry for a workflow's vaulted model credential |
 | `ENABLE_WORKER_WATCHDOG` | `true` | Worker death detection |
 | `WORKER_DEATH_GRACE_SEC` | `60` | Grace period before marking dead |
 | `WORKER_REHYDRATION_GRACE_SEC` | `120` | Extra grace for a worker's rehydrated in-flight tasks after the root restarts, before the watchdog may reclaim them |

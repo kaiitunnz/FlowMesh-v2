@@ -5,7 +5,7 @@ from typing import Any, cast
 
 import pytest
 
-from server.config import OrchestrationConfig
+from server.config import AgentBindingConfig, OrchestrationConfig
 from server.task.parser import parse_workflow
 from server.task.runtime import TaskRuntime
 from server.task.v2 import (
@@ -15,7 +15,9 @@ from server.task.v2 import (
     build_inspection,
     compile_workflow,
 )
+from server.task.v2.compiler.agent_binding import AgentBindingDefaults
 from server.task.v2.representations.operators import LoopContextRegion, PortKind
+from tests.server.task.test_v2_orchestration import _NoopSecretVault
 
 REGIONS_WF = """
 apiVersion: flowmesh/v2
@@ -84,10 +86,15 @@ spec:
 """
 
 
+# A deployment default harness so a bare agent in a fixture resolves rather than
+# failing binding validation; these tests exercise region lowering, not bindings.
+_BINDINGS = AgentBindingDefaults(default_backend="codex")
+
+
 def _compile(text: str) -> Any:
     parsed = parse_workflow(text, "native")
     source = FrontendWorkflowSource.capture(text, "native", name="wf")
-    template, _ = compile_workflow("wfl-test", parsed, source)
+    template, _ = compile_workflow("wfl-test", parsed, source, bindings=_BINDINGS)
     return template
 
 
@@ -138,7 +145,7 @@ def test_tool_interface_and_published_result() -> None:
 def test_inspection_report_renders_without_executing() -> None:
     parsed = parse_workflow(REGIONS_WF, "native")
     source = FrontendWorkflowSource.capture(REGIONS_WF, "native", name="wf")
-    report = build_inspection("wfl-x", parsed, source)
+    report = build_inspection("wfl-x", parsed, source, bindings=_BINDINGS)
     assert report.ok
     assert report.region_bearing
     text = report.render_text()
@@ -184,9 +191,10 @@ def _runtime() -> TaskRuntime:
     return TaskRuntime(
         cast(Any, _CapturingRegistry()),
         cast(Any, worker_stub),
-        OrchestrationConfig(),
+        OrchestrationConfig(agent_binding=AgentBindingConfig(default_backend="codex")),
         Path(tempfile.gettempdir()),
         logging.getLogger("v2-regions-test"),
+        secret_vault=cast(Any, _NoopSecretVault()),
     )
 
 
@@ -257,7 +265,7 @@ spec:
 """
     parsed = parse_workflow(text, "native")
     source = FrontendWorkflowSource.capture(text, "native", name="wf")
-    template, _ = compile_workflow("wfl", parsed, source)
+    template, _ = compile_workflow("wfl", parsed, source, bindings=_BINDINGS)
     after_id = next(t.task_id for t in parsed.tasks if t.graph_node_name == "after")
     assert ("route", after_id) in {(e.from_op, e.to_op) for e in template.edges}
 
@@ -278,7 +286,7 @@ spec:
     parsed = parse_workflow(text, "native")
     source = FrontendWorkflowSource.capture(text, "native", name="wf")
     with pytest.raises(CompileError):
-        build_inspection("wfl", parsed, source)
+        build_inspection("wfl", parsed, source, bindings=_BINDINGS)
 
 
 def test_non_string_authority_list_is_rejected() -> None:

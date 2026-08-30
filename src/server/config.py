@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
+from shared.tasks.specs import ModelBindingMode
 from shared.utils.parsing import parse_bool_env, parse_float_env, parse_int_env
 
 
@@ -303,7 +304,6 @@ class AgentModelGatewayConfig:
     mode: GatewayMode = GatewayMode.CANNED
     url: str | None = None
     model: str | None = None
-    api_key: str | None = None
     timeout_sec: float = 60.0
 
     @classmethod
@@ -318,9 +318,63 @@ class AgentModelGatewayConfig:
             mode=mode,
             url=_first_env(f"{prefix}URL", "UTU_LLM_BASE_URL"),
             model=_first_env(f"{prefix}MODEL", "UTU_LLM_MODEL"),
-            api_key=_first_env(f"{prefix}API_KEY", "UTU_LLM_API_KEY"),
             timeout_sec=parse_float_env(f"{prefix}TIMEOUT_SEC") or 60.0,
         )
+
+
+# Deployment gateway modes map to the per-workflow default binding mode; the codex
+# reasoning passthrough (``proxy``) defaults a new binding to an external openai one.
+_DEFAULT_BINDING_MODE = {
+    "canned": ModelBindingMode.CANNED,
+    "echo": ModelBindingMode.ECHO,
+    "openai": ModelBindingMode.OPENAI,
+    "proxy": ModelBindingMode.OPENAI,
+}
+
+
+@dataclass
+class AgentBindingConfig:
+    """Deployment defaults for per-workflow agent harness and managed-model bindings.
+
+    The model defaults read ``AGENT_MODEL_GATEWAY_*`` with no ``UTU_LLM_*`` fallback:
+    the legacy provider path stays available only to the UTU executor, never as a tier
+    for a new pinned binding. A workflow supplies its own inline credential; the
+    deployment holds none.
+    """
+
+    default_backend: str | None = None
+    default_version: str | None = None
+    default_mode: ModelBindingMode | None = None
+    default_url: str | None = None
+    default_model: str | None = None
+
+    @classmethod
+    def from_env(cls) -> "AgentBindingConfig":
+        prefix = "AGENT_MODEL_GATEWAY_"
+        raw_mode = (os.getenv(f"{prefix}MODE") or "").strip().lower()
+        return cls(
+            default_backend=_first_env("AGENT_HARNESS_DEFAULT_BACKEND"),
+            default_version=_first_env("AGENT_HARNESS_DEFAULT_VERSION"),
+            default_mode=_DEFAULT_BINDING_MODE.get(raw_mode),
+            default_url=_first_env(f"{prefix}URL"),
+            default_model=_first_env(f"{prefix}MODEL"),
+        )
+
+
+@dataclass
+class ModelSecretVaultConfig:
+    """The durable vault backstop TTL for user-supplied model credentials.
+
+    The TTL is sliding: a workflow that keeps resolving its credential keeps it, while
+    an abandoned, idle submission expires after this window. Purge on a workflow's
+    terminal transition is the primary reclaim; this backstop bounds the rest.
+    """
+
+    ttl_sec: int = 86400
+
+    @classmethod
+    def from_env(cls) -> "ModelSecretVaultConfig":
+        return cls(ttl_sec=parse_int_env("AGENT_MODEL_SECRET_TTL_SEC") or 86400)
 
 
 @dataclass
@@ -330,6 +384,10 @@ class OrchestrationConfig:
     max_activations: int | None = None
     episode_lowering: bool = False
     gateway: AgentModelGatewayConfig = field(default_factory=AgentModelGatewayConfig)
+    agent_binding: AgentBindingConfig = field(default_factory=AgentBindingConfig)
+    model_secret_vault: ModelSecretVaultConfig = field(
+        default_factory=ModelSecretVaultConfig
+    )
 
     @classmethod
     def from_env(cls) -> "OrchestrationConfig":
@@ -339,6 +397,8 @@ class OrchestrationConfig:
             max_activations=parse_int_env("ORCHESTRATOR_MAX_ACTIVATIONS"),
             episode_lowering=parse_bool_env("ORCHESTRATOR_EPISODE_LOWERING", False),
             gateway=AgentModelGatewayConfig.from_env(),
+            agent_binding=AgentBindingConfig.from_env(),
+            model_secret_vault=ModelSecretVaultConfig.from_env(),
         )
 
 

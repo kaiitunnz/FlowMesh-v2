@@ -59,9 +59,10 @@ The runtime is two top-level processes:
 `scn-` SSH connection rows, `cmd-` supervisor commands. The v2 orchestration
 ledger adds `act-` activations, `scp-` scopes, `wki-` work items, `att-`
 attempts, `inv-` invocations, `agr-` authority grants, and `idm-` idempotency
-keys (the fabric-assigned dedupe authority for a mediated boundary). Always use
-`new_*_id()` helpers in `src/shared/utils/ids.py`. Never use `uuid4()` or
-`secrets.token_hex` for IDs.
+keys (the fabric-assigned dedupe authority for a mediated boundary). `msk-` is an
+unguessable ref for a workflow's vaulted model credential. Always use `new_*_id()`
+helpers in `src/shared/utils/ids.py`. Never use `uuid4()` or `secrets.token_hex`
+for IDs.
 
 ## Task state machine
 
@@ -161,20 +162,19 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   `spawn_agent` creates one child activation, closed by a `SpawnSeal` or the agent's
   completion.
 - **Agent-episode dispatch seam.** An agent that declares a harness backend
-  (`spec.harness.backend`) dispatches through the worker runner to the `AgentEpisodeExecutor`,
-  which drives one adapter step per dispatch behind that backend key (the built-in
-  `scripted` backend, or the version-pinned `codex` app-server binding). Each step starts
-  or resumes from an opaque durable continuation capsule plus durably delivered outcomes
-  the fabric ships on `WorkerTaskMessage.agent_episode`, and returns a completion, failure,
-  cancellation, yield, or a typed boundary request emitted before it executes. The worker
-  reports the step; the server routes the boundary into the ledger and either re-dispatches
-  the agent for its next step or suspends its lane until a durable outcome is injected. The
-  capsule and its one pending outcome are rebuilt from the ledger, so a restart resumes with
-  the same context. An agent without a declared backend stays on the legacy UTU executor,
-  which remains the default execution path.
+  (`spec.harness.backend`) dispatches to the `AgentEpisodeExecutor`, which runs one adapter
+  step per dispatch behind that backend key (the built-in `scripted` backend or the `codex`
+  app-server binding). A step resumes the agent's durable context and returns a completion,
+  failure, cancellation, yield, or a typed boundary request; the server routes a boundary
+  into the ledger and either re-dispatches the agent or suspends it until a durable outcome
+  arrives, and a restart resumes with the same context. A v2 agent's harness and
+  managed-model binding are resolved at submission and pinned on its compiled operator; the
+  backend comes from `spec.harness.backend` or the `AGENT_HARNESS_DEFAULT_BACKEND` default,
+  and an agent with neither fails template validation. Non-v2 agents run on the legacy UTU
+  executor.
 - **Agent-model gateway.** A managed model request an agent defers becomes a durable
   invocation the agent-model gateway settles off the agent's lane, injecting the result
-  back at the originating call; resident-capacity admission is not part of it.
+  back at the originating call.
 - **Task merging.** Compatible adjacent tasks in a DAG (same `taskType`,
   model, hardware shape, and merge key) coalesce into a single dispatch.
   Merged children ride on `WorkerTaskMessage.merged_children`; the worker

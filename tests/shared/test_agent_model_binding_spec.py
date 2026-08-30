@@ -1,0 +1,97 @@
+import pytest
+from pydantic import SecretStr, ValidationError
+
+from shared.tasks.specs import (
+    AgentHarnessSpec,
+    AgentModelBindingSpec,
+    AgentSpecStrict,
+    ModelBindingMode,
+)
+
+
+def test_external_openai_binding_accepts_url_model_and_inline_key():
+    binding = AgentModelBindingSpec(
+        mode=ModelBindingMode.OPENAI,
+        url="https://api.example/v1",
+        model="gpt-4o-mini",
+        api_key="sk-user-owned",
+    )
+    assert binding.mode is ModelBindingMode.OPENAI
+    assert isinstance(binding.api_key, SecretStr)
+    assert binding.api_key.get_secret_value() == "sk-user-owned"
+
+
+def test_inline_api_key_is_masked_in_repr():
+    binding = AgentModelBindingSpec(mode="openai", url="https://h/v1", api_key="sk-x")
+    assert "sk-x" not in repr(binding)
+    assert "sk-x" not in str(binding)
+
+
+def test_resident_binding_needs_no_url_or_credential():
+    binding = AgentModelBindingSpec(
+        mode=ModelBindingMode.RESIDENT, service_model_ref="Qwen/Qwen3-4B-Instruct"
+    )
+    assert binding.service_model_ref == "Qwen/Qwen3-4B-Instruct"
+    assert binding.url is None
+    assert binding.api_key is None
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"mode": "openai", "url": "https://user:pass@host/v1"},
+        {"mode": "resident", "url": "https://host/v1"},
+        {"mode": "resident", "api_key": "sk-x"},
+        {"mode": "openai", "service_model_ref": "catalog/x"},
+        {"mode": "canned", "model": "m"},
+        {"mode": "canned", "api_key": "sk-x"},
+        {"mode": "echo", "url": "https://host"},
+        {"service_model_ref": "catalog/x", "url": "https://host"},
+        {"service_model_ref": "catalog/x", "api_key": "sk-x"},
+    ],
+)
+def test_incoherent_or_misplaced_credential_bindings_are_rejected(kwargs):
+    with pytest.raises(ValidationError):
+        AgentModelBindingSpec(**kwargs)
+
+
+def test_unknown_field_is_rejected():
+    with pytest.raises(ValidationError):
+        AgentModelBindingSpec(mode="openai", url="https://h/v1", token="sk-x")
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["api_key", "apiKey", "auth_token", "access_key", "SECRET", "password", "auth"],
+)
+def test_credential_harness_params_are_rejected(key):
+    with pytest.raises(ValidationError):
+        AgentHarnessSpec(backend="codex", params={key: "sk-secret"})
+
+
+def test_nested_credential_harness_params_are_rejected():
+    with pytest.raises(ValidationError):
+        AgentHarnessSpec(backend="codex", params={"auth": {"token": "sk-secret"}})
+
+
+@pytest.mark.parametrize(
+    "key", ["max_tokens", "token_limit", "token_budget", "n_tokens", "model"]
+)
+def test_generation_params_are_not_mistaken_for_credentials(key):
+    spec = AgentHarnessSpec(backend="codex", params={key: 512})
+    assert spec.params == {key: 512}
+
+
+def test_non_secret_harness_params_are_allowed():
+    spec = AgentHarnessSpec(backend="codex", params={"base_url": "x", "model": "m"})
+    assert spec.params == {"base_url": "x", "model": "m"}
+
+
+def test_agent_spec_carries_model_binding_beside_harness():
+    spec = AgentSpecStrict(
+        taskType="agent",
+        harness=AgentHarnessSpec(backend="scripted", params={"script": []}),
+        model_binding=AgentModelBindingSpec(mode="canned"),
+    )
+    assert spec.model_binding is not None
+    assert spec.model_binding.mode is ModelBindingMode.CANNED

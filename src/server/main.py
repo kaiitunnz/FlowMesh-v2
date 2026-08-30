@@ -28,9 +28,15 @@ from .hooks import register
 from .registries import WorkerRegistry, WorkflowRegistry
 from .registries.node import NodeRegistry
 from .routers import docs, health, v1
-from .services.agent_model_gateway import AgentModelGateway, build_agent_model_router
+from .services.agent_model_gateway import (
+    AgentModelGateway,
+    ResolvedGatewayBinding,
+    build_agent_model_router,
+    to_gateway_binding,
+)
 from .services.log_archiver import TaskLogArchiver
 from .services.metrics import MetricsRecorder
+from .services.model_secret_vault import ModelSecretVault
 from .services.monitoring import EventMonitor
 from .services.port_forward import PortForwardService
 from .services.ssh_audit import SshAuditService
@@ -118,14 +124,32 @@ AGENT_MODEL_GATEWAY = None
 if IS_ROOT_NODE:
     WORKFLOW_REGISTRY = WorkflowRegistry(REDIS_CLIENT)
     WORKER_REGISTRY = WorkerRegistry(REDIS_CLIENT)
+    MODEL_SECRET_VAULT = ModelSecretVault(
+        REDIS_CLIENT, config.orchestration.model_secret_vault.ttl_sec, logger
+    )
     RUNTIME = TaskRuntime(
-        WORKFLOW_REGISTRY, WORKER_REGISTRY, config.orchestration, RESULTS_DIR, logger
+        WORKFLOW_REGISTRY,
+        WORKER_REGISTRY,
+        config.orchestration,
+        RESULTS_DIR,
+        logger,
+        secret_vault=MODEL_SECRET_VAULT,
     )
     AGENT_MODEL_GATEWAY = AgentModelGateway(
         RUNTIME, config.orchestration.gateway, logger
     )
     RUNTIME.set_invocation_settler(AGENT_MODEL_GATEWAY.settle)
     AGENT_MODEL_GATEWAY.set_boundary_originator(RUNTIME.originate_episode_boundary)
+
+    def _resolve_gateway_binding(task_id: str) -> ResolvedGatewayBinding | None:
+        assert RUNTIME is not None
+        resolved = RUNTIME.gateway_binding_for(task_id)
+        if resolved is None:
+            return None
+        workflow_id, pinned = resolved
+        return to_gateway_binding(pinned, MODEL_SECRET_VAULT, workflow_id)
+
+    AGENT_MODEL_GATEWAY.set_binding_resolver(_resolve_gateway_binding)
 
     DISPATCHER = create_dispatcher(
         config.dispatch,

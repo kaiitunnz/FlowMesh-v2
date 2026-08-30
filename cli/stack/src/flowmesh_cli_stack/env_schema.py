@@ -257,35 +257,55 @@ STACK_ENV_SCHEMA = EnvSchema(
                     description="Lower v2 templates into run-to-yield episodes.",
                     var_type=EnvVarType.BOOL,
                 ),
+            ],
+        ),
+        EnvSection(
+            title="Agent Harness & Model Binding",
+            description=["Deployment defaults for agent harnesses and their models."],
+            vars=[
+                EnvVar(
+                    "AGENT_HARNESS_DEFAULT_BACKEND",
+                    "",
+                    description=(
+                        "Default agent harness backend when a workflow sets none."
+                    ),
+                ),
+                EnvVar(
+                    "AGENT_HARNESS_DEFAULT_VERSION",
+                    "",
+                    description="Default agent harness backend version.",
+                ),
                 EnvVar(
                     "AGENT_MODEL_GATEWAY_MODE",
                     "canned",
-                    description="Agent-model gateway upstream mode.",
+                    description="Managed model upstream mode.",
                     choices=("canned", "echo", "openai", "proxy"),
                 ),
                 EnvVar(
                     "AGENT_MODEL_GATEWAY_URL",
                     "",
-                    description="Upstream base URL for the openai and proxy modes.",
+                    description="Upstream base URL (openai/proxy modes).",
                     var_type=EnvVarType.URL,
                 ),
                 EnvVar(
                     "AGENT_MODEL_GATEWAY_MODEL",
                     "",
-                    description="Upstream model for the openai and proxy modes.",
-                ),
-                EnvVar(
-                    "AGENT_MODEL_GATEWAY_API_KEY",
-                    "",
-                    description="Upstream API key for the openai and proxy modes.",
+                    description="Upstream model (openai/proxy modes).",
                 ),
                 EnvVar(
                     "AGENT_MODEL_GATEWAY_TIMEOUT_SEC",
                     "60",
-                    description="Upstream request timeout in seconds for the gateway.",
+                    description="Upstream request timeout (seconds).",
                     var_type=EnvVarType.FLOAT,
                     min_value=0,
                     min_inclusive=False,
+                ),
+                EnvVar(
+                    "AGENT_MODEL_SECRET_TTL_SEC",
+                    "86400",
+                    description="Expiry for a workflow's vaulted model credential.",
+                    var_type=EnvVarType.INT,
+                    min_value=1,
                 ),
             ],
         ),
