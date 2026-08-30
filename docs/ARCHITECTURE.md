@@ -170,8 +170,12 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   reports the step; the server routes the boundary into the ledger and either re-dispatches
   the agent for its next step or suspends its lane until a durable outcome is injected. The
   capsule and its one pending outcome are rebuilt from the ledger, so a restart resumes with
-  the same context. An agent without a declared backend stays on the legacy UTU executor,
-  which remains the default execution path.
+  the same context. A v2 agent's effective harness and managed-model binding are resolved at
+  submission and pinned on its compiled operator: the backend comes from `spec.harness.backend`
+  or a deployment default (`AGENT_HARNESS_DEFAULT_BACKEND`), and an agent with neither fails
+  template validation. The dispatch reads the pinned binding, so a later deployment-default
+  change cannot move a live activation. The legacy UTU executor remains the execution path for
+  non-v2 agents.
 - **Agent-model gateway.** A managed model request an agent defers becomes a durable
   invocation the agent-model gateway settles off the agent's lane, injecting the result
   back at the originating call; resident-capacity admission is not part of it.

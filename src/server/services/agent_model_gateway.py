@@ -19,7 +19,7 @@ from urllib.parse import urlparse
 
 import httpx
 import requests
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -258,7 +258,13 @@ class AgentModelGateway:
         the turn history, so a crash-before-inject re-drive re-derives the same
         correlation and the boundary machinery dedups it.
         """
-        binding = self._effective(task_id)
+        try:
+            binding = self._effective(task_id)
+        except Exception as exc:
+            # A resident binding is not served here: surface a clean typed error rather
+            # than letting the resolver's failure render as an unhandled 500.
+            self._logger.warning("agent-model gateway binding unavailable: %s", exc)
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
         if binding.mode in (GatewayMode.CANNED, GatewayMode.ECHO):
             # No live model to call a facade: settle the turn deterministically.
             text = self.invoke(_dump_input(body.get("input")), task_id)

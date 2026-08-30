@@ -1,6 +1,8 @@
+import asyncio
 from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
 from pydantic import SecretStr
 
 import server.services.agent_model_gateway as gw
@@ -123,3 +125,17 @@ def test_to_gateway_binding_rejects_resident_for_external_gateway():
 def test_secret_resolver_denies_unregistered_ref():
     assert SecretRefResolver({"team": SecretStr("s")}).resolve("rogue") is None
     assert SecretRefResolver({}).resolve(None) is None
+
+
+def test_originate_surfaces_a_clean_error_not_a_500():
+    # A resident binding is not served externally: the episode surface must fail with a
+    # typed error, not an unhandled exception the framework renders as a 500.
+    gateway = _gateway()
+
+    def _resident(_task_id):
+        raise RuntimeError("model binding mode 'resident' is not served externally")
+
+    gateway.set_binding_resolver(_resident)
+    with pytest.raises(HTTPException) as excinfo:
+        asyncio.run(gateway.originate_or_forward("tsk", {"input": "hi"}))
+    assert excinfo.value.status_code == 502
