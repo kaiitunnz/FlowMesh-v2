@@ -1,0 +1,120 @@
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata:
+  name: lit-review-fanout
+  owner: researcher
+  annotations:
+    description: >-
+      Pre-defined graph fanout: three codex reviewer agents each research a facet of
+      "recent advances in retrieval-augmented generation" with the fabric web_search
+      tool, then a merging agent combines their findings into a cited markdown brief.
+      Each agent's model calls route through the FlowMesh agent-model gateway to
+      model_binding.url (a self-hosted fm-serve-vllm endpoint); its web_search calls are
+      captured server-side and executed by the fabric tool broker. Fill model_binding
+      url/model/api_key and point every harness.params.base_url at your FlowMesh gateway.
+
+spec:
+  graph:
+    nodes:
+      - name: retrieval_methods
+        spec:
+          taskType: agent
+          task: >-
+            Research recent advances in retrieval methods for
+            retrieval-augmented generation (dense retrieval, hybrid search,
+            late interaction). Use the web_search tool to find current work and
+            cite source URLs. Write a short findings section.
+          v2:
+            authority: { invoke: [search/v1, model], delegate: [] }
+            tools:
+              - { name: web_search, interface: "search/v1" }
+              - { name: model }
+            boundary: [invocation, yield]
+          harness:
+            backend: codex
+            version: v1
+            params:
+              base_url: http://REPLACE_WITH_FLOWMESH_GATEWAY_HOST:PORT
+              model: REPLACE_WITH_YOUR_SERVED_MODEL
+          model_binding:
+            mode: openai
+            url: https://REPLACE_WITH_YOUR_FM_SERVE_URL/v1
+            model: REPLACE_WITH_YOUR_SERVED_MODEL
+            api_key: "REPLACE_WITH_YOUR_SERVE_KEY"
+
+      - name: generation_grounding
+        spec:
+          taskType: agent
+          task: >-
+            Research recent advances in grounding generation on retrieved
+            evidence for retrieval-augmented generation (citation faithfulness,
+            attribution, hallucination reduction). Use the web_search tool and
+            cite source URLs. Write a short findings section.
+          v2:
+            authority: { invoke: [search/v1, model], delegate: [] }
+            tools:
+              - { name: web_search, interface: "search/v1" }
+              - { name: model }
+            boundary: [invocation, yield]
+          harness:
+            backend: codex
+            version: v1
+            params:
+              base_url: http://REPLACE_WITH_FLOWMESH_GATEWAY_HOST:PORT
+              model: REPLACE_WITH_YOUR_SERVED_MODEL
+          model_binding:
+            mode: openai
+            url: https://REPLACE_WITH_YOUR_FM_SERVE_URL/v1
+            model: REPLACE_WITH_YOUR_SERVED_MODEL
+            api_key: "REPLACE_WITH_YOUR_SERVE_KEY"
+
+      - name: evaluation
+        spec:
+          taskType: agent
+          task: >-
+            Research recent advances in evaluating retrieval-augmented
+            generation systems (benchmarks, metrics, end-to-end evaluation).
+            Use the web_search tool and cite source URLs. Write a short findings
+            section.
+          v2:
+            authority: { invoke: [search/v1, model], delegate: [] }
+            tools:
+              - { name: web_search, interface: "search/v1" }
+              - { name: model }
+            boundary: [invocation, yield]
+          harness:
+            backend: codex
+            version: v1
+            params:
+              base_url: http://REPLACE_WITH_FLOWMESH_GATEWAY_HOST:PORT
+              model: REPLACE_WITH_YOUR_SERVED_MODEL
+          model_binding:
+            mode: openai
+            url: https://REPLACE_WITH_YOUR_FM_SERVE_URL/v1
+            model: REPLACE_WITH_YOUR_SERVED_MODEL
+            api_key: "REPLACE_WITH_YOUR_SERVE_KEY"
+
+      - name: merge_review
+        dependsOn: [retrieval_methods, generation_grounding, evaluation]
+        spec:
+          taskType: agent
+          task: >-
+            Combine the three upstream findings sections into one cohesive
+            markdown literature review titled "Recent Advances in
+            Retrieval-Augmented Generation", preserving the cited source URLs.
+            Output the markdown as your final message.
+          v2:
+            authority: { invoke: [model], delegate: [] }
+            tools: [{ name: model }]
+            boundary: [invocation, yield]
+          harness:
+            backend: codex
+            version: v1
+            params:
+              base_url: http://REPLACE_WITH_FLOWMESH_GATEWAY_HOST:PORT
+              model: REPLACE_WITH_YOUR_SERVED_MODEL
+          model_binding:
+            mode: openai
+            url: https://REPLACE_WITH_YOUR_FM_SERVE_URL/v1
+            model: REPLACE_WITH_YOUR_SERVED_MODEL
+            api_key: "REPLACE_WITH_YOUR_SERVE_KEY"

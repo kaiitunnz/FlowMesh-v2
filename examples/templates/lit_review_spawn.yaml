@@ -1,0 +1,99 @@
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata:
+  name: lit-review-spawn
+  owner: researcher
+  annotations:
+    description: >-
+      Dynamic spawn_agent fanout: a lead codex agent decides the facets of "recent
+      advances in retrieval-augmented generation" and spawns a reviewer child per facet
+      through the fabric spawn_agent facade; each child researches its facet with the
+      fabric web_search tool and returns cited findings; a merging agent then combines
+      them into a markdown brief. The reviewer child region declares the search/v1
+      interface in its authority ceiling, so a spawned child may invoke web search
+      (fail-closed: a child tool the region omits is a compile error). Model calls route
+      through the FlowMesh agent-model gateway to a self-hosted fm-serve-vllm endpoint;
+      fill model_binding url/model/api_key and point harness.params.base_url at your
+      FlowMesh gateway.
+
+spec:
+  graph:
+    nodes:
+      - name: lead
+        spec:
+          taskType: agent
+          task: >-
+            Break "recent advances in retrieval-augmented generation" into three
+            facets (retrieval methods, generation grounding, evaluation). For each,
+            call spawn_agent with region "reviewer" and an args object naming the
+            facet. After the reviewers return, output their combined findings.
+          v2:
+            authority: { invoke: [search/v1, model], delegate: [search/v1, model] }
+            tools:
+              - { name: web_search, interface: "search/v1" }
+              - { name: model }
+            boundary: [spawn, spawn_seal, invocation, yield]
+            child:
+              - name: reviewer
+                authority: { invoke: [search/v1, model], delegate: [] }
+          harness:
+            backend: codex
+            version: v1
+            params:
+              base_url: http://REPLACE_WITH_FLOWMESH_GATEWAY_HOST:PORT
+              model: REPLACE_WITH_YOUR_SERVED_MODEL
+          model_binding:
+            mode: openai
+            url: https://REPLACE_WITH_YOUR_FM_SERVE_URL/v1
+            model: REPLACE_WITH_YOUR_SERVED_MODEL
+            api_key: "REPLACE_WITH_YOUR_SERVE_KEY"
+
+      - name: reviewer
+        spec:
+          taskType: agent
+          task: >-
+            Research your assigned facet of retrieval-augmented generation. Use the
+            web_search tool to find current work, cite the source URLs, and write a
+            short findings section for the facet.
+          v2:
+            authority: { invoke: [search/v1, model], delegate: [] }
+            tools:
+              - { name: web_search, interface: "search/v1" }
+              - { name: model }
+            boundary: [invocation, yield]
+          harness:
+            backend: codex
+            version: v1
+            params:
+              base_url: http://REPLACE_WITH_FLOWMESH_GATEWAY_HOST:PORT
+              model: REPLACE_WITH_YOUR_SERVED_MODEL
+          model_binding:
+            mode: openai
+            url: https://REPLACE_WITH_YOUR_FM_SERVE_URL/v1
+            model: REPLACE_WITH_YOUR_SERVED_MODEL
+            api_key: "REPLACE_WITH_YOUR_SERVE_KEY"
+
+      - name: merge_review
+        dependsOn: [lead]
+        spec:
+          taskType: agent
+          task: >-
+            Combine the lead agent's collected reviewer findings into one cohesive
+            markdown literature review titled "Recent Advances in Retrieval-Augmented
+            Generation", preserving the cited source URLs. Output the markdown as your
+            final message.
+          v2:
+            authority: { invoke: [model], delegate: [] }
+            tools: [{ name: model }]
+            boundary: [invocation, yield]
+          harness:
+            backend: codex
+            version: v1
+            params:
+              base_url: http://REPLACE_WITH_FLOWMESH_GATEWAY_HOST:PORT
+              model: REPLACE_WITH_YOUR_SERVED_MODEL
+          model_binding:
+            mode: openai
+            url: https://REPLACE_WITH_YOUR_FM_SERVE_URL/v1
+            model: REPLACE_WITH_YOUR_SERVED_MODEL
+            api_key: "REPLACE_WITH_YOUR_SERVE_KEY"
