@@ -114,6 +114,8 @@ WORKER_UPLOAD_RESULTS: bool = parse_bool_env("WORKER_UPLOAD_RESULTS", False)
 WORKER_EXECUTOR_IDLE_CLEANUP_SEC: float = parse_float_env(
     "WORKER_EXECUTOR_IDLE_CLEANUP_SEC", 60
 )
+WORKER_ENABLE_DEV_MODEL: bool = parse_bool_env("WORKER_ENABLE_DEV_MODEL", False)
+DEV_MODEL_FORWARD_URL: str = os.getenv("DEV_MODEL_FORWARD_URL", "")
 
 VAST_SEARCH_LIMIT: int = int(os.getenv("VAST_SEARCH_LIMIT") or "10")
 VAST_MAX_RETRIES: int = int(os.getenv("VAST_MAX_RETRIES") or "1")

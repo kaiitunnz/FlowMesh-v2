@@ -70,6 +70,7 @@ class TaskType(StrEnum):
     OMNI_TEXT2AUDIO = "omni_text2audio"
     OMNI_TEXT2GENERAL = "omni_text2general"
     SERVE = "serve"
+    DEV_MODEL = "dev_model"
 
 
 class LogLevel(StrEnum):

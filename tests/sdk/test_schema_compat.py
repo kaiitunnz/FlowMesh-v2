@@ -116,6 +116,7 @@ _RESULT_MODEL_NAMES = [
     "EmbeddingResult",
     "DiffusionResult",
     "ServeResult",
+    "DevModelResult",
     "SFTResult",
     "LoRAResult",
     "PPOResult",

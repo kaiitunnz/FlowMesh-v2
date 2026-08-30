@@ -75,6 +75,10 @@ class WorkerConfig(BaseModel):
     is unspecified."""
     executor_idle_cleanup_sec: float = env.WORKER_EXECUTOR_IDLE_CLEANUP_SEC
     """Seconds an executor may sit idle before the worker unloads it"""
+    enable_dev_model: bool = env.WORKER_ENABLE_DEV_MODEL
+    """Whether the worker advertises the GPU-free dev_model serving executor"""
+    dev_model_forward_url: str = env.DEV_MODEL_FORWARD_URL
+    """Upstream OpenAI-compatible base URL dev_model forwards to (empty = canned)"""
 
 
 WorkerTokenType = NewType("WorkerTokenType", str)
@@ -167,6 +171,8 @@ class WorkerAdapter(ABC):
             "WORKER_EXECUTOR_IDLE_CLEANUP_SEC": to_env_str(
                 config.executor_idle_cleanup_sec
             ),
+            "WORKER_ENABLE_DEV_MODEL": to_env_str(config.enable_dev_model),
+            "DEV_MODEL_FORWARD_URL": config.dev_model_forward_url,
             "DOCKER_GPU_RUNTIME": to_env_str(env.DOCKER_GPU_RUNTIME),
             "FLOWMESH_API_KEY": to_env_str(env.FLOWMESH_API_KEY),
             "WORKER_OWNER_PRINCIPAL_JSON": self.owner.model_dump_json(),

@@ -14,6 +14,8 @@ from .specs import (
     DataProfilingSpecTemplate,
     DataRetrievalSpecStrict,
     DataRetrievalSpecTemplate,
+    DevModelSpecStrict,
+    DevModelSpecTemplate,
     DiffusionSpecStrict,
     DiffusionSpecTemplate,
     DPOSpecStrict,
@@ -65,6 +67,7 @@ type TaskSpecStrict = Annotated[
     | EmbeddingSpecStrict
     | SSHSpecStrict
     | ServeSpecStrict
+    | DevModelSpecStrict
     | OmniText2ImageSpecStrict
     | OmniText2SpeechSpecStrict
     | OmniText2AudioSpecStrict
@@ -89,6 +92,7 @@ type TaskSpecTemplate = Annotated[
     | EmbeddingSpecTemplate
     | SSHSpecTemplate
     | ServeSpecTemplate
+    | DevModelSpecTemplate
     | OmniText2ImageSpecTemplate
     | OmniText2SpeechSpecTemplate
     | OmniText2AudioSpecTemplate

@@ -631,6 +631,18 @@ STACK_ENV_SCHEMA = EnvSchema(
                     var_type=EnvVarType.FLOAT,
                     min_value=0,
                 ),
+                EnvVar(
+                    "WORKER_ENABLE_DEV_MODEL",
+                    "false",
+                    var_type=EnvVarType.BOOL,
+                    description="Advertise the GPU-free dev_model executor.",
+                ),
+                EnvVar(
+                    "DEV_MODEL_FORWARD_URL",
+                    var_type=EnvVarType.URL,
+                    url_schemes={"http", "https"},
+                    description="Upstream URL dev_model forwards to; canned if unset.",
+                ),
             ],
         ),
         EnvSection(
