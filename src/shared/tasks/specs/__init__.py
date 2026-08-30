@@ -8,6 +8,7 @@ from .diffusion import DiffusionSpecStrict, DiffusionSpecTemplate
 from .inference import InferenceBackend, InferenceSpecStrict, InferenceSpecTemplate
 from .misc import (
     AgentHarnessSpec,
+    AgentModelBindingSpec,
     AgentSpecStrict,
     AgentSpecTemplate,
     ApiSpecStrict,
@@ -20,6 +21,7 @@ from .misc import (
     EchoSpecTemplate,
     EmbeddingSpecStrict,
     EmbeddingSpecTemplate,
+    ModelBindingMode,
 )
 from .omni import (
     OmniText2AudioSpecStrict,
@@ -49,6 +51,8 @@ from .training import (
 
 __all__ = [
     "AgentHarnessSpec",
+    "AgentModelBindingSpec",
+    "ModelBindingMode",
     "ConditionSpec",
     "TaskSpecBase",
     "TaskSpecStrictBase",
