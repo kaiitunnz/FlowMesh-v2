@@ -49,7 +49,6 @@ def test_delegate_exceeds_invoke_rejected() -> None:
     err = _reject("""      - name: a
         spec:
           taskType: agent
-          configName: default
           task: hi
           v2:
             authority: {invoke: [], delegate: [web_search]}
@@ -62,7 +61,6 @@ def test_invoke_undeclared_tool_rejected() -> None:
     err = _reject("""      - name: a
         spec:
           taskType: agent
-          configName: default
           task: hi
           v2: {authority: {invoke: [ghost]}}
 """)
