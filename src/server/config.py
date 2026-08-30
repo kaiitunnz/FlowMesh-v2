@@ -282,12 +282,9 @@ class GatewayMode(StrEnum):
     PROXY = "proxy"
 
 
-def _first_env(*names: str) -> str | None:
-    """The first non-empty, stripped value among the given env vars, else None."""
-    for name in names:
-        if value := (os.getenv(name) or "").strip():
-            return value
-    return None
+def _env_or_none(name: str) -> str | None:
+    """The env var's non-empty, stripped value, else None."""
+    return (os.getenv(name) or "").strip() or None
 
 
 @dataclass
@@ -315,8 +312,8 @@ class AgentModelGatewayConfig:
             mode = GatewayMode.CANNED
         return cls(
             mode=mode,
-            url=_first_env(f"{prefix}URL"),
-            model=_first_env(f"{prefix}MODEL"),
+            url=_env_or_none(f"{prefix}URL"),
+            model=_env_or_none(f"{prefix}MODEL"),
             timeout_sec=parse_float_env(f"{prefix}TIMEOUT_SEC") or 60.0,
         )
 
@@ -350,11 +347,11 @@ class AgentBindingConfig:
         prefix = "AGENT_MODEL_GATEWAY_"
         raw_mode = (os.getenv(f"{prefix}MODE") or "").strip().lower()
         return cls(
-            default_backend=_first_env("AGENT_HARNESS_DEFAULT_BACKEND"),
-            default_version=_first_env("AGENT_HARNESS_DEFAULT_VERSION"),
+            default_backend=_env_or_none("AGENT_HARNESS_DEFAULT_BACKEND"),
+            default_version=_env_or_none("AGENT_HARNESS_DEFAULT_VERSION"),
             default_mode=_DEFAULT_BINDING_MODE.get(raw_mode),
-            default_url=_first_env(f"{prefix}URL"),
-            default_model=_first_env(f"{prefix}MODEL"),
+            default_url=_env_or_none(f"{prefix}URL"),
+            default_model=_env_or_none(f"{prefix}MODEL"),
         )
 
 
