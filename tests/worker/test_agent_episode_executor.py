@@ -158,7 +158,7 @@ def _runner(tmp_path: Path, executors: dict[str, Executor]) -> Runner:
         results_dir=tmp_path,
         hardware=make_worker_hardware(),
         executors=executors,
-        default_executor=executors["agent"],
+        default_executor=executors["default"],
         logger=MagicMock(),
     )
 
@@ -174,11 +174,11 @@ def test_runner_routes_an_episode_message_to_the_episode_executor(
     tmp_path: Path,
 ) -> None:
     # An agent message carrying an agent-episode dispatch routes to the episode
-    # executor; a bare agent message routes to the UTU executor. This is the production
-    # seam the dispatcher and runner select, exercised end-to-end on the real stack.
+    # executor; a bare agent with no dispatch context fails without falling back to any
+    # other executor. This is the production seam the dispatcher and runner select.
     episode = _RecordingExecutor(_agent_result())
-    utu = _RecordingExecutor(_agent_result())
-    runner = _runner(tmp_path, {"agent_episode": episode, "agent": utu})
+    default = _RecordingExecutor(_agent_result())
+    runner = _runner(tmp_path, {"agent_episode": episode, "default": default})
 
     with_episode = make_worker_task_message(
         {"taskType": "agent"},
@@ -187,10 +187,10 @@ def test_runner_routes_an_episode_message_to_the_episode_executor(
     )
     runner.task_stream = [with_episode]
     runner.start()
-    assert episode.ran and not utu.ran
+    assert episode.ran and not default.ran
 
-    episode.ran = utu.ran = False
+    episode.ran = default.ran = False
     bare = make_worker_task_message({"taskType": "agent"}, task_type=TaskType.AGENT)
     runner.task_stream = [bare]
     runner.start()
-    assert utu.ran and not episode.ran
+    assert not episode.ran and not default.ran

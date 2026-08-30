@@ -464,9 +464,13 @@ class Runner:
                         desired_key = self._select_embedding_executor_key(spec)
                     elif task_type == "serve":
                         desired_key = "vllm_serve"
-                    elif task_type == "agent" and msg.agent_episode is not None:
-                        # A v2 agent carrying a harness backend key runs the
-                        # run-to-yield episode path; a bare agent stays on UTU.
+                    elif task_type == "agent":
+                        if msg.agent_episode is None:
+                            raise ExecutionError(
+                                "agent task reached the worker without a resolved "
+                                "harness binding; every agent runs the harness "
+                                "episode path"
+                            )
                         desired_key = "agent_episode"
                     else:
                         desired_key = "default" if task_type is None else task_type

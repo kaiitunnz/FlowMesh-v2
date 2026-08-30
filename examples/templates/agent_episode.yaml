@@ -1,0 +1,40 @@
+apiVersion: flowmesh/v2
+kind: AgentTask
+metadata:
+  name: agent-episode
+  owner: researcher
+  annotations:
+    description: >-
+      Agent driven as a run-to-yield harness episode. The harness backend drives
+      the agent and its managed model requests settle through the agent-model
+      gateway. An agent with neither an explicit harness nor a deployment default
+      backend fails validation.
+
+spec:
+  taskType: agent
+
+  task: Summarize the latest trends in artificial intelligence in three bullet points
+
+  harness:
+    backend: codex
+    version: v1
+
+  model_binding:
+    mode: openai
+    url: https://api.openai.com/v1
+    model: gpt-4o-mini
+
+  resources:
+    hardware:
+      cpu: 2
+      memory: 4Gi
+      gpu:
+        type: any
+        count: 0
+
+  output:
+    destination:
+      type: local
+    artifacts:
+      - results.json
+      - agent_output.txt

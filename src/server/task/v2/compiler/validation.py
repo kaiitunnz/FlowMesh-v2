@@ -524,7 +524,8 @@ def _check_agent_binding(
                 code="agent.harness.unresolved",
                 message=(
                     "agent has no harness backend: declare spec.harness or configure a "
-                    "deployment default harness backend"
+                    "deployment default (AGENT_HARNESS_DEFAULT_BACKEND). See "
+                    "examples/templates/agent_episode.yaml"
                 ),
                 location=location,
             )

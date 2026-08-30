@@ -213,6 +213,13 @@ def _build_task_template(
     task_type = task_spec.get("taskType")
     if not isinstance(task_type, str) or not task_type.strip():
         raise ValueError(f"Invalid task payload{context}: spec.taskType is required")
+    if task_type == TaskType.AGENT and not _is_v2_mode(payload.apiVersion):
+        raise ValueError(
+            f"Invalid task payload{context}: an 'agent' task requires apiVersion "
+            "'flowmesh/v2' with a resolved harness binding (declare spec.harness or "
+            "configure a deployment default harness backend). See "
+            "examples/templates/agent_episode.yaml."
+        )
     try:
         task = TaskEnvelopeTemplate.model_validate(payload)
     except ValidationError as exc:

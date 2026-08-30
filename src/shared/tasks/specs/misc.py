@@ -119,7 +119,8 @@ class AgentHarnessSpec(BaseModel):
     """Declares the harness backend that drives an agent as a run-to-yield episode.
 
     ``backend``/``version`` select and pin the adapter binding; ``params`` are its
-    non-secret backend configuration. An agent without this runs the legacy UTU path.
+    non-secret backend configuration. When omitted, the deployment default harness
+    backend resolves the binding; an agent with neither fails validation.
     """
 
     backend: str
