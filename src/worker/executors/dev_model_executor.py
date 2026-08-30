@@ -186,9 +186,14 @@ class DevModelExecutor(Executor):
             )
 
         client = httpx.Client() if forward_url is not None else None
-        server = _DevModelHTTPServer(
-            (bind_host, port), _DevModelHandler, forward_url, model_id, client
-        )
+        try:
+            server = _DevModelHTTPServer(
+                (bind_host, port), _DevModelHandler, forward_url, model_id, client
+            )
+        except BaseException:
+            if client is not None:
+                client.close()
+            raise
         self._server = server
         serve_thread = threading.Thread(target=server.serve_forever, daemon=True)
         serve_thread.start()
