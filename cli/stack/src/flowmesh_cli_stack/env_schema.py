@@ -287,6 +287,35 @@ STACK_ENV_SCHEMA = EnvSchema(
                     min_value=0,
                     min_inclusive=False,
                 ),
+                EnvVar(
+                    "AGENT_MODEL_GATEWAY_SECRETS",
+                    "",
+                    description=(
+                        "Authorized workflow secret refs as ref=ENV_VAR pairs; a "
+                        "workflow names a ref and the server resolves it upstream-side."
+                    ),
+                ),
+                EnvVar(
+                    "AGENT_MODEL_GATEWAY_RESIDENT_MODELS",
+                    "",
+                    description=(
+                        "Authorized resident model refs as "
+                        "ref=family[:engine_batch[:isolation]] pairs."
+                    ),
+                ),
+                EnvVar(
+                    "AGENT_HARNESS_DEFAULT_BACKEND",
+                    "",
+                    description=(
+                        "Deployment default agent harness backend when a workflow "
+                        "declares none; unset requires each agent to declare one."
+                    ),
+                ),
+                EnvVar(
+                    "AGENT_HARNESS_DEFAULT_VERSION",
+                    "",
+                    description="Deployment default agent harness backend version.",
+                ),
             ],
         ),
         EnvSection(
