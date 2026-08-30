@@ -13,7 +13,6 @@ from server.services.agent_model_gateway import (
     ResolvedGatewayBinding,
     to_gateway_binding,
 )
-from server.services.secret_ref import SecretRefResolver
 from server.task.v2.representations.operators import (
     AgentModelGatewayBinding,
     BindingProvenance,
@@ -26,6 +25,16 @@ _PROV = ModelBindingProvenance(
     url=BindingProvenance.SOURCE,
     model=BindingProvenance.SOURCE,
 )
+
+
+class _FakeVault:
+    """A workflow-scoped credential store, keyed by (workflow_id, ref)."""
+
+    def __init__(self, store: dict[tuple[str, str], SecretStr]) -> None:
+        self._store = store
+
+    def resolve(self, workflow_id: str, ref: str | None) -> SecretStr | None:
+        return self._store.get((workflow_id, ref)) if ref else None
 
 
 def _gateway() -> AgentModelGateway:
@@ -93,40 +102,31 @@ def test_no_resolver_falls_back_to_deployment_default():
     assert gateway.invoke("echoed", "tsk") == "echoed"
 
 
-def test_to_gateway_binding_resolves_secret_ref_server_side():
-    resolver = SecretRefResolver({"team": SecretStr("sk-team")})
-    pinned = AgentModelGatewayBinding(
+def _openai_binding(secret_ref: str | None = None) -> AgentModelGatewayBinding:
+    return AgentModelGatewayBinding(
         mode=ModelBindingMode.OPENAI,
         url="https://h/v1",
         model="m",
-        secret_ref="team",
+        secret_ref=secret_ref,
         provenance=_PROV,
     )
-    resolved = to_gateway_binding(pinned, resolver, default_api_key=None)
-    assert resolved.api_key == "sk-team"
+
+
+def test_to_gateway_binding_resolves_vaulted_key_within_its_workflow():
+    vault = _FakeVault({("wfl-1", "msk-a"): SecretStr("sk-user")})
+    resolved = to_gateway_binding(_openai_binding("msk-a"), vault, "wfl-1")
+    assert resolved.api_key == "sk-user"
     assert resolved.url == "https://h/v1" and resolved.model == "m"
 
 
-def test_deployment_key_pairs_only_with_the_deployment_default_url():
-    prov = ModelBindingProvenance(
-        mode=BindingProvenance.DEFAULT,
-        url=BindingProvenance.DEFAULT,
-        model=BindingProvenance.DEFAULT,
-    )
-    pinned = AgentModelGatewayBinding(
-        mode=ModelBindingMode.OPENAI, url="https://gw/v1", model="m", provenance=prov
-    )
-    resolved = to_gateway_binding(pinned, SecretRefResolver({}), "sk-default")
-    assert resolved.api_key == "sk-default"
+def test_vaulted_ref_does_not_resolve_across_workflows():
+    vault = _FakeVault({("wfl-1", "msk-a"): SecretStr("sk-user")})
+    # Another workflow presenting the same ref gets no credential.
+    assert to_gateway_binding(_openai_binding("msk-a"), vault, "wfl-2").api_key is None
 
 
-def test_deployment_key_is_never_sent_to_a_workflow_provided_url():
-    # A workflow-provided (source) url with no secret_ref must not inherit the
-    # deployment key, or the shared key would leak to a workflow-chosen host.
-    pinned = AgentModelGatewayBinding(
-        mode=ModelBindingMode.OPENAI, url="https://byo/v1", model="m", provenance=_PROV
-    )
-    resolved = to_gateway_binding(pinned, SecretRefResolver({}), "sk-default")
+def test_missing_ref_is_unauthenticated():
+    resolved = to_gateway_binding(_openai_binding(None), _FakeVault({}), "wfl-1")
     assert resolved.api_key is None
 
 
@@ -135,12 +135,7 @@ def test_to_gateway_binding_rejects_resident_for_external_gateway():
         mode=ModelBindingMode.RESIDENT, service_model_ref="cat/x", provenance=_PROV
     )
     with pytest.raises(ResidentBindingNotServable, match="not served externally"):
-        to_gateway_binding(pinned, SecretRefResolver({}), None)
-
-
-def test_secret_resolver_denies_unregistered_ref():
-    assert SecretRefResolver({"team": SecretStr("s")}).resolve("rogue") is None
-    assert SecretRefResolver({}).resolve(None) is None
+        to_gateway_binding(pinned, _FakeVault({}), "wfl-1")
 
 
 def test_originate_reports_a_resident_binding_as_not_implemented():

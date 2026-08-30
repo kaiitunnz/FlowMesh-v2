@@ -3,21 +3,14 @@ import pytest
 from server.task.parser import parse_workflow
 from server.task.v2.compiler.agent_binding import (
     AgentBindingDefaults,
-    ResidentModelEntry,
+    service_family_for_ref,
 )
 from server.task.v2.compiler.diagnostics import CompileError
 from server.task.v2.compiler.pipeline import compile_workflow
-from server.task.v2.representations.operators import (
-    AgentOperator,
-    BindingProvenance,
-)
+from server.task.v2.representations.operators import AgentOperator, BindingProvenance
 from server.task.v2.representations.source import FrontendWorkflowSource
+from shared.tasks import TaskType
 from shared.tasks.specs import ModelBindingMode
-
-_RESIDENT = AgentBindingDefaults(
-    default_backend="codex",
-    resident_catalog={"catalog/qwen": ResidentModelEntry(family="inference:qwen")},
-)
 
 
 def _indent(body: str) -> str:
@@ -45,10 +38,12 @@ spec:
 """
 
 
-def _compile(text: str, defaults: AgentBindingDefaults):
+def _compile(text, defaults, secret_refs=None):
     parsed = parse_workflow(text, "native")
     source = FrontendWorkflowSource.capture(text, "native", name="wf")
-    return compile_workflow("wfl-t", parsed, source, bindings=defaults)
+    return compile_workflow(
+        "wfl-t", parsed, source, bindings=defaults, secret_refs=secret_refs
+    )
 
 
 def _agent(template) -> AgentOperator:
@@ -60,12 +55,7 @@ def test_source_harness_and_model_binding_pin_with_source_provenance():
         """        harness: {backend: scripted, version: v2, params: {script: []}}
         model_binding: {mode: openai, url: "https://api.src/v1", model: src-model}"""
     )
-    template, _ = _compile(
-        text,
-        AgentBindingDefaults(
-            default_backend="codex", allowed_upstream_hosts=frozenset({"api.src"})
-        ),
-    )
+    template, _ = _compile(text, AgentBindingDefaults(default_backend="codex"))
     agent = _agent(template)
     assert agent.harness_binding.backend == "scripted"
     assert agent.harness_binding.provenance.backend is BindingProvenance.SOURCE
@@ -74,14 +64,12 @@ def test_source_harness_and_model_binding_pin_with_source_provenance():
 
 
 def test_deployment_default_beats_fallback_but_loses_to_source():
-    text = _agent_workflow("")
     defaults = AgentBindingDefaults(
         default_backend="codex",
         default_mode=ModelBindingMode.OPENAI,
         default_url="https://api.default/v1",
-        allowed_upstream_hosts=frozenset({"api.default"}),
     )
-    template, _ = _compile(text, defaults)
+    template, _ = _compile(_agent_workflow(""), defaults)
     agent = _agent(template)
     assert agent.harness_binding.backend == "codex"
     assert agent.harness_binding.provenance.backend is BindingProvenance.DEFAULT
@@ -113,80 +101,58 @@ def test_openai_binding_without_url_is_rejected():
         _compile(text, AgentBindingDefaults(default_backend="codex"))
 
 
-def test_resident_binding_pins_service_family_and_required_intent():
+def test_any_external_url_compiles_without_an_allowlist():
     text = _agent_workflow(
-        "        model_binding: {mode: resident, service_model_ref: catalog/qwen}"
+        'model_binding: {mode: openai, url: "https://anything.example/v1", model: m}'
     )
-    template, plan = _compile(text, _RESIDENT)
+    template, _ = _compile(text, AgentBindingDefaults(default_backend="codex"))
+    assert _agent(template).model_binding.url == "https://anything.example/v1"
+
+
+def test_vaulted_secret_ref_pins_on_the_model_binding():
+    text = _agent_workflow(
+        'model_binding: {mode: openai, url: "https://a/v1", model: m}'
+    )
+    parsed = parse_workflow(text, "native")
+    task_id = next(
+        t.task_id for t in parsed.tasks if t.task.spec.taskType == TaskType.AGENT
+    )
+    source = FrontendWorkflowSource.capture(text, "native", name="wf")
+    template, _ = compile_workflow(
+        "wfl-t",
+        parsed,
+        source,
+        bindings=AgentBindingDefaults(default_backend="codex"),
+        secret_refs={task_id: "msk-abc123"},
+    )
+    assert _agent(template).model_binding.secret_ref == "msk-abc123"
+
+
+def test_any_resident_reference_pins_a_canonical_service_family():
+    text = _agent_workflow(
+        "        model_binding: {mode: resident, service_model_ref: Qwen/Qwen3-4B}"
+    )
+    template, plan = _compile(text, AgentBindingDefaults(default_backend="codex"))
     binding = _agent(template).model_binding
     assert binding.mode is ModelBindingMode.RESIDENT
     assert binding.url is None
     resident = [n for n in plan.nodes if n.service_family_requirement is not None]
     assert len(resident) == 1
-    assert resident[0].service_family_requirement.family == "inference:qwen"
+    assert resident[0].service_family_requirement.family == "Qwen/Qwen3-4B"
     assert resident[0].residency_intent.required is True
 
 
-def test_unauthorized_resident_reference_is_rejected():
-    text = _agent_workflow(
-        "        model_binding: {mode: resident, service_model_ref: catalog/unknown}"
+def test_identical_resident_references_derive_the_same_family():
+    assert service_family_for_ref("Qwen/Qwen3-4B ") == service_family_for_ref(
+        "Qwen/Qwen3-4B"
     )
-    with pytest.raises(CompileError, match="unauthorized_resident"):
-        _compile(text, _RESIDENT)
-
-
-def test_unauthorized_secret_ref_is_rejected():
-    text = _agent_workflow(
-        'model_binding: {mode: openai, url: "https://a/v1", model: m, secret_ref: bad}'
-    )
-    with pytest.raises(CompileError, match="unauthorized_secret"):
-        _compile(
-            text,
-            AgentBindingDefaults(
-                default_backend="codex", allowed_upstream_hosts=frozenset({"a"})
-            ),
-        )
-
-
-def test_authorized_secret_ref_compiles():
-    defaults = AgentBindingDefaults(
-        default_backend="codex",
-        secret_allowlist=frozenset({"team"}),
-        allowed_upstream_hosts=frozenset({"a"}),
-    )
-    text = _agent_workflow(
-        'model_binding: {mode: openai, url: "https://a/v1", model: m, secret_ref: team}'
-    )
-    template, _ = _compile(text, defaults)
-    assert _agent(template).model_binding.secret_ref == "team"
-
-
-def test_external_url_off_the_allowlist_is_rejected():
-    text = _agent_workflow(
-        'model_binding: {mode: openai, url: "https://evil/v1", model: m}'
-    )
-    with pytest.raises(CompileError, match="upstream_not_allowed"):
-        _compile(text, AgentBindingDefaults(default_backend="codex"))
-
-
-def test_external_url_on_the_allowlist_compiles():
-    text = _agent_workflow(
-        'model_binding: {mode: openai, url: "https://trusted/v1", model: m}'
-    )
-    defaults = AgentBindingDefaults(
-        default_backend="codex", allowed_upstream_hosts=frozenset({"trusted"})
-    )
-    template, _ = _compile(text, defaults)
-    assert _agent(template).model_binding.url == "https://trusted/v1"
 
 
 def test_compat_sugar_normalizes_harness_params_to_openai_binding():
     text = _agent_workflow(
         "harness: {backend: codex, params: {base_url: 'https://a/v1', model: m}}"
     )
-    template, _ = _compile(
-        text, AgentBindingDefaults(allowed_upstream_hosts=frozenset({"a"}))
-    )
+    template, _ = _compile(text, AgentBindingDefaults())
     binding = _agent(template).model_binding
     assert binding.mode is ModelBindingMode.OPENAI
     assert binding.url == "https://a/v1" and binding.model == "m"

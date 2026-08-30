@@ -1,6 +1,4 @@
-from collections.abc import Mapping
-from dataclasses import dataclass, field
-from urllib.parse import urlsplit
+from dataclasses import dataclass
 
 from shared.tasks.specs import AgentHarnessSpec, AgentModelBindingSpec, ModelBindingMode
 
@@ -17,15 +15,6 @@ _FALLBACK_OPENAI_MODEL = "gpt-4o-mini"
 
 
 @dataclass(frozen=True)
-class ResidentModelEntry:
-    """A policy-authorized resident model/engine dependency in the catalog."""
-
-    family: str
-    engine_batch_key: str | None = None
-    isolation: str | None = None
-
-
-@dataclass(frozen=True)
 class AgentBindingDefaults:
     """Deployment-resolved defaults injected into compilation from the config edge.
 
@@ -39,9 +28,6 @@ class AgentBindingDefaults:
     default_mode: ModelBindingMode | None = None
     default_url: str | None = None
     default_model: str | None = None
-    secret_allowlist: frozenset[str] = frozenset()
-    allowed_upstream_hosts: frozenset[str] = frozenset()
-    resident_catalog: Mapping[str, ResidentModelEntry] = field(default_factory=dict)
 
 
 def neutral_defaults() -> AgentBindingDefaults:
@@ -53,26 +39,14 @@ def neutral_defaults() -> AgentBindingDefaults:
     return AgentBindingDefaults()
 
 
-def resident_entry(
-    defaults: AgentBindingDefaults, ref: str | None
-) -> ResidentModelEntry | None:
-    return defaults.resident_catalog.get(ref) if ref else None
+def service_family_for_ref(ref: str) -> str:
+    """The canonical service family a resident model reference belongs to.
 
-
-def secret_ref_authorized(defaults: AgentBindingDefaults, ref: str | None) -> bool:
-    return ref is None or ref in defaults.secret_allowlist
-
-
-def upstream_host_allowed(defaults: AgentBindingDefaults, url: str | None) -> bool:
-    """Whether an external upstream url's host is a trusted egress target.
-
-    Default-deny: an empty allowlist trusts no host, so external egress is off until a
-    deployment authorizes each host a credential may reach.
+    The reference is the model identifier (a served name or repository id), and the
+    family is derived from it deterministically so identical references group into one
+    demand family for downstream residency scheduling.
     """
-    if not url:
-        return False
-    host = (urlsplit(url).hostname or "").lower()
-    return host in defaults.allowed_upstream_hosts
+    return ref.strip()
 
 
 def _resolve_harness(
@@ -131,7 +105,9 @@ def _effective_source_mode(source: AgentModelBindingSpec) -> ModelBindingMode | 
 
 
 def _resolve_model(
-    source: AgentModelBindingSpec | None, defaults: AgentBindingDefaults
+    source: AgentModelBindingSpec | None,
+    defaults: AgentBindingDefaults,
+    secret_ref: str | None,
 ) -> AgentModelGatewayBinding:
     source_mode = _effective_source_mode(source) if source is not None else None
     if source_mode is not None:
@@ -171,7 +147,7 @@ def _resolve_model(
         mode=mode,
         url=url,
         model=model,
-        secret_ref=source.secret_ref if source else None,
+        secret_ref=secret_ref,
         provenance=ModelBindingProvenance(
             mode=mode_prov, url=url_prov, model=model_prov
         ),
@@ -192,14 +168,16 @@ def resolve_agent_bindings(
     harness: AgentHarnessSpec | None,
     model_binding: AgentModelBindingSpec | None,
     defaults: AgentBindingDefaults,
+    secret_ref: str | None = None,
 ) -> tuple[AgentHarnessBinding | None, AgentModelGatewayBinding]:
     """Resolve the effective, submission-pinned harness and model bindings.
 
     Resolution is best-effort and never fails: an unresolved harness stays ``None``
     and an incomplete external binding keeps a ``None`` url. Validation turns those
-    into diagnostics so a dry-run and a submission agree.
+    into diagnostics so a dry-run and a submission agree. ``secret_ref`` is the vault
+    ref minted for an inline credential at submission, pinned onto the model binding.
     """
     return (
         _resolve_harness(harness, defaults),
-        _resolve_model(_source_model(harness, model_binding), defaults),
+        _resolve_model(_source_model(harness, model_binding), defaults, secret_ref),
     )

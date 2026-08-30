@@ -3,7 +3,7 @@ from enum import StrEnum
 from typing import Any, Literal, Self
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, SecretStr, field_validator, model_validator
 
 from ..task_type import TaskType
 from .common import (
@@ -13,10 +13,10 @@ from .common import (
     TaskSpecTemplateBase,
 )
 
-# A harness/model-binding key is credential-bearing when it contains one of these
-# substrings or is a segment-boundary credential word (so ``max_tokens`` is allowed
-# but ``auth_token`` is not). Credentials reach an upstream only through a server-side
-# secret_ref, never through opaque config.
+# A harness param key is credential-bearing when it contains one of these substrings
+# or is a segment-boundary credential word (so ``max_tokens`` is allowed but
+# ``auth_token`` is not). A model credential belongs in the binding's inline ``api_key``
+# (vaulted at submission), never in an opaque harness param.
 _CREDENTIAL_SUBSTRINGS = (
     "api_key",
     "apikey",
@@ -80,9 +80,10 @@ class ModelBindingMode(StrEnum):
 class AgentModelBindingSpec(BaseModel):
     """The source model binding an agent declares beside its harness.
 
-    A workflow chooses a model dependency, never a raw provider connection or a
-    credential: ``secret_ref`` names an authorized server-side secret, and an extra
-    field (e.g. a raw ``api_key``) is rejected outright.
+    An external ``openai`` upstream carries an inline ``api_key`` (the user's own
+    credential, held as a masked ``SecretStr``); a ``resident`` binding names a
+    FlowMesh-served model by reference with no url or credential. The credential is
+    vaulted server-side at submission and never persists on the compiled binding.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -90,7 +91,7 @@ class AgentModelBindingSpec(BaseModel):
     mode: ModelBindingMode | None = None
     url: str | None = None
     model: str | None = None
-    secret_ref: str | None = None
+    api_key: SecretStr | None = None
     service_model_ref: str | None = None
 
     @model_validator(mode="after")
@@ -99,14 +100,16 @@ class AgentModelBindingSpec(BaseModel):
             raise ValueError("model_binding.url must not embed credentials")
         if self.service_model_ref and self.url:
             raise ValueError("model_binding cannot set both service_model_ref and url")
-        if self.mode is ModelBindingMode.RESIDENT and (self.url or self.secret_ref):
-            raise ValueError("a resident model_binding carries no url or secret_ref")
+        if self.mode is ModelBindingMode.RESIDENT and (self.url or self.api_key):
+            raise ValueError("a resident model_binding carries no url or api_key")
         if self.mode is ModelBindingMode.OPENAI and self.service_model_ref:
             raise ValueError("an openai model_binding carries no service_model_ref")
         if self.mode in (ModelBindingMode.CANNED, ModelBindingMode.ECHO) and (
-            self.url or self.model or self.secret_ref or self.service_model_ref
+            self.url or self.model or self.api_key or self.service_model_ref
         ):
-            raise ValueError(f"a {self.mode} model_binding carries no url/model/ref")
+            raise ValueError(f"a {self.mode} model_binding carries no url/model/key")
+        if self.api_key is not None and self.service_model_ref:
+            raise ValueError("a resident model_binding carries no api_key")
         return self
 
 
@@ -126,7 +129,8 @@ class AgentHarnessSpec(BaseModel):
     def _reject_credential_params(cls, params: dict[str, Any]) -> dict[str, Any]:
         if (key := _find_credential_key(params)) is not None:
             raise ValueError(
-                f"harness param {key!r} looks credential-bearing; use a secret_ref"
+                f"harness param {key!r} looks credential-bearing; put a model "
+                "credential in model_binding.api_key"
             )
         return params
 

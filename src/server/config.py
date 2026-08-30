@@ -3,8 +3,6 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
-from pydantic import SecretStr
-
 from shared.tasks.specs import ModelBindingMode
 from shared.utils.parsing import parse_bool_env, parse_float_env, parse_int_env
 
@@ -306,7 +304,6 @@ class AgentModelGatewayConfig:
     mode: GatewayMode = GatewayMode.CANNED
     url: str | None = None
     model: str | None = None
-    api_key: str | None = None
     timeout_sec: float = 60.0
 
     @classmethod
@@ -321,7 +318,6 @@ class AgentModelGatewayConfig:
             mode=mode,
             url=_first_env(f"{prefix}URL", "UTU_LLM_BASE_URL"),
             model=_first_env(f"{prefix}MODEL", "UTU_LLM_MODEL"),
-            api_key=_first_env(f"{prefix}API_KEY", "UTU_LLM_API_KEY"),
             timeout_sec=parse_float_env(f"{prefix}TIMEOUT_SEC") or 60.0,
         )
 
@@ -336,61 +332,14 @@ _DEFAULT_BINDING_MODE = {
 }
 
 
-@dataclass(frozen=True)
-class ResidentModelConfig:
-    """One authorized resident model/engine dependency in the deployment catalog."""
-
-    family: str
-    engine_batch_key: str | None = None
-    isolation: str | None = None
-
-
-def _load_secret_refs(raw: str | None) -> dict[str, SecretStr]:
-    """Resolve ``ref=ENV_VAR`` pairs to server-side secret values at the config edge.
-
-    A ref is authorized only when its backing env var holds a value, so the secret
-    material stays server-side and a template only ever carries the ref name.
-    """
-    secrets: dict[str, SecretStr] = {}
-    for item in (raw or "").split(","):
-        if "=" in (entry := item.strip()):
-            ref, env_var = (part.strip() for part in entry.split("=", 1))
-            if ref and env_var and (value := os.getenv(env_var)):
-                secrets[ref] = SecretStr(value)
-    return secrets
-
-
-def _parse_allowed_hosts(raw: str | None) -> frozenset[str]:
-    """Parse the comma-separated trusted upstream hostnames a credential may reach."""
-    return frozenset(
-        host.lower() for item in (raw or "").split(",") if (host := item.strip())
-    )
-
-
-def _parse_resident_models(raw: str | None) -> dict[str, ResidentModelConfig]:
-    """Parse ``ref=family[:engine_batch[:isolation]]`` authorized resident entries."""
-    catalog: dict[str, ResidentModelConfig] = {}
-    for item in (raw or "").split(","):
-        if "=" not in (entry := item.strip()):
-            continue
-        ref, spec = entry.split("=", 1)
-        parts = [p.strip() or None for p in spec.split(":")]
-        if (ref := ref.strip()) and parts[0]:
-            catalog[ref] = ResidentModelConfig(
-                family=parts[0],
-                engine_batch_key=parts[1] if len(parts) > 1 else None,
-                isolation=parts[2] if len(parts) > 2 else None,
-            )
-    return catalog
-
-
 @dataclass
 class AgentBindingConfig:
     """Deployment defaults for per-workflow agent harness and managed-model bindings.
 
     The model defaults read ``AGENT_MODEL_GATEWAY_*`` with no ``UTU_LLM_*`` fallback:
     the legacy provider path stays available only to the UTU executor, never as a tier
-    for a new pinned binding.
+    for a new pinned binding. A workflow supplies its own inline credential; the
+    deployment holds none.
     """
 
     default_backend: str | None = None
@@ -398,9 +347,6 @@ class AgentBindingConfig:
     default_mode: ModelBindingMode | None = None
     default_url: str | None = None
     default_model: str | None = None
-    secrets: dict[str, SecretStr] = field(default_factory=dict)
-    resident_models: dict[str, ResidentModelConfig] = field(default_factory=dict)
-    allowed_hosts: frozenset[str] = frozenset()
 
     @classmethod
     def from_env(cls) -> "AgentBindingConfig":
@@ -412,12 +358,23 @@ class AgentBindingConfig:
             default_mode=_DEFAULT_BINDING_MODE.get(raw_mode),
             default_url=_first_env(f"{prefix}URL"),
             default_model=_first_env(f"{prefix}MODEL"),
-            secrets=_load_secret_refs(os.getenv(f"{prefix}SECRETS")),
-            allowed_hosts=_parse_allowed_hosts(os.getenv(f"{prefix}ALLOWED_HOSTS")),
-            resident_models=_parse_resident_models(
-                os.getenv(f"{prefix}RESIDENT_MODELS")
-            ),
         )
+
+
+@dataclass
+class ModelSecretVaultConfig:
+    """The durable vault backstop TTL for user-supplied model credentials.
+
+    The TTL is sliding: a workflow that keeps resolving its credential keeps it, while
+    an abandoned, idle submission expires after this window. Purge on a workflow's
+    terminal transition is the primary reclaim; this backstop bounds the rest.
+    """
+
+    ttl_sec: int = 86400
+
+    @classmethod
+    def from_env(cls) -> "ModelSecretVaultConfig":
+        return cls(ttl_sec=parse_int_env("AGENT_MODEL_SECRET_TTL_SEC") or 86400)
 
 
 @dataclass
@@ -428,6 +385,9 @@ class OrchestrationConfig:
     episode_lowering: bool = False
     gateway: AgentModelGatewayConfig = field(default_factory=AgentModelGatewayConfig)
     agent_binding: AgentBindingConfig = field(default_factory=AgentBindingConfig)
+    model_secret_vault: ModelSecretVaultConfig = field(
+        default_factory=ModelSecretVaultConfig
+    )
 
     @classmethod
     def from_env(cls) -> "OrchestrationConfig":
@@ -438,6 +398,7 @@ class OrchestrationConfig:
             episode_lowering=parse_bool_env("ORCHESTRATOR_EPISODE_LOWERING", False),
             gateway=AgentModelGatewayConfig.from_env(),
             agent_binding=AgentBindingConfig.from_env(),
+            model_secret_vault=ModelSecretVaultConfig.from_env(),
         )
 
 

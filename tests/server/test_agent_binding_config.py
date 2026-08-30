@@ -1,6 +1,6 @@
 import pytest
 
-from server.config import AgentBindingConfig
+from server.config import AgentBindingConfig, ModelSecretVaultConfig
 from shared.tasks.specs import ModelBindingMode
 
 
@@ -12,9 +12,7 @@ def _clear_env(monkeypatch):
         "AGENT_MODEL_GATEWAY_MODE",
         "AGENT_MODEL_GATEWAY_URL",
         "AGENT_MODEL_GATEWAY_MODEL",
-        "AGENT_MODEL_GATEWAY_SECRETS",
-        "AGENT_MODEL_GATEWAY_ALLOWED_HOSTS",
-        "AGENT_MODEL_GATEWAY_RESIDENT_MODELS",
+        "AGENT_MODEL_SECRET_TTL_SEC",
         "UTU_LLM_BASE_URL",
         "UTU_LLM_MODEL",
     ):
@@ -47,36 +45,14 @@ def test_proxy_mode_defaults_a_binding_to_openai(monkeypatch):
     assert AgentBindingConfig.from_env().default_mode is ModelBindingMode.OPENAI
 
 
-def test_secret_refs_resolve_to_server_side_values_at_the_edge(monkeypatch):
-    monkeypatch.setenv("TEAM_ENV", "resolved-team-value")
-    monkeypatch.setenv(
-        "AGENT_MODEL_GATEWAY_SECRETS", "team=TEAM_ENV,missing=ABSENT_ENV"
-    )
+def test_the_deployment_holds_no_credential_or_egress_defaults():
     cfg = AgentBindingConfig.from_env()
-    assert set(cfg.secrets) == {"team"}
-    assert cfg.secrets["team"].get_secret_value() == "resolved-team-value"
+    assert not hasattr(cfg, "secrets")
+    assert not hasattr(cfg, "allowed_hosts")
+    assert not hasattr(cfg, "resident_models")
 
 
-def test_allowed_hosts_parse_case_insensitively(monkeypatch):
-    monkeypatch.setenv(
-        "AGENT_MODEL_GATEWAY_ALLOWED_HOSTS", "api.OpenAI.com, gw.internal"
-    )
-    hosts = AgentBindingConfig.from_env().allowed_hosts
-    assert hosts == frozenset({"api.openai.com", "gw.internal"})
-
-
-def test_allowed_hosts_default_empty(monkeypatch):
-    assert AgentBindingConfig.from_env().allowed_hosts == frozenset()
-
-
-def test_resident_catalog_parses_family_and_qualifiers(monkeypatch):
-    monkeypatch.setenv(
-        "AGENT_MODEL_GATEWAY_RESIDENT_MODELS",
-        "qwen=inference:vllm:isolated, plain=embed",
-    )
-    catalog = AgentBindingConfig.from_env().resident_models
-    assert catalog["qwen"].family == "inference"
-    assert catalog["qwen"].engine_batch_key == "vllm"
-    assert catalog["qwen"].isolation == "isolated"
-    assert catalog["plain"].family == "embed"
-    assert catalog["plain"].engine_batch_key is None
+def test_secret_vault_ttl_defaults_and_overrides(monkeypatch):
+    assert ModelSecretVaultConfig.from_env().ttl_sec == 86400
+    monkeypatch.setenv("AGENT_MODEL_SECRET_TTL_SEC", "3600")
+    assert ModelSecretVaultConfig.from_env().ttl_sec == 3600

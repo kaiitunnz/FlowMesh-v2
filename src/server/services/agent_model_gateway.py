@@ -27,11 +27,8 @@ from shared.harness import BoundaryEventKind, BoundaryRequest
 from shared.tasks.specs import ModelBindingMode
 
 from ..config import AgentModelGatewayConfig, GatewayMode
-from ..task.v2.representations.operators import (
-    AgentModelGatewayBinding,
-    BindingProvenance,
-)
-from .secret_ref import SecretRefResolver
+from ..task.v2.representations.operators import AgentModelGatewayBinding
+from .model_secret_vault import ModelSecretVault
 
 _INJECT_CALL_PREFIX = "fab-"
 
@@ -65,15 +62,14 @@ class ResidentBindingNotServable(RuntimeError):
 
 def to_gateway_binding(
     pinned: AgentModelGatewayBinding,
-    secret_resolver: SecretRefResolver,
-    default_api_key: str | None,
+    vault: ModelSecretVault,
+    workflow_id: str,
 ) -> ResolvedGatewayBinding:
     """Map a pinned model binding to its effective upstream, resolving the credential.
 
-    A ``secret_ref`` selects a server-side secret. Otherwise the deployment default
-    key applies only to the deployment's own default url — a workflow that brings its
-    own url must bring its own authorized ``secret_ref`` rather than inherit the
-    deployment key, so the shared key never reaches a workflow-chosen host. A resident
+    The credential is the workflow's own inline key, vaulted at submission under its
+    workflow and named here by the generated ``secret_ref``; it resolves only within
+    that workflow. Without a resolvable ref the upstream is unauthenticated. A resident
     binding is not served by the external gateway.
     """
     mode = _BINDING_MODE_TO_GATEWAY.get(pinned.mode)
@@ -81,13 +77,8 @@ def to_gateway_binding(
         raise ResidentBindingNotServable(
             f"model binding mode {pinned.mode.value!r} is not served externally"
         )
-    secret = secret_resolver.resolve(pinned.secret_ref)
-    if secret is not None:
-        api_key: str | None = secret.get_secret_value()
-    elif pinned.provenance.url is BindingProvenance.DEFAULT:
-        api_key = default_api_key
-    else:
-        api_key = None
+    secret = vault.resolve(workflow_id, pinned.secret_ref)
+    api_key = secret.get_secret_value() if secret is not None else None
     return ResolvedGatewayBinding(
         mode=mode, url=pinned.url, model=pinned.model, api_key=api_key
     )
@@ -166,7 +157,6 @@ class AgentModelGateway:
             mode=self._cfg.mode,
             url=self._cfg.url,
             model=self._cfg.model,
-            api_key=self._cfg.api_key,
         )
 
     def settle(self, task_id: str, call_correlation: str, payload: str | None) -> None:

@@ -29,7 +29,7 @@ def _operator() -> AgentOperator:
             mode=ModelBindingMode.OPENAI,
             url="https://api.example/v1",
             model="gpt-4o-mini",
-            secret_ref="team-openai",
+            secret_ref="msk-abc123",
             provenance=ModelBindingProvenance(
                 mode=BindingProvenance.SOURCE,
                 url=BindingProvenance.DEFAULT,
@@ -46,13 +46,13 @@ def test_operator_binding_round_trips_through_json():
     assert back.harness_binding.backend == "codex"
     assert back.harness_binding.provenance.version is BindingProvenance.DEFAULT
     assert back.model_binding.mode is ModelBindingMode.OPENAI
-    assert back.model_binding.secret_ref == "team-openai"
+    assert back.model_binding.secret_ref == "msk-abc123"
     assert back.model_binding.provenance.model is BindingProvenance.FALLBACK
 
 
-def test_serialized_binding_carries_only_the_secret_reference():
+def test_serialized_binding_carries_only_the_generated_secret_reference():
     dumped = _operator().model_dump_json()
-    assert "team-openai" in dumped
+    assert "msk-abc123" in dumped
     assert "secret_ref" in dumped
     assert "api_key" not in dumped and "password" not in dumped
 

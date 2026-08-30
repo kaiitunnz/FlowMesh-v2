@@ -275,11 +275,6 @@ STACK_ENV_SCHEMA = EnvSchema(
                     description="Upstream model for the openai and proxy modes.",
                 ),
                 EnvVar(
-                    "AGENT_MODEL_GATEWAY_API_KEY",
-                    "",
-                    description="Upstream API key for the openai and proxy modes.",
-                ),
-                EnvVar(
                     "AGENT_MODEL_GATEWAY_TIMEOUT_SEC",
                     "60",
                     description="Upstream request timeout in seconds for the gateway.",
@@ -288,28 +283,14 @@ STACK_ENV_SCHEMA = EnvSchema(
                     min_inclusive=False,
                 ),
                 EnvVar(
-                    "AGENT_MODEL_GATEWAY_SECRETS",
-                    "",
+                    "AGENT_MODEL_SECRET_TTL_SEC",
+                    "86400",
                     description=(
-                        "Authorized workflow secret refs as ref=ENV_VAR pairs; a "
-                        "workflow names a ref and the server resolves it upstream-side."
+                        "Sliding TTL backstop for a workflow's vaulted model "
+                        "credential; refreshed on each use, purged on terminal."
                     ),
-                ),
-                EnvVar(
-                    "AGENT_MODEL_GATEWAY_ALLOWED_HOSTS",
-                    "",
-                    description=(
-                        "Comma-separated trusted upstream hosts a model credential may "
-                        "reach; empty denies every external openai url (egress off)."
-                    ),
-                ),
-                EnvVar(
-                    "AGENT_MODEL_GATEWAY_RESIDENT_MODELS",
-                    "",
-                    description=(
-                        "Authorized resident model refs as "
-                        "ref=family[:engine_batch[:isolation]] pairs."
-                    ),
+                    var_type=EnvVarType.INT,
+                    min_value=1,
                 ),
                 EnvVar(
                     "AGENT_HARNESS_DEFAULT_BACKEND",

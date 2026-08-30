@@ -98,6 +98,10 @@ def workflow_ds_key(workflow_id: str) -> str:
     return f"workflow:{workflow_id}:ds"
 
 
+def workflow_model_secret_key(workflow_id: str) -> str:
+    return f"workflow:{workflow_id}:model_secret"
+
+
 def task_state_key(task_id: str) -> str:
     return f"task:{task_id}:state"
 

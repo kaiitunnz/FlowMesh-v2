@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from shared.tasks import TaskType
@@ -43,8 +44,8 @@ from ..representations.template import (
 )
 from .agent_binding import (
     AgentBindingDefaults,
-    resident_entry,
     resolve_agent_bindings,
+    service_family_for_ref,
 )
 from .bindings import (
     BindingClass,
@@ -151,6 +152,7 @@ def _agent_operator(
     name_to_op: dict[str, str],
     operator_ids: set[str],
     defaults: AgentBindingDefaults,
+    secret_ref: str | None,
 ) -> AgentOperator:
     inputs, outputs = _ports(task, TaskType.AGENT)
     spec = task.task.spec
@@ -163,7 +165,7 @@ def _agent_operator(
         else None
     )
     harness_binding, gateway_binding = resolve_agent_bindings(
-        harness, model_binding, defaults
+        harness, model_binding, defaults, secret_ref
     )
     return AgentOperator(
         operator_id=task.task_id,
@@ -214,6 +216,7 @@ def lower_tasks(
     name_to_op: dict[str, str],
     acc: LoweringAccumulator,
     defaults: AgentBindingDefaults,
+    secret_refs: Mapping[str, str],
 ) -> None:
     """Lower each legacy task into a symbolic leaf/agent/residency operator.
 
@@ -231,7 +234,11 @@ def lower_tasks(
     for task in parsed.tasks:
         task_type = task.task.spec.taskType
         if binding_class(task_type) is BindingClass.AGENT:
-            acc.operators.append(_agent_operator(task, name_to_op, task_ids, defaults))
+            acc.operators.append(
+                _agent_operator(
+                    task, name_to_op, task_ids, defaults, secret_refs.get(task.task_id)
+                )
+            )
         else:
             acc.operators.append(_leaf_operator(task, task_type, name_to_op, task_ids))
         acc.source_map.append(_source_map_entry(task))
@@ -283,9 +290,7 @@ def lower_tasks(
                 source_ref=operator_id,
             )
         )
-        requirement, intent = _resident_annotations(
-            agent_ops.get(operator_id), defaults
-        )
+        requirement, intent = _resident_annotations(agent_ops.get(operator_id))
         acc.nodes.append(
             PhysicalNode(
                 node_id=f"phys:{operator_id}",
@@ -298,29 +303,24 @@ def lower_tasks(
 
 
 def _resident_annotations(
-    agent: AgentOperator | None, defaults: AgentBindingDefaults
+    agent: AgentOperator | None,
 ) -> tuple[ServiceFamilyRequirement | None, ResidencyIntent | None]:
     """Derive the plan-derived resident requirement for a resident-bound agent.
 
     Detection only: it pins the finite dependency a resident model binding needs, with
-    no allocation, claim, or replica. An unauthorized reference pins nothing and is
-    reported by validation instead.
+    no allocation, claim, or replica. The service family is derived canonically from
+    the reference, so identical references pin one shared demand family; engine-batch
+    and isolation policy are the residency scheduler's to set.
     """
     if agent is None or agent.model_binding is None:
         return None, None
     binding = agent.model_binding
-    if binding.mode is not ModelBindingMode.RESIDENT:
+    if binding.mode is not ModelBindingMode.RESIDENT or not binding.service_model_ref:
         return None, None
-    entry = resident_entry(defaults, binding.service_model_ref)
-    if entry is None:
-        return None, None
+    family = service_family_for_ref(binding.service_model_ref)
     return (
-        ServiceFamilyRequirement(
-            family=entry.family,
-            engine_batch_key=entry.engine_batch_key,
-            isolation=entry.isolation,
-        ),
-        ResidencyIntent(service_family=entry.family, required=True),
+        ServiceFamilyRequirement(family=family),
+        ResidencyIntent(service_family=family, required=True),
     )
 
 

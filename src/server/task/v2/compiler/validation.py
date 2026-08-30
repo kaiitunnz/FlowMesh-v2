@@ -20,13 +20,6 @@ from ..representations.operators import (
 from ..representations.plan import PhysicalExecutionPlan
 from ..representations.results import CardinalityKind, ReleaseConditionKind
 from ..representations.template import LogicalWorkflowTemplate
-from .agent_binding import (
-    AgentBindingDefaults,
-    neutral_defaults,
-    resident_entry,
-    secret_ref_authorized,
-    upstream_host_allowed,
-)
 from .diagnostics import Diagnostic, Severity, SourceLocation
 
 _DETERMINISTIC = (
@@ -515,13 +508,12 @@ def _check_cycles(
 
 
 def _check_agent_binding(
-    op: AgentOperator, defaults: AgentBindingDefaults, loc: dict[str, SourceLocation]
+    op: AgentOperator, loc: dict[str, SourceLocation]
 ) -> list[Diagnostic]:
     """Diagnose an agent whose resolved harness/model binding is unresolvable.
 
-    A bare agent with no source harness and no deployment default, an external
-    binding missing its url, and an unauthorized resident/secret reference each fail
-    here rather than reaching a worker.
+    A bare agent with no source harness and no deployment default, and an external
+    binding missing its url, each fail here rather than reaching a worker.
     """
     diags: list[Diagnostic] = []
     location = loc.get(op.operator_id)
@@ -539,45 +531,11 @@ def _check_agent_binding(
     binding = op.model_binding
     if binding is None:
         return diags
-    if binding.mode is ModelBindingMode.OPENAI:
-        if not binding.url:
-            diags.append(
-                Diagnostic(
-                    code="agent.model_binding.missing_url",
-                    message="an openai model binding requires a url",
-                    location=location,
-                )
-            )
-        elif not upstream_host_allowed(defaults, binding.url):
-            diags.append(
-                Diagnostic(
-                    code="agent.model_binding.upstream_not_allowed",
-                    message=(
-                        "the model binding url host is not a trusted upstream; add "
-                        "it to the deployment's allowed upstream hosts"
-                    ),
-                    location=location,
-                )
-            )
-    if (
-        binding.mode is ModelBindingMode.RESIDENT
-        and resident_entry(defaults, binding.service_model_ref) is None
-    ):
+    if binding.mode is ModelBindingMode.OPENAI and not binding.url:
         diags.append(
             Diagnostic(
-                code="agent.model_binding.unauthorized_resident",
-                message=(
-                    f"resident service_model_ref {binding.service_model_ref!r} is not "
-                    "an authorized model dependency"
-                ),
-                location=location,
-            )
-        )
-    if not secret_ref_authorized(defaults, binding.secret_ref):
-        diags.append(
-            Diagnostic(
-                code="agent.model_binding.unauthorized_secret",
-                message=f"secret_ref {binding.secret_ref!r} is not authorized",
+                code="agent.model_binding.missing_url",
+                message="an openai model binding requires a url",
                 location=location,
             )
         )
@@ -587,17 +545,13 @@ def _check_agent_binding(
 def validate_compilation(
     template: LogicalWorkflowTemplate,
     plan: PhysicalExecutionPlan,
-    defaults: AgentBindingDefaults | None = None,
 ) -> list[Diagnostic]:
     """Run every validation pass over a compiled template and physical plan.
 
     Passes check declaration *consistency*: an unpinned live read is legal
     latitude, not an error. Only a contradictory declaration (e.g. recompute over
     a live external read) or a malformed region/authority face fails validation.
-    ``defaults`` supplies the authorized resident catalog and secret allowlist the
-    agent-binding checks resolve against.
     """
-    defaults = defaults if defaults is not None else neutral_defaults()
     loc = _location_index(template)
     declared_tools = {tool.name for tool in template.tool_declarations}
     diags: list[Diagnostic] = []
@@ -616,7 +570,7 @@ def validate_compilation(
             diags.extend(_check_effect_boundary(template, op, loc))
         elif isinstance(op, AgentOperator):
             diags.extend(_check_authority(op, op.authority, declared_tools, loc))
-            diags.extend(_check_agent_binding(op, defaults, loc))
+            diags.extend(_check_agent_binding(op, loc))
         elif isinstance(op, SpawnRegion):
             diags.extend(_check_authority(op, op.authority, declared_tools, loc))
 

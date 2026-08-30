@@ -21,6 +21,7 @@ from shared.schemas.command import InterruptMessage
 from shared.schemas.result import ResultEnvelope, result_file_path
 from shared.tasks import TaskEnvelopeTemplate
 from shared.utils import new_workflow_id
+from shared.utils.ids import new_model_secret_ref
 
 from ..config import AgentBindingConfig, OrchestrationConfig
 from ..hooks import SUPPLIER_RESOLVERS
@@ -39,6 +40,7 @@ from ..orchestration.episode import BoundaryEvent
 from ..orchestration.harness import to_boundary_event
 from ..registries.worker import Worker, WorkerRegistry
 from ..registries.workflow import PersistedTask, WorkflowRegistry, WorkflowSched
+from ..services.model_secret_vault import ModelSecretVault
 from ..utils.time import parse_iso_ts
 from .models import (
     TERMINAL_TASK_STATUSES,
@@ -49,7 +51,7 @@ from .models import (
     TaskUsage,
     categorize_task_type,
 )
-from .parser import parse_workflow
+from .parser import ParsedWorkflow, parse_workflow
 from .v2 import (
     ExecutionMode,
     FrontendWorkflowSource,
@@ -59,7 +61,8 @@ from .v2 import (
     build_inspection,
     compile_bundle,
 )
-from .v2.compiler.agent_binding import AgentBindingDefaults, ResidentModelEntry
+from .v2.compiler.agent_binding import AgentBindingDefaults
+from .v2.credentials import pop_inline_model_secrets, redact_source_text
 from .v2.representations.operators import AgentModelGatewayBinding
 from .v2.representations.plan import EpisodeSpec
 
@@ -76,16 +79,6 @@ def _binding_defaults(cfg: AgentBindingConfig) -> AgentBindingDefaults:
         default_mode=cfg.default_mode,
         default_url=cfg.default_url,
         default_model=cfg.default_model,
-        secret_allowlist=frozenset(cfg.secrets),
-        allowed_upstream_hosts=cfg.allowed_hosts,
-        resident_catalog={
-            ref: ResidentModelEntry(
-                family=entry.family,
-                engine_batch_key=entry.engine_batch_key,
-                isolation=entry.isolation,
-            )
-            for ref, entry in cfg.resident_models.items()
-        },
     )
 
 
@@ -121,12 +114,14 @@ class TaskRuntime:
         results_dir: Path,
         logger: logging.Logger,
         feasibility_check: EpisodeFeasibility | None = None,
+        secret_vault: ModelSecretVault | None = None,
     ) -> None:
         self._workflow_registry = workflow_registry
         self._worker_registry = worker_registry
         self._logger = logger
         self._results_dir = results_dir
         self._feasibility_check = feasibility_check
+        self._secret_vault = secret_vault
         self._scope_budget = ScopeBudget.from_config(orchestration)
         self._agent_binding_defaults = _binding_defaults(orchestration.agent_binding)
         self._lowering_strategy = (
@@ -205,12 +200,36 @@ class TaskRuntime:
             bindings=self._agent_binding_defaults,
         )
 
+    async def _vault_inline_secrets(
+        self, workflow_id: str, parsed: ParsedWorkflow
+    ) -> dict[str, str]:
+        """Vault each agent's inline model credential, returning its generated ref.
+
+        The credential is stripped from the parsed spec and stored under the workflow,
+        so only the opaque ref reaches the compiled binding, the persisted record, and
+        every downstream surface.
+        """
+        secrets = pop_inline_model_secrets(parsed)
+        if not secrets:
+            return {}
+        vault = self._secret_vault
+        if vault is None:
+            raise RuntimeError(
+                "an inline model credential requires a configured secret vault"
+            )
+        secret_refs: dict[str, str] = {}
+        for task_id, secret in secrets.items():
+            ref = new_model_secret_ref()
+            await vault.store(workflow_id, ref, secret)
+            secret_refs[task_id] = ref
+        return secret_refs
+
     async def register(
         self, owner_id: str, org_id: str, payload: str, format: str = "native"
     ) -> tuple[str, list[TaskParsingResult]]:
         parsed_workflow = parse_workflow(payload, format)
         specs = parsed_workflow.tasks
-        yaml_text = payload
+        yaml_text = redact_source_text(payload, format)
         results: list[TaskParsingResult] = []
         workflow_id = new_workflow_id()
         task_records: list[TaskRecord] = []
@@ -220,6 +239,7 @@ class TaskRuntime:
         v2_bundle: PersistedV2Workflow | None = None
         v2_engine: OrchestrationEngine | None = None
         if ExecutionMode.is_v2(parsed_workflow.api_version):
+            secret_refs = await self._vault_inline_secrets(workflow_id, parsed_workflow)
             source = FrontendWorkflowSource.capture(yaml_text, format)
             v2_bundle = compile_bundle(
                 workflow_id,
@@ -227,6 +247,7 @@ class TaskRuntime:
                 source,
                 strategy=self._lowering_strategy,
                 bindings=self._agent_binding_defaults,
+                secret_refs=secret_refs,
             )
             v2_engine = OrchestrationEngine.build(
                 workflow_id, owner_id, org_id, v2_bundle, budget=self._scope_budget
@@ -1143,6 +1164,24 @@ class TaskRuntime:
                 return None
             op = engine.agent_operator(task_id)
             return op.model_binding if op is not None else None
+
+    def gateway_binding_for(
+        self, task_id: str
+    ) -> tuple[str, AgentModelGatewayBinding] | None:
+        """The task's owning workflow and its pinned model binding, for the gateway.
+
+        The workflow id scopes the credential resolution so a vaulted ref yields a
+        secret only within the workflow that minted it.
+        """
+        with self._lock:
+            record = self._tasks.get(task_id)
+            engine = self._engines.get(record.workflow_id) if record else None
+            if record is None or engine is None:
+                return None
+            op = engine.agent_operator(task_id)
+            if op is None or op.model_binding is None:
+                return None
+            return record.workflow_id, op.model_binding
 
     def agent_episode_dispatch(self, task_id: str) -> AgentEpisodeDispatch | None:
         """The agent-episode context to ship with a dispatch, or None for the UTU path.
@@ -2119,6 +2158,8 @@ class TaskRuntime:
                 )
             else:
                 self._worker_registry.publish_interrupt(worker, interrupt)
+        if self._secret_vault is not None:
+            self._secret_vault.purge(workflow_id)
         return touched
 
     def mark_cancelled(

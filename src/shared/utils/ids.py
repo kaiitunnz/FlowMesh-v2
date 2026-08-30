@@ -21,6 +21,7 @@ PREFIX_ATTEMPT = "att"
 PREFIX_INVOCATION = "inv"
 PREFIX_AUTHORITY_GRANT = "agr"
 PREFIX_IDEMPOTENCY_KEY = "idm"
+PREFIX_MODEL_SECRET = "msk"
 
 
 def _uuid_str() -> str:
@@ -87,12 +88,17 @@ def new_idempotency_key() -> str:
     return f"{PREFIX_IDEMPOTENCY_KEY}-{_uuid_hex()}"
 
 
+def new_model_secret_ref() -> str:
+    return f"{PREFIX_MODEL_SECRET}-{secrets.token_hex(16)}"
+
+
 __all__ = [
     "PREFIX_ACTIVATION",
     "PREFIX_ATTEMPT",
     "PREFIX_AUTHORITY_GRANT",
     "PREFIX_IDEMPOTENCY_KEY",
     "PREFIX_INVOCATION",
+    "PREFIX_MODEL_SECRET",
     "PREFIX_NODE",
     "PREFIX_SCOPE",
     "PREFIX_SSH_CONNECTION",
@@ -107,6 +113,7 @@ __all__ = [
     "new_authority_grant_id",
     "new_idempotency_key",
     "new_invocation_id",
+    "new_model_secret_ref",
     "new_node_id",
     "new_scope_id",
     "new_ssh_connection_id",

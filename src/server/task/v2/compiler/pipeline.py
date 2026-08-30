@@ -1,3 +1,5 @@
+from collections.abc import Mapping
+
 from pydantic import ValidationError
 
 from ...parser import ParsedWorkflow
@@ -77,6 +79,7 @@ def compile_workflow(
     validate: bool = True,
     strategy: LoweringStrategy = LoweringStrategy.TRANSPARENT,
     bindings: AgentBindingDefaults | None = None,
+    secret_refs: Mapping[str, str] | None = None,
 ) -> tuple[LogicalWorkflowTemplate, PhysicalExecutionPlan]:
     """Compile a parsed workflow into symbolic v2 representations.
 
@@ -85,14 +88,15 @@ def compile_workflow(
     transparent lowering mints one boundary per legacy task/executor, while the
     episode-cut lowering rewrites that into run-to-yield episodes. ``bindings`` supplies
     the deployment-resolved agent harness/model defaults so each agent pins its
-    effective binding at submission. Raises :class:`CompileError` when any
+    effective binding at submission; ``secret_refs`` maps an agent's source id to the
+    vault ref minted for its inline credential. Raises :class:`CompileError` when any
     error-severity diagnostic is produced. The result carries no worker/replica/endpoint
     bindings and no activation tags.
     """
     defaults = bindings if bindings is not None else neutral_defaults()
     acc = LoweringAccumulator()
     name_to_op = build_name_map(parsed)
-    lower_tasks(parsed, name_to_op, acc, defaults)
+    lower_tasks(parsed, name_to_op, acc, defaults, secret_refs or {})
     lower_frontend_v2(parsed, acc)
     induce_effect_boundaries(acc)
     template = _assemble_template(workflow_id, source, acc)
@@ -101,7 +105,7 @@ def compile_workflow(
         nodes = lower_to_episodes(template, nodes)
     plan = _finalize_plan(workflow_id, template.version, nodes)
     if validate:
-        diagnostics = validate_compilation(template, plan, defaults)
+        diagnostics = validate_compilation(template, plan)
         if has_errors(diagnostics):
             raise CompileError(tuple(diagnostics))
     return template, plan
@@ -113,9 +117,15 @@ def compile_bundle(
     source: FrontendWorkflowSource,
     strategy: LoweringStrategy = LoweringStrategy.TRANSPARENT,
     bindings: AgentBindingDefaults | None = None,
+    secret_refs: Mapping[str, str] | None = None,
 ) -> PersistedV2Workflow:
     """Compile a parsed workflow into the durable plan-time bundle."""
     template, plan = compile_workflow(
-        workflow_id, parsed, source, strategy=strategy, bindings=bindings
+        workflow_id,
+        parsed,
+        source,
+        strategy=strategy,
+        bindings=bindings,
+        secret_refs=secret_refs,
     )
     return PersistedV2Workflow(source=source, template=template, plan=plan)

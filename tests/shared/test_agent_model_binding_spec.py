@@ -1,5 +1,5 @@
 import pytest
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
 from shared.tasks.specs import (
     AgentHarnessSpec,
@@ -9,23 +9,31 @@ from shared.tasks.specs import (
 )
 
 
-def test_external_openai_binding_accepts_url_model_secret_ref():
+def test_external_openai_binding_accepts_url_model_and_inline_key():
     binding = AgentModelBindingSpec(
         mode=ModelBindingMode.OPENAI,
         url="https://api.example/v1",
         model="gpt-4o-mini",
-        secret_ref="team-openai",
+        api_key="sk-user-owned",
     )
     assert binding.mode is ModelBindingMode.OPENAI
-    assert binding.secret_ref == "team-openai"
+    assert isinstance(binding.api_key, SecretStr)
+    assert binding.api_key.get_secret_value() == "sk-user-owned"
+
+
+def test_inline_api_key_is_masked_in_repr():
+    binding = AgentModelBindingSpec(mode="openai", url="https://h/v1", api_key="sk-x")
+    assert "sk-x" not in repr(binding)
+    assert "sk-x" not in str(binding)
 
 
 def test_resident_binding_needs_no_url_or_credential():
     binding = AgentModelBindingSpec(
-        mode=ModelBindingMode.RESIDENT, service_model_ref="catalog/qwen"
+        mode=ModelBindingMode.RESIDENT, service_model_ref="Qwen/Qwen3-4B-Instruct"
     )
-    assert binding.service_model_ref == "catalog/qwen"
+    assert binding.service_model_ref == "Qwen/Qwen3-4B-Instruct"
     assert binding.url is None
+    assert binding.api_key is None
 
 
 @pytest.mark.parametrize(
@@ -33,21 +41,23 @@ def test_resident_binding_needs_no_url_or_credential():
     [
         {"mode": "openai", "url": "https://user:pass@host/v1"},
         {"mode": "resident", "url": "https://host/v1"},
-        {"mode": "resident", "secret_ref": "x"},
+        {"mode": "resident", "api_key": "sk-x"},
         {"mode": "openai", "service_model_ref": "catalog/x"},
         {"mode": "canned", "model": "m"},
+        {"mode": "canned", "api_key": "sk-x"},
         {"mode": "echo", "url": "https://host"},
         {"service_model_ref": "catalog/x", "url": "https://host"},
+        {"service_model_ref": "catalog/x", "api_key": "sk-x"},
     ],
 )
-def test_incoherent_or_credential_bindings_are_rejected(kwargs):
+def test_incoherent_or_misplaced_credential_bindings_are_rejected(kwargs):
     with pytest.raises(ValidationError):
         AgentModelBindingSpec(**kwargs)
 
 
-def test_raw_api_key_in_model_binding_is_rejected():
+def test_unknown_field_is_rejected():
     with pytest.raises(ValidationError):
-        AgentModelBindingSpec(mode="openai", url="https://host/v1", api_key="sk-secret")
+        AgentModelBindingSpec(mode="openai", url="https://h/v1", token="sk-x")
 
 
 @pytest.mark.parametrize(
