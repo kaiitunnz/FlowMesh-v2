@@ -7,10 +7,12 @@ step, and returns the step's :class:`HarnessResult`. The lane releases after the
 the server routes any boundary and re-dispatches with the next capsule and outcomes.
 """
 
+import logging
 from pathlib import Path
 from typing import Any, ClassVar
 
 from shared.harness import (
+    REQUIRED_MEDIATED_FACADES,
     HarnessAdapter,
     HarnessCapsule,
     HarnessResult,
@@ -21,6 +23,8 @@ from shared.tasks.task_type import TaskType
 
 from .base_executor import ExecutionError, Executor, ExecutorTask
 from .harness import build_adapter
+
+_LOG = logging.getLogger("agent-episode-executor")
 
 
 class AgentEpisodeResult(BaseExecutorResult):
@@ -52,10 +56,11 @@ class AgentEpisodeExecutor(Executor):
                 "agent-episode dispatch context"
             )
         adapter = build_adapter(dispatch.backend, task, self._config)
-        if not adapter.bypass_disabled():
+        missing = REQUIRED_MEDIATED_FACADES - adapter.mediated_facades()
+        if missing:
             raise ExecutionError(
-                f"harness backend {dispatch.backend.backend!r} does not disable native "
-                "tool and subagent bypass paths"
+                f"harness backend {dispatch.backend.backend!r} does not mediate "
+                + ", ".join(sorted(missing))
             )
         self._adapter = adapter
         capsule = (
@@ -63,9 +68,21 @@ class AgentEpisodeExecutor(Executor):
             if dispatch.capsule_blob is not None
             else None
         )
+        for outcome in dispatch.delivered_outcomes:
+            _LOG.info(
+                "[fabric] injecting %s outcome at call %s",
+                outcome.kind.value,
+                outcome.call_correlation,
+            )
         result = adapter.start(
             task.task_id, capsule=capsule, outcomes=dispatch.delivered_outcomes
         )
+        if result.kind is HarnessResultKind.BOUNDARY and result.request is not None:
+            _LOG.info(
+                "[fabric] episode yielded a %s boundary (interface=%s)",
+                result.request.kind.value,
+                result.request.interface or "-",
+            )
         value = result.value if result.kind is HarnessResultKind.COMPLETION else None
         return AgentEpisodeResult(harness_result=result, value=value)
 

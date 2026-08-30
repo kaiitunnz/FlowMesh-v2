@@ -19,6 +19,7 @@ injected at most once on a resume from the committed capsule. The untyped
 ``_CodexExperimentalSurface`` and pinned to this Codex version.
 """
 
+import logging
 import threading
 import weakref
 from collections.abc import Sequence
@@ -45,6 +46,7 @@ _INJECT_TOOL = "fabric_mediated"
 # supplied at the gateway from the per-workflow secret_ref, resolved server-side, and
 # never passes through Codex — so the placeholder is correct here, not a missing one.
 _KEY_ENV = "FLOWMESH_CODEX_API_KEY"
+_LOG = logging.getLogger("codex-transport")
 
 
 class CodexTransportError(RuntimeError):
@@ -97,6 +99,10 @@ class CodexTransportConfig:
             f'model="{self.model}"',
             f'approval_policy="{self.approval_policy}"',
             f'sandbox_mode="{self.sandbox_mode}"',
+            # The fabric mediates web search through a gateway-injected facade, so the
+            # native codex web_search (provider-executed, unavailable on a self-hosted
+            # model) stays off; the model sees only the fabric facade.
+            "tools.web_search=false",
         )
         env = {"CODEX_HOME": self.codex_home.as_posix(), _KEY_ENV: "placeholder"}
         return CodexConfig(
@@ -236,6 +242,9 @@ class RealCodexAppServerTransport:
             if isinstance(payload, ItemCompletedNotification):
                 if isinstance(root := payload.item.root, AgentMessageThreadItem):
                     agent_texts.append(root.text)
+                    # Surface the agent's live message on the task log stream so a
+                    # watcher sees progress as the episode reasons and calls facades.
+                    _LOG.info("[agent] %s", root.text.strip().replace("\n", " ")[:200])
             elif isinstance(payload, ErrorNotification) and not payload.will_retry:
                 return CodexEvent(kind="error", value=payload.error.message)
             elif isinstance(payload, TurnCompletedNotification):

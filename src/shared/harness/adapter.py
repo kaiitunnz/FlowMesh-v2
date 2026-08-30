@@ -31,6 +31,25 @@ class FacadeTool(StrEnum):
 FACADE_TOOLS = frozenset(FacadeTool)
 
 
+class MediatedFacade(StrEnum):
+    """A capability class the fabric mediates instead of a native harness path.
+
+    An adapter reports which of these it fully mediates (no native bypass path); a
+    capability outside the reported set may still run as a native harness tool.
+    """
+
+    MODEL = "model"
+    SPAWN_AGENT = "spawn_agent"
+    SEARCH = "search"
+
+
+# The set the fabric requires a supported agent backend to mediate: the model boundary,
+# child delegation, and web search all cross the fabric's validation, not a native path.
+REQUIRED_MEDIATED_FACADES = frozenset(
+    {MediatedFacade.MODEL, MediatedFacade.SPAWN_AGENT, MediatedFacade.SEARCH}
+)
+
+
 class HarnessBackendKey(BaseModel):
     """A versioned identity for one harness binding."""
 
@@ -144,14 +163,15 @@ class HarnessAdapter(ABC):
     def cancel(self, activation_id: str) -> None:
         """Cancel the harness session for an activation."""
 
-    def bypass_disabled(self) -> bool:
-        """Whether native tool and subagent bypass paths are disabled.
+    def mediated_facades(self) -> frozenset[MediatedFacade]:
+        """The capability classes this backend fully mediates through a fabric facade.
 
-        A supported configuration returns True: every side effect flows through a
-        fabric-owned facade, so no raw tool, endpoint, or native subagent escapes the
-        engine's validation.
+        A supported configuration mediates at least ``REQUIRED_MEDIATED_FACADES``: the
+        model, child delegation, and web search each flow through a fabric-owned facade,
+        so no raw endpoint, native subagent, or native web search escapes validation. A
+        capability outside the set may still run as an ordinary native harness tool.
         """
-        return True
+        return REQUIRED_MEDIATED_FACADES
 
     def export_state(self, activation_id: str) -> str | None:
         """Export activation-private harness state for a relocatable capsule.
