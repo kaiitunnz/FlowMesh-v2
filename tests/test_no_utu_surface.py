@@ -11,8 +11,17 @@ from pathlib import Path
 import pytest
 
 _ROOT = Path(__file__).resolve().parents[1]
-_SCAN_DIRS = ("src", "cli", "sdk", "hook", "docs", "examples", "tests")
-_SCAN_FILES = ("pyproject.toml", "AGENTS.md", "CONTRIBUTING.md")
+_SCAN_DIRS = (
+    "src",
+    "cli",
+    "sdk",
+    "hook",
+    "docs",
+    "examples",
+    "tests",
+    ".github/workflows",
+)
+_SCAN_FILES = ("pyproject.toml", "AGENTS.md", "CONTRIBUTING.md", "uv.lock")
 _SUFFIXES = {".py", ".md", ".toml", ".yaml", ".yml", ".example", ".txt"}
 _SELF = Path(__file__).name
 
