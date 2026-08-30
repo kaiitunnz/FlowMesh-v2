@@ -113,9 +113,8 @@ class TaskRuntime:
         orchestration: OrchestrationConfig,
         results_dir: Path,
         logger: logging.Logger,
-        feasibility_check: EpisodeFeasibility | None = None,
-        *,
         secret_vault: ModelSecretVault,
+        feasibility_check: EpisodeFeasibility | None = None,
     ) -> None:
         self._workflow_registry = workflow_registry
         self._worker_registry = worker_registry
