@@ -161,17 +161,16 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   deduplicated by its fabric-assigned idempotency key rather than repeating its effect. A
   `spawn_agent` creates one child activation, closed by a `SpawnSeal` or the agent's
   completion.
-- **Agent-episode dispatch seam.** An agent that declares a harness backend
-  (`spec.harness.backend`) dispatches to the `AgentEpisodeExecutor`, which runs one adapter
-  step per dispatch behind that backend key (the built-in `scripted` backend or the `codex`
-  app-server binding). A step resumes the agent's durable context and returns a completion,
-  failure, cancellation, yield, or a typed boundary request; the server routes a boundary
-  into the ledger and either re-dispatches the agent or suspends it until a durable outcome
-  arrives, and a restart resumes with the same context. A v2 agent's harness and
-  managed-model binding are resolved at submission and pinned on its compiled operator; the
-  backend comes from `spec.harness.backend` or the `AGENT_HARNESS_DEFAULT_BACKEND` default,
-  and an agent with neither fails template validation. Non-v2 agents run on the legacy UTU
-  executor.
+- **Agent-episode dispatch seam.** Every agent dispatches to the `AgentEpisodeExecutor`,
+  which runs one adapter step per dispatch behind its resolved backend key (the built-in
+  `scripted` backend or the `codex` app-server binding). A step resumes the agent's durable
+  context and returns a completion, failure, cancellation, yield, or a typed boundary
+  request; the server routes a boundary into the ledger and either re-dispatches the agent
+  or suspends it until a durable outcome arrives, and a restart resumes with the same
+  context. An agent's harness and managed-model binding are resolved at submission and
+  pinned on its compiled operator; the backend comes from `spec.harness.backend` or the
+  `AGENT_HARNESS_DEFAULT_BACKEND` default, and an agent with neither fails template
+  validation. `agent` is a v2-only task type: a legacy v1 agent submission is rejected.
 - **Agent-model gateway.** A managed model request an agent defers becomes a durable
   invocation the agent-model gateway settles off the agent's lane, injecting the result
   back at the originating call.

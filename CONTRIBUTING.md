@@ -31,7 +31,6 @@ you're working on:
 | `runtime-training` | Training executors (trl, peft) |
 | `runtime-training-gpu` | GPU-only training deps (deepspeed) |
 | `runtime-rag` | RAG executor (Qdrant, fastembed) |
-| `runtime-agent` | Agent executor / Utu framework (OpenAI Agents SDK, Hydra, tools) |
 | `runtime-harness-codex` | Live Codex app-server harness backend (`openai-codex`) |
 | `runtime-analytics` | Data analytics and connectors (pandas, boto3, psycopg) |
 | `runtime-observability` | Tracing and monitoring (OpenTelemetry, Arize Phoenix) |

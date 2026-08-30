@@ -40,8 +40,8 @@ listed here is in `.env.example`.
 | `AGENT_HARNESS_DEFAULT_BACKEND` | – | Default agent harness backend when a workflow sets none |
 | `AGENT_HARNESS_DEFAULT_VERSION` | – | Default agent harness backend version |
 | `AGENT_MODEL_GATEWAY_MODE` | `canned` | Managed model upstream mode (`canned`/`echo`/`openai`/`proxy`) |
-| `AGENT_MODEL_GATEWAY_URL` | `UTU_LLM_BASE_URL` | Upstream base URL (openai/proxy modes) |
-| `AGENT_MODEL_GATEWAY_MODEL` | `UTU_LLM_MODEL` | Upstream model (openai/proxy modes) |
+| `AGENT_MODEL_GATEWAY_URL` | – | Upstream base URL (openai/proxy modes) |
+| `AGENT_MODEL_GATEWAY_MODEL` | – | Upstream model (openai/proxy modes) |
 | `AGENT_MODEL_GATEWAY_TIMEOUT_SEC` | `60` | Upstream request timeout (seconds) |
 | `AGENT_MODEL_SECRET_TTL_SEC` | `86400` | Expiry for a workflow's vaulted model credential |
 | `ENABLE_WORKER_WATCHDOG` | `true` | Worker death detection |
