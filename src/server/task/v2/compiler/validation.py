@@ -584,7 +584,11 @@ def validate_compilation(
     a live external read) or a malformed region/authority face fails validation.
     """
     loc = _location_index(template)
-    declared_tools = {tool.name for tool in template.tool_declarations}
+    # An invoke face names an interface, so a tool is referenced by its declared
+    # interface (a tool without one is referenced by its bare name).
+    declared_tools = {
+        tool.interface or tool.name for tool in template.tool_declarations
+    }
     diags: list[Diagnostic] = []
 
     diags.extend(_check_source_map(template, plan, loc))
