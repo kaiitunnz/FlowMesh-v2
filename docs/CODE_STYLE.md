@@ -32,9 +32,10 @@
 
 ## Object IDs
 
-3-char prefixes: `wfl-`, `tsk-`, `ssn-`, `scn-`, `cmd-`, and the v2
-orchestration-ledger `act-`, `scp-`, `wki-`, `att-`, `inv-`, `agr-`, `idm-`.
-Always use `new_*_id()`/`new_idempotency_key()` helpers in
+3-char prefixes: `wfl-`, `tsk-`, `ssn-`, `scn-`, `cmd-`, the v2
+orchestration-ledger `act-`, `scp-`, `wki-`, `att-`, `inv-`, `agr-`, `idm-`, and
+`msk-` (a vaulted model-secret ref). Always use
+`new_*_id()`/`new_idempotency_key()`/`new_model_secret_ref()` helpers in
 `src/shared/utils/ids.py`. Never use `uuid4()` or `secrets.token_hex` for IDs.
 
 ## Security rules (bandit-enforced)

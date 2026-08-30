@@ -40,11 +40,8 @@ listed here is in `.env.example`.
 | `AGENT_MODEL_GATEWAY_MODE` | `canned` | Agent-model gateway upstream: `canned`, `echo`, `openai`, or `proxy` (an upstream Responses API) |
 | `AGENT_MODEL_GATEWAY_URL` | `UTU_LLM_BASE_URL` | Upstream base URL for `openai` / `proxy` modes |
 | `AGENT_MODEL_GATEWAY_MODEL` | `UTU_LLM_MODEL` | Upstream model for `openai` / `proxy` modes |
-| `AGENT_MODEL_GATEWAY_API_KEY` | `UTU_LLM_API_KEY` | Upstream API key for `openai` / `proxy` modes |
 | `AGENT_MODEL_GATEWAY_TIMEOUT_SEC` | `60` | Upstream request timeout (seconds) |
-| `AGENT_MODEL_GATEWAY_SECRETS` | – | Authorized workflow `secret_ref`s as `ref=ENV_VAR` pairs; a binding names a ref and the server resolves the value upstream-side |
-| `AGENT_MODEL_GATEWAY_ALLOWED_HOSTS` | – | Comma-separated trusted upstream hosts a model credential may reach; empty denies every external `openai` url (egress off by default) |
-| `AGENT_MODEL_GATEWAY_RESIDENT_MODELS` | – | Authorized resident model refs as `ref=family[:engine_batch[:isolation]]` pairs |
+| `AGENT_MODEL_SECRET_TTL_SEC` | `86400` | Sliding TTL backstop for a workflow's vaulted model credential; refreshed on each use, purged on terminal |
 | `AGENT_HARNESS_DEFAULT_BACKEND` | – | Deployment default agent harness backend when a workflow declares none; unset requires each agent to declare one |
 | `AGENT_HARNESS_DEFAULT_VERSION` | – | Deployment default agent harness backend version |
 | `ENABLE_WORKER_WATCHDOG` | `true` | Worker death detection |

@@ -59,9 +59,10 @@ The runtime is two top-level processes:
 `scn-` SSH connection rows, `cmd-` supervisor commands. The v2 orchestration
 ledger adds `act-` activations, `scp-` scopes, `wki-` work items, `att-`
 attempts, `inv-` invocations, `agr-` authority grants, and `idm-` idempotency
-keys (the fabric-assigned dedupe authority for a mediated boundary). Always use
-`new_*_id()` helpers in `src/shared/utils/ids.py`. Never use `uuid4()` or
-`secrets.token_hex` for IDs.
+keys (the fabric-assigned dedupe authority for a mediated boundary). `msk-` is an
+unguessable ref for a workflow's vaulted model credential. Always use `new_*_id()`
+helpers in `src/shared/utils/ids.py`. Never use `uuid4()` or `secrets.token_hex`
+for IDs.
 
 ## Task state machine
 
