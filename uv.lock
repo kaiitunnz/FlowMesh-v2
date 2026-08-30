@@ -1517,7 +1517,6 @@ ci = [
     { name = "nvidia-ml-py" },
     { name = "openai-codex" },
     { name = "openinference-instrumentation-openai" },
-    { name = "openinference-instrumentation-openai-agents" },
     { name = "opentelemetry-api" },
     { name = "opentelemetry-instrumentation" },
     { name = "opentelemetry-sdk" },
@@ -1621,7 +1620,6 @@ runtime-observability = [
     { name = "arize-phoenix-client" },
     { name = "arize-phoenix-otel" },
     { name = "openinference-instrumentation-openai" },
-    { name = "openinference-instrumentation-openai-agents" },
     { name = "opentelemetry-api" },
     { name = "opentelemetry-instrumentation" },
     { name = "opentelemetry-sdk" },
@@ -1684,7 +1682,6 @@ runtime-worker-cpu = [
     { name = "nvidia-ml-py" },
     { name = "openai-codex" },
     { name = "openinference-instrumentation-openai" },
-    { name = "openinference-instrumentation-openai-agents" },
     { name = "opentelemetry-api" },
     { name = "opentelemetry-instrumentation" },
     { name = "opentelemetry-sdk" },
@@ -1753,7 +1750,6 @@ ci = [
     { name = "nvidia-ml-py", specifier = ">=13.580.82" },
     { name = "openai-codex", specifier = "==0.147.0" },
     { name = "openinference-instrumentation-openai", specifier = ">=0.1.39" },
-    { name = "openinference-instrumentation-openai-agents", specifier = ">=1.3.0" },
     { name = "opentelemetry-api", specifier = ">=1.38.0" },
     { name = "opentelemetry-instrumentation", specifier = ">=0.59b0" },
     { name = "opentelemetry-sdk", specifier = ">=1.38.0" },
@@ -1853,7 +1849,6 @@ runtime-observability = [
     { name = "arize-phoenix-client", specifier = ">=1.21.0" },
     { name = "arize-phoenix-otel", specifier = ">=0.13.1" },
     { name = "openinference-instrumentation-openai", specifier = ">=0.1.39" },
-    { name = "openinference-instrumentation-openai-agents", specifier = ">=1.3.0" },
     { name = "opentelemetry-api", specifier = ">=1.38.0" },
     { name = "opentelemetry-instrumentation", specifier = ">=0.59b0" },
     { name = "opentelemetry-sdk", specifier = ">=1.38.0" },
@@ -1914,7 +1909,6 @@ runtime-worker-cpu = [
     { name = "nvidia-ml-py", specifier = ">=13.580.82" },
     { name = "openai-codex", specifier = "==0.147.0" },
     { name = "openinference-instrumentation-openai", specifier = ">=0.1.39" },
-    { name = "openinference-instrumentation-openai-agents", specifier = ">=1.3.0" },
     { name = "opentelemetry-api", specifier = ">=1.38.0" },
     { name = "opentelemetry-instrumentation", specifier = ">=0.59b0" },
     { name = "opentelemetry-sdk", specifier = ">=1.38.0" },
@@ -4344,24 +4338,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/56/0b/bc3d634467c468941d110e9f4bd32d37e8d8d04a5b44595f0efb5f90e4c8/openinference_instrumentation_openai-0.1.39.tar.gz", hash = "sha256:86beb3f48fe08caafb2b4cc30a6ac81e790906d9c3fae188618314a50dea1b82", size = 22843, upload-time = "2025-10-10T03:48:47.605Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/8a/d8/1c7e900f5b6895e70befdd04a733f045ddd17b9a5efe72388a37e2f14a21/openinference_instrumentation_openai-0.1.39-py3-none-any.whl", hash = "sha256:0ab0da12e77e9cf28265d491837e8d43488f01a7bbc005fed2cff1d8f5fff162", size = 30254, upload-time = "2025-10-10T03:48:46.315Z" },
-]
-
-[[package]]
-name = "openinference-instrumentation-openai-agents"
-version = "1.3.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "openinference-instrumentation" },
-    { name = "openinference-semantic-conventions" },
-    { name = "opentelemetry-api" },
-    { name = "opentelemetry-instrumentation" },
-    { name = "opentelemetry-semantic-conventions" },
-    { name = "typing-extensions" },
-    { name = "wrapt" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/04/89/da03d95e695403a6f080aaad50676bbbfd54dcabc8392c05a551f5187e47/openinference_instrumentation_openai_agents-1.3.0.tar.gz", hash = "sha256:25d447187868d8c572662b9ba8a0009338cd3f0888ea3db640744370949d282a", size = 12442, upload-time = "2025-09-08T19:07:28.465Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/9a/4a/d5a915ffd136cfc6d9f8f27ec99f156f900677c323ae04791f35afd13ce5/openinference_instrumentation_openai_agents-1.3.0-py3-none-any.whl", hash = "sha256:4038b5b080dc1194de236ae153026924c69896a48b2f7668c8fd87a628f726d1", size = 14270, upload-time = "2025-09-08T19:07:24.941Z" },
 ]
 
 [[package]]
