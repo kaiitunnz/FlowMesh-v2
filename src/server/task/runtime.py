@@ -38,6 +38,13 @@ from ..orchestration import (
 )
 from ..orchestration.episode import BoundaryEvent
 from ..orchestration.harness import to_boundary_event
+from ..orchestration.tool_dispatch import (
+    MODEL_INTERFACE,
+    SEARCH_INTERFACE,
+    ToolInvocationEnvelope,
+    ToolOutcome,
+    ToolOutcomeStatus,
+)
 from ..registries.worker import Worker, WorkerRegistry
 from ..registries.workflow import PersistedTask, WorkflowRegistry, WorkflowSched
 from ..services.model_secret_vault import ModelSecretVault
@@ -150,9 +157,11 @@ class TaskRuntime:
         self._task_epoch_index: dict[str, int] = {}
         self._rehydrated_dispatched: dict[str, float] = {}
         self._engines: dict[str, OrchestrationEngine] = {}
-        # Settles a mediated model/effect boundary off the caller's lane; the gateway
-        # installs it, and it is absent (agent stays suspended) until then.
-        self._settler: Callable[[str, str, str | None], None] | None = None
+        # Interface-keyed handlers for a mediated boundary, dispatched off the caller's
+        # lane. The model gateway settles the "model" interface; the fabric tool broker
+        # executes a fabric-served tool ("search/v1"). Both take the durable envelope.
+        self._model_settler: Callable[[ToolInvocationEnvelope], None] | None = None
+        self._tool_broker: Callable[[ToolInvocationEnvelope], None] | None = None
         # Facade boundaries the agent-model gateway captured server-side during an
         # episode's model turn, keyed by task; the completion path reroutes the clean
         # turn-completion into the pending boundary rather than settling it.
@@ -594,12 +603,12 @@ class TaskRuntime:
             )
             self._apply_advance_locked(workflow_id, advance)
 
-        # Re-issue the off-lane settle for any model/effect boundary suspended with no
-        # durable outcome: the settle ran on an in-memory executor a crash discarded, so
-        # nothing else resumes the agent; the request payload is on the envelope.
-        if self._settler is not None:
-            for settle_task, corr, payload in engine.stranded_model_settlements():
-                self._settler(settle_task, corr, payload)
+        # Re-issue the off-lane dispatch for any mediated boundary suspended with no
+        # durable outcome: the handler ran on an in-memory executor a crash discarded,
+        # so nothing else resumes the agent. The durable envelope routes it to the same
+        # handler (a search to the broker, a model to the gateway) it was recorded for.
+        for envelope in engine.pending_tool_dispatches():
+            self._dispatch_boundary(envelope)
         self._save_ledger_locked(workflow_id)
 
     # ------------------------------------------------------------------ #
@@ -1058,15 +1067,16 @@ class TaskRuntime:
         elif request.kind in (BoundaryEventKind.STATE_ACCESS, BoundaryEventKind.YIELD):
             self._reenqueue_episode_locked(task_id)
             changed = handled = True
-        elif (
-            corr is not None
-            and self._settler is not None
-            and request.kind
-            in (BoundaryEventKind.INVOCATION, BoundaryEventKind.EXTERNAL_EFFECT)
+        elif corr is not None and request.kind in (
+            BoundaryEventKind.INVOCATION,
+            BoundaryEventKind.EXTERNAL_EFFECT,
         ):
-            # A model or effect boundary suspends until the gateway settles it off-lane.
-            self._settler(task_id, corr, event.request_payload)
-            handled = True
+            # A model or fabric-tool boundary suspends until its handler settles it
+            # off-lane; the durable envelope routes it by exact (kind, interface).
+            envelope = engine.tool_dispatch_envelope(task_id, corr)
+            if envelope is not None:
+                self._dispatch_boundary(envelope)
+                handled = True
         if not handled:
             # A blocked boundary no branch re-readied or handed off (a denial lacking a
             # correlation) must not hang the episode; re-ready it so it can continue.
@@ -1138,11 +1148,45 @@ class TaskRuntime:
             self._cv.notify_all()
             return True
 
-    def set_invocation_settler(
-        self, settler: Callable[[str, str, str | None], None]
+    def _dispatch_boundary(self, env: ToolInvocationEnvelope) -> None:
+        """Route a recorded mediated boundary to its handler by exact (kind, interface).
+
+        Only ``(INVOCATION, "model")`` reaches the model gateway and only
+        ``(INVOCATION, "search/v1")`` the fabric tool broker. An unrecognized interface
+        is a fabric misconfiguration terminalized as a typed unavailable outcome — never
+        a silent fall-through to the model settler.
+        """
+        if (
+            env.kind is BoundaryEventKind.INVOCATION
+            and env.interface == MODEL_INTERFACE
+        ):
+            if self._model_settler is not None:
+                self._model_settler(env)
+            return
+        if (
+            env.kind is BoundaryEventKind.INVOCATION
+            and env.interface == SEARCH_INTERFACE
+        ):
+            if self._tool_broker is not None:
+                self._tool_broker(env)
+            return
+        outcome = ToolOutcome(
+            status=ToolOutcomeStatus.UNAVAILABLE,
+            value=f"no fabric handler for interface {env.interface!r}",
+        )
+        self.settle_episode_invocation(
+            env.task_id, env.call_correlation, outcome.model_dump_json()
+        )
+
+    def set_model_settler(
+        self, settler: Callable[[ToolInvocationEnvelope], None]
     ) -> None:
-        """Install the off-lane settler for mediated model and effect boundaries."""
-        self._settler = settler
+        """Install the off-lane handler for the mediated ``model`` interface."""
+        self._model_settler = settler
+
+    def set_tool_broker(self, broker: Callable[[ToolInvocationEnvelope], None]) -> None:
+        """Install the off-lane handler for fabric-served tool interfaces."""
+        self._tool_broker = broker
 
     def originate_episode_boundary(
         self, task_id: str, request: BoundaryRequest

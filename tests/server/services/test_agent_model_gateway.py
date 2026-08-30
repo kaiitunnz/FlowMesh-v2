@@ -50,10 +50,12 @@ def _canned_gateway(runtime) -> AgentModelGateway:
     )
 
     # A synchronous settle keeps the test deterministic; production submits off-lane.
-    def _settle(task: str, call: str, payload: str | None) -> None:
-        runtime.settle_episode_invocation(task, call, gateway.invoke(payload))
+    def _settle(env) -> None:
+        runtime.settle_episode_invocation(
+            env.task_id, env.call_correlation, gateway.invoke(env.request_payload)
+        )
 
-    runtime.set_invocation_settler(_settle)
+    runtime.set_model_settler(_settle)
     return gateway
 
 
@@ -121,10 +123,12 @@ def test_upstream_failure_fails_the_boundary_not_an_empty_success() -> None:
     async def run() -> None:
         runtime = _runtime(FakeRegistry())
 
-        def _settle(task: str, call: str, payload: str | None) -> None:
-            runtime.settle_episode_invocation(task, call, None, error="upstream 503")
+        def _settle(env) -> None:
+            runtime.settle_episode_invocation(
+                env.task_id, env.call_correlation, None, error="upstream 503"
+            )
 
-        runtime.set_invocation_settler(_settle)
+        runtime.set_model_settler(_settle)
         workflow_id, ids = await _register(runtime, _MODEL_AGENT_WF)
         solver = ids["solver"]
         adapter = _model_boundary_adapter()

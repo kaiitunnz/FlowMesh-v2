@@ -28,6 +28,7 @@ from shared.harness import BoundaryEventKind, BoundaryRequest
 from shared.tasks.specs import ModelBindingMode
 
 from ..config import AgentModelGatewayConfig, GatewayMode
+from ..orchestration.tool_dispatch import ToolInvocationEnvelope
 from ..task.v2.representations.operators import AgentModelGatewayBinding
 from .model_secret_vault import ModelSecretVault
 
@@ -160,9 +161,11 @@ class AgentModelGateway:
             model=self._cfg.model,
         )
 
-    def settle(self, task_id: str, call_correlation: str, payload: str | None) -> None:
+    def settle(self, env: ToolInvocationEnvelope) -> None:
         """Settle a suspended model boundary off the caller's lane, never inline."""
-        self._executor.submit(self._settle, task_id, call_correlation, payload)
+        self._executor.submit(
+            self._settle, env.task_id, env.call_correlation, env.request_payload
+        )
 
     def _settle(self, task_id: str, call_correlation: str, payload: str | None) -> None:
         try:

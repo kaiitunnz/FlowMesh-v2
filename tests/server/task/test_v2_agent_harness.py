@@ -292,10 +292,19 @@ def test_stranded_model_boundary_is_listed_for_resettlement() -> None:
             request_payload="q",
         ),
     )
-    assert eng.stranded_model_settlements() == [("A", "c0", "q")]
+    pending = eng.pending_tool_dispatches()
+    assert len(pending) == 1
+    env = pending[0]
+    assert (env.task_id, env.call_correlation, env.interface, env.request_payload) == (
+        "A",
+        "c0",
+        "model",
+        "q",
+    )
+    assert env.invocation_id
     # Once settled, it is no longer stranded.
     eng.settle_boundary_outcome("A", "c0", value="answer")
-    assert eng.stranded_model_settlements() == []
+    assert eng.pending_tool_dispatches() == []
 
 
 def test_only_the_durable_outcome_re_readies_a_suspended_episode() -> None:

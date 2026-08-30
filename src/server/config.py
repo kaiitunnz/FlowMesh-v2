@@ -372,6 +372,35 @@ class ModelSecretVaultConfig:
 
 
 @dataclass
+class WebSearchConfig:
+    """The fabric web-search tool's provider binding and bounds.
+
+    ``provider`` selects the backend (keyless ``duckduckgo`` default); ``api_key`` is
+    the deployment credential a keyed provider needs. ``max_calls`` bounds one episode's
+    searches; ``result_char_cap`` bounds the injected result size.
+    """
+
+    provider: str = "duckduckgo"
+    api_key: str | None = None
+    max_results: int = 5
+    timeout_sec: float = 20.0
+    result_char_cap: int = 6000
+    max_calls: int = 8
+
+    @classmethod
+    def from_env(cls) -> "WebSearchConfig":
+        prefix = "WEB_SEARCH_"
+        return cls(
+            provider=(os.getenv(f"{prefix}PROVIDER") or "duckduckgo").strip().lower(),
+            api_key=_env_or_none(f"{prefix}API_KEY"),
+            max_results=parse_int_env(f"{prefix}MAX_RESULTS") or 5,
+            timeout_sec=parse_float_env(f"{prefix}TIMEOUT_SEC") or 20.0,
+            result_char_cap=parse_int_env(f"{prefix}RESULT_CHAR_CAP") or 6000,
+            max_calls=parse_int_env(f"{prefix}MAX_CALLS") or 8,
+        )
+
+
+@dataclass
 class OrchestrationConfig:
     max_scope_depth: int | None = None
     max_loop_iterations: int | None = None
@@ -382,6 +411,7 @@ class OrchestrationConfig:
     model_secret_vault: ModelSecretVaultConfig = field(
         default_factory=ModelSecretVaultConfig
     )
+    web_search: WebSearchConfig = field(default_factory=WebSearchConfig)
 
     @classmethod
     def from_env(cls) -> "OrchestrationConfig":
@@ -393,6 +423,7 @@ class OrchestrationConfig:
             gateway=AgentModelGatewayConfig.from_env(),
             agent_binding=AgentBindingConfig.from_env(),
             model_secret_vault=ModelSecretVaultConfig.from_env(),
+            web_search=WebSearchConfig.from_env(),
         )
 
 

@@ -90,6 +90,7 @@ from .state import (
     WorkItem,
     WorkItemStatus,
 )
+from .tool_dispatch import MODEL_INTERFACE, GrantSnapshot, ToolInvocationEnvelope
 
 _EVENT_FIELDS = frozenset(
     {"operator_id", "work_item_id", "attempt_id", "invocation_id", "slot_key"}
@@ -766,15 +767,16 @@ class OrchestrationEngine:
                 attempt.status = AttemptStatus.SUCCEEDED
                 attempt.finished_at = now_iso()
 
-    def stranded_model_settlements(self) -> list[tuple[str, str, str | None]]:
-        """Model/effect boundaries suspended with no durable outcome, for a restart.
+    def pending_tool_dispatches(self) -> list[ToolInvocationEnvelope]:
+        """Mediated boundaries suspended with no durable outcome, for a restart.
 
-        A model or effect boundary suspends off-lane while the gateway settles it; a
-        crash before that settle leaves the work item blocked with an issued
-        invocation and no recorded outcome. Returns each such boundary's (task, call,
-        payload) so the settle can be re-issued from the durable envelope.
+        A model or tool boundary suspends off-lane while its handler settles it; a crash
+        before that settle leaves the work item blocked with an issued invocation and no
+        recorded outcome. Returns each as a full dispatch envelope so the runtime routes
+        it back to its handler by (kind, interface) — a search to the broker, a model to
+        the gateway — never misrouting on the recovered kind.
         """
-        stranded: list[tuple[str, str, str | None]] = []
+        pending: list[ToolInvocationEnvelope] = []
         for (activation, corr), env in self._boundary_events.items():
             if env.kind not in (
                 BoundaryEventKind.INVOCATION,
@@ -787,8 +789,47 @@ class OrchestrationEngine:
             work_item = self._work_items.get(wi) if wi else None
             if work_item is None or work_item.status is not WorkItemStatus.BLOCKED:
                 continue
-            stranded.append((work_item.legacy_task_id, corr, env.request_payload))
-        return stranded
+            if (envelope := self._envelope_from(work_item, env)) is not None:
+                pending.append(envelope)
+        return pending
+
+    def tool_dispatch_envelope(
+        self, task_id: str, call_correlation: str
+    ) -> ToolInvocationEnvelope | None:
+        """The dispatch envelope for a recorded mediated boundary, or None if absent."""
+        wi = self._work_item_for_task(task_id)
+        if wi is None:
+            return None
+        env = self._boundary_events.get((wi.activation_id, call_correlation))
+        if env is None:
+            return None
+        return self._envelope_from(wi, env)
+
+    def _envelope_from(
+        self, wi: WorkItem, env: BoundaryEvent
+    ) -> ToolInvocationEnvelope | None:
+        if env.invocation_id is None or env.call_correlation is None:
+            return None
+        return ToolInvocationEnvelope(
+            kind=env.kind,
+            interface=env.interface or MODEL_INTERFACE,
+            invocation_id=env.invocation_id,
+            task_id=wi.legacy_task_id,
+            activation_id=wi.activation_id,
+            call_correlation=env.call_correlation,
+            idempotency_key=env.idempotency_key,
+            request_payload=env.request_payload,
+            grant_snapshot=self._grant_snapshot_for(wi),
+        )
+
+    def _grant_snapshot_for(self, wi: WorkItem) -> GrantSnapshot:
+        grant_id = self._instance.root_grant_id
+        if (act := self._activations.get(wi.activation_id)) is not None:
+            if (scope := self._scopes.get(act.scope_id)) is not None:
+                grant_id = scope.grant_id or grant_id
+        return GrantSnapshot(
+            grant_id=grant_id, policy_envelope=self._instance.policy_envelope
+        )
 
     def settle_boundary_outcome(
         self, task_id: str, call_correlation: str, *, value: str | None = None

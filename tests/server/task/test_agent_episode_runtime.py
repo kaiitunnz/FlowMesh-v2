@@ -135,10 +135,12 @@ def test_model_boundary_settle_returns_the_record_to_pending() -> None:
     async def run() -> None:
         runtime = _runtime(FakeRegistry())
 
-        def _settle(task: str, call: str, payload: str | None) -> None:
-            runtime.settle_episode_invocation(task, call, f"model:{payload}")
+        def _settle(env) -> None:
+            runtime.settle_episode_invocation(
+                env.task_id, env.call_correlation, f"model:{env.request_payload}"
+            )
 
-        runtime.set_invocation_settler(_settle)
+        runtime.set_model_settler(_settle)
         workflow_id, ids = await _register(runtime, _AGENT_WF)
         writer = ids["writer"]
         adapter = ScriptedHarnessAdapter(
@@ -195,8 +197,10 @@ def test_model_boundary_settle_returns_the_record_to_pending() -> None:
 
 
 def _canned_settler(runtime):
-    def _settle(task: str, call: str, payload: str | None) -> None:
-        runtime.settle_episode_invocation(task, call, f"model:{payload}")
+    def _settle(env) -> None:
+        runtime.settle_episode_invocation(
+            env.task_id, env.call_correlation, f"model:{env.request_payload}"
+        )
 
     return _settle
 
@@ -206,7 +210,7 @@ def test_a_consumed_outcome_is_not_reinjected_across_a_query_step() -> None:
     # re-ship the earlier outcome: pending_outcome_call is cleared as each step runs.
     async def run() -> None:
         runtime = _runtime(FakeRegistry())
-        runtime.set_invocation_settler(_canned_settler(runtime))
+        runtime.set_model_settler(_canned_settler(runtime))
         workflow_id, ids = await _register(runtime, _AGENT_WF)
         writer = ids["writer"]
         adapter = ScriptedHarnessAdapter(
@@ -248,7 +252,7 @@ def test_a_consumed_outcome_is_not_reinjected_across_a_query_step() -> None:
 def test_a_denied_boundary_re_readies_with_a_denied_outcome() -> None:
     async def run() -> None:
         runtime = _runtime(FakeRegistry())
-        runtime.set_invocation_settler(_canned_settler(runtime))
+        runtime.set_model_settler(_canned_settler(runtime))
         workflow_id, ids = await _register(runtime, _AGENT_WF)
         writer = ids["writer"]
         # "danger" is outside the declared invoke face, so the boundary is denied.
