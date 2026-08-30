@@ -1,4 +1,4 @@
-"""GPU-free model-serving executor for agent / model-gateway development.
+"""GPU-free model-serving executor.
 
 Stands up an OpenAI-compatible HTTP endpoint (Chat Completions + Responses)
 without a GPU, emits a TASK_UPDATE with the endpoint details, and blocks until
@@ -25,7 +25,7 @@ from shared.utils.parsing import parse_float_env
 from worker.config import WorkerConfig
 
 from .base_executor import Executor, ExecutorTask, TaskCancelledError
-from .vllm_serve_executor import _resolve_port
+from .utils.net import resolve_bind_port
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +33,7 @@ _DEFAULT_TTL_SEC = 3600.0
 _MAX_TTL_SEC = 86400.0
 _POLL_INTERVAL_SEC = 5.0
 _FORWARD_TIMEOUT_SEC = 120.0
+_MAX_BODY_BYTES = 10 * 1024 * 1024
 _ROUTES = frozenset({"/v1/chat/completions", "/v1/responses"})
 _CANNED_TEXT = "This is a deterministic dev_model response."
 
@@ -40,7 +41,7 @@ _CANNED_TEXT = "This is a deterministic dev_model response."
 def _request_model(body: bytes, fallback: str) -> str:
     try:
         payload = json.loads(body or b"{}")
-    except (json.JSONDecodeError, ValueError):
+    except ValueError:
         return fallback
     model = payload.get("model") if isinstance(payload, dict) else None
     return model if isinstance(model, str) and model else fallback
@@ -120,30 +121,53 @@ class _DevModelHandler(BaseHTTPRequestHandler):
         if path not in _ROUTES:
             self._write_json(404, {"error": f"unknown route {self.path}"})
             return
-        length = int(self.headers.get("Content-Length") or 0)
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            self._write_json(400, {"error": "invalid Content-Length"})
+            return
+        if length < 0 or length > _MAX_BODY_BYTES:
+            self._write_json(413, {"error": "request body too large"})
+            return
         body = self.rfile.read(length) if length else b""
         server = self.server
         if server.forward_url is not None and server.client is not None:
-            self._forward(server.client, server.forward_url, path, body)
+            self._forward(
+                server.client,
+                server.forward_url,
+                path,
+                body,
+                self.headers.get("Authorization"),
+            )
         else:
             model = _request_model(body, server.model_name)
             self._write_json(200, _canned_response(path, model))
 
     def _forward(
-        self, client: httpx.Client, forward_url: str, path: str, body: bytes
+        self,
+        client: httpx.Client,
+        forward_url: str,
+        path: str,
+        body: bytes,
+        authorization: str | None,
     ) -> None:
+        headers = {"Content-Type": "application/json"}
+        if authorization:
+            headers["Authorization"] = authorization
         try:
             resp = client.post(
                 forward_url.rstrip("/") + path,
                 content=body,
-                headers={"Content-Type": "application/json"},
+                headers=headers,
                 timeout=_FORWARD_TIMEOUT_SEC,
             )
         except httpx.RequestError as exc:
             self._write_json(502, {"error": f"dev_model forward failed: {exc}"})
             return
         self.send_response(resp.status_code)
-        self.send_header("Content-Type", "application/json")
+        self.send_header(
+            "Content-Type", resp.headers.get("Content-Type", "application/json")
+        )
         self.send_header("Content-Length", str(len(resp.content)))
         self.end_headers()
         self.wfile.write(resp.content)
@@ -176,7 +200,7 @@ class DevModelExecutor(Executor):
         bind_host = (
             "0.0.0.0" if access_mode == "direct" else "127.0.0.1"
         )  # nosec B104 - direct mode is an explicit opt-in to a client-reachable endpoint
-        port = _resolve_port(spec.port, bind_host)
+        port = resolve_bind_port(spec.port, bind_host)
         forward_url = self._config.dev_model_forward_url
 
         out_dir.mkdir(parents=True, exist_ok=True)

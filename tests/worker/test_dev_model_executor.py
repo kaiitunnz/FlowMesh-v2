@@ -1,6 +1,7 @@
 """Tests for DevModelExecutor."""
 
 import json
+import socket
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -20,6 +21,8 @@ from tests.worker.factories import (
     make_worker_hardware,
     make_worker_task_message,
 )
+from worker.executors import dev_model_executor as mod
+from worker.executors.base_executor import TaskCancelledError
 from worker.executors.dev_model_executor import (
     _CANNED_TEXT,
     DevModelExecutor,
@@ -147,9 +150,29 @@ class _UpstreamHandler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         body = json.loads(self.rfile.read(length) or b"{}")
         out = json.dumps(
-            {"upstream": True, "path": self.path, "echo_model": body.get("model")}
+            {
+                "upstream": True,
+                "path": self.path,
+                "echo_model": body.get("model"),
+                "echo_auth": self.headers.get("Authorization"),
+            }
         ).encode("utf-8")
         self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(out)))
+        self.end_headers()
+        self.wfile.write(out)
+
+
+class _AuthUpstreamHandler(BaseHTTPRequestHandler):
+    def log_message(self, *args: object) -> None:
+        pass
+
+    def do_POST(self) -> None:
+        self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        authorized = self.headers.get("Authorization") == "Bearer sk-test"
+        out = b'{"ok": true}' if authorized else b'{"error": "unauthorized"}'
+        self.send_response(200 if authorized else 401)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(out)))
         self.end_headers()
@@ -157,8 +180,10 @@ class _UpstreamHandler(BaseHTTPRequestHandler):
 
 
 @contextmanager
-def _upstream_server() -> Iterator[str]:
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _UpstreamHandler)
+def _upstream_server(
+    handler: type[BaseHTTPRequestHandler] = _UpstreamHandler,
+) -> Iterator[str]:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -177,10 +202,28 @@ class TestForwardMode:
                     f"{base}/v1/chat/completions",
                     json={"model": "up-model", "messages": []},
                     timeout=5.0,
-                ).json()
-        assert resp["upstream"] is True
-        assert resp["path"] == "/v1/chat/completions"
-        assert resp["echo_model"] == "up-model"
+                )
+        assert resp.json()["upstream"] is True
+        assert resp.json()["path"] == "/v1/chat/completions"
+        assert resp.json()["echo_model"] == "up-model"
+        assert resp.headers["Content-Type"] == "application/json; charset=utf-8"
+
+    def test_forwards_authorization_header(self) -> None:
+        with (
+            _upstream_server(_AuthUpstreamHandler) as upstream,
+            httpx.Client() as client,
+        ):
+            with _running_server(forward_url=upstream, client=client) as base:
+                without = httpx.post(f"{base}/v1/responses", json={}, timeout=5.0)
+                withauth = httpx.post(
+                    f"{base}/v1/responses",
+                    json={},
+                    headers={"Authorization": "Bearer sk-test"},
+                    timeout=5.0,
+                )
+        assert without.status_code == 401
+        assert withauth.status_code == 200
+        assert withauth.json()["ok"] is True
 
     def test_forward_error_returns_502(self) -> None:
         with httpx.Client() as client:
@@ -190,6 +233,26 @@ class TestForwardMode:
                     f"{base}/v1/responses", json={"input": "x"}, timeout=5.0
                 )
         assert resp.status_code == 502
+
+
+class TestMalformedRequests:
+    def _raw_post(self, base: str, headers: str) -> int:
+        host, port = base.removeprefix("http://").split(":")
+        with socket.create_connection((host, int(port)), timeout=5.0) as sock:
+            sock.sendall(
+                f"POST /v1/chat/completions HTTP/1.1\r\nHost: {host}\r\n"
+                f"{headers}\r\n\r\n".encode()
+            )
+            status_line = sock.recv(256).decode("latin-1").splitlines()[0]
+        return int(status_line.split()[1])
+
+    def test_invalid_content_length_returns_400(self) -> None:
+        with _running_server() as base:
+            assert self._raw_post(base, "Content-Length: abc") == 400
+
+    def test_oversized_body_returns_413(self) -> None:
+        with _running_server() as base:
+            assert self._raw_post(base, "Content-Length: 999999999") == 413
 
 
 class TestRunLifecycle:
@@ -222,6 +285,30 @@ class TestRunLifecycle:
         assert result.port == serve["port"]
         assert "api_key" not in serve
 
+    def test_direct_mode_binds_all_interfaces_and_advertises_fqdn(
+        self, tmp_path: Path
+    ) -> None:
+        spec = DevModelSpecStrict(taskType=TaskType.DEV_MODEL, accessMode="direct")
+        task = make_worker_task_message(spec=spec, task_type=TaskType.DEV_MODEL)
+        ex = self._make_executor()
+        emit = MagicMock()
+        bind: dict[str, object] = {}
+
+        def capture_bind(_ttl: float) -> None:
+            bind["host"] = ex._server.server_address[0]  # type: ignore[union-attr]
+
+        with (
+            patch("socket.getfqdn", return_value="worker-1.cluster.local"),
+            patch.object(ex, "emit_update", emit),
+            patch.object(ex, "_wait_for_serve", side_effect=capture_bind),
+        ):
+            ex.run(task, tmp_path)
+
+        serve = emit.call_args.args[1]["serve"]
+        assert bind["host"] == "0.0.0.0"
+        assert serve["mode"] == "direct"
+        assert serve["host"] == "worker-1.cluster.local"
+
     def test_run_serves_canned_endpoint_while_alive(self, tmp_path: Path) -> None:
         spec = DevModelSpecStrict(taskType=TaskType.DEV_MODEL)
         task = make_worker_task_message(spec=spec, task_type=TaskType.DEV_MODEL)
@@ -250,17 +337,39 @@ class TestCancelStop:
             make_worker_config(enable_dev_model=True), make_worker_hardware()
         )
 
-    def test_cancel_sets_event(self) -> None:
+    def test_cancel_sets_event_and_shuts_down_server(self) -> None:
         ex = self._make_executor()
+        server = MagicMock()
+        ex._server = server
         ex.cancel("tsk-test")
         assert ex._cancel_event.is_set()
+        server.shutdown.assert_called_once_with()
 
-    def test_stop_sets_event(self) -> None:
+    def test_stop_sets_event_and_shuts_down_server(self) -> None:
         ex = self._make_executor()
+        server = MagicMock()
+        ex._server = server
         ex.stop("tsk-test")
         assert ex._stop_event.is_set()
+        server.shutdown.assert_called_once_with()
 
     def test_cancel_no_server_is_safe(self) -> None:
         ex = self._make_executor()
         ex._server = None
         ex.cancel("tsk-test")
+
+    def test_wait_for_serve_unblocks_on_stop(self) -> None:
+        ex = self._make_executor()
+        ex._stop_event.set()
+        orig = mod._POLL_INTERVAL_SEC
+        mod._POLL_INTERVAL_SEC = 0.01
+        try:
+            ex._wait_for_serve(ttl_sec=60.0)
+        finally:
+            mod._POLL_INTERVAL_SEC = orig
+
+    def test_wait_for_serve_raises_on_cancel(self) -> None:
+        ex = self._make_executor()
+        ex._cancel_event.set()
+        with pytest.raises(TaskCancelledError):
+            ex._wait_for_serve(ttl_sec=60.0)

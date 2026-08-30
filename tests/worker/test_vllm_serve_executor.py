@@ -22,11 +22,11 @@ from tests.worker.factories import (
 )
 from worker.executors import vllm_serve_executor as mod
 from worker.executors.base_executor import ExecutionError, TaskCancelledError
+from worker.executors.utils.net import resolve_bind_port
 from worker.executors.vllm_serve_executor import (
     ServeResult,
     VLLMServeExecutor,
     _drain_to_log,
-    _resolve_port,
 )
 
 
@@ -422,16 +422,16 @@ class TestServeAccessModeHostBinding:
 
 class TestResolvePort:
     def test_none_returns_free_ephemeral_port(self) -> None:
-        port = _resolve_port(None, "127.0.0.1")
+        port = resolve_bind_port(None, "127.0.0.1")
         assert 1 <= port <= 65535
 
     def test_two_calls_can_return_distinct_usable_ports(self) -> None:
-        first = _resolve_port(None, "127.0.0.1")
+        first = resolve_bind_port(None, "127.0.0.1")
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as holder:
             holder.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             holder.bind(("127.0.0.1", first))
             holder.listen(1)
-            second = _resolve_port(None, "127.0.0.1")
+            second = resolve_bind_port(None, "127.0.0.1")
             assert second != first
 
     def test_occupied_requested_port_raises(self) -> None:
@@ -440,7 +440,7 @@ class TestResolvePort:
             holder.listen(1)
             occupied = holder.getsockname()[1]
             with pytest.raises(ExecutionError, match="unavailable"):
-                _resolve_port(occupied, "127.0.0.1")
+                resolve_bind_port(occupied, "127.0.0.1")
 
 
 class TestDefaultReadinessTimeout:
