@@ -29,10 +29,16 @@ class ModelSecretVault:
         self._logger = logger or logging.getLogger("model-secret-vault")
 
     async def store(self, workflow_id: str, ref: str, secret: SecretStr) -> None:
-        """Vault one workflow-scoped credential under its generated ref."""
+        """Vault one workflow-scoped credential under its generated ref.
+
+        The write and its TTL commit as one transaction, so a crash never leaves a
+        credential without an expiry backstop.
+        """
         key = workflow_model_secret_key(workflow_id)
-        await self._redis.asyncio.hash_set(key, {ref: secret.get_secret_value()})
-        await self._redis.asyncio.expire(key, self._ttl_sec)
+        async with self._redis.asyncio.control_pipeline() as pipe:
+            pipe.hset(key, ref, secret.get_secret_value())
+            pipe.expire(key, self._ttl_sec)
+            await pipe.execute()
 
     def resolve(self, workflow_id: str, ref: str | None) -> SecretStr | None:
         """The credential for ``ref`` within ``workflow_id``, refreshing the TTL."""

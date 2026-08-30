@@ -7,9 +7,12 @@ import pytest
 from pydantic import SecretStr
 
 from server.config import OrchestrationConfig
+from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime
 from server.task.v2 import PersistedV2Workflow
+from shared.harness import HarnessCapsule
 from tests.server.task.test_v2_orchestration import FakeRegistry, _WorkerRegistryStub
+from worker.executors.harness.scripted import ScriptedHarnessAdapter, ScriptedStep
 
 _RAW_KEY = "sk-super-secret-USER-KEY"
 
@@ -109,4 +112,38 @@ async def test_cancel_purges_the_workflow_vault():
     runtime = _runtime(vault, FakeRegistry())
     workflow_id, _ = await runtime.register("owner", "org", _WF, format="native")
     runtime.cancel_workflow(workflow_id)
+    assert workflow_id in vault.purged
+
+
+def _drive_agent_to_done(runtime: TaskRuntime, task_id: str) -> None:
+    engine = runtime.orchestration_engine(runtime._tasks[task_id].workflow_id)
+    dispatch = runtime.agent_episode_dispatch(task_id)
+    assert engine is not None and dispatch is not None
+    adapter = ScriptedHarnessAdapter([ScriptedStep(op="complete", value="done")], "v1")
+    capsule = (
+        HarnessCapsule(backend=dispatch.backend, blob=dispatch.capsule_blob)
+        if dispatch.capsule_blob is not None
+        else None
+    )
+    engine.on_dispatched(task_id, "wkr-1")
+    result = adapter.start(
+        task_id, capsule=capsule, outcomes=dispatch.delivered_outcomes
+    )
+    runtime.mark_succeeded(
+        task_id,
+        "wkr-1",
+        {"agent_episode": result.model_dump(mode="json")},
+        "2026-08-30T00:00:00Z",
+    )
+
+
+@pytest.mark.anyio
+async def test_done_workflow_purges_the_vault():
+    vault = _RecordingVault()
+    runtime = _runtime(vault, FakeRegistry())
+    workflow_id, results = await runtime.register("owner", "org", _WF, format="native")
+    task_id = next(r.task_id for r in results if r.graph_node_name == "solver")
+    _drive_agent_to_done(runtime, task_id)
+    record = runtime.get_record(task_id)
+    assert record is not None and record.status is TaskStatus.DONE
     assert workflow_id in vault.purged

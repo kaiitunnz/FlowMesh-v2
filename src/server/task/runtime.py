@@ -707,6 +707,20 @@ class TaskRuntime:
         ]
         if terminal_ids:
             self._persist_terminal_locked(*terminal_ids)
+
+    def _reclaim_vault_if_settled_locked(self, workflow_id: str) -> None:
+        """Purge a workflow's vaulted credentials once its last task has settled.
+
+        The primary reclaim on the terminal transition, for a workflow that completes
+        or fails; the vault's sliding TTL only backstops a submission that never
+        settles. Called after an event's advance materializes any new children, so a
+        producer that fans out is not reclaimed while its children are still pending.
+        """
+        if self._secret_vault is None:
+            return
+        records = [r for r in self._tasks.values() if r.workflow_id == workflow_id]
+        if records and all(r.status in TERMINAL_TASK_STATUSES for r in records):
+            self._secret_vault.purge(workflow_id)
         else:
             self._workflow_registry.commit_transition(
                 workflow_id, sched=self._sched_locked(workflow_id)
@@ -1957,6 +1971,8 @@ class TaskRuntime:
                     notify = True
                 self._save_ledger_locked(record.workflow_id)
 
+            if record is not None:
+                self._reclaim_vault_if_settled_locked(record.workflow_id)
             if notify:
                 self._cv.notify_all()
 
@@ -2078,6 +2094,8 @@ class TaskRuntime:
             if record is not None and record.workflow_id in self._engines:
                 self._save_ledger_locked(record.workflow_id)
 
+            if record is not None:
+                self._reclaim_vault_if_settled_locked(record.workflow_id)
             return impacted, merged_children_ids, usages
 
     # ------------------------------------------------------------------ #
@@ -2220,6 +2238,7 @@ class TaskRuntime:
                     advance.ready or advance.retry
                 ), "a whole-instance cancel readies no work"
                 self._save_ledger_locked(record.workflow_id)
+            self._reclaim_vault_if_settled_locked(record.workflow_id)
             return usages
 
     def get_record(self, task_id: str) -> TaskRecord | None:

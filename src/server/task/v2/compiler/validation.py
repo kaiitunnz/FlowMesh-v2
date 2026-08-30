@@ -512,8 +512,9 @@ def _check_agent_binding(
 ) -> list[Diagnostic]:
     """Diagnose an agent whose resolved harness/model binding is unresolvable.
 
-    A bare agent with no source harness and no deployment default, and an external
-    binding missing its url, each fail here rather than reaching a worker.
+    A bare agent with no source harness and no deployment default, an external binding
+    missing its url, and a resident binding missing its reference each fail here rather
+    than reaching a worker.
     """
     diags: list[Diagnostic] = []
     location = loc.get(op.operator_id)
@@ -536,6 +537,14 @@ def _check_agent_binding(
             Diagnostic(
                 code="agent.model_binding.missing_url",
                 message="an openai model binding requires a url",
+                location=location,
+            )
+        )
+    if binding.mode is ModelBindingMode.RESIDENT and not binding.service_model_ref:
+        diags.append(
+            Diagnostic(
+                code="agent.model_binding.missing_resident_ref",
+                message="a resident model binding requires a service_model_ref",
                 location=location,
             )
         )

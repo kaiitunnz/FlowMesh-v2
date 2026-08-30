@@ -142,6 +142,12 @@ def test_any_resident_reference_pins_a_canonical_service_family():
     assert resident[0].residency_intent.required is True
 
 
+def test_resident_binding_without_a_reference_is_rejected():
+    text = _agent_workflow("        model_binding: {mode: resident}")
+    with pytest.raises(CompileError, match="missing_resident_ref"):
+        _compile(text, AgentBindingDefaults(default_backend="codex"))
+
+
 def test_identical_resident_references_derive_the_same_family():
     assert service_family_for_ref("Qwen/Qwen3-4B ") == service_family_for_ref(
         "Qwen/Qwen3-4B"

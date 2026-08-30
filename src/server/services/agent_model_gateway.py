@@ -9,6 +9,7 @@ crosses the same seam; a generic endpoint without this conversion is not valid.
 Resident-capacity admission is not part of this path: the invocation settles directly.
 """
 
+import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator, Callable
@@ -269,7 +270,9 @@ class AgentModelGateway:
         correlation and the boundary machinery dedups it.
         """
         try:
-            binding = self._effective(task_id)
+            # Resolve off the event loop: the binding lookup reaches the credential
+            # vault over the network, and this runs on the async request path.
+            binding = await asyncio.to_thread(self._effective, task_id)
         except ResidentBindingNotServable as exc:
             # Detection-only in this transition: the external gateway cannot serve it.
             raise HTTPException(status_code=501, detail=str(exc)) from exc

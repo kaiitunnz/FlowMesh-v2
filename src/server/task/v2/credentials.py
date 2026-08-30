@@ -34,9 +34,9 @@ def redact_source_text(raw_payload: str, format: str) -> str:
     """Return the submitted source with every inline ``api_key`` masked.
 
     Redaction is structural: the payload is parsed, each ``api_key`` field is masked,
-    and the document is re-serialized, so a credential never survives in the captured
-    source regardless of how it was quoted or escaped. A payload with no ``api_key``
-    (or one that does not parse) is returned unchanged.
+    and the document is re-serialized, so an inline ``api_key`` never survives in the
+    captured source regardless of how it was quoted or escaped. A payload with no
+    ``api_key`` (or one that does not parse) is returned unchanged.
     """
     try:
         doc = yaml.safe_load(raw_payload)

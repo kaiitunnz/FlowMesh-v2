@@ -6,15 +6,48 @@ from pydantic import SecretStr
 from server.services.model_secret_vault import ModelSecretVault
 
 
-class _FakeAsync:
-    def __init__(self, store: dict[str, dict[str, str]]) -> None:
+class _FakePipe:
+    def __init__(
+        self, store: dict[str, dict[str, str]], expire_calls: list[tuple[str, int]]
+    ) -> None:
         self._store = store
+        self._expire_calls = expire_calls
+        self._ops: list[tuple] = []
 
-    async def hash_set(self, key: str, mapping: dict[str, str]) -> None:
-        self._store.setdefault(key, {}).update(mapping)
+    def hset(self, key: str, field: str, value: str) -> "_FakePipe":
+        self._ops.append(("hset", key, field, value))
+        return self
 
-    async def expire(self, key: str, ttl_sec: int) -> bool:
-        return key in self._store
+    def expire(self, key: str, ttl_sec: int) -> "_FakePipe":
+        self._ops.append(("expire", key, ttl_sec))
+        return self
+
+    async def execute(self) -> None:
+        for op in self._ops:
+            if op[0] == "hset":
+                _, key, field, value = op
+                self._store.setdefault(key, {})[field] = value
+            else:
+                _, key, ttl = op
+                self._expire_calls.append((key, ttl))
+        self._ops.clear()
+
+    async def __aenter__(self) -> "_FakePipe":
+        return self
+
+    async def __aexit__(self, *exc: object) -> bool:
+        return False
+
+
+class _FakeAsync:
+    def __init__(
+        self, store: dict[str, dict[str, str]], expire_calls: list[tuple[str, int]]
+    ) -> None:
+        self._store = store
+        self._expire_calls = expire_calls
+
+    def control_pipeline(self) -> _FakePipe:
+        return _FakePipe(self._store, self._expire_calls)
 
 
 class _FakeSync:
@@ -40,7 +73,7 @@ class _FakeRedis:
     def __init__(self) -> None:
         self._store: dict[str, dict[str, str]] = {}
         self.expire_calls: list[tuple[str, int]] = []
-        self.asyncio = _FakeAsync(self._store)
+        self.asyncio = _FakeAsync(self._store, self.expire_calls)
         self.sync = _FakeSync(self._store, self.expire_calls)
 
 
@@ -55,6 +88,13 @@ async def test_store_then_resolve_within_the_same_workflow():
     await vault.store("wfl-1", "msk-a", SecretStr("sk-user"))
     resolved = vault.resolve("wfl-1", "msk-a")
     assert resolved is not None and resolved.get_secret_value() == "sk-user"
+
+
+@pytest.mark.anyio
+async def test_store_commits_the_ttl_atomically():
+    vault, redis = _vault(ttl_sec=100)
+    await vault.store("wfl-1", "msk-a", SecretStr("sk-user"))
+    assert ("workflow:wfl-1:model_secret", 100) in redis.expire_calls
 
 
 @pytest.mark.anyio

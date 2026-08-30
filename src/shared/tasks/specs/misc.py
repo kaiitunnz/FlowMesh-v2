@@ -109,7 +109,9 @@ class AgentModelBindingSpec(BaseModel):
         ):
             raise ValueError(f"a {self.mode} model_binding carries no url/model/key")
         if self.api_key is not None and self.service_model_ref:
-            raise ValueError("a resident model_binding carries no api_key")
+            raise ValueError(
+                "model_binding api_key and service_model_ref are exclusive"
+            )
         return self
 
 
