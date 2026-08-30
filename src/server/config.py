@@ -296,9 +296,8 @@ class AgentModelGatewayConfig:
 
     ``mode`` selects how a durable model invocation settles: ``canned`` and ``echo`` are
     deterministic and credential-free; ``openai`` forwards to an OpenAI-compatible
-    endpoint (reusing the ``UTU_LLM_*`` provider path when unset); ``proxy`` targets an
-    upstream Responses API, streaming a harness's own model turns and settling a
-    deferred facade with a single-shot call.
+    endpoint; ``proxy`` targets an upstream Responses API, streaming a harness's own
+    model turns and settling a deferred facade with a single-shot call.
     """
 
     mode: GatewayMode = GatewayMode.CANNED
@@ -316,8 +315,8 @@ class AgentModelGatewayConfig:
             mode = GatewayMode.CANNED
         return cls(
             mode=mode,
-            url=_first_env(f"{prefix}URL", "UTU_LLM_BASE_URL"),
-            model=_first_env(f"{prefix}MODEL", "UTU_LLM_MODEL"),
+            url=_first_env(f"{prefix}URL"),
+            model=_first_env(f"{prefix}MODEL"),
             timeout_sec=parse_float_env(f"{prefix}TIMEOUT_SEC") or 60.0,
         )
 
@@ -336,10 +335,8 @@ _DEFAULT_BINDING_MODE = {
 class AgentBindingConfig:
     """Deployment defaults for per-workflow agent harness and managed-model bindings.
 
-    The model defaults read ``AGENT_MODEL_GATEWAY_*`` with no ``UTU_LLM_*`` fallback:
-    the legacy provider path stays available only to the UTU executor, never as a tier
-    for a new pinned binding. A workflow supplies its own inline credential; the
-    deployment holds none.
+    The model defaults read ``AGENT_MODEL_GATEWAY_*``. A workflow supplies its own
+    inline credential; the deployment holds none.
     """
 
     default_backend: str | None = None
