@@ -87,40 +87,27 @@ Declared per agent under `spec.harness`:
 
 ## Per-workflow harness and model binding
 
-An agent's effective harness and managed-model binding are resolved at submission and
-pinned on its compiled operator, so a retry or resume cannot observe a later environment
-change. The harness backend is the workflow's `spec.harness.backend` or the deployment
-default `AGENT_HARNESS_DEFAULT_BACKEND` / `AGENT_HARNESS_DEFAULT_VERSION`; there is no
-universal hardcoded backend, and an agent with neither fails template validation.
+An agent declares its harness and model binding in the workflow; both are pinned at
+submission, so a retry or resume is unaffected by a later environment change.
 
-A `spec.model_binding` beside `spec.harness` chooses the managed model dependency. Its
-finite modes are `canned` and `echo` (deterministic, credential-free), `openai` (an
-external OpenAI-compatible upstream: `url`, `model`, and the user's own inline `api_key`),
-and `resident` (a `service_model_ref` naming any FlowMesh-served model, with no url or
-credential). Each non-secret field resolves as workflow value, then the
-`AGENT_MODEL_GATEWAY_*` deployment default, then a safe `canned` fallback; an effective
-`openai` binding without a url fails validation. A `resident` binding compiles to a
-plan-derived service-family requirement — the family derived canonically from the reference
-so identical references group as one demand — satisfied by resident-capacity control, never
-a remote provider.
+`spec.harness.backend` (and optional `version`) selects the harness. A workflow that omits
+it falls back to `AGENT_HARNESS_DEFAULT_BACKEND` / `AGENT_HARNESS_DEFAULT_VERSION`, and an
+agent with neither fails validation.
 
-A mediated model request the agent defers is settled by the **agent-model gateway**, not a
-raw model endpoint. The gateway implements the OpenAI Responses API so a harness whose
-provider targets it crosses the same seam, and for an agent episode it injects the facade
-tool and captures the model's native facade call. It resolves each invocation's upstream
-from the activation's pinned binding, never from the request body, so two workflows use
-different upstreams without cross-talk. The deployment holds no model key: the credential is
-the workflow's own inline `api_key`, vaulted server-side at submission and referenced
-everywhere else by an opaque generated ref that resolves only within its owning workflow, so
-one workflow can never read another's key. The raw key never enters the captured source, the
-compiled template, the ledger, a work item, a capsule, an artifact, or a log — only the ref
-does; the gateway resolves the ref to the key on the server-to-upstream path alone. A `url`
-that embeds credentials and a credential-bearing harness param are still rejected, since
-those persist. The `AGENT_MODEL_GATEWAY_*` env family (see [`ENV.md`](ENV.md)) supplies the
-deployment defaults; the `UTU_LLM_*` provider path remains available only to the legacy UTU
-executor.
+`spec.model_binding` selects the managed model. Its modes are `canned` and `echo`
+(deterministic, credential-free), `openai` (an external OpenAI-compatible upstream — `url`,
+`model`, and the user's own inline `api_key`), and `resident` (a `service_model_ref` naming
+a FlowMesh-served model, with no url or credential). Each field falls back to the
+`AGENT_MODEL_GATEWAY_*` deployment default, then a `canned` default; an `openai` binding
+requires a url and a `resident` binding requires a reference.
 
-Vaulted credentials live in the Redis control store within its trust boundary (ACL, auth,
-TLS), like the ledger, results, and captured source; they are not encrypted at rest, so a
-Redis-at-rest compromise would expose them as it would prompts or outputs. Because these are
-reusable user-owned keys, the deployment operator owns that at-rest boundary.
+A mediated model request the agent defers is settled by the agent-model gateway against that
+workflow's own binding. The deployment holds no model key: the credential is the workflow's
+inline `api_key`, vaulted server-side at submission so only a reference is stored and used on
+the server-to-upstream path — the raw key never persists in the source, template, ledger, or
+logs. A credential embedded in a `url` or a harness param is rejected. The
+`AGENT_MODEL_GATEWAY_*` defaults are in [`ENV.md`](ENV.md); the `UTU_LLM_*` path serves only
+the legacy UTU executor.
+
+Vaulted credentials live in the Redis control store's trust boundary (ACL, auth, TLS) and are
+not encrypted at rest, so the deployment operator owns that at-rest boundary.
