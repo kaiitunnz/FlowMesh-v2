@@ -80,12 +80,15 @@ Declared per agent under `spec.harness`:
   declared step sequence from `params.script`) or `codex` (the version-pinned Codex
   app-server binding).
 - `version` — pins the adapter/protocol so a capsule resumes only on a match.
-- `params` — backend-specific configuration.
+- `params` — backend-specific configuration. The `codex` backend reads `base_url` and
+  `model` (the Responses gateway it drives) and an optional `codex_home` override (the
+  rollout directory, by default isolated per workflow and agent under the results dir).
 
 A mediated model request the agent defers is settled by the **agent-model gateway**, not a
-raw model endpoint. The gateway implements the OpenAI Responses API (`POST /v1/responses`)
-so a harness whose provider targets it crosses the same seam. Its upstream is configured
-on the server under the `AGENT_MODEL_GATEWAY_*` env family (see
+raw model endpoint. The gateway implements the OpenAI Responses API so a harness whose
+provider targets it crosses the same seam, and for an agent episode it injects the facade
+tool and captures the model's native facade call. Its upstream is configured on the server
+under the `AGENT_MODEL_GATEWAY_*` env family (see
 [`ENV.md`](ENV.md)); the default `canned` mode is deterministic and credential-free, while
 `openai` forwards to an OpenAI-compatible endpoint, reusing the `UTU_LLM_*` provider path
 when its own values are unset.

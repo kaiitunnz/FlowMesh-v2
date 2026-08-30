@@ -2505,3 +2505,20 @@ class OrchestrationEngine:
 
     def _latest_attempt(self, wi: WorkItem) -> Attempt | None:
         return self._attempts.get(wi.attempt_ids[-1]) if wi.attempt_ids else None
+
+    def latest_attempt_open(self, task_id: str) -> bool:
+        """Whether the work item's latest attempt still expects a terminal report.
+
+        A reroute that re-enqueues an episode closes the attempt that produced the turn,
+        so a completion whose attempt is already closed is a superseded replay —
+        applying it would preempt the live turn. A genuine terminal report lands while
+        its attempt is still issued or running.
+        """
+        wi = self._work_item_for_task(task_id)
+        if wi is None:
+            return False
+        attempt = self._latest_attempt(wi)
+        return attempt is not None and attempt.status in (
+            AttemptStatus.ISSUED,
+            AttemptStatus.RUNNING,
+        )

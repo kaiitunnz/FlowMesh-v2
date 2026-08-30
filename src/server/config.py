@@ -278,6 +278,7 @@ class GatewayMode(StrEnum):
     CANNED = "canned"
     ECHO = "echo"
     OPENAI = "openai"
+    PROXY = "proxy"
 
 
 def _first_env(*names: str) -> str | None:
@@ -294,7 +295,9 @@ class AgentModelGatewayConfig:
 
     ``mode`` selects how a durable model invocation settles: ``canned`` and ``echo`` are
     deterministic and credential-free; ``openai`` forwards to an OpenAI-compatible
-    endpoint (reusing the ``UTU_LLM_*`` provider path when unset).
+    endpoint (reusing the ``UTU_LLM_*`` provider path when unset); ``proxy`` targets an
+    upstream Responses API, streaming a harness's own model turns and settling a
+    deferred facade with a single-shot call.
     """
 
     mode: GatewayMode = GatewayMode.CANNED

@@ -12,6 +12,7 @@ from typing import Any
 from shared.harness import (
     AgentEpisodeDispatch,
     BoundaryEventKind,
+    BoundaryRequest,
     HarnessBackendKey,
     HarnessResult,
     HarnessResultKind,
@@ -134,6 +135,10 @@ class TaskRuntime:
         # Settles a mediated model/effect boundary off the caller's lane; the gateway
         # installs it, and it is absent (agent stays suspended) until then.
         self._settler: Callable[[str, str, str | None], None] | None = None
+        # Facade boundaries the agent-model gateway captured server-side during an
+        # episode's model turn, keyed by task; the completion path reroutes the clean
+        # turn-completion into the pending boundary rather than settling it.
+        self._pending_originations: dict[str, BoundaryRequest] = {}
 
         self._lock = threading.RLock()
         self._cv = threading.Condition(self._lock)
@@ -941,6 +946,8 @@ class TaskRuntime:
         if record is None or engine is None:
             return
         if hr.kind in (HarnessResultKind.FAILURE, HarnessResultKind.CANCELLATION):
+            self._pending_originations.pop(task_id, None)
+            record.pending_origination = None
             reason = hr.error or (
                 "agent episode cancelled"
                 if hr.kind is HarnessResultKind.CANCELLATION
@@ -1071,6 +1078,24 @@ class TaskRuntime:
     ) -> None:
         """Install the off-lane settler for mediated model and effect boundaries."""
         self._settler = settler
+
+    def originate_episode_boundary(
+        self, task_id: str, request: BoundaryRequest
+    ) -> None:
+        """Record a facade boundary the gateway captured during an episode's model turn.
+
+        The agent-model gateway sees a harness's native facade call before the harness
+        does and clean-completes the turn; this records the captured boundary so the
+        episode's next completion reroutes into it, keyed by the awaiting task. It is
+        persisted on the task record before the gateway acks the clean turn to the
+        harness, so a restart-replayed completion still reroutes rather than settling
+        the episode DONE with its child region silently missing.
+        """
+        with self._lock:
+            self._pending_originations[task_id] = request
+            if (record := self._tasks.get(task_id)) is not None:
+                record.pending_origination = request
+                self._persist_locked(task_id)
 
     def agent_episode_dispatch(self, task_id: str) -> AgentEpisodeDispatch | None:
         """The agent-episode context to ship with a dispatch, or None for the UTU path.
@@ -1723,10 +1748,43 @@ class TaskRuntime:
             episode_step = payload.get("agent_episode")
             if episode_step is not None and record is not None:
                 harness_result = HarnessResult.model_validate(episode_step)
+                # The durable record is the source of truth: a restart drops the
+                # in-memory stash, but a replayed completion still finds its captured
+                # boundary and reroute rather than settling the episode DONE.
+                originated = self._pending_originations.pop(task_id, None)
+                if originated is None:
+                    originated = record.pending_origination
                 if harness_result.kind is not HarnessResultKind.COMPLETION:
                     # A non-terminal episode step routes its boundary and re-dispatches;
                     # a completion falls through to the terminal path below.
                     self._apply_episode_step_locked(task_id, harness_result)
+                    return usages
+                if originated is not None:
+                    # The gateway captured a facade during this turn: the clean
+                    # turn-completion is a yield on that boundary, not the episode's
+                    # terminal result, so it routes as a boundary, not a completion. The
+                    # captured boundary is consumed durably in the same reroute save.
+                    record.pending_origination = None
+                    self._apply_episode_step_locked(
+                        task_id,
+                        HarnessResult(
+                            kind=HarnessResultKind.BOUNDARY,
+                            request=originated,
+                            capsule=harness_result.capsule,
+                        ),
+                    )
+                    return usages
+                engine = self._engines.get(record.workflow_id)
+                if (
+                    engine is not None
+                    and record.status not in TERMINAL_TASK_STATUSES
+                    and not engine.latest_attempt_open(task_id)
+                ):
+                    # A completion whose attempt the reroute already closed is a
+                    # superseded replay; settling it would preempt the live turn and
+                    # publish the episode with a stale intermediate result. A post-DONE
+                    # terminal replay is excluded so it still reaches the idempotent
+                    # done-branch below (its fan-out / re-persist heal must survive).
                     return usages
             if record:
                 if record.status == TaskStatus.CANCELLED:
@@ -1860,6 +1918,10 @@ class TaskRuntime:
                 record.status = TaskStatus.FAILED
                 record.error = message
                 record.finished_ts = finished_ts
+                # A facade captured on a turn that then failed is never rerouted; drop
+                # it so a replayed completion can't resurrect it against a failed task.
+                self._pending_originations.pop(task_id, None)
+                record.pending_origination = None
                 if started_ts:
                     record.started_ts = started_ts
                 if worker_id:
