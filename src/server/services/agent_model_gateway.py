@@ -376,8 +376,14 @@ class AgentModelGateway:
                 "a facade turn mixes search and spawn interfaces; denied fail-closed"
             )
         if self._fence is not None and self._fence(task_id):
-            raise RuntimeError(
-                "a facade group is already outstanding for this episode; refused"
+            # A facade group is already outstanding for this episode. Rather than 500
+            # the turn (which fails the episode), buffer this one deterministically:
+            # drop the new facade calls, keep native calls, and clean-complete so the
+            # outstanding batch delivers first and the model can retry next turn.
+            kept = [item for item in output if item not in facades]
+            return kept + _message_output(
+                "A prior fabric tool call is still in flight; its results will arrive "
+                "before your next turn. Do not repeat the call now."
             )
         base = _forward_index(body.get("input"))
         if spawns:

@@ -484,6 +484,22 @@ def test_mixed_or_multi_spawn_facade_turns_are_denied_fail_closed(
         assert not originated and not batches
 
 
+def test_a_fenced_second_facade_group_buffers_without_a_500(monkeypatch: Any) -> None:
+    # With a batch already outstanding, a second facade group is deterministically
+    # buffered (dropped with a wait message), never a 500 that would fail the episode.
+    output = [_fn("web_search", "s0", '{"query": "again"}')]
+    _upstream_client(monkeypatch, output)
+    gateway, originated, batches = _agent_gateway()
+    gateway.set_facade_fence(lambda task: True)  # a batch is already outstanding
+    app = FastAPI()
+    app.include_router(build_agent_model_router(gateway))
+    request = {"model": "m", "input": [], "tools": [], "stream": True}
+    resp = TestClient(app).post("/agent/tsk-1/v1/responses", json=request)
+    assert resp.status_code == 200
+    assert not batches and not originated  # no second group captured
+    assert "still in flight" in resp.content.decode()
+
+
 def test_parallel_search_facades_form_one_ordered_batch(monkeypatch: Any) -> None:
     # Three web_search calls in one turn become one ordered batch; a co-emitted native
     # tool call is preserved verbatim so the harness runs it.
