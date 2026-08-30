@@ -64,6 +64,12 @@ class ServeResult(StrictExecutorResult):
     port: int
 
 
+class DevModelResult(StrictExecutorResult):
+    task_type: Literal[TaskType.DEV_MODEL] = TaskType.DEV_MODEL
+    model: str
+    port: int
+
+
 class _TrainingResult(StrictExecutorResult):
     training_time_seconds: float | None = None
     error_message: str | None = None
@@ -233,6 +239,7 @@ _RESULT_TAGS: frozenset[str] = frozenset(
         TaskType.EMBEDDING.value,
         TaskType.DIFFUSION.value,
         TaskType.SERVE.value,
+        TaskType.DEV_MODEL.value,
         TaskType.SFT.value,
         TaskType.LORA_SFT.value,
         TaskType.PPO.value,
@@ -270,6 +277,7 @@ AnyExecutorResult = Annotated[
         | Annotated[EmbeddingResult, Tag(TaskType.EMBEDDING.value)]
         | Annotated[DiffusionResult, Tag(TaskType.DIFFUSION.value)]
         | Annotated[ServeResult, Tag(TaskType.SERVE.value)]
+        | Annotated[DevModelResult, Tag(TaskType.DEV_MODEL.value)]
         | Annotated[SFTResult, Tag(TaskType.SFT.value)]
         | Annotated[LoRAResult, Tag(TaskType.LORA_SFT.value)]
         | Annotated[PPOResult, Tag(TaskType.PPO.value)]
