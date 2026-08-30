@@ -2322,6 +2322,13 @@ class OrchestrationEngine:
     def work_item(self, task_id: str) -> WorkItem | None:
         return self._work_item_for_task(task_id)
 
+    def agent_operator(self, task_id: str) -> AgentOperator | None:
+        """The agent operator a dispatched task realizes, resolving its work item."""
+        wi = self._work_item_for_task(task_id)
+        operator_id = wi.operator_id if wi is not None else task_id
+        op = self._operators.get(operator_id)
+        return op if isinstance(op, AgentOperator) else None
+
     def invocation_for_task(self, task_id: str) -> Invocation | None:
         wi = self._work_item_for_task(task_id)
         if wi is None or wi.invocation_id is None:

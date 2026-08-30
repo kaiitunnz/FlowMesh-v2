@@ -3,6 +3,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
+from pydantic import SecretStr
+
 from shared.tasks.specs import ModelBindingMode
 from shared.utils.parsing import parse_bool_env, parse_float_env, parse_int_env
 
@@ -343,15 +345,19 @@ class ResidentModelConfig:
     isolation: str | None = None
 
 
-def _parse_secret_refs(raw: str | None) -> dict[str, str]:
-    """Parse ``ref=ENV_VAR`` pairs authorizing a secret_ref to a server-side env var."""
-    refs: dict[str, str] = {}
+def _load_secret_refs(raw: str | None) -> dict[str, SecretStr]:
+    """Resolve ``ref=ENV_VAR`` pairs to server-side secret values at the config edge.
+
+    A ref is authorized only when its backing env var holds a value, so the secret
+    material stays server-side and a template only ever carries the ref name.
+    """
+    secrets: dict[str, SecretStr] = {}
     for item in (raw or "").split(","):
         if "=" in (entry := item.strip()):
-            name, env_var = entry.split("=", 1)
-            if (name := name.strip()) and (env_var := env_var.strip()):
-                refs[name] = env_var
-    return refs
+            ref, env_var = (part.strip() for part in entry.split("=", 1))
+            if ref and env_var and (value := os.getenv(env_var)):
+                secrets[ref] = SecretStr(value)
+    return secrets
 
 
 def _parse_resident_models(raw: str | None) -> dict[str, ResidentModelConfig]:
@@ -385,7 +391,7 @@ class AgentBindingConfig:
     default_mode: ModelBindingMode | None = None
     default_url: str | None = None
     default_model: str | None = None
-    secret_refs: dict[str, str] = field(default_factory=dict)
+    secrets: dict[str, SecretStr] = field(default_factory=dict)
     resident_models: dict[str, ResidentModelConfig] = field(default_factory=dict)
 
     @classmethod
@@ -398,7 +404,7 @@ class AgentBindingConfig:
             default_mode=_DEFAULT_BINDING_MODE.get(raw_mode),
             default_url=_first_env(f"{prefix}URL"),
             default_model=_first_env(f"{prefix}MODEL"),
-            secret_refs=_parse_secret_refs(os.getenv(f"{prefix}SECRETS")),
+            secrets=_load_secret_refs(os.getenv(f"{prefix}SECRETS")),
             resident_models=_parse_resident_models(
                 os.getenv(f"{prefix}RESIDENT_MODELS")
             ),

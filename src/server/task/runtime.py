@@ -20,7 +20,6 @@ from shared.harness import (
 from shared.schemas.command import InterruptMessage
 from shared.schemas.result import ResultEnvelope, result_file_path
 from shared.tasks import TaskEnvelopeTemplate
-from shared.tasks.specs import AgentSpecStrict, AgentSpecTemplate
 from shared.utils import new_workflow_id
 
 from ..config import AgentBindingConfig, OrchestrationConfig
@@ -61,6 +60,7 @@ from .v2 import (
     compile_bundle,
 )
 from .v2.compiler.agent_binding import AgentBindingDefaults, ResidentModelEntry
+from .v2.representations.operators import AgentModelGatewayBinding
 from .v2.representations.plan import EpisodeSpec
 
 # A live-feasibility check: whether a lowered episode's declared alternative can be
@@ -76,7 +76,7 @@ def _binding_defaults(cfg: AgentBindingConfig) -> AgentBindingDefaults:
         default_mode=cfg.default_mode,
         default_url=cfg.default_url,
         default_model=cfg.default_model,
-        secret_allowlist=frozenset(cfg.secret_refs),
+        secret_allowlist=frozenset(cfg.secrets),
         resident_catalog={
             ref: ResidentModelEntry(
                 family=entry.family,
@@ -1128,28 +1128,41 @@ class TaskRuntime:
                 record.pending_origination = request
                 self._persist_locked(task_id)
 
-    def agent_episode_dispatch(self, task_id: str) -> AgentEpisodeDispatch | None:
-        """The agent-episode context to ship with a dispatch, or None for the UTU path.
+    def resolve_model_binding(self, task_id: str) -> AgentModelGatewayBinding | None:
+        """The pinned managed-model binding for a task's agent, for the gateway.
 
-        A v2 agent that declares a harness backend carries its durable capsule and one
-        pending injected outcome, rebuilt from the ledger; a bare agent carries nothing
-        and dispatches to the legacy executor unchanged.
+        Returns the effective binding frozen at submission so a mediated invocation
+        resolves its upstream from the activation, never from the request body or a
+        later environment change.
         """
         with self._lock:
             record = self._tasks.get(task_id)
             engine = self._engines.get(record.workflow_id) if record else None
-            if record is None or engine is None:
+            if engine is None:
                 return None
-            spec = record.task.spec
-            if (
-                not isinstance(spec, (AgentSpecStrict, AgentSpecTemplate))
-                or spec.harness is None
-            ):
+            op = engine.agent_operator(task_id)
+            return op.model_binding if op is not None else None
+
+    def agent_episode_dispatch(self, task_id: str) -> AgentEpisodeDispatch | None:
+        """The agent-episode context to ship with a dispatch, or None for the UTU path.
+
+        The backend key comes from the operator's pinned harness binding, so a
+        later deployment-default change cannot move a live activation. A v1 agent
+        has no engine and dispatches to the legacy executor unchanged.
+        """
+        with self._lock:
+            record = self._tasks.get(task_id)
+            engine = self._engines.get(record.workflow_id) if record else None
+            if engine is None:
+                return None
+            op = engine.agent_operator(task_id)
+            harness = op.harness_binding if op is not None else None
+            if harness is None:
                 return None
             capsule_blob, outcomes = engine.episode_context(task_id)
             return AgentEpisodeDispatch(
                 backend=HarnessBackendKey(
-                    backend=spec.harness.backend, version=spec.harness.version
+                    backend=harness.backend, version=harness.version
                 ),
                 capsule_blob=capsule_blob,
                 delivered_outcomes=outcomes,

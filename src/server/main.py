@@ -28,11 +28,17 @@ from .hooks import register
 from .registries import WorkerRegistry, WorkflowRegistry
 from .registries.node import NodeRegistry
 from .routers import docs, health, v1
-from .services.agent_model_gateway import AgentModelGateway, build_agent_model_router
+from .services.agent_model_gateway import (
+    AgentModelGateway,
+    ResolvedGatewayBinding,
+    build_agent_model_router,
+    to_gateway_binding,
+)
 from .services.log_archiver import TaskLogArchiver
 from .services.metrics import MetricsRecorder
 from .services.monitoring import EventMonitor
 from .services.port_forward import PortForwardService
+from .services.secret_ref import SecretRefResolver
 from .services.ssh_audit import SshAuditService
 from .services.watchdog import WorkerWatchdog
 from .supervisor import WorkerSupervisor
@@ -126,6 +132,17 @@ if IS_ROOT_NODE:
     )
     RUNTIME.set_invocation_settler(AGENT_MODEL_GATEWAY.settle)
     AGENT_MODEL_GATEWAY.set_boundary_originator(RUNTIME.originate_episode_boundary)
+    SECRET_RESOLVER = SecretRefResolver(config.orchestration.agent_binding.secrets)
+    _GATEWAY_DEFAULT_KEY = config.orchestration.gateway.api_key
+
+    def _resolve_gateway_binding(task_id: str) -> ResolvedGatewayBinding | None:
+        assert RUNTIME is not None
+        pinned = RUNTIME.resolve_model_binding(task_id)
+        if pinned is None:
+            return None
+        return to_gateway_binding(pinned, SECRET_RESOLVER, _GATEWAY_DEFAULT_KEY)
+
+    AGENT_MODEL_GATEWAY.set_binding_resolver(_resolve_gateway_binding)
 
     DISPATCHER = create_dispatcher(
         config.dispatch,
