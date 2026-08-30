@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
+from shared.tasks.specs import ModelBindingMode
 from shared.utils.parsing import parse_bool_env, parse_float_env, parse_int_env
 
 
@@ -323,6 +324,87 @@ class AgentModelGatewayConfig:
         )
 
 
+# Deployment gateway modes map to the per-workflow default binding mode; the codex
+# reasoning passthrough (``proxy``) defaults a new binding to an external openai one.
+_DEFAULT_BINDING_MODE = {
+    "canned": ModelBindingMode.CANNED,
+    "echo": ModelBindingMode.ECHO,
+    "openai": ModelBindingMode.OPENAI,
+    "proxy": ModelBindingMode.OPENAI,
+}
+
+
+@dataclass(frozen=True)
+class ResidentModelConfig:
+    """One authorized resident model/engine dependency in the deployment catalog."""
+
+    family: str
+    engine_batch_key: str | None = None
+    isolation: str | None = None
+
+
+def _parse_secret_refs(raw: str | None) -> dict[str, str]:
+    """Parse ``ref=ENV_VAR`` pairs authorizing a secret_ref to a server-side env var."""
+    refs: dict[str, str] = {}
+    for item in (raw or "").split(","):
+        if "=" in (entry := item.strip()):
+            name, env_var = entry.split("=", 1)
+            if (name := name.strip()) and (env_var := env_var.strip()):
+                refs[name] = env_var
+    return refs
+
+
+def _parse_resident_models(raw: str | None) -> dict[str, ResidentModelConfig]:
+    """Parse ``ref=family[:engine_batch[:isolation]]`` authorized resident entries."""
+    catalog: dict[str, ResidentModelConfig] = {}
+    for item in (raw or "").split(","):
+        if "=" not in (entry := item.strip()):
+            continue
+        ref, spec = entry.split("=", 1)
+        parts = [p.strip() or None for p in spec.split(":")]
+        if (ref := ref.strip()) and parts[0]:
+            catalog[ref] = ResidentModelConfig(
+                family=parts[0],
+                engine_batch_key=parts[1] if len(parts) > 1 else None,
+                isolation=parts[2] if len(parts) > 2 else None,
+            )
+    return catalog
+
+
+@dataclass
+class AgentBindingConfig:
+    """Deployment defaults for per-workflow agent harness and managed-model bindings.
+
+    The model defaults read ``AGENT_MODEL_GATEWAY_*`` with no ``UTU_LLM_*`` fallback:
+    the legacy provider path stays available only to the UTU executor, never as a tier
+    for a new pinned binding.
+    """
+
+    default_backend: str | None = None
+    default_version: str | None = None
+    default_mode: ModelBindingMode | None = None
+    default_url: str | None = None
+    default_model: str | None = None
+    secret_refs: dict[str, str] = field(default_factory=dict)
+    resident_models: dict[str, ResidentModelConfig] = field(default_factory=dict)
+
+    @classmethod
+    def from_env(cls) -> "AgentBindingConfig":
+        prefix = "AGENT_MODEL_GATEWAY_"
+        raw_mode = (os.getenv(f"{prefix}MODE") or "").strip().lower()
+        return cls(
+            default_backend=_first_env("AGENT_HARNESS_DEFAULT_BACKEND"),
+            default_version=_first_env("AGENT_HARNESS_DEFAULT_VERSION"),
+            default_mode=_DEFAULT_BINDING_MODE.get(raw_mode),
+            default_url=_first_env(f"{prefix}URL"),
+            default_model=_first_env(f"{prefix}MODEL"),
+            secret_refs=_parse_secret_refs(os.getenv(f"{prefix}SECRETS")),
+            resident_models=_parse_resident_models(
+                os.getenv(f"{prefix}RESIDENT_MODELS")
+            ),
+        )
+
+
 @dataclass
 class OrchestrationConfig:
     max_scope_depth: int | None = None
@@ -330,6 +412,7 @@ class OrchestrationConfig:
     max_activations: int | None = None
     episode_lowering: bool = False
     gateway: AgentModelGatewayConfig = field(default_factory=AgentModelGatewayConfig)
+    agent_binding: AgentBindingConfig = field(default_factory=AgentBindingConfig)
 
     @classmethod
     def from_env(cls) -> "OrchestrationConfig":
@@ -339,6 +422,7 @@ class OrchestrationConfig:
             max_activations=parse_int_env("ORCHESTRATOR_MAX_ACTIVATIONS"),
             episode_lowering=parse_bool_env("ORCHESTRATOR_EPISODE_LOWERING", False),
             gateway=AgentModelGatewayConfig.from_env(),
+            agent_binding=AgentBindingConfig.from_env(),
         )
 
 

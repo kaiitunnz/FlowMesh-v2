@@ -15,8 +15,13 @@ from server.task.v2 import (
     PersistedV2Workflow,
     compile_workflow,
 )
+from server.task.v2.compiler.agent_binding import AgentBindingDefaults
 from server.task.v2.compiler.bindings import BindingClass, binding_class
 from shared.tasks import TaskType
+
+# Legacy example agents declare no harness; a lowering test supplies a deployment
+# default so a bare agent resolves rather than failing binding validation.
+_BINDINGS = AgentBindingDefaults(default_backend="codex")
 
 _EXAMPLES = pathlib.Path(__file__).parents[3] / "examples" / "templates"
 _TEMPLATE_FILES = sorted(_EXAMPLES.glob("*.yaml"))
@@ -26,7 +31,7 @@ _FORBIDDEN = ("worker_id", "replica", "endpoint", "activation", "attempt")
 def _compile(text: str) -> tuple[Any, Any, Any]:
     parsed = parse_workflow(text, "native")
     source = FrontendWorkflowSource.capture(text, "native", name="wf")
-    template, plan = compile_workflow("wfl-test", parsed, source)
+    template, plan = compile_workflow("wfl-test", parsed, source, bindings=_BINDINGS)
     return parsed, template, plan
 
 

@@ -7,6 +7,7 @@ from ..representations.plan import PhysicalExecutionPlan, PhysicalNode
 from ..representations.source import FrontendWorkflowSource
 from ..representations.template import LogicalWorkflowTemplate
 from ..representations.versioning import VersionId, content_digest
+from .agent_binding import AgentBindingDefaults, neutral_defaults
 from .diagnostics import CompileError, Diagnostic
 from .episodes import lower_to_episodes
 from .project import (
@@ -75,19 +76,23 @@ def compile_workflow(
     source: FrontendWorkflowSource,
     validate: bool = True,
     strategy: LoweringStrategy = LoweringStrategy.TRANSPARENT,
+    bindings: AgentBindingDefaults | None = None,
 ) -> tuple[LogicalWorkflowTemplate, PhysicalExecutionPlan]:
     """Compile a parsed workflow into symbolic v2 representations.
 
     Lowers legacy tasks (and, when present, structured regions) into the acyclic
     subset of a logical template, then builds a physical plan under ``strategy``: the
     transparent lowering mints one boundary per legacy task/executor, while the
-    episode-cut lowering rewrites that into run-to-yield episodes. Raises
-    :class:`CompileError` when any error-severity diagnostic is produced. The result
-    carries no worker/replica/endpoint bindings and no activation tags.
+    episode-cut lowering rewrites that into run-to-yield episodes. ``bindings`` supplies
+    the deployment-resolved agent harness/model defaults so each agent pins its
+    effective binding at submission. Raises :class:`CompileError` when any
+    error-severity diagnostic is produced. The result carries no worker/replica/endpoint
+    bindings and no activation tags.
     """
+    defaults = bindings if bindings is not None else neutral_defaults()
     acc = LoweringAccumulator()
     name_to_op = build_name_map(parsed)
-    lower_tasks(parsed, name_to_op, acc)
+    lower_tasks(parsed, name_to_op, acc, defaults)
     lower_frontend_v2(parsed, acc)
     induce_effect_boundaries(acc)
     template = _assemble_template(workflow_id, source, acc)
@@ -96,7 +101,7 @@ def compile_workflow(
         nodes = lower_to_episodes(template, nodes)
     plan = _finalize_plan(workflow_id, template.version, nodes)
     if validate:
-        diagnostics = validate_compilation(template, plan)
+        diagnostics = validate_compilation(template, plan, defaults)
         if has_errors(diagnostics):
             raise CompileError(tuple(diagnostics))
     return template, plan
@@ -107,7 +112,10 @@ def compile_bundle(
     parsed: ParsedWorkflow,
     source: FrontendWorkflowSource,
     strategy: LoweringStrategy = LoweringStrategy.TRANSPARENT,
+    bindings: AgentBindingDefaults | None = None,
 ) -> PersistedV2Workflow:
     """Compile a parsed workflow into the durable plan-time bundle."""
-    template, plan = compile_workflow(workflow_id, parsed, source, strategy=strategy)
+    template, plan = compile_workflow(
+        workflow_id, parsed, source, strategy=strategy, bindings=bindings
+    )
     return PersistedV2Workflow(source=source, template=template, plan=plan)

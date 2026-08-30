@@ -23,7 +23,7 @@ from shared.tasks import TaskEnvelopeTemplate
 from shared.tasks.specs import AgentSpecStrict, AgentSpecTemplate
 from shared.utils import new_workflow_id
 
-from ..config import OrchestrationConfig
+from ..config import AgentBindingConfig, OrchestrationConfig
 from ..hooks import SUPPLIER_RESOLVERS
 from ..orchestration import (
     Advance,
@@ -60,11 +60,32 @@ from .v2 import (
     build_inspection,
     compile_bundle,
 )
+from .v2.compiler.agent_binding import AgentBindingDefaults, ResidentModelEntry
 from .v2.representations.plan import EpisodeSpec
 
 # A live-feasibility check: whether a lowered episode's declared alternative can be
 # placed now.
 EpisodeFeasibility = Callable[[EpisodeSpec], bool]
+
+
+def _binding_defaults(cfg: AgentBindingConfig) -> AgentBindingDefaults:
+    """Convert the deployment binding config into the compiler's injected defaults."""
+    return AgentBindingDefaults(
+        default_backend=cfg.default_backend,
+        default_version=cfg.default_version,
+        default_mode=cfg.default_mode,
+        default_url=cfg.default_url,
+        default_model=cfg.default_model,
+        secret_allowlist=frozenset(cfg.secret_refs),
+        resident_catalog={
+            ref: ResidentModelEntry(
+                family=entry.family,
+                engine_batch_key=entry.engine_batch_key,
+                isolation=entry.isolation,
+            )
+            for ref, entry in cfg.resident_models.items()
+        },
+    )
 
 
 def _sanitize_merge_spec(spec: dict[str, Any]) -> dict[str, Any]:
@@ -106,6 +127,7 @@ class TaskRuntime:
         self._results_dir = results_dir
         self._feasibility_check = feasibility_check
         self._scope_budget = ScopeBudget.from_config(orchestration)
+        self._agent_binding_defaults = _binding_defaults(orchestration.agent_binding)
         self._lowering_strategy = (
             LoweringStrategy.EPISODE_CUT
             if orchestration.episode_lowering
@@ -175,7 +197,12 @@ class TaskRuntime:
         if not ExecutionMode.is_v2(parsed_workflow.api_version):
             return None
         source = FrontendWorkflowSource.capture(payload, format)
-        return build_inspection(new_workflow_id(), parsed_workflow, source)
+        return build_inspection(
+            new_workflow_id(),
+            parsed_workflow,
+            source,
+            bindings=self._agent_binding_defaults,
+        )
 
     async def register(
         self, owner_id: str, org_id: str, payload: str, format: str = "native"
@@ -194,7 +221,11 @@ class TaskRuntime:
         if ExecutionMode.is_v2(parsed_workflow.api_version):
             source = FrontendWorkflowSource.capture(yaml_text, format)
             v2_bundle = compile_bundle(
-                workflow_id, parsed_workflow, source, strategy=self._lowering_strategy
+                workflow_id,
+                parsed_workflow,
+                source,
+                strategy=self._lowering_strategy,
+                bindings=self._agent_binding_defaults,
             )
             v2_engine = OrchestrationEngine.build(
                 workflow_id, owner_id, org_id, v2_bundle, budget=self._scope_budget
