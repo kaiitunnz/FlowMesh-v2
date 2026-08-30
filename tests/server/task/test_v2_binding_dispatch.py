@@ -8,7 +8,11 @@ import pytest
 from server.config import AgentBindingConfig, OrchestrationConfig
 from server.task.runtime import TaskRuntime
 from shared.tasks.specs import ModelBindingMode
-from tests.server.task.test_v2_orchestration import FakeRegistry, _WorkerRegistryStub
+from tests.server.task.test_v2_orchestration import (
+    FakeRegistry,
+    _NoopSecretVault,
+    _WorkerRegistryStub,
+)
 
 _WF = """
 apiVersion: flowmesh/v2
@@ -42,6 +46,7 @@ def _runtime() -> TaskRuntime:
         config,
         Path(tempfile.gettempdir()),
         logging.getLogger("v2-binding-dispatch"),
+        secret_vault=cast(Any, _NoopSecretVault()),
     )
 
 

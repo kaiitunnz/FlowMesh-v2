@@ -14,6 +14,7 @@ from tests.server.dispatcher.helpers import (
     WorkflowRegistryStub,
     make_capturing_dispatcher,
 )
+from tests.server.task.test_v2_orchestration import _NoopSecretVault
 
 _ECHO_WORKFLOW = """
 apiVersion: mloc/v1
@@ -40,6 +41,7 @@ def _setup(
         OrchestrationConfig(),
         Path(tempfile.gettempdir()),
         logging.getLogger("test_dispatch_once_retry"),
+        secret_vault=cast(Any, _NoopSecretVault()),
     )
     _, results = asyncio.run(
         runtime.register("owner", "org", _ECHO_WORKFLOW, format="native")

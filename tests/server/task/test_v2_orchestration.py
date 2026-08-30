@@ -182,6 +182,19 @@ class _WorkerRegistryStub:
         return 0
 
 
+class _NoopSecretVault:
+    """A model-secret vault for tests that never exercise the credential path."""
+
+    async def store(self, workflow_id: str, ref: str, secret: Any) -> None:
+        return None
+
+    def resolve(self, workflow_id: str, ref: str | None) -> None:
+        return None
+
+    def purge(self, workflow_id: str) -> None:
+        return None
+
+
 def _runtime(registry: FakeRegistry) -> TaskRuntime:
     return TaskRuntime(
         cast(Any, registry),
@@ -189,6 +202,7 @@ def _runtime(registry: FakeRegistry) -> TaskRuntime:
         OrchestrationConfig(),
         Path(tempfile.gettempdir()),
         logging.getLogger("v2-test"),
+        secret_vault=cast(Any, _NoopSecretVault()),
     )
 
 
@@ -317,6 +331,7 @@ async def test_live_spawn_fans_out_children_to_real_dispatch(tmp_path: Any) -> N
         OrchestrationConfig(),
         tmp_path,
         logging.getLogger("live"),
+        secret_vault=cast(Any, _NoopSecretVault()),
     )
     workflow_id, ids = await _register(runtime, AUTORESEARCH)
     planner = ids["planner"]
@@ -366,6 +381,7 @@ async def test_fan_out_is_idempotent_across_a_producer_replay(tmp_path: Any) -> 
         OrchestrationConfig(),
         tmp_path,
         logging.getLogger("live"),
+        secret_vault=cast(Any, _NoopSecretVault()),
     )
     workflow_id, ids = await _register(runtime, AUTORESEARCH)
     planner = ids["planner"]
@@ -392,6 +408,7 @@ async def test_deferred_fan_out_recovers_on_replay_when_result_lands(
         OrchestrationConfig(),
         tmp_path,
         logging.getLogger("live"),
+        secret_vault=cast(Any, _NoopSecretVault()),
     )
     workflow_id, ids = await _register(runtime, AUTORESEARCH)
     planner = ids["planner"]
@@ -420,6 +437,7 @@ async def test_deferred_fan_out_recovers_on_result_ingest_without_a_second_event
         OrchestrationConfig(),
         tmp_path,
         logging.getLogger("live"),
+        secret_vault=cast(Any, _NoopSecretVault()),
     )
     workflow_id, ids = await _register(runtime, AUTORESEARCH)
     planner = ids["planner"]
@@ -453,6 +471,7 @@ async def test_zero_element_fan_out_seals_and_closes_the_join_empty(
         OrchestrationConfig(),
         tmp_path,
         logging.getLogger("live"),
+        secret_vault=cast(Any, _NoopSecretVault()),
     )
     workflow_id, ids = await _register(runtime, AUTORESEARCH)
     planner = ids["planner"]
@@ -480,6 +499,7 @@ async def test_child_template_holds_completion_until_the_spawn_seals(
         OrchestrationConfig(),
         tmp_path,
         logging.getLogger("live"),
+        secret_vault=cast(Any, _NoopSecretVault()),
     )
     workflow_id, ids = await _register(runtime, AUTORESEARCH)
     planner, trial = ids["planner"], ids["trial"]
@@ -515,6 +535,7 @@ async def test_rehydration_re_drives_a_deferred_fan_out(tmp_path: Any) -> None:
         OrchestrationConfig(),
         tmp_path,
         logging.getLogger("live"),
+        secret_vault=cast(Any, _NoopSecretVault()),
     )
     workflow_id, ids = await _register(runtime, AUTORESEARCH)
     planner = ids["planner"]
@@ -533,6 +554,7 @@ async def test_rehydration_re_drives_a_deferred_fan_out(tmp_path: Any) -> None:
         OrchestrationConfig(),
         tmp_path,
         logging.getLogger("rehydrate"),
+        secret_vault=cast(Any, _NoopSecretVault()),
     )
     assert await restored.rehydrate() == 1
     engine = restored.orchestration_engine(workflow_id)
@@ -567,6 +589,7 @@ async def test_scheduler_rejects_an_infeasible_episode_alternative() -> None:
         logging.getLogger("feas"),
         feasibility_check=lambda spec: spec.boundary
         is not EpisodeBoundaryKind.SERVICE_ISSUE,
+        secret_vault=cast(Any, _NoopSecretVault()),
     )
     _, ids = await _register(runtime, _INFEASIBLE)
     # A sampled model call lowers to a service-issue episode the check rejects; the

@@ -12,7 +12,7 @@ from collections.abc import Iterable, Iterator, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -52,6 +52,7 @@ from server.task.models import TaskRecord
 from server.task.runtime import TaskRuntime
 from shared.tasks import TaskEnvelopeTemplate
 from shared.tasks.worker_message import WorkerStatus
+from tests.server.task.test_v2_orchestration import _NoopSecretVault
 
 
 @pytest.fixture
@@ -541,6 +542,7 @@ def _make_runtime_with_record(task_id: str) -> tuple[TaskRuntime, TaskRecord]:
         orchestration=OrchestrationConfig(),
         results_dir=Path(tempfile.gettempdir()),
         logger=logging.getLogger("test.supplier"),
+        secret_vault=cast(Any, _NoopSecretVault()),
     )
     env = TaskEnvelopeTemplate.model_validate(
         {"apiVersion": "mloc/v1", "kind": "Task", "spec": {"taskType": "echo"}}

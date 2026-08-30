@@ -32,6 +32,7 @@ from server.task.v2.compiler.agent_binding import AgentBindingDefaults
 from server.task.v2.compiler.bindings import leaf_profile as _leaf_profile
 from server.task.v2.representations.operators import EqualityRelationKind
 from shared.tasks import TaskType
+from tests.server.task.test_v2_orchestration import _NoopSecretVault
 
 _BINDINGS = AgentBindingDefaults(default_backend="codex")
 
@@ -114,6 +115,7 @@ def _runtime(registry: _CapturingRegistry) -> TaskRuntime:
         OrchestrationConfig(),
         Path(tempfile.gettempdir()),
         logging.getLogger("v2-test"),
+        secret_vault=cast(Any, _NoopSecretVault()),
     )
 
 

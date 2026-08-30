@@ -17,6 +17,7 @@ from server.task.v2 import (
 )
 from server.task.v2.compiler.agent_binding import AgentBindingDefaults
 from server.task.v2.representations.operators import LoopContextRegion, PortKind
+from tests.server.task.test_v2_orchestration import _NoopSecretVault
 
 REGIONS_WF = """
 apiVersion: flowmesh/v2
@@ -193,6 +194,7 @@ def _runtime() -> TaskRuntime:
         OrchestrationConfig(agent_binding=AgentBindingConfig(default_backend="codex")),
         Path(tempfile.gettempdir()),
         logging.getLogger("v2-regions-test"),
+        secret_vault=cast(Any, _NoopSecretVault()),
     )
 
 

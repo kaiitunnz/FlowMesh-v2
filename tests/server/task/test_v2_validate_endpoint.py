@@ -13,6 +13,7 @@ from server.auth.security import authenticate_connection
 from server.config import OrchestrationConfig
 from server.routers.v1 import workflows as workflows_router
 from server.task.runtime import TaskRuntime
+from tests.server.task.test_v2_orchestration import _NoopSecretVault
 
 _V1_WF = """
 apiVersion: flowmesh/v1
@@ -87,6 +88,7 @@ def _runtime() -> TaskRuntime:
         OrchestrationConfig(),
         Path(tempfile.gettempdir()),
         logging.getLogger("v2-endpoint-test"),
+        secret_vault=cast(Any, _NoopSecretVault()),
     )
 
 

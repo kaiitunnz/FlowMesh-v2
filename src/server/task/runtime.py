@@ -114,7 +114,8 @@ class TaskRuntime:
         results_dir: Path,
         logger: logging.Logger,
         feasibility_check: EpisodeFeasibility | None = None,
-        secret_vault: ModelSecretVault | None = None,
+        *,
+        secret_vault: ModelSecretVault,
     ) -> None:
         self._workflow_registry = workflow_registry
         self._worker_registry = worker_registry
@@ -217,15 +218,10 @@ class TaskRuntime:
         secrets = pop_inline_model_secrets(parsed)
         if not secrets:
             return {}
-        vault = self._secret_vault
-        if vault is None:
-            raise RuntimeError(
-                "an inline model credential requires a configured secret vault"
-            )
         secret_refs: dict[str, str] = {}
         for task_id, secret in secrets.items():
             ref = new_model_secret_ref()
-            await vault.store(workflow_id, ref, secret)
+            await self._secret_vault.store(workflow_id, ref, secret)
             secret_refs[task_id] = ref
         return secret_refs
 
@@ -720,8 +716,6 @@ class TaskRuntime:
         settles. Called after an event's advance materializes any new children, so a
         producer that fans out is not reclaimed while its children are still pending.
         """
-        if self._secret_vault is None:
-            return
         records = [r for r in self._tasks.values() if r.workflow_id == workflow_id]
         if records and all(r.status in TERMINAL_TASK_STATUSES for r in records):
             self._secret_vault.purge(workflow_id)
@@ -2181,8 +2175,7 @@ class TaskRuntime:
                 )
             else:
                 self._worker_registry.publish_interrupt(worker, interrupt)
-        if self._secret_vault is not None:
-            self._secret_vault.purge(workflow_id)
+        self._secret_vault.purge(workflow_id)
         return touched
 
     def mark_cancelled(
