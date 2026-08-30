@@ -21,7 +21,7 @@ PREFIX_ATTEMPT = "att"
 PREFIX_INVOCATION = "inv"
 PREFIX_AUTHORITY_GRANT = "agr"
 PREFIX_IDEMPOTENCY_KEY = "idm"
-PREFIX_MODEL_SECRET = "msk"
+PREFIX_MODEL_SECRET = "msk"  # nosec B105 - object-id prefix, not a credential
 
 
 def _uuid_str() -> str:
