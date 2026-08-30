@@ -1,9 +1,8 @@
 """The agent-episode executor drives one adapter step behind a backend key.
 
 An agent whose dispatch carries a harness backend key routes to the episode executor
-and advertises the AGENT capability even when the legacy UTU executor cannot import; a
-step returns the backend's :class:`HarnessResult`; and a native-bypass backend is
-refused.
+and advertises the AGENT capability; a step returns the backend's result; and a
+native-bypass backend is refused.
 """
 
 from pathlib import Path
@@ -70,9 +69,9 @@ def test_agent_episode_key_is_registered() -> None:
     assert cls is not None and cls.supported_task_types == frozenset({TaskType.AGENT})
 
 
-def test_worker_advertises_agent_without_the_utu_executor() -> None:
-    # The episode executor is dependency-light, so a CPU worker that cannot import the
-    # UTU agent executor still advertises AGENT through it.
+def test_worker_advertises_agent_through_the_episode_executor() -> None:
+    # The episode executor is dependency-light, so a CPU worker advertises AGENT through
+    # it — the only executor that services the task type.
     cls = EXECUTOR_REGISTRY.get("agent_episode")
     assert cls is not None
     caps = build_capabilities({"agent_episode": cls(make_worker_config())})

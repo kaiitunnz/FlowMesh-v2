@@ -31,6 +31,22 @@ spec:
 """
 
 
+_WF_DEFAULT_BACKEND = """
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {name: bind}
+spec:
+  taskType: echo
+  graph:
+    nodes:
+      - name: solver
+        spec:
+          taskType: agent
+          v2: {authority: {invoke: [model], delegate: []}, tools: [{name: model}]}
+          model_binding: {mode: canned}
+"""
+
+
 def _runtime() -> TaskRuntime:
     # A deployment default that differs from the source binding: the pin must ignore it.
     config = OrchestrationConfig(
@@ -65,3 +81,18 @@ async def test_dispatch_and_model_binding_read_the_source_pin_not_the_default():
     assert dispatch is not None
     assert dispatch.backend.backend == "scripted"
     assert dispatch.backend.version == "v9"
+
+
+@pytest.mark.anyio
+async def test_default_backend_agent_dispatches_through_the_episode_path():
+    # An agent with no source harness resolves the deployment default and dispatches
+    # through the same episode path as an explicit-harness agent.
+    runtime = _runtime()
+    _, results = await runtime.register(
+        "owner", "org", _WF_DEFAULT_BACKEND, format="native"
+    )
+    task_id = next(r.task_id for r in results if r.graph_node_name == "solver")
+
+    dispatch = runtime.agent_episode_dispatch(task_id)
+    assert dispatch is not None
+    assert dispatch.backend.backend == "codex"
