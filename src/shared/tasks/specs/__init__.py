@@ -4,6 +4,7 @@ from .common import (
     TaskSpecStrictBase,
     TaskSpecTemplateBase,
 )
+from .dev_model import DevModelSpecStrict, DevModelSpecTemplate
 from .diffusion import DiffusionSpecStrict, DiffusionSpecTemplate
 from .inference import InferenceBackend, InferenceSpecStrict, InferenceSpecTemplate
 from .misc import (
@@ -59,6 +60,8 @@ __all__ = [
     "TaskSpecTemplateBase",
     "DPOSpecStrict",
     "DPOSpecTemplate",
+    "DevModelSpecStrict",
+    "DevModelSpecTemplate",
     "DiffusionSpecStrict",
     "DiffusionSpecTemplate",
     "ImageClassificationTrainingSpecStrict",

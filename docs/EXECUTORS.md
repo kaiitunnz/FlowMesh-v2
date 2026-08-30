@@ -18,6 +18,7 @@ The worker resolves `spec.taskType` against an executor registry in
 | `data_retrieval` | `DataRetrievalExecutor` | DataFrame loading from sources (`type: sql`, `type: s3`, `type: lumid` with `mode: sql\|s3\|agent` via lumid-data-app; `type: lumid` (mode `sql`/`s3`/`agent`) requires `lumid_data_token`, the bearer forwarded to lumid-data-app) |
 | `ssh` | `SSHExecutor` | Interactive SSH session or non-interactive container job |
 | `serve` | `VLLMServeExecutor` | Persistent vLLM API server for a single model |
+| `dev_model` | `DevModelExecutor` | GPU-free OpenAI-compatible endpoint (chat + Responses) that forwards to `DEV_MODEL_FORWARD_URL` or returns canned responses; gated by `WORKER_ENABLE_DEV_MODEL` |
 
 Helper utilities live in `src/worker/executors/utils/` (`artifacts`,
 `checkpoints`, `data_utils`, `distributed`, `graph_templates`,

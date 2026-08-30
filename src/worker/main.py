@@ -121,6 +121,7 @@ def initialize_executors(
         "rag",
         "agent",
         "agent_episode",
+        "dev_model",
         "sft",
         "lora_sft",
         "image_classification_training",

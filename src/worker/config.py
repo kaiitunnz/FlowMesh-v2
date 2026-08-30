@@ -42,6 +42,8 @@ class WorkerConfig:
     network_bandwidth_bytes_per_sec: float | None
     executor_idle_cleanup_sec: float | None
     enable_mp_executors: bool
+    enable_dev_model: bool
+    dev_model_forward_url: str | None
     docker_gpu_runtime: str | None
     ssh_limits: SSHLimits | None
     enable_ssh_gpu_limit: bool
@@ -105,6 +107,8 @@ class WorkerConfig:
             raise SystemExit("WORKER_NETWORK_BANDWIDTH_BYTES_PER_SEC must be positive")
 
         enable_mp_executors = parse_bool_env("WORKER_ENABLE_MP_EXECUTORS", True)
+        enable_dev_model = parse_bool_env("WORKER_ENABLE_DEV_MODEL", False)
+        dev_model_forward_url = os.getenv("DEV_MODEL_FORWARD_URL", "").strip() or None
         docker_gpu_runtime = os.getenv("DOCKER_GPU_RUNTIME", "").strip() or None
         grpc_keepalive_time_ms = parse_int_env(
             "SUPERVISOR_GRPC_KEEPALIVE_TIME_MS", 300_000
@@ -167,6 +171,8 @@ class WorkerConfig:
             network_bandwidth_bytes_per_sec=network_bandwidth_bytes_per_sec,
             executor_idle_cleanup_sec=executor_idle_cleanup_sec,
             enable_mp_executors=enable_mp_executors,
+            enable_dev_model=enable_dev_model,
+            dev_model_forward_url=dev_model_forward_url,
             docker_gpu_runtime=docker_gpu_runtime,
             ssh_limits=ssh_limits,
             enable_ssh_gpu_limit=enable_ssh_gpu_limit,

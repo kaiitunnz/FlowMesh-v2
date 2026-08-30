@@ -22,6 +22,7 @@ class TestExecutorRegistry:
             "vllm_lora",
             "vllm_embedding",
             "vllm_serve",
+            "dev_model",
             "ppo",
             "dpo",
             "sft",

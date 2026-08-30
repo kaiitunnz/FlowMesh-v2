@@ -631,6 +631,20 @@ STACK_ENV_SCHEMA = EnvSchema(
                     var_type=EnvVarType.FLOAT,
                     min_value=0,
                 ),
+                EnvVar(
+                    "WORKER_ENABLE_DEV_MODEL",
+                    "false",
+                    var_type=EnvVarType.BOOL,
+                    description="Advertise the GPU-free dev_model serving executor "
+                    "(development / test backend).",
+                ),
+                EnvVar(
+                    "DEV_MODEL_FORWARD_URL",
+                    var_type=EnvVarType.URL,
+                    url_schemes={"http", "https"},
+                    description="Upstream OpenAI-compatible base URL dev_model "
+                    "forwards to; canned deterministic responses when unset.",
+                ),
             ],
         ),
         EnvSection(
