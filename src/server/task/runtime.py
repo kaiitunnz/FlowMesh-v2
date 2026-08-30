@@ -707,6 +707,10 @@ class TaskRuntime:
         ]
         if terminal_ids:
             self._persist_terminal_locked(*terminal_ids)
+        else:
+            self._workflow_registry.commit_transition(
+                workflow_id, sched=self._sched_locked(workflow_id)
+            )
 
     def _reclaim_vault_if_settled_locked(self, workflow_id: str) -> None:
         """Purge a workflow's vaulted credentials once its last task has settled.
@@ -721,10 +725,6 @@ class TaskRuntime:
         records = [r for r in self._tasks.values() if r.workflow_id == workflow_id]
         if records and all(r.status in TERMINAL_TASK_STATUSES for r in records):
             self._secret_vault.purge(workflow_id)
-        else:
-            self._workflow_registry.commit_transition(
-                workflow_id, sched=self._sched_locked(workflow_id)
-            )
 
     # ------------------------------------------------------------------ #
     # Ready queue helpers
