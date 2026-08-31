@@ -24,9 +24,11 @@ spec:
           taskType: agent
           task: >-
             Break "recent advances in retrieval-augmented generation" into three
-            facets (retrieval methods, generation grounding, evaluation). For each,
-            call spawn_agent with region "reviewer" and an args object naming the
-            facet. After the reviewers return, output their combined findings.
+            facets (retrieval methods, generation grounding, evaluation). For each
+            facet, call spawn_agent with region "reviewer" and an args object naming
+            the facet, then seal the spawns and finish. Do not wait for or summarize
+            the reviewers yourself — a downstream merge agent combines their findings
+            from the region's join aggregate.
           v2:
             authority: { invoke: [search/v1, model], delegate: [search/v1, model] }
             tools:
@@ -78,12 +80,12 @@ spec:
         spec:
           taskType: agent
           task: >-
-            Combine the lead agent's collected reviewer findings under INPUTS into one
-            cohesive markdown literature review titled "Recent Advances in
-            Retrieval-Augmented Generation", preserving the cited source URLs. Output the
-            markdown as your final message.
+            Combine the per-facet reviewer findings under INPUTS into one cohesive
+            markdown literature review titled "Recent Advances in Retrieval-Augmented
+            Generation", preserving the cited source URLs. Output the markdown as your
+            final message.
           v2:
-            inputs: [{ name: reviews, from: lead }]
+            inputs: [{ name: reviews, from: lead, region: reviewer }]
             authority: { invoke: [model], delegate: [] }
             tools: [{ name: model }]
             boundary: [invocation, yield]

@@ -14,7 +14,12 @@ from pathlib import Path
 from typing import Any, cast
 
 from server.config import OrchestrationConfig
-from server.orchestration import Advance, PublicationOutcome, WorkItemStatus
+from server.orchestration import (
+    Advance,
+    OrchestrationEngine,
+    PublicationOutcome,
+    WorkItemStatus,
+)
 from server.orchestration.state import (
     AcceptedInput,
     AcceptedInputMember,
@@ -175,6 +180,155 @@ def test_spawn_mints_a_typed_child_entry_input_not_spec_data() -> None:
     (accepted,) = engine.accepted_inputs_for_task(child)
     assert accepted.target_port == "facet" and accepted.provenance == "spawn_element"
     assert accepted.members[0].value_ref.literal == '{"facet": "retrieval methods"}'
+
+
+def _fanout_bundle(
+    completion: JoinCompletion = JoinCompletion.ALL_SETTLED,
+    first_k: int | None = None,
+    residual: str | None = None,
+):
+    child = LeafOperator(
+        operator_id="R",
+        source_ref="R",
+        outputs=(Port(name="out"),),
+        profile=leaf_profile(TaskType.ECHO),
+    )
+    spawn = SpawnRegion(
+        operator_id="S",
+        source_ref="S",
+        outputs=(Port(name="children"),),
+        child_template_ref="R",
+    )
+    join = JoinRegion(
+        operator_id="J",
+        source_ref="J",
+        inputs=(Port(name="children"),),
+        outputs=(Port(name="out"),),
+        completion=completion,
+        first_k=first_k,
+        residual_policy=residual,
+    )
+    edges = [
+        TemplateEdge(from_op="P", to_op="S"),
+        TemplateEdge(from_op="S", to_op="J"),
+        TemplateEdge(from_op="J", to_op="M", to_port="reviews"),
+    ]
+    return _bundle(
+        [_leaf("P"), child, spawn, join, _input_agent("M", ("reviews",))],
+        edges,
+        (_decl("out:M", "M"),),
+    )
+
+
+def _member_indices(engine: OrchestrationEngine, task_id: str) -> list[int | None]:
+    plan = engine.agent_input_plan(task_id)
+    assert plan is not None
+    return [m.child_index for m in plan.ports[0].members]
+
+
+def _member_pairs(
+    engine: OrchestrationEngine, task_id: str
+) -> list[tuple[int | None, str | None]]:
+    plan = engine.agent_input_plan(task_id)
+    assert plan is not None
+    return [(m.child_index, m.legacy_task_id) for m in plan.ports[0].members]
+
+
+def test_region_aggregate_replays_identically_after_restart() -> None:
+    bundle = _fanout_bundle()
+    engine = _engine(bundle, granted=frozenset({"model"}))
+    engine.on_succeeded("P")
+    kids = [engine.materialize_child("S").ready[0] for _ in range(3)]
+    engine.seal_spawn("S")
+    for task_id in (kids[2], kids[0], kids[1]):
+        engine.on_succeeded(task_id)
+    before = _member_pairs(engine, "M")
+    # A restart rebuilds the engine from the durable snapshot; the frozen aggregate
+    # replays identically — same members, same order, no re-derivation.
+    restored = OrchestrationEngine(engine.to_snapshot(), bundle)
+    after = _member_pairs(restored, "M")
+    assert before == after == [(0, kids[0]), (1, kids[1]), (2, kids[2])]
+
+
+def test_early_join_freezes_membership_against_a_residual_child() -> None:
+    bundle = _fanout_bundle(
+        completion=JoinCompletion.FIRST_K, first_k=2, residual="continue"
+    )
+    engine = _engine(bundle, granted=frozenset({"model"}))
+    engine.on_succeeded("P")
+    kids = [engine.materialize_child("S").ready[0] for _ in range(3)]
+    engine.on_succeeded(kids[0])
+    engine.on_succeeded(kids[1])  # first_k=2 met -> early release freezes membership
+    frozen = _member_indices(engine, "M")
+    engine.on_succeeded(kids[2])  # a residual child settling later must not mutate it
+    assert frozen == _member_indices(engine, "M") == [0, 1]
+
+
+_REGION_OUTPUT_WF = """
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {name: region-output}
+spec:
+  graph:
+    nodes:
+      - name: lead
+        spec:
+          taskType: agent
+          task: spawn reviewers
+          v2:
+            authority: {invoke: [model], delegate: [model]}
+            tools: [{name: model}]
+            boundary: [spawn, spawn_seal, yield]
+            child: [{name: reviewer, authority: {invoke: [model], delegate: []}}]
+          harness: {backend: scripted, version: v1, params: {script: []}}
+      - name: reviewer
+        spec:
+          taskType: agent
+          task: research the facet
+          v2:
+            inputs: [facet]
+            authority: {invoke: [model], delegate: []}
+            tools: [{name: model}]
+            boundary: [invocation, yield]
+          harness: {backend: scripted, version: v1, params: {script: []}}
+      - name: merge
+        spec:
+          taskType: agent
+          task: merge the reviews
+          v2:
+            inputs: [{name: reviews, from: lead, region: reviewer}]
+            authority: {invoke: [model], delegate: []}
+            tools: [{name: model}]
+            boundary: [invocation, yield]
+          harness: {backend: scripted, version: v1, params: {script: []}}
+"""
+
+
+def test_region_output_binds_the_child_region_join_to_the_merge_input() -> None:
+    from server.task.parser import parse_workflow
+    from server.task.v2 import FrontendWorkflowSource, compile_workflow
+    from server.task.v2.compiler.agent_binding import AgentBindingDefaults
+    from server.task.v2.representations.operators import JoinRegion as _Join
+    from shared.tasks.specs import ModelBindingMode
+
+    binding = AgentBindingDefaults(
+        default_backend="scripted",
+        default_version="v1",
+        default_mode=ModelBindingMode.OPENAI,
+        default_url="http://x/v1",
+        default_model="m",
+    )
+    parsed = parse_workflow(_REGION_OUTPUT_WF, "native")
+    source = FrontendWorkflowSource.capture(_REGION_OUTPUT_WF, "native", name="wf")
+    template, _ = compile_workflow("wfl-x", parsed, source, bindings=binding)
+    by_id = {op.operator_id: op for op in template.operators}
+    reviews_edges = [
+        e for e in template.edges if e.to_port == "reviews" and not e.feedback
+    ]
+    assert len(reviews_edges) == 1
+    # The merge's input is delivered by the lead's reviewer child-region join aggregate.
+    assert isinstance(by_id.get(reviews_edges[0].from_op), _Join)
+    assert reviews_edges[0].from_op.endswith(":reviewer:spawn:join")
 
 
 def _runtime(budget: int | None = None) -> TaskRuntime:

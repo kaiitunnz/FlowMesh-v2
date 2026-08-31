@@ -287,10 +287,12 @@ def _apply_agent_inputs(
     """Declare an agent's delivered input ports and their producer bindings.
 
     Each ``spec.v2.inputs`` entry adds a named input port delivered on the agent's first
-    turn. A ``{name, from}`` entry also wires a delivery edge from the producer's output
-    to that port; a bare ``{name}`` entry (a spawn child's entry port) is filled by the
-    spawned element. Declaring inputs is opt-in — an agent with none keeps ordering-only
-    dependencies. The port set augments the lowered ports so model/ordering ports stay.
+    turn. A ``{name, from}`` entry wires a delivery edge from the producer's output; a
+    ``{name, from, region}`` entry binds the parent agent's child-region join aggregate
+    (its region output) — dynamically-spawned children merged downstream, not mid-run; a
+    bare ``{name}`` entry (a spawn child's entry port) is filled by the spawned element.
+    Declaring inputs is opt-in — an agent with none keeps ordering-only deps. The port
+    set augments the lowered ports so model/ordering ports stay.
     """
     inputs = v2.get("inputs")
     if inputs is None:
@@ -302,10 +304,13 @@ def _apply_agent_inputs(
     ports: list[Port] = list(op.inputs)
     declared: list[str] = []
     for entry in inputs:
+        region: str | None = None
         if isinstance(entry, str):
             port_name, source = entry, None
         elif isinstance(entry, dict) and entry.get("name"):
-            port_name, source = str(entry["name"]), entry.get("from")
+            port_name = str(entry["name"])
+            source = entry.get("from")
+            region = str(entry["region"]) if entry.get("region") else None
         else:
             raise compile_error(
                 "v2.bad-input-port",
@@ -316,12 +321,12 @@ def _apply_agent_inputs(
         if not any(port.name == port_name for port in ports):
             ports.append(Port(name=port_name))
         if source is not None:
+            parent_op = name_to_op.get(str(source), str(source))
+            # A region output binds the parent's child-region join aggregate; a plain
+            # source binds the producer's own output.
+            from_op = f"{parent_op}:{region}:spawn:join" if region else parent_op
             acc.edges.append(
-                TemplateEdge(
-                    from_op=name_to_op.get(str(source), str(source)),
-                    to_op=op.operator_id,
-                    to_port=port_name,
-                )
+                TemplateEdge(from_op=from_op, to_op=op.operator_id, to_port=port_name)
             )
     return op.model_copy(
         update={"inputs": tuple(ports), "declared_input_ports": tuple(declared)}

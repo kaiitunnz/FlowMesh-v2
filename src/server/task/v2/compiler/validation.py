@@ -508,6 +508,45 @@ def _check_agent_inputs(
     return diags
 
 
+def _check_region_outputs(
+    template: LogicalWorkflowTemplate, loc: dict[str, SourceLocation]
+) -> list[Diagnostic]:
+    """A region-output binding delivers a child region's join aggregate downstream.
+
+    An edge into an agent input port from a join must come from a matched join — a
+    top-level region join or a declared child-region join of an agent. Data delivery is
+    authority-neutral, so the consumer need not hold the region's invoke authority; this
+    only rejects an edge from a join that no spawn region owns (a dangling aggregate).
+    """
+    diags: list[Diagnostic] = []
+    op_by_id = {op.operator_id: op for op in template.operators}
+    matched_joins = {
+        edge.to_op
+        for edge in template.edges
+        if isinstance(op_by_id.get(edge.from_op), SpawnRegion)
+        and isinstance(op_by_id.get(edge.to_op), JoinRegion)
+    }
+    for edge in template.edges:
+        if edge.feedback or edge.to_port is None:
+            continue
+        source = op_by_id.get(edge.from_op)
+        target = op_by_id.get(edge.to_op)
+        if not isinstance(source, JoinRegion) or not isinstance(target, AgentOperator):
+            continue
+        if edge.from_op not in matched_joins:
+            diags.append(
+                Diagnostic(
+                    code="dataflow.unmatched-region-output",
+                    message=(
+                        f"region-output edge into {target.operator_id!r} reads join "
+                        f"{edge.from_op!r} that no spawn region feeds"
+                    ),
+                    location=loc.get(edge.to_op),
+                )
+            )
+    return diags
+
+
 def _check_result_declarations(
     template: LogicalWorkflowTemplate, loc: dict[str, SourceLocation]
 ) -> list[Diagnostic]:
@@ -654,6 +693,7 @@ def validate_compilation(
     diags.extend(_check_spawn_child_targets(template, loc))
     diags.extend(_check_child_regions(template, loc))
     diags.extend(_check_agent_inputs(template, loc))
+    diags.extend(_check_region_outputs(template, loc))
     diags.extend(_check_result_declarations(template, loc))
     diags.extend(_check_cycles(template, loc))
 

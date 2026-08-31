@@ -267,6 +267,39 @@ class Record(BaseModel):
     value_ref: ValueRef | None = None
 
 
+class RegionAggregateMember(BaseModel):
+    """One frozen member of a region-join aggregate, captured at join release.
+
+    Retains the settled child's activation, its stable key (child index, never arrival
+    order), the selected source output port, its terminal outcome, and an immutable
+    value reference. Membership is frozen at release so a residual child never mutates
+    the emitted aggregate and a restart replays the same members.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    child_activation_id: str
+    child_key: str
+    source_port: str | None = None
+    outcome: PublicationOutcome
+    value_ref: ValueRef | None = None
+
+
+class RegionJoinAggregate(BaseModel):
+    """The immutable aggregate a join publishes at its region-output endpoint.
+
+    Materialized once when the join's release condition is met, ordered by stable child
+    key. A downstream edge delivers it like any other record, creating the consumer's
+    accepted input; the parent agent never receives it and never resumes for it.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    join_operator_id: str
+    activation_id: str
+    members: tuple[RegionAggregateMember, ...] = ()
+
+
 class AcceptedInputMember(BaseModel):
     """One durable member of an accepted input on an agent's target port.
 
@@ -469,6 +502,7 @@ class LedgerSnapshot(BaseModel):
     continuations: list[Continuation] = Field(default_factory=list)
     records: list[Record] = Field(default_factory=list)
     accepted_inputs: list[AcceptedInput] = Field(default_factory=list)
+    region_aggregates: list[RegionJoinAggregate] = Field(default_factory=list)
     invocations: list[Invocation] = Field(default_factory=list)
     attempts: list[Attempt] = Field(default_factory=list)
     boundary_events: list[BoundaryEvent] = Field(default_factory=list)

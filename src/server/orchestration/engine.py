@@ -86,6 +86,8 @@ from .state import (
     PublicationOutcome,
     Record,
     RecoveryDisposition,
+    RegionAggregateMember,
+    RegionJoinAggregate,
     ResultPublication,
     ResultSlot,
     Scope,
@@ -211,6 +213,10 @@ class OrchestrationEngine:
             self._accepted_by_activation.setdefault(accepted.activation_id, []).append(
                 accepted
             )
+        self._region_aggregates = list(snapshot.region_aggregates)
+        self._aggregate_by_join: dict[str, RegionJoinAggregate] = {
+            agg.join_operator_id: agg for agg in self._region_aggregates
+        }
         self._invocations = {i.invocation_id: i for i in snapshot.invocations}
         self._attempts = {a.attempt_id: a for a in snapshot.attempts}
         self._receipts = {r.invocation_id: r for r in snapshot.effect_receipts}
@@ -1471,22 +1477,28 @@ class OrchestrationEngine:
         for source in sources:
             if self._kind(source) is OperatorKind.JOIN:
                 provenance = "join_aggregate"
-                scope_id = self._scope_for_join(source)
-                if scope_id is None or scope_id not in self._released_scopes:
-                    return None
-                for child in self._materialized_children(scope_id):
-                    child_wi = self._work_items[
-                        self._wi_by_activation[child.activation_id]
-                    ]
-                    if child_wi.outcome is None:
-                        return None
+                aggregate = self._aggregate_by_join.get(source)
+                if aggregate is None:
+                    return (
+                        None  # the join has not released and frozen its aggregate yet
+                    )
+                for member in sorted(aggregate.members, key=lambda m: m.child_key):
+                    child_op = (
+                        self._activations[member.child_activation_id].operator_id
+                        if member.child_activation_id in self._activations
+                        else source
+                    )
                     members.append(
                         self._member_plan(
-                            child.operator_id,
-                            child.activation_id,
-                            child.child_index,
-                            child_wi.outcome,
-                            child_wi.value_ref,
+                            child_op,
+                            member.child_activation_id,
+                            (
+                                int(member.child_key)
+                                if member.child_key.isdigit()
+                                else None
+                            ),
+                            member.outcome,
+                            member.value_ref,
                             ordinal,
                         )
                     )
@@ -2158,6 +2170,7 @@ class OrchestrationEngine:
         assert isinstance(join, JoinRegion)
         outcome, value_ref = self._join_result(join, scope_id)
         children = self._materialized_children(scope_id)
+        self._freeze_region_aggregate(join, join_op, scope_id)
         self._emit(
             "join_released",
             operator_id=join_op,
@@ -2169,6 +2182,45 @@ class OrchestrationEngine:
         return self._deliver_record(
             join_op, self._control_activation(join_op), value_ref
         )
+
+    def _freeze_region_aggregate(
+        self, join: JoinRegion, join_op: str, scope_id: str
+    ) -> None:
+        """Capture an immutable region-join aggregate at release, ordered by child key.
+
+        A full-closure join freezes every settled child; an early join freezes only its
+        selected qualifiers. Membership is fixed here so a residual child never mutates
+        the emitted aggregate and a restart replays the same members.
+        """
+        selected = (
+            self._qualifiers(scope_id)
+            if join.completion in _EARLY_JOINS
+            else self._materialized_children(scope_id)
+        )
+        members = tuple(
+            RegionAggregateMember(
+                child_activation_id=child.activation_id,
+                child_key=str(
+                    child.child_index if child.child_index is not None else 0
+                ),
+                source_port="out",
+                outcome=self._work_items[
+                    self._wi_by_activation[child.activation_id]
+                ].outcome
+                or PublicationOutcome.SUCCESS,
+                value_ref=self._work_items[
+                    self._wi_by_activation[child.activation_id]
+                ].value_ref,
+            )
+            for child in selected
+        )
+        aggregate = RegionJoinAggregate(
+            join_operator_id=join_op,
+            activation_id=self._control_activation(join_op),
+            members=members,
+        )
+        self._region_aggregates.append(aggregate)
+        self._aggregate_by_join[join_op] = aggregate
 
     def _join_result(
         self, join: JoinRegion, scope_id: str
@@ -2784,6 +2836,7 @@ class OrchestrationEngine:
             continuations=list(self._continuations.values()),
             records=list(self._records),
             accepted_inputs=list(self._accepted_inputs),
+            region_aggregates=list(self._region_aggregates),
             invocations=list(self._invocations.values()),
             attempts=list(self._attempts.values()),
             boundary_events=list(self._boundary_events.values()),
