@@ -39,8 +39,6 @@ from ..task.v2.representations.operators import (
 )
 from .model_secret_vault import ModelSecretVault
 
-_INJECT_CALL_PREFIX = "fab-"
-
 _BINDING_MODE_TO_GATEWAY = {
     ModelBindingMode.CANNED: GatewayMode.CANNED,
     ModelBindingMode.ECHO: GatewayMode.ECHO,
@@ -380,7 +378,7 @@ class AgentModelGateway:
             # the turn (which fails the episode), buffer this one deterministically:
             # drop the new facade calls, keep native calls, and clean-complete so the
             # outstanding batch delivers first and the model can retry next turn.
-            kept = [item for item in output if item not in facades]
+            kept = [item for item in output if all(item is not f for f in facades)]
             return kept + _message_output(
                 "A prior fabric tool call is still in flight; its results will arrive "
                 "before your next turn. Do not repeat the call now."
@@ -507,27 +505,12 @@ def _facade_calls(
     ]
 
 
-def _other_tool_calls(
-    output: Any, by_name: dict[str, FacadeDescriptor]
-) -> list[dict[str, Any]]:
-    if not isinstance(output, list):
-        return []
-    return [
-        item
-        for item in output
-        if isinstance(item, dict)
-        and item.get("type") == "function_call"
-        and item.get("name") not in by_name
-    ]
-
-
 def _forward_index(history: Any) -> int:
     """The settled-outcome count in the turn history, for a re-drive-stable correlation.
 
     A harness posts its full turn history each turn, so a re-drive before a facade's
-    outcome injects derives the same base, while every injected outcome (a batch member
-    under its own call id, or a spawn under a ``fab-`` id) adds a function-call output
-    that advances the base for the next turn's facades.
+    outcome injects derives the same base, while every injected outcome adds a
+    function-call output that advances the base for the next turn's facades.
     """
     if not isinstance(history, list):
         return 0

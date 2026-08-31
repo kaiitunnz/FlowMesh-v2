@@ -17,6 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from ..config import WebSearchConfig
 from ..orchestration.tool_dispatch import (
+    SEARCH_INTERFACE,
     ToolInvocationEnvelope,
     ToolOutcome,
     ToolOutcomeStatus,
@@ -29,8 +30,6 @@ from .search_providers import (
     SearchUnavailable,
     build_search_provider,
 )
-
-SEARCH_INTERFACE = "search/v1"
 
 # (task_id, call_correlation, serialized ToolOutcome) — the runtime settles it durably.
 SettleCallback = Callable[[str, str, str], None]
@@ -48,13 +47,16 @@ class FabricToolBroker:
     ) -> None:
         self._cfg = config
         self._settle = settle
-        self._provider = provider or build_search_provider(config.provider)
+        self._provider = provider or build_search_provider(config)
         self._log = logger or logging.getLogger("fabric-tool-broker")
         self._pool = ThreadPoolExecutor(
             max_workers=4, thread_name_prefix="fabric-tool-broker"
         )
         self._lock = threading.Lock()
-        self._calls: dict[str, int] = {}  # per-episode call budget, rebuildable
+        # Per-episode call budget. Best-effort: it is an in-memory count reset on
+        # restart, so an episode may exceed the budget across a crash — never
+        # exactly-once accounting, by design for this demo.
+        self._calls: dict[str, int] = {}
 
     def submit(self, env: ToolInvocationEnvelope) -> None:
         """Accept a recorded tool boundary and dispatch it off the agent's lane."""

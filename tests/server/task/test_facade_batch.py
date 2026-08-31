@@ -84,7 +84,7 @@ def _members(n: int) -> list[FacadeBatchMember]:
     ]
 
 
-def test_gate1_reverse_completion_is_one_ordered_resume() -> None:
+def test_reverse_order_completion_yields_one_ordered_resume() -> None:
     eng = _search_engine()
     eng.route_boundary_batch("A", "A:0", _members(3))
     assert eng.work_item("A").status is WorkItemStatus.BLOCKED
@@ -102,7 +102,7 @@ def test_gate1_reverse_completion_is_one_ordered_resume() -> None:
     assert [o.injection_tool for o in outcomes] == ["web_search"] * 3
 
 
-def test_gate2_a_crash_reissues_only_unresolved_members() -> None:
+def test_a_crash_reissues_only_unresolved_members() -> None:
     eng = _search_engine()
     eng.route_boundary_batch("A", "A:0", _members(3))
     eng.settle_boundary_outcome("A", "A:0:1", value="done")
@@ -112,7 +112,7 @@ def test_gate2_a_crash_reissues_only_unresolved_members() -> None:
     assert corrs == ["A:0:0", "A:0:2"]
 
 
-def test_gate3_all_recorded_injects_the_record_without_requery() -> None:
+def test_a_fully_recorded_batch_injects_without_requery() -> None:
     eng = _search_engine()
     eng.route_boundary_batch("A", "A:0", _members(3))
     for i in range(3):
@@ -124,7 +124,7 @@ def test_gate3_all_recorded_injects_the_record_without_requery() -> None:
     assert [o.value for o in outcomes] == ["r0", "r1", "r2"]
 
 
-def test_gate4_a_late_duplicate_settle_does_not_requeue() -> None:
+def test_a_late_duplicate_settle_does_not_requeue() -> None:
     eng = _search_engine()
     eng.route_boundary_batch("A", "A:0", _members(2))
     eng.settle_boundary_outcome("A", "A:0:0", value="r0")
@@ -148,7 +148,7 @@ def _runtime(max_parallel: int) -> TaskRuntime:
     )
 
 
-def test_gate5_an_oversized_batch_settles_overflow_as_quota() -> None:
+def test_an_oversized_batch_settles_overflow_as_quota() -> None:
     async def run() -> None:
         runtime = _runtime(max_parallel=2)
         dispatched: list[ToolInvocationEnvelope] = []
@@ -198,17 +198,19 @@ def test_gate5_an_oversized_batch_settles_overflow_as_quota() -> None:
     asyncio.run(run())
 
 
-def test_gate6_native_shell_is_permitted_without_network_egress() -> None:
+def test_native_shell_is_permitted_without_network_egress() -> None:
     # The codex sandbox permits native shell but denies it network, so a native curl
-    # cannot bypass the mediated search/v1 facade — the only egress.
-    from pathlib import Path as _Path
+    # cannot bypass the mediated search/v1 facade — the only egress. Guarded so the test
+    # does not couple to the optional runtime-harness-codex dependency.
+    import pytest
 
+    pytest.importorskip("openai_codex")
     from worker.executors.harness.codex_transport import CodexTransportConfig
 
     cfg = CodexTransportConfig(
         base_url="http://gw",
         model="m",
-        codex_home=_Path(tempfile.gettempdir()) / "ch",
+        codex_home=Path(tempfile.gettempdir()) / "ch",
         initial_input="t",
         task_id="tsk-1",
     )

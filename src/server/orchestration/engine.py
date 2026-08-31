@@ -687,6 +687,8 @@ class OrchestrationEngine:
         if self._is_boundary_redrive(wi, event):
             return Advance()
         op = self._operators.get(wi.operator_id)
+        # An agent boundary is authority-checked against the operator's declared face; a
+        # leaf boundary carries no authority ceiling and defers its invocation directly.
         if isinstance(op, AgentOperator):
             if (denial := self._validate_agent_boundary(op, wi, event)) is not None:
                 return self._record_boundary_denial(wi, event, denial)
@@ -757,10 +759,13 @@ class OrchestrationEngine:
                 batch_id=batch_id,
                 batch_ordinal=member.ordinal,
             )
+            # Only an agent operator originates a batch; a non-agent operator is a
+            # fabric misconfiguration, denied fail-closed rather than minting an
+            # unvalidated invocation.
             denial = (
                 self._validate_agent_boundary(op, wi, event)
                 if isinstance(op, AgentOperator)
-                else None
+                else DenialKind.AUTHORITY
             )
             if denial is not None:
                 self._record_boundary(wi, event, denial=denial)
@@ -943,7 +948,15 @@ class OrchestrationEngine:
             return Advance()
         corr = (wi.activation_id, call_correlation)
         env = self._boundary_events.get(corr)
-        if env is not None and value is not None and env.outcome_value is None:
+        resolved = env is not None and (
+            env.outcome_value is not None or env.denial is not None
+        )
+        if resolved:
+            # A duplicate/late settle of an already-resolved member is an idempotent
+            # no-op: it never re-runs the deliver path, so it cannot re-ready or
+            # re-inject a stale outcome once the episode moved on to another boundary.
+            return Advance()
+        if env is not None and value is not None:
             env = env.model_copy(update={"outcome_value": value})
             self._boundary_events[corr] = env
         if env is not None and env.batch_id is not None:

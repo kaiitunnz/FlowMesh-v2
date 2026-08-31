@@ -174,3 +174,62 @@ def test_duckduckgo_provider_maps_http_faults(monkeypatch: Any) -> None:
         raise AssertionError("expected a timeout fault")
     except SearchTimeout:
         pass
+
+
+def test_serper_provider_parses_organic_and_maps_faults(monkeypatch: Any) -> None:
+    import server.services.search_providers as mod
+
+    class _Resp:
+        def __init__(self, code: int, payload: dict[str, Any]) -> None:
+            self.status_code = code
+            self._payload = payload
+
+        def json(self) -> dict[str, Any]:
+            return self._payload
+
+    seen: dict[str, Any] = {}
+
+    def _post(url: str, **kwargs: Any) -> _Resp:
+        seen["url"] = url
+        seen["key"] = kwargs["headers"].get("X-API-KEY")
+        return _Resp(
+            200,
+            {"organic": [{"title": "T", "link": "https://x/y", "snippet": "S"}]},
+        )
+
+    monkeypatch.setattr(mod.requests, "post", _post)
+    results = mod.SerperProvider("k-123").search("q", max_results=3, timeout_sec=1.0)
+    assert seen["url"] == "https://google.serper.dev/search" and seen["key"] == "k-123"
+    assert results == [mod.SearchResult(title="T", url="https://x/y", snippet="S")]
+
+    monkeypatch.setattr(mod.requests, "post", lambda *a, **k: _Resp(429, {}))
+    try:
+        mod.SerperProvider("k").search("q", max_results=3, timeout_sec=1.0)
+        raise AssertionError("expected a quota fault")
+    except SearchQuotaExceeded:
+        pass
+
+
+def test_build_search_provider_selects_by_config() -> None:
+    from server.config import WebSearchConfig
+    from server.services.search_providers import (
+        DuckDuckGoProvider,
+        SerperProvider,
+        build_search_provider,
+    )
+
+    assert isinstance(
+        build_search_provider(WebSearchConfig(provider="duckduckgo")),
+        DuckDuckGoProvider,
+    )
+    keyed = build_search_provider(WebSearchConfig(provider="serper", api_key="k-abc"))
+    assert isinstance(keyed, SerperProvider)
+    for bad in (
+        WebSearchConfig(provider="serper"),  # keyed provider with no key
+        WebSearchConfig(provider="nope"),  # unknown provider
+    ):
+        try:
+            build_search_provider(bad)
+            raise AssertionError("expected a config error")
+        except ValueError:
+            pass

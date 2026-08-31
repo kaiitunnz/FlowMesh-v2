@@ -2001,8 +2001,11 @@ class TaskRuntime:
                     return usages
                 if batch is not None:
                     # The gateway captured a turn-scoped facade batch: route the whole
-                    # ordered membership, suspend once, and dispatch its members.
+                    # ordered membership, suspend once, and dispatch its members. Clear
+                    # both pending captures so a single origination can never leak.
                     record.pending_batch_origination = None
+                    record.pending_origination = None
+                    self._pending_originations.pop(task_id, None)
                     self._route_and_dispatch_batch_locked(
                         task_id, batch, harness_result.capsule
                     )

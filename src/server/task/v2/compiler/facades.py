@@ -8,6 +8,7 @@ it did not declare.
 """
 
 import json
+from typing import Any
 
 from shared.harness.boundary import BoundaryEventKind
 
@@ -16,9 +17,10 @@ from ..representations.operators import AgentOperator, FacadeDescriptor
 from .project import LoweringAccumulator
 
 _SPAWN_AGENT_NAME = "spawn_agent"
+_DEFAULT_SEARCH_NAME = "web_search"
 
 
-def _spawn_agent_schema() -> dict[str, object]:
+def _spawn_agent_schema() -> dict[str, Any]:
     return {
         "type": "function",
         "name": _SPAWN_AGENT_NAME,
@@ -43,7 +45,7 @@ def _spawn_agent_schema() -> dict[str, object]:
     }
 
 
-def _search_schema(name: str) -> dict[str, object]:
+def _search_schema(name: str) -> dict[str, Any]:
     return {
         "type": "function",
         "name": name,
@@ -87,7 +89,7 @@ def pin_agent_facades(acc: LoweringAccumulator) -> None:
         for interface in op.authority.invoke:
             if interface not in FABRIC_TOOL_INTERFACES:
                 continue
-            name = tool_name_for.get(interface, "web_search")
+            name = tool_name_for.get(interface, _DEFAULT_SEARCH_NAME)
             facades.append(
                 FacadeDescriptor(
                     name=name,
