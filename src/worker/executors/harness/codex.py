@@ -30,6 +30,7 @@ from shared.harness import (
     HarnessResult,
     HarnessResultKind,
     OutcomeKind,
+    render_input_envelope,
 )
 from shared.tasks.specs import AgentSpecStrict
 from shared.tasks.worker_message import WorkerTaskMessage
@@ -178,12 +179,14 @@ def build_codex_adapter(
     # keep both off the import path of a worker that never selects the codex backend.
     from .codex_transport import CodexTransportConfig, RealCodexAppServerTransport
 
+    dispatch = task.agent_episode
+    bindings = dispatch.input_bindings if dispatch is not None else ()
     transport = RealCodexAppServerTransport(
         CodexTransportConfig(
             base_url=base_url,
             model=model,
             codex_home=codex_home,
-            initial_input=_agent_task(spec),
+            initial_input=render_input_envelope(_agent_task(spec), bindings),
             task_id=task.task_id,
         )
     )

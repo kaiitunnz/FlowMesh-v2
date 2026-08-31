@@ -5,26 +5,39 @@ metadata:
   owner: researcher
   annotations:
     description: >-
-      Pre-defined graph fanout: three codex reviewer agents each research a facet of
-      "recent advances in retrieval-augmented generation" with the fabric web_search
-      tool, then a merging agent combines their findings into a cited markdown brief.
-      Each agent's model calls route through the FlowMesh agent-model gateway to
-      model_binding.url (a self-hosted fm-serve-vllm endpoint); its web_search calls are
-      captured server-side and executed by the fabric tool broker. Fill model_binding
-      url/model/api_key and point every harness.params.base_url at your FlowMesh gateway.
+      Graph-declared fanout over a producer's static facet list. A planner emits the
+      facets of "recent advances in retrieval-augmented generation"; a spawn region
+      fans out one codex reviewer agent per facet, each receiving its facet on a declared
+      input port and researching it with the fabric web_search tool; a join collects the
+      reviewers and a merging agent combines their findings, received on its own input
+      port, into a cited markdown brief. Each agent's model calls route through the
+      FlowMesh agent-model gateway to model_binding.url (a self-hosted fm-serve-vllm
+      endpoint); its web_search calls are captured server-side and executed by the fabric
+      tool broker. Fill model_binding url/model/api_key and point every
+      harness.params.base_url at your FlowMesh gateway.
 
 spec:
   graph:
     nodes:
-      - name: retrieval_methods
+      - name: planner
+        spec:
+          taskType: echo
+          data:
+            type: list
+            items:
+              - "retrieval methods for retrieval-augmented generation: dense retrieval, hybrid search, late interaction"
+              - "grounding generation on retrieved evidence: citation faithfulness, attribution, hallucination reduction"
+              - "evaluating retrieval-augmented generation systems: benchmarks, metrics, end-to-end evaluation"
+
+      - name: reviewer
         spec:
           taskType: agent
           task: >-
-            Research recent advances in retrieval methods for
-            retrieval-augmented generation (dense retrieval, hybrid search,
-            late interaction). Use the web_search tool to find current work and
-            cite source URLs. Write a short findings section.
+            You are assigned one facet of a survey on retrieval-augmented generation,
+            given under INPUTS. Use the web_search tool to find current work on that
+            facet, cite the source URLs, and write a short findings section for it.
           v2:
+            inputs: [facet]
             authority: { invoke: [search/v1, model], delegate: [] }
             tools:
               - { name: web_search, interface: "search/v1" }
@@ -42,68 +55,29 @@ spec:
             model: REPLACE_WITH_YOUR_SERVED_MODEL
             api_key: "REPLACE_WITH_YOUR_SERVE_KEY"
 
-      - name: generation_grounding
-        spec:
-          taskType: agent
-          task: >-
-            Research recent advances in grounding generation on retrieved
-            evidence for retrieval-augmented generation (citation faithfulness,
-            attribution, hallucination reduction). Use the web_search tool and
-            cite source URLs. Write a short findings section.
-          v2:
-            authority: { invoke: [search/v1, model], delegate: [] }
-            tools:
-              - { name: web_search, interface: "search/v1" }
-              - { name: model }
-            boundary: [invocation, yield]
-          harness:
-            backend: codex
-            version: v1
-            params:
-              base_url: http://REPLACE_WITH_FLOWMESH_GATEWAY_HOST:PORT
-              model: REPLACE_WITH_YOUR_SERVED_MODEL
-          model_binding:
-            mode: openai
-            url: https://REPLACE_WITH_YOUR_FM_SERVE_URL/v1
-            model: REPLACE_WITH_YOUR_SERVED_MODEL
-            api_key: "REPLACE_WITH_YOUR_SERVE_KEY"
+      - name: fanout
+        dependsOn: [planner]
+        region:
+          kind: spawn
+          child: reviewer
+          authority: { invoke: [search/v1, model], delegate: [] }
 
-      - name: evaluation
-        spec:
-          taskType: agent
-          task: >-
-            Research recent advances in evaluating retrieval-augmented
-            generation systems (benchmarks, metrics, end-to-end evaluation).
-            Use the web_search tool and cite source URLs. Write a short findings
-            section.
-          v2:
-            authority: { invoke: [search/v1, model], delegate: [] }
-            tools:
-              - { name: web_search, interface: "search/v1" }
-              - { name: model }
-            boundary: [invocation, yield]
-          harness:
-            backend: codex
-            version: v1
-            params:
-              base_url: http://REPLACE_WITH_FLOWMESH_GATEWAY_HOST:PORT
-              model: REPLACE_WITH_YOUR_SERVED_MODEL
-          model_binding:
-            mode: openai
-            url: https://REPLACE_WITH_YOUR_FM_SERVE_URL/v1
-            model: REPLACE_WITH_YOUR_SERVED_MODEL
-            api_key: "REPLACE_WITH_YOUR_SERVE_KEY"
+      - name: collect
+        dependsOn: [fanout]
+        region:
+          kind: join
+          completion: all_settled
 
       - name: merge_review
-        dependsOn: [retrieval_methods, generation_grounding, evaluation]
         spec:
           taskType: agent
           task: >-
-            Combine the three upstream findings sections into one cohesive
-            markdown literature review titled "Recent Advances in
-            Retrieval-Augmented Generation", preserving the cited source URLs.
-            Output the markdown as your final message.
+            Combine the per-facet reviewer findings under INPUTS into one cohesive
+            markdown literature review titled "Recent Advances in Retrieval-Augmented
+            Generation", preserving the cited source URLs. Output the markdown as your
+            final message.
           v2:
+            inputs: [{ name: reviews, from: collect }]
             authority: { invoke: [model], delegate: [] }
             tools: [{ name: model }]
             boundary: [invocation, yield]

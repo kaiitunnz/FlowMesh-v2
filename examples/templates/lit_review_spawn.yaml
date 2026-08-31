@@ -52,10 +52,11 @@ spec:
         spec:
           taskType: agent
           task: >-
-            Research your assigned facet of retrieval-augmented generation. Use the
-            web_search tool to find current work, cite the source URLs, and write a
-            short findings section for the facet.
+            You are assigned one facet of a survey on retrieval-augmented generation,
+            given under INPUTS. Use the web_search tool to find current work on that
+            facet, cite the source URLs, and write a short findings section for it.
           v2:
+            inputs: [facet]
             authority: { invoke: [search/v1, model], delegate: [] }
             tools:
               - { name: web_search, interface: "search/v1" }
@@ -74,15 +75,15 @@ spec:
             api_key: "REPLACE_WITH_YOUR_SERVE_KEY"
 
       - name: merge_review
-        dependsOn: [lead]
         spec:
           taskType: agent
           task: >-
-            Combine the lead agent's collected reviewer findings into one cohesive
-            markdown literature review titled "Recent Advances in Retrieval-Augmented
-            Generation", preserving the cited source URLs. Output the markdown as your
-            final message.
+            Combine the lead agent's collected reviewer findings under INPUTS into one
+            cohesive markdown literature review titled "Recent Advances in
+            Retrieval-Augmented Generation", preserving the cited source URLs. Output the
+            markdown as your final message.
           v2:
+            inputs: [{ name: reviews, from: lead }]
             authority: { invoke: [model], delegate: [] }
             tools: [{ name: model }]
             boundary: [invocation, yield]

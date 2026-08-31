@@ -1,5 +1,6 @@
 from .adapter import (
     FACADE_TOOLS,
+    INPUT_RENDERER_VERSION,
     REQUIRED_MEDIATED_FACADES,
     AgentEpisodeDispatch,
     DeliveredOutcome,
@@ -9,13 +10,17 @@ from .adapter import (
     HarnessCapsule,
     HarnessResult,
     HarnessResultKind,
+    InputBinding,
+    InputBindingMember,
     MediatedFacade,
     OutcomeKind,
 )
 from .boundary import BoundaryEventKind, BoundaryRequest, DenialKind
+from .input_render import render_input_envelope
 
 __all__ = [
     "FACADE_TOOLS",
+    "INPUT_RENDERER_VERSION",
     "REQUIRED_MEDIATED_FACADES",
     "AgentEpisodeDispatch",
     "BoundaryEventKind",
@@ -28,6 +33,9 @@ __all__ = [
     "HarnessCapsule",
     "HarnessResult",
     "HarnessResultKind",
+    "InputBinding",
+    "InputBindingMember",
     "MediatedFacade",
     "OutcomeKind",
+    "render_input_envelope",
 ]

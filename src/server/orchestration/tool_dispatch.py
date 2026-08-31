@@ -85,6 +85,46 @@ class FacadeBatchOrigination(BaseModel):
     members: tuple[FacadeBatchMember, ...]
 
 
+class InputMemberPlan(BaseModel):
+    """One member of an agent input the engine identifies for the runtime to resolve.
+
+    The engine owns membership and ordering; the runtime resolves ``value_ref`` to a
+    frozen value and digest. A single producer binding yields one member; a merge/join
+    aggregate yields one per settled source child, ordered by the declared contract.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    source_operator_id: str
+    source_activation_id: str
+    child_index: int | None = None
+    outcome: str
+    value_ref_kind: str
+    legacy_task_id: str | None = None
+    collection_key: str | None = None
+    literal: str | None = None
+    ordinal: int = 0
+
+
+class InputPortPlan(BaseModel):
+    """The ordered members bound to one declared agent input port."""
+
+    model_config = ConfigDict(frozen=True)
+
+    target_port: str
+    provenance: str
+    members: tuple[InputMemberPlan, ...] = ()
+
+
+class AgentInputPlan(BaseModel):
+    """The engine's per-port input membership for an activation, to be resolved."""
+
+    model_config = ConfigDict(frozen=True)
+
+    activation_id: str
+    ports: tuple[InputPortPlan, ...] = ()
+
+
 class ToolOutcomeStatus(StrEnum):
     """The typed result class of a fabric-served tool call, all durably injected."""
 

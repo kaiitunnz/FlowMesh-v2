@@ -213,7 +213,10 @@ def _apply_one(
 
     if isinstance(op, AgentOperator):
         return _apply_agent_child_regions(
-            _apply_agent_v2(op, v2, name), v2, name_to_op, acc
+            _apply_agent_inputs(_apply_agent_v2(op, v2, name), v2, name_to_op, acc),
+            v2,
+            name_to_op,
+            acc,
         )
     if isinstance(op, LeafOperator):
         return _apply_leaf_v2(op, v2, name)
@@ -273,6 +276,56 @@ def _apply_agent_child_regions(
         acc.edges.append(TemplateEdge(from_op=spawn_id, to_op=join_id))
         refs.append(ChildRegionRef(name=role, spawn_ref=spawn_id))
     return op.model_copy(update={"child_region_refs": tuple(refs)})
+
+
+def _apply_agent_inputs(
+    op: AgentOperator,
+    v2: dict[str, Any],
+    name_to_op: dict[str, str],
+    acc: LoweringAccumulator,
+) -> AgentOperator:
+    """Declare an agent's delivered input ports and their producer bindings.
+
+    Each ``spec.v2.inputs`` entry adds a named input port delivered on the agent's first
+    turn. A ``{name, from}`` entry also wires a delivery edge from the producer's output
+    to that port; a bare ``{name}`` entry (a spawn child's entry port) is filled by the
+    spawned element. Declaring inputs is opt-in — an agent with none keeps ordering-only
+    dependencies. The port set augments the lowered ports so model/ordering ports stay.
+    """
+    inputs = v2.get("inputs")
+    if inputs is None:
+        return op
+    if not isinstance(inputs, list):
+        raise compile_error(
+            "v2.inputs-not-list", "spec.v2.inputs must be a list", op.source_ref
+        )
+    ports: list[Port] = list(op.inputs)
+    declared: list[str] = []
+    for entry in inputs:
+        if isinstance(entry, str):
+            port_name, source = entry, None
+        elif isinstance(entry, dict) and entry.get("name"):
+            port_name, source = str(entry["name"]), entry.get("from")
+        else:
+            raise compile_error(
+                "v2.bad-input-port",
+                "each spec.v2.input is a name or a {name, from} mapping",
+                op.source_ref,
+            )
+        declared.append(port_name)
+        if not any(port.name == port_name for port in ports):
+            ports.append(Port(name=port_name))
+        if source is not None:
+            acc.edges.append(
+                TemplateEdge(
+                    from_op=name_to_op.get(str(source), str(source)),
+                    to_op=op.operator_id,
+                    to_port=port_name,
+                )
+            )
+    return op.model_copy(
+        update={"inputs": tuple(ports), "declared_input_ports": tuple(declared)}
+    )
 
 
 def _apply_agent_v2(op: AgentOperator, v2: dict[str, Any], name: str) -> AgentOperator:

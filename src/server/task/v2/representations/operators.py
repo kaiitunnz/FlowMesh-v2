@@ -350,6 +350,10 @@ class AgentOperator(_OperatorBase):
     # The fabric-owned facade tools the gateway injects for this agent, pinned at
     # compile time from its declared tools and child regions.
     facades: tuple[FacadeDescriptor, ...] = ()
+    # Explicitly-declared input ports this agent receives on its first turn (opt-in
+    # dataflow), distinct from the auto-synthesized ordering-only port. Empty keeps
+    # bare dependencies ordering-only.
+    declared_input_ports: tuple[str, ...] = ()
     # The finite, uniquely named set of declared child regions a spawn_agent may select.
     child_region_refs: tuple[ChildRegionRef, ...] = ()
     # Legacy single-target shorthand the compiler normalizes into one declared region;

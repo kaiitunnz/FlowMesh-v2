@@ -37,6 +37,7 @@ listed here is in `.env.example`.
 | `ORCHESTRATOR_MAX_LOOP_ITERATIONS` | `1000` | Max loop iterations per v2 `LoopContext` |
 | `ORCHESTRATOR_MAX_ACTIVATIONS` | `10000` | Max dynamic activations per v2 workflow instance |
 | `ORCHESTRATOR_EPISODE_LOWERING` | `false` | Lower v2 templates into run-to-yield episodes |
+| `ORCHESTRATOR_AGENT_INPUT_BUDGET_BYTES` | `262144` | Max resolved first-turn input bytes per agent |
 | `AGENT_HARNESS_DEFAULT_BACKEND` | – | Default agent harness backend when a workflow sets none |
 | `AGENT_HARNESS_DEFAULT_VERSION` | – | Default agent harness backend version |
 | `AGENT_MODEL_GATEWAY_MODE` | `canned` | Managed model upstream mode (`canned`/`echo`/`openai`/`proxy`) |

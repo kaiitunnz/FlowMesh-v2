@@ -257,6 +257,13 @@ STACK_ENV_SCHEMA = EnvSchema(
                     description="Lower v2 templates into run-to-yield episodes.",
                     var_type=EnvVarType.BOOL,
                 ),
+                EnvVar(
+                    "ORCHESTRATOR_AGENT_INPUT_BUDGET_BYTES",
+                    "262144",
+                    description="Max resolved first-turn input bytes per agent.",
+                    var_type=EnvVarType.INT,
+                    min_value=1,
+                ),
             ],
         ),
         EnvSection(

@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import heapq
 import json
 import logging
@@ -10,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from shared.harness import (
+    INPUT_RENDERER_VERSION,
     AgentEpisodeDispatch,
     BoundaryEventKind,
     BoundaryRequest,
@@ -17,6 +19,8 @@ from shared.harness import (
     HarnessCapsule,
     HarnessResult,
     HarnessResultKind,
+    InputBinding,
+    InputBindingMember,
 )
 from shared.schemas.command import InterruptMessage
 from shared.schemas.result import ResultEnvelope, result_file_path
@@ -27,9 +31,12 @@ from shared.utils.ids import new_model_secret_ref
 from ..config import AgentBindingConfig, OrchestrationConfig
 from ..hooks import SUPPLIER_RESOLVERS
 from ..orchestration import (
+    AcceptedInput,
+    AcceptedInputMember,
     Advance,
     LedgerSnapshot,
     OrchestrationEngine,
+    PublicationOutcome,
     RecoveryDisposition,
     RegionError,
     ResultPublication,
@@ -79,6 +86,16 @@ from .v2.representations.plan import EpisodeSpec
 # A live-feasibility check: whether a lowered episode's declared alternative can be
 # placed now.
 EpisodeFeasibility = Callable[[EpisodeSpec], bool]
+
+
+def _stringify(value: Any) -> str:
+    """A stable string rendering of a resolved input value, for delivery and digest."""
+    return value if isinstance(value, str) else json.dumps(value, sort_keys=True)
+
+
+def _content_digest(value: str) -> str:
+    """A stable content digest over a resolved input value, for replay integrity."""
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def _binding_defaults(cfg: AgentBindingConfig) -> AgentBindingDefaults:
@@ -134,6 +151,7 @@ class TaskRuntime:
         self._secret_vault = secret_vault
         self._scope_budget = ScopeBudget.from_config(orchestration)
         self._web_search = orchestration.web_search
+        self._input_budget_bytes = orchestration.agent_input_budget_bytes
         self._agent_binding_defaults = _binding_defaults(orchestration.agent_binding)
         self._lowering_strategy = (
             LoweringStrategy.EPISODE_CUT
@@ -1353,12 +1371,20 @@ class TaskRuntime:
             if harness is None:
                 return None
             capsule_blob, outcomes = engine.episode_context(task_id)
+            # First-turn dataflow inputs are delivered only on the first dispatch; a
+            # resume injects only the harness's own delivered outcomes.
+            input_bindings = (
+                self._agent_input_bindings(engine, task_id)
+                if capsule_blob is None
+                else ()
+            )
             return AgentEpisodeDispatch(
                 backend=HarnessBackendKey(
                     backend=harness.backend, version=harness.version
                 ),
                 capsule_blob=capsule_blob,
                 delivered_outcomes=outcomes,
+                input_bindings=input_bindings,
             )
 
     def _synthesize_ready_children_locked(
@@ -1504,11 +1530,13 @@ class TaskRuntime:
     def _apply_advance_locked(self, workflow_id: str, advance: Advance) -> bool:
         # A ready/settle advance never carries a retry; the failure path drives those.
         assert not advance.retry, "retry is applied by the failure path"
+        engine = self._engines.get(workflow_id)
+        if engine is not None:
+            self._resolve_agent_inputs_locked(engine, advance)
         changed = False
         for task_id in advance.ready:
             if self._enqueue_ready_locked(task_id):
                 changed = True
-        engine = self._engines.get(workflow_id)
         for task_id in advance.failed:
             reason = (
                 engine and engine.failure_reason(task_id)
@@ -1564,10 +1592,26 @@ class TaskRuntime:
                 producer_task_id,
             )
             return advance
-        value_ref = ValueRef(kind="legacy_task_result", legacy_task_id=producer_task_id)
+        # An agent child receives its element through the typed accepted-input channel
+        # its declared entry port; a leaf child keeps the legacy spec.data injection.
+        child_is_agent = engine.agent_entry_port(child_template_id) is not None
         new_children: list[str] = []
-        for element in elements:
+        for index, element in enumerate(elements):
             try:
+                if child_is_agent:
+                    child_task_id = engine.create_fanout_child(
+                        spawn_op, producer_task_id, index
+                    )
+                    self._register_child_locked(child_task_id, template_record, None)
+                    self._mint_fanout_facet_locked(
+                        engine, child_task_id, producer_task_id, index, element
+                    )
+                    advance.extend(engine.reconsider_admission(child_task_id))
+                    new_children.append(child_task_id)
+                    continue
+                value_ref = ValueRef(
+                    kind="legacy_task_result", legacy_task_id=producer_task_id
+                )
                 child_advance = engine.materialize_child(spawn_op, value_ref=value_ref)
             except RegionError:
                 break  # a budget, seal, or denial stops further children
@@ -1614,6 +1658,183 @@ class TaskRuntime:
             item["output"] if isinstance(item, dict) and "output" in item else item
             for item in collection
         ]
+
+    def _mint_fanout_facet_locked(
+        self,
+        engine: OrchestrationEngine,
+        child_task_id: str,
+        producer_task_id: str,
+        index: int,
+        element: Any,
+    ) -> None:
+        """Record a fan-out child's typed entry-port input from its producer element."""
+        wi = engine.work_item(child_task_id)
+        if wi is None:
+            return
+        entry_port = engine.agent_entry_port(wi.operator_id)
+        if entry_port is None:
+            return
+        value_ref = ValueRef(
+            kind="legacy_task_result",
+            legacy_task_id=producer_task_id,
+            collection_key=str(index),
+        )
+        engine.record_accepted_input(
+            AcceptedInput(
+                activation_id=wi.activation_id,
+                target_port=entry_port,
+                occurrence_key=str(index),
+                provenance="spawn_element",
+                members=(
+                    AcceptedInputMember(
+                        source_operator_id=producer_task_id,
+                        source_activation_id=wi.activation_id,
+                        child_index=index,
+                        outcome=PublicationOutcome.SUCCESS,
+                        value_ref=value_ref,
+                        content_digest=_content_digest(_stringify(element)),
+                    ),
+                ),
+                renderer_version=INPUT_RENDERER_VERSION,
+            )
+        )
+
+    def _resolve_agent_inputs_locked(
+        self, engine: OrchestrationEngine, advance: Advance
+    ) -> None:
+        """Resolve and record each edge-bound agent's accepted inputs, then re-admit.
+
+        The engine owns membership and ordering; the runtime resolves every member's
+        frozen value and digest and records the durable accepted input. A member whose
+        value is not yet readable defers the whole port until a later advance.
+        """
+        for task_id in engine.blocked_input_agents():
+            plan = engine.agent_input_plan(task_id)
+            if plan is None:
+                continue
+            resolved: list[tuple[str, AcceptedInput]] = []
+            total_bytes = 0
+            for port in plan.ports:
+                members: list[AcceptedInputMember] = []
+                for member in port.members:
+                    value_ref = ValueRef(
+                        kind=member.value_ref_kind,
+                        legacy_task_id=member.legacy_task_id,
+                        collection_key=member.collection_key,
+                        literal=member.literal,
+                    )
+                    value = self._resolve_value_ref(value_ref)
+                    if value is None:
+                        break
+                    total_bytes += len(value.encode("utf-8"))
+                    members.append(
+                        AcceptedInputMember(
+                            source_operator_id=member.source_operator_id,
+                            source_activation_id=member.source_activation_id,
+                            child_index=member.child_index,
+                            outcome=PublicationOutcome(member.outcome),
+                            value_ref=value_ref,
+                            content_digest=_content_digest(value),
+                            ordinal=member.ordinal,
+                        )
+                    )
+                if len(members) != len(port.members):
+                    continue
+                resolved.append(
+                    (
+                        port.target_port,
+                        AcceptedInput(
+                            activation_id=plan.activation_id,
+                            target_port=port.target_port,
+                            provenance=port.provenance,
+                            members=tuple(members),
+                            renderer_version=INPUT_RENDERER_VERSION,
+                        ),
+                    )
+                )
+            # Overflow is a typed declared failure, never silent truncation: a resolved
+            # input cone exceeding the budget fails the agent instead of dispatching it.
+            if total_bytes > self._input_budget_bytes:
+                advance.extend(
+                    engine.on_failed(
+                        task_id,
+                        f"input_too_large: resolved input is {total_bytes} bytes, "
+                        f"over the {self._input_budget_bytes}-byte budget",
+                        retryable=False,
+                    )
+                )
+                continue
+            for _, accepted in resolved:
+                engine.record_accepted_input(accepted)
+            advance.extend(engine.reconsider_admission(task_id))
+
+    def _resolve_value_ref(self, value_ref: ValueRef | None) -> str | None:
+        """Resolve a frozen value reference to its immutable string value, or None.
+
+        An inline value is its literal; a producer reference reads the settled result
+        selects one collection element (a fan-out element) or the whole ``value``. None
+        signals a not-yet-readable result, deferring the input.
+        """
+        if value_ref is None:
+            return None
+        if value_ref.kind == "inline":
+            return value_ref.literal or ""
+        if value_ref.kind == "empty":
+            return ""
+        if value_ref.kind != "legacy_task_result" or not value_ref.legacy_task_id:
+            return None
+        path = result_file_path(self._results_dir, value_ref.legacy_task_id)
+        if not path.exists():
+            return None
+        try:
+            envelope = ResultEnvelope.model_validate_json(path.read_text("utf-8"))
+        except (ValueError, OSError):
+            return None
+        payload = envelope.result.model_dump()
+        if value_ref.collection_key is not None:
+            collection = payload.get("fanout")
+            if not isinstance(collection, list):
+                collection = payload.get("items")
+            if not isinstance(collection, list):
+                return None
+            index = int(value_ref.collection_key)
+            if index < 0 or index >= len(collection):
+                return None
+            item = collection[index]
+            item = (
+                item["output"] if isinstance(item, dict) and "output" in item else item
+            )
+            return _stringify(item)
+        value = payload.get("value")
+        return _stringify(value if value is not None else payload)
+
+    def _agent_input_bindings(
+        self, engine: OrchestrationEngine, task_id: str
+    ) -> tuple[InputBinding, ...]:
+        """The resolved first-turn input bindings for an agent's input ports."""
+        bindings: list[InputBinding] = []
+        for ordinal, accepted in enumerate(engine.accepted_inputs_for_task(task_id)):
+            members = tuple(
+                InputBindingMember(
+                    source_operator_id=member.source_operator_id,
+                    source_activation_id=member.source_activation_id,
+                    child_index=member.child_index,
+                    outcome=member.outcome.value,
+                    value=self._resolve_value_ref(member.value_ref),
+                    content_digest=member.content_digest,
+                    ordinal=member.ordinal,
+                )
+                for member in accepted.members
+            )
+            bindings.append(
+                InputBinding(
+                    port=accepted.target_port,
+                    provenance=accepted.provenance,
+                    ordinal=accepted.ordinal or ordinal,
+                    members=members,
+                )
+            )
+        return tuple(bindings)
 
     def _synthesize_child_record(
         self, template: TaskRecord, child_task_id: str, element: Any

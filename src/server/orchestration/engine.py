@@ -15,11 +15,12 @@ empty set. Scheduler/worker placement stays a physical decision that never chang
 the engine considers ready.
 """
 
+import hashlib
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Self
 
-from shared.harness import DeliveredOutcome, OutcomeKind
+from shared.harness import INPUT_RENDERER_VERSION, DeliveredOutcome, OutcomeKind
 from shared.utils import (
     new_activation_id,
     new_attempt_id,
@@ -62,6 +63,8 @@ from .outcomes import (
     next_on_uncertain,
 )
 from .state import (
+    AcceptedInput,
+    AcceptedInputMember,
     Activation,
     Attempt,
     AttemptStatus,
@@ -93,8 +96,11 @@ from .state import (
 )
 from .tool_dispatch import (
     MODEL_INTERFACE,
+    AgentInputPlan,
     FacadeBatchMember,
     GrantSnapshot,
+    InputMemberPlan,
+    InputPortPlan,
     ToolInvocationEnvelope,
 )
 
@@ -136,6 +142,11 @@ class RegionError(ValueError):
 
 def _control_key(operator_id: str) -> str:
     return f"control:{operator_id}"
+
+
+def _digest(value: str) -> str:
+    """A stable content digest over a resolved input value, for replay integrity."""
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def _effect_recovery(op: LogicalOperator | None) -> tuple[EffectClass, RecoveryClass]:
@@ -194,6 +205,12 @@ class OrchestrationEngine:
         self._work_items = {w.work_item_id: w for w in snapshot.work_items}
         self._continuations = {c.work_item_id: c for c in snapshot.continuations}
         self._records = list(snapshot.records)
+        self._accepted_inputs = list(snapshot.accepted_inputs)
+        self._accepted_by_activation: dict[str, list[AcceptedInput]] = {}
+        for accepted in self._accepted_inputs:
+            self._accepted_by_activation.setdefault(accepted.activation_id, []).append(
+                accepted
+            )
         self._invocations = {i.invocation_id: i for i in snapshot.invocations}
         self._attempts = {a.attempt_id: a for a in snapshot.attempts}
         self._receipts = {r.invocation_id: r for r in snapshot.effect_receipts}
@@ -466,10 +483,14 @@ class OrchestrationEngine:
                 replay_contract=replay.get(op.operator_id),
             )
             work_items.append(work_item)
+            required_ports = (
+                set(op.declared_input_ports) if isinstance(op, AgentOperator) else set()
+            )
             continuations.append(
                 Continuation(
                     work_item_id=work_item.work_item_id,
                     waiting_on=set(preds[op.operator_id]),
+                    required_ports=required_ports,
                 )
             )
 
@@ -702,8 +723,14 @@ class OrchestrationEngine:
                 opener = self._agent_spawn_opener(op, wi, event)
                 # Record only after the child materializes: a budget/depth rejection
                 # raises and must leave no phantom-accepted envelope to re-drive. The
-                # region selects the entry body; a raw child_ref never names a body.
-                advance = self.materialize_child(opener, value_ref=event.value_ref)
+                # region selects the entry body; a raw child_ref never names a body. The
+                # spawn payload becomes the child's inline child-init input.
+                child_input = event.value_ref or (
+                    ValueRef(kind="inline", literal=event.request_payload)
+                    if event.request_payload is not None
+                    else None
+                )
+                advance = self.materialize_child(opener, value_ref=child_input)
                 self._record_boundary(wi, event)
                 return advance
             case BoundaryEventKind.SPAWN_SEAL:
@@ -1277,11 +1304,234 @@ class OrchestrationEngine:
         trace-level :meth:`spawn_child`.
         """
         advance = Advance()
-        _, wi = self._create_child(
+        activation, wi = self._create_child(
             spawn, operator_id, dispatchable=True, value_ref=value_ref
         )
+        self._init_child_input(activation, wi, value_ref)
         self._admit(wi.work_item_id, advance)
         return advance
+
+    def create_fanout_child(self, spawn: str, producer_task_id: str, index: int) -> str:
+        """Create one producer-fanout child (unadmitted) and return its task id.
+
+        The child carries a frozen reference to element ``index`` of the producer's
+        collection as its child-init input. It stays blocked on its input manifest until
+        the runtime resolves and records the child-entry accepted input.
+        """
+        value_ref = ValueRef(
+            kind="legacy_task_result",
+            legacy_task_id=producer_task_id,
+            collection_key=str(index),
+        )
+        activation, wi = self._create_child(
+            spawn, None, dispatchable=True, value_ref=value_ref
+        )
+        self._init_child_input(activation, wi, value_ref)
+        return wi.legacy_task_id
+
+    def _init_child_input(
+        self, activation: Activation, wi: WorkItem, value_ref: ValueRef | None
+    ) -> None:
+        """Declare a child agent's input manifest and mint an inline child-init input.
+
+        A child agent with a declared entry port gains a continuation requiring that
+        port. An inline child-init value (a ``spawn_agent`` payload) is minted here; a
+        producer-collection reference is left for the runtime to resolve and record.
+        """
+        entry_port = self.agent_entry_port(wi.operator_id)
+        if entry_port is None:
+            return
+        self._continuations[wi.work_item_id] = Continuation(
+            work_item_id=wi.work_item_id, required_ports={entry_port}
+        )
+        if value_ref is not None and value_ref.kind == "inline":
+            self.record_accepted_input(
+                AcceptedInput(
+                    activation_id=activation.activation_id,
+                    target_port=entry_port,
+                    occurrence_key=str(activation.child_index or 0),
+                    provenance="spawn_element",
+                    members=(
+                        AcceptedInputMember(
+                            source_operator_id=self._scopes[
+                                activation.scope_id
+                            ].owner_operator_id
+                            or activation.operator_id,
+                            source_activation_id=activation.activation_id,
+                            child_index=activation.child_index,
+                            outcome=PublicationOutcome.SUCCESS,
+                            value_ref=value_ref,
+                            content_digest=_digest(value_ref.literal or ""),
+                        ),
+                    ),
+                    renderer_version=INPUT_RENDERER_VERSION,
+                )
+            )
+
+    def agent_entry_port(self, operator_id: str) -> str | None:
+        """The single declared input port of an agent child body, or None.
+
+        A spawn child agent declares exactly one input port (compile-enforced); a leaf
+        child or an agent with no declared input has no entry port.
+        """
+        op = self._operators.get(operator_id)
+        if not isinstance(op, AgentOperator) or not op.declared_input_ports:
+            return None
+        return op.declared_input_ports[0]
+
+    def record_accepted_input(self, accepted: AcceptedInput) -> None:
+        """Record a durable accepted input on an agent's target port (idempotent)."""
+        existing = self._accepted_by_activation.setdefault(accepted.activation_id, [])
+        if any(a.target_port == accepted.target_port for a in existing):
+            return
+        self._accepted_inputs.append(accepted)
+        existing.append(accepted)
+
+    def accepted_inputs_for(self, activation_id: str) -> tuple[AcceptedInput, ...]:
+        """The recorded accepted inputs for one activation, ordered by ordinal."""
+        return tuple(
+            sorted(
+                self._accepted_by_activation.get(activation_id, ()),
+                key=lambda a: (a.ordinal, a.target_port),
+            )
+        )
+
+    def accepted_inputs_for_task(self, task_id: str) -> tuple[AcceptedInput, ...]:
+        """The recorded accepted inputs for a task's activation, ordered by ordinal."""
+        wi = self._work_item_for_task(task_id)
+        return self.accepted_inputs_for(wi.activation_id) if wi else ()
+
+    def blocked_input_agents(self) -> list[str]:
+        """Task ids of agents blocked on an unsatisfied declared-input manifest."""
+        pending: list[str] = []
+        for wi in self._work_items.values():
+            if wi.status is not WorkItemStatus.BLOCKED or not wi.legacy_task_id:
+                continue
+            cont = self._continuations.get(wi.work_item_id)
+            if cont is None or not cont.required_ports:
+                continue
+            have = {a.target_port for a in self.accepted_inputs_for(wi.activation_id)}
+            if not cont.required_ports <= have:
+                pending.append(wi.legacy_task_id)
+        return pending
+
+    def reconsider_admission(self, task_id: str) -> Advance:
+        """Re-attempt admission of a work item after its input manifest changed."""
+        advance = Advance()
+        wi = self._work_item_for_task(task_id)
+        if wi is not None and wi.status is WorkItemStatus.BLOCKED:
+            self._admit(wi.work_item_id, advance)
+        return advance
+
+    def agent_input_plan(self, task_id: str) -> AgentInputPlan | None:
+        """The engine's per-port input membership for an agent, resolved by the runtime.
+
+        Covers edge-bound ports (a direct producer or a join/merge aggregate) whose
+        sources have settled and are not yet recorded. Membership and ordering are the
+        engine's decision — declared by the edge and the join's child order, never
+        arrival. A fan-out child's inline entry port is minted at materialization and is
+        not returned here.
+        """
+        wi = self._work_item_for_task(task_id)
+        if wi is None:
+            return None
+        cont = self._continuations.get(wi.work_item_id)
+        if cont is None or not cont.required_ports:
+            return None
+        have = {a.target_port for a in self.accepted_inputs_for(wi.activation_id)}
+        ports: list[InputPortPlan] = []
+        for port in sorted(cont.required_ports):
+            if port in have:
+                continue
+            resolved = self._port_members(wi.operator_id, port)
+            if resolved is None:
+                continue
+            provenance, members = resolved
+            ports.append(
+                InputPortPlan(target_port=port, provenance=provenance, members=members)
+            )
+        if not ports:
+            return None
+        return AgentInputPlan(activation_id=wi.activation_id, ports=tuple(ports))
+
+    def _port_members(
+        self, agent_op: str, port: str
+    ) -> tuple[str, tuple[InputMemberPlan, ...]] | None:
+        """The ordered members feeding a port, or None if a source is unsettled."""
+        sources = [
+            edge.from_op
+            for edge in self._bundle.template.edges
+            if edge.to_op == agent_op and edge.to_port == port and not edge.feedback
+        ]
+        if not sources:
+            return None
+        provenance = "producer"
+        members: list[InputMemberPlan] = []
+        ordinal = 0
+        for source in sources:
+            if self._kind(source) is OperatorKind.JOIN:
+                provenance = "join_aggregate"
+                scope_id = self._scope_for_join(source)
+                if scope_id is None or scope_id not in self._released_scopes:
+                    return None
+                for child in self._materialized_children(scope_id):
+                    child_wi = self._work_items[
+                        self._wi_by_activation[child.activation_id]
+                    ]
+                    if child_wi.outcome is None:
+                        return None
+                    members.append(
+                        self._member_plan(
+                            child.operator_id,
+                            child.activation_id,
+                            child.child_index,
+                            child_wi.outcome,
+                            child_wi.value_ref,
+                            ordinal,
+                        )
+                    )
+                    ordinal += 1
+            else:
+                src_wi_id = self._wi_by_operator.get(source)
+                src_wi = self._work_items.get(src_wi_id) if src_wi_id else None
+                if src_wi is None or src_wi.outcome is None:
+                    return None
+                members.append(
+                    self._member_plan(
+                        source,
+                        src_wi.activation_id,
+                        None,
+                        src_wi.outcome,
+                        ValueRef(
+                            kind="legacy_task_result",
+                            legacy_task_id=src_wi.legacy_task_id,
+                        ),
+                        ordinal,
+                    )
+                )
+                ordinal += 1
+        return provenance, tuple(members)
+
+    @staticmethod
+    def _member_plan(
+        source_operator_id: str,
+        source_activation_id: str,
+        child_index: int | None,
+        outcome: PublicationOutcome,
+        value_ref: ValueRef | None,
+        ordinal: int,
+    ) -> InputMemberPlan:
+        return InputMemberPlan(
+            source_operator_id=source_operator_id,
+            source_activation_id=source_activation_id,
+            child_index=child_index,
+            outcome=outcome.value,
+            value_ref_kind=value_ref.kind if value_ref else "empty",
+            legacy_task_id=value_ref.legacy_task_id if value_ref else None,
+            collection_key=value_ref.collection_key if value_ref else None,
+            literal=value_ref.literal if value_ref else None,
+            ordinal=ordinal,
+        )
 
     def _create_child(
         self,
@@ -2209,10 +2459,20 @@ class OrchestrationEngine:
         return advance
 
     def _admit(self, work_item_id: str, advance: Advance) -> None:
-        """Move a work item whose predecessors settled to READY, gating on authority."""
+        """Move a work item whose predecessors settled to READY, gating on authority.
+
+        A declared-input agent is admissible only once its accepted-input manifest is
+        satisfied — every required port carries a recorded accepted input — so a fan-out
+        child or a downstream merge agent never dispatches before its input is durable.
+        """
         wi = self._work_items[work_item_id]
         if wi.status is not WorkItemStatus.BLOCKED:
             return
+        cont = self._continuations.get(work_item_id)
+        if cont is not None and cont.required_ports:
+            have = {a.target_port for a in self.accepted_inputs_for(wi.activation_id)}
+            if not cont.required_ports <= have:
+                return
         interface = self._requested_interface(wi.operator_id)
         if interface is not None and interface not in self._root_grant.invoke:
             self._decisions.append(
@@ -2523,6 +2783,7 @@ class OrchestrationEngine:
             work_items=list(self._work_items.values()),
             continuations=list(self._continuations.values()),
             records=list(self._records),
+            accepted_inputs=list(self._accepted_inputs),
             invocations=list(self._invocations.values()),
             attempts=list(self._attempts.values()),
             boundary_events=list(self._boundary_events.values()),

@@ -408,6 +408,7 @@ class OrchestrationConfig:
     max_loop_iterations: int | None = None
     max_activations: int | None = None
     episode_lowering: bool = False
+    agent_input_budget_bytes: int = 262_144
     gateway: AgentModelGatewayConfig = field(default_factory=AgentModelGatewayConfig)
     agent_binding: AgentBindingConfig = field(default_factory=AgentBindingConfig)
     model_secret_vault: ModelSecretVaultConfig = field(
@@ -422,6 +423,10 @@ class OrchestrationConfig:
             max_loop_iterations=parse_int_env("ORCHESTRATOR_MAX_LOOP_ITERATIONS"),
             max_activations=parse_int_env("ORCHESTRATOR_MAX_ACTIVATIONS"),
             episode_lowering=parse_bool_env("ORCHESTRATOR_EPISODE_LOWERING", False),
+            agent_input_budget_bytes=parse_int_env(
+                "ORCHESTRATOR_AGENT_INPUT_BUDGET_BYTES"
+            )
+            or 262_144,
             gateway=AgentModelGatewayConfig.from_env(),
             agent_binding=AgentBindingConfig.from_env(),
             model_secret_vault=ModelSecretVaultConfig.from_env(),

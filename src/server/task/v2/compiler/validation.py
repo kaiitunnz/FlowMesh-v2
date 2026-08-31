@@ -1,3 +1,5 @@
+from collections import defaultdict
+
 from shared.tasks.specs import ModelBindingMode
 
 from ..representations.operators import (
@@ -450,6 +452,62 @@ def _check_child_regions(
     return diags
 
 
+def _check_agent_inputs(
+    template: LogicalWorkflowTemplate, loc: dict[str, SourceLocation]
+) -> list[Diagnostic]:
+    """An agent's declared input ports must each be delivered by a declared source.
+
+    Declaring input ports is opt-in: a child agent with no declared input port keeps the
+    ordering-only behavior and receives no element. A spawn child body that opts in
+    declares exactly one entry port to receive its spawned element; a downstream agent's
+    every declared input port is bound by an incoming delivery edge whose ``to_port``
+    names it. An unbound port would deadlock — its input manifest could never be
+    satisfied — so it fails at compile time.
+    """
+    diags: list[Diagnostic] = []
+    child_bodies = {
+        op.child_template_ref
+        for op in template.operators
+        if isinstance(op, (SpawnRegion, AgentOperator)) and op.child_template_ref
+    }
+    bound: dict[str, set[str]] = defaultdict(set)
+    for edge in template.edges:
+        if edge.to_port and not edge.feedback:
+            bound[edge.to_op].add(edge.to_port)
+    for op in template.operators:
+        if not isinstance(op, AgentOperator):
+            continue
+        location = loc.get(op.operator_id)
+        is_child = op.operator_id in child_bodies
+        if is_child and len(op.declared_input_ports) > 1:
+            diags.append(
+                Diagnostic(
+                    code="dataflow.child-entry-port",
+                    message=(
+                        f"spawn child agent {op.operator_id!r} declares "
+                        f"{len(op.declared_input_ports)} input ports; a child receives "
+                        "its element on exactly one entry port"
+                    ),
+                    location=location,
+                )
+            )
+        if is_child:
+            continue
+        for port_name in op.declared_input_ports:
+            if port_name not in bound.get(op.operator_id, set()):
+                diags.append(
+                    Diagnostic(
+                        code="dataflow.unbound-input",
+                        message=(
+                            f"agent {op.operator_id!r} input port {port_name!r} is "
+                            "delivered by no producer; declare it as {name, from}"
+                        ),
+                        location=location,
+                    )
+                )
+    return diags
+
+
 def _check_result_declarations(
     template: LogicalWorkflowTemplate, loc: dict[str, SourceLocation]
 ) -> list[Diagnostic]:
@@ -595,6 +653,7 @@ def validate_compilation(
     diags.extend(_check_ports(template, loc))
     diags.extend(_check_spawn_child_targets(template, loc))
     diags.extend(_check_child_regions(template, loc))
+    diags.extend(_check_agent_inputs(template, loc))
     diags.extend(_check_result_declarations(template, loc))
     diags.extend(_check_cycles(template, loc))
 

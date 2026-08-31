@@ -106,13 +106,17 @@ class ValueRef(BaseModel):
     """A durable reference to a logical output value, never the value itself.
 
     A loop-carried value may reference a versioned ``ModelRef`` so an iteration pins the
-    model version it observes without pinning a physical replica.
+    model version it observes without pinning a physical replica. ``collection_key``
+    selects one element of a producer's fan-out collection, so a spawned child's
+    child-init input is a frozen reference into the producer result rather than a copy.
     """
 
     model_config = ConfigDict(frozen=True)
 
-    kind: str  # "legacy_task_result" | "empty" | "join_result" | "model_ref"
+    kind: str  # "legacy_task_result" | "inline" | "empty" | "join_result" | "model_ref"
     legacy_task_id: str | None = None
+    collection_key: str | None = None  # element selector into a producer collection
+    literal: str | None = None  # a bounded, immutable inline child-init value
     model_ref: ModelRef | None = None
 
 
@@ -263,11 +267,57 @@ class Record(BaseModel):
     value_ref: ValueRef | None = None
 
 
+class AcceptedInputMember(BaseModel):
+    """One durable member of an accepted input on an agent's target port.
+
+    Preserves its source operator/output port, source activation and child index, its
+    terminal outcome, an immutable ``value_ref``, a content digest over the resolved
+    value, and a canonical ordinal. A merge/join aggregate carries one member per source
+    child; a single producer binding carries exactly one.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    source_operator_id: str
+    source_output_port: str | None = None
+    source_activation_id: str
+    child_index: int | None = None
+    outcome: PublicationOutcome
+    value_ref: ValueRef | None = None
+    content_digest: str
+    ordinal: int = 0
+
+
+class AcceptedInput(BaseModel):
+    """A durable delivery of a settled value to one agent input port.
+
+    Keyed by (activation, target_port, occurrence_key); members are ordered by the
+    declared producer/merge contract, never by arrival. Part of the agent input cone: a
+    work item is ready only once each required port carries an accepted input, and a
+    restart replays exactly these refs, outcomes, ordering, and renderer version.
+    Minting
+    an accepted input is authority-neutral — it delivers data, never an invoke right.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    activation_id: str
+    target_port: str
+    occurrence_key: str = "0"
+    provenance: str = "producer"
+    members: tuple[AcceptedInputMember, ...] = ()
+    ordinal: int = 0
+    renderer_version: str
+
+
 class Continuation(BaseModel):
     """Suspended logical progress waiting on predecessor records."""
 
     work_item_id: str
     waiting_on: set[str] = Field(default_factory=set)  # operator ids not settled
+    # Declared input ports that must each carry an accepted input before the work item
+    # is admissible; empty for an operator with no declared dataflow inputs.
+    required_ports: set[str] = Field(default_factory=set)
 
 
 class ProgressCapability(BaseModel):
@@ -418,6 +468,7 @@ class LedgerSnapshot(BaseModel):
     work_items: list[WorkItem] = Field(default_factory=list)
     continuations: list[Continuation] = Field(default_factory=list)
     records: list[Record] = Field(default_factory=list)
+    accepted_inputs: list[AcceptedInput] = Field(default_factory=list)
     invocations: list[Invocation] = Field(default_factory=list)
     attempts: list[Attempt] = Field(default_factory=list)
     boundary_events: list[BoundaryEvent] = Field(default_factory=list)

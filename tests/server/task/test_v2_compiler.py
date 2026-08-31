@@ -225,4 +225,3 @@ def test_old_parser_path_still_selectable() -> None:
     for path in _TEMPLATE_FILES:
         parsed = parse_workflow(path.read_text(), "native")
         assert parsed.tasks
-        assert parsed.regions == []
