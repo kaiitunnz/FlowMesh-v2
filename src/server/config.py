@@ -379,6 +379,8 @@ class ResidentCapacityConfig:
     a GPU vLLM replica; ``dev_model`` is the GPU-free stand-in. ``allowed_models`` empty
     permits any plan-derived model; a non-empty list enforces an explicit catalog.
     ``admission_slots`` is the conservative safe-slot count reported per replica.
+    ``forward_api_key`` is the credential the in-server adapter presents to a replica
+    that reports none, so the ``dev_model`` stand-in can forward it to a keyed upstream.
     """
 
     enabled: bool = False
@@ -391,6 +393,7 @@ class ResidentCapacityConfig:
     poll_interval_sec: float = 1.0
     serve_ttl_sec: float | None = None
     allowed_models: tuple[str, ...] = ()
+    forward_api_key: str | None = None
 
     @classmethod
     def from_env(cls) -> "ResidentCapacityConfig":
@@ -423,6 +426,7 @@ class ResidentCapacityConfig:
             poll_interval_sec=parse_float_env(f"{prefix}POLL_INTERVAL_SEC") or 1.0,
             serve_ttl_sec=parse_float_env(f"{prefix}SERVE_TTL_SEC"),
             allowed_models=allowed,
+            forward_api_key=_env_or_none(f"{prefix}FORWARD_API_KEY"),
         )
 
 

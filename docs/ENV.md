@@ -64,6 +64,7 @@ listed here is in `.env.example`.
 | `RESIDENT_POLL_INTERVAL_SEC` | `1` | Admission wait poll interval (seconds) |
 | `RESIDENT_SERVE_TTL_SEC` | – | Materialized replica TTL (seconds) |
 | `RESIDENT_ALLOWED_MODELS` | – | Comma-separated allowed model catalog; any if empty |
+| `RESIDENT_FORWARD_API_KEY` | – | Credential the adapter presents to a keyless replica |
 | `ENABLE_WORKER_WATCHDOG` | `true` | Worker death detection |
 | `WORKER_DEATH_GRACE_SEC` | `60` | Grace period before marking dead |
 | `WORKER_REHYDRATION_GRACE_SEC` | `120` | Extra grace for a worker's rehydrated in-flight tasks after the root restarts, before the watchdog may reclaim them |

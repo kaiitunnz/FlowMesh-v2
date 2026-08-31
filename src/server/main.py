@@ -269,7 +269,7 @@ if IS_ROOT_NODE:
             return ReplicaEndpoint(
                 base_url=f"http://{host}:{port}/v1",
                 model=str(serve.get("model") or ""),
-                api_key=serve.get("api_key"),
+                api_key=serve.get("api_key") or _resident_cfg.forward_api_key,
             )
 
         RESIDENT_CONTROL = ResidentCapacityControl(

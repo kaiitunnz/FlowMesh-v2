@@ -450,6 +450,11 @@ STACK_ENV_SCHEMA = EnvSchema(
                     "",
                     description="Comma-separated allowed model catalog; any if empty.",
                 ),
+                EnvVar(
+                    "RESIDENT_FORWARD_API_KEY",
+                    "",
+                    description="Credential the adapter presents to a keyless replica.",
+                ),
             ],
         ),
         EnvSection(
