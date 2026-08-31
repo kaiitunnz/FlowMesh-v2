@@ -22,6 +22,10 @@ PREFIX_INVOCATION = "inv"
 PREFIX_AUTHORITY_GRANT = "agr"
 PREFIX_IDEMPOTENCY_KEY = "idm"
 PREFIX_MODEL_SECRET = "msk"  # nosec B105 - object-id prefix, not a credential
+PREFIX_SERVICE_CLAIM = "scl"
+PREFIX_REPLICA = "rpl"
+PREFIX_ALLOCATION_LEASE = "lse"
+PREFIX_ADMISSION_HANDOFF = "hnd"  # nosec B105 - object-id prefix, not a credential
 
 
 def _uuid_str() -> str:
@@ -92,15 +96,35 @@ def new_model_secret_ref() -> str:
     return f"{PREFIX_MODEL_SECRET}-{secrets.token_hex(16)}"
 
 
+def new_service_claim_id() -> str:
+    return f"{PREFIX_SERVICE_CLAIM}-{_uuid_hex()}"
+
+
+def new_replica_id() -> str:
+    return f"{PREFIX_REPLICA}-{_uuid_hex()}"
+
+
+def new_allocation_lease_id() -> str:
+    return f"{PREFIX_ALLOCATION_LEASE}-{_uuid_hex()}"
+
+
+def new_admission_handoff_token() -> str:
+    return f"{PREFIX_ADMISSION_HANDOFF}-{secrets.token_hex(16)}"
+
+
 __all__ = [
     "PREFIX_ACTIVATION",
+    "PREFIX_ADMISSION_HANDOFF",
+    "PREFIX_ALLOCATION_LEASE",
     "PREFIX_ATTEMPT",
     "PREFIX_AUTHORITY_GRANT",
     "PREFIX_IDEMPOTENCY_KEY",
     "PREFIX_INVOCATION",
     "PREFIX_MODEL_SECRET",
     "PREFIX_NODE",
+    "PREFIX_REPLICA",
     "PREFIX_SCOPE",
+    "PREFIX_SERVICE_CLAIM",
     "PREFIX_SSH_CONNECTION",
     "PREFIX_SSH_SESSION",
     "PREFIX_SUPERVISOR_COMMAND",
@@ -109,13 +133,17 @@ __all__ = [
     "PREFIX_WORKER",
     "PREFIX_WORKFLOW",
     "new_activation_id",
+    "new_admission_handoff_token",
+    "new_allocation_lease_id",
     "new_attempt_id",
     "new_authority_grant_id",
     "new_idempotency_key",
     "new_invocation_id",
     "new_model_secret_ref",
     "new_node_id",
+    "new_replica_id",
     "new_scope_id",
+    "new_service_claim_id",
     "new_ssh_connection_id",
     "new_ssh_session_id",
     "new_supervisor_command_id",
