@@ -45,6 +45,28 @@ def test_snapshot_round_trips_authoritative_facts():
     assert restored.invocations.get("inv-1") is not None
 
 
+def test_replica_endpoint_credential_is_not_persisted():
+    from server.resident import ReplicaEndpoint, ReplicaIncarnation, ReplicaState
+
+    stores = warm_stores()
+    stores.directory.add(
+        ReplicaIncarnation(
+            replica_id="rpl-keyed",
+            family="fam",
+            incarnation=1,
+            state=ReplicaState.WARM,
+            endpoint=ReplicaEndpoint(
+                base_url="http://replica/v1", model="m", api_key="super-secret"
+            ),
+        )
+    )
+    blob = stores.to_snapshot().model_dump_json()
+    assert "super-secret" not in blob
+    restored = ResidentStores()
+    restored.load_snapshot(ResidentSnapshot.model_validate_json(blob))
+    assert restored.directory.get("rpl-keyed").endpoint.api_key is None
+
+
 def test_derived_credit_and_demand_rebuild_on_load():
     stores, reserved, pending = _seed()
     restored = ResidentStores()

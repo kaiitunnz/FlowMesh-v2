@@ -176,7 +176,7 @@ class TaskRuntime:
         # executes a fabric-served tool ("search/v1"). Both take the durable envelope.
         self._model_settler: Callable[[ToolInvocationEnvelope], None] | None = None
         self._tool_broker: Callable[[ToolInvocationEnvelope], None] | None = None
-        self._resident_terminal_hook: Callable[[str], None] | None = None
+        self._resident_terminal_hook: Callable[[str, bool], None] | None = None
         # Facade boundaries the agent-model gateway captured server-side during an
         # episode's model turn, keyed by task; the completion path reroutes the clean
         # turn-completion into the pending boundary rather than settling it.
@@ -712,11 +712,11 @@ class TaskRuntime:
         """Re-commit the workflow's already-terminal tasks and schedule state.
 
         The idempotency guard calls this on a replayed terminal event: the original
-        transition may have failed its persist after committing in memory, so
-        re-committing makes the durable state current before the consumer's cursor
-        advances past the event (else the task re-runs after a restart). It covers the
-        whole workflow, not just the replayed task, because a cascade's other affected
-        tasks aren't identifiable here. Idempotent; only on a rare duplicate replay.
+        transition may have failed its persist after committing in memory, so re-
+        committing makes the durable state current before the consumer's cursor advances
+        past the event (else the task re-runs after a restart). It covers the whole
+        workflow, not just the replayed task, because a cascade's other affected tasks
+        aren't identifiable here. Idempotent; only on a rare duplicate replay.
         """
         terminal_ids = [
             task_id
@@ -734,10 +734,10 @@ class TaskRuntime:
     def _reclaim_vault_if_settled_locked(self, workflow_id: str) -> None:
         """Purge a workflow's vaulted credentials once its last task has settled.
 
-        The primary reclaim on the terminal transition, for a workflow that completes
-        or fails; the vault's sliding TTL only backstops a submission that never
-        settles. Called after an event's advance materializes any new children, so a
-        producer that fans out is not reclaimed while its children are still pending.
+        The primary reclaim on the terminal transition, for a workflow that completes or
+        fails; the vault's sliding TTL only backstops a submission that never settles.
+        Called after an event's advance materializes any new children, so a producer
+        that fans out is not reclaimed while its children are still pending.
         """
         records = [r for r in self._tasks.values() if r.workflow_id == workflow_id]
         if records and all(r.status in TERMINAL_TASK_STATUSES for r in records):
@@ -935,8 +935,8 @@ class TaskRuntime:
         self, stop_event: threading.Event, timeout: float = 1.0
     ) -> str | None:
         """
-        Block until a task is ready or stop_event is set.
-        Returns a task_id or None when stopping.
+        Block until a task is ready or stop_event is set. Returns a task_id or None when
+        stopping.
         """
         with self._cv:
             while not stop_event.is_set():
@@ -1201,8 +1201,14 @@ class TaskRuntime:
                     f"agent-model gateway upstream failed: {error}",
                     retryable=False,
                 )
+                invocation_id = engine.terminalize_boundary_invocation(
+                    task_id, call_correlation
+                )
                 changed = self._apply_advance_locked(record.workflow_id, advance)
                 self._save_ledger_locked(record.workflow_id)
+                # A fenced failure terminal releases the resident credit just as a
+                # completion does; nothing else may release an accepted credit.
+                self._release_resident_credit(invocation_id, failed=True)
                 if changed:
                     self._cv.notify_all()
                 return changed
@@ -1219,18 +1225,17 @@ class TaskRuntime:
             else:
                 self._apply_advance_locked(record.workflow_id, advance)
             self._save_ledger_locked(record.workflow_id)
-            if invocation_id is not None and self._resident_terminal_hook is not None:
-                self._resident_terminal_hook(invocation_id)
+            self._release_resident_credit(invocation_id, failed=False)
             self._cv.notify_all()
             return True
 
     def _dispatch_boundary(self, env: ToolInvocationEnvelope) -> None:
         """Route a recorded mediated boundary to its handler by exact (kind, interface).
 
-        Only ``(INVOCATION, "model")`` reaches the model gateway and only
-        ``(INVOCATION, "search/v1")`` the fabric tool broker. An unrecognized interface
-        is a fabric misconfiguration terminalized as a typed unavailable outcome — never
-        a silent fall-through to the model settler.
+        Only ``(INVOCATION, "model")`` reaches the model gateway and only ``(INVOCATION,
+        "search/v1")`` the fabric tool broker. An unrecognized interface is a fabric
+        misconfiguration terminalized as a typed unavailable outcome — never a silent
+        fall-through to the model settler.
         """
         if (
             env.kind is BoundaryEventKind.INVOCATION
@@ -1264,15 +1269,21 @@ class TaskRuntime:
         """Install the off-lane handler for fabric-served tool interfaces."""
         self._tool_broker = broker
 
-    def set_resident_terminal_hook(self, hook: Callable[[str], None]) -> None:
+    def set_resident_terminal_hook(self, hook: Callable[[str, bool], None]) -> None:
         """Install the consumer that releases a resident admission credit on DS
         terminal.
 
-        The hook receives the settled boundary's ``invocation_id`` so the Admission
-        controller advances the linked claim to terminal — the sole normal credit
-        release.
+        The hook receives the settled boundary's ``invocation_id`` and whether the
+        outcome was a failure, so the Admission controller advances the linked claim to
+        terminal on any fenced outcome — the sole normal credit release.
         """
         self._resident_terminal_hook = hook
+
+    def _release_resident_credit(
+        self, invocation_id: str | None, *, failed: bool
+    ) -> None:
+        if invocation_id is not None and self._resident_terminal_hook is not None:
+            self._resident_terminal_hook(invocation_id, failed)
 
     def originate_facade_turn_group(self, task_id: str, group: FacadeTurnGroup) -> None:
         """Record a turn-scoped facade group the gateway captured, before it acks.
@@ -1886,8 +1897,8 @@ class TaskRuntime:
     ) -> list[str]:
         """Fail the non-terminal task records terminally; returns the ones changed.
 
-        Persists them here when ``persist`` is set; the failure cascade instead lets
-        the caller's single terminal-persist cover them.
+        Persists them here when ``persist`` is set; the failure cascade instead lets the
+        caller's single terminal-persist cover them.
         """
         failed_now: list[str] = []
         for task_id in task_ids:
@@ -2470,6 +2481,7 @@ class TaskRuntime:
         cancelling: list[str] = []
         touched: list[str] = []
         interrupts: list[InterruptMessage] = []
+        resident_invocation_ids: list[str] = []
         with self._cv:
             workflow_tasks = [
                 item
@@ -2531,8 +2543,17 @@ class TaskRuntime:
             # work items settle CANCELLED in lockstep with its task records; the
             # snapshot follows the committed task state so the ledger never leads it.
             if workflow_id in self._engines:
-                self._engines[workflow_id].cancel_instance()
+                engine = self._engines[workflow_id]
+                engine.cancel_instance()
+                resident_invocation_ids = (
+                    engine.cancel_outstanding_boundary_invocations()
+                )
                 self._save_ledger_locked(workflow_id)
+
+        # A cancelled in-flight resident invocation releases its credit from this fenced
+        # cancellation terminal, so a lost or draining replica is not held forever.
+        for invocation_id in resident_invocation_ids:
+            self._release_resident_credit(invocation_id, failed=True)
 
         for interrupt in interrupts:
             worker = self._worker_registry.get_worker(interrupt.worker_id)
@@ -2696,8 +2717,8 @@ class TaskRuntime:
     def queued_gpu_counts(self) -> set[int]:
         """Return the set of distinct GPU counts requested by tasks in the ready queue.
 
-        0 represents a CPU-only task.  Used to match each candidate server to
-        the best worker it can create for the current queue.
+        0 represents a CPU-only task.  Used to match each candidate server to the best
+        worker it can create for the current queue.
         """
         counts: set[int] = set()
         with self._cv:

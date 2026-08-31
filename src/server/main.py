@@ -7,6 +7,7 @@ import json
 import os
 import threading
 from contextlib import AsyncExitStack, asynccontextmanager
+from typing import Any
 
 import uvicorn
 from fastapi import FastAPI
@@ -36,9 +37,11 @@ from .resident import (
     HttpInferenceAdapter,
     LifecycleScaleManager,
     ReplicaEndpoint,
+    ReplicaIncarnation,
     ResidentCapacityControl,
     ResidentPolicyLimits,
     ResidentStores,
+    ServiceFamily,
 )
 from .routers import docs, health, v1
 from .services.agent_model_gateway import (
@@ -196,12 +199,14 @@ if IS_ROOT_NODE:
 
         _resident_admission = AdmissionController(_resident_stores, _persist_resident)
 
-        async def _materialize_resident(family, replica):
+        async def _materialize_resident(
+            family: ServiceFamily, replica: ReplicaIncarnation
+        ) -> str:
             assert RUNTIME is not None
             spec_type = (
                 "dev_model" if _resident_cfg.substrate == "dev_model" else "serve"
             )
-            spec: dict[str, object] = {
+            spec: dict[str, Any] = {
                 "taskType": spec_type,
                 "resources": {
                     "hardware": {
@@ -269,7 +274,7 @@ if IS_ROOT_NODE:
             return ReplicaEndpoint(
                 base_url=f"http://{host}:{port}/v1",
                 model=str(serve.get("model") or ""),
-                api_key=serve.get("api_key") or _resident_cfg.forward_api_key,
+                api_key=serve.get("api_key"),
             )
 
         RESIDENT_CONTROL = ResidentCapacityControl(
@@ -277,7 +282,8 @@ if IS_ROOT_NODE:
             admission=_resident_admission,
             lifecycle=_resident_lifecycle,
             adapter=HttpInferenceAdapter(
-                timeout_sec=config.orchestration.gateway.timeout_sec
+                timeout_sec=config.orchestration.gateway.timeout_sec,
+                forward_api_key=_resident_cfg.forward_api_key,
             ),
             limits=_resident_limits,
             binding_resolver=RUNTIME.gateway_binding_for,

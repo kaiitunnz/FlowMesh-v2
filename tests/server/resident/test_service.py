@@ -12,6 +12,7 @@ import asyncio
 
 from server.orchestration.tool_dispatch import ToolInvocationEnvelope
 from server.resident import (
+    AdapterError,
     AdmissionController,
     ClaimState,
     LifecycleScaleManager,
@@ -64,7 +65,23 @@ class _FakeAdapter:
         return self.completion
 
 
-def _build(*, limits=None, adapter=None):
+class _FlakyAdapter:
+    """Fails post-acceptance for the first ``fail_first`` calls, then succeeds."""
+
+    def __init__(self, completion="OK", fail_first=1):
+        self.completion = completion
+        self.remaining_failures = fail_first
+        self.calls = 0
+
+    async def issue(self, handoff, request_payload):
+        self.calls += 1
+        if self.remaining_failures > 0:
+            self.remaining_failures -= 1
+            raise AdapterError("route lost", pre_acceptance=False)
+        return self.completion
+
+
+def _build(*, limits=None, adapter=None, materialize_fn=None):
     stores = ResidentStores()
     limits = limits or ResidentPolicyLimits()
     settled = []
@@ -73,8 +90,10 @@ def _build(*, limits=None, adapter=None):
         settled.append((task_id, call_correlation, value, error))
         return True
 
-    async def materialize_fn(family, replica):
-        return "tsk-serve-1"
+    if materialize_fn is None:
+
+        async def materialize_fn(family, replica):
+            return "tsk-serve-1"
 
     admission = AdmissionController(stores)
     lifecycle = LifecycleScaleManager(
@@ -133,3 +152,57 @@ def test_rehydrate_reconciles_in_flight_claim():
     claim = fresh_stores.claims.by_invocation("inv-1")[0]
     assert claim.state is ClaimState.UNCERTAIN
     assert fresh_stores.credit_ledger.held(claim.replica_id) == 1
+
+
+def test_post_acceptance_loss_holds_then_releases_on_ds_terminal():
+    svc, stores, settled = _build(adapter=_FlakyAdapter(fail_first=1))
+    asyncio.run(svc._serve_invocation(_env()))
+
+    claim = stores.claims.by_invocation("inv-1")[0]
+    assert claim.state is ClaimState.UNCERTAIN  # held, not released on a lost route
+    assert stores.credit_ledger.held(claim.replica_id) == 1
+    assert settled[-1][3] is not None  # the boundary settled with an error
+
+    # The runtime fires the terminal hook on the failure settle, releasing the credit.
+    svc.on_invocation_terminal("inv-1", failed=True)
+    assert claim.state is ClaimState.TERMINAL
+    assert stores.credit_ledger.held(claim.replica_id) == 0
+
+
+def test_redrive_resumes_without_double_admit_or_release():
+    svc, stores, _ = _build(adapter=_FlakyAdapter(fail_first=1))
+    asyncio.run(svc._serve_invocation(_env()))  # first drive: post-acceptance loss
+    first = stores.claims.by_invocation("inv-1")[0]
+    assert first.state is ClaimState.UNCERTAIN
+    replicas = len(stores.directory.all())
+    assert stores.credit_ledger.held(first.replica_id) == 1
+
+    # A re-drive of the same invocation resumes the parked claim on its live replica: no
+    # new claim, no new materialize, and the credit is not released before a terminal.
+    asyncio.run(svc._serve_invocation(_env()))
+    claims = stores.claims.by_invocation("inv-1")
+    assert len(claims) == 1 and claims[0] is first
+    assert len(stores.directory.all()) == replicas
+    assert stores.credit_ledger.held(first.replica_id) == 1
+
+    svc.on_invocation_terminal("inv-1", failed=False)
+    assert first.state is ClaimState.TERMINAL
+    assert stores.credit_ledger.held(first.replica_id) == 0
+
+
+def test_failed_materialize_recovers_family_and_settles():
+    async def boom(family, replica):
+        raise RuntimeError("cold start failed")
+
+    svc, stores, settled = _build(materialize_fn=boom)
+    asyncio.run(svc._serve_invocation(_env()))
+
+    # The invocation settled with a typed provisioning error rather than hanging.
+    assert settled[-1][3] is not None and "materialization failed" in settled[-1][3]
+    # No replica is wedged MATERIALIZING, so the family can materialize again.
+    assert all(
+        r.state is not ReplicaState.MATERIALIZING for r in stores.directory.all()
+    )
+    assert svc._lifecycle.plan_capacity("m", "m").action == "materialize"
+    # The claim settled without holding any credit.
+    assert all(not c.holds_credit for c in stores.claims.all())

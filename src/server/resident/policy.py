@@ -4,7 +4,7 @@ Before the Lifecycle & scale manager creates or joins an allocation for a plan-d
 family, policy checks the allowed model/engine catalog, per-family replica quota, and
 the bounded concurrent cold-start limit. A refusal is a typed, durable outcome that
 creates no allocation, route authorization, or credit and never silently substitutes an
-arbitrary provider. Thresholds here are the conservative baseline; calibration is later.
+arbitrary provider. Thresholds here are the conservative baseline.
 """
 
 from dataclasses import dataclass, field
@@ -16,9 +16,9 @@ from .state import ProvisioningDenialReason
 class ResidentPolicyLimits:
     """Deployment-resolved caps for resident auto-provisioning.
 
-    ``allowed_models`` empty means the deployment allows any plan-derived model; a
-    non-empty set enforces an explicit catalog. The manager receives resolved values
-    from the config edge rather than reading the environment.
+    ``allowed_models`` empty means the deployment allows any plan-derived model; a non-
+    empty set enforces an explicit catalog. The manager receives resolved values from
+    the config edge rather than reading the environment.
     """
 
     allowed_models: frozenset[str] = field(default_factory=frozenset)

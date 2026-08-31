@@ -79,9 +79,10 @@ TERMINAL --(permitted reissue)--> successor PENDING (same invocation_id, fresh e
 A `RESERVED` claim authorizes one opaque, short-lived, claim-bound admission handoff — a
 descriptor an engine adapter consumes to reach the selected replica and obtain an enqueue
 acknowledgement. It is neither a persisted control object nor a network route authorization.
-The handoff is locality-neutral: the default inference adapter consumes it in-server and
-relays the request to the replica's OpenAI-compatible endpoint, and the same descriptor
-could be consumed by an authenticated worker-side deputy without changing the contract.
+The handoff is locality-neutral: its fields are data an adapter consumes, not a
+server-owned client. The default inference adapter consumes it in-server and relays the
+request to the replica's OpenAI-compatible endpoint, so where the bytes run is not fixed by
+the contract.
 
 ## Replica lifecycle and policy
 

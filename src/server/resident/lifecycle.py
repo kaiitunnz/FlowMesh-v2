@@ -2,13 +2,10 @@
 
 It owns allocation leases and replica-directory lifecycle, performs policy-bounded,
 demand-driven scale-from-zero for approved plan-derived families, and drains before an
-idle
-teardown so accepted work reaches a terminal outcome. It never mints or releases an
-admission credit: the capacity decision (join a warm replica, materialize one, or
-return a
-typed denial) is a pure function of the directory, leases, and policy, and the actual
-start
-and stop cross the flat worker plane through injected substrate hooks.
+idle teardown so accepted work reaches a terminal outcome. It never mints or releases an
+admission credit: the capacity decision (join a warm replica, materialize one, or return
+a typed denial) is a pure function of the directory, leases, and policy, and the actual
+start and stop cross the flat worker plane through injected substrate hooks.
 """
 
 from collections.abc import Awaitable, Callable
@@ -122,7 +119,13 @@ class LifecycleScaleManager:
         self._stores.leases.add(lease)
         self._stores.directory.add(replica)
         self._persist()
-        serve_task_id = await self._materialize_fn(family, replica)
+        try:
+            serve_task_id = await self._materialize_fn(family, replica)
+        except Exception:
+            # A failed cold start must not wedge the family: invalidate the replica so a
+            # later demand can materialize again, and let the caller settle the claim.
+            self.on_preempt(replica.replica_id)
+            raise
         replica.serve_task_id = serve_task_id
         replica.updated_at = now_iso()
         self._persist()
@@ -143,7 +146,8 @@ class LifecycleScaleManager:
 
     def refresh_report(self, replica_id: str) -> None:
         """Ingest a conservative normalized capacity report for a replica's current
-        state."""
+        state.state.
+        """
         replica = self._stores.directory.get(replica_id)
         if replica is None:
             return
@@ -161,7 +165,8 @@ class LifecycleScaleManager:
 
     def drain(self, replica_id: str) -> None:
         """Reject new claims on a replica while its admitted work reaches a safe
-        outcome."""
+        outcome.outcome.
+        """
         replica = self._stores.directory.get(replica_id)
         if replica is None or replica.state not in SERVABLE_REPLICA_STATES:
             return

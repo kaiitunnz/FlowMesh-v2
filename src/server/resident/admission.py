@@ -1,15 +1,11 @@
 """The Admission controller: the fast admission loop over durable control facts.
 
 It fair-orders claims from the DemandLedger, selects a compatible replica from the
-derived
-CapacityPools and Replica directory, atomically records the fenced
-``ServiceClaim.RESERVED``
-credit, and advances the claim FSM as engine acknowledgements and fenced ``DS`` terminal
-outcomes arrive. It writes only claim facts; capacity reports are evidence it reads,
-never
-credit it mints. Every authoritative mutation is persisted through the injected hook so
-the
-credit survives a restart.
+derived CapacityPools and Replica directory, atomically records the fenced
+``ServiceClaim.RESERVED`` credit, and advances the claim FSM as engine acknowledgements
+and fenced ``DS`` terminal outcomes arrive. It writes only claim facts; capacity reports
+are evidence it reads, never credit it mints. Every authoritative mutation is persisted
+through the injected hook so the credit survives a restart.
 """
 
 from collections.abc import Callable
@@ -19,15 +15,16 @@ from shared.utils.ids import new_admission_handoff_token
 from .capacity import default_credit
 from .claim import (
     accept,
-    begin_reconcile,
     begin_stream,
     mark_uncertain,
     new_claim,
+    release_on_ds_terminal,
     reserve,
     settle_terminal,
 )
 from .selection import SelectionStrategy, build_selection_strategy
 from .state import (
+    SERVABLE_REPLICA_STATES,
     AdmissionHandoff,
     AdmissionProfile,
     ClaimState,
@@ -56,6 +53,22 @@ class AdmissionController:
             self._strategies[family] = build_selection_strategy(name)
         return self._strategies[family]
 
+    def active_claim(self, invocation_id: str) -> ServiceClaim | None:
+        """The non-terminal claim for an invocation, if one is in flight.
+
+        A re-driven boundary attaches to this existing claim — a resume that reuses its
+        held credit — rather than raising a successor and re-admitting, so a restart
+        cannot double-submit or release the parked credit before the fenced terminal.
+        """
+        return next(
+            (
+                claim
+                for claim in self._stores.claims.by_invocation(invocation_id)
+                if claim.state is not ClaimState.TERMINAL
+            ),
+            None,
+        )
+
     def raise_claim(
         self,
         *,
@@ -67,9 +80,10 @@ class AdmissionController:
     ) -> ServiceClaim:
         """Record the durable invocation request and a fresh pending claim.
 
-        A prior credit-bearing claim for the same invocation — a lost attempt — is
-        reconciled to terminal first, so a reissue is a successor with a fresh admission
-        epoch rather than a reopening.
+        Called only when no claim for the invocation is in flight. A permitted reissue
+        is a successor: the admission epoch advances past every prior terminal claim,
+        and no prior credit is released here — release happens only through the fenced
+        DS terminal.
         """
         self._stores.invocations.put(
             InvocationRequest(
@@ -80,7 +94,13 @@ class AdmissionController:
                 replayable=replayable,
             )
         )
-        epoch = self._reconcile_invocation(invocation_id)
+        epoch = max(
+            (
+                prior.admission_epoch + 1
+                for prior in self._stores.claims.by_invocation(invocation_id)
+            ),
+            default=0,
+        )
         claim = new_claim(
             invocation_id=invocation_id, family=family, admission_epoch=epoch
         )
@@ -97,19 +117,33 @@ class AdmissionController:
         self._persist()
         return claim
 
-    def _reconcile_invocation(self, invocation_id: str) -> int:
-        """Reconcile lingering credit-bearing claims and return the next admission
-        epoch."""
-        epoch = 0
-        for prior in self._stores.claims.by_invocation(invocation_id):
-            epoch = max(epoch, prior.admission_epoch + 1)
-            if prior.holds_credit:
-                if prior.state is not ClaimState.RECONCILING:
-                    if prior.state is not ClaimState.UNCERTAIN:
-                        mark_uncertain(prior)
-                    begin_reconcile(prior)
-                settle_terminal(prior, ClaimTerminalReason.RECONCILED)
-        return epoch
+    def rebuild_handoff(self, claim: ServiceClaim) -> AdmissionHandoff | None:
+        """A fresh claim-bound handoff for an in-flight claim's replica, if still live.
+
+        Resuming a re-driven boundary reissues to the same fenced replica incarnation
+        under the existing credit; if the replica is gone or superseded, no handoff is
+        built and the caller settles the boundary so the fenced terminal releases the
+        credit.
+        """
+        if claim.replica_id is None or claim.incarnation is None:
+            return None
+        replica = self._stores.directory.get(claim.replica_id)
+        if (
+            replica is None
+            or replica.endpoint is None
+            or replica.incarnation != claim.incarnation
+            or replica.state not in SERVABLE_REPLICA_STATES
+        ):
+            return None
+        return AdmissionHandoff(
+            token=new_admission_handoff_token(),
+            claim_id=claim.claim_id,
+            invocation_id=claim.invocation_id,
+            family=claim.family,
+            replica_id=replica.replica_id,
+            incarnation=replica.incarnation,
+            endpoint=replica.endpoint,
+        )
 
     def admit(
         self,
@@ -121,8 +155,8 @@ class AdmissionController:
         """Select a feasible replica and record the fenced RESERVED credit, or defer.
 
         Returns the opaque claim-bound handoff on success; ``None`` leaves the claim
-        pending
-        without holding a replica or an episode lane when no replica is feasible.
+        pending without holding a replica or an episode lane when no replica is
+        feasible.
         """
         candidates = self._stores.pools.feasible_candidates(
             claim.family, profile, now_ts=now_ts
@@ -178,30 +212,27 @@ class AdmissionController:
         self._persist()
 
     def on_route_loss(self, claim: ServiceClaim) -> None:
-        """Hold the credit after a post-acceptance route loss, pending
-        reconciliation."""
+        """Hold the credit after a post-acceptance route loss, pending reconciliation.
+
+        The credit is not released here: a lost route is uncertain, not evidence the
+        invocation completed. It releases only when the fenced DS terminal arrives.
+        """
         if claim.holds_credit and claim.state is not ClaimState.UNCERTAIN:
             mark_uncertain(claim)
             self._persist()
 
-    def reconcile(self, invocation_id: str) -> None:
-        """Drive an invocation's lingering credit-bearing claims to a reconciled
-        terminal."""
-        self._reconcile_invocation(invocation_id)
-        self._persist()
-
     def on_ds_terminal(self, invocation_id: str, reason: ClaimTerminalReason) -> None:
-        """Advance every credit-bearing claim of an invocation to terminal from a DS
-        outcome.
+        """Settle every non-terminal claim of an invocation from a fenced DS outcome.
 
         This is the sole normal release path for an accepted credit: the orchestration
         engine records the terminal outcome and the controller consumes it by
-        ``invocation_id``.
+        ``invocation_id``, tolerant of the claim's source state.
         """
         released = False
         for claim in self._stores.claims.by_invocation(invocation_id):
-            if claim.holds_credit:
-                settle_terminal(claim, reason)
+            if claim.state is not ClaimState.TERMINAL:
+                release_on_ds_terminal(claim, reason)
+                self._stores.demand.remove(claim.claim_id)
                 released = True
         if released:
             self._persist()

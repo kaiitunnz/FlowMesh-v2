@@ -3,9 +3,9 @@
 The Service-family registry, Replica directory, DemandLedger, Allocation leases, durable
 invocation requests, and ``ServiceClaim`` facts are authoritative in their domains. Only
 ``ServiceClaim`` facts are authoritative for admission credits. The derived
-``CapacityPools`` and Admission-credit ledger are computed from those authorities,
-so they cannot diverge: no cached credit exists for a report or a provisioning decision
-to overwrite or release. Capacity reports are evidence, fenced by incarnation and report
+``CapacityPools`` and Admission-credit ledger are computed from those authorities, so
+they cannot diverge: no cached credit exists for a report or a provisioning decision to
+overwrite or release. Capacity reports are evidence, fenced by incarnation and report
 epoch, never a credit authority.
 """
 
@@ -273,8 +273,7 @@ class ResidentStores:
         claims.
 
         Derived views and capacity telemetry are not restored: they are recomputed on
-        read
-        and refreshed by live reports.
+        read and refreshed by live reports.
         """
         for family in snapshot.families:
             self.families.register(family)

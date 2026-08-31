@@ -17,9 +17,9 @@ from ..utils.time import now_iso
 class ClaimState(StrEnum):
     """The causal state of one admission claim.
 
-    ``PENDING`` and ``TERMINAL`` hold no credit; every other state is a
-    credit-bearing nonterminal fact. ``UNCERTAIN`` and ``RECONCILING`` retain the
-    credit after a route/incarnation loss until a fenced terminal outcome settles it.
+    ``PENDING`` and ``TERMINAL`` hold no credit; every other state is a credit-bearing
+    nonterminal fact. ``UNCERTAIN`` and ``RECONCILING`` retain the credit after a
+    route/incarnation loss until a fenced terminal outcome settles it.
     """
 
     PENDING = "pending"
@@ -51,6 +51,7 @@ class ClaimTerminalReason(StrEnum):
 
     COMPLETED = "completed"
     CANCELLED = "cancelled"
+    FAILED = "failed"
     ENQUEUE_FAILED = "enqueue_failed"
     EXPIRED = "expired"
     RECONCILED = "reconciled"
@@ -111,8 +112,8 @@ class AdmissionProfile(BaseModel):
 class ClaimCredit(BaseModel):
     """The conservative demand a reserved claim debits from a replica's safe capacity.
 
-    It is an admission accounting estimate, not a claim on literal engine KV blocks:
-    one admission slot plus a projected token demand.
+    It is an admission accounting estimate, not a claim on literal engine KV blocks: one
+    admission slot plus a projected token demand.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -141,25 +142,26 @@ class SafeCapacityVector(BaseModel):
 class ReplicaEndpoint(BaseModel):
     """The reachable address of a materialized replica.
 
-    ``api_key`` stays server-side; it is materialized into the admission handoff and
-    never surfaced to a workflow. ``base_url`` is OpenAI-compatible for the inference
-    family.
+    ``api_key`` stays server-side and never reaches a workflow; it is held out of the
+    durable snapshot (``exclude=True``) so no credential is persisted in cleartext, and
+    is re-attached from a live probe on rehydrate. ``base_url`` is OpenAI-compatible for
+    the inference family.
     """
 
     model_config = ConfigDict(frozen=True)
 
     base_url: str
     model: str
-    api_key: str | None = None
+    api_key: str | None = Field(default=None, exclude=True)
     protocol: str = "openai"
 
 
 class ReplicaCapacityReport(BaseModel):
     """Engine-adapter-normalized evidence about one replica incarnation.
 
-    It carries the replica incarnation and report epoch so a stale report cannot fence
-    a newer decision. It may tighten the safe-capacity budget and reconciliation
-    evidence, but never creates, overwrites, or releases a claim credit.
+    It carries the replica incarnation and report epoch so a stale report cannot fence a
+    newer decision. It may tighten the safe-capacity budget and reconciliation evidence,
+    but never creates, overwrites, or releases a claim credit.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -314,9 +316,9 @@ class AdmissionHandoff(BaseModel):
 
     A ``RESERVED`` claim authorizes exactly this: a trusted, claim-bound descriptor an
     engine adapter consumes to reach the selected replica incarnation and obtain an
-    enqueue acknowledgement. It is locality-neutral — the same descriptor can be
-    consumed in-server or by an authenticated worker-side deputy — and is neither a
-    data-plane route nor a post-acceptance route authorization.
+    enqueue acknowledgement. It is locality-neutral — its fields are data an adapter
+    consumes, not a server-owned client — and is neither a data-plane route nor a post-
+    acceptance route authorization.
     """
 
     model_config = ConfigDict(frozen=True)

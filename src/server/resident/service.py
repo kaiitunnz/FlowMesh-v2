@@ -2,13 +2,10 @@
 
 A resident model binding routes here instead of the external agent-model gateway. The
 service raises a durable ServiceClaim for the invocation the engine already minted,
-drives
-the Admission controller and Lifecycle & scale manager, delivers the request through the
-inference adapter, and settles the outcome back at the originating call. Execution
-defaults
-to the in-server relay; the credit releases only when the fenced DS terminal returns
-through
-``invocation_id``. It runs the invocation off the calling lane, mirroring the gateway.
+drives the Admission controller and Lifecycle & scale manager, delivers the request
+through the inference adapter off the calling lane, and settles the outcome back at the
+originating call. Execution defaults to the in-server relay; the credit releases only
+when the fenced DS terminal returns through ``invocation_id``.
 """
 
 import asyncio
@@ -99,9 +96,15 @@ class ResidentCapacityControl:
             return
         asyncio.run_coroutine_threadsafe(self._serve_invocation(env), self._loop)
 
-    def on_invocation_terminal(self, invocation_id: str) -> None:
-        """Release the admission credit from a fenced DS terminal outcome."""
-        self._admission.on_ds_terminal(invocation_id, ClaimTerminalReason.COMPLETED)
+    def on_invocation_terminal(self, invocation_id: str, failed: bool = False) -> None:
+        """Release the admission credit from a fenced DS terminal outcome.
+
+        Wired on both the success and the failure/cancel settlement of a resident
+        boundary, so every fenced terminal — not only a completion — releases the
+        credit.
+        """
+        reason = ClaimTerminalReason.FAILED if failed else ClaimTerminalReason.COMPLETED
+        self._admission.on_ds_terminal(invocation_id, reason)
 
     def rehydrate(self, snapshot: ResidentSnapshot) -> None:
         """Rebuild the authoritative CS facts and reconcile in-flight claims after a
@@ -112,6 +115,13 @@ class ResidentCapacityControl:
         until the linked invocation reaches a fenced terminal outcome.
         """
         self._stores.load_snapshot(snapshot)
+        # Endpoint credentials are not persisted; re-attach them from a live probe of
+        # each replica's still-running serve task so a resumed request can authenticate.
+        for replica in self._stores.directory.all():
+            if replica.endpoint is None or replica.serve_task_id is None:
+                continue
+            if (fresh := self._probe_endpoint(replica.serve_task_id)) is not None:
+                replica.endpoint = fresh
         for claim in self._stores.claims.all():
             if claim.state in (
                 ClaimState.RESERVED,
@@ -134,36 +144,62 @@ class ResidentCapacityControl:
         model_ref = binding.service_model_ref
         assert model_ref is not None
         family = service_family_for_ref(model_ref)
-        if not self._ensure_family(family, model_ref):
-            self._fail(
-                env,
-                ProvisioningDenialReason.MODEL_NOT_ALLOWED,
-                f"model {model_ref!r} is not in the allowed catalog",
-            )
-            return
+
         profile = AdmissionProfile(engine_batch_key=family)
-        claim = self._admission.raise_claim(
-            invocation_id=env.invocation_id,
-            workflow_id=workflow_id,
-            family=family,
-            profile=profile,
-        )
-        handoff = await self._acquire_capacity(env, family, model_ref, claim, profile)
-        if handoff is None:
-            return
+        existing = self._admission.active_claim(env.invocation_id)
+        if existing is not None and existing.holds_credit:
+            # Resume a re-driven boundary on the in-flight claim: reissue to the same
+            # fenced replica under the held credit, never re-admitting or releasing.
+            claim = existing
+            handoff = self._admission.rebuild_handoff(existing)
+            if handoff is None:
+                self._admission.on_route_loss(existing)
+                self._settle(
+                    env.task_id,
+                    env.call_correlation,
+                    None,
+                    error="resident replica is unavailable to resume the invocation",
+                )
+                return
+        else:
+            if existing is not None:
+                claim = existing
+            elif not self._ensure_family(family, model_ref):
+                self._fail(
+                    env,
+                    ProvisioningDenialReason.MODEL_NOT_ALLOWED,
+                    f"model {model_ref!r} is not in the allowed catalog",
+                )
+                return
+            else:
+                claim = self._admission.raise_claim(
+                    invocation_id=env.invocation_id,
+                    workflow_id=workflow_id,
+                    family=family,
+                    profile=profile,
+                )
+            handoff = await self._acquire_capacity(
+                env, family, model_ref, claim, profile
+            )
+            if handoff is None:
+                return
         try:
             completion = await self._adapter.issue(handoff, env.request_payload)
         except AdapterError as exc:
-            if exc.pre_acceptance:
+            if exc.pre_acceptance and claim.state is ClaimState.RESERVED:
+                # A known pre-acceptance enqueue failure of a fresh reservation releases
+                # its credit directly; no engine ever received it.
                 self._admission.on_enqueue_failed(claim)
             else:
+                # A post-acceptance loss (or a failure on a resumed claim) holds the
+                # credit; the settle below records the fenced DS terminal releasing it.
                 self._admission.on_route_loss(claim)
-                self._admission.reconcile(env.invocation_id)
             self._settle(
                 env.task_id, env.call_correlation, None, error=f"resident issue: {exc}"
             )
             return
-        self._admission.on_enqueue_ack(claim)
+        if claim.state is ClaimState.RESERVED:
+            self._admission.on_enqueue_ack(claim)
         self._settle(env.task_id, env.call_correlation, completion)
 
     def _ensure_family(self, family: str, model_ref: str) -> bool:
@@ -200,7 +236,16 @@ class ResidentCapacityControl:
                 if plan.action == "materialize" and not self._has_materializing(family):
                     definition = self._stores.families.get(family)
                     if definition is not None:
-                        await self._lifecycle.materialize(definition)
+                        try:
+                            await self._lifecycle.materialize(definition)
+                        except Exception as exc:  # cold start could not be started
+                            self._admission.on_denied(claim)
+                            self._fail(
+                                env,
+                                ProvisioningDenialReason.RESOURCE_CAP,
+                                f"resident materialization failed: {exc}",
+                            )
+                            return None
             if loop.time() >= deadline:
                 self._admission.on_expired(claim)
                 self._fail(

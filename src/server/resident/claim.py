@@ -123,6 +123,20 @@ def settle_terminal(claim: ServiceClaim, reason: ClaimTerminalReason) -> None:
     _touch(claim, ClaimState.TERMINAL)
 
 
+def release_on_ds_terminal(claim: ServiceClaim, reason: ClaimTerminalReason) -> None:
+    """Release a claim's credit from a fenced DS terminal outcome.
+
+    A terminal recorded in the ledger and consumed by ``invocation_id`` is
+    authoritative, so it settles any non-terminal claim regardless of its source state —
+    the sole normal path by which an accepted credit disappears. Idempotent on an
+    already-terminal claim.
+    """
+    if claim.state is ClaimState.TERMINAL:
+        return
+    claim.terminal_reason = reason
+    _touch(claim, ClaimState.TERMINAL)
+
+
 def successor_claim(claim: ServiceClaim) -> ServiceClaim:
     """Raise a fresh successor claim for a permitted reissue.
 

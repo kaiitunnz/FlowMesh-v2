@@ -6,6 +6,7 @@ post-acceptance failure (entering reconciliation).
 """
 
 import asyncio
+import json
 
 import httpx
 import pytest
@@ -69,3 +70,46 @@ def test_malformed_body_is_post_acceptance():
     with pytest.raises(AdapterError) as excinfo:
         asyncio.run(_adapter(handler).issue(_HANDOFF, "hi"))
     assert excinfo.value.pre_acceptance is False
+
+
+def test_forward_key_is_presented_when_the_replica_reports_none():
+    keyless = _HANDOFF.model_copy(
+        update={
+            "endpoint": ReplicaEndpoint(
+                base_url="http://replica/v1", model="m", api_key=None
+            )
+        }
+    )
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["auth"] = request.headers.get("authorization")
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    adapter = HttpInferenceAdapter(
+        transport=httpx.MockTransport(handler), forward_api_key="fwd-secret"
+    )
+    asyncio.run(adapter.issue(keyless, "hi"))
+    assert seen["auth"] == "Bearer fwd-secret"
+
+
+def test_full_chat_request_is_forwarded_faithfully():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    payload = json.dumps(
+        {
+            "messages": [
+                {"role": "system", "content": "be terse"},
+                {"role": "user", "content": "hi"},
+            ],
+            "temperature": 0.1,
+        }
+    )
+    asyncio.run(_adapter(handler).issue(_HANDOFF, payload))
+    assert seen["body"]["messages"][0]["role"] == "system"
+    assert seen["body"]["temperature"] == 0.1
+    assert seen["body"]["model"] == "m"  # the replica's model is pinned

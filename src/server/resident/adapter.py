@@ -3,9 +3,9 @@
 The adapter consumes a claim-bound admission handoff and delivers the request to the
 selected replica incarnation, returning the completion. It is the compatibility path
 over a stock OpenAI-compatible engine — a vLLM serve replica or the GPU-free
-``dev_model`` stand-in — so the server relays the request. The same handoff descriptor
-could be consumed by an authenticated worker-side deputy without changing this contract;
-a tighter engine-native pre-admission handshake is a later refinement.
+``dev_model`` stand-in — so the server relays the request. The handoff is locality-
+neutral: its descriptor is data an adapter consumes, not a server-owned client, so where
+the bytes run is not fixed by this contract.
 """
 
 import json
@@ -37,18 +37,32 @@ class EngineInvocationAdapter(Protocol):
     ) -> str: ...
 
 
-def _extract_prompt(payload: str | None) -> str:
-    if not payload:
-        return ""
-    try:
-        parsed = json.loads(payload)
-    except (json.JSONDecodeError, TypeError):
-        return payload
+def _chat_body(request_payload: str | None, model: str) -> dict[str, Any]:
+    """Build the OpenAI chat request from a boundary payload.
+
+    A payload that is already a chat request (a JSON object carrying ``messages``) is
+    forwarded faithfully with the replica's model pinned, preserving its system and
+    multi-turn messages and sampling parameters; a bare prompt is wrapped as one user
+    message. A payload naming a single ``prompt``/``input``/``content`` field is treated
+    as that prompt.
+    """
+    parsed: Any = None
+    if request_payload:
+        try:
+            parsed = json.loads(request_payload)
+        except (json.JSONDecodeError, TypeError):
+            parsed = None
+    if isinstance(parsed, dict) and isinstance(parsed.get("messages"), list):
+        return {**parsed, "model": model}
     if isinstance(parsed, dict):
         for key in ("prompt", "input", "content"):
             if isinstance(value := parsed.get(key), str):
-                return value
-    return payload
+                return {
+                    "model": model,
+                    "messages": [{"role": "user", "content": value}],
+                }
+    prompt = request_payload or ""
+    return {"model": model, "messages": [{"role": "user", "content": prompt}]}
 
 
 class HttpInferenceAdapter:
@@ -58,22 +72,23 @@ class HttpInferenceAdapter:
         self,
         *,
         timeout_sec: float = 60.0,
+        forward_api_key: str | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._timeout = timeout_sec
+        self._forward_api_key = forward_api_key
         self._transport = transport
 
     async def issue(
         self, handoff: AdmissionHandoff, request_payload: str | None
     ) -> str:
         endpoint = handoff.endpoint
-        body: dict[str, Any] = {
-            "model": endpoint.model,
-            "messages": [{"role": "user", "content": _extract_prompt(request_payload)}],
-        }
+        body = _chat_body(request_payload, endpoint.model)
         headers = {"Content-Type": "application/json"}
-        if endpoint.api_key:
-            headers["Authorization"] = f"Bearer {endpoint.api_key}"
+        # A replica's own key when it reports one; else the deployment forward key the
+        # adapter holds out-of-band, so a keyless stand-in can reach a keyed upstream.
+        if api_key := (endpoint.api_key or self._forward_api_key):
+            headers["Authorization"] = f"Bearer {api_key}"
         url = f"{endpoint.base_url.rstrip('/')}/chat/completions"
         try:
             async with httpx.AsyncClient(
