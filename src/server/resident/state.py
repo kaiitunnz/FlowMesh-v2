@@ -69,6 +69,11 @@ class ReplicaState(StrEnum):
     FAILED = "failed"
 
 
+SERVABLE_REPLICA_STATES: frozenset[ReplicaState] = frozenset(
+    {ReplicaState.WARM, ReplicaState.BUSY}
+)
+
+
 class ProvisioningDenialReason(StrEnum):
     """A typed reason an auto-materialization or admission is refused by policy."""
 
@@ -287,6 +292,21 @@ class ServiceClaim(BaseModel):
     @property
     def holds_credit(self) -> bool:
         return self.state in CREDIT_BEARING_CLAIM_STATES
+
+
+class ResidentSnapshot(BaseModel):
+    """The durable aggregate of the authoritative resident-capacity control facts.
+
+    It persists exactly the authoritative ``CS`` stores; derived views and telemetry are
+    rebuilt on load. The DemandLedger is reconstructed from the pending claims and their
+    invocation requests, so no separate demand persistence is needed.
+    """
+
+    families: list[ServiceFamily] = Field(default_factory=list)
+    replicas: list[ReplicaIncarnation] = Field(default_factory=list)
+    leases: list[AllocationLease] = Field(default_factory=list)
+    invocations: list[InvocationRequest] = Field(default_factory=list)
+    claims: list[ServiceClaim] = Field(default_factory=list)
 
 
 class AdmissionHandoff(BaseModel):

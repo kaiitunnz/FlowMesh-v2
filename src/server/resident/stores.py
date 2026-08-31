@@ -14,11 +14,13 @@ from .selection import ReplicaCandidate
 from .state import (
     AdmissionProfile,
     AllocationLease,
+    ClaimState,
     DemandEntry,
     InvocationRequest,
     ReplicaCapacityReport,
     ReplicaIncarnation,
     ReplicaState,
+    ResidentSnapshot,
     ServiceClaim,
     ServiceFamily,
 )
@@ -251,3 +253,51 @@ class ResidentStores:
         self.reports = ReportStore()
         self.credit_ledger = AdmissionCreditLedger(self.claims)
         self.pools = CapacityPools(self.directory, self.claims, self.reports)
+
+    def to_snapshot(self) -> ResidentSnapshot:
+        """Serialize only the authoritative ``CS`` facts for durable persistence."""
+        return ResidentSnapshot(
+            families=self.families.all(),
+            replicas=self.directory.all(),
+            leases=self.leases.all(),
+            invocations=[
+                request
+                for claim in self.claims.all()
+                if (request := self.invocations.get(claim.invocation_id)) is not None
+            ],
+            claims=self.claims.all(),
+        )
+
+    def load_snapshot(self, snapshot: ResidentSnapshot) -> None:
+        """Rehydrate authoritative facts and rebuild the DemandLedger from pending
+        claims.
+
+        Derived views and capacity telemetry are not restored: they are recomputed on
+        read
+        and refreshed by live reports.
+        """
+        for family in snapshot.families:
+            self.families.register(family)
+        for replica in snapshot.replicas:
+            self.directory.add(replica)
+        for lease in snapshot.leases:
+            self.leases.add(lease)
+        for request in snapshot.invocations:
+            self.invocations.put(request)
+        for claim in snapshot.claims:
+            self.claims.add(claim)
+            if claim.state is ClaimState.PENDING:
+                self._reenqueue_demand(claim)
+
+    def _reenqueue_demand(self, claim: ServiceClaim) -> None:
+        request = self.invocations.get(claim.invocation_id)
+        profile = request.profile if request is not None else None
+        self.demand.enqueue(
+            DemandEntry(
+                claim_id=claim.claim_id,
+                invocation_id=claim.invocation_id,
+                family=claim.family,
+                tenant=profile.tenant if profile else None,
+                deadline_at=profile.deadline_at if profile else None,
+            )
+        )

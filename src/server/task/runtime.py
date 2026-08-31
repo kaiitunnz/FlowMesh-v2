@@ -176,6 +176,7 @@ class TaskRuntime:
         # executes a fabric-served tool ("search/v1"). Both take the durable envelope.
         self._model_settler: Callable[[ToolInvocationEnvelope], None] | None = None
         self._tool_broker: Callable[[ToolInvocationEnvelope], None] | None = None
+        self._resident_terminal_hook: Callable[[str], None] | None = None
         # Facade boundaries the agent-model gateway captured server-side during an
         # episode's model turn, keyed by task; the completion path reroutes the clean
         # turn-completion into the pending boundary rather than settling it.
@@ -1208,6 +1209,9 @@ class TaskRuntime:
             advance = engine.settle_boundary_outcome(
                 task_id, call_correlation, value=value
             )
+            invocation_id = engine.terminalize_boundary_invocation(
+                task_id, call_correlation
+            )
             # The work item re-readied; the record must return to PENDING too, or the
             # dispatcher skips it (a ready task dispatches only from a pending record).
             if advance.ready:
@@ -1215,6 +1219,8 @@ class TaskRuntime:
             else:
                 self._apply_advance_locked(record.workflow_id, advance)
             self._save_ledger_locked(record.workflow_id)
+            if invocation_id is not None and self._resident_terminal_hook is not None:
+                self._resident_terminal_hook(invocation_id)
             self._cv.notify_all()
             return True
 
@@ -1257,6 +1263,16 @@ class TaskRuntime:
     def set_tool_broker(self, broker: Callable[[ToolInvocationEnvelope], None]) -> None:
         """Install the off-lane handler for fabric-served tool interfaces."""
         self._tool_broker = broker
+
+    def set_resident_terminal_hook(self, hook: Callable[[str], None]) -> None:
+        """Install the consumer that releases a resident admission credit on DS
+        terminal.
+
+        The hook receives the settled boundary's ``invocation_id`` so the Admission
+        controller advances the linked claim to terminal — the sole normal credit
+        release.
+        """
+        self._resident_terminal_hook = hook
 
     def originate_facade_turn_group(self, task_id: str, group: FacadeTurnGroup) -> None:
         """Record a turn-scoped facade group the gateway captured, before it acks.

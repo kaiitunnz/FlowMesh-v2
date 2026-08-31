@@ -1,3 +1,5 @@
+from .adapter import AdapterError, EngineInvocationAdapter, HttpInferenceAdapter
+from .admission import AdmissionController
 from .capacity import default_credit, is_feasible, outstanding_slots, residual_after
 from .claim import (
     ClaimTransitionError,
@@ -10,6 +12,7 @@ from .claim import (
     settle_terminal,
     successor_claim,
 )
+from .lifecycle import CapacityPlan, LifecycleScaleManager
 from .policy import (
     ProvisioningDecision,
     ResidentPolicyLimits,
@@ -24,8 +27,10 @@ from .selection import (
     SelectionStrategy,
     build_selection_strategy,
 )
+from .service import ResidentCapacityControl
 from .state import (
     CREDIT_BEARING_CLAIM_STATES,
+    SERVABLE_REPLICA_STATES,
     AdmissionHandoff,
     AdmissionProfile,
     AllocationLease,
@@ -39,6 +44,7 @@ from .state import (
     ReplicaEndpoint,
     ReplicaIncarnation,
     ReplicaState,
+    ResidentSnapshot,
     SafeCapacityVector,
     ServiceClaim,
     ServiceFamily,
@@ -59,11 +65,15 @@ from .stores import (
 __all__ = [
     "CREDIT_BEARING_CLAIM_STATES",
     "DEFAULT_SELECTION_STRATEGY",
+    "SERVABLE_REPLICA_STATES",
+    "AdapterError",
+    "AdmissionController",
     "AdmissionCreditLedger",
     "AdmissionHandoff",
     "AdmissionProfile",
     "AllocationLease",
     "BatchAwareBestFit",
+    "CapacityPlan",
     "CapacityPools",
     "ClaimCredit",
     "ClaimState",
@@ -72,10 +82,13 @@ __all__ = [
     "ClaimTransitionError",
     "DemandEntry",
     "DemandLedger",
+    "EngineInvocationAdapter",
+    "HttpInferenceAdapter",
     "InvocationRequest",
     "InvocationStore",
     "LeaseStore",
     "LeastLoad",
+    "LifecycleScaleManager",
     "ProvisioningDecision",
     "ProvisioningDenialReason",
     "ReplicaCandidate",
@@ -85,7 +98,9 @@ __all__ = [
     "ReplicaIncarnation",
     "ReplicaState",
     "ReportStore",
+    "ResidentCapacityControl",
     "ResidentPolicyLimits",
+    "ResidentSnapshot",
     "ResidentStores",
     "RoundRobin",
     "SafeCapacityVector",

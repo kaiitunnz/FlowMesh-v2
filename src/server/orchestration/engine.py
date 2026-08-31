@@ -1128,6 +1128,28 @@ class OrchestrationEngine:
         self.mark_pending_outcome(task_id, call_correlation)
         return self.deliver_boundary_outcome(task_id, call_correlation)
 
+    def terminalize_boundary_invocation(
+        self, task_id: str, call_correlation: str
+    ) -> str | None:
+        """Record a settled mediated boundary's invocation as terminal in the ledger.
+
+        Returns the durable ``invocation_id`` so a control-plane consumer bound to it —
+        the
+        resident-capacity admission credit — can advance from this fenced ``DS``
+        outcome.
+        The transition is idempotent and never regresses an ambiguity-terminal outcome.
+        """
+        wi = self._work_item_for_task(task_id)
+        if wi is None:
+            return None
+        env = self._boundary_events.get((wi.activation_id, call_correlation))
+        if env is None or env.invocation_id is None:
+            return None
+        invocation = self._invocations.get(env.invocation_id)
+        if invocation is not None:
+            invocation.state = next_on_terminal(invocation.state)
+        return env.invocation_id
+
     def episode_context(
         self, task_id: str
     ) -> tuple[str | None, tuple[DeliveredOutcome, ...]]:

@@ -11,15 +11,11 @@ from collections.abc import Iterable
 
 from ..utils.time import now_iso, parse_iso_ts
 from .state import (
+    SERVABLE_REPLICA_STATES,
     AdmissionProfile,
     ClaimCredit,
     ReplicaCapacityReport,
-    ReplicaState,
     ServiceClaim,
-)
-
-_SERVABLE_REPLICA_STATES: frozenset[ReplicaState] = frozenset(
-    {ReplicaState.WARM, ReplicaState.BUSY}
 )
 
 
@@ -50,7 +46,7 @@ def is_feasible(
     safe headroom after every outstanding credit. The gate is conservative: it never
     packs past the reported safe slots even to make a denser batch.
     """
-    if not report.healthy or report.state not in _SERVABLE_REPLICA_STATES:
+    if not report.healthy or report.state not in SERVABLE_REPLICA_STATES:
         return False
     if (
         profile.adapter_ref is not None
