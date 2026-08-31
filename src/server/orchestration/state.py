@@ -106,13 +106,17 @@ class ValueRef(BaseModel):
     """A durable reference to a logical output value, never the value itself.
 
     A loop-carried value may reference a versioned ``ModelRef`` so an iteration pins the
-    model version it observes without pinning a physical replica.
+    model version it observes without pinning a physical replica. ``collection_key``
+    selects one element of a producer's fan-out collection, so a spawned child's
+    child-init input is a frozen reference into the producer result rather than a copy.
     """
 
     model_config = ConfigDict(frozen=True)
 
-    kind: str  # "legacy_task_result" | "empty" | "join_result" | "model_ref"
+    kind: str  # "legacy_task_result" | "inline" | "empty" | "join_result" | "model_ref"
     legacy_task_id: str | None = None
+    collection_key: str | None = None  # element selector into a producer collection
+    literal: str | None = None  # a bounded, immutable inline child-init value
     model_ref: ModelRef | None = None
 
 
@@ -144,11 +148,18 @@ class BoundaryEvent(BaseModel):
     child_ref: str | None = None
     child_region_ref: str | None = None  # role a spawn/seal selects; never a raw op id
     request_payload: str | None = None
-    injection_target: str | None = None
+    injection_target: str | None = None  # the harness call id the outcome returns at
+    injection_tool: str | None = None  # facade tool name, to rebuild the call
     continuation: str | None = None
     state_ref: str | None = None
     value_ref: ValueRef | None = None
     invocation_id: str | None = None
+    # A turn-scoped facade group: members share one group id and one continuation,
+    # ordered by source ordinal. An await-outcome member holds the resume gate; an
+    # admit-and-close member (a spawn) settles at admission and never holds it.
+    group_id: str | None = None
+    group_ordinal: int | None = None
+    completion_mode: str | None = None
     denial: DenialKind | None = None
     outcome_value: str | None = None  # settled result payload injected at re-dispatch
 
@@ -258,11 +269,88 @@ class Record(BaseModel):
     value_ref: ValueRef | None = None
 
 
+class RegionAggregateMember(BaseModel):
+    """One frozen member of a region-join aggregate, captured at join release.
+
+    Retains the settled child's activation, its stable key (child index, never arrival
+    order), the selected source output port, its terminal outcome, and an immutable
+    value reference. Membership is frozen at release so a residual child never mutates
+    the emitted aggregate and a restart replays the same members.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    child_activation_id: str
+    child_key: str
+    source_port: str | None = None
+    outcome: PublicationOutcome
+    value_ref: ValueRef | None = None
+
+
+class RegionJoinAggregate(BaseModel):
+    """The immutable aggregate a join publishes at its region-output endpoint.
+
+    Materialized once when the join's release condition is met, ordered by stable child
+    key. A downstream edge delivers it like any other record, creating the consumer's
+    accepted input; the parent agent never receives it and never resumes for it.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    join_operator_id: str
+    activation_id: str
+    members: tuple[RegionAggregateMember, ...] = ()
+
+
+class AcceptedInputMember(BaseModel):
+    """One durable member of an accepted input on an agent's target port.
+
+    Preserves its source operator/output port, source activation and child index, its
+    terminal outcome, an immutable ``value_ref``, and a canonical ordinal. A merge/join
+    aggregate carries one member per source child; a single producer binding carries
+    exactly one.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    source_operator_id: str
+    source_output_port: str | None = None
+    source_activation_id: str
+    child_index: int | None = None
+    outcome: PublicationOutcome
+    value_ref: ValueRef | None = None
+    ordinal: int = 0
+
+
+class AcceptedInput(BaseModel):
+    """A durable delivery of a settled value to one agent input port.
+
+    Keyed by (activation, target_port, occurrence_key); members are ordered by the
+    declared producer/merge contract, never by arrival. Part of the agent input cone: a
+    work item is ready only once each required port carries an accepted input, and a
+    restart replays exactly these value references, terminal outcomes, and ordering.
+    Minting an accepted input is authority-neutral — it delivers data, never an invoke
+    right.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    activation_id: str
+    target_port: str
+    occurrence_key: str = "0"
+    provenance: str = "producer"
+    members: tuple[AcceptedInputMember, ...] = ()
+    ordinal: int = 0
+
+
 class Continuation(BaseModel):
     """Suspended logical progress waiting on predecessor records."""
 
     work_item_id: str
     waiting_on: set[str] = Field(default_factory=set)  # operator ids not settled
+    # Declared input ports that must each carry an accepted input before the work item
+    # is admissible; empty for an operator with no declared dataflow inputs.
+    required_ports: set[str] = Field(default_factory=set)
 
 
 class ProgressCapability(BaseModel):
@@ -306,6 +394,8 @@ class WorkItem(BaseModel):
     continuation_ref: str | None = None
     # the settled boundary call whose outcome the next episode resume injects
     pending_outcome_call: str | None = None
+    # the settled facade group whose ordered outcome vector the next resume injects
+    pending_outcome_group: str | None = None
     attempt_ids: list[str] = Field(default_factory=list)
 
 
@@ -411,6 +501,8 @@ class LedgerSnapshot(BaseModel):
     work_items: list[WorkItem] = Field(default_factory=list)
     continuations: list[Continuation] = Field(default_factory=list)
     records: list[Record] = Field(default_factory=list)
+    accepted_inputs: list[AcceptedInput] = Field(default_factory=list)
+    region_aggregates: list[RegionJoinAggregate] = Field(default_factory=list)
     invocations: list[Invocation] = Field(default_factory=list)
     attempts: list[Attempt] = Field(default_factory=list)
     boundary_events: list[BoundaryEvent] = Field(default_factory=list)

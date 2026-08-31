@@ -1,3 +1,5 @@
+from collections import defaultdict
+
 from shared.tasks.specs import ModelBindingMode
 
 from ..representations.operators import (
@@ -426,6 +428,122 @@ def _check_child_regions(
                         location=location,
                     )
                 )
+            entry = (
+                op_by_id.get(target.child_template_ref)
+                if target.child_template_ref
+                else None
+            )
+            if isinstance(entry, AgentOperator):
+                omitted = set(entry.authority.invoke) - set(target.authority.invoke)
+                if omitted:
+                    diags.append(
+                        Diagnostic(
+                            code="region.child-tool-omitted",
+                            message=(
+                                f"child agent {entry.operator_id!r} declares "
+                                "interface(s) "
+                                + ", ".join(sorted(omitted))
+                                + f" the region {ref.spawn_ref!r} ceiling omits; "
+                                "declare them on the region authority"
+                            ),
+                            location=location,
+                        )
+                    )
+    return diags
+
+
+def _check_agent_inputs(
+    template: LogicalWorkflowTemplate, loc: dict[str, SourceLocation]
+) -> list[Diagnostic]:
+    """An agent's declared input ports must each be delivered by a declared source.
+
+    Declaring input ports is opt-in: a child agent with no declared input port keeps the
+    ordering-only behavior and receives no element. A spawn child body that opts in
+    declares exactly one entry port to receive its spawned element; a downstream agent's
+    every declared input port is bound by an incoming delivery edge whose ``to_port``
+    names it. An unbound port would deadlock — its input manifest could never be
+    satisfied — so it fails at compile time.
+    """
+    diags: list[Diagnostic] = []
+    child_bodies = {
+        op.child_template_ref
+        for op in template.operators
+        if isinstance(op, (SpawnRegion, AgentOperator)) and op.child_template_ref
+    }
+    bound: dict[str, set[str]] = defaultdict(set)
+    for edge in template.edges:
+        if edge.to_port and not edge.feedback:
+            bound[edge.to_op].add(edge.to_port)
+    for op in template.operators:
+        if not isinstance(op, AgentOperator):
+            continue
+        location = loc.get(op.operator_id)
+        is_child = op.operator_id in child_bodies
+        if is_child and len(op.declared_input_ports) > 1:
+            diags.append(
+                Diagnostic(
+                    code="dataflow.child-entry-port",
+                    message=(
+                        f"spawn child agent {op.operator_id!r} declares "
+                        f"{len(op.declared_input_ports)} input ports; a child receives "
+                        "its element on exactly one entry port"
+                    ),
+                    location=location,
+                )
+            )
+        if is_child:
+            continue
+        for port_name in op.declared_input_ports:
+            if port_name not in bound.get(op.operator_id, set()):
+                diags.append(
+                    Diagnostic(
+                        code="dataflow.unbound-input",
+                        message=(
+                            f"agent {op.operator_id!r} input port {port_name!r} is "
+                            "delivered by no producer; declare it as {name, from}"
+                        ),
+                        location=location,
+                    )
+                )
+    return diags
+
+
+def _check_region_outputs(
+    template: LogicalWorkflowTemplate, loc: dict[str, SourceLocation]
+) -> list[Diagnostic]:
+    """A region-output binding delivers a child region's join aggregate downstream.
+
+    An edge into an agent input port from a join must come from a matched join — a
+    top-level region join or a declared child-region join of an agent. Data delivery is
+    authority-neutral, so the consumer need not hold the region's invoke authority; this
+    only rejects an edge from a join that no spawn region owns (a dangling aggregate).
+    """
+    diags: list[Diagnostic] = []
+    op_by_id = {op.operator_id: op for op in template.operators}
+    matched_joins = {
+        edge.to_op
+        for edge in template.edges
+        if isinstance(op_by_id.get(edge.from_op), SpawnRegion)
+        and isinstance(op_by_id.get(edge.to_op), JoinRegion)
+    }
+    for edge in template.edges:
+        if edge.feedback or edge.to_port is None:
+            continue
+        source = op_by_id.get(edge.from_op)
+        target = op_by_id.get(edge.to_op)
+        if not isinstance(source, JoinRegion) or not isinstance(target, AgentOperator):
+            continue
+        if edge.from_op not in matched_joins:
+            diags.append(
+                Diagnostic(
+                    code="dataflow.unmatched-region-output",
+                    message=(
+                        f"region-output edge into {target.operator_id!r} reads join "
+                        f"{edge.from_op!r} that no spawn region feeds"
+                    ),
+                    location=loc.get(edge.to_op),
+                )
+            )
     return diags
 
 
@@ -563,13 +681,19 @@ def validate_compilation(
     a live external read) or a malformed region/authority face fails validation.
     """
     loc = _location_index(template)
-    declared_tools = {tool.name for tool in template.tool_declarations}
+    # An invoke face names an interface, so a tool is referenced by its declared
+    # interface (a tool without one is referenced by its bare name).
+    declared_tools = {
+        tool.interface or tool.name for tool in template.tool_declarations
+    }
     diags: list[Diagnostic] = []
 
     diags.extend(_check_source_map(template, plan, loc))
     diags.extend(_check_ports(template, loc))
     diags.extend(_check_spawn_child_targets(template, loc))
     diags.extend(_check_child_regions(template, loc))
+    diags.extend(_check_agent_inputs(template, loc))
+    diags.extend(_check_region_outputs(template, loc))
     diags.extend(_check_result_declarations(template, loc))
     diags.extend(_check_cycles(template, loc))
 

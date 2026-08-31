@@ -34,6 +34,7 @@ from .services.agent_model_gateway import (
     build_agent_model_router,
     to_gateway_binding,
 )
+from .services.fabric_tool_broker import FabricToolBroker
 from .services.log_archiver import TaskLogArchiver
 from .services.metrics import MetricsRecorder
 from .services.model_secret_vault import ModelSecretVault
@@ -120,6 +121,7 @@ WATCHDOG = None
 EVENT_MONITOR = None
 LOG_ARCHIVER = None
 AGENT_MODEL_GATEWAY = None
+FABRIC_TOOL_BROKER = None
 
 if IS_ROOT_NODE:
     WORKFLOW_REGISTRY = WorkflowRegistry(REDIS_CLIENT)
@@ -138,8 +140,19 @@ if IS_ROOT_NODE:
     AGENT_MODEL_GATEWAY = AgentModelGateway(
         RUNTIME, config.orchestration.gateway, logger
     )
-    RUNTIME.set_invocation_settler(AGENT_MODEL_GATEWAY.settle)
-    AGENT_MODEL_GATEWAY.set_boundary_originator(RUNTIME.originate_episode_boundary)
+    RUNTIME.set_model_settler(AGENT_MODEL_GATEWAY.settle)
+    AGENT_MODEL_GATEWAY.set_facade_group_originator(RUNTIME.originate_facade_turn_group)
+    AGENT_MODEL_GATEWAY.set_facade_fence(RUNTIME.has_pending_facade)
+    AGENT_MODEL_GATEWAY.set_facade_resolver(RUNTIME.agent_facade_descriptors)
+
+    def _settle_tool(task_id: str, call_correlation: str, value: str) -> None:
+        assert RUNTIME is not None
+        RUNTIME.settle_episode_invocation(task_id, call_correlation, value)
+
+    FABRIC_TOOL_BROKER = FabricToolBroker(
+        config.orchestration.web_search, _settle_tool, logger=logger
+    )
+    RUNTIME.set_tool_broker(FABRIC_TOOL_BROKER.submit)
 
     def _resolve_gateway_binding(task_id: str) -> ResolvedGatewayBinding | None:
         assert RUNTIME is not None
@@ -426,6 +439,8 @@ async def _lifespan(_: FastAPI):
             _stop_background()
             if AGENT_MODEL_GATEWAY is not None:
                 AGENT_MODEL_GATEWAY.shutdown()
+            if FABRIC_TOOL_BROKER is not None:
+                FABRIC_TOOL_BROKER.shutdown()
             if PORT_FORWARD_SERVICE is not None:
                 await PORT_FORWARD_SERVICE.stop()
 

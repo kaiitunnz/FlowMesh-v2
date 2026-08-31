@@ -3,10 +3,10 @@ from typing import Any
 
 from pydantic import BaseModel, Field, computed_field
 
-from shared.harness import BoundaryRequest
 from shared.tasks import TaskEnvelopeTemplate
 from shared.tasks.worker_message import HardwareUsage
 
+from ..orchestration.tool_dispatch import FacadeTurnGroup
 from ..utils.time import now_iso
 
 TRAINING_TASK_TYPES = {
@@ -155,10 +155,11 @@ class TaskRecord(BaseModel):
     latest_update: dict[str, Any] | None = Field(
         default=None, description="Latest mid-task update payload."
     )
-    pending_origination: BoundaryRequest | None = Field(
+    pending_facade_group: FacadeTurnGroup | None = Field(
         default=None,
-        description="A facade boundary the gateway captured for this agent episode, "
-        "durable so a restart-replayed completion still reroutes into it.",
+        description="A turn-scoped facade group the gateway captured for this agent "
+        "episode, durable so a restart-replayed completion still routes its whole "
+        "ordered membership.",
     )
 
     @computed_field  # type: ignore[prop-decorator]

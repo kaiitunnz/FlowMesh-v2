@@ -42,9 +42,10 @@ def test_examples_compile_to_acyclic_templates(path: pathlib.Path) -> None:
     v2_text = path.read_text().replace("flowmesh/v1", "flowmesh/v2")
     parsed, template, _ = _compile(v2_text)
 
-    # One operator per task; dependsOn preserved as edges.
-    assert len(template.operators) == len(parsed.tasks)
+    # Every task is an operator; a child-region shorthand may synthesize extra region
+    # operators. dependsOn is preserved as edges.
     task_ids = {t.task_id for t in parsed.tasks}
+    assert task_ids <= template.operator_ids
     forward_edges = {(e.from_op, e.to_op) for e in template.edges if not e.feedback}
     expected_edges = {
         (dep, task.task_id)
@@ -77,10 +78,10 @@ def test_examples_are_symbolic(path: pathlib.Path) -> None:
 @pytest.mark.parametrize("path", _TEMPLATE_FILES, ids=lambda p: p.name)
 def test_physical_plan_one_boundary_per_task(path: pathlib.Path) -> None:
     v2_text = path.read_text().replace("flowmesh/v1", "flowmesh/v2")
-    parsed, _, plan = _compile(v2_text)
-    # One physical boundary per legacy task/executor boundary.
-    assert len(plan.nodes) == len(parsed.tasks)
-    assert {n.logical_ref for n in plan.nodes} == {t.task_id for t in parsed.tasks}
+    _, template, plan = _compile(v2_text)
+    # One physical boundary per logical operator (a task, plus any synthesized region).
+    assert len(plan.nodes) == len(template.operators)
+    assert {n.logical_ref for n in plan.nodes} == template.operator_ids
 
 
 def test_binding_registry_is_an_adapter() -> None:
@@ -224,4 +225,3 @@ def test_old_parser_path_still_selectable() -> None:
     for path in _TEMPLATE_FILES:
         parsed = parse_workflow(path.read_text(), "native")
         assert parsed.tasks
-        assert parsed.regions == []

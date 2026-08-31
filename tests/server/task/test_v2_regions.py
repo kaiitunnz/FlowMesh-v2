@@ -32,7 +32,7 @@ spec:
           taskType: agent
           task: draft a research plan
           v2:
-            authority: {invoke: [web_search], delegate: []}
+            authority: {invoke: [search/v1], delegate: []}
             tools: [{name: web_search, interface: search/v1}]
             boundary: [invocation, external_effect, yield]
       - name: route
@@ -59,7 +59,7 @@ spec:
         region:
           kind: spawn
           child: search_child
-          authority: {invoke: [web_search], delegate: [web_search]}
+          authority: {invoke: [search/v1], delegate: [search/v1]}
       - name: collect
         dependsOn: [fanout]
         region: {kind: join, completion: all_settled, residual: cancel}

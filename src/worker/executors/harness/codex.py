@@ -30,6 +30,7 @@ from shared.harness import (
     HarnessResult,
     HarnessResultKind,
     OutcomeKind,
+    render_input_envelope,
 )
 from shared.tasks.specs import AgentSpecStrict
 from shared.tasks.worker_message import WorkerTaskMessage
@@ -53,6 +54,11 @@ class CodexInjectItem(BaseModel):
     idempotency_key: str | None = None
     denied: bool = False
     value: str | None = None
+    # When set, the outcome injects back at the model's own call id under its tool name
+    # (a captured facade), rather than a synthetic fabric-mediated call.
+    injection_target: str | None = None
+    injection_tool: str | None = None
+    injection_arguments: str | None = None
 
 
 class CodexAppServerTransport(Protocol):
@@ -128,6 +134,9 @@ class CodexAppServerHarnessAdapter(HarnessAdapter):
                     idempotency_key=outcome.idempotency_key,
                     denied=outcome.kind is OutcomeKind.DENIED,
                     value=outcome.value,
+                    injection_target=outcome.injection_target,
+                    injection_tool=outcome.injection_tool,
+                    injection_arguments=outcome.injection_arguments,
                 )
             )
             if outcome.idempotency_key is not None:
@@ -170,12 +179,14 @@ def build_codex_adapter(
     # keep both off the import path of a worker that never selects the codex backend.
     from .codex_transport import CodexTransportConfig, RealCodexAppServerTransport
 
+    dispatch = task.agent_episode
+    bindings = dispatch.input_bindings if dispatch is not None else ()
     transport = RealCodexAppServerTransport(
         CodexTransportConfig(
             base_url=base_url,
             model=model,
             codex_home=codex_home,
-            initial_input=_agent_task(spec),
+            initial_input=render_input_envelope(_agent_task(spec), bindings),
             task_id=task.task_id,
         )
     )

@@ -372,16 +372,51 @@ class ModelSecretVaultConfig:
 
 
 @dataclass
+class WebSearchConfig:
+    """The fabric web-search tool's provider binding and bounds.
+
+    ``provider`` selects the backend (keyless ``duckduckgo`` default); ``api_key`` is
+    the deployment credential a keyed provider needs. ``max_calls`` bounds one episode's
+    searches; ``result_char_cap`` bounds the injected result size.
+    """
+
+    provider: str = "duckduckgo"
+    api_key: str | None = None
+    max_results: int = 5
+    timeout_sec: float = 20.0
+    result_char_cap: int = 6000
+    max_calls: int = 8
+    max_parallel: int = 4
+
+    @classmethod
+    def from_env(cls) -> "WebSearchConfig":
+        prefix = "WEB_SEARCH_"
+        return cls(
+            provider=(os.getenv(f"{prefix}PROVIDER") or "duckduckgo").strip().lower(),
+            api_key=_env_or_none(f"{prefix}API_KEY"),
+            max_results=parse_int_env(f"{prefix}MAX_RESULTS") or 5,
+            timeout_sec=parse_float_env(f"{prefix}TIMEOUT_SEC") or 20.0,
+            result_char_cap=parse_int_env(f"{prefix}RESULT_CHAR_CAP") or 6000,
+            max_calls=parse_int_env(f"{prefix}MAX_CALLS") or 8,
+            max_parallel=parse_int_env(f"{prefix}MAX_PARALLEL_CALLS_PER_TURN") or 4,
+        )
+
+
+@dataclass
 class OrchestrationConfig:
     max_scope_depth: int | None = None
     max_loop_iterations: int | None = None
     max_activations: int | None = None
+    max_spawns_per_turn: int | None = None
+    max_spawns_per_region: int | None = None
     episode_lowering: bool = False
+    agent_input_budget_bytes: int = 262_144
     gateway: AgentModelGatewayConfig = field(default_factory=AgentModelGatewayConfig)
     agent_binding: AgentBindingConfig = field(default_factory=AgentBindingConfig)
     model_secret_vault: ModelSecretVaultConfig = field(
         default_factory=ModelSecretVaultConfig
     )
+    web_search: WebSearchConfig = field(default_factory=WebSearchConfig)
 
     @classmethod
     def from_env(cls) -> "OrchestrationConfig":
@@ -389,10 +424,17 @@ class OrchestrationConfig:
             max_scope_depth=parse_int_env("ORCHESTRATOR_MAX_SCOPE_DEPTH"),
             max_loop_iterations=parse_int_env("ORCHESTRATOR_MAX_LOOP_ITERATIONS"),
             max_activations=parse_int_env("ORCHESTRATOR_MAX_ACTIVATIONS"),
+            max_spawns_per_turn=parse_int_env("ORCHESTRATOR_MAX_SPAWNS_PER_TURN"),
+            max_spawns_per_region=parse_int_env("ORCHESTRATOR_MAX_SPAWNS_PER_REGION"),
             episode_lowering=parse_bool_env("ORCHESTRATOR_EPISODE_LOWERING", False),
+            agent_input_budget_bytes=parse_int_env(
+                "ORCHESTRATOR_AGENT_INPUT_BUDGET_BYTES"
+            )
+            or 262_144,
             gateway=AgentModelGatewayConfig.from_env(),
             agent_binding=AgentBindingConfig.from_env(),
             model_secret_vault=ModelSecretVaultConfig.from_env(),
+            web_search=WebSearchConfig.from_env(),
         )
 
 

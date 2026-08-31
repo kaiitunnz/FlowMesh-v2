@@ -94,3 +94,16 @@ logs. A credential embedded in a `url` or a harness param is rejected. The
 
 Vaulted credentials live in the Redis control store's trust boundary (ACL, auth, TLS) and are
 not encrypted at rest, so the deployment operator owns that at-rest boundary.
+
+## Fabric-served tools
+
+Beyond the model and `spawn_agent`, an agent may declare a fabric-served tool it invokes
+through a gateway-injected facade. The agent lists it under `spec.v2.tools` (`{name,
+interface}`) and grants the interface in `authority.invoke`; only an agent's declared
+facades are available to it.
+
+`web_search` (`interface: search/v1`) is the built-in fabric tool. Its provider is keyless
+DuckDuckGo by default, or a keyed provider via `WEB_SEARCH_*` ([`ENV.md`](ENV.md)); results
+are snippets. An agent must declare `web_search` in its authority to use it, and a spawned
+child must carry the interface in its child-region authority ceiling — an undeclared tool is
+a compile error.

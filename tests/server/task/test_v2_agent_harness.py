@@ -292,10 +292,46 @@ def test_stranded_model_boundary_is_listed_for_resettlement() -> None:
             request_payload="q",
         ),
     )
-    assert eng.stranded_model_settlements() == [("A", "c0", "q")]
+    pending = eng.pending_tool_dispatches()
+    assert len(pending) == 1
+    env = pending[0]
+    assert (env.task_id, env.call_correlation, env.interface, env.request_payload) == (
+        "A",
+        "c0",
+        "model",
+        "q",
+    )
+    assert env.invocation_id
     # Once settled, it is no longer stranded.
     eng.settle_boundary_outcome("A", "c0", value="answer")
-    assert eng.stranded_model_settlements() == []
+    assert eng.pending_tool_dispatches() == []
+
+
+def test_a_stranded_search_boundary_carries_its_tool_interface() -> None:
+    # A crash-stranded search invocation is re-listed with interface "search/v1", so
+    # recovery routes it to the tool broker rather than the model settler.
+    eng = _engine(
+        _bundle(
+            [_agent("A", invoke=("search/v1", "model"), delegate=())],
+            [],
+            (_decl("out:A", "A"),),
+        ),
+        granted=frozenset({"search/v1", "model"}),
+    )
+    _dispatch_agent(eng)
+    eng.route_boundary_event(
+        "A",
+        BoundaryEvent(
+            kind=BoundaryEventKind.INVOCATION,
+            call_correlation="s0",
+            interface="search/v1",
+            request_payload='{"query": "q"}',
+        ),
+    )
+    pending = eng.pending_tool_dispatches()
+    assert len(pending) == 1
+    assert pending[0].interface == "search/v1"
+    assert pending[0].request_payload == '{"query": "q"}'
 
 
 def test_only_the_durable_outcome_re_readies_a_suspended_episode() -> None:

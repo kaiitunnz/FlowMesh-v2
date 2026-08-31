@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from shared.harness import (
+    REQUIRED_MEDIATED_FACADES,
     DeliveredOutcome,
     HarnessResultKind,
     OutcomeKind,
@@ -90,8 +91,9 @@ def test_backend_key_pins_the_version() -> None:
     assert key.backend == "codex" and key.version == "v1"
 
 
-def test_bypass_paths_are_disabled() -> None:
-    assert CodexAppServerHarnessAdapter(FakeCodexAppServer([])).bypass_disabled()
+def test_the_required_facades_are_mediated() -> None:
+    adapter = CodexAppServerHarnessAdapter(FakeCodexAppServer([]))
+    assert adapter.mediated_facades() >= REQUIRED_MEDIATED_FACADES
 
 
 def test_a_completed_turn_completes_the_episode() -> None:

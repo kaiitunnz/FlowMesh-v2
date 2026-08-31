@@ -9,6 +9,8 @@ from .outcomes import (
     is_replayable,
 )
 from .state import (
+    AcceptedInput,
+    AcceptedInputMember,
     Activation,
     Attempt,
     AttemptStatus,
@@ -39,6 +41,8 @@ from .state import (
 )
 
 __all__ = [
+    "AcceptedInput",
+    "AcceptedInputMember",
     "Activation",
     "AdmissionError",
     "Advance",

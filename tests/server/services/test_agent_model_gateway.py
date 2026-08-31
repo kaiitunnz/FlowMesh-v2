@@ -8,19 +8,21 @@ conversion for a harness whose provider targets the gateway directly.
 """
 
 import asyncio
+import json
 from typing import Any
 
-import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from server.config import AgentModelGatewayConfig, GatewayMode
 from server.orchestration import WorkItemStatus
+from server.orchestration.tool_dispatch import FacadeCompletionMode
 from server.services.agent_model_gateway import (
     AgentModelGateway,
     ResponsesRequest,
     build_agent_model_router,
 )
+from server.task.v2.representations.operators import FacadeDescriptor
 from shared.harness import BoundaryEventKind, HarnessCapsule
 from tests.server.task.test_v2_orchestration import FakeRegistry, _register, _runtime
 from worker.executors.harness.scripted import ScriptedHarnessAdapter, ScriptedStep
@@ -50,10 +52,12 @@ def _canned_gateway(runtime) -> AgentModelGateway:
     )
 
     # A synchronous settle keeps the test deterministic; production submits off-lane.
-    def _settle(task: str, call: str, payload: str | None) -> None:
-        runtime.settle_episode_invocation(task, call, gateway.invoke(payload))
+    def _settle(env) -> None:
+        runtime.settle_episode_invocation(
+            env.task_id, env.call_correlation, gateway.invoke(env.request_payload)
+        )
 
-    runtime.set_invocation_settler(_settle)
+    runtime.set_model_settler(_settle)
     return gateway
 
 
@@ -121,10 +125,12 @@ def test_upstream_failure_fails_the_boundary_not_an_empty_success() -> None:
     async def run() -> None:
         runtime = _runtime(FakeRegistry())
 
-        def _settle(task: str, call: str, payload: str | None) -> None:
-            runtime.settle_episode_invocation(task, call, None, error="upstream 503")
+        def _settle(env) -> None:
+            runtime.settle_episode_invocation(
+                env.task_id, env.call_correlation, None, error="upstream 503"
+            )
 
-        runtime.set_invocation_settler(_settle)
+        runtime.set_model_settler(_settle)
         workflow_id, ids = await _register(runtime, _MODEL_AGENT_WF)
         solver = ids["solver"]
         adapter = _model_boundary_adapter()
@@ -274,7 +280,7 @@ def _facade_index() -> tuple[dict[str, Any], int]:
             "arguments": '{"region": "reviewer", "args": {"focus": "security"}}',
         },
     ]
-    facades = _facade_calls(output)
+    facades = _facade_calls(output, {"spawn_agent": _spawn_facade()})
     assert len(facades) == 1
     history = [
         {"type": "message", "role": "user"},
@@ -283,19 +289,40 @@ def _facade_index() -> tuple[dict[str, Any], int]:
     return facades[0], _forward_index(history)
 
 
-def test_facade_capture_maps_the_native_call_to_a_boundary() -> None:
-    from server.services.agent_model_gateway import _facade_boundary
-
-    call, index = _facade_index()
-    # One fab- output already resolved in history advances the next facade's index.
+def test_facade_capture_maps_the_native_call_to_a_group_member(
+    monkeypatch: Any,
+) -> None:
+    _, index = _facade_index()
+    # One fab- output already resolved in history advances the next group's base.
     assert index == 1
-    boundary = _facade_boundary(call, "tsk-1:1")
-    assert boundary.kind is BoundaryEventKind.SPAWN
-    assert boundary.child_region_ref == "reviewer"
-    assert boundary.call_correlation == "tsk-1:1"
-    assert (
-        boundary.request_payload is not None and "security" in boundary.request_payload
-    )
+    output: list[dict[str, Any]] = [
+        {"type": "reasoning", "content": []},
+        {
+            "type": "function_call",
+            "name": "spawn_agent",
+            "call_id": "call_1",
+            "arguments": '{"region": "reviewer", "args": {"focus": "security"}}',
+        },
+    ]
+    _upstream_client(monkeypatch, output)
+    gateway, groups = _agent_gateway()
+    app = FastAPI()
+    app.include_router(build_agent_model_router(gateway))
+    history = [
+        {"type": "message", "role": "user"},
+        {"type": "function_call_output", "call_id": "fab-x:0", "output": "r"},
+    ]
+    request = {"model": "m", "input": history, "tools": [], "stream": True}
+    resp = TestClient(app).post("/agent/tsk-1/v1/responses", json=request)
+
+    assert resp.status_code == 200
+    _, group = groups[0]
+    assert group.group_id == "tsk-1:1"  # the base tracks the resolved-outcome count
+    (member,) = group.members
+    assert member.kind is BoundaryEventKind.SPAWN
+    assert member.interface_or_region == "reviewer"
+    assert member.call_correlation == "tsk-1:1:0"
+    assert member.request_payload is not None and "security" in member.request_payload
 
 
 def _upstream_client(monkeypatch: Any, output: list[dict[str, Any]]) -> None:
@@ -327,14 +354,44 @@ def _upstream_client(monkeypatch: Any, output: list[dict[str, Any]]) -> None:
     monkeypatch.setattr(mod.httpx, "AsyncClient", _Client)
 
 
+def _spawn_facade() -> FacadeDescriptor:
+    return FacadeDescriptor(
+        name="spawn_agent",
+        kind=BoundaryEventKind.SPAWN,
+        tool_schema=json.dumps(
+            {
+                "type": "function",
+                "name": "spawn_agent",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"region": {"type": "string"}},
+                    "required": ["region"],
+                },
+            }
+        ),
+    )
+
+
+def _search_facade() -> FacadeDescriptor:
+    return FacadeDescriptor(
+        name="web_search",
+        kind=BoundaryEventKind.INVOCATION,
+        interface="search/v1",
+        tool_schema=json.dumps({"type": "function", "name": "web_search"}),
+    )
+
+
 def _agent_gateway() -> tuple[AgentModelGateway, list[Any]]:
     cfg = AgentModelGatewayConfig(
         mode=GatewayMode.PROXY, url="http://up/v1", model="qwen"
     )
     gateway = AgentModelGateway(None, cfg)  # type: ignore[arg-type]
-    originated: list[Any] = []
-    gateway.set_boundary_originator(lambda task, req: originated.append((task, req)))
-    return gateway, originated
+    groups: list[Any] = []
+    gateway.set_facade_group_originator(
+        lambda task, group: groups.append((task, group))
+    )
+    gateway.set_facade_resolver(lambda task: [_spawn_facade(), _search_facade()])
+    return gateway, groups
 
 
 def test_agent_turn_captures_a_facade_and_clean_completes(monkeypatch: Any) -> None:
@@ -347,22 +404,25 @@ def test_agent_turn_captures_a_facade_and_clean_completes(monkeypatch: Any) -> N
         }
     ]
     _upstream_client(monkeypatch, output)
-    gateway, originated = _agent_gateway()
+    gateway, groups = _agent_gateway()
     app = FastAPI()
     app.include_router(build_agent_model_router(gateway))
     request = {"model": "gpt-5-codex", "input": [], "tools": [], "stream": True}
     resp = TestClient(app).post("/agent/tsk-1/v1/responses", json=request)
 
     assert resp.status_code == 200
-    # The boundary is originated server-side, keyed to the episode's task.
-    assert len(originated) == 1
-    task_id, boundary = originated[0]
+    # The group is originated server-side, keyed to the episode's task.
+    assert len(groups) == 1
+    task_id, group = groups[0]
     assert task_id == "tsk-1"
-    assert boundary.kind is BoundaryEventKind.SPAWN
-    assert boundary.call_correlation == "tsk-1:0"
+    (member,) = group.members
+    assert member.kind is BoundaryEventKind.SPAWN
+    assert member.completion_mode is FacadeCompletionMode.ADMIT_AND_CLOSE
+    assert member.call_correlation == "tsk-1:0:0"
+    assert member.interface_or_region == "reviewer"
     # Codex sees a clean turn-completing message, never the raw tool call.
     body = resp.content.decode()
-    assert "Dispatched spawn_agent to the reviewer region" in body
+    assert "Dispatched 1 spawn(s)" in body
     assert "function_call" not in body
 
 
@@ -375,19 +435,19 @@ def test_agent_turn_without_a_facade_passes_through(monkeypatch: Any) -> None:
         }
     ]
     _upstream_client(monkeypatch, output)
-    gateway, originated = _agent_gateway()
+    gateway, groups = _agent_gateway()
     app = FastAPI()
     app.include_router(build_agent_model_router(gateway))
     request = {"model": "gpt-5-codex", "input": [], "tools": [], "stream": True}
     resp = TestClient(app).post("/agent/tsk-1/v1/responses", json=request)
 
-    assert resp.status_code == 200 and not originated
+    assert resp.status_code == 200 and not groups
     assert "just reasoning" in resp.content.decode()
 
 
 def test_facade_turn_preserves_co_emitted_reasoning(monkeypatch: Any) -> None:
     # A reasoning item co-emitted with the facade is kept for continuity; only the
-    # facade call becomes the dispatch message.
+    # facade call becomes the dispatch summary.
     output: list[dict[str, Any]] = [
         {"type": "reasoning", "id": "rs_1", "content": []},
         {
@@ -398,58 +458,103 @@ def test_facade_turn_preserves_co_emitted_reasoning(monkeypatch: Any) -> None:
         },
     ]
     _upstream_client(monkeypatch, output)
-    gateway, originated = _agent_gateway()
+    gateway, groups = _agent_gateway()
     app = FastAPI()
     app.include_router(build_agent_model_router(gateway))
     request = {"model": "gpt-5-codex", "input": [], "tools": [], "stream": True}
     resp = TestClient(app).post("/agent/tsk-1/v1/responses", json=request)
 
     body = resp.content.decode()
-    assert len(originated) == 1
+    assert len(groups) == 1
     assert '"reasoning"' in body and "rs_1" in body  # reasoning preserved
-    assert "Dispatched spawn_agent" in body
+    assert "Dispatched 1 spawn(s)" in body
     assert '"function_call"' not in body  # the facade call itself is not surfaced
 
 
-def test_a_multi_facade_or_mixed_turn_is_denied(monkeypatch: Any) -> None:
-    # Two facade calls, or a facade co-emitted with a real tool call, must not silently
-    # collapse to one boundary — the turn is denied.
-    two_facades: list[dict[str, Any]] = [
-        {
-            "type": "function_call",
-            "name": "spawn_agent",
-            "call_id": "c1",
-            "arguments": '{"region": "a"}',
-        },
-        {
-            "type": "function_call",
-            "name": "spawn_agent",
-            "call_id": "c2",
-            "arguments": '{"region": "b"}',
-        },
+def _fn(name: str, call_id: str, args: str = "{}") -> dict[str, Any]:
+    return {
+        "type": "function_call",
+        "name": name,
+        "call_id": call_id,
+        "arguments": args,
+    }
+
+
+def test_mixed_and_multi_spawn_facade_turns_form_one_group(monkeypatch: Any) -> None:
+    # Real models co-emit multiple spawns and search on one turn; they all join a single
+    # ordered group with kind-specific completion, never a fail-closed refusal.
+    output = [
+        _fn("spawn_agent", "c1", '{"region": "a"}'),
+        _fn("spawn_agent", "c2", '{"region": "a"}'),
+        _fn("web_search", "c3", '{"query": "x"}'),
     ]
-    facade_plus_real: list[dict[str, Any]] = [
-        {
-            "type": "function_call",
-            "name": "spawn_agent",
-            "call_id": "c1",
-            "arguments": '{"region": "a"}',
-        },
-        {
-            "type": "function_call",
-            "name": "exec_command",
-            "call_id": "c2",
-            "arguments": "{}",
-        },
+    _upstream_client(monkeypatch, output)
+    gateway, groups = _agent_gateway()
+    app = FastAPI()
+    app.include_router(build_agent_model_router(gateway))
+    request = {"model": "m", "input": [], "tools": [], "stream": True}
+    resp = TestClient(app).post("/agent/tsk-1/v1/responses", json=request)
+
+    assert resp.status_code == 200
+    assert len(groups) == 1
+    _, group = groups[0]
+    assert [m.kind for m in group.members] == [
+        BoundaryEventKind.SPAWN,
+        BoundaryEventKind.SPAWN,
+        BoundaryEventKind.INVOCATION,
     ]
-    for output in (two_facades, facade_plus_real):
-        _upstream_client(monkeypatch, output)
-        gateway, originated = _agent_gateway()
-        app = FastAPI()
-        app.include_router(build_agent_model_router(gateway))
-        request = {"model": "gpt-5-codex", "input": [], "tools": [], "stream": True}
-        with pytest.raises(RuntimeError, match="exactly one facade call"):
-            TestClient(app, raise_server_exceptions=True).post(
-                "/agent/tsk-1/v1/responses", json=request
-            )
-        assert not originated
+    assert [m.completion_mode for m in group.members] == [
+        FacadeCompletionMode.ADMIT_AND_CLOSE,
+        FacadeCompletionMode.ADMIT_AND_CLOSE,
+        FacadeCompletionMode.AWAIT_OUTCOME,
+    ]
+    body = resp.content.decode()
+    assert "2 spawn(s)" in body and "1 web search" in body
+
+
+def test_a_fenced_second_facade_group_returns_typed_busy(monkeypatch: Any) -> None:
+    # With a group already holding the resume gate, a distinct second group returns a
+    # typed busy turn — never a 500, never a dropped-silently child, never a raw call.
+    output = [_fn("web_search", "s0", '{"query": "again"}')]
+    _upstream_client(monkeypatch, output)
+    gateway, groups = _agent_gateway()
+    gateway.set_facade_fence(lambda task: True)  # a group is already open
+    app = FastAPI()
+    app.include_router(build_agent_model_router(gateway))
+    request = {"model": "m", "input": [], "tools": [], "stream": True}
+    resp = TestClient(app).post("/agent/tsk-1/v1/responses", json=request)
+    assert resp.status_code == 200
+    assert not groups  # no second group captured
+    body = resp.content.decode()
+    assert "still in flight" in body
+    assert '"function_call"' not in body  # the deferred facade is not surfaced
+
+
+def test_parallel_search_facades_form_one_ordered_group(monkeypatch: Any) -> None:
+    # Three web_search calls in one turn become one ordered group; a co-emitted native
+    # tool call is preserved verbatim so the harness runs it.
+    output = [
+        _fn("web_search", "s0", '{"query": "retrieval"}'),
+        _fn("web_search", "s1", '{"query": "grounding"}'),
+        _fn("web_search", "s2", '{"query": "evaluation"}'),
+        _fn("exec_command", "n0", '{"cmd": "ls"}'),
+    ]
+    _upstream_client(monkeypatch, output)
+    gateway, groups = _agent_gateway()
+    app = FastAPI()
+    app.include_router(build_agent_model_router(gateway))
+    request = {"model": "m", "input": [], "tools": [], "stream": True}
+    resp = TestClient(app).post("/agent/tsk-1/v1/responses", json=request)
+    assert resp.status_code == 200
+    assert len(groups) == 1
+    task_id, group = groups[0]
+    members = group.members
+    assert task_id == "tsk-1" and len(members) == 3
+    assert [m.ordinal for m in members] == [0, 1, 2]
+    assert [m.harness_call_id for m in members] == ["s0", "s1", "s2"]
+    assert all(m.interface_or_region == "search/v1" for m in members)
+    assert all(m.completion_mode is FacadeCompletionMode.AWAIT_OUTCOME for m in members)
+    assert members[0].call_correlation != members[1].call_correlation
+    body = resp.content.decode()
+    assert "exec_command" in body  # native call preserved verbatim
+    assert "Dispatched 3 web search" in body

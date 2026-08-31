@@ -15,6 +15,7 @@ empty set. Scheduler/worker placement stays a physical decision that never chang
 the engine considers ready.
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Self
 
@@ -61,6 +62,8 @@ from .outcomes import (
     next_on_uncertain,
 )
 from .state import (
+    AcceptedInput,
+    AcceptedInputMember,
     Activation,
     Attempt,
     AttemptStatus,
@@ -82,6 +85,8 @@ from .state import (
     PublicationOutcome,
     Record,
     RecoveryDisposition,
+    RegionAggregateMember,
+    RegionJoinAggregate,
     ResultPublication,
     ResultSlot,
     Scope,
@@ -89,6 +94,18 @@ from .state import (
     WorkflowInstance,
     WorkItem,
     WorkItemStatus,
+)
+from .tool_dispatch import (
+    MODEL_INTERFACE,
+    AgentInputPlan,
+    FacadeCallMember,
+    FacadeCompletionMode,
+    FacadeTurnGroup,
+    GrantSnapshot,
+    InputMemberPlan,
+    InputPortPlan,
+    ToolInvocationEnvelope,
+    ToolOutcomeStatus,
 )
 
 _EVENT_FIELDS = frozenset(
@@ -187,6 +204,16 @@ class OrchestrationEngine:
         self._work_items = {w.work_item_id: w for w in snapshot.work_items}
         self._continuations = {c.work_item_id: c for c in snapshot.continuations}
         self._records = list(snapshot.records)
+        self._accepted_inputs = list(snapshot.accepted_inputs)
+        self._accepted_by_activation: dict[str, list[AcceptedInput]] = {}
+        for accepted in self._accepted_inputs:
+            self._accepted_by_activation.setdefault(accepted.activation_id, []).append(
+                accepted
+            )
+        self._region_aggregates = list(snapshot.region_aggregates)
+        self._aggregate_by_join: dict[str, RegionJoinAggregate] = {
+            agg.join_operator_id: agg for agg in self._region_aggregates
+        }
         self._invocations = {i.invocation_id: i for i in snapshot.invocations}
         self._attempts = {a.attempt_id: a for a in snapshot.attempts}
         self._receipts = {r.invocation_id: r for r in snapshot.effect_receipts}
@@ -459,10 +486,14 @@ class OrchestrationEngine:
                 replay_contract=replay.get(op.operator_id),
             )
             work_items.append(work_item)
+            required_ports = (
+                set(op.declared_input_ports) if isinstance(op, AgentOperator) else set()
+            )
             continuations.append(
                 Continuation(
                     work_item_id=work_item.work_item_id,
                     waiting_on=set(preds[op.operator_id]),
+                    required_ports=required_ports,
                 )
             )
 
@@ -680,6 +711,8 @@ class OrchestrationEngine:
         if self._is_boundary_redrive(wi, event):
             return Advance()
         op = self._operators.get(wi.operator_id)
+        # An agent boundary is authority-checked against the operator's declared face; a
+        # leaf boundary carries no authority ceiling and defers its invocation directly.
         if isinstance(op, AgentOperator):
             if (denial := self._validate_agent_boundary(op, wi, event)) is not None:
                 return self._record_boundary_denial(wi, event, denial)
@@ -693,8 +726,14 @@ class OrchestrationEngine:
                 opener = self._agent_spawn_opener(op, wi, event)
                 # Record only after the child materializes: a budget/depth rejection
                 # raises and must leave no phantom-accepted envelope to re-drive. The
-                # region selects the entry body; a raw child_ref never names a body.
-                advance = self.materialize_child(opener, value_ref=event.value_ref)
+                # region selects the entry body; a raw child_ref never names a body. The
+                # spawn payload becomes the child's inline child-init input.
+                child_input = event.value_ref or (
+                    ValueRef(kind="inline", literal=event.request_payload)
+                    if event.request_payload is not None
+                    else None
+                )
+                advance = self.materialize_child(opener, value_ref=child_input)
                 self._record_boundary(wi, event)
                 return advance
             case BoundaryEventKind.SPAWN_SEAL:
@@ -720,6 +759,227 @@ class OrchestrationEngine:
                 )
                 return Advance()
         return Advance()
+
+    def route_facade_turn_group(self, task_id: str, group: FacadeTurnGroup) -> Advance:
+        """Record a model turn's facade group and route each member kind-specifically.
+
+        Each ordered member is authority-checked and recorded independently under one
+        shared group id and the work item's single continuation. A spawn member admits
+        one child in source order and settles at admission with a deterministic
+        acceptance ack (never a child result); a search member defers as an invocation
+        that holds the resume gate. A per-member budget overflow is a typed quota
+        outcome that leaves an accepted sibling untouched. The lane suspends once when
+        an await-outcome member is still unresolved; a group with none (a spawn-only
+        turn) re-readies at once, injecting the ordered acceptance vector on its next
+        step. A re-drive of the same group reuses its recorded members and creates no
+        duplicate child or invocation.
+        """
+        wi = self._work_item_for_task(task_id)
+        if wi is None or wi.status in _TERMINAL_WI:
+            return Advance()
+        op = self._operators.get(wi.operator_id)
+        advance = Advance()
+        per_region: dict[str, int] = {}
+        for member in group.members:
+            if (wi.activation_id, member.call_correlation) in self._boundary_events:
+                continue  # a re-driven group reuses its recorded members
+            event = self._facade_member_event(group.group_id, member)
+            if member.kind is BoundaryEventKind.SPAWN:
+                self._route_group_spawn(op, wi, event, per_region, advance)
+            else:
+                self._route_group_invocation(op, wi, event)
+        members = self._group_members(wi.activation_id, group.group_id)
+        if self._group_awaits_unresolved(members):
+            self._suspend_work_item(wi, "episode_group_suspended")
+            return advance
+        # No await-outcome member is pending: the group settled at admission. Stage its
+        # ordered acceptance vector for the next step; the runtime re-enqueues the lane
+        # at once (closing this turn's attempt) rather than holding a worker.
+        wi.pending_outcome_group = group.group_id
+        wi.pending_outcome_call = None
+        return advance
+
+    def _facade_member_event(
+        self, group_id: str, member: FacadeCallMember
+    ) -> BoundaryEvent:
+        is_spawn = member.kind is BoundaryEventKind.SPAWN
+        return BoundaryEvent(
+            kind=member.kind,
+            interface=None if is_spawn else member.interface_or_region,
+            child_region_ref=member.interface_or_region if is_spawn else None,
+            call_correlation=member.call_correlation,
+            request_payload=member.request_payload,
+            injection_target=member.harness_call_id,
+            injection_tool=member.tool_name,
+            group_id=group_id,
+            group_ordinal=member.ordinal,
+            completion_mode=member.completion_mode.value,
+        )
+
+    def _route_group_invocation(
+        self, op: LogicalOperator | None, wi: WorkItem, event: BoundaryEvent
+    ) -> None:
+        # Only an agent operator originates a facade; a non-agent operator is a fabric
+        # misconfiguration, denied fail-closed rather than minting an unvalidated call.
+        denial = (
+            self._validate_agent_boundary(op, wi, event)
+            if isinstance(op, AgentOperator)
+            else DenialKind.AUTHORITY
+        )
+        if denial is not None:
+            self._record_boundary(wi, event, denial=denial)
+            return
+        invocation = Invocation(
+            invocation_id=new_invocation_id(),
+            work_item_id=wi.work_item_id,
+            state=InvocationState.ISSUED,
+            replayable=True,
+        )
+        self._invocations[invocation.invocation_id] = invocation
+        self._record_boundary(wi, event, invocation_id=invocation.invocation_id)
+
+    def _route_group_spawn(
+        self,
+        op: LogicalOperator | None,
+        wi: WorkItem,
+        event: BoundaryEvent,
+        per_region: dict[str, int],
+        advance: Advance,
+    ) -> None:
+        if not isinstance(op, AgentOperator):
+            self._record_boundary(wi, event, denial=DenialKind.AUTHORITY)
+            return
+        if (denial := self._validate_agent_boundary(op, wi, event)) is not None:
+            self._record_boundary(wi, event, denial=denial)
+            return
+        region = event.child_region_ref or ""
+        # This turn's admitted spawns already register in the child-init scope, so the
+        # region count reflects them; per_region only sums the per-turn budget across
+        # regions and must not be re-added here (that would trip the region cap at 2x).
+        turn_total = sum(per_region.values())
+        region_total = self._region_child_count(wi.activation_id, region)
+        if (
+            turn_total >= self._budget.max_spawns_per_turn
+            or region_total >= self._budget.max_spawns_per_region
+        ):
+            # A budget overflow is a typed quota outcome, never a denial and never a
+            # sibling-poisoning failure: the member acks quota and creates no child.
+            self._record_boundary(wi, event)
+            self._set_member_outcome(
+                wi,
+                event.call_correlation,
+                f"{ToolOutcomeStatus.QUOTA.value}: the {region!r} spawn budget was "
+                "reached this turn; no child was created",
+            )
+            return
+        child_input = (
+            ValueRef(kind="inline", literal=event.request_payload)
+            if event.request_payload is not None
+            else None
+        )
+        try:
+            opener = self._agent_spawn_opener(op, wi, event)
+            child_advance = self.materialize_child(opener, value_ref=child_input)
+        except RegionError as exc:
+            self._record_boundary(wi, event)
+            self._set_member_outcome(
+                wi,
+                event.call_correlation,
+                f"{ToolOutcomeStatus.UNAVAILABLE.value}: the {region!r} region cannot "
+                f"accept a child ({exc})",
+            )
+            return
+        advance.extend(child_advance)
+        self._record_boundary(wi, event)
+        self._set_member_outcome(
+            wi,
+            event.call_correlation,
+            f"{ToolOutcomeStatus.SUCCESS.value}: spawned a {region!r} reviewer child",
+        )
+        per_region[region] = per_region.get(region, 0) + 1
+
+    def _set_member_outcome(
+        self, wi: WorkItem, call_correlation: str | None, value: str
+    ) -> None:
+        """Settle a group member's outcome in place without re-readying the lane."""
+        if call_correlation is None:
+            return
+        corr = (wi.activation_id, call_correlation)
+        if (env := self._boundary_events.get(corr)) is not None:
+            self._boundary_events[corr] = env.model_copy(
+                update={"outcome_value": value}
+            )
+
+    def _region_child_count(self, agent_activation: str, region: str) -> int:
+        """The children already materialized under an agent's named spawn region."""
+        act = self._activations.get(agent_activation)
+        op = self._operators.get(act.operator_id) if act else None
+        if not isinstance(op, AgentOperator):
+            return 0
+        region_op = self._agent_region_op(op, region)
+        if region_op is None:
+            return 0
+        opener = self._region_openers.get((agent_activation, region_op))
+        if opener is None or (scope_id := self._scope_id_for(opener)) is None:
+            return 0
+        return sum(
+            1
+            for a in self._activations.values()
+            if a.scope_id == scope_id and a.kind == "child"
+        )
+
+    def _group_members(self, activation_id: str, group_id: str) -> list[BoundaryEvent]:
+        members = [
+            env
+            for (act, _), env in self._boundary_events.items()
+            if act == activation_id and env.group_id == group_id
+        ]
+        members.sort(key=lambda e: e.group_ordinal or 0)
+        return members
+
+    @staticmethod
+    def _group_awaits_unresolved(members: Sequence[BoundaryEvent]) -> bool:
+        """Whether the group holds an await-outcome member with no settled outcome."""
+        return any(
+            e.completion_mode == FacadeCompletionMode.AWAIT_OUTCOME.value
+            and e.outcome_value is None
+            and e.denial is None
+            for e in members
+        )
+
+    def has_open_facade_group(self, task_id: str) -> bool:
+        """Whether a recorded facade group for this episode still holds the resume gate.
+
+        A group is open only while an await-outcome member is unsettled; a spawn-only
+        group closes at admission, so the fence lets the next turn issue another group.
+        """
+        wi = self._work_item_for_task(task_id)
+        if wi is None:
+            return False
+        return self._group_awaits_unresolved(
+            [
+                env
+                for (act, _), env in self._boundary_events.items()
+                if act == wi.activation_id and env.group_id is not None
+            ]
+        )
+
+    def group_dispatch_envelopes(
+        self, task_id: str, group_id: str
+    ) -> list[ToolInvocationEnvelope]:
+        """The dispatch envelopes for a group's still-unresolved invocation members."""
+        wi = self._work_item_for_task(task_id)
+        if wi is None:
+            return []
+        out: list[ToolInvocationEnvelope] = []
+        for env in self._group_members(wi.activation_id, group_id):
+            if env.kind is not BoundaryEventKind.INVOCATION:
+                continue
+            if env.outcome_value is not None or env.denial is not None:
+                continue
+            if (envelope := self._envelope_from(wi, env)) is not None:
+                out.append(envelope)
+        return out
 
     def deliver_boundary_outcome(self, task_id: str, call_correlation: str) -> Advance:
         """Re-ready a boundary-suspended work item once its outcome is durable.
@@ -753,6 +1013,8 @@ class OrchestrationEngine:
         """
         if (wi := self._work_item_for_task(task_id)) is not None:
             wi.pending_outcome_call = call_correlation
+            if call_correlation is None:
+                wi.pending_outcome_group = None
 
     def close_latest_attempt(self, task_id: str) -> None:
         """Settle a still-running attempt of a continuing episode, bounding its history.
@@ -766,15 +1028,16 @@ class OrchestrationEngine:
                 attempt.status = AttemptStatus.SUCCEEDED
                 attempt.finished_at = now_iso()
 
-    def stranded_model_settlements(self) -> list[tuple[str, str, str | None]]:
-        """Model/effect boundaries suspended with no durable outcome, for a restart.
+    def pending_tool_dispatches(self) -> list[ToolInvocationEnvelope]:
+        """Mediated boundaries suspended with no durable outcome, for a restart.
 
-        A model or effect boundary suspends off-lane while the gateway settles it; a
-        crash before that settle leaves the work item blocked with an issued
-        invocation and no recorded outcome. Returns each such boundary's (task, call,
-        payload) so the settle can be re-issued from the durable envelope.
+        A model or tool boundary suspends off-lane while its handler settles it; a crash
+        before that settle leaves the work item blocked with an issued invocation and no
+        recorded outcome. Returns each as a full dispatch envelope so the runtime routes
+        it back to its handler by (kind, interface) — a search to the broker, a model to
+        the gateway — never misrouting on the recovered kind.
         """
-        stranded: list[tuple[str, str, str | None]] = []
+        pending: list[ToolInvocationEnvelope] = []
         for (activation, corr), env in self._boundary_events.items():
             if env.kind not in (
                 BoundaryEventKind.INVOCATION,
@@ -787,8 +1050,47 @@ class OrchestrationEngine:
             work_item = self._work_items.get(wi) if wi else None
             if work_item is None or work_item.status is not WorkItemStatus.BLOCKED:
                 continue
-            stranded.append((work_item.legacy_task_id, corr, env.request_payload))
-        return stranded
+            if (envelope := self._envelope_from(work_item, env)) is not None:
+                pending.append(envelope)
+        return pending
+
+    def tool_dispatch_envelope(
+        self, task_id: str, call_correlation: str
+    ) -> ToolInvocationEnvelope | None:
+        """The dispatch envelope for a recorded mediated boundary, or None if absent."""
+        wi = self._work_item_for_task(task_id)
+        if wi is None:
+            return None
+        env = self._boundary_events.get((wi.activation_id, call_correlation))
+        if env is None:
+            return None
+        return self._envelope_from(wi, env)
+
+    def _envelope_from(
+        self, wi: WorkItem, env: BoundaryEvent
+    ) -> ToolInvocationEnvelope | None:
+        if env.invocation_id is None or env.call_correlation is None:
+            return None
+        return ToolInvocationEnvelope(
+            kind=env.kind,
+            interface=env.interface or MODEL_INTERFACE,
+            invocation_id=env.invocation_id,
+            task_id=wi.legacy_task_id,
+            activation_id=wi.activation_id,
+            call_correlation=env.call_correlation,
+            idempotency_key=env.idempotency_key,
+            request_payload=env.request_payload,
+            grant_snapshot=self._grant_snapshot_for(wi),
+        )
+
+    def _grant_snapshot_for(self, wi: WorkItem) -> GrantSnapshot:
+        grant_id = self._instance.root_grant_id
+        if (act := self._activations.get(wi.activation_id)) is not None:
+            if (scope := self._scopes.get(act.scope_id)) is not None:
+                grant_id = scope.grant_id or grant_id
+        return GrantSnapshot(
+            grant_id=grant_id, policy_envelope=self._instance.policy_envelope
+        )
 
     def settle_boundary_outcome(
         self, task_id: str, call_correlation: str, *, value: str | None = None
@@ -802,10 +1104,27 @@ class OrchestrationEngine:
         if wi is None:
             return Advance()
         corr = (wi.activation_id, call_correlation)
-        if (env := self._boundary_events.get(corr)) is not None and value is not None:
-            self._boundary_events[corr] = env.model_copy(
-                update={"outcome_value": value}
-            )
+        env = self._boundary_events.get(corr)
+        resolved = env is not None and (
+            env.outcome_value is not None or env.denial is not None
+        )
+        if resolved:
+            # A duplicate/late settle of an already-resolved member is an idempotent
+            # no-op: it never re-runs the deliver path, so it cannot re-ready or
+            # re-inject a stale outcome once the episode moved on to another boundary.
+            return Advance()
+        if env is not None and value is not None:
+            env = env.model_copy(update={"outcome_value": value})
+            self._boundary_events[corr] = env
+        if env is not None and env.group_id is not None:
+            # A group member settled: hold the resume until every await-outcome member
+            # is resolved, then re-ready exactly once with the full ordered vector.
+            members = self._group_members(wi.activation_id, env.group_id)
+            if self._group_awaits_unresolved(members):
+                return Advance()
+            wi.pending_outcome_group = env.group_id
+            wi.pending_outcome_call = None
+            return self.deliver_boundary_outcome(task_id, call_correlation)
         self.mark_pending_outcome(task_id, call_correlation)
         return self.deliver_boundary_outcome(task_id, call_correlation)
 
@@ -822,7 +1141,10 @@ class OrchestrationEngine:
         if wi is None:
             return None, ()
         outcomes: tuple[DeliveredOutcome, ...] = ()
-        if wi.pending_outcome_call is not None:
+        if wi.pending_outcome_group is not None:
+            members = self._group_members(wi.activation_id, wi.pending_outcome_group)
+            outcomes = tuple(self._delivered_outcome(env) for env in members)
+        elif wi.pending_outcome_call is not None:
             env = self._boundary_events.get((wi.activation_id, wi.pending_outcome_call))
             if env is not None:
                 outcomes = (self._delivered_outcome(env),)
@@ -837,12 +1159,17 @@ class OrchestrationEngine:
                 idempotency_key=env.idempotency_key,
                 kind=OutcomeKind.DENIED,
                 denial=env.denial,
+                injection_target=env.injection_target,
+                injection_tool=env.injection_tool,
+                injection_arguments=env.request_payload,
             )
         return DeliveredOutcome(
             call_correlation=corr,
             idempotency_key=env.idempotency_key,
             kind=OutcomeKind.RESULT,
             value=env.outcome_value,
+            injection_target=env.injection_target,
+            injection_tool=env.injection_tool,
         )
 
     def _is_boundary_redrive(self, wi: WorkItem, event: BoundaryEvent) -> bool:
@@ -1107,11 +1434,238 @@ class OrchestrationEngine:
         trace-level :meth:`spawn_child`.
         """
         advance = Advance()
-        _, wi = self._create_child(
+        activation, wi = self._create_child(
             spawn, operator_id, dispatchable=True, value_ref=value_ref
         )
+        self._init_child_input(activation, wi, value_ref)
         self._admit(wi.work_item_id, advance)
         return advance
+
+    def create_fanout_child(self, spawn: str, producer_task_id: str, index: int) -> str:
+        """Create one producer-fanout child (unadmitted) and return its task id.
+
+        The child carries a frozen reference to element ``index`` of the producer's
+        collection as its child-init input. It stays blocked on its input manifest until
+        the runtime resolves and records the child-entry accepted input.
+        """
+        value_ref = ValueRef(
+            kind="legacy_task_result",
+            legacy_task_id=producer_task_id,
+            collection_key=str(index),
+        )
+        activation, wi = self._create_child(
+            spawn, None, dispatchable=True, value_ref=value_ref
+        )
+        self._init_child_input(activation, wi, value_ref)
+        return wi.legacy_task_id
+
+    def _init_child_input(
+        self, activation: Activation, wi: WorkItem, value_ref: ValueRef | None
+    ) -> None:
+        """Declare a child agent's input manifest and mint an inline child-init input.
+
+        A child agent with a declared entry port gains a continuation requiring that
+        port. An inline child-init value (a ``spawn_agent`` payload) is minted here; a
+        producer-collection reference is left for the runtime to resolve and record.
+        """
+        entry_port = self.agent_entry_port(wi.operator_id)
+        if entry_port is None:
+            return
+        self._continuations[wi.work_item_id] = Continuation(
+            work_item_id=wi.work_item_id, required_ports={entry_port}
+        )
+        if value_ref is not None and value_ref.kind == "inline":
+            self.record_accepted_input(
+                AcceptedInput(
+                    activation_id=activation.activation_id,
+                    target_port=entry_port,
+                    occurrence_key=str(activation.child_index or 0),
+                    provenance="spawn_element",
+                    members=(
+                        AcceptedInputMember(
+                            source_operator_id=self._scopes[
+                                activation.scope_id
+                            ].owner_operator_id
+                            or activation.operator_id,
+                            source_activation_id=activation.activation_id,
+                            child_index=activation.child_index,
+                            outcome=PublicationOutcome.SUCCESS,
+                            value_ref=value_ref,
+                        ),
+                    ),
+                )
+            )
+
+    def agent_entry_port(self, operator_id: str) -> str | None:
+        """The single declared input port of an agent child body, or None.
+
+        A spawn child agent declares exactly one input port (compile-enforced); a leaf
+        child or an agent with no declared input has no entry port.
+        """
+        op = self._operators.get(operator_id)
+        if not isinstance(op, AgentOperator) or not op.declared_input_ports:
+            return None
+        return op.declared_input_ports[0]
+
+    def record_accepted_input(self, accepted: AcceptedInput) -> None:
+        """Record a durable accepted input on an agent's target port (idempotent)."""
+        existing = self._accepted_by_activation.setdefault(accepted.activation_id, [])
+        if any(a.target_port == accepted.target_port for a in existing):
+            return
+        self._accepted_inputs.append(accepted)
+        existing.append(accepted)
+
+    def accepted_inputs_for(self, activation_id: str) -> tuple[AcceptedInput, ...]:
+        """The recorded accepted inputs for one activation, ordered by ordinal."""
+        return tuple(
+            sorted(
+                self._accepted_by_activation.get(activation_id, ()),
+                key=lambda a: (a.ordinal, a.target_port),
+            )
+        )
+
+    def accepted_inputs_for_task(self, task_id: str) -> tuple[AcceptedInput, ...]:
+        """The recorded accepted inputs for a task's activation, ordered by ordinal."""
+        wi = self._work_item_for_task(task_id)
+        return self.accepted_inputs_for(wi.activation_id) if wi else ()
+
+    def blocked_input_agents(self) -> list[str]:
+        """Task ids of agents blocked on an unsatisfied declared-input manifest."""
+        pending: list[str] = []
+        for wi in self._work_items.values():
+            if wi.status is not WorkItemStatus.BLOCKED or not wi.legacy_task_id:
+                continue
+            cont = self._continuations.get(wi.work_item_id)
+            if cont is None or not cont.required_ports:
+                continue
+            have = {a.target_port for a in self.accepted_inputs_for(wi.activation_id)}
+            if not cont.required_ports <= have:
+                pending.append(wi.legacy_task_id)
+        return pending
+
+    def reconsider_admission(self, task_id: str) -> Advance:
+        """Re-attempt admission of a work item after its input manifest changed."""
+        advance = Advance()
+        wi = self._work_item_for_task(task_id)
+        if wi is not None and wi.status is WorkItemStatus.BLOCKED:
+            self._admit(wi.work_item_id, advance)
+        return advance
+
+    def agent_input_plan(self, task_id: str) -> AgentInputPlan | None:
+        """The engine's per-port input membership for an agent, resolved by the runtime.
+
+        Covers edge-bound ports (a direct producer or a join/merge aggregate) whose
+        sources have settled and are not yet recorded. Membership and ordering are the
+        engine's decision — declared by the edge and the join's child order, never
+        arrival. A fan-out child's inline entry port is minted at materialization and is
+        not returned here.
+        """
+        wi = self._work_item_for_task(task_id)
+        if wi is None:
+            return None
+        cont = self._continuations.get(wi.work_item_id)
+        if cont is None or not cont.required_ports:
+            return None
+        have = {a.target_port for a in self.accepted_inputs_for(wi.activation_id)}
+        ports: list[InputPortPlan] = []
+        for port in sorted(cont.required_ports):
+            if port in have:
+                continue
+            resolved = self._port_members(wi.operator_id, port)
+            if resolved is None:
+                continue
+            provenance, members = resolved
+            ports.append(
+                InputPortPlan(target_port=port, provenance=provenance, members=members)
+            )
+        if not ports:
+            return None
+        return AgentInputPlan(activation_id=wi.activation_id, ports=tuple(ports))
+
+    def _port_members(
+        self, agent_op: str, port: str
+    ) -> tuple[str, tuple[InputMemberPlan, ...]] | None:
+        """The ordered members feeding a port, or None if a source is unsettled."""
+        sources = [
+            edge.from_op
+            for edge in self._bundle.template.edges
+            if edge.to_op == agent_op and edge.to_port == port and not edge.feedback
+        ]
+        if not sources:
+            return None
+        provenance = "producer"
+        members: list[InputMemberPlan] = []
+        ordinal = 0
+        for source in sources:
+            if self._kind(source) is OperatorKind.JOIN:
+                provenance = "join_aggregate"
+                aggregate = self._aggregate_by_join.get(source)
+                if aggregate is None:
+                    return (
+                        None  # the join has not released and frozen its aggregate yet
+                    )
+                for member in sorted(aggregate.members, key=lambda m: m.child_key):
+                    child_op = (
+                        self._activations[member.child_activation_id].operator_id
+                        if member.child_activation_id in self._activations
+                        else source
+                    )
+                    members.append(
+                        self._member_plan(
+                            child_op,
+                            member.child_activation_id,
+                            (
+                                int(member.child_key)
+                                if member.child_key.isdigit()
+                                else None
+                            ),
+                            member.outcome,
+                            member.value_ref,
+                            ordinal,
+                        )
+                    )
+                    ordinal += 1
+            else:
+                src_wi_id = self._wi_by_operator.get(source)
+                src_wi = self._work_items.get(src_wi_id) if src_wi_id else None
+                if src_wi is None or src_wi.outcome is None:
+                    return None
+                members.append(
+                    self._member_plan(
+                        source,
+                        src_wi.activation_id,
+                        None,
+                        src_wi.outcome,
+                        ValueRef(
+                            kind="legacy_task_result",
+                            legacy_task_id=src_wi.legacy_task_id,
+                        ),
+                        ordinal,
+                    )
+                )
+                ordinal += 1
+        return provenance, tuple(members)
+
+    @staticmethod
+    def _member_plan(
+        source_operator_id: str,
+        source_activation_id: str,
+        child_index: int | None,
+        outcome: PublicationOutcome,
+        value_ref: ValueRef | None,
+        ordinal: int,
+    ) -> InputMemberPlan:
+        return InputMemberPlan(
+            source_operator_id=source_operator_id,
+            source_activation_id=source_activation_id,
+            child_index=child_index,
+            outcome=outcome.value,
+            value_ref_kind=value_ref.kind if value_ref else "empty",
+            legacy_task_id=value_ref.legacy_task_id if value_ref else None,
+            collection_key=value_ref.collection_key if value_ref else None,
+            literal=value_ref.literal if value_ref else None,
+            ordinal=ordinal,
+        )
 
     def _create_child(
         self,
@@ -1738,6 +2292,7 @@ class OrchestrationEngine:
         assert isinstance(join, JoinRegion)
         outcome, value_ref = self._join_result(join, scope_id)
         children = self._materialized_children(scope_id)
+        self._freeze_region_aggregate(join, join_op, scope_id)
         self._emit(
             "join_released",
             operator_id=join_op,
@@ -1749,6 +2304,45 @@ class OrchestrationEngine:
         return self._deliver_record(
             join_op, self._control_activation(join_op), value_ref
         )
+
+    def _freeze_region_aggregate(
+        self, join: JoinRegion, join_op: str, scope_id: str
+    ) -> None:
+        """Capture an immutable region-join aggregate at release, ordered by child key.
+
+        A full-closure join freezes every settled child; an early join freezes only its
+        selected qualifiers. Membership is fixed here so a residual child never mutates
+        the emitted aggregate and a restart replays the same members.
+        """
+        selected = (
+            self._qualifiers(scope_id)
+            if join.completion in _EARLY_JOINS
+            else self._materialized_children(scope_id)
+        )
+        members = tuple(
+            RegionAggregateMember(
+                child_activation_id=child.activation_id,
+                child_key=str(
+                    child.child_index if child.child_index is not None else 0
+                ),
+                source_port="out",
+                outcome=self._work_items[
+                    self._wi_by_activation[child.activation_id]
+                ].outcome
+                or PublicationOutcome.SUCCESS,
+                value_ref=self._work_items[
+                    self._wi_by_activation[child.activation_id]
+                ].value_ref,
+            )
+            for child in selected
+        )
+        aggregate = RegionJoinAggregate(
+            join_operator_id=join_op,
+            activation_id=self._control_activation(join_op),
+            members=members,
+        )
+        self._region_aggregates.append(aggregate)
+        self._aggregate_by_join[join_op] = aggregate
 
     def _join_result(
         self, join: JoinRegion, scope_id: str
@@ -2039,10 +2633,20 @@ class OrchestrationEngine:
         return advance
 
     def _admit(self, work_item_id: str, advance: Advance) -> None:
-        """Move a work item whose predecessors settled to READY, gating on authority."""
+        """Move a work item whose predecessors settled to READY, gating on authority.
+
+        A declared-input agent is admissible only once its accepted-input manifest is
+        satisfied — every required port carries a recorded accepted input — so a fan-out
+        child or a downstream merge agent never dispatches before its input is durable.
+        """
         wi = self._work_items[work_item_id]
         if wi.status is not WorkItemStatus.BLOCKED:
             return
+        cont = self._continuations.get(work_item_id)
+        if cont is not None and cont.required_ports:
+            have = {a.target_port for a in self.accepted_inputs_for(wi.activation_id)}
+            if not cont.required_ports <= have:
+                return
         interface = self._requested_interface(wi.operator_id)
         if interface is not None and interface not in self._root_grant.invoke:
             self._decisions.append(
@@ -2292,6 +2896,32 @@ class OrchestrationEngine:
         op = self._operators.get(spawn_op)
         return op.child_template_ref if isinstance(op, SpawnRegion) else None
 
+    def sealed_region_child_templates(self) -> frozenset[str]:
+        """Child templates of agent-region spawns whose child-init sealed or revoked.
+
+        A child template holds the workflow open until its spawn seals; a producer
+        fanout retires it on materialization, and an agent's dynamic spawn region
+        retires it once the region seals (on ``spawn_agent`` seal or the parent's
+        completion), so the template — never dispatched as a task — stops holding it.
+        """
+        sealed: set[str] = set()
+        for spawn_op in self._agent_region_spawns:
+            template = self.child_template_of(spawn_op)
+            if template is None:
+                continue
+            scope_id = self._scope_id_for(spawn_op)
+            cap = (
+                self._capabilities.get((scope_id, ProgressAxis.CHILD_INIT))
+                if scope_id
+                else None
+            )
+            if cap is not None and cap.status in (
+                CapabilityStatus.SEALED,
+                CapabilityStatus.REVOKED,
+            ):
+                sealed.add(template)
+        return frozenset(sealed)
+
     def spawn_is_open(self, spawn_op: str) -> bool:
         """Whether a spawn's child-init capability still admits new children.
 
@@ -2353,6 +2983,8 @@ class OrchestrationEngine:
             work_items=list(self._work_items.values()),
             continuations=list(self._continuations.values()),
             records=list(self._records),
+            accepted_inputs=list(self._accepted_inputs),
+            region_aggregates=list(self._region_aggregates),
             invocations=list(self._invocations.values()),
             attempts=list(self._attempts.values()),
             boundary_events=list(self._boundary_events.values()),

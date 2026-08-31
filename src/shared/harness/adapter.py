@@ -31,6 +31,25 @@ class FacadeTool(StrEnum):
 FACADE_TOOLS = frozenset(FacadeTool)
 
 
+class MediatedFacade(StrEnum):
+    """A capability class the fabric mediates instead of a native harness path.
+
+    An adapter reports which of these it fully mediates (no native bypass path); a
+    capability outside the reported set may still run as a native harness tool.
+    """
+
+    MODEL = "model"
+    SPAWN_AGENT = "spawn_agent"
+    SEARCH = "search"
+
+
+# The set the fabric requires a supported agent backend to mediate: the model boundary,
+# child delegation, and web search all cross the fabric's validation, not a native path.
+REQUIRED_MEDIATED_FACADES = frozenset(
+    {MediatedFacade.MODEL, MediatedFacade.SPAWN_AGENT, MediatedFacade.SEARCH}
+)
+
+
 class HarnessBackendKey(BaseModel):
     """A versioned identity for one harness binding."""
 
@@ -71,6 +90,46 @@ class DeliveredOutcome(BaseModel):
     kind: OutcomeKind = OutcomeKind.RESULT
     denial: DenialKind | None = None  # set when kind is DENIED
     value: str | None = None  # opaque result payload when kind is RESULT
+    # The original harness call this outcome injects back at, the tool the model called,
+    # and its arguments, so a captured facade result maps faithfully to its own call id.
+    injection_target: str | None = None
+    injection_tool: str | None = None
+    injection_arguments: str | None = None
+
+
+class InputBindingMember(BaseModel):
+    """One resolved member of a first-turn input binding.
+
+    Carries the source operator/activation, its terminal outcome, the frozen resolved
+    value, and a canonical ordinal. The adapter renders members in ordinal order and may
+    add only presentation labels — never choose membership or ordering.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    source_operator_id: str
+    source_activation_id: str
+    child_index: int | None = None
+    outcome: str
+    value: str | None = None
+    ordinal: int = 0
+
+
+class InputBinding(BaseModel):
+    """A structured first-turn input delivered to one declared agent input port.
+
+    The fabric resolves the durable accepted-input manifest into this projection; the
+    adapter renders it into a delimited envelope beside the static instruction. A single
+    producer binding carries one member; a merge/join aggregate carries its ordered
+    members.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    port: str
+    provenance: str
+    ordinal: int = 0
+    members: tuple[InputBindingMember, ...] = ()
 
 
 class AgentEpisodeDispatch(BaseModel):
@@ -78,7 +137,10 @@ class AgentEpisodeDispatch(BaseModel):
 
     The backend key selects the adapter; ``capsule_blob`` resumes a prior step (None on
     the first dispatch); ``delivered_outcomes`` are the durable outcomes to inject at
-    their originating calls before the adapter steps.
+    their originating calls before the adapter steps. ``input_bindings`` carry the
+    resolved first-turn dataflow inputs and are populated only on the first dispatch
+    (``capsule_blob`` is None); a resume injects only ``delivered_outcomes`` and never
+    re-applies the initial context.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -86,6 +148,7 @@ class AgentEpisodeDispatch(BaseModel):
     backend: HarnessBackendKey
     capsule_blob: str | None = None
     delivered_outcomes: tuple[DeliveredOutcome, ...] = ()
+    input_bindings: tuple[InputBinding, ...] = ()
 
 
 class HarnessResultKind(StrEnum):
@@ -144,14 +207,15 @@ class HarnessAdapter(ABC):
     def cancel(self, activation_id: str) -> None:
         """Cancel the harness session for an activation."""
 
-    def bypass_disabled(self) -> bool:
-        """Whether native tool and subagent bypass paths are disabled.
+    def mediated_facades(self) -> frozenset[MediatedFacade]:
+        """The capability classes this backend fully mediates through a fabric facade.
 
-        A supported configuration returns True: every side effect flows through a
-        fabric-owned facade, so no raw tool, endpoint, or native subagent escapes the
-        engine's validation.
+        A supported configuration mediates at least ``REQUIRED_MEDIATED_FACADES``: the
+        model, child delegation, and web search each flow through a fabric-owned facade,
+        so no raw endpoint, native subagent, or native web search escapes validation. A
+        capability outside the set may still run as an ordinary native harness tool.
         """
-        return True
+        return REQUIRED_MEDIATED_FACADES
 
     def export_state(self, activation_id: str) -> str | None:
         """Export activation-private harness state for a relocatable capsule.

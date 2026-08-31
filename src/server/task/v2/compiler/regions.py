@@ -213,7 +213,10 @@ def _apply_one(
 
     if isinstance(op, AgentOperator):
         return _apply_agent_child_regions(
-            _apply_agent_v2(op, v2, name), v2, name_to_op, acc
+            _apply_agent_inputs(_apply_agent_v2(op, v2, name), v2, name_to_op, acc),
+            v2,
+            name_to_op,
+            acc,
         )
     if isinstance(op, LeafOperator):
         return _apply_leaf_v2(op, v2, name)
@@ -238,21 +241,28 @@ def _apply_agent_child_regions(
     so a ``spawn_agent`` selects the region by name without knowing the compiled ids.
     """
     children = v2.get("child")
-    if isinstance(children, str):
+    if isinstance(children, (str, dict)):
         children = [children]
     if not isinstance(children, list):
         return op
     refs: list[ChildRegionRef] = list(op.child_region_refs)
     for child in children:
-        entry_op = name_to_op.get(str(child), str(child))
-        spawn_id = f"{op.operator_id}:{child}:spawn"
+        # A child is a bare role name (empty region ceiling, fail-closed) or a mapping
+        # {name, authority} that declares the region's per-site invoke/delegate ceiling.
+        if isinstance(child, dict):
+            role = str(child.get("name"))
+            ceiling = _authority(child.get("authority"), role, "graph_node")
+        else:
+            role, ceiling = str(child), AuthorityCeiling()
+        entry_op = name_to_op.get(role, role)
+        spawn_id = f"{op.operator_id}:{role}:spawn"
         join_id = f"{spawn_id}:join"
         spawn = SpawnRegion(
             operator_id=spawn_id,
             source_ref=op.source_ref,
             outputs=(Port(name="children"),),
             child_template_ref=entry_op,
-            authority=AuthorityCeiling(),
+            authority=ceiling,
         )
         join = JoinRegion(
             operator_id=join_id,
@@ -264,8 +274,63 @@ def _apply_agent_child_regions(
         _add_synth_operator(spawn, op.operator_id, acc)
         _add_synth_operator(join, op.operator_id, acc)
         acc.edges.append(TemplateEdge(from_op=spawn_id, to_op=join_id))
-        refs.append(ChildRegionRef(name=str(child), spawn_ref=spawn_id))
+        refs.append(ChildRegionRef(name=role, spawn_ref=spawn_id))
     return op.model_copy(update={"child_region_refs": tuple(refs)})
+
+
+def _apply_agent_inputs(
+    op: AgentOperator,
+    v2: dict[str, Any],
+    name_to_op: dict[str, str],
+    acc: LoweringAccumulator,
+) -> AgentOperator:
+    """Declare an agent's delivered input ports and their producer bindings.
+
+    Each ``spec.v2.inputs`` entry adds a named input port delivered on the agent's first
+    turn. A ``{name, from}`` entry wires a delivery edge from the producer's output; a
+    ``{name, from, region}`` entry binds the parent agent's child-region join aggregate
+    (its region output) — dynamically-spawned children merged downstream, not mid-run; a
+    bare ``{name}`` entry (a spawn child's entry port) is filled by the spawned element.
+    Declaring inputs is opt-in — an agent with none keeps ordering-only deps. The port
+    set augments the lowered ports so model/ordering ports stay.
+    """
+    inputs = v2.get("inputs")
+    if inputs is None:
+        return op
+    if not isinstance(inputs, list):
+        raise compile_error(
+            "v2.inputs-not-list", "spec.v2.inputs must be a list", op.source_ref
+        )
+    ports: list[Port] = list(op.inputs)
+    declared: list[str] = []
+    for entry in inputs:
+        region: str | None = None
+        if isinstance(entry, str):
+            port_name, source = entry, None
+        elif isinstance(entry, dict) and entry.get("name"):
+            port_name = str(entry["name"])
+            source = entry.get("from")
+            region = str(entry["region"]) if entry.get("region") else None
+        else:
+            raise compile_error(
+                "v2.bad-input-port",
+                "each spec.v2.input is a name or a {name, from} mapping",
+                op.source_ref,
+            )
+        declared.append(port_name)
+        if not any(port.name == port_name for port in ports):
+            ports.append(Port(name=port_name))
+        if source is not None:
+            parent_op = name_to_op.get(str(source), str(source))
+            # A region output binds the parent's child-region join aggregate; a plain
+            # source binds the producer's own output.
+            from_op = f"{parent_op}:{region}:spawn:join" if region else parent_op
+            acc.edges.append(
+                TemplateEdge(from_op=from_op, to_op=op.operator_id, to_port=port_name)
+            )
+    return op.model_copy(
+        update={"inputs": tuple(ports), "declared_input_ports": tuple(declared)}
+    )
 
 
 def _apply_agent_v2(op: AgentOperator, v2: dict[str, Any], name: str) -> AgentOperator:

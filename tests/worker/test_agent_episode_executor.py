@@ -10,12 +10,14 @@ from pathlib import Path
 import pytest
 
 from shared.harness import (
+    REQUIRED_MEDIATED_FACADES,
     BoundaryEventKind,
     BoundaryRequest,
     HarnessAdapter,
     HarnessBackendKey,
     HarnessResult,
     HarnessResultKind,
+    MediatedFacade,
 )
 from shared.tasks.task_type import TaskType
 from shared.tasks.worker_message import WorkerTaskMessage
@@ -48,8 +50,12 @@ class _FakeAdapter(HarnessAdapter):
     def cancel(self, activation_id: str) -> None:
         self.cancelled.append(activation_id)
 
-    def bypass_disabled(self) -> bool:
-        return self._bypass
+    def mediated_facades(self) -> frozenset[MediatedFacade]:
+        return (
+            REQUIRED_MEDIATED_FACADES
+            if self._bypass
+            else frozenset({MediatedFacade.MODEL})
+        )
 
 
 def _dispatch_msg(**episode: object) -> WorkerTaskMessage:
@@ -107,7 +113,7 @@ def test_native_bypass_backend_is_refused(tmp_path: Path) -> None:
         "fake", lambda backend, task, config: _FakeAdapter(completion, bypass=False)
     )
     ex = AgentEpisodeExecutor(make_worker_config())
-    with pytest.raises(ExecutionError, match="bypass"):
+    with pytest.raises(ExecutionError, match="mediate"):
         ex.run(_dispatch_msg(), tmp_path)
 
 

@@ -11,10 +11,14 @@ import asyncio
 from typing import Any
 
 from server.orchestration import ProgressAxis, WorkItemStatus
+from server.orchestration.tool_dispatch import (
+    FacadeCallMember,
+    FacadeCompletionMode,
+    FacadeTurnGroup,
+)
 from server.task.models import TaskStatus
 from shared.harness import (
     BoundaryEventKind,
-    BoundaryRequest,
     HarnessAdapter,
     HarnessBackendKey,
     HarnessCapsule,
@@ -135,10 +139,12 @@ def test_model_boundary_settle_returns_the_record_to_pending() -> None:
     async def run() -> None:
         runtime = _runtime(FakeRegistry())
 
-        def _settle(task: str, call: str, payload: str | None) -> None:
-            runtime.settle_episode_invocation(task, call, f"model:{payload}")
+        def _settle(env) -> None:
+            runtime.settle_episode_invocation(
+                env.task_id, env.call_correlation, f"model:{env.request_payload}"
+            )
 
-        runtime.set_invocation_settler(_settle)
+        runtime.set_model_settler(_settle)
         workflow_id, ids = await _register(runtime, _AGENT_WF)
         writer = ids["writer"]
         adapter = ScriptedHarnessAdapter(
@@ -195,8 +201,10 @@ def test_model_boundary_settle_returns_the_record_to_pending() -> None:
 
 
 def _canned_settler(runtime):
-    def _settle(task: str, call: str, payload: str | None) -> None:
-        runtime.settle_episode_invocation(task, call, f"model:{payload}")
+    def _settle(env) -> None:
+        runtime.settle_episode_invocation(
+            env.task_id, env.call_correlation, f"model:{env.request_payload}"
+        )
 
     return _settle
 
@@ -206,7 +214,7 @@ def test_a_consumed_outcome_is_not_reinjected_across_a_query_step() -> None:
     # re-ship the earlier outcome: pending_outcome_call is cleared as each step runs.
     async def run() -> None:
         runtime = _runtime(FakeRegistry())
-        runtime.set_invocation_settler(_canned_settler(runtime))
+        runtime.set_model_settler(_canned_settler(runtime))
         workflow_id, ids = await _register(runtime, _AGENT_WF)
         writer = ids["writer"]
         adapter = ScriptedHarnessAdapter(
@@ -248,7 +256,7 @@ def test_a_consumed_outcome_is_not_reinjected_across_a_query_step() -> None:
 def test_a_denied_boundary_re_readies_with_a_denied_outcome() -> None:
     async def run() -> None:
         runtime = _runtime(FakeRegistry())
-        runtime.set_invocation_settler(_canned_settler(runtime))
+        runtime.set_model_settler(_canned_settler(runtime))
         workflow_id, ids = await _register(runtime, _AGENT_WF)
         writer = ids["writer"]
         # "danger" is outside the declared invoke face, so the boundary is denied.
@@ -310,10 +318,10 @@ def _complete(
     adapter: HarnessAdapter,
     task_id: str,
     *,
-    originate: BoundaryRequest | None = None,
+    originate: FacadeTurnGroup | None = None,
     worker: str = "wkr-1",
 ) -> None:
-    """Drive one clean-completing turn, optionally originating a facade first."""
+    """Drive one clean-completing turn, optionally originating a facade group first."""
     engine = runtime.orchestration_engine(runtime._tasks[task_id].workflow_id)
     dispatch = runtime.agent_episode_dispatch(task_id)
     capsule = (
@@ -326,17 +334,24 @@ def _complete(
         task_id, capsule=capsule, outcomes=dispatch.delivered_outcomes
     )
     if originate is not None:
-        runtime.originate_episode_boundary(task_id, originate)
+        runtime.originate_facade_turn_group(task_id, originate)
     runtime.mark_succeeded(
         task_id, worker, {"agent_episode": result.model_dump(mode="json")}, _TS
     )
 
 
-def _spawn_reviewer(writer: str) -> BoundaryRequest:
-    return BoundaryRequest(
+def _spawn_reviewer(writer: str) -> FacadeTurnGroup:
+    member = FacadeCallMember(
+        ordinal=0,
         kind=BoundaryEventKind.SPAWN,
-        call_correlation=f"{writer}:0",
-        child_region_ref="reviewer",
+        completion_mode=FacadeCompletionMode.ADMIT_AND_CLOSE,
+        call_correlation=f"{writer}:0:0",
+        harness_call_id="spawn0",
+        tool_name="spawn_agent",
+        interface_or_region="reviewer",
+    )
+    return FacadeTurnGroup(
+        group_id=f"{writer}:0", activation_id=writer, turn_id="0", members=(member,)
     )
 
 
@@ -404,13 +419,13 @@ def test_gateway_origination_survives_a_restart_replay() -> None:
         result = adapter.start(
             writer, capsule=None, outcomes=dispatch.delivered_outcomes
         )
-        runtime.originate_episode_boundary(writer, _spawn_reviewer(writer))
+        runtime.originate_facade_turn_group(writer, _spawn_reviewer(writer))
         # The origination is durable on the record, not only in the volatile stash.
         record = runtime.get_record(writer)
-        assert record is not None and record.pending_origination is not None
+        assert record is not None and record.pending_facade_group is not None
 
         # Crash before the reroute: the in-memory stash is lost, as on a restart.
-        runtime._pending_originations.clear()
+        runtime._pending_facade_groups.clear()
 
         # The completion replays from the durable stream (at-least-once).
         runtime.mark_succeeded(
@@ -425,7 +440,7 @@ def test_gateway_origination_survives_a_restart_replay() -> None:
         ]
         assert len(children) == 1
         assert str(record.status) != "DONE"
-        assert record.pending_origination is None  # consumed once
+        assert record.pending_facade_group is None  # consumed once
 
     asyncio.run(run())
 
@@ -449,7 +464,7 @@ def test_a_post_reroute_completion_replay_is_a_noop() -> None:
         result = adapter.start(
             writer, capsule=None, outcomes=dispatch.delivered_outcomes
         )
-        runtime.originate_episode_boundary(writer, _spawn_reviewer(writer))
+        runtime.originate_facade_turn_group(writer, _spawn_reviewer(writer))
         payload = {"agent_episode": result.model_dump(mode="json")}
         runtime.mark_succeeded(writer, "wkr-1", payload, _TS)
         assert (

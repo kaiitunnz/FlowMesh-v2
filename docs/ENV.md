@@ -36,7 +36,10 @@ listed here is in `.env.example`.
 | `ORCHESTRATOR_MAX_SCOPE_DEPTH` | `64` | Max nested call/spawn/recursion depth for v2 dynamic regions |
 | `ORCHESTRATOR_MAX_LOOP_ITERATIONS` | `1000` | Max loop iterations per v2 `LoopContext` |
 | `ORCHESTRATOR_MAX_ACTIVATIONS` | `10000` | Max dynamic activations per v2 workflow instance |
+| `ORCHESTRATOR_MAX_SPAWNS_PER_TURN` | `32` | Max spawn children admitted in one facade turn group |
+| `ORCHESTRATOR_MAX_SPAWNS_PER_REGION` | `256` | Max spawn children admitted per agent child region |
 | `ORCHESTRATOR_EPISODE_LOWERING` | `false` | Lower v2 templates into run-to-yield episodes |
+| `ORCHESTRATOR_AGENT_INPUT_BUDGET_BYTES` | `262144` | Max resolved first-turn input bytes per agent |
 | `AGENT_HARNESS_DEFAULT_BACKEND` | – | Default agent harness backend when a workflow sets none |
 | `AGENT_HARNESS_DEFAULT_VERSION` | – | Default agent harness backend version |
 | `AGENT_MODEL_GATEWAY_MODE` | `canned` | Managed model upstream mode (`canned`/`echo`/`openai`/`proxy`) |
@@ -44,6 +47,13 @@ listed here is in `.env.example`.
 | `AGENT_MODEL_GATEWAY_MODEL` | – | Upstream model (openai/proxy modes) |
 | `AGENT_MODEL_GATEWAY_TIMEOUT_SEC` | `60` | Upstream request timeout (seconds) |
 | `AGENT_MODEL_SECRET_TTL_SEC` | `86400` | Expiry for a workflow's vaulted model credential |
+| `WEB_SEARCH_PROVIDER` | `duckduckgo` | Fabric web-search backend |
+| `WEB_SEARCH_API_KEY` | – | Deployment key for a keyed search provider |
+| `WEB_SEARCH_MAX_RESULTS` | `5` | Results per search |
+| `WEB_SEARCH_TIMEOUT_SEC` | `20` | Search request timeout (seconds) |
+| `WEB_SEARCH_RESULT_CHAR_CAP` | `6000` | Injected result size cap |
+| `WEB_SEARCH_MAX_CALLS` | `8` | Searches per episode |
+| `WEB_SEARCH_MAX_PARALLEL_CALLS_PER_TURN` | `4` | Parallel searches per turn |
 | `ENABLE_WORKER_WATCHDOG` | `true` | Worker death detection |
 | `WORKER_DEATH_GRACE_SEC` | `60` | Grace period before marking dead |
 | `WORKER_REHYDRATION_GRACE_SEC` | `120` | Extra grace for a worker's rehydrated in-flight tasks after the root restarts, before the watchdog may reclaim them |

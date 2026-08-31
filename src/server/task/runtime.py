@@ -12,10 +12,12 @@ from typing import Any
 from shared.harness import (
     AgentEpisodeDispatch,
     BoundaryEventKind,
-    BoundaryRequest,
     HarnessBackendKey,
+    HarnessCapsule,
     HarnessResult,
     HarnessResultKind,
+    InputBinding,
+    InputBindingMember,
 )
 from shared.schemas.command import InterruptMessage
 from shared.schemas.result import ResultEnvelope, result_file_path
@@ -26,9 +28,12 @@ from shared.utils.ids import new_model_secret_ref
 from ..config import AgentBindingConfig, OrchestrationConfig
 from ..hooks import SUPPLIER_RESOLVERS
 from ..orchestration import (
+    AcceptedInput,
+    AcceptedInputMember,
     Advance,
     LedgerSnapshot,
     OrchestrationEngine,
+    PublicationOutcome,
     RecoveryDisposition,
     RegionError,
     ResultPublication,
@@ -38,6 +43,14 @@ from ..orchestration import (
 )
 from ..orchestration.episode import BoundaryEvent
 from ..orchestration.harness import to_boundary_event
+from ..orchestration.tool_dispatch import (
+    MODEL_INTERFACE,
+    SEARCH_INTERFACE,
+    FacadeTurnGroup,
+    ToolInvocationEnvelope,
+    ToolOutcome,
+    ToolOutcomeStatus,
+)
 from ..registries.worker import Worker, WorkerRegistry
 from ..registries.workflow import PersistedTask, WorkflowRegistry, WorkflowSched
 from ..services.model_secret_vault import ModelSecretVault
@@ -63,12 +76,17 @@ from .v2 import (
 )
 from .v2.compiler.agent_binding import AgentBindingDefaults
 from .v2.credentials import pop_inline_model_secrets, redact_source_text
-from .v2.representations.operators import AgentModelGatewayBinding
+from .v2.representations.operators import AgentModelGatewayBinding, FacadeDescriptor
 from .v2.representations.plan import EpisodeSpec
 
 # A live-feasibility check: whether a lowered episode's declared alternative can be
 # placed now.
 EpisodeFeasibility = Callable[[EpisodeSpec], bool]
+
+
+def _stringify(value: Any) -> str:
+    """A stable string rendering of a resolved input value, for delivery."""
+    return value if isinstance(value, str) else json.dumps(value, sort_keys=True)
 
 
 def _binding_defaults(cfg: AgentBindingConfig) -> AgentBindingDefaults:
@@ -123,6 +141,8 @@ class TaskRuntime:
         self._feasibility_check = feasibility_check
         self._secret_vault = secret_vault
         self._scope_budget = ScopeBudget.from_config(orchestration)
+        self._web_search = orchestration.web_search
+        self._input_budget_bytes = orchestration.agent_input_budget_bytes
         self._agent_binding_defaults = _binding_defaults(orchestration.agent_binding)
         self._lowering_strategy = (
             LoweringStrategy.EPISODE_CUT
@@ -150,13 +170,16 @@ class TaskRuntime:
         self._task_epoch_index: dict[str, int] = {}
         self._rehydrated_dispatched: dict[str, float] = {}
         self._engines: dict[str, OrchestrationEngine] = {}
-        # Settles a mediated model/effect boundary off the caller's lane; the gateway
-        # installs it, and it is absent (agent stays suspended) until then.
-        self._settler: Callable[[str, str, str | None], None] | None = None
+        self._retired_region_templates: dict[str, set[str]] = {}
+        # Interface-keyed handlers for a mediated boundary, dispatched off the caller's
+        # lane. The model gateway settles the "model" interface; the fabric tool broker
+        # executes a fabric-served tool ("search/v1"). Both take the durable envelope.
+        self._model_settler: Callable[[ToolInvocationEnvelope], None] | None = None
+        self._tool_broker: Callable[[ToolInvocationEnvelope], None] | None = None
         # Facade boundaries the agent-model gateway captured server-side during an
         # episode's model turn, keyed by task; the completion path reroutes the clean
         # turn-completion into the pending boundary rather than settling it.
-        self._pending_originations: dict[str, BoundaryRequest] = {}
+        self._pending_facade_groups: dict[str, FacadeTurnGroup] = {}
 
         self._lock = threading.RLock()
         self._cv = threading.Condition(self._lock)
@@ -594,12 +617,12 @@ class TaskRuntime:
             )
             self._apply_advance_locked(workflow_id, advance)
 
-        # Re-issue the off-lane settle for any model/effect boundary suspended with no
-        # durable outcome: the settle ran on an in-memory executor a crash discarded, so
-        # nothing else resumes the agent; the request payload is on the envelope.
-        if self._settler is not None:
-            for settle_task, corr, payload in engine.stranded_model_settlements():
-                self._settler(settle_task, corr, payload)
+        # Re-issue the off-lane dispatch for any mediated boundary suspended with no
+        # durable outcome: the handler ran on an in-memory executor a crash discarded,
+        # so nothing else resumes the agent. The durable envelope routes it to the same
+        # handler (a search to the broker, a model to the gateway) it was recorded for.
+        for envelope in engine.pending_tool_dispatches():
+            self._dispatch_boundary(envelope)
         self._save_ledger_locked(workflow_id)
 
     # ------------------------------------------------------------------ #
@@ -1011,8 +1034,8 @@ class TaskRuntime:
         if record is None or engine is None:
             return
         if hr.kind in (HarnessResultKind.FAILURE, HarnessResultKind.CANCELLATION):
-            self._pending_originations.pop(task_id, None)
-            record.pending_origination = None
+            self._pending_facade_groups.pop(task_id, None)
+            record.pending_facade_group = None
             reason = hr.error or (
                 "agent episode cancelled"
                 if hr.kind is HarnessResultKind.CANCELLATION
@@ -1058,15 +1081,16 @@ class TaskRuntime:
         elif request.kind in (BoundaryEventKind.STATE_ACCESS, BoundaryEventKind.YIELD):
             self._reenqueue_episode_locked(task_id)
             changed = handled = True
-        elif (
-            corr is not None
-            and self._settler is not None
-            and request.kind
-            in (BoundaryEventKind.INVOCATION, BoundaryEventKind.EXTERNAL_EFFECT)
+        elif corr is not None and request.kind in (
+            BoundaryEventKind.INVOCATION,
+            BoundaryEventKind.EXTERNAL_EFFECT,
         ):
-            # A model or effect boundary suspends until the gateway settles it off-lane.
-            self._settler(task_id, corr, event.request_payload)
-            handled = True
+            # A model or fabric-tool boundary suspends until its handler settles it
+            # off-lane; the durable envelope routes it by exact (kind, interface).
+            envelope = engine.tool_dispatch_envelope(task_id, corr)
+            if envelope is not None:
+                self._dispatch_boundary(envelope)
+                handled = True
         if not handled:
             # A blocked boundary no branch re-readied or handed off (a denial lacking a
             # correlation) must not hang the episode; re-ready it so it can continue.
@@ -1077,6 +1101,62 @@ class TaskRuntime:
         self._save_ledger_locked(record.workflow_id)
         if changed:
             self._cv.notify_all()
+
+    def _route_and_dispatch_facade_group_locked(
+        self,
+        task_id: str,
+        group: FacadeTurnGroup,
+        capsule: HarnessCapsule | None,
+    ) -> None:
+        """Route a facade group into the ledger and dispatch its search members.
+
+        The group's single continuation is the clean turn's capsule. Its spawn members
+        materialize one child each (whose dispatchable records are synthesized here) and
+        settle at admission; its search members up to the per-turn parallel cap dispatch
+        concurrently to the broker, any beyond it settling as typed quota outcomes in
+        source order — never a 500, never truncation. A spawn-only group re-readies the
+        lead at once; a group with a search holds the lane until every await member is
+        durably resolved.
+        """
+        record = self._tasks.get(task_id)
+        engine = self._engines.get(record.workflow_id) if record else None
+        if record is None or engine is None:
+            return
+        wi = engine.work_item(task_id)
+        if wi is not None and capsule is not None:
+            wi.continuation_ref = capsule.blob
+        engine.mark_pending_outcome(task_id, None)
+        advance = engine.route_facade_turn_group(task_id, group)
+        self._synthesize_ready_children_locked(record.workflow_id, engine, advance)
+        self._apply_advance_locked(record.workflow_id, advance)
+        cap = self._web_search.max_parallel
+        for index, envelope in enumerate(
+            engine.group_dispatch_envelopes(task_id, group.group_id)
+        ):
+            if index < cap:
+                self._dispatch_boundary(envelope)
+            else:
+                overflow = ToolOutcome(
+                    status=ToolOutcomeStatus.QUOTA,
+                    value=f"web search parallel cap ({cap}) exceeded this turn",
+                )
+                self.settle_episode_invocation(
+                    task_id, envelope.call_correlation, overflow.model_dump_json()
+                )
+        # A spawn-only group settled at admission (the lane never suspended): re-enqueue
+        # the lead now, closing this turn's attempt, so its next step injects the ack
+        # vector. A group holding a search stays suspended until its members settle.
+        stuck = engine.work_item(task_id)
+        if stuck is not None and stuck.status is not WorkItemStatus.BLOCKED:
+            self._reenqueue_episode_locked(task_id)
+        else:
+            # The lane stays suspended on a search: still persist the record so the
+            # cleared pending_facade_group is durable. The ledger already holds this
+            # group, so a crash before the first member settles must not leave the stale
+            # capture on disk to hijack the lead's next completion on restart.
+            self._persist_locked(task_id)
+        self._save_ledger_locked(record.workflow_id)
+        self._cv.notify_all()
 
     def _reenqueue_episode_locked(self, task_id: str) -> None:
         """Re-ready a still-running agent episode for its next run-to-yield step."""
@@ -1138,29 +1218,80 @@ class TaskRuntime:
             self._cv.notify_all()
             return True
 
-    def set_invocation_settler(
-        self, settler: Callable[[str, str, str | None], None]
-    ) -> None:
-        """Install the off-lane settler for mediated model and effect boundaries."""
-        self._settler = settler
+    def _dispatch_boundary(self, env: ToolInvocationEnvelope) -> None:
+        """Route a recorded mediated boundary to its handler by exact (kind, interface).
 
-    def originate_episode_boundary(
-        self, task_id: str, request: BoundaryRequest
-    ) -> None:
-        """Record a facade boundary the gateway captured during an episode's model turn.
+        Only ``(INVOCATION, "model")`` reaches the model gateway and only
+        ``(INVOCATION, "search/v1")`` the fabric tool broker. An unrecognized interface
+        is a fabric misconfiguration terminalized as a typed unavailable outcome — never
+        a silent fall-through to the model settler.
+        """
+        if (
+            env.kind is BoundaryEventKind.INVOCATION
+            and env.interface == MODEL_INTERFACE
+        ):
+            if self._model_settler is not None:
+                self._model_settler(env)
+            return
+        if (
+            env.kind is BoundaryEventKind.INVOCATION
+            and env.interface == SEARCH_INTERFACE
+        ):
+            if self._tool_broker is not None:
+                self._tool_broker(env)
+            return
+        outcome = ToolOutcome(
+            status=ToolOutcomeStatus.UNAVAILABLE,
+            value=f"no fabric handler for interface {env.interface!r}",
+        )
+        self.settle_episode_invocation(
+            env.task_id, env.call_correlation, outcome.model_dump_json()
+        )
 
-        The agent-model gateway sees a harness's native facade call before the harness
-        does and clean-completes the turn; this records the captured boundary so the
-        episode's next completion reroutes into it, keyed by the awaiting task. It is
-        persisted on the task record before the gateway acks the clean turn to the
-        harness, so a restart-replayed completion still reroutes rather than settling
-        the episode DONE with its child region silently missing.
+    def set_model_settler(
+        self, settler: Callable[[ToolInvocationEnvelope], None]
+    ) -> None:
+        """Install the off-lane handler for the mediated ``model`` interface."""
+        self._model_settler = settler
+
+    def set_tool_broker(self, broker: Callable[[ToolInvocationEnvelope], None]) -> None:
+        """Install the off-lane handler for fabric-served tool interfaces."""
+        self._tool_broker = broker
+
+    def originate_facade_turn_group(self, task_id: str, group: FacadeTurnGroup) -> None:
+        """Record a turn-scoped facade group the gateway captured, before it acks.
+
+        The agent-model gateway sees a model turn's native facade calls before the
+        harness does and clean-completes the turn; the whole ordered membership and its
+        single continuation are persisted on the task record before the gateway acks the
+        clean turn, so the episode's next completion routes the group rather than
+        settling the episode DONE, and a restart-replayed completion still routes it. At
+        most one group is open per episode; a second capture while one holds the gate is
+        refused by the gateway fence, not stored here.
         """
         with self._lock:
-            self._pending_originations[task_id] = request
+            self._pending_facade_groups[task_id] = group
             if (record := self._tasks.get(task_id)) is not None:
-                record.pending_origination = request
+                record.pending_facade_group = group
                 self._persist_locked(task_id)
+
+    def has_pending_facade(self, task_id: str) -> bool:
+        """Whether a facade group is already captured or still open for this episode.
+
+        The gateway fence reads this to refuse a distinct second group before the open
+        one's await-outcome members settle, so a group is never overwritten mid-flight.
+        A spawn-only group holds nothing here once routed, so a later turn may issue it.
+        """
+        with self._lock:
+            if task_id in self._pending_facade_groups:
+                return True
+            record = self._tasks.get(task_id)
+            engine = self._engines.get(record.workflow_id) if record else None
+            if record is not None and record.pending_facade_group is not None:
+                return True
+            if engine is None:
+                return False
+            return engine.has_open_facade_group(task_id)
 
     def resolve_model_binding(self, task_id: str) -> AgentModelGatewayBinding | None:
         """The pinned managed-model binding for a task's agent, for the gateway.
@@ -1176,6 +1307,20 @@ class TaskRuntime:
                 return None
             op = engine.agent_operator(task_id)
             return op.model_binding if op is not None else None
+
+    def agent_facade_descriptors(self, task_id: str) -> list[FacadeDescriptor]:
+        """The fabric facades pinned on a task's agent, for the gateway to inject.
+
+        Only an agent's compile-pinned facades are injectable, so the model can never be
+        offered a fabric tool the agent did not declare.
+        """
+        with self._lock:
+            record = self._tasks.get(task_id)
+            engine = self._engines.get(record.workflow_id) if record else None
+            if engine is None:
+                return []
+            op = engine.agent_operator(task_id)
+            return list(op.facades) if op is not None else []
 
     def gateway_binding_for(
         self, task_id: str
@@ -1211,12 +1356,20 @@ class TaskRuntime:
             if harness is None:
                 return None
             capsule_blob, outcomes = engine.episode_context(task_id)
+            # First-turn dataflow inputs are delivered only on the first dispatch; a
+            # resume injects only the harness's own delivered outcomes.
+            input_bindings = (
+                self._agent_input_bindings(engine, task_id)
+                if capsule_blob is None
+                else ()
+            )
             return AgentEpisodeDispatch(
                 backend=HarnessBackendKey(
                     backend=harness.backend, version=harness.version
                 ),
                 capsule_blob=capsule_blob,
                 delivered_outcomes=outcomes,
+                input_bindings=input_bindings,
             )
 
     def _synthesize_ready_children_locked(
@@ -1265,6 +1418,23 @@ class TaskRuntime:
                 self._records_locked(*child_task_ids),
                 engine.to_snapshot(),
                 retire=retire,
+            )
+
+    def _retire_sealed_region_templates_locked(
+        self, workflow_id: str, engine: OrchestrationEngine
+    ) -> None:
+        """Retire an agent-region child template once its spawn region has sealed.
+
+        A dynamic spawn region's child body is a template, never dispatched as a task;
+        once the region seals it no longer holds the workflow open, so it is dropped
+        from the remaining set (idempotently, tracked per workflow) with the ledger.
+        """
+        already = self._retired_region_templates.setdefault(workflow_id, set())
+        pending = engine.sealed_region_child_templates() - already
+        if pending:
+            already.update(pending)
+            self._commit_new_children_locked(
+                workflow_id, engine, [], retire=sorted(pending)
             )
 
     def episode_feasible(self, task_id: str) -> bool:
@@ -1362,11 +1532,14 @@ class TaskRuntime:
     def _apply_advance_locked(self, workflow_id: str, advance: Advance) -> bool:
         # A ready/settle advance never carries a retry; the failure path drives those.
         assert not advance.retry, "retry is applied by the failure path"
+        engine = self._engines.get(workflow_id)
+        if engine is not None:
+            self._resolve_agent_inputs_locked(engine, advance)
+            self._retire_sealed_region_templates_locked(workflow_id, engine)
         changed = False
         for task_id in advance.ready:
             if self._enqueue_ready_locked(task_id):
                 changed = True
-        engine = self._engines.get(workflow_id)
         for task_id in advance.failed:
             reason = (
                 engine and engine.failure_reason(task_id)
@@ -1422,10 +1595,26 @@ class TaskRuntime:
                 producer_task_id,
             )
             return advance
-        value_ref = ValueRef(kind="legacy_task_result", legacy_task_id=producer_task_id)
+        # An agent child receives its element through the typed accepted-input channel
+        # its declared entry port; a leaf child keeps the legacy spec.data injection.
+        child_is_agent = engine.agent_entry_port(child_template_id) is not None
         new_children: list[str] = []
-        for element in elements:
+        for index, element in enumerate(elements):
             try:
+                if child_is_agent:
+                    child_task_id = engine.create_fanout_child(
+                        spawn_op, producer_task_id, index
+                    )
+                    self._register_child_locked(child_task_id, template_record, None)
+                    self._mint_fanout_facet_locked(
+                        engine, child_task_id, producer_task_id, index
+                    )
+                    advance.extend(engine.reconsider_admission(child_task_id))
+                    new_children.append(child_task_id)
+                    continue
+                value_ref = ValueRef(
+                    kind="legacy_task_result", legacy_task_id=producer_task_id
+                )
                 child_advance = engine.materialize_child(spawn_op, value_ref=value_ref)
             except RegionError:
                 break  # a budget, seal, or denial stops further children
@@ -1472,6 +1661,177 @@ class TaskRuntime:
             item["output"] if isinstance(item, dict) and "output" in item else item
             for item in collection
         ]
+
+    def _mint_fanout_facet_locked(
+        self,
+        engine: OrchestrationEngine,
+        child_task_id: str,
+        producer_task_id: str,
+        index: int,
+    ) -> None:
+        """Record a fan-out child's typed entry-port input from its producer element."""
+        wi = engine.work_item(child_task_id)
+        if wi is None:
+            return
+        entry_port = engine.agent_entry_port(wi.operator_id)
+        if entry_port is None:
+            return
+        value_ref = ValueRef(
+            kind="legacy_task_result",
+            legacy_task_id=producer_task_id,
+            collection_key=str(index),
+        )
+        engine.record_accepted_input(
+            AcceptedInput(
+                activation_id=wi.activation_id,
+                target_port=entry_port,
+                occurrence_key=str(index),
+                provenance="spawn_element",
+                members=(
+                    AcceptedInputMember(
+                        source_operator_id=producer_task_id,
+                        source_activation_id=wi.activation_id,
+                        child_index=index,
+                        outcome=PublicationOutcome.SUCCESS,
+                        value_ref=value_ref,
+                    ),
+                ),
+            )
+        )
+
+    def _resolve_agent_inputs_locked(
+        self, engine: OrchestrationEngine, advance: Advance
+    ) -> None:
+        """Resolve and record each edge-bound agent's accepted inputs, then re-admit.
+
+        The engine owns membership and ordering; the runtime resolves every member's
+        frozen value and records the durable accepted input. A member whose value is not
+        yet readable defers the whole port until a later advance.
+        """
+        for task_id in engine.blocked_input_agents():
+            plan = engine.agent_input_plan(task_id)
+            if plan is None:
+                continue
+            resolved: list[tuple[str, AcceptedInput]] = []
+            total_bytes = 0
+            for port in plan.ports:
+                members: list[AcceptedInputMember] = []
+                for member in port.members:
+                    value_ref = ValueRef(
+                        kind=member.value_ref_kind,
+                        legacy_task_id=member.legacy_task_id,
+                        collection_key=member.collection_key,
+                        literal=member.literal,
+                    )
+                    value = self._resolve_value_ref(value_ref)
+                    if value is None:
+                        break
+                    total_bytes += len(value.encode("utf-8"))
+                    members.append(
+                        AcceptedInputMember(
+                            source_operator_id=member.source_operator_id,
+                            source_activation_id=member.source_activation_id,
+                            child_index=member.child_index,
+                            outcome=PublicationOutcome(member.outcome),
+                            value_ref=value_ref,
+                            ordinal=member.ordinal,
+                        )
+                    )
+                if len(members) != len(port.members):
+                    continue
+                resolved.append(
+                    (
+                        port.target_port,
+                        AcceptedInput(
+                            activation_id=plan.activation_id,
+                            target_port=port.target_port,
+                            provenance=port.provenance,
+                            members=tuple(members),
+                        ),
+                    )
+                )
+            # Overflow is a typed declared failure, never silent truncation: a resolved
+            # input cone exceeding the budget fails the agent instead of dispatching it.
+            if total_bytes > self._input_budget_bytes:
+                advance.extend(
+                    engine.on_failed(
+                        task_id,
+                        f"input_too_large: resolved input is {total_bytes} bytes, "
+                        f"over the {self._input_budget_bytes}-byte budget",
+                        retryable=False,
+                    )
+                )
+                continue
+            for _, accepted in resolved:
+                engine.record_accepted_input(accepted)
+            advance.extend(engine.reconsider_admission(task_id))
+
+    def _resolve_value_ref(self, value_ref: ValueRef | None) -> str | None:
+        """Resolve a frozen value reference to its immutable string value, or None.
+
+        An inline value is its literal; a producer reference reads the settled result
+        selects one collection element (a fan-out element) or the whole ``value``. None
+        signals a not-yet-readable result, deferring the input.
+        """
+        if value_ref is None:
+            return None
+        if value_ref.kind == "inline":
+            return value_ref.literal or ""
+        if value_ref.kind == "empty":
+            return ""
+        if value_ref.kind != "legacy_task_result" or not value_ref.legacy_task_id:
+            return None
+        path = result_file_path(self._results_dir, value_ref.legacy_task_id)
+        if not path.exists():
+            return None
+        try:
+            envelope = ResultEnvelope.model_validate_json(path.read_text("utf-8"))
+        except (ValueError, OSError):
+            return None
+        payload = envelope.result.model_dump()
+        if value_ref.collection_key is not None:
+            collection = payload.get("fanout")
+            if not isinstance(collection, list):
+                collection = payload.get("items")
+            if not isinstance(collection, list):
+                return None
+            index = int(value_ref.collection_key)
+            if index < 0 or index >= len(collection):
+                return None
+            item = collection[index]
+            item = (
+                item["output"] if isinstance(item, dict) and "output" in item else item
+            )
+            return _stringify(item)
+        value = payload.get("value")
+        return _stringify(value if value is not None else payload)
+
+    def _agent_input_bindings(
+        self, engine: OrchestrationEngine, task_id: str
+    ) -> tuple[InputBinding, ...]:
+        """The resolved first-turn input bindings for an agent's input ports."""
+        bindings: list[InputBinding] = []
+        for ordinal, accepted in enumerate(engine.accepted_inputs_for_task(task_id)):
+            members = tuple(
+                InputBindingMember(
+                    source_operator_id=member.source_operator_id,
+                    source_activation_id=member.source_activation_id,
+                    child_index=member.child_index,
+                    outcome=member.outcome.value,
+                    value=self._resolve_value_ref(member.value_ref),
+                    ordinal=member.ordinal,
+                )
+                for member in accepted.members
+            )
+            bindings.append(
+                InputBinding(
+                    port=accepted.target_port,
+                    provenance=accepted.provenance,
+                    ordinal=accepted.ordinal or ordinal,
+                    members=members,
+                )
+            )
+        return tuple(bindings)
 
     def _synthesize_child_record(
         self, template: TaskRecord, child_task_id: str, element: Any
@@ -1846,27 +2206,22 @@ class TaskRuntime:
                 # The durable record is the source of truth: a restart drops the
                 # in-memory stash, but a replayed completion still finds its captured
                 # boundary and reroute rather than settling the episode DONE.
-                originated = self._pending_originations.pop(task_id, None)
-                if originated is None:
-                    originated = record.pending_origination
+                group = self._pending_facade_groups.pop(task_id, None)
+                if group is None:
+                    group = record.pending_facade_group
                 if harness_result.kind is not HarnessResultKind.COMPLETION:
                     # A non-terminal episode step routes its boundary and re-dispatches;
                     # a completion falls through to the terminal path below.
                     self._apply_episode_step_locked(task_id, harness_result)
                     return usages
-                if originated is not None:
-                    # The gateway captured a facade during this turn: the clean
-                    # turn-completion is a yield on that boundary, not the episode's
-                    # terminal result, so it routes as a boundary, not a completion. The
-                    # captured boundary is consumed durably in the same reroute save.
-                    record.pending_origination = None
-                    self._apply_episode_step_locked(
-                        task_id,
-                        HarnessResult(
-                            kind=HarnessResultKind.BOUNDARY,
-                            request=originated,
-                            capsule=harness_result.capsule,
-                        ),
+                if group is not None:
+                    # The gateway captured a turn-scoped facade group: the clean
+                    # turn-completion is a yield on that group, not the episode's
+                    # terminal result, so it routes the whole ordered membership
+                    # kind-specifically, consumed durably in the same reroute save.
+                    record.pending_facade_group = None
+                    self._route_and_dispatch_facade_group_locked(
+                        task_id, group, harness_result.capsule
                     )
                     return usages
                 engine = self._engines.get(record.workflow_id)
@@ -2017,8 +2372,8 @@ class TaskRuntime:
                 record.finished_ts = finished_ts
                 # A facade captured on a turn that then failed is never rerouted; drop
                 # it so a replayed completion can't resurrect it against a failed task.
-                self._pending_originations.pop(task_id, None)
-                record.pending_origination = None
+                self._pending_facade_groups.pop(task_id, None)
+                record.pending_facade_group = None
                 if started_ts:
                     record.started_ts = started_ts
                 if worker_id:
