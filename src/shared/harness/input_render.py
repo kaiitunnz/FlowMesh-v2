@@ -1,18 +1,18 @@
-"""The version-pinned renderer for an agent's first-turn dataflow inputs.
+"""The renderer for an agent's first-turn dataflow inputs.
 
 A harness adapter renders the resolved input bindings into a delimited envelope beside
 the agent's static instruction. The renderer is the sole place text is composed; it
-members in their canonical ordinal order and may add only presentation labels. It never
-chooses membership or ordering (those come from the durable manifest) and never
+orders members in their canonical ordinal order and may add only presentation labels. It
+never chooses membership or ordering (those come from the durable manifest) and never
 truncates (an oversized input is a compile-time bounds decision, not a render-time one).
-The version tag is pinned so a restart re-renders byte-identically.
+It is a pure deterministic function of the manifest, so a restart re-renders the same.
 """
 
 from collections.abc import Sequence
 
-from .adapter import INPUT_RENDERER_VERSION, InputBinding
+from .adapter import InputBinding
 
-__all__ = ["INPUT_RENDERER_VERSION", "render_input_envelope"]
+__all__ = ["render_input_envelope"]
 
 
 def render_input_envelope(instruction: str, bindings: Sequence[InputBinding]) -> str:

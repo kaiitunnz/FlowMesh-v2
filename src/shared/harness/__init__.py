@@ -1,6 +1,5 @@
 from .adapter import (
     FACADE_TOOLS,
-    INPUT_RENDERER_VERSION,
     REQUIRED_MEDIATED_FACADES,
     AgentEpisodeDispatch,
     DeliveredOutcome,
@@ -20,7 +19,6 @@ from .input_render import render_input_envelope
 
 __all__ = [
     "FACADE_TOOLS",
-    "INPUT_RENDERER_VERSION",
     "REQUIRED_MEDIATED_FACADES",
     "AgentEpisodeDispatch",
     "BoundaryEventKind",

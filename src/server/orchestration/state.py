@@ -306,9 +306,9 @@ class AcceptedInputMember(BaseModel):
     """One durable member of an accepted input on an agent's target port.
 
     Preserves its source operator/output port, source activation and child index, its
-    terminal outcome, an immutable ``value_ref``, a content digest over the resolved
-    value, and a canonical ordinal. A merge/join aggregate carries one member per source
-    child; a single producer binding carries exactly one.
+    terminal outcome, an immutable ``value_ref``, and a canonical ordinal. A merge/join
+    aggregate carries one member per source child; a single producer binding carries
+    exactly one.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -319,7 +319,6 @@ class AcceptedInputMember(BaseModel):
     child_index: int | None = None
     outcome: PublicationOutcome
     value_ref: ValueRef | None = None
-    content_digest: str
     ordinal: int = 0
 
 
@@ -329,9 +328,9 @@ class AcceptedInput(BaseModel):
     Keyed by (activation, target_port, occurrence_key); members are ordered by the
     declared producer/merge contract, never by arrival. Part of the agent input cone: a
     work item is ready only once each required port carries an accepted input, and a
-    restart replays exactly these refs, outcomes, ordering, and renderer version.
-    Minting
-    an accepted input is authority-neutral — it delivers data, never an invoke right.
+    restart replays exactly these value references, terminal outcomes, and ordering.
+    Minting an accepted input is authority-neutral — it delivers data, never an invoke
+    right.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -342,7 +341,6 @@ class AcceptedInput(BaseModel):
     provenance: str = "producer"
     members: tuple[AcceptedInputMember, ...] = ()
     ordinal: int = 0
-    renderer_version: str
 
 
 class Continuation(BaseModel):

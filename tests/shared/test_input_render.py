@@ -15,7 +15,6 @@ def _member(op: str, value: str, ordinal: int, child: int | None = None):
         child_index=child,
         outcome="success",
         value=value,
-        content_digest=f"d-{op}",
         ordinal=ordinal,
     )
 

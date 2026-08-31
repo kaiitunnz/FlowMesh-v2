@@ -15,12 +15,11 @@ empty set. Scheduler/worker placement stays a physical decision that never chang
 the engine considers ready.
 """
 
-import hashlib
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Self
 
-from shared.harness import INPUT_RENDERER_VERSION, DeliveredOutcome, OutcomeKind
+from shared.harness import DeliveredOutcome, OutcomeKind
 from shared.utils import (
     new_activation_id,
     new_attempt_id,
@@ -147,11 +146,6 @@ class RegionError(ValueError):
 
 def _control_key(operator_id: str) -> str:
     return f"control:{operator_id}"
-
-
-def _digest(value: str) -> str:
-    """A stable content digest over a resolved input value, for replay integrity."""
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def _effect_recovery(op: LogicalOperator | None) -> tuple[EffectClass, RecoveryClass]:
@@ -859,10 +853,11 @@ class OrchestrationEngine:
             self._record_boundary(wi, event, denial=denial)
             return
         region = event.child_region_ref or ""
+        # This turn's admitted spawns already register in the child-init scope, so the
+        # region count reflects them; per_region only sums the per-turn budget across
+        # regions and must not be re-added here (that would trip the region cap at 2x).
         turn_total = sum(per_region.values())
-        region_total = self._region_child_count(
-            wi.activation_id, region
-        ) + per_region.get(region, 0)
+        region_total = self._region_child_count(wi.activation_id, region)
         if (
             turn_total >= self._budget.max_spawns_per_turn
             or region_total >= self._budget.max_spawns_per_region
@@ -1496,10 +1491,8 @@ class OrchestrationEngine:
                             child_index=activation.child_index,
                             outcome=PublicationOutcome.SUCCESS,
                             value_ref=value_ref,
-                            content_digest=_digest(value_ref.literal or ""),
                         ),
                     ),
-                    renderer_version=INPUT_RENDERER_VERSION,
                 )
             )
 

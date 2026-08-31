@@ -253,6 +253,24 @@ def test_a_per_turn_spawn_budget_overflow_is_a_typed_quota_outcome() -> None:
     assert ToolOutcomeStatus.QUOTA.value in (outcomes[2].value or "")
 
 
+def test_the_per_region_spawn_cap_admits_exactly_its_budget() -> None:
+    # The region cap is an independent knob: raise the per-turn cap well above it so the
+    # region budget alone gates. This-turn admits already register in the child-init
+    # scope, so the cap must admit exactly max_spawns_per_region, not half of it.
+    eng = _engine(_spawning_agent(child=_leaf("child")))
+    object.__setattr__(eng._budget, "max_spawns_per_turn", 100)
+    object.__setattr__(eng._budget, "max_spawns_per_region", 4)
+    _dispatch_agent(eng)
+    advance = eng.route_facade_turn_group(
+        "A", _group(*(_spawn_member(i) for i in range(6)))
+    )
+    children = [t for t in advance.ready if t.startswith("act-")]
+    assert len(children) == 4  # exactly the per-region budget
+    _, outcomes = eng.episode_context("A")
+    quota = [o for o in outcomes if ToolOutcomeStatus.QUOTA.value in (o.value or "")]
+    assert len(quota) == 2  # the two over-budget members ack quota and create no child
+
+
 # --------------------------------------------------------------------------- #
 # Mixed group: only the search holds the resume gate
 # --------------------------------------------------------------------------- #
@@ -359,6 +377,81 @@ def test_an_oversized_search_group_settles_overflow_as_quota() -> None:
             ToolOutcome.model_validate_json(o.value or "{}").status for o in outcomes
         ]
         assert statuses[2:] == [ToolOutcomeStatus.QUOTA, ToolOutcomeStatus.QUOTA]
+
+    asyncio.run(run())
+
+
+def test_a_crash_after_route_does_not_resurrect_a_stale_group() -> None:
+    # A search group routes into the ledger and suspends the lane; the pending group is
+    # cleared. If that cleared state is not durable, a crash before the members settle
+    # lets the stale group rehydrate and hijack the lead's next completion. The cleared
+    # group must be persisted, and the searches must recover as pending tool dispatches.
+    async def run() -> None:
+        registry = FakeRegistry()
+        tmp = Path(tempfile.mkdtemp())
+        cfg = OrchestrationConfig(web_search=WebSearchConfig(max_parallel=4))
+        runtime = TaskRuntime(
+            cast(Any, registry),
+            cast(Any, _WorkerRegistryStub()),
+            cfg,
+            tmp,
+            logging.getLogger("med2"),
+            secret_vault=cast(Any, _NoopSecretVault()),
+        )
+        runtime.set_tool_broker(lambda env: None)
+        workflow_id, ids = await _register(runtime, _SEARCH_WF)
+        task = ids["searcher"]
+        engine = runtime.orchestration_engine(workflow_id)
+        assert engine is not None
+        engine.on_dispatched(task, "w1")
+        group = FacadeTurnGroup(
+            group_id=f"{task}:0",
+            activation_id=task,
+            turn_id="0",
+            members=tuple(_search_member(i, group_id=f"{task}:0") for i in range(2)),
+        )
+        runtime.originate_facade_turn_group(task, group)
+        rec = runtime.get_record(task)
+        assert rec is not None and rec.pending_facade_group is not None
+        completion = HarnessResult(
+            kind=HarnessResultKind.COMPLETION, value=None, capsule=None
+        )
+        runtime.mark_succeeded(
+            task, "w1", {"agent_episode": completion.model_dump(mode="json")}, _TS
+        )
+        # The route suspended on the searches; the cleared pending group is now durable.
+        rec = runtime.get_record(task)
+        assert rec is not None and rec.pending_facade_group is None
+
+        # Restart from the same registry: the stale group must not survive to re-route.
+        restored = TaskRuntime(
+            cast(Any, registry),
+            cast(Any, _WorkerRegistryStub()),
+            cfg,
+            tmp,
+            logging.getLogger("med2-restored"),
+            secret_vault=cast(Any, _NoopSecretVault()),
+        )
+        await restored.rehydrate()
+        # The stale group did not survive: no capture remains to hijack a completion.
+        rrec = restored.get_record(task)
+        assert rrec is not None and rrec.pending_facade_group is None
+        # The searches survive as recoverable unsettled invocations in the ledger, so
+        # recovery re-drives them rather than re-routing a resurrected group.
+        reng = restored.orchestration_engine(workflow_id)
+        assert reng is not None
+        snap = reng.to_snapshot()
+        unsettled = [
+            b
+            for b in snap.boundary_events
+            if b.kind is BoundaryEventKind.INVOCATION
+            and b.outcome_value is None
+            and b.denial is None
+        ]
+        assert sorted(b.call_correlation or "" for b in unsettled) == [
+            f"{task}:0:0",
+            f"{task}:0:1",
+        ]
 
     asyncio.run(run())
 

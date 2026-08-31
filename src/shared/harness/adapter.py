@@ -97,17 +97,12 @@ class DeliveredOutcome(BaseModel):
     injection_arguments: str | None = None
 
 
-# Pinned so a restart re-renders an agent's first-turn input envelope byte-identically.
-INPUT_RENDERER_VERSION = "input-envelope/v1"
-
-
 class InputBindingMember(BaseModel):
     """One resolved member of a first-turn input binding.
 
     Carries the source operator/activation, its terminal outcome, the frozen resolved
-    value, a content digest over it, and a canonical ordinal. The adapter renders
-    members in ordinal order and may add only presentation labels — never choose
-    membership or ordering.
+    value, and a canonical ordinal. The adapter renders members in ordinal order and may
+    add only presentation labels — never choose membership or ordering.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -117,7 +112,6 @@ class InputBindingMember(BaseModel):
     child_index: int | None = None
     outcome: str
     value: str | None = None
-    content_digest: str
     ordinal: int = 0
 
 
@@ -125,9 +119,9 @@ class InputBinding(BaseModel):
     """A structured first-turn input delivered to one declared agent input port.
 
     The fabric resolves the durable accepted-input manifest into this projection; the
-    adapter renders it into a version-pinned, delimited envelope beside the static
-    instruction. A single producer binding carries one member; a merge/join aggregate
-    carries its ordered members.
+    adapter renders it into a delimited envelope beside the static instruction. A single
+    producer binding carries one member; a merge/join aggregate carries its ordered
+    members.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -155,7 +149,6 @@ class AgentEpisodeDispatch(BaseModel):
     capsule_blob: str | None = None
     delivered_outcomes: tuple[DeliveredOutcome, ...] = ()
     input_bindings: tuple[InputBinding, ...] = ()
-    renderer_version: str = INPUT_RENDERER_VERSION
 
 
 class HarnessResultKind(StrEnum):

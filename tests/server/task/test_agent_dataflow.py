@@ -71,10 +71,8 @@ def _accepted(activation: str, port: str, value_ref: ValueRef) -> AcceptedInput:
                 source_activation_id="act-P",
                 outcome=PublicationOutcome.SUCCESS,
                 value_ref=value_ref,
-                content_digest="d",
             ),
         ),
-        renderer_version="input-envelope/v1",
     )
 
 

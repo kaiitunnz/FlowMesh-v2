@@ -1,5 +1,4 @@
 import copy
-import hashlib
 import heapq
 import json
 import logging
@@ -11,7 +10,6 @@ from pathlib import Path
 from typing import Any
 
 from shared.harness import (
-    INPUT_RENDERER_VERSION,
     AgentEpisodeDispatch,
     BoundaryEventKind,
     HarnessBackendKey,
@@ -87,13 +85,8 @@ EpisodeFeasibility = Callable[[EpisodeSpec], bool]
 
 
 def _stringify(value: Any) -> str:
-    """A stable string rendering of a resolved input value, for delivery and digest."""
+    """A stable string rendering of a resolved input value, for delivery."""
     return value if isinstance(value, str) else json.dumps(value, sort_keys=True)
-
-
-def _content_digest(value: str) -> str:
-    """A stable content digest over a resolved input value, for replay integrity."""
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def _binding_defaults(cfg: AgentBindingConfig) -> AgentBindingDefaults:
@@ -1156,6 +1149,12 @@ class TaskRuntime:
         stuck = engine.work_item(task_id)
         if stuck is not None and stuck.status is not WorkItemStatus.BLOCKED:
             self._reenqueue_episode_locked(task_id)
+        else:
+            # The lane stays suspended on a search: still persist the record so the
+            # cleared pending_facade_group is durable. The ledger already holds this
+            # group, so a crash before the first member settles must not leave the stale
+            # capture on disk to hijack the lead's next completion on restart.
+            self._persist_locked(task_id)
         self._save_ledger_locked(record.workflow_id)
         self._cv.notify_all()
 
@@ -1608,7 +1607,7 @@ class TaskRuntime:
                     )
                     self._register_child_locked(child_task_id, template_record, None)
                     self._mint_fanout_facet_locked(
-                        engine, child_task_id, producer_task_id, index, element
+                        engine, child_task_id, producer_task_id, index
                     )
                     advance.extend(engine.reconsider_admission(child_task_id))
                     new_children.append(child_task_id)
@@ -1669,7 +1668,6 @@ class TaskRuntime:
         child_task_id: str,
         producer_task_id: str,
         index: int,
-        element: Any,
     ) -> None:
         """Record a fan-out child's typed entry-port input from its producer element."""
         wi = engine.work_item(child_task_id)
@@ -1696,10 +1694,8 @@ class TaskRuntime:
                         child_index=index,
                         outcome=PublicationOutcome.SUCCESS,
                         value_ref=value_ref,
-                        content_digest=_content_digest(_stringify(element)),
                     ),
                 ),
-                renderer_version=INPUT_RENDERER_VERSION,
             )
         )
 
@@ -1709,8 +1705,8 @@ class TaskRuntime:
         """Resolve and record each edge-bound agent's accepted inputs, then re-admit.
 
         The engine owns membership and ordering; the runtime resolves every member's
-        frozen value and digest and records the durable accepted input. A member whose
-        value is not yet readable defers the whole port until a later advance.
+        frozen value and records the durable accepted input. A member whose value is not
+        yet readable defers the whole port until a later advance.
         """
         for task_id in engine.blocked_input_agents():
             plan = engine.agent_input_plan(task_id)
@@ -1738,7 +1734,6 @@ class TaskRuntime:
                             child_index=member.child_index,
                             outcome=PublicationOutcome(member.outcome),
                             value_ref=value_ref,
-                            content_digest=_content_digest(value),
                             ordinal=member.ordinal,
                         )
                     )
@@ -1752,7 +1747,6 @@ class TaskRuntime:
                             target_port=port.target_port,
                             provenance=port.provenance,
                             members=tuple(members),
-                            renderer_version=INPUT_RENDERER_VERSION,
                         ),
                     )
                 )
@@ -1825,7 +1819,6 @@ class TaskRuntime:
                     child_index=member.child_index,
                     outcome=member.outcome.value,
                     value=self._resolve_value_ref(member.value_ref),
-                    content_digest=member.content_digest,
                     ordinal=member.ordinal,
                 )
                 for member in accepted.members
