@@ -252,6 +252,20 @@ STACK_ENV_SCHEMA = EnvSchema(
                     min_value=1,
                 ),
                 EnvVar(
+                    "ORCHESTRATOR_MAX_SPAWNS_PER_TURN",
+                    "32",
+                    description="Max spawn children admitted in one facade turn group.",
+                    var_type=EnvVarType.INT,
+                    min_value=1,
+                ),
+                EnvVar(
+                    "ORCHESTRATOR_MAX_SPAWNS_PER_REGION",
+                    "256",
+                    description="Max spawn children admitted per agent child region.",
+                    var_type=EnvVarType.INT,
+                    min_value=1,
+                ),
+                EnvVar(
                     "ORCHESTRATOR_EPISODE_LOWERING",
                     "0",
                     description="Lower v2 templates into run-to-yield episodes.",

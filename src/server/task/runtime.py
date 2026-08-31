@@ -14,7 +14,6 @@ from shared.harness import (
     INPUT_RENDERER_VERSION,
     AgentEpisodeDispatch,
     BoundaryEventKind,
-    BoundaryRequest,
     HarnessBackendKey,
     HarnessCapsule,
     HarnessResult,
@@ -49,8 +48,7 @@ from ..orchestration.harness import to_boundary_event
 from ..orchestration.tool_dispatch import (
     MODEL_INTERFACE,
     SEARCH_INTERFACE,
-    FacadeBatchMember,
-    FacadeBatchOrigination,
+    FacadeTurnGroup,
     ToolInvocationEnvelope,
     ToolOutcome,
     ToolOutcomeStatus,
@@ -188,8 +186,7 @@ class TaskRuntime:
         # Facade boundaries the agent-model gateway captured server-side during an
         # episode's model turn, keyed by task; the completion path reroutes the clean
         # turn-completion into the pending boundary rather than settling it.
-        self._pending_originations: dict[str, BoundaryRequest] = {}
-        self._pending_batch_originations: dict[str, FacadeBatchOrigination] = {}
+        self._pending_facade_groups: dict[str, FacadeTurnGroup] = {}
 
         self._lock = threading.RLock()
         self._cv = threading.Condition(self._lock)
@@ -1044,8 +1041,8 @@ class TaskRuntime:
         if record is None or engine is None:
             return
         if hr.kind in (HarnessResultKind.FAILURE, HarnessResultKind.CANCELLATION):
-            self._pending_originations.pop(task_id, None)
-            record.pending_origination = None
+            self._pending_facade_groups.pop(task_id, None)
+            record.pending_facade_group = None
             reason = hr.error or (
                 "agent episode cancelled"
                 if hr.kind is HarnessResultKind.CANCELLATION
@@ -1112,18 +1109,21 @@ class TaskRuntime:
         if changed:
             self._cv.notify_all()
 
-    def _route_and_dispatch_batch_locked(
+    def _route_and_dispatch_facade_group_locked(
         self,
         task_id: str,
-        batch: FacadeBatchOrigination,
+        group: FacadeTurnGroup,
         capsule: HarnessCapsule | None,
     ) -> None:
-        """Route a facade batch into the ledger, suspend once, and dispatch its members.
+        """Route a facade group into the ledger and dispatch its search members.
 
-        The batch's single continuation is the clean turn's capsule. Members up to the
-        per-turn parallel cap dispatch concurrently to the broker; any beyond it settle
-        as typed quota outcomes in source order — never a 500, never truncation. The
-        episode resumes once, when every member is durably resolved.
+        The group's single continuation is the clean turn's capsule. Its spawn members
+        materialize one child each (whose dispatchable records are synthesized here) and
+        settle at admission; its search members up to the per-turn parallel cap dispatch
+        concurrently to the broker, any beyond it settling as typed quota outcomes in
+        source order — never a 500, never truncation. A spawn-only group re-readies the
+        lead at once; a group with a search holds the lane until every await member is
+        durably resolved.
         """
         record = self._tasks.get(task_id)
         engine = self._engines.get(record.workflow_id) if record else None
@@ -1133,11 +1133,12 @@ class TaskRuntime:
         if wi is not None and capsule is not None:
             wi.continuation_ref = capsule.blob
         engine.mark_pending_outcome(task_id, None)
-        advance = engine.route_boundary_batch(task_id, batch.batch_id, batch.members)
+        advance = engine.route_facade_turn_group(task_id, group)
+        self._synthesize_ready_children_locked(record.workflow_id, engine, advance)
         self._apply_advance_locked(record.workflow_id, advance)
         cap = self._web_search.max_parallel
         for index, envelope in enumerate(
-            engine.batch_dispatch_envelopes(task_id, batch.batch_id)
+            engine.group_dispatch_envelopes(task_id, group.group_id)
         ):
             if index < cap:
                 self._dispatch_boundary(envelope)
@@ -1149,6 +1150,12 @@ class TaskRuntime:
                 self.settle_episode_invocation(
                     task_id, envelope.call_correlation, overflow.model_dump_json()
                 )
+        # A spawn-only group settled at admission (the lane never suspended): re-enqueue
+        # the lead now, closing this turn's attempt, so its next step injects the ack
+        # vector. A group holding a search stays suspended until its members settle.
+        stuck = engine.work_item(task_id)
+        if stuck is not None and stuck.status is not WorkItemStatus.BLOCKED:
+            self._reenqueue_episode_locked(task_id)
         self._save_ledger_locked(record.workflow_id)
         self._cv.notify_all()
 
@@ -1252,62 +1259,40 @@ class TaskRuntime:
         """Install the off-lane handler for fabric-served tool interfaces."""
         self._tool_broker = broker
 
-    def originate_episode_boundary(
-        self, task_id: str, request: BoundaryRequest
-    ) -> None:
-        """Record a facade boundary the gateway captured during an episode's model turn.
+    def originate_facade_turn_group(self, task_id: str, group: FacadeTurnGroup) -> None:
+        """Record a turn-scoped facade group the gateway captured, before it acks.
 
-        The agent-model gateway sees a harness's native facade call before the harness
-        does and clean-completes the turn; this records the captured boundary so the
-        episode's next completion reroutes into it, keyed by the awaiting task. It is
-        persisted on the task record before the gateway acks the clean turn to the
-        harness, so a restart-replayed completion still reroutes rather than settling
-        the episode DONE with its child region silently missing.
+        The agent-model gateway sees a model turn's native facade calls before the
+        harness does and clean-completes the turn; the whole ordered membership and its
+        single continuation are persisted on the task record before the gateway acks the
+        clean turn, so the episode's next completion routes the group rather than
+        settling the episode DONE, and a restart-replayed completion still routes it. At
+        most one group is open per episode; a second capture while one holds the gate is
+        refused by the gateway fence, not stored here.
         """
         with self._lock:
-            self._pending_originations[task_id] = request
+            self._pending_facade_groups[task_id] = group
             if (record := self._tasks.get(task_id)) is not None:
-                record.pending_origination = request
-                self._persist_locked(task_id)
-
-    def originate_episode_batch(
-        self, task_id: str, batch_id: str, members: Sequence[FacadeBatchMember]
-    ) -> None:
-        """Record a turn-scoped facade batch the gateway captured, before it acks.
-
-        The ordered membership and its single continuation are persisted on the record
-        before the clean turn returns to the harness, so a restart-replayed completion
-        routes the whole batch. At most one batch is outstanding per episode; a second
-        capture while one is pending is refused by the gateway fence, not stored here.
-        """
-        origination = FacadeBatchOrigination(batch_id=batch_id, members=tuple(members))
-        with self._lock:
-            self._pending_batch_originations[task_id] = origination
-            if (record := self._tasks.get(task_id)) is not None:
-                record.pending_batch_origination = origination
+                record.pending_facade_group = group
                 self._persist_locked(task_id)
 
     def has_pending_facade(self, task_id: str) -> bool:
-        """Whether a facade boundary or batch is already captured for this episode.
+        """Whether a facade group is already captured or still open for this episode.
 
-        The gateway fence reads this to refuse a second facade group before the first is
-        delivered, so a batch is never overwritten or overlapped mid-flight.
+        The gateway fence reads this to refuse a distinct second group before the open
+        one's await-outcome members settle, so a group is never overwritten mid-flight.
+        A spawn-only group holds nothing here once routed, so a later turn may issue it.
         """
         with self._lock:
-            if task_id in self._pending_originations or (
-                task_id in self._pending_batch_originations
-            ):
+            if task_id in self._pending_facade_groups:
                 return True
             record = self._tasks.get(task_id)
             engine = self._engines.get(record.workflow_id) if record else None
-            if record is not None and (
-                record.pending_origination is not None
-                or record.pending_batch_origination is not None
-            ):
+            if record is not None and record.pending_facade_group is not None:
                 return True
             if engine is None:
                 return False
-            return engine.has_open_facade_batch(task_id)
+            return engine.has_open_facade_group(task_id)
 
     def resolve_model_binding(self, task_id: str) -> AgentModelGatewayBinding | None:
         """The pinned managed-model binding for a task's agent, for the gateway.
@@ -2228,41 +2213,22 @@ class TaskRuntime:
                 # The durable record is the source of truth: a restart drops the
                 # in-memory stash, but a replayed completion still finds its captured
                 # boundary and reroute rather than settling the episode DONE.
-                originated = self._pending_originations.pop(task_id, None)
-                if originated is None:
-                    originated = record.pending_origination
-                batch = self._pending_batch_originations.pop(task_id, None)
-                if batch is None:
-                    batch = record.pending_batch_origination
+                group = self._pending_facade_groups.pop(task_id, None)
+                if group is None:
+                    group = record.pending_facade_group
                 if harness_result.kind is not HarnessResultKind.COMPLETION:
                     # A non-terminal episode step routes its boundary and re-dispatches;
                     # a completion falls through to the terminal path below.
                     self._apply_episode_step_locked(task_id, harness_result)
                     return usages
-                if batch is not None:
-                    # The gateway captured a turn-scoped facade batch: route the whole
-                    # ordered membership, suspend once, and dispatch its members. Clear
-                    # both pending captures so a single origination can never leak.
-                    record.pending_batch_origination = None
-                    record.pending_origination = None
-                    self._pending_originations.pop(task_id, None)
-                    self._route_and_dispatch_batch_locked(
-                        task_id, batch, harness_result.capsule
-                    )
-                    return usages
-                if originated is not None:
-                    # The gateway captured a facade during this turn: the clean
-                    # turn-completion is a yield on that boundary, not the episode's
-                    # terminal result, so it routes as a boundary, not a completion. The
-                    # captured boundary is consumed durably in the same reroute save.
-                    record.pending_origination = None
-                    self._apply_episode_step_locked(
-                        task_id,
-                        HarnessResult(
-                            kind=HarnessResultKind.BOUNDARY,
-                            request=originated,
-                            capsule=harness_result.capsule,
-                        ),
+                if group is not None:
+                    # The gateway captured a turn-scoped facade group: the clean
+                    # turn-completion is a yield on that group, not the episode's
+                    # terminal result, so it routes the whole ordered membership
+                    # kind-specifically, consumed durably in the same reroute save.
+                    record.pending_facade_group = None
+                    self._route_and_dispatch_facade_group_locked(
+                        task_id, group, harness_result.capsule
                     )
                     return usages
                 engine = self._engines.get(record.workflow_id)
@@ -2413,8 +2379,8 @@ class TaskRuntime:
                 record.finished_ts = finished_ts
                 # A facade captured on a turn that then failed is never rerouted; drop
                 # it so a replayed completion can't resurrect it against a failed task.
-                self._pending_originations.pop(task_id, None)
-                record.pending_origination = None
+                self._pending_facade_groups.pop(task_id, None)
+                record.pending_facade_group = None
                 if started_ts:
                     record.started_ts = started_ts
                 if worker_id:

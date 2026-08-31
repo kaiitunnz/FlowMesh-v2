@@ -154,10 +154,12 @@ class BoundaryEvent(BaseModel):
     state_ref: str | None = None
     value_ref: ValueRef | None = None
     invocation_id: str | None = None
-    # A turn-scoped facade batch: members share one batch id and one continuation, are
-    # ordered by their source ordinal, and resume the episode once, together, in order.
-    batch_id: str | None = None
-    batch_ordinal: int | None = None
+    # A turn-scoped facade group: members share one group id and one continuation,
+    # ordered by source ordinal. An await-outcome member holds the resume gate; an
+    # admit-and-close member (a spawn) settles at admission and never holds it.
+    group_id: str | None = None
+    group_ordinal: int | None = None
+    completion_mode: str | None = None
     denial: DenialKind | None = None
     outcome_value: str | None = None  # settled result payload injected at re-dispatch
 
@@ -394,8 +396,8 @@ class WorkItem(BaseModel):
     continuation_ref: str | None = None
     # the settled boundary call whose outcome the next episode resume injects
     pending_outcome_call: str | None = None
-    # the completed facade batch whose ordered outcome vector the next resume injects
-    pending_outcome_batch: str | None = None
+    # the settled facade group whose ordered outcome vector the next resume injects
+    pending_outcome_group: str | None = None
     attempt_ids: list[str] = Field(default_factory=list)
 
 

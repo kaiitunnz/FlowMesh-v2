@@ -58,31 +58,59 @@ class ToolInvocationEnvelope(BaseModel):
     grant_snapshot: GrantSnapshot = GrantSnapshot()
 
 
-class FacadeBatchMember(BaseModel):
-    """One ordered member of a turn-scoped facade batch, captured at the gateway.
+class FacadeCompletionMode(StrEnum):
+    """How a facade group member completes, driving the group's resume gate.
 
-    All members of a batch share one interface and one continuation; each keeps its own
-    stable ``call_correlation`` (turn base plus source ``ordinal``) and the harness call
-    it injects back at (``original_call_id`` under the ``tool_name`` the model called).
+    ``AWAIT_OUTCOME`` (a search) holds the episode until its durable outcome settles and
+    injects that outcome on resume. ``ADMIT_AND_CLOSE`` (a spawn) settles at admission
+    with a deterministic acceptance ack, never a child result, and never holds the gate.
+    """
+
+    ADMIT_AND_CLOSE = "admit_and_close"
+    AWAIT_OUTCOME = "await_outcome"
+
+
+class FacadeCallMember(BaseModel):
+    """One ordered facade call captured in a model turn, of any mediated kind.
+
+    Members share their turn group's id and the work item's single continuation; each
+    keeps its own stable ``call_correlation`` (turn base plus source ``ordinal``) and
+    the harness call it injects back at (``harness_call_id`` under ``tool_name``).
+    ``kind`` and ``completion_mode`` select the member's kind-specific routing: a spawn
+    materializes one child and acks at admission, a search defers and holds the gate.
+    ``interface_or_region`` carries the search interface or the spawn's target region.
     """
 
     model_config = ConfigDict(frozen=True)
 
-    interface: str
-    call_correlation: str
     ordinal: int
-    original_call_id: str
+    kind: BoundaryEventKind
+    completion_mode: FacadeCompletionMode
+    call_correlation: str
+    harness_call_id: str
     tool_name: str
+    interface_or_region: str | None = None
     request_payload: str | None = None
 
 
-class FacadeBatchOrigination(BaseModel):
-    """A captured facade batch awaiting routing: its id and ordered membership."""
+class FacadeTurnGroup(BaseModel):
+    """A model turn's captured facade calls, recorded before the cleaned turn returns.
+
+    One group per turn carries every facade call the model co-emitted, ordered by source
+    ``ordinal``. The fabric assigns the stable ``group_id`` and each member's
+    correlation from ``(activation_id, turn_id, ordinal)``, never a harness call id, so
+    a re-drive of the same turn recovers the same identities and creates no duplicate
+    work. The group's members complete kind-specifically; only its ``AWAIT_OUTCOME``
+    members hold the episode's resume gate.
+    """
 
     model_config = ConfigDict(frozen=True)
 
-    batch_id: str
-    members: tuple[FacadeBatchMember, ...]
+    group_id: str
+    activation_id: str
+    turn_id: str
+    members: tuple[FacadeCallMember, ...]
+    capsule: str | None = None
 
 
 class InputMemberPlan(BaseModel):

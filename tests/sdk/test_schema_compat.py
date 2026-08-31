@@ -245,14 +245,13 @@ def test_result_extra_policy_matches(server_model: type, sdk_model: type) -> Non
 
 
 def test_task_info_fields() -> None:
-    """TaskInfo: last_queue_ts and the pending facade captures are server-internal."""
+    """TaskInfo: last_queue_ts and the pending facade capture are server-internal."""
     assert_fields_match(
         SrvTaskInfo,
         TaskInfo,
         skip_server_fields={
             "last_queue_ts",
-            "pending_origination",
-            "pending_batch_origination",
+            "pending_facade_group",
         },
     )
 

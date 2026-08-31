@@ -24,13 +24,14 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from shared.harness import BoundaryEventKind, BoundaryRequest
+from shared.harness import BoundaryEventKind
 from shared.tasks.specs import ModelBindingMode
 
 from ..config import AgentModelGatewayConfig, GatewayMode
 from ..orchestration.tool_dispatch import (
-    SEARCH_INTERFACE,
-    FacadeBatchMember,
+    FacadeCallMember,
+    FacadeCompletionMode,
+    FacadeTurnGroup,
     ToolInvocationEnvelope,
 )
 from ..task.v2.representations.operators import (
@@ -91,10 +92,9 @@ def to_gateway_binding(
     )
 
 
-BoundaryOriginator = Callable[[str, BoundaryRequest], None]
-# Originates a turn-scoped facade batch (batch id + ordered members) captured on a turn.
-BatchOriginator = Callable[[str, str, list[FacadeBatchMember]], None]
-# True when a facade boundary/batch is already outstanding for the episode (the fence).
+# Originates a turn-scoped facade group (its ordered members) captured on a model turn.
+FacadeGroupOriginator = Callable[[str, FacadeTurnGroup], None]
+# True when a facade group with an unsettled await-outcome member is open (the fence).
 FacadeFence = Callable[[str], bool]
 # Resolves the facade tools the gateway may inject for one agent, keyed by its task id;
 # a call to one is captured server-side and originated as a fabric boundary.
@@ -137,8 +137,7 @@ class AgentModelGateway:
         self._settler = settler
         self._cfg = config
         self._logger = logger or logging.getLogger("agent-model-gateway")
-        self._originator: BoundaryOriginator | None = None
-        self._batch_originator: BatchOriginator | None = None
+        self._group_originator: FacadeGroupOriginator | None = None
         self._fence: FacadeFence | None = None
         self._binding_resolver: GatewayBindingResolver | None = None
         self._facade_resolver: FacadeResolver | None = None
@@ -146,9 +145,9 @@ class AgentModelGateway:
             max_workers=4, thread_name_prefix="agent-model-gateway"
         )
 
-    def set_boundary_originator(self, originator: BoundaryOriginator) -> None:
-        """Install the sink for facade boundaries captured on an episode turn."""
-        self._originator = originator
+    def set_facade_group_originator(self, originator: FacadeGroupOriginator) -> None:
+        """Install the sink for a turn-scoped facade group captured on a model turn."""
+        self._group_originator = originator
 
     def set_binding_resolver(self, resolver: GatewayBindingResolver) -> None:
         """Install the per-invocation upstream resolver keyed by episode task id."""
@@ -157,10 +156,6 @@ class AgentModelGateway:
     def set_facade_resolver(self, resolver: FacadeResolver) -> None:
         """Install the per-agent facade resolver keyed by episode task id."""
         self._facade_resolver = resolver
-
-    def set_batch_originator(self, originator: BatchOriginator) -> None:
-        """Install the sink for a turn-scoped facade batch captured on a turn."""
-        self._batch_originator = originator
 
     def set_facade_fence(self, fence: FacadeFence) -> None:
         """Install the fence: whether a facade group is already outstanding."""
@@ -335,7 +330,7 @@ class AgentModelGateway:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
         output = data.get("output", []) if isinstance(data, dict) else []
         facades = _facade_calls(output, by_name)
-        if facades and self._originator is not None:
+        if facades and self._group_originator is not None:
             output = self._capture_facades(task_id, body, output, facades, by_name)
         elif facades:
             self._logger.warning(
@@ -352,73 +347,54 @@ class AgentModelGateway:
         facades: list[dict[str, Any]],
         by_name: dict[str, FacadeDescriptor],
     ) -> list[Any]:
-        """Capture a turn's facade calls server-side; return the harness-visible output.
+        """Capture a turn's facade calls as one group; return the harness output.
 
-        Search facades of one turn form an ordered batch; a spawn facade stays single.
-        Mixing search with spawn, or a second facade group while one is outstanding, is
-        denied fail-closed. Non-facade (native) tool calls are preserved verbatim so the
-        harness runs them; only the captured facade calls become the dispatch message.
+        Every facade call the model co-emitted on the turn — spawn and search alike —
+        joins one ordered ``FacadeTurnGroup`` whose stable identity is derived from the
+        turn, never a harness call id. A second group captured while one still holds the
+        resume gate is refused with a typed busy turn (never a 500, a dropped call, or a
+        silent child). Native (non-facade) tool calls are preserved verbatim so the
+        harness runs them; the captured facade calls become the group and a summary.
         """
-        searches = [
-            c
-            for c in facades
-            if by_name[str(c.get("name"))].interface == SEARCH_INTERFACE
-        ]
-        spawns = [
-            c
-            for c in facades
-            if by_name[str(c.get("name"))].kind is BoundaryEventKind.SPAWN
-        ]
-        if searches and spawns:
-            raise RuntimeError(
-                "a facade turn mixes search and spawn interfaces; denied fail-closed"
-            )
         if self._fence is not None and self._fence(task_id):
-            # A facade group is already outstanding for this episode. Rather than 500
-            # the turn (which fails the episode), buffer this one deterministically:
-            # drop the new facade calls, keep native calls, and clean-complete so the
-            # outstanding batch delivers first and the model can retry next turn.
             kept = [item for item in output if all(item is not f for f in facades)]
-            return kept + _message_output(
-                "A prior fabric tool call is still in flight; its results will arrive "
-                "before your next turn. Do not repeat the call now."
-            )
+            return kept + _message_output(_FACADE_BUSY_MESSAGE)
         base = _forward_index(body.get("input"))
-        if spawns:
-            if len(spawns) > 1:
-                raise RuntimeError(
-                    "a spawn facade turn must carry exactly one spawn call"
-                )
-            call = spawns[0]
-            request = _facade_boundary(
-                call, by_name[str(call.get("name"))], f"{task_id}:{base}"
-            )
-            assert self._originator is not None
-            self._originator(task_id, request)
-            kept = [item for item in output if item is not call]
-            return kept + _message_output(
-                _dispatched_message(call, request.child_region_ref)
-            )
-        members: list[FacadeBatchMember] = []
-        for ordinal, call in enumerate(searches):
+        group_id = f"{task_id}:{base}"
+        members: list[FacadeCallMember] = []
+        for ordinal, call in enumerate(facades):
+            descriptor = by_name[str(call.get("name"))]
+            is_spawn = descriptor.kind is BoundaryEventKind.SPAWN
             raw = call.get("arguments")
             payload = raw if isinstance(raw, str) else json.dumps(raw or {})
             members.append(
-                FacadeBatchMember(
-                    interface=SEARCH_INTERFACE,
-                    call_correlation=f"{task_id}:{base}:{ordinal}",
+                FacadeCallMember(
                     ordinal=ordinal,
-                    original_call_id=str(call.get("call_id")),
+                    kind=descriptor.kind,
+                    completion_mode=(
+                        FacadeCompletionMode.ADMIT_AND_CLOSE
+                        if is_spawn
+                        else FacadeCompletionMode.AWAIT_OUTCOME
+                    ),
+                    call_correlation=f"{group_id}:{ordinal}",
+                    harness_call_id=str(call.get("call_id")),
                     tool_name=str(call.get("name")),
+                    interface_or_region=(
+                        _spawn_region(raw) if is_spawn else descriptor.interface
+                    ),
                     request_payload=payload,
                 )
             )
-        if self._batch_originator is not None:
-            self._batch_originator(task_id, f"{task_id}:{base}", members)
-        kept = [item for item in output if all(item is not s for s in searches)]
-        return kept + _message_output(
-            f"Dispatched {len(members)} web search(es); awaiting the mediated results."
+        group = FacadeTurnGroup(
+            group_id=group_id,
+            activation_id=task_id,
+            turn_id=str(base),
+            members=tuple(members),
         )
+        assert self._group_originator is not None
+        self._group_originator(task_id, group)
+        kept = [item for item in output if all(item is not f for f in facades)]
+        return kept + _message_output(_group_dispatch_summary(members))
 
     def responses(self, request: ResponsesRequest) -> dict[str, Any]:
         """Convert one OpenAI Responses request and return its settled output."""
@@ -521,30 +497,38 @@ def _forward_index(history: Any) -> int:
     )
 
 
-def _facade_boundary(
-    call: dict[str, Any], descriptor: FacadeDescriptor, call_correlation: str
-) -> BoundaryRequest:
-    raw = call.get("arguments")
-    payload = raw if isinstance(raw, str) else json.dumps(raw or {})
-    args: Any = raw
-    if isinstance(raw, str):
+_FACADE_BUSY_MESSAGE = (
+    "A prior fabric tool group is still in flight; its results arrive before your next "
+    "turn. Do not repeat the call now — reissue any remaining call on a later turn."
+)
+
+
+def _spawn_region(arguments: Any) -> str | None:
+    """The declared child region a ``spawn_agent`` call names, from its arguments."""
+    args: Any = arguments
+    if isinstance(arguments, str):
         try:
-            args = json.loads(raw)
+            args = json.loads(arguments)
         except json.JSONDecodeError:
-            args = {}
-    region = args.get("region") if isinstance(args, dict) else None
-    return BoundaryRequest(
-        kind=descriptor.kind,
-        interface=descriptor.interface,
-        call_correlation=call_correlation,
-        child_region_ref=region if isinstance(region, str) else None,
-        request_payload=payload,
+            return None
+    return args.get("region") if isinstance(args, dict) else None
+
+
+def _group_dispatch_summary(members: list[FacadeCallMember]) -> str:
+    spawns = sum(1 for m in members if m.kind is BoundaryEventKind.SPAWN)
+    searches = len(members) - spawns
+    parts = [
+        label
+        for count, label in (
+            (spawns, f"{spawns} spawn(s)"),
+            (searches, f"{searches} web search(es)"),
+        )
+        if count
+    ]
+    return (
+        f"Dispatched {' and '.join(parts)}; the mediated results arrive before your "
+        "next turn."
     )
-
-
-def _dispatched_message(call: dict[str, Any], region: str | None) -> str:
-    where = f" to the {region} region" if region else ""
-    return f"Dispatched {call.get('name')}{where}; awaiting the mediated result."
 
 
 def _message_output(text: str) -> list[dict[str, Any]]:

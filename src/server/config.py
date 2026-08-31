@@ -407,6 +407,8 @@ class OrchestrationConfig:
     max_scope_depth: int | None = None
     max_loop_iterations: int | None = None
     max_activations: int | None = None
+    max_spawns_per_turn: int | None = None
+    max_spawns_per_region: int | None = None
     episode_lowering: bool = False
     agent_input_budget_bytes: int = 262_144
     gateway: AgentModelGatewayConfig = field(default_factory=AgentModelGatewayConfig)
@@ -422,6 +424,8 @@ class OrchestrationConfig:
             max_scope_depth=parse_int_env("ORCHESTRATOR_MAX_SCOPE_DEPTH"),
             max_loop_iterations=parse_int_env("ORCHESTRATOR_MAX_LOOP_ITERATIONS"),
             max_activations=parse_int_env("ORCHESTRATOR_MAX_ACTIVATIONS"),
+            max_spawns_per_turn=parse_int_env("ORCHESTRATOR_MAX_SPAWNS_PER_TURN"),
+            max_spawns_per_region=parse_int_env("ORCHESTRATOR_MAX_SPAWNS_PER_REGION"),
             episode_lowering=parse_bool_env("ORCHESTRATOR_EPISODE_LOWERING", False),
             agent_input_budget_bytes=parse_int_env(
                 "ORCHESTRATOR_AGENT_INPUT_BUDGET_BYTES"

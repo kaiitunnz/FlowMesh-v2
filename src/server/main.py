@@ -141,8 +141,7 @@ if IS_ROOT_NODE:
         RUNTIME, config.orchestration.gateway, logger
     )
     RUNTIME.set_model_settler(AGENT_MODEL_GATEWAY.settle)
-    AGENT_MODEL_GATEWAY.set_boundary_originator(RUNTIME.originate_episode_boundary)
-    AGENT_MODEL_GATEWAY.set_batch_originator(RUNTIME.originate_episode_batch)
+    AGENT_MODEL_GATEWAY.set_facade_group_originator(RUNTIME.originate_facade_turn_group)
     AGENT_MODEL_GATEWAY.set_facade_fence(RUNTIME.has_pending_facade)
     AGENT_MODEL_GATEWAY.set_facade_resolver(RUNTIME.agent_facade_descriptors)
 

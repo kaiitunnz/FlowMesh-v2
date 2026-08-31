@@ -38,6 +38,7 @@ import uvicorn  # noqa: E402
 from fastapi import FastAPI  # noqa: E402
 
 from server.config import AgentModelGatewayConfig, GatewayMode  # noqa: E402
+from server.orchestration.tool_dispatch import FacadeTurnGroup  # noqa: E402
 from server.services.agent_model_gateway import (  # noqa: E402
     AgentModelGateway,
     build_agent_model_router,
@@ -47,7 +48,6 @@ from server.task.v2.representations.operators import (  # noqa: E402
 )
 from shared.harness import (  # noqa: E402
     BoundaryEventKind,
-    BoundaryRequest,
     DeliveredOutcome,
     HarnessResultKind,
     OutcomeKind,
@@ -196,19 +196,17 @@ class _Fabric:
     """The fabric's role: record the gateway-originated boundary and settle it once."""
 
     def __init__(self) -> None:
-        self.originated: list[tuple[str, BoundaryRequest]] = []
+        self.originated: list[tuple[str, FacadeTurnGroup]] = []
         self._settled: dict[str, DeliveredOutcome] = {}
 
-    def originate(self, task_id: str, request: BoundaryRequest) -> None:
-        # A re-drive re-originates the same stable correlation; record it once.
-        if all(
-            r.call_correlation != request.call_correlation for _, r in self.originated
-        ):
-            self.originated.append((task_id, request))
+    def originate(self, task_id: str, group: FacadeTurnGroup) -> None:
+        # A re-drive re-originates the same stable group id; record it once.
+        if all(g.group_id != group.group_id for _, g in self.originated):
+            self.originated.append((task_id, group))
 
     def settle(self, value: str = _FINAL_TEXT) -> DeliveredOutcome:
-        assert self.originated, "the gateway never originated a boundary"
-        corr = self.originated[0][1].call_correlation
+        assert self.originated, "the gateway never originated a group"
+        corr = self.originated[0][1].members[0].call_correlation
         assert corr is not None
         if corr not in self._settled:
             self._settled[corr] = DeliveredOutcome(
@@ -228,7 +226,7 @@ class _GatewayServer:
             mode=GatewayMode.PROXY, url=upstream, model="codex-model"
         )
         gateway = AgentModelGateway(None, cfg)  # type: ignore[arg-type]
-        gateway.set_boundary_originator(fabric.originate)
+        gateway.set_facade_group_originator(fabric.originate)
         gateway.set_facade_resolver(lambda task: [_spawn_facade()])
         app = FastAPI()
         app.include_router(build_agent_model_router(gateway))
@@ -293,7 +291,7 @@ def test_kill9_before_injection_injects_the_outcome_once(
         # The gateway captured the native spawn_agent and clean-completed the turn.
         assert first.kind is HarnessResultKind.COMPLETION
         assert len(fabric.originated) == 1
-        assert fabric.originated[0][1].child_region_ref == "reviewer"
+        assert fabric.originated[0][1].members[0].interface_or_region == "reviewer"
 
         # The app-server dies after the boundary originates, before its outcome injects.
         os.kill(issue.pid, 9)

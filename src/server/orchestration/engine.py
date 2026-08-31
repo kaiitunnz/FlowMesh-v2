@@ -99,11 +99,14 @@ from .state import (
 from .tool_dispatch import (
     MODEL_INTERFACE,
     AgentInputPlan,
-    FacadeBatchMember,
+    FacadeCallMember,
+    FacadeCompletionMode,
+    FacadeTurnGroup,
     GrantSnapshot,
     InputMemberPlan,
     InputPortPlan,
     ToolInvocationEnvelope,
+    ToolOutcomeStatus,
 )
 
 _EVENT_FIELDS = frozenset(
@@ -763,94 +766,220 @@ class OrchestrationEngine:
                 return Advance()
         return Advance()
 
-    def route_boundary_batch(
-        self, task_id: str, batch_id: str, members: Sequence[FacadeBatchMember]
-    ) -> Advance:
-        """Record a turn-scoped facade batch and suspend the episode once.
+    def route_facade_turn_group(self, task_id: str, group: FacadeTurnGroup) -> Advance:
+        """Record a model turn's facade group and route each member kind-specifically.
 
-        Each ordered member is authority-checked and recorded independently — its own
-        correlation, invocation, idempotency key, and injection target — under one
-        shared batch id and the work item's single continuation. A re-drive of the whole
-        batch is a no-op once its members are recorded. The lane suspends once; the
-        episode resumes only when every member is durable, injecting the ordered vector.
+        Each ordered member is authority-checked and recorded independently under one
+        shared group id and the work item's single continuation. A spawn member admits
+        one child in source order and settles at admission with a deterministic
+        acceptance ack (never a child result); a search member defers as an invocation
+        that holds the resume gate. A per-member budget overflow is a typed quota
+        outcome that leaves an accepted sibling untouched. The lane suspends once when
+        an await-outcome member is still unresolved; a group with none (a spawn-only
+        turn) re-readies at once, injecting the ordered acceptance vector on its next
+        step. A re-drive of the same group reuses its recorded members and creates no
+        duplicate child or invocation.
         """
         wi = self._work_item_for_task(task_id)
         if wi is None or wi.status in _TERMINAL_WI:
             return Advance()
         op = self._operators.get(wi.operator_id)
-        for member in members:
-            corr = (wi.activation_id, member.call_correlation)
-            if corr in self._boundary_events:
-                continue  # a re-driven batch reuses its recorded members
-            event = BoundaryEvent(
-                kind=BoundaryEventKind.INVOCATION,
-                interface=member.interface,
-                call_correlation=member.call_correlation,
-                request_payload=member.request_payload,
-                injection_target=member.original_call_id,
-                injection_tool=member.tool_name,
-                batch_id=batch_id,
-                batch_ordinal=member.ordinal,
-            )
-            # Only an agent operator originates a batch; a non-agent operator is a
-            # fabric misconfiguration, denied fail-closed rather than minting an
-            # unvalidated invocation.
-            denial = (
-                self._validate_agent_boundary(op, wi, event)
-                if isinstance(op, AgentOperator)
-                else DenialKind.AUTHORITY
-            )
-            if denial is not None:
-                self._record_boundary(wi, event, denial=denial)
-                continue
-            invocation = Invocation(
-                invocation_id=new_invocation_id(),
-                work_item_id=wi.work_item_id,
-                state=InvocationState.ISSUED,
-                replayable=True,
-            )
-            self._invocations[invocation.invocation_id] = invocation
-            self._record_boundary(wi, event, invocation_id=invocation.invocation_id)
-        self._suspend_work_item(wi, "episode_batch_suspended")
-        return Advance()
+        advance = Advance()
+        per_region: dict[str, int] = {}
+        for member in group.members:
+            if (wi.activation_id, member.call_correlation) in self._boundary_events:
+                continue  # a re-driven group reuses its recorded members
+            event = self._facade_member_event(group.group_id, member)
+            if member.kind is BoundaryEventKind.SPAWN:
+                self._route_group_spawn(op, wi, event, per_region, advance)
+            else:
+                self._route_group_invocation(op, wi, event)
+        members = self._group_members(wi.activation_id, group.group_id)
+        if self._group_awaits_unresolved(members):
+            self._suspend_work_item(wi, "episode_group_suspended")
+            return advance
+        # No await-outcome member is pending: the group settled at admission. Stage its
+        # ordered acceptance vector for the next step; the runtime re-enqueues the lane
+        # at once (closing this turn's attempt) rather than holding a worker.
+        wi.pending_outcome_group = group.group_id
+        wi.pending_outcome_call = None
+        return advance
 
-    def _batch_members(self, activation_id: str, batch_id: str) -> list[BoundaryEvent]:
+    def _facade_member_event(
+        self, group_id: str, member: FacadeCallMember
+    ) -> BoundaryEvent:
+        is_spawn = member.kind is BoundaryEventKind.SPAWN
+        return BoundaryEvent(
+            kind=member.kind,
+            interface=None if is_spawn else member.interface_or_region,
+            child_region_ref=member.interface_or_region if is_spawn else None,
+            call_correlation=member.call_correlation,
+            request_payload=member.request_payload,
+            injection_target=member.harness_call_id,
+            injection_tool=member.tool_name,
+            group_id=group_id,
+            group_ordinal=member.ordinal,
+            completion_mode=member.completion_mode.value,
+        )
+
+    def _route_group_invocation(
+        self, op: LogicalOperator | None, wi: WorkItem, event: BoundaryEvent
+    ) -> None:
+        # Only an agent operator originates a facade; a non-agent operator is a fabric
+        # misconfiguration, denied fail-closed rather than minting an unvalidated call.
+        denial = (
+            self._validate_agent_boundary(op, wi, event)
+            if isinstance(op, AgentOperator)
+            else DenialKind.AUTHORITY
+        )
+        if denial is not None:
+            self._record_boundary(wi, event, denial=denial)
+            return
+        invocation = Invocation(
+            invocation_id=new_invocation_id(),
+            work_item_id=wi.work_item_id,
+            state=InvocationState.ISSUED,
+            replayable=True,
+        )
+        self._invocations[invocation.invocation_id] = invocation
+        self._record_boundary(wi, event, invocation_id=invocation.invocation_id)
+
+    def _route_group_spawn(
+        self,
+        op: LogicalOperator | None,
+        wi: WorkItem,
+        event: BoundaryEvent,
+        per_region: dict[str, int],
+        advance: Advance,
+    ) -> None:
+        if not isinstance(op, AgentOperator):
+            self._record_boundary(wi, event, denial=DenialKind.AUTHORITY)
+            return
+        if (denial := self._validate_agent_boundary(op, wi, event)) is not None:
+            self._record_boundary(wi, event, denial=denial)
+            return
+        region = event.child_region_ref or ""
+        turn_total = sum(per_region.values())
+        region_total = self._region_child_count(
+            wi.activation_id, region
+        ) + per_region.get(region, 0)
+        if (
+            turn_total >= self._budget.max_spawns_per_turn
+            or region_total >= self._budget.max_spawns_per_region
+        ):
+            # A budget overflow is a typed quota outcome, never a denial and never a
+            # sibling-poisoning failure: the member acks quota and creates no child.
+            self._record_boundary(wi, event)
+            self._set_member_outcome(
+                wi,
+                event.call_correlation,
+                f"{ToolOutcomeStatus.QUOTA.value}: the {region!r} spawn budget was "
+                "reached this turn; no child was created",
+            )
+            return
+        child_input = (
+            ValueRef(kind="inline", literal=event.request_payload)
+            if event.request_payload is not None
+            else None
+        )
+        try:
+            opener = self._agent_spawn_opener(op, wi, event)
+            child_advance = self.materialize_child(opener, value_ref=child_input)
+        except RegionError as exc:
+            self._record_boundary(wi, event)
+            self._set_member_outcome(
+                wi,
+                event.call_correlation,
+                f"{ToolOutcomeStatus.UNAVAILABLE.value}: the {region!r} region cannot "
+                f"accept a child ({exc})",
+            )
+            return
+        advance.extend(child_advance)
+        self._record_boundary(wi, event)
+        self._set_member_outcome(
+            wi,
+            event.call_correlation,
+            f"{ToolOutcomeStatus.SUCCESS.value}: spawned a {region!r} reviewer child",
+        )
+        per_region[region] = per_region.get(region, 0) + 1
+
+    def _set_member_outcome(
+        self, wi: WorkItem, call_correlation: str | None, value: str
+    ) -> None:
+        """Settle a group member's outcome in place without re-readying the lane."""
+        if call_correlation is None:
+            return
+        corr = (wi.activation_id, call_correlation)
+        if (env := self._boundary_events.get(corr)) is not None:
+            self._boundary_events[corr] = env.model_copy(
+                update={"outcome_value": value}
+            )
+
+    def _region_child_count(self, agent_activation: str, region: str) -> int:
+        """The children already materialized under an agent's named spawn region."""
+        act = self._activations.get(agent_activation)
+        op = self._operators.get(act.operator_id) if act else None
+        if not isinstance(op, AgentOperator):
+            return 0
+        region_op = self._agent_region_op(op, region)
+        if region_op is None:
+            return 0
+        opener = self._region_openers.get((agent_activation, region_op))
+        if opener is None or (scope_id := self._scope_id_for(opener)) is None:
+            return 0
+        return sum(
+            1
+            for a in self._activations.values()
+            if a.scope_id == scope_id and a.kind == "child"
+        )
+
+    def _group_members(self, activation_id: str, group_id: str) -> list[BoundaryEvent]:
         members = [
             env
             for (act, _), env in self._boundary_events.items()
-            if act == activation_id and env.batch_id == batch_id
+            if act == activation_id and env.group_id == group_id
         ]
-        members.sort(key=lambda e: e.batch_ordinal or 0)
+        members.sort(key=lambda e: e.group_ordinal or 0)
         return members
 
-    def _batch_resolved(self, members: Sequence[BoundaryEvent]) -> bool:
-        return all(e.outcome_value is not None or e.denial is not None for e in members)
+    @staticmethod
+    def _group_awaits_unresolved(members: Sequence[BoundaryEvent]) -> bool:
+        """Whether the group holds an await-outcome member with no settled outcome."""
+        return any(
+            e.completion_mode == FacadeCompletionMode.AWAIT_OUTCOME.value
+            and e.outcome_value is None
+            and e.denial is None
+            for e in members
+        )
 
-    def has_open_facade_batch(self, task_id: str) -> bool:
-        """Whether a recorded facade batch for this episode is not yet resolved."""
+    def has_open_facade_group(self, task_id: str) -> bool:
+        """Whether a recorded facade group for this episode still holds the resume gate.
+
+        A group is open only while an await-outcome member is unsettled; a spawn-only
+        group closes at admission, so the fence lets the next turn issue another group.
+        """
         wi = self._work_item_for_task(task_id)
         if wi is None:
             return False
-        seen: set[str] = set()
-        for (act, _), env in self._boundary_events.items():
-            if act != wi.activation_id or env.batch_id is None:
-                continue
-            if env.batch_id in seen:
-                continue
-            seen.add(env.batch_id)
-            if not self._batch_resolved(self._batch_members(act, env.batch_id)):
-                return True
-        return False
+        return self._group_awaits_unresolved(
+            [
+                env
+                for (act, _), env in self._boundary_events.items()
+                if act == wi.activation_id and env.group_id is not None
+            ]
+        )
 
-    def batch_dispatch_envelopes(
-        self, task_id: str, batch_id: str
+    def group_dispatch_envelopes(
+        self, task_id: str, group_id: str
     ) -> list[ToolInvocationEnvelope]:
-        """The dispatch envelopes for a batch's still-unresolved members, in order."""
+        """The dispatch envelopes for a group's still-unresolved invocation members."""
         wi = self._work_item_for_task(task_id)
         if wi is None:
             return []
         out: list[ToolInvocationEnvelope] = []
-        for env in self._batch_members(wi.activation_id, batch_id):
+        for env in self._group_members(wi.activation_id, group_id):
+            if env.kind is not BoundaryEventKind.INVOCATION:
+                continue
             if env.outcome_value is not None or env.denial is not None:
                 continue
             if (envelope := self._envelope_from(wi, env)) is not None:
@@ -890,7 +1019,7 @@ class OrchestrationEngine:
         if (wi := self._work_item_for_task(task_id)) is not None:
             wi.pending_outcome_call = call_correlation
             if call_correlation is None:
-                wi.pending_outcome_batch = None
+                wi.pending_outcome_group = None
 
     def close_latest_attempt(self, task_id: str) -> None:
         """Settle a still-running attempt of a continuing episode, bounding its history.
@@ -992,13 +1121,13 @@ class OrchestrationEngine:
         if env is not None and value is not None:
             env = env.model_copy(update={"outcome_value": value})
             self._boundary_events[corr] = env
-        if env is not None and env.batch_id is not None:
-            # A batch member settled: hold the resume until every member is resolved,
-            # then re-ready exactly once with the full ordered vector.
-            members = self._batch_members(wi.activation_id, env.batch_id)
-            if not self._batch_resolved(members):
+        if env is not None and env.group_id is not None:
+            # A group member settled: hold the resume until every await-outcome member
+            # is resolved, then re-ready exactly once with the full ordered vector.
+            members = self._group_members(wi.activation_id, env.group_id)
+            if self._group_awaits_unresolved(members):
                 return Advance()
-            wi.pending_outcome_batch = env.batch_id
+            wi.pending_outcome_group = env.group_id
             wi.pending_outcome_call = None
             return self.deliver_boundary_outcome(task_id, call_correlation)
         self.mark_pending_outcome(task_id, call_correlation)
@@ -1017,8 +1146,8 @@ class OrchestrationEngine:
         if wi is None:
             return None, ()
         outcomes: tuple[DeliveredOutcome, ...] = ()
-        if wi.pending_outcome_batch is not None:
-            members = self._batch_members(wi.activation_id, wi.pending_outcome_batch)
+        if wi.pending_outcome_group is not None:
+            members = self._group_members(wi.activation_id, wi.pending_outcome_group)
             outcomes = tuple(self._delivered_outcome(env) for env in members)
         elif wi.pending_outcome_call is not None:
             env = self._boundary_events.get((wi.activation_id, wi.pending_outcome_call))
