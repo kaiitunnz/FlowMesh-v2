@@ -47,6 +47,13 @@ listed here is in `.env.example`.
 | `AGENT_MODEL_GATEWAY_MODEL` | – | Upstream model (openai/proxy modes) |
 | `AGENT_MODEL_GATEWAY_TIMEOUT_SEC` | `60` | Upstream request timeout (seconds) |
 | `AGENT_MODEL_SECRET_TTL_SEC` | `86400` | Expiry for a workflow's vaulted model credential |
+| `WEB_SEARCH_PROVIDER` | `duckduckgo` | Fabric web-search backend |
+| `WEB_SEARCH_API_KEY` | – | Deployment key for a keyed search provider |
+| `WEB_SEARCH_MAX_RESULTS` | `5` | Results per search |
+| `WEB_SEARCH_TIMEOUT_SEC` | `20` | Search request timeout (seconds) |
+| `WEB_SEARCH_RESULT_CHAR_CAP` | `6000` | Injected result size cap |
+| `WEB_SEARCH_MAX_CALLS` | `8` | Searches per episode |
+| `WEB_SEARCH_MAX_PARALLEL_CALLS_PER_TURN` | `4` | Parallel searches per turn |
 | `ENABLE_WORKER_WATCHDOG` | `true` | Worker death detection |
 | `WORKER_DEATH_GRACE_SEC` | `60` | Grace period before marking dead |
 | `WORKER_REHYDRATION_GRACE_SEC` | `120` | Extra grace for a worker's rehydrated in-flight tasks after the root restarts, before the watchdog may reclaim them |
@@ -75,20 +82,6 @@ not interfere with each other.
 - `DOCKER_GPU_RUNTIME` defaults to `nvidia`. On hosts where Docker GPU access
 works with `--gpus all` but fails with `--runtime=nvidia` (for example, DGX
 Spark), set `DOCKER_GPU_RUNTIME=` in the stack env.
-
-### Web Search
-
-Fabric-mediated `web_search` tool for agents.
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `WEB_SEARCH_PROVIDER` | `duckduckgo` | Fabric web-search backend |
-| `WEB_SEARCH_API_KEY` | – | Deployment key for a keyed search provider |
-| `WEB_SEARCH_MAX_RESULTS` | `5` | Results per search |
-| `WEB_SEARCH_TIMEOUT_SEC` | `20` | Search request timeout (seconds) |
-| `WEB_SEARCH_RESULT_CHAR_CAP` | `6000` | Injected result size cap |
-| `WEB_SEARCH_MAX_CALLS` | `8` | Searches per episode |
-| `WEB_SEARCH_MAX_PARALLEL_CALLS_PER_TURN` | `4` | Parallel searches per turn |
 
 ## Worker
 
