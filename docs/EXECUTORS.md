@@ -99,21 +99,11 @@ not encrypted at rest, so the deployment operator owns that at-rest boundary.
 
 Beyond the model and `spawn_agent`, an agent may declare a fabric-served tool it invokes
 through a gateway-injected facade. The agent lists it under `spec.v2.tools` (`{name,
-interface}`) and grants the interface in `authority.invoke`; the compiler pins the facade
-and the gateway injects only an agent's declared facades. The model's facade call is
-captured server-side as an `invocation` boundary and executed off the agent's lane by the
-`FabricToolBroker`, which returns a typed outcome (success with results and provenance, or
-timeout / quota / unavailable) injected back at the call.
+interface}`) and grants the interface in `authority.invoke`; only an agent's declared
+facades are available to it.
 
 `web_search` (`interface: search/v1`) is the built-in fabric tool. Its provider is keyless
 DuckDuckGo by default, or a keyed provider via `WEB_SEARCH_*` ([`ENV.md`](ENV.md)); results
-are snippets only. A child region must declare the interface in its authority ceiling for a
-spawned child to invoke it — a child that declares a tool the region omits is a compile
-error.
-
-Search calls a model emits together in one turn form an ordered facade batch: each member
-is authority-checked and executed independently off the agent's lane, and the episode
-resumes once with the full ordered result vector injected back at each original call.
-Members beyond `WEB_SEARCH_MAX_PARALLEL_CALLS_PER_TURN` settle as typed quota outcomes in
-source order. Native shell runs in a no-network sandbox, so the fabric search facade is the
-only web egress.
+are snippets. An agent must declare `web_search` in its authority to use it, and a spawned
+child must carry the interface in its child-region authority ceiling — an undeclared tool is
+a compile error.

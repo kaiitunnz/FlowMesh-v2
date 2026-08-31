@@ -328,6 +328,12 @@ STACK_ENV_SCHEMA = EnvSchema(
                     var_type=EnvVarType.INT,
                     min_value=1,
                 ),
+            ],
+        ),
+        EnvSection(
+            title="Web Search",
+            description=["Fabric-mediated web_search tool for agents."],
+            vars=[
                 EnvVar(
                     "WEB_SEARCH_PROVIDER",
                     "duckduckgo",
