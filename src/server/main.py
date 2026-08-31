@@ -1,7 +1,9 @@
 import argparse
+import asyncio
 import atexit
 import importlib
 import inspect
+import json
 import os
 import threading
 from contextlib import AsyncExitStack, asynccontextmanager
@@ -25,8 +27,19 @@ from .clients import RedisClient
 from .config import NodeRole, ServerConfig
 from .dispatcher.factory import create_dispatcher
 from .hooks import register
+from .orchestration.tool_dispatch import ToolInvocationEnvelope
 from .registries import WorkerRegistry, WorkflowRegistry
 from .registries.node import NodeRegistry
+from .registries.resident import ResidentRegistry
+from .resident import (
+    AdmissionController,
+    HttpInferenceAdapter,
+    LifecycleScaleManager,
+    ReplicaEndpoint,
+    ResidentCapacityControl,
+    ResidentPolicyLimits,
+    ResidentStores,
+)
 from .routers import docs, health, v1
 from .services.agent_model_gateway import (
     AgentModelGateway,
@@ -122,6 +135,8 @@ EVENT_MONITOR = None
 LOG_ARCHIVER = None
 AGENT_MODEL_GATEWAY = None
 FABRIC_TOOL_BROKER = None
+RESIDENT_CONTROL = None
+RESIDENT_REGISTRY = None
 
 if IS_ROOT_NODE:
     WORKFLOW_REGISTRY = WorkflowRegistry(REDIS_CLIENT)
@@ -163,6 +178,124 @@ if IS_ROOT_NODE:
         return to_gateway_binding(pinned, MODEL_SECRET_VAULT, workflow_id)
 
     AGENT_MODEL_GATEWAY.set_binding_resolver(_resolve_gateway_binding)
+
+    _resident_cfg = config.orchestration.resident
+    if _resident_cfg.enabled:
+        RESIDENT_REGISTRY = ResidentRegistry(REDIS_CLIENT)
+        _resident_stores = ResidentStores()
+        _resident_limits = ResidentPolicyLimits(
+            allowed_models=frozenset(_resident_cfg.allowed_models),
+            max_replicas_per_family=_resident_cfg.max_replicas_per_family,
+            max_concurrent_cold_starts=_resident_cfg.max_concurrent_cold_starts,
+            cold_start_deadline_sec=_resident_cfg.cold_start_deadline_sec,
+        )
+
+        def _persist_resident() -> None:
+            assert RESIDENT_REGISTRY is not None
+            RESIDENT_REGISTRY.save_snapshot(_resident_stores.to_snapshot())
+
+        _resident_admission = AdmissionController(_resident_stores, _persist_resident)
+
+        async def _materialize_resident(family, replica):
+            assert RUNTIME is not None
+            spec_type = (
+                "dev_model" if _resident_cfg.substrate == "dev_model" else "serve"
+            )
+            spec: dict[str, object] = {
+                "taskType": spec_type,
+                "resources": {
+                    "hardware": {
+                        "cpu": 2,
+                        "memory": "4Gi",
+                        "gpu": {
+                            "type": "any",
+                            "count": 0 if spec_type == "dev_model" else 1,
+                        },
+                    }
+                },
+                "model": {
+                    "source": {
+                        "type": "huggingface",
+                        "identifier": family.model_ref,
+                        "revision": "main",
+                    }
+                },
+                "accessMode": _resident_cfg.access_mode,
+            }
+            if _resident_cfg.serve_ttl_sec:
+                spec["ttlSeconds"] = _resident_cfg.serve_ttl_sec
+            payload = {
+                "apiVersion": "flowmesh/v1",
+                "kind": "ResidentServe",
+                "metadata": {"name": f"resident-{replica.replica_id}"},
+                "spec": spec,
+            }
+            _wf, entries = await RUNTIME.register(
+                "resident-capacity-control",
+                "system",
+                json.dumps(payload),
+                format="native",
+            )
+            return entries[0].task_id
+
+        async def _stop_resident(serve_task_id: str) -> None:
+            assert RUNTIME is not None
+            record = RUNTIME.get_record(serve_task_id)
+            if record is not None:
+                RUNTIME.cancel_workflow(
+                    record.workflow_id, reason="resident idle teardown"
+                )
+
+        _resident_lifecycle = LifecycleScaleManager(
+            _resident_stores,
+            limits=_resident_limits,
+            admission_slots=_resident_cfg.admission_slots,
+            persist=_persist_resident,
+            materialize_fn=_materialize_resident,
+            stop_fn=_stop_resident,
+        )
+
+        def _resident_endpoint(serve_task_id: str) -> ReplicaEndpoint | None:
+            assert RUNTIME is not None
+            record = RUNTIME.get_record(serve_task_id)
+            if record is None or not record.latest_update:
+                return None
+            serve = record.latest_update.get("serve")
+            if not isinstance(serve, dict):
+                return None
+            host, port = serve.get("host"), serve.get("port")
+            if not host or not port:
+                return None
+            return ReplicaEndpoint(
+                base_url=f"http://{host}:{port}/v1",
+                model=str(serve.get("model") or ""),
+                api_key=serve.get("api_key"),
+            )
+
+        RESIDENT_CONTROL = ResidentCapacityControl(
+            stores=_resident_stores,
+            admission=_resident_admission,
+            lifecycle=_resident_lifecycle,
+            adapter=HttpInferenceAdapter(
+                timeout_sec=config.orchestration.gateway.timeout_sec
+            ),
+            limits=_resident_limits,
+            binding_resolver=RUNTIME.gateway_binding_for,
+            settle_cb=RUNTIME.settle_episode_invocation,
+            endpoint_probe=_resident_endpoint,
+            logger=logger,
+            poll_interval_sec=_resident_cfg.poll_interval_sec,
+        )
+        RUNTIME.set_resident_terminal_hook(RESIDENT_CONTROL.on_invocation_terminal)
+
+        def _model_settle(env: ToolInvocationEnvelope) -> None:
+            assert RESIDENT_CONTROL is not None and AGENT_MODEL_GATEWAY is not None
+            if RESIDENT_CONTROL.is_resident(env.task_id):
+                RESIDENT_CONTROL.settle(env)
+            else:
+                AGENT_MODEL_GATEWAY.settle(env)
+
+        RUNTIME.set_model_settler(_model_settle)
 
     DISPATCHER = create_dispatcher(
         config.dispatch,
@@ -396,6 +529,11 @@ async def _lifespan(_: FastAPI):
         if IS_ROOT_NODE:
             if RUNTIME is not None:
                 await RUNTIME.rehydrate()
+            if RESIDENT_CONTROL is not None and RESIDENT_REGISTRY is not None:
+                RESIDENT_CONTROL.bind_loop(asyncio.get_running_loop())
+                snapshot = await RESIDENT_REGISTRY.load_snapshot_async()
+                if snapshot is not None:
+                    RESIDENT_CONTROL.rehydrate(snapshot)
             if PORT_FORWARD_SERVICE is not None:
                 await PORT_FORWARD_SERVICE.start()
             _start_root_threads()

@@ -372,6 +372,61 @@ class ModelSecretVaultConfig:
 
 
 @dataclass
+class ResidentCapacityConfig:
+    """Resident-capacity control admission and materialization knobs.
+
+    ``substrate`` selects the serving stand-in a materialized replica runs: ``serve`` is
+    a GPU vLLM replica; ``dev_model`` is the GPU-free stand-in. ``allowed_models`` empty
+    permits any plan-derived model; a non-empty list enforces an explicit catalog.
+    ``admission_slots`` is the conservative safe-slot count reported per replica.
+    """
+
+    enabled: bool = False
+    substrate: str = "serve"
+    access_mode: str = "forward"
+    admission_slots: int = 8
+    max_replicas_per_family: int = 1
+    max_concurrent_cold_starts: int = 1
+    cold_start_deadline_sec: float = 300.0
+    poll_interval_sec: float = 1.0
+    serve_ttl_sec: float | None = None
+    allowed_models: tuple[str, ...] = ()
+
+    @classmethod
+    def from_env(cls) -> "ResidentCapacityConfig":
+        prefix = "RESIDENT_"
+        raw_allowed = _env_or_none(f"{prefix}ALLOWED_MODELS")
+        allowed = (
+            tuple(m.strip() for m in raw_allowed.split(",") if m.strip())
+            if raw_allowed
+            else ()
+        )
+        substrate = (
+            os.getenv(f"{prefix}INFERENCE_SUBSTRATE") or "serve"
+        ).strip().lower() or "serve"
+        access = (
+            os.getenv(f"{prefix}SERVE_ACCESS_MODE") or "forward"
+        ).strip().lower() or "forward"
+        return cls(
+            enabled=parse_bool_env(f"{prefix}CAPACITY_ENABLED", False),
+            substrate=substrate,
+            access_mode=access,
+            admission_slots=max(1, parse_int_env(f"{prefix}ADMISSION_SLOTS") or 8),
+            max_replicas_per_family=max(
+                1, parse_int_env(f"{prefix}MAX_REPLICAS_PER_FAMILY") or 1
+            ),
+            max_concurrent_cold_starts=max(
+                1, parse_int_env(f"{prefix}MAX_COLD_STARTS") or 1
+            ),
+            cold_start_deadline_sec=parse_float_env(f"{prefix}COLD_START_DEADLINE_SEC")
+            or 300.0,
+            poll_interval_sec=parse_float_env(f"{prefix}POLL_INTERVAL_SEC") or 1.0,
+            serve_ttl_sec=parse_float_env(f"{prefix}SERVE_TTL_SEC"),
+            allowed_models=allowed,
+        )
+
+
+@dataclass
 class WebSearchConfig:
     """The fabric web-search tool's provider binding and bounds.
 
@@ -417,6 +472,7 @@ class OrchestrationConfig:
         default_factory=ModelSecretVaultConfig
     )
     web_search: WebSearchConfig = field(default_factory=WebSearchConfig)
+    resident: ResidentCapacityConfig = field(default_factory=ResidentCapacityConfig)
 
     @classmethod
     def from_env(cls) -> "OrchestrationConfig":
@@ -435,6 +491,7 @@ class OrchestrationConfig:
             agent_binding=AgentBindingConfig.from_env(),
             model_secret_vault=ModelSecretVaultConfig.from_env(),
             web_search=WebSearchConfig.from_env(),
+            resident=ResidentCapacityConfig.from_env(),
         )
 
 
