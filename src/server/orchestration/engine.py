@@ -2774,6 +2774,32 @@ class OrchestrationEngine:
         op = self._operators.get(spawn_op)
         return op.child_template_ref if isinstance(op, SpawnRegion) else None
 
+    def sealed_region_child_templates(self) -> frozenset[str]:
+        """Child templates of agent-region spawns whose child-init sealed or revoked.
+
+        A child template holds the workflow open until its spawn seals; a producer
+        fanout retires it on materialization, and an agent's dynamic spawn region
+        retires it once the region seals (on ``spawn_agent`` seal or the parent's
+        completion), so the template — never dispatched as a task — stops holding it.
+        """
+        sealed: set[str] = set()
+        for spawn_op in self._agent_region_spawns:
+            template = self.child_template_of(spawn_op)
+            if template is None:
+                continue
+            scope_id = self._scope_id_for(spawn_op)
+            cap = (
+                self._capabilities.get((scope_id, ProgressAxis.CHILD_INIT))
+                if scope_id
+                else None
+            )
+            if cap is not None and cap.status in (
+                CapabilityStatus.SEALED,
+                CapabilityStatus.REVOKED,
+            ):
+                sealed.add(template)
+        return frozenset(sealed)
+
     def spawn_is_open(self, spawn_op: str) -> bool:
         """Whether a spawn's child-init capability still admits new children.
 

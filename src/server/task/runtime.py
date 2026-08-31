@@ -179,6 +179,7 @@ class TaskRuntime:
         self._task_epoch_index: dict[str, int] = {}
         self._rehydrated_dispatched: dict[str, float] = {}
         self._engines: dict[str, OrchestrationEngine] = {}
+        self._retired_region_templates: dict[str, set[str]] = {}
         # Interface-keyed handlers for a mediated boundary, dispatched off the caller's
         # lane. The model gateway settles the "model" interface; the fabric tool broker
         # executes a fabric-served tool ("search/v1"). Both take the durable envelope.
@@ -1435,6 +1436,23 @@ class TaskRuntime:
                 retire=retire,
             )
 
+    def _retire_sealed_region_templates_locked(
+        self, workflow_id: str, engine: OrchestrationEngine
+    ) -> None:
+        """Retire an agent-region child template once its spawn region has sealed.
+
+        A dynamic spawn region's child body is a template, never dispatched as a task;
+        once the region seals it no longer holds the workflow open, so it is dropped
+        from the remaining set (idempotently, tracked per workflow) with the ledger.
+        """
+        already = self._retired_region_templates.setdefault(workflow_id, set())
+        pending = engine.sealed_region_child_templates() - already
+        if pending:
+            already.update(pending)
+            self._commit_new_children_locked(
+                workflow_id, engine, [], retire=sorted(pending)
+            )
+
     def episode_feasible(self, task_id: str) -> bool:
         """Whether a ready episode's declared alternative can be placed now.
 
@@ -1533,6 +1551,7 @@ class TaskRuntime:
         engine = self._engines.get(workflow_id)
         if engine is not None:
             self._resolve_agent_inputs_locked(engine, advance)
+            self._retire_sealed_region_templates_locked(workflow_id, engine)
         changed = False
         for task_id in advance.ready:
             if self._enqueue_ready_locked(task_id):
