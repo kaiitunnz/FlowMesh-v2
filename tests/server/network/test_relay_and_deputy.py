@@ -149,7 +149,11 @@ def test_node_relay_round_trip_through_session() -> None:
     async def run():
         async with _Fixture() as fx:
             route = _route(
-                _candidate(Transport.NODE_RELAY, f"127.0.0.1:{fx.relay_port}")
+                _candidate(
+                    Transport.NODE_RELAY,
+                    f"127.0.0.1:{fx.relay_port}",
+                    f"127.0.0.1:{fx.sidecar_port}",
+                )
             )
             return await run_echo(route, b"relayed", connect_budget_sec=3.0)
 
@@ -181,7 +185,11 @@ def test_connect_failure_falls_to_next_candidate() -> None:
             dead = _free_port()
             route = _route(
                 _candidate(Transport.WORKER_DIRECT, f"127.0.0.1:{dead}"),
-                _candidate(Transport.NODE_RELAY, f"127.0.0.1:{fx.relay_port}"),
+                _candidate(
+                    Transport.NODE_RELAY,
+                    f"127.0.0.1:{fx.relay_port}",
+                    f"127.0.0.1:{fx.sidecar_port}",
+                ),
             )
             return await run_echo(route, b"failover", connect_budget_sec=3.0)
 
