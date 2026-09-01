@@ -119,3 +119,26 @@ rows in [`ENV.md`](ENV.md) for enablement, the serving substrate (`serve` or `de
 the policy caps, the conservative admission-slot count, the cold-start budget, the per-family
 selection strategy, and the idle-teardown retain window (`RESIDENT_IDLE_RETAIN_SEC`, `0`
 disables).
+
+## Observability
+
+Read-only operator/admin visibility into resident capacity is exposed under `/v1/resident`,
+gated to a SYSTEM/ADMIN principal. The endpoints return empty results when resident capacity
+is disabled.
+
+| Method | Path | Returns |
+| --- | --- | --- |
+| GET | `/v1/resident/families` | Registered service families (family, engine/batch key, model ref, isolation, selection strategy, warmth). |
+| GET | `/v1/resident/replicas` | Replica incarnations — live and inert — with state, health, backing `serve_task_id`, worker, lease, and endpoint host and port. Filterable by `family`. |
+| GET | `/v1/resident/claims` | Credit-bearing admission claims and per-replica held credit, recomputed on read from the authoritative claims. |
+
+A replica's endpoint is projected to host and port only; no `api_key` or serving credential
+is ever returned.
+
+To read a replica's serving logs, list replicas, take a replica's `serve_task_id`, and read
+that task through the normal task-log path, `GET /v1/tasks/{serve_task_id}/logs` — resident
+serve tasks are owned by the resolved system principal, so an operator reads them like any
+other task.
+
+Set `RESIDENT_SERVE_TTL_SEC` so a replica's backing serve task self-expires, bounding an
+orphaned serve task if a teardown is missed.
