@@ -92,7 +92,7 @@ def test_idle_teardown_only_stops_uncommitted_replica():
     stores = warm_stores()
     stopped = []
 
-    async def stop_fn(serve_task_id):
+    def stop_fn(serve_task_id):
         stopped.append(serve_task_id)
 
     stores.directory.get("rpl-1").serve_task_id = "tsk-serve-1"
@@ -103,20 +103,27 @@ def test_idle_teardown_only_stops_uncommitted_replica():
     assert stopped == ["tsk-serve-1"]
 
 
-def test_preempt_invalidates_incarnation():
+def test_preempt_invalidates_incarnation_and_reaps_serve_task():
     stores = warm_stores()
-    mgr = _manager(stores)
+    stopped = []
+
+    def stop_fn(serve_task_id):
+        stopped.append(serve_task_id)
+
+    stores.directory.get("rpl-1").serve_task_id = "tsk-serve-1"
+    mgr = _manager(stores, stop_fn=stop_fn)
     mgr.on_preempt("rpl-1")
     replica = stores.directory.get("rpl-1")
     assert replica.state is ReplicaState.PREEMPTED
     assert replica.incarnation == 2
+    assert stopped == ["tsk-serve-1"]
 
 
 def test_idle_sweep_drains_then_stops_an_idle_replica():
     stores = warm_stores()
     stopped = []
 
-    async def stop_fn(serve_task_id):
+    def stop_fn(serve_task_id):
         stopped.append(serve_task_id)
 
     replica = stores.directory.get("rpl-1")
