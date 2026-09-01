@@ -109,6 +109,7 @@ if config.worker_management.enabled:
         worker_management=config.worker_management,
         logging_config=config.logging,
         logger=logger,
+        network=config.orchestration.network,
     )
 
 # --------------------------------------------------------------------------- #

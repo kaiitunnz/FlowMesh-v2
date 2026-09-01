@@ -19,6 +19,7 @@ from shared.schemas.command import (
     CommandResponse,
     CommandType,
 )
+from shared.schemas.network import NetworkEndpointAdvertisement
 from shared.schemas.node import NodeInfo
 from shared.utils import new_node_id
 
@@ -48,6 +49,7 @@ class Node(BaseModel):
     last_seen: str | None = None
     max_gpu_count: int = 0
     current_gpu_count: int = 0
+    network_endpoint: NetworkEndpointAdvertisement | None = None
 
     @classmethod
     def from_info(cls, node_id: str, info: NodeInfo) -> "Node":
@@ -62,6 +64,7 @@ class Node(BaseModel):
             last_seen=info.last_seen,
             max_gpu_count=info.max_gpu_count,
             current_gpu_count=info.max_gpu_count,
+            network_endpoint=info.network_endpoint,
         )
 
     @field_serializer("tags")
@@ -73,6 +76,25 @@ class Node(BaseModel):
         if isinstance(v, str):
             v_str = v.strip()
             return v_str.split(",") if v_str else []
+        return v
+
+    @field_serializer("network_endpoint")
+    def serialize_network_endpoint(
+        self, adv: NetworkEndpointAdvertisement | None
+    ) -> str | None:
+        # JSON-encode the nested advertisement so it survives the flat node hash; the
+        # ``None`` case is dropped by the non-None mapping filter on write.
+        return adv.model_dump_json() if adv is not None else None
+
+    @field_validator("network_endpoint", mode="before")
+    def validate_network_endpoint(cls, v: Any) -> Any:
+        if isinstance(v, str):
+            v_str = v.strip()
+            return (
+                NetworkEndpointAdvertisement.model_validate_json(v_str)
+                if v_str
+                else None
+            )
         return v
 
 

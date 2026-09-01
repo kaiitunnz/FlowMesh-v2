@@ -1,5 +1,6 @@
 """Node-related models."""
 
+import json
 from enum import StrEnum
 from typing import Any
 
@@ -24,6 +25,7 @@ class Node(BaseModel):
     last_seen: str | None = None
     max_gpu_count: int = 0
     current_gpu_count: int = 0
+    network_endpoint: dict[str, Any] | None = None
 
     @field_validator("tags", mode="before")
     @classmethod
@@ -33,6 +35,15 @@ class Node(BaseModel):
         if isinstance(value, str):
             return [tag.strip() for tag in value.split(",") if tag.strip()]
         return list(value)
+
+    @field_validator("network_endpoint", mode="before")
+    @classmethod
+    def validate_network_endpoint(cls, value: Any) -> Any:
+        # The server serializes the advertisement as a JSON string in its node hash.
+        if isinstance(value, str):
+            text = value.strip()
+            return json.loads(text) if text else None
+        return value
 
 
 class NodeRegisterResponse(BaseModel):

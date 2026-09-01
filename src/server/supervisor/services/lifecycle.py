@@ -7,6 +7,7 @@ import httpx
 from lumid_hooks import PrincipalContext
 
 from shared.schemas.event import NodeEvent, serialize_event
+from shared.schemas.network import NetworkEndpointAdvertisement
 from shared.schemas.node import NodeInfo
 from shared.utils.http import auth_headers
 from shared.utils.time import now_iso
@@ -32,6 +33,9 @@ class Lifecycle:
         system_principal: PrincipalContext,
         current_gpu_count_getter: Callable[[], int] | None = None,
         on_reregister: Callable[[str], None] | None = None,
+        endpoint_advertisement_provider: (
+            Callable[[], NetworkEndpointAdvertisement | None] | None
+        ) = None,
     ) -> None:
         self._redis = redis
         self._node_registry = node_registry
@@ -44,6 +48,7 @@ class Lifecycle:
         self._system_principal = system_principal
         self._current_gpu_count_getter = current_gpu_count_getter
         self._on_reregister = on_reregister
+        self._endpoint_advertisement_provider = endpoint_advertisement_provider
 
         self._node_id: str | None = None
         self._stop_event = threading.Event()
@@ -69,9 +74,19 @@ class Lifecycle:
 
     def _register(self) -> str:
         """Register with the root and return the assigned node_id."""
+        self._refresh_advertisement()
         if self._role is NodeRole.ROOT:
             return self._register_direct()
         return self._register_http()
+
+    def _refresh_advertisement(self) -> None:
+        """Attach a fresh-generation endpoint advertisement before each registration."""
+        if self._endpoint_advertisement_provider is None:
+            return
+        advertisement = self._endpoint_advertisement_provider()
+        self._node_info = self._node_info.model_copy(
+            update={"network_endpoint": advertisement}
+        )
 
     def _register_direct(self) -> str:
         """Root node: register directly via NodeRegistry (Redis)."""

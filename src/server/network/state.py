@@ -13,19 +13,26 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from shared.schemas.network import NetworkEndpointAdvertisement, ReachabilityClass
+
 from ..utils.time import now_iso
 
-
-class ReachabilityClass(StrEnum):
-    """The operator-declared network class of an endpoint.
-
-    An origin's class must be able to reach a target's class for a direct candidate to
-    be legal; shared-node placement alone does not make a direct path legal.
-    """
-
-    SAME_NODE = "same_node"
-    SAME_CLUSTER = "same_cluster"
-    ROUTABLE = "routable"
+__all__ = [
+    "NetworkEndpointAdvertisement",
+    "PolicyClass",
+    "ReachabilityClass",
+    "ReachabilityEntry",
+    "ReachabilityState",
+    "ReplicaListenerAdvertisement",
+    "ResolvedRoute",
+    "RouteCandidate",
+    "RouteHop",
+    "RouteObservation",
+    "RouteObservationOutcome",
+    "RouteOrigin",
+    "Transport",
+    "is_demoting",
+]
 
 
 class PolicyClass(StrEnum):
@@ -90,26 +97,6 @@ _DEMOTING_OUTCOMES: frozenset[RouteObservationOutcome] = frozenset(
 def is_demoting(outcome: RouteObservationOutcome) -> bool:
     """Whether the outcome is a network-path failure that may demote reachability."""
     return outcome in _DEMOTING_OUTCOMES
-
-
-class NetworkEndpointAdvertisement(BaseModel):
-    """A node's (or registered ingress edge's) purpose-scoped network-plane endpoint.
-
-    Operator-configured and identity/TLS-bound at the source, not a worker-supplied
-    arbitrary URL and not the generic server-management endpoint. ``generation`` is the
-    monotonic fence: re-registration mints a fresh generation so stale advertisements
-    and route evidence keyed to an older one are never used.
-    """
-
-    model_config = ConfigDict(frozen=True)
-
-    endpoint_id: str
-    node_id: str | None = None
-    url: str
-    generation: int
-    trust_domain: str
-    reachability_class: ReachabilityClass
-    protocols: tuple[str, ...] = ()
 
 
 class ReplicaListenerAdvertisement(BaseModel):
