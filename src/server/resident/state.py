@@ -11,6 +11,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ..network.state import ReplicaListenerAdvertisement
 from ..utils.time import now_iso
 
 
@@ -190,7 +191,9 @@ class ReplicaIncarnation(BaseModel):
 
     ``incarnation`` is the monotonic fence: a lost or recreated replica invalidates
     outstanding routes and admission decisions bound to an older incarnation. The
-    backing serve task and worker locate the generically hosted allocation.
+    backing serve task and worker locate the generically hosted allocation. ``listener``
+    is the non-secret resident-facing route advertisement, fenced by ``incarnation`` and
+    ``listener_generation``; it never names the raw engine listener or credential.
     """
 
     replica_id: str
@@ -198,6 +201,8 @@ class ReplicaIncarnation(BaseModel):
     incarnation: int
     state: ReplicaState = ReplicaState.MATERIALIZING
     endpoint: ReplicaEndpoint | None = None
+    listener: ReplicaListenerAdvertisement | None = None
+    listener_generation: int = 0
     healthy: bool = False
     serve_task_id: str | None = None
     worker_id: str | None = None
