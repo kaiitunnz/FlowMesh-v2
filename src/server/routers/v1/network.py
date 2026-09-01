@@ -170,9 +170,11 @@ async def list_network_reachability(
         NetworkReachabilityEntryInfo(
             origin_id=str(entry["origin_id"]),
             target_node_id=str(entry["target_node_id"]),
+            incarnation=int(entry["incarnation"]),
             listener_generation=int(entry["listener_generation"]),
             transport=str(entry["transport"]),
             state=str(entry["state"]),
+            retries=int(entry["retries"]),
         )
         for entry in network.reachability_snapshot()
     ]

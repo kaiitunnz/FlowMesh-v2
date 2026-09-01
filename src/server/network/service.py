@@ -161,6 +161,7 @@ class NetworkPlane:
                     "listener_generation": entry.listener_generation,
                     "transport": entry.transport.value,
                     "state": state.value,
+                    "retries": entry.retries,
                 }
             )
         return snapshot

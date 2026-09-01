@@ -59,6 +59,8 @@ class NetworkEndpointInfo(BaseModel):
 class NetworkReachabilityEntryInfo(BaseModel):
     origin_id: str
     target_node_id: str
+    incarnation: int
     listener_generation: int
     transport: str
     state: str
+    retries: int
