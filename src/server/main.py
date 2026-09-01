@@ -3,16 +3,14 @@ import asyncio
 import atexit
 import importlib
 import inspect
-import json
 import os
 import threading
 from contextlib import AsyncExitStack, asynccontextmanager
-from typing import Any
 
 import uvicorn
 from fastapi import FastAPI
 from flowmesh_hook import ResourceKind
-from lumid_hooks import HookBindings, ResourceRef
+from lumid_hooks import HookBindings, PrincipalContext, ResourceRef
 
 if __name__ == "__main__" and __package__ is None:
     import sys
@@ -56,6 +54,7 @@ from .services.metrics import MetricsRecorder
 from .services.model_secret_vault import ModelSecretVault
 from .services.monitoring import EventMonitor
 from .services.port_forward import PortForwardService
+from .services.resident_materializer import materialize_resident_replica
 from .services.ssh_audit import SshAuditService
 from .services.watchdog import WorkerWatchdog
 from .supervisor import WorkerSupervisor
@@ -203,45 +202,11 @@ if IS_ROOT_NODE:
             family: ServiceFamily, replica: ReplicaIncarnation
         ) -> str:
             assert RUNTIME is not None
-            spec_type = (
-                "dev_model" if _resident_cfg.substrate == "dev_model" else "serve"
+            owner: PrincipalContext = app.state.system_principal
+            assert owner is not None
+            return await materialize_resident_replica(
+                RUNTIME, owner, _resident_cfg, family, replica, logger
             )
-            spec: dict[str, Any] = {
-                "taskType": spec_type,
-                "resources": {
-                    "hardware": {
-                        "cpu": 2,
-                        "memory": "4Gi",
-                        "gpu": {
-                            "type": "any",
-                            "count": 0 if spec_type == "dev_model" else 1,
-                        },
-                    }
-                },
-                "model": {
-                    "source": {
-                        "type": "huggingface",
-                        "identifier": family.model_ref,
-                        "revision": "main",
-                    }
-                },
-                "accessMode": _resident_cfg.access_mode,
-            }
-            if _resident_cfg.serve_ttl_sec:
-                spec["ttlSeconds"] = _resident_cfg.serve_ttl_sec
-            payload = {
-                "apiVersion": "flowmesh/v1",
-                "kind": "ResidentServe",
-                "metadata": {"name": f"resident-{replica.replica_id}"},
-                "spec": spec,
-            }
-            _wf, entries = await RUNTIME.register(
-                "resident-capacity-control",
-                "system",
-                json.dumps(payload),
-                format="native",
-            )
-            return entries[0].task_id
 
         async def _stop_resident(serve_task_id: str) -> None:
             assert RUNTIME is not None

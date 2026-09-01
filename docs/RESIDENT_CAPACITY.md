@@ -23,7 +23,10 @@ or routing.
   replica-directory lifecycle, performs policy-bounded, demand-driven scale-from-zero for
   approved plan-derived families, drains before an idle teardown, and reconciles preemption.
   Materializing and stopping a replica cross the flat worker plane by dispatching and
-  cancelling a serve (or `dev_model`) task.
+  cancelling a serve (or `dev_model`) task. The materialized task is owned by the system
+  principal `FLOWMESH_API_KEY` resolves to (the default admin in a no-auth build), and its
+  ownership is registered so an operator reads a resident replica's logs through the normal
+  owner-scoped path.
 
 ## Stores
 
