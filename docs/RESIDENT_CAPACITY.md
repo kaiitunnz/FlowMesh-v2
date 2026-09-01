@@ -35,7 +35,7 @@ read and cannot diverge.
 | Store | Kind | Holds |
 | --- | --- | --- |
 | Service-family registry | Authoritative | Policy-approved, plan-derived family definitions. Registration materializes no capacity. |
-| Replica directory | Authoritative | Live replica incarnations, endpoints, health, and the incarnation fence. |
+| Replica directory | Authoritative | Live replica incarnations, endpoints, health, the incarnation fence, and a non-secret `ReplicaListenerAdvertisement` fenced by incarnation and listener generation. |
 | DemandLedger | Read state | Unadmitted-claim references the controller fair-orders. Never promotes a claim itself. |
 | Allocation leases | Authoritative | Lease records and lifecycle ownership per replica. |
 | Invocation requests | Authoritative | The durable request record keyed by `invocation_id`, carrying the admission profile. |
