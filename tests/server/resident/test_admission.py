@@ -28,7 +28,7 @@ def test_reserve_accept_release_cycle():
     ctl = AdmissionController(stores)
     claim = _raise(ctl)
 
-    handoff = ctl.admit(claim, PROFILE)
+    handoff = ctl.admit(claim, PROFILE, idempotency_key="idm-x")
     assert handoff is not None
     assert handoff.replica_id == "rpl-1" and handoff.incarnation == 1
     assert claim.state is ClaimState.RESERVED
@@ -48,10 +48,10 @@ def test_admission_never_overcommits():
     stores = warm_stores(slots=1)
     ctl = AdmissionController(stores)
     first = _raise(ctl, "inv-1")
-    assert ctl.admit(first, PROFILE) is not None
+    assert ctl.admit(first, PROFILE, idempotency_key="idm-x") is not None
 
     second = _raise(ctl, "inv-2")
-    assert ctl.admit(second, PROFILE) is None
+    assert ctl.admit(second, PROFILE, idempotency_key="idm-x") is None
     assert second.state is ClaimState.PENDING
 
 
@@ -73,7 +73,7 @@ def test_route_loss_holds_credit_until_ds_terminal():
     stores = warm_stores()
     ctl = AdmissionController(stores)
     claim = _raise(ctl)
-    ctl.admit(claim, PROFILE)
+    ctl.admit(claim, PROFILE, idempotency_key="idm-x")
     ctl.on_enqueue_ack(claim)
 
     ctl.on_route_loss(claim)
@@ -91,14 +91,14 @@ def test_redrive_resumes_the_in_flight_claim_then_a_successor_after_terminal():
     stores = warm_stores()
     ctl = AdmissionController(stores)
     first = _raise(ctl, "inv-1")
-    ctl.admit(first, PROFILE)
+    ctl.admit(first, PROFILE, idempotency_key="idm-x")
     ctl.on_enqueue_ack(first)
     ctl.on_route_loss(first)  # a lost attempt, parked and still holding credit
 
     # A re-drive attaches to the in-flight claim (dedup) and can resume its replica; it
     # does not mint a successor or release the parked credit.
     assert ctl.active_claim("inv-1") is first
-    assert ctl.rebuild_handoff(first) is not None
+    assert ctl.rebuild_handoff(first, idempotency_key="idm-x") is not None
     assert stores.credit_ledger.held("rpl-1") == 1
 
     # Only after the fenced DS terminal releases it is a fresh claim a successor.
@@ -116,7 +116,7 @@ def test_ds_terminal_releases_a_reserved_credit_on_cancellation():
     stores = warm_stores()
     ctl = AdmissionController(stores)
     claim = _raise(ctl)
-    ctl.admit(claim, PROFILE)
+    ctl.admit(claim, PROFILE, idempotency_key="idm-x")
     assert claim.state is ClaimState.RESERVED
 
     ctl.on_ds_terminal("inv-1", ClaimTerminalReason.CANCELLED)
@@ -124,12 +124,41 @@ def test_ds_terminal_releases_a_reserved_credit_on_cancellation():
     assert stores.credit_ledger.held("rpl-1") == 0
 
 
+def test_accept_and_authorize_issues_a_fenced_route_authorization():
+    stores = warm_stores()
+    ctl = AdmissionController(stores)
+    claim = _raise(ctl)
+    ctl.admit(claim, PROFILE, idempotency_key="idm-x")
+
+    auth = ctl.accept_and_authorize(
+        claim,
+        idempotency_key="idm-x",
+        origin_id="rog-1",
+        operation="inference",
+        deadline_at="2026-01-01T00:00:00Z",
+    )
+    assert claim.state is ClaimState.ACCEPTED
+    # The fence binds the accepted claim's subject, request identity, and incarnation.
+    assert auth.claim_id == claim.claim_id
+    assert auth.invocation_id == "inv-1"
+    assert auth.idempotency_key == "idm-x"
+    assert auth.origin_id == "rog-1"
+    assert auth.replica_id == "rpl-1" and auth.incarnation == 1
+    assert auth.route_auth_epoch == 1
+
+    ctl.on_stream_started(claim)
+    assert claim.state is ClaimState.STREAMING
+    assert (
+        stores.credit_ledger.held("rpl-1") == 1
+    )  # authorizing the stream holds credit
+
+
 def test_persist_hook_fires_on_mutation():
     stores = warm_stores()
     calls = []
     ctl = AdmissionController(stores, persist=lambda: calls.append(1))
     claim = _raise(ctl)
-    ctl.admit(claim, PROFILE)
+    ctl.admit(claim, PROFILE, idempotency_key="idm-x")
     ctl.on_enqueue_ack(claim)
     ctl.on_ds_terminal("inv-1", ClaimTerminalReason.COMPLETED)
     assert len(calls) >= 4

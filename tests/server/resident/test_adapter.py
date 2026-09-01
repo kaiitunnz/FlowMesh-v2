@@ -11,18 +11,10 @@ import json
 import httpx
 import pytest
 
-from server.resident import AdmissionHandoff, HttpInferenceAdapter, ReplicaEndpoint
+from server.resident import HttpInferenceAdapter, ReplicaEndpoint
 from server.resident.adapter import AdapterError
 
-_HANDOFF = AdmissionHandoff(
-    token="hnd-x",
-    claim_id="scl-x",
-    invocation_id="inv-x",
-    family="fam",
-    replica_id="rpl-1",
-    incarnation=1,
-    endpoint=ReplicaEndpoint(base_url="http://replica/v1", model="m", api_key="k"),
-)
+_ENDPOINT = ReplicaEndpoint(base_url="http://replica/v1", model="m", api_key="k")
 
 
 def _adapter(handler):
@@ -39,7 +31,7 @@ def test_issue_returns_completion_and_authenticates():
             200, json={"choices": [{"message": {"content": "hello world"}}]}
         )
 
-    out = asyncio.run(_adapter(handler).issue(_HANDOFF, '{"prompt": "hi"}'))
+    out = asyncio.run(_adapter(handler).issue(_ENDPOINT, '{"prompt": "hi"}'))
     assert out == "hello world"
     assert seen["url"] == "http://replica/v1/chat/completions"
     assert seen["auth"] == "Bearer k"
@@ -50,7 +42,7 @@ def test_connection_refusal_is_pre_acceptance_connection_failure():
         raise httpx.ConnectError("refused")
 
     with pytest.raises(AdapterError) as excinfo:
-        asyncio.run(_adapter(handler).issue(_HANDOFF, "hi"))
+        asyncio.run(_adapter(handler).issue(_ENDPOINT, "hi"))
     assert excinfo.value.pre_acceptance is True
     assert excinfo.value.connection_failure is True
 
@@ -60,7 +52,7 @@ def test_http_status_is_pre_acceptance_but_not_a_connection_failure():
         return httpx.Response(503, json={"error": "overloaded"})
 
     with pytest.raises(AdapterError) as excinfo:
-        asyncio.run(_adapter(handler).issue(_HANDOFF, "hi"))
+        asyncio.run(_adapter(handler).issue(_ENDPOINT, "hi"))
     assert excinfo.value.pre_acceptance is True
     assert excinfo.value.connection_failure is False
 
@@ -70,7 +62,7 @@ def test_mid_request_loss_is_post_acceptance():
         raise httpx.ReadTimeout("lost")
 
     with pytest.raises(AdapterError) as excinfo:
-        asyncio.run(_adapter(handler).issue(_HANDOFF, "hi"))
+        asyncio.run(_adapter(handler).issue(_ENDPOINT, "hi"))
     assert excinfo.value.pre_acceptance is False
 
 
@@ -79,18 +71,12 @@ def test_malformed_body_is_post_acceptance():
         return httpx.Response(200, json={"unexpected": True})
 
     with pytest.raises(AdapterError) as excinfo:
-        asyncio.run(_adapter(handler).issue(_HANDOFF, "hi"))
+        asyncio.run(_adapter(handler).issue(_ENDPOINT, "hi"))
     assert excinfo.value.pre_acceptance is False
 
 
 def test_forward_key_is_presented_when_the_replica_reports_none():
-    keyless = _HANDOFF.model_copy(
-        update={
-            "endpoint": ReplicaEndpoint(
-                base_url="http://replica/v1", model="m", api_key=None
-            )
-        }
-    )
+    keyless = ReplicaEndpoint(base_url="http://replica/v1", model="m", api_key=None)
     seen = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -120,7 +106,7 @@ def test_full_chat_request_is_forwarded_faithfully():
             "temperature": 0.1,
         }
     )
-    asyncio.run(_adapter(handler).issue(_HANDOFF, payload))
+    asyncio.run(_adapter(handler).issue(_ENDPOINT, payload))
     assert seen["body"]["messages"][0]["role"] == "system"
     assert seen["body"]["temperature"] == 0.1
     assert seen["body"]["model"] == "m"  # the replica's model is pinned

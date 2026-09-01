@@ -1,11 +1,10 @@
-"""Locality-neutral engine-invocation adapter for the inference family.
+"""In-server engine-invocation adapter for the inference family.
 
-The adapter consumes a claim-bound admission handoff and delivers the request to the
-selected replica incarnation, returning the completion. It is the compatibility path
-over a stock OpenAI-compatible engine — a vLLM serve replica or the GPU-free
-``dev_model`` stand-in — so the server relays the request. The handoff is locality-
-neutral: its descriptor is data an adapter consumes, not a server-owned client, so where
-the bytes run is not fixed by this contract.
+The adapter delivers a claim-gated request to a selected replica endpoint and returns
+the completion. It is the compatibility path over a stock OpenAI-compatible engine — a
+vLLM serve replica or the GPU-free ``dev_model`` stand-in — used when the native fabric
+path is not in effect, so the server relays the request to the replica's endpoint (read
+from the replica directory, never carried on the handoff).
 """
 
 import json
@@ -13,7 +12,7 @@ from typing import Any, Protocol
 
 import httpx
 
-from .state import AdmissionHandoff
+from .state import ReplicaEndpoint
 
 
 class AdapterError(RuntimeError):
@@ -40,10 +39,10 @@ class AdapterError(RuntimeError):
 
 
 class EngineInvocationAdapter(Protocol):
-    """The seam an admission handoff is executed through."""
+    """The seam a claim-gated request is delivered to a replica endpoint through."""
 
     async def issue(
-        self, handoff: AdmissionHandoff, request_payload: str | None
+        self, endpoint: ReplicaEndpoint, request_payload: str | None
     ) -> str: ...
 
 
@@ -90,9 +89,8 @@ class HttpInferenceAdapter:
         self._transport = transport
 
     async def issue(
-        self, handoff: AdmissionHandoff, request_payload: str | None
+        self, endpoint: ReplicaEndpoint, request_payload: str | None
     ) -> str:
-        endpoint = handoff.endpoint
         body = _chat_body(request_payload, endpoint.model)
         headers = {"Content-Type": "application/json"}
         # A replica's own key when it reports one; else the deployment forward key the

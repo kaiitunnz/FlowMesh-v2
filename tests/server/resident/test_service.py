@@ -61,8 +61,8 @@ class _FakeAdapter:
         self.completion = completion
         self.calls = []
 
-    async def issue(self, handoff, request_payload):
-        self.calls.append(handoff)
+    async def issue(self, endpoint, request_payload):
+        self.calls.append(endpoint)
         return self.completion
 
 
@@ -74,7 +74,7 @@ class _FlakyAdapter:
         self.remaining_failures = fail_first
         self.calls = 0
 
-    async def issue(self, handoff, request_payload):
+    async def issue(self, endpoint, request_payload):
         self.calls += 1
         if self.remaining_failures > 0:
             self.remaining_failures -= 1
@@ -83,16 +83,15 @@ class _FlakyAdapter:
 
 
 class _DeadThenLiveAdapter:
-    """Unreachable for the first replica it sees, reachable for any later replica."""
+    """Unreachable for the first delivery (a dead replica), reachable thereafter."""
 
     def __init__(self, completion="OK"):
         self.completion = completion
-        self.dead_replica = None
+        self.first = True
 
-    async def issue(self, handoff, request_payload):
-        if self.dead_replica is None:
-            self.dead_replica = handoff.replica_id
-        if handoff.replica_id == self.dead_replica:
+    async def issue(self, endpoint, request_payload):
+        if self.first:
+            self.first = False
             raise AdapterError(
                 "connection refused", pre_acceptance=True, connection_failure=True
             )
@@ -103,7 +102,7 @@ class _StatusAdapter:
     """Fails pre-acceptance with a transient HTTP status (a live replica), never a
     connection failure."""
 
-    async def issue(self, handoff, request_payload):
+    async def issue(self, endpoint, request_payload):
         raise AdapterError("503", pre_acceptance=True, connection_failure=False)
 
 

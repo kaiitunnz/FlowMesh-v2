@@ -230,7 +230,9 @@ class ResidentCapacityControl:
             # Resume a re-driven boundary on the in-flight claim: reissue to the same
             # fenced replica under the held credit, never re-admitting or releasing.
             claim = existing
-            handoff = self._admission.rebuild_handoff(existing)
+            handoff = self._admission.rebuild_handoff(
+                existing, idempotency_key=env.idempotency_key
+            )
             if handoff is None:
                 self._admission.on_route_loss(existing)
                 self._settle(
@@ -262,8 +264,20 @@ class ResidentCapacityControl:
             )
             if handoff is None:
                 return
+        replica = self._stores.directory.get(handoff.replica_id)
+        if replica is None or replica.endpoint is None:
+            self._admission.on_route_loss(claim)
+            self._settle(
+                env.task_id,
+                env.call_correlation,
+                None,
+                error="resident replica endpoint is unavailable",
+            )
+            return
         try:
-            completion = await self._adapter.issue(handoff, env.request_payload)
+            completion = await self._adapter.issue(
+                replica.endpoint, env.request_payload
+            )
         except AdapterError as exc:
             if exc.connection_failure and claim.replica_id is not None:
                 # The replica is unreachable: invalidate its incarnation so the next
@@ -314,7 +328,9 @@ class ResidentCapacityControl:
         while True:
             async with self._admit_lock:
                 self._promote_ready_replicas(family)
-                handoff = self._admission.admit(claim, profile)
+                handoff = self._admission.admit(
+                    claim, profile, idempotency_key=env.idempotency_key
+                )
                 if handoff is not None:
                     return handoff
                 plan = self._lifecycle.plan_capacity(family, model_ref)
