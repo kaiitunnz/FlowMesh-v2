@@ -1,5 +1,6 @@
 from . import (
     nodes,
+    resident,
     results,
     serve,
     ssh,
@@ -13,6 +14,7 @@ from . import (
 
 __all__ = [
     "nodes",
+    "resident",
     "results",
     "serve",
     "ssh",

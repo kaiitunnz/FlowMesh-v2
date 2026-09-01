@@ -7,6 +7,7 @@ from .clients import RedisClient
 from .dispatcher import Dispatcher
 from .hooks import PrincipalContext
 from .registries import NodeRegistry, WorkerRegistry, WorkflowRegistry
+from .resident.service import ResidentCapacityControl
 from .services.metrics import MetricsRecorder
 from .services.monitoring import EventMonitor
 from .services.port_forward import PortForwardService
@@ -94,3 +95,7 @@ def get_ssh_proxy_enabled(conn: HTTPConnection) -> bool:
 
 def get_serve_proxy_enabled(conn: HTTPConnection) -> bool:
     return conn.app.state.serve_proxy_enabled
+
+
+def get_resident_control(conn: HTTPConnection) -> ResidentCapacityControl | None:
+    return conn.app.state.resident_control
