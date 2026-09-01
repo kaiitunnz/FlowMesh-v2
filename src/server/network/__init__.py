@@ -1,5 +1,7 @@
 from .directory import NetworkEndpointDirectory
 from .reachability import NetworkReachabilityView, ReachabilityBounds
+from .relay import RelaySession
+from .resolver import resolve_route
 from .state import (
     NetworkEndpointAdvertisement,
     PolicyClass,
@@ -23,6 +25,7 @@ __all__ = [
     "NetworkReachabilityView",
     "PolicyClass",
     "ReachabilityBounds",
+    "RelaySession",
     "ReachabilityClass",
     "ReachabilityEntry",
     "ReachabilityState",
@@ -35,4 +38,5 @@ __all__ = [
     "RouteOrigin",
     "Transport",
     "is_demoting",
+    "resolve_route",
 ]
