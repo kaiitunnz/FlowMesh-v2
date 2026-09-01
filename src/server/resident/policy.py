@@ -9,6 +9,7 @@ arbitrary provider. Thresholds here are the conservative baseline.
 
 from dataclasses import dataclass, field
 
+from .selection import DEFAULT_SELECTION_STRATEGY
 from .state import ProvisioningDenialReason
 
 
@@ -17,14 +18,16 @@ class ResidentPolicyLimits:
     """Deployment-resolved caps for resident auto-provisioning.
 
     ``allowed_models`` empty means the deployment allows any plan-derived model; a non-
-    empty set enforces an explicit catalog. The manager receives resolved values from
-    the config edge rather than reading the environment.
+    empty set enforces an explicit catalog. ``selection_strategy`` is the replica-
+    selection strategy each auto-registered family adopts. The manager receives resolved
+    values from the config edge rather than reading the environment.
     """
 
     allowed_models: frozenset[str] = field(default_factory=frozenset)
     max_replicas_per_family: int = 1
     max_concurrent_cold_starts: int = 1
     cold_start_deadline_sec: float = 300.0
+    selection_strategy: str = DEFAULT_SELECTION_STRATEGY
 
 
 @dataclass(frozen=True)

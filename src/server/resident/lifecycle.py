@@ -14,7 +14,7 @@ from typing import Literal
 
 from shared.utils.ids import new_allocation_lease_id, new_replica_id
 
-from ..utils.time import now_iso
+from ..utils.time import now_iso, parse_iso_ts
 from .policy import ProvisioningDecision, ResidentPolicyLimits, decide_materialization
 from .state import (
     SERVABLE_REPLICA_STATES,
@@ -61,6 +61,7 @@ class LifecycleScaleManager:
         *,
         limits: ResidentPolicyLimits,
         admission_slots: int,
+        idle_retain_sec: float = 0.0,
         persist: Callable[[], None] | None = None,
         materialize_fn: MaterializeFn | None = None,
         stop_fn: StopFn | None = None,
@@ -68,6 +69,7 @@ class LifecycleScaleManager:
         self._stores = stores
         self._limits = limits
         self._admission_slots = max(1, admission_slots)
+        self._idle_retain_sec = max(0.0, idle_retain_sec)
         self._persist = persist or (lambda: None)
         self._materialize_fn = materialize_fn
         self._stop_fn = stop_fn
@@ -146,7 +148,7 @@ class LifecycleScaleManager:
 
     def refresh_report(self, replica_id: str) -> None:
         """Ingest a conservative normalized capacity report for a replica's current
-        state.state.
+        state.
         """
         replica = self._stores.directory.get(replica_id)
         if replica is None:
@@ -165,7 +167,7 @@ class LifecycleScaleManager:
 
     def drain(self, replica_id: str) -> None:
         """Reject new claims on a replica while its admitted work reaches a safe
-        outcome.outcome.
+        outcome.
         """
         replica = self._stores.directory.get(replica_id)
         if replica is None or replica.state not in SERVABLE_REPLICA_STATES:
@@ -191,6 +193,29 @@ class LifecycleScaleManager:
         self._persist()
         if self._stop_fn is not None and replica.serve_task_id is not None:
             await self._stop_fn(replica.serve_task_id)
+
+    async def sweep_idle(self, *, now_ts: float | None = None) -> None:
+        """Drain idle servable replicas past the retain window, then stop drained ones.
+
+        A conservative scale-down: a servable replica holding no admission credit and
+        idle past the retain window is drained; a drained replica still holding no
+        credit is stopped, cancelling its serve task. A later eligible claim then
+        materializes the family from zero again. A non-positive window disables it.
+        """
+        if self._idle_retain_sec <= 0:
+            return
+        reference = now_ts if now_ts is not None else parse_iso_ts(now_iso())
+        for replica in self._stores.directory.all():
+            held = self._stores.credit_ledger.held(replica.replica_id)
+            if replica.state in SERVABLE_REPLICA_STATES:
+                if held == 0 and self._idle_past_retain(replica, reference):
+                    self.drain(replica.replica_id)
+            elif replica.state is ReplicaState.DRAINING and held == 0:
+                await self.stop(replica.replica_id)
+
+    def _idle_past_retain(self, replica: ReplicaIncarnation, reference: float) -> bool:
+        idle_for = reference - parse_iso_ts(replica.last_active_at)
+        return idle_for >= self._idle_retain_sec
 
     def on_preempt(self, replica_id: str) -> None:
         """Invalidate a preempted or failed replica incarnation for reconciliation."""

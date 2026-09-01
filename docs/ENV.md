@@ -65,6 +65,9 @@ listed here is in `.env.example`.
 | `RESIDENT_SERVE_TTL_SEC` | – | Materialized replica TTL (seconds) |
 | `RESIDENT_ALLOWED_MODELS` | – | Comma-separated allowed model catalog; any if empty |
 | `RESIDENT_FORWARD_API_KEY` | – | Credential the adapter presents to a keyless replica |
+| `RESIDENT_SELECTION_STRATEGY` | `batch-aware-best-fit` | Per-family replica-selection strategy |
+| `RESIDENT_IDLE_RETAIN_SEC` | `0` | Idle retain window before teardown; 0 disables |
+| `RESIDENT_IDLE_SWEEP_INTERVAL_SEC` | `30` | Idle-teardown sweep interval (seconds) |
 | `ENABLE_WORKER_WATCHDOG` | `true` | Worker death detection |
 | `WORKER_DEATH_GRACE_SEC` | `60` | Grace period before marking dead |
 | `WORKER_REHYDRATION_GRACE_SEC` | `120` | Extra grace for a worker's rehydrated in-flight tasks after the root restarts, before the watchdog may reclaim them |

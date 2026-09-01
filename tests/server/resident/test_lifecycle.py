@@ -9,6 +9,7 @@ holds no admitted credit.
 import asyncio
 
 from server.resident import (
+    ClaimCredit,
     LifecycleScaleManager,
     ProvisioningDenialReason,
     ReplicaEndpoint,
@@ -16,8 +17,13 @@ from server.resident import (
     ResidentPolicyLimits,
     ResidentStores,
     ServiceFamily,
+    new_claim,
+    reserve,
 )
 from tests.server.resident._helpers import PROFILE, warm_stores
+
+_PAST = "2000-01-01T00:00:00Z"
+_FUTURE = "2999-01-01T00:00:00Z"
 
 _FAMILY = ServiceFamily(family="fam", engine_batch_key="fam", model_ref="m")
 _ENDPOINT = ReplicaEndpoint(base_url="http://replica", model="m")
@@ -104,3 +110,46 @@ def test_preempt_invalidates_incarnation():
     replica = stores.directory.get("rpl-1")
     assert replica.state is ReplicaState.PREEMPTED
     assert replica.incarnation == 2
+
+
+def test_idle_sweep_drains_then_stops_an_idle_replica():
+    stores = warm_stores()
+    stopped = []
+
+    async def stop_fn(serve_task_id):
+        stopped.append(serve_task_id)
+
+    replica = stores.directory.get("rpl-1")
+    replica.serve_task_id = "tsk-serve-1"
+    replica.last_active_at = _PAST
+    mgr = _manager(stores, stop_fn=stop_fn, idle_retain_sec=30.0)
+
+    asyncio.run(mgr.sweep_idle())
+    assert stores.directory.get("rpl-1").state is ReplicaState.DRAINING
+    assert stopped == []  # drained first, stopped on the next sweep
+
+    asyncio.run(mgr.sweep_idle())
+    assert stores.directory.get("rpl-1").state is ReplicaState.STOPPED
+    assert stopped == ["tsk-serve-1"]
+
+
+def test_idle_sweep_retains_a_recent_replica_and_when_disabled():
+    disabled = warm_stores()
+    disabled.directory.get("rpl-1").last_active_at = _PAST
+    asyncio.run(_manager(disabled, idle_retain_sec=0.0).sweep_idle())
+    assert disabled.directory.get("rpl-1").state is ReplicaState.WARM
+
+    recent = warm_stores()
+    recent.directory.get("rpl-1").last_active_at = _FUTURE
+    asyncio.run(_manager(recent, idle_retain_sec=1.0).sweep_idle())
+    assert recent.directory.get("rpl-1").state is ReplicaState.WARM
+
+
+def test_idle_sweep_holds_a_replica_that_still_holds_credit():
+    stores = warm_stores()
+    stores.directory.get("rpl-1").last_active_at = _PAST
+    claim = new_claim(invocation_id="inv-x", family="fam")
+    reserve(claim, replica_id="rpl-1", incarnation=1, credit=ClaimCredit(slots=1))
+    stores.claims.add(claim)
+    asyncio.run(_manager(stores, idle_retain_sec=1.0).sweep_idle())
+    assert stores.directory.get("rpl-1").state is ReplicaState.WARM

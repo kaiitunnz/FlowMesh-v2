@@ -3,9 +3,9 @@
 A claim advances ``PENDING -> RESERVED -> ACCEPTED -> STREAMING -> TERMINAL`` on the
 normal path. A pre-acceptance cancellation, known enqueue failure, or expiry records a
 terminal transition directly; a route or incarnation loss moves a credit-bearing claim
-to ``UNCERTAIN``/``RECONCILING`` and only a fenced terminal outcome releases its credit.
-Each transition is validated against the source state so a derived credit can never be
-released by an illegal or duplicate step.
+to ``UNCERTAIN`` and only a fenced terminal outcome releases its credit. Each transition
+is validated against the source state so a derived credit can never be released by an
+illegal or duplicate step.
 """
 
 from shared.utils.ids import new_service_claim_id
@@ -24,7 +24,6 @@ _TERMINAL_SOURCES: dict[ClaimTerminalReason, frozenset[ClaimState]] = {
             ClaimState.ACCEPTED,
             ClaimState.STREAMING,
             ClaimState.UNCERTAIN,
-            ClaimState.RECONCILING,
         }
     ),
     ClaimTerminalReason.CANCELLED: frozenset(
@@ -34,14 +33,10 @@ _TERMINAL_SOURCES: dict[ClaimTerminalReason, frozenset[ClaimState]] = {
             ClaimState.ACCEPTED,
             ClaimState.STREAMING,
             ClaimState.UNCERTAIN,
-            ClaimState.RECONCILING,
         }
     ),
     ClaimTerminalReason.ENQUEUE_FAILED: frozenset({ClaimState.RESERVED}),
     ClaimTerminalReason.EXPIRED: frozenset({ClaimState.PENDING, ClaimState.RESERVED}),
-    ClaimTerminalReason.RECONCILED: frozenset(
-        {ClaimState.UNCERTAIN, ClaimState.RECONCILING}
-    ),
 }
 
 _UNCERTAIN_SOURCES: frozenset[ClaimState] = frozenset(
@@ -63,19 +58,17 @@ def reserve(
     *,
     replica_id: str,
     incarnation: int,
-    report_epoch: int,
     credit: ClaimCredit,
 ) -> None:
     """Bind a pending claim to a selected replica incarnation and hold its credit.
 
-    The replica incarnation and report epoch fence the reservation so a stale report or
-    a superseded incarnation cannot later be mistaken for this credit.
+    The replica incarnation fences the reservation so a superseded incarnation cannot
+    later be mistaken for this credit.
     """
     if claim.state is not ClaimState.PENDING:
         raise ClaimTransitionError(f"cannot reserve a claim in {claim.state}")
     claim.replica_id = replica_id
     claim.incarnation = incarnation
-    claim.report_epoch = report_epoch
     claim.credit = credit
     _touch(claim, ClaimState.RESERVED)
 
@@ -101,19 +94,12 @@ def mark_uncertain(claim: ServiceClaim) -> None:
     _touch(claim, ClaimState.UNCERTAIN)
 
 
-def begin_reconcile(claim: ServiceClaim) -> None:
-    """Move an uncertain claim into active reconciliation, still holding its credit."""
-    if claim.state is not ClaimState.UNCERTAIN:
-        raise ClaimTransitionError(f"cannot reconcile a claim in {claim.state}")
-    _touch(claim, ClaimState.RECONCILING)
-
-
 def settle_terminal(claim: ServiceClaim, reason: ClaimTerminalReason) -> None:
     """Advance a claim to ``TERMINAL`` and release its derived credit.
 
     Only a transition legal for the reason is accepted; a terminal claim is never
-    reopened. A ``COMPLETED`` or ``RECONCILED`` reason represents a fenced terminal
-    outcome consumed from ``DS`` by ``invocation_id``.
+    reopened. A ``COMPLETED`` reason represents a fenced terminal outcome consumed from
+    ``DS`` by ``invocation_id``.
     """
     if claim.state is ClaimState.TERMINAL:
         return
@@ -135,23 +121,6 @@ def release_on_ds_terminal(claim: ServiceClaim, reason: ClaimTerminalReason) -> 
         return
     claim.terminal_reason = reason
     _touch(claim, ClaimState.TERMINAL)
-
-
-def successor_claim(claim: ServiceClaim) -> ServiceClaim:
-    """Raise a fresh successor claim for a permitted reissue.
-
-    The successor carries a new ``claim_id`` and an incremented admission epoch under
-    the same ``invocation_id``; it starts ``PENDING`` and holds no credit until it
-    reserves independently.
-    """
-    if claim.state is not ClaimState.TERMINAL:
-        raise ClaimTransitionError("cannot reissue a non-terminal claim")
-    return ServiceClaim(
-        claim_id=new_service_claim_id(),
-        invocation_id=claim.invocation_id,
-        family=claim.family,
-        admission_epoch=claim.admission_epoch + 1,
-    )
 
 
 def new_claim(

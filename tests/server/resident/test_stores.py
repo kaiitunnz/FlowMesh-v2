@@ -55,13 +55,7 @@ def _stores(*, slots=2, incarnation=1):
 
 def _reserve_on(stores, replica_id="rpl-1", incarnation=1):
     claim = new_claim(invocation_id=f"inv-{len(stores.claims.all())}", family="fam")
-    reserve(
-        claim,
-        replica_id=replica_id,
-        incarnation=incarnation,
-        report_epoch=1,
-        credit=_CREDIT,
-    )
+    reserve(claim, replica_id=replica_id, incarnation=incarnation, credit=_CREDIT)
     stores.claims.add(claim)
     return claim
 

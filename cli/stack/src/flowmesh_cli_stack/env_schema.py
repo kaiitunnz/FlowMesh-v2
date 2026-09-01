@@ -455,6 +455,27 @@ STACK_ENV_SCHEMA = EnvSchema(
                     "",
                     description="Credential the adapter presents to a keyless replica.",
                 ),
+                EnvVar(
+                    "RESIDENT_SELECTION_STRATEGY",
+                    "batch-aware-best-fit",
+                    description="Per-family replica-selection strategy.",
+                    choices=["batch-aware-best-fit", "least-load", "round-robin"],
+                ),
+                EnvVar(
+                    "RESIDENT_IDLE_RETAIN_SEC",
+                    "0",
+                    description="Idle retain window before teardown; 0 disables.",
+                    var_type=EnvVarType.FLOAT,
+                    min_value=0,
+                ),
+                EnvVar(
+                    "RESIDENT_IDLE_SWEEP_INTERVAL_SEC",
+                    "30",
+                    description="Idle-teardown sweep interval (seconds).",
+                    var_type=EnvVarType.FLOAT,
+                    min_value=0,
+                    min_inclusive=False,
+                ),
             ],
         ),
         EnvSection(

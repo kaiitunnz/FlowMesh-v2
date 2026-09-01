@@ -14,6 +14,7 @@ from server.orchestration.tool_dispatch import ToolInvocationEnvelope
 from server.resident import (
     AdapterError,
     AdmissionController,
+    AdmissionProfile,
     ClaimState,
     LifecycleScaleManager,
     ReplicaEndpoint,
@@ -152,6 +153,46 @@ def test_rehydrate_reconciles_in_flight_claim():
     claim = fresh_stores.claims.by_invocation("inv-1")[0]
     assert claim.state is ClaimState.UNCERTAIN
     assert fresh_stores.credit_ledger.held(claim.replica_id) == 1
+
+
+def test_rehydrate_reports_a_warm_replica_so_it_is_admittable_again():
+    svc, stores, _ = _build()
+    asyncio.run(svc._serve_invocation(_env()))
+    snapshot = stores.to_snapshot()  # capacity reports are not persisted
+
+    fresh_svc, fresh_stores, _ = _build()
+    fresh_svc.rehydrate(snapshot)
+    fam = fresh_stores.directory.all()[0].family
+    # Re-reported on rehydrate, the warm replica is feasible again — without the
+    # re-report a resident invocation would spin to the cold-start budget forever.
+    assert fresh_stores.pools.feasible_candidates(
+        fam, AdmissionProfile(engine_batch_key=fam)
+    )
+
+
+def test_rehydrate_preempts_a_warm_replica_whose_serve_task_is_gone():
+    svc, stores, _ = _build()
+    asyncio.run(svc._serve_invocation(_env()))
+    snapshot = stores.to_snapshot()
+
+    fresh_svc, fresh_stores, _ = _build()
+    fresh_svc._probe_endpoint = lambda serve_task_id: None  # serve task is gone
+    fresh_svc.rehydrate(snapshot)
+    states = {r.state for r in fresh_stores.directory.all()}
+    assert ReplicaState.WARM not in states
+    assert ReplicaState.PREEMPTED in states
+
+
+def test_serve_settles_an_error_when_an_internal_path_raises():
+    svc, stores, settled = _build()
+
+    def boom(task_id):
+        raise RuntimeError("resolver exploded")
+
+    svc._resolve_binding = boom
+    asyncio.run(svc._serve_invocation(_env()))
+    assert len(settled) == 1
+    assert settled[0][3] is not None and "resident serve error" in settled[0][3]
 
 
 def test_post_acceptance_loss_holds_then_releases_on_ds_terminal():

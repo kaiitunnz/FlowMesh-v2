@@ -100,18 +100,23 @@ bounded zero-to-one materialization. Before creating an allocation, policy check
 model catalog, the per-family replica quota, and the concurrent cold-start limit; a refusal
 is a typed durable outcome that creates no allocation, handoff, or credit and never
 substitutes an external provider. A drain rejects new claims while admitted work reaches a
-safe outcome; idle teardown stops only a drained replica that holds no credit.
+safe outcome. Idle teardown is off by default; when a retain window is configured, a
+background sweep drains a servable replica that has held no credit past the window and stops
+it once drained, and a later eligible claim materializes the family from zero again.
 
 ## Selection strategy
 
-Replica selection is swappable and bound per approved family, not per workflow or request.
-The default `batch-aware-best-fit` fills the feasible replica with the least remaining safe
-headroom before spilling; `least-load` and `round-robin` are also available. The choice
-changes only which feasible replica a claim reserves; the engine still owns continuous
-batching, token scheduling, and KV allocation.
+Replica selection is swappable and bound per approved family, not per workflow or request,
+selected per deployment through `RESIDENT_SELECTION_STRATEGY`. The default
+`batch-aware-best-fit` fills the feasible replica with the least remaining safe headroom
+before spilling; `least-load` and `round-robin` are also available. The choice changes only
+which feasible replica a claim reserves; the engine still owns continuous batching, token
+scheduling, and KV allocation.
 
 ## Configuration
 
 Resident-capacity control is off by default and enabled per deployment. See the `RESIDENT_*`
 rows in [`ENV.md`](ENV.md) for enablement, the serving substrate (`serve` or `dev_model`),
-the policy caps, the conservative admission-slot count, and the cold-start budget.
+the policy caps, the conservative admission-slot count, the cold-start budget, the per-family
+selection strategy, and the idle-teardown retain window (`RESIDENT_IDLE_RETAIN_SEC`, `0`
+disables).

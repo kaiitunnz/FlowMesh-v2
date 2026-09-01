@@ -22,6 +22,7 @@ from .admission import AdmissionController
 from .lifecycle import LifecycleScaleManager
 from .policy import ResidentPolicyLimits
 from .state import (
+    SERVABLE_REPLICA_STATES,
     AdmissionHandoff,
     AdmissionProfile,
     ClaimState,
@@ -61,6 +62,7 @@ class ResidentCapacityControl:
         endpoint_probe: EndpointProbe,
         logger: logging.Logger | None = None,
         poll_interval_sec: float = 1.0,
+        idle_sweep_interval_sec: float = 0.0,
     ) -> None:
         self._stores = stores
         self._admission = admission
@@ -72,12 +74,39 @@ class ResidentCapacityControl:
         self._probe_endpoint = endpoint_probe
         self._logger = logger or logging.getLogger("resident-capacity")
         self._poll_interval = poll_interval_sec
+        self._idle_sweep_interval = idle_sweep_interval_sec
         self._loop: asyncio.AbstractEventLoop | None = None
         self._admit_lock = asyncio.Lock()
+        self._sweep_task: asyncio.Task[None] | None = None
 
     def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         """Capture the event loop the off-lane invocation coroutines run on."""
         self._loop = loop
+
+    def start(self) -> None:
+        """Begin the background idle-teardown sweep when a sweep interval is set."""
+        if self._loop is None or self._sweep_task is not None:
+            return
+        if self._idle_sweep_interval <= 0:
+            return
+        self._sweep_task = self._loop.create_task(self._maintenance_loop())
+
+    def shutdown(self) -> None:
+        """Cancel the background idle-teardown sweep."""
+        if self._sweep_task is not None:
+            self._sweep_task.cancel()
+            self._sweep_task = None
+
+    async def _maintenance_loop(self) -> None:
+        try:
+            while True:
+                await asyncio.sleep(self._idle_sweep_interval)
+                try:
+                    await self._lifecycle.sweep_idle()
+                except Exception:
+                    self._logger.exception("resident idle sweep failed")
+        except asyncio.CancelledError:
+            return
 
     def is_resident(self, task_id: str) -> bool:
         """Whether a task's pinned model binding is served by resident capacity."""
@@ -115,13 +144,21 @@ class ResidentCapacityControl:
         until the linked invocation reaches a fenced terminal outcome.
         """
         self._stores.load_snapshot(snapshot)
-        # Endpoint credentials are not persisted; re-attach them from a live probe of
-        # each replica's still-running serve task so a resumed request can authenticate.
+        # Reports are not snapshotted and endpoint credentials are not persisted:
+        # re-probe each servable replica to re-attach its endpoint and re-report
+        # capacity so a warm replica is admittable again. A serve task that no longer
+        # reports an endpoint is gone, so invalidate the incarnation to re-materialize.
         for replica in self._stores.directory.all():
-            if replica.endpoint is None or replica.serve_task_id is None:
+            if (
+                replica.state not in SERVABLE_REPLICA_STATES
+                or replica.serve_task_id is None
+            ):
                 continue
-            if (fresh := self._probe_endpoint(replica.serve_task_id)) is not None:
-                replica.endpoint = fresh
+            if (fresh := self._probe_endpoint(replica.serve_task_id)) is None:
+                self._lifecycle.on_preempt(replica.replica_id)
+                continue
+            replica.endpoint = fresh
+            self._lifecycle.refresh_report(replica.replica_id)
         for claim in self._stores.claims.all():
             if claim.state in (
                 ClaimState.RESERVED,
@@ -131,6 +168,26 @@ class ResidentCapacityControl:
                 self._admission.on_route_loss(claim)
 
     async def _serve_invocation(self, env: ToolInvocationEnvelope) -> None:
+        """Serve one resident invocation, settling an error at its call on any escape.
+
+        The adapter and materialize paths settle their own typed outcomes; this guard
+        catches every other escape (binding resolution, claim raise/resume, endpoint
+        probe) so the originating agent call always settles instead of hanging.
+        """
+        try:
+            await self._serve_invocation_inner(env)
+        except Exception as exc:
+            self._logger.exception(
+                "resident serve failed for invocation %s", env.invocation_id
+            )
+            self._settle(
+                env.task_id,
+                env.call_correlation,
+                None,
+                error=f"resident serve error: {exc}",
+            )
+
+    async def _serve_invocation_inner(self, env: ToolInvocationEnvelope) -> None:
         resolved = self._resolve_binding(env.task_id)
         if resolved is None or resolved[1].service_model_ref is None:
             self._settle(
@@ -208,7 +265,12 @@ class ResidentCapacityControl:
         if self._limits.allowed_models and model_ref not in self._limits.allowed_models:
             return False
         self._stores.families.register(
-            ServiceFamily(family=family, engine_batch_key=family, model_ref=model_ref)
+            ServiceFamily(
+                family=family,
+                engine_batch_key=family,
+                model_ref=model_ref,
+                selection_strategy=self._limits.selection_strategy,
+            )
         )
         return True
 

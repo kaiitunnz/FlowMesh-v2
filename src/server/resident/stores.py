@@ -94,20 +94,6 @@ class DemandLedger:
     def remove(self, claim_id: str) -> None:
         self._entries.pop(claim_id, None)
 
-    def unadmitted(self, family: str | None = None) -> list[DemandEntry]:
-        """Fair order: earliest deadline first, then arrival order."""
-        pending = [
-            e
-            for e in self._entries.values()
-            if not e.admitted and (family is None or e.family == family)
-        ]
-        return sorted(
-            pending, key=lambda e: (e.deadline_at or "~", e.created_at, e.claim_id)
-        )
-
-    def backlog(self, family: str) -> int:
-        return len(self.unadmitted(family))
-
 
 class LeaseStore:
     """Allocation-lease records and their lifecycle ownership."""

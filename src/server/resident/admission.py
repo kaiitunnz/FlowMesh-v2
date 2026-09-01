@@ -12,6 +12,7 @@ from collections.abc import Callable
 
 from shared.utils.ids import new_admission_handoff_token
 
+from ..utils.time import now_iso
 from .capacity import default_credit
 from .claim import (
     accept,
@@ -172,9 +173,9 @@ class AdmissionController:
             claim,
             replica_id=replica.replica_id,
             incarnation=replica.incarnation,
-            report_epoch=chosen.report.report_epoch,
             credit=credit,
         )
+        replica.last_active_at = now_iso()
         self._stores.demand.mark_admitted(claim.claim_id)
         self._persist()
         return AdmissionHandoff(
@@ -197,7 +198,15 @@ class AdmissionController:
     def on_enqueue_failed(self, claim: ServiceClaim) -> None:
         """Release a reserved credit on a known pre-acceptance enqueue failure."""
         settle_terminal(claim, ClaimTerminalReason.ENQUEUE_FAILED)
+        self._touch_replica(claim)
         self._persist()
+
+    def _touch_replica(self, claim: ServiceClaim) -> None:
+        """Stamp the claim's replica idle-clock so a retain window starts at release."""
+        if claim.replica_id is None:
+            return
+        if (replica := self._stores.directory.get(claim.replica_id)) is not None:
+            replica.last_active_at = now_iso()
 
     def on_denied(self, claim: ServiceClaim) -> None:
         """Terminate a still-pending claim a policy denial refused before any credit."""
@@ -233,6 +242,7 @@ class AdmissionController:
             if claim.state is not ClaimState.TERMINAL:
                 release_on_ds_terminal(claim, reason)
                 self._stores.demand.remove(claim.claim_id)
+                self._touch_replica(claim)
                 released = True
         if released:
             self._persist()

@@ -18,8 +18,8 @@ class ClaimState(StrEnum):
     """The causal state of one admission claim.
 
     ``PENDING`` and ``TERMINAL`` hold no credit; every other state is a credit-bearing
-    nonterminal fact. ``UNCERTAIN`` and ``RECONCILING`` retain the credit after a
-    route/incarnation loss until a fenced terminal outcome settles it.
+    nonterminal fact. ``UNCERTAIN`` retains the credit after a route/incarnation loss
+    until a fenced terminal outcome settles it.
     """
 
     PENDING = "pending"
@@ -27,7 +27,6 @@ class ClaimState(StrEnum):
     ACCEPTED = "accepted"
     STREAMING = "streaming"
     UNCERTAIN = "uncertain"
-    RECONCILING = "reconciling"
     TERMINAL = "terminal"
 
 
@@ -37,7 +36,6 @@ CREDIT_BEARING_CLAIM_STATES: frozenset[ClaimState] = frozenset(
         ClaimState.ACCEPTED,
         ClaimState.STREAMING,
         ClaimState.UNCERTAIN,
-        ClaimState.RECONCILING,
     }
 )
 
@@ -46,7 +44,7 @@ class ClaimTerminalReason(StrEnum):
     """Why a claim reached ``TERMINAL``.
 
     ``COMPLETED`` is the settled semantic outcome consumed from ``DS``; the rest are
-    pre-acceptance exits or a reconciled loss. None reopens a terminal claim.
+    pre-acceptance exits or a settled loss. None reopens a terminal claim.
     """
 
     COMPLETED = "completed"
@@ -54,7 +52,6 @@ class ClaimTerminalReason(StrEnum):
     FAILED = "failed"
     ENQUEUE_FAILED = "enqueue_failed"
     EXPIRED = "expired"
-    RECONCILED = "reconciled"
 
 
 class ReplicaState(StrEnum):
@@ -99,14 +96,10 @@ class AdmissionProfile(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     engine_batch_key: str
-    isolation_domain: str | None = None
     tenant: str | None = None
-    slo_class: str | None = None
     deadline_at: str | None = None
-    max_prompt_tokens: int | None = None
     max_output_tokens: int | None = None
     adapter_ref: str | None = None
-    cache_affinity_hint: str | None = None
 
 
 class ClaimCredit(BaseModel):
@@ -125,18 +118,14 @@ class ClaimCredit(BaseModel):
 class SafeCapacityVector(BaseModel):
     """A replica's conservative safe-admission headroom.
 
-    It is per-family, per-hardware, and per-SLO-class, not a scalar running-set
-    threshold. ``admission_slots`` is the calibrated conservative slot count the stock
-    adapter reports; the token/sequence/KV fields tighten it where an engine exposes
-    them.
+    ``admission_slots`` is the calibrated conservative slot count the stock adapter
+    reports — a per-family, per-hardware slot budget rather than a scalar running-set
+    threshold.
     """
 
     model_config = ConfigDict(frozen=True)
 
     admission_slots: int
-    running_sequences: int | None = None
-    scheduled_tokens: int | None = None
-    kv_headroom: float | None = None
 
 
 class ReplicaEndpoint(BaseModel):
@@ -160,8 +149,9 @@ class ReplicaCapacityReport(BaseModel):
     """Engine-adapter-normalized evidence about one replica incarnation.
 
     It carries the replica incarnation and report epoch so a stale report cannot fence a
-    newer decision. It may tighten the safe-capacity budget and reconciliation evidence,
-    but never creates, overwrites, or releases a claim credit.
+    newer decision. It may tighten the safe-capacity budget, but never creates,
+    overwrites, or releases a claim credit. ``adapter_slots_free`` constrains an
+    adapter-scoped claim's feasibility (see ``AdmissionProfile.adapter_ref``).
     """
 
     model_config = ConfigDict(frozen=True)
@@ -171,15 +161,8 @@ class ReplicaCapacityReport(BaseModel):
     report_epoch: int
     state: ReplicaState
     healthy: bool
-    running: int = 0
-    waiting: int = 0
-    token_backlog: int | None = None
     safe: SafeCapacityVector
-    ttft_ms: float | None = None
-    itl_ms: float | None = None
-    preemption_pressure: float | None = None
     adapter_slots_free: int | None = None
-    cache_affinity: dict[str, str] = Field(default_factory=dict)
     at: str = Field(default_factory=now_iso)
 
 
@@ -222,6 +205,7 @@ class ReplicaIncarnation(BaseModel):
     report_epoch: int = 0
     created_at: str = Field(default_factory=now_iso)
     updated_at: str = Field(default_factory=now_iso)
+    last_active_at: str = Field(default_factory=now_iso)
 
 
 class AllocationLease(BaseModel):
@@ -286,7 +270,6 @@ class ServiceClaim(BaseModel):
     credit: ClaimCredit | None = None
     replica_id: str | None = None
     incarnation: int | None = None
-    report_epoch: int | None = None
     terminal_reason: ClaimTerminalReason | None = None
     created_at: str = Field(default_factory=now_iso)
     updated_at: str = Field(default_factory=now_iso)

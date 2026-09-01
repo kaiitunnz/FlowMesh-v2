@@ -394,6 +394,9 @@ class ResidentCapacityConfig:
     serve_ttl_sec: float | None = None
     allowed_models: tuple[str, ...] = ()
     forward_api_key: str | None = None
+    selection_strategy: str = "batch-aware-best-fit"
+    idle_retain_sec: float = 0.0
+    idle_sweep_interval_sec: float = 30.0
 
     @classmethod
     def from_env(cls) -> "ResidentCapacityConfig":
@@ -410,6 +413,9 @@ class ResidentCapacityConfig:
         access = (
             os.getenv(f"{prefix}SERVE_ACCESS_MODE") or "forward"
         ).strip().lower() or "forward"
+        strategy = (
+            os.getenv(f"{prefix}SELECTION_STRATEGY") or "batch-aware-best-fit"
+        ).strip().lower() or "batch-aware-best-fit"
         return cls(
             enabled=parse_bool_env(f"{prefix}CAPACITY_ENABLED", False),
             substrate=substrate,
@@ -427,6 +433,10 @@ class ResidentCapacityConfig:
             serve_ttl_sec=parse_float_env(f"{prefix}SERVE_TTL_SEC"),
             allowed_models=allowed,
             forward_api_key=_env_or_none(f"{prefix}FORWARD_API_KEY"),
+            selection_strategy=strategy,
+            idle_retain_sec=parse_float_env(f"{prefix}IDLE_RETAIN_SEC") or 0.0,
+            idle_sweep_interval_sec=parse_float_env(f"{prefix}IDLE_SWEEP_INTERVAL_SEC")
+            or 30.0,
         )
 
 

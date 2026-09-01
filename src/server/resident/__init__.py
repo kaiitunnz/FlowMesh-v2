@@ -4,13 +4,11 @@ from .capacity import default_credit, is_feasible, outstanding_slots, residual_a
 from .claim import (
     ClaimTransitionError,
     accept,
-    begin_reconcile,
     begin_stream,
     mark_uncertain,
     new_claim,
     reserve,
     settle_terminal,
-    successor_claim,
 )
 from .lifecycle import CapacityPlan, LifecycleScaleManager
 from .policy import (
@@ -109,7 +107,6 @@ __all__ = [
     "ServiceFamily",
     "ServiceFamilyRegistry",
     "accept",
-    "begin_reconcile",
     "begin_stream",
     "build_selection_strategy",
     "decide_materialization",
@@ -121,5 +118,4 @@ __all__ = [
     "reserve",
     "residual_after",
     "settle_terminal",
-    "successor_claim",
 ]
