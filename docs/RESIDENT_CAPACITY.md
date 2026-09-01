@@ -23,10 +23,8 @@ or routing.
   replica-directory lifecycle, performs policy-bounded, demand-driven scale-from-zero for
   approved plan-derived families, drains before an idle teardown, and reconciles preemption.
   Materializing and stopping a replica cross the flat worker plane by dispatching and
-  cancelling a serve (or `dev_model`) task. The materialized task is owned by the system
-  principal `FLOWMESH_API_KEY` resolves to (the default admin in a no-auth build), and its
-  ownership is registered so an operator reads a resident replica's logs through the normal
-  owner-scoped path.
+  cancelling a serve (or `dev_model`) task; an operator reads a resident replica's logs
+  through the normal task-log path.
 
 ## Stores
 
@@ -60,22 +58,23 @@ fact.
 ```
 PENDING → RESERVED → ACCEPTED → STREAMING → TERMINAL
 PENDING / RESERVED → TERMINAL               (cancel, known enqueue failure, expiry)
-RESERVED / ACCEPTED / STREAMING → UNCERTAIN → RECONCILING → TERMINAL
+RESERVED / ACCEPTED / STREAMING → UNCERTAIN → TERMINAL
 TERMINAL --(permitted reissue)--> successor PENDING (same invocation_id, fresh epoch)
 ```
 
-- **Fencing.** `RESERVED` stamps the selected replica's incarnation and report epoch onto
-  the claim, so a stale report or a superseded incarnation cannot be mistaken for this
-  credit. Concurrent reservations cannot overcommit a replica's reported safe slots.
+- **Fencing.** `RESERVED` stamps the selected replica's incarnation onto the claim, so a
+  superseded incarnation cannot be mistaken for this credit. Concurrent reservations cannot
+  overcommit a replica's reported safe slots.
 - **Credit release.** A `TERMINAL` transition releases the derived credit. For an accepted
   or streaming claim the only normal release is a fenced terminal outcome recorded in `DS`
   and consumed by `invocation_id`; a stream close or a telemetry report alone never releases
   it. A pre-acceptance cancellation, known enqueue failure, or expiry records a terminal
   transition directly.
-- **Loss and reconciliation.** A route or incarnation loss moves a credit-bearing claim to
-  `UNCERTAIN`/`RECONCILING`, holding its credit until the linked invocation settles. A
-  permitted reissue reconciles the lost claim to terminal and raises a successor with a
-  fresh admission epoch; it never reopens a terminal claim or reuses its credit.
+- **Loss and reissue.** A route or incarnation loss moves a credit-bearing claim to
+  `UNCERTAIN`, holding its credit until the fenced terminal outcome for its invocation
+  settles it. A re-driven boundary resumes the in-flight claim on its replica under the held
+  credit; once a claim is terminal, a permitted reissue raises a successor with a fresh
+  admission epoch, never reopening a terminal claim or reusing its credit.
 
 ## Handoff and execution
 
