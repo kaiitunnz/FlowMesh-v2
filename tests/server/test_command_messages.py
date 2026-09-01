@@ -45,6 +45,7 @@ class TestCommandMessage:
             "DESTROY_WORKER",
             "DESTROY_WORKERS",
             "START_RELAY",
+            "DELIVER_ROUTE_PLAN",
         }
         assert {t.value for t in CommandType} == expected
 

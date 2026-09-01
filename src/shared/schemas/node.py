@@ -1,5 +1,7 @@
 from pydantic import BaseModel, Field
 
+from shared.schemas.network import NetworkEndpointAdvertisement
+
 
 class NodeInfo(BaseModel):
     namespace: str = Field(description="Node namespace.")
@@ -10,6 +12,9 @@ class NodeInfo(BaseModel):
     tags: list[str] = Field(description="Node tags.")
     last_seen: str = Field(description="Last heartbeat timestamp.")
     max_gpu_count: int = Field(description="Total GPU count available on this node.")
+    network_endpoint: NetworkEndpointAdvertisement | None = Field(
+        default=None, description="Network-plane endpoint advertisement."
+    )
 
 
 __all__ = ["NodeInfo"]

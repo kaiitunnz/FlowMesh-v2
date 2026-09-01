@@ -9,14 +9,16 @@ from multiprocessing.process import BaseProcess
 from multiprocessing.queues import Queue as MPQueue
 from queue import Empty as QueueEmpty
 from queue import Full as QueueFull
-from threading import Thread
+from threading import Lock, Thread
 
 from shared.schemas.command import CommandMessage, CommandResponse
+from shared.schemas.network import NetworkEndpointAdvertisement, ReachabilityClass
 
 from ..config import (
     GrpcConfig,
     IdentityConfig,
     LoggingConfig,
+    NetworkPlaneConfig,
     RedisConfig,
     WorkerManagementConfig,
 )
@@ -45,12 +47,14 @@ class WorkerSupervisor:
         worker_management: WorkerManagementConfig,
         logging_config: LoggingConfig,
         logger: logging.Logger,
+        network: NetworkPlaneConfig | None = None,
     ) -> None:
         self._identity = identity
         self._redis = redis
         self._grpc = grpc
         self._worker_management = worker_management
         self._logging_config = logging_config
+        self._network = network or NetworkPlaneConfig()
         self._logger = logger
         self._process: BaseProcess | None = None
         self._cmd_sender: TaskSender[CommandMessage, CommandResponse] | None = None
@@ -87,6 +91,7 @@ class WorkerSupervisor:
                 "grpc_cfg": self._grpc,
                 "wm_cfg": self._worker_management,
                 "log_cfg": self._logging_config,
+                "network_cfg": self._network,
                 "cmd_receiver": self._cmd_receiver,
                 "node_id_queue": self._node_id_queue,
                 "system_principal": system_principal,
@@ -227,12 +232,50 @@ def _enqueue_latest_node_id(
             )
 
 
+def _endpoint_advertisement_provider(
+    network_cfg: NetworkPlaneConfig,
+) -> Callable[[], NetworkEndpointAdvertisement | None]:
+    """Return a provider that mints a fresh-generation endpoint advertisement.
+
+    Each call bumps the generation so a re-registration supersedes the prior
+    advertisement and its route evidence. It returns ``None`` when the network plane is
+    disabled or unconfigured, leaving the node advertisement absent.
+    """
+    if not network_cfg.enabled or not network_cfg.endpoint_url:
+        return lambda: None
+
+    url = network_cfg.endpoint_url
+    try:
+        reachability_class = ReachabilityClass(network_cfg.reachability_class)
+    except ValueError:
+        reachability_class = ReachabilityClass.ROUTABLE
+    lock = Lock()
+    generation = 0
+
+    def provider() -> NetworkEndpointAdvertisement | None:
+        nonlocal generation
+        with lock:
+            generation += 1
+            current = generation
+        return NetworkEndpointAdvertisement(
+            endpoint_id=url,
+            url=url,
+            generation=current,
+            trust_domain=network_cfg.trust_domain,
+            reachability_class=reachability_class,
+            protocols=network_cfg.protocols,
+        )
+
+    return provider
+
+
 def _run_supervisor(
     identity: IdentityConfig,
     redis_cfg: RedisConfig,
     grpc_cfg: GrpcConfig,
     wm_cfg: WorkerManagementConfig,
     log_cfg: LoggingConfig,
+    network_cfg: NetworkPlaneConfig,
     cmd_receiver: TaskReceiver[CommandMessage, CommandResponse] | None,
     node_id_queue: MPQueue[str],
     system_principal: PrincipalContext,
@@ -245,6 +288,7 @@ def _run_supervisor(
     from shared.utils.time import now_iso
 
     from ..clients import RedisClient
+    from ..network.listeners import NetworkPlaneListeners
     from ..registries.node import NodeRegistry
     from ..utils.logging import get_logger as _get_logger
     from .manager import WorkerManager
@@ -319,6 +363,7 @@ def _run_supervisor(
         logger=logger,
         system_principal=system_principal,
         current_gpu_count_getter=current_gpu_count_getter,
+        endpoint_advertisement_provider=_endpoint_advertisement_provider(network_cfg),
     )
 
     # Register now — must happen before other components that need node_id
@@ -361,6 +406,15 @@ def _run_supervisor(
         relay_service=relay_service,
         logger=logger,
     )
+
+    network_listeners: NetworkPlaneListeners | None = None
+    if network_cfg.enabled and network_cfg.sidecar_url and network_cfg.endpoint_url:
+        network_listeners = NetworkPlaneListeners(
+            sidecar_url=network_cfg.sidecar_url,
+            endpoint_url=network_cfg.endpoint_url,
+            buffer_bytes=network_cfg.relay_buffer_bytes,
+            logger=logger,
+        )
 
     def _on_reregister(new_node_id: str) -> None:
         # Rebind the subscriptions first and wait for the reader threads to
@@ -407,6 +461,8 @@ def _run_supervisor(
         await worker_manager.start()
         command_listener.start()
         await grpc_server.start()
+        if network_listeners is not None:
+            await network_listeners.start()
         # Wire the re-register callback only once the reader threads are up
         lifecycle.set_reregister_callback(_on_reregister)
         logger.info("Supervisor ready for node %s", node_id)
@@ -419,6 +475,8 @@ def _run_supervisor(
         # Publish unregister event early to allow the server to handle before being
         # timed out
         lifecycle.publish_unregister()
+        if network_listeners is not None:
+            await network_listeners.stop()
         await grpc_server.stop()
         await command_listener.stop()
         await worker_manager.stop()

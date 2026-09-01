@@ -40,6 +40,10 @@ and artifacts.
   control: the Admission controller and Lifecycle & scale manager, the `CS`
   stores, the claim-admission FSM and its fencing/credit-release rules, and the
   inference substrate. Read before touching `src/server/resident/`.
+- **[`docs/NETWORK_PLANE.md`](docs/NETWORK_PLANE.md)** — network plane: trusted
+  endpoint advertisements, the derived reachability view and its state machine,
+  the pure route resolver, the three transports, and the bounded relay session.
+  Read before touching `src/server/network/`.
 - **[`docs/ENV.md`](docs/ENV.md)** — curated server / worker /
   supervisor env var tables (the knobs you actually tune). Full schema
   in `cli/stack/src/flowmesh_cli_stack/env_schema.py`.

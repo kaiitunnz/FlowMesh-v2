@@ -105,8 +105,10 @@ class EventMonitor:
         results_dir: Path | str = ".",
         log_stream_ttl_sec: int = 0,
         server_base_url: str = "http://localhost:8000",
+        on_node_removed: Callable[[str], None] | None = None,
     ) -> None:
         self._redis_client = redis_client
+        self._on_node_removed = on_node_removed
         self._stop_event = threading.Event()
         self._logger = logger
         self._runtime = runtime
@@ -665,6 +667,8 @@ class EventMonitor:
                 )
             case "SV_UNREGISTER":
                 self._node_registry.unregister_node(event.node_id)
+                if self._on_node_removed is not None:
+                    self._on_node_removed(event.node_id)
                 actor = self._actor_from_event(event)
                 if self._own_node_id is not None and event.node_id == self._own_node_id:
                     self._schedule_own_node_deregister(event.node_id, actor)

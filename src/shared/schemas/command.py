@@ -17,6 +17,7 @@ class CommandType(StrEnum):
     DESTROY_WORKER = "DESTROY_WORKER"  # payload: {worker_name: str}
     DESTROY_WORKERS = "DESTROY_WORKERS"  # payload: {worker_names: [str]} or null
     START_RELAY = "START_RELAY"
+    DELIVER_ROUTE_PLAN = "DELIVER_ROUTE_PLAN"  # payload: resolved route + echo payload
 
 
 class CommandMessage(BaseModel):

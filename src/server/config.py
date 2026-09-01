@@ -481,6 +481,61 @@ class WebSearchConfig:
 
 
 @dataclass
+class NetworkPlaneConfig:
+    """Feature-gated network-plane route substrate knobs.
+
+    ``endpoint_url`` is the operator-configured node-relay endpoint advertised on
+    registration; ``sidecar_url`` is the node-local echo listener the relay uplinks to;
+    ``control_relay_url`` is the root's controlled-fallback relay. TTL/backoff bounds
+    drive the reachability state machine.
+    """
+
+    enabled: bool = False
+    endpoint_url: str | None = None
+    sidecar_url: str | None = None
+    control_relay_url: str | None = None
+    trust_domain: str = "flowmesh"
+    reachability_class: str = "routable"
+    protocols: tuple[str, ...] = ("echo",)
+    positive_ttl_sec: float = 30.0
+    negative_ttl_sec: float = 15.0
+    backoff_base_sec: float = 1.0
+    backoff_max_sec: float = 30.0
+    connect_budget_sec: float = 5.0
+    route_ttl_sec: float = 30.0
+    relay_buffer_bytes: int = 65536
+
+    @classmethod
+    def from_env(cls) -> "NetworkPlaneConfig":
+        prefix = "NETWORK_PLANE_"
+        raw_protocols = _env_or_none(f"{prefix}PROTOCOLS")
+        protocols = (
+            tuple(p.strip() for p in raw_protocols.split(",") if p.strip())
+            if raw_protocols
+            else ("echo",)
+        )
+        return cls(
+            enabled=parse_bool_env(f"{prefix}ENABLED", False),
+            endpoint_url=_env_or_none(f"{prefix}ENDPOINT_URL"),
+            sidecar_url=_env_or_none(f"{prefix}SIDECAR_URL"),
+            control_relay_url=_env_or_none(f"{prefix}CONTROL_RELAY_URL"),
+            trust_domain=_env_or_none(f"{prefix}TRUST_DOMAIN") or "flowmesh",
+            reachability_class=_env_or_none(f"{prefix}REACHABILITY_CLASS")
+            or "routable",
+            protocols=protocols,
+            positive_ttl_sec=parse_float_env(f"{prefix}POSITIVE_TTL_SEC") or 30.0,
+            negative_ttl_sec=parse_float_env(f"{prefix}NEGATIVE_TTL_SEC") or 15.0,
+            backoff_base_sec=parse_float_env(f"{prefix}BACKOFF_BASE_SEC") or 1.0,
+            backoff_max_sec=parse_float_env(f"{prefix}BACKOFF_MAX_SEC") or 30.0,
+            connect_budget_sec=parse_float_env(f"{prefix}CONNECT_BUDGET_SEC") or 5.0,
+            route_ttl_sec=parse_float_env(f"{prefix}ROUTE_TTL_SEC") or 30.0,
+            relay_buffer_bytes=max(
+                1024, parse_int_env(f"{prefix}RELAY_BUFFER_BYTES") or 65536
+            ),
+        )
+
+
+@dataclass
 class OrchestrationConfig:
     max_scope_depth: int | None = None
     max_loop_iterations: int | None = None
@@ -496,6 +551,7 @@ class OrchestrationConfig:
     )
     web_search: WebSearchConfig = field(default_factory=WebSearchConfig)
     resident: ResidentCapacityConfig = field(default_factory=ResidentCapacityConfig)
+    network: NetworkPlaneConfig = field(default_factory=NetworkPlaneConfig)
 
     @classmethod
     def from_env(cls) -> "OrchestrationConfig":
@@ -515,6 +571,7 @@ class OrchestrationConfig:
             model_secret_vault=ModelSecretVaultConfig.from_env(),
             web_search=WebSearchConfig.from_env(),
             resident=ResidentCapacityConfig.from_env(),
+            network=NetworkPlaneConfig.from_env(),
         )
 
 

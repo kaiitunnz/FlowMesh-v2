@@ -62,7 +62,8 @@ attempts, `inv-` invocations, `agr-` authority grants, and `idm-` idempotency
 keys (the fabric-assigned dedupe authority for a mediated boundary). Resident-capacity
 control adds `scl-` service claims, `rpl-` replica incarnations, and `lse-` allocation
 leases. `msk-` is an unguessable ref for a workflow's vaulted model credential and `hnd-`
-an unguessable claim-bound admission handoff token. Always use `new_*_id()`
+an unguessable claim-bound admission handoff token. The network plane adds `rog-` route
+origins and `rly-` relay sessions. Always use `new_*_id()`
 helpers in `src/shared/utils/ids.py`. Never use `uuid4()` or `secrets.token_hex`
 for IDs.
 
@@ -88,6 +89,7 @@ src/
     governance/           Governance schemas and trace analysis
     hooks/                Plugin extension ABCs + registries
     main.py               Entrypoint, FLOWMESH_PLUGINS loader, EventMonitor wiring
+    network/              Network plane: endpoint directory, reachability, resolver, relay
     orchestration/        Durable orchestration ledger (DS), engine, outcomes
     registries/           Worker / Node registries (Redis-backed)
     routers/v1/           workflows, tasks, results, workers, nodes, ssh, stack, system
@@ -184,6 +186,13 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   a credit releases only from a fenced ledger terminal consumed by `invocation_id`.
   Enable with `RESIDENT_CAPACITY_ENABLED=true`. See
   [`RESIDENT_CAPACITY.md`](RESIDENT_CAPACITY.md).
+- **Network-plane route substrate.** A topology-aware, control-resolved routing substrate
+  turns trusted node endpoint advertisements and directional reachability evidence into an
+  ordered route resolved by a pure resolver, carried over a `worker_direct`, `node_relay`,
+  or `control_relay` transport by an origin-side deputy that never peer-discovers. It is a
+  routing substrate only: it carries no resident traffic and mints no `ServiceClaim` or
+  `RouteAuthorization`. Enable with `NETWORK_PLANE_ENABLED=true`. See
+  [`NETWORK_PLANE.md`](NETWORK_PLANE.md).
 - **Task merging.** Compatible adjacent tasks in a DAG (same `taskType`,
   model, hardware shape, and merge key) coalesce into a single dispatch.
   Merged children ride on `WorkerTaskMessage.merged_children`; the worker

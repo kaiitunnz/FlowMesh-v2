@@ -6,6 +6,7 @@ from starlette.requests import HTTPConnection
 from .clients import RedisClient
 from .dispatcher import Dispatcher
 from .hooks import PrincipalContext
+from .network.service import NetworkPlane
 from .registries import NodeRegistry, WorkerRegistry, WorkflowRegistry
 from .resident.service import ResidentCapacityControl
 from .services.metrics import MetricsRecorder
@@ -99,3 +100,7 @@ def get_serve_proxy_enabled(conn: HTTPConnection) -> bool:
 
 def get_resident_control(conn: HTTPConnection) -> ResidentCapacityControl | None:
     return conn.app.state.resident_control
+
+
+def get_network_plane(conn: HTTPConnection) -> NetworkPlane | None:
+    return conn.app.state.network_plane

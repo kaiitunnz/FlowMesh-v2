@@ -68,6 +68,20 @@ listed here is in `.env.example`.
 | `RESIDENT_SELECTION_STRATEGY` | `batch-aware-best-fit` | Per-family replica-selection strategy |
 | `RESIDENT_IDLE_RETAIN_SEC` | `0` | Idle retain window before teardown; 0 disables |
 | `RESIDENT_IDLE_SWEEP_INTERVAL_SEC` | `30` | Idle-teardown sweep interval (seconds) |
+| `NETWORK_PLANE_ENABLED` | `false` | Enable the route-discovery and relay substrate |
+| `NETWORK_PLANE_ENDPOINT_URL` | – | Advertised node-relay endpoint (`host:port`) |
+| `NETWORK_PLANE_SIDECAR_URL` | – | Node-local echo listener (`host:port`) |
+| `NETWORK_PLANE_CONTROL_RELAY_URL` | – | Root controlled-fallback relay endpoint (`host:port`) |
+| `NETWORK_PLANE_TRUST_DOMAIN` | `flowmesh` | Endpoint trust domain |
+| `NETWORK_PLANE_REACHABILITY_CLASS` | `routable` | Endpoint reachability class |
+| `NETWORK_PLANE_PROTOCOLS` | `echo` | Advertised transport protocols |
+| `NETWORK_PLANE_POSITIVE_TTL_SEC` | `30` | Verified reachability TTL (seconds) |
+| `NETWORK_PLANE_NEGATIVE_TTL_SEC` | `15` | Demoted reachability TTL (seconds) |
+| `NETWORK_PLANE_BACKOFF_BASE_SEC` | `1` | Demotion retry backoff base (seconds) |
+| `NETWORK_PLANE_BACKOFF_MAX_SEC` | `30` | Demotion retry backoff cap (seconds) |
+| `NETWORK_PLANE_CONNECT_BUDGET_SEC` | `5` | Per-candidate optimistic connect budget (seconds) |
+| `NETWORK_PLANE_ROUTE_TTL_SEC` | `30` | Resolved-route snapshot TTL (seconds) |
+| `NETWORK_PLANE_RELAY_BUFFER_BYTES` | `65536` | Bounded relay-session in-flight buffer (bytes) |
 | `ENABLE_WORKER_WATCHDOG` | `true` | Worker death detection |
 | `WORKER_DEATH_GRACE_SEC` | `60` | Grace period before marking dead |
 | `WORKER_REHYDRATION_GRACE_SEC` | `120` | Extra grace for a worker's rehydrated in-flight tasks after the root restarts, before the watchdog may reclaim them |
