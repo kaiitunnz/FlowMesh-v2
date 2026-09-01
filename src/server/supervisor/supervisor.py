@@ -290,6 +290,7 @@ def _run_supervisor(
     from shared.utils.time import now_iso
 
     from ..clients import RedisClient
+    from ..network.listeners import NetworkPlaneListeners
     from ..registries.node import NodeRegistry
     from ..utils.logging import get_logger as _get_logger
     from .manager import WorkerManager
@@ -408,6 +409,15 @@ def _run_supervisor(
         logger=logger,
     )
 
+    network_listeners: NetworkPlaneListeners | None = None
+    if network_cfg.enabled and network_cfg.sidecar_url and network_cfg.endpoint_url:
+        network_listeners = NetworkPlaneListeners(
+            sidecar_url=network_cfg.sidecar_url,
+            endpoint_url=network_cfg.endpoint_url,
+            buffer_bytes=network_cfg.relay_buffer_bytes,
+            logger=logger,
+        )
+
     def _on_reregister(new_node_id: str) -> None:
         # Rebind the subscriptions first and wait for the reader threads to
         # switch channels, THEN re-home workers, so the dispatcher never
@@ -453,6 +463,8 @@ def _run_supervisor(
         await worker_manager.start()
         command_listener.start()
         await grpc_server.start()
+        if network_listeners is not None:
+            await network_listeners.start()
         # Wire the re-register callback only once the reader threads are up
         lifecycle.set_reregister_callback(_on_reregister)
         logger.info("Supervisor ready for node %s", node_id)
@@ -465,6 +477,8 @@ def _run_supervisor(
         # Publish unregister event early to allow the server to handle before being
         # timed out
         lifecycle.publish_unregister()
+        if network_listeners is not None:
+            await network_listeners.stop()
         await grpc_server.stop()
         await command_listener.stop()
         await worker_manager.stop()

@@ -67,9 +67,14 @@ def resolve_route(
     *,
     now: float,
     route_epoch: int,
+    control_relay_endpoint: str | None = None,
     expires_at: float | None = None,
 ) -> ResolvedRoute:
-    """Resolve the ordered candidate ladder for one origin/target pair."""
+    """Resolve the ordered candidate ladder for one origin/target pair.
+
+    ``control_relay_endpoint`` is the deployment's controlled-fallback relay; when set,
+    the control-relay candidate carries it plus the target sidecar as explicit hops.
+    """
     graded: list[tuple[int, int, RouteCandidate]] = []
 
     def consider(transport: Transport, hops: tuple[RouteHop, ...]) -> None:
@@ -134,16 +139,28 @@ def resolve_route(
             ),
         )
 
-    consider(
-        Transport.CONTROL_RELAY,
-        (
+    if control_relay_endpoint is not None and direct_route is not None:
+        control_hops: tuple[RouteHop, ...] = (
+            RouteHop(
+                transport=Transport.CONTROL_RELAY,
+                endpoint=control_relay_endpoint,
+                node_id=None,
+            ),
+            RouteHop(
+                transport=Transport.CONTROL_RELAY,
+                endpoint=direct_route,
+                node_id=listener.node_id,
+            ),
+        )
+    else:
+        control_hops = (
             RouteHop(
                 transport=Transport.CONTROL_RELAY,
                 endpoint=_CONTROL_RELAY_ENDPOINT,
                 node_id=None,
             ),
-        ),
-    )
+        )
+    consider(Transport.CONTROL_RELAY, control_hops)
 
     graded.sort(key=lambda item: (item[0], item[1]))
     return ResolvedRoute(

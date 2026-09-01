@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import contextlib
 import logging
 import queue
@@ -17,6 +18,8 @@ from shared.schemas.command import (
 )
 
 from ...clients.redis import NODE_RESPONSE_CHANNEL, SyncRedisClient, node_cmd_channel
+from ...network.deputy import run_echo
+from ...network.state import ResolvedRoute
 from ...utils.concurrent import Sentinel, TaskReceiver
 from ..adapters.docker import DockerWorkerConfig
 from ..manager import WorkerInitConfig, WorkerManager
@@ -355,6 +358,8 @@ class CommandListener:
                 return await self._handle_destroy_workers_cmd(cmd)
             case CommandType.START_RELAY:
                 return self._handle_start_relay_cmd(cmd)
+            case CommandType.DELIVER_ROUTE_PLAN:
+                return await self._handle_deliver_route_plan_cmd(cmd)
             case _:
                 return CommandResponse.error(cmd, f"Unknown command: {cmd.command}")
 
@@ -446,6 +451,42 @@ class CommandListener:
             return CommandResponse.ok(cmd)
         except Exception as exc:
             return CommandResponse.error(cmd, f"Failed to start relay uplink: {exc}")
+
+    async def _handle_deliver_route_plan_cmd(
+        self, cmd: CommandMessage
+    ) -> CommandResponse:
+        """Run the origin-side deputy over a resolved route and echo a payload.
+
+        This proves the transport ladder and relay mechanics; it forwards no resident
+        request and accepts no claim or route authorization.
+        """
+        payload = cmd.payload or {}
+        try:
+            resolved = ResolvedRoute.model_validate(payload["resolved_route"])
+            echo_payload = base64.b64decode(payload["payload_b64"])
+            budget = float(payload.get("connect_budget_sec", 5.0))
+        except (KeyError, ValidationError, ValueError) as exc:
+            return CommandResponse.error(cmd, f"Invalid route plan: {exc}")
+        outcome = await run_echo(resolved, echo_payload, connect_budget_sec=budget)
+        return CommandResponse.ok(
+            cmd,
+            data={
+                "selected_transport": (
+                    outcome.selected_transport.value
+                    if outcome.selected_transport is not None
+                    else None
+                ),
+                "echoed_b64": (
+                    base64.b64encode(outcome.echoed).decode()
+                    if outcome.echoed is not None
+                    else None
+                ),
+                "observations": [
+                    {"transport": transport.value, "outcome": result.value}
+                    for transport, result in outcome.observations
+                ],
+            },
+        )
 
     async def _handle_create_worker_cmd(self, cmd: CommandMessage) -> CommandResponse:
         """Handle CREATE_WORKER: payload is a WorkerInitConfig dict."""

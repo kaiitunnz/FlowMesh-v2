@@ -26,6 +26,8 @@ from .clients import RedisClient
 from .config import NodeRole, ServerConfig
 from .dispatcher.factory import create_dispatcher
 from .hooks import register
+from .network.listeners import NetworkControlRelay
+from .network.service import NetworkPlane
 from .orchestration.tool_dispatch import ToolInvocationEnvelope
 from .registries import WorkerRegistry, WorkflowRegistry
 from .registries.node import NodeRegistry
@@ -129,6 +131,8 @@ AGENT_MODEL_GATEWAY = None
 FABRIC_TOOL_BROKER = None
 RESIDENT_CONTROL = None
 RESIDENT_REGISTRY = None
+NETWORK_PLANE = None
+NETWORK_CONTROL_RELAY = None
 
 if IS_ROOT_NODE:
     WORKFLOW_REGISTRY = WorkflowRegistry(REDIS_CLIENT)
@@ -194,6 +198,17 @@ if IS_ROOT_NODE:
                 AGENT_MODEL_GATEWAY.settle(env)
 
         RUNTIME.set_model_settler(_model_settle)
+
+    if config.orchestration.network.enabled:
+        NETWORK_PLANE = NetworkPlane(
+            config.orchestration.network, NODE_REGISTRY, logger
+        )
+        if config.orchestration.network.control_relay_url:
+            NETWORK_CONTROL_RELAY = NetworkControlRelay(
+                control_relay_url=config.orchestration.network.control_relay_url,
+                buffer_bytes=config.orchestration.network.relay_buffer_bytes,
+                logger=logger,
+            )
 
     DISPATCHER = create_dispatcher(
         config.dispatch,
@@ -433,6 +448,8 @@ async def _lifespan(_: FastAPI):
                 if snapshot is not None:
                     RESIDENT_CONTROL.rehydrate(snapshot)
                 RESIDENT_CONTROL.start()
+            if NETWORK_CONTROL_RELAY is not None:
+                await NETWORK_CONTROL_RELAY.start()
             if PORT_FORWARD_SERVICE is not None:
                 await PORT_FORWARD_SERVICE.start()
             _start_root_threads()
@@ -474,6 +491,8 @@ async def _lifespan(_: FastAPI):
 
             # --- Root-only shutdown ---
             _stop_background()
+            if NETWORK_CONTROL_RELAY is not None:
+                await NETWORK_CONTROL_RELAY.stop()
             if RESIDENT_CONTROL is not None:
                 RESIDENT_CONTROL.shutdown()
             if AGENT_MODEL_GATEWAY is not None:
@@ -514,6 +533,7 @@ app.state.ssh_audit = SSH_AUDIT_SERVICE
 app.state.ssh_proxy_enabled = config.port_forward.ssh_proxy_enabled and IS_ROOT_NODE
 app.state.serve_proxy_enabled = config.port_forward.serve_proxy_enabled and IS_ROOT_NODE
 app.state.resident_control = RESIDENT_CONTROL
+app.state.network_plane = NETWORK_PLANE
 
 # Routers — shared
 app.include_router(health.router)
@@ -531,6 +551,7 @@ if IS_ROOT_NODE:
     app.include_router(v1.ssh.router, prefix=v1_prefix)
     app.include_router(v1.serve.router, prefix=v1_prefix)
     app.include_router(v1.resident.router, prefix=v1_prefix)
+    app.include_router(v1.network.router, prefix=v1_prefix)
     app.include_router(v1.system.router, prefix=v1_prefix)
     app.include_router(v1.traces.router, prefix=v1_prefix)
     if AGENT_MODEL_GATEWAY is not None:

@@ -1,4 +1,5 @@
 from . import (
+    network,
     nodes,
     resident,
     results,
@@ -13,6 +14,7 @@ from . import (
 )
 
 __all__ = [
+    "network",
     "nodes",
     "resident",
     "results",
