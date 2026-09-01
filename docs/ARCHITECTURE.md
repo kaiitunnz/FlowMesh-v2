@@ -59,8 +59,10 @@ The runtime is two top-level processes:
 `scn-` SSH connection rows, `cmd-` supervisor commands. The v2 orchestration
 ledger adds `act-` activations, `scp-` scopes, `wki-` work items, `att-`
 attempts, `inv-` invocations, `agr-` authority grants, and `idm-` idempotency
-keys (the fabric-assigned dedupe authority for a mediated boundary). `msk-` is an
-unguessable ref for a workflow's vaulted model credential. Always use `new_*_id()`
+keys (the fabric-assigned dedupe authority for a mediated boundary). Resident-capacity
+control adds `scl-` service claims, `rpl-` replica incarnations, and `lse-` allocation
+leases. `msk-` is an unguessable ref for a workflow's vaulted model credential and `hnd-`
+an unguessable claim-bound admission handoff token. Always use `new_*_id()`
 helpers in `src/shared/utils/ids.py`. Never use `uuid4()` or `secrets.token_hex`
 for IDs.
 
@@ -174,6 +176,14 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
 - **Agent-model gateway.** A managed model request an agent defers becomes a durable
   invocation the agent-model gateway settles off the agent's lane, injecting the result
   back at the originating call.
+- **Resident-capacity control.** A `resident` model binding is served from reusable
+  physical capacity rather than an external endpoint. Two control-plane actors — an
+  Admission controller and a Lifecycle & scale manager — over durable control-state
+  stores admit an invocation to a compatible model-serving replica, materializing one
+  from zero on demand under policy. `ServiceClaim` facts are the sole credit authority;
+  a credit releases only from a fenced ledger terminal consumed by `invocation_id`.
+  Enable with `RESIDENT_CAPACITY_ENABLED=true`. See
+  [`RESIDENT_CAPACITY.md`](RESIDENT_CAPACITY.md).
 - **Task merging.** Compatible adjacent tasks in a DAG (same `taskType`,
   model, hardware shape, and merge key) coalesce into a single dispatch.
   Merged children ride on `WorkerTaskMessage.merged_children`; the worker

@@ -1,18 +1,17 @@
 """The orchestration engine over the transparent structured-region physical plan.
 
-The engine owns semantic readiness: it turns settled records into ready
-work items, incrementally materializing the activation graph rather than precreating
-attempts. Static top-level leaf and agent operators materialize eagerly and dispatch
-through the runtime; control operators (branch, merge, spawn, join, loop) settle inside
-the ledger and never dispatch; spawn children and loop iterations materialize as records
-flow. An agent is both dispatchable (a run-to-yield episode) and a scope owner: it
-yields validated boundary requests the engine turns into durable work, and its
-spawn_agent facade opens a child-init scope per selected child region, keyed by
-(agent activation, region), lazily on that region's first child. Progress
-capabilities (child-init and loop-time) are the closure authority — a
-region closes only when its combined account seals and drains, never on an observed
-empty set. Scheduler/worker placement stays a physical decision that never changes what
-the engine considers ready.
+The engine owns semantic readiness: it turns settled records into ready work items,
+incrementally materializing the activation graph rather than precreating attempts.
+Static top-level leaf and agent operators materialize eagerly and dispatch through the
+runtime; control operators (branch, merge, spawn, join, loop) settle inside the ledger
+and never dispatch; spawn children and loop iterations materialize as records flow. An
+agent is both dispatchable (a run-to-yield episode) and a scope owner: it yields
+validated boundary requests the engine turns into durable work, and its spawn_agent
+facade opens a child-init scope per selected child region, keyed by (agent activation,
+region), lazily on that region's first child. Progress capabilities (child-init and
+loop-time) are the closure authority — a region closes only when its combined account
+seals and drains, never on an observed empty set. Scheduler/worker placement stays a
+physical decision that never changes what the engine considers ready.
 """
 
 from collections.abc import Sequence
@@ -1128,6 +1127,47 @@ class OrchestrationEngine:
         self.mark_pending_outcome(task_id, call_correlation)
         return self.deliver_boundary_outcome(task_id, call_correlation)
 
+    def terminalize_boundary_invocation(
+        self, task_id: str, call_correlation: str
+    ) -> str | None:
+        """Record a settled mediated boundary's invocation as terminal in the ledger.
+
+        Returns the durable ``invocation_id`` so a control-plane consumer bound to it —
+        the resident-capacity admission credit — can advance from this fenced ``DS``
+        outcome. The transition is idempotent and never regresses an ambiguity-terminal
+        outcome.
+        """
+        wi = self._work_item_for_task(task_id)
+        if wi is None:
+            return None
+        env = self._boundary_events.get((wi.activation_id, call_correlation))
+        if env is None or env.invocation_id is None:
+            return None
+        invocation = self._invocations.get(env.invocation_id)
+        if invocation is not None:
+            invocation.state = next_on_terminal(invocation.state)
+        return env.invocation_id
+
+    def cancel_outstanding_boundary_invocations(self) -> list[str]:
+        """Terminalize every unsettled mediated boundary invocation on cancellation.
+
+        Returns their durable ``invocation_id``s so a control-plane consumer bound to
+        them — a resident-capacity admission credit — releases from this fenced
+        cancellation terminal rather than being stranded.
+        """
+        ids: list[str] = []
+        for env in self._boundary_events.values():
+            if (
+                env.invocation_id is None
+                or env.outcome_value is not None
+                or env.denial is not None
+            ):
+                continue
+            if (invocation := self._invocations.get(env.invocation_id)) is not None:
+                invocation.state = next_on_terminal(invocation.state)
+            ids.append(env.invocation_id)
+        return ids
+
     def episode_context(
         self, task_id: str
     ) -> tuple[str | None, tuple[DeliveredOutcome, ...]]:
@@ -1195,8 +1235,7 @@ class OrchestrationEngine:
         effective invoke face, or a spawn/seal that names no declared child region — a
         raw operator id or an undeclared role — is a definitive denial: authority when
         the request is undeclared, policy when the pinned envelope blocks a declared
-        one.
-        None means admissible.
+        one. None means admissible.
         """
         if event.kind not in op.boundary.events:
             return DenialKind.AUTHORITY
@@ -1409,8 +1448,8 @@ class OrchestrationEngine:
         opener activation id for a specific recursion level. Rejects a child after a
         definitive denial, or after the child-init capability is sealed or revoked
         (late-child prevention). When the child body is itself a scope opener, opens a
-        nested scope owned by the child activation, so grandchildren (and recursive
-        re-entries) attenuate from the child grant at ``depth+1``. Returns the child
+        nested scope owned by the child activation, so grandchildren (and recursive re-
+        entries) attenuate from the child grant at ``depth+1``. Returns the child
         activation id, which addresses that nested scope.
         """
         activation, _ = self._create_child(
@@ -1429,9 +1468,9 @@ class OrchestrationEngine:
 
         Unlike :meth:`spawn_child`, the child is given a stable dispatchable identity,
         carries its child-init input as ``value_ref``, and is readied for a physical
-        attempt. The child body must be a leaf, or an agent that itself owns a
-        child-init scope; a spawn/loop child body is not live-dispatchable and stays a
-        trace-level :meth:`spawn_child`.
+        attempt. The child body must be a leaf, or an agent that itself owns a child-
+        init scope; a spawn/loop child body is not live-dispatchable and stays a trace-
+        level :meth:`spawn_child`.
         """
         advance = Advance()
         activation, wi = self._create_child(
@@ -1975,8 +2014,8 @@ class OrchestrationEngine:
     ) -> None:
         """Record a definitive dynamic authorization denial at a spawn site.
 
-        A denial creates no child activation and no resident claim, and is separate
-        from quota/rate/capacity/transport outcomes. It does not seal the child-init
+        A denial creates no child activation and no resident claim, and is separate from
+        quota/rate/capacity/transport outcomes. It does not seal the child-init
         capability: grant denial and cardinality sealing stay distinct.
         """
         self._denied_spawns.add(spawn_op)
@@ -2069,8 +2108,8 @@ class OrchestrationEngine:
         """Apply a cancelled scope's join residual policy to its materialized children.
 
         A declared ``drain``/``continue`` leaves materialized children to settle; the
-        default (``cancel``, and any scope without a declared policy) cancels every
-        not-yet-settled child.
+        default (``cancel``, and any scope without a declared policy) cancels every not-
+        yet-settled child.
         """
         join = self._join_of_scope(scope_id)
         if self._residual_policy(join, ResidualPolicy.CANCEL) is ResidualPolicy.CANCEL:

@@ -54,6 +54,20 @@ listed here is in `.env.example`.
 | `WEB_SEARCH_RESULT_CHAR_CAP` | `6000` | Injected result size cap |
 | `WEB_SEARCH_MAX_CALLS` | `8` | Searches per episode |
 | `WEB_SEARCH_MAX_PARALLEL_CALLS_PER_TURN` | `4` | Parallel searches per turn |
+| `RESIDENT_CAPACITY_ENABLED` | `false` | Serve resident model bindings via admission |
+| `RESIDENT_INFERENCE_SUBSTRATE` | `serve` | Resident replica substrate (`serve` or `dev_model`) |
+| `RESIDENT_SERVE_ACCESS_MODE` | `forward` | Materialized replica endpoint access mode |
+| `RESIDENT_ADMISSION_SLOTS` | `8` | Conservative safe admission slots per replica |
+| `RESIDENT_MAX_REPLICAS_PER_FAMILY` | `1` | Replica quota per service family |
+| `RESIDENT_MAX_COLD_STARTS` | `1` | Concurrent cold starts |
+| `RESIDENT_COLD_START_DEADLINE_SEC` | `300` | Cold-start / admission wait budget (seconds) |
+| `RESIDENT_POLL_INTERVAL_SEC` | `1` | Admission wait poll interval (seconds) |
+| `RESIDENT_SERVE_TTL_SEC` | – | Materialized replica TTL (seconds) |
+| `RESIDENT_ALLOWED_MODELS` | – | Comma-separated allowed model catalog; any if empty |
+| `RESIDENT_FORWARD_API_KEY` | – | Credential the adapter presents to a keyless replica |
+| `RESIDENT_SELECTION_STRATEGY` | `batch-aware-best-fit` | Per-family replica-selection strategy |
+| `RESIDENT_IDLE_RETAIN_SEC` | `0` | Idle retain window before teardown; 0 disables |
+| `RESIDENT_IDLE_SWEEP_INTERVAL_SEC` | `30` | Idle-teardown sweep interval (seconds) |
 | `ENABLE_WORKER_WATCHDOG` | `true` | Worker death detection |
 | `WORKER_DEATH_GRACE_SEC` | `60` | Grace period before marking dead |
 | `WORKER_REHYDRATION_GRACE_SEC` | `120` | Extra grace for a worker's rehydrated in-flight tasks after the root restarts, before the watchdog may reclaim them |

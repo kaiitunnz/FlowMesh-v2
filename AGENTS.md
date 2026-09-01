@@ -36,6 +36,10 @@ and artifacts.
   hierarchy: single task, multi-stage DAG (`spec.stages`), graph DAG
   (`taskType: graph_template`), and schedule hints (`epoch_groups`,
   `schedule_in_epoch_order`).
+- **[`docs/RESIDENT_CAPACITY.md`](docs/RESIDENT_CAPACITY.md)** — resident-capacity
+  control: the Admission controller and Lifecycle & scale manager, the `CS`
+  stores, the claim-admission FSM and its fencing/credit-release rules, and the
+  inference substrate. Read before touching `src/server/resident/`.
 - **[`docs/ENV.md`](docs/ENV.md)** — curated server / worker /
   supervisor env var tables (the knobs you actually tune). Full schema
   in `cli/stack/src/flowmesh_cli_stack/env_schema.py`.

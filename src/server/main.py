@@ -1,4 +1,5 @@
 import argparse
+import asyncio
 import atexit
 import importlib
 import inspect
@@ -25,8 +26,11 @@ from .clients import RedisClient
 from .config import NodeRole, ServerConfig
 from .dispatcher.factory import create_dispatcher
 from .hooks import register
+from .orchestration.tool_dispatch import ToolInvocationEnvelope
 from .registries import WorkerRegistry, WorkflowRegistry
 from .registries.node import NodeRegistry
+from .registries.resident import ResidentRegistry
+from .resident.wiring import build_resident_capacity
 from .routers import docs, health, v1
 from .services.agent_model_gateway import (
     AgentModelGateway,
@@ -122,6 +126,8 @@ EVENT_MONITOR = None
 LOG_ARCHIVER = None
 AGENT_MODEL_GATEWAY = None
 FABRIC_TOOL_BROKER = None
+RESIDENT_CONTROL = None
+RESIDENT_REGISTRY = None
 
 if IS_ROOT_NODE:
     WORKFLOW_REGISTRY = WorkflowRegistry(REDIS_CLIENT)
@@ -163,6 +169,30 @@ if IS_ROOT_NODE:
         return to_gateway_binding(pinned, MODEL_SECRET_VAULT, workflow_id)
 
     AGENT_MODEL_GATEWAY.set_binding_resolver(_resolve_gateway_binding)
+
+    if config.orchestration.resident.enabled:
+        RESIDENT_REGISTRY = ResidentRegistry(REDIS_CLIENT)
+
+        def _resident_owner():
+            return app.state.system_principal
+
+        RESIDENT_CONTROL = build_resident_capacity(
+            runtime=RUNTIME,
+            orchestration=config.orchestration,
+            system_principal=_resident_owner,
+            registry=RESIDENT_REGISTRY,
+            logger=logger,
+        )
+        RUNTIME.set_resident_terminal_hook(RESIDENT_CONTROL.on_invocation_terminal)
+
+        def _model_settle(env: ToolInvocationEnvelope) -> None:
+            assert RESIDENT_CONTROL is not None and AGENT_MODEL_GATEWAY is not None
+            if RESIDENT_CONTROL.is_resident(env.task_id):
+                RESIDENT_CONTROL.settle(env)
+            else:
+                AGENT_MODEL_GATEWAY.settle(env)
+
+        RUNTIME.set_model_settler(_model_settle)
 
     DISPATCHER = create_dispatcher(
         config.dispatch,
@@ -396,6 +426,12 @@ async def _lifespan(_: FastAPI):
         if IS_ROOT_NODE:
             if RUNTIME is not None:
                 await RUNTIME.rehydrate()
+            if RESIDENT_CONTROL is not None and RESIDENT_REGISTRY is not None:
+                RESIDENT_CONTROL.bind_loop(asyncio.get_running_loop())
+                snapshot = await RESIDENT_REGISTRY.load_snapshot_async()
+                if snapshot is not None:
+                    RESIDENT_CONTROL.rehydrate(snapshot)
+                RESIDENT_CONTROL.start()
             if PORT_FORWARD_SERVICE is not None:
                 await PORT_FORWARD_SERVICE.start()
             _start_root_threads()
@@ -437,6 +473,8 @@ async def _lifespan(_: FastAPI):
 
             # --- Root-only shutdown ---
             _stop_background()
+            if RESIDENT_CONTROL is not None:
+                RESIDENT_CONTROL.shutdown()
             if AGENT_MODEL_GATEWAY is not None:
                 AGENT_MODEL_GATEWAY.shutdown()
             if FABRIC_TOOL_BROKER is not None:
