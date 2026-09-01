@@ -512,6 +512,7 @@ app.state.port_forward = PORT_FORWARD_SERVICE
 app.state.ssh_audit = SSH_AUDIT_SERVICE
 app.state.ssh_proxy_enabled = config.port_forward.ssh_proxy_enabled and IS_ROOT_NODE
 app.state.serve_proxy_enabled = config.port_forward.serve_proxy_enabled and IS_ROOT_NODE
+app.state.resident_control = RESIDENT_CONTROL
 
 # Routers — shared
 app.include_router(health.router)
@@ -528,6 +529,7 @@ if IS_ROOT_NODE:
     app.include_router(v1.results.router, prefix=v1_prefix)
     app.include_router(v1.ssh.router, prefix=v1_prefix)
     app.include_router(v1.serve.router, prefix=v1_prefix)
+    app.include_router(v1.resident.router, prefix=v1_prefix)
     app.include_router(v1.system.router, prefix=v1_prefix)
     app.include_router(v1.traces.router, prefix=v1_prefix)
     if AGENT_MODEL_GATEWAY is not None:

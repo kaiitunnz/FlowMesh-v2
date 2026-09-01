@@ -94,6 +94,20 @@ Server policy toggles: `ENABLE_SERVER_SSH_PROXY`,
 PAT-exempt: authenticated solely by the task's vLLM api-key, not a Lumid PAT.
 Gated by `ENABLE_SERVER_SERVE_PROXY`.
 
+## Resident
+
+SYSTEM/ADMIN-gated read-only views into resident-capacity control. Empty when resident
+capacity is disabled.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/v1/resident/families` | List registered service families. |
+| GET | `/api/v1/resident/replicas` | List replica incarnations (state, health, `serve_task_id`, endpoint host/port). Filter: `family`. |
+| GET | `/api/v1/resident/claims` | List credit-bearing admission claims and per-replica held credit. |
+
+Endpoint responses carry host and port only — never an `api_key`. Read a replica's serving
+logs via its `serve_task_id` through `GET /api/v1/tasks/{id}/logs`.
+
 ## System
 
 | Method | Path | Description |

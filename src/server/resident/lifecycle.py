@@ -31,7 +31,7 @@ from .stores import ResidentStores
 # Submits the family's serve substrate and returns the backing serve task id.
 MaterializeFn = Callable[[ServiceFamily, ReplicaIncarnation], Awaitable[str]]
 # Tears down a replica's backing serve task.
-StopFn = Callable[[str], Awaitable[None]]
+StopFn = Callable[[str], None]
 
 _ACTIVE_REPLICA_STATES: frozenset[ReplicaState] = frozenset(
     {
@@ -179,7 +179,7 @@ class LifecycleScaleManager:
         self.refresh_report(replica_id)
         self._persist()
 
-    async def stop(self, replica_id: str) -> None:
+    def stop(self, replica_id: str) -> None:
         """Complete an idle teardown once a drained replica holds no admitted work."""
         replica = self._stores.directory.get(replica_id)
         if replica is None:
@@ -191,10 +191,9 @@ class LifecycleScaleManager:
         replica.updated_at = now_iso()
         self._promote_lease(replica_id, ReplicaState.STOPPED)
         self._persist()
-        if self._stop_fn is not None and replica.serve_task_id is not None:
-            await self._stop_fn(replica.serve_task_id)
+        self._reap_serve_task(replica.serve_task_id)
 
-    async def sweep_idle(self, *, now_ts: float | None = None) -> None:
+    def sweep_idle(self, *, now_ts: float | None = None) -> None:
         """Drain idle servable replicas past the retain window, then stop drained ones.
 
         A conservative scale-down: a servable replica holding no admission credit and
@@ -211,23 +210,34 @@ class LifecycleScaleManager:
                 if held == 0 and self._idle_past_retain(replica, reference):
                     self.drain(replica.replica_id)
             elif replica.state is ReplicaState.DRAINING and held == 0:
-                await self.stop(replica.replica_id)
+                self.stop(replica.replica_id)
 
     def _idle_past_retain(self, replica: ReplicaIncarnation, reference: float) -> bool:
         idle_for = reference - parse_iso_ts(replica.last_active_at)
         return idle_for >= self._idle_retain_sec
 
     def on_preempt(self, replica_id: str) -> None:
-        """Invalidate a preempted or failed replica incarnation for reconciliation."""
+        """Invalidate a preempted or failed replica incarnation for reconciliation.
+
+        Reaps the invalidated incarnation's backing serve task so a replica the family
+        will re-materialize from zero does not leave an orphaned serve workflow running.
+        """
         replica = self._stores.directory.get(replica_id)
         if replica is None:
             return
+        serve_task_id = replica.serve_task_id
         replica.state = ReplicaState.PREEMPTED
         replica.healthy = False
         replica.incarnation += 1
         replica.updated_at = now_iso()
         self._promote_lease(replica_id, ReplicaState.PREEMPTED)
         self._persist()
+        self._reap_serve_task(serve_task_id)
+
+    def _reap_serve_task(self, serve_task_id: str | None) -> None:
+        """Cancel a replica's backing serve task; absent or terminal is a no-op."""
+        if self._stop_fn is not None and serve_task_id is not None:
+            self._stop_fn(serve_task_id)
 
     def _promote_lease(self, replica_id: str, state: ReplicaState) -> None:
         replica = self._stores.directory.get(replica_id)

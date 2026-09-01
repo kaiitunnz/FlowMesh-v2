@@ -29,6 +29,7 @@ from .state import (
     ClaimTerminalReason,
     ProvisioningDenialReason,
     ReplicaEndpoint,
+    ReplicaIncarnation,
     ReplicaState,
     ResidentSnapshot,
     ServiceClaim,
@@ -102,7 +103,7 @@ class ResidentCapacityControl:
             while True:
                 await asyncio.sleep(self._idle_sweep_interval)
                 try:
-                    await self._lifecycle.sweep_idle()
+                    self._lifecycle.sweep_idle()
                 except Exception:
                     self._logger.exception("resident idle sweep failed")
         except asyncio.CancelledError:
@@ -134,6 +135,27 @@ class ResidentCapacityControl:
         """
         reason = ClaimTerminalReason.FAILED if failed else ClaimTerminalReason.COMPLETED
         self._admission.on_ds_terminal(invocation_id, reason)
+
+    def list_service_families(self) -> list[ServiceFamily]:
+        """The registered service families, for operator read access."""
+        return self._stores.families.all()
+
+    def list_replica_incarnations(self) -> list[ReplicaIncarnation]:
+        """Every replica incarnation in the directory, inert ones included."""
+        return self._stores.directory.all()
+
+    def list_credit_bearing_claims(self) -> tuple[list[ServiceClaim], dict[str, int]]:
+        """The credit-bearing claims and the per-replica held credit derived on read.
+
+        The held count recomputes from the authoritative claims through the credit
+        ledger; it is never a stored counter.
+        """
+        claims = [c for c in self._stores.claims.all() if c.holds_credit]
+        held = {
+            replica_id: self._stores.credit_ledger.held(replica_id)
+            for replica_id in {c.replica_id for c in claims if c.replica_id is not None}
+        }
+        return claims, held
 
     def rehydrate(self, snapshot: ResidentSnapshot) -> None:
         """Rebuild the authoritative CS facts and reconcile in-flight claims after a

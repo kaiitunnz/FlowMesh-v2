@@ -56,10 +56,12 @@ def build_resident_capacity(
             runtime, system_principal(), cfg, family, replica, logger
         )
 
-    async def stop(serve_task_id: str) -> None:
+    def stop(serve_task_id: str) -> None:
         record = runtime.get_record(serve_task_id)
         if record is not None:
-            runtime.cancel_workflow(record.workflow_id, reason="resident idle teardown")
+            runtime.cancel_workflow(
+                record.workflow_id, reason="resident replica teardown"
+            )
 
     lifecycle = LifecycleScaleManager(
         stores,
