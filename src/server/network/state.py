@@ -150,6 +150,7 @@ class RouteObservation(BaseModel):
     origin_id: str
     policy_class: PolicyClass
     target_node_id: str
+    incarnation: int
     listener_generation: int
     transport: Transport
     outcome: RouteObservationOutcome
@@ -168,6 +169,7 @@ class ReachabilityEntry(BaseModel):
     origin_id: str
     policy_class: PolicyClass
     target_node_id: str
+    incarnation: int
     listener_generation: int
     transport: Transport
     state: ReachabilityState = ReachabilityState.UNKNOWN

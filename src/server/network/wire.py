@@ -2,8 +2,7 @@
 
 A request is a length-prefixed payload; a response is a status byte plus, on success,
 the echoed payload. The frame is end-to-end between the origin deputy and the target
-sidecar, so a relay hop stays byte-transparent. This is a test capability — it never
-carries a resident request.
+sidecar, so a relay hop stays byte-transparent.
 """
 
 import asyncio
@@ -30,3 +29,9 @@ async def read_frame(reader: asyncio.StreamReader) -> bytes:
     if size > _MAX_FRAME_BYTES:
         raise ValueError(f"frame too large: {size}")
     return await reader.readexactly(size)
+
+
+def split_host_port(endpoint: str) -> tuple[str, int]:
+    """Split a ``host:port`` endpoint, defaulting the host to loopback."""
+    host, _, port = endpoint.rpartition(":")
+    return host or "127.0.0.1", int(port)

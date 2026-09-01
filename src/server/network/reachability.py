@@ -1,16 +1,18 @@
 """The derived network reachability view.
 
-A directional, endpoint-/policy-class-scoped view over classified route observations. It
-holds no authority: it never admits capacity, mints a claim, or issues a route — it only
-records whether a path has been seen to work, fail, or is untried. Entries are keyed by
-``(origin, policy class, target node, listener generation, transport)`` and created
-lazily (demand-paged); a query for an unseen key returns ``UNKNOWN`` without allocating.
+A directional, endpoint-/policy-class-scoped view over classified route observations.
+It records only whether a path has been seen to work, fail, or is untried. Entries are
+keyed by ``(origin, policy class, target node, incarnation, listener generation,
+transport)``, created lazily; a query for an unseen key returns ``UNKNOWN`` and
+allocates nothing.
 
-State machine: ``UNKNOWN`` → ``OPTIMISTIC`` when a route is attempted → ``VERIFIED`` on
-a successful observation, or ``DEMOTED`` on a network-path failure with a negative TTL
-and bounded retry backoff. Authority, tenant, fence, application, and engine failures do
-not evidence the path and leave the state unchanged. Keying by listener generation
-fences a stale advertisement: a new generation gets fresh ``UNKNOWN`` entries.
+State machine: ``UNKNOWN`` → ``OPTIMISTIC`` on an attempt → ``VERIFIED`` on a success,
+or ``DEMOTED`` on a network-path failure. A demotion holds until its retry backoff cools
+or its negative TTL forgets it, whichever comes first, and the backoff climbs across
+repeated failures toward its cap. Authority, tenant, fence, application, and engine
+failures are not path evidence and leave the state unchanged. Keying by incarnation and
+listener generation fences a stale advertisement: a recreated incarnation gets fresh
+entries and never inherits a dead one's state.
 """
 
 from dataclasses import dataclass
@@ -25,7 +27,11 @@ from .state import (
     is_demoting,
 )
 
-_ReachabilityKey = tuple[str, PolicyClass, str, int, Transport]
+_ReachabilityKey = tuple[str, PolicyClass, str, int, int, Transport]
+
+# Cap the backoff exponent so a long-dead path cannot grow the shift without bound; the
+# computed backoff is separately clamped to ``backoff_max_sec``.
+_MAX_BACKOFF_SHIFT = 30
 
 
 @dataclass(frozen=True)
@@ -50,16 +56,25 @@ class NetworkReachabilityView:
         origin_id: str,
         policy_class: PolicyClass,
         target_node_id: str,
+        incarnation: int,
         listener_generation: int,
         transport: Transport,
     ) -> _ReachabilityKey:
-        return (origin_id, policy_class, target_node_id, listener_generation, transport)
+        return (
+            origin_id,
+            policy_class,
+            target_node_id,
+            incarnation,
+            listener_generation,
+            transport,
+        )
 
     def mark_optimistic(
         self,
         origin_id: str,
         policy_class: PolicyClass,
         target_node_id: str,
+        incarnation: int,
         listener_generation: int,
         transport: Transport,
         *,
@@ -67,52 +82,63 @@ class NetworkReachabilityView:
     ) -> None:
         """Move an untried or cooled-down key to ``OPTIMISTIC`` before an attempt.
 
-        A verified or still-backing-off entry is left as is: an attempt does not erase a
-        known outcome.
+        A verified or still-demoted entry is left as is: an attempt does not erase a
+        known outcome. A prior failure count is carried forward so a re-attempt after
+        cool-down keeps escalating the backoff rather than resetting it.
         """
         key = self._key(
-            origin_id, policy_class, target_node_id, listener_generation, transport
+            origin_id,
+            policy_class,
+            target_node_id,
+            incarnation,
+            listener_generation,
+            transport,
         )
         entry = self._entries.get(key)
         state = entry.state if entry is not None else ReachabilityState.UNKNOWN
         if state is ReachabilityState.VERIFIED and not self._expired(entry, now):
             return
-        if state is ReachabilityState.DEMOTED and self._backing_off(entry, now):
+        if state is ReachabilityState.DEMOTED and self._demoted_active(entry, now):
             return
         self._entries[key] = ReachabilityEntry(
             origin_id=origin_id,
             policy_class=policy_class,
             target_node_id=target_node_id,
+            incarnation=incarnation,
             listener_generation=listener_generation,
             transport=transport,
             state=ReachabilityState.OPTIMISTIC,
+            retries=entry.retries if entry is not None else 0,
         )
 
     def observe(self, obs: RouteObservation, *, now: float) -> None:
         """Settle a key from an attempt's classified outcome.
 
-        A path failure demotes with a negative TTL and exponential backoff; a success
-        verifies with a positive TTL. A non-path (authority/tenant/fence/application/
-        engine) outcome is not evidence about the path and leaves the state unchanged.
+        A path failure demotes and escalates the backoff from the carried failure
+        count; a success verifies and clears it. A non-path (authority/tenant/fence/
+        application/engine) outcome is not path evidence and leaves the state unchanged.
         """
         key = self._key(
             obs.origin_id,
             obs.policy_class,
             obs.target_node_id,
+            obs.incarnation,
             obs.listener_generation,
             obs.transport,
         )
         prior = self._entries.get(key)
         if is_demoting(obs.outcome):
             retries = (prior.retries + 1) if prior is not None else 1
+            shift = min(retries - 1, _MAX_BACKOFF_SHIFT)
             backoff = min(
-                self._bounds.backoff_base_sec * (2 ** (retries - 1)),
+                self._bounds.backoff_base_sec * (2**shift),
                 self._bounds.backoff_max_sec,
             )
             self._entries[key] = ReachabilityEntry(
                 origin_id=obs.origin_id,
                 policy_class=obs.policy_class,
                 target_node_id=obs.target_node_id,
+                incarnation=obs.incarnation,
                 listener_generation=obs.listener_generation,
                 transport=obs.transport,
                 state=ReachabilityState.DEMOTED,
@@ -125,6 +151,7 @@ class NetworkReachabilityView:
                 origin_id=obs.origin_id,
                 policy_class=obs.policy_class,
                 target_node_id=obs.target_node_id,
+                incarnation=obs.incarnation,
                 listener_generation=obs.listener_generation,
                 transport=obs.transport,
                 state=ReachabilityState.VERIFIED,
@@ -137,6 +164,7 @@ class NetworkReachabilityView:
         origin_id: str,
         policy_class: PolicyClass,
         target_node_id: str,
+        incarnation: int,
         listener_generation: int,
         transport: Transport,
         *,
@@ -144,12 +172,18 @@ class NetworkReachabilityView:
     ) -> ReachabilityState:
         """The current reachability, applying TTL expiry and backoff cool-down.
 
-        A verified entry past its positive TTL and a demoted entry past its backoff both
-        return ``UNKNOWN`` so the resolver may re-attempt optimistically.
+        A verified entry past its positive TTL returns ``UNKNOWN`` for re-verification.
+        A demoted entry stays ``DEMOTED`` only while backing off and within its negative
+        TTL; once either lapses it returns ``UNKNOWN`` for an optimistic retry.
         """
         entry = self._entries.get(
             self._key(
-                origin_id, policy_class, target_node_id, listener_generation, transport
+                origin_id,
+                policy_class,
+                target_node_id,
+                incarnation,
+                listener_generation,
+                transport,
             )
         )
         if entry is None:
@@ -163,7 +197,7 @@ class NetworkReachabilityView:
         if entry.state is ReachabilityState.DEMOTED:
             return (
                 ReachabilityState.DEMOTED
-                if self._backing_off(entry, now)
+                if self._demoted_active(entry, now)
                 else ReachabilityState.UNKNOWN
             )
         return entry.state
@@ -178,6 +212,11 @@ class NetworkReachabilityView:
 
     def entries(self) -> list[ReachabilityEntry]:
         return list(self._entries.values())
+
+    def _demoted_active(self, entry: ReachabilityEntry | None, now: float) -> bool:
+        # A demotion holds while it is still backing off and not yet past the negative
+        # TTL forget ceiling — whichever bound elapses first releases it.
+        return self._backing_off(entry, now) and not self._expired(entry, now)
 
     @staticmethod
     def _expired(entry: ReachabilityEntry | None, now: float) -> bool:

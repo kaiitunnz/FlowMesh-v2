@@ -18,11 +18,6 @@ from .relay import RelaySession
 _ConnHandler = Callable[[asyncio.StreamReader, asyncio.StreamWriter], Awaitable[None]]
 
 
-def _split_host_port(endpoint: str) -> tuple[str, int]:
-    host, _, port = endpoint.rpartition(":")
-    return host or "127.0.0.1", int(port)
-
-
 async def _close(writer: asyncio.StreamWriter) -> None:
     try:
         writer.close()
@@ -37,7 +32,7 @@ class _TcpServer:
     def __init__(
         self, endpoint: str, handler: _ConnHandler, *, logger: logging.Logger | None
     ) -> None:
-        self._host, self._port = _split_host_port(endpoint)
+        self._host, self._port = wire.split_host_port(endpoint)
         self._handler = handler
         self._logger = logger
         self._server: asyncio.Server | None = None
@@ -78,7 +73,7 @@ async def _echo_connection(
 def _fixed_relay_connection(
     target: str, *, buffer_bytes: int, logger: logging.Logger | None
 ) -> _ConnHandler:
-    target_host, target_port = _split_host_port(target)
+    target_host, target_port = wire.split_host_port(target)
 
     async def handler(
         reader: asyncio.StreamReader, writer: asyncio.StreamWriter
@@ -105,7 +100,7 @@ def _control_relay_connection(
     ) -> None:
         try:
             target = (await wire.read_frame(reader)).decode()
-            target_host, target_port = _split_host_port(target)
+            target_host, target_port = wire.split_host_port(target)
             target_reader, target_writer = await asyncio.open_connection(
                 target_host, target_port
             )

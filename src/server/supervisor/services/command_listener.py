@@ -455,11 +455,7 @@ class CommandListener:
     async def _handle_deliver_route_plan_cmd(
         self, cmd: CommandMessage
     ) -> CommandResponse:
-        """Run the origin-side deputy over a resolved route and echo a payload.
-
-        This proves the transport ladder and relay mechanics; it forwards no resident
-        request and accepts no claim or route authorization.
-        """
+        """Run the origin-side deputy over a resolved route and echo a payload."""
         payload = cmd.payload or {}
         try:
             resolved = ResolvedRoute.model_validate(payload["resolved_route"])

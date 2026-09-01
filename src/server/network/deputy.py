@@ -3,8 +3,7 @@
 Runs on the origin node and executes a resolved candidate ladder in order, echoing a
 payload over each transport until one round-trips. It executes only the candidates the
 control plane resolved — it never scans an address or invents a peer — and returns a
-classified observation per attempt so the control plane can update reachability. It
-forwards no resident bytes and holds no claim.
+classified observation per attempt so the control plane can update reachability.
 """
 
 import asyncio
@@ -67,7 +66,7 @@ async def _attempt(
 async def _drive(
     candidate: RouteCandidate, payload: bytes
 ) -> tuple[RouteObservationOutcome, bytes | None]:
-    connect_host, connect_port = _split_host_port(candidate.hops[0].endpoint)
+    connect_host, connect_port = wire.split_host_port(candidate.hops[0].endpoint)
     reader, writer = await asyncio.open_connection(connect_host, connect_port)
     try:
         if candidate.transport is Transport.CONTROL_RELAY and len(candidate.hops) > 1:
@@ -91,9 +90,7 @@ async def _echo_exchange(
     if status == wire.STATUS_OK:
         echoed = await reader.readexactly(len(payload))
         return RouteObservationOutcome.VERIFIED, echoed
+    # Only OK / APP_ERROR exist over the echo; a nonstandard status is treated as a path
+    # failure here. When real transports land, a status carrying an auth/fence rejection
+    # must classify as non-demoting to preserve the never-demote-on-non-path invariant.
     return RouteObservationOutcome.ROUTE_FAILURE, None
-
-
-def _split_host_port(endpoint: str) -> tuple[str, int]:
-    host, _, port = endpoint.rpartition(":")
-    return host or "127.0.0.1", int(port)

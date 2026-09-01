@@ -3,9 +3,9 @@
 A ``RelaySession`` bridges two stream pairs (a caller side and a target side) with a
 bounded in-flight buffer, so a slow consumer backpressures a fast producer rather than
 letting the relay grow without limit. It is cancellable and self-cleaning: cancelling or
-completing a session closes both writers. It is a dedicated network-plane mechanism used
-by the node-relay uplink and the control-relay fallback — not the event/log relay — and
-carries only the bytes handed to it, never a resident engine request.
+completing a session closes both writers. It is a dedicated network-plane mechanism,
+distinct from the event/log relay, used by the node-relay uplink and control-relay
+fallback.
 """
 
 import asyncio
@@ -65,7 +65,12 @@ class RelaySession:
     async def _pump(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
-        """One direction, bounded by ``_max_chunks`` in-flight reads (backpressure)."""
+        """One direction, bounded by ``_max_chunks`` in-flight reads (backpressure).
+
+        The reader and writer coroutines run as paired tasks; if one raises (a peer
+        reset mid-transfer), the sibling is cancelled and awaited rather than left
+        blocked on the queue, so an aborted relay orphans no task.
+        """
         queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=self._max_chunks)
 
         async def read_side() -> None:
@@ -83,7 +88,14 @@ class RelaySession:
                 writer.write(chunk)
                 await writer.drain()
 
-        await asyncio.gather(read_side(), write_side())
+        sides = [asyncio.create_task(read_side()), asyncio.create_task(write_side())]
+        try:
+            await asyncio.gather(*sides)
+        finally:
+            for task in sides:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*sides, return_exceptions=True)
 
     async def _close(self, writer: asyncio.StreamWriter) -> None:
         try:

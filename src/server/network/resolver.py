@@ -3,9 +3,8 @@
 ``resolve_route`` is a pure control-plane function: given a trusted ``RouteOrigin``, the
 target replica listener, the target node's endpoint advertisement, and a snapshot of the
 derived reachability view, it returns an ordered, expiry-bounded ``ResolvedRoute``
-candidate ladder. It issues no authority, chooses no capacity, mutates no
-``ServiceClaim`` or reachability entry, and permits no peer discovery — the deputy
-executes only the candidates it returns.
+candidate ladder. It is pure — it mutates nothing and permits no peer discovery; the
+deputy executes only the candidates it returns.
 
 Ladder rules:
 - ``worker_direct`` is legal only when the listener is explicitly directly routable and
@@ -82,6 +81,7 @@ def resolve_route(
             origin.origin_id,
             origin.policy_class,
             listener.node_id,
+            listener.incarnation,
             listener.listener_generation,
             transport,
             now=now,
@@ -139,6 +139,8 @@ def resolve_route(
             ),
         )
 
+    # control_relay needs a target sidecar to relay to (``direct_route``); a listener
+    # with no advertised route therefore yields no candidate at all, by design.
     if control_relay_endpoint is not None and direct_route is not None:
         control_hops: tuple[RouteHop, ...] = (
             RouteHop(

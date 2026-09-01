@@ -1,9 +1,8 @@
 """Feature-gated network-plane route-discovery diagnostics and echo seam.
 
 The echo resolves a route from advertisements and reachability, delivers the plan to the
-origin node's deputy, and folds the returned observations into the reachability view. It
-proves the transport ladder and relay mechanics; it forwards no resident request and
-accepts no ``ServiceClaim`` or ``RouteAuthorization``. Every endpoint is SYSTEM/ADMIN.
+origin node's deputy, and folds the returned observations into the reachability view.
+Every endpoint is SYSTEM/ADMIN.
 """
 
 import base64

@@ -2,6 +2,7 @@
 
 import asyncio
 import socket
+import struct
 
 from server.network.deputy import run_echo
 from server.network.listeners import NetworkControlRelay, NetworkPlaneListeners
@@ -67,6 +68,44 @@ def test_relay_session_round_trips_and_bounds_buffer() -> None:
         return got
 
     assert asyncio.run(run()) == b"relay-me"
+
+
+def test_relay_session_orphans_no_task_on_midstream_reset() -> None:
+    async def run() -> list[asyncio.Task]:
+        async def echo(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+            while data := await reader.read(1024):
+                writer.write(data)
+                await writer.drain()
+            writer.close()
+
+        server = await asyncio.start_server(echo, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        near, peer = socket.socketpair()
+        near.setblocking(False)
+        caller_reader, caller_writer = await asyncio.open_connection(sock=near)
+        target_reader, target_writer = await asyncio.open_connection("127.0.0.1", port)
+        session = RelaySession("rly-reset", buffer_bytes=32768)
+        task = asyncio.create_task(
+            session.relay(caller_reader, caller_writer, target_reader, target_writer)
+        )
+        peer.send(b"hello")
+        await asyncio.sleep(0.05)
+        # Abruptly reset the caller's peer so the caller-side read raises mid-stream.
+        peer.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        peer.close()
+        await asyncio.wait_for(task, 2.0)  # relay completes; it does not hang
+        await asyncio.sleep(0.05)
+        lingering = [
+            t
+            for t in asyncio.all_tasks()
+            if t is not asyncio.current_task() and not t.done()
+        ]
+        server.close()
+        await server.wait_closed()
+        return lingering
+
+    # The reworked pump cancels its sibling on error, so no pump task is orphaned.
+    assert asyncio.run(run()) == []
 
 
 class _Fixture:

@@ -2,8 +2,8 @@
 
 Ties the derived reachability view to the node registry (the durable carrier of endpoint
 advertisements) and the pure resolver. It resolves an ordered route for a trusted
-origin, records the deputy's classified observations, and exposes the directory and
-reachability for diagnostics. It admits no capacity and issues no route authorization.
+origin, records the deputy's classified observations, and exposes endpoints and
+reachability for diagnostics.
 """
 
 import logging
@@ -93,6 +93,7 @@ class NetworkPlane:
                 origin.origin_id,
                 origin.policy_class,
                 listener.node_id,
+                listener.incarnation,
                 listener.listener_generation,
                 candidate.transport,
                 now=now,
@@ -113,6 +114,7 @@ class NetworkPlane:
                     origin_id=origin.origin_id,
                     policy_class=origin.policy_class,
                     target_node_id=listener.node_id,
+                    incarnation=listener.incarnation,
                     listener_generation=listener.listener_generation,
                     transport=transport,
                     outcome=outcome,
@@ -130,6 +132,7 @@ class NetworkPlane:
                 origin.origin_id,
                 origin.policy_class,
                 listener.node_id,
+                listener.incarnation,
                 listener.listener_generation,
                 transport,
                 now=now,
@@ -145,6 +148,7 @@ class NetworkPlane:
                 entry.origin_id,
                 entry.policy_class,
                 entry.target_node_id,
+                entry.incarnation,
                 entry.listener_generation,
                 entry.transport,
                 now=now,
@@ -153,12 +157,21 @@ class NetworkPlane:
                 {
                     "origin_id": entry.origin_id,
                     "target_node_id": entry.target_node_id,
+                    "incarnation": entry.incarnation,
                     "listener_generation": entry.listener_generation,
                     "transport": entry.transport.value,
                     "state": state.value,
                 }
             )
         return snapshot
+
+    def forget_node(self, node_id: str) -> None:
+        """Reclaim a departed node's reachability entries and rotation cursor.
+
+        Wired to node deregistration so the derived view stays bounded under node churn.
+        """
+        self._reachability.invalidate_node(node_id)
+        self._seen_generation.pop(node_id, None)
 
     async def endpoints(self) -> list[NetworkEndpointAdvertisement]:
         nodes = await self._nodes.list_nodes_async()

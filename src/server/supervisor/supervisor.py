@@ -9,7 +9,7 @@ from multiprocessing.process import BaseProcess
 from multiprocessing.queues import Queue as MPQueue
 from queue import Empty as QueueEmpty
 from queue import Full as QueueFull
-from threading import Thread
+from threading import Lock, Thread
 
 from shared.schemas.command import CommandMessage, CommandResponse
 from shared.schemas.network import NetworkEndpointAdvertisement, ReachabilityClass
@@ -241,8 +241,6 @@ def _endpoint_advertisement_provider(
     advertisement and its route evidence. It returns ``None`` when the network plane is
     disabled or unconfigured, leaving the node advertisement absent.
     """
-    from threading import Lock
-
     if not network_cfg.enabled or not network_cfg.endpoint_url:
         return lambda: None
 

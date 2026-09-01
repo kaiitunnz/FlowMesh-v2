@@ -482,14 +482,12 @@ class WebSearchConfig:
 
 @dataclass
 class NetworkPlaneConfig:
-    """Feature-gated network-plane route substrate.
+    """Feature-gated network-plane route substrate knobs.
 
-    It carries no resident traffic: it advertises node network endpoints, derives a
-    reachability view from route observations, resolves ordered route candidates, and
-    proves the transport ladder through a bounded echo. ``endpoint_url`` is the
-    operator-configured node-relay endpoint advertised on registration; ``sidecar_url``
-    is the node-local echo listener the relay uplinks to; ``control_relay_url`` is the
-    root's controlled-fallback relay. TTL/backoff bounds drive the reachability machine.
+    ``endpoint_url`` is the operator-configured node-relay endpoint advertised on
+    registration; ``sidecar_url`` is the node-local echo listener the relay uplinks to;
+    ``control_relay_url`` is the root's controlled-fallback relay. TTL/backoff bounds
+    drive the reachability state machine.
     """
 
     enabled: bool = False
@@ -521,11 +519,8 @@ class NetworkPlaneConfig:
             endpoint_url=_env_or_none(f"{prefix}ENDPOINT_URL"),
             sidecar_url=_env_or_none(f"{prefix}SIDECAR_URL"),
             control_relay_url=_env_or_none(f"{prefix}CONTROL_RELAY_URL"),
-            trust_domain=(os.getenv(f"{prefix}TRUST_DOMAIN") or "flowmesh").strip()
-            or "flowmesh",
-            reachability_class=(
-                os.getenv(f"{prefix}REACHABILITY_CLASS") or "routable"
-            ).strip()
+            trust_domain=_env_or_none(f"{prefix}TRUST_DOMAIN") or "flowmesh",
+            reachability_class=_env_or_none(f"{prefix}REACHABILITY_CLASS")
             or "routable",
             protocols=protocols,
             positive_ttl_sec=parse_float_env(f"{prefix}POSITIVE_TTL_SEC") or 30.0,
