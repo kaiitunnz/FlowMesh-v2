@@ -12,7 +12,9 @@ Ladder rules:
   placement alone is not sufficient.
 - ``node_relay`` goes through the target node's announced endpoint and its node-local
   uplink; it is the initial same-node path as well as the normal cross-node path.
-- ``control_relay`` is the always-available controlled fallback.
+- ``control_relay`` is the always-available controlled fallback, routing through the
+  root relay endpoint and, when the target node advertises one, its node endpoint and
+  node-local uplink to the sidecar.
 
 Candidates a demotion has removed drop out; among those left, verified paths precede
 untried ones, and within a rank the base preference is direct, then node relay, then
@@ -140,13 +142,27 @@ def resolve_route(
         )
 
     # control_relay needs a target sidecar to relay to (``direct_route``); a listener
-    # with no advertised route therefore yields no candidate at all, by design.
+    # with no advertised route therefore yields no candidate at all, by design. When the
+    # target node advertises an endpoint, the fallback routes through it and its
+    # node-local uplink to the sidecar, so it stays viable for a sidecar reachable only
+    # via its node rather than collapsing to the same reachability as worker_direct.
     if control_relay_endpoint is not None and direct_route is not None:
         control_hops: tuple[RouteHop, ...] = (
             RouteHop(
                 transport=Transport.CONTROL_RELAY,
                 endpoint=control_relay_endpoint,
                 node_id=None,
+            ),
+            *(
+                (
+                    RouteHop(
+                        transport=Transport.CONTROL_RELAY,
+                        endpoint=node_endpoint.url,
+                        node_id=node_endpoint.node_id,
+                    ),
+                )
+                if node_endpoint is not None
+                else ()
             ),
             RouteHop(
                 transport=Transport.CONTROL_RELAY,

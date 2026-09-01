@@ -165,7 +165,7 @@ def test_verified_candidate_is_preferred() -> None:
     assert _transports(route)[0] == "node_relay"
 
 
-def test_control_relay_carries_concrete_hops() -> None:
+def test_control_relay_routes_through_node_endpoint() -> None:
     view = NetworkReachabilityView()
     route = resolve_route(
         _origin(),
@@ -177,8 +177,31 @@ def test_control_relay_carries_concrete_hops() -> None:
         control_relay_endpoint="127.0.0.1:5000",
     )
     control = [c for c in route.candidates if c.transport is Transport.CONTROL_RELAY][0]
-    assert control.hops[0].endpoint == "127.0.0.1:5000"
-    assert control.hops[1].endpoint == "127.0.0.1:9001"
+    # Root relay, then the target node's endpoint uplink, then the terminal sidecar.
+    assert [hop.endpoint for hop in control.hops] == [
+        "127.0.0.1:5000",
+        "127.0.0.1:9101",
+        "127.0.0.1:9001",
+    ]
+
+
+def test_control_relay_dials_sidecar_when_node_unadvertised() -> None:
+    view = NetworkReachabilityView()
+    route = resolve_route(
+        _origin(),
+        _listener(directly_routable=True),
+        None,
+        view,
+        now=0.0,
+        route_epoch=1,
+        control_relay_endpoint="127.0.0.1:5000",
+    )
+    control = [c for c in route.candidates if c.transport is Transport.CONTROL_RELAY][0]
+    # With no node endpoint the fallback dials the sidecar directly from the root.
+    assert [hop.endpoint for hop in control.hops] == [
+        "127.0.0.1:5000",
+        "127.0.0.1:9001",
+    ]
 
 
 def test_resolver_is_pure() -> None:

@@ -179,6 +179,24 @@ def test_control_relay_round_trip() -> None:
     assert outcome.echoed == b"controlled"
 
 
+def test_control_relay_chains_through_node_endpoint() -> None:
+    async def run():
+        async with _Fixture() as fx:
+            route = _route(
+                _candidate(
+                    Transport.CONTROL_RELAY,
+                    f"127.0.0.1:{fx.control_port}",
+                    f"127.0.0.1:{fx.relay_port}",
+                    f"127.0.0.1:{fx.sidecar_port}",
+                )
+            )
+            return await run_echo(route, b"via-node", connect_budget_sec=3.0)
+
+    outcome = asyncio.run(run())
+    assert outcome.selected_transport is Transport.CONTROL_RELAY
+    assert outcome.echoed == b"via-node"
+
+
 def test_connect_failure_falls_to_next_candidate() -> None:
     async def run():
         async with _Fixture() as fx:
