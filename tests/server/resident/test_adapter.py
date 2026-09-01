@@ -45,13 +45,24 @@ def test_issue_returns_completion_and_authenticates():
     assert seen["auth"] == "Bearer k"
 
 
-def test_connection_refusal_is_pre_acceptance():
+def test_connection_refusal_is_pre_acceptance_connection_failure():
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("refused")
 
     with pytest.raises(AdapterError) as excinfo:
         asyncio.run(_adapter(handler).issue(_HANDOFF, "hi"))
     assert excinfo.value.pre_acceptance is True
+    assert excinfo.value.connection_failure is True
+
+
+def test_http_status_is_pre_acceptance_but_not_a_connection_failure():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, json={"error": "overloaded"})
+
+    with pytest.raises(AdapterError) as excinfo:
+        asyncio.run(_adapter(handler).issue(_HANDOFF, "hi"))
+    assert excinfo.value.pre_acceptance is True
+    assert excinfo.value.connection_failure is False
 
 
 def test_mid_request_loss_is_post_acceptance():

@@ -82,6 +82,31 @@ class _FlakyAdapter:
         return self.completion
 
 
+class _DeadThenLiveAdapter:
+    """Unreachable for the first replica it sees, reachable for any later replica."""
+
+    def __init__(self, completion="OK"):
+        self.completion = completion
+        self.dead_replica = None
+
+    async def issue(self, handoff, request_payload):
+        if self.dead_replica is None:
+            self.dead_replica = handoff.replica_id
+        if handoff.replica_id == self.dead_replica:
+            raise AdapterError(
+                "connection refused", pre_acceptance=True, connection_failure=True
+            )
+        return self.completion
+
+
+class _StatusAdapter:
+    """Fails pre-acceptance with a transient HTTP status (a live replica), never a
+    connection failure."""
+
+    async def issue(self, handoff, request_payload):
+        raise AdapterError("503", pre_acceptance=True, connection_failure=False)
+
+
 def _build(*, limits=None, adapter=None, materialize_fn=None):
     stores = ResidentStores()
     limits = limits or ResidentPolicyLimits()
@@ -181,6 +206,38 @@ def test_rehydrate_preempts_a_warm_replica_whose_serve_task_is_gone():
     states = {r.state for r in fresh_stores.directory.all()}
     assert ReplicaState.WARM not in states
     assert ReplicaState.PREEMPTED in states
+
+
+def test_connection_failure_invalidates_replica_and_self_heals():
+    svc, stores, settled = _build(adapter=_DeadThenLiveAdapter())
+
+    # First invocation: the replica is unreachable, so it is invalidated and the
+    # boundary settles an error; no servable replica or held credit remains.
+    asyncio.run(svc._serve_invocation(_env("inv-1")))
+    assert settled[-1][3] is not None
+    assert any(r.state is ReplicaState.PREEMPTED for r in stores.directory.all())
+    assert all(not c.holds_credit for c in stores.claims.all())
+    fam = stores.directory.all()[0].family
+    assert not stores.pools.feasible_candidates(
+        fam, AdmissionProfile(engine_batch_key=fam)
+    )
+
+    # The next invocation self-heals: the family re-materializes from zero.
+    asyncio.run(svc._serve_invocation(_env("inv-2")))
+    assert settled[-1] == ("tsk-1", "c1", "OK", None)
+    warm = [r for r in stores.directory.all() if r.state is ReplicaState.WARM]
+    assert len(warm) == 1
+
+
+def test_transient_pre_acceptance_status_does_not_invalidate_the_replica():
+    svc, stores, settled = _build(adapter=_StatusAdapter())
+    asyncio.run(svc._serve_invocation(_env()))
+
+    # The reserved credit is released, but a live replica returning a transient
+    # status is not invalidated.
+    assert settled[-1][3] is not None
+    assert [r for r in stores.directory.all() if r.state is ReplicaState.WARM]
+    assert all(r.state is not ReplicaState.PREEMPTED for r in stores.directory.all())
 
 
 def test_serve_settles_an_error_when_an_internal_path_raises():

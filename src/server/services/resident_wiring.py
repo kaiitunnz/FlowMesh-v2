@@ -24,6 +24,7 @@ from ..resident import (
     ResidentStores,
     ServiceFamily,
 )
+from ..task.models import TERMINAL_TASK_STATUSES
 from ..task.runtime import TaskRuntime
 from .resident_materializer import materialize_resident_replica
 
@@ -76,7 +77,13 @@ def build_resident_capacity(
 
     def endpoint(serve_task_id: str) -> ReplicaEndpoint | None:
         record = runtime.get_record(serve_task_id)
-        if record is None or not record.latest_update:
+        # A terminal or absent serve task is known-dead: report no endpoint so the
+        # replica is invalidated rather than re-reported live.
+        if (
+            record is None
+            or record.status in TERMINAL_TASK_STATUSES
+            or not record.latest_update
+        ):
             return None
         serve = record.latest_update.get("serve")
         if not isinstance(serve, dict):

@@ -243,6 +243,11 @@ class ResidentCapacityControl:
         try:
             completion = await self._adapter.issue(handoff, env.request_payload)
         except AdapterError as exc:
+            if exc.connection_failure and claim.replica_id is not None:
+                # The replica is unreachable: invalidate its incarnation so the next
+                # admission re-materializes the family from zero rather than wedging on
+                # a dead replica. A transient HTTP status leaves a live replica alone.
+                self._lifecycle.on_preempt(claim.replica_id)
             if exc.pre_acceptance and claim.state is ClaimState.RESERVED:
                 # A known pre-acceptance enqueue failure of a fresh reservation releases
                 # its credit directly; no engine ever received it.

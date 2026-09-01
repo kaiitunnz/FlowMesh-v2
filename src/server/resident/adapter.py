@@ -22,11 +22,21 @@ class AdapterError(RuntimeError):
     ``pre_acceptance`` marks a failure before an engine enqueue acknowledgement — a
     connection or refusal that releases the credit as an enqueue failure — apart from a
     loss after the request was received, which reconciles rather than releasing.
+    ``connection_failure`` narrows that further to an unreachable replica (a refused or
+    dropped connection), distinct from a transient HTTP status a live replica returned,
+    so the caller can invalidate a dead incarnation without nuking a healthy one.
     """
 
-    def __init__(self, message: str, *, pre_acceptance: bool) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        pre_acceptance: bool,
+        connection_failure: bool = False,
+    ) -> None:
         super().__init__(message)
         self.pre_acceptance = pre_acceptance
+        self.connection_failure = connection_failure
 
 
 class EngineInvocationAdapter(Protocol):
@@ -98,7 +108,9 @@ class HttpInferenceAdapter:
                 response.raise_for_status()
                 data = response.json()
         except httpx.ConnectError as exc:
-            raise AdapterError(str(exc), pre_acceptance=True) from exc
+            raise AdapterError(
+                str(exc), pre_acceptance=True, connection_failure=True
+            ) from exc
         except httpx.HTTPStatusError as exc:
             raise AdapterError(str(exc), pre_acceptance=True) from exc
         except httpx.HTTPError as exc:
