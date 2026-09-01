@@ -103,7 +103,7 @@ class ResidentCapacityControl:
             while True:
                 await asyncio.sleep(self._idle_sweep_interval)
                 try:
-                    await self._lifecycle.sweep_idle()
+                    self._lifecycle.sweep_idle()
                 except Exception:
                     self._logger.exception("resident idle sweep failed")
         except asyncio.CancelledError:

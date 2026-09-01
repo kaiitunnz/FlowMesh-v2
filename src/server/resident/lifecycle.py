@@ -179,7 +179,7 @@ class LifecycleScaleManager:
         self.refresh_report(replica_id)
         self._persist()
 
-    async def stop(self, replica_id: str) -> None:
+    def stop(self, replica_id: str) -> None:
         """Complete an idle teardown once a drained replica holds no admitted work."""
         replica = self._stores.directory.get(replica_id)
         if replica is None:
@@ -193,7 +193,7 @@ class LifecycleScaleManager:
         self._persist()
         self._reap_serve_task(replica.serve_task_id)
 
-    async def sweep_idle(self, *, now_ts: float | None = None) -> None:
+    def sweep_idle(self, *, now_ts: float | None = None) -> None:
         """Drain idle servable replicas past the retain window, then stop drained ones.
 
         A conservative scale-down: a servable replica holding no admission credit and
@@ -210,7 +210,7 @@ class LifecycleScaleManager:
                 if held == 0 and self._idle_past_retain(replica, reference):
                     self.drain(replica.replica_id)
             elif replica.state is ReplicaState.DRAINING and held == 0:
-                await self.stop(replica.replica_id)
+                self.stop(replica.replica_id)
 
     def _idle_past_retain(self, replica: ReplicaIncarnation, reference: float) -> bool:
         idle_for = reference - parse_iso_ts(replica.last_active_at)

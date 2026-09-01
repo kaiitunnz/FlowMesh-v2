@@ -98,7 +98,7 @@ def test_idle_teardown_only_stops_uncommitted_replica():
     stores.directory.get("rpl-1").serve_task_id = "tsk-serve-1"
     mgr = _manager(stores, stop_fn=stop_fn)
     mgr.drain("rpl-1")
-    asyncio.run(mgr.stop("rpl-1"))
+    mgr.stop("rpl-1")
     assert stores.directory.get("rpl-1").state is ReplicaState.STOPPED
     assert stopped == ["tsk-serve-1"]
 
@@ -131,11 +131,11 @@ def test_idle_sweep_drains_then_stops_an_idle_replica():
     replica.last_active_at = _PAST
     mgr = _manager(stores, stop_fn=stop_fn, idle_retain_sec=30.0)
 
-    asyncio.run(mgr.sweep_idle())
+    mgr.sweep_idle()
     assert stores.directory.get("rpl-1").state is ReplicaState.DRAINING
     assert stopped == []  # drained first, stopped on the next sweep
 
-    asyncio.run(mgr.sweep_idle())
+    mgr.sweep_idle()
     assert stores.directory.get("rpl-1").state is ReplicaState.STOPPED
     assert stopped == ["tsk-serve-1"]
 
@@ -143,12 +143,12 @@ def test_idle_sweep_drains_then_stops_an_idle_replica():
 def test_idle_sweep_retains_a_recent_replica_and_when_disabled():
     disabled = warm_stores()
     disabled.directory.get("rpl-1").last_active_at = _PAST
-    asyncio.run(_manager(disabled, idle_retain_sec=0.0).sweep_idle())
+    _manager(disabled, idle_retain_sec=0.0).sweep_idle()
     assert disabled.directory.get("rpl-1").state is ReplicaState.WARM
 
     recent = warm_stores()
     recent.directory.get("rpl-1").last_active_at = _FUTURE
-    asyncio.run(_manager(recent, idle_retain_sec=1.0).sweep_idle())
+    _manager(recent, idle_retain_sec=1.0).sweep_idle()
     assert recent.directory.get("rpl-1").state is ReplicaState.WARM
 
 
@@ -158,5 +158,5 @@ def test_idle_sweep_holds_a_replica_that_still_holds_credit():
     claim = new_claim(invocation_id="inv-x", family="fam")
     reserve(claim, replica_id="rpl-1", incarnation=1, credit=ClaimCredit(slots=1))
     stores.claims.add(claim)
-    asyncio.run(_manager(stores, idle_retain_sec=1.0).sweep_idle())
+    _manager(stores, idle_retain_sec=1.0).sweep_idle()
     assert stores.directory.get("rpl-1").state is ReplicaState.WARM
