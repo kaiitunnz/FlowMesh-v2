@@ -46,7 +46,7 @@ class EngineInvocationAdapter(Protocol):
     ) -> str: ...
 
 
-def _chat_body(request_payload: str | None, model: str) -> dict[str, Any]:
+def chat_body(request_payload: str | None, model: str) -> dict[str, Any]:
     """Build the OpenAI chat request from a boundary payload.
 
     A payload that is already a chat request (a JSON object carrying ``messages``) is
@@ -91,7 +91,7 @@ class HttpInferenceAdapter:
     async def issue(
         self, endpoint: ReplicaEndpoint, request_payload: str | None
     ) -> str:
-        body = _chat_body(request_payload, endpoint.model)
+        body = chat_body(request_payload, endpoint.model)
         headers = {"Content-Type": "application/json"}
         # A replica's own key when it reports one; else the deployment forward key the
         # adapter holds out-of-band, so a keyless stand-in can reach a keyed upstream.
