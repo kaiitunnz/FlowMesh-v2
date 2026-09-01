@@ -26,6 +26,8 @@ PREFIX_SERVICE_CLAIM = "scl"
 PREFIX_REPLICA = "rpl"
 PREFIX_ALLOCATION_LEASE = "lse"
 PREFIX_ADMISSION_HANDOFF = "hnd"  # nosec B105 - object-id prefix, not a credential
+PREFIX_ROUTE_ORIGIN = "rog"  # nosec B105 - object-id prefix, not a credential
+PREFIX_RELAY_SESSION = "rly"
 
 
 def _uuid_str() -> str:
@@ -112,6 +114,14 @@ def new_admission_handoff_token() -> str:
     return f"{PREFIX_ADMISSION_HANDOFF}-{secrets.token_hex(16)}"
 
 
+def new_route_origin_id() -> str:
+    return f"{PREFIX_ROUTE_ORIGIN}-{secrets.token_hex(16)}"
+
+
+def new_relay_session_id() -> str:
+    return f"{PREFIX_RELAY_SESSION}-{_uuid_hex()}"
+
+
 __all__ = [
     "PREFIX_ACTIVATION",
     "PREFIX_ADMISSION_HANDOFF",
@@ -122,7 +132,9 @@ __all__ = [
     "PREFIX_INVOCATION",
     "PREFIX_MODEL_SECRET",
     "PREFIX_NODE",
+    "PREFIX_RELAY_SESSION",
     "PREFIX_REPLICA",
+    "PREFIX_ROUTE_ORIGIN",
     "PREFIX_SCOPE",
     "PREFIX_SERVICE_CLAIM",
     "PREFIX_SSH_CONNECTION",
@@ -141,7 +153,9 @@ __all__ = [
     "new_invocation_id",
     "new_model_secret_ref",
     "new_node_id",
+    "new_relay_session_id",
     "new_replica_id",
+    "new_route_origin_id",
     "new_scope_id",
     "new_service_claim_id",
     "new_ssh_connection_id",
