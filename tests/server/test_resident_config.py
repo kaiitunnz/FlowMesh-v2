@@ -3,6 +3,7 @@
 import pytest
 
 from server.config import ResidentCapacityConfig
+from server.resident.selection import DEFAULT_SELECTION_STRATEGY
 
 _KEYS = (
     "RESIDENT_SELECTION_STRATEGY",
@@ -17,9 +18,10 @@ def _clear_env(monkeypatch):
         monkeypatch.delenv(key, raising=False)
 
 
-def test_defaults_disable_idle_teardown_and_use_the_default_strategy():
+def test_defaults_disable_idle_teardown_and_use_the_canonical_strategy():
     cfg = ResidentCapacityConfig.from_env()
-    assert cfg.selection_strategy == "batch-aware-best-fit"
+    assert cfg.selection_strategy == DEFAULT_SELECTION_STRATEGY
+    assert ResidentCapacityConfig().selection_strategy == DEFAULT_SELECTION_STRATEGY
     assert cfg.idle_retain_sec == 0.0
     assert cfg.idle_sweep_interval_sec == 30.0
 

@@ -7,6 +7,14 @@ from shared.tasks.specs import ModelBindingMode
 from shared.utils.parsing import parse_bool_env, parse_float_env, parse_int_env
 
 
+def _default_selection_strategy() -> str:
+    # Lazy import: the resident package pulls in the orchestration chain, which imports
+    # this module, so referencing the canonical default at call time breaks the cycle.
+    from .resident.selection import DEFAULT_SELECTION_STRATEGY
+
+    return DEFAULT_SELECTION_STRATEGY
+
+
 class NodeRole(StrEnum):
     ROOT = "root"
     WORKER = "worker"
@@ -394,7 +402,7 @@ class ResidentCapacityConfig:
     serve_ttl_sec: float | None = None
     allowed_models: tuple[str, ...] = ()
     forward_api_key: str | None = None
-    selection_strategy: str = "batch-aware-best-fit"
+    selection_strategy: str = field(default_factory=_default_selection_strategy)
     idle_retain_sec: float = 0.0
     idle_sweep_interval_sec: float = 30.0
 
@@ -413,9 +421,10 @@ class ResidentCapacityConfig:
         access = (
             os.getenv(f"{prefix}SERVE_ACCESS_MODE") or "forward"
         ).strip().lower() or "forward"
+        default_strategy = _default_selection_strategy()
         strategy = (
-            os.getenv(f"{prefix}SELECTION_STRATEGY") or "batch-aware-best-fit"
-        ).strip().lower() or "batch-aware-best-fit"
+            os.getenv(f"{prefix}SELECTION_STRATEGY") or default_strategy
+        ).strip().lower() or default_strategy
         return cls(
             enabled=parse_bool_env(f"{prefix}CAPACITY_ENABLED", False),
             substrate=substrate,
