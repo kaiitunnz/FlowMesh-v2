@@ -10,13 +10,19 @@ from ..resident.state import (
 
 
 class ResidentFamilyInfo(BaseModel):
-    family: str
-    engine_batch_key: str
-    model_ref: str
-    isolation: str | None = None
-    selection_strategy: str
-    warmth: str | None = None
-    created_at: str
+    family: str = Field(description="Service-family identifier.")
+    engine_batch_key: str = Field(
+        description="Engine and batch key a compatible replica is admitted against."
+    )
+    model_ref: str = Field(description="Model reference served by the family.")
+    isolation: str | None = Field(
+        default=None, description="Isolation requirement, if any."
+    )
+    selection_strategy: str = Field(
+        description="Per-family replica-selection strategy."
+    )
+    warmth: str | None = Field(default=None, description="Warmth policy, if any.")
+    created_at: str = Field(description="Family registration timestamp.")
 
     @classmethod
     def project(cls, family: ServiceFamily) -> "ResidentFamilyInfo":
@@ -32,8 +38,8 @@ class ResidentFamilyInfo(BaseModel):
 
 
 class ResidentReplicaEndpointInfo(BaseModel):
-    host: str | None = None
-    port: int | None = None
+    host: str | None = Field(default=None, description="Replica endpoint host.")
+    port: int | None = Field(default=None, description="Replica endpoint port.")
 
     @classmethod
     def parse(cls, base_url: str) -> "ResidentReplicaEndpointInfo":
@@ -42,18 +48,26 @@ class ResidentReplicaEndpointInfo(BaseModel):
 
 
 class ResidentReplicaInfo(BaseModel):
-    replica_id: str
-    family: str
-    incarnation: int
-    state: str
-    healthy: bool
-    serve_task_id: str | None = None
-    worker_id: str | None = None
-    lease_id: str | None = None
-    endpoint: ResidentReplicaEndpointInfo | None = None
-    created_at: str
-    updated_at: str
-    last_active_at: str
+    replica_id: str = Field(description="Replica incarnation identifier.")
+    family: str = Field(description="Owning service-family identifier.")
+    incarnation: int = Field(description="Monotonic incarnation fence.")
+    state: str = Field(description="Replica lifecycle state.")
+    healthy: bool = Field(description="Whether the replica is reporting healthy.")
+    serve_task_id: str | None = Field(
+        default=None, description="Backing serve task identifier."
+    )
+    worker_id: str | None = Field(
+        default=None, description="Worker hosting the replica."
+    )
+    lease_id: str | None = Field(
+        default=None, description="Allocation lease identifier."
+    )
+    endpoint: ResidentReplicaEndpointInfo | None = Field(
+        default=None, description="Reachable endpoint host and port, when known."
+    )
+    created_at: str = Field(description="Replica creation timestamp.")
+    updated_at: str = Field(description="Last state-change timestamp.")
+    last_active_at: str = Field(description="Last admission-activity timestamp.")
 
     @classmethod
     def project(cls, replica: ReplicaIncarnation) -> "ResidentReplicaInfo":
@@ -79,13 +93,17 @@ class ResidentReplicaInfo(BaseModel):
 
 
 class ResidentClaimInfo(BaseModel):
-    claim_id: str
-    invocation_id: str
-    family: str
-    admission_epoch: int
-    state: str
-    replica_id: str | None = None
-    incarnation: int | None = None
+    claim_id: str = Field(description="Admission-claim identifier.")
+    invocation_id: str = Field(description="Linked invocation identifier.")
+    family: str = Field(description="Service-family identifier.")
+    admission_epoch: int = Field(description="Claim admission epoch.")
+    state: str = Field(description="Claim FSM state.")
+    replica_id: str | None = Field(
+        default=None, description="Reserved replica incarnation, if admitted."
+    )
+    incarnation: int | None = Field(
+        default=None, description="Fenced replica incarnation, if admitted."
+    )
 
     @classmethod
     def project(cls, claim: ServiceClaim) -> "ResidentClaimInfo":
@@ -101,10 +119,16 @@ class ResidentClaimInfo(BaseModel):
 
 
 class ResidentReplicaCredit(BaseModel):
-    replica_id: str
-    held_slots: int
+    replica_id: str = Field(description="Replica incarnation identifier.")
+    held_slots: int = Field(
+        description="Admission slots held, recomputed from credit-bearing claims."
+    )
 
 
 class ResidentClaimsView(BaseModel):
-    claims: list[ResidentClaimInfo] = Field(default_factory=list)
-    held_credit: list[ResidentReplicaCredit] = Field(default_factory=list)
+    claims: list[ResidentClaimInfo] = Field(
+        default_factory=list, description="Credit-bearing admission claims."
+    )
+    held_credit: list[ResidentReplicaCredit] = Field(
+        default_factory=list, description="Per-replica held-credit rollup."
+    )
