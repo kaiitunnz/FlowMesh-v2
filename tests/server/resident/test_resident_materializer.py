@@ -20,7 +20,7 @@ from server.auth import require_permission
 from server.config import ResidentCapacityConfig
 from server.hooks import PERMISSION_CHECKERS, RESOURCE_REGISTRARS
 from server.resident import ReplicaIncarnation, ServiceFamily
-from server.services.resident_materializer import materialize_resident_replica
+from server.resident.materializer import materialize_resident_replica
 
 _LOGGER = logging.getLogger("test.resident_materializer")
 _SYSTEM = PrincipalContext(

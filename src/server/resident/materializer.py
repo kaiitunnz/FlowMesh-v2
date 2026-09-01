@@ -16,8 +16,8 @@ from lumid_hooks import PrincipalContext
 
 from ..auth import register_resource
 from ..config import ResidentCapacityConfig
-from ..resident import ReplicaIncarnation, ServiceFamily
 from ..task.runtime import TaskRuntime
+from .state import ReplicaIncarnation, ServiceFamily
 
 
 async def materialize_resident_replica(

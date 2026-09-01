@@ -13,20 +13,16 @@ from lumid_hooks import PrincipalContext
 
 from ..config import OrchestrationConfig
 from ..registries.resident import ResidentRegistry
-from ..resident import (
-    AdmissionController,
-    HttpInferenceAdapter,
-    LifecycleScaleManager,
-    ReplicaEndpoint,
-    ReplicaIncarnation,
-    ResidentCapacityControl,
-    ResidentPolicyLimits,
-    ResidentStores,
-    ServiceFamily,
-)
 from ..task.models import TERMINAL_TASK_STATUSES
 from ..task.runtime import TaskRuntime
-from .resident_materializer import materialize_resident_replica
+from .adapter import HttpInferenceAdapter
+from .admission import AdmissionController
+from .lifecycle import LifecycleScaleManager
+from .materializer import materialize_resident_replica
+from .policy import ResidentPolicyLimits
+from .service import ResidentCapacityControl
+from .state import ReplicaEndpoint, ReplicaIncarnation, ServiceFamily
+from .stores import ResidentStores
 
 # Yields the resolved system principal, read lazily so materialization uses the
 # principal resolved during lifespan startup rather than one captured at wiring time.

@@ -30,6 +30,7 @@ from .orchestration.tool_dispatch import ToolInvocationEnvelope
 from .registries import WorkerRegistry, WorkflowRegistry
 from .registries.node import NodeRegistry
 from .registries.resident import ResidentRegistry
+from .resident.wiring import build_resident_capacity
 from .routers import docs, health, v1
 from .services.agent_model_gateway import (
     AgentModelGateway,
@@ -43,7 +44,6 @@ from .services.metrics import MetricsRecorder
 from .services.model_secret_vault import ModelSecretVault
 from .services.monitoring import EventMonitor
 from .services.port_forward import PortForwardService
-from .services.resident_wiring import build_resident_capacity
 from .services.ssh_audit import SshAuditService
 from .services.watchdog import WorkerWatchdog
 from .supervisor import WorkerSupervisor
