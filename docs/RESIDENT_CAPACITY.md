@@ -78,13 +78,34 @@ TERMINAL --(permitted reissue)--> successor PENDING (same invocation_id, fresh e
 
 ## Handoff and execution
 
-A `RESERVED` claim authorizes one opaque, short-lived, claim-bound admission handoff — a
-descriptor an engine adapter consumes to reach the selected replica and obtain an enqueue
-acknowledgement. It is neither a persisted control object nor a network route authorization.
-The handoff is locality-neutral: its fields are data an adapter consumes, not a
-server-owned client. The default inference adapter consumes it in-server and relays the
-request to the replica's OpenAI-compatible endpoint, so where the bytes run is not fixed by
-the contract.
+A `RESERVED` claim authorizes one single-use, claim-bound admission handoff — the
+pre-`ACCEPTED` bootstrap fence that binds the tenant subject, the fabric `idm-*` request
+identity, the selected replica incarnation and listener generation, an expiry, and a
+candidate route snapshot. It carries no raw engine endpoint or credential and is neither a
+persisted control object nor a `RouteAuthorization`.
+
+When the network plane is off, an in-server adapter consumes the handoff and relays the
+request to the replica's OpenAI-compatible endpoint (read from the replica directory), the
+claim-gated compatibility path.
+
+When [`NETWORK_PLANE_ENABLED`](NETWORK_PLANE.md) is also on, the invocation is carried
+data-direct over the native fabric path and the server never carries the bytes. The
+Lifecycle & scale manager binds a per-replica **resident-facing sidecar** on the replica
+node and advertises its non-secret listener; the sidecar is the enforced claim gate,
+validating every fence against its own incarnation and listener generation before reaching
+the co-located engine. Delivery is two-phase, server-driven over the node-command seam: a
+bootstrap poke delivers the handoff over the origin node's deputy and obtains the engine
+enqueue acknowledgement, at which point the Admission controller records `ACCEPTED` and
+issues the immutable `RouteAuthorization`; a stream poke then carries the authorized
+response over the same held deputy-to-sidecar channel, with cancellation and backpressure.
+A pre-delivery connect failure takes an already-resolved fallback candidate with no
+re-admission; a lost acknowledgement, ambiguous bootstrap, or stream loss is `UNCERTAIN`
+and holds the credit until the fenced DS terminal. Request, stream, and cancel emit
+claim-tagged load evidence, tagged latency-sensitive service traffic versus bulk transfer.
+
+The legacy serve proxy cannot reach a resident allocation: a resident replica's serve task
+is marked resident and the proxy refuses it by allocation identity, independent of its
+access mode. A resident allocation is reachable only through its claim-gated sidecar.
 
 ## Replica lifecycle and policy
 

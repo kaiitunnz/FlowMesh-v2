@@ -183,16 +183,24 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   Admission controller and a Lifecycle & scale manager — over durable control-state
   stores admit an invocation to a compatible model-serving replica, materializing one
   from zero on demand under policy. `ServiceClaim` facts are the sole credit authority;
-  a credit releases only from a fenced ledger terminal consumed by `invocation_id`.
-  Enable with `RESIDENT_CAPACITY_ENABLED=true`. See
-  [`RESIDENT_CAPACITY.md`](RESIDENT_CAPACITY.md).
+  a credit releases only from a fenced ledger terminal consumed by `invocation_id`. When
+  the network plane is also enabled, the invocation is carried data-direct over the fabric
+  path: a per-replica claim-gated sidecar fronts the engine, and delivery is two-phase and
+  server-driven — a bootstrap poke over the origin node's deputy obtains the engine
+  acknowledgement, the Admission controller records `ACCEPTED` and issues the immutable
+  `RouteAuthorization`, then a stream poke carries the authorized response over the
+  data-direct deputy-to-sidecar channel while the server never carries the bytes; a lost
+  or ambiguous delivery is `UNCERTAIN` and holds the credit. Otherwise an in-server adapter
+  relays the request as the claim-gated compatibility path. Enable with
+  `RESIDENT_CAPACITY_ENABLED=true`. See [`RESIDENT_CAPACITY.md`](RESIDENT_CAPACITY.md).
 - **Network-plane route substrate.** A topology-aware, control-resolved routing substrate
   turns trusted node endpoint advertisements and directional reachability evidence into an
   ordered route resolved by a pure resolver, carried over a `worker_direct`, `node_relay`,
-  or `control_relay` transport by an origin-side deputy that never peer-discovers. It is a
-  routing substrate only: it carries no resident traffic and mints no `ServiceClaim` or
-  `RouteAuthorization`. Enable with `NETWORK_PLANE_ENABLED=true`. See
-  [`NETWORK_PLANE.md`](NETWORK_PLANE.md).
+  or `control_relay` transport by an origin-side deputy that never peer-discovers. The
+  substrate holds no admission authority — it mints no `ServiceClaim` or `RouteAuthorization`
+  and its transports carry only what a caller frames over them; resident-capacity control
+  binds it to carry claim-gated resident invocation traffic. Enable with
+  `NETWORK_PLANE_ENABLED=true`. See [`NETWORK_PLANE.md`](NETWORK_PLANE.md).
 - **Task merging.** Compatible adjacent tasks in a DAG (same `taskType`,
   model, hardware shape, and merge key) coalesce into a single dispatch.
   Merged children ride on `WorkerTaskMessage.merged_children`; the worker

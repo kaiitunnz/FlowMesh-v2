@@ -68,6 +68,8 @@ listed here is in `.env.example`.
 | `RESIDENT_SELECTION_STRATEGY` | `batch-aware-best-fit` | Per-family replica-selection strategy |
 | `RESIDENT_IDLE_RETAIN_SEC` | `0` | Idle retain window before teardown; 0 disables |
 | `RESIDENT_IDLE_SWEEP_INTERVAL_SEC` | `30` | Idle-teardown sweep interval (seconds) |
+| `RESIDENT_SIDECAR_BIND_HOST` | `127.0.0.1` | Host a resident sidecar binds on the replica node |
+| `RESIDENT_SIDECAR_DIRECTLY_ROUTABLE` | `false` | Advertise the resident sidecar as directly routable |
 | `NETWORK_PLANE_ENABLED` | `false` | Enable the route-discovery and relay substrate |
 | `NETWORK_PLANE_ENDPOINT_URL` | – | Advertised node-relay endpoint (`host:port`) |
 | `NETWORK_PLANE_SIDECAR_URL` | – | Node-local echo listener (`host:port`) |

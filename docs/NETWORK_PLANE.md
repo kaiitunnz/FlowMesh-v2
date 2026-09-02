@@ -66,10 +66,16 @@ round-trips, and a demoted direct or node path drops out until its backoff cools
   routable listener whose endpoint class the origin's network class can reach, under a
   bounded optimistic connect budget. Shared-node placement alone does not make it legal.
 - **`node_relay`** — caller to the target node's announced endpoint, which uplinks over an
-  authenticated node-local relay session to the resident-facing sidecar. It is the initial
-  same-node path as well as the normal cross-node path.
+  authenticated node-local relay session to the target listener the route names. It is the
+  initial same-node path as well as the normal cross-node path.
 - **`control_relay`** — the controlled fallback: a bounded relay session through the root's
-  relay endpoint to the target sidecar.
+  relay endpoint and, when the target node advertises one, its node endpoint to the target
+  listener.
+
+Each relay hop is target-addressed: it reads one leading frame naming its next hop, dials
+it, and byte-relays the rest, so a route reaches whichever listener its hops name and a
+multi-hop ladder chains through the relays. The origin deputy writes a frame per hop after
+the first; a direct route writes none.
 
 A `RelaySession` bridges two stream pairs with a bounded in-flight buffer, so a slow
 consumer backpressures a fast producer; it is cancellable and self-cleaning. It is a
