@@ -109,10 +109,14 @@ class ResidentRelayAttachment:
                     "relay frame delivery failed; skipping session=%s",
                     entry.frame.session_id,
                 )
-        await self._cursor.set(last_id)
-        await self._streams.trim_up_to(
-            self._node_id, RelayDirection.TARGET_TO_ORIGIN, last_id
-        )
+        # Advance the durable cursor and trim only while this node still owns the leg: a
+        # stuck delivery can outlast the lease, and a lapsed owner that woke after a
+        # successor took over must not rewind the shared cursor or trim under it.
+        if await self._lease.owns(self._node_id, self._LEG, self._owner):
+            await self._cursor.set(last_id)
+            await self._streams.trim_up_to(
+                self._node_id, RelayDirection.TARGET_TO_ORIGIN, last_id
+            )
         return len(entries)
 
     def start(self, loop: asyncio.AbstractEventLoop) -> None:

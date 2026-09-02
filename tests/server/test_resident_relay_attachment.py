@@ -81,6 +81,35 @@ def test_send_up_publishes_a_response_to_the_up_stream() -> None:
     asyncio.run(run())
 
 
+def test_a_lease_that_lapses_mid_delivery_does_not_advance_the_cursor() -> None:
+    async def run() -> None:
+        redis = FakeBinaryRedis()
+        streams = RelayStreamStore(redis)
+        await streams.publish_down("nde-t", relay_frame(RelayFrameKind.DATA, seq=1))
+
+        class _LapsingDelivery(LocalDelivery):
+            def __init__(self) -> None:
+                self.frames: list[str] = []
+
+            async def on_frame(self, frame: RelayFrame) -> None:
+                # A stuck loopback write outlasts the 15s lease: expire it mid-delivery.
+                redis.now += 20.0
+                self.frames.append(f"{frame.session_id}:{frame.seq}")
+
+        delivery = _LapsingDelivery()
+        attachment = ResidentRelayAttachment(redis, "nde-t", delivery, owner="owner-1")
+        assert await attachment.pump_once() == 1
+        assert delivery.frames == ["rly-1:1"]
+        # The lease lapsed during delivery, so the owner must not advance the shared
+        # cursor: a successor reclaims the now-free lease and re-reads the same frame
+        # from the unadvanced cursor rather than the lapsed owner rewinding it.
+        successor, successor_delivery = _attachment(redis, "owner-2")
+        assert await successor.pump_once() == 1
+        assert successor_delivery.frames == ["rly-1:1"]
+
+    asyncio.run(run())
+
+
 def test_only_the_lease_owner_consumes_the_down_stream() -> None:
     async def run() -> None:
         redis = FakeBinaryRedis()
