@@ -107,8 +107,11 @@ def build_resident_capacity(
         limits=limits,
         binding_resolver=runtime.gateway_binding_for,
         settle_cb=runtime.settle_episode_invocation,
+        redispatch_cb=runtime.redispatch_episode_invocation,
         endpoint_probe=endpoint,
         logger=logger,
         poll_interval_sec=cfg.poll_interval_sec,
         idle_sweep_interval_sec=sweep_interval,
+        redrive_backoff_sec=cfg.redrive_backoff_sec,
+        max_transient_redrives=cfg.max_transient_redrives,
     )

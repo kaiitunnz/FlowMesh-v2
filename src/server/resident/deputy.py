@@ -44,12 +44,18 @@ class BootstrapResult:
 
 @dataclass
 class StreamResult:
-    """The stream/cancel phase outcome; a non-ok post-acceptance result is uncertain."""
+    """The stream/cancel phase outcome.
+
+    A non-ok post-acceptance result is uncertain unless ``definite``: the sidecar sets
+    that only when the engine refused with a definite status, so no slot is held and the
+    caller may release rather than hold the credit.
+    """
 
     ok: bool
     completion: str | None = None
     rejection: str | None = None
     cancelled: bool = False
+    definite: bool = False
 
 
 @dataclass
@@ -162,6 +168,12 @@ class ResidentInvocationDeputy:
                     parts.append(str(msg.get("data", "")))
                 elif msg["kind"] == wire.KIND_DONE:
                     return StreamResult(True, completion="".join(parts))
+                elif msg["kind"] == wire.KIND_FAILED:
+                    return StreamResult(
+                        False,
+                        rejection=msg.get("reason"),
+                        definite=bool(msg.get("definite")),
+                    )
                 elif msg["kind"] == wire.KIND_REJECT:
                     return StreamResult(False, rejection=msg.get("reason"))
                 else:

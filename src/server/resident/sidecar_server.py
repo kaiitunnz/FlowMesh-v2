@@ -164,7 +164,18 @@ class ResidentSidecarServer:
             if follow["kind"] != wire.KIND_STREAM:
                 return None
             self._on_load(self._gate.load_evidence(auth, "stream"))
-            engine = await engine_task
+            try:
+                engine = await engine_task
+            except httpx.HTTPStatusError as exc:
+                # The engine refused with a definite status: no slot is held, so the
+                # origin deputy may release the credit rather than hold it.
+                await wire.write_msg(
+                    writer,
+                    wire.KIND_FAILED,
+                    definite=True,
+                    reason=f"engine {exc.response.status_code}",
+                )
+                return None
             async for chunk in engine.chunks:
                 await wire.write_msg(writer, wire.KIND_CHUNK, data=chunk)
             await wire.write_msg(writer, wire.KIND_DONE)

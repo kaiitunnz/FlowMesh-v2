@@ -132,6 +132,7 @@ def _build(*, limits=None, adapter=None, materialize_fn=None):
         limits=limits,
         binding_resolver=lambda task_id: ("wfl-1", _binding()),
         settle_cb=settle_cb,
+        redispatch_cb=lambda *a, **k: False,
         endpoint_probe=lambda serve_task_id: ReplicaEndpoint(
             base_url="http://replica", model="m"
         ),

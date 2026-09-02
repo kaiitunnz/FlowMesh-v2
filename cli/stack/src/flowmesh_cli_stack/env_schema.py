@@ -441,6 +441,20 @@ STACK_ENV_SCHEMA = EnvSchema(
                     min_inclusive=False,
                 ),
                 EnvVar(
+                    "RESIDENT_REDRIVE_BACKOFF_SEC",
+                    "0.5",
+                    description="Backoff before re-driving a held resident invocation.",
+                    var_type=EnvVarType.FLOAT,
+                    min_value=0,
+                ),
+                EnvVar(
+                    "RESIDENT_MAX_TRANSIENT_REDRIVES",
+                    "3",
+                    description="Transient resident losses before a replica preempt.",
+                    var_type=EnvVarType.INT,
+                    min_value=1,
+                ),
+                EnvVar(
                     "RESIDENT_SERVE_TTL_SEC",
                     "",
                     description="Materialized replica TTL (seconds).",

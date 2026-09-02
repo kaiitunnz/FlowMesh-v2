@@ -62,6 +62,8 @@ listed here is in `.env.example`.
 | `RESIDENT_MAX_COLD_STARTS` | `1` | Concurrent cold starts |
 | `RESIDENT_COLD_START_DEADLINE_SEC` | `300` | Cold-start / admission wait budget (seconds) |
 | `RESIDENT_POLL_INTERVAL_SEC` | `1` | Admission wait poll interval (seconds) |
+| `RESIDENT_REDRIVE_BACKOFF_SEC` | `0.5` | Backoff before re-driving a held resident invocation |
+| `RESIDENT_MAX_TRANSIENT_REDRIVES` | `3` | Transient resident losses before a replica preempt |
 | `RESIDENT_SERVE_TTL_SEC` | – | Materialized replica TTL (seconds) |
 | `RESIDENT_ALLOWED_MODELS` | – | Comma-separated allowed model catalog; any if empty |
 | `RESIDENT_FORWARD_API_KEY` | – | Credential the adapter presents to a keyless replica |

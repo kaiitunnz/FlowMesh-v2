@@ -20,6 +20,7 @@ from server.network.state import (
     RouteOrigin,
     Transport,
 )
+from server.orchestration import WorkItemStatus
 from server.orchestration.tool_dispatch import ToolInvocationEnvelope
 from server.resident import (
     AdmissionController,
@@ -136,16 +137,15 @@ def _env(invocation_id: str = "inv-1") -> ToolInvocationEnvelope:
     )
 
 
-def _build(engine: Any) -> tuple[ResidentCapacityControl, ResidentStores, list[Any]]:
+def _make(
+    engine: Any,
+    *,
+    settle_cb: Any,
+    redispatch_cb: Any,
+    backoff: float = 0.0,
+) -> tuple[ResidentCapacityControl, ResidentStores]:
     stores = ResidentStores()
     limits = ResidentPolicyLimits()
-    settled: list[Any] = []
-
-    def settle_cb(
-        task_id: str, call_correlation: str, value: Any, *, error: Any = None
-    ):
-        settled.append((task_id, call_correlation, value, error))
-        return True
 
     async def materialize_fn(family: Any, replica: Any) -> str:
         return "tsk-serve-1"
@@ -182,13 +182,35 @@ def _build(engine: Any) -> tuple[ResidentCapacityControl, ResidentStores, list[A
         limits=limits,
         binding_resolver=lambda task_id: ("wfl-1", _binding()),
         settle_cb=settle_cb,
+        redispatch_cb=redispatch_cb,
         endpoint_probe=lambda serve_task_id: ReplicaEndpoint(
             base_url="http://engine/v1", model="m"
         ),
         native_delivery=native,
         poll_interval_sec=0.01,
+        redrive_backoff_sec=backoff,
     )
-    return svc, stores, settled
+    return svc, stores
+
+
+def _build(
+    engine: Any,
+) -> tuple[ResidentCapacityControl, ResidentStores, list[Any], list[Any]]:
+    settled: list[Any] = []
+    redispatched: list[Any] = []
+
+    def settle_cb(
+        task_id: str, call_correlation: str, value: Any, *, error: Any = None
+    ):
+        settled.append((task_id, call_correlation, value, error))
+        return True
+
+    def redispatch_cb(task_id: str, call_correlation: str) -> bool:
+        redispatched.append((task_id, call_correlation))
+        return False
+
+    svc, stores = _make(engine, settle_cb=settle_cb, redispatch_cb=redispatch_cb)
+    return svc, stores, settled, redispatched
 
 
 class _UnusedAdapter:
@@ -200,7 +222,7 @@ class _UnusedAdapter:
 
 def test_native_delivery_completes_and_releases_on_ds_terminal() -> None:
     async def run() -> None:
-        svc, stores, settled = _build(_good_engine)
+        svc, stores, settled, _ = _build(_good_engine)
         await svc._serve_invocation(_env())
 
         assert settled == [("tsk-1", "c1", "".join(_CHUNKS), None)]
@@ -220,23 +242,36 @@ def test_native_delivery_completes_and_releases_on_ds_terminal() -> None:
     asyncio.run(run())
 
 
-def test_native_stream_loss_is_uncertain_and_survives_restart() -> None:
+def test_native_stream_loss_holds_uncertain_and_requests_a_redrive() -> None:
     async def run() -> None:
-        svc, stores, settled = _build(_loss_engine)
+        svc, stores, settled, redispatched = _build(_loss_engine)
         await svc._serve_invocation(_env())
 
         claim = stores.claims.by_invocation("inv-1")[0]
         rid = claim.replica_id
         assert rid is not None
-        # held, not released on a lost stream
+        # A lost stream is uncertain: the credit is held, not released, and the boundary
+        # is re-driven rather than settled with an error.
         assert claim.state is ClaimState.UNCERTAIN
         assert stores.credit_ledger.held(rid) == 1
-        assert settled[-1][3] is not None  # the boundary settled with an error
+        assert settled == []
+        assert redispatched == [("tsk-1", "c1")]
+
+    asyncio.run(run())
+
+
+def test_native_uncertain_claim_survives_restart() -> None:
+    async def run() -> None:
+        svc, stores, settled, _ = _build(_loss_engine)
+        await svc._serve_invocation(_env())
+        claim = stores.claims.by_invocation("inv-1")[0]
+        rid = claim.replica_id
+        assert rid is not None and claim.state is ClaimState.UNCERTAIN
 
         # A restart rehydrates the ledger: the in-flight claim stays uncertain and holds
         # its credit until the fenced DS terminal.
         snapshot = stores.to_snapshot()
-        fresh, fresh_stores, _ = _build(_loss_engine)
+        fresh, fresh_stores, _, _ = _build(_loss_engine)
         fresh.rehydrate(snapshot)
         resumed = fresh_stores.claims.by_invocation("inv-1")[0]
         assert resumed.state is ClaimState.UNCERTAIN
@@ -247,5 +282,101 @@ def test_native_stream_loss_is_uncertain_and_survives_restart() -> None:
         svc.on_invocation_terminal("inv-1", failed=True)
         assert claim.state is ClaimState.TERMINAL
         assert stores.credit_ledger.held(rid) == 0
+
+    asyncio.run(run())
+
+
+async def _noop() -> None:
+    return None
+
+
+class _FlakyEngine:
+    """Drops the stream ``fail_times`` times, then serves a completion."""
+
+    def __init__(self, fail_times: int) -> None:
+        self.calls = 0
+        self._fail = fail_times
+
+    async def __call__(
+        self, endpoint: ReplicaEndpoint, request: str | None
+    ) -> EngineResponse:
+        self.calls += 1
+        if self.calls <= self._fail:
+
+            async def dropped() -> AsyncIterator[str]:
+                raise ConnectionError("engine dropped mid-stream")
+                yield ""  # pragma: no cover - marks this an async generator
+
+            return EngineResponse(chunks=dropped(), aclose=_noop)
+
+        async def served() -> AsyncIterator[str]:
+            for part in _CHUNKS:
+                yield part
+
+        return EngineResponse(chunks=served(), aclose=_noop)
+
+
+def test_native_stream_loss_redrives_to_completion_through_the_runtime() -> None:
+    # The production seam: model_settler routes through the service, losses hold the
+    # credit and re-drive through the real runtime, and a completion settles the
+    # boundary and releases the credit through the fenced DS terminal — no stub.
+    from server.task.models import TaskStatus
+    from tests.server.task import test_v2_orchestration as v2o
+    from tests.server.task.test_agent_episode_runtime import _AGENT_WF, _step
+    from worker.executors.harness.scripted import ScriptedHarnessAdapter, ScriptedStep
+
+    async def run() -> None:
+        runtime = v2o._runtime(v2o.FakeRegistry())
+        engine = _FlakyEngine(fail_times=2)
+        seen: dict[str, str] = {}
+        svc, stores = _make(
+            engine,
+            settle_cb=runtime.settle_episode_invocation,
+            redispatch_cb=runtime.redispatch_episode_invocation,
+            backoff=0.001,
+        )
+        svc.bind_loop(asyncio.get_running_loop())
+        runtime.set_resident_terminal_hook(svc.on_invocation_terminal)
+
+        def settler(env: ToolInvocationEnvelope) -> None:
+            seen.setdefault("inv", env.invocation_id)
+            svc.settle(env)
+
+        runtime.set_model_settler(settler)
+        workflow_id, ids = await v2o._register(runtime, _AGENT_WF)
+        writer = ids["writer"]
+        adapter = ScriptedHarnessAdapter(
+            [
+                ScriptedStep(
+                    op="boundary",
+                    kind=BoundaryEventKind.INVOCATION,
+                    call="m0",
+                    interface="model",
+                    payload="draft",
+                ),
+                ScriptedStep(op="complete", value_from="m0"),
+            ],
+            "v1",
+        )
+        eng = runtime.orchestration_engine(workflow_id)
+        assert eng is not None
+
+        _step(runtime, adapter, writer)  # model boundary → service → held re-drive loop
+        for _ in range(1000):
+            await asyncio.sleep(0.005)
+            claims = stores.claims.by_invocation(seen.get("inv", ""))
+            if claims and claims[0].state is ClaimState.TERMINAL:
+                break
+        assert engine.calls == 3  # two held re-drives, then a completion
+        claims = stores.claims.by_invocation(seen["inv"])
+        assert len(claims) == 1  # the same claim resumed; no successor was raised
+        assert claims[0].state is ClaimState.TERMINAL
+        assert claims[0].replica_id is not None
+        assert stores.credit_ledger.held(claims[0].replica_id) == 0
+        assert runtime._tasks[writer].status is TaskStatus.PENDING  # re-readied
+
+        _step(runtime, adapter, writer)  # the agent injects the model value, completes
+        wi = eng.work_item(writer)
+        assert wi is not None and wi.status is WorkItemStatus.SETTLED
 
     asyncio.run(run())

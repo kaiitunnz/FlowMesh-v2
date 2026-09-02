@@ -23,6 +23,7 @@ KIND_ACK = "ack"
 KIND_CHUNK = "chunk"
 KIND_DONE = "done"
 KIND_REJECT = "reject"
+KIND_FAILED = "failed"
 
 split_host_port = netwire.split_host_port
 

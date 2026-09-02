@@ -399,6 +399,8 @@ class ResidentCapacityConfig:
     max_concurrent_cold_starts: int = 1
     cold_start_deadline_sec: float = 300.0
     poll_interval_sec: float = 1.0
+    redrive_backoff_sec: float = 0.5
+    max_transient_redrives: int = 3
     serve_ttl_sec: float | None = None
     allowed_models: tuple[str, ...] = ()
     forward_api_key: str | None = None
@@ -441,6 +443,10 @@ class ResidentCapacityConfig:
             cold_start_deadline_sec=parse_float_env(f"{prefix}COLD_START_DEADLINE_SEC")
             or 300.0,
             poll_interval_sec=parse_float_env(f"{prefix}POLL_INTERVAL_SEC") or 1.0,
+            redrive_backoff_sec=parse_float_env(f"{prefix}REDRIVE_BACKOFF_SEC") or 0.5,
+            max_transient_redrives=max(
+                1, parse_int_env(f"{prefix}MAX_TRANSIENT_REDRIVES") or 3
+            ),
             serve_ttl_sec=parse_float_env(f"{prefix}SERVE_TTL_SEC"),
             allowed_models=allowed,
             forward_api_key=_env_or_none(f"{prefix}FORWARD_API_KEY"),

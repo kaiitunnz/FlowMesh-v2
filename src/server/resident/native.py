@@ -39,11 +39,12 @@ class BootstrapReply:
 
 @dataclass(frozen=True)
 class StreamReply:
-    """The stream phase result; a non-ok post-acceptance result is uncertain."""
+    """The stream phase result; a non-ok result is uncertain unless ``definite``."""
 
     ok: bool
     completion: str | None
     rejection: str | None
+    definite: bool = False
 
 
 class NativeTransport:
@@ -130,6 +131,7 @@ class NativeTransport:
             ok=bool(data.get("ok")),
             completion=data.get("completion"),
             rejection=data.get("rejection"),
+            definite=bool(data.get("definite")),
         )
 
     async def cancel(

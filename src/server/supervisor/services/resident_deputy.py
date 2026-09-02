@@ -108,6 +108,7 @@ class ResidentDeputyService:
             "ok": result.ok,
             "completion": result.completion,
             "rejection": result.rejection,
+            "definite": result.definite,
         }
 
     async def cancel(self, payload: dict[str, Any]) -> dict[str, Any]:

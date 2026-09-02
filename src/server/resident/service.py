@@ -51,6 +51,8 @@ from .stores import ResidentStores
 BindingResolver = Callable[[str], tuple[str, AgentModelGatewayBinding] | None]
 # Settles a mediated boundary back at its originating call, or fails it with an error.
 SettleCallback = Callable[..., bool]
+# Re-drives a still-pending mediated boundary off-lane without settling it.
+RedispatchCallback = Callable[[str, str], bool]
 # Reads a serve substrate's reported endpoint once ready, else None.
 EndpointProbe = Callable[[str], ReplicaEndpoint | None]
 # Persists the authoritative CS snapshot.
@@ -107,12 +109,15 @@ class ResidentCapacityControl:
         limits: ResidentPolicyLimits,
         binding_resolver: BindingResolver,
         settle_cb: SettleCallback,
+        redispatch_cb: RedispatchCallback,
         endpoint_probe: EndpointProbe,
         native_delivery: NativeDeliveryDeps | None = None,
         persist: PersistCallback | None = None,
         logger: logging.Logger | None = None,
         poll_interval_sec: float = 1.0,
         idle_sweep_interval_sec: float = 0.0,
+        redrive_backoff_sec: float = 0.5,
+        max_transient_redrives: int = 3,
     ) -> None:
         self._stores = stores
         self._admission = admission
@@ -121,12 +126,16 @@ class ResidentCapacityControl:
         self._limits = limits
         self._resolve_binding = binding_resolver
         self._settle = settle_cb
+        self._redispatch = redispatch_cb
         self._probe_endpoint = endpoint_probe
         self._native = native_delivery
         self._persist = persist or (lambda: None)
         self._logger = logger or logging.getLogger("resident-capacity")
         self._poll_interval = poll_interval_sec
         self._idle_sweep_interval = idle_sweep_interval_sec
+        self._redrive_backoff = redrive_backoff_sec
+        self._max_transient_redrives = max_transient_redrives
+        self._transient_failures: dict[str, int] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
         self._admit_lock = asyncio.Lock()
         self._sweep_task: asyncio.Task[None] | None = None
@@ -190,6 +199,7 @@ class ResidentCapacityControl:
         """
         reason = ClaimTerminalReason.FAILED if failed else ClaimTerminalReason.COMPLETED
         self._admission.on_ds_terminal(invocation_id, reason)
+        self._transient_failures.pop(invocation_id, None)
 
     def list_service_families(self) -> list[ServiceFamily]:
         """The registered service families, for operator read access."""
@@ -388,31 +398,19 @@ class ResidentCapacityControl:
 
         The bytes never cross the server: it resolves a route, pokes the origin deputy
         to deliver the bootstrap, records ``ACCEPTED`` and issues the fence on the ack,
-        then pokes the authorized stream. A fence rejection or an unreachable replica is
-        a pre-acceptance failure; an ambiguous bootstrap or a lost stream holds the
-        credit as uncertain until the fenced DS terminal.
+        then pokes the authorized stream. A definite fence rejection releases the
+        reservation and invalidates the incarnation; an unreachable path, an ambiguous
+        bootstrap, or a seam failure holds the credit uncertain and re-drives.
         """
         deps = self._native
         assert deps is not None
         listener = await self._ensure_sidecar(replica)
         if listener is None:
-            self._admission.on_route_loss(claim)
-            self._settle(
-                env.task_id,
-                env.call_correlation,
-                None,
-                error="resident sidecar is unavailable",
-            )
+            await self._hold_and_redrive(env, claim, "resident sidecar is unavailable")
             return
         resolved = await deps.network.resolve(origin_node, listener)
         if resolved is None:
-            self._admission.on_route_loss(claim)
-            self._settle(
-                env.task_id,
-                env.call_correlation,
-                None,
-                error="no route to the resident replica",
-            )
+            await self._hold_and_redrive(env, claim, "no route to the resident replica")
             return
         origin, route = resolved
         handoff = handoff.model_copy(
@@ -432,13 +430,7 @@ class ResidentCapacityControl:
                 request_payload=env.request_payload,
             )
         except NativeTransportError as exc:
-            self._admission.on_route_loss(claim)
-            self._settle(
-                env.task_id,
-                env.call_correlation,
-                None,
-                error=f"resident bootstrap failed: {exc}",
-            )
+            await self._hold_and_redrive(env, claim, f"bootstrap poke failed: {exc}")
             return
         deps.network.record_observations(origin, listener, boot.observations)
         if boot.acked:
@@ -446,21 +438,25 @@ class ResidentCapacityControl:
                 env, claim, profile, origin, origin_node, session_id
             )
             return
-        # Not acknowledged: an ambiguous delivery holds the credit as uncertain, while a
-        # definitive pre-delivery failure or fence rejection releases the reservation
-        # and invalidates the incarnation so the family re-materializes.
-        if boot.uncertain:
-            self._admission.on_route_loss(claim)
-            detail = "resident bootstrap delivery is uncertain"
-        else:
-            if claim.state is ClaimState.RESERVED:
-                self._admission.on_enqueue_failed(claim)
-            else:
-                self._admission.on_route_loss(claim)
-            if claim.replica_id is not None:
-                self._lifecycle.on_preempt(claim.replica_id)
-            detail = f"resident bootstrap refused: {boot.rejection or 'unreachable'}"
-        self._settle(env.task_id, env.call_correlation, None, error=detail)
+        if boot.rejection is not None:
+            # A definite fence rejection releases the reservation and invalidates the
+            # incarnation so the family re-materializes; it is never re-driven.
+            self._release_definite(
+                env,
+                claim,
+                f"resident bootstrap refused: {boot.rejection}",
+                pre_acceptance=True,
+                preempt=True,
+            )
+            return
+        # An ambiguous delivery or an unreachable path is uncertain, not a completion:
+        # hold the credit and re-drive under the held claim.
+        detail = (
+            "resident bootstrap delivery is uncertain"
+            if boot.uncertain
+            else "resident bootstrap unreachable"
+        )
+        await self._hold_and_redrive(env, claim, detail)
 
     async def _stream_native(
         self,
@@ -497,26 +493,70 @@ class ResidentCapacityControl:
                 origin_node, session_id=session_id, auth=auth
             )
         except NativeTransportError as exc:
-            self._admission.on_route_loss(claim)
-            self._settle(
-                env.task_id,
-                env.call_correlation,
-                None,
-                error=f"resident stream failed: {exc}",
-            )
+            await self._hold_and_redrive(env, claim, f"resident stream failed: {exc}")
             return
         if not stream.ok:
-            # A post-acceptance stream loss or refusal holds the credit as uncertain
-            # until the fenced DS terminal; it is never a completion.
-            self._admission.on_route_loss(claim)
-            self._settle(
-                env.task_id,
-                env.call_correlation,
-                None,
-                error=f"resident stream lost: {stream.rejection or 'unknown'}",
+            if stream.definite:
+                # A definite engine refusal held no slot: release through the fenced
+                # terminal and fail the boundary per task policy.
+                self._release_definite(
+                    env,
+                    claim,
+                    f"resident engine refused: {stream.rejection or 'unknown'}",
+                    pre_acceptance=False,
+                    preempt=False,
+                )
+                return
+            # A post-acceptance stream loss is uncertain — the engine may still hold the
+            # slot — so hold the credit and re-drive rather than releasing.
+            await self._hold_and_redrive(
+                env, claim, f"resident stream lost: {stream.rejection or 'unknown'}"
             )
             return
         self._settle(env.task_id, env.call_correlation, stream.completion)
+
+    async def _hold_and_redrive(
+        self, env: ToolInvocationEnvelope, claim: ServiceClaim, detail: str
+    ) -> None:
+        """Hold the credit uncertain and re-drive the boundary under its held claim.
+
+        A transient or ambiguous native loss neither completes nor releases: the claim
+        stays uncertain and the boundary re-drives to resume on the same fenced replica.
+        A path that keeps failing preempts the replica so the next resume's rebuild
+        returns None and the fenced terminal releases — the hold is bounded by replica
+        health, never a timer that could release while the engine still holds the slot.
+        """
+        self._admission.on_route_loss(claim)
+        count = self._transient_failures.get(env.invocation_id, 0) + 1
+        self._transient_failures[env.invocation_id] = count
+        if count >= self._max_transient_redrives and claim.replica_id is not None:
+            self._lifecycle.on_preempt(claim.replica_id)
+        self._logger.info(
+            "resident delivery held uncertain (attempt %d): %s", count, detail
+        )
+        await asyncio.sleep(self._redrive_backoff)
+        self._redispatch(env.task_id, env.call_correlation)
+
+    def _release_definite(
+        self,
+        env: ToolInvocationEnvelope,
+        claim: ServiceClaim,
+        detail: str,
+        *,
+        pre_acceptance: bool,
+        preempt: bool,
+    ) -> None:
+        """Terminalize a definite native failure so the fenced terminal releases credit.
+
+        A pre-acceptance refusal releases the still-reserved credit directly; the settle
+        then terminalizes the boundary, and the fenced DS terminal is idempotent over
+        the already-released claim.
+        """
+        if pre_acceptance and claim.state is ClaimState.RESERVED:
+            self._admission.on_enqueue_failed(claim)
+        if preempt and claim.replica_id is not None:
+            self._lifecycle.on_preempt(claim.replica_id)
+        self._settle(env.task_id, env.call_correlation, None, error=detail)
 
     async def _ensure_sidecar(
         self, replica: ReplicaIncarnation
