@@ -443,7 +443,7 @@ class ResidentCapacityConfig:
             cold_start_deadline_sec=parse_float_env(f"{prefix}COLD_START_DEADLINE_SEC")
             or 300.0,
             poll_interval_sec=parse_float_env(f"{prefix}POLL_INTERVAL_SEC") or 1.0,
-            redrive_backoff_sec=parse_float_env(f"{prefix}REDRIVE_BACKOFF_SEC") or 0.5,
+            redrive_backoff_sec=parse_float_env(f"{prefix}REDRIVE_BACKOFF_SEC", 0.5),
             max_transient_redrives=max(
                 1, parse_int_env(f"{prefix}MAX_TRANSIENT_REDRIVES") or 3
             ),
