@@ -17,6 +17,7 @@ trimmed — a stream is trimmed only at or below the cumulative-acknowledged id.
 """
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Protocol
@@ -26,6 +27,12 @@ from ..clients.redis import (
     resident_relay_session_key,
     resident_relay_up_key,
 )
+
+# A crashed origin can never trim its own session record; a generous TTL bounds the leak
+# without expiring an active one — a single invocation's session lives far under it.
+_SESSION_TTL_MS = 1_800_000
+
+_logger = logging.getLogger("reverse-relay")
 
 
 class RelayFrameKind(StrEnum):
@@ -99,11 +106,12 @@ class BinaryRedis(Protocol):
 
     async def xadd(self, name: str, fields: dict[bytes, bytes]) -> bytes: ...
     async def xread(
-        self, streams: dict[str, str], count: int, block: int
+        self, streams: dict[str, str], count: int, block: int | None
     ) -> list[Any]: ...
     async def xtrim(self, name: str, minid: str, approximate: bool) -> int: ...
     async def hset(self, name: str, mapping: dict[str, str]) -> int: ...
     async def hgetall(self, name: str) -> dict[bytes, bytes]: ...
+    async def pexpire(self, name: str, ms: int) -> int: ...
     async def set(self, name: str, value: str, nx: bool, px: int) -> bool | None: ...
     async def get(self, name: str) -> bytes | None: ...
     async def delete(self, name: str) -> int: ...
@@ -133,36 +141,48 @@ class RelayStreamStore:
         return (await self._redis.xadd(key, frame.to_fields())).decode()
 
     async def read_up(
-        self, node_id: str, after_id: str, count: int, block_ms: int
-    ) -> list[StreamEntry]:
+        self, node_id: str, after_id: str, count: int, block_ms: int | None
+    ) -> tuple[list[StreamEntry], str | None]:
         key = resident_relay_up_key(node_id)
         return await self._read(key, after_id, count, block_ms)
 
     async def read_down(
-        self, node_id: str, after_id: str, count: int, block_ms: int
-    ) -> list[StreamEntry]:
+        self, node_id: str, after_id: str, count: int, block_ms: int | None
+    ) -> tuple[list[StreamEntry], str | None]:
         return await self._read(
             resident_relay_down_key(node_id), after_id, count, block_ms
         )
 
     async def _read(
-        self, key: str, after_id: str, count: int, block_ms: int
-    ) -> list[StreamEntry]:
+        self, key: str, after_id: str, count: int, block_ms: int | None
+    ) -> tuple[list[StreamEntry], str | None]:
+        """Read a batch and return its decodable entries plus the last raw id seen.
+
+        Each entry is decoded inside the read so an undecodable frame — an unknown kind
+        or direction, a non-int field, a rolling-upgrade mix — is skipped rather than
+        raising out and stalling the stream. The last raw id is returned even when its
+        frame was skipped, so the caller advances the cursor past a poison frame.
+        """
         result = await self._redis.xread({key: after_id}, count=count, block=block_ms)
         entries: list[StreamEntry] = []
+        last_id: str | None = None
         for _stream, items in result or []:
             for entry_id, fields in items:
                 eid = (
                     entry_id.decode() if isinstance(entry_id, bytes) else str(entry_id)
                 )
-                entries.append(StreamEntry(eid, RelayFrame.from_fields(fields)))
-        return entries
+                last_id = eid
+                try:
+                    entries.append(StreamEntry(eid, RelayFrame.from_fields(fields)))
+                except (KeyError, ValueError):
+                    _logger.warning("skipping undecodable relay frame %s", eid)
+        return entries, last_id
 
     async def trim_up_to(
         self, node_id: str, direction: RelayDirection, min_id: str
     ) -> None:
-        """Trim strictly at or below ``min_id`` (the cumulative-acked id) — never above,
-        so an unacknowledged frame is never discarded."""
+        """Trim at or below ``min_id`` (the recorded cursor, the last-forwarded id) —
+        never above it, so a frame past the cursor is never discarded."""
         key = (
             resident_relay_up_key(node_id)
             if direction is RelayDirection.ORIGIN_TO_TARGET
@@ -183,7 +203,11 @@ class RelaySessionStore:
 
     async def update(self, session_id: str, **fields: str | int) -> None:
         mapping = {k: str(v) for k, v in fields.items()}
-        await self._redis.hset(resident_relay_session_key(session_id), mapping=mapping)
+        key = resident_relay_session_key(session_id)
+        await self._redis.hset(key, mapping=mapping)
+        # Bound the record against an origin crash that can never reap it; the delivery
+        # path deletes it well within the TTL on every terminal.
+        await self._redis.pexpire(key, _SESSION_TTL_MS)
 
     async def delete(self, session_id: str) -> None:
         await self._redis.delete(resident_relay_session_key(session_id))
@@ -290,10 +314,6 @@ class DirectionWindow:
     @property
     def in_flight(self) -> int:
         return self._state.used
-
-    @property
-    def granted(self) -> int:
-        return self._state.granted
 
 
 __all__ = [

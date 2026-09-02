@@ -13,8 +13,11 @@ frames are round-robined across sessions so one busy session cannot starve anoth
 the shared per-node stream. The durable cursor advances after each batch, so a bridge
 that restarts mid-batch (or errors before recording the cursor) re-reads and may
 re-forward a frame; the receiving endpoint drops the re-forward by its per-direction
-sequence, so a data frame is delivered exactly once. A forwarded prefix is trimmed at or
-below the recorded cursor, bounding the per-node stream.
+sequence, so a data frame lands once within a receiver's lifetime. That dedup is an
+in-memory high-water mark, so a receiver restart can re-deliver a re-forwarded frame;
+grants are idempotent and chunks reassemble, but the guarantee is not exactly-once
+across a receiver restart. A forwarded prefix is trimmed at or below the recorded
+cursor, bounding the per-node stream.
 """
 
 import logging
@@ -65,16 +68,19 @@ class RootRendezvousBridge:
         self._logger = logger or logging.getLogger("network-rendezvous")
 
     async def pump_node(self, node_id: str) -> int:
-        """Forward one bounded batch from a node's up stream; return the count read."""
+        """Forward one bounded batch from a node's up stream; return the count read.
+
+        The read is non-blocking: this driver multiplexes every node's up stream on one
+        loop, so a blocking read on an idle node would wedge the whole cluster's bridge.
+        """
         after = await self._cursors.get(node_id)
-        entries = await self._streams.read_up(
-            node_id, after, count=self._batch, block_ms=0
+        entries, last_id = await self._streams.read_up(
+            node_id, after, count=self._batch, block_ms=None
         )
-        if not entries:
+        if last_id is None:
             return 0
         for entry in self._fair_order(entries):
             await self._forward(entry)
-        last_id = entries[-1].entry_id
         await self._cursors.set(node_id, last_id)
         # Trim the forwarded prefix of this node's up stream at or below the recorded
         # cursor so it stays bounded; unforwarded frames past the cursor are never cut.

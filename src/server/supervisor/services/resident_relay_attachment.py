@@ -81,17 +81,23 @@ class ResidentRelayAttachment:
         """Consume one bounded batch of down frames while this node owns the lease.
 
         Returns the number of frames dispatched, or ``-1`` when the lease is not held so
-        a caller can tell "quiet" from "fenced".
+        a caller can tell "quiet" from "fenced". The read is a bounded long-poll so an
+        idle node still loops back to refresh its ownership lease and cut idle latency.
         """
         if not await self._lease.acquire(self._node_id, self._LEG, self._owner):
             if not await self._lease.refresh(self._node_id, self._LEG, self._owner):
                 return -1
         after = await self._cursor.get()
-        entries = await self._streams.read_down(
-            self._node_id, after, count=self._batch, block_ms=0
+        entries, last_id = await self._streams.read_down(
+            self._node_id, after, count=self._batch, block_ms=self._poll_ms
         )
-        if not entries:
+        if last_id is None:
             return 0
+        # Fence dispatch on continued ownership: if the lease lapsed during the read, a
+        # successor owns the leg, so drop this batch undelivered and unadvanced rather
+        # than deliver under the successor — it re-reads from the unchanged cursor.
+        if not await self._lease.owns(self._node_id, self._LEG, self._owner):
+            return -1
         for entry in entries:
             try:
                 await self._delivery.on_frame(entry.frame)
@@ -103,15 +109,10 @@ class ResidentRelayAttachment:
                     "relay frame delivery failed; skipping session=%s",
                     entry.frame.session_id,
                 )
-        last_id = entries[-1].entry_id
-        # Advance the durable cursor and trim the consumed prefix only while this node
-        # still owns the leg, so a lapsed owner that woke after handover cannot rewind
-        # the shared cursor or trim under the successor.
-        if await self._lease.owns(self._node_id, self._LEG, self._owner):
-            await self._cursor.set(last_id)
-            await self._streams.trim_up_to(
-                self._node_id, RelayDirection.TARGET_TO_ORIGIN, last_id
-            )
+        await self._cursor.set(last_id)
+        await self._streams.trim_up_to(
+            self._node_id, RelayDirection.TARGET_TO_ORIGIN, last_id
+        )
         return len(entries)
 
     def start(self, loop: asyncio.AbstractEventLoop) -> None:
@@ -135,8 +136,10 @@ class ResidentRelayAttachment:
                     count = await self.pump_once()
                 except Exception:
                     self._logger.exception("resident relay attachment pump failed")
-                    count = 0
-                if count <= 0:
+                    count = -1
+                # A quiet or busy pump paces itself on the long-poll read; only a fenced
+                # pump (the lease is held elsewhere) backs off before retrying.
+                if count < 0:
                     await asyncio.sleep(self._poll_ms / 1000.0)
         except asyncio.CancelledError:
             return

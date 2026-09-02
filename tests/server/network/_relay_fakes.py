@@ -19,6 +19,9 @@ class FakeBinaryRedis:
         self._hashes: dict[str, dict[bytes, bytes]] = {}
         self._strings: dict[str, tuple[str, float]] = {}  # value, expires_at
         self.now = 0.0
+        self.blocks: list[int | None] = (
+            []
+        )  # the block arg of each xread, for assertions
 
     async def xadd(self, name: str, fields: dict[bytes, bytes]) -> bytes:
         self._seq += 1
@@ -26,7 +29,10 @@ class FakeBinaryRedis:
         self._streams.setdefault(name, []).append((entry_id, dict(fields)))
         return entry_id.encode()
 
-    async def xread(self, streams: dict[str, str], count: int, block: int) -> list[Any]:
+    async def xread(
+        self, streams: dict[str, str], count: int, block: int | None
+    ) -> list[Any]:
+        self.blocks.append(block)
         out: list[Any] = []
         for key, after in streams.items():
             after_n = _idnum(after)
@@ -53,6 +59,10 @@ class FakeBinaryRedis:
 
     async def hgetall(self, name: str) -> dict[bytes, bytes]:
         return dict(self._hashes.get(name, {}))
+
+    async def pexpire(self, name: str, ms: int) -> int:
+        # The substrate only sets a leak-backstop TTL; presence is what the tests check.
+        return 1 if name in self._hashes or name in self._strings else 0
 
     async def set(self, name: str, value: str, nx: bool, px: int) -> bool | None:
         live = self._live(name)

@@ -55,6 +55,18 @@ def test_dispatches_down_frames_and_resumes_from_the_cursor() -> None:
     asyncio.run(run())
 
 
+def test_the_down_read_is_a_bounded_long_poll_not_block_forever() -> None:
+    async def run() -> None:
+        redis = FakeBinaryRedis()
+        attachment, _ = _attachment(redis, "owner-1")
+        await attachment.pump_once()
+        # A positive block (long-poll), never BLOCK 0: an idle node loops back to
+        # refresh its ownership lease instead of blocking forever on a quiet stream.
+        assert redis.blocks and all(b is not None and b > 0 for b in redis.blocks)
+
+    asyncio.run(run())
+
+
 def test_send_up_publishes_a_response_to_the_up_stream() -> None:
     async def run() -> None:
         redis = FakeBinaryRedis()
@@ -63,7 +75,7 @@ def test_send_up_publishes_a_response_to_the_up_stream() -> None:
         await attachment.send_up(
             relay_frame(RelayFrameKind.DATA, direction=RelayDirection.TARGET_TO_ORIGIN)
         )
-        up = await streams.read_up("nde-t", "0", count=10, block_ms=0)
+        up, _ = await streams.read_up("nde-t", "0", count=10, block_ms=None)
         assert [e.frame.kind for e in up] == [RelayFrameKind.DATA]
 
     asyncio.run(run())
@@ -123,7 +135,7 @@ def test_pump_trims_the_consumed_down_prefix() -> None:
         assert await attachment.pump_once() == 3
         # The consumed prefix is trimmed at or below the durable cursor, bounding the
         # stream; an unconsumed frame would survive (MINID keeps the boundary).
-        remaining = await streams.read_down("nde-t", "0", count=10, block_ms=0)
+        remaining, _ = await streams.read_down("nde-t", "0", count=10, block_ms=None)
         assert len(remaining) < 3
 
     asyncio.run(run())

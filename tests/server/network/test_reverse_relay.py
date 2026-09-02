@@ -7,6 +7,7 @@ the recovery path is proven without a live Redis or a fake dependency.
 
 import asyncio
 
+from server.clients.redis import resident_relay_down_key
 from server.network.reverse_relay import (
     DirectionWindow,
     RelayDirection,
@@ -45,12 +46,42 @@ def test_cursor_read_returns_only_entries_after_the_stored_id() -> None:
         )
         await streams.publish_down("nde-t", relay_frame(RelayFrameKind.DATA, seq=2))
         # From cursor "0" both entries read; from `first` only the second.
-        all_entries = await streams.read_down("nde-t", "0", count=10, block_ms=0)
+        all_entries, _ = await streams.read_down("nde-t", "0", count=10, block_ms=None)
         assert [e.frame.seq for e in all_entries] == [1, 2]
-        after_first = await streams.read_down("nde-t", first, count=10, block_ms=0)
-        assert [e.frame.seq for e in after_first] == [2]
+        after, _ = await streams.read_down("nde-t", first, count=10, block_ms=None)
+        assert [e.frame.seq for e in after] == [2]
 
     asyncio.run(run())
+
+
+def test_an_undecodable_frame_is_skipped_and_the_cursor_still_advances() -> None:
+    async def run() -> None:
+        redis = FakeBinaryRedis()
+        streams = RelayStreamStore(redis)
+        await streams.publish_down("nde-t", relay_frame(RelayFrameKind.DATA, seq=1))
+        # A frame with an unknown kind (a realistic rolling-upgrade mix) cannot decode.
+        # It is the last entry, so the cursor must still advance past it.
+        poison = (
+            await redis.xadd(
+                resident_relay_down_key("nde-t"),
+                {
+                    b"k": b"bogus",
+                    b"s": b"rly-1",
+                    b"i": b"inv",
+                    b"m": b"idm",
+                    b"d": b"t2o",
+                    b"q": b"2",
+                    b"a": b"0",
+                },
+            )
+        ).decode()
+        entries, last_id = await streams.read_down(
+            "nde-t", "0", count=10, block_ms=None
+        )
+        # The good frame lands; the poison is skipped but the cursor advances to it, so
+        # it is never re-read and cannot wedge the node's stream.
+        assert [e.frame.seq for e in entries] == [1]
+        assert last_id == poison
 
 
 def test_trim_never_discards_an_unacknowledged_frame() -> None:
@@ -63,7 +94,7 @@ def test_trim_never_discards_an_unacknowledged_frame() -> None:
         # Trim at the cumulative-acked id: MINID keeps seq=2 (the substrate never trims
         # above the acked id, so an unacknowledged frame always survives).
         await streams.trim_up_to("nde-t", RelayDirection.TARGET_TO_ORIGIN, acked)
-        surviving = await streams.read_down("nde-t", "0", count=10, block_ms=0)
+        surviving, _ = await streams.read_down("nde-t", "0", count=10, block_ms=None)
         assert [e.frame.seq for e in surviving] == [1, 2]
 
     asyncio.run(run())
