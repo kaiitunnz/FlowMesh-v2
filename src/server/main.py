@@ -268,6 +268,7 @@ if IS_ROOT_NODE:
                 node_of_replica=_node_of_replica,
                 sidecar_bind_host=_resident_cfg.sidecar_bind_host,
                 directly_routable=_resident_cfg.sidecar_directly_routable,
+                forward_api_key=_resident_cfg.forward_api_key,
             )
         )
 

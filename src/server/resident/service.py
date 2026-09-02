@@ -91,6 +91,7 @@ class NativeDeliveryDeps:
     node_of_replica: Callable[[ReplicaIncarnation], str | None]
     sidecar_bind_host: str = "127.0.0.1"
     directly_routable: bool = False
+    forward_api_key: str | None = None
 
 
 class ResidentCapacityControl:
@@ -537,6 +538,12 @@ class ResidentCapacityControl:
         if node_id is None:
             return None
         generation = replica.listener_generation + 1
+        # The sidecar reaches its co-located engine with the endpoint's own key, or the
+        # deployment forward key so a keyless stand-in can still forward to a keyed
+        # upstream — mirroring the in-server adapter.
+        engine = replica.endpoint
+        if engine.api_key is None and deps.forward_api_key is not None:
+            engine = engine.model_copy(update={"api_key": deps.forward_api_key})
         try:
             host, port = await deps.transport.bind_sidecar(
                 node_id,
@@ -544,7 +551,7 @@ class ResidentCapacityControl:
                 incarnation=replica.incarnation,
                 listener_generation=generation,
                 route=f"{deps.sidecar_bind_host}:0",
-                engine=replica.endpoint,
+                engine=engine,
             )
         except NativeTransportError:
             return None
