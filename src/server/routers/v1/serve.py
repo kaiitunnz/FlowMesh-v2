@@ -74,6 +74,10 @@ def _resolve_serve_relay_target(
     record = runtime.get_record(task_id)
     if record is None or record.task_type != TaskType.SERVE:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "serve task not found")
+    if bool(getattr(record.task.spec, "resident", False)):
+        # A resident allocation is reached only through its claim-gated sidecar, never
+        # this proxy — structurally, by allocation identity rather than an access mode.
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "serve task not found")
     if record.status != TaskStatus.DISPATCHED:
         raise HTTPException(status.HTTP_409_CONFLICT, "serve task is not running")
     serve_info = safe_get(record.latest_update, "serve")

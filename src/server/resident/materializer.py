@@ -47,6 +47,7 @@ async def materialize_resident_replica(
             }
         },
         "accessMode": config.access_mode,
+        "resident": True,
     }
     if config.serve_ttl_sec:
         spec["ttlSeconds"] = config.serve_ttl_sec
