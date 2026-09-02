@@ -21,7 +21,7 @@ from pydantic import ValidationError
 
 from . import wire
 from .adapter import chat_body
-from .sidecar import LoadEvidence, SidecarClaimGate, TrafficClass
+from .sidecar import LoadEvidence, SidecarClaimGate
 from .state import AdmissionHandoff, ReplicaEndpoint, RouteAuthorization
 
 
@@ -243,5 +243,4 @@ __all__ = [
     "LoadSink",
     "ResidentSidecarListener",
     "ResidentSidecarServer",
-    "TrafficClass",
 ]

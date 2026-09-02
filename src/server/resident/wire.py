@@ -8,6 +8,7 @@ sidecar streams the response and honors cancellation. A relay hop stays
 byte-transparent, so the frames are end-to-end between deputy and sidecar.
 """
 
+import asyncio
 import json
 from typing import Any
 
@@ -26,12 +27,12 @@ KIND_REJECT = "reject"
 split_host_port = netwire.split_host_port
 
 
-async def write_msg(writer: Any, kind: str, **fields: Any) -> None:
+async def write_msg(writer: asyncio.StreamWriter, kind: str, **fields: Any) -> None:
     """Write one JSON control/data frame."""
     await netwire.write_frame(writer, json.dumps({"kind": kind, **fields}).encode())
 
 
-async def read_msg(reader: Any) -> dict[str, Any]:
+async def read_msg(reader: asyncio.StreamReader) -> dict[str, Any]:
     """Read one JSON frame; a malformed or non-object frame is a protocol error."""
     payload = json.loads((await netwire.read_frame(reader)).decode())
     if not isinstance(payload, dict) or "kind" not in payload:
