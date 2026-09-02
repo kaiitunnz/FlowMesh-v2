@@ -41,6 +41,8 @@ def _node(node_id: str, *, generation: int, cls=ReachabilityClass.ROUTABLE) -> N
             generation=generation,
             trust_domain="fm",
             reachability_class=cls,
+            relay_attachment_id=f"att-{node_id}",
+            relay_attachment_generation=generation,
         ),
     )
 

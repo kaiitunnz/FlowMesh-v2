@@ -85,7 +85,6 @@ class NetworkPlane:
             self._reachability,
             now=now,
             route_epoch=self._route_epoch,
-            control_relay_endpoint=self._config.control_relay_url,
             expires_at=now + self._config.route_ttl_sec,
         )
         for candidate in route.candidates:
@@ -199,6 +198,8 @@ class NetworkPlane:
             reachability_class=endpoint.reachability_class,
             policy_class=PolicyClass.DEFAULT,
             trust_domain=endpoint.trust_domain,
+            relay_attachment_id=endpoint.relay_attachment_id,
+            relay_attachment_generation=endpoint.relay_attachment_generation,
         )
 
     def _invalidate_on_rotation(

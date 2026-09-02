@@ -136,6 +136,8 @@ class RouteOrigin(BaseModel):
     reachability_class: ReachabilityClass
     policy_class: PolicyClass = PolicyClass.DEFAULT
     trust_domain: str
+    relay_attachment_id: str | None = None
+    relay_attachment_generation: int = 0
 
 
 class RouteObservation(BaseModel):
@@ -180,13 +182,21 @@ class ReachabilityEntry(BaseModel):
 
 
 class RouteHop(BaseModel):
-    """One hop of a resolved candidate path."""
+    """One hop of a resolved candidate path.
+
+    For a forward-dial ``worker_direct`` / ``node_relay`` hop, ``endpoint`` is a
+    dialable address. For a ``control_relay`` hop it instead names a reverse-relay
+    attachment: ``node_id`` is the attaching node and ``attachment_id`` its non-secret
+    outbound attachment identity; ``endpoint`` on the terminal hop is the node-local
+    sidecar delivery route, never a peer-dialable address.
+    """
 
     model_config = ConfigDict(frozen=True)
 
     transport: Transport
     endpoint: str
     node_id: str | None = None
+    attachment_id: str | None = None
 
 
 class RouteCandidate(BaseModel):
