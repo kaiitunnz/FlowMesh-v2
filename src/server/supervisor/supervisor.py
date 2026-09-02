@@ -299,6 +299,7 @@ def _run_supervisor(
     from .services.lifecycle import Lifecycle
     from .services.relay_service import RelayService
     from .services.relay_uplink import RelayUplinkService
+    from .services.resident_deputy import ResidentDeputyService
     from .services.task_listener import TaskListener
 
     # --- logging (child has its own logger) ---
@@ -387,6 +388,11 @@ def _run_supervisor(
         logger,
         capacity_change_callback=lifecycle.heartbeat_now,
     )
+    resident_deputy: ResidentDeputyService | None = None
+    if network_cfg.enabled:
+        resident_deputy = ResidentDeputyService(
+            connect_budget_sec=network_cfg.connect_budget_sec, logger=logger
+        )
     command_listener = CommandListener(
         redis=redis_client.sync,
         node_id=node_id,
@@ -394,6 +400,7 @@ def _run_supervisor(
         logger=logger,
         cmd_receiver=cmd_receiver,
         relay_uplink=relay_uplink,
+        resident_deputy=resident_deputy,
     )
     grpc_server = GrpcServer(
         grpc_cfg.host,
@@ -477,6 +484,8 @@ def _run_supervisor(
         lifecycle.publish_unregister()
         if network_listeners is not None:
             await network_listeners.stop()
+        if resident_deputy is not None:
+            await resident_deputy.stop()
         await grpc_server.stop()
         await command_listener.stop()
         await worker_manager.stop()

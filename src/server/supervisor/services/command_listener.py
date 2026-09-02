@@ -25,6 +25,7 @@ from ..adapters.docker import DockerWorkerConfig
 from ..manager import WorkerInitConfig, WorkerManager
 from .pubsub_reader import RebindableReader
 from .relay_uplink import RelayUplinkService
+from .resident_deputy import ResidentDeputyService
 
 type ResponseHandler = Callable[[CommandResponse], None]
 
@@ -140,6 +141,7 @@ class CommandListener:
         logger: logging.Logger,
         cmd_receiver: TaskReceiver[CommandMessage, CommandResponse] | None = None,
         relay_uplink: RelayUplinkService | None = None,
+        resident_deputy: ResidentDeputyService | None = None,
         max_inflight: int = _MAX_INFLIGHT_CMDS,
     ) -> None:
         self.logger = logger
@@ -147,6 +149,7 @@ class CommandListener:
         self._node_id = node_id
         self._wm = worker_manager
         self._relay_uplink = relay_uplink
+        self._resident_deputy = resident_deputy
         self._cmd_receiver = cmd_receiver
         self._max_inflight = max_inflight
 
@@ -360,6 +363,16 @@ class CommandListener:
                 return self._handle_start_relay_cmd(cmd)
             case CommandType.DELIVER_ROUTE_PLAN:
                 return await self._handle_deliver_route_plan_cmd(cmd)
+            case CommandType.BIND_RESIDENT_SIDECAR:
+                return await self._handle_resident_cmd(cmd, "bind_sidecar")
+            case CommandType.UNBIND_RESIDENT_SIDECAR:
+                return await self._handle_unbind_resident_sidecar_cmd(cmd)
+            case CommandType.DELIVER_RESIDENT_BOOTSTRAP:
+                return await self._handle_resident_cmd(cmd, "bootstrap")
+            case CommandType.DELIVER_RESIDENT_STREAM:
+                return await self._handle_resident_cmd(cmd, "stream")
+            case CommandType.DELIVER_RESIDENT_CANCEL:
+                return await self._handle_resident_cmd(cmd, "cancel")
             case _:
                 return CommandResponse.error(cmd, f"Unknown command: {cmd.command}")
 
@@ -483,6 +496,42 @@ class CommandListener:
                 ],
             },
         )
+
+    async def _handle_resident_cmd(
+        self, cmd: CommandMessage, action: str
+    ) -> CommandResponse:
+        """Drive a resident sidecar bind or a deputy delivery phase.
+
+        The resident bytes ride the data-direct deputy-to-sidecar channel; this command
+        only pokes the phase and returns its control result.
+        """
+        deputy = self._resident_deputy
+        if deputy is None:
+            return CommandResponse.error(cmd, "resident deputy is not available")
+        payload = cmd.payload or {}
+        try:
+            if action == "bind_sidecar":
+                data = await deputy.bind_sidecar(payload)
+            elif action == "bootstrap":
+                data = await deputy.bootstrap(payload)
+            elif action == "stream":
+                data = await deputy.stream(payload)
+            else:
+                data = await deputy.cancel(payload)
+        except (KeyError, ValidationError, ValueError) as exc:
+            return CommandResponse.error(cmd, f"Invalid {action} payload: {exc}")
+        return CommandResponse.ok(cmd, data=data)
+
+    async def _handle_unbind_resident_sidecar_cmd(
+        self, cmd: CommandMessage
+    ) -> CommandResponse:
+        if self._resident_deputy is None:
+            return CommandResponse.error(cmd, "resident deputy is not available")
+        replica_id = (cmd.payload or {}).get("replica_id")
+        if not isinstance(replica_id, str):
+            return CommandResponse.error(cmd, "unbind requires replica_id")
+        data = await self._resident_deputy.unbind_sidecar(replica_id)
+        return CommandResponse.ok(cmd, data=data)
 
     async def _handle_create_worker_cmd(self, cmd: CommandMessage) -> CommandResponse:
         """Handle CREATE_WORKER: payload is a WorkerInitConfig dict."""
