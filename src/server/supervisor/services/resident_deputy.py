@@ -14,7 +14,7 @@ from typing import Any
 
 from ...network.state import ResolvedRoute
 from ...resident.deputy import ResidentInvocationDeputy
-from ...resident.sidecar import SidecarClaimGate
+from ...resident.sidecar import LoadEvidence, SidecarClaimGate
 from ...resident.sidecar_server import (
     EngineOpen,
     HttpEngineDelivery,
@@ -62,6 +62,7 @@ class ResidentDeputyService:
             gate=gate,
             endpoint=endpoint,
             engine_open=self._engine_open,
+            on_load=self._record_load,
             logger=self._logger,
         )
         listener = ResidentSidecarListener(server, route=str(payload["route"]))
@@ -118,6 +119,19 @@ class ResidentDeputyService:
             "cancelled": result.cancelled,
             "rejection": result.rejection,
         }
+
+    def _record_load(self, evidence: LoadEvidence) -> None:
+        """Emit claim-tagged load evidence, tagged latency-sensitive versus bulk."""
+        if self._logger is not None:
+            self._logger.info(
+                "resident load claim=%s invocation=%s replica=%s/%d op=%s class=%s",
+                evidence.claim_id,
+                evidence.invocation_id,
+                evidence.replica_id,
+                evidence.incarnation,
+                evidence.operation,
+                evidence.traffic_class.value,
+            )
 
     async def stop(self) -> None:
         """Drop every bound sidecar on shutdown."""
