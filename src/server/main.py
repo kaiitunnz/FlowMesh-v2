@@ -37,7 +37,7 @@ from .registries import WorkerRegistry, WorkflowRegistry
 from .registries.node import NodeRegistry
 from .registries.resident import ResidentRegistry
 from .resident.native import NativeTransport, NativeTransportError
-from .resident.service import NativeDeliveryDeps
+from .resident.service import NativeDeliveryDeps, ResidentCapacityControl
 from .resident.state import ReplicaIncarnation
 from .resident.wiring import build_resident_capacity
 from .routers import docs, health, v1
@@ -506,6 +506,30 @@ async def _reconcile_resources() -> None:
     await reconcile_resources(refs, logger)
 
 
+async def _rehydrate_root_state(
+    runtime: TaskRuntime | None,
+    resident_control: ResidentCapacityControl | None,
+    resident_registry: ResidentRegistry | None,
+) -> None:
+    """Rebuild durable root state on startup in a credit-safe order.
+
+    Resident-capacity control binds its loop and loads its claim store before the
+    runtime rehydrates, because the runtime's rehydrate re-drives every suspended
+    mediated boundary through the resident settler; were the control not running with
+    its claims loaded first, an in-flight resident invocation would terminalize against
+    an empty store and strand (or re-admit a second) credit.
+    """
+    if resident_control is not None and resident_registry is not None:
+        resident_control.bind_loop(asyncio.get_running_loop())
+        snapshot = await resident_registry.load_snapshot_async()
+        if snapshot is not None:
+            resident_control.rehydrate(snapshot)
+    if runtime is not None:
+        await runtime.rehydrate()
+    if resident_control is not None and resident_registry is not None:
+        resident_control.start()
+
+
 @asynccontextmanager
 async def _lifespan(_: FastAPI):
     async with AsyncExitStack() as plugin_stack:
@@ -519,20 +543,7 @@ async def _lifespan(_: FastAPI):
 
         # --- Root-only startup ---
         if IS_ROOT_NODE:
-            # Bind the loop and load the resident claim store BEFORE the runtime
-            # rehydrates: the runtime's rehydrate re-drives every suspended mediated
-            # boundary through the resident settler, so the control must be running with
-            # its claims loaded first, or an in-flight resident invocation terminalizes
-            # against an empty store and strands (or re-admits a second) credit.
-            if RESIDENT_CONTROL is not None and RESIDENT_REGISTRY is not None:
-                RESIDENT_CONTROL.bind_loop(asyncio.get_running_loop())
-                snapshot = await RESIDENT_REGISTRY.load_snapshot_async()
-                if snapshot is not None:
-                    RESIDENT_CONTROL.rehydrate(snapshot)
-            if RUNTIME is not None:
-                await RUNTIME.rehydrate()
-            if RESIDENT_CONTROL is not None and RESIDENT_REGISTRY is not None:
-                RESIDENT_CONTROL.start()
+            await _rehydrate_root_state(RUNTIME, RESIDENT_CONTROL, RESIDENT_REGISTRY)
             if RESIDENT_BRIDGE is not None and NODE_REGISTRY is not None:
                 _bridge = RESIDENT_BRIDGE
                 _nodes = NODE_REGISTRY
