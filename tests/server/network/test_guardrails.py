@@ -10,11 +10,12 @@ from pathlib import Path
 
 import server.network.deputy as deputy
 import server.network.listeners as listeners
+import server.network.rendezvous as rendezvous
 import server.network.resolver as resolver
 import server.network.reverse_relay as reverse_relay
 import server.network.service as service
 
-_SUBSTRATE = (deputy, listeners, resolver, reverse_relay, service)
+_SUBSTRATE = (deputy, listeners, rendezvous, resolver, reverse_relay, service)
 
 _FORBIDDEN_IDENTIFIERS = {
     "ServiceClaim",
