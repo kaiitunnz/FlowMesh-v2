@@ -441,3 +441,80 @@ def test_a_flaky_sidecar_connect_is_ridden_out() -> None:
         assert conn == ("reader", "writer") and len(calls) == 3
 
     asyncio.run(run())
+
+
+def test_uncertain_bootstrap_redrives_leave_no_leaked_session_state() -> None:
+    async def run() -> None:
+        redis = FakeBinaryRedis()
+        # No attachment/bridge consumes the up stream, so no ack ever returns and each
+        # bootstrap times out uncertain — the re-drive shape.
+        endpoint = ResidentRelayEndpoint(redis, "nde-o", recv_budget_sec=0.05)
+        sessions = RelaySessionStore(redis)
+        for i in range(3):
+            sid = f"rly-{i}"
+            boot = await endpoint.bootstrap(
+                sid,
+                route=_route("127.0.0.1:1"),
+                handoff=_handoff(),
+                request_payload='{"p":"hi"}',
+            )
+            assert not boot.acked and boot.uncertain
+            # The abandoned attempt is reaped: no origin state, no durable record left.
+            assert sid not in endpoint._origin
+            assert sid not in endpoint._o2t_windows
+            assert sid not in endpoint._t2o_consumed
+            assert await sessions.load(sid) == {}
+        # Nothing accumulated across the re-drives.
+        assert endpoint._origin == {}
+        assert endpoint._o2t_windows == {}
+        assert endpoint._t2o_consumed == {}
+
+    asyncio.run(run())
+
+
+def test_a_failing_sidecar_connect_does_not_block_the_pump() -> None:
+    async def run() -> None:
+        redis = FakeBinaryRedis()
+
+        async def dead_connect(route: str) -> Any:
+            raise ConnectionRefusedError("sidecar gone")
+
+        endpoint = ResidentRelayEndpoint(
+            redis,
+            "nde-t",
+            connect=dead_connect,
+            connect_tries=3,
+            connect_backoff_sec=0.02,
+        )
+        sessions = RelaySessionStore(redis)
+        await sessions.update(
+            "rly-1",
+            invocation_id="inv-1",
+            idm="idm-1",
+            origin_node="nde-o",
+            target_node="nde-t",
+            sidecar_route="127.0.0.1:1",
+        )
+        frame = RelayFrame(
+            kind=RelayFrameKind.DATA,
+            session_id="rly-1",
+            invocation_id="inv-1",
+            idm="idm-1",
+            direction=RelayDirection.ORIGIN_TO_TARGET,
+            seq=1,
+            payload=b"boot",
+        )
+        start = asyncio.get_event_loop().time()
+        await endpoint.on_frame(frame)
+        # on_frame dispatched the connect off the pump loop and returned at once, rather
+        # than blocking the node's multiplexed stream for the whole connect budget.
+        assert asyncio.get_event_loop().time() - start < 0.05
+        assert "rly-1" in endpoint._establishing
+        # Draining the abandoned connect leaves no target state behind.
+        est = endpoint._establishing.get("rly-1")
+        if est is not None:
+            with contextlib.suppress(Exception):
+                await est
+        assert "rly-1" not in endpoint._targets
+
+    asyncio.run(run())

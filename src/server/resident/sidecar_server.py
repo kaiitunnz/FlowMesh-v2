@@ -15,6 +15,7 @@ import contextlib
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
+from typing import Any
 
 import httpx
 from pydantic import ValidationError
@@ -103,6 +104,19 @@ class ResidentSidecarServer:
         self._on_load = on_load or (lambda _ev: None)
         self._stream_deadline = stream_deadline_sec
         self._logger = logger
+        # The live serve task per invocation, so a fresh-session re-drive supersedes its
+        # prior attempt and exactly one engine runs per invocation under one credit.
+        self._inflight: dict[str, asyncio.Task[Any]] = {}
+
+    def _supersede(self, invocation_id: str) -> None:
+        current = asyncio.current_task()
+        prior = self._inflight.get(invocation_id)
+        if prior is not None and prior is not current and not prior.done():
+            # A prior attempt for this invocation is still live (its engine running as
+            # it awaits a stream that never comes); cancel it so no two engines run.
+            prior.cancel()
+        if current is not None:
+            self._inflight[invocation_id] = current
 
     async def handle(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
@@ -142,6 +156,7 @@ class ResidentSidecarServer:
             )
             return None
         session = self._gate.session_for(handoff)
+        self._supersede(handoff.invocation_id)
         self._on_load(self._gate.load_evidence(handoff, "request"))
         # Dispatch the engine request and acknowledge immediately: the ack marks engine
         # receipt, not completion, so the origin deputy is not blocked on inference
@@ -202,6 +217,9 @@ class ResidentSidecarServer:
             await wire.write_msg(writer, wire.KIND_DONE)
             return engine
         finally:
+            # Deregister unless a newer attempt has already superseded this one.
+            if self._inflight.get(handoff.invocation_id) is asyncio.current_task():
+                self._inflight.pop(handoff.invocation_id, None)
             if engine is None:
                 engine_task.cancel()
                 with contextlib.suppress(Exception, asyncio.CancelledError):

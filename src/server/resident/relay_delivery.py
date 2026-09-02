@@ -141,6 +141,9 @@ class ResidentRelayEndpoint:
         self._logger = logger or logging.getLogger("resident-relay-endpoint")
         self._origin: dict[str, asyncio.Queue[RelayFrame]] = {}
         self._targets: dict[str, _TargetBridge] = {}
+        # In-progress off-pump sidecar connects, so a slow connect never stalls the
+        # node's pump loop.
+        self._establishing: dict[str, asyncio.Task[None]] = {}
         # Sender-side windows by role: the origin gates its origin-to-target sends, the
         # target gates its target-to-origin responses. Each direction's receiver tracks
         # the cumulative bytes it has drained so its grants advance the sender's window.
@@ -175,7 +178,7 @@ class ResidentRelayEndpoint:
                 # aborts the co-located engine promptly.
                 await self.reap_target(frame.session_id)
             else:
-                await self._to_sidecar(frame, record.get("sidecar_route", ""))
+                await self._route_to_sidecar(frame, record.get("sidecar_route", ""))
         elif frame.direction is RelayDirection.TARGET_TO_ORIGIN and origin_here:
             queue = self._origin.get(frame.session_id)
             if queue is not None:
@@ -214,23 +217,54 @@ class ResidentRelayEndpoint:
         if window is not None:
             await window.grant(frame.ack)
 
-    async def _to_sidecar(self, frame: RelayFrame, route: str) -> None:
+    async def _route_to_sidecar(self, frame: RelayFrame, route: str) -> None:
         bridge = self._targets.get(frame.session_id)
-        if bridge is None:
-            if not route:
-                return
+        if bridge is not None:
+            await self._deliver_to_sidecar(frame, bridge)
+            return
+        establishing = self._establishing.get(frame.session_id)
+        if establishing is not None:
+            # A frame arrived while the connection is still being established (rare: the
+            # stream follows the ack, which follows a completed establish). Wait, then
+            # deliver over the now-bound bridge.
+            await establishing
+            bridge = self._targets.get(frame.session_id)
+            if bridge is not None:
+                await self._deliver_to_sidecar(frame, bridge)
+            return
+        if not route:
+            return
+        # Establish the sidecar connection off the pump loop, so a slow or never-binding
+        # connect backpressures only this session and never stalls the node's stream.
+        self._establishing[frame.session_id] = asyncio.ensure_future(
+            self._establish_target(frame, route)
+        )
+
+    async def _establish_target(self, frame: RelayFrame, route: str) -> None:
+        session_id = frame.session_id
+        try:
             reader, writer = await self._connect_sidecar(route)
             window = self._t2o_windows.setdefault(
-                frame.session_id, DirectionWindow(self._window_bytes)
+                session_id, DirectionWindow(self._window_bytes)
             )
-            new_bridge = _TargetBridge(reader, writer, self._publish_up, frame, window)
-            session_id = frame.session_id
-            new_bridge.set_on_closed(
-                lambda: self._on_target_closed(session_id, new_bridge)
-            )
-            self._targets[frame.session_id] = new_bridge
-            new_bridge.start()
-            bridge = new_bridge
+            bridge = _TargetBridge(reader, writer, self._publish_up, frame, window)
+            bridge.set_on_closed(lambda: self._on_target_closed(session_id, bridge))
+            self._targets[session_id] = bridge
+            bridge.start()
+            self._establishing.pop(session_id, None)
+            await self._deliver_to_sidecar(frame, bridge)
+        except asyncio.CancelledError:
+            self._establishing.pop(session_id, None)
+        except (ConnectionError, OSError, ValueError):
+            # The sidecar never bound (or dropped mid-establish); abandon this attempt
+            # so the origin's boundary re-drives on a fresh session rather than hang.
+            self._logger.warning("resident sidecar establish failed: %s", session_id)
+            self._establishing.pop(session_id, None)
+            await self.reap_target(session_id)
+
+    async def _deliver_to_sidecar(
+        self, frame: RelayFrame, bridge: _TargetBridge
+    ) -> None:
         await bridge.to_sidecar(frame.payload)
         # Having drained an origin-to-target frame to the sidecar, grant the origin its
         # cumulative consumed bytes; the grant returns on the target-to-origin path so
@@ -362,7 +396,9 @@ class ResidentRelayEndpoint:
         )
         raw = await self._recv(session_id, self._budget)
         if raw is None:
-            # An uncertain bootstrap keeps the session for the redrive to reuse.
+            # An uncertain bootstrap is abandoned: the re-drive mints a fresh session,
+            # so reap this one's origin state and record rather than leak it.
+            await self.close_origin(session_id)
             return BootstrapResult(False, Transport.CONTROL_RELAY, None, True, [])
         msg = wire.decode_msg(raw)
         if msg["kind"] == wire.KIND_ACK:
@@ -388,6 +424,9 @@ class ResidentRelayEndpoint:
         while True:
             raw = await self._recv(session_id, self._budget)
             if raw is None:
+                # A stream loss is abandoned: the re-drive mints a fresh session, so
+                # reap this one rather than leak its origin state and record.
+                await self.close_origin(session_id)
                 return StreamResult(False, rejection="stream_loss")
             msg = wire.decode_msg(raw)
             kind = msg["kind"]
@@ -443,6 +482,9 @@ class ResidentRelayEndpoint:
         await self._sessions.delete(session_id)
 
     async def reap_target(self, session_id: str) -> None:
+        establishing = self._establishing.pop(session_id, None)
+        if establishing is not None and not establishing.done():
+            establishing.cancel()
         bridge = self._targets.pop(session_id, None)
         self._t2o_windows.pop(session_id, None)
         self._o2t_consumed.pop(session_id, None)

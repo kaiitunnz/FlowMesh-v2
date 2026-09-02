@@ -24,6 +24,7 @@ from server.network.state import (
     RouteHop,
     Transport,
 )
+from server.resident import wire
 from server.resident.deputy import ResidentInvocationDeputy
 from server.resident.sidecar import SidecarClaimGate
 from server.resident.sidecar_server import (
@@ -359,5 +360,72 @@ def test_redrive_replaces_and_closes_the_prior_session() -> None:
             assert deputy._sessions["s1"] is not first
             assert first.writer.is_closing()
             await deputy.reap("s1")
+
+    asyncio.run(run())
+
+
+class _CountingEngine:
+    """Tracks concurrent engine generations so a supersede can be observed."""
+
+    def __init__(self) -> None:
+        self.live = 0
+        self.max_live = 0
+        self.aborted = 0
+
+    async def __call__(
+        self, endpoint: ReplicaEndpoint, request: str | None
+    ) -> EngineResponse:
+        self.live += 1
+        self.max_live = max(self.max_live, self.live)
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            self.aborted += 1
+            raise
+        finally:
+            self.live -= 1
+        raise AssertionError("the counting engine should have been cancelled")
+
+
+async def _bootstrap_conn(
+    port: int,
+) -> tuple[asyncio.StreamReader, asyncio.StreamWriter, dict[str, Any]]:
+    reader, writer = await asyncio.open_connection("127.0.0.1", port)
+    await wire.write_msg(
+        writer,
+        wire.KIND_BOOTSTRAP,
+        handoff=_handoff().model_dump(mode="json"),
+        request='{"p":"hi"}',
+    )
+    return reader, writer, await wire.read_msg(reader)
+
+
+def test_a_fresh_session_redrive_supersedes_the_prior_engine() -> None:
+    async def run() -> None:
+        engine = _CountingEngine()
+        async with _Fixture(engine=engine) as fx:
+            # Attempt one: bootstrap for inv-1 acks, then holds awaiting a stream that
+            # never comes while engine one runs (the pre-fix double-engine window).
+            r1, w1, ack1 = await _bootstrap_conn(fx.sidecar_port)
+            assert ack1["kind"] == wire.KIND_ACK
+            for _ in range(100):
+                if engine.live == 1:
+                    break
+                await asyncio.sleep(0.01)
+            assert engine.live == 1
+            # A fresh-session re-drive re-delivers the same invocation's bootstrap on a
+            # new connection; the sidecar supersedes attempt one, so one engine runs.
+            r2, w2, ack2 = await _bootstrap_conn(fx.sidecar_port)
+            assert ack2["kind"] == wire.KIND_ACK
+            for _ in range(200):
+                if engine.aborted >= 1 and engine.live == 1:
+                    break
+                await asyncio.sleep(0.01)
+            assert engine.aborted >= 1  # attempt one's engine was aborted
+            assert engine.live == 1  # exactly one engine (attempt two) remains
+            for w in (w1, w2):
+                w.close()
+                with contextlib.suppress(Exception):
+                    await w.wait_closed()
 
     asyncio.run(run())
