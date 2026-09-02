@@ -28,6 +28,6 @@ python-dotenv==1.2.2
 qdrant-client==1.15.1
 sqlalchemy==2.0.44
 torch==2.11.0
-transformers==5.8.1
+transformers==5.16.1
 trl==1.6.0
 websocket-client==1.9.0
