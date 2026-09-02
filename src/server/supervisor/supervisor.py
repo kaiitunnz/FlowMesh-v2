@@ -282,14 +282,18 @@ def _run_supervisor(
 ) -> None:
     """Target function executed inside the child process."""
     from pathlib import Path
+    from typing import cast
 
     from shared._version import FLOWMESH_RELEASE_VERSION
     from shared.schemas.node import NodeInfo
     from shared.utils.time import now_iso
 
     from ..clients import RedisClient
+    from ..clients.redis import resident_relay_client
     from ..network.listeners import NetworkPlaneListeners
+    from ..network.reverse_relay import BinaryRedis
     from ..registries.node import NodeRegistry
+    from ..resident.relay_delivery import ResidentRelayEndpoint
     from ..utils.logging import get_logger as _get_logger
     from .manager import WorkerManager
     from .registry import WorkerRegistry as WorkerAdapterRegistry
@@ -300,6 +304,7 @@ def _run_supervisor(
     from .services.relay_service import RelayService
     from .services.relay_uplink import RelayUplinkService
     from .services.resident_deputy import ResidentDeputyService
+    from .services.resident_relay_attachment import ResidentRelayAttachment
     from .services.task_listener import TaskListener
 
     # --- logging (child has its own logger) ---
@@ -389,9 +394,30 @@ def _run_supervisor(
         capacity_change_callback=lifecycle.heartbeat_now,
     )
     resident_deputy: ResidentDeputyService | None = None
+    resident_attachment: ResidentRelayAttachment | None = None
     if network_cfg.enabled:
+        relay_redis = cast(
+            BinaryRedis,
+            resident_relay_client(
+                redis_cfg.resident_relay_url,
+                acl_enabled=redis_cfg.acl_enabled,
+                username=redis_cfg.username,
+                password=redis_cfg.password,
+                tls_ca_file=redis_cfg.tls_ca_file,
+            ),
+        )
+        relay_endpoint = ResidentRelayEndpoint(relay_redis, node_id, logger=logger)
         resident_deputy = ResidentDeputyService(
-            connect_budget_sec=network_cfg.connect_budget_sec, logger=logger
+            connect_budget_sec=network_cfg.connect_budget_sec,
+            endpoint=relay_endpoint,
+            logger=logger,
+        )
+        resident_attachment = ResidentRelayAttachment(
+            relay_redis,
+            node_id,
+            relay_endpoint,
+            owner=f"{node_id}:{os.getpid()}",
+            logger=logger,
         )
     command_listener = CommandListener(
         redis=redis_client.sync,
@@ -470,6 +496,8 @@ def _run_supervisor(
         await grpc_server.start()
         if network_listeners is not None:
             await network_listeners.start()
+        if resident_attachment is not None:
+            resident_attachment.start(loop)
         # Wire the re-register callback only once the reader threads are up
         lifecycle.set_reregister_callback(_on_reregister)
         logger.info("Supervisor ready for node %s", node_id)
@@ -482,6 +510,8 @@ def _run_supervisor(
         # Publish unregister event early to allow the server to handle before being
         # timed out
         lifecycle.publish_unregister()
+        if resident_attachment is not None:
+            await resident_attachment.stop()
         if network_listeners is not None:
             await network_listeners.stop()
         if resident_deputy is not None:

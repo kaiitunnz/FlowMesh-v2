@@ -6,7 +6,7 @@ import inspect
 import os
 import threading
 from contextlib import AsyncExitStack, asynccontextmanager
-from typing import Any
+from typing import Any, cast
 
 import uvicorn
 from fastapi import FastAPI
@@ -25,9 +25,12 @@ from shared.schemas.command import CommandMessage, CommandType
 
 from .auth import reconcile_resources, resolve_system_principal
 from .clients import RedisClient
+from .clients.redis import resident_relay_client
 from .config import NodeRole, ServerConfig
 from .dispatcher.factory import create_dispatcher
 from .hooks import register
+from .network.rendezvous import RootCursorStore, RootRendezvousBridge
+from .network.reverse_relay import BinaryRedis, RelaySessionStore, RelayStreamStore
 from .network.service import NetworkPlane
 from .orchestration.tool_dispatch import ToolInvocationEnvelope
 from .registries import WorkerRegistry, WorkflowRegistry
@@ -136,6 +139,8 @@ FABRIC_TOOL_BROKER = None
 RESIDENT_CONTROL = None
 RESIDENT_REGISTRY = None
 NETWORK_PLANE = None
+RESIDENT_BRIDGE = None
+RESIDENT_BRIDGE_TASK = None
 
 if IS_ROOT_NODE:
     WORKFLOW_REGISTRY = WorkflowRegistry(REDIS_CLIENT)
@@ -205,6 +210,22 @@ if IS_ROOT_NODE:
     if config.orchestration.network.enabled:
         NETWORK_PLANE = NetworkPlane(
             config.orchestration.network, NODE_REGISTRY, logger
+        )
+        _relay_redis = cast(
+            BinaryRedis,
+            resident_relay_client(
+                config.redis.resident_relay_url,
+                acl_enabled=config.redis.acl_enabled,
+                username=config.redis.username,
+                password=config.redis.password,
+                tls_ca_file=config.redis.tls_ca_file,
+            ),
+        )
+        RESIDENT_BRIDGE = RootRendezvousBridge(
+            RelayStreamStore(_relay_redis),
+            RelaySessionStore(_relay_redis),
+            RootCursorStore(_relay_redis),
+            logger=logger,
         )
 
     if (
@@ -505,6 +526,26 @@ async def _lifespan(_: FastAPI):
                 if snapshot is not None:
                     RESIDENT_CONTROL.rehydrate(snapshot)
                 RESIDENT_CONTROL.start()
+            if RESIDENT_BRIDGE is not None and NODE_REGISTRY is not None:
+                _bridge = RESIDENT_BRIDGE
+                _nodes = NODE_REGISTRY
+
+                async def _pump_resident_bridge() -> None:
+                    # Bridge each attached node's up stream to its peers' down streams;
+                    # a non-blocking sweep, so poll all nodes on a short interval.
+                    while True:
+                        try:
+                            for _node in await _nodes.list_nodes_async():
+                                await _bridge.pump_node(_node.id)
+                        except asyncio.CancelledError:
+                            return
+                        except Exception:
+                            logger.exception("resident relay bridge pump failed")
+                        await asyncio.sleep(0.05)
+
+                app.state.resident_bridge_task = asyncio.create_task(
+                    _pump_resident_bridge()
+                )
             if PORT_FORWARD_SERVICE is not None:
                 await PORT_FORWARD_SERVICE.start()
             _start_root_threads()
@@ -546,6 +587,13 @@ async def _lifespan(_: FastAPI):
 
             # --- Root-only shutdown ---
             _stop_background()
+            _bridge_task = getattr(app.state, "resident_bridge_task", None)
+            if _bridge_task is not None:
+                _bridge_task.cancel()
+                try:
+                    await _bridge_task
+                except (asyncio.CancelledError, Exception):
+                    pass
             if RESIDENT_CONTROL is not None:
                 RESIDENT_CONTROL.shutdown()
             if AGENT_MODEL_GATEWAY is not None:
