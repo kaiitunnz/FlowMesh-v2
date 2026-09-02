@@ -95,25 +95,30 @@ settles the boundary, so its fenced terminal releases the credit rather than hol
 re-driving it as the native path does. That narrower ambiguous-loss window is a tracked
 follow-up to bring onto the same hold-and-re-drive split.
 
-When [`NETWORK_PLANE_ENABLED`](NETWORK_PLANE.md) is also on, the invocation is carried
-data-direct over the native fabric path and the server never carries the bytes. The
-Lifecycle & scale manager binds a per-replica **resident-facing sidecar** on the replica
-node and advertises its non-secret listener; the sidecar is the enforced claim gate,
-validating every fence against its own incarnation and listener generation before reaching
-the co-located engine. Delivery is two-phase, server-driven over the node-command seam: a
-bootstrap poke delivers the handoff over the origin node's deputy and obtains the engine
-enqueue acknowledgement, at which point the Admission controller records `ACCEPTED` and
-issues the immutable `RouteAuthorization`; a stream poke then carries the authorized
-response over the same held deputy-to-sidecar channel, with cancellation and backpressure.
-A pre-delivery connect failure takes an already-resolved fallback candidate with no
-re-admission; a fence rejection or a clean engine refusal is a definite release; a lost
-acknowledgement, ambiguous bootstrap, or stream loss is `UNCERTAIN`, holds the credit, and
-re-drives until a definite outcome or the fenced DS terminal. The sidecar classifies a clean
-engine status as definite so no held slot leaks its credit. A cancellation reaps both ends of
-the data-direct channel — the deputy closes the connection and the sidecar aborts the
-co-located engine request — so a cancelled invocation stops promptly rather than waiting out
-the stream deadline. Request and stream emit claim-tagged load evidence, tagged
-latency-sensitive service traffic versus bulk transfer.
+When [`NETWORK_PLANE_ENABLED`](NETWORK_PLANE.md) is also on, the invocation is carried over
+the native fabric path and the server never carries the bytes. The Lifecycle & scale
+manager binds a per-replica **resident-facing sidecar** on the replica node and advertises
+its non-secret listener; the sidecar is the enforced claim gate, validating every fence
+against its own incarnation and listener generation before reaching the co-located engine.
+Delivery is two-phase, server-driven over the node-command seam: a bootstrap poke delivers
+the handoff over the origin node's deputy and obtains the engine enqueue acknowledgement, at
+which point the Admission controller records `ACCEPTED` and issues the immutable
+`RouteAuthorization`; a stream poke then carries the authorized response, with cancellation
+and backpressure. The universal path is the reverse-rendezvous `control_relay`: the origin
+deputy and the target sidecar each attach outward to the root, which bridges the framed
+request and response between their per-node streams, so neither the origin nor the replica
+node needs an inbound connection; the exact resident wire messages ride as opaque relay
+payloads, so the sidecar and its claim gate serve them unchanged. A verified `worker_direct`
+or `node_relay` offload may carry a reachable pair instead. A pre-delivery offload connect
+failure takes the already-resolved base candidate with no re-admission; a fence rejection or
+a clean engine refusal is a definite release; a lost acknowledgement, ambiguous bootstrap,
+or stream loss is `UNCERTAIN`, holds the credit, and re-drives until a definite outcome or
+the fenced DS terminal, resuming from the durable relay cursor rather than re-running the
+engine. The sidecar classifies a clean engine status as definite so no held slot leaks its
+credit. A cancellation reaps both ends — the deputy pokes a cancel that closes the sidecar
+connection and aborts the co-located engine request — so a cancelled invocation stops
+promptly rather than waiting out the stream deadline. Request and stream emit claim-tagged
+load evidence, tagged latency-sensitive service traffic versus bulk transfer.
 
 The legacy serve proxy cannot reach a resident allocation: a resident replica's serve task
 is marked resident and the proxy refuses it by allocation identity, independent of its

@@ -22,8 +22,11 @@ Route resolution is derived from four separate facts, each with its own owner an
   `generation`, trust domain, reachability class, and protocol capability. It rides on
   node registration and is carried on the node record, so the node registry is its durable
   carrier. It is not a worker-supplied arbitrary URL and not the generic server-management
-  endpoint. Re-registration mints a fresh generation, and route evidence bound to a
-  superseded generation is invalidated.
+  endpoint. It also carries the node's non-secret outbound relay-attachment identity and
+  generation, proving the node can attach outward to the root rendezvous for the universal
+  `control_relay`; that is attach eligibility, not an inbound address a peer may dial.
+  Re-registration mints a fresh generation, and route evidence bound to a superseded
+  generation is invalidated.
 - **`ReplicaListenerAdvertisement`** — a non-secret listener in the replica directory,
   fenced by replica incarnation and listener generation. It names the resident-facing
   sidecar/adapter capability and its route endpoint(s); it never names a raw engine
@@ -59,27 +62,48 @@ gets fresh `UNKNOWN` entries, and node re-registration invalidates a target's en
 
 ## Transports
 
-The resolver orders three transport candidates; the deputy tries them in order until one
-round-trips, and a demoted direct or node path drops out until its backoff cools.
+The resolver orders three transport candidates. `control_relay` is the universal base,
+carried whenever the origin and target both advertise an outbound relay attachment;
+policy may rank a verified `worker_direct` or `node_relay` offload ahead of it, and a
+demoted offload drops out until its backoff cools.
 
-- **`worker_direct`** — caller to the listener. Legal only for an explicitly directly
-  routable listener whose endpoint class the origin's network class can reach, under a
-  bounded optimistic connect budget. Shared-node placement alone does not make it legal.
+- **`worker_direct`** — caller to the listener. A forward-dial offload legal only for an
+  explicitly directly routable listener whose endpoint class the origin's network class can
+  reach, under a bounded optimistic connect budget. Shared-node placement alone does not
+  make it legal.
 - **`node_relay`** — caller to the target node's announced endpoint, which uplinks over an
-  authenticated node-local relay session to the target listener the route names. It is the
-  initial same-node path as well as the normal cross-node path.
-- **`control_relay`** — the controlled fallback: a bounded relay session through the root's
-  relay endpoint and, when the target node advertises one, its node endpoint to the target
-  listener.
+  authenticated node-local relay session to the target listener the route names. A
+  forward-dial offload; the initial same-node path as well as the normal cross-node path.
+- **`control_relay`** — the universal reverse-rendezvous base. Its descriptor names the
+  origin reverse attachment, the root rendezvous, the target reverse attachment, and the
+  target's node-local sidecar delivery, not a chain of dialable addresses; its feasibility
+  is that both ends have a live outbound attachment, not that either is inbound-reachable.
 
-Each relay hop is target-addressed: it reads one leading frame naming its next hop, dials
-it, and byte-relays the rest, so a route reaches whichever listener its hops name and a
-multi-hop ladder chains through the relays. The origin deputy writes a frame per hop after
-the first; a direct route writes none.
+A `worker_direct` or `node_relay` hop is target-addressed and forward-dialed: the deputy
+reads one leading frame naming its next hop, dials it, and byte-relays the rest, chaining a
+multi-hop ladder through the relays; a `RelaySession` bridges the two stream pairs with a
+bounded in-flight buffer so a slow consumer backpressures a fast producer.
 
-A `RelaySession` bridges two stream pairs with a bounded in-flight buffer, so a slow
-consumer backpressures a fast producer; it is cancellable and self-cleaning. It is a
-dedicated network-plane mechanism, distinct from the event/log relay.
+## Reverse-rendezvous relay
+
+`control_relay` carries a resident invocation without either end accepting an inbound
+connection — the shape a flat outbound-only fleet needs. Each node attaches outward to the
+root by writing its per-node `up` stream and reading its per-node `down` stream on a
+dedicated relay Redis endpoint; the root **rendezvous bridge** is the only party that moves
+a frame between two nodes, reading a node's up stream from a durable cursor and forwarding
+each frame to the peer node's down stream chosen by the session's routing record. The
+bridge reads only routing and flow-control fields and forwards the payload opaquely; it
+holds no admission, credit, or engine authority. Draining is fair — priority control frames
+first, then data round-robined across sessions so one busy session cannot starve another.
+
+A `rly-*` **session** frames a direction with a stable sequence and a receiver-owned
+acknowledged cursor under a per-invocation byte window; a cumulative acknowledgement
+releases only relay-window credit, never a capacity credit. Recovery is a durable cursor
+lease rather than a consumer group: each leg has one logical receiver that resumes from its
+stored cursor, and a restarted receiver reclaims an owner-fenced lease. Unacknowledged
+frames are never trimmed — a stream is trimmed only at or below the acknowledged id. The
+relay uses its own traffic namespace and Redis endpoint, distinct from the event/log relay
+and the legacy proxy streams.
 
 ## Echo seam
 
