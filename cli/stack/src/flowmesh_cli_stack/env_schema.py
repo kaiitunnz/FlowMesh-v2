@@ -510,6 +510,12 @@ STACK_ENV_SCHEMA = EnvSchema(
                     description="Advertise the resident sidecar as directly routable.",
                     var_type=EnvVarType.BOOL,
                 ),
+                EnvVar(
+                    "RESIDENT_RELAY_ONLY",
+                    "false",
+                    description="Mandate the reverse-relay for resident traffic.",
+                    var_type=EnvVarType.BOOL,
+                ),
             ],
         ),
         EnvSection(

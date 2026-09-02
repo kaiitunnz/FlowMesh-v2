@@ -392,6 +392,8 @@ class ResidentCapacityConfig:
     ``admission_slots`` is the conservative safe-slot count reported per replica.
     ``forward_api_key`` is the credential the in-server adapter presents to a replica
     that reports none, so the ``dev_model`` stand-in can forward it to a keyed upstream.
+    ``relay_only`` mandates the reverse-rendezvous relay for resident traffic, the mode
+    an outbound-only fleet uses so no invocation attempts a forward-dial offload.
     """
 
     enabled: bool = False
@@ -412,6 +414,7 @@ class ResidentCapacityConfig:
     idle_sweep_interval_sec: float = 30.0
     sidecar_bind_host: str = "127.0.0.1"
     sidecar_directly_routable: bool = False
+    relay_only: bool = False
 
     @classmethod
     def from_env(cls) -> "ResidentCapacityConfig":
@@ -464,6 +467,7 @@ class ResidentCapacityConfig:
             sidecar_directly_routable=parse_bool_env(
                 f"{prefix}SIDECAR_DIRECTLY_ROUTABLE", False
             ),
+            relay_only=parse_bool_env(f"{prefix}RELAY_ONLY", False),
         )
 
 

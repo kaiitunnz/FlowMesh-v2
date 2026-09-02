@@ -108,8 +108,11 @@ and backpressure. The universal path is the reverse-rendezvous `control_relay`: 
 deputy and the target sidecar each attach outward to the root, which bridges the framed
 request and response between their per-node streams, so neither the origin nor the replica
 node needs an inbound connection; the exact resident wire messages ride as opaque relay
-payloads, so the sidecar and its claim gate serve them unchanged. A verified `worker_direct`
-or `node_relay` offload may carry a reachable pair instead. A pre-delivery offload connect
+payloads, so the sidecar and its claim gate serve them unchanged. The response is carried
+under the relay's per-direction byte window, so a large completion is chunked and
+flow-controlled rather than framed whole. A verified `worker_direct` or `node_relay` offload
+may carry a reachable pair instead; an outbound-only fleet sets `RESIDENT_RELAY_ONLY` to
+mandate the relay so no invocation attempts a forward-dial offload that would always fail. A pre-delivery offload connect
 failure takes the already-resolved base candidate with no re-admission; a fence rejection or
 a clean engine refusal is a definite release; a lost acknowledgement, ambiguous bootstrap,
 or stream loss is `UNCERTAIN`, holds the credit, and re-drives until a definite outcome or
@@ -155,8 +158,9 @@ scheduling, and KV allocation.
 Resident-capacity control is off by default and enabled per deployment. See the `RESIDENT_*`
 rows in [`ENV.md`](ENV.md) for enablement, the serving substrate (`serve` or `dev_model`),
 the policy caps, the conservative admission-slot count, the cold-start budget, the per-family
-selection strategy, and the idle-teardown retain window (`RESIDENT_IDLE_RETAIN_SEC`, `0`
-disables).
+selection strategy, the idle-teardown retain window (`RESIDENT_IDLE_RETAIN_SEC`, `0`
+disables), and the relay-only mode (`RESIDENT_RELAY_ONLY`) that mandates the reverse-relay
+for an outbound-only fleet.
 
 ## Observability
 

@@ -94,6 +94,7 @@ class NativeDeliveryDeps:
     sidecar_bind_host: str = "127.0.0.1"
     directly_routable: bool = False
     forward_api_key: str | None = None
+    relay_only: bool = False
 
 
 class ResidentCapacityControl:
@@ -431,6 +432,23 @@ class ResidentCapacityControl:
             await self._hold_and_redrive(env, claim, "no route to the resident replica")
             return
         origin, route = resolved
+        if deps.relay_only:
+            # An outbound-only fleet mandates the reverse-rendezvous relay: drop the
+            # forward-dial offloads so no invocation attempts a dial that will fail.
+            route = route.model_copy(
+                update={
+                    "candidates": tuple(
+                        c
+                        for c in route.candidates
+                        if c.transport is Transport.CONTROL_RELAY
+                    )
+                }
+            )
+            if not route.candidates:
+                await self._hold_and_redrive(
+                    env, claim, "no reverse-relay route to the resident replica"
+                )
+                return
         handoff = handoff.model_copy(
             update={
                 "route": route,

@@ -282,6 +282,7 @@ if IS_ROOT_NODE:
                 sidecar_bind_host=_resident_cfg.sidecar_bind_host,
                 directly_routable=_resident_cfg.sidecar_directly_routable,
                 forward_api_key=_resident_cfg.forward_api_key,
+                relay_only=_resident_cfg.relay_only,
             )
         )
 
