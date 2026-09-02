@@ -11,15 +11,25 @@ when the fenced DS terminal returns through ``invocation_id``.
 import asyncio
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Protocol
 
 from shared.tasks.specs import ModelBindingMode
 
+from ..network.state import (
+    ReplicaListenerAdvertisement,
+    ResolvedRoute,
+    RouteObservationOutcome,
+    RouteOrigin,
+    Transport,
+)
 from ..orchestration.tool_dispatch import ToolInvocationEnvelope
 from ..task.v2.compiler.agent_binding import service_family_for_ref
 from ..task.v2.representations.operators import AgentModelGatewayBinding
 from .adapter import AdapterError, EngineInvocationAdapter
 from .admission import AdmissionController
 from .lifecycle import LifecycleScaleManager
+from .native import NativeTransport, NativeTransportError
 from .policy import ResidentPolicyLimits
 from .state import (
     SERVABLE_REPLICA_STATES,
@@ -47,6 +57,42 @@ EndpointProbe = Callable[[str], ReplicaEndpoint | None]
 PersistCallback = Callable[[], None]
 
 
+class RouteResolver(Protocol):
+    """The control-plane route resolution the native delivery consumes.
+
+    Satisfied structurally by the network plane; the resident path binds it rather than
+    re-deriving endpoints, reachability, or the resolver.
+    """
+
+    async def resolve(
+        self, origin_node_id: str, listener: ReplicaListenerAdvertisement
+    ) -> tuple[RouteOrigin, ResolvedRoute] | None: ...
+
+    def record_observations(
+        self,
+        origin: RouteOrigin,
+        listener: ReplicaListenerAdvertisement,
+        observations: list[tuple[Transport, RouteObservationOutcome]],
+    ) -> None: ...
+
+
+@dataclass
+class NativeDeliveryDeps:
+    """What the service needs to carry a resident invocation over the fabric path.
+
+    Present only when the network plane is enabled; its absence selects the in-server
+    compatibility path. The two node resolvers map a workflow task to its origin node
+    and a replica to its host node — in a single-node deployment both are the root node.
+    """
+
+    network: RouteResolver
+    transport: NativeTransport
+    origin_node_of_task: Callable[[str], str | None]
+    node_of_replica: Callable[[ReplicaIncarnation], str | None]
+    sidecar_bind_host: str = "127.0.0.1"
+    directly_routable: bool = False
+
+
 class ResidentCapacityControl:
     """The resident model-settle entrypoint and the two admission/lifecycle actors."""
 
@@ -61,6 +107,8 @@ class ResidentCapacityControl:
         binding_resolver: BindingResolver,
         settle_cb: SettleCallback,
         endpoint_probe: EndpointProbe,
+        native_delivery: NativeDeliveryDeps | None = None,
+        persist: PersistCallback | None = None,
         logger: logging.Logger | None = None,
         poll_interval_sec: float = 1.0,
         idle_sweep_interval_sec: float = 0.0,
@@ -73,12 +121,18 @@ class ResidentCapacityControl:
         self._resolve_binding = binding_resolver
         self._settle = settle_cb
         self._probe_endpoint = endpoint_probe
+        self._native = native_delivery
+        self._persist = persist or (lambda: None)
         self._logger = logger or logging.getLogger("resident-capacity")
         self._poll_interval = poll_interval_sec
         self._idle_sweep_interval = idle_sweep_interval_sec
         self._loop: asyncio.AbstractEventLoop | None = None
         self._admit_lock = asyncio.Lock()
         self._sweep_task: asyncio.Task[None] | None = None
+
+    def set_native_delivery(self, deps: NativeDeliveryDeps) -> None:
+        """Enable the native fabric data path once the network plane is available."""
+        self._native = deps
 
     def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         """Capture the event loop the off-lane invocation coroutines run on."""
@@ -274,6 +328,26 @@ class ResidentCapacityControl:
                 error="resident replica endpoint is unavailable",
             )
             return
+        origin_node = (
+            self._native.origin_node_of_task(env.task_id)
+            if self._native is not None
+            else None
+        )
+        if self._native is not None and origin_node is not None:
+            await self._deliver_native(
+                env, claim, profile, handoff, replica, origin_node
+            )
+        else:
+            await self._deliver_compat(env, claim, replica)
+
+    async def _deliver_compat(
+        self,
+        env: ToolInvocationEnvelope,
+        claim: ServiceClaim,
+        replica: ReplicaIncarnation,
+    ) -> None:
+        """In-server claim-gated delivery for when the native fabric path is off."""
+        assert replica.endpoint is not None
         try:
             completion = await self._adapter.issue(
                 replica.endpoint, env.request_payload
@@ -299,6 +373,195 @@ class ResidentCapacityControl:
         if claim.state is ClaimState.RESERVED:
             self._admission.on_enqueue_ack(claim)
         self._settle(env.task_id, env.call_correlation, completion)
+
+    async def _deliver_native(
+        self,
+        env: ToolInvocationEnvelope,
+        claim: ServiceClaim,
+        profile: AdmissionProfile,
+        handoff: AdmissionHandoff,
+        replica: ReplicaIncarnation,
+        origin_node: str,
+    ) -> None:
+        """Carry the invocation two-phase over the data-direct fabric path.
+
+        The bytes never cross the server: it resolves a route, pokes the origin deputy
+        to deliver the bootstrap, records ``ACCEPTED`` and issues the fence on the ack,
+        then pokes the authorized stream. A fence rejection or an unreachable replica is
+        a pre-acceptance failure; an ambiguous bootstrap or a lost stream holds the
+        credit as uncertain until the fenced DS terminal.
+        """
+        deps = self._native
+        assert deps is not None
+        listener = await self._ensure_sidecar(replica)
+        if listener is None:
+            self._admission.on_route_loss(claim)
+            self._settle(
+                env.task_id,
+                env.call_correlation,
+                None,
+                error="resident sidecar is unavailable",
+            )
+            return
+        resolved = await deps.network.resolve(origin_node, listener)
+        if resolved is None:
+            self._admission.on_route_loss(claim)
+            self._settle(
+                env.task_id,
+                env.call_correlation,
+                None,
+                error="no route to the resident replica",
+            )
+            return
+        origin, route = resolved
+        handoff = handoff.model_copy(
+            update={
+                "route": route,
+                "origin_id": origin.origin_id,
+                "listener_generation": listener.listener_generation,
+            }
+        )
+        session_id = f"{claim.invocation_id}:{claim.admission_epoch}"
+        try:
+            boot = await deps.transport.bootstrap(
+                origin_node,
+                session_id=session_id,
+                route=route,
+                handoff=handoff,
+                request_payload=env.request_payload,
+            )
+        except NativeTransportError as exc:
+            self._admission.on_route_loss(claim)
+            self._settle(
+                env.task_id,
+                env.call_correlation,
+                None,
+                error=f"resident bootstrap failed: {exc}",
+            )
+            return
+        deps.network.record_observations(origin, listener, boot.observations)
+        if boot.acked:
+            await self._stream_native(
+                env, claim, profile, origin, origin_node, session_id
+            )
+            return
+        # Not acknowledged: an ambiguous delivery holds the credit as uncertain, while a
+        # definitive pre-delivery failure or fence rejection releases the reservation
+        # and invalidates the incarnation so the family re-materializes.
+        if boot.uncertain:
+            self._admission.on_route_loss(claim)
+            detail = "resident bootstrap delivery is uncertain"
+        else:
+            if claim.state is ClaimState.RESERVED:
+                self._admission.on_enqueue_failed(claim)
+            else:
+                self._admission.on_route_loss(claim)
+            if claim.replica_id is not None:
+                self._lifecycle.on_preempt(claim.replica_id)
+            detail = f"resident bootstrap refused: {boot.rejection or 'unreachable'}"
+        self._settle(env.task_id, env.call_correlation, None, error=detail)
+
+    async def _stream_native(
+        self,
+        env: ToolInvocationEnvelope,
+        claim: ServiceClaim,
+        profile: AdmissionProfile,
+        origin: RouteOrigin,
+        origin_node: str,
+        session_id: str,
+    ) -> None:
+        deps = self._native
+        assert deps is not None
+        origin_id = origin.origin_id
+        if claim.state is ClaimState.RESERVED:
+            auth = self._admission.accept_and_authorize(
+                claim,
+                idempotency_key=env.idempotency_key,
+                origin_id=origin_id,
+                operation="inference",
+                deadline_at=profile.deadline_at,
+            )
+            self._admission.on_stream_started(claim)
+        else:
+            # A resumed in-flight claim keeps its held credit; re-mint the fence only.
+            auth = self._admission.reauthorize(
+                claim,
+                idempotency_key=env.idempotency_key,
+                origin_id=origin_id,
+                operation="inference",
+                deadline_at=profile.deadline_at,
+            )
+        try:
+            stream = await deps.transport.stream(
+                origin_node, session_id=session_id, auth=auth
+            )
+        except NativeTransportError as exc:
+            self._admission.on_route_loss(claim)
+            self._settle(
+                env.task_id,
+                env.call_correlation,
+                None,
+                error=f"resident stream failed: {exc}",
+            )
+            return
+        if not stream.ok:
+            # A post-acceptance stream loss or refusal holds the credit as uncertain
+            # until the fenced DS terminal; it is never a completion.
+            self._admission.on_route_loss(claim)
+            self._settle(
+                env.task_id,
+                env.call_correlation,
+                None,
+                error=f"resident stream lost: {stream.rejection or 'unknown'}",
+            )
+            return
+        self._settle(env.task_id, env.call_correlation, stream.completion)
+
+    async def _ensure_sidecar(
+        self, replica: ReplicaIncarnation
+    ) -> ReplicaListenerAdvertisement | None:
+        """Bind (or rebind) the replica's sidecar and stamp its listener advertisement.
+
+        Reuses a listener already advertised for the current incarnation; a superseded
+        incarnation forces a rebind under a fresh listener generation.
+        """
+        deps = self._native
+        if deps is None or replica.endpoint is None:
+            return None
+        if (
+            replica.listener is not None
+            and replica.listener.incarnation == replica.incarnation
+        ):
+            return replica.listener
+        node_id = deps.node_of_replica(replica)
+        if node_id is None:
+            return None
+        generation = replica.listener_generation + 1
+        try:
+            host, port = await deps.transport.bind_sidecar(
+                node_id,
+                replica_id=replica.replica_id,
+                incarnation=replica.incarnation,
+                listener_generation=generation,
+                route=f"{deps.sidecar_bind_host}:0",
+                engine=replica.endpoint,
+            )
+        except NativeTransportError:
+            return None
+        replica.listener_generation = generation
+        replica.listener = ReplicaListenerAdvertisement(
+            replica_id=replica.replica_id,
+            family=replica.family,
+            incarnation=replica.incarnation,
+            listener_generation=generation,
+            node_id=node_id,
+            worker_id=replica.worker_id,
+            routes=(f"{host}:{port}",),
+            protocols=("resident",),
+            directly_routable=deps.directly_routable,
+        )
+        self._persist()
+        return replica.listener
 
     def _ensure_family(self, family: str, model_ref: str) -> bool:
         if family in self._stores.families:

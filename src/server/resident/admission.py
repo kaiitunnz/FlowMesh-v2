@@ -248,10 +248,53 @@ class AdmissionController:
         prior mint for the same claim.
         """
         accept(claim)
+        self._persist()
+        return self._mint_authorization(
+            claim,
+            idempotency_key=idempotency_key,
+            origin_id=origin_id,
+            operation=operation,
+            budget=budget,
+            deadline_at=deadline_at,
+        )
+
+    def reauthorize(
+        self,
+        claim: ServiceClaim,
+        *,
+        idempotency_key: str | None,
+        origin_id: str | None,
+        operation: str,
+        budget: int | None = None,
+        deadline_at: str | None = None,
+    ) -> RouteAuthorization:
+        """Re-mint the fence for a resumed in-flight claim without an FSM transition.
+
+        A re-driven boundary on a claim already past ``RESERVED`` reissues to the same
+        held credit; the fresh route-authorization epoch supersedes the prior mint.
+        """
+        return self._mint_authorization(
+            claim,
+            idempotency_key=idempotency_key,
+            origin_id=origin_id,
+            operation=operation,
+            budget=budget,
+            deadline_at=deadline_at,
+        )
+
+    def _mint_authorization(
+        self,
+        claim: ServiceClaim,
+        *,
+        idempotency_key: str | None,
+        origin_id: str | None,
+        operation: str,
+        budget: int | None,
+        deadline_at: str | None,
+    ) -> RouteAuthorization:
         assert claim.replica_id is not None and claim.incarnation is not None
         epoch = self._route_auth_epochs.get(claim.claim_id, 0) + 1
         self._route_auth_epochs[claim.claim_id] = epoch
-        self._persist()
         replica = self._stores.directory.get(claim.replica_id)
         request = self._stores.invocations.get(claim.invocation_id)
         return RouteAuthorization(

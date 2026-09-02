@@ -476,6 +476,17 @@ STACK_ENV_SCHEMA = EnvSchema(
                     min_value=0,
                     min_inclusive=False,
                 ),
+                EnvVar(
+                    "RESIDENT_SIDECAR_BIND_HOST",
+                    "127.0.0.1",
+                    description="Host a resident sidecar binds on the replica node.",
+                ),
+                EnvVar(
+                    "RESIDENT_SIDECAR_DIRECTLY_ROUTABLE",
+                    "false",
+                    description="Advertise the resident sidecar as directly routable.",
+                    var_type=EnvVarType.BOOL,
+                ),
             ],
         ),
         EnvSection(

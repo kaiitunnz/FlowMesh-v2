@@ -6,6 +6,7 @@ import inspect
 import os
 import threading
 from contextlib import AsyncExitStack, asynccontextmanager
+from typing import Any
 
 import uvicorn
 from fastapi import FastAPI
@@ -20,6 +21,7 @@ if __name__ == "__main__" and __package__ is None:
     sys.modules.setdefault("server.main", sys.modules[__name__])
 
 from shared._version import FLOWMESH_RELEASE_VERSION
+from shared.schemas.command import CommandMessage, CommandType
 
 from .auth import reconcile_resources, resolve_system_principal
 from .clients import RedisClient
@@ -32,6 +34,9 @@ from .orchestration.tool_dispatch import ToolInvocationEnvelope
 from .registries import WorkerRegistry, WorkflowRegistry
 from .registries.node import NodeRegistry
 from .registries.resident import ResidentRegistry
+from .resident.native import NativeTransport, NativeTransportError
+from .resident.service import NativeDeliveryDeps
+from .resident.state import ReplicaIncarnation
 from .resident.wiring import build_resident_capacity
 from .routers import docs, health, v1
 from .services.agent_model_gateway import (
@@ -209,6 +214,62 @@ if IS_ROOT_NODE:
                 buffer_bytes=config.orchestration.network.relay_buffer_bytes,
                 logger=logger,
             )
+
+    if (
+        RESIDENT_CONTROL is not None
+        and NETWORK_PLANE is not None
+        and WORKER_REGISTRY is not None
+    ):
+        _resident_cfg = config.orchestration.resident
+        _network = NETWORK_PLANE
+        _workers = WORKER_REGISTRY
+        _runtime = RUNTIME
+        assert _runtime is not None
+        _cmd_timeout = max(
+            config.orchestration.gateway.timeout_sec,
+            _resident_cfg.cold_start_deadline_sec,
+        )
+
+        async def _exec_node_cmd(
+            node_id: str, command: CommandType, payload: dict[str, Any]
+        ) -> dict[str, Any]:
+            resp = await NODE_REGISTRY.exec_node_cmd(
+                node_id,
+                CommandMessage(command=command, payload=payload),
+                timeout=_cmd_timeout,
+            )
+            if not resp.success:
+                raise NativeTransportError(
+                    resp.message or "resident node command failed"
+                )
+            return resp.data or {}
+
+        def _node_of_worker(worker_id: str | None) -> str | None:
+            if worker_id is None:
+                return None
+            worker = _workers.get_worker(worker_id)
+            return worker.node_id if worker is not None else None
+
+        def _origin_node_of_task(task_id: str) -> str | None:
+            record = _runtime.get_record(task_id)
+            return _node_of_worker(record.assigned_worker) if record else None
+
+        def _node_of_replica(replica: ReplicaIncarnation) -> str | None:
+            if replica.serve_task_id is None:
+                return None
+            record = _runtime.get_record(replica.serve_task_id)
+            return _node_of_worker(record.assigned_worker) if record else None
+
+        RESIDENT_CONTROL.set_native_delivery(
+            NativeDeliveryDeps(
+                network=_network,
+                transport=NativeTransport(_exec_node_cmd),
+                origin_node_of_task=_origin_node_of_task,
+                node_of_replica=_node_of_replica,
+                sidecar_bind_host=_resident_cfg.sidecar_bind_host,
+                directly_routable=_resident_cfg.sidecar_directly_routable,
+            )
+        )
 
     DISPATCHER = create_dispatcher(
         config.dispatch,
