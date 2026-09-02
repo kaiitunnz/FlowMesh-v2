@@ -1065,6 +1065,24 @@ class OrchestrationEngine:
             return None
         return self._envelope_from(wi, env)
 
+    def pending_tool_dispatch(
+        self, task_id: str, call_correlation: str
+    ) -> ToolInvocationEnvelope | None:
+        """The dispatch envelope for a still-pending mediated boundary, or None.
+
+        Returns an envelope only while the boundary is suspended with no durable outcome
+        and its work item is blocked, so a held re-drive re-issues exactly the off-lane
+        dispatch a restart would; a settled, terminalized, or cancelled boundary yields
+        nothing.
+        """
+        wi = self._work_item_for_task(task_id)
+        if wi is None or wi.status is not WorkItemStatus.BLOCKED:
+            return None
+        env = self._boundary_events.get((wi.activation_id, call_correlation))
+        if env is None or env.denial is not None or env.outcome_value is not None:
+            return None
+        return self._envelope_from(wi, env)
+
     def _envelope_from(
         self, wi: WorkItem, env: BoundaryEvent
     ) -> ToolInvocationEnvelope | None:

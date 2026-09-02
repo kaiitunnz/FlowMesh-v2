@@ -1229,6 +1229,30 @@ class TaskRuntime:
             self._cv.notify_all()
             return True
 
+    def redispatch_episode_invocation(
+        self, task_id: str, call_correlation: str
+    ) -> bool:
+        """Re-issue a still-pending mediated boundary off-lane without settling it.
+
+        A transient or uncertain delivery loss holds the boundary pending and any linked
+        credit uncertain, then re-drives the same durable envelope to its handler — the
+        path a restart uses — so the invocation resumes under its held claim rather than
+        terminalizing. A boundary that already settled, terminalized, or cancelled is a
+        no-op, so a late re-drive neither re-runs the handler nor releases a credit.
+        """
+        with self._cv:
+            record = self._tasks.get(task_id)
+            engine = self._engines.get(record.workflow_id) if record else None
+            if record is None or engine is None:
+                return False
+            if record.status in TERMINAL_TASK_STATUSES:
+                return False
+            envelope = engine.pending_tool_dispatch(task_id, call_correlation)
+            if envelope is None:
+                return False
+            self._dispatch_boundary(envelope)
+        return True
+
     def _dispatch_boundary(self, env: ToolInvocationEnvelope) -> None:
         """Route a recorded mediated boundary to its handler by exact (kind, interface).
 
