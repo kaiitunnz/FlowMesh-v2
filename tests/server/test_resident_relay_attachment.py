@@ -84,3 +84,28 @@ def test_only_the_lease_owner_consumes_the_down_stream() -> None:
         assert second_delivery.frames == ["rly-1:2"]
 
     asyncio.run(run())
+
+
+def test_a_reclaimed_lease_resumes_mid_stream_without_re_delivering() -> None:
+    async def run() -> None:
+        redis = FakeBinaryRedis()
+        streams = RelayStreamStore(redis)
+        await streams.publish_down("nde-t", relay_frame(RelayFrameKind.DATA, seq=1))
+        await streams.publish_down("nde-t", relay_frame(RelayFrameKind.DATA, seq=2))
+        a, a_delivery = _attachment(redis, "owner-a")
+        b, b_delivery = _attachment(redis, "owner-b")
+        # A owns the leg and consumes the first two frames mid-stream; its durable
+        # cursor advances. A competitor is fenced while A's lease is still live.
+        assert await a.pump_once() == 2
+        assert a_delivery.frames == ["rly-1:1", "rly-1:2"]
+        assert await b.pump_once() == -1
+        assert b_delivery.frames == []
+        # A's process dies without a clean release: its lease lapses on the TTL clock.
+        redis.now += 20.0
+        # The rest of the stream arrives; B reclaims the lapsed lease and resumes from
+        # the shared durable cursor, delivering only the new frame, not replaying 1/2.
+        await streams.publish_down("nde-t", relay_frame(RelayFrameKind.DATA, seq=3))
+        assert await b.pump_once() == 1
+        assert b_delivery.frames == ["rly-1:3"]
+
+    asyncio.run(run())
