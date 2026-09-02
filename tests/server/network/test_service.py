@@ -61,7 +61,7 @@ def _listener(node_id="nde-2", generation=0) -> ReplicaListenerAdvertisement:
 
 def _plane(registry: _FakeNodeRegistry) -> NetworkPlane:
     return NetworkPlane(
-        NetworkPlaneConfig(enabled=True, control_relay_url="127.0.0.1:5000"),
+        NetworkPlaneConfig(enabled=True),
         registry,  # type: ignore[arg-type]
         logging.getLogger("test-network"),
     )

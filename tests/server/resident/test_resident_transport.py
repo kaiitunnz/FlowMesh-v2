@@ -1,6 +1,8 @@
-"""The resident deputy and sidecar carry a claim-gated invocation over each transport.
+"""The resident deputy and sidecar carry a claim-gated invocation over the forward-dial
+offloads (worker_direct and node_relay); the universal control_relay rides the
+reverse-rendezvous relay covered by the substrate tests.
 
-Over real loopback sockets — with the substrate relays as the intermediate hops and a
+Over real loopback sockets — with the node relay as the intermediate hop and a
 fake engine behind the sidecar — a bootstrap is admitted and its response streams back;
 a fence rejection is refused before the engine body is forwarded and surfaces as a
 stopped delivery at the deputy; cancellation is honored only under a valid
@@ -15,7 +17,7 @@ from typing import Any
 
 import httpx
 
-from server.network.listeners import NetworkControlRelay, NetworkPlaneListeners
+from server.network.listeners import NetworkPlaneListeners
 from server.network.state import (
     ResolvedRoute,
     RouteCandidate,
@@ -103,7 +105,6 @@ class _Fixture:
     def __init__(self, engine: _EngineOpen = _fake_engine) -> None:
         self.sidecar_port = _free_port()
         self.relay_port = _free_port()
-        self.control_port = _free_port()
         self.loads: list[str] = []
         self.sidecar = ResidentSidecarListener(
             ResidentSidecarServer(
@@ -119,19 +120,14 @@ class _Fixture:
             endpoint_url=f"127.0.0.1:{self.relay_port}",
             buffer_bytes=65536,
         )
-        self.control = NetworkControlRelay(
-            control_relay_url=f"127.0.0.1:{self.control_port}", buffer_bytes=65536
-        )
 
     async def __aenter__(self) -> "_Fixture":
         await self.sidecar.start()
         await self.relays.start()
-        await self.control.start()
         return self
 
     async def __aexit__(self, *_exc: object) -> None:
         await self.relays.stop()
-        await self.control.stop()
         await self.sidecar.stop()
 
     def _sidecar_hop(self, transport: Transport) -> RouteHop:
@@ -151,19 +147,6 @@ class _Fixture:
             RouteCandidate(
                 transport=t,
                 hops=(
-                    RouteHop(transport=t, endpoint=f"127.0.0.1:{self.relay_port}"),
-                    self._sidecar_hop(t),
-                ),
-            )
-        )
-
-    def control_relay(self) -> ResolvedRoute:
-        t = Transport.CONTROL_RELAY
-        return _route(
-            RouteCandidate(
-                transport=t,
-                hops=(
-                    RouteHop(transport=t, endpoint=f"127.0.0.1:{self.control_port}"),
                     RouteHop(transport=t, endpoint=f"127.0.0.1:{self.relay_port}"),
                     self._sidecar_hop(t),
                 ),
@@ -198,11 +181,7 @@ def test_delivers_and_streams_over_each_transport() -> None:
             assert stream.completion == "".join(_CHUNKS)
             assert fx.loads == ["request", "stream"]
 
-    for select in (
-        _Fixture.direct,
-        _Fixture.node_relay,
-        _Fixture.control_relay,
-    ):
+    for select in (_Fixture.direct, _Fixture.node_relay):
         asyncio.run(run(select))
 
 

@@ -76,7 +76,6 @@ listed here is in `.env.example`.
 | `NETWORK_PLANE_ENABLED` | `false` | Enable the route-discovery and relay substrate |
 | `NETWORK_PLANE_ENDPOINT_URL` | – | Advertised node-relay endpoint (`host:port`) |
 | `NETWORK_PLANE_SIDECAR_URL` | – | Node-local echo listener (`host:port`) |
-| `NETWORK_PLANE_CONTROL_RELAY_URL` | – | Root controlled-fallback relay endpoint (`host:port`) |
 | `NETWORK_PLANE_TRUST_DOMAIN` | `flowmesh` | Endpoint trust domain |
 | `NETWORK_PLANE_REACHABILITY_CLASS` | `routable` | Endpoint reachability class |
 | `NETWORK_PLANE_PROTOCOLS` | `echo` | Advertised transport protocols |

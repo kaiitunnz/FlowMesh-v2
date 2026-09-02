@@ -532,11 +532,6 @@ STACK_ENV_SCHEMA = EnvSchema(
                     description="Node-local echo listener (host:port).",
                 ),
                 EnvVar(
-                    "NETWORK_PLANE_CONTROL_RELAY_URL",
-                    "",
-                    description="Root controlled-fallback relay endpoint (host:port).",
-                ),
-                EnvVar(
                     "NETWORK_PLANE_TRUST_DOMAIN",
                     "flowmesh",
                     description="Endpoint trust domain.",

@@ -503,15 +503,13 @@ class NetworkPlaneConfig:
     """Feature-gated network-plane route substrate knobs.
 
     ``endpoint_url`` is the operator-configured node-relay endpoint advertised on
-    registration; ``sidecar_url`` is the node-local echo listener the relay uplinks to;
-    ``control_relay_url`` is the root's controlled-fallback relay. TTL/backoff bounds
-    drive the reachability state machine.
+    registration; ``sidecar_url`` is the node-local echo listener the relay uplinks to.
+    TTL/backoff bounds drive the reachability state machine.
     """
 
     enabled: bool = False
     endpoint_url: str | None = None
     sidecar_url: str | None = None
-    control_relay_url: str | None = None
     trust_domain: str = "flowmesh"
     reachability_class: str = "routable"
     protocols: tuple[str, ...] = ("echo",)
@@ -536,7 +534,6 @@ class NetworkPlaneConfig:
             enabled=parse_bool_env(f"{prefix}ENABLED", False),
             endpoint_url=_env_or_none(f"{prefix}ENDPOINT_URL"),
             sidecar_url=_env_or_none(f"{prefix}SIDECAR_URL"),
-            control_relay_url=_env_or_none(f"{prefix}CONTROL_RELAY_URL"),
             trust_domain=_env_or_none(f"{prefix}TRUST_DOMAIN") or "flowmesh",
             reachability_class=_env_or_none(f"{prefix}REACHABILITY_CLASS")
             or "routable",

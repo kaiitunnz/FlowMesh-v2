@@ -1,9 +1,9 @@
 """Network-plane listeners for the feature-gated echo seam.
 
 Each network-plane node runs a bounded echo sidecar (the resident-facing listener
-stand-in) and a node-relay endpoint that uplinks to it; the root additionally runs a
-control-relay endpoint reached as the controlled fallback. They exercise the transport
-ladder and the bounded relay session without ever fronting a resident engine.
+stand-in) and a node-relay endpoint that uplinks to it. They exercise the reachable-pair
+forward-dial transports and the bounded relay session without ever fronting a resident
+engine; the universal control_relay rides the reverse-rendezvous relay instead.
 """
 
 import asyncio
@@ -122,26 +122,3 @@ class NetworkPlaneListeners:
     async def stop(self) -> None:
         await self._node_relay.stop()
         await self._sidecar.stop()
-
-
-class NetworkControlRelay:
-    """The root's controlled-fallback relay, reached by ``control_relay`` routes."""
-
-    def __init__(
-        self,
-        *,
-        control_relay_url: str,
-        buffer_bytes: int,
-        logger: logging.Logger | None = None,
-    ) -> None:
-        self._server = _TcpServer(
-            control_relay_url,
-            _relay_connection(buffer_bytes=buffer_bytes, logger=logger),
-            logger=logger,
-        )
-
-    async def start(self) -> None:
-        await self._server.start()
-
-    async def stop(self) -> None:
-        await self._server.stop()
