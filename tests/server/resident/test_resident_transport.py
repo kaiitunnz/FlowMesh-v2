@@ -8,8 +8,9 @@ authorization; and a pre-send connect failure falls to the next candidate.
 """
 
 import asyncio
+import contextlib
 import socket
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
 from server.network.listeners import NetworkControlRelay, NetworkPlaneListeners
@@ -91,10 +92,13 @@ def _auth(**overrides: object) -> RouteAuthorization:
     return RouteAuthorization(**base)
 
 
+_EngineOpen = Callable[[ReplicaEndpoint, str | None], Awaitable[EngineResponse]]
+
+
 class _Fixture:
     """A resident sidecar plus the substrate relay hops, all on loopback."""
 
-    def __init__(self) -> None:
+    def __init__(self, engine: _EngineOpen = _fake_engine) -> None:
         self.sidecar_port = _free_port()
         self.relay_port = _free_port()
         self.control_port = _free_port()
@@ -103,7 +107,7 @@ class _Fixture:
             ResidentSidecarServer(
                 gate=_gate(),
                 endpoint=ReplicaEndpoint(base_url="http://engine/v1", model="m"),
-                engine_open=_fake_engine,
+                engine_open=engine,
                 on_load=lambda ev: self.loads.append(ev.operation),
             ),
             route=f"127.0.0.1:{self.sidecar_port}",
@@ -238,17 +242,52 @@ def test_stream_rejection_is_refused_before_the_body() -> None:
         asyncio.run(run(override, expected))
 
 
-def test_cancel_is_honored_only_under_a_valid_authorization() -> None:
-    async def run() -> None:
-        async with _Fixture() as fx:
-            deputy = ResidentInvocationDeputy(connect_budget_sec=3.0)
-            await deputy.bootstrap("s1", fx.direct(), _handoff(), None)
-            good = await deputy.cancel("s1", _auth())
-            assert good.ok and good.cancelled
+class _SlowEngine:
+    """Hangs in the request until cancelled, recording that the engine was aborted."""
 
-            await deputy.bootstrap("s2", fx.direct(), _handoff(), None)
-            bad = await deputy.cancel("s2", _auth(incarnation=9))
-            assert not bad.ok and bad.rejection == "wrong_incarnation"
+    def __init__(self) -> None:
+        self.aborted = False
+
+    async def __call__(
+        self, endpoint: ReplicaEndpoint, request: str | None
+    ) -> EngineResponse:
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            self.aborted = True
+            raise
+
+        async def chunks() -> AsyncIterator[str]:
+            yield "done"
+
+        async def aclose() -> None:
+            return None
+
+        return EngineResponse(chunks=chunks(), aclose=aclose)
+
+
+def test_cancel_aborts_the_engine_and_reaps_both_ends() -> None:
+    async def run() -> None:
+        slow = _SlowEngine()
+        async with _Fixture(engine=slow) as fx:
+            deputy = ResidentInvocationDeputy(connect_budget_sec=3.0)
+            boot = await deputy.bootstrap(
+                "s1", fx.direct(), _handoff(), '{"prompt": "hi"}'
+            )
+            assert boot.acked
+            stream = asyncio.ensure_future(deputy.stream("s1", _auth()))
+            await asyncio.sleep(0.1)  # let the stream reach the hung engine request
+            cancel = await deputy.cancel("s1")
+            assert cancel.ok and cancel.cancelled
+            with contextlib.suppress(asyncio.CancelledError):
+                await stream
+            # Both ends are reaped and the co-located engine request was aborted.
+            assert "s1" not in deputy._sessions
+            for _ in range(100):
+                if slow.aborted:
+                    break
+                await asyncio.sleep(0.01)
+            assert slow.aborted
 
     asyncio.run(run())
 

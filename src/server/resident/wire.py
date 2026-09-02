@@ -17,7 +17,6 @@ from ..network import wire as netwire
 # Deputy -> sidecar.
 KIND_BOOTSTRAP = "bootstrap"
 KIND_STREAM = "stream"
-KIND_CANCEL = "cancel"
 # Sidecar -> deputy.
 KIND_ACK = "ack"
 KIND_CHUNK = "chunk"

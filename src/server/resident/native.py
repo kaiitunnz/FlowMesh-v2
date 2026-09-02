@@ -134,11 +134,10 @@ class NativeTransport:
             definite=bool(data.get("definite")),
         )
 
-    async def cancel(
-        self, node_id: str, *, session_id: str, auth: RouteAuthorization
-    ) -> None:
+    async def cancel(self, node_id: str, *, session_id: str) -> None:
+        """Reap a held session so a fenced terminal stops the engine and both ends."""
         await self._exec(
             node_id,
             CommandType.DELIVER_RESIDENT_CANCEL,
-            {"session_id": session_id, "auth": auth.model_dump(mode="json")},
+            {"session_id": session_id},
         )

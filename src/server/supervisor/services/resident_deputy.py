@@ -112,9 +112,8 @@ class ResidentDeputyService:
         }
 
     async def cancel(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Cancel a held invocation under its authorization."""
-        auth = RouteAuthorization.model_validate(payload["auth"])
-        result = await self._deputy.cancel(str(payload["session_id"]), auth)
+        """Reap a held invocation so both ends close and the engine request aborts."""
+        result = await self._deputy.cancel(str(payload["session_id"]))
         return {
             "ok": result.ok,
             "cancelled": result.cancelled,

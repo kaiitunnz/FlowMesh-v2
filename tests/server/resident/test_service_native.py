@@ -8,6 +8,7 @@ post-acceptance stream loss holds the credit as uncertain and survives a restart
 
 import asyncio
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from typing import Any
 
 from server.network.state import (
@@ -282,6 +283,36 @@ def test_native_uncertain_claim_survives_restart() -> None:
         svc.on_invocation_terminal("inv-1", failed=True)
         assert claim.state is ClaimState.TERMINAL
         assert stores.credit_ledger.held(rid) == 0
+
+    asyncio.run(run())
+
+
+def test_failed_terminal_pokes_a_native_reap_for_a_live_session() -> None:
+    async def run() -> None:
+        cancels: list[dict[str, Any]] = []
+
+        async def exec_cmd(node_id: str, command: Any, payload: dict[str, Any]):
+            cancels.append({"node": node_id, "cmd": command.value, **payload})
+            return {}
+
+        svc, _ = _make(
+            _good_engine,
+            settle_cb=lambda *a, **k: True,
+            redispatch_cb=lambda *a, **k: False,
+        )
+        assert svc._native is not None
+        deps = replace(svc._native, transport=NativeTransport(exec_cmd))
+        svc.set_native_delivery(deps)
+        svc.bind_loop(asyncio.get_running_loop())
+        svc._live_sessions["inv-9"] = ("nde-1", "inv-9:0")
+
+        # A fenced failure/cancel terminal reaps the still-held native session.
+        svc.on_invocation_terminal("inv-9", failed=True)
+        await asyncio.sleep(0.05)
+        assert cancels == [
+            {"node": "nde-1", "cmd": "DELIVER_RESIDENT_CANCEL", "session_id": "inv-9:0"}
+        ]
+        assert "inv-9" not in svc._live_sessions
 
     asyncio.run(run())
 

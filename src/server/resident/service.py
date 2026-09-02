@@ -136,6 +136,7 @@ class ResidentCapacityControl:
         self._redrive_backoff = redrive_backoff_sec
         self._max_transient_redrives = max_transient_redrives
         self._transient_failures: dict[str, int] = {}
+        self._live_sessions: dict[str, tuple[str, str]] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
         self._admit_lock = asyncio.Lock()
         self._sweep_task: asyncio.Task[None] | None = None
@@ -200,6 +201,20 @@ class ResidentCapacityControl:
         reason = ClaimTerminalReason.FAILED if failed else ClaimTerminalReason.COMPLETED
         self._admission.on_ds_terminal(invocation_id, reason)
         self._transient_failures.pop(invocation_id, None)
+        live = self._live_sessions.pop(invocation_id, None)
+        if (
+            failed
+            and live is not None
+            and self._native is not None
+            and self._loop is not None
+        ):
+            # A fenced failure/cancel terminal reaps a still-held native session best
+            # effort so the engine stream stops promptly; the deputy reaper is the
+            # restart-safe backstop when this poke does not land.
+            origin_node, session_id = live
+            asyncio.run_coroutine_threadsafe(
+                self._reap_native(origin_node, session_id), self._loop
+            )
 
     def list_service_families(self) -> list[ServiceFamily]:
         """The registered service families, for operator read access."""
@@ -434,6 +449,9 @@ class ResidentCapacityControl:
             return
         deps.network.record_observations(origin, listener, boot.observations)
         if boot.acked:
+            # Track the held session so a fenced cancellation terminal reaps both ends
+            # of the data-direct channel and stops the engine promptly.
+            self._live_sessions[env.invocation_id] = (origin_node, session_id)
             await self._stream_native(
                 env, claim, profile, origin, origin_node, session_id
             )
@@ -536,6 +554,16 @@ class ResidentCapacityControl:
         )
         await asyncio.sleep(self._redrive_backoff)
         self._redispatch(env.task_id, env.call_correlation)
+
+    async def _reap_native(self, origin_node: str, session_id: str) -> None:
+        """Reap a held native session so a terminal stops the engine and both ends."""
+        deps = self._native
+        if deps is None:
+            return
+        try:
+            await deps.transport.cancel(origin_node, session_id=session_id)
+        except NativeTransportError:
+            pass
 
     def _release_definite(
         self,

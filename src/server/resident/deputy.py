@@ -13,6 +13,7 @@ or any ambiguous delivery is uncertain, never a blind resend to another path.
 """
 
 import asyncio
+import contextlib
 import logging
 import socket
 import ssl
@@ -64,6 +65,7 @@ class _Session:
     writer: asyncio.StreamWriter
     transport: Transport
     reaper: asyncio.TimerHandle | None = None
+    stream_task: "asyncio.Task[StreamResult] | None" = None
 
 
 class ResidentInvocationDeputy:
@@ -157,6 +159,9 @@ class ResidentInvocationDeputy:
         if session is None:
             return StreamResult(False, rejection="no_session")
         self._stop_reaper(session)
+        current = asyncio.current_task()
+        if isinstance(current, asyncio.Task):
+            session.stream_task = current
         try:
             await wire.write_msg(
                 session.writer, wire.KIND_STREAM, auth=auth.model_dump(mode="json")
@@ -183,24 +188,23 @@ class ResidentInvocationDeputy:
         finally:
             await self.reap(session_id)
 
-    async def cancel(self, session_id: str, auth: RouteAuthorization) -> StreamResult:
-        """Cancel the invocation under the authorization; the sidecar validates it."""
+    async def cancel(self, session_id: str) -> StreamResult:
+        """Abort a held invocation and reap both ends of its data-direct connection.
+
+        The origin control plane reaps only the session it opened, so there is no fence
+        on the seam: it cancels any in-flight stream and closes the connection, which
+        the sidecar observes to abort its co-located engine request.
+        """
         session = self._sessions.get(session_id)
         if session is None:
             return StreamResult(False, rejection="no_session")
-        self._stop_reaper(session)
-        try:
-            await wire.write_msg(
-                session.writer, wire.KIND_CANCEL, auth=auth.model_dump(mode="json")
-            )
-            msg = await wire.read_msg(session.reader)
-            if msg["kind"] == wire.KIND_DONE:
-                return StreamResult(True, cancelled=True)
-            return StreamResult(False, rejection=msg.get("reason"))
-        except (OSError, ValueError, asyncio.IncompleteReadError):
-            return StreamResult(False, rejection="stream_loss")
-        finally:
-            await self.reap(session_id)
+        task = session.stream_task
+        if task is not None and not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+        await self.reap(session_id)
+        return StreamResult(True, cancelled=True)
 
     async def reap(self, session_id: str) -> None:
         """Close and forget a held session and cancel its reaper; safe to call twice."""

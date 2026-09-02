@@ -157,13 +157,23 @@ class ResidentSidecarServer:
                     writer, wire.KIND_REJECT, reason=str(gate.rejection)
                 )
                 return None
-            if follow["kind"] == wire.KIND_CANCEL:
-                self._on_load(self._gate.load_evidence(auth, "cancel"))
-                await wire.write_msg(writer, wire.KIND_DONE, cancelled=True)
-                return None
             if follow["kind"] != wire.KIND_STREAM:
                 return None
             self._on_load(self._gate.load_evidence(auth, "stream"))
+            # Race the engine against a cancel: the origin deputy cancels by closing the
+            # connection, so an EOF while the engine still runs aborts the request.
+            cancel_watch = asyncio.ensure_future(reader.read(1))
+            try:
+                await asyncio.wait(
+                    {engine_task, cancel_watch},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if cancel_watch.done():
+                    return None  # the connection closed: the finally aborts the engine
+            finally:
+                cancel_watch.cancel()
+                with contextlib.suppress(Exception, asyncio.CancelledError):
+                    await cancel_watch
             try:
                 engine = await engine_task
             except httpx.HTTPStatusError as exc:
