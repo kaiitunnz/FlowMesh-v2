@@ -190,8 +190,9 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   acknowledgement, the Admission controller records `ACCEPTED` and issues the immutable
   `RouteAuthorization`, then a stream poke carries the authorized response over the
   data-direct deputy-to-sidecar channel while the server never carries the bytes; a lost
-  or ambiguous delivery is `UNCERTAIN` and holds the credit. Otherwise an in-server adapter
-  relays the request as the claim-gated compatibility path. Enable with
+  or ambiguous delivery is `UNCERTAIN`, holds the credit, and re-drives, releasing only on a
+  definite outcome, and a cancellation reaps both ends of the channel. Otherwise an in-server
+  adapter relays the request as the claim-gated compatibility path. Enable with
   `RESIDENT_CAPACITY_ENABLED=true`. See [`RESIDENT_CAPACITY.md`](RESIDENT_CAPACITY.md).
 - **Network-plane route substrate.** A topology-aware, control-resolved routing substrate
   turns trusted node endpoint advertisements and directional reachability evidence into an

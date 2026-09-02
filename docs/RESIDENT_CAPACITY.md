@@ -70,11 +70,15 @@ TERMINAL --(permitted reissue)--> successor PENDING (same invocation_id, fresh e
   and consumed by `invocation_id`; a stream close or a telemetry report alone never releases
   it. A pre-acceptance cancellation, known enqueue failure, or expiry records a terminal
   transition directly.
-- **Loss and reissue.** A route or incarnation loss moves a credit-bearing claim to
-  `UNCERTAIN`, holding its credit until the fenced terminal outcome for its invocation
-  settles it. A re-driven boundary resumes the in-flight claim on its replica under the held
-  credit; once a claim is terminal, a permitted reissue raises a successor with a fresh
-  admission epoch, never reopening a terminal claim or reusing its credit.
+- **Loss and reissue.** A transient or ambiguous route loss moves a credit-bearing claim to
+  `UNCERTAIN` and re-drives the boundary under the held credit — the runtime re-issues the
+  same durable invocation, which resumes on the fenced replica — releasing nothing until a
+  definite outcome. Only a completion, a fence rejection, or a clean engine refusal releases;
+  a lost stream is held, never read as a completion. The hold is bounded by replica health,
+  not a timer: a path that keeps failing preempts the replica after a bounded number of
+  attempts, so the next resume finds no live incarnation and the fenced terminal releases.
+  Once a claim is terminal, a permitted reissue raises a successor with a fresh admission
+  epoch, never reopening a terminal claim or reusing its credit.
 
 ## Handoff and execution
 
@@ -99,9 +103,14 @@ enqueue acknowledgement, at which point the Admission controller records `ACCEPT
 issues the immutable `RouteAuthorization`; a stream poke then carries the authorized
 response over the same held deputy-to-sidecar channel, with cancellation and backpressure.
 A pre-delivery connect failure takes an already-resolved fallback candidate with no
-re-admission; a lost acknowledgement, ambiguous bootstrap, or stream loss is `UNCERTAIN`
-and holds the credit until the fenced DS terminal. Request, stream, and cancel emit
-claim-tagged load evidence, tagged latency-sensitive service traffic versus bulk transfer.
+re-admission; a fence rejection or a clean engine refusal is a definite release; a lost
+acknowledgement, ambiguous bootstrap, or stream loss is `UNCERTAIN`, holds the credit, and
+re-drives until a definite outcome or the fenced DS terminal. The sidecar classifies a clean
+engine status as definite so no held slot leaks its credit. A cancellation reaps both ends of
+the data-direct channel — the deputy closes the connection and the sidecar aborts the
+co-located engine request — so a cancelled invocation stops promptly rather than waiting out
+the stream deadline. Request and stream emit claim-tagged load evidence, tagged
+latency-sensitive service traffic versus bulk transfer.
 
 The legacy serve proxy cannot reach a resident allocation: a resident replica's serve task
 is marked resident and the proxy refuses it by allocation identity, independent of its
