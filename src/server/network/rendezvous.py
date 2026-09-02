@@ -10,9 +10,11 @@ holds no admission, credit, or engine authority.
 
 Draining is fair: within a read batch, priority control frames go first, then data
 frames are round-robined across sessions so one busy session cannot starve another on
-the shared per-node stream. The durable cursor advances in stream order, so a restarted
-bridge re-reads from the last recorded position and any re-forwarded frame is
-deduplicated by its receiver.
+the shared per-node stream. The durable cursor advances after each batch, so a bridge
+that restarts mid-batch (or errors before recording the cursor) re-reads and may
+re-forward a frame; the receiving endpoint drops the re-forward by its per-direction
+sequence, so a data frame is delivered exactly once. A forwarded prefix is trimmed at or
+below the recorded cursor, bounding the per-node stream.
 """
 
 import logging
@@ -72,7 +74,13 @@ class RootRendezvousBridge:
             return 0
         for entry in self._fair_order(entries):
             await self._forward(entry)
-        await self._cursors.set(node_id, entries[-1].entry_id)
+        last_id = entries[-1].entry_id
+        await self._cursors.set(node_id, last_id)
+        # Trim the forwarded prefix of this node's up stream at or below the recorded
+        # cursor so it stays bounded; unforwarded frames past the cursor are never cut.
+        await self._streams.trim_up_to(
+            node_id, RelayDirection.ORIGIN_TO_TARGET, last_id
+        )
         return len(entries)
 
     @staticmethod

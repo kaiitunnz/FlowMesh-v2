@@ -21,23 +21,20 @@ from server.network.reverse_relay import (
 from ._relay_fakes import FakeBinaryRedis, relay_frame
 
 
-def test_frame_codec_round_trips_raw_payload_and_opaque_fence() -> None:
+def test_frame_codec_round_trips_a_raw_binary_payload() -> None:
     frame = RelayFrame(
-        kind=RelayFrameKind.OPEN,
+        kind=RelayFrameKind.DATA,
         session_id="rly-9",
         invocation_id="inv-9",
         idm="idm-9",
         direction=RelayDirection.ORIGIN_TO_TARGET,
         seq=3,
         ack=2,
-        window=4096,
         payload=b"\x00\x01\x02not-utf8\xff",
-        fence=b'{"handoff":"opaque"}',
     )
     restored = RelayFrame.from_fields(frame.to_fields())
     assert restored == frame
     assert restored.payload == b"\x00\x01\x02not-utf8\xff"  # binary-safe, not base64
-    assert restored.fence == b'{"handoff":"opaque"}'  # opaque to the substrate
 
 
 def test_cursor_read_returns_only_entries_after_the_stored_id() -> None:
@@ -105,14 +102,7 @@ def test_session_record_round_trips_the_durable_cursor() -> None:
 
 
 def test_control_frames_ride_the_priority_lane() -> None:
-    for kind in (
-        RelayFrameKind.OPEN,
-        RelayFrameKind.ACK,
-        RelayFrameKind.WINDOW,
-        RelayFrameKind.CANCEL,
-        RelayFrameKind.TERMINAL,
-        RelayFrameKind.ERROR,
-    ):
+    for kind in (RelayFrameKind.WINDOW, RelayFrameKind.CANCEL):
         assert relay_frame(kind).is_control
     assert not relay_frame(RelayFrameKind.DATA).is_control
 

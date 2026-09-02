@@ -162,11 +162,8 @@ def relay_down_key(relay_token: str) -> str:
     return f"relay:{relay_token}:down"
 
 
-# Resident-relay namespace: per-node standing reverse-attachment streams and per-session
-# records, isolated from the control/telemetry/legacy-proxy relay keys above.
-RESIDENT_RELAY_GROUP = "rr"
-
-
+# Resident-relay namespace (rr:*): per-node standing reverse-attachment streams and
+# per-session records, isolated from the control/telemetry/legacy-proxy relay keys.
 def resident_relay_up_key(node_id: str) -> str:
     return f"rr:node:{node_id}:up"
 

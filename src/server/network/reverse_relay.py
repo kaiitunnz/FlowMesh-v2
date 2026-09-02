@@ -6,8 +6,9 @@ root rendezvous, which bridges opaque framed data between their per-node streams
 module is the transport primitives — frame codec, per-node stream cursor reads, the
 durable per-session record, and the ownership lease that hands a leg's single receiver
 over on restart. It is deliberately free of any resident, claim, or admission concept:
-frames carry an opaque fence and an opaque payload, and are keyed only by the relay
-session, invocation, and idempotency identifiers used for routing and dedupe.
+a frame carries an opaque payload (the resident fence and body ride inside it) and is
+keyed only by the relay session, invocation, and idempotency identifiers used for
+routing and dedupe.
 
 Durability follows a cursor lease, not a consumer group: each leg has one logical
 receiver that reads its node stream from a durable stored cursor, and a restart reclaims
@@ -16,8 +17,6 @@ trimmed — a stream is trimmed only at or below the cumulative-acknowledged id.
 """
 
 import asyncio
-import time
-from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Protocol
@@ -30,16 +29,11 @@ from ..clients.redis import (
 
 
 class RelayFrameKind(StrEnum):
-    """The frame kinds. Every kind but ``DATA`` rides the priority control lane: it
-    bypasses the byte window so a full data window cannot deadlock cancellation."""
-
-    OPEN = "open"
+    # Bulk DATA, plus the WINDOW grant and CANCEL that ride the priority control lane,
+    # bypassing the byte window so a full data window cannot deadlock cancellation.
     DATA = "data"
-    ACK = "ack"
     WINDOW = "window"
     CANCEL = "cancel"
-    TERMINAL = "terminal"
-    ERROR = "error"
 
 
 class RelayDirection(StrEnum):
@@ -49,22 +43,15 @@ class RelayDirection(StrEnum):
     TARGET_TO_ORIGIN = "t2o"
 
 
-_CONTROL_KINDS = frozenset(
-    {
-        RelayFrameKind.OPEN,
-        RelayFrameKind.ACK,
-        RelayFrameKind.WINDOW,
-        RelayFrameKind.CANCEL,
-        RelayFrameKind.TERMINAL,
-        RelayFrameKind.ERROR,
-    }
-)
+_CONTROL_KINDS = frozenset({RelayFrameKind.WINDOW, RelayFrameKind.CANCEL})
 
 
 @dataclass(frozen=True)
 class RelayFrame:
-    """One relay frame. ``fence`` and ``payload`` are opaque bytes the root never reads;
-    the remaining fields are the routing and flow-control metadata it may read."""
+    """One relay frame. ``payload`` is opaque bytes the root never reads (the resident
+    fence and body ride inside it); the rest are routing and flow-control metadata it
+    may read. ``seq`` orders a direction's data for receiver dedup; ``ack`` carries a
+    grant's cumulative byte credit."""
 
     kind: RelayFrameKind
     session_id: str
@@ -73,9 +60,7 @@ class RelayFrame:
     direction: RelayDirection
     seq: int = 0
     ack: int = 0
-    window: int = 0
     payload: bytes = b""
-    fence: bytes = b""
 
     @property
     def is_control(self) -> bool:
@@ -90,12 +75,9 @@ class RelayFrame:
             b"d": self.direction.value.encode(),
             b"q": str(self.seq).encode(),
             b"a": str(self.ack).encode(),
-            b"w": str(self.window).encode(),
         }
         if self.payload:
             fields[b"y"] = self.payload
-        if self.fence:
-            fields[b"f"] = self.fence
         return fields
 
     @staticmethod
@@ -108,9 +90,7 @@ class RelayFrame:
             direction=RelayDirection(fields[b"d"].decode()),
             seq=int(fields[b"q"]),
             ack=int(fields[b"a"]),
-            window=int(fields[b"w"]),
             payload=fields.get(b"y", b""),
-            fence=fields.get(b"f", b""),
         )
 
 
@@ -127,6 +107,7 @@ class BinaryRedis(Protocol):
     async def set(self, name: str, value: str, nx: bool, px: int) -> bool | None: ...
     async def get(self, name: str) -> bytes | None: ...
     async def delete(self, name: str) -> int: ...
+    async def eval(self, script: str, numkeys: int, *keys_and_args: str) -> Any: ...
 
 
 @dataclass
@@ -191,11 +172,7 @@ class RelayStreamStore:
 
 
 class RelaySessionStore:
-    """The durable per-session record: the cursor/lease home and window state.
-
-    It references the fence and identities opaquely and is never a source of truth for
-    admission credit — control state remains that sole authority.
-    """
+    """The durable per-session routing record: origin/target nodes and sidecar route."""
 
     def __init__(self, redis: BinaryRedis) -> None:
         self._redis = redis
@@ -208,13 +185,30 @@ class RelaySessionStore:
         mapping = {k: str(v) for k, v in fields.items()}
         await self._redis.hset(resident_relay_session_key(session_id), mapping=mapping)
 
+    async def delete(self, session_id: str) -> None:
+        await self._redis.delete(resident_relay_session_key(session_id))
+
+
+# Owner-fenced compare-and-act: refresh or drop the lease only while this owner still
+# holds it, atomically, so a lapsed owner that wakes after a successor took over cannot
+# extend or delete the successor's lease.
+_REFRESH_IF_OWNER = (
+    "if redis.call('get', KEYS[1]) == ARGV[1] "
+    "then return redis.call('pexpire', KEYS[1], ARGV[2]) else return 0 end"
+)
+_RELEASE_IF_OWNER = (
+    "if redis.call('get', KEYS[1]) == ARGV[1] "
+    "then return redis.call('del', KEYS[1]) else return 0 end"
+)
+
 
 class RelayLease:
     """A leg's single-receiver ownership lease with owner-fenced handover.
 
     Acquisition is atomic (``SET NX PX``); a lapsed lease lets a successor acquire, and
-    the prior owner is fenced because every action first checks it still owns the lease.
-    The lease is transport-recovery ownership only and never touches admission credit.
+    refresh and release compare-and-act under the owner atomically, so a stalled prior
+    owner that wakes after handover cannot extend or delete the successor's lease. The
+    lease is transport-recovery ownership only and never touches admission credit.
     """
 
     def __init__(self, redis: BinaryRedis, ttl_ms: int = 15000) -> None:
@@ -236,34 +230,21 @@ class RelayLease:
         return held is not None and held.decode() == owner
 
     async def refresh(self, session_id: str, leg: str, owner: str) -> bool:
-        if not await self.owns(session_id, leg, owner):
-            return False
-        await self._redis.set(self._key(session_id, leg), owner, nx=False, px=self._ttl)
-        return True
+        got = await self._redis.eval(
+            _REFRESH_IF_OWNER, 1, self._key(session_id, leg), owner, str(self._ttl)
+        )
+        return bool(got)
 
     async def release(self, session_id: str, leg: str, owner: str) -> None:
-        if await self.owns(session_id, leg, owner):
-            await self._redis.delete(self._key(session_id, leg))
-
-
-# The reverse-attachment liveness clock, injected so tests are deterministic.
-Clock = Callable[[], float]
-
-
-def default_clock() -> float:
-    return time.monotonic()
+        await self._redis.eval(_RELEASE_IF_OWNER, 1, self._key(session_id, leg), owner)
 
 
 @dataclass
 class WindowState:
-    """A direction's byte window: the granted in-flight budget, the bytes sent but not
-    yet acknowledged, and the cumulative bytes the receiver has confirmed consuming.
-
-    A cumulative ack is idempotent: a receiver reports the running total it has drained,
-    and the sender frees the delta since the last ack. Control frames bypass this budget
-    entirely and are never counted.
-    """
-
+    # A direction's byte window: the granted in-flight budget, the sent-but-unacked
+    # bytes, and the cumulative bytes the receiver has confirmed. A cumulative ack is
+    # idempotent — the receiver reports its running drained total and the sender frees
+    # the delta since the last ack.
     granted: int
     used: int = 0
     acked: int = 0
@@ -315,20 +296,8 @@ class DirectionWindow:
         return self._state.granted
 
 
-def make_stores(
-    redis: BinaryRedis, *, lease_ttl_ms: int = 15000
-) -> tuple[RelayStreamStore, RelaySessionStore, RelayLease]:
-    """Bundle the three substrate stores over one binary-safe Redis connection."""
-    return (
-        RelayStreamStore(redis),
-        RelaySessionStore(redis),
-        RelayLease(redis, ttl_ms=lease_ttl_ms),
-    )
-
-
 __all__ = [
     "BinaryRedis",
-    "Clock",
     "DirectionWindow",
     "RelayDirection",
     "RelayFrame",
@@ -338,6 +307,4 @@ __all__ = [
     "RelayStreamStore",
     "StreamEntry",
     "WindowState",
-    "default_clock",
-    "make_stores",
 ]

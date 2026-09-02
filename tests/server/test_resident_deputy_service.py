@@ -199,10 +199,27 @@ def test_control_relay_dispatches_to_the_reverse_relay_endpoint() -> None:
         assert boot["acked"] and boot["selected_transport"] == "control_relay"
         stream = await svc.stream({"session_id": "s1", "auth": _auth()})
         assert stream["ok"] and stream["completion"] == "".join(_CHUNKS)
-        cancel = await svc.cancel({"session_id": "s1"})
+        # A cancel routes to the endpoint while the session is still active (after
+        # bootstrap, before stream); a completed session is reaped, so its cancel is a
+        # no-op.
+        boot2 = await svc.bootstrap(
+            {
+                "session_id": "s2",
+                "resolved_route": _relay_route(),
+                "handoff": _handoff(),
+                "request": '{"prompt": "hi"}',
+            }
+        )
+        assert boot2["acked"]
+        cancel = await svc.cancel({"session_id": "s2"})
         assert cancel["ok"] and cancel["cancelled"]
         # The whole exchange went to the reverse-relay endpoint, never the dial deputy.
-        assert endpoint.calls == ["bootstrap:s1", "stream:s1", "cancel:s1"]
+        assert endpoint.calls == [
+            "bootstrap:s1",
+            "stream:s1",
+            "bootstrap:s2",
+            "cancel:s2",
+        ]
         await svc.stop()
 
     asyncio.run(run())

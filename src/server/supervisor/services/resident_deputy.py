@@ -108,6 +108,10 @@ class ResidentDeputyService:
                 handoff=handoff,
                 request_payload=payload.get("request"),
             )
+            if not result.acked:
+                # No stream will follow this session (a re-drive mints a fresh one), so
+                # drop it from the relay set rather than leak it per attempt.
+                self._relay_sessions.discard(session_id)
         else:
             result = await self._deputy.bootstrap(
                 session_id, route, handoff, payload.get("request")
@@ -134,6 +138,10 @@ class ResidentDeputyService:
         if session_id in self._relay_sessions:
             assert self._endpoint is not None
             result: StreamResult = await self._endpoint.stream(session_id, auth)
+            # The stream is this session's last phase; the endpoint has reaped its own
+            # state, so drop the routing entry (kept until now so a cancel mid-stream
+            # still routes here). A later reap-cancel is then a harmless no-op.
+            self._relay_sessions.discard(session_id)
         else:
             result = await self._deputy.stream(session_id, auth)
         return {

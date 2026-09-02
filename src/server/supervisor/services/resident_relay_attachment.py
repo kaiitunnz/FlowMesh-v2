@@ -16,9 +16,9 @@ from typing import Protocol
 
 from ...network.reverse_relay import (
     BinaryRedis,
+    RelayDirection,
     RelayFrame,
     RelayLease,
-    RelaySessionStore,
     RelayStreamStore,
 )
 
@@ -68,7 +68,6 @@ class ResidentRelayAttachment:
         self._batch = batch
         self._poll_ms = poll_ms
         self._streams = RelayStreamStore(redis)
-        self._sessions = RelaySessionStore(redis)
         self._lease = RelayLease(redis, ttl_ms=lease_ttl_ms)
         self._cursor = _DownCursor(redis, node_id)
         self._logger = logger or logging.getLogger("resident-relay-attachment")
@@ -94,8 +93,25 @@ class ResidentRelayAttachment:
         if not entries:
             return 0
         for entry in entries:
-            await self._delivery.on_frame(entry.frame)
-        await self._cursor.set(entries[-1].entry_id)
+            try:
+                await self._delivery.on_frame(entry.frame)
+            except Exception:
+                # A frame that cannot be delivered (its sidecar is gone, a bridge writer
+                # is closed) must never stall the node's stream or re-deliver the batch;
+                # advance past it and let its session recover on the re-drive path.
+                self._logger.exception(
+                    "relay frame delivery failed; skipping session=%s",
+                    entry.frame.session_id,
+                )
+        last_id = entries[-1].entry_id
+        # Advance the durable cursor and trim the consumed prefix only while this node
+        # still owns the leg, so a lapsed owner that woke after handover cannot rewind
+        # the shared cursor or trim under the successor.
+        if await self._lease.owns(self._node_id, self._LEG, self._owner):
+            await self._cursor.set(last_id)
+            await self._streams.trim_up_to(
+                self._node_id, RelayDirection.TARGET_TO_ORIGIN, last_id
+            )
         return len(entries)
 
     def start(self, loop: asyncio.AbstractEventLoop) -> None:

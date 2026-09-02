@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from shared.tasks.specs import ModelBindingMode
+from shared.utils.ids import new_relay_session_id
 
 from ..network.state import (
     ReplicaListenerAdvertisement,
@@ -456,7 +457,9 @@ class ResidentCapacityControl:
                 "listener_generation": listener.listener_generation,
             }
         )
-        session_id = f"{claim.invocation_id}:{claim.admission_epoch}"
+        # A fresh relay session per delivery attempt: a re-drive gets its own
+        # session, so its bridge and per-direction seq never collide with an old one.
+        session_id = new_relay_session_id()
         try:
             boot = await deps.transport.bootstrap(
                 origin_node,

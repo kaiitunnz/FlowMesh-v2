@@ -66,7 +66,27 @@ class FakeBinaryRedis:
         return live.encode() if live is not None else None
 
     async def delete(self, name: str) -> int:
-        return 1 if self._strings.pop(name, None) is not None else 0
+        # Redis DEL removes a key of any type; model strings, hashes, and streams alike.
+        hit = (
+            self._strings.pop(name, None) is not None
+            or self._hashes.pop(name, None) is not None
+            or self._streams.pop(name, None) is not None
+        )
+        return 1 if hit else 0
+
+    async def eval(self, script: str, numkeys: int, *keys_and_args: str) -> int:
+        # Models the two owner-fenced lease scripts: compare the live value to the
+        # owner, then pexpire (refresh) or del (release) only on a match.
+        key, owner = keys_and_args[0], keys_and_args[1]
+        if self._live(key) != owner:
+            return 0
+        if "pexpire" in script:
+            self._strings[key] = (owner, self.now + int(keys_and_args[2]) / 1000.0)
+            return 1
+        if "del" in script:
+            self._strings.pop(key, None)
+            return 1
+        return 0
 
     def _live(self, name: str) -> str | None:
         entry = self._strings.get(name)
@@ -89,8 +109,8 @@ def relay_frame(
     session_id: str = "rly-1",
     direction: RelayDirection = RelayDirection.TARGET_TO_ORIGIN,
     seq: int = 0,
+    ack: int = 0,
     payload: bytes = b"",
-    fence: bytes = b"",
 ) -> RelayFrame:
     return RelayFrame(
         kind=kind,
@@ -99,6 +119,6 @@ def relay_frame(
         idm="idm-1",
         direction=direction,
         seq=seq,
+        ack=ack,
         payload=payload,
-        fence=fence,
     )

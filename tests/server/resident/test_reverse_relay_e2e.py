@@ -13,7 +13,13 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from server.network.rendezvous import RootCursorStore, RootRendezvousBridge
-from server.network.reverse_relay import RelaySessionStore, RelayStreamStore
+from server.network.reverse_relay import (
+    RelayDirection,
+    RelayFrame,
+    RelayFrameKind,
+    RelaySessionStore,
+    RelayStreamStore,
+)
 from server.network.state import (
     ResolvedRoute,
     RouteCandidate,
@@ -347,5 +353,91 @@ def test_a_cancel_preempts_a_full_data_window_without_deadlock() -> None:
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await stream_task
         await harness.sidecar.stop()
+
+    asyncio.run(run())
+
+
+def test_completion_reaps_target_state_and_deletes_the_session_record() -> None:
+    async def run() -> None:
+        harness = _Harness()
+        route = _route(await harness.start())
+        done = asyncio.Event()
+        driver = asyncio.ensure_future(_drive(harness, done))
+        try:
+            boot = await asyncio.wait_for(
+                harness.origin.bootstrap(
+                    "s1", route=route, handoff=_handoff(), request_payload='{"p":"hi"}'
+                ),
+                timeout=10.0,
+            )
+            assert boot.acked
+            result = await asyncio.wait_for(harness.origin.stream("s1", _auth()), 10.0)
+            assert result.ok
+            # The sidecar closed after DONE, so the target self-reaps its session state
+            # and the origin's terminal deleted the routing record: neither leaks.
+            sessions = RelaySessionStore(harness.redis)
+            for _ in range(200):
+                reaped = "s1" not in harness.target._targets
+                gone = await sessions.load("s1") == {}
+                if reaped and gone:
+                    break
+                await asyncio.sleep(0.01)
+            assert "s1" not in harness.target._targets
+            assert "s1" not in harness.target._t2o_windows
+            assert await sessions.load("s1") == {}
+        finally:
+            done.set()
+            await driver
+        await harness.sidecar.stop()
+
+    asyncio.run(run())
+
+
+def test_a_re_forwarded_data_frame_is_deduped() -> None:
+    async def run() -> None:
+        redis = FakeBinaryRedis()
+        endpoint = ResidentRelayEndpoint(redis, "nde-o")
+        await endpoint.open_origin(
+            "s1",
+            invocation_id="inv-1",
+            idm="idm-1",
+            origin_node="nde-o",
+            target_node="nde-t",
+            sidecar_route="127.0.0.1:1",
+        )
+        frame = RelayFrame(
+            kind=RelayFrameKind.DATA,
+            session_id="s1",
+            invocation_id="inv-1",
+            idm="idm-1",
+            direction=RelayDirection.TARGET_TO_ORIGIN,
+            seq=1,
+            payload=b"once",
+        )
+        await endpoint.on_frame(frame)
+        await endpoint.on_frame(frame)  # a bridge re-forward with the same seq
+        # The duplicate is dropped, so the origin sees the frame exactly once.
+        assert endpoint._origin["s1"].qsize() == 1
+
+    asyncio.run(run())
+
+
+def test_a_flaky_sidecar_connect_is_ridden_out() -> None:
+    async def run() -> None:
+        calls: list[str] = []
+
+        async def flaky(route: str) -> Any:
+            calls.append(route)
+            if len(calls) < 3:
+                raise ConnectionRefusedError("sidecar not bound yet")
+            return ("reader", "writer")
+
+        endpoint = ResidentRelayEndpoint(
+            FakeBinaryRedis(), "nde-t", connect=flaky, connect_backoff_sec=0.0
+        )
+        conn = await endpoint._connect_sidecar("127.0.0.1:1")
+        # A bootstrap that raced the sidecar bind retries under the bounded budget
+        # rather than losing the attempt to a re-drive.
+        assert conn == ("reader", "writer") and len(calls) == 3
 
     asyncio.run(run())

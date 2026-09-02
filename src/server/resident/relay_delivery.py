@@ -17,6 +17,7 @@ from collections.abc import Awaitable, Callable
 
 from ..network import wire as netwire
 from ..network.reverse_relay import (
+    BinaryRedis,
     DirectionWindow,
     RelayDirection,
     RelayFrame,
@@ -64,8 +65,12 @@ class _TargetBridge:
         self._publish = publish
         self._frame = frame
         self._window = window
+        self._on_closed: Callable[[], Awaitable[None]] | None = None
         self._seq = 0
         self._pump: asyncio.Task[None] | None = None
+
+    def set_on_closed(self, on_closed: Callable[[], Awaitable[None]]) -> None:
+        self._on_closed = on_closed
 
     def start(self) -> None:
         self._pump = asyncio.ensure_future(self._drain())
@@ -80,10 +85,14 @@ class _TargetBridge:
                 self._seq += 1
                 await self._window.reserve(len(payload))
                 await self._publish(self._response(payload))
-        except (asyncio.IncompleteReadError, ConnectionError, OSError, ValueError):
-            return
         except asyncio.CancelledError:
-            return
+            return  # a cancel is the reap path, which owns the state cleanup
+        except (asyncio.IncompleteReadError, ConnectionError, OSError, ValueError):
+            pass
+        # The sidecar closed after its terminal (done/failed/reject): reap this node's
+        # target-side session state so it does not leak on a normal completion.
+        if self._on_closed is not None:
+            await self._on_closed()
 
     def _response(self, payload: bytes) -> RelayFrame:
         return RelayFrame(
@@ -111,12 +120,14 @@ class ResidentRelayEndpoint:
 
     def __init__(
         self,
-        redis,  # noqa: ANN001 - a network.reverse_relay.BinaryRedis
+        redis: BinaryRedis,
         node_id: str,
         *,
         connect: SidecarConnect = _default_connect,
         recv_budget_sec: float = 300.0,
         window_bytes: int = 65536,
+        connect_tries: int = 20,
+        connect_backoff_sec: float = 0.05,
         logger: logging.Logger | None = None,
     ) -> None:
         self._node_id = node_id
@@ -125,6 +136,8 @@ class ResidentRelayEndpoint:
         self._connect = connect
         self._budget = recv_budget_sec
         self._window_bytes = window_bytes
+        self._connect_tries = max(1, connect_tries)
+        self._connect_backoff = connect_backoff_sec
         self._logger = logger or logging.getLogger("resident-relay-endpoint")
         self._origin: dict[str, asyncio.Queue[RelayFrame]] = {}
         self._targets: dict[str, _TargetBridge] = {}
@@ -135,6 +148,9 @@ class ResidentRelayEndpoint:
         self._t2o_windows: dict[str, DirectionWindow] = {}
         self._o2t_consumed: dict[str, int] = {}
         self._t2o_consumed: dict[str, int] = {}
+        # The highest data seq seen per (session, direction), so a bridge re-forward on
+        # a crash or mid-batch error never double-delivers to the sidecar/origin.
+        self._seen: dict[tuple[str, RelayDirection], int] = {}
 
     async def on_frame(self, frame: RelayFrame) -> None:
         """Route one down frame by this node's role in the session."""
@@ -145,8 +161,13 @@ class ResidentRelayEndpoint:
         origin_here = record.get("origin_node") == self._node_id
         if frame.kind is RelayFrameKind.WINDOW:
             # A window grant advances the sender's flow-control budget only; the sender
-            # of a direction is that direction's own node.
+            # of a direction is that direction's own node. Grants are idempotent, so a
+            # re-forwarded grant is harmless and needs no dedup.
             await self._on_grant(frame, origin_here, target_here)
+            return
+        if self._is_duplicate(frame):
+            # A bridge re-forward (crash or mid-batch retry) re-delivers a frame with
+            # a fresh entry id; drop it by per-direction seq so it lands once.
             return
         if frame.direction is RelayDirection.ORIGIN_TO_TARGET and target_here:
             if frame.kind is RelayFrameKind.CANCEL:
@@ -159,6 +180,23 @@ class ResidentRelayEndpoint:
             queue = self._origin.get(frame.session_id)
             if queue is not None:
                 queue.put_nowait(frame)
+
+    def _is_duplicate(self, frame: RelayFrame) -> bool:
+        if frame.kind is not RelayFrameKind.DATA or frame.seq == 0:
+            return False
+        key = (frame.session_id, frame.direction)
+        if frame.seq <= self._seen.get(key, 0):
+            return True
+        self._seen[key] = frame.seq
+        return False
+
+    async def _on_target_closed(self, session_id: str, bridge: _TargetBridge) -> None:
+        # Reap only if a redrive has not already replaced this session's bridge.
+        if self._targets.get(session_id) is bridge:
+            self._targets.pop(session_id, None)
+            self._t2o_windows.pop(session_id, None)
+            self._o2t_consumed.pop(session_id, None)
+            self._seen.pop((session_id, RelayDirection.ORIGIN_TO_TARGET), None)
 
     async def _on_grant(
         self, frame: RelayFrame, origin_here: bool, target_here: bool
@@ -181,13 +219,18 @@ class ResidentRelayEndpoint:
         if bridge is None:
             if not route:
                 return
-            reader, writer = await self._connect(route)
+            reader, writer = await self._connect_sidecar(route)
             window = self._t2o_windows.setdefault(
                 frame.session_id, DirectionWindow(self._window_bytes)
             )
-            bridge = _TargetBridge(reader, writer, self._publish_up, frame, window)
-            self._targets[frame.session_id] = bridge
-            bridge.start()
+            new_bridge = _TargetBridge(reader, writer, self._publish_up, frame, window)
+            session_id = frame.session_id
+            new_bridge.set_on_closed(
+                lambda: self._on_target_closed(session_id, new_bridge)
+            )
+            self._targets[frame.session_id] = new_bridge
+            new_bridge.start()
+            bridge = new_bridge
         await bridge.to_sidecar(frame.payload)
         # Having drained an origin-to-target frame to the sidecar, grant the origin its
         # cumulative consumed bytes; the grant returns on the target-to-origin path so
@@ -195,6 +238,19 @@ class ResidentRelayEndpoint:
         consumed = self._o2t_consumed.get(frame.session_id, 0) + len(frame.payload)
         self._o2t_consumed[frame.session_id] = consumed
         await self._emit_grant(frame, RelayDirection.TARGET_TO_ORIGIN, consumed)
+
+    async def _connect_sidecar(self, route: str) -> _Conn:
+        # A bootstrap can arrive a beat before the sidecar listener binds/rebinds;
+        # retry the loopback connect under a bounded budget so the racing session holds
+        # briefly rather than lose the attempt to a needless re-drive.
+        last: Exception | None = None
+        for _ in range(self._connect_tries):
+            try:
+                return await self._connect(route)
+            except (ConnectionError, OSError) as exc:
+                last = exc
+                await asyncio.sleep(self._connect_backoff)
+        raise last if last is not None else ConnectionError("sidecar connect failed")
 
     async def _publish_up(self, frame: RelayFrame) -> None:
         await self._streams.publish_up(self._node_id, frame)
@@ -306,14 +362,17 @@ class ResidentRelayEndpoint:
         )
         raw = await self._recv(session_id, self._budget)
         if raw is None:
+            # An uncertain bootstrap keeps the session for the redrive to reuse.
             return BootstrapResult(False, Transport.CONTROL_RELAY, None, True, [])
         msg = wire.decode_msg(raw)
         if msg["kind"] == wire.KIND_ACK:
             return BootstrapResult(True, Transport.CONTROL_RELAY, None, False, [])
         if msg["kind"] == wire.KIND_REJECT:
+            await self.close_origin(session_id)
             return BootstrapResult(
                 False, Transport.CONTROL_RELAY, msg.get("reason"), False, []
             )
+        await self.close_origin(session_id)
         return BootstrapResult(False, Transport.CONTROL_RELAY, "protocol", False, [])
 
     async def stream(self, session_id: str, auth: RouteAuthorization) -> StreamResult:
@@ -335,24 +394,28 @@ class ResidentRelayEndpoint:
             if kind == wire.KIND_CHUNK:
                 parts.append(str(msg.get("data", "")))
             elif kind == wire.KIND_DONE:
-                self.close_origin(session_id)
+                await self.close_origin(session_id)
                 return StreamResult(True, completion="".join(parts))
             elif kind == wire.KIND_FAILED:
-                self.close_origin(session_id)
+                await self.close_origin(session_id)
                 return StreamResult(
                     False,
                     rejection=msg.get("reason"),
                     definite=bool(msg.get("definite")),
                 )
             elif kind == wire.KIND_REJECT:
-                self.close_origin(session_id)
+                await self.close_origin(session_id)
                 return StreamResult(False, rejection=msg.get("reason"))
             else:
-                self.close_origin(session_id)
+                await self.close_origin(session_id)
                 return StreamResult(False, rejection="protocol")
 
     async def cancel(self, session_id: str) -> None:
-        """Poke a cancel to the target to reap the sidecar, and drop the origin."""
+        """Poke a cancel to the target to reap the sidecar, and drop the origin.
+
+        The routing record is left in place so the cancel can be bridged to the target;
+        the target deletes it once it has reaped the sidecar (the cancel's last use).
+        """
         record = await self._sessions.load(session_id)
         if record:
             await self._streams.publish_up(
@@ -365,17 +428,27 @@ class ResidentRelayEndpoint:
                     direction=RelayDirection.ORIGIN_TO_TARGET,
                 ),
             )
-        self.close_origin(session_id)
+        self._reap_origin_state(session_id)
 
-    def close_origin(self, session_id: str) -> None:
+    def _reap_origin_state(self, session_id: str) -> None:
         self._origin.pop(session_id, None)
         self._o2t_windows.pop(session_id, None)
         self._t2o_consumed.pop(session_id, None)
+        self._seen.pop((session_id, RelayDirection.TARGET_TO_ORIGIN), None)
+
+    async def close_origin(self, session_id: str) -> None:
+        # On a stream terminal the origin has the last frame, so reap the origin state
+        # and delete the routing record; its stream is then trimmable and does not leak.
+        self._reap_origin_state(session_id)
+        await self._sessions.delete(session_id)
 
     async def reap_target(self, session_id: str) -> None:
         bridge = self._targets.pop(session_id, None)
         self._t2o_windows.pop(session_id, None)
         self._o2t_consumed.pop(session_id, None)
+        self._seen.pop((session_id, RelayDirection.ORIGIN_TO_TARGET), None)
+        # A cancel's last use of the record was routing it here; the target deletes it.
+        await self._sessions.delete(session_id)
         if bridge is not None:
             await bridge.close()
 
