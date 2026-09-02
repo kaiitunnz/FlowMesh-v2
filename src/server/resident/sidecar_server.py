@@ -177,13 +177,17 @@ class ResidentSidecarServer:
             try:
                 engine = await engine_task
             except httpx.HTTPStatusError as exc:
-                # The engine refused with a definite status: no slot is held, so the
-                # origin deputy may release the credit rather than hold it.
+                status = exc.response.status_code
+                # A 4xx request error (bar 429) is a definite refusal that held no slot,
+                # so the origin deputy releases the credit. A 429 rate-limit or any 5xx
+                # is a transient engine condition, carried as uncertain so the boundary
+                # holds the credit and re-drives rather than failing fast.
+                definite = 400 <= status < 500 and status != 429
                 await wire.write_msg(
                     writer,
                     wire.KIND_FAILED,
-                    definite=True,
-                    reason=f"engine {exc.response.status_code}",
+                    definite=definite,
+                    reason=f"engine {status}",
                 )
                 return None
             async for chunk in engine.chunks:

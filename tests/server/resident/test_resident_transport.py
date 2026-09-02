@@ -13,6 +13,8 @@ import socket
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
+import httpx
+
 from server.network.listeners import NetworkControlRelay, NetworkPlaneListeners
 from server.network.state import (
     ResolvedRoute,
@@ -290,6 +292,41 @@ def test_cancel_aborts_the_engine_and_reaps_both_ends() -> None:
             assert slow.aborted
 
     asyncio.run(run())
+
+
+class _RefusingEngine:
+    """Raises an engine HTTP status error so the sidecar classifies the failure."""
+
+    def __init__(self, status: int) -> None:
+        self._status = status
+
+    async def __call__(
+        self, endpoint: ReplicaEndpoint, request: str | None
+    ) -> EngineResponse:
+        req = httpx.Request("POST", "http://engine/v1/chat/completions")
+        resp = httpx.Response(self._status, request=req)
+        raise httpx.HTTPStatusError("refused", request=req, response=resp)
+
+
+def test_engine_4xx_is_definite_but_429_and_5xx_are_uncertain() -> None:
+    async def run(status: int, expect_definite: bool) -> None:
+        async with _Fixture(engine=_RefusingEngine(status)) as fx:
+            deputy = ResidentInvocationDeputy(connect_budget_sec=3.0)
+            boot = await deputy.bootstrap("s1", fx.direct(), _handoff(), None)
+            assert boot.acked
+            result = await deputy.stream("s1", _auth())
+            # A definite refusal lets the caller release; an uncertain one holds.
+            assert not result.ok and result.definite is expect_definite
+
+    for status, expect_definite in [
+        (400, True),
+        (404, True),
+        (422, True),
+        (429, False),
+        (500, False),
+        (503, False),
+    ]:
+        asyncio.run(run(status, expect_definite))
 
 
 def test_pre_send_connect_failure_falls_to_the_next_candidate() -> None:
