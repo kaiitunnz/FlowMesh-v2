@@ -519,13 +519,19 @@ async def _lifespan(_: FastAPI):
 
         # --- Root-only startup ---
         if IS_ROOT_NODE:
-            if RUNTIME is not None:
-                await RUNTIME.rehydrate()
+            # Bind the loop and load the resident claim store BEFORE the runtime
+            # rehydrates: the runtime's rehydrate re-drives every suspended mediated
+            # boundary through the resident settler, so the control must be running with
+            # its claims loaded first, or an in-flight resident invocation terminalizes
+            # against an empty store and strands (or re-admits a second) credit.
             if RESIDENT_CONTROL is not None and RESIDENT_REGISTRY is not None:
                 RESIDENT_CONTROL.bind_loop(asyncio.get_running_loop())
                 snapshot = await RESIDENT_REGISTRY.load_snapshot_async()
                 if snapshot is not None:
                     RESIDENT_CONTROL.rehydrate(snapshot)
+            if RUNTIME is not None:
+                await RUNTIME.rehydrate()
+            if RESIDENT_CONTROL is not None and RESIDENT_REGISTRY is not None:
                 RESIDENT_CONTROL.start()
             if RESIDENT_BRIDGE is not None and NODE_REGISTRY is not None:
                 _bridge = RESIDENT_BRIDGE

@@ -180,6 +180,35 @@ def test_rehydrate_reconciles_in_flight_claim():
     assert fresh_stores.credit_ledger.held(claim.replica_id) == 1
 
 
+def test_redrive_after_rehydrate_resumes_under_one_credit():
+    # The startup ordering (bind + rehydrate the claim store, then let the runtime
+    # re-drive suspended boundaries) exists so the re-drive finds the loaded in-flight
+    # claim and resumes on it. If the store were empty when the boundary re-drove, the
+    # loaded credit would strand and a second be admitted for the same invocation.
+    svc, stores, _ = _build()
+    asyncio.run(svc._serve_invocation(_env()))
+    snapshot = stores.to_snapshot()
+
+    fresh_svc, fresh_stores, fresh_settled = _build()
+    fresh_svc.rehydrate(snapshot)  # loads the in-flight claim as UNCERTAIN, credit held
+    resumed = fresh_stores.claims.by_invocation("inv-1")[0]
+    assert resumed.state is ClaimState.UNCERTAIN
+    assert fresh_stores.credit_ledger.held(resumed.replica_id) == 1
+
+    # The runtime re-drives the suspended boundary: it resumes on the existing claim.
+    asyncio.run(fresh_svc._serve_invocation(_env()))
+    claims = fresh_stores.claims.by_invocation("inv-1")
+    assert len(claims) == 1  # resumed, not re-admitted as a successor
+    assert (
+        fresh_stores.credit_ledger.held(resumed.replica_id) == 1
+    )  # exactly one credit
+    assert fresh_settled[-1] == ("tsk-1", "c1", "OK", None)
+
+    # The fenced DS terminal then releases that single credit — none stranded.
+    fresh_svc.on_invocation_terminal("inv-1")
+    assert fresh_stores.credit_ledger.held(resumed.replica_id) == 0
+
+
 def test_rehydrate_reports_a_warm_replica_so_it_is_admittable_again():
     svc, stores, _ = _build()
     asyncio.run(svc._serve_invocation(_env()))
