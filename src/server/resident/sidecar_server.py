@@ -11,7 +11,7 @@ named on the wire to the deputy.
 """
 
 import asyncio
-import json
+import contextlib
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
@@ -39,27 +39,17 @@ EngineOpen = Callable[[ReplicaEndpoint, str | None], Awaitable[EngineResponse]]
 LoadSink = Callable[[LoadEvidence], None]
 
 
-async def _sse_chunks(response: httpx.Response) -> AsyncIterator[str]:
-    """Yield content deltas from an OpenAI-compatible SSE completion stream."""
-    async for line in response.aiter_lines():
-        if not line.startswith("data:"):
-            continue
-        data = line[len("data:") :].strip()
-        if data == "[DONE]":
-            break
-        try:
-            delta = json.loads(data)["choices"][0]["delta"].get("content")
-        except (json.JSONDecodeError, KeyError, IndexError, TypeError):
-            continue
-        if delta:
-            yield delta
-
-
 class HttpEngineDelivery:
-    """Streams a completion from an OpenAI-compatible engine over SSE."""
+    """Delivers a completion from an OpenAI-compatible engine.
+
+    The engine call is non-streaming — it fits a stock vLLM replica and the GPU-free
+    ``dev_model`` stand-in alike — and its content is handed to the sidecar as one
+    chunk; the two-phase carriage between the origin deputy and the sidecar frames it
+    over the authorized channel regardless.
+    """
 
     def __init__(
-        self, *, timeout_sec: float = 60.0, forward_api_key: str | None = None
+        self, *, timeout_sec: float = 300.0, forward_api_key: str | None = None
     ) -> None:
         self._timeout = timeout_sec
         self._forward_api_key = forward_api_key
@@ -67,21 +57,24 @@ class HttpEngineDelivery:
     async def __call__(
         self, endpoint: ReplicaEndpoint, request_payload: str | None
     ) -> EngineResponse:
-        body = {**chat_body(request_payload, endpoint.model), "stream": True}
+        body = chat_body(request_payload, endpoint.model)
         headers = {"Content-Type": "application/json"}
         if api_key := (endpoint.api_key or self._forward_api_key):
             headers["Authorization"] = f"Bearer {api_key}"
         url = f"{endpoint.base_url.rstrip('/')}/chat/completions"
-        client = httpx.AsyncClient(timeout=self._timeout)
-        request = client.build_request("POST", url, json=body, headers=headers)
-        response = await client.send(request, stream=True)
-        response.raise_for_status()
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            response = await client.post(url, json=body, headers=headers)
+            response.raise_for_status()
+            data = response.json()
+        content = str(data["choices"][0]["message"]["content"])
+
+        async def chunks() -> AsyncIterator[str]:
+            yield content
 
         async def aclose() -> None:
-            await response.aclose()
-            await client.aclose()
+            return None
 
-        return EngineResponse(chunks=_sse_chunks(response), aclose=aclose)
+        return EngineResponse(chunks=chunks(), aclose=aclose)
 
 
 class ResidentSidecarServer:
@@ -143,30 +136,44 @@ class ResidentSidecarServer:
             return None
         session = self._gate.session_for(handoff)
         self._on_load(self._gate.load_evidence(handoff, "request"))
-        engine = await self._engine_open(self._endpoint, opening.get("request"))
-        await wire.write_msg(writer, wire.KIND_ACK)
-
-        # Bound the post-ack wait: an acknowledged session whose stream or cancel never
-        # arrives is reaped rather than holding the engine open indefinitely.
-        follow = await asyncio.wait_for(
-            wire.read_msg(reader), timeout=self._stream_deadline
+        # Dispatch the engine request and acknowledge immediately: the ack marks engine
+        # receipt, not completion, so the origin deputy is not blocked on inference
+        # before the control plane can authorize the response stream.
+        engine_task: asyncio.Task[EngineResponse] = asyncio.ensure_future(
+            self._engine_open(self._endpoint, opening.get("request"))
         )
-        auth = RouteAuthorization.model_validate(follow["auth"])
-        gate = self._gate.check_stream(auth, session)
-        if not gate.admitted:
-            await wire.write_msg(writer, wire.KIND_REJECT, reason=str(gate.rejection))
+        await wire.write_msg(writer, wire.KIND_ACK)
+        engine: EngineResponse | None = None
+        try:
+            # Bound the post-ack wait: an acknowledged session whose stream or cancel
+            # never arrives is reaped rather than holding the engine open indefinitely.
+            follow = await asyncio.wait_for(
+                wire.read_msg(reader), timeout=self._stream_deadline
+            )
+            auth = RouteAuthorization.model_validate(follow["auth"])
+            gate = self._gate.check_stream(auth, session)
+            if not gate.admitted:
+                await wire.write_msg(
+                    writer, wire.KIND_REJECT, reason=str(gate.rejection)
+                )
+                return None
+            if follow["kind"] == wire.KIND_CANCEL:
+                self._on_load(self._gate.load_evidence(auth, "cancel"))
+                await wire.write_msg(writer, wire.KIND_DONE, cancelled=True)
+                return None
+            if follow["kind"] != wire.KIND_STREAM:
+                return None
+            self._on_load(self._gate.load_evidence(auth, "stream"))
+            engine = await engine_task
+            async for chunk in engine.chunks:
+                await wire.write_msg(writer, wire.KIND_CHUNK, data=chunk)
+            await wire.write_msg(writer, wire.KIND_DONE)
             return engine
-        if follow["kind"] == wire.KIND_CANCEL:
-            self._on_load(self._gate.load_evidence(auth, "cancel"))
-            await wire.write_msg(writer, wire.KIND_DONE, cancelled=True)
-            return engine
-        if follow["kind"] != wire.KIND_STREAM:
-            return engine
-        self._on_load(self._gate.load_evidence(auth, "stream"))
-        async for chunk in engine.chunks:
-            await wire.write_msg(writer, wire.KIND_CHUNK, data=chunk)
-        await wire.write_msg(writer, wire.KIND_DONE)
-        return engine
+        finally:
+            if engine is None:
+                engine_task.cancel()
+                with contextlib.suppress(Exception, asyncio.CancelledError):
+                    await engine_task
 
 
 async def _close(writer: asyncio.StreamWriter) -> None:
