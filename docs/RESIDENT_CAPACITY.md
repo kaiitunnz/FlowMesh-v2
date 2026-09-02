@@ -90,7 +90,10 @@ persisted control object nor a `RouteAuthorization`.
 
 When the network plane is off, an in-server adapter consumes the handoff and relays the
 request to the replica's OpenAI-compatible endpoint (read from the replica directory), the
-claim-gated compatibility path.
+claim-gated compatibility path. This path is single-shot: a post-acceptance ambiguous loss
+settles the boundary, so its fenced terminal releases the credit rather than holding and
+re-driving it as the native path does. That narrower ambiguous-loss window is a tracked
+follow-up to bring onto the same hold-and-re-drive split.
 
 When [`NETWORK_PLANE_ENABLED`](NETWORK_PLANE.md) is also on, the invocation is carried
 data-direct over the native fabric path and the server never carries the bytes. The

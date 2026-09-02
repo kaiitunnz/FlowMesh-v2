@@ -389,8 +389,11 @@ class ResidentCapacityControl:
                 # its credit directly; no engine ever received it.
                 self._admission.on_enqueue_failed(claim)
             else:
-                # A post-acceptance loss (or a failure on a resumed claim) holds the
-                # credit; the settle below records the fenced DS terminal releasing it.
+                # A post-acceptance loss marks the credit uncertain, but this
+                # single-shot path then settles the boundary, so its fenced terminal
+                # releases rather than holding and re-driving as the native path does.
+                # That narrower ambiguous-loss window is a tracked follow-up to bring
+                # onto the same split.
                 self._admission.on_route_loss(claim)
             self._settle(
                 env.task_id, env.call_correlation, None, error=f"resident issue: {exc}"
@@ -450,8 +453,11 @@ class ResidentCapacityControl:
         deps.network.record_observations(origin, listener, boot.observations)
         if boot.acked:
             # Track the held session so a fenced cancellation terminal reaps both ends
-            # of the data-direct channel and stops the engine promptly.
-            self._live_sessions[env.invocation_id] = (origin_node, session_id)
+            # of the data-direct channel and stops the engine promptly. A claim already
+            # settled by a concurrent terminal is not tracked: its credit is gone and
+            # nothing would pop the entry again.
+            if claim.state is not ClaimState.TERMINAL:
+                self._live_sessions[env.invocation_id] = (origin_node, session_id)
             await self._stream_native(
                 env, claim, profile, origin, origin_node, session_id
             )
@@ -544,6 +550,10 @@ class ResidentCapacityControl:
         returns None and the fenced terminal releases — the hold is bounded by replica
         health, never a timer that could release while the engine still holds the slot.
         """
+        if claim.state is ClaimState.TERMINAL:
+            # A concurrent terminal (e.g. a cancel) already settled the boundary and
+            # released the credit; there is nothing to hold or re-drive.
+            return
         self._admission.on_route_loss(claim)
         count = self._transient_failures.get(env.invocation_id, 0) + 1
         self._transient_failures[env.invocation_id] = count

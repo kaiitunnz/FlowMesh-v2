@@ -317,6 +317,24 @@ def test_failed_terminal_pokes_a_native_reap_for_a_live_session() -> None:
     asyncio.run(run())
 
 
+def test_hold_and_redrive_is_a_noop_once_the_claim_settled() -> None:
+    async def run() -> None:
+        svc, stores, _, redispatched = _build(_good_engine)
+        await svc._serve_invocation(_env())
+        claim = stores.claims.by_invocation("inv-1")[0]
+        svc.on_invocation_terminal("inv-1")
+        assert claim.state is ClaimState.TERMINAL and redispatched == []
+
+        # A late transient loss racing an already-settled claim neither re-holds the
+        # released credit nor re-drives the settled boundary.
+        await svc._hold_and_redrive(_env(), claim, "stream loss after terminal")
+        assert redispatched == []
+        assert "inv-1" not in svc._transient_failures
+        assert claim.state is ClaimState.TERMINAL
+
+    asyncio.run(run())
+
+
 async def _noop() -> None:
     return None
 
