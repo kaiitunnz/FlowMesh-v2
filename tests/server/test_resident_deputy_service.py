@@ -10,6 +10,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from server.network.state import ResolvedRoute, RouteCandidate, RouteHop, Transport
+from server.resident.deputy import BootstrapResult, StreamResult
 from server.resident.sidecar_server import EngineResponse
 from server.resident.state import AdmissionHandoff, ReplicaEndpoint, RouteAuthorization
 from server.supervisor.services.resident_deputy import ResidentDeputyService
@@ -130,6 +131,78 @@ def test_bound_sidecar_refuses_a_mismatched_incarnation() -> None:
             }
         )
         assert not boot["acked"] and boot["rejection"] == "wrong_incarnation"
+        await svc.stop()
+
+    asyncio.run(run())
+
+
+def _relay_route() -> dict[str, Any]:
+    t = Transport.CONTROL_RELAY
+    return ResolvedRoute(
+        origin_id="rog-1",
+        target_node_id="nde-t",
+        listener_generation=1,
+        route_epoch=1,
+        candidates=(
+            RouteCandidate(
+                transport=t,
+                hops=(
+                    RouteHop(
+                        transport=t, endpoint="", node_id="nde-o", attachment_id="a-o"
+                    ),
+                    RouteHop(
+                        transport=t,
+                        endpoint="127.0.0.1:1",
+                        node_id="nde-t",
+                        attachment_id="a-t",
+                    ),
+                ),
+            ),
+        ),
+    ).model_dump(mode="json")
+
+
+class _FakeEndpoint:
+    """Records the origin driver calls the service routes for a control_relay route."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def bootstrap(
+        self, session_id, *, route, handoff, request_payload
+    ):  # noqa: ANN001,ANN201
+        self.calls.append(f"bootstrap:{session_id}")
+        return BootstrapResult(True, Transport.CONTROL_RELAY, None, False, [])
+
+    async def stream(self, session_id, auth) -> StreamResult:  # noqa: ANN001
+        self.calls.append(f"stream:{session_id}")
+        return StreamResult(True, completion="".join(_CHUNKS))
+
+    async def cancel(self, session_id) -> None:  # noqa: ANN001
+        self.calls.append(f"cancel:{session_id}")
+
+
+def test_control_relay_dispatches_to_the_reverse_relay_endpoint() -> None:
+    async def run() -> None:
+        endpoint = _FakeEndpoint()
+        svc = ResidentDeputyService(
+            connect_budget_sec=3.0, endpoint=endpoint  # type: ignore[arg-type]
+        )
+        boot = await svc.bootstrap(
+            {
+                "session_id": "s1",
+                "resolved_route": _relay_route(),
+                "handoff": _handoff(),
+                "request": '{"prompt": "hi"}',
+            }
+        )
+        assert boot["acked"] and boot["selected_transport"] == "control_relay"
+        stream = await svc.stream({"session_id": "s1", "auth": _auth()})
+        assert stream["ok"] and stream["completion"] == "".join(_CHUNKS)
+        cancel = await svc.cancel({"session_id": "s1"})
+        assert cancel["ok"] and cancel["cancelled"]
+        # The whole exchange went to the reverse-relay endpoint, never the dial deputy.
+        assert endpoint.calls == ["bootstrap:s1", "stream:s1", "cancel:s1"]
         await svc.stop()
 
     asyncio.run(run())
