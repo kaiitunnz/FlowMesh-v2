@@ -51,7 +51,6 @@ def _auth(**overrides) -> RouteAuthorization:
         family="fam",
         operation="inference",
         admission_epoch=0,
-        route_auth_epoch=1,
         tenant="t1",
         origin_id="rog-1",
         replica_id="rpl-1",

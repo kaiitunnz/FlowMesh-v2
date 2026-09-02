@@ -300,16 +300,18 @@ class ResidentSnapshot(BaseModel):
 
 
 class AdmissionHandoff(BaseModel):
-    """A single-use, claim-bound pre-``ACCEPTED`` bootstrap fence.
+    """A claim-bound pre-``ACCEPTED`` bootstrap fence for one reserved claim.
 
-    A ``RESERVED`` claim authorizes exactly this: one bootstrap delivery that reaches
-    the selected replica incarnation's resident-facing sidecar and obtains an engine
-    enqueue acknowledgement. It binds the tenant-scoped invocation subject, the fabric
-    ``idm-*`` request identity, the selected replica incarnation and listener
-    generation, and an expiry; ``route`` carries the pre-acceptance snapshot the deputy
-    executes. It is neither general service access nor the post-``ACCEPTED``
-    ``RouteAuthorization``, and it never carries the raw engine endpoint or credential —
-    the sidecar reaches its co-located engine locally.
+    A ``RESERVED`` claim authorizes one bootstrap delivery that reaches the selected
+    replica incarnation's resident-facing sidecar and obtains an engine enqueue
+    acknowledgement. It binds the tenant-scoped invocation subject, the fabric ``idm-*``
+    request identity, the selected replica incarnation and listener generation, and an
+    expiry; ``route`` carries the pre-acceptance snapshot the deputy executes. The
+    sidecar validates those bindings and trusts that only the origin deputy reaches its
+    per-replica route; it does not itself track ``token`` to reject a replayed
+    bootstrap — that credential handshake is deferred. It is neither general service
+    access nor the post-``ACCEPTED`` ``RouteAuthorization``, and it never carries the
+    raw engine endpoint or credential — the sidecar reaches its co-located engine.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -349,13 +351,11 @@ class RouteAuthorization(BaseModel):
     family: str
     operation: str
     admission_epoch: int
-    route_auth_epoch: int
     tenant: str | None = None
     origin_id: str | None = None
     replica_id: str
     incarnation: int
     listener_generation: int = 0
     deadline_at: str | None = None
-    budget: int | None = None
     issued_at: str = Field(default_factory=now_iso)
     expires_at: str | None = None

@@ -48,7 +48,6 @@ class AdmissionController:
         self._stores = stores
         self._persist = persist or (lambda: None)
         self._strategies: dict[str, SelectionStrategy] = {}
-        self._route_auth_epochs: dict[str, int] = {}
 
     def _build_handoff(
         self,
@@ -238,14 +237,12 @@ class AdmissionController:
         idempotency_key: str | None,
         origin_id: str | None,
         operation: str,
-        budget: int | None = None,
         deadline_at: str | None = None,
     ) -> RouteAuthorization:
         """Record ``ACCEPTED`` on an engine enqueue ack and issue the immutable fence.
 
         The fence is minted only after acknowledgement and is re-mintable from the
-        durable claim on a resume; a fresh route-authorization epoch supersedes any
-        prior mint for the same claim.
+        durable claim on a resume.
         """
         accept(claim)
         self._persist()
@@ -254,7 +251,6 @@ class AdmissionController:
             idempotency_key=idempotency_key,
             origin_id=origin_id,
             operation=operation,
-            budget=budget,
             deadline_at=deadline_at,
         )
 
@@ -265,20 +261,18 @@ class AdmissionController:
         idempotency_key: str | None,
         origin_id: str | None,
         operation: str,
-        budget: int | None = None,
         deadline_at: str | None = None,
     ) -> RouteAuthorization:
         """Re-mint the fence for a resumed in-flight claim without an FSM transition.
 
         A re-driven boundary on a claim already past ``RESERVED`` reissues to the same
-        held credit; the fresh route-authorization epoch supersedes the prior mint.
+        held credit under a freshly minted fence for the same replica incarnation.
         """
         return self._mint_authorization(
             claim,
             idempotency_key=idempotency_key,
             origin_id=origin_id,
             operation=operation,
-            budget=budget,
             deadline_at=deadline_at,
         )
 
@@ -289,12 +283,9 @@ class AdmissionController:
         idempotency_key: str | None,
         origin_id: str | None,
         operation: str,
-        budget: int | None,
         deadline_at: str | None,
     ) -> RouteAuthorization:
         assert claim.replica_id is not None and claim.incarnation is not None
-        epoch = self._route_auth_epochs.get(claim.claim_id, 0) + 1
-        self._route_auth_epochs[claim.claim_id] = epoch
         replica = self._stores.directory.get(claim.replica_id)
         request = self._stores.invocations.get(claim.invocation_id)
         return RouteAuthorization(
@@ -304,7 +295,6 @@ class AdmissionController:
             family=claim.family,
             operation=operation,
             admission_epoch=claim.admission_epoch,
-            route_auth_epoch=epoch,
             tenant=request.profile.tenant if request is not None else None,
             origin_id=origin_id,
             replica_id=claim.replica_id,
@@ -313,7 +303,6 @@ class AdmissionController:
                 replica.listener_generation if replica is not None else 0
             ),
             deadline_at=deadline_at,
-            budget=budget,
             expires_at=deadline_at,
         )
 

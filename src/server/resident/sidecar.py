@@ -2,17 +2,20 @@
 
 A resident allocation is fronted by a sidecar that admits data-plane traffic only after
 validating the fence it carries against the sidecar's own replica incarnation and
-listener generation. The pure validation here is that gate: it accepts a single-use
+listener generation. The pure validation here is that gate: it accepts a claim-bound
 bootstrap handoff to open a session, then admits the authorized response stream only
 under a matching immutable route authorization, rejecting a fence that is expired, names
 another replica incarnation or a superseded listener generation, or does not continue
-the session's tenant subject, claim, invocation, or request identity.
+the session's tenant subject, claim, invocation, or request identity. It validates those
+bindings and trusts that only the origin deputy reaches its per-replica route; it does
+not track the handoff token to reject a replay, which the deferred credential handshake
+would add.
 
-The gate is the target-side authority the design requires: an intermediate relay may
-validate its own hop, but never substitutes for this check before engine delivery. A
-rejection is an authorization failure, not a network-path failure, so a caller reports
-it as non-demoting route evidence. Every admitted operation carries claim-tagged load
-evidence for control-plane accounting, distinguished from bulk transfer.
+The gate is the target-side authority: an intermediate relay may validate its own hop,
+but never substitutes for this check before engine delivery. A rejection is an
+authorization failure, not a network-path failure, so a caller reports it as
+non-demoting route evidence. Every admitted operation carries claim-tagged load evidence
+for control-plane accounting, distinguished from bulk transfer.
 """
 
 from collections.abc import Callable
@@ -110,7 +113,7 @@ class SidecarClaimGate:
         )
 
     def check_bootstrap(self, handoff: AdmissionHandoff) -> GateDecision:
-        """Admit a single-use bootstrap delivery, or reject its fence."""
+        """Admit a claim-bound bootstrap delivery, or reject its fence."""
         if handoff.replica_id != self._replica_id:
             return GateDecision.deny(GateRejection.WRONG_REPLICA)
         if handoff.incarnation != self._incarnation:

@@ -144,7 +144,6 @@ def test_accept_and_authorize_issues_a_fenced_route_authorization():
     assert auth.idempotency_key == "idm-x"
     assert auth.origin_id == "rog-1"
     assert auth.replica_id == "rpl-1" and auth.incarnation == 1
-    assert auth.route_auth_epoch == 1
 
     ctl.on_stream_started(claim)
     assert claim.state is ClaimState.STREAMING
