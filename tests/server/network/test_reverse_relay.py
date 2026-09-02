@@ -83,6 +83,8 @@ def test_an_undecodable_frame_is_skipped_and_the_cursor_still_advances() -> None
         assert [e.frame.seq for e in entries] == [1]
         assert last_id == poison
 
+    asyncio.run(run())
+
 
 def test_trim_never_discards_an_unacknowledged_frame() -> None:
     async def run() -> None:
