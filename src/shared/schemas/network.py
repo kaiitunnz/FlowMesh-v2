@@ -30,6 +30,13 @@ class NetworkEndpointAdvertisement(BaseModel):
     arbitrary URL and not the generic server-management endpoint. ``generation`` is the
     monotonic fence: re-registration mints a fresh generation so stale advertisements
     and route evidence keyed to an older one are never used.
+
+    ``relay_attachment_id`` / ``relay_attachment_generation`` are the non-secret
+    identity and monotonic fence of this node's (or ingress edge's) outbound relay
+    attachment to the root rendezvous. They prove the node can attach outward for the
+    universal reverse relay; they are not an inbound URL a peer may dial. A changed
+    attachment generation invalidates route evidence and base relay candidates keyed to
+    the older one.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -41,6 +48,8 @@ class NetworkEndpointAdvertisement(BaseModel):
     trust_domain: str
     reachability_class: ReachabilityClass
     protocols: tuple[str, ...] = ()
+    relay_attachment_id: str | None = None
+    relay_attachment_generation: int = 0
 
 
 __all__ = ["NetworkEndpointAdvertisement", "ReachabilityClass"]
