@@ -82,6 +82,7 @@ class ResidentInvocationDeputy:
         self._session_ttl = session_ttl_sec
         self._logger = logger
         self._sessions: dict[str, _Session] = {}
+        self._reaper_tasks: set[asyncio.Task[None]] = set()
 
     async def bootstrap(
         self,
@@ -214,7 +215,9 @@ class ResidentInvocationDeputy:
             await _close(session.writer)
 
     async def aclose(self) -> None:
-        """Reap every held session; for supervisor shutdown."""
+        """Reap every held session and cancel any pending reaper; for shutdown."""
+        for task in list(self._reaper_tasks):
+            task.cancel()
         for session_id in list(self._sessions):
             await self.reap(session_id)
 
@@ -227,7 +230,9 @@ class ResidentInvocationDeputy:
     def _on_reaper(self, session_id: str) -> None:
         if self._logger is not None:
             self._logger.warning("reaping stranded resident session %s", session_id)
-        asyncio.ensure_future(self.reap(session_id))
+        task = asyncio.ensure_future(self.reap(session_id))
+        self._reaper_tasks.add(task)
+        task.add_done_callback(self._reaper_tasks.discard)
 
     async def _connect(
         self, candidate: RouteCandidate
