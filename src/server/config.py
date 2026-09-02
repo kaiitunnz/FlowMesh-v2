@@ -43,6 +43,7 @@ class LoggingConfig:
 class RedisConfig:
     control_url: str = "redis://localhost:6379/0"
     telemetry_url: str = "redis://localhost:6379/0"
+    resident_relay_url: str = "redis://localhost:6379/0"
     acl_enabled: bool = False
     username: str = "admin"
     password: str = ""
@@ -51,10 +52,12 @@ class RedisConfig:
     @classmethod
     def from_env(cls) -> "RedisConfig":
         redis_url = os.getenv("REDIS_URL") or "redis://localhost:6379/0"
+        telemetry = os.getenv("REDIS_TELEMETRY_URL") or redis_url
         tls_raw = os.getenv("REDIS_TLS_CA_FILE", "").strip()
         return cls(
             control_url=os.getenv("REDIS_CONTROL_URL") or redis_url,
-            telemetry_url=os.getenv("REDIS_TELEMETRY_URL") or redis_url,
+            telemetry_url=telemetry,
+            resident_relay_url=os.getenv("REDIS_RESIDENT_RELAY_URL") or telemetry,
             acl_enabled=parse_bool_env("REDIS_ACL_ENABLED", False),
             username=os.getenv("REDIS_USERNAME", "admin"),
             password=os.getenv("REDIS_PASSWORD", ""),

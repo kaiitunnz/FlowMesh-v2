@@ -15,6 +15,7 @@ listed here is in `.env.example`.
 | `NODE_ROLE` | `root` | `root` deploys local Redis; `worker` skips it and connects to the root's Redis via the URLs below |
 | `REDIS_CONTROL_URL` | `redis://localhost:6379/0` | Redis control channel. On worker nodes, must point at the root node's reachable Redis endpoint |
 | `REDIS_TELEMETRY_URL` | `redis://localhost:6380/0` | Redis telemetry channel. On worker nodes, must point at the root node's reachable Redis endpoint |
+| `REDIS_RESIDENT_RELAY_URL` | (telemetry) | Redis endpoint for the resident relay; defaults to telemetry |
 | `DATABASE_URL` | – | Postgres connection string |
 | `RESULTS_DIR` | `./results` | Server-side results directory |
 | `SERVER_RESULTS_DIR` | `flowmesh_results` | Host-side directory/docker volume to mount at `RESULTS_DIR` in the server container |

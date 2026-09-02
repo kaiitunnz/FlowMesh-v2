@@ -166,6 +166,15 @@ STACK_ENV_SCHEMA = EnvSchema(
                     required=True,
                     url_schemes={"redis", "rediss"},
                 ),
+                EnvVar(
+                    "REDIS_RESIDENT_RELAY_URL",
+                    "",
+                    description=(
+                        "Redis endpoint for the resident relay; defaults to telemetry."
+                    ),
+                    var_type=EnvVarType.URL,
+                    url_schemes={"redis", "rediss"},
+                ),
             ],
         ),
         EnvSection(
