@@ -276,3 +276,33 @@ def test_pre_send_connect_failure_falls_to_the_next_candidate() -> None:
             await deputy.reap("s1")
 
     asyncio.run(run())
+
+
+def test_stranded_session_is_reaped_after_its_ttl() -> None:
+    async def run() -> None:
+        async with _Fixture() as fx:
+            deputy = ResidentInvocationDeputy(
+                connect_budget_sec=3.0, session_ttl_sec=0.05
+            )
+            boot = await deputy.bootstrap("s1", fx.direct(), _handoff(), None)
+            assert boot.acked and "s1" in deputy._sessions
+            await asyncio.sleep(0.2)
+            # No stream or cancel followed the ack: the reaper closed the held session.
+            assert "s1" not in deputy._sessions
+
+    asyncio.run(run())
+
+
+def test_redrive_replaces_and_closes_the_prior_session() -> None:
+    async def run() -> None:
+        async with _Fixture() as fx:
+            deputy = ResidentInvocationDeputy(connect_budget_sec=3.0)
+            assert (await deputy.bootstrap("s1", fx.direct(), _handoff(), None)).acked
+            first = deputy._sessions["s1"]
+            assert (await deputy.bootstrap("s1", fx.direct(), _handoff(), None)).acked
+            # A re-drive under the same session id closes the prior connection.
+            assert deputy._sessions["s1"] is not first
+            assert first.writer.is_closing()
+            await deputy.reap("s1")
+
+    asyncio.run(run())

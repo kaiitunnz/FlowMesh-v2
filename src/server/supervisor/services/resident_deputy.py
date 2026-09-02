@@ -134,6 +134,7 @@ class ResidentDeputyService:
             )
 
     async def stop(self) -> None:
-        """Drop every bound sidecar on shutdown."""
+        """Reap held deputy sessions and drop every bound sidecar on shutdown."""
+        await self._deputy.aclose()
         for replica_id in list(self._sidecars):
             await self.unbind_sidecar(replica_id)

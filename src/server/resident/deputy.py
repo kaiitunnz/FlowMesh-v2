@@ -57,15 +57,21 @@ class _Session:
     reader: asyncio.StreamReader
     writer: asyncio.StreamWriter
     transport: Transport
+    reaper: asyncio.TimerHandle | None = None
 
 
 class ResidentInvocationDeputy:
     """Carries a resident invocation from bootstrap to streamed response."""
 
     def __init__(
-        self, *, connect_budget_sec: float, logger: logging.Logger | None = None
+        self,
+        *,
+        connect_budget_sec: float,
+        session_ttl_sec: float = 300.0,
+        logger: logging.Logger | None = None,
     ) -> None:
         self._budget = connect_budget_sec
+        self._session_ttl = session_ttl_sec
         self._logger = logger
         self._sessions: dict[str, _Session] = {}
 
@@ -80,8 +86,8 @@ class ResidentInvocationDeputy:
 
         A pre-send connect/route failure falls to the next candidate; a failure once
         the bootstrap is sent is an ambiguous delivery, so it stops as uncertain. A
-        validated
-        acknowledgement holds the connection for the stream phase.
+        validated ack holds the connection for the stream phase, bounded by a reaper so
+        a session whose stream never arrives cannot strand a connection.
         """
         observations: list[tuple[Transport, RouteObservationOutcome]] = []
         for candidate in route.candidates:
@@ -114,9 +120,12 @@ class ResidentInvocationDeputy:
                 observations.append(
                     (candidate.transport, RouteObservationOutcome.VERIFIED)
                 )
-                self._sessions[session_id] = _Session(
-                    reader, writer, candidate.transport
+                await self.reap(session_id)
+                session = _Session(reader, writer, candidate.transport)
+                session.reaper = asyncio.get_running_loop().call_later(
+                    self._session_ttl, self._on_reaper, session_id
                 )
+                self._sessions[session_id] = session
                 return BootstrapResult(
                     True, candidate.transport, None, False, observations
                 )
@@ -141,6 +150,7 @@ class ResidentInvocationDeputy:
         session = self._sessions.get(session_id)
         if session is None:
             return StreamResult(False, rejection="no_session")
+        self._stop_reaper(session)
         try:
             await wire.write_msg(
                 session.writer, wire.KIND_STREAM, auth=auth.model_dump(mode="json")
@@ -166,6 +176,7 @@ class ResidentInvocationDeputy:
         session = self._sessions.get(session_id)
         if session is None:
             return StreamResult(False, rejection="no_session")
+        self._stop_reaper(session)
         try:
             await wire.write_msg(
                 session.writer, wire.KIND_CANCEL, auth=auth.model_dump(mode="json")
@@ -180,10 +191,27 @@ class ResidentInvocationDeputy:
             await self.reap(session_id)
 
     async def reap(self, session_id: str) -> None:
-        """Close and forget a held session; safe to call more than once."""
+        """Close and forget a held session and cancel its reaper; safe to call twice."""
         session = self._sessions.pop(session_id, None)
         if session is not None:
+            self._stop_reaper(session)
             await _close(session.writer)
+
+    async def aclose(self) -> None:
+        """Reap every held session; for supervisor shutdown."""
+        for session_id in list(self._sessions):
+            await self.reap(session_id)
+
+    @staticmethod
+    def _stop_reaper(session: _Session) -> None:
+        if session.reaper is not None:
+            session.reaper.cancel()
+            session.reaper = None
+
+    def _on_reaper(self, session_id: str) -> None:
+        if self._logger is not None:
+            self._logger.warning("reaping stranded resident session %s", session_id)
+        asyncio.ensure_future(self.reap(session_id))
 
     async def _connect(
         self, candidate: RouteCandidate
