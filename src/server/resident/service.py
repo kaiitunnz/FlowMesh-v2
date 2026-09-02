@@ -198,25 +198,29 @@ class ResidentCapacityControl:
 
         Wired on both the success and the failure/cancel settlement of a resident
         boundary, so every fenced terminal — not only a completion — releases the
-        credit.
+        credit. The settling thread is not the serve lane, so the admission-state
+        mutation is marshaled onto the loop the serve coroutines run on, keeping every
+        access to the claim store and session maps single-threaded.
         """
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(
+                self._settle_terminal_local, invocation_id, failed
+            )
+        else:
+            self._settle_terminal_local(invocation_id, failed)
+
+    def _settle_terminal_local(self, invocation_id: str, failed: bool) -> None:
         reason = ClaimTerminalReason.FAILED if failed else ClaimTerminalReason.COMPLETED
         self._admission.on_ds_terminal(invocation_id, reason)
         self._transient_failures.pop(invocation_id, None)
         live = self._live_sessions.pop(invocation_id, None)
-        if (
-            failed
-            and live is not None
-            and self._native is not None
-            and self._loop is not None
-        ):
+        if failed and live is not None and self._native is not None and self._loop:
             # A fenced failure/cancel terminal reaps a still-held native session best
             # effort so the engine stream stops promptly; the deputy reaper is the
-            # restart-safe backstop when this poke does not land.
+            # restart-safe backstop when this poke does not land. Already on the loop
+            # here, so schedule the reap directly.
             origin_node, session_id = live
-            asyncio.run_coroutine_threadsafe(
-                self._reap_native(origin_node, session_id), self._loop
-            )
+            self._loop.create_task(self._reap_native(origin_node, session_id))
 
     def list_service_families(self) -> list[ServiceFamily]:
         """The registered service families, for operator read access."""
@@ -452,7 +456,6 @@ class ResidentCapacityControl:
                 return
         handoff = handoff.model_copy(
             update={
-                "route": route,
                 "origin_id": origin.origin_id,
                 "listener_generation": listener.listener_generation,
             }
@@ -514,13 +517,16 @@ class ResidentCapacityControl:
     ) -> None:
         deps = self._native
         assert deps is not None
+        if claim.state is ClaimState.TERMINAL:
+            # A concurrent cancel terminalized the claim during the bootstrap await; its
+            # credit is already released, so do not accept, authorize, or stream.
+            return
         origin_id = origin.origin_id
         if claim.state is ClaimState.RESERVED:
             auth = self._admission.accept_and_authorize(
                 claim,
                 idempotency_key=env.idempotency_key,
                 origin_id=origin_id,
-                operation="inference",
                 deadline_at=profile.deadline_at,
             )
             self._admission.on_stream_started(claim)
@@ -530,7 +536,6 @@ class ResidentCapacityControl:
                 claim,
                 idempotency_key=env.idempotency_key,
                 origin_id=origin_id,
-                operation="inference",
                 deadline_at=profile.deadline_at,
             )
         try:

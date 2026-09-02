@@ -22,6 +22,7 @@ from server.network.state import (
     ResolvedRoute,
     RouteCandidate,
     RouteHop,
+    RouteObservationOutcome,
     Transport,
 )
 from server.resident import wire
@@ -84,9 +85,6 @@ def _auth(**overrides: object) -> RouteAuthorization:
         claim_id="scl-1",
         invocation_id="inv-1",
         idempotency_key="idm-1",
-        family="fam",
-        operation="inference",
-        admission_epoch=0,
         tenant="t1",
         origin_id="rog-1",
         replica_id="rpl-1",
@@ -177,7 +175,10 @@ def test_delivers_and_streams_over_each_transport() -> None:
         async with _Fixture() as fx:
             deputy = ResidentInvocationDeputy(connect_budget_sec=3.0)
             boot, stream = await _deliver(deputy, select(fx))
-            assert boot.acked and boot.selected_transport is not None
+            assert boot.acked
+            assert any(
+                o is RouteObservationOutcome.VERIFIED for _, o in boot.observations
+            )
             assert stream is not None and stream.ok
             assert stream.completion == "".join(_CHUNKS)
             assert fx.loads == ["request", "stream"]
@@ -260,7 +261,7 @@ def test_cancel_aborts_the_engine_and_reaps_both_ends() -> None:
             stream = asyncio.ensure_future(deputy.stream("s1", _auth()))
             await asyncio.sleep(0.1)  # let the stream reach the hung engine request
             cancel = await deputy.cancel("s1")
-            assert cancel.ok and cancel.cancelled
+            assert cancel.ok
             with contextlib.suppress(asyncio.CancelledError):
                 await stream
             # Both ends are reaped and the co-located engine request was aborted.
@@ -327,7 +328,12 @@ def test_pre_send_connect_failure_falls_to_the_next_candidate() -> None:
             )
             deputy = ResidentInvocationDeputy(connect_budget_sec=3.0)
             boot = await deputy.bootstrap("s1", route, _handoff(), None)
-            assert boot.acked and boot.selected_transport is Transport.WORKER_DIRECT
+            assert boot.acked
+            verified = [
+                t for t, o in boot.observations if o is RouteObservationOutcome.VERIFIED
+            ]
+            # The first candidate connect-failed; the deputy fell through to the live.
+            assert verified == [Transport.WORKER_DIRECT]
             assert boot.observations[0][1].value == "connect_failure"
             await deputy.reap("s1")
 

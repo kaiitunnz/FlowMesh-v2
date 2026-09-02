@@ -25,7 +25,7 @@ from ..network.reverse_relay import (
     RelaySessionStore,
     RelayStreamStore,
 )
-from ..network.state import ResolvedRoute, Transport
+from ..network.state import ResolvedRoute
 from . import wire
 from .deputy import BootstrapResult, StreamResult
 from .state import AdmissionHandoff, RouteAuthorization
@@ -59,12 +59,15 @@ class _TargetBridge:
         publish: Callable[[RelayFrame], Awaitable[None]],
         frame: RelayFrame,
         window: DirectionWindow,
+        *,
+        reserve_budget_sec: float,
     ) -> None:
         self._reader = reader
         self._writer = writer
         self._publish = publish
         self._frame = frame
         self._window = window
+        self._reserve_budget = reserve_budget_sec
         self._on_closed: Callable[[], Awaitable[None]] | None = None
         self._seq = 0
         self._pump: asyncio.Task[None] | None = None
@@ -83,11 +86,22 @@ class _TargetBridge:
             while True:
                 payload = await netwire.read_frame(self._reader)
                 self._seq += 1
-                await self._window.reserve(len(payload))
+                # Bound the window reserve: an origin that crashed mid-stream never
+                # grants again, so a full window would orphan this pump on the sidecar
+                # loopback. Time out instead and fall through to reap.
+                await asyncio.wait_for(
+                    self._window.reserve(len(payload)), timeout=self._reserve_budget
+                )
                 await self._publish(self._response(payload))
         except asyncio.CancelledError:
             return  # a cancel is the reap path, which owns the state cleanup
-        except (asyncio.IncompleteReadError, ConnectionError, OSError, ValueError):
+        except (
+            TimeoutError,
+            asyncio.IncompleteReadError,
+            ConnectionError,
+            OSError,
+            ValueError,
+        ):
             pass
         # The sidecar closed after its terminal (done/failed/reject): reap this node's
         # target-side session state so it does not leak on a normal completion.
@@ -139,8 +153,12 @@ class ResidentRelayEndpoint:
         self._connect_tries = max(1, connect_tries)
         self._connect_backoff = connect_backoff_sec
         self._logger = logger or logging.getLogger("resident-relay-endpoint")
-        self._origin: dict[str, asyncio.Queue[RelayFrame]] = {}
+        # A ``None`` item is the cancel sentinel that wakes a driver blocked in _recv.
+        self._origin: dict[str, asyncio.Queue[RelayFrame | None]] = {}
         self._targets: dict[str, _TargetBridge] = {}
+        # Sessions a cancel is reaping: the woken driver keeps the routing record so the
+        # published cancel still bridges to the target, which deletes it after reaping.
+        self._cancelling: set[str] = set()
         # In-progress off-pump sidecar connects, so a slow connect never stalls the
         # node's pump loop.
         self._establishing: dict[str, asyncio.Task[None]] = {}
@@ -247,7 +265,14 @@ class ResidentRelayEndpoint:
             window = self._t2o_windows.setdefault(
                 session_id, DirectionWindow(self._window_bytes)
             )
-            bridge = _TargetBridge(reader, writer, self._publish_up, frame, window)
+            bridge = _TargetBridge(
+                reader,
+                writer,
+                self._publish_up,
+                frame,
+                window,
+                reserve_budget_sec=self._budget,
+            )
             bridge.set_on_closed(lambda: self._on_target_closed(session_id, bridge))
             self._targets[session_id] = bridge
             bridge.start()
@@ -324,7 +349,7 @@ class ResidentRelayEndpoint:
             target_node=target_node,
             sidecar_route=sidecar_route,
         )
-        self._origin.setdefault(session_id, asyncio.Queue())
+        self._origin.setdefault(session_id, asyncio.Queue[RelayFrame | None]())
         self._o2t_windows.setdefault(session_id, DirectionWindow(self._window_bytes))
 
     async def _send(
@@ -353,6 +378,10 @@ class ResidentRelayEndpoint:
         try:
             frame = await asyncio.wait_for(queue.get(), timeout=timeout)
         except TimeoutError:
+            return None
+        if frame is None:
+            # The cancel sentinel: a cancel woke this driver so its phase returns
+            # promptly instead of blocking to the recv budget.
             return None
         # Having drained a target-to-origin frame, grant the target its cumulative
         # consumed bytes; the grant returns on the origin-to-target path so the root
@@ -399,17 +428,15 @@ class ResidentRelayEndpoint:
             # An uncertain bootstrap is abandoned: the re-drive mints a fresh session,
             # so reap this one's origin state and record rather than leak it.
             await self.close_origin(session_id)
-            return BootstrapResult(False, Transport.CONTROL_RELAY, None, True, [])
+            return BootstrapResult(False, None, True, [])
         msg = wire.decode_msg(raw)
         if msg["kind"] == wire.KIND_ACK:
-            return BootstrapResult(True, Transport.CONTROL_RELAY, None, False, [])
+            return BootstrapResult(True, None, False, [])
         if msg["kind"] == wire.KIND_REJECT:
             await self.close_origin(session_id)
-            return BootstrapResult(
-                False, Transport.CONTROL_RELAY, msg.get("reason"), False, []
-            )
+            return BootstrapResult(False, msg.get("reason"), False, [])
         await self.close_origin(session_id)
-        return BootstrapResult(False, Transport.CONTROL_RELAY, "protocol", False, [])
+        return BootstrapResult(False, "protocol", False, [])
 
     async def stream(self, session_id: str, auth: RouteAuthorization) -> StreamResult:
         """Present the authorization and assemble the streamed completion over rr."""
@@ -467,6 +494,13 @@ class ResidentRelayEndpoint:
                     direction=RelayDirection.ORIGIN_TO_TARGET,
                 ),
             )
+        # Wake a driver blocked in _recv so its phase returns; mark the session so its
+        # close keeps the routing record for the cancel just published (the target
+        # deletes it after reaping). The sentinel rides the driver's own queue ref.
+        queue = self._origin.get(session_id)
+        if queue is not None:
+            self._cancelling.add(session_id)
+            queue.put_nowait(None)
         self._reap_origin_state(session_id)
 
     def _reap_origin_state(self, session_id: str) -> None:
@@ -479,9 +513,15 @@ class ResidentRelayEndpoint:
         # On a stream terminal the origin has the last frame, so reap the origin state
         # and delete the routing record; its stream is then trimmable and does not leak.
         self._reap_origin_state(session_id)
+        if session_id in self._cancelling:
+            # A cancel is reaping this session: keep the record so the published cancel
+            # still bridges to the target, which deletes it after reaping the sidecar.
+            self._cancelling.discard(session_id)
+            return
         await self._sessions.delete(session_id)
 
     async def reap_target(self, session_id: str) -> None:
+        self._cancelling.discard(session_id)
         establishing = self._establishing.pop(session_id, None)
         if establishing is not None and not establishing.done():
             establishing.cancel()

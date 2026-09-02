@@ -74,7 +74,6 @@ class AdmissionController:
             replica_id=replica.replica_id,
             incarnation=replica.incarnation,
             listener_generation=replica.listener_generation,
-            deadline_at=deadline_at,
             expires_at=deadline_at,
         )
 
@@ -236,7 +235,6 @@ class AdmissionController:
         *,
         idempotency_key: str | None,
         origin_id: str | None,
-        operation: str,
         deadline_at: str | None = None,
     ) -> RouteAuthorization:
         """Record ``ACCEPTED`` on an engine enqueue ack and issue the immutable fence.
@@ -250,7 +248,6 @@ class AdmissionController:
             claim,
             idempotency_key=idempotency_key,
             origin_id=origin_id,
-            operation=operation,
             deadline_at=deadline_at,
         )
 
@@ -260,7 +257,6 @@ class AdmissionController:
         *,
         idempotency_key: str | None,
         origin_id: str | None,
-        operation: str,
         deadline_at: str | None = None,
     ) -> RouteAuthorization:
         """Re-mint the fence for a resumed in-flight claim without an FSM transition.
@@ -272,7 +268,6 @@ class AdmissionController:
             claim,
             idempotency_key=idempotency_key,
             origin_id=origin_id,
-            operation=operation,
             deadline_at=deadline_at,
         )
 
@@ -282,7 +277,6 @@ class AdmissionController:
         *,
         idempotency_key: str | None,
         origin_id: str | None,
-        operation: str,
         deadline_at: str | None,
     ) -> RouteAuthorization:
         assert claim.replica_id is not None and claim.incarnation is not None
@@ -292,9 +286,6 @@ class AdmissionController:
             claim_id=claim.claim_id,
             invocation_id=claim.invocation_id,
             idempotency_key=idempotency_key,
-            family=claim.family,
-            operation=operation,
-            admission_epoch=claim.admission_epoch,
             tenant=request.profile.tenant if request is not None else None,
             origin_id=origin_id,
             replica_id=claim.replica_id,
@@ -302,7 +293,6 @@ class AdmissionController:
             listener_generation=(
                 replica.listener_generation if replica is not None else 0
             ),
-            deadline_at=deadline_at,
             expires_at=deadline_at,
         )
 

@@ -124,9 +124,6 @@ def _auth() -> RouteAuthorization:
         claim_id="scl-1",
         invocation_id="inv-1",
         idempotency_key="idm-1",
-        family="fam",
-        operation="inference",
-        admission_epoch=0,
         tenant="t1",
         origin_id="rog-1",
         replica_id="rpl-1",
@@ -146,15 +143,8 @@ def _route(sidecar_route: str) -> ResolvedRoute:
             RouteCandidate(
                 transport=t,
                 hops=(
-                    RouteHop(
-                        transport=t, endpoint="", node_id="nde-o", attachment_id="a-o"
-                    ),
-                    RouteHop(
-                        transport=t,
-                        endpoint=sidecar_route,
-                        node_id="nde-t",
-                        attachment_id="a-t",
-                    ),
+                    RouteHop(transport=t, endpoint="", node_id="nde-o"),
+                    RouteHop(transport=t, endpoint=sidecar_route, node_id="nde-t"),
                 ),
             ),
         ),
@@ -231,7 +221,7 @@ def test_all_nat_invocation_completes_over_control_relay() -> None:
             boot = await harness.origin.bootstrap(
                 "s1", route=route, handoff=_handoff(), request_payload='{"p":"hi"}'
             )
-            assert boot.acked and boot.selected_transport is Transport.CONTROL_RELAY
+            assert boot.acked
             result = await harness.origin.stream("s1", _auth())
             done.set()
             return result
@@ -276,6 +266,36 @@ def test_cancel_over_the_relay_reaps_the_co_located_sidecar() -> None:
             stream.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await stream
+        finally:
+            done.set()
+            await driver
+        await harness.sidecar.stop()
+
+    asyncio.run(run())
+
+
+def test_cancel_wakes_a_blocked_origin_stream_promptly() -> None:
+    async def run() -> None:
+        slow = _SlowEngine()
+        harness = _Harness(engine=slow)  # recv budget is 5s
+        route = _route(await harness.start())
+        done = asyncio.Event()
+        driver = asyncio.ensure_future(_drive(harness, done))
+        try:
+            boot = await asyncio.wait_for(
+                harness.origin.bootstrap(
+                    "s1", route=route, handoff=_handoff(), request_payload='{"p":"hi"}'
+                ),
+                timeout=10.0,
+            )
+            assert boot.acked
+            stream = asyncio.ensure_future(harness.origin.stream("s1", _auth()))
+            await asyncio.sleep(0.1)  # the stream blocks in _recv on the hung engine
+            await harness.origin.cancel("s1")
+            # The cancel sentinel wakes the blocked driver: the stream returns a loss
+            # well within the recv budget instead of hanging until it elapses.
+            result = await asyncio.wait_for(stream, timeout=2.0)
+            assert not result.ok
         finally:
             done.set()
             await driver

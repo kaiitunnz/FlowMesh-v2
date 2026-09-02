@@ -42,7 +42,24 @@ def _node(node_id: str, *, generation: int, cls=ReachabilityClass.ROUTABLE) -> N
             trust_domain="fm",
             reachability_class=cls,
             relay_attachment_id=f"att-{node_id}",
-            relay_attachment_generation=generation,
+        ),
+    )
+
+
+def _outbound_only_node(node_id: str, *, generation: int) -> Node:
+    # A network-plane node with no inbound URL: empty endpoint_id/url and no attachment
+    # id, as the provider mints it. The server derives the identity from the node.
+    return Node(
+        id=node_id,
+        namespace="ns",
+        cluster="cl",
+        alias=node_id,
+        network_endpoint=NetworkEndpointAdvertisement(
+            endpoint_id="",
+            url="",
+            generation=generation,
+            trust_domain="fm",
+            reachability_class=ReachabilityClass.ROUTABLE,
         ),
     )
 
@@ -88,6 +105,30 @@ def test_resolve_none_without_origin_endpoint() -> None:
     registry.set(_node("nde-2", generation=1))
     plane = _plane(registry)
     assert asyncio.run(plane.resolve("nde-1", _listener())) is None
+
+
+def test_outbound_only_nodes_resolve_only_the_control_relay() -> None:
+    # Neither the origin nor the target has an inbound URL, so the forward-dial
+    # transports drop out, but the reverse-relay base still resolves: the attachment
+    # identity comes from the node, not the (absent) inbound endpoint.
+    registry = _FakeNodeRegistry()
+    registry.set(_outbound_only_node("nde-1", generation=1))
+    registry.set(_outbound_only_node("nde-2", generation=1))
+    plane = _plane(registry)
+    listener = ReplicaListenerAdvertisement(
+        replica_id="rpl-1",
+        family="echo",
+        incarnation=1,
+        listener_generation=0,
+        node_id="nde-2",
+        routes=("127.0.0.1:9500",),
+        directly_routable=False,
+    )
+    result = asyncio.run(plane.resolve("nde-1", listener))
+    assert result is not None
+    _origin, route = result
+    transports = [c.transport.value for c in route.candidates]
+    assert transports == ["control_relay"]
 
 
 def test_observation_demotes_and_next_resolve_drops_direct() -> None:

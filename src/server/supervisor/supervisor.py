@@ -238,17 +238,18 @@ def _endpoint_advertisement_provider(
     """Return a provider that mints a fresh-generation endpoint advertisement.
 
     Each call bumps the generation so a re-registration supersedes the prior
-    advertisement and its route evidence. The advertisement also carries the node's
-    outbound relay attachment: a network-plane node always stands up its reverse-relay
-    attachment, so it is attach-eligible, and the attachment generation tracks the
-    endpoint generation so a re-registration invalidates stale relay evidence through
-    the same rotation path. It returns ``None`` when the network plane is disabled or
-    unconfigured, leaving the node advertisement absent.
+    advertisement and its route evidence, which is the same fence that invalidates the
+    node's stale relay evidence. A network-plane node always stands up its reverse-relay
+    attachment, so it advertises even without an inbound endpoint URL: the outbound
+    attachment is attach-eligible regardless, and the server derives the attachment and
+    endpoint identity from the node id when the URL is absent (``url`` then empty). It
+    returns ``None`` only when the network plane is disabled, leaving the advertisement
+    absent.
     """
-    if not network_cfg.enabled or not network_cfg.endpoint_url:
+    if not network_cfg.enabled:
         return lambda: None
 
-    url = network_cfg.endpoint_url
+    url = network_cfg.endpoint_url or ""
     try:
         reachability_class = ReachabilityClass(network_cfg.reachability_class)
     except ValueError:
@@ -268,8 +269,6 @@ def _endpoint_advertisement_provider(
             trust_domain=network_cfg.trust_domain,
             reachability_class=reachability_class,
             protocols=network_cfg.protocols,
-            relay_attachment_id=url,
-            relay_attachment_generation=current,
         )
 
     return provider

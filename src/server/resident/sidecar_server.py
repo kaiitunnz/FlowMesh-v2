@@ -126,6 +126,7 @@ class ResidentSidecarServer:
             engine = await self._serve(reader, writer)
         except (
             TimeoutError,
+            KeyError,
             ValidationError,
             ValueError,
             ConnectionError,
@@ -133,9 +134,10 @@ class ResidentSidecarServer:
             OSError,
             httpx.HTTPError,
         ):
-            # An engine that refuses or drops the request closes the connection without
-            # an ack; the origin deputy reads the close and settles the boundary. An
-            # engine transport error is not the caller's fence failure.
+            # An engine that refuses or drops the request, or a malformed follow frame
+            # missing its fields, closes the connection without an ack; the origin
+            # deputy reads the close and settles the boundary. A transport or decode
+            # error is not the caller's fence failure.
             pass
         finally:
             if engine is not None:

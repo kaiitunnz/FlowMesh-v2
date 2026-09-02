@@ -31,7 +31,6 @@ class BootstrapReply:
     acked: bool
     rejection: str | None
     uncertain: bool
-    selected_transport: Transport | None
     observations: list[tuple[Transport, RouteObservationOutcome]] = field(
         default_factory=list
     )
@@ -107,12 +106,10 @@ class NativeTransport:
                 "request": request_payload,
             },
         )
-        selected = data.get("selected_transport")
         return BootstrapReply(
             acked=bool(data.get("acked")),
             rejection=data.get("rejection"),
             uncertain=bool(data.get("uncertain")),
-            selected_transport=Transport(selected) if selected else None,
             observations=[
                 (Transport(o["transport"]), RouteObservationOutcome(o["outcome"]))
                 for o in data.get("observations", [])

@@ -12,11 +12,11 @@ Ladder rules:
   placement alone is not sufficient.
 - ``node_relay`` goes through the target node's announced endpoint and its node-local
   uplink; it is the initial same-node path as well as the normal cross-node path.
-- ``control_relay`` is the universal reverse-rendezvous base: it names the origin and
-  target reverse-relay attachments and the target's node-local sidecar delivery, and
-  the root bridges between them. Its feasibility is that both ends have a registered
-  outbound attachment, not that either is inbound-reachable, so it is the guaranteed
-  base whenever both attachments are present.
+- ``control_relay`` is the universal reverse-rendezvous base: the root bridges between
+  the origin and target reverse-relay attachments to the target's node-local sidecar
+  delivery. Its feasibility is that both ends have a registered outbound attachment, not
+  that either is inbound-reachable, so it is the guaranteed base whenever both
+  attachments are present — including for an outbound-only node with no inbound URL.
 
 Candidates a demotion has removed drop out; among those left, verified paths precede
 untried ones, and within a rank the base preference is direct, then node relay, then
@@ -124,7 +124,7 @@ def resolve_route(
             ),
         )
 
-    if node_endpoint is not None and direct_route is not None:
+    if node_endpoint is not None and node_endpoint.url and direct_route is not None:
         consider(
             Transport.NODE_RELAY,
             (
@@ -141,11 +141,11 @@ def resolve_route(
             ),
         )
 
-    # control_relay is the universal reverse-rendezvous base: it carries the origin and
-    # target reverse-relay attachments and the target's node-local sidecar delivery, and
-    # the root bridges between them. It needs both ends attached outward and a sidecar
-    # delivery route; it does not need either end to be inbound-reachable, so it is the
-    # guaranteed base whenever both attachments are present.
+    # control_relay is the universal reverse-rendezvous base: the root bridges between
+    # the origin and target reverse-relay attachments to the target's node-local sidecar
+    # delivery. It needs both ends attached outward and a sidecar delivery route; it
+    # does not need either end inbound-reachable, so it is the guaranteed base whenever
+    # both attachments are present, including an outbound-only node with no inbound URL.
     target_attachment = (
         node_endpoint.relay_attachment_id if node_endpoint is not None else None
     )
@@ -161,13 +161,11 @@ def resolve_route(
                     transport=Transport.CONTROL_RELAY,
                     endpoint="",
                     node_id=origin.node_id,
-                    attachment_id=origin.relay_attachment_id,
                 ),
                 RouteHop(
                     transport=Transport.CONTROL_RELAY,
                     endpoint=direct_route,
                     node_id=listener.node_id,
-                    attachment_id=target_attachment,
                 ),
             ),
         )

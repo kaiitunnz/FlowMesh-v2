@@ -134,7 +134,6 @@ def test_accept_and_authorize_issues_a_fenced_route_authorization():
         claim,
         idempotency_key="idm-x",
         origin_id="rog-1",
-        operation="inference",
         deadline_at="2026-01-01T00:00:00Z",
     )
     assert claim.state is ClaimState.ACCEPTED

@@ -35,7 +35,6 @@ class BootstrapResult:
     """The bootstrap phase outcome, with per-candidate classified route observations."""
 
     acked: bool
-    selected_transport: Transport | None
     rejection: str | None
     uncertain: bool
     observations: list[tuple[Transport, RouteObservationOutcome]] = field(
@@ -55,7 +54,6 @@ class StreamResult:
     ok: bool
     completion: str | None = None
     rejection: str | None = None
-    cancelled: bool = False
     definite: bool = False
 
 
@@ -122,9 +120,7 @@ class ResidentInvocationDeputy:
                 observations.append(
                     (candidate.transport, RouteObservationOutcome.TIMEOUT)
                 )
-                return BootstrapResult(
-                    False, candidate.transport, None, True, observations
-                )
+                return BootstrapResult(False, None, True, observations)
             if reply["kind"] == wire.KIND_ACK:
                 observations.append(
                     (candidate.transport, RouteObservationOutcome.VERIFIED)
@@ -135,9 +131,7 @@ class ResidentInvocationDeputy:
                     self._session_ttl, self._on_reaper, session_id
                 )
                 self._sessions[session_id] = session
-                return BootstrapResult(
-                    True, candidate.transport, None, False, observations
-                )
+                return BootstrapResult(True, None, False, observations)
             await _close(writer)
             if reply["kind"] == wire.KIND_REJECT:
                 # A fence rejection is an authorization failure, not a path failure,
@@ -146,13 +140,11 @@ class ResidentInvocationDeputy:
                 observations.append(
                     (candidate.transport, RouteObservationOutcome.FENCE_INVALID)
                 )
-                return BootstrapResult(
-                    False, candidate.transport, reply.get("reason"), False, observations
-                )
+                return BootstrapResult(False, reply.get("reason"), False, observations)
             observations.append(
                 (candidate.transport, RouteObservationOutcome.ROUTE_FAILURE)
             )
-        return BootstrapResult(False, None, None, False, observations)
+        return BootstrapResult(False, None, False, observations)
 
     async def stream(self, session_id: str, auth: RouteAuthorization) -> StreamResult:
         """Present the authorization and assemble the streamed response completion."""
@@ -205,7 +197,7 @@ class ResidentInvocationDeputy:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
         await self.reap(session_id)
-        return StreamResult(True, cancelled=True)
+        return StreamResult(True)
 
     async def reap(self, session_id: str) -> None:
         """Close and forget a held session and cancel its reaper; safe to call twice."""

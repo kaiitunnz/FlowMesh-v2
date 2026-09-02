@@ -11,7 +11,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..network.state import ReplicaListenerAdvertisement, ResolvedRoute
+from ..network.state import ReplicaListenerAdvertisement
 from ..utils.time import now_iso
 
 
@@ -306,8 +306,8 @@ class AdmissionHandoff(BaseModel):
     replica incarnation's resident-facing sidecar and obtains an engine enqueue
     acknowledgement. It binds the tenant-scoped invocation subject, the fabric ``idm-*``
     request identity, the selected replica incarnation and listener generation, and an
-    expiry; ``route`` carries the pre-acceptance snapshot the deputy executes. The
-    sidecar validates those bindings and trusts that only the origin deputy reaches its
+    expiry. The deputy carries the resolved route alongside this handoff; the sidecar
+    validates these bindings and trusts that only the origin deputy reaches its
     per-replica route; it does not itself track ``token`` to reject a replayed
     bootstrap — that credential handshake is deferred. It is neither general service
     access nor the post-``ACCEPTED`` ``RouteAuthorization``, and it never carries the
@@ -326,8 +326,6 @@ class AdmissionHandoff(BaseModel):
     replica_id: str
     incarnation: int
     listener_generation: int = 0
-    route: ResolvedRoute | None = None
-    deadline_at: str | None = None
     expires_at: str | None = None
 
 
@@ -338,9 +336,11 @@ class RouteAuthorization(BaseModel):
     stream, cancellation, and backpressure for a single tenant-scoped invocation. It is
     distinct from the ephemeral ``ResolvedRoute``: it stamps no path and is never
     refreshed. The resident-facing sidecar validates it per stream and rejects it once
-    any bound fence — deadline, replica incarnation, listener generation, subject,
-    claim, invocation, or request identity — no longer holds. It carries no bearer
-    credential; its fence fields are the authority.
+    any bound fence — expiry, replica incarnation, listener generation, subject, claim,
+    invocation, or request identity — no longer holds. A permitted reissue is a fresh
+    successor claim under the same invocation, so the claim fence alone rejects a
+    superseded authorization. It carries no bearer credential; its fence fields are the
+    authority.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -348,14 +348,9 @@ class RouteAuthorization(BaseModel):
     claim_id: str
     invocation_id: str
     idempotency_key: str | None = None
-    family: str
-    operation: str
-    admission_epoch: int
     tenant: str | None = None
     origin_id: str | None = None
     replica_id: str
     incarnation: int
     listener_generation: int = 0
-    deadline_at: str | None = None
-    issued_at: str = Field(default_factory=now_iso)
     expires_at: str | None = None

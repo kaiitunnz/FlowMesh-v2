@@ -24,7 +24,6 @@ def _origin(
         policy_class=PolicyClass.DEFAULT,
         trust_domain="fm",
         relay_attachment_id="att-origin" if attached else None,
-        relay_attachment_generation=1 if attached else 0,
     )
 
 
@@ -53,7 +52,6 @@ def _endpoint(
         trust_domain="fm",
         reachability_class=reachability_class,
         relay_attachment_id="att-target" if attached else None,
-        relay_attachment_generation=1 if attached else 0,
     )
 
 
@@ -193,14 +191,11 @@ def test_control_relay_names_origin_and_target_attachments() -> None:
     )
     control = [c for c in route.candidates if c.transport is Transport.CONTROL_RELAY][0]
     origin_hop, target_hop = control.hops
-    # The descriptor names the origin and target reverse attachments (by node +
-    # non-secret attachment id) and the target's node-local sidecar delivery, not
-    # dialable TCP hops.
+    # The descriptor names the origin and target ends by node (the delivery routes by
+    # node id) and the target's node-local sidecar delivery, not dialable TCP hops.
     assert origin_hop.node_id == "nde-origin"
-    assert origin_hop.attachment_id == "att-origin"
     assert origin_hop.endpoint == ""  # the origin end names no dialable address
     assert target_hop.node_id == "nde-1"
-    assert target_hop.attachment_id == "att-target"
     assert target_hop.endpoint == "127.0.0.1:9001"  # local sidecar delivery route
 
 

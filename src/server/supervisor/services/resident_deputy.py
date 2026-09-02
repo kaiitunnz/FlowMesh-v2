@@ -120,11 +120,6 @@ class ResidentDeputyService:
             "acked": result.acked,
             "rejection": result.rejection,
             "uncertain": result.uncertain,
-            "selected_transport": (
-                result.selected_transport.value
-                if result.selected_transport is not None
-                else None
-            ),
             "observations": [
                 {"transport": transport.value, "outcome": outcome.value}
                 for transport, outcome in result.observations
@@ -158,13 +153,9 @@ class ResidentDeputyService:
             assert self._endpoint is not None
             self._relay_sessions.discard(session_id)
             await self._endpoint.cancel(session_id)
-            return {"ok": True, "cancelled": True, "rejection": None}
+            return {"ok": True, "rejection": None}
         result = await self._deputy.cancel(session_id)
-        return {
-            "ok": result.ok,
-            "cancelled": result.cancelled,
-            "rejection": result.rejection,
-        }
+        return {"ok": result.ok, "rejection": result.rejection}
 
     def _record_load(self, evidence: LoadEvidence) -> None:
         """Emit claim-tagged load evidence, tagged latency-sensitive versus bulk."""

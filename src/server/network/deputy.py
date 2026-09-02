@@ -36,9 +36,16 @@ async def run_echo(
     *,
     connect_budget_sec: float,
 ) -> EchoOutcome:
-    """Attempt each candidate in order; stop at the first that round-trips."""
+    """Attempt each forward-dial candidate in order; stop at the first that round-trips.
+
+    ``control_relay`` carries no dialable first hop — its origin hop endpoint is empty —
+    so this forward-dial diagnostic skips it rather than dialing an empty address and
+    recording a spurious demotion for the guaranteed reverse-relay base.
+    """
     observations: list[tuple[Transport, RouteObservationOutcome]] = []
     for candidate in resolved.candidates:
+        if candidate.transport is Transport.CONTROL_RELAY:
+            continue
         outcome, echoed = await _attempt(candidate, payload, connect_budget_sec)
         observations.append((candidate.transport, outcome))
         if outcome is RouteObservationOutcome.VERIFIED:
