@@ -8,12 +8,14 @@ the recovery path is proven without a live Redis or a fake dependency.
 import asyncio
 
 from server.network.reverse_relay import (
+    DirectionWindow,
     RelayDirection,
     RelayFrame,
     RelayFrameKind,
     RelayLease,
     RelaySessionStore,
     RelayStreamStore,
+    WindowState,
 )
 
 from ._relay_fakes import FakeBinaryRedis, relay_frame
@@ -113,3 +115,34 @@ def test_control_frames_ride_the_priority_lane() -> None:
     ):
         assert relay_frame(kind).is_control
     assert not relay_frame(RelayFrameKind.DATA).is_control
+
+
+def test_window_grant_advances_only_relay_window_credit() -> None:
+    # A cumulative ack frees the delta since the last ack and is idempotent. It touches
+    # only the direction's own byte accounting; the substrate cannot name, and so never
+    # releases, a service-claim admission credit.
+    window = WindowState(granted=100, used=80)
+    window.on_ack(30)
+    assert (window.used, window.acked) == (50, 30)
+    window.on_ack(30)  # a repeated cumulative ack releases nothing further
+    assert (window.used, window.acked) == (50, 30)
+    window.on_ack(80)
+    assert (window.used, window.acked) == (0, 80)
+
+
+def test_direction_window_blocks_the_sender_until_a_grant_arrives() -> None:
+    async def run() -> None:
+        window = DirectionWindow(granted=100)
+        await window.reserve(60)
+        assert window.in_flight == 60
+        # A second 60-byte send exceeds the 100-byte window: the sender blocks, holding
+        # no more than its granted window in flight, until the receiver grants.
+        blocked = asyncio.ensure_future(window.reserve(60))
+        await asyncio.sleep(0.01)
+        assert not blocked.done()
+        assert window.in_flight == 60
+        await window.grant(60)
+        await asyncio.wait_for(blocked, timeout=1.0)
+        assert window.in_flight == 60
+
+    asyncio.run(run())

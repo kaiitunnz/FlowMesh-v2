@@ -17,6 +17,7 @@ from collections.abc import Awaitable, Callable
 
 from ..network import wire as netwire
 from ..network.reverse_relay import (
+    DirectionWindow,
     RelayDirection,
     RelayFrame,
     RelayFrameKind,
@@ -42,7 +43,13 @@ async def _default_connect(
 
 class _TargetBridge:
     """Holds a session's loopback connection to the co-located sidecar and pumps its
-    responses back to the up stream as target-to-origin frames."""
+    responses back to the up stream as target-to-origin frames.
+
+    Each response frame reserves its size against the origin's granted window before it
+    is published, so a slow origin backpressures the sidecar rather than flooding the
+    relay stream. A cancel closes the connection, which cancels a pump blocked on the
+    window, so a full data window never deadlocks cancellation.
+    """
 
     def __init__(
         self,
@@ -50,11 +57,13 @@ class _TargetBridge:
         writer: asyncio.StreamWriter,
         publish: Callable[[RelayFrame], Awaitable[None]],
         frame: RelayFrame,
+        window: DirectionWindow,
     ) -> None:
         self._reader = reader
         self._writer = writer
         self._publish = publish
         self._frame = frame
+        self._window = window
         self._seq = 0
         self._pump: asyncio.Task[None] | None = None
 
@@ -69,6 +78,7 @@ class _TargetBridge:
             while True:
                 payload = await netwire.read_frame(self._reader)
                 self._seq += 1
+                await self._window.reserve(len(payload))
                 await self._publish(self._response(payload))
         except (asyncio.IncompleteReadError, ConnectionError, OSError, ValueError):
             return
@@ -106,6 +116,7 @@ class ResidentRelayEndpoint:
         *,
         connect: SidecarConnect = _default_connect,
         recv_budget_sec: float = 300.0,
+        window_bytes: int = 65536,
         logger: logging.Logger | None = None,
     ) -> None:
         self._node_id = node_id
@@ -113,9 +124,17 @@ class ResidentRelayEndpoint:
         self._sessions = RelaySessionStore(redis)
         self._connect = connect
         self._budget = recv_budget_sec
+        self._window_bytes = window_bytes
         self._logger = logger or logging.getLogger("resident-relay-endpoint")
         self._origin: dict[str, asyncio.Queue[RelayFrame]] = {}
         self._targets: dict[str, _TargetBridge] = {}
+        # Sender-side windows by role: the origin gates its origin-to-target sends, the
+        # target gates its target-to-origin responses. Each direction's receiver tracks
+        # the cumulative bytes it has drained so its grants advance the sender's window.
+        self._o2t_windows: dict[str, DirectionWindow] = {}
+        self._t2o_windows: dict[str, DirectionWindow] = {}
+        self._o2t_consumed: dict[str, int] = {}
+        self._t2o_consumed: dict[str, int] = {}
 
     async def on_frame(self, frame: RelayFrame) -> None:
         """Route one down frame by this node's role in the session."""
@@ -124,6 +143,11 @@ class ResidentRelayEndpoint:
             return
         target_here = record.get("target_node") == self._node_id
         origin_here = record.get("origin_node") == self._node_id
+        if frame.kind is RelayFrameKind.WINDOW:
+            # A window grant advances the sender's flow-control budget only; the sender
+            # of a direction is that direction's own node.
+            await self._on_grant(frame, origin_here, target_here)
+            return
         if frame.direction is RelayDirection.ORIGIN_TO_TARGET and target_here:
             if frame.kind is RelayFrameKind.CANCEL:
                 # A cancel closes the sidecar connection so its end-of-stream watch
@@ -136,19 +160,59 @@ class ResidentRelayEndpoint:
             if queue is not None:
                 queue.put_nowait(frame)
 
+    async def _on_grant(
+        self, frame: RelayFrame, origin_here: bool, target_here: bool
+    ) -> None:
+        # A grant travels back opposite the data it acks (so the root routes it to the
+        # sender): a target-to-origin grant advances the origin's send window, and an
+        # origin-to-target grant advances the target's. Keying on the return direction
+        # also resolves the single-node case, where one node is both origin and target.
+        if frame.direction is RelayDirection.TARGET_TO_ORIGIN and origin_here:
+            window = self._o2t_windows.get(frame.session_id)
+        elif frame.direction is RelayDirection.ORIGIN_TO_TARGET and target_here:
+            window = self._t2o_windows.get(frame.session_id)
+        else:
+            window = None
+        if window is not None:
+            await window.grant(frame.ack)
+
     async def _to_sidecar(self, frame: RelayFrame, route: str) -> None:
         bridge = self._targets.get(frame.session_id)
         if bridge is None:
             if not route:
                 return
             reader, writer = await self._connect(route)
-            bridge = _TargetBridge(reader, writer, self._publish_up, frame)
+            window = self._t2o_windows.setdefault(
+                frame.session_id, DirectionWindow(self._window_bytes)
+            )
+            bridge = _TargetBridge(reader, writer, self._publish_up, frame, window)
             self._targets[frame.session_id] = bridge
             bridge.start()
         await bridge.to_sidecar(frame.payload)
+        # Having drained an origin-to-target frame to the sidecar, grant the origin its
+        # cumulative consumed bytes; the grant returns on the target-to-origin path so
+        # the root routes it back to the origin sender.
+        consumed = self._o2t_consumed.get(frame.session_id, 0) + len(frame.payload)
+        self._o2t_consumed[frame.session_id] = consumed
+        await self._emit_grant(frame, RelayDirection.TARGET_TO_ORIGIN, consumed)
 
     async def _publish_up(self, frame: RelayFrame) -> None:
         await self._streams.publish_up(self._node_id, frame)
+
+    async def _emit_grant(
+        self, frame: RelayFrame, direction: RelayDirection, cumulative: int
+    ) -> None:
+        await self._streams.publish_up(
+            self._node_id,
+            RelayFrame(
+                kind=RelayFrameKind.WINDOW,
+                session_id=frame.session_id,
+                invocation_id=frame.invocation_id,
+                idm=frame.idm,
+                direction=direction,
+                ack=cumulative,
+            ),
+        )
 
     # ---- origin control_relay driver ----
 
@@ -171,10 +235,14 @@ class ResidentRelayEndpoint:
             sidecar_route=sidecar_route,
         )
         self._origin.setdefault(session_id, asyncio.Queue())
+        self._o2t_windows.setdefault(session_id, DirectionWindow(self._window_bytes))
 
     async def _send(
         self, session_id: str, invocation_id: str, idm: str, seq: int, payload: bytes
     ) -> None:
+        window = self._o2t_windows.get(session_id)
+        if window is not None:
+            await window.reserve(len(payload))
         await self._streams.publish_up(
             self._node_id,
             RelayFrame(
@@ -196,6 +264,13 @@ class ResidentRelayEndpoint:
             frame = await asyncio.wait_for(queue.get(), timeout=timeout)
         except TimeoutError:
             return None
+        # Having drained a target-to-origin frame, grant the target its cumulative
+        # consumed bytes; the grant returns on the origin-to-target path so the root
+        # routes it back to the target sender. A slow origin thus holds no more than its
+        # window in flight.
+        consumed = self._t2o_consumed.get(session_id, 0) + len(frame.payload)
+        self._t2o_consumed[session_id] = consumed
+        await self._emit_grant(frame, RelayDirection.ORIGIN_TO_TARGET, consumed)
         return frame.payload
 
     async def bootstrap(
@@ -294,9 +369,13 @@ class ResidentRelayEndpoint:
 
     def close_origin(self, session_id: str) -> None:
         self._origin.pop(session_id, None)
+        self._o2t_windows.pop(session_id, None)
+        self._t2o_consumed.pop(session_id, None)
 
     async def reap_target(self, session_id: str) -> None:
         bridge = self._targets.pop(session_id, None)
+        self._t2o_windows.pop(session_id, None)
+        self._o2t_consumed.pop(session_id, None)
         if bridge is not None:
             await bridge.close()
 

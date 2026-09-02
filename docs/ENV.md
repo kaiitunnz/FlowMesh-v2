@@ -86,6 +86,7 @@ listed here is in `.env.example`.
 | `NETWORK_PLANE_CONNECT_BUDGET_SEC` | `5` | Per-candidate optimistic connect budget (seconds) |
 | `NETWORK_PLANE_ROUTE_TTL_SEC` | `30` | Resolved-route snapshot TTL (seconds) |
 | `NETWORK_PLANE_RELAY_BUFFER_BYTES` | `65536` | Bounded relay-session in-flight buffer (bytes) |
+| `NETWORK_PLANE_RELAY_WINDOW_BYTES` | `65536` | Reverse-relay per-direction in-flight window (bytes) |
 | `ENABLE_WORKER_WATCHDOG` | `true` | Worker death detection |
 | `WORKER_DEATH_GRACE_SEC` | `60` | Grace period before marking dead |
 | `WORKER_REHYDRATION_GRACE_SEC` | `120` | Extra grace for a worker's rehydrated in-flight tasks after the root restarts, before the watchdog may reclaim them |

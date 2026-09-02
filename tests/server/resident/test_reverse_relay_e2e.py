@@ -64,6 +64,40 @@ class _SlowEngine:
         raise AssertionError("the slow engine should have been cancelled")
 
 
+class _FloodEngine:
+    """Emits a completion far larger than one window, recording an aborted stream."""
+
+    def __init__(self, chunks: list[str]) -> None:
+        self._chunks = chunks
+        self.aborted = False
+
+    async def __call__(
+        self, endpoint: ReplicaEndpoint, request: str | None
+    ) -> EngineResponse:
+        chunks = self._chunks
+        outer = self
+
+        async def gen() -> AsyncIterator[str]:
+            try:
+                for part in chunks:
+                    yield part
+            except GeneratorExit:
+                outer.aborted = True
+                raise
+
+        async def aclose() -> None:
+            outer.aborted = True
+
+        return EngineResponse(chunks=gen(), aclose=aclose)
+
+
+async def _pump_until(harness: "_Harness", ready: Any, limit: int = 80) -> None:
+    for _ in range(limit):
+        await harness.pump_step()
+        if ready():
+            return
+
+
 def _handoff() -> AdmissionHandoff:
     return AdmissionHandoff(
         token="hnd-1",
@@ -124,7 +158,7 @@ def _route(sidecar_route: str) -> ResolvedRoute:
 class _Harness:
     """Shared redis, root bridge, two attachments/endpoints, and a loopback sidecar."""
 
-    def __init__(self, engine: Any = _fake_engine) -> None:
+    def __init__(self, engine: Any = _fake_engine, window_bytes: int = 65536) -> None:
         self.redis = FakeBinaryRedis()
         self.loads: list[str] = []
         self.sidecar = ResidentSidecarListener(
@@ -138,8 +172,12 @@ class _Harness:
             ),
             route="127.0.0.1:0",
         )
-        self.origin = ResidentRelayEndpoint(self.redis, "nde-o", recv_budget_sec=5.0)
-        self.target = ResidentRelayEndpoint(self.redis, "nde-t", recv_budget_sec=5.0)
+        self.origin = ResidentRelayEndpoint(
+            self.redis, "nde-o", recv_budget_sec=5.0, window_bytes=window_bytes
+        )
+        self.target = ResidentRelayEndpoint(
+            self.redis, "nde-t", recv_budget_sec=5.0, window_bytes=window_bytes
+        )
         self.bridge = RootRendezvousBridge(
             RelayStreamStore(self.redis),
             RelaySessionStore(self.redis),
@@ -157,10 +195,17 @@ class _Harness:
         return f"{host}:{port}"
 
     async def pump_step(self) -> None:
+        await self.pump_producer()
+        await self.origin_attach.pump_once()
+        await asyncio.sleep(0.002)
+
+    async def pump_producer(self) -> None:
+        # The origin-to-target request path plus the target-to-origin forwarding, but
+        # not the origin's own consume: a slow origin that never drains its down stream
+        # grants nothing, so the target fills its window and backpressures.
         await self.bridge.pump_node("nde-o")
         await self.target_attach.pump_once()
         await self.bridge.pump_node("nde-t")
-        await self.origin_attach.pump_once()
         await asyncio.sleep(0.002)
 
 
@@ -228,6 +273,79 @@ def test_cancel_over_the_relay_reaps_the_co_located_sidecar() -> None:
         finally:
             done.set()
             await driver
+        await harness.sidecar.stop()
+
+    asyncio.run(run())
+
+
+def test_a_slow_origin_backpressures_the_target_to_its_window() -> None:
+    async def run() -> None:
+        chunks = ["x" * 100 for _ in range(20)]
+        window = 256
+        harness = _Harness(engine=_FloodEngine(chunks), window_bytes=window)
+        route = _route(await harness.start())
+        boot = asyncio.ensure_future(
+            harness.origin.bootstrap(
+                "s1", route=route, handoff=_handoff(), request_payload='{"p":"hi"}'
+            )
+        )
+        await _pump_until(harness, boot.done)
+        assert (await boot).acked
+        # Start the stream but pump only the producer side, never the origin's consume:
+        # the target fills its window and blocks, holding no more than it was granted.
+        stream_task = asyncio.ensure_future(harness.origin.stream("s1", _auth()))
+        for _ in range(60):
+            await harness.pump_producer()
+        win = harness.target._t2o_windows.get("s1")
+        assert win is not None
+        assert 0 < win.in_flight <= window
+        assert not stream_task.done()  # completion withheld: this is the backpressure
+        # Resume the origin's consume: its grants advance the window and the stream
+        # completes with every chunk reassembled, in order, with no loss.
+        done = asyncio.Event()
+        driver = asyncio.ensure_future(_drive(harness, done))
+        try:
+            result = await asyncio.wait_for(stream_task, timeout=10.0)
+        finally:
+            done.set()
+            await driver
+        assert result.ok and result.completion == "".join(chunks)
+        await harness.sidecar.stop()
+
+    asyncio.run(run())
+
+
+def test_a_cancel_preempts_a_full_data_window_without_deadlock() -> None:
+    async def run() -> None:
+        flood = _FloodEngine(["y" * 100 for _ in range(20)])
+        window = 256
+        harness = _Harness(engine=flood, window_bytes=window)
+        route = _route(await harness.start())
+        boot = asyncio.ensure_future(
+            harness.origin.bootstrap(
+                "s1", route=route, handoff=_handoff(), request_payload='{"p":"hi"}'
+            )
+        )
+        await _pump_until(harness, boot.done)
+        assert (await boot).acked
+        stream_task = asyncio.ensure_future(harness.origin.stream("s1", _auth()))
+        for _ in range(60):
+            await harness.pump_producer()
+        win = harness.target._t2o_windows.get("s1")
+        assert win is not None and 0 < win.in_flight <= window  # full window, blocked
+        assert "s1" in harness.target._targets
+        # A cancel rides the priority lane, bypasses the full data window, reaps the
+        # co-located sidecar, and aborts the engine — no deadlock under a full window.
+        await harness.origin.cancel("s1")
+        for _ in range(200):
+            await harness.pump_producer()
+            if flood.aborted and "s1" not in harness.target._targets:
+                break
+        assert flood.aborted
+        assert "s1" not in harness.target._targets
+        stream_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await stream_task
         await harness.sidecar.stop()
 
     asyncio.run(run())

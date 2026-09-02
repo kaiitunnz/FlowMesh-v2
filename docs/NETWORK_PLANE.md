@@ -97,13 +97,18 @@ holds no admission, credit, or engine authority. Draining is fair — priority c
 first, then data round-robined across sessions so one busy session cannot starve another.
 
 A `rly-*` **session** frames a direction with a stable sequence and a receiver-owned
-acknowledged cursor under a per-invocation byte window; a cumulative acknowledgement
-releases only relay-window credit, never a capacity credit. Recovery is a durable cursor
-lease rather than a consumer group: each leg has one logical receiver that resumes from its
-stored cursor, and a restarted receiver reclaims an owner-fenced lease. Unacknowledged
-frames are never trimmed — a stream is trimmed only at or below the acknowledged id. The
-relay uses its own traffic namespace and Redis endpoint, distinct from the event/log relay
-and the legacy proxy streams.
+acknowledged cursor under a per-invocation byte window. The sender admits a data frame only
+within the receiver's granted window and blocks once it is full, so a slow receiver
+backpressures a fast producer and never holds more than its advertised window in flight; a
+completion larger than the window is chunked under it rather than framed whole. Control
+frames — open, acknowledgement, window grant, cancel, terminal — ride the priority lane and
+bypass the data window, so a cancel is never deadlocked behind a full window. A cumulative
+acknowledgement advances the window and releases only relay-window byte credit, never a
+capacity credit. Recovery is a durable cursor lease rather than a consumer group: each leg
+has one logical receiver that resumes from its stored cursor, and a restarted receiver
+reclaims an owner-fenced lease. Unacknowledged frames are never trimmed — a stream is
+trimmed only at or below the acknowledged id. The relay uses its own traffic namespace and
+Redis endpoint, distinct from the event/log relay and the legacy proxy streams.
 
 ## Echo seam
 

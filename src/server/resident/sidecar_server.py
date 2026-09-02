@@ -43,16 +43,21 @@ class HttpEngineDelivery:
     """Delivers a completion from an OpenAI-compatible engine.
 
     The engine call is non-streaming — it fits a stock vLLM replica and the GPU-free
-    ``dev_model`` stand-in alike — and its content is handed to the sidecar as one
-    chunk; the two-phase carriage between the origin deputy and the sidecar frames it
-    over the authorized channel regardless.
+    ``dev_model`` stand-in alike — but its content is emitted in bounded pieces so the
+    two-phase carriage between the origin deputy and the sidecar flow-controls a large
+    completion over the windowed relay instead of framing it as one oversized frame.
     """
 
     def __init__(
-        self, *, timeout_sec: float = 300.0, forward_api_key: str | None = None
+        self,
+        *,
+        timeout_sec: float = 300.0,
+        forward_api_key: str | None = None,
+        chunk_chars: int = 8192,
     ) -> None:
         self._timeout = timeout_sec
         self._forward_api_key = forward_api_key
+        self._chunk_chars = max(1, chunk_chars)
 
     async def __call__(
         self, endpoint: ReplicaEndpoint, request_payload: str | None
@@ -67,9 +72,11 @@ class HttpEngineDelivery:
             response.raise_for_status()
             data = response.json()
         content = str(data["choices"][0]["message"]["content"])
+        size = self._chunk_chars
 
         async def chunks() -> AsyncIterator[str]:
-            yield content
+            for start in range(0, len(content), size):
+                yield content[start : start + size]
 
         async def aclose() -> None:
             return None

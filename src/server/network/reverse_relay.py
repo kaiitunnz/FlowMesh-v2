@@ -15,9 +15,10 @@ an owner-fenced lease and resumes from that cursor. Unacknowledged frames are ne
 trimmed — a stream is trimmed only at or below the cumulative-acknowledged id.
 """
 
+import asyncio
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Protocol
 
@@ -255,18 +256,63 @@ def default_clock() -> float:
 
 @dataclass
 class WindowState:
-    """A direction's byte window: what the receiver has granted vs. the sender's used
-    bytes. Control frames bypass this budget entirely."""
+    """A direction's byte window: the granted in-flight budget, the bytes sent but not
+    yet acknowledged, and the cumulative bytes the receiver has confirmed consuming.
+
+    A cumulative ack is idempotent: a receiver reports the running total it has drained,
+    and the sender frees the delta since the last ack. Control frames bypass this budget
+    entirely and are never counted.
+    """
 
     granted: int
     used: int = 0
-    pending: list[RelayFrame] = field(default_factory=list)
+    acked: int = 0
 
     def can_send(self, size: int) -> bool:
-        return self.used + size <= self.granted
+        # A frame fits within the remaining window, or — when nothing is yet in flight —
+        # is admitted alone so a payload larger than the whole window still makes
+        # progress instead of deadlocking. Resident completions are chunked under the
+        # window, so alone-admit only ever carries a single oversized control frame.
+        return self.used == 0 or self.used + size <= self.granted
 
     def on_ack(self, cumulative: int) -> None:
-        self.used = max(0, self.used - cumulative)
+        if cumulative > self.acked:
+            self.used = max(0, self.used - (cumulative - self.acked))
+            self.acked = cumulative
+
+
+class DirectionWindow:
+    """Sender-side flow control for one direction's data frames.
+
+    A send reserves its byte size against the receiver's granted window, blocking until
+    earlier bytes are acknowledged when the window is full, so a slow receiver holds no
+    more than its advertised window in flight. A grant advances the cumulative ack and
+    wakes a blocked sender. It carries only relay-window byte credit and never a service
+    claim's admission credit.
+    """
+
+    def __init__(self, granted: int) -> None:
+        self._state = WindowState(granted=granted)
+        self._cond = asyncio.Condition()
+
+    async def reserve(self, size: int) -> None:
+        async with self._cond:
+            while not self._state.can_send(size):
+                await self._cond.wait()
+            self._state.used += size
+
+    async def grant(self, cumulative: int) -> None:
+        async with self._cond:
+            self._state.on_ack(cumulative)
+            self._cond.notify_all()
+
+    @property
+    def in_flight(self) -> int:
+        return self._state.used
+
+    @property
+    def granted(self) -> int:
+        return self._state.granted
 
 
 def make_stores(
@@ -283,6 +329,7 @@ def make_stores(
 __all__ = [
     "BinaryRedis",
     "Clock",
+    "DirectionWindow",
     "RelayDirection",
     "RelayFrame",
     "RelayFrameKind",

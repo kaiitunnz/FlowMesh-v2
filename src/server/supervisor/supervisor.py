@@ -412,10 +412,16 @@ def _run_supervisor(
                 tls_ca_file=redis_cfg.tls_ca_file,
             ),
         )
-        relay_endpoint = ResidentRelayEndpoint(relay_redis, node_id, logger=logger)
+        relay_endpoint = ResidentRelayEndpoint(
+            relay_redis,
+            node_id,
+            window_bytes=network_cfg.relay_window_bytes,
+            logger=logger,
+        )
         resident_deputy = ResidentDeputyService(
             connect_budget_sec=network_cfg.connect_budget_sec,
             endpoint=relay_endpoint,
+            relay_window_bytes=network_cfg.relay_window_bytes,
             logger=logger,
         )
         resident_attachment = ResidentRelayAttachment(

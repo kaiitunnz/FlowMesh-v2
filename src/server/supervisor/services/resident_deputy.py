@@ -35,6 +35,7 @@ class ResidentDeputyService:
         engine_timeout_sec: float = 300.0,
         engine_open: EngineOpen | None = None,
         endpoint: ResidentRelayEndpoint | None = None,
+        relay_window_bytes: int = 65536,
         logger: logging.Logger | None = None,
     ) -> None:
         self._deputy = ResidentInvocationDeputy(
@@ -43,8 +44,11 @@ class ResidentDeputyService:
         self._endpoint = endpoint
         self._relay_sessions: set[str] = set()
         self._sidecars: dict[str, ResidentSidecarListener] = {}
+        # Size the engine's per-chunk emission well under the relay window so a chunk
+        # frame, with its wire envelope, always fits and never blocks the sender.
         self._engine_open = engine_open or HttpEngineDelivery(
-            timeout_sec=engine_timeout_sec
+            timeout_sec=engine_timeout_sec,
+            chunk_chars=max(256, relay_window_bytes // 8),
         )
         self._logger = logger
 
