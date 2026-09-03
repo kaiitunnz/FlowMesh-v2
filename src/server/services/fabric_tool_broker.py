@@ -202,11 +202,9 @@ class FabricToolBroker:
             attempts = (
                 recovery.attempts if recovery is not None else _MAX_DELIVERY_ATTEMPTS
             )
-        if attempts < _MAX_DELIVERY_ATTEMPTS and self._redispatch is not None:
-            # Hold the durable boundary pending and re-drive the same logical operation.
-            # A cancelled or already-settled boundary refuses the re-drive, so a durable
-            # cancellation naturally ends recovery without a manufactured outcome.
+        if self._redispatch is not None and attempts < _MAX_DELIVERY_ATTEMPTS:
             if self._redispatch(env.task_id, env.call_correlation):
+                # Held the durable boundary pending; re-drive the logical operation.
                 self._log.info(
                     "remote tool op ambiguous; re-driving inv=%s attempt=%s reason=%s",
                     env.invocation_id,
@@ -214,6 +212,13 @@ class FabricToolBroker:
                     result.reason,
                 )
                 return
+            # The re-drive was refused: the boundary already settled or was cancelled,
+            # so its existing outcome stands. Recovery ends here — never manufacture a
+            # terminal outcome over a boundary that is already terminal.
+            self._finish(key)
+            return
+        # Genuine bounded-retry exhaustion (or no recovery path): terminalize with the
+        # ambiguity audit outcome rather than treating a lost reply as a result.
         self._finish(key)
         self._settle(
             env.task_id,

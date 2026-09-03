@@ -294,7 +294,7 @@ def test_ambiguous_delivery_re_drives_then_terminalizes_with_an_audit_outcome() 
     assert "recovery was exhausted" in outcome.value
 
 
-def test_ambiguous_delivery_stops_re_driving_when_the_boundary_is_gone() -> None:
+def test_ambiguous_delivery_on_a_cancelled_boundary_manufactures_no_terminal() -> None:
     settled: list[tuple[str, str, str]] = []
 
     broker = FabricToolBroker.build(
@@ -304,8 +304,6 @@ def test_ambiguous_delivery_stops_re_driving_when_the_boundary_is_gone() -> None
         redispatch=lambda _t, _c: False,  # the boundary is cancelled or already settled
     )
     broker._run(_env('{"query": "x"}'))
-    # A refused re-drive ends recovery at once without a manufactured second attempt.
-    assert len(settled) == 1
-    assert ToolOutcome.model_validate_json(settled[0][2]).status is (
-        ToolOutcomeStatus.UNAVAILABLE
-    )
+    # A refused re-drive means the boundary is already terminal: its outcome stands and
+    # the broker manufactures no terminal over it (contract: cleanup never settles).
+    assert settled == []
