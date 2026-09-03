@@ -116,26 +116,15 @@ def test_policy_defaults_to_server_relay() -> None:
     assert policy.select() is server
 
 
-def test_policy_routes_a_keyless_allowlisted_provider_to_the_worker_sidecar() -> None:
-    policy, _, worker = _policy(provider="duckduckgo", egress_locality="worker_sidecar")
-    assert policy.select() is worker
-
-
-def test_policy_keeps_a_keyed_provider_on_server_relay_by_default() -> None:
-    policy, server, _ = _policy(
+def test_policy_routes_any_provider_to_the_worker_sidecar_when_configured() -> None:
+    keyless, _, worker = _policy(
+        provider="duckduckgo", egress_locality="worker_sidecar"
+    )
+    assert keyless.select() is worker
+    keyed, _, worker = _policy(
         provider="serper", api_key="k", egress_locality="worker_sidecar"
     )
-    assert policy.select() is server
-
-
-def test_policy_opts_a_keyed_provider_into_the_worker_sidecar_only_explicitly() -> None:
-    policy, _, worker = _policy(
-        provider="serper",
-        api_key="k",
-        egress_locality="worker_sidecar",
-        egress_allow_keyed=True,
-    )
-    assert policy.select() is worker
+    assert keyed.select() is worker
 
 
 def test_a_worker_carriage_delivers_the_surfaces_enforced_outcome() -> None:

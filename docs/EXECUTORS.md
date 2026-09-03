@@ -111,7 +111,5 @@ a compile error.
 The control plane stays authoritative for the authority, quota, and idempotency of a
 search; only where the approved operation egresses is a deployment policy. `WEB_SEARCH_EGRESS_LOCALITY`
 selects `server_relay` (the default in-server provider call) or `worker_sidecar` (a
-fabric sidecar surface that egresses under the server-issued operation envelope). A keyless
-allowlisted provider is eligible for worker-sidecar egress; a keyed provider stays on
-server relay unless `WEB_SEARCH_EGRESS_ALLOW_KEYED` opts it in, so its credential otherwise
-never leaves the server. Either locality yields the identical search result.
+fabric sidecar surface that egresses under the server-issued operation envelope). Either
+locality yields the identical search result.

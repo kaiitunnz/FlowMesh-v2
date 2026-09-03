@@ -34,10 +34,6 @@ from .search_providers import (
 if TYPE_CHECKING:
     from ..config import WebSearchConfig
 
-# Providers eligible for keyless worker-sidecar egress. A provider outside this
-# allowlist reaches a worker sidecar only through the explicit keyed opt-in policy.
-WORKER_SIDECAR_ELIGIBLE_PROVIDERS = frozenset({"duckduckgo"})
-
 _SERVED_INTERFACES = frozenset({SEARCH_INTERFACE})
 
 
@@ -211,10 +207,8 @@ class EgressLocalityPolicy:
     """Selects the execution locality for an external-tool operation under deployment
     policy.
 
-    Server relay is the default. A worker sidecar is offered only when the deployment
-    selects it and the provider is either a keyless allowlisted provider or a keyed
-    provider the deployment explicitly opted into distributing credentials for;
-    otherwise a keyed provider stays on server relay so its credential never leaves it.
+    Server relay is the default; a worker sidecar is selected when the deployment
+    configures it.
     """
 
     def __init__(
@@ -228,10 +222,6 @@ class EgressLocalityPolicy:
         self._worker = worker
 
     def select(self) -> ExecutionLocalityAdapter:
-        if self._cfg.egress_locality != EgressLocality.WORKER_SIDECAR:
-            return self._server
-        if self._cfg.provider in WORKER_SIDECAR_ELIGIBLE_PROVIDERS:
-            return self._worker
-        if self._cfg.egress_allow_keyed:
+        if self._cfg.egress_locality == EgressLocality.WORKER_SIDECAR:
             return self._worker
         return self._server

@@ -73,8 +73,7 @@ class FabricToolBroker:
         """Wire the default localities around the configured provider.
 
         The co-located worker sidecar shares the configured provider, so no credential
-        crosses a wire in-process; the policy gate governs whether a keyed provider is
-        eligible for worker-sidecar egress at all.
+        crosses a wire in-process.
         """
         log = logger or logging.getLogger("fabric-tool-broker")
         prov = provider or build_search_provider(config)

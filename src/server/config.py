@@ -479,8 +479,7 @@ class WebSearchConfig:
     the deployment credential a keyed provider needs. ``max_calls`` bounds one episode's
     searches; ``result_char_cap`` bounds the injected result size. ``egress_locality``
     selects where an approved search egresses (``server_relay`` default or
-    ``worker_sidecar``); ``egress_allow_keyed`` opts a keyed provider into a worker
-    sidecar, which otherwise stays on server relay so its credential stays server-side.
+    ``worker_sidecar``).
     """
 
     provider: str = "duckduckgo"
@@ -491,7 +490,6 @@ class WebSearchConfig:
     max_calls: int = 8
     max_parallel: int = 4
     egress_locality: str = "server_relay"
-    egress_allow_keyed: bool = False
 
     @classmethod
     def from_env(cls) -> "WebSearchConfig":
@@ -507,7 +505,6 @@ class WebSearchConfig:
             egress_locality=(os.getenv(f"{prefix}EGRESS_LOCALITY") or "server_relay")
             .strip()
             .lower(),
-            egress_allow_keyed=parse_bool_env(f"{prefix}EGRESS_ALLOW_KEYED", False),
         )
 
 

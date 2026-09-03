@@ -56,7 +56,6 @@ listed here is in `.env.example`.
 | `WEB_SEARCH_MAX_CALLS` | `8` | Searches per episode |
 | `WEB_SEARCH_MAX_PARALLEL_CALLS_PER_TURN` | `4` | Parallel searches per turn |
 | `WEB_SEARCH_EGRESS_LOCALITY` | `server_relay` | Where a search egresses (`server_relay` or `worker_sidecar`) |
-| `WEB_SEARCH_EGRESS_ALLOW_KEYED` | `false` | Allow a keyed provider worker-sidecar egress |
 | `RESIDENT_CAPACITY_ENABLED` | `false` | Serve resident model bindings via admission |
 | `RESIDENT_INFERENCE_SUBSTRATE` | `serve` | Resident replica substrate (`serve` or `dev_model`) |
 | `RESIDENT_SERVE_ACCESS_MODE` | `forward` | Materialized replica endpoint access mode |
