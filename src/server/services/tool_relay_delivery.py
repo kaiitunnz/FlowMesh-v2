@@ -266,7 +266,10 @@ class ToolRelayEndpoint:
             # the TTL reaps it. Deleting it here would strand the cancel mid-route.
             self._cancelled.discard(session_id)
             return
-        await self._sessions.delete(session_id)
+        # Best-effort: a delete fault must not propagate out of a possibly-egressed
+        # delivery and become a terminal outcome; the record's TTL reaps it instead.
+        with contextlib.suppress(Exception):
+            await self._sessions.delete(session_id)
 
 
 __all__ = ["SidecarConnect", "ToolRelayEndpoint"]

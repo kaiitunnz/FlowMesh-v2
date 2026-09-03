@@ -6,6 +6,7 @@ demoting observation is recorded, without standing up the full relay harness.
 """
 
 import asyncio
+import threading
 from typing import Any
 
 from server.config import WebSearchConfig
@@ -117,6 +118,35 @@ def _carriage(deputy: _FakeDeputy, exec_calls: list[str]) -> RemoteSidecarCarria
     )
 
 
+def _fast_carriage(deputy: Any) -> RemoteSidecarCarriage:
+    async def exec_cmd(node_id: str, command: CommandType, payload: dict) -> dict:
+        return {"host": "127.0.0.1", "port": 9999}
+
+    async def select_node() -> str:
+        return TARGET_NODE
+
+    async def endpoint_provider(node_id: str) -> NetworkEndpointAdvertisement:
+        return _target_endpoint(node_id)
+
+    registry = ToolTargetRegistry(
+        exec_node_cmd=exec_cmd,
+        select_node=select_node,
+        sidecar_route="127.0.0.1:0",
+        provider="fake",
+        interfaces=("search/v1",),
+        directly_routable=True,
+    )
+    return RemoteSidecarCarriage(
+        origin_deputy=deputy,
+        registry=registry,
+        endpoint_provider=endpoint_provider,
+        ingress_endpoint=_ingress(),
+        provider="fake",
+        connect_budget_sec=0.05,
+        outer_margin_sec=0.1,
+    )
+
+
 def _run(carriage: RemoteSidecarCarriage) -> Any:
     envelope = ToolOperationEnvelope(
         interface="search/v1",
@@ -192,6 +222,45 @@ def test_reject_reply_becomes_unavailable() -> None:
     reply = wire.encode_msg(wire.KIND_REJECT, reason="digest")
     outcome = _run(_carriage(_FakeDeputy(reply), []))
     assert outcome.status.value == "unavailable"
+
+
+class _HangDeputy:
+    """A deputy whose delivery never returns, forcing the carriage's outer bound."""
+
+    def __init__(self) -> None:
+        self.cancelled: list[str] = []
+
+    async def deliver(self, session_id: str, route: Any, **kw: Any) -> Any:
+        await asyncio.Event().wait()
+
+    async def cancel(self, session_id: str) -> None:
+        self.cancelled.append(session_id)
+
+
+def test_outer_timeout_holds_ambiguous_and_aborts() -> None:
+    # A delivery that outruns the outer bound is a nonterminal ambiguous loss, never a
+    # terminal outcome, and the carriage fires a best-effort cancel to reap the session.
+    deputy = _HangDeputy()
+    carriage = _fast_carriage(deputy)
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    carriage.bind_loop(loop)
+    envelope = ToolOperationEnvelope(
+        interface="search/v1",
+        idempotency_key="idm-1",
+        max_results=3,
+        timeout_sec=0.05,
+        result_char_cap=6000,
+    )
+    request = ToolRequest(interface="search/v1", query="q", max_results=3)
+    try:
+        result = carriage(envelope, request)
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(2.0)
+    assert isinstance(result, AmbiguousDelivery)
+    assert len(deputy.cancelled) == 1
 
 
 def test_lost_reply_after_egress_is_ambiguous() -> None:

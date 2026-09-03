@@ -297,6 +297,7 @@ class RemoteSidecarCarriage:
         deadline_sec: float = 30.0,
         route_ttl_sec: float = 30.0,
         connect_budget_sec: float = 5.0,
+        outer_margin_sec: float = 10.0,
         logger: logging.Logger | None = None,
     ) -> None:
         self._deputy = origin_deputy
@@ -307,6 +308,7 @@ class RemoteSidecarCarriage:
         self._tenant = tenant
         self._policy_class = policy_class
         self._deadline_sec = deadline_sec
+        self._outer_margin = outer_margin_sec
         self._route_ttl = route_ttl_sec
         self._budget = connect_budget_sec
         self._log = logger or logging.getLogger("remote-sidecar-carriage")
@@ -333,7 +335,7 @@ class RemoteSidecarCarriage:
             # Cover a connect on each of up to three serial candidates plus one full
             # provider egress, so a slow search reached only after a failed forward dial
             # is not cut off by the outer bound.
-            outer = envelope.timeout_sec + self._budget * 3 + 10.0
+            outer = envelope.timeout_sec + self._budget * 3 + self._outer_margin
             return future.result(timeout=outer)
         except FuturesTimeoutError:
             # The operation outran its bound after it was on a wire: reap the in-flight
@@ -406,20 +408,37 @@ class RemoteSidecarCarriage:
             operation_payload=payload,
             read_deadline_sec=envelope.timeout_sec + self._budget,
         )
-        self._record(origin, target, observations)
         if reply is not None:
+            self._record(origin, target, observations)
             return self._decode(reply)
-        # No terminal reply: drop the cached target so the next physical attempt rebinds
-        # a fresh sidecar under a rotated generation rather than resolving forever to a
-        # target that may be gone.
-        await self._registry.invalidate(target)
         if egressed:
             # The operation reached a wire and may have egressed: hold the durable
-            # boundary pending for a same-idm-* re-drive, never a terminal outcome.
+            # boundary pending for a same-idm-* re-drive, never a terminal outcome. The
+            # record and rebind run best-effort AFTER this decision, so a bookkeeping
+            # fault cannot coerce a post-egress loss into a terminal unavailable.
+            await self._reap_lost_target(origin, target, observations)
             return AmbiguousDelivery("the remote tool reply was lost after egress")
         # The operation never reached a wire — a known pre-delivery failure, safe to
-        # terminalize since nothing egressed.
+        # terminalize since nothing egressed. Drop the cached target so the next attempt
+        # rebinds a fresh sidecar rather than resolving forever to one that may be gone.
+        self._record(origin, target, observations)
+        await self._registry.invalidate(target)
         return _unavailable("no route to the external-tool sidecar")
+
+    async def _reap_lost_target(
+        self,
+        origin: RouteOrigin,
+        target: NonresidentSidecarTarget,
+        observations: list[tuple[Transport, RouteObservationOutcome]],
+    ) -> None:
+        # Best-effort after an ambiguous loss: record the observations and drop the
+        # cached target so the re-drive rebinds under a rotated generation. A fault here
+        # must not propagate — the boundary is already held pending as ambiguous.
+        try:
+            self._record(origin, target, observations)
+            await self._registry.invalidate(target)
+        except Exception as exc:  # noqa: BLE001 - post-egress reap is best-effort
+            self._log.debug("post-egress tool reap failed: %s", exc)
 
     def _fence(
         self,
