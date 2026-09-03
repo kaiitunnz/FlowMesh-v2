@@ -184,11 +184,7 @@ class ServerRelayAdapter:
 
 
 class WorkerSidecarAdapter:
-    """Hands an approved operation to a fabric worker-sidecar surface over its carriage.
-
-    The carriage is the seam between the control path and the enforcing execution
-    surface; the surface enforces the envelope wherever it runs.
-    """
+    """Hands an approved operation to a worker-sidecar surface over its carriage."""
 
     locality = EgressLocality.WORKER_SIDECAR
 
@@ -202,11 +198,7 @@ class WorkerSidecarAdapter:
 
 
 class ColocatedSidecarCarriage:
-    """Carriage to a fabric ``ExternalToolSidecar`` co-located with the control plane.
-
-    It is the swappable seam a differently-located surface substitutes without changing
-    the envelope contract or the surface's enforcement.
-    """
+    """Carriage to an ``ExternalToolSidecar`` co-located with the control plane."""
 
     def __init__(self, sidecar: ExternalToolSidecar) -> None:
         self._sidecar = sidecar
