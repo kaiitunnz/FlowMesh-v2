@@ -9,9 +9,11 @@ delivery uses the tool namespace, egresses at the target, and returns the typed 
 import asyncio
 import time
 
+from server.network import wire as netwire
 from server.network.rendezvous import RootCursorStore, RootRendezvousBridge
 from server.network.reverse_relay import (
     TOOL_RELAY_KEYSPACE,
+    RelayDirection,
     RelaySessionStore,
     RelayStreamStore,
 )
@@ -30,6 +32,7 @@ from server.services.tool_egress import (
 )
 from server.services.tool_relay_delivery import ToolRelayEndpoint
 from server.supervisor.services.reverse_relay_attachment import ReverseRelayAttachment
+from shared.utils.ids import new_tool_delivery_nonce
 from tests.server.network._relay_fakes import FakeBinaryRedis
 
 TARGET_ID = "stg-1"
@@ -56,6 +59,7 @@ def _envelope(query: str, max_results: int = 3) -> RemoteToolOperationEnvelope:
         request_digest=tool_request_digest("search/v1", query, max_results),
         target_id=TARGET_ID,
         target_generation=TARGET_GEN,
+        delivery_nonce=new_tool_delivery_nonce(),
         deadline_epoch=time.time() + 30,
         max_results=max_results,
         timeout_sec=5.0,
@@ -165,5 +169,79 @@ def test_operation_round_trips_over_the_tool_relay() -> None:
         # The provider egress happened at the target sidecar, not the origin.
         assert provider.calls == ["what is flowmesh"]
         await harness.sidecar.stop()
+
+    asyncio.run(run())
+
+
+class _HangingSidecar:
+    """Accepts one operation frame, then never replies — a stalled provider egress."""
+
+    def __init__(self) -> None:
+        self._server: asyncio.Server | None = None
+
+    async def _serve(
+        self, reader: asyncio.StreamReader, _writer: asyncio.StreamWriter
+    ) -> None:
+        await netwire.read_frame(reader)
+        await asyncio.Event().wait()
+
+    async def start(self) -> str:
+        self._server = await asyncio.start_server(self._serve, "127.0.0.1", 0)
+        host, port = self._server.sockets[0].getsockname()[:2]
+        return f"{host}:{port}"
+
+    async def stop(self) -> None:
+        if self._server is not None:
+            self._server.close()
+
+
+def test_cancel_reaps_both_ends_of_an_in_flight_delivery() -> None:
+    async def run() -> None:
+        provider = _FakeProvider()
+        harness = _Harness(provider)
+        sidecar = _HangingSidecar()
+        sidecar_route = await sidecar.start()
+        done = asyncio.Event()
+
+        async def exchange() -> bytes | None:
+            reply = await harness.origin.deliver(
+                "xtr-1",
+                invocation_id="inv-1",
+                idm="idm-abc",
+                origin_node="nde-o",
+                target_node="nde-t",
+                sidecar_route=sidecar_route,
+                operation_payload=_operation_payload("stalled"),
+                recv_timeout=10.0,
+            )
+            done.set()
+            return reply
+
+        driver = asyncio.ensure_future(_drive(harness, done))
+        task = asyncio.ensure_future(exchange())
+        try:
+            # Let the op reach the target and start bridging to the hanging sidecar.
+            for _ in range(20):
+                await harness.pump_step()
+                if "xtr-1" in harness.target._targets:
+                    break
+            assert "xtr-1" in harness.target._targets
+            # Cancel: the origin pokes a CANCEL the target reaps, and both ends drop the
+            # in-flight session state so no late frame can resurrect it.
+            await harness.origin.cancel("xtr-1")
+            for _ in range(20):
+                await harness.pump_step()
+                if "xtr-1" not in harness.target._targets:
+                    break
+            reply = await asyncio.wait_for(task, timeout=10.0)
+        finally:
+            done.set()
+            await driver
+            await sidecar.stop()
+        assert reply is None
+        assert "xtr-1" not in harness.target._targets
+        assert ("xtr-1", RelayDirection.ORIGIN_TO_TARGET) not in harness.target._seen
+        assert "xtr-1" not in harness.origin._origin
+        assert provider.calls == []
 
     asyncio.run(run())

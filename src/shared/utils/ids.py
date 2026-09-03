@@ -30,6 +30,7 @@ PREFIX_ROUTE_ORIGIN = "rog"  # nosec B105 - object-id prefix, not a credential
 PREFIX_RELAY_SESSION = "rly"
 PREFIX_SIDECAR_TARGET = "stg"
 PREFIX_TOOL_RELAY_SESSION = "xtr"
+PREFIX_TOOL_DELIVERY_NONCE = "xdn"  # nosec B105 - object-id prefix, not a credential
 
 
 def _uuid_str() -> str:
@@ -132,6 +133,10 @@ def new_tool_relay_session_id() -> str:
     return f"{PREFIX_TOOL_RELAY_SESSION}-{_uuid_hex()}"
 
 
+def new_tool_delivery_nonce() -> str:
+    return f"{PREFIX_TOOL_DELIVERY_NONCE}-{secrets.token_hex(16)}"
+
+
 __all__ = [
     "PREFIX_ACTIVATION",
     "PREFIX_ADMISSION_HANDOFF",
@@ -152,6 +157,7 @@ __all__ = [
     "PREFIX_SSH_SESSION",
     "PREFIX_SUPERVISOR_COMMAND",
     "PREFIX_TASK",
+    "PREFIX_TOOL_DELIVERY_NONCE",
     "PREFIX_TOOL_RELAY_SESSION",
     "PREFIX_WORK_ITEM",
     "PREFIX_WORKER",
@@ -175,6 +181,7 @@ __all__ = [
     "new_ssh_session_id",
     "new_supervisor_command_id",
     "new_task_id",
+    "new_tool_delivery_nonce",
     "new_tool_relay_session_id",
     "new_work_item_id",
     "new_worker_id",

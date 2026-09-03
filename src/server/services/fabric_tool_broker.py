@@ -16,6 +16,7 @@ import logging
 import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 
 from ..config import WebSearchConfig
 from ..orchestration.tool_dispatch import (
@@ -26,6 +27,8 @@ from ..orchestration.tool_dispatch import (
 )
 from .search_providers import LazySearchProvider, SearchProvider
 from .tool_egress import (
+    AmbiguousDelivery,
+    CarriageResult,
     ColocatedSidecarCarriage,
     EgressLocalityPolicy,
     ExecutionTransport,
@@ -38,6 +41,21 @@ from .tool_egress import (
 
 # (task_id, call_correlation, serialized ToolOutcome) — the runtime settles it durably.
 SettleCallback = Callable[[str, str, str], None]
+# (task_id, call_correlation) -> re-dispatched; holds the boundary pending to re-drive.
+RedispatchCallback = Callable[[str, str], bool]
+
+# Bounded retry policy for an ambiguous delivery: a lost reply re-drives the same
+# logical operation under its idm-* at most this many physical attempts before it
+# terminalizes with an ambiguity audit outcome. Each attempt is itself deadline-bounded.
+_MAX_DELIVERY_ATTEMPTS = 3
+
+
+@dataclass
+class _Recovery:
+    """Per logical operation recovery state across physical delivery attempts."""
+
+    attempts: int = 0
+    charged: bool = False
 
 
 class FabricToolBroker:
@@ -49,9 +67,11 @@ class FabricToolBroker:
         settle: SettleCallback,
         policy: EgressLocalityPolicy,
         logger: logging.Logger | None = None,
+        redispatch: RedispatchCallback | None = None,
     ) -> None:
         self._cfg = config
         self._settle = settle
+        self._redispatch = redispatch
         self._policy = policy
         self._log = logger or logging.getLogger("fabric-tool-broker")
         self._pool = ThreadPoolExecutor(
@@ -62,6 +82,9 @@ class FabricToolBroker:
         # restart, so an episode may exceed the budget across a crash — never
         # exactly-once accounting.
         self._calls: dict[str, int] = {}
+        # Per logical operation recovery state, keyed by (task_id, call_correlation): a
+        # re-drive reuses the same authority/quota accounting and bounds its attempts.
+        self._recovery: dict[tuple[str, str], _Recovery] = {}
 
     @classmethod
     def build(
@@ -71,6 +94,7 @@ class FabricToolBroker:
         provider: SearchProvider | None = None,
         logger: logging.Logger | None = None,
         worker_carriage: ExecutionTransport | None = None,
+        redispatch: RedispatchCallback | None = None,
     ) -> "FabricToolBroker":
         """Wire the localities around the configured provider.
 
@@ -88,7 +112,13 @@ class FabricToolBroker:
             ExternalToolSidecar(prov, log)
         )
         worker = WorkerSidecarAdapter(carriage)
-        return cls(config, settle, EgressLocalityPolicy(config, server, worker), log)
+        return cls(
+            config,
+            settle,
+            EgressLocalityPolicy(config, server, worker),
+            log,
+            redispatch=redispatch,
+        )
 
     def submit(self, env: ToolInvocationEnvelope) -> None:
         """Accept a recorded tool boundary and dispatch it off the agent's lane."""
@@ -98,29 +128,43 @@ class FabricToolBroker:
         self._pool.shutdown(wait=False)
 
     def _run(self, env: ToolInvocationEnvelope) -> None:
+        key = (env.task_id, env.call_correlation)
         try:
-            outcome = self._dispatch(env)
+            result = self._dispatch(env, key)
         except (
             Exception
         ) as exc:  # noqa: BLE001 - a broker fault is a typed tool outcome
             self._log.warning("fabric tool dispatch failed: %s", exc)
-            outcome = ToolOutcome(
+            result = ToolOutcome(
                 status=ToolOutcomeStatus.UNAVAILABLE,
                 value=f"the {env.interface} tool is unavailable",
             )
-        self._settle(env.task_id, env.call_correlation, outcome.model_dump_json())
+        if isinstance(result, AmbiguousDelivery):
+            self._on_ambiguous(env, key, result)
+            return
+        self._finish(key)
+        self._settle(env.task_id, env.call_correlation, result.model_dump_json())
 
-    def _dispatch(self, env: ToolInvocationEnvelope) -> ToolOutcome:
+    def _dispatch(
+        self, env: ToolInvocationEnvelope, key: tuple[str, str]
+    ) -> CarriageResult:
         if env.interface != SEARCH_INTERFACE:
             return ToolOutcome(
                 status=ToolOutcomeStatus.UNAVAILABLE,
                 value=f"no handler for interface {env.interface}",
             )
-        if not self._charge(env.task_id):
-            return ToolOutcome(
-                status=ToolOutcomeStatus.QUOTA,
-                value=f"search budget exhausted ({self._cfg.max_calls} calls/episode)",
-            )
+        recovery = self._touch(key)
+        if not recovery.charged:
+            # Draw down the episode budget once per logical operation; a same-idm-*
+            # re-drive of a lost delivery reuses it rather than re-charging.
+            if not self._charge(env.task_id):
+                return ToolOutcome(
+                    status=ToolOutcomeStatus.QUOTA,
+                    value=(
+                        f"search budget exhausted ({self._cfg.max_calls} calls/episode)"
+                    ),
+                )
+            recovery.charged = True
         query, max_results = self._parse_request(env.request_payload)
         if not query:
             return ToolOutcome(
@@ -138,13 +182,63 @@ class FabricToolBroker:
         )
         adapter = self._policy.select()
         self._log.info(
-            "fabric search interface=%s inv=%s locality=%s query=%r",
+            "fabric search interface=%s inv=%s locality=%s attempt=%s query=%r",
             env.interface,
             env.invocation_id,
             adapter.locality.value,
+            recovery.attempts,
             query,
         )
         return adapter.execute(envelope, request)
+
+    def _on_ambiguous(
+        self,
+        env: ToolInvocationEnvelope,
+        key: tuple[str, str],
+        result: AmbiguousDelivery,
+    ) -> None:
+        with self._lock:
+            recovery = self._recovery.get(key)
+            attempts = (
+                recovery.attempts if recovery is not None else _MAX_DELIVERY_ATTEMPTS
+            )
+        if attempts < _MAX_DELIVERY_ATTEMPTS and self._redispatch is not None:
+            # Hold the durable boundary pending and re-drive the same logical operation.
+            # A cancelled or already-settled boundary refuses the re-drive, so a durable
+            # cancellation naturally ends recovery without a manufactured outcome.
+            if self._redispatch(env.task_id, env.call_correlation):
+                self._log.info(
+                    "remote tool op ambiguous; re-driving inv=%s attempt=%s reason=%s",
+                    env.invocation_id,
+                    attempts,
+                    result.reason,
+                )
+                return
+        self._finish(key)
+        self._settle(
+            env.task_id,
+            env.call_correlation,
+            ToolOutcome(
+                status=ToolOutcomeStatus.UNAVAILABLE,
+                value=(
+                    f"the {env.interface} operation was lost and recovery was "
+                    f"exhausted after {attempts} attempts"
+                ),
+            ).model_dump_json(),
+        )
+
+    def _touch(self, key: tuple[str, str]) -> _Recovery:
+        with self._lock:
+            recovery = self._recovery.get(key)
+            if recovery is None:
+                recovery = _Recovery()
+                self._recovery[key] = recovery
+            recovery.attempts += 1
+            return recovery
+
+    def _finish(self, key: tuple[str, str]) -> None:
+        with self._lock:
+            self._recovery.pop(key, None)
 
     def _charge(self, task_id: str) -> bool:
         with self._lock:

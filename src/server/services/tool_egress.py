@@ -85,13 +85,20 @@ def tool_request_digest(interface: str, query: str, max_results: int) -> str:
 class RemoteToolOperationEnvelope(BaseModel):
     """A short-lived operation fence for one bounded off-server external-tool operation.
 
-    The control path issues it; the remote sidecar validates it before egress and
-    rejects an expired, altered, wrong-provider, wrong-audience, wrong-policy, or
-    over-budget operation as a tool-fence failure — never a reachability-demoting
-    observation. It is
-    not a ``ServiceClaim``, ``RouteAuthorization``, or lease, and carries no credential.
-    ``request_digest`` binds request integrity; ``provider`` and ``target_id`` /
-    ``target_generation`` bind the audience; ``deadline_epoch`` bounds its lifetime.
+    The control path issues it per physical delivery attempt; the remote sidecar
+    validates it before egress and rejects an expired, altered, wrong-provider,
+    wrong-audience, wrong-policy, over-budget, or replayed operation as a tool-fence
+    failure — never a reachability-demoting observation. It is not a ``ServiceClaim``,
+    ``RouteAuthorization``, or lease, and holds no credential. ``request_digest`` binds
+    request integrity; ``provider`` and ``target_id`` / ``target_generation`` bind the
+    audience, both provisioned out-of-band over the authenticated command seam and never
+    guessable from a frame; ``delivery_nonce`` is a one-use, target-scoped authorization
+    the sidecar consumes atomically before egress, so an exact replay of one authorized
+    delivery is refused while a fresh same-``idempotency_key`` re-drive with a new nonce
+    is accepted; ``deadline_epoch`` bounds its lifetime. ``tenant`` is carried as audit
+    context only; per-tenant enforcement is deferred with per-tenant credential
+    delegation. ``policy_class`` binds the operation's policy to the target's bound
+    policy.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -102,6 +109,7 @@ class RemoteToolOperationEnvelope(BaseModel):
     request_digest: str
     target_id: str
     target_generation: int
+    delivery_nonce: str
     tenant: str | None = None
     policy_class: str = "default"
     deadline_epoch: float
@@ -184,8 +192,28 @@ class ExternalToolSidecar:
         )
 
 
-# Carriage from the control path to an execution surface for one bounded operation.
-ExecutionTransport = Callable[[ToolOperationEnvelope, ToolRequest], ToolOutcome]
+class AmbiguousDelivery:
+    """A nonterminal carriage result: the operation may have egressed but its reply was
+    lost.
+
+    It is distinct from a ``ToolOutcome``: a lost acknowledgement, reverse session,
+    response, or post-write stream after possible sidecar/provider execution is never
+    coerced into a terminal ``UNAVAILABLE``/``TIMEOUT`` value merely because carriage
+    lost it. The control path holds the durable boundary pending and re-drives the same
+    logical operation under its ``idempotency_key``, within its bounded retry budget.
+    """
+
+    __slots__ = ("reason",)
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+
+
+# Carriage from the control path to an execution surface for one bounded operation. A
+# terminal ``ToolOutcome`` settles the boundary; an ``AmbiguousDelivery`` holds it
+# pending for a same-``idempotency_key`` re-drive.
+CarriageResult = ToolOutcome | AmbiguousDelivery
+ExecutionTransport = Callable[[ToolOperationEnvelope, ToolRequest], CarriageResult]
 
 
 class ExecutionLocalityAdapter(Protocol):
@@ -195,7 +223,7 @@ class ExecutionLocalityAdapter(Protocol):
 
     def execute(
         self, envelope: ToolOperationEnvelope, request: ToolRequest
-    ) -> ToolOutcome: ...
+    ) -> CarriageResult: ...
 
 
 class ServerRelayAdapter:
@@ -212,7 +240,7 @@ class ServerRelayAdapter:
 
     def execute(
         self, envelope: ToolOperationEnvelope, request: ToolRequest
-    ) -> ToolOutcome:
+    ) -> CarriageResult:
         return self._sidecar.execute(envelope, request)
 
 
@@ -226,7 +254,7 @@ class WorkerSidecarAdapter:
 
     def execute(
         self, envelope: ToolOperationEnvelope, request: ToolRequest
-    ) -> ToolOutcome:
+    ) -> CarriageResult:
         return self._transport(envelope, request)
 
 
@@ -238,7 +266,7 @@ class ColocatedSidecarCarriage:
 
     def __call__(
         self, envelope: ToolOperationEnvelope, request: ToolRequest
-    ) -> ToolOutcome:
+    ) -> CarriageResult:
         return self._sidecar.execute(envelope, request)
 
 

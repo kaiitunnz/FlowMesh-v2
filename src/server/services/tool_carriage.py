@@ -27,6 +27,7 @@ from shared.schemas.command import CommandType
 from shared.utils.ids import (
     new_route_origin_id,
     new_sidecar_target_id,
+    new_tool_delivery_nonce,
     new_tool_relay_session_id,
 )
 
@@ -47,6 +48,8 @@ from ..network.state import (
 from ..orchestration.tool_dispatch import ToolOutcome, ToolOutcomeStatus
 from . import tool_sidecar_wire as wire
 from .tool_egress import (
+    AmbiguousDelivery,
+    CarriageResult,
     RemoteToolOperationEnvelope,
     ToolOperationEnvelope,
     ToolRequest,
@@ -94,7 +97,15 @@ class ToolEgressOriginDeputy:
         idm: str,
         operation_payload: bytes,
         read_deadline_sec: float,
-    ) -> tuple[bytes | None, list[tuple[Transport, RouteObservationOutcome]]]:
+    ) -> tuple[bytes | None, list[tuple[Transport, RouteObservationOutcome]], bool]:
+        """Deliver one operation and read its reply.
+
+        Returns ``(reply, observations, egressed)``. ``reply`` is the sidecar's opaque
+        wire body or ``None`` when no terminal reply arrived. ``egressed`` is ``True``
+        once the operation reached a wire — a forward-dial write completed, or a relay
+        frame was published up — so a subsequent lost reply is an ambiguous delivery the
+        caller holds pending, not a pre-delivery failure it may terminalize.
+        """
         observations: list[tuple[Transport, RouteObservationOutcome]] = []
         for candidate in route.candidates:
             if candidate.transport is Transport.CONTROL_RELAY:
@@ -107,17 +118,23 @@ class ToolEgressOriginDeputy:
                     target_node=target_hop.node_id or "",
                     sidecar_route=target_hop.endpoint,
                     operation_payload=operation_payload,
+                    recv_timeout=read_deadline_sec,
                 )
-                return reply, observations
+                # The frame was published up: a missing reply is an ambiguous loss.
+                return reply, observations, True
             reply, outcome, ambiguous = await self._forward_dial(
                 candidate, operation_payload, read_deadline_sec
             )
             observations.append((candidate.transport, outcome))
             if reply is not None:
-                return reply, observations
+                return reply, observations, False
             if ambiguous:
-                return None, observations
-        return None, observations
+                return None, observations, True
+        return None, observations, False
+
+    async def cancel(self, session_id: str) -> None:
+        """Best-effort reap of an in-flight delivery's origin/target/session state."""
+        await self._relay.cancel(session_id)
 
     async def _forward_dial(
         self, candidate: RouteCandidate, payload: bytes, read_deadline_sec: float
@@ -174,6 +191,7 @@ class ToolTargetRegistry:
         provider: str,
         interfaces: tuple[str, ...],
         directly_routable: bool,
+        policy_class: str = "default",
         logger: logging.Logger | None = None,
     ) -> None:
         self._exec = exec_node_cmd
@@ -182,6 +200,7 @@ class ToolTargetRegistry:
         self._provider = provider
         self._interfaces = interfaces
         self._directly_routable = directly_routable
+        self._policy_class = policy_class
         self._log = logger
         self._target: NonresidentSidecarTarget | None = None
         self._generation = 0
@@ -205,6 +224,7 @@ class ToolTargetRegistry:
                     "target_generation": gen,
                     "route": self._route,
                     "interfaces": list(self._interfaces),
+                    "policy_class": self._policy_class,
                 },
             )
             host, port = data.get("host"), data.get("port")
@@ -273,6 +293,7 @@ class RemoteSidecarCarriage:
         ingress_endpoint: NetworkEndpointAdvertisement,
         provider: str,
         tenant: str | None = None,
+        policy_class: str = "default",
         deadline_sec: float = 30.0,
         route_ttl_sec: float = 30.0,
         connect_budget_sec: float = 5.0,
@@ -284,6 +305,7 @@ class RemoteSidecarCarriage:
         self._ingress = ingress_endpoint
         self._provider = provider
         self._tenant = tenant
+        self._policy_class = policy_class
         self._deadline_sec = deadline_sec
         self._route_ttl = route_ttl_sec
         self._budget = connect_budget_sec
@@ -299,12 +321,13 @@ class RemoteSidecarCarriage:
 
     def __call__(
         self, envelope: ToolOperationEnvelope, request: ToolRequest
-    ) -> ToolOutcome:
+    ) -> CarriageResult:
         loop = self._loop
         if loop is None:
             return _unavailable("the remote tool carriage is not ready")
+        session_id = new_tool_relay_session_id()
         future = asyncio.run_coroutine_threadsafe(
-            self._deliver(envelope, request), loop
+            self._deliver(envelope, request, session_id), loop
         )
         try:
             # Cover a connect on each of up to three serial candidates plus one full
@@ -313,17 +336,34 @@ class RemoteSidecarCarriage:
             outer = envelope.timeout_sec + self._budget * 3 + 10.0
             return future.result(timeout=outer)
         except FuturesTimeoutError:
-            # The operation outran its bound: cancel the main-loop coroutine so it does
-            # not leak, and settle a typed outcome; a re-drive reuses the same idm-*.
+            # The operation outran its bound after it was on a wire: reap the in-flight
+            # session on both ends and hold the boundary pending. It is never coerced to
+            # a terminal outcome, since the sidecar may have egressed; a re-drive reuses
+            # the same idm-* under a fresh nonce and session.
+            self._abort(session_id)
             future.cancel()
-            return _unavailable("the remote tool operation timed out")
+            return AmbiguousDelivery("the remote tool operation outran its bound")
         except Exception as exc:  # noqa: BLE001 - a carriage fault is a typed outcome
             self._log.warning("remote tool carriage failed: %s", exc)
             return _unavailable("the remote tool carriage failed")
 
+    def _abort(self, session_id: str) -> None:
+        loop = self._loop
+        if loop is None:
+            return
+        # Fire the cancel poke on the loop the network I/O runs on and wait briefly, so
+        # a reverse-rendezvous target reaps its runner promptly rather than only on its
+        # own bounded read; a reap failure is harmless best-effort.
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self._deputy.cancel(session_id), loop
+            ).result(timeout=self._budget)
+        except Exception as exc:  # noqa: BLE001 - cancel/reap is best-effort
+            self._log.debug("remote tool cancel failed session=%s: %s", session_id, exc)
+
     async def _deliver(
-        self, envelope: ToolOperationEnvelope, request: ToolRequest
-    ) -> ToolOutcome:
+        self, envelope: ToolOperationEnvelope, request: ToolRequest, session_id: str
+    ) -> CarriageResult:
         target = await self._registry.ensure_target()
         if target is None or envelope.interface not in target.interfaces:
             return _unavailable("no eligible external-tool sidecar target")
@@ -357,9 +397,9 @@ class RemoteSidecarCarriage:
             envelope=self._fence(envelope, request, target).model_dump(mode="json"),
             request=request.model_dump(mode="json"),
         )
-        idm = envelope.idempotency_key or new_tool_relay_session_id()
-        reply, observations = await self._deputy.deliver(
-            new_tool_relay_session_id(),
+        idm = envelope.idempotency_key or session_id
+        reply, observations, egressed = await self._deputy.deliver(
+            session_id,
             route,
             invocation_id=idm,
             idm=idm,
@@ -367,13 +407,19 @@ class RemoteSidecarCarriage:
             read_deadline_sec=envelope.timeout_sec + self._budget,
         )
         self._record(origin, target, observations)
-        if reply is None:
-            # A lost delivery may mean the bound target node is gone; drop the cached
-            # target so the next operation rebinds (possibly on a live node) rather than
-            # resolving forever to a dead one. A fence reject keeps the target — it is
-            # alive and answered.
-            await self._registry.invalidate(target)
-        return self._decode(reply)
+        if reply is not None:
+            return self._decode(reply)
+        # No terminal reply: drop the cached target so the next physical attempt rebinds
+        # a fresh sidecar under a rotated generation rather than resolving forever to a
+        # target that may be gone.
+        await self._registry.invalidate(target)
+        if egressed:
+            # The operation reached a wire and may have egressed: hold the durable
+            # boundary pending for a same-idm-* re-drive, never a terminal outcome.
+            return AmbiguousDelivery("the remote tool reply was lost after egress")
+        # The operation never reached a wire — a known pre-delivery failure, safe to
+        # terminalize since nothing egressed.
+        return _unavailable("no route to the external-tool sidecar")
 
     def _fence(
         self,
@@ -390,7 +436,9 @@ class RemoteSidecarCarriage:
             ),
             target_id=target.target_id,
             target_generation=target.target_generation,
+            delivery_nonce=new_tool_delivery_nonce(),
             tenant=self._tenant,
+            policy_class=self._policy_class,
             deadline_epoch=time.time() + self._deadline_sec,
             max_results=envelope.max_results,
             timeout_sec=envelope.timeout_sec,

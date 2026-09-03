@@ -46,6 +46,12 @@ class ExternalToolSidecarServer:
         self._interfaces = interfaces
         self._policy_class = policy_class
         self._log = logger or logging.getLogger("external-tool-sidecar")
+        # Consumed one-use delivery nonces -> fence deadline. Target-scoped to this
+        # bound incarnation: a restart drops the set and control rebinds under a fresh
+        # generation before accepting a delivery, so a lost set admits no stale replay.
+        # It is mutated on the single loop between fence checks, so consuming a nonce
+        # stays atomic without a lock.
+        self._nonces: dict[str, float] = {}
 
     async def handle(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
@@ -78,6 +84,14 @@ class ExternalToolSidecarServer:
                 "tool fence rejected op target=%s reason=%s", self._target_id, reason
             )
             await wire.write_msg(writer, wire.KIND_REJECT, reason=reason)
+            return
+        if not self._consume_nonce(envelope.delivery_nonce, envelope.deadline_epoch):
+            # An exact replay of one authorized delivery: refuse before egress. A fresh
+            # control-authorized re-drive carries a new nonce and is not caught here.
+            self._log.info(
+                "tool fence rejected op target=%s reason=replay", self._target_id
+            )
+            await wire.write_msg(writer, wire.KIND_REJECT, reason="replay")
             return
         colocated = ToolOperationEnvelope(
             interface=envelope.interface,
@@ -120,6 +134,16 @@ class ExternalToolSidecarServer:
         ):
             return "digest"
         return None
+
+    def _consume_nonce(self, nonce: str, deadline_epoch: float) -> bool:
+        """Atomically consume a one-use delivery nonce; ``False`` on an exact replay."""
+        now = time.time()
+        for expired in [n for n, exp in self._nonces.items() if exp <= now]:
+            self._nonces.pop(expired, None)
+        if nonce in self._nonces:
+            return False
+        self._nonces[nonce] = deadline_epoch
+        return True
 
 
 class ExternalToolSidecarListener:

@@ -10,16 +10,21 @@ from typing import Any
 
 from server.config import WebSearchConfig
 from server.network import wire as netwire
+from server.network.reachability import NetworkReachabilityView, is_demoting
 from server.network.state import (
     NetworkEndpointAdvertisement,
     NonresidentSidecarTarget,
+    PolicyClass,
     ReachabilityClass,
+    ReachabilityState,
     ResolvedRoute,
     RouteCandidate,
     RouteHop,
+    RouteObservation,
     RouteObservationOutcome,
     Transport,
 )
+from server.orchestration.tool_dispatch import ToolOutcome
 from server.services import tool_sidecar_wire as wire
 from server.services.fabric_tool_broker import FabricToolBroker
 from server.services.tool_carriage import (
@@ -27,7 +32,11 @@ from server.services.tool_carriage import (
     ToolEgressOriginDeputy,
     ToolTargetRegistry,
 )
-from server.services.tool_egress import ToolOperationEnvelope, ToolRequest
+from server.services.tool_egress import (
+    AmbiguousDelivery,
+    ToolOperationEnvelope,
+    ToolRequest,
+)
 from server.services.tool_relay_delivery import ToolRelayEndpoint
 from shared.schemas.command import CommandType
 from tests.server.network._relay_fakes import FakeBinaryRedis
@@ -60,18 +69,24 @@ def _target_endpoint(node_id: str) -> NetworkEndpointAdvertisement:
 
 
 class _FakeDeputy:
-    """Returns a canned reply and the observations it would have recorded."""
+    """Returns a canned reply, the observations it would have recorded, and egress."""
 
     def __init__(
         self,
         reply: bytes | None,
         observations: list[tuple[Transport, RouteObservationOutcome]] | None = None,
+        egressed: bool = False,
     ) -> None:
         self.reply = reply
         self.observations = observations or []
+        self.egressed = egressed
+        self.cancelled: list[str] = []
 
     async def deliver(self, session_id: str, route: Any, **kw: Any) -> Any:
-        return self.reply, self.observations
+        return self.reply, self.observations, self.egressed
+
+    async def cancel(self, session_id: str) -> None:
+        self.cancelled.append(session_id)
 
 
 def _carriage(deputy: _FakeDeputy, exec_calls: list[str]) -> RemoteSidecarCarriage:
@@ -111,7 +126,7 @@ def _run(carriage: RemoteSidecarCarriage) -> Any:
         result_char_cap=6000,
     )
     request = ToolRequest(interface="search/v1", query="q", max_results=3)
-    return asyncio.run(carriage._deliver(envelope, request))
+    return asyncio.run(carriage._deliver(envelope, request, "xtr-test"))
 
 
 def test_registry_binds_once_and_caches() -> None:
@@ -179,8 +194,17 @@ def test_reject_reply_becomes_unavailable() -> None:
     assert outcome.status.value == "unavailable"
 
 
-def test_lost_reply_becomes_unavailable() -> None:
-    outcome = _run(_carriage(_FakeDeputy(None), []))
+def test_lost_reply_after_egress_is_ambiguous() -> None:
+    # The operation reached a wire but no reply came back: a nonterminal ambiguous
+    # delivery the control path holds pending, never a terminal outcome.
+    result = _run(_carriage(_FakeDeputy(None, egressed=True), []))
+    assert isinstance(result, AmbiguousDelivery)
+
+
+def test_lost_reply_without_egress_is_terminal_unavailable() -> None:
+    # The operation never reached a wire (a pre-delivery failure): safe to terminalize.
+    outcome = _run(_carriage(_FakeDeputy(None, egressed=False), []))
+    assert isinstance(outcome, ToolOutcome)
     assert outcome.status.value == "unavailable"
 
 
@@ -265,7 +289,7 @@ def test_forward_dial_reply_read_uses_the_operation_deadline() -> None:
             ),
         )
         try:
-            reply, obs = await deputy.deliver(
+            reply, obs, egressed = await deputy.deliver(
                 "xtr-1",
                 route,
                 invocation_id="i",
@@ -278,5 +302,92 @@ def test_forward_dial_reply_read_uses_the_operation_deadline() -> None:
             await server.wait_closed()
         assert reply == b"late-reply"
         assert obs == [(Transport.WORKER_DIRECT, RouteObservationOutcome.VERIFIED)]
+        assert egressed is False
+
+    asyncio.run(run())
+
+
+def test_forward_dial_read_timeout_is_ambiguous_and_non_demoting() -> None:
+    async def run() -> None:
+        # The connect succeeds and the op is written, but the sidecar never replies
+        # within the read deadline: an ambiguous post-send loss, classified as a
+        # non-demoting application error so provider silence never demotes the path.
+        async def handler(
+            reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+        ) -> None:
+            # Read the op, then hold the connection open without replying, so the client
+            # read fires a real timeout rather than seeing an early close.
+            await netwire.read_frame(reader)
+            await asyncio.sleep(1.0)
+
+        server = await asyncio.start_server(handler, "127.0.0.1", 0)
+        host, port = server.sockets[0].getsockname()[:2]
+        deputy = ToolEgressOriginDeputy(
+            relay_endpoint=ToolRelayEndpoint(FakeBinaryRedis(), "nde-o"),
+            connect_budget_sec=1.0,
+        )
+        route = ResolvedRoute(
+            origin_id="rog-1",
+            target_node_id=TARGET_NODE,
+            listener_generation=1,
+            route_epoch=1,
+            candidates=(
+                RouteCandidate(
+                    transport=Transport.WORKER_DIRECT,
+                    hops=(
+                        RouteHop(
+                            transport=Transport.WORKER_DIRECT,
+                            endpoint=f"{host}:{port}",
+                            node_id=TARGET_NODE,
+                        ),
+                    ),
+                ),
+            ),
+        )
+        try:
+            reply, obs, egressed = await deputy.deliver(
+                "xtr-1",
+                route,
+                invocation_id="i",
+                idm="m",
+                operation_payload=b"op",
+                read_deadline_sec=0.2,
+            )
+        finally:
+            server.close()
+        assert reply is None
+        assert egressed is True
+        assert obs == [
+            (Transport.WORKER_DIRECT, RouteObservationOutcome.APPLICATION_ERROR)
+        ]
+        # The classified outcome does not demote reachability: feeding it to a view
+        # keeps the path usable, so a slow or silent provider never marks it down.
+        assert is_demoting(RouteObservationOutcome.APPLICATION_ERROR) is False
+        view = NetworkReachabilityView()
+        now = 100.0
+        view.observe(
+            RouteObservation(
+                origin_id="rog-1",
+                policy_class=PolicyClass.DEFAULT,
+                target_node_id=TARGET_NODE,
+                incarnation=1,
+                listener_generation=1,
+                transport=Transport.WORKER_DIRECT,
+                outcome=RouteObservationOutcome.APPLICATION_ERROR,
+            ),
+            now=now,
+        )
+        assert (
+            view.state_for(
+                "rog-1",
+                PolicyClass.DEFAULT,
+                TARGET_NODE,
+                1,
+                1,
+                Transport.WORKER_DIRECT,
+                now=now,
+            )
+            is not ReachabilityState.DEMOTED
+        )
 
     asyncio.run(run())

@@ -61,6 +61,10 @@ class ToolRelayEndpoint:
         self._origin: dict[str, asyncio.Queue[RelayFrame | None]] = {}
         self._targets: dict[str, asyncio.Task[None]] = {}
         self._seen: dict[tuple[str, RelayDirection], int] = {}
+        # Sessions cancelled by the origin: the routing record is retained (not deleted
+        # on the delivery's exit) until the root forwards the CANCEL and the record TTL
+        # reaps it, so the cancel stays routable to the target.
+        self._cancelled: set[str] = set()
 
     async def on_frame(self, frame: RelayFrame) -> None:
         """Route one down frame by this node's role in the session."""
@@ -97,7 +101,13 @@ class ToolRelayEndpoint:
             return
         task = asyncio.ensure_future(self._bridge_once(frame, route))
         self._targets[frame.session_id] = task
-        task.add_done_callback(lambda _t: self._targets.pop(frame.session_id, None))
+        task.add_done_callback(lambda _t: self._on_target_done(frame.session_id))
+
+    def _on_target_done(self, session_id: str) -> None:
+        # A completed single request/reply retires the target-runner and its dedup key,
+        # so a long-lived target node accrues no per-operation state after the exchange.
+        self._targets.pop(session_id, None)
+        self._seen.pop((session_id, RelayDirection.ORIGIN_TO_TARGET), None)
 
     async def _bridge_once(self, frame: RelayFrame, route: str) -> None:
         try:
@@ -111,7 +121,9 @@ class ToolRelayEndpoint:
             return
         try:
             await netwire.write_frame(writer, frame.payload)
-            reply = await netwire.read_frame(reader)
+            # Bound the sidecar reply read: a provider that ignores its own timeout must
+            # not hang this target forever — the origin re-drives on a fresh session.
+            reply = await asyncio.wait_for(netwire.read_frame(reader), self._budget)
             await self._streams.publish_up(
                 self._node_id,
                 RelayFrame(
@@ -124,8 +136,15 @@ class ToolRelayEndpoint:
                     payload=reply,
                 ),
             )
-        except (asyncio.IncompleteReadError, ConnectionError, OSError, ValueError):
-            # A mid-exchange loss leaves the origin waiting; it times out and re-drives.
+        except (
+            TimeoutError,
+            asyncio.IncompleteReadError,
+            ConnectionError,
+            OSError,
+            ValueError,
+        ):
+            # A mid-exchange loss or a stalled reply leaves the origin waiting; it times
+            # out and re-drives on a fresh session.
             pass
         finally:
             with contextlib.suppress(OSError):
@@ -162,12 +181,14 @@ class ToolRelayEndpoint:
         target_node: str,
         sidecar_route: str,
         operation_payload: bytes,
+        recv_timeout: float | None = None,
     ) -> bytes | None:
         """Send one operation over the rr session and await its single reply payload.
 
         Returns the reply frame's opaque payload (the tool-sidecar wire body), or
         ``None`` on a lost or cancelled exchange — the origin then leaves the durable
-        boundary pending for its idm-* re-drive.
+        boundary pending for its idm-* re-drive. ``recv_timeout`` bounds the reply wait
+        by the operation deadline; without it the endpoint's own receive budget applies.
         """
         await self._sessions.update(
             session_id,
@@ -191,11 +212,13 @@ class ToolRelayEndpoint:
             ),
         )
         try:
-            return await self._recv(session_id, self._budget)
+            return await self._recv(
+                session_id, recv_timeout if recv_timeout is not None else self._budget
+            )
         finally:
             # Reap the origin state even when the caller cancels this coroutine on its
             # outer timeout, so a cancelled exchange leaves no in-memory session behind.
-            await self.close_origin(session_id)
+            await self._retire_origin(session_id)
 
     async def _recv(self, session_id: str, timeout: float) -> bytes | None:
         queue = self._origin.get(session_id)
@@ -208,7 +231,12 @@ class ToolRelayEndpoint:
         return frame.payload if frame is not None else None
 
     async def cancel(self, session_id: str) -> None:
-        """Poke a cancel to the target and drop the origin's wait."""
+        """Poke a cancel to the target and drop the origin's wait.
+
+        The routing record is deliberately retained: it must survive until the root
+        forwards the CANCEL and the target reaps it, so it is left for the session-store
+        TTL to reap rather than deleted here.
+        """
         record = await self._sessions.load(session_id)
         if record:
             await self._streams.publish_up(
@@ -221,14 +249,23 @@ class ToolRelayEndpoint:
                     direction=RelayDirection.ORIGIN_TO_TARGET,
                 ),
             )
+        self._cancelled.add(session_id)
         queue = self._origin.get(session_id)
         if queue is not None:
             queue.put_nowait(None)
-        await self.close_origin(session_id)
+        self._drop_origin_local(session_id)
 
-    async def close_origin(self, session_id: str) -> None:
+    def _drop_origin_local(self, session_id: str) -> None:
         self._origin.pop(session_id, None)
         self._seen.pop((session_id, RelayDirection.TARGET_TO_ORIGIN), None)
+
+    async def _retire_origin(self, session_id: str) -> None:
+        self._drop_origin_local(session_id)
+        if session_id in self._cancelled:
+            # A cancelled exchange keeps its record for the CANCEL to reach the target;
+            # the TTL reaps it. Deleting it here would strand the cancel mid-route.
+            self._cancelled.discard(session_id)
+            return
         await self._sessions.delete(session_id)
 
 

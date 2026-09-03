@@ -197,6 +197,10 @@ if IS_ROOT_NODE:
         assert RUNTIME is not None
         RUNTIME.settle_episode_invocation(task_id, call_correlation, value)
 
+    def _redispatch_tool(task_id: str, call_correlation: str) -> bool:
+        assert RUNTIME is not None
+        return RUNTIME.redispatch_episode_invocation(task_id, call_correlation)
+
     def _resolve_gateway_binding(task_id: str) -> ResolvedGatewayBinding | None:
         assert RUNTIME is not None
         resolved = RUNTIME.gateway_binding_for(task_id)
@@ -347,6 +351,7 @@ if IS_ROOT_NODE:
         _settle_tool,
         logger=logger,
         worker_carriage=REMOTE_TOOL_CARRIAGE,
+        redispatch=_redispatch_tool,
     )
     RUNTIME.set_tool_broker(FABRIC_TOOL_BROKER.submit)
 

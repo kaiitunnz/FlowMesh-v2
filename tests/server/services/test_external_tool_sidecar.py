@@ -21,6 +21,7 @@ from server.services.tool_egress import (
     ToolRequest,
     tool_request_digest,
 )
+from shared.utils.ids import new_tool_delivery_nonce
 
 TARGET_ID = "stg-1"
 TARGET_GEN = 4
@@ -50,6 +51,7 @@ def _envelope(**overrides: object) -> RemoteToolOperationEnvelope:
         request_digest=tool_request_digest("search/v1", QUERY, 3),
         target_id=TARGET_ID,
         target_generation=TARGET_GEN,
+        delivery_nonce=new_tool_delivery_nonce(),
         deadline_epoch=time.time() + 30,
         max_results=3,
         timeout_sec=5.0,
@@ -147,3 +149,21 @@ def test_provider_fault_maps_to_typed_outcome() -> None:
         assert provider.calls == [QUERY]
 
     _run(body, fail=True)
+
+
+def test_exact_replay_of_one_authorization_is_rejected_before_egress() -> None:
+    async def body(route: str, provider: _FakeProvider) -> None:
+        req = ToolRequest(interface="search/v1", query=QUERY, max_results=3)
+        # One authorized delivery egresses; replaying that exact nonce is refused with
+        # no second provider call, while a fresh nonce under the same idm egresses.
+        fixed = _envelope()
+        first = await _exchange(route, fixed, req)
+        assert first["kind"] == wire.KIND_RESULT
+        replay = await _exchange(route, fixed, req)
+        assert replay["kind"] == wire.KIND_REJECT
+        assert replay["reason"] == "replay"
+        fresh = await _exchange(route, _envelope(), req)
+        assert fresh["kind"] == wire.KIND_RESULT
+        assert provider.calls == [QUERY, QUERY]
+
+    _run(body)

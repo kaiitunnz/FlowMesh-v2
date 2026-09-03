@@ -22,6 +22,7 @@ from server.services.search_providers import (
     SearchTimeout,
     SearchUnavailable,
 )
+from server.services.tool_egress import AmbiguousDelivery
 from shared.harness import BoundaryEventKind
 
 
@@ -235,3 +236,76 @@ def test_build_search_provider_selects_by_config() -> None:
             raise AssertionError("expected a config error")
         except ValueError:
             pass
+
+
+def test_lazy_provider_defers_a_missing_key_to_first_search() -> None:
+    from server.services.search_providers import LazySearchProvider
+
+    # A keyed provider with no key must not fail at construction — only on egress,
+    # so a deployment that egresses only off-server never builds it on the server.
+    lazy = LazySearchProvider(WebSearchConfig(provider="serper", api_key=None))
+    try:
+        lazy.search("q", max_results=1, timeout_sec=1.0)
+        raise AssertionError("expected the missing key to raise on first search")
+    except ValueError:
+        pass
+
+
+def test_egress_deputy_construction_defers_a_missing_key() -> None:
+    from server.supervisor.services.tool_egress_deputy import ToolEgressDeputyService
+
+    # The supervisor deputy builds its provider lazily too: a keyed config with the key
+    # only on the server must not crash a worker supervisor at construction.
+    ToolEgressDeputyService(
+        web_search_config=WebSearchConfig(provider="serper", api_key=None)
+    )
+
+
+def _ambiguous_carriage(_env: Any, _req: Any) -> AmbiguousDelivery:
+    return AmbiguousDelivery("lost after egress")
+
+
+def test_ambiguous_delivery_re_drives_then_terminalizes_with_an_audit_outcome() -> None:
+    settled: list[tuple[str, str, str]] = []
+    redispatched: list[tuple[str, str]] = []
+
+    def redispatch(task_id: str, correlation: str) -> bool:
+        redispatched.append((task_id, correlation))
+        return True
+
+    broker = FabricToolBroker.build(
+        WebSearchConfig(egress_locality="worker_sidecar", max_calls=1),
+        lambda t, c, v: settled.append((t, c, v)),
+        worker_carriage=_ambiguous_carriage,
+        redispatch=redispatch,
+    )
+    env = _env('{"query": "x"}')
+    # An ambiguous delivery holds the boundary pending and re-drives under the same
+    # correlation; a single episode charge covers every attempt (max_calls=1 but no
+    # attempt terminalizes as QUOTA), until the bounded retry policy is exhausted.
+    broker._run(env)
+    broker._run(env)
+    assert redispatched == [("tsk-1", "c0"), ("tsk-1", "c0")]
+    assert settled == []
+    broker._run(env)
+    assert len(settled) == 1
+    outcome = ToolOutcome.model_validate_json(settled[0][2])
+    assert outcome.status is ToolOutcomeStatus.UNAVAILABLE
+    assert "recovery was exhausted" in outcome.value
+
+
+def test_ambiguous_delivery_stops_re_driving_when_the_boundary_is_gone() -> None:
+    settled: list[tuple[str, str, str]] = []
+
+    broker = FabricToolBroker.build(
+        WebSearchConfig(egress_locality="worker_sidecar"),
+        lambda t, c, v: settled.append((t, c, v)),
+        worker_carriage=_ambiguous_carriage,
+        redispatch=lambda _t, _c: False,  # the boundary is cancelled or already settled
+    )
+    broker._run(_env('{"query": "x"}'))
+    # A refused re-drive ends recovery at once without a manufactured second attempt.
+    assert len(settled) == 1
+    assert ToolOutcome.model_validate_json(settled[0][2]).status is (
+        ToolOutcomeStatus.UNAVAILABLE
+    )

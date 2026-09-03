@@ -64,7 +64,8 @@ control adds `scl-` service claims, `rpl-` replica incarnations, and `lse-` allo
 leases. `msk-` is an unguessable ref for a workflow's vaulted model credential and `hnd-`
 an unguessable claim-bound admission handoff token. The network plane adds `rog-` route
 origins and `rly-` relay sessions. Remote external-tool carriage adds `stg-` nonresident
-sidecar targets and `xtr-` tool relay sessions. Always use `new_*_id()`
+sidecar targets, `xtr-` tool relay sessions, and `xdn-` one-use tool delivery nonces.
+Always use `new_*_id()`
 helpers in `src/shared/utils/ids.py`. Never use `uuid4()` or `secrets.token_hex`
 for IDs.
 

@@ -246,14 +246,7 @@ def test_reverse_rendezvous_fallback_egresses_at_the_remote_sidecar() -> None:
     assert harness.provider.calls == [QUERY]
 
 
-def test_keyed_credential_never_enters_the_fabric() -> None:
-    harness = _Harness(directly_routable=True, api_key=SECRET)
-    harness.start()
-    try:
-        outcome = harness.run_search(QUERY)
-    finally:
-        harness.stop()
-    assert outcome.status.value == "success"
+def _assert_credential_absent(harness: _Harness, outcome: Any) -> None:
     # The secret lives only in the sidecar's local provider; it never enters a node
     # command payload, the returned outcome, or any relay stream frame.
     blob = repr(harness.exec_payloads) + outcome.model_dump_json()
@@ -262,3 +255,27 @@ def test_keyed_credential_never_enters_the_fabric() -> None:
             blob += repr(fields)
     assert SECRET not in blob
     assert harness.provider.api_key == SECRET
+
+
+def test_keyed_credential_never_enters_the_fabric() -> None:
+    harness = _Harness(directly_routable=True, api_key=SECRET)
+    harness.start()
+    try:
+        outcome = harness.run_search(QUERY)
+    finally:
+        harness.stop()
+    assert outcome.status.value == "success"
+    _assert_credential_absent(harness, outcome)
+
+
+def test_keyed_credential_absent_from_reverse_rendezvous_frames() -> None:
+    # Force the reverse-rendezvous path so the operation frame travels the redis relay
+    # streams, then prove the secret is absent from those captured on-wire frames.
+    harness = _Harness(directly_routable=False, api_key=SECRET)
+    harness.start()
+    try:
+        outcome = harness.run_search(QUERY)
+    finally:
+        harness.stop()
+    assert outcome.status.value == "success"
+    _assert_credential_absent(harness, outcome)

@@ -130,8 +130,7 @@ def test_policy_routes_any_provider_to_the_worker_sidecar_when_configured() -> N
 def test_a_worker_carriage_delivers_the_surfaces_enforced_outcome() -> None:
     provider = _StubProvider([SearchResult(title="a", url="u", snippet="s")])
     carriage = ColocatedSidecarCarriage(ExternalToolSidecar(provider))
-    over_budget: ToolOutcome = carriage(
-        _envelope(max_results=1), _request(max_results=9)
-    )
+    over_budget = carriage(_envelope(max_results=1), _request(max_results=9))
+    assert isinstance(over_budget, ToolOutcome)
     assert over_budget.status is ToolOutcomeStatus.QUOTA
     assert provider.calls == []

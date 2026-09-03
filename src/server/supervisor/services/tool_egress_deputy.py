@@ -17,7 +17,7 @@ from ...services.external_tool_sidecar import (
     ExternalToolSidecarListener,
     ExternalToolSidecarServer,
 )
-from ...services.search_providers import SearchProvider, build_search_provider
+from ...services.search_providers import LazySearchProvider, SearchProvider
 from ...services.tool_egress import ExternalToolSidecar
 
 _DEFAULT_INTERFACES = ("search/v1",)
@@ -34,7 +34,11 @@ class ToolEgressDeputyService:
         logger: logging.Logger | None = None,
     ) -> None:
         self._cfg = web_search_config
-        self._provider = provider or build_search_provider(web_search_config)
+        # Build the provider lazily so a node bound as an egress target constructs it —
+        # and reads its deployment-global credential — only when it actually egresses,
+        # never eagerly at startup: a keyed provider whose key is only on the server
+        # must not crash a worker supervisor, nor force the key onto every node.
+        self._provider = provider or LazySearchProvider(web_search_config)
         self._logger = logger
         self._sidecars: dict[str, ExternalToolSidecarListener] = {}
 
@@ -48,6 +52,7 @@ class ToolEgressDeputyService:
             target_generation=int(payload["target_generation"]),
             provider=self._cfg.provider,
             interfaces=frozenset(str(i) for i in interfaces),
+            policy_class=str(payload.get("policy_class", "default")),
             logger=self._logger,
         )
         listener = ExternalToolSidecarListener(server, route=str(payload["route"]))
