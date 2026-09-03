@@ -6,6 +6,7 @@ import inspect
 import os
 import threading
 from contextlib import AsyncExitStack, asynccontextmanager
+from typing import cast
 
 import uvicorn
 from fastapi import FastAPI
@@ -23,16 +24,18 @@ from shared._version import FLOWMESH_RELEASE_VERSION
 
 from .auth import reconcile_resources, resolve_system_principal
 from .clients import RedisClient
+from .clients.redis import resident_relay_client
 from .config import NodeRole, ServerConfig
 from .dispatcher.factory import create_dispatcher
 from .hooks import register
-from .network.listeners import NetworkControlRelay
+from .network.rendezvous import RootCursorStore, RootRendezvousBridge
+from .network.reverse_relay import BinaryRedis, RelaySessionStore, RelayStreamStore
 from .network.service import NetworkPlane
 from .orchestration.tool_dispatch import ToolInvocationEnvelope
 from .registries import WorkerRegistry, WorkflowRegistry
 from .registries.node import NodeRegistry
 from .registries.resident import ResidentRegistry
-from .resident.wiring import build_resident_capacity
+from .resident.wiring import build_resident_capacity, wire_native_delivery
 from .routers import docs, health, v1
 from .services.agent_model_gateway import (
     AgentModelGateway,
@@ -48,6 +51,7 @@ from .services.monitoring import EventMonitor
 from .services.port_forward import PortForwardService
 from .services.ssh_audit import SshAuditService
 from .services.watchdog import WorkerWatchdog
+from .startup import rehydrate_root_state, start_resident_bridge_pump
 from .supervisor import WorkerSupervisor
 from .task.runtime import TaskRuntime
 from .utils.logging import get_logger
@@ -132,7 +136,8 @@ FABRIC_TOOL_BROKER = None
 RESIDENT_CONTROL = None
 RESIDENT_REGISTRY = None
 NETWORK_PLANE = None
-NETWORK_CONTROL_RELAY = None
+RESIDENT_BRIDGE = None
+RESIDENT_BRIDGE_TASK = None
 
 if IS_ROOT_NODE:
     WORKFLOW_REGISTRY = WorkflowRegistry(REDIS_CLIENT)
@@ -203,12 +208,42 @@ if IS_ROOT_NODE:
         NETWORK_PLANE = NetworkPlane(
             config.orchestration.network, NODE_REGISTRY, logger
         )
-        if config.orchestration.network.control_relay_url:
-            NETWORK_CONTROL_RELAY = NetworkControlRelay(
-                control_relay_url=config.orchestration.network.control_relay_url,
-                buffer_bytes=config.orchestration.network.relay_buffer_bytes,
-                logger=logger,
-            )
+        _relay_redis = cast(
+            BinaryRedis,
+            resident_relay_client(
+                config.redis.resident_relay_url,
+                acl_enabled=config.redis.acl_enabled,
+                username=config.redis.username,
+                password=config.redis.password,
+                tls_ca_file=config.redis.tls_ca_file,
+            ),
+        )
+        RESIDENT_BRIDGE = RootRendezvousBridge(
+            RelayStreamStore(_relay_redis),
+            RelaySessionStore(_relay_redis),
+            RootCursorStore(_relay_redis),
+            logger=logger,
+        )
+
+    if (
+        RESIDENT_CONTROL is not None
+        and NETWORK_PLANE is not None
+        and WORKER_REGISTRY is not None
+    ):
+        assert RUNTIME is not None
+        _resident_cfg = config.orchestration.resident
+        wire_native_delivery(
+            RESIDENT_CONTROL,
+            network=NETWORK_PLANE,
+            worker_registry=WORKER_REGISTRY,
+            runtime=RUNTIME,
+            node_registry=NODE_REGISTRY,
+            resident_cfg=_resident_cfg,
+            cmd_timeout_sec=max(
+                config.orchestration.gateway.timeout_sec,
+                _resident_cfg.cold_start_deadline_sec,
+            ),
+        )
 
     DISPATCHER = create_dispatcher(
         config.dispatch,
@@ -443,16 +478,11 @@ async def _lifespan(_: FastAPI):
 
         # --- Root-only startup ---
         if IS_ROOT_NODE:
-            if RUNTIME is not None:
-                await RUNTIME.rehydrate()
-            if RESIDENT_CONTROL is not None and RESIDENT_REGISTRY is not None:
-                RESIDENT_CONTROL.bind_loop(asyncio.get_running_loop())
-                snapshot = await RESIDENT_REGISTRY.load_snapshot_async()
-                if snapshot is not None:
-                    RESIDENT_CONTROL.rehydrate(snapshot)
-                RESIDENT_CONTROL.start()
-            if NETWORK_CONTROL_RELAY is not None:
-                await NETWORK_CONTROL_RELAY.start()
+            await rehydrate_root_state(RUNTIME, RESIDENT_CONTROL, RESIDENT_REGISTRY)
+            if RESIDENT_BRIDGE is not None and NODE_REGISTRY is not None:
+                app.state.resident_bridge_task = start_resident_bridge_pump(
+                    RESIDENT_BRIDGE, NODE_REGISTRY, logger
+                )
             if PORT_FORWARD_SERVICE is not None:
                 await PORT_FORWARD_SERVICE.start()
             _start_root_threads()
@@ -494,8 +524,13 @@ async def _lifespan(_: FastAPI):
 
             # --- Root-only shutdown ---
             _stop_background()
-            if NETWORK_CONTROL_RELAY is not None:
-                await NETWORK_CONTROL_RELAY.stop()
+            _bridge_task = app.state.resident_bridge_task
+            if _bridge_task is not None:
+                _bridge_task.cancel()
+                try:
+                    await _bridge_task
+                except (asyncio.CancelledError, Exception):
+                    pass
             if RESIDENT_CONTROL is not None:
                 RESIDENT_CONTROL.shutdown()
             if AGENT_MODEL_GATEWAY is not None:
@@ -537,6 +572,8 @@ app.state.ssh_proxy_enabled = config.port_forward.ssh_proxy_enabled and IS_ROOT_
 app.state.serve_proxy_enabled = config.port_forward.serve_proxy_enabled and IS_ROOT_NODE
 app.state.resident_control = RESIDENT_CONTROL
 app.state.network_plane = NETWORK_PLANE
+# Started in lifespan on the root node when the resident relay bridge is enabled.
+app.state.resident_bridge_task = None
 
 # Routers — shared
 app.include_router(health.router)

@@ -1,9 +1,9 @@
 """Network-plane listeners for the feature-gated echo seam.
 
 Each network-plane node runs a bounded echo sidecar (the resident-facing listener
-stand-in) and a node-relay endpoint that uplinks to it; the root additionally runs a
-control-relay endpoint reached as the controlled fallback. They exercise the transport
-ladder and the bounded relay session without ever fronting a resident engine.
+stand-in) and a node-relay endpoint that uplinks to it. They exercise the reachable-pair
+forward-dial transports and the bounded relay session without ever fronting a resident
+engine; the universal control_relay rides the reverse-rendezvous relay instead.
 """
 
 import asyncio
@@ -70,31 +70,14 @@ async def _echo_connection(
         await _close(writer)
 
 
-def _fixed_relay_connection(
-    target: str, *, buffer_bytes: int, logger: logging.Logger | None
-) -> _ConnHandler:
-    target_host, target_port = wire.split_host_port(target)
-
-    async def handler(
-        reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-    ) -> None:
-        try:
-            target_reader, target_writer = await asyncio.open_connection(
-                target_host, target_port
-            )
-        except OSError:
-            await _close(writer)
-            return
-        await RelaySession(
-            new_relay_session_id(), buffer_bytes=buffer_bytes, logger=logger
-        ).relay(reader, writer, target_reader, target_writer)
-
-    return handler
-
-
-def _control_relay_connection(
+def _relay_connection(
     *, buffer_bytes: int, logger: logging.Logger | None
 ) -> _ConnHandler:
+    """A target-addressed relay hop: read one leading frame naming the next hop,
+    dial it, and byte-relay the rest. Both the node-relay uplink and the control
+    relay use it, so a route resolves to whichever sidecar its hops name rather
+    than a single fixed target, and multi-hop ladders chain through it."""
+
     async def handler(
         reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
@@ -128,9 +111,7 @@ class NetworkPlaneListeners:
         self._sidecar = _TcpServer(sidecar_url, _echo_connection, logger=logger)
         self._node_relay = _TcpServer(
             endpoint_url,
-            _fixed_relay_connection(
-                sidecar_url, buffer_bytes=buffer_bytes, logger=logger
-            ),
+            _relay_connection(buffer_bytes=buffer_bytes, logger=logger),
             logger=logger,
         )
 
@@ -141,26 +122,3 @@ class NetworkPlaneListeners:
     async def stop(self) -> None:
         await self._node_relay.stop()
         await self._sidecar.stop()
-
-
-class NetworkControlRelay:
-    """The root's controlled-fallback relay, reached by ``control_relay`` routes."""
-
-    def __init__(
-        self,
-        *,
-        control_relay_url: str,
-        buffer_bytes: int,
-        logger: logging.Logger | None = None,
-    ) -> None:
-        self._server = _TcpServer(
-            control_relay_url,
-            _control_relay_connection(buffer_bytes=buffer_bytes, logger=logger),
-            logger=logger,
-        )
-
-    async def start(self) -> None:
-        await self._server.start()
-
-    async def stop(self) -> None:
-        await self._server.stop()

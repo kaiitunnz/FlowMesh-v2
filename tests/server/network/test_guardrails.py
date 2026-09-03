@@ -10,8 +10,13 @@ from pathlib import Path
 
 import server.network.deputy as deputy
 import server.network.listeners as listeners
+import server.network.rendezvous as rendezvous
 import server.network.resolver as resolver
+import server.network.reverse_relay as reverse_relay
 import server.network.service as service
+import server.network.state as state
+
+_SUBSTRATE = (deputy, listeners, rendezvous, resolver, reverse_relay, service, state)
 
 _FORBIDDEN_IDENTIFIERS = {
     "ServiceClaim",
@@ -46,13 +51,13 @@ def _identifiers(tree: ast.Module) -> set[str]:
 
 
 def test_substrate_modules_do_not_import_resident() -> None:
-    for module in (deputy, listeners, resolver, service):
+    for module in _SUBSTRATE:
         assert not any(
             "resident" in name for name in _imported_modules(_tree(module))
         ), f"{module.__name__} imports resident code"
 
 
 def test_substrate_modules_touch_no_claim_identifier() -> None:
-    for module in (deputy, listeners, resolver, service):
+    for module in _SUBSTRATE:
         used = _identifiers(_tree(module)) & _FORBIDDEN_IDENTIFIERS
         assert not used, f"{module.__name__} references {sorted(used)}"

@@ -5,7 +5,7 @@ import socket
 import struct
 
 from server.network.deputy import run_echo
-from server.network.listeners import NetworkControlRelay, NetworkPlaneListeners
+from server.network.listeners import NetworkPlaneListeners
 from server.network.relay import RelaySession
 from server.network.state import (
     ResolvedRoute,
@@ -112,24 +112,18 @@ class _Fixture:
     def __init__(self) -> None:
         self.sidecar_port = _free_port()
         self.relay_port = _free_port()
-        self.control_port = _free_port()
         self.listeners = NetworkPlaneListeners(
             sidecar_url=f"127.0.0.1:{self.sidecar_port}",
             endpoint_url=f"127.0.0.1:{self.relay_port}",
             buffer_bytes=65536,
         )
-        self.control = NetworkControlRelay(
-            control_relay_url=f"127.0.0.1:{self.control_port}", buffer_bytes=65536
-        )
 
     async def __aenter__(self) -> "_Fixture":
         await self.listeners.start()
-        await self.control.start()
         return self
 
     async def __aexit__(self, *_exc: object) -> None:
         await self.listeners.stop()
-        await self.control.stop()
 
 
 def test_worker_direct_round_trip() -> None:
@@ -149,7 +143,11 @@ def test_node_relay_round_trip_through_session() -> None:
     async def run():
         async with _Fixture() as fx:
             route = _route(
-                _candidate(Transport.NODE_RELAY, f"127.0.0.1:{fx.relay_port}")
+                _candidate(
+                    Transport.NODE_RELAY,
+                    f"127.0.0.1:{fx.relay_port}",
+                    f"127.0.0.1:{fx.sidecar_port}",
+                )
             )
             return await run_echo(route, b"relayed", connect_budget_sec=3.0)
 
@@ -158,30 +156,17 @@ def test_node_relay_round_trip_through_session() -> None:
     assert outcome.echoed == b"relayed"
 
 
-def test_control_relay_round_trip() -> None:
-    async def run():
-        async with _Fixture() as fx:
-            route = _route(
-                _candidate(
-                    Transport.CONTROL_RELAY,
-                    f"127.0.0.1:{fx.control_port}",
-                    f"127.0.0.1:{fx.sidecar_port}",
-                )
-            )
-            return await run_echo(route, b"controlled", connect_budget_sec=3.0)
-
-    outcome = asyncio.run(run())
-    assert outcome.selected_transport is Transport.CONTROL_RELAY
-    assert outcome.echoed == b"controlled"
-
-
 def test_connect_failure_falls_to_next_candidate() -> None:
     async def run():
         async with _Fixture() as fx:
             dead = _free_port()
             route = _route(
                 _candidate(Transport.WORKER_DIRECT, f"127.0.0.1:{dead}"),
-                _candidate(Transport.NODE_RELAY, f"127.0.0.1:{fx.relay_port}"),
+                _candidate(
+                    Transport.NODE_RELAY,
+                    f"127.0.0.1:{fx.relay_port}",
+                    f"127.0.0.1:{fx.sidecar_port}",
+                ),
             )
             return await run_echo(route, b"failover", connect_budget_sec=3.0)
 

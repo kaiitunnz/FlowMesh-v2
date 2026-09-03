@@ -13,14 +13,17 @@ from server.network.state import (
 )
 
 
-def _origin(reachability_class=ReachabilityClass.SAME_NODE) -> RouteOrigin:
+def _origin(
+    reachability_class=ReachabilityClass.SAME_NODE, *, attached: bool = True
+) -> RouteOrigin:
     return RouteOrigin(
         origin_id="rog-1",
         endpoint_id="e-origin",
-        node_id="nde-1",
+        node_id="nde-origin",
         reachability_class=reachability_class,
         policy_class=PolicyClass.DEFAULT,
         trust_domain="fm",
+        relay_attachment_id="att-origin" if attached else None,
     )
 
 
@@ -39,7 +42,7 @@ def _listener(
 
 
 def _endpoint(
-    reachability_class=ReachabilityClass.ROUTABLE,
+    reachability_class=ReachabilityClass.ROUTABLE, *, attached: bool = True
 ) -> NetworkEndpointAdvertisement:
     return NetworkEndpointAdvertisement(
         endpoint_id="e-target",
@@ -48,6 +51,7 @@ def _endpoint(
         generation=1,
         trust_domain="fm",
         reachability_class=reachability_class,
+        relay_attachment_id="att-target" if attached else None,
     )
 
 
@@ -99,18 +103,28 @@ def test_routable_origin_cannot_reach_same_node_endpoint() -> None:
     assert "worker_direct" not in _transports(route)
 
 
-def test_control_relay_only_when_no_node_endpoint() -> None:
+def test_no_control_relay_without_both_attachments() -> None:
     view = NetworkReachabilityView()
-    route = resolve_route(
+    # No target endpoint means no target attachment: the reverse relay is infeasible.
+    no_target = resolve_route(
         _origin(),
         _listener(directly_routable=True),
         None,
         view,
         now=0.0,
         route_epoch=1,
-        control_relay_endpoint="127.0.0.1:5000",
     )
-    assert _transports(route) == ["control_relay"]
+    assert "control_relay" not in _transports(no_target)
+    # An unattached origin is equally infeasible even with a fully attached target.
+    no_origin = resolve_route(
+        _origin(attached=False),
+        _listener(directly_routable=False),
+        _endpoint(ReachabilityClass.SAME_NODE),
+        view,
+        now=0.0,
+        route_epoch=1,
+    )
+    assert "control_relay" not in _transports(no_origin)
 
 
 def test_demoted_direct_falls_out_of_ladder() -> None:
@@ -165,7 +179,7 @@ def test_verified_candidate_is_preferred() -> None:
     assert _transports(route)[0] == "node_relay"
 
 
-def test_control_relay_carries_concrete_hops() -> None:
+def test_control_relay_names_origin_and_target_attachments() -> None:
     view = NetworkReachabilityView()
     route = resolve_route(
         _origin(),
@@ -174,11 +188,15 @@ def test_control_relay_carries_concrete_hops() -> None:
         view,
         now=0.0,
         route_epoch=1,
-        control_relay_endpoint="127.0.0.1:5000",
     )
     control = [c for c in route.candidates if c.transport is Transport.CONTROL_RELAY][0]
-    assert control.hops[0].endpoint == "127.0.0.1:5000"
-    assert control.hops[1].endpoint == "127.0.0.1:9001"
+    origin_hop, target_hop = control.hops
+    # The descriptor names the origin and target ends by node (the delivery routes by
+    # node id) and the target's node-local sidecar delivery, not dialable TCP hops.
+    assert origin_hop.node_id == "nde-origin"
+    assert origin_hop.endpoint == ""  # the origin end names no dialable address
+    assert target_hop.node_id == "nde-1"
+    assert target_hop.endpoint == "127.0.0.1:9001"  # local sidecar delivery route
 
 
 def test_resolver_is_pure() -> None:

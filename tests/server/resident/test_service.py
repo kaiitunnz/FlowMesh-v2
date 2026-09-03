@@ -61,8 +61,8 @@ class _FakeAdapter:
         self.completion = completion
         self.calls = []
 
-    async def issue(self, handoff, request_payload):
-        self.calls.append(handoff)
+    async def issue(self, endpoint, request_payload):
+        self.calls.append(endpoint)
         return self.completion
 
 
@@ -74,7 +74,7 @@ class _FlakyAdapter:
         self.remaining_failures = fail_first
         self.calls = 0
 
-    async def issue(self, handoff, request_payload):
+    async def issue(self, endpoint, request_payload):
         self.calls += 1
         if self.remaining_failures > 0:
             self.remaining_failures -= 1
@@ -83,16 +83,15 @@ class _FlakyAdapter:
 
 
 class _DeadThenLiveAdapter:
-    """Unreachable for the first replica it sees, reachable for any later replica."""
+    """Unreachable for the first delivery (a dead replica), reachable thereafter."""
 
     def __init__(self, completion="OK"):
         self.completion = completion
-        self.dead_replica = None
+        self.first = True
 
-    async def issue(self, handoff, request_payload):
-        if self.dead_replica is None:
-            self.dead_replica = handoff.replica_id
-        if handoff.replica_id == self.dead_replica:
+    async def issue(self, endpoint, request_payload):
+        if self.first:
+            self.first = False
             raise AdapterError(
                 "connection refused", pre_acceptance=True, connection_failure=True
             )
@@ -103,7 +102,7 @@ class _StatusAdapter:
     """Fails pre-acceptance with a transient HTTP status (a live replica), never a
     connection failure."""
 
-    async def issue(self, handoff, request_payload):
+    async def issue(self, endpoint, request_payload):
         raise AdapterError("503", pre_acceptance=True, connection_failure=False)
 
 
@@ -133,6 +132,7 @@ def _build(*, limits=None, adapter=None, materialize_fn=None):
         limits=limits,
         binding_resolver=lambda task_id: ("wfl-1", _binding()),
         settle_cb=settle_cb,
+        redispatch_cb=lambda *a, **k: False,
         endpoint_probe=lambda serve_task_id: ReplicaEndpoint(
             base_url="http://replica", model="m"
         ),
@@ -178,6 +178,35 @@ def test_rehydrate_reconciles_in_flight_claim():
     claim = fresh_stores.claims.by_invocation("inv-1")[0]
     assert claim.state is ClaimState.UNCERTAIN
     assert fresh_stores.credit_ledger.held(claim.replica_id) == 1
+
+
+def test_redrive_after_rehydrate_resumes_under_one_credit():
+    # The startup ordering (bind + rehydrate the claim store, then let the runtime
+    # re-drive suspended boundaries) exists so the re-drive finds the loaded in-flight
+    # claim and resumes on it. If the store were empty when the boundary re-drove, the
+    # loaded credit would strand and a second be admitted for the same invocation.
+    svc, stores, _ = _build()
+    asyncio.run(svc._serve_invocation(_env()))
+    snapshot = stores.to_snapshot()
+
+    fresh_svc, fresh_stores, fresh_settled = _build()
+    fresh_svc.rehydrate(snapshot)  # loads the in-flight claim as UNCERTAIN, credit held
+    resumed = fresh_stores.claims.by_invocation("inv-1")[0]
+    assert resumed.state is ClaimState.UNCERTAIN
+    assert fresh_stores.credit_ledger.held(resumed.replica_id) == 1
+
+    # The runtime re-drives the suspended boundary: it resumes on the existing claim.
+    asyncio.run(fresh_svc._serve_invocation(_env()))
+    claims = fresh_stores.claims.by_invocation("inv-1")
+    assert len(claims) == 1  # resumed, not re-admitted as a successor
+    assert (
+        fresh_stores.credit_ledger.held(resumed.replica_id) == 1
+    )  # exactly one credit
+    assert fresh_settled[-1] == ("tsk-1", "c1", "OK", None)
+
+    # The fenced DS terminal then releases that single credit — none stranded.
+    fresh_svc.on_invocation_terminal("inv-1")
+    assert fresh_stores.credit_ledger.held(resumed.replica_id) == 0
 
 
 def test_rehydrate_reports_a_warm_replica_so_it_is_admittable_again():

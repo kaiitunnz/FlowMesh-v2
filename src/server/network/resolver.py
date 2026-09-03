@@ -12,7 +12,11 @@ Ladder rules:
   placement alone is not sufficient.
 - ``node_relay`` goes through the target node's announced endpoint and its node-local
   uplink; it is the initial same-node path as well as the normal cross-node path.
-- ``control_relay`` is the always-available controlled fallback.
+- ``control_relay`` is the universal reverse-rendezvous base: the root bridges between
+  the origin and target reverse-relay attachments to the target's node-local sidecar
+  delivery. Its feasibility is that both ends have a registered outbound attachment, not
+  that either is inbound-reachable, so it is the guaranteed base whenever both
+  attachments are present — including for an outbound-only node with no inbound URL.
 
 Candidates a demotion has removed drop out; among those left, verified paths precede
 untried ones, and within a rank the base preference is direct, then node relay, then
@@ -31,8 +35,6 @@ from .state import (
     RouteOrigin,
     Transport,
 )
-
-_CONTROL_RELAY_ENDPOINT = "control-plane"
 
 _CLASS_LOCALITY: dict[ReachabilityClass, int] = {
     ReachabilityClass.SAME_NODE: 0,
@@ -66,13 +68,13 @@ def resolve_route(
     *,
     now: float,
     route_epoch: int,
-    control_relay_endpoint: str | None = None,
     expires_at: float | None = None,
 ) -> ResolvedRoute:
     """Resolve the ordered candidate ladder for one origin/target pair.
 
-    ``control_relay_endpoint`` is the deployment's controlled-fallback relay; when set,
-    the control-relay candidate carries it plus the target sidecar as explicit hops.
+    The ``control_relay`` base is carried whenever the origin and the target node both
+    advertise an outbound reverse-relay attachment; it names those attachments and the
+    target's node-local sidecar delivery, and the root bridges between them.
     """
     graded: list[tuple[int, int, RouteCandidate]] = []
 
@@ -122,7 +124,7 @@ def resolve_route(
             ),
         )
 
-    if node_endpoint is not None and direct_route is not None:
+    if node_endpoint is not None and node_endpoint.url and direct_route is not None:
         consider(
             Transport.NODE_RELAY,
             (
@@ -139,30 +141,34 @@ def resolve_route(
             ),
         )
 
-    # control_relay needs a target sidecar to relay to (``direct_route``); a listener
-    # with no advertised route therefore yields no candidate at all, by design.
-    if control_relay_endpoint is not None and direct_route is not None:
-        control_hops: tuple[RouteHop, ...] = (
-            RouteHop(
-                transport=Transport.CONTROL_RELAY,
-                endpoint=control_relay_endpoint,
-                node_id=None,
-            ),
-            RouteHop(
-                transport=Transport.CONTROL_RELAY,
-                endpoint=direct_route,
-                node_id=listener.node_id,
+    # control_relay is the universal reverse-rendezvous base: the root bridges between
+    # the origin and target reverse-relay attachments to the target's node-local sidecar
+    # delivery. It needs both ends attached outward and a sidecar delivery route; it
+    # does not need either end inbound-reachable, so it is the guaranteed base whenever
+    # both attachments are present, including an outbound-only node with no inbound URL.
+    target_attachment = (
+        node_endpoint.relay_attachment_id if node_endpoint is not None else None
+    )
+    if (
+        origin.relay_attachment_id is not None
+        and target_attachment is not None
+        and direct_route is not None
+    ):
+        consider(
+            Transport.CONTROL_RELAY,
+            (
+                RouteHop(
+                    transport=Transport.CONTROL_RELAY,
+                    endpoint="",
+                    node_id=origin.node_id,
+                ),
+                RouteHop(
+                    transport=Transport.CONTROL_RELAY,
+                    endpoint=direct_route,
+                    node_id=listener.node_id,
+                ),
             ),
         )
-    else:
-        control_hops = (
-            RouteHop(
-                transport=Transport.CONTROL_RELAY,
-                endpoint=_CONTROL_RELAY_ENDPOINT,
-                node_id=None,
-            ),
-        )
-    consider(Transport.CONTROL_RELAY, control_hops)
 
     graded.sort(key=lambda item: (item[0], item[1]))
     return ResolvedRoute(

@@ -57,7 +57,11 @@ async def materialize_resident_replica(
         "spec": spec,
     }
     workflow_id, entries = await runtime.register(
-        owner.principal_id, owner.org_id, json.dumps(payload), format="native"
+        owner.principal_id,
+        owner.org_id,
+        json.dumps(payload),
+        format="native",
+        resident=True,
     )
     await register_resource(
         owner,

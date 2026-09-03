@@ -29,7 +29,14 @@ class NetworkEndpointAdvertisement(BaseModel):
     Operator-configured and identity/TLS-bound at the source, not a worker-supplied
     arbitrary URL and not the generic server-management endpoint. ``generation`` is the
     monotonic fence: re-registration mints a fresh generation so stale advertisements
-    and route evidence keyed to an older one are never used.
+    and route evidence keyed to an older one are never used, which is also the fence
+    that invalidates the node's relay evidence.
+
+    ``relay_attachment_id`` is the non-secret identity of this node's (or ingress
+    edge's) outbound relay attachment to the root rendezvous. It proves the node can
+    attach outward for the universal reverse relay; it is not an inbound URL a peer may
+    dial, so a node advertises it even without an inbound endpoint URL. ``url`` is empty
+    for such an outbound-only node.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -41,6 +48,7 @@ class NetworkEndpointAdvertisement(BaseModel):
     trust_domain: str
     reachability_class: ReachabilityClass
     protocols: tuple[str, ...] = ()
+    relay_attachment_id: str | None = None
 
 
 __all__ = ["NetworkEndpointAdvertisement", "ReachabilityClass"]

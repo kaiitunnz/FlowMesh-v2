@@ -60,7 +60,24 @@ class NetworkPlane:
         node = await self._nodes.get_node_async(node_id)
         if node is None or node.network_endpoint is None:
             return None
-        return node.network_endpoint.model_copy(update={"node_id": node.id})
+        return self._stamp(node.network_endpoint, node.id)
+
+    @staticmethod
+    def _stamp(
+        endpoint: NetworkEndpointAdvertisement, node_id: str
+    ) -> NetworkEndpointAdvertisement:
+        """Stamp the node id and complete the identity an outbound-only node leaves out.
+
+        A network-plane node always attaches outward to the rendezvous, so it is relay
+        attach-eligible even with no inbound URL. Its endpoint and attachment identities
+        derive from the node id when the advertisement carries none.
+        """
+        updates: dict[str, str] = {"node_id": node_id}
+        if not endpoint.endpoint_id:
+            updates["endpoint_id"] = f"node-{node_id}"
+        if endpoint.relay_attachment_id is None:
+            updates["relay_attachment_id"] = f"rr-{node_id}"
+        return endpoint.model_copy(update=updates)
 
     async def resolve(
         self, origin_node_id: str, listener: ReplicaListenerAdvertisement
@@ -85,7 +102,6 @@ class NetworkPlane:
             self._reachability,
             now=now,
             route_epoch=self._route_epoch,
-            control_relay_endpoint=self._config.control_relay_url,
             expires_at=now + self._config.route_ttl_sec,
         )
         for candidate in route.candidates:
@@ -177,7 +193,7 @@ class NetworkPlane:
     async def endpoints(self) -> list[NetworkEndpointAdvertisement]:
         nodes = await self._nodes.list_nodes_async()
         return [
-            node.network_endpoint.model_copy(update={"node_id": node.id})
+            self._stamp(node.network_endpoint, node.id)
             for node in nodes
             if node.network_endpoint is not None
         ]
@@ -199,6 +215,7 @@ class NetworkPlane:
             reachability_class=endpoint.reachability_class,
             policy_class=PolicyClass.DEFAULT,
             trust_domain=endpoint.trust_domain,
+            relay_attachment_id=endpoint.relay_attachment_id,
         )
 
     def _invalidate_on_rotation(

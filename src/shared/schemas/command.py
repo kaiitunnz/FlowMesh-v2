@@ -18,6 +18,17 @@ class CommandType(StrEnum):
     DESTROY_WORKERS = "DESTROY_WORKERS"  # payload: {worker_names: [str]} or null
     START_RELAY = "START_RELAY"
     DELIVER_ROUTE_PLAN = "DELIVER_ROUTE_PLAN"  # payload: resolved route + echo payload
+    BIND_RESIDENT_SIDECAR = (
+        "BIND_RESIDENT_SIDECAR"  # bind a replica's claim-gated sidecar
+    )
+    UNBIND_RESIDENT_SIDECAR = "UNBIND_RESIDENT_SIDECAR"  # drop a replica's sidecar
+    DELIVER_RESIDENT_BOOTSTRAP = (
+        "DELIVER_RESIDENT_BOOTSTRAP"  # phase 1: bootstrap + ack
+    )
+    DELIVER_RESIDENT_STREAM = (
+        "DELIVER_RESIDENT_STREAM"  # phase 2: stream under the fence
+    )
+    DELIVER_RESIDENT_CANCEL = "DELIVER_RESIDENT_CANCEL"  # cancel a held invocation
 
 
 class CommandMessage(BaseModel):

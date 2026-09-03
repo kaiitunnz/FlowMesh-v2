@@ -20,7 +20,7 @@ def _seed():
     reserved = ctl.raise_claim(
         invocation_id="inv-1", workflow_id="wfl-1", family="fam", profile=PROFILE
     )
-    ctl.admit(reserved, PROFILE)
+    ctl.admit(reserved, PROFILE, idempotency_key="idm-x")
     ctl.on_enqueue_ack(reserved)
     pending = ctl.raise_claim(
         invocation_id="inv-2", workflow_id="wfl-1", family="fam", profile=PROFILE

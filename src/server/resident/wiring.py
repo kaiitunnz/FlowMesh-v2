@@ -8,10 +8,16 @@ principal so an operator reads its logs through the normal owner-scoped path.
 
 import logging
 from collections.abc import Callable
+from typing import Any
 
 from lumid_hooks import PrincipalContext
 
-from ..config import OrchestrationConfig
+from shared.schemas.command import CommandMessage, CommandType
+
+from ..config import OrchestrationConfig, ResidentCapacityConfig
+from ..network.service import NetworkPlane
+from ..registries import WorkerRegistry
+from ..registries.node import NodeRegistry
 from ..registries.resident import ResidentRegistry
 from ..task.models import TERMINAL_TASK_STATUSES
 from ..task.runtime import TaskRuntime
@@ -19,8 +25,9 @@ from .adapter import HttpInferenceAdapter
 from .admission import AdmissionController
 from .lifecycle import LifecycleScaleManager
 from .materializer import materialize_resident_replica
+from .native import NativeTransport, NativeTransportError
 from .policy import ResidentPolicyLimits
-from .service import ResidentCapacityControl
+from .service import NativeDeliveryDeps, ResidentCapacityControl
 from .state import ReplicaEndpoint, ReplicaIncarnation, ServiceFamily
 from .stores import ResidentStores
 
@@ -107,8 +114,70 @@ def build_resident_capacity(
         limits=limits,
         binding_resolver=runtime.gateway_binding_for,
         settle_cb=runtime.settle_episode_invocation,
+        redispatch_cb=runtime.redispatch_episode_invocation,
         endpoint_probe=endpoint,
         logger=logger,
         poll_interval_sec=cfg.poll_interval_sec,
         idle_sweep_interval_sec=sweep_interval,
+        redrive_backoff_sec=cfg.redrive_backoff_sec,
+        max_transient_redrives=cfg.max_transient_redrives,
+    )
+
+
+def wire_native_delivery(
+    resident_control: ResidentCapacityControl,
+    *,
+    network: NetworkPlane,
+    worker_registry: WorkerRegistry,
+    runtime: TaskRuntime,
+    node_registry: NodeRegistry,
+    resident_cfg: ResidentCapacityConfig,
+    cmd_timeout_sec: float,
+) -> None:
+    """Wire native two-phase delivery into resident-capacity control.
+
+    Resolves an origin task's node and a replica's node through the worker registry and
+    carries the bootstrap/stream/cancel pokes as node commands, so a resident invocation
+    is delivered data-direct over the fabric rather than relayed in-server.
+    """
+
+    def _node_of_worker(worker_id: str | None) -> str | None:
+        if worker_id is None:
+            return None
+        worker = worker_registry.get_worker(worker_id)
+        return worker.node_id if worker is not None else None
+
+    def _origin_node_of_task(task_id: str) -> str | None:
+        record = runtime.get_record(task_id)
+        return _node_of_worker(record.assigned_worker) if record else None
+
+    def _node_of_replica(replica: ReplicaIncarnation) -> str | None:
+        if replica.serve_task_id is None:
+            return None
+        record = runtime.get_record(replica.serve_task_id)
+        return _node_of_worker(record.assigned_worker) if record else None
+
+    async def _exec_node_cmd(
+        node_id: str, command: CommandType, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        resp = await node_registry.exec_node_cmd(
+            node_id,
+            CommandMessage(command=command, payload=payload),
+            timeout=cmd_timeout_sec,
+        )
+        if not resp.success:
+            raise NativeTransportError(resp.message or "resident node command failed")
+        return resp.data or {}
+
+    resident_control.set_native_delivery(
+        NativeDeliveryDeps(
+            network=network,
+            transport=NativeTransport(_exec_node_cmd),
+            origin_node_of_task=_origin_node_of_task,
+            node_of_replica=_node_of_replica,
+            sidecar_bind_host=resident_cfg.sidecar_bind_host,
+            directly_routable=resident_cfg.sidecar_directly_routable,
+            forward_api_key=resident_cfg.forward_api_key,
+            relay_only=resident_cfg.relay_only,
+        )
     )

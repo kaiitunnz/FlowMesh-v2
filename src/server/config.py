@@ -43,6 +43,7 @@ class LoggingConfig:
 class RedisConfig:
     control_url: str = "redis://localhost:6379/0"
     telemetry_url: str = "redis://localhost:6379/0"
+    resident_relay_url: str = "redis://localhost:6379/0"
     acl_enabled: bool = False
     username: str = "admin"
     password: str = ""
@@ -51,10 +52,12 @@ class RedisConfig:
     @classmethod
     def from_env(cls) -> "RedisConfig":
         redis_url = os.getenv("REDIS_URL") or "redis://localhost:6379/0"
+        telemetry = os.getenv("REDIS_TELEMETRY_URL") or redis_url
         tls_raw = os.getenv("REDIS_TLS_CA_FILE", "").strip()
         return cls(
             control_url=os.getenv("REDIS_CONTROL_URL") or redis_url,
-            telemetry_url=os.getenv("REDIS_TELEMETRY_URL") or redis_url,
+            telemetry_url=telemetry,
+            resident_relay_url=os.getenv("REDIS_RESIDENT_RELAY_URL") or telemetry,
             acl_enabled=parse_bool_env("REDIS_ACL_ENABLED", False),
             username=os.getenv("REDIS_USERNAME", "admin"),
             password=os.getenv("REDIS_PASSWORD", ""),
@@ -389,6 +392,8 @@ class ResidentCapacityConfig:
     ``admission_slots`` is the conservative safe-slot count reported per replica.
     ``forward_api_key`` is the credential the in-server adapter presents to a replica
     that reports none, so the ``dev_model`` stand-in can forward it to a keyed upstream.
+    ``relay_only`` mandates the reverse-rendezvous relay for resident traffic, the mode
+    an outbound-only fleet uses so no invocation attempts a forward-dial offload.
     """
 
     enabled: bool = False
@@ -399,12 +404,17 @@ class ResidentCapacityConfig:
     max_concurrent_cold_starts: int = 1
     cold_start_deadline_sec: float = 300.0
     poll_interval_sec: float = 1.0
+    redrive_backoff_sec: float = 0.5
+    max_transient_redrives: int = 3
     serve_ttl_sec: float | None = None
     allowed_models: tuple[str, ...] = ()
     forward_api_key: str | None = None
     selection_strategy: str = field(default_factory=_default_selection_strategy)
     idle_retain_sec: float = 0.0
     idle_sweep_interval_sec: float = 30.0
+    sidecar_bind_host: str = "127.0.0.1"
+    sidecar_directly_routable: bool = False
+    relay_only: bool = False
 
     @classmethod
     def from_env(cls) -> "ResidentCapacityConfig":
@@ -439,6 +449,10 @@ class ResidentCapacityConfig:
             cold_start_deadline_sec=parse_float_env(f"{prefix}COLD_START_DEADLINE_SEC")
             or 300.0,
             poll_interval_sec=parse_float_env(f"{prefix}POLL_INTERVAL_SEC") or 1.0,
+            redrive_backoff_sec=parse_float_env(f"{prefix}REDRIVE_BACKOFF_SEC", 0.5),
+            max_transient_redrives=max(
+                1, parse_int_env(f"{prefix}MAX_TRANSIENT_REDRIVES") or 3
+            ),
             serve_ttl_sec=parse_float_env(f"{prefix}SERVE_TTL_SEC"),
             allowed_models=allowed,
             forward_api_key=_env_or_none(f"{prefix}FORWARD_API_KEY"),
@@ -446,6 +460,14 @@ class ResidentCapacityConfig:
             idle_retain_sec=parse_float_env(f"{prefix}IDLE_RETAIN_SEC") or 0.0,
             idle_sweep_interval_sec=parse_float_env(f"{prefix}IDLE_SWEEP_INTERVAL_SEC")
             or 30.0,
+            sidecar_bind_host=(
+                os.getenv(f"{prefix}SIDECAR_BIND_HOST") or "127.0.0.1"
+            ).strip()
+            or "127.0.0.1",
+            sidecar_directly_routable=parse_bool_env(
+                f"{prefix}SIDECAR_DIRECTLY_ROUTABLE", False
+            ),
+            relay_only=parse_bool_env(f"{prefix}RELAY_ONLY", False),
         )
 
 
@@ -485,15 +507,14 @@ class NetworkPlaneConfig:
     """Feature-gated network-plane route substrate knobs.
 
     ``endpoint_url`` is the operator-configured node-relay endpoint advertised on
-    registration; ``sidecar_url`` is the node-local echo listener the relay uplinks to;
-    ``control_relay_url`` is the root's controlled-fallback relay. TTL/backoff bounds
-    drive the reachability state machine.
+    registration; ``sidecar_url`` is the node-local echo listener the relay uplinks to.
+    TTL/backoff bounds drive the reachability state machine. ``relay_window_bytes`` is
+    the reverse-rendezvous relay's per-direction in-flight byte window.
     """
 
     enabled: bool = False
     endpoint_url: str | None = None
     sidecar_url: str | None = None
-    control_relay_url: str | None = None
     trust_domain: str = "flowmesh"
     reachability_class: str = "routable"
     protocols: tuple[str, ...] = ("echo",)
@@ -504,6 +525,7 @@ class NetworkPlaneConfig:
     connect_budget_sec: float = 5.0
     route_ttl_sec: float = 30.0
     relay_buffer_bytes: int = 65536
+    relay_window_bytes: int = 65536
 
     @classmethod
     def from_env(cls) -> "NetworkPlaneConfig":
@@ -518,7 +540,6 @@ class NetworkPlaneConfig:
             enabled=parse_bool_env(f"{prefix}ENABLED", False),
             endpoint_url=_env_or_none(f"{prefix}ENDPOINT_URL"),
             sidecar_url=_env_or_none(f"{prefix}SIDECAR_URL"),
-            control_relay_url=_env_or_none(f"{prefix}CONTROL_RELAY_URL"),
             trust_domain=_env_or_none(f"{prefix}TRUST_DOMAIN") or "flowmesh",
             reachability_class=_env_or_none(f"{prefix}REACHABILITY_CLASS")
             or "routable",
@@ -531,6 +552,9 @@ class NetworkPlaneConfig:
             route_ttl_sec=parse_float_env(f"{prefix}ROUTE_TTL_SEC") or 30.0,
             relay_buffer_bytes=max(
                 1024, parse_int_env(f"{prefix}RELAY_BUFFER_BYTES") or 65536
+            ),
+            relay_window_bytes=max(
+                1024, parse_int_env(f"{prefix}RELAY_WINDOW_BYTES") or 65536
             ),
         )
 

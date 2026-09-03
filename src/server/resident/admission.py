@@ -32,6 +32,8 @@ from .state import (
     ClaimTerminalReason,
     DemandEntry,
     InvocationRequest,
+    ReplicaIncarnation,
+    RouteAuthorization,
     ServiceClaim,
 )
 from .stores import ResidentStores
@@ -46,6 +48,34 @@ class AdmissionController:
         self._stores = stores
         self._persist = persist or (lambda: None)
         self._strategies: dict[str, SelectionStrategy] = {}
+
+    def _build_handoff(
+        self,
+        claim: ServiceClaim,
+        replica: ReplicaIncarnation,
+        *,
+        idempotency_key: str | None,
+        tenant: str | None,
+        deadline_at: str | None,
+    ) -> AdmissionHandoff:
+        """A single-use fence handoff for a reserved claim's replica incarnation.
+
+        It carries no route or origin: the network path resolves and attaches those, and
+        the compatibility path reaches the replica endpoint from the directory. It never
+        carries the raw engine endpoint.
+        """
+        return AdmissionHandoff(
+            token=new_admission_handoff_token(),
+            claim_id=claim.claim_id,
+            invocation_id=claim.invocation_id,
+            idempotency_key=idempotency_key,
+            family=claim.family,
+            tenant=tenant,
+            replica_id=replica.replica_id,
+            incarnation=replica.incarnation,
+            listener_generation=replica.listener_generation,
+            expires_at=deadline_at,
+        )
 
     def _strategy_for(self, family: str) -> SelectionStrategy:
         definition = self._stores.families.get(family)
@@ -118,7 +148,9 @@ class AdmissionController:
         self._persist()
         return claim
 
-    def rebuild_handoff(self, claim: ServiceClaim) -> AdmissionHandoff | None:
+    def rebuild_handoff(
+        self, claim: ServiceClaim, *, idempotency_key: str | None
+    ) -> AdmissionHandoff | None:
         """A fresh claim-bound handoff for an in-flight claim's replica, if still live.
 
         Resuming a re-driven boundary reissues to the same fenced replica incarnation
@@ -136,14 +168,14 @@ class AdmissionController:
             or replica.state not in SERVABLE_REPLICA_STATES
         ):
             return None
-        return AdmissionHandoff(
-            token=new_admission_handoff_token(),
-            claim_id=claim.claim_id,
-            invocation_id=claim.invocation_id,
-            family=claim.family,
-            replica_id=replica.replica_id,
-            incarnation=replica.incarnation,
-            endpoint=replica.endpoint,
+        request = self._stores.invocations.get(claim.invocation_id)
+        profile = request.profile if request is not None else None
+        return self._build_handoff(
+            claim,
+            replica,
+            idempotency_key=idempotency_key,
+            tenant=profile.tenant if profile is not None else None,
+            deadline_at=profile.deadline_at if profile is not None else None,
         )
 
     def admit(
@@ -151,11 +183,12 @@ class AdmissionController:
         claim: ServiceClaim,
         profile: AdmissionProfile,
         *,
+        idempotency_key: str | None,
         now_ts: float | None = None,
     ) -> AdmissionHandoff | None:
         """Select a feasible replica and record the fenced RESERVED credit, or defer.
 
-        Returns the opaque claim-bound handoff on success; ``None`` leaves the claim
+        Returns the single-use claim-bound handoff on success; ``None`` leaves the claim
         pending without holding a replica or an episode lane when no replica is
         feasible.
         """
@@ -178,20 +211,93 @@ class AdmissionController:
         replica.last_active_at = now_iso()
         self._stores.demand.mark_admitted(claim.claim_id)
         self._persist()
-        return AdmissionHandoff(
-            token=new_admission_handoff_token(),
-            claim_id=claim.claim_id,
-            invocation_id=claim.invocation_id,
-            family=claim.family,
-            replica_id=replica.replica_id,
-            incarnation=replica.incarnation,
-            endpoint=replica.endpoint,
+        return self._build_handoff(
+            claim,
+            replica,
+            idempotency_key=idempotency_key,
+            tenant=profile.tenant,
             deadline_at=profile.deadline_at,
         )
 
     def on_enqueue_ack(self, claim: ServiceClaim) -> None:
-        """Record the engine enqueue acknowledgement, then the response stream."""
+        """Record a single-shot enqueue acknowledgement, then the response stream.
+
+        Used by the in-server compatibility path, where acknowledgement and completion
+        arrive together, so there is no separate authorized stream to fence.
+        """
         accept(claim)
+        begin_stream(claim)
+        self._persist()
+
+    def accept_and_authorize(
+        self,
+        claim: ServiceClaim,
+        *,
+        idempotency_key: str | None,
+        origin_id: str | None,
+        deadline_at: str | None = None,
+    ) -> RouteAuthorization:
+        """Record ``ACCEPTED`` on an engine enqueue ack and issue the immutable fence.
+
+        The fence is minted only after acknowledgement and is re-mintable from the
+        durable claim on a resume.
+        """
+        accept(claim)
+        self._persist()
+        return self._mint_authorization(
+            claim,
+            idempotency_key=idempotency_key,
+            origin_id=origin_id,
+            deadline_at=deadline_at,
+        )
+
+    def reauthorize(
+        self,
+        claim: ServiceClaim,
+        *,
+        idempotency_key: str | None,
+        origin_id: str | None,
+        deadline_at: str | None = None,
+    ) -> RouteAuthorization:
+        """Re-mint the fence for a resumed in-flight claim without an FSM transition.
+
+        A re-driven boundary on a claim already past ``RESERVED`` reissues to the same
+        held credit under a freshly minted fence for the same replica incarnation.
+        """
+        return self._mint_authorization(
+            claim,
+            idempotency_key=idempotency_key,
+            origin_id=origin_id,
+            deadline_at=deadline_at,
+        )
+
+    def _mint_authorization(
+        self,
+        claim: ServiceClaim,
+        *,
+        idempotency_key: str | None,
+        origin_id: str | None,
+        deadline_at: str | None,
+    ) -> RouteAuthorization:
+        assert claim.replica_id is not None and claim.incarnation is not None
+        replica = self._stores.directory.get(claim.replica_id)
+        request = self._stores.invocations.get(claim.invocation_id)
+        return RouteAuthorization(
+            claim_id=claim.claim_id,
+            invocation_id=claim.invocation_id,
+            idempotency_key=idempotency_key,
+            tenant=request.profile.tenant if request is not None else None,
+            origin_id=origin_id,
+            replica_id=claim.replica_id,
+            incarnation=claim.incarnation,
+            listener_generation=(
+                replica.listener_generation if replica is not None else 0
+            ),
+            expires_at=deadline_at,
+        )
+
+    def on_stream_started(self, claim: ServiceClaim) -> None:
+        """Record the start of the authorized response stream for an accepted claim."""
         begin_stream(claim)
         self._persist()
 

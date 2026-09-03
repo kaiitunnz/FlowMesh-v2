@@ -70,21 +70,63 @@ TERMINAL --(permitted reissue)--> successor PENDING (same invocation_id, fresh e
   and consumed by `invocation_id`; a stream close or a telemetry report alone never releases
   it. A pre-acceptance cancellation, known enqueue failure, or expiry records a terminal
   transition directly.
-- **Loss and reissue.** A route or incarnation loss moves a credit-bearing claim to
-  `UNCERTAIN`, holding its credit until the fenced terminal outcome for its invocation
-  settles it. A re-driven boundary resumes the in-flight claim on its replica under the held
-  credit; once a claim is terminal, a permitted reissue raises a successor with a fresh
-  admission epoch, never reopening a terminal claim or reusing its credit.
+- **Loss and reissue.** A transient or ambiguous route loss moves a credit-bearing claim to
+  `UNCERTAIN` and re-drives the boundary under the held credit — the runtime re-issues the
+  same durable invocation, which resumes on the fenced replica — releasing nothing until a
+  definite outcome. Only a completion, a fence rejection, or a clean engine refusal releases;
+  a lost stream is held, never read as a completion. The hold is bounded by replica health,
+  not a timer: a path that keeps failing preempts the replica after a bounded number of
+  attempts, so the next resume finds no live incarnation and the fenced terminal releases.
+  Once a claim is terminal, a permitted reissue raises a successor with a fresh admission
+  epoch, never reopening a terminal claim or reusing its credit.
 
 ## Handoff and execution
 
-A `RESERVED` claim authorizes one opaque, short-lived, claim-bound admission handoff — a
-descriptor an engine adapter consumes to reach the selected replica and obtain an enqueue
-acknowledgement. It is neither a persisted control object nor a network route authorization.
-The handoff is locality-neutral: its fields are data an adapter consumes, not a
-server-owned client. The default inference adapter consumes it in-server and relays the
-request to the replica's OpenAI-compatible endpoint, so where the bytes run is not fixed by
-the contract.
+A `RESERVED` claim authorizes one single-use, claim-bound admission handoff — the
+pre-`ACCEPTED` bootstrap fence that binds the tenant subject, the fabric `idm-*` request
+identity, the selected replica incarnation and listener generation, an expiry, and a
+candidate route snapshot. It carries no raw engine endpoint or credential and is neither a
+persisted control object nor a `RouteAuthorization`.
+
+When the network plane is off, an in-server adapter consumes the handoff and relays the
+request to the replica's OpenAI-compatible endpoint (read from the replica directory), the
+claim-gated compatibility path. This path is single-shot: a post-acceptance ambiguous loss
+settles the boundary, so its fenced terminal releases the credit rather than holding and
+re-driving it as the native path does. That narrower ambiguous-loss window is a tracked
+follow-up to bring onto the same hold-and-re-drive split.
+
+When [`NETWORK_PLANE_ENABLED`](NETWORK_PLANE.md) is also on, the invocation is carried over
+the native fabric path, whose live stream never crosses the server — though the deputy
+returns the assembled completion to it to settle the invocation. The Lifecycle & scale
+manager binds a per-replica **resident-facing sidecar** on the replica node and advertises
+its non-secret listener; the sidecar is the enforced claim gate, validating every fence
+against its own incarnation and listener generation before reaching the co-located engine.
+Delivery is two-phase, server-driven over the node-command seam: a bootstrap poke delivers
+the handoff over the origin node's deputy and obtains the engine enqueue acknowledgement, at
+which point the Admission controller records `ACCEPTED` and issues the immutable
+`RouteAuthorization`; a stream poke then carries the authorized response, with cancellation
+and backpressure. The universal path is the reverse-rendezvous `control_relay`: the origin
+deputy and the target sidecar each attach outward to the root, which bridges the framed
+request and response between their per-node streams, so neither the origin nor the replica
+node needs an inbound connection; the exact resident wire messages ride as opaque relay
+payloads, so the sidecar and its claim gate serve them unchanged. The response is carried
+under the relay's per-direction byte window, so a large completion is chunked and
+flow-controlled rather than framed whole. A verified `worker_direct` or `node_relay` offload
+may carry a reachable pair instead; an outbound-only fleet sets `RESIDENT_RELAY_ONLY` to
+mandate the relay so no invocation attempts a forward-dial offload that would always fail. A pre-delivery offload connect
+failure takes the already-resolved base candidate with no re-admission; a fence rejection or
+a clean engine refusal is a definite release; a lost acknowledgement, ambiguous bootstrap,
+or stream loss is `UNCERTAIN`, holds the credit, and re-drives until a definite outcome or
+the fenced DS terminal, resuming from the durable relay cursor rather than re-running the
+engine. The sidecar classifies a clean engine status as definite so no held slot leaks its
+credit. A cancellation reaps both ends — the deputy pokes a cancel that closes the sidecar
+connection and aborts the co-located engine request — so a cancelled invocation stops
+promptly rather than waiting out the stream deadline. Request and stream emit claim-tagged
+load evidence, tagged latency-sensitive service traffic versus bulk transfer.
+
+The legacy serve proxy cannot reach a resident allocation: a resident replica's serve task
+is marked resident and the proxy refuses it by allocation identity, independent of its
+access mode. A resident allocation is reachable only through its claim-gated sidecar.
 
 ## Replica lifecycle and policy
 
@@ -117,8 +159,9 @@ scheduling, and KV allocation.
 Resident-capacity control is off by default and enabled per deployment. See the `RESIDENT_*`
 rows in [`ENV.md`](ENV.md) for enablement, the serving substrate (`serve` or `dev_model`),
 the policy caps, the conservative admission-slot count, the cold-start budget, the per-family
-selection strategy, and the idle-teardown retain window (`RESIDENT_IDLE_RETAIN_SEC`, `0`
-disables).
+selection strategy, the idle-teardown retain window (`RESIDENT_IDLE_RETAIN_SEC`, `0`
+disables), and the relay-only mode (`RESIDENT_RELAY_ONLY`) that mandates the reverse-relay
+for an outbound-only fleet.
 
 ## Observability
 

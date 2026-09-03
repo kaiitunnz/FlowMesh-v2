@@ -166,6 +166,15 @@ STACK_ENV_SCHEMA = EnvSchema(
                     required=True,
                     url_schemes={"redis", "rediss"},
                 ),
+                EnvVar(
+                    "REDIS_RESIDENT_RELAY_URL",
+                    "",
+                    description=(
+                        "Redis endpoint for the resident relay; defaults to telemetry."
+                    ),
+                    var_type=EnvVarType.URL,
+                    url_schemes={"redis", "rediss"},
+                ),
             ],
         ),
         EnvSection(
@@ -441,6 +450,20 @@ STACK_ENV_SCHEMA = EnvSchema(
                     min_inclusive=False,
                 ),
                 EnvVar(
+                    "RESIDENT_REDRIVE_BACKOFF_SEC",
+                    "0.5",
+                    description="Backoff before re-driving a held resident invocation.",
+                    var_type=EnvVarType.FLOAT,
+                    min_value=0,
+                ),
+                EnvVar(
+                    "RESIDENT_MAX_TRANSIENT_REDRIVES",
+                    "3",
+                    description="Transient resident losses before a replica preempt.",
+                    var_type=EnvVarType.INT,
+                    min_value=1,
+                ),
+                EnvVar(
                     "RESIDENT_SERVE_TTL_SEC",
                     "",
                     description="Materialized replica TTL (seconds).",
@@ -476,6 +499,23 @@ STACK_ENV_SCHEMA = EnvSchema(
                     min_value=0,
                     min_inclusive=False,
                 ),
+                EnvVar(
+                    "RESIDENT_SIDECAR_BIND_HOST",
+                    "127.0.0.1",
+                    description="Host a resident sidecar binds on the replica node.",
+                ),
+                EnvVar(
+                    "RESIDENT_SIDECAR_DIRECTLY_ROUTABLE",
+                    "false",
+                    description="Advertise the resident sidecar as directly routable.",
+                    var_type=EnvVarType.BOOL,
+                ),
+                EnvVar(
+                    "RESIDENT_RELAY_ONLY",
+                    "false",
+                    description="Mandate the reverse-relay for resident traffic.",
+                    var_type=EnvVarType.BOOL,
+                ),
             ],
         ),
         EnvSection(
@@ -496,11 +536,6 @@ STACK_ENV_SCHEMA = EnvSchema(
                     "NETWORK_PLANE_SIDECAR_URL",
                     "",
                     description="Node-local echo listener (host:port).",
-                ),
-                EnvVar(
-                    "NETWORK_PLANE_CONTROL_RELAY_URL",
-                    "",
-                    description="Root controlled-fallback relay endpoint (host:port).",
                 ),
                 EnvVar(
                     "NETWORK_PLANE_TRUST_DOMAIN",
@@ -571,6 +606,13 @@ STACK_ENV_SCHEMA = EnvSchema(
                     "NETWORK_PLANE_RELAY_BUFFER_BYTES",
                     "65536",
                     description="Bounded relay-session in-flight buffer (bytes).",
+                    var_type=EnvVarType.INT,
+                    min_value=1024,
+                ),
+                EnvVar(
+                    "NETWORK_PLANE_RELAY_WINDOW_BYTES",
+                    "65536",
+                    description="Reverse-relay per-direction in-flight window (bytes).",
                     var_type=EnvVarType.INT,
                     min_value=1024,
                 ),

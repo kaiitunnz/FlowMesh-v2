@@ -15,6 +15,7 @@ from server.orchestration.tool_dispatch import (
     FacadeCallMember,
     FacadeCompletionMode,
     FacadeTurnGroup,
+    ToolInvocationEnvelope,
 )
 from server.task.models import TaskStatus
 from shared.harness import (
@@ -207,6 +208,49 @@ def _canned_settler(runtime):
         )
 
     return _settle
+
+
+def test_redispatch_reissues_a_held_boundary_and_no_ops_once_settled() -> None:
+    # A held boundary (its handler did not settle) re-drives to the same handler with
+    # the same durable envelope; once it settles, a later re-drive neither re-runs nor
+    # releases.
+    async def run() -> None:
+        runtime = _runtime(FakeRegistry())
+        captured: list[ToolInvocationEnvelope] = []
+        runtime.set_model_settler(captured.append)  # capture without settling: held
+        workflow_id, ids = await _register(runtime, _AGENT_WF)
+        writer = ids["writer"]
+        adapter = ScriptedHarnessAdapter(
+            [
+                ScriptedStep(
+                    op="boundary",
+                    kind=BoundaryEventKind.INVOCATION,
+                    call="m0",
+                    interface="model",
+                    payload="draft",
+                ),
+                ScriptedStep(op="complete", value_from="m0"),
+            ],
+            "v1",
+        )
+        engine = runtime.orchestration_engine(workflow_id)
+        assert engine is not None
+
+        _step(runtime, adapter, writer)  # model boundary → suspend, held (no settle)
+        assert len(captured) == 1
+        wi = engine.work_item(writer)
+        assert wi is not None and wi.status is WorkItemStatus.BLOCKED
+
+        assert runtime.redispatch_episode_invocation(writer, "m0") is True
+        assert len(captured) == 2
+        assert captured[1].invocation_id == captured[0].invocation_id
+        assert captured[1].call_correlation == "m0"
+
+        runtime.settle_episode_invocation(writer, "m0", "model:draft")
+        assert runtime.redispatch_episode_invocation(writer, "m0") is False
+        assert len(captured) == 2
+
+    asyncio.run(run())
 
 
 def test_a_consumed_outcome_is_not_reinjected_across_a_query_step() -> None:

@@ -95,6 +95,7 @@ def _control(stores: ResidentStores) -> ResidentCapacityControl:
         limits=limits,
         binding_resolver=lambda task_id: None,
         settle_cb=lambda *a, **k: True,
+        redispatch_cb=lambda *a, **k: False,
         endpoint_probe=lambda serve_task_id: None,
     )
 

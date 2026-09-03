@@ -15,6 +15,7 @@ listed here is in `.env.example`.
 | `NODE_ROLE` | `root` | `root` deploys local Redis; `worker` skips it and connects to the root's Redis via the URLs below |
 | `REDIS_CONTROL_URL` | `redis://localhost:6379/0` | Redis control channel. On worker nodes, must point at the root node's reachable Redis endpoint |
 | `REDIS_TELEMETRY_URL` | `redis://localhost:6380/0` | Redis telemetry channel. On worker nodes, must point at the root node's reachable Redis endpoint |
+| `REDIS_RESIDENT_RELAY_URL` | (telemetry) | Redis endpoint for the resident relay; defaults to telemetry |
 | `DATABASE_URL` | – | Postgres connection string |
 | `RESULTS_DIR` | `./results` | Server-side results directory |
 | `SERVER_RESULTS_DIR` | `flowmesh_results` | Host-side directory/docker volume to mount at `RESULTS_DIR` in the server container |
@@ -62,16 +63,20 @@ listed here is in `.env.example`.
 | `RESIDENT_MAX_COLD_STARTS` | `1` | Concurrent cold starts |
 | `RESIDENT_COLD_START_DEADLINE_SEC` | `300` | Cold-start / admission wait budget (seconds) |
 | `RESIDENT_POLL_INTERVAL_SEC` | `1` | Admission wait poll interval (seconds) |
+| `RESIDENT_REDRIVE_BACKOFF_SEC` | `0.5` | Backoff before re-driving a held resident invocation |
+| `RESIDENT_MAX_TRANSIENT_REDRIVES` | `3` | Transient resident losses before a replica preempt |
 | `RESIDENT_SERVE_TTL_SEC` | – | Materialized replica TTL (seconds) |
 | `RESIDENT_ALLOWED_MODELS` | – | Comma-separated allowed model catalog; any if empty |
 | `RESIDENT_FORWARD_API_KEY` | – | Credential the adapter presents to a keyless replica |
 | `RESIDENT_SELECTION_STRATEGY` | `batch-aware-best-fit` | Per-family replica-selection strategy |
 | `RESIDENT_IDLE_RETAIN_SEC` | `0` | Idle retain window before teardown; 0 disables |
 | `RESIDENT_IDLE_SWEEP_INTERVAL_SEC` | `30` | Idle-teardown sweep interval (seconds) |
+| `RESIDENT_SIDECAR_BIND_HOST` | `127.0.0.1` | Host a resident sidecar binds on the replica node |
+| `RESIDENT_SIDECAR_DIRECTLY_ROUTABLE` | `false` | Advertise the resident sidecar as directly routable |
+| `RESIDENT_RELAY_ONLY` | `false` | Mandate the reverse-relay for resident traffic |
 | `NETWORK_PLANE_ENABLED` | `false` | Enable the route-discovery and relay substrate |
 | `NETWORK_PLANE_ENDPOINT_URL` | – | Advertised node-relay endpoint (`host:port`) |
 | `NETWORK_PLANE_SIDECAR_URL` | – | Node-local echo listener (`host:port`) |
-| `NETWORK_PLANE_CONTROL_RELAY_URL` | – | Root controlled-fallback relay endpoint (`host:port`) |
 | `NETWORK_PLANE_TRUST_DOMAIN` | `flowmesh` | Endpoint trust domain |
 | `NETWORK_PLANE_REACHABILITY_CLASS` | `routable` | Endpoint reachability class |
 | `NETWORK_PLANE_PROTOCOLS` | `echo` | Advertised transport protocols |
@@ -82,6 +87,7 @@ listed here is in `.env.example`.
 | `NETWORK_PLANE_CONNECT_BUDGET_SEC` | `5` | Per-candidate optimistic connect budget (seconds) |
 | `NETWORK_PLANE_ROUTE_TTL_SEC` | `30` | Resolved-route snapshot TTL (seconds) |
 | `NETWORK_PLANE_RELAY_BUFFER_BYTES` | `65536` | Bounded relay-session in-flight buffer (bytes) |
+| `NETWORK_PLANE_RELAY_WINDOW_BYTES` | `65536` | Reverse-relay per-direction in-flight window (bytes) |
 | `ENABLE_WORKER_WATCHDOG` | `true` | Worker death detection |
 | `WORKER_DEATH_GRACE_SEC` | `60` | Grace period before marking dead |
 | `WORKER_REHYDRATION_GRACE_SEC` | `120` | Extra grace for a worker's rehydrated in-flight tasks after the root restarts, before the watchdog may reclaim them |

@@ -300,13 +300,18 @@ class ResidentSnapshot(BaseModel):
 
 
 class AdmissionHandoff(BaseModel):
-    """An opaque, short-lived, claim-bound execution handoff.
+    """A claim-bound pre-``ACCEPTED`` bootstrap fence for one reserved claim.
 
-    A ``RESERVED`` claim authorizes exactly this: a trusted, claim-bound descriptor an
-    engine adapter consumes to reach the selected replica incarnation and obtain an
-    enqueue acknowledgement. It is locality-neutral — its fields are data an adapter
-    consumes, not a server-owned client — and is neither a data-plane route nor a post-
-    acceptance route authorization.
+    A ``RESERVED`` claim authorizes one bootstrap delivery that reaches the selected
+    replica incarnation's resident-facing sidecar and obtains an engine enqueue
+    acknowledgement. It binds the tenant-scoped invocation subject, the fabric ``idm-*``
+    request identity, the selected replica incarnation and listener generation, and an
+    expiry. The deputy carries the resolved route alongside this handoff; the sidecar
+    validates these bindings and trusts that only the origin deputy reaches its
+    per-replica route; it does not itself track ``token`` to reject a replayed
+    bootstrap — that credential handshake is deferred. It is neither general service
+    access nor the post-``ACCEPTED`` ``RouteAuthorization``, and it never carries the
+    raw engine endpoint or credential — the sidecar reaches its co-located engine.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -314,8 +319,38 @@ class AdmissionHandoff(BaseModel):
     token: str
     claim_id: str
     invocation_id: str
+    idempotency_key: str | None = None
     family: str
+    tenant: str | None = None
+    origin_id: str | None = None
     replica_id: str
     incarnation: int
-    endpoint: ReplicaEndpoint
-    deadline_at: str | None = None
+    listener_generation: int = 0
+    expires_at: str | None = None
+
+
+class RouteAuthorization(BaseModel):
+    """The immutable post-``ACCEPTED`` fence for one accepted-claim response stream.
+
+    Issued only after the engine enqueue acknowledgement, it authorizes the response
+    stream, cancellation, and backpressure for a single tenant-scoped invocation. It is
+    distinct from the ephemeral ``ResolvedRoute``: it stamps no path and is never
+    refreshed. The resident-facing sidecar validates it per stream and rejects it once
+    any bound fence — expiry, replica incarnation, listener generation, subject, claim,
+    invocation, or request identity — no longer holds. A permitted reissue is a fresh
+    successor claim under the same invocation, so the claim fence alone rejects a
+    superseded authorization. It carries no bearer credential; its fence fields are the
+    authority.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    claim_id: str
+    invocation_id: str
+    idempotency_key: str | None = None
+    tenant: str | None = None
+    origin_id: str | None = None
+    replica_id: str
+    incarnation: int
+    listener_generation: int = 0
+    expires_at: str | None = None
