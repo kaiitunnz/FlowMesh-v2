@@ -146,7 +146,7 @@ class ReverseRelayAttachment:
                 try:
                     count = await self.pump_once()
                 except Exception:
-                    self._logger.exception("resident relay attachment pump failed")
+                    self._logger.exception("reverse relay attachment pump failed")
                     count = -1
                 # A quiet or busy pump paces itself on the long-poll read; only a fenced
                 # pump (the lease is held elsewhere) backs off before retrying.
