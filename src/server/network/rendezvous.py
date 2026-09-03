@@ -23,10 +23,11 @@ cursor, bounding the per-node stream.
 import logging
 from collections import OrderedDict, deque
 
-from ..clients.redis import RESIDENT_RELAY_ROOT_CURSOR_KEY
 from .reverse_relay import (
+    RESIDENT_RELAY_KEYSPACE,
     BinaryRedis,
     RelayDirection,
+    RelayKeyspace,
     RelaySessionStore,
     RelayStreamStore,
     StreamEntry,
@@ -36,18 +37,19 @@ from .reverse_relay import (
 class RootCursorStore:
     """The bridge's durable read position per attached node up stream."""
 
-    def __init__(self, redis: BinaryRedis) -> None:
+    def __init__(
+        self, redis: BinaryRedis, keyspace: RelayKeyspace = RESIDENT_RELAY_KEYSPACE
+    ) -> None:
         self._redis = redis
+        self._key = keyspace.root_cursor
 
     async def get(self, node_id: str) -> str:
-        raw = await self._redis.hgetall(RESIDENT_RELAY_ROOT_CURSOR_KEY)
+        raw = await self._redis.hgetall(self._key)
         value = raw.get(node_id.encode())
         return value.decode() if value else "0"
 
     async def set(self, node_id: str, entry_id: str) -> None:
-        await self._redis.hset(
-            RESIDENT_RELAY_ROOT_CURSOR_KEY, mapping={node_id: entry_id}
-        )
+        await self._redis.hset(self._key, mapping={node_id: entry_id})
 
 
 class RootRendezvousBridge:

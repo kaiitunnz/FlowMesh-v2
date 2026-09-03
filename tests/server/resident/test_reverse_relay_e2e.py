@@ -34,7 +34,7 @@ from server.resident.sidecar_server import (
     ResidentSidecarServer,
 )
 from server.resident.state import AdmissionHandoff, ReplicaEndpoint, RouteAuthorization
-from server.supervisor.services.resident_relay_attachment import ResidentRelayAttachment
+from server.supervisor.services.reverse_relay_attachment import ReverseRelayAttachment
 from tests.server.network._relay_fakes import FakeBinaryRedis
 
 _CHUNKS = ["once ", "upon ", "a time"]
@@ -179,10 +179,10 @@ class _Harness:
             RelaySessionStore(self.redis),
             RootCursorStore(self.redis),
         )
-        self.origin_attach = ResidentRelayAttachment(
+        self.origin_attach = ReverseRelayAttachment(
             self.redis, "nde-o", self.origin, owner="o"
         )
-        self.target_attach = ResidentRelayAttachment(
+        self.target_attach = ReverseRelayAttachment(
             self.redis, "nde-t", self.target, owner="t"
         )
 

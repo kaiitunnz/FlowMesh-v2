@@ -18,14 +18,22 @@ trimmed — a stream is trimmed only at or below the cumulative-acknowledged id.
 
 import asyncio
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Protocol
 
 from ..clients.redis import (
+    RESIDENT_RELAY_ROOT_CURSOR_KEY,
+    TOOL_RELAY_ROOT_CURSOR_KEY,
+    resident_relay_down_cursor_key,
     resident_relay_down_key,
     resident_relay_session_key,
     resident_relay_up_key,
+    tool_relay_down_cursor_key,
+    tool_relay_down_key,
+    tool_relay_session_key,
+    tool_relay_up_key,
 )
 
 # A crashed origin can never trim its own session record; a generous TTL bounds the leak
@@ -33,6 +41,41 @@ from ..clients.redis import (
 _SESSION_TTL_MS = 1_800_000
 
 _logger = logging.getLogger("reverse-relay")
+
+
+@dataclass(frozen=True)
+class RelayKeyspace:
+    """The redis key builders that place one reverse-relay namespace end to end.
+
+    A keyspace isolates a namespace's per-node up/down streams, per-session routing
+    record and its lease, the root bridge's per-node read cursor, and each node
+    attachment's own down-stream cursor. Distinct keyspaces (resident ``rr:*`` and
+    external-tool ``xt:*``) never share a stream, record, lease, or cursor, so both can
+    run on one node at once.
+    """
+
+    up: Callable[[str], str]
+    down: Callable[[str], str]
+    session: Callable[[str], str]
+    root_cursor: str
+    down_cursor: Callable[[str], str]
+
+
+RESIDENT_RELAY_KEYSPACE = RelayKeyspace(
+    up=resident_relay_up_key,
+    down=resident_relay_down_key,
+    session=resident_relay_session_key,
+    root_cursor=RESIDENT_RELAY_ROOT_CURSOR_KEY,
+    down_cursor=resident_relay_down_cursor_key,
+)
+
+TOOL_RELAY_KEYSPACE = RelayKeyspace(
+    up=tool_relay_up_key,
+    down=tool_relay_down_key,
+    session=tool_relay_session_key,
+    root_cursor=TOOL_RELAY_ROOT_CURSOR_KEY,
+    down_cursor=tool_relay_down_cursor_key,
+)
 
 
 class RelayFrameKind(StrEnum):
@@ -129,29 +172,29 @@ class StreamEntry:
 class RelayStreamStore:
     """Cursor reads and acked-bounded trims over the per-node up/down streams."""
 
-    def __init__(self, redis: BinaryRedis) -> None:
+    def __init__(
+        self, redis: BinaryRedis, keyspace: RelayKeyspace = RESIDENT_RELAY_KEYSPACE
+    ) -> None:
         self._redis = redis
+        self._ks = keyspace
 
     async def publish_up(self, node_id: str, frame: RelayFrame) -> str:
-        key = resident_relay_up_key(node_id)
+        key = self._ks.up(node_id)
         return (await self._redis.xadd(key, frame.to_fields())).decode()
 
     async def publish_down(self, node_id: str, frame: RelayFrame) -> str:
-        key = resident_relay_down_key(node_id)
+        key = self._ks.down(node_id)
         return (await self._redis.xadd(key, frame.to_fields())).decode()
 
     async def read_up(
         self, node_id: str, after_id: str, count: int, block_ms: int | None
     ) -> tuple[list[StreamEntry], str | None]:
-        key = resident_relay_up_key(node_id)
-        return await self._read(key, after_id, count, block_ms)
+        return await self._read(self._ks.up(node_id), after_id, count, block_ms)
 
     async def read_down(
         self, node_id: str, after_id: str, count: int, block_ms: int | None
     ) -> tuple[list[StreamEntry], str | None]:
-        return await self._read(
-            resident_relay_down_key(node_id), after_id, count, block_ms
-        )
+        return await self._read(self._ks.down(node_id), after_id, count, block_ms)
 
     async def _read(
         self, key: str, after_id: str, count: int, block_ms: int | None
@@ -184,9 +227,9 @@ class RelayStreamStore:
         """Trim at or below ``min_id`` (the recorded cursor, the last-forwarded id) —
         never above it, so a frame past the cursor is never discarded."""
         key = (
-            resident_relay_up_key(node_id)
+            self._ks.up(node_id)
             if direction is RelayDirection.ORIGIN_TO_TARGET
-            else resident_relay_down_key(node_id)
+            else self._ks.down(node_id)
         )
         await self._redis.xtrim(key, minid=min_id, approximate=False)
 
@@ -194,23 +237,26 @@ class RelayStreamStore:
 class RelaySessionStore:
     """The durable per-session routing record: origin/target nodes and sidecar route."""
 
-    def __init__(self, redis: BinaryRedis) -> None:
+    def __init__(
+        self, redis: BinaryRedis, keyspace: RelayKeyspace = RESIDENT_RELAY_KEYSPACE
+    ) -> None:
         self._redis = redis
+        self._ks = keyspace
 
     async def load(self, session_id: str) -> dict[str, str]:
-        raw = await self._redis.hgetall(resident_relay_session_key(session_id))
+        raw = await self._redis.hgetall(self._ks.session(session_id))
         return {k.decode(): v.decode() for k, v in raw.items()}
 
     async def update(self, session_id: str, **fields: str | int) -> None:
         mapping = {k: str(v) for k, v in fields.items()}
-        key = resident_relay_session_key(session_id)
+        key = self._ks.session(session_id)
         await self._redis.hset(key, mapping=mapping)
         # Bound the record against an origin crash that can never reap it; the delivery
         # path deletes it well within the TTL on every terminal.
         await self._redis.pexpire(key, _SESSION_TTL_MS)
 
     async def delete(self, session_id: str) -> None:
-        await self._redis.delete(resident_relay_session_key(session_id))
+        await self._redis.delete(self._ks.session(session_id))
 
 
 # Owner-fenced compare-and-act: refresh or drop the lease only while this owner still
@@ -235,13 +281,18 @@ class RelayLease:
     lease is transport-recovery ownership only and never touches admission credit.
     """
 
-    def __init__(self, redis: BinaryRedis, ttl_ms: int = 15000) -> None:
+    def __init__(
+        self,
+        redis: BinaryRedis,
+        ttl_ms: int = 15000,
+        keyspace: RelayKeyspace = RESIDENT_RELAY_KEYSPACE,
+    ) -> None:
         self._redis = redis
         self._ttl = ttl_ms
+        self._ks = keyspace
 
-    @staticmethod
-    def _key(session_id: str, leg: str) -> str:
-        return f"{resident_relay_session_key(session_id)}:lease:{leg}"
+    def _key(self, session_id: str, leg: str) -> str:
+        return f"{self._ks.session(session_id)}:lease:{leg}"
 
     async def acquire(self, session_id: str, leg: str, owner: str) -> bool:
         got = await self._redis.set(
@@ -317,11 +368,14 @@ class DirectionWindow:
 
 
 __all__ = [
+    "RESIDENT_RELAY_KEYSPACE",
+    "TOOL_RELAY_KEYSPACE",
     "BinaryRedis",
     "DirectionWindow",
     "RelayDirection",
     "RelayFrame",
     "RelayFrameKind",
+    "RelayKeyspace",
     "RelayLease",
     "RelaySessionStore",
     "RelayStreamStore",

@@ -309,7 +309,7 @@ def _run_supervisor(
     from .services.relay_service import RelayService
     from .services.relay_uplink import RelayUplinkService
     from .services.resident_deputy import ResidentDeputyService
-    from .services.resident_relay_attachment import ResidentRelayAttachment
+    from .services.reverse_relay_attachment import ReverseRelayAttachment
     from .services.task_listener import TaskListener
 
     # --- logging (child has its own logger) ---
@@ -399,7 +399,7 @@ def _run_supervisor(
         capacity_change_callback=lifecycle.heartbeat_now,
     )
     resident_deputy: ResidentDeputyService | None = None
-    resident_attachment: ResidentRelayAttachment | None = None
+    resident_attachment: ReverseRelayAttachment | None = None
     if network_cfg.enabled:
         relay_redis = cast(
             BinaryRedis,
@@ -423,7 +423,7 @@ def _run_supervisor(
             relay_window_bytes=network_cfg.relay_window_bytes,
             logger=logger,
         )
-        resident_attachment = ResidentRelayAttachment(
+        resident_attachment = ReverseRelayAttachment(
             relay_redis,
             node_id,
             relay_endpoint,

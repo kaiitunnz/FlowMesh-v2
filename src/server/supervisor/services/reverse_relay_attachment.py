@@ -1,13 +1,15 @@
 """The per-node reverse-relay attachment that runs on the supervisor.
 
 A node attaches outward to the root once — a standing consumer of its own ``:down``
-stream behind an ownership lease and a durable cursor — and multiplexes every resident
-relay session over it. The attachment neither dials a peer nor accepts an inbound
-connection: it reads frames the root bridged to this node and dispatches each to a local
-delivery handler (the co-located sidecar for a session this node targets, or the waiting
-deputy for one this node originated), and it publishes response frames to its ``:up``
-stream for the root to bridge onward. Recovery is the durable cursor and lease, not a
-node command; a restart reclaims the lease and resumes from the stored position.
+stream behind an ownership lease and a durable cursor — and multiplexes every relay
+session in one namespace over it. The attachment neither dials a peer nor accepts an
+inbound connection: it reads frames the root bridged to this node and dispatches each to
+a local delivery handler (the co-located sidecar for a session this node targets, or the
+waiting deputy for one this node originated), and it publishes response frames to its
+``:up`` stream for the root to bridge onward. Recovery is the durable cursor and lease,
+not a node command; a restart reclaims the lease and resumes from the stored position.
+One instance serves one namespace; a node running both the resident (``rr:*``) and the
+external-tool (``xt:*``) namespace runs one attachment per keyspace.
 """
 
 import asyncio
@@ -15,9 +17,11 @@ import logging
 from typing import Protocol
 
 from ...network.reverse_relay import (
+    RESIDENT_RELAY_KEYSPACE,
     BinaryRedis,
     RelayDirection,
     RelayFrame,
+    RelayKeyspace,
     RelayLease,
     RelayStreamStore,
 )
@@ -32,9 +36,11 @@ class LocalDelivery(Protocol):
 class _DownCursor:
     """The attachment's durable read position for its own down stream."""
 
-    def __init__(self, redis: BinaryRedis, node_id: str) -> None:
+    def __init__(
+        self, redis: BinaryRedis, node_id: str, keyspace: RelayKeyspace
+    ) -> None:
         self._redis = redis
-        self._key = f"rr:node:{node_id}:down_cursor"
+        self._key = keyspace.down_cursor(node_id)
 
     async def get(self) -> str:
         raw = await self._redis.hgetall(self._key)
@@ -45,8 +51,8 @@ class _DownCursor:
         await self._redis.hset(self._key, mapping={"id": entry_id})
 
 
-class ResidentRelayAttachment:
-    """A node's standing outbound attachment consumer over its reverse-relay streams."""
+class ReverseRelayAttachment:
+    """A node's standing outbound attachment consumer over one namespace's streams."""
 
     _LEG = "down"
 
@@ -57,6 +63,7 @@ class ResidentRelayAttachment:
         delivery: LocalDelivery,
         *,
         owner: str,
+        keyspace: RelayKeyspace = RESIDENT_RELAY_KEYSPACE,
         batch: int = 64,
         poll_ms: int = 1000,
         lease_ttl_ms: int = 15000,
@@ -67,10 +74,10 @@ class ResidentRelayAttachment:
         self._owner = owner
         self._batch = batch
         self._poll_ms = poll_ms
-        self._streams = RelayStreamStore(redis)
-        self._lease = RelayLease(redis, ttl_ms=lease_ttl_ms)
-        self._cursor = _DownCursor(redis, node_id)
-        self._logger = logger or logging.getLogger("resident-relay-attachment")
+        self._streams = RelayStreamStore(redis, keyspace)
+        self._lease = RelayLease(redis, ttl_ms=lease_ttl_ms, keyspace=keyspace)
+        self._cursor = _DownCursor(redis, node_id, keyspace)
+        self._logger = logger or logging.getLogger("reverse-relay-attachment")
         self._task: asyncio.Task[None] | None = None
 
     async def send_up(self, frame: RelayFrame) -> None:
@@ -149,4 +156,4 @@ class ResidentRelayAttachment:
             return
 
 
-__all__ = ["LocalDelivery", "ResidentRelayAttachment"]
+__all__ = ["LocalDelivery", "ReverseRelayAttachment"]
