@@ -479,7 +479,9 @@ class WebSearchConfig:
     the deployment credential a keyed provider needs. ``max_calls`` bounds one episode's
     searches; ``result_char_cap`` bounds the injected result size. ``egress_locality``
     selects where an approved search egresses (``server_relay`` default or
-    ``worker_sidecar``).
+    ``worker_sidecar``). With ``worker_sidecar`` and ``sidecar_remote``, the operation
+    is carried to a remote sidecar on ``sidecar_node`` (empty selects a worker) bound on
+    ``sidecar_route``, offered a direct dial only when ``sidecar_directly_routable``.
     """
 
     provider: str = "duckduckgo"
@@ -490,6 +492,10 @@ class WebSearchConfig:
     max_calls: int = 8
     max_parallel: int = 4
     egress_locality: str = "server_relay"
+    sidecar_remote: bool = False
+    sidecar_node: str | None = None
+    sidecar_route: str = "127.0.0.1:0"
+    sidecar_directly_routable: bool = False
 
     @classmethod
     def from_env(cls) -> "WebSearchConfig":
@@ -505,6 +511,14 @@ class WebSearchConfig:
             egress_locality=(os.getenv(f"{prefix}EGRESS_LOCALITY") or "server_relay")
             .strip()
             .lower(),
+            sidecar_remote=parse_bool_env(f"{prefix}SIDECAR_REMOTE", False),
+            sidecar_node=_env_or_none(f"{prefix}SIDECAR_NODE"),
+            sidecar_route=(
+                os.getenv(f"{prefix}SIDECAR_ROUTE") or "127.0.0.1:0"
+            ).strip(),
+            sidecar_directly_routable=parse_bool_env(
+                f"{prefix}SIDECAR_DIRECTLY_ROUTABLE", False
+            ),
         )
 
 

@@ -113,3 +113,11 @@ search; only where the approved operation egresses is a deployment policy. `WEB_
 selects `server_relay` (the default in-server provider call) or `worker_sidecar` (a
 fabric sidecar surface that egresses under the server-issued operation envelope). Either
 locality yields the identical search result.
+
+With `worker_sidecar` and `WEB_SEARCH_SIDECAR_REMOTE`, the approved operation is carried
+over the network plane to a sidecar bound in a remote worker's supervisor process, so the
+provider call happens off the server; the carriage adds no admission credit and moves only
+the operation and its result. The remote sidecar validates a short-lived operation fence
+(request digest, provider and target audience, expiry, bounds) before any egress and reads
+its keyed provider credential only from its own local environment — no credential travels
+in a workflow, envelope, frame, message, or log.

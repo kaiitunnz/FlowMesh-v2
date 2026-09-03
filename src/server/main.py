@@ -21,6 +21,8 @@ if __name__ == "__main__" and __package__ is None:
     sys.modules.setdefault("server.main", sys.modules[__name__])
 
 from shared._version import FLOWMESH_RELEASE_VERSION
+from shared.schemas.command import CommandMessage, CommandType
+from shared.schemas.network import NetworkEndpointAdvertisement, ReachabilityClass
 
 from .auth import reconcile_resources, resolve_system_principal
 from .clients import RedisClient
@@ -29,8 +31,13 @@ from .config import NodeRole, ServerConfig
 from .dispatcher.factory import create_dispatcher
 from .hooks import register
 from .network.rendezvous import RootCursorStore, RootRendezvousBridge
-from .network.reverse_relay import BinaryRedis, RelaySessionStore, RelayStreamStore
-from .network.service import NetworkPlane
+from .network.reverse_relay import (
+    TOOL_RELAY_KEYSPACE,
+    BinaryRedis,
+    RelaySessionStore,
+    RelayStreamStore,
+)
+from .network.service import NetworkPlane, stamp_endpoint
 from .orchestration.tool_dispatch import ToolInvocationEnvelope
 from .registries import WorkerRegistry, WorkflowRegistry
 from .registries.node import NodeRegistry
@@ -50,9 +57,21 @@ from .services.model_secret_vault import ModelSecretVault
 from .services.monitoring import EventMonitor
 from .services.port_forward import PortForwardService
 from .services.ssh_audit import SshAuditService
+from .services.tool_carriage import (
+    RemoteSidecarCarriage,
+    ToolEgressOriginDeputy,
+    ToolTargetRegistry,
+)
+from .services.tool_egress import EgressLocality
+from .services.tool_relay_delivery import ToolRelayEndpoint
 from .services.watchdog import WorkerWatchdog
-from .startup import rehydrate_root_state, start_resident_bridge_pump
+from .startup import (
+    rehydrate_root_state,
+    start_resident_bridge_pump,
+    start_tool_bridge_pump,
+)
 from .supervisor import WorkerSupervisor
+from .supervisor.services.reverse_relay_attachment import ReverseRelayAttachment
 from .task.runtime import TaskRuntime
 from .utils.logging import get_logger
 
@@ -138,6 +157,19 @@ RESIDENT_REGISTRY = None
 NETWORK_PLANE = None
 RESIDENT_BRIDGE = None
 RESIDENT_BRIDGE_TASK = None
+TOOL_BRIDGE = None
+TOOL_INGRESS_ATTACH = None
+TOOL_INGRESS_NODE_ID = None
+TOOL_TARGET_REGISTRY = None
+REMOTE_TOOL_CARRIAGE = None
+
+
+def _reachability_class(value: str) -> ReachabilityClass:
+    try:
+        return ReachabilityClass(value)
+    except ValueError:
+        return ReachabilityClass.ROUTABLE
+
 
 if IS_ROOT_NODE:
     WORKFLOW_REGISTRY = WorkflowRegistry(REDIS_CLIENT)
@@ -164,11 +196,6 @@ if IS_ROOT_NODE:
     def _settle_tool(task_id: str, call_correlation: str, value: str) -> None:
         assert RUNTIME is not None
         RUNTIME.settle_episode_invocation(task_id, call_correlation, value)
-
-    FABRIC_TOOL_BROKER = FabricToolBroker.build(
-        config.orchestration.web_search, _settle_tool, logger=logger
-    )
-    RUNTIME.set_tool_broker(FABRIC_TOOL_BROKER.submit)
 
     def _resolve_gateway_binding(task_id: str) -> ResolvedGatewayBinding | None:
         assert RUNTIME is not None
@@ -224,6 +251,104 @@ if IS_ROOT_NODE:
             RootCursorStore(_relay_redis),
             logger=logger,
         )
+
+    _ws_cfg = config.orchestration.web_search
+    if (
+        config.orchestration.network.enabled
+        and _ws_cfg.sidecar_remote
+        and _ws_cfg.egress_locality == EgressLocality.WORKER_SIDECAR.value
+    ):
+        _net_cfg = config.orchestration.network
+        TOOL_BRIDGE = RootRendezvousBridge(
+            RelayStreamStore(_relay_redis, TOOL_RELAY_KEYSPACE),
+            RelaySessionStore(_relay_redis, TOOL_RELAY_KEYSPACE),
+            RootCursorStore(_relay_redis, TOOL_RELAY_KEYSPACE),
+            logger=logger,
+        )
+        TOOL_INGRESS_NODE_ID = f"xt-ingress-{config.identity.alias or 'root'}"
+        _tool_origin_endpoint = ToolRelayEndpoint(
+            _relay_redis, TOOL_INGRESS_NODE_ID, logger=logger
+        )
+        TOOL_INGRESS_ATTACH = ReverseRelayAttachment(
+            _relay_redis,
+            TOOL_INGRESS_NODE_ID,
+            _tool_origin_endpoint,
+            owner=f"{TOOL_INGRESS_NODE_ID}:{os.getpid()}",
+            keyspace=TOOL_RELAY_KEYSPACE,
+            logger=logger,
+        )
+        _ingress_endpoint = NetworkEndpointAdvertisement(
+            endpoint_id=TOOL_INGRESS_NODE_ID,
+            node_id=TOOL_INGRESS_NODE_ID,
+            url="",
+            generation=1,
+            trust_domain=_net_cfg.trust_domain,
+            reachability_class=_reachability_class(_net_cfg.reachability_class),
+            relay_attachment_id=f"xt-{TOOL_INGRESS_NODE_ID}",
+        )
+
+        async def _tool_exec_node_cmd(
+            node_id: str, command: CommandType, payload: dict[str, object]
+        ) -> dict[str, object]:
+            resp = await NODE_REGISTRY.exec_node_cmd(
+                node_id,
+                CommandMessage(command=command, payload=payload),
+                timeout=_net_cfg.connect_budget_sec + _ws_cfg.timeout_sec + 10.0,
+            )
+            if not resp.success:
+                raise RuntimeError(resp.message or "tool node command failed")
+            return resp.data or {}
+
+        async def _select_tool_target_node() -> str | None:
+            if _ws_cfg.sidecar_node:
+                return _ws_cfg.sidecar_node
+            for node in await NODE_REGISTRY.list_nodes_async():
+                if node.network_endpoint is not None:
+                    return node.id
+            return None
+
+        async def _tool_target_endpoint(
+            node_id: str,
+        ) -> NetworkEndpointAdvertisement | None:
+            node = await NODE_REGISTRY.get_node_async(node_id)
+            if node is None or node.network_endpoint is None:
+                return None
+            return stamp_endpoint(
+                node.network_endpoint, node.id, attachment_prefix="xt"
+            )
+
+        TOOL_TARGET_REGISTRY = ToolTargetRegistry(
+            exec_node_cmd=_tool_exec_node_cmd,
+            select_node=_select_tool_target_node,
+            sidecar_route=_ws_cfg.sidecar_route,
+            provider=_ws_cfg.provider,
+            interfaces=("search/v1",),
+            directly_routable=_ws_cfg.sidecar_directly_routable,
+            logger=logger,
+        )
+        REMOTE_TOOL_CARRIAGE = RemoteSidecarCarriage(
+            origin_deputy=ToolEgressOriginDeputy(
+                relay_endpoint=_tool_origin_endpoint,
+                connect_budget_sec=_net_cfg.connect_budget_sec,
+                logger=logger,
+            ),
+            registry=TOOL_TARGET_REGISTRY,
+            endpoint_provider=_tool_target_endpoint,
+            ingress_endpoint=_ingress_endpoint,
+            provider=_ws_cfg.provider,
+            deadline_sec=_ws_cfg.timeout_sec + 10.0,
+            route_ttl_sec=_net_cfg.route_ttl_sec,
+            connect_budget_sec=_net_cfg.connect_budget_sec,
+            logger=logger,
+        )
+
+    FABRIC_TOOL_BROKER = FabricToolBroker.build(
+        config.orchestration.web_search,
+        _settle_tool,
+        logger=logger,
+        worker_carriage=REMOTE_TOOL_CARRIAGE,
+    )
+    RUNTIME.set_tool_broker(FABRIC_TOOL_BROKER.submit)
 
     if (
         RESIDENT_CONTROL is not None
@@ -483,6 +608,19 @@ async def _lifespan(_: FastAPI):
                 app.state.resident_bridge_task = start_resident_bridge_pump(
                     RESIDENT_BRIDGE, NODE_REGISTRY, logger
                 )
+            if (
+                TOOL_BRIDGE is not None
+                and TOOL_INGRESS_ATTACH is not None
+                and REMOTE_TOOL_CARRIAGE is not None
+                and TOOL_INGRESS_NODE_ID is not None
+                and NODE_REGISTRY is not None
+            ):
+                loop = asyncio.get_running_loop()
+                REMOTE_TOOL_CARRIAGE.bind_loop(loop)
+                TOOL_INGRESS_ATTACH.start(loop)
+                app.state.tool_bridge_task = start_tool_bridge_pump(
+                    TOOL_BRIDGE, NODE_REGISTRY, TOOL_INGRESS_NODE_ID, logger
+                )
             if PORT_FORWARD_SERVICE is not None:
                 await PORT_FORWARD_SERVICE.start()
             _start_root_threads()
@@ -531,6 +669,17 @@ async def _lifespan(_: FastAPI):
                     await _bridge_task
                 except (asyncio.CancelledError, Exception):
                     pass
+            _tool_bridge_task = getattr(app.state, "tool_bridge_task", None)
+            if _tool_bridge_task is not None:
+                _tool_bridge_task.cancel()
+                try:
+                    await _tool_bridge_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            if TOOL_INGRESS_ATTACH is not None:
+                await TOOL_INGRESS_ATTACH.stop()
+            if TOOL_TARGET_REGISTRY is not None:
+                await TOOL_TARGET_REGISTRY.close()
             if RESIDENT_CONTROL is not None:
                 RESIDENT_CONTROL.shutdown()
             if AGENT_MODEL_GATEWAY is not None:
@@ -574,6 +723,7 @@ app.state.resident_control = RESIDENT_CONTROL
 app.state.network_plane = NETWORK_PLANE
 # Started in lifespan on the root node when the resident relay bridge is enabled.
 app.state.resident_bridge_task = None
+app.state.tool_bridge_task = None
 
 # Routers — shared
 app.include_router(health.router)

@@ -55,3 +55,31 @@ def start_resident_bridge_pump(
             await asyncio.sleep(0.05)
 
     return asyncio.create_task(_pump())
+
+
+def start_tool_bridge_pump(
+    bridge: RootRendezvousBridge,
+    nodes: NodeRegistry,
+    ingress_node_id: str,
+    logger: logging.Logger,
+) -> asyncio.Task[None]:
+    """Start the external-tool root bridge's pump loop.
+
+    Sweeps every attached node plus the in-server ingress edge, which is not a
+    registered node, so its origin-to-target frames forward like any attached node's.
+    """
+
+    async def _pump() -> None:
+        while True:
+            try:
+                node_ids = [node.id for node in await nodes.list_nodes_async()]
+                node_ids.append(ingress_node_id)
+                for node_id in node_ids:
+                    await bridge.pump_node(node_id)
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                logger.exception("tool relay bridge pump failed")
+            await asyncio.sleep(0.05)
+
+    return asyncio.create_task(_pump())
