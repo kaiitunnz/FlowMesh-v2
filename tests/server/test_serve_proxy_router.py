@@ -238,7 +238,7 @@ def _make_record(
     record.status = status
     record.task_type = task_type
     record.assigned_worker = assigned_worker
-    record.task.spec.resident = False
+    record.resident = False
     record.latest_update = (
         latest_update
         if latest_update is not None

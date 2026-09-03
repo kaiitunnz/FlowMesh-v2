@@ -58,11 +58,19 @@ class _Entry:
 class _FakeRuntime:
     def __init__(self) -> None:
         self.register_call: tuple[str, str, str, str] | None = None
+        self.register_resident: bool | None = None
 
     async def register(
-        self, owner_id: str, org_id: str, payload: str, format: str
+        self,
+        owner_id: str,
+        org_id: str,
+        payload: str,
+        format: str,
+        *,
+        resident: bool = False,
     ) -> tuple[str, list[_Entry]]:
         self.register_call = (owner_id, org_id, payload, format)
+        self.register_resident = resident
         return "wfl-resident", [_Entry("tsk-resident")]
 
 
@@ -132,6 +140,9 @@ def test_gpu_serve_substrate_requests_a_gpu_replica() -> None:
     assert spec["taskType"] == "serve"
     assert spec["resources"]["hardware"]["gpu"]["count"] == 1
     assert spec["ttlSeconds"] == 600
+    # The resident marker rides the register call, not the user-facing spec.
+    assert runtime.register_resident is True
+    assert "resident" not in spec
 
 
 def test_materialization_survives_without_registered_registrars() -> None:

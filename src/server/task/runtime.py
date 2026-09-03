@@ -249,7 +249,13 @@ class TaskRuntime:
         return secret_refs
 
     async def register(
-        self, owner_id: str, org_id: str, payload: str, format: str = "native"
+        self,
+        owner_id: str,
+        org_id: str,
+        payload: str,
+        format: str = "native",
+        *,
+        resident: bool = False,
     ) -> tuple[str, list[TaskParsingResult]]:
         parsed_workflow = parse_workflow(payload, format)
         specs = parsed_workflow.tasks
@@ -325,6 +331,7 @@ class TaskRuntime:
                     selected_worker=selected_worker,
                     task_type=task_type,
                     category=category,
+                    resident=resident,
                 )
                 task_records.append(record)
                 record.last_queue_ts = record.submitted_ts

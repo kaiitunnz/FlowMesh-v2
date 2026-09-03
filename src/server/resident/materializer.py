@@ -47,7 +47,6 @@ async def materialize_resident_replica(
             }
         },
         "accessMode": config.access_mode,
-        "resident": True,
     }
     if config.serve_ttl_sec:
         spec["ttlSeconds"] = config.serve_ttl_sec
@@ -58,7 +57,11 @@ async def materialize_resident_replica(
         "spec": spec,
     }
     workflow_id, entries = await runtime.register(
-        owner.principal_id, owner.org_id, json.dumps(payload), format="native"
+        owner.principal_id,
+        owner.org_id,
+        json.dumps(payload),
+        format="native",
+        resident=True,
     )
     await register_resource(
         owner,

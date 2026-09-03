@@ -10,17 +10,21 @@ from typing import cast
 
 import pytest
 from fastapi import HTTPException
+from pydantic import ValidationError
 
 from server.routers.v1 import serve as serve_router
 from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime
 from shared.tasks import TaskType
+from shared.tasks.specs.dev_model import DevModelSpecStrict
+from shared.tasks.specs.serve import ServeSpecStrict
 
 
 def _runtime(*, resident: bool) -> TaskRuntime:
     record = SimpleNamespace(
         task_type=TaskType.SERVE,
-        task=SimpleNamespace(spec=SimpleNamespace(resident=resident)),
+        resident=resident,
+        task=SimpleNamespace(spec=SimpleNamespace()),
         status=TaskStatus.DISPATCHED,
         latest_update={
             "serve": {
@@ -43,3 +47,14 @@ def test_nonresident_proxy_serve_task_still_resolves() -> None:
         _runtime(resident=False), "tsk-1"
     )
     assert (host, port) == ("127.0.0.1", 9001)
+
+
+@pytest.mark.parametrize(
+    ("spec_cls", "task_type"),
+    [(ServeSpecStrict, TaskType.SERVE), (DevModelSpecStrict, TaskType.DEV_MODEL)],
+)
+def test_a_user_cannot_declare_a_task_resident(spec_cls, task_type) -> None:
+    # `resident` is a server-internal marker set only by the materializer, not a
+    # user-facing field: the strict spec rejects it rather than silently serving one.
+    with pytest.raises(ValidationError):
+        spec_cls(taskType=task_type, resident=True)

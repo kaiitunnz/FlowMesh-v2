@@ -13,7 +13,6 @@ class ServeSpecStrict(ModelSpecStrict):
     accessMode: Literal["direct", "forward", "proxy"] | None = None
     port: Annotated[int, Field(ge=1, le=65535)] | None = None
     apiKey: str | None = Field(default=None, min_length=1)
-    resident: bool = False
 
     def validate_dispatchable(self) -> None:
         _validate_serve_dispatchable(self)
@@ -26,7 +25,6 @@ class ServeSpecTemplate(ModelSpecTemplate):
     accessMode: Literal["direct", "forward", "proxy"] | None = None
     port: Annotated[int, Field(ge=1, le=65535)] | None = None
     apiKey: str | None = Field(default=None, min_length=1)
-    resident: bool = False
 
     def validate_dispatchable(self) -> None:
         _validate_serve_dispatchable(self)

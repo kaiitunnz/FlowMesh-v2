@@ -80,6 +80,10 @@ class TaskRecord(BaseModel):
     status: str = Field(default=TaskStatus.PENDING, description="Task status.")
     task_type: str | None = Field(default=None, description="Task type.")
     category: str | None = Field(default=None, description="Task category.")
+    resident: bool = Field(
+        default=False,
+        description="Server-internal: backs resident capacity; not user-settable.",
+    )
     assigned_worker: str | None = Field(
         default=None, description="Assigned worker identifier."
     )
