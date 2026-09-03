@@ -153,3 +153,27 @@ def build_search_provider(config: "WebSearchConfig") -> SearchProvider:
             raise ValueError("the serper web-search provider needs WEB_SEARCH_API_KEY")
         return SerperProvider(config.api_key)
     raise ValueError(f"unknown web-search provider {config.provider!r}")
+
+
+class LazySearchProvider:
+    """Builds the configured provider on first use.
+
+    Defers ``build_search_provider`` — and a keyed provider's missing-key error — to the
+    first search, so a deployment that egresses only off-server (remote worker-sidecar
+    egress) need not carry the provider credential on the server or fail startup for its
+    absence. The credential still lives only in the environment of whichever process
+    actually egresses.
+    """
+
+    def __init__(self, config: "WebSearchConfig") -> None:
+        self._config = config
+        self._provider: SearchProvider | None = None
+
+    def search(
+        self, query: str, *, max_results: int, timeout_sec: float
+    ) -> list[SearchResult]:
+        if self._provider is None:
+            self._provider = build_search_provider(self._config)
+        return self._provider.search(
+            query, max_results=max_results, timeout_sec=timeout_sec
+        )

@@ -190,9 +190,12 @@ class ToolRelayEndpoint:
                 payload=operation_payload,
             ),
         )
-        raw = await self._recv(session_id, self._budget)
-        await self.close_origin(session_id)
-        return raw
+        try:
+            return await self._recv(session_id, self._budget)
+        finally:
+            # Reap the origin state even when the caller cancels this coroutine on its
+            # outer timeout, so a cancelled exchange leaves no in-memory session behind.
+            await self.close_origin(session_id)
 
     async def _recv(self, session_id: str, timeout: float) -> bytes | None:
         queue = self._origin.get(session_id)

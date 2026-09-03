@@ -24,7 +24,7 @@ from ..orchestration.tool_dispatch import (
     ToolOutcome,
     ToolOutcomeStatus,
 )
-from .search_providers import SearchProvider, build_search_provider
+from .search_providers import LazySearchProvider, SearchProvider
 from .tool_egress import (
     ColocatedSidecarCarriage,
     EgressLocalityPolicy,
@@ -77,10 +77,12 @@ class FabricToolBroker:
         The server relay egresses in-server. The worker-sidecar locality uses
         ``worker_carriage`` when a remote carriage is configured — real off-server
         egress to a worker sidecar — otherwise a co-located sidecar sharing the server's
-        provider, so no credential crosses a wire in-process.
+        provider, so no credential crosses a wire in-process. The provider is built
+        lazily, so a deployment that only egresses off-server never constructs it and
+        need not carry its credential on the server.
         """
         log = logger or logging.getLogger("fabric-tool-broker")
-        prov = provider or build_search_provider(config)
+        prov: SearchProvider = provider or LazySearchProvider(config)
         server = ServerRelayAdapter(ExternalToolSidecar(prov, log))
         carriage = worker_carriage or ColocatedSidecarCarriage(
             ExternalToolSidecar(prov, log)

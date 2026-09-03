@@ -93,6 +93,7 @@ class ToolEgressOriginDeputy:
         invocation_id: str,
         idm: str,
         operation_payload: bytes,
+        read_deadline_sec: float,
     ) -> tuple[bytes | None, list[tuple[Transport, RouteObservationOutcome]]]:
         observations: list[tuple[Transport, RouteObservationOutcome]] = []
         for candidate in route.candidates:
@@ -109,7 +110,7 @@ class ToolEgressOriginDeputy:
                 )
                 return reply, observations
             reply, outcome, ambiguous = await self._forward_dial(
-                candidate, operation_payload
+                candidate, operation_payload, read_deadline_sec
             )
             observations.append((candidate.transport, outcome))
             if reply is not None:
@@ -119,8 +120,11 @@ class ToolEgressOriginDeputy:
         return None, observations
 
     async def _forward_dial(
-        self, candidate: RouteCandidate, payload: bytes
+        self, candidate: RouteCandidate, payload: bytes, read_deadline_sec: float
     ) -> tuple[bytes | None, RouteObservationOutcome, bool]:
+        # The connect is bounded by the connect budget; the reply read is bounded by the
+        # operation deadline, since the sidecar answers only after its provider egress —
+        # reading under the connect budget would time out a slow-but-healthy search.
         try:
             reader, writer = await asyncio.wait_for(
                 self._connect(candidate), self._budget
@@ -129,7 +133,9 @@ class ToolEgressOriginDeputy:
             return None, _classify(exc), False
         try:
             await netwire.write_frame(writer, payload)
-            reply = await asyncio.wait_for(netwire.read_frame(reader), self._budget)
+            reply = await asyncio.wait_for(
+                netwire.read_frame(reader), read_deadline_sec
+            )
             return reply, RouteObservationOutcome.VERIFIED, False
         except (
             TimeoutError,
@@ -139,8 +145,10 @@ class ToolEgressOriginDeputy:
             ValueError,
         ):
             # The operation is already on the wire: an ambiguous delivery, not a
-            # pre-send failure, so stop rather than re-drive to another path.
-            return None, RouteObservationOutcome.TIMEOUT, True
+            # pre-send failure, so stop rather than re-drive to another path. The
+            # connect succeeded, so a slow or lost reply is application latency,
+            # classified non-demoting so provider slowness never demotes the path.
+            return None, RouteObservationOutcome.APPLICATION_ERROR, True
         finally:
             await _close(writer)
 
@@ -215,6 +223,16 @@ class ToolTargetRegistry:
             )
             return self._target
 
+    async def invalidate(self, target: NonresidentSidecarTarget) -> None:
+        """Drop the cached target after a lost delivery so the next op rebinds.
+
+        Only clears the still-current target, so a concurrent op that already rebound a
+        fresh target is not reset; a bind bumps the generation, fencing the stale one.
+        """
+        async with self._lock:
+            if self._target is not None and self._target.target_id == target.target_id:
+                self._target = None
+
     async def close(self) -> None:
         target = self._target
         self._target = None
@@ -277,7 +295,11 @@ class RemoteSidecarCarriage:
             self._deliver(envelope, request), loop
         )
         try:
-            return future.result(timeout=envelope.timeout_sec + self._budget + 10.0)
+            # Cover a connect on each of up to three serial candidates plus one full
+            # provider egress, so a slow search reached only after a failed forward dial
+            # is not cut off by the outer bound.
+            outer = envelope.timeout_sec + self._budget * 3 + 10.0
+            return future.result(timeout=outer)
         except FuturesTimeoutError:
             # The operation outran its bound: cancel the main-loop coroutine so it does
             # not leak, and settle a typed outcome; a re-drive reuses the same idm-*.
@@ -330,8 +352,15 @@ class RemoteSidecarCarriage:
             invocation_id=idm,
             idm=idm,
             operation_payload=payload,
+            read_deadline_sec=envelope.timeout_sec + self._budget,
         )
         self._record(origin, target, observations)
+        if reply is None:
+            # A lost delivery may mean the bound target node is gone; drop the cached
+            # target so the next operation rebinds (possibly on a live node) rather than
+            # resolving forever to a dead one. A fence reject keeps the target — it is
+            # alive and answered.
+            await self._registry.invalidate(target)
         return self._decode(reply)
 
     def _fence(
