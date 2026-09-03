@@ -63,7 +63,7 @@ class _Session:
     writer: asyncio.StreamWriter
     transport: Transport
     reaper: asyncio.TimerHandle | None = None
-    stream_task: "asyncio.Task[StreamResult] | None" = None
+    stream_task: asyncio.Task[StreamResult] | None = None
 
 
 class ResidentInvocationDeputy:
