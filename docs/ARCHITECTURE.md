@@ -63,7 +63,8 @@ keys (the fabric-assigned dedupe authority for a mediated boundary). Resident-ca
 control adds `scl-` service claims, `rpl-` replica incarnations, and `lse-` allocation
 leases. `msk-` is an unguessable ref for a workflow's vaulted model credential and `hnd-`
 an unguessable claim-bound admission handoff token. The network plane adds `rog-` route
-origins and `rly-` relay sessions. Always use `new_*_id()`
+origins and `rly-` relay sessions. Remote external-tool carriage adds `stg-` nonresident
+sidecar targets and `xtr-` tool relay sessions. Always use `new_*_id()`
 helpers in `src/shared/utils/ids.py`. Never use `uuid4()` or `secrets.token_hex`
 for IDs.
 
