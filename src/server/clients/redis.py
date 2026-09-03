@@ -176,32 +176,8 @@ def resident_relay_session_key(session_id: str) -> str:
     return f"rr:sess:{session_id}"
 
 
-def resident_relay_client(
-    url: str,
-    *,
-    acl_enabled: bool = False,
-    username: str = "admin",
-    password: str = "",
-    tls_ca_file: str | None = None,
-) -> async_redis.Redis:
-    """A binary-safe async Redis client for the resident relay's frame payloads.
-
-    Unlike the control and telemetry clients this does not decode responses, so a
-    frame's raw-bytes payload rides a stream field verbatim, not through a text codec.
-    """
-    authed = _with_redis_auth(
-        url, acl_enabled=acl_enabled, username=username, password=password
-    )
-    ssl_kwargs: dict[str, Any] = {}
-    if tls_ca_file:
-        ssl_kwargs = {
-            "connection_class": AsyncSSLConnection,
-            "ssl_cert_reqs": ssl.CERT_REQUIRED,
-            "ssl_ca_certs": tls_ca_file,
-        }
-    return async_redis.from_url(
-        authed, decode_responses=False, **_keepalive_kwargs(), **ssl_kwargs
-    )
+# The root bridge's durable per-node read cursor over the reverse-attachment up streams.
+RESIDENT_RELAY_ROOT_CURSOR_KEY = "rr:root:up_cursor"
 
 
 def ssh_connection_key(connection_id: str) -> str:
@@ -246,6 +222,34 @@ def iter_pubsub_messages(pubsub: PubSub, poll_timeout: float = 1.0) -> Iterable[
             yield parsed
     except REDIS_CONN_ERRORS:
         return
+
+
+def resident_relay_client(
+    url: str,
+    *,
+    acl_enabled: bool = False,
+    username: str = "admin",
+    password: str = "",
+    tls_ca_file: str | None = None,
+) -> async_redis.Redis:
+    """A binary-safe async Redis client for the resident relay's frame payloads.
+
+    Unlike the control and telemetry clients this does not decode responses, so a
+    frame's raw-bytes payload rides a stream field verbatim, not through a text codec.
+    """
+    authed = _with_redis_auth(
+        url, acl_enabled=acl_enabled, username=username, password=password
+    )
+    ssl_kwargs: dict[str, Any] = {}
+    if tls_ca_file:
+        ssl_kwargs = {
+            "connection_class": AsyncSSLConnection,
+            "ssl_cert_reqs": ssl.CERT_REQUIRED,
+            "ssl_ca_certs": tls_ca_file,
+        }
+    return async_redis.from_url(
+        authed, decode_responses=False, **_keepalive_kwargs(), **ssl_kwargs
+    )
 
 
 def _sync[T](value: Awaitable[T] | T) -> T:
