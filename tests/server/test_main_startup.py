@@ -4,7 +4,7 @@ binds and loads its claim store before the runtime re-drives suspended boundarie
 import asyncio
 from typing import Any
 
-from server.main import _rehydrate_root_state
+from server.startup import rehydrate_root_state
 
 
 class _Recorder:
@@ -38,7 +38,7 @@ def test_root_startup_loads_resident_capacity_before_the_runtime() -> None:
     calls: list[str] = []
     runtime, control, registry = _Runtime(calls), _Control(calls), _Registry(calls)
     asyncio.run(
-        _rehydrate_root_state(runtime, control, registry)  # type: ignore[arg-type]
+        rehydrate_root_state(runtime, control, registry)  # type: ignore[arg-type]
     )
     # The BLOCKER guard: the claim store is bound and loaded before the runtime
     # re-drives suspended boundaries (a resident boundary would otherwise terminalize
