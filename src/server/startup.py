@@ -1,5 +1,8 @@
 import asyncio
+import logging
 
+from .network.rendezvous import RootRendezvousBridge
+from .registries.node import NodeRegistry
 from .registries.resident import ResidentRegistry
 from .resident.service import ResidentCapacityControl
 from .task.runtime import TaskRuntime
@@ -27,3 +30,28 @@ async def rehydrate_root_state(
         await runtime.rehydrate()
     if resident_control is not None and resident_registry is not None:
         resident_control.start()
+
+
+def start_resident_bridge_pump(
+    bridge: RootRendezvousBridge,
+    nodes: NodeRegistry,
+    logger: logging.Logger,
+) -> asyncio.Task[None]:
+    """Start the root bridge's pump loop.
+
+    Sweeps every attached node on a short non-blocking interval, forwarding each node's
+    up stream to its peers' down streams.
+    """
+
+    async def _pump() -> None:
+        while True:
+            try:
+                for node in await nodes.list_nodes_async():
+                    await bridge.pump_node(node.id)
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                logger.exception("resident relay bridge pump failed")
+            await asyncio.sleep(0.05)
+
+    return asyncio.create_task(_pump())

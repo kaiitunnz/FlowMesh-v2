@@ -6,7 +6,7 @@ import inspect
 import os
 import threading
 from contextlib import AsyncExitStack, asynccontextmanager
-from typing import Any, cast
+from typing import cast
 
 import uvicorn
 from fastapi import FastAPI
@@ -21,7 +21,6 @@ if __name__ == "__main__" and __package__ is None:
     sys.modules.setdefault("server.main", sys.modules[__name__])
 
 from shared._version import FLOWMESH_RELEASE_VERSION
-from shared.schemas.command import CommandMessage, CommandType
 
 from .auth import reconcile_resources, resolve_system_principal
 from .clients import RedisClient
@@ -36,10 +35,7 @@ from .orchestration.tool_dispatch import ToolInvocationEnvelope
 from .registries import WorkerRegistry, WorkflowRegistry
 from .registries.node import NodeRegistry
 from .registries.resident import ResidentRegistry
-from .resident.native import NativeTransport, NativeTransportError
-from .resident.service import NativeDeliveryDeps
-from .resident.state import ReplicaIncarnation
-from .resident.wiring import build_resident_capacity
+from .resident.wiring import build_resident_capacity, wire_native_delivery
 from .routers import docs, health, v1
 from .services.agent_model_gateway import (
     AgentModelGateway,
@@ -55,7 +51,7 @@ from .services.monitoring import EventMonitor
 from .services.port_forward import PortForwardService
 from .services.ssh_audit import SshAuditService
 from .services.watchdog import WorkerWatchdog
-from .startup import rehydrate_root_state
+from .startup import rehydrate_root_state, start_resident_bridge_pump
 from .supervisor import WorkerSupervisor
 from .task.runtime import TaskRuntime
 from .utils.logging import get_logger
@@ -234,57 +230,19 @@ if IS_ROOT_NODE:
         and NETWORK_PLANE is not None
         and WORKER_REGISTRY is not None
     ):
+        assert RUNTIME is not None
         _resident_cfg = config.orchestration.resident
-        _network = NETWORK_PLANE
-        _workers = WORKER_REGISTRY
-        _runtime = RUNTIME
-        assert _runtime is not None
-        _cmd_timeout = max(
-            config.orchestration.gateway.timeout_sec,
-            _resident_cfg.cold_start_deadline_sec,
-        )
-
-        async def _exec_node_cmd(
-            node_id: str, command: CommandType, payload: dict[str, Any]
-        ) -> dict[str, Any]:
-            resp = await NODE_REGISTRY.exec_node_cmd(
-                node_id,
-                CommandMessage(command=command, payload=payload),
-                timeout=_cmd_timeout,
-            )
-            if not resp.success:
-                raise NativeTransportError(
-                    resp.message or "resident node command failed"
-                )
-            return resp.data or {}
-
-        def _node_of_worker(worker_id: str | None) -> str | None:
-            if worker_id is None:
-                return None
-            worker = _workers.get_worker(worker_id)
-            return worker.node_id if worker is not None else None
-
-        def _origin_node_of_task(task_id: str) -> str | None:
-            record = _runtime.get_record(task_id)
-            return _node_of_worker(record.assigned_worker) if record else None
-
-        def _node_of_replica(replica: ReplicaIncarnation) -> str | None:
-            if replica.serve_task_id is None:
-                return None
-            record = _runtime.get_record(replica.serve_task_id)
-            return _node_of_worker(record.assigned_worker) if record else None
-
-        RESIDENT_CONTROL.set_native_delivery(
-            NativeDeliveryDeps(
-                network=_network,
-                transport=NativeTransport(_exec_node_cmd),
-                origin_node_of_task=_origin_node_of_task,
-                node_of_replica=_node_of_replica,
-                sidecar_bind_host=_resident_cfg.sidecar_bind_host,
-                directly_routable=_resident_cfg.sidecar_directly_routable,
-                forward_api_key=_resident_cfg.forward_api_key,
-                relay_only=_resident_cfg.relay_only,
-            )
+        wire_native_delivery(
+            RESIDENT_CONTROL,
+            network=NETWORK_PLANE,
+            worker_registry=WORKER_REGISTRY,
+            runtime=RUNTIME,
+            node_registry=NODE_REGISTRY,
+            resident_cfg=_resident_cfg,
+            cmd_timeout_sec=max(
+                config.orchestration.gateway.timeout_sec,
+                _resident_cfg.cold_start_deadline_sec,
+            ),
         )
 
     DISPATCHER = create_dispatcher(
@@ -522,24 +480,8 @@ async def _lifespan(_: FastAPI):
         if IS_ROOT_NODE:
             await rehydrate_root_state(RUNTIME, RESIDENT_CONTROL, RESIDENT_REGISTRY)
             if RESIDENT_BRIDGE is not None and NODE_REGISTRY is not None:
-                _bridge = RESIDENT_BRIDGE
-                _nodes = NODE_REGISTRY
-
-                async def _pump_resident_bridge() -> None:
-                    # Bridge each attached node's up stream to its peers' down streams;
-                    # a non-blocking sweep, so poll all nodes on a short interval.
-                    while True:
-                        try:
-                            for _node in await _nodes.list_nodes_async():
-                                await _bridge.pump_node(_node.id)
-                        except asyncio.CancelledError:
-                            return
-                        except Exception:
-                            logger.exception("resident relay bridge pump failed")
-                        await asyncio.sleep(0.05)
-
-                app.state.resident_bridge_task = asyncio.create_task(
-                    _pump_resident_bridge()
+                app.state.resident_bridge_task = start_resident_bridge_pump(
+                    RESIDENT_BRIDGE, NODE_REGISTRY, logger
                 )
             if PORT_FORWARD_SERVICE is not None:
                 await PORT_FORWARD_SERVICE.start()
@@ -582,7 +524,7 @@ async def _lifespan(_: FastAPI):
 
             # --- Root-only shutdown ---
             _stop_background()
-            _bridge_task = getattr(app.state, "resident_bridge_task", None)
+            _bridge_task = app.state.resident_bridge_task
             if _bridge_task is not None:
                 _bridge_task.cancel()
                 try:
@@ -630,6 +572,8 @@ app.state.ssh_proxy_enabled = config.port_forward.ssh_proxy_enabled and IS_ROOT_
 app.state.serve_proxy_enabled = config.port_forward.serve_proxy_enabled and IS_ROOT_NODE
 app.state.resident_control = RESIDENT_CONTROL
 app.state.network_plane = NETWORK_PLANE
+# Started in lifespan on the root node when the resident relay bridge is enabled.
+app.state.resident_bridge_task = None
 
 # Routers — shared
 app.include_router(health.router)
