@@ -173,6 +173,72 @@ def test_operation_round_trips_over_the_tool_relay() -> None:
     asyncio.run(run())
 
 
+def test_normal_completion_clears_the_target_seen_entry() -> None:
+    async def run() -> None:
+        provider = _FakeProvider()
+        harness = _Harness(provider)
+        sidecar_route = await harness.start()
+        done = asyncio.Event()
+
+        async def exchange() -> bytes | None:
+            reply = await harness.origin.deliver(
+                "xtr-s",
+                invocation_id="inv-1",
+                idm="idm-abc",
+                origin_node="nde-o",
+                target_node="nde-t",
+                sidecar_route=sidecar_route,
+                operation_payload=_operation_payload("q"),
+            )
+            done.set()
+            return reply
+
+        driver = asyncio.ensure_future(_drive(harness, done))
+        try:
+            reply = await asyncio.wait_for(exchange(), timeout=10.0)
+        finally:
+            done.set()
+            await driver
+        assert reply is not None
+        # A normal (non-cancel) completion retires the target's per-op dedup entry, so a
+        # long-lived target node accrues no _seen leak after the single exchange.
+        assert ("xtr-s", RelayDirection.ORIGIN_TO_TARGET) not in harness.target._seen
+        await harness.sidecar.stop()
+
+    asyncio.run(run())
+
+
+def test_cancel_retains_the_routing_record_until_reaped() -> None:
+    async def run() -> None:
+        redis = FakeBinaryRedis()
+        origin = ToolRelayEndpoint(redis, "nde-o", recv_budget_sec=5.0)
+        task = asyncio.ensure_future(
+            origin.deliver(
+                "xtr-r",
+                invocation_id="inv-1",
+                idm="idm-abc",
+                origin_node="nde-o",
+                target_node="nde-t",
+                sidecar_route="127.0.0.1:1",
+                operation_payload=b"op",
+            )
+        )
+        for _ in range(200):
+            await asyncio.sleep(0.001)
+            if await origin._sessions.load("xtr-r"):
+                break
+        assert await origin._sessions.load("xtr-r")  # the routing record was written
+        await origin.cancel("xtr-r")
+        await asyncio.wait_for(task, timeout=5.0)  # the delivery's finally has run
+        # The retention guard keeps the routing record after cancel so the root can
+        # still forward the CANCEL to the target; always-delete would fail here.
+        assert await origin._sessions.load("xtr-r")
+        # The origin's local wait is dropped either way.
+        assert "xtr-r" not in origin._origin
+
+    asyncio.run(run())
+
+
 class _HangingSidecar:
     """Accepts one operation frame, then never replies — a stalled provider egress."""
 
