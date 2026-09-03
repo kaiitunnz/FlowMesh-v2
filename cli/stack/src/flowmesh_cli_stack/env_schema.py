@@ -389,6 +389,18 @@ STACK_ENV_SCHEMA = EnvSchema(
                     var_type=EnvVarType.INT,
                     min_value=1,
                 ),
+                EnvVar(
+                    "WEB_SEARCH_EGRESS_LOCALITY",
+                    "server_relay",
+                    description="Where a search egresses.",
+                    choices=["server_relay", "worker_sidecar"],
+                ),
+                EnvVar(
+                    "WEB_SEARCH_EGRESS_ALLOW_KEYED",
+                    "false",
+                    description="Allow a keyed provider worker-sidecar egress.",
+                    var_type=EnvVarType.BOOL,
+                ),
             ],
         ),
         EnvSection(

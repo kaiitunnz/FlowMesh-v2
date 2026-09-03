@@ -165,7 +165,7 @@ if IS_ROOT_NODE:
         assert RUNTIME is not None
         RUNTIME.settle_episode_invocation(task_id, call_correlation, value)
 
-    FABRIC_TOOL_BROKER = FabricToolBroker(
+    FABRIC_TOOL_BROKER = FabricToolBroker.build(
         config.orchestration.web_search, _settle_tool, logger=logger
     )
     RUNTIME.set_tool_broker(FABRIC_TOOL_BROKER.submit)
