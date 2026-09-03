@@ -22,13 +22,11 @@ Route resolution is derived from four separate facts, each with its own owner an
   `generation`, trust domain, reachability class, and protocol capability. It rides on
   node registration and is carried on the node record, so the node registry is its durable
   carrier. It is not a worker-supplied arbitrary URL and not the generic server-management
-  endpoint. It also carries the node's non-secret outbound relay-attachment identity,
-  proving the node can attach outward to the root rendezvous for the universal
-  `control_relay`; that is attach eligibility, not an inbound address a peer may dial. A
-  network-plane node advertises even without an inbound URL — the natural outbound-only
-  shape — with an empty URL; the server then derives its endpoint and attachment identity
-  from the node id. Re-registration mints a fresh endpoint generation, which is the fence
-  that invalidates route evidence — relay evidence included — bound to a superseded one.
+  endpoint. It also carries the node's non-secret outbound relay-attachment identity —
+  attach eligibility for the universal `control_relay`, not an inbound address. A node may
+  advertise with an empty URL, the outbound-only shape, and the server derives its endpoint
+  and attachment identity from the node id. Re-registration mints a fresh endpoint
+  generation, the fence that invalidates route evidence bound to a superseded one.
 - **`ReplicaListenerAdvertisement`** — a non-secret listener in the replica directory,
   fenced by replica incarnation and listener generation. It names the resident-facing
   sidecar/adapter capability and its route endpoint(s); it never names a raw engine
@@ -78,10 +76,9 @@ demoted offload drops out until its backoff cools.
   forward-dial offload; the initial same-node path as well as the normal cross-node path.
 - **`control_relay`** — the universal reverse-rendezvous base. Its descriptor names the
   origin and target reverse attachments by node (the delivery routes by node id) and the
-  target's node-local sidecar delivery, not a chain of dialable addresses; its feasibility
-  is that both ends have a live outbound attachment, not that either is inbound-reachable —
-  so it resolves for an outbound-only node with no inbound URL, where the forward-dial
-  offloads drop out.
+  target's node-local sidecar delivery, not a chain of dialable addresses. It is feasible
+  whenever both ends hold a live outbound attachment, so it resolves for an outbound-only
+  node where the forward-dial offloads do not.
 
 A `worker_direct` or `node_relay` hop is target-addressed and forward-dialed: the deputy
 reads one leading frame naming its next hop, dials it, and byte-relays the rest, chaining a

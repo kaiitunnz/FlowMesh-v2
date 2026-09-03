@@ -96,7 +96,8 @@ re-driving it as the native path does. That narrower ambiguous-loss window is a 
 follow-up to bring onto the same hold-and-re-drive split.
 
 When [`NETWORK_PLANE_ENABLED`](NETWORK_PLANE.md) is also on, the invocation is carried over
-the native fabric path and the server never carries the bytes. The Lifecycle & scale
+the native fabric path, whose live stream never crosses the server — though the deputy
+returns the assembled completion to it to settle the invocation. The Lifecycle & scale
 manager binds a per-replica **resident-facing sidecar** on the replica node and advertises
 its non-secret listener; the sidecar is the enforced claim gate, validating every fence
 against its own incarnation and listener generation before reaching the co-located engine.

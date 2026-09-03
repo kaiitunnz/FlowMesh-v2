@@ -189,7 +189,8 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   server-driven — a bootstrap poke over the origin node's deputy obtains the engine
   acknowledgement, the Admission controller records `ACCEPTED` and issues the immutable
   `RouteAuthorization`, then a stream poke carries the authorized response over the
-  data-direct deputy-to-sidecar channel while the server never carries the bytes; a lost
+  data-direct deputy-to-sidecar channel — the live stream never crosses the server, though
+  the deputy returns the assembled completion to it to settle the invocation; a lost
   or ambiguous delivery is `UNCERTAIN`, holds the credit, and re-drives, releasing only on a
   definite outcome, and a cancellation reaps both ends of the channel. Otherwise an in-server
   adapter relays the request as the claim-gated compatibility path. Enable with
