@@ -59,7 +59,7 @@ class FabricToolBroker:
         self._lock = threading.Lock()
         # Per-episode call budget. Best-effort: it is an in-memory count reset on
         # restart, so an episode may exceed the budget across a crash — never
-        # exactly-once accounting, by design for this demo.
+        # exactly-once accounting.
         self._calls: dict[str, int] = {}
 
     @classmethod

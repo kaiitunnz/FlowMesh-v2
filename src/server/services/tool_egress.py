@@ -62,9 +62,8 @@ class ToolOperationEnvelope(BaseModel):
     """A server-issued authorization for exactly one bounded external-tool operation.
 
     The control path issues it after the authority and quota checks; the execution
-    surface egresses only within it, so one envelope contract binds any surface
-    identically wherever it runs. ``idempotency_key`` is the fabric dedupe authority a
-    re-drive reuses; the result bounds cap the single authorized operation.
+    surface egresses only within it. ``idempotency_key`` is the fabric dedupe authority
+    a re-drive reuses; the result bounds cap the single authorized operation.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -82,8 +81,7 @@ class ExternalToolSidecar:
 
     It egresses only within the server-issued ``ToolOperationEnvelope``, refusing an
     interface it does not serve or a request beyond the issued result budget, and maps a
-    provider fault to a typed outcome. It is the single egress point for an approved
-    operation; the opaque agent harness has no network path of its own.
+    provider fault to a typed outcome.
     """
 
     def __init__(
