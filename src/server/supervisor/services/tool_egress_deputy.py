@@ -54,11 +54,22 @@ class ToolEgressDeputyService:
         await self._drop(target_id)
         host, port = await listener.start()
         self._sidecars[target_id] = listener
+        if self._logger is not None:
+            self._logger.info(
+                "tool sidecar bound target=%s provider=%s route=%s:%s",
+                target_id,
+                self._cfg.provider,
+                host,
+                port,
+            )
         return {"bound": True, "host": host, "port": port}
 
     async def unbind_sidecar(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Drop a target's sidecar; absent is a no-op."""
-        await self._drop(str(payload["target_id"]))
+        target_id = str(payload["target_id"])
+        await self._drop(target_id)
+        if self._logger is not None:
+            self._logger.info("tool sidecar unbound target=%s", target_id)
         return {"unbound": True}
 
     async def _drop(self, target_id: str) -> None:
