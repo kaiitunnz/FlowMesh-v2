@@ -11,6 +11,7 @@ not serve or a request beyond its issued budget; the agent harness never egresse
 deployment policy selects the locality per provider, with server relay the default.
 """
 
+import hashlib
 import logging
 from collections.abc import Callable
 from enum import StrEnum
@@ -66,6 +67,44 @@ class ToolOperationEnvelope(BaseModel):
 
     interface: str
     idempotency_key: str | None
+    max_results: int
+    timeout_sec: float
+    result_char_cap: int
+
+
+def tool_request_digest(interface: str, query: str, max_results: int) -> str:
+    """A canonical integrity digest over the bounded request the fence commits to.
+
+    The remote sidecar recomputes it over the delivered request and rejects a mismatch,
+    so an altered request or an altered digest fails the fence before any provider call.
+    """
+    raw = f"{interface}\x00{query}\x00{max_results}".encode()
+    return hashlib.sha256(raw).hexdigest()
+
+
+class RemoteToolOperationEnvelope(BaseModel):
+    """A short-lived operation fence for one bounded off-server external-tool operation.
+
+    The control path issues it; the remote sidecar validates it before egress and
+    rejects an expired, altered, wrong-provider, wrong-audience, wrong-policy, or
+    over-budget operation as a tool-fence failure — never a reachability-demoting
+    observation. It is
+    not a ``ServiceClaim``, ``RouteAuthorization``, or lease, and carries no credential.
+    ``request_digest`` binds request integrity; ``provider`` and ``target_id`` /
+    ``target_generation`` bind the audience; ``deadline_epoch`` bounds its lifetime.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    interface: str
+    provider: str
+    idempotency_key: str | None
+    request_digest: str
+    target_id: str
+    target_generation: int
+    tenant: str | None = None
+    policy_class: str = "default"
+    deadline_epoch: float
     max_results: int
     timeout_sec: float
     result_char_cap: int
