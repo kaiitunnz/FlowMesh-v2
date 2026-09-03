@@ -28,6 +28,7 @@ from .search_providers import SearchProvider, build_search_provider
 from .tool_egress import (
     ColocatedSidecarCarriage,
     EgressLocalityPolicy,
+    ExecutionTransport,
     ExternalToolSidecar,
     ServerRelayAdapter,
     ToolOperationEnvelope,
@@ -69,18 +70,22 @@ class FabricToolBroker:
         settle: SettleCallback,
         provider: SearchProvider | None = None,
         logger: logging.Logger | None = None,
+        worker_carriage: ExecutionTransport | None = None,
     ) -> "FabricToolBroker":
-        """Wire the default localities around the configured provider.
+        """Wire the localities around the configured provider.
 
-        The co-located worker sidecar shares the configured provider, so no credential
-        crosses a wire in-process.
+        The server relay egresses in-server. The worker-sidecar locality uses
+        ``worker_carriage`` when a remote carriage is configured — real off-server
+        egress to a worker sidecar — otherwise a co-located sidecar sharing the server's
+        provider, so no credential crosses a wire in-process.
         """
         log = logger or logging.getLogger("fabric-tool-broker")
         prov = provider or build_search_provider(config)
         server = ServerRelayAdapter(ExternalToolSidecar(prov, log))
-        worker = WorkerSidecarAdapter(
-            ColocatedSidecarCarriage(ExternalToolSidecar(prov, log))
+        carriage = worker_carriage or ColocatedSidecarCarriage(
+            ExternalToolSidecar(prov, log)
         )
+        worker = WorkerSidecarAdapter(carriage)
         return cls(config, settle, EgressLocalityPolicy(config, server, worker), log)
 
     def submit(self, env: ToolInvocationEnvelope) -> None:
