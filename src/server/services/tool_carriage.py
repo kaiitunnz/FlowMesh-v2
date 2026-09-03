@@ -228,10 +228,22 @@ class ToolTargetRegistry:
 
         Only clears the still-current target, so a concurrent op that already rebound a
         fresh target is not reset; a bind bumps the generation, fencing the stale one.
+        The old sidecar is unbound best-effort so a rebind against a live node leaves no
+        orphaned listener behind.
         """
         async with self._lock:
-            if self._target is not None and self._target.target_id == target.target_id:
-                self._target = None
+            if self._target is None or self._target.target_id != target.target_id:
+                return
+            self._target = None
+        try:
+            await self._exec(
+                target.node_id,
+                CommandType.UNBIND_TOOL_SIDECAR,
+                {"target_id": target.target_id},
+            )
+        except Exception as exc:  # noqa: BLE001 - unbind is best-effort
+            if self._log is not None:
+                self._log.debug("stale tool sidecar unbind failed: %s", exc)
 
     async def close(self) -> None:
         target = self._target

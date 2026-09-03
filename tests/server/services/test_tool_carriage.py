@@ -184,12 +184,12 @@ def test_lost_reply_becomes_unavailable() -> None:
     assert outcome.status.value == "unavailable"
 
 
-def test_registry_invalidate_rebinds_on_a_fresh_generation() -> None:
+def test_registry_invalidate_rebinds_and_unbinds_the_stale_sidecar() -> None:
     async def run() -> None:
-        gens: list[int] = []
+        cmds: list[tuple[str, str]] = []
 
         async def exec_cmd(node_id: str, command: CommandType, payload: dict) -> dict:
-            gens.append(int(payload["target_generation"]))
+            cmds.append((command.value, str(payload["target_id"])))
             return {"host": "127.0.0.1", "port": 1}
 
         async def select_node() -> str:
@@ -210,7 +210,12 @@ def test_registry_invalidate_rebinds_on_a_fresh_generation() -> None:
         assert second is not None
         assert first.target_generation == 1 and second.target_generation == 2
         assert first.target_id != second.target_id
-        assert gens == [1, 2]
+        # Bind, then unbind the stale target on invalidate, then rebind a fresh one.
+        assert cmds == [
+            (CommandType.BIND_TOOL_SIDECAR.value, first.target_id),
+            (CommandType.UNBIND_TOOL_SIDECAR.value, first.target_id),
+            (CommandType.BIND_TOOL_SIDECAR.value, second.target_id),
+        ]
 
     asyncio.run(run())
 
