@@ -389,6 +389,12 @@ STACK_ENV_SCHEMA = EnvSchema(
                     var_type=EnvVarType.INT,
                     min_value=1,
                 ),
+                EnvVar(
+                    "WEB_SEARCH_EGRESS_LOCALITY",
+                    "server_relay",
+                    description="Where a search egresses.",
+                    choices=["server_relay", "worker_sidecar"],
+                ),
             ],
         ),
         EnvSection(

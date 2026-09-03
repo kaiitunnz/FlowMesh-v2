@@ -1,12 +1,14 @@
-"""The FabricToolBroker — a dedicated actor that executes fabric-served tool boundaries.
+"""The FabricToolBroker — the authoritative control path for fabric-served tools.
 
-The broker is the execution home for mediated tool invocations (today ``search/v1``). It
-is not a semantic authority and holds no durable store: the engine validates and records
-the invocation, the runtime submits the durable envelope, and the broker dispatches it
-off the agent's lane, normalizes the provider's answer into a typed ``ToolOutcome``, and
-hands that back to be terminalized durably before the agent resumes. Its per-episode
-budget and in-flight set are a rebuildable projection of ledger facts, restored by
-re-submission on restart, never persisted here.
+The broker is the control home for mediated tool invocations (today ``search/v1``). It
+is not a semantic authority over the ledger and holds no durable store: the engine
+validates and records the invocation, the runtime submits the durable envelope, and the
+broker draws down the episode budget, issues a bounded operation envelope, selects an
+execution locality under deployment policy, and hands the operation to that adapter off
+the agent's lane. It hands the adapter's typed ``ToolOutcome`` back to be terminalized
+durably before the agent resumes. Its per-episode budget and in-flight set are a
+rebuildable projection of ledger facts, restored by re-submission on restart, never
+persisted here.
 """
 
 import json
@@ -22,13 +24,15 @@ from ..orchestration.tool_dispatch import (
     ToolOutcome,
     ToolOutcomeStatus,
 )
-from .search_providers import (
-    SearchProvider,
-    SearchQuotaExceeded,
-    SearchResult,
-    SearchTimeout,
-    SearchUnavailable,
-    build_search_provider,
+from .search_providers import SearchProvider, build_search_provider
+from .tool_egress import (
+    ColocatedSidecarCarriage,
+    EgressLocalityPolicy,
+    ExternalToolSidecar,
+    ServerRelayAdapter,
+    ToolOperationEnvelope,
+    ToolRequest,
+    WorkerSidecarAdapter,
 )
 
 # (task_id, call_correlation, serialized ToolOutcome) — the runtime settles it durably.
@@ -36,18 +40,18 @@ SettleCallback = Callable[[str, str, str], None]
 
 
 class FabricToolBroker:
-    """Execute a fabric-served tool boundary off-lane and return a typed outcome."""
+    """Draw down budget, authorize a bounded operation, and route it to a locality."""
 
     def __init__(
         self,
         config: WebSearchConfig,
         settle: SettleCallback,
-        provider: SearchProvider | None = None,
+        policy: EgressLocalityPolicy,
         logger: logging.Logger | None = None,
     ) -> None:
         self._cfg = config
         self._settle = settle
-        self._provider = provider or build_search_provider(config)
+        self._policy = policy
         self._log = logger or logging.getLogger("fabric-tool-broker")
         self._pool = ThreadPoolExecutor(
             max_workers=4, thread_name_prefix="fabric-tool-broker"
@@ -55,8 +59,29 @@ class FabricToolBroker:
         self._lock = threading.Lock()
         # Per-episode call budget. Best-effort: it is an in-memory count reset on
         # restart, so an episode may exceed the budget across a crash — never
-        # exactly-once accounting, by design for this demo.
+        # exactly-once accounting.
         self._calls: dict[str, int] = {}
+
+    @classmethod
+    def build(
+        cls,
+        config: WebSearchConfig,
+        settle: SettleCallback,
+        provider: SearchProvider | None = None,
+        logger: logging.Logger | None = None,
+    ) -> "FabricToolBroker":
+        """Wire the default localities around the configured provider.
+
+        The co-located worker sidecar shares the configured provider, so no credential
+        crosses a wire in-process.
+        """
+        log = logger or logging.getLogger("fabric-tool-broker")
+        prov = provider or build_search_provider(config)
+        server = ServerRelayAdapter(ExternalToolSidecar(prov, log))
+        worker = WorkerSidecarAdapter(
+            ColocatedSidecarCarriage(ExternalToolSidecar(prov, log))
+        )
+        return cls(config, settle, EgressLocalityPolicy(config, server, worker), log)
 
     def submit(self, env: ToolInvocationEnvelope) -> None:
         """Accept a recorded tool boundary and dispatch it off the agent's lane."""
@@ -94,30 +119,25 @@ class FabricToolBroker:
             return ToolOutcome(
                 status=ToolOutcomeStatus.SUCCESS, value="No query supplied."
             )
+        request = ToolRequest(
+            interface=env.interface, query=query, max_results=max_results
+        )
+        envelope = ToolOperationEnvelope(
+            interface=env.interface,
+            idempotency_key=env.idempotency_key,
+            max_results=max_results,
+            timeout_sec=self._cfg.timeout_sec,
+            result_char_cap=self._cfg.result_char_cap,
+        )
+        adapter = self._policy.select()
         self._log.info(
-            "fabric search interface=%s inv=%s query=%r",
+            "fabric search interface=%s inv=%s locality=%s query=%r",
             env.interface,
             env.invocation_id,
+            adapter.locality.value,
             query,
         )
-        try:
-            results = self._provider.search(
-                query, max_results=max_results, timeout_sec=self._cfg.timeout_sec
-            )
-        except SearchTimeout:
-            return ToolOutcome(
-                status=ToolOutcomeStatus.TIMEOUT, value="the web search timed out"
-            )
-        except SearchQuotaExceeded:
-            return ToolOutcome(
-                status=ToolOutcomeStatus.QUOTA, value="the search provider rate-limited"
-            )
-        except SearchUnavailable:
-            return ToolOutcome(
-                status=ToolOutcomeStatus.UNAVAILABLE,
-                value="the search provider was unreachable",
-            )
-        return self._normalize(query, results)
+        return adapter.execute(envelope, request)
 
     def _charge(self, task_id: str) -> bool:
         with self._lock:
@@ -141,20 +161,3 @@ class FabricToolBroker:
         requested = args.get("max_results")
         n = min(int(requested), cap) if isinstance(requested, int) else cap
         return (query.strip() if isinstance(query, str) else ""), max(1, n)
-
-    def _normalize(self, query: str, results: list[SearchResult]) -> ToolOutcome:
-        if not results:
-            return ToolOutcome(
-                status=ToolOutcomeStatus.SUCCESS, value=f"No results for {query!r}."
-            )
-        blocks: list[str] = []
-        provenance: list[dict[str, str]] = []
-        for i, r in enumerate(results, 1):
-            blocks.append(f"[{i}] {r.title}\n    URL: {r.url}\n    {r.snippet}")
-            provenance.append({"title": r.title, "url": r.url})
-        value = "\n\n".join(blocks)[: self._cfg.result_char_cap]
-        return ToolOutcome(
-            status=ToolOutcomeStatus.SUCCESS,
-            value=value,
-            provenance=tuple(provenance),
-        )

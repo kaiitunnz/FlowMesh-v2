@@ -55,8 +55,10 @@ class _StubProvider:
 
 def _broker(provider: Any, **cfg: Any) -> tuple[FabricToolBroker, list[tuple]]:
     settled: list[tuple] = []
-    broker = FabricToolBroker(
-        WebSearchConfig(**cfg), lambda t, c, v: settled.append((t, c, v)), provider
+    broker = FabricToolBroker.build(
+        WebSearchConfig(**cfg),
+        lambda t, c, v: settled.append((t, c, v)),
+        provider=provider,
     )
     return broker, settled
 

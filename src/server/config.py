@@ -477,7 +477,9 @@ class WebSearchConfig:
 
     ``provider`` selects the backend (keyless ``duckduckgo`` default); ``api_key`` is
     the deployment credential a keyed provider needs. ``max_calls`` bounds one episode's
-    searches; ``result_char_cap`` bounds the injected result size.
+    searches; ``result_char_cap`` bounds the injected result size. ``egress_locality``
+    selects where an approved search egresses (``server_relay`` default or
+    ``worker_sidecar``).
     """
 
     provider: str = "duckduckgo"
@@ -487,6 +489,7 @@ class WebSearchConfig:
     result_char_cap: int = 6000
     max_calls: int = 8
     max_parallel: int = 4
+    egress_locality: str = "server_relay"
 
     @classmethod
     def from_env(cls) -> "WebSearchConfig":
@@ -499,6 +502,9 @@ class WebSearchConfig:
             result_char_cap=parse_int_env(f"{prefix}RESULT_CHAR_CAP") or 6000,
             max_calls=parse_int_env(f"{prefix}MAX_CALLS") or 8,
             max_parallel=parse_int_env(f"{prefix}MAX_PARALLEL_CALLS_PER_TURN") or 4,
+            egress_locality=(os.getenv(f"{prefix}EGRESS_LOCALITY") or "server_relay")
+            .strip()
+            .lower(),
         )
 
 
