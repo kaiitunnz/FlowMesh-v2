@@ -100,11 +100,13 @@ src/
     supervisor/           Per-node agent (gRPC server, adapters, lifecycle)
     task/                 parser, runtime, models, merge / epoch helpers
       v2/                   versioned representations, compiler
+    tools/                Fabric-served external-tool broker, carriage, egress
     utils/                concurrent, helpers, logging, misc, time
   shared/
     grpc/supervisor/v1/   Generated proto stubs (server + worker)
     schemas/              Cross-cutting schemas
     tasks/                Workflow/task spec models
+    tools/                External-tool contract, frame codec, search backends
     utils/                JSON, parsing, time, ids
   worker/
     docker/               Worker Dockerfiles (CPU + GPU)
