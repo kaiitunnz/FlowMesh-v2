@@ -1,41 +1,26 @@
-"""Framed protocol for remote external-tool carriage between the origin and a sidecar.
+"""Socket/relay framing for the remote external-tool carriage.
 
-The in-server origin and the worker sidecar speak this over a connection the network
-plane carries (``worker_direct`` / ``node_relay``, or through a target-addressed relay
-hop, or as opaque payloads over the reverse-rendezvous relay). It is a single request /
-reply: the origin sends one operation frame carrying the operation fence and the bounded
-request; the sidecar validates the fence, egresses within it, and returns one result
-frame — or a reject frame when the fence fails, before any provider call. A relay hop
-stays byte-transparent, so the frames are end-to-end between origin and sidecar. It is
-claim-free: no admission, credit, or resident concept rides it.
+The message-body codec (``encode_msg`` / ``decode_msg`` and the ``KIND_*`` values) is
+the shared ``shared.tools.wire`` contract the origin and the worker executor both speak;
+this module adds the server-side socket framing that carries one body over a
+network-plane connection. A relay hop stays byte-transparent, so the frames are
+end-to-end.
 """
 
 import asyncio
-import json
 from typing import Any
+
+from shared.tools.wire import KIND_OPERATION as KIND_OPERATION
+from shared.tools.wire import KIND_REJECT as KIND_REJECT
+from shared.tools.wire import KIND_RESULT as KIND_RESULT
+from shared.tools.wire import (
+    decode_msg,
+    encode_msg,
+)
 
 from ..network import wire as netwire
 
-# Origin -> sidecar.
-KIND_OPERATION = "operation"
-# Sidecar -> origin.
-KIND_RESULT = "result"
-KIND_REJECT = "reject"
-
 split_host_port = netwire.split_host_port
-
-
-def encode_msg(kind: str, **fields: Any) -> bytes:
-    """Serialize one message body; it rides a socket frame or relay payload verbatim."""
-    return json.dumps({"kind": kind, **fields}).encode()
-
-
-def decode_msg(raw: bytes) -> dict[str, Any]:
-    """Parse one message body; a malformed or non-object body is a protocol error."""
-    payload = json.loads(raw.decode())
-    if not isinstance(payload, dict) or "kind" not in payload:
-        raise ValueError("malformed tool sidecar wire frame")
-    return payload
 
 
 async def write_msg(writer: asyncio.StreamWriter, kind: str, **fields: Any) -> None:

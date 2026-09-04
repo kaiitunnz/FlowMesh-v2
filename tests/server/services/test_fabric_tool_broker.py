@@ -139,7 +139,7 @@ GPT-5.6 <b>Sol</b></a>
 
 
 def test_duckduckgo_provider_parses_and_unwraps(monkeypatch: Any) -> None:
-    import server.services.search_providers as mod
+    import shared.tools.providers as mod
 
     class _Resp:
         status_code = 200
@@ -154,7 +154,7 @@ def test_duckduckgo_provider_parses_and_unwraps(monkeypatch: Any) -> None:
 
 
 def test_duckduckgo_provider_maps_http_faults(monkeypatch: Any) -> None:
-    import server.services.search_providers as mod
+    import shared.tools.providers as mod
 
     class _Resp:
         def __init__(self, code: int) -> None:
@@ -180,7 +180,7 @@ def test_duckduckgo_provider_maps_http_faults(monkeypatch: Any) -> None:
 
 
 def test_serper_provider_parses_organic_and_maps_faults(monkeypatch: Any) -> None:
-    import server.services.search_providers as mod
+    import shared.tools.providers as mod
 
     class _Resp:
         def __init__(self, code: int, payload: dict[str, Any]) -> None:
