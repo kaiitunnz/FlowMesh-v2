@@ -22,7 +22,6 @@ from server.services.external_tool_sidecar import (
     ExternalToolSidecarListener,
     ExternalToolSidecarServer,
 )
-from server.services.search_providers import SearchResult
 from server.services.tool_carriage import (
     RemoteSidecarCarriage,
     ToolEgressOriginDeputy,
@@ -36,6 +35,7 @@ from server.services.tool_egress import (
 from server.services.tool_relay_delivery import ToolRelayEndpoint
 from server.supervisor.services.reverse_relay_attachment import ReverseRelayAttachment
 from shared.schemas.command import CommandType
+from shared.tools.providers import SearchResult
 from tests.server.network._relay_fakes import FakeBinaryRedis
 
 INGRESS = "xt-ingress"

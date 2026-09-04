@@ -23,7 +23,6 @@ from server.services.external_tool_sidecar import (
     ExternalToolSidecarListener,
     ExternalToolSidecarServer,
 )
-from server.services.search_providers import SearchResult
 from server.services.tool_egress import (
     ExternalToolSidecar,
     RemoteToolOperationEnvelope,
@@ -32,6 +31,7 @@ from server.services.tool_egress import (
 )
 from server.services.tool_relay_delivery import ToolRelayEndpoint
 from server.supervisor.services.reverse_relay_attachment import ReverseRelayAttachment
+from shared.tools.providers import SearchResult
 from shared.utils.ids import new_tool_delivery_nonce
 from tests.server.network._relay_fakes import FakeBinaryRedis
 

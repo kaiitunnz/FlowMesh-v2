@@ -18,6 +18,8 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
+from shared.tools.providers import LazySearchProvider, SearchProvider
+
 from ..config import WebSearchConfig
 from ..orchestration.tool_dispatch import (
     SEARCH_INTERFACE,
@@ -25,7 +27,6 @@ from ..orchestration.tool_dispatch import (
     ToolOutcome,
     ToolOutcomeStatus,
 )
-from .search_providers import LazySearchProvider, SearchProvider
 from .tool_egress import (
     AmbiguousDelivery,
     CarriageResult,

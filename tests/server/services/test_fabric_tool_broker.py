@@ -16,14 +16,14 @@ from server.orchestration.tool_dispatch import (
     ToolOutcomeStatus,
 )
 from server.services.fabric_tool_broker import FabricToolBroker
-from server.services.search_providers import (
+from server.services.tool_egress import AmbiguousDelivery
+from shared.harness import BoundaryEventKind
+from shared.tools.providers import (
     SearchQuotaExceeded,
     SearchResult,
     SearchTimeout,
     SearchUnavailable,
 )
-from server.services.tool_egress import AmbiguousDelivery
-from shared.harness import BoundaryEventKind
 
 
 def _env(
@@ -215,7 +215,7 @@ def test_serper_provider_parses_organic_and_maps_faults(monkeypatch: Any) -> Non
 
 def test_build_search_provider_selects_by_config() -> None:
     from server.config import WebSearchConfig
-    from server.services.search_providers import (
+    from shared.tools.providers import (
         DuckDuckGoProvider,
         SerperProvider,
         build_search_provider,
@@ -239,7 +239,7 @@ def test_build_search_provider_selects_by_config() -> None:
 
 
 def test_lazy_provider_defers_a_missing_key_to_first_search() -> None:
-    from server.services.search_providers import LazySearchProvider
+    from shared.tools.providers import LazySearchProvider
 
     # A keyed provider with no key must not fail at construction — only on egress,
     # so a deployment that egresses only off-server never builds it on the server.

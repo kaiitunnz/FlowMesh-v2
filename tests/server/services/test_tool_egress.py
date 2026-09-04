@@ -14,7 +14,6 @@ from server.orchestration.tool_dispatch import (
     ToolOutcome,
     ToolOutcomeStatus,
 )
-from server.services.search_providers import SearchResult
 from server.services.tool_egress import (
     ColocatedSidecarCarriage,
     EgressLocality,
@@ -25,6 +24,7 @@ from server.services.tool_egress import (
     ToolRequest,
     WorkerSidecarAdapter,
 )
+from shared.tools.providers import SearchResult
 
 
 class _StubProvider:

@@ -14,13 +14,13 @@ from server.services.external_tool_sidecar import (
     ExternalToolSidecarListener,
     ExternalToolSidecarServer,
 )
-from server.services.search_providers import SearchResult, SearchUnavailable
 from server.services.tool_egress import (
     ExternalToolSidecar,
     RemoteToolOperationEnvelope,
     ToolRequest,
     tool_request_digest,
 )
+from shared.tools.providers import SearchResult, SearchUnavailable
 from shared.utils.ids import new_tool_delivery_nonce
 
 TARGET_ID = "stg-1"
