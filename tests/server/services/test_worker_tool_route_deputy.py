@@ -6,6 +6,7 @@ only by a transport session id, writes the opaque reply back, and pops the sessi
 on every terminal. It constructs no provider and reads no credential.
 """
 
+import ast
 import asyncio
 import base64
 import inspect
@@ -131,17 +132,44 @@ def test_a_failed_write_back_to_the_origin_pops_the_session() -> None:
 
 
 def test_the_supervisor_deputy_constructs_no_provider() -> None:
-    # The invariant: the supervisor routes opaque frames and never egresses. Its module
-    # imports and namespace carry no provider, sidecar, credential, or HTTP client.
+    # The invariant: the supervisor routes opaque frames and never egresses. From the
+    # shared tool package it may import only the opaque wire codec (the FRAME_* frame
+    # kinds) — never a provider, egress surface, envelope decoder, or credential, under
+    # either the old or the relocated shared.tools.* paths.
     src = inspect.getsource(deputy_mod)
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.ImportFrom) and (node.module or "").startswith(
+            "shared.tools"
+        ):
+            assert node.module == "shared.tools.wire", (
+                f"supervisor deputy may import from shared.tools only the wire codec, "
+                f"not {node.module}"
+            )
+            for alias in node.names:
+                assert alias.name.startswith("FRAME_"), (
+                    f"supervisor deputy may import only FRAME_* from the wire codec, "
+                    f"not {alias.name}"
+                )
     for forbidden in (
         "ExternalToolSidecar",
         "search_providers",
+        "shared.tools.providers",
+        "shared.tools.egress",
         "WebSearchConfig",
         "LazySearchProvider",
+        "build_search_provider",
+        "SearchProvider",
         "decode_msg",
+        "encode_msg",
         "requests",
+        "httpx",
     ):
         assert forbidden not in src, f"supervisor deputy must not reference {forbidden}"
-    for attr in ("ExternalToolSidecar", "LazySearchProvider", "requests"):
+    for attr in (
+        "ExternalToolSidecar",
+        "LazySearchProvider",
+        "build_search_provider",
+        "SearchProvider",
+        "requests",
+    ):
         assert not hasattr(deputy_mod, attr)
