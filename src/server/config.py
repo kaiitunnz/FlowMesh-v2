@@ -4,6 +4,7 @@ from enum import StrEnum
 from pathlib import Path
 
 from shared.tasks.specs import ModelBindingMode
+from shared.tools.schema import DEFAULT_SEARCH_PROVIDER
 from shared.utils.parsing import parse_bool_env, parse_float_env, parse_int_env
 
 
@@ -484,7 +485,7 @@ class WebSearchConfig:
     offered a direct dial only when ``sidecar_directly_routable``.
     """
 
-    provider: str = "duckduckgo"
+    provider: str = DEFAULT_SEARCH_PROVIDER
     api_key: str | None = None
     max_results: int = 5
     timeout_sec: float = 20.0
@@ -500,7 +501,9 @@ class WebSearchConfig:
     def from_env(cls) -> "WebSearchConfig":
         prefix = "WEB_SEARCH_"
         return cls(
-            provider=(os.getenv(f"{prefix}PROVIDER") or "duckduckgo").strip().lower(),
+            provider=(os.getenv(f"{prefix}PROVIDER") or DEFAULT_SEARCH_PROVIDER)
+            .strip()
+            .lower(),
             api_key=_env_or_none(f"{prefix}API_KEY"),
             max_results=parse_int_env(f"{prefix}MAX_RESULTS") or 5,
             timeout_sec=parse_float_env(f"{prefix}TIMEOUT_SEC") or 20.0,

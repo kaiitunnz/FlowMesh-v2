@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from shared.schemas.worker import SSHLimits
+from shared.tools.schema import DEFAULT_SEARCH_PROVIDER
 from shared.utils.parsing import (
     parse_bool_env,
     parse_float_env,
@@ -112,7 +113,9 @@ class WorkerConfig:
         enable_dev_model = parse_bool_env("WORKER_ENABLE_DEV_MODEL", False)
         dev_model_forward_url = os.getenv("DEV_MODEL_FORWARD_URL", "").strip() or None
         web_search_provider = (
-            (os.getenv("WEB_SEARCH_PROVIDER") or "duckduckgo").strip().lower()
+            (os.getenv("WEB_SEARCH_PROVIDER") or DEFAULT_SEARCH_PROVIDER)
+            .strip()
+            .lower()
         )
         web_search_api_key = os.getenv("WEB_SEARCH_API_KEY", "").strip() or None
         docker_gpu_runtime = os.getenv("DOCKER_GPU_RUNTIME", "").strip() or None

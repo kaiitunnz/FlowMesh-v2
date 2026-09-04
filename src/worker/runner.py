@@ -19,6 +19,7 @@ from shared.tasks.specs import (
     TaskSpecStrictBase,
 )
 from shared.tasks.worker_message import HardwareUsage, WorkerHardware, WorkerTaskMessage
+from shared.tools.schema import DEFAULT_SEARCH_PROVIDER
 from shared.utils.manifest import prepare_output_dir, sync_manifest
 from shared.utils.time import now_iso
 
@@ -42,7 +43,7 @@ class Runner:
         logger: logging.Logger,
         network_bandwidth_bytes_per_sec: float | None = None,
         executor_idle_cleanup_sec: float | None = None,
-        web_search_provider: str = "duckduckgo",
+        web_search_provider: str = DEFAULT_SEARCH_PROVIDER,
         web_search_api_key: str | None = None,
     ):
         self.lifecycle = lifecycle

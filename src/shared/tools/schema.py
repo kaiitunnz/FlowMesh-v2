@@ -13,6 +13,9 @@ from pydantic import BaseModel, ConfigDict
 # The reserved fabric-served tool interface. Exact routing keys on this exact value.
 SEARCH_INTERFACE = "search/v1"
 
+# The keyless web-search backend selected when no provider is configured.
+DEFAULT_SEARCH_PROVIDER = "duckduckgo"
+
 
 class ToolRequest(BaseModel):
     """The parsed, bounds-shaped request the control path derived from a boundary."""
@@ -114,6 +117,7 @@ class ToolOutcome(BaseModel):
 
 
 __all__ = [
+    "DEFAULT_SEARCH_PROVIDER",
     "SEARCH_INTERFACE",
     "RemoteToolOperationEnvelope",
     "ToolOperationEnvelope",
