@@ -1109,6 +1109,24 @@ class OrchestrationEngine:
             grant_id=grant_id, policy_envelope=self._instance.policy_envelope
         )
 
+    def boundary_settleable(self, task_id: str, call_correlation: str) -> bool:
+        """Whether a mediated settle for this exact boundary is still legal.
+
+        A settle is legal only while the boundary's work item is still BLOCKED — its
+        episode suspended on the mediated call — and the boundary itself is unresolved.
+        A cancelled or otherwise non-blocked work item, or an already-settled or denied
+        boundary, is absorbing: a late or duplicate model, tool, or resident delivery is
+        audit evidence only. It must not stamp an outcome, re-ready the episode, replace
+        the durable correlation, or release a resident credit a second time. Gate on the
+        BLOCKED work item, not a task record's status, since cancellation can leave the
+        record CANCELLING while the work item is already CANCELLED.
+        """
+        wi = self._work_item_for_task(task_id)
+        if wi is None or wi.status is not WorkItemStatus.BLOCKED:
+            return False
+        env = self._boundary_events.get((wi.activation_id, call_correlation))
+        return env is not None and env.outcome_value is None and env.denial is None
+
     def settle_boundary_outcome(
         self, task_id: str, call_correlation: str, *, value: str | None = None
     ) -> Advance:
@@ -1122,13 +1140,15 @@ class OrchestrationEngine:
             return Advance()
         corr = (wi.activation_id, call_correlation)
         env = self._boundary_events.get(corr)
-        resolved = env is not None and (
-            env.outcome_value is not None or env.denial is not None
+        resolved = wi.status is not WorkItemStatus.BLOCKED or (
+            env is not None
+            and (env.outcome_value is not None or env.denial is not None)
         )
         if resolved:
-            # A duplicate/late settle of an already-resolved member is an idempotent
-            # no-op: it never re-runs the deliver path, so it cannot re-ready or
-            # re-inject a stale outcome once the episode moved on to another boundary.
+            # A duplicate/late settle of an already-resolved member, or any settle for a
+            # no-longer-BLOCKED (cancelled or terminal) work item, is an idempotent
+            # no-op: it never re-runs the deliver path, so it cannot re-ready or stamp a
+            # stale outcome on a resolved or cancelled boundary.
             return Advance()
         if env is not None and value is not None:
             env = env.model_copy(update={"outcome_value": value})

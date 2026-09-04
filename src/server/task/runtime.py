@@ -1202,6 +1202,15 @@ class TaskRuntime:
             engine = self._engines.get(record.workflow_id) if record else None
             if record is None or engine is None:
                 return False
+            if not engine.boundary_settleable(task_id, call_correlation):
+                # Absorbing: the exact boundary is already resolved, or its work item is
+                # no longer BLOCKED because a durable cancellation made it CANCELLED. A
+                # late or duplicate tool/model/resident delivery is audit evidence, so
+                # it must not settle or fail the boundary, terminalize its invocation,
+                # re-ready the episode, or release the resident credit a second time
+                # (cancellation already terminalized and released it). This precedes the
+                # credit hook so a late success cannot win the claim's terminal reason.
+                return False
             if error is not None:
                 advance = engine.on_failed(
                     task_id,
