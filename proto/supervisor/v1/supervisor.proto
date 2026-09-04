@@ -26,6 +26,8 @@ message RegisterRequest {
 // Worker registration response.
 message RegisterResponse {
   string worker_id = 1;
+  // Monotonic registration incarnation; fences a worker-attached tool delivery.
+  int64 incarnation = 2;
 }
 
 // Interrupt payload emitted by the supervisor.
@@ -46,6 +48,16 @@ message TaskMessage {
   google.protobuf.Struct payload = 1;
 }
 
+// External-tool operation frame relayed to a worker executor over its attachment.
+message ToolEgressFrame {
+  // Transport session id the supervisor correlates the reply by.
+  string session_id = 1;
+  // Routing discriminator the supervisor sets from the transport action, never the payload.
+  string kind = 2;
+  // Opaque carriage frame bytes; only the worker executor decodes them.
+  bytes payload = 3;
+}
+
 // Dispatch envelope emitted by the supervisor.
 message DispatchMessage {
   oneof payload {
@@ -55,6 +67,8 @@ message DispatchMessage {
     InterruptMessage interrupt = 2;
     // Graceful stop signal for an active task.
     StopMessage stop = 3;
+    // External-tool operation frame for a worker executor.
+    ToolEgressFrame egress = 4;
   }
 }
 
