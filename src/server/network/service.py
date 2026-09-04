@@ -82,13 +82,7 @@ class NetworkPlane:
         node = await self._nodes.get_node_async(node_id)
         if node is None or node.network_endpoint is None:
             return None
-        return self._stamp(node.network_endpoint, node.id)
-
-    @staticmethod
-    def _stamp(
-        endpoint: NetworkEndpointAdvertisement, node_id: str
-    ) -> NetworkEndpointAdvertisement:
-        return stamp_endpoint(endpoint, node_id)
+        return stamp_endpoint(node.network_endpoint, node.id)
 
     async def resolve(
         self, origin_node_id: str, listener: ReplicaListenerAdvertisement
@@ -204,7 +198,7 @@ class NetworkPlane:
     async def endpoints(self) -> list[NetworkEndpointAdvertisement]:
         nodes = await self._nodes.list_nodes_async()
         return [
-            self._stamp(node.network_endpoint, node.id)
+            stamp_endpoint(node.network_endpoint, node.id)
             for node in nodes
             if node.network_endpoint is not None
         ]
