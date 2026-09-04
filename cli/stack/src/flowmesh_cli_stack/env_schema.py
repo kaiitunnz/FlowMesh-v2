@@ -555,13 +555,6 @@ STACK_ENV_SCHEMA = EnvSchema(
                     "",
                     description="Content-store root; under the data dir if empty.",
                 ),
-                EnvVar(
-                    "CONTENT_STORE_INLINE_MAX_BYTES",
-                    "4096",
-                    description="Inline control-datum size bound.",
-                    var_type=EnvVarType.INT,
-                    min_value=1,
-                ),
             ],
         ),
         EnvSection(

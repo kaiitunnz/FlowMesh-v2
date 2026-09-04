@@ -19,7 +19,7 @@ from shared.harness import (
     HarnessResult,
     HarnessResultKind,
 )
-from shared.outcome import ContentStoreError
+from shared.outcome import ContentStoreError, FabricContentStore
 from shared.schemas.result import BaseExecutorResult
 from shared.tasks.task_type import TaskType
 
@@ -71,7 +71,7 @@ class AgentEpisodeExecutor(Executor):
             if dispatch.capsule_blob is not None
             else None
         )
-        outcomes = tuple(self._hydrate(o) for o in dispatch.delivered_outcomes)
+        outcomes = self._hydrate_outcomes(dispatch.delivered_outcomes)
         for outcome in outcomes:
             _LOG.info(
                 "[fabric] injecting %s outcome at call %s",
@@ -88,28 +88,36 @@ class AgentEpisodeExecutor(Executor):
         value = result.value if result.kind is HarnessResultKind.COMPLETION else None
         return AgentEpisodeResult(harness_result=result, value=value)
 
-    def _hydrate(self, outcome: DeliveredOutcome) -> DeliveredOutcome:
-        """Resolve a reference-backed outcome into its injected value.
+    def _hydrate_outcomes(
+        self, outcomes: tuple[DeliveredOutcome, ...]
+    ) -> tuple[DeliveredOutcome, ...]:
+        """Resolve any reference-backed outcome into its injected value.
 
         A manifest is fetched from the content store and digest-verified before
-        injection; a hydration failure is retried as a physical delivery of the same
-        reference, never a re-run of the invocation, so it fails the step rather than
-        injecting an unverified value. An inline outcome passes through unchanged.
+        injection; a hydration failure fails the step for a physical retry of the same
+        reference, never a re-run of the invocation, so an unverified value is never
+        injected. An inline outcome passes through unchanged.
         """
-        if outcome.outcome_ref is None:
-            return outcome
+        if not any(o.outcome_ref is not None for o in outcomes):
+            return outcomes
         store = build_content_store(self._config.server_base_url)
         if store is None:
-            raise ExecutionError(
-                f"cannot hydrate outcome at {outcome.call_correlation}: no store"
-            )
+            raise ExecutionError("cannot hydrate a reference-backed outcome: no store")
+        return tuple(self._hydrate(o, store) for o in outcomes)
+
+    @staticmethod
+    def _hydrate(
+        outcome: DeliveredOutcome, store: FabricContentStore
+    ) -> DeliveredOutcome:
+        if outcome.outcome_ref is None:
+            return outcome
         try:
-            data = store.hydrate(outcome.outcome_ref)
-        except ContentStoreError as exc:
+            value = store.hydrate(outcome.outcome_ref).decode()
+        except (ContentStoreError, UnicodeDecodeError) as exc:
             raise ExecutionError(
                 f"outcome hydration failed at {outcome.call_correlation}: {exc}"
             ) from exc
-        return outcome.model_copy(update={"value": data.decode(), "outcome_ref": None})
+        return outcome.model_copy(update={"value": value, "outcome_ref": None})
 
     def cancel(self, task_id: str) -> None:
         if self._adapter is not None:

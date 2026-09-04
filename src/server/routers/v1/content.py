@@ -58,7 +58,6 @@ async def put_content(
             body,
             media_type=media_type,
             provenance=f"principal:{principal.principal_id}",
-            owner_subject=principal.principal_id,
         )
     except ContentStoreError as exc:
         raise HTTPException(

@@ -19,47 +19,45 @@ def test_manifest_carries_no_url_or_path() -> None:
     )
     fields = set(OutcomeManifest.model_fields)
     assert "url" not in fields and "path" not in fields
-    dumped = manifest.model_dump()
-    assert "http" not in str(dumped)
+    assert "http" not in str(manifest.model_dump())
 
 
-def test_carrier_discriminates_inline_and_ref() -> None:
+def test_carrier_round_trips_inline_and_ref() -> None:
     manifest = OutcomeManifest(
         content_digest=content_digest(b"x"), size_bytes=1, media_type="application/json"
     )
-    inline = InlineControl(value="unavailable")
     ref = ManifestRef(manifest=manifest)
-    assert inline.kind == "inline" and ref.kind == "manifest"
     assert ManifestRef.model_validate_json(ref.model_dump_json()).manifest == manifest
+    inline = InlineControl(value="unavailable")
+    assert InlineControl.model_validate_json(inline.model_dump_json()) == inline
 
 
 def test_materialize_is_idempotent_under_idempotency_key() -> None:
     store = InMemoryContentStore()
-    first = store.materialize("t1", "idm-1", b"payload", media_type="application/json")
-    second = store.materialize("t1", "idm-1", b"payload", media_type="application/json")
+    first = store.materialize("idm-1", b"payload", media_type="application/json")
+    second = store.materialize("idm-1", b"payload", media_type="application/json")
     assert first == second
     assert store.write_count == 1  # the second call found the first, no second write
 
 
 def test_hydrate_verifies_digest() -> None:
     store = InMemoryContentStore()
-    manifest = store.materialize("t1", "idm-2", b"body", media_type="application/json")
+    manifest = store.materialize("idm-2", b"body", media_type="application/json")
     assert store.hydrate(manifest) == b"body"
 
 
-def test_hydrate_denies_wrong_tenant() -> None:
+def test_hydrate_raises_on_missing_content() -> None:
     store = InMemoryContentStore()
-    manifest = store.materialize("t1", "idm-3", b"body", media_type="application/json")
-    other = manifest.model_copy(
-        update={"access": manifest.access.model_copy(update={"tenant": "t2"})}
+    absent = OutcomeManifest(
+        content_digest=content_digest(b"other"), size_bytes=5, media_type="text/plain"
     )
     with pytest.raises(OutcomeHydrationError):
-        store.hydrate(other)
+        store.hydrate(absent)
 
 
 def test_hydrate_raises_on_digest_mismatch() -> None:
     store = InMemoryContentStore()
-    manifest = store.materialize("t1", "idm-4", b"body", media_type="application/json")
+    manifest = store.materialize("idm-4", b"body", media_type="application/json")
     tampered = manifest.model_copy(update={"content_digest": content_digest(b"other")})
     with pytest.raises(OutcomeHydrationError):
         store.hydrate(tampered)

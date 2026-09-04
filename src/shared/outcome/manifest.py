@@ -5,27 +5,21 @@ addressed content by the producing worker; only this bounded manifest travels ba
 the control plane and lands on the durable boundary. It records the content identity
 and the metadata a resumed worker needs to hydrate and verify the value, plus the
 fabric idempotency key the materialization dedups under. It carries no bearer URL and
-no worker-local path: content is addressed by ``(access.tenant, content_digest)`` and
-fetched over an authorized fabric data path.
+no worker-local path: content is fetched by digest over an authorized fabric data path.
+
+Isolation is the content store's own: it partitions content by the authenticated
+principal, so a resume authenticated as the same principal hydrates the content and a
+different one cannot. ``tenant`` records that scope for audit; it is not a second gate.
 """
 
 import hashlib
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
 
 def content_digest(data: bytes) -> str:
     """The immutable content identity: a hex sha256 over the materialized bytes."""
     return hashlib.sha256(data).hexdigest()
-
-
-class OutcomeAccessBinding(BaseModel):
-    """The tenant/owner scope a hydration request must satisfy to read the content."""
-
-    model_config = ConfigDict(frozen=True)
-
-    tenant: str | None = None
-    owner_subject: str | None = None
 
 
 class OutcomeManifest(BaseModel):
@@ -36,7 +30,6 @@ class OutcomeManifest(BaseModel):
     content_digest: str
     size_bytes: int
     media_type: str
-    encoding: str | None = None
     provenance: str | None = None  # opaque producer tag; audit only, never parsed
     idempotency_key: str | None = None
-    access: OutcomeAccessBinding = Field(default_factory=OutcomeAccessBinding)
+    tenant: str | None = None  # the principal scope the content was materialized under

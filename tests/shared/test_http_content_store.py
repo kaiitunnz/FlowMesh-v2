@@ -36,29 +36,27 @@ def store(tmp_path, monkeypatch) -> HttpFabricContentStore:
     monkeypatch.setattr(
         "shared.outcome.http_store.requests", _RequestsShim(TestClient(app))
     )
-    return HttpFabricContentStore("http://testserver", token="k")
+    return HttpFabricContentStore("http://testserver")
 
 
 def test_materialize_then_hydrate(store) -> None:
-    manifest = store.materialize(
-        "local", "idm-1", b"payload", media_type="application/json"
-    )
+    manifest = store.materialize("idm-1", b"payload", media_type="application/json")
     assert store.hydrate(manifest) == b"payload"
 
 
 def test_materialize_finds_prior_under_idem(store) -> None:
-    first = store.materialize("local", "idm-2", b"a", media_type="application/json")
-    assert store.find("local", "idm-2") == first
-    second = store.materialize("local", "idm-2", b"a", media_type="application/json")
+    first = store.materialize("idm-2", b"a", media_type="application/json")
+    assert store.find("idm-2") == first
+    second = store.materialize("idm-2", b"a", media_type="application/json")
     assert first == second
 
 
 def test_find_missing_returns_none(store) -> None:
-    assert store.find("local", "idm-absent") is None
+    assert store.find("idm-absent") is None
 
 
 def test_hydrate_missing_raises(store) -> None:
-    manifest = store.materialize("local", "idm-3", b"a", media_type="application/json")
+    manifest = store.materialize("idm-3", b"a", media_type="application/json")
     tampered = manifest.model_copy(update={"content_digest": "0" * 64})
     with pytest.raises(OutcomeHydrationError):
         store.hydrate(tampered)

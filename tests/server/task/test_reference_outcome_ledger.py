@@ -11,7 +11,7 @@ import asyncio
 from server.orchestration import WorkItemStatus
 from server.orchestration.state import LedgerSnapshot
 from shared.harness import BoundaryEventKind
-from shared.outcome import OutcomeAccessBinding, OutcomeManifest, content_digest
+from shared.outcome import OutcomeManifest, content_digest
 from tests.server.task.test_v2_orchestration import FakeRegistry, _register, _runtime
 from worker.executors.harness.scripted import ScriptedHarnessAdapter, ScriptedStep
 
@@ -38,7 +38,7 @@ def _manifest() -> OutcomeManifest:
         size_bytes=12,
         media_type="application/json",
         idempotency_key="idm-1",
-        access=OutcomeAccessBinding(tenant="local"),
+        tenant="local",
     )
 
 

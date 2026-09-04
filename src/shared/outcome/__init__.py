@@ -5,19 +5,16 @@ from .content_store import (
     ContentStoreError,
     FabricContentStore,
     OutcomeHydrationError,
-    OutcomeSpool,
 )
-from .manifest import OutcomeAccessBinding, OutcomeManifest, content_digest
+from .manifest import OutcomeManifest, content_digest
 
 __all__ = [
     "ContentStoreError",
     "FabricContentStore",
     "InlineControl",
     "ManifestRef",
-    "OutcomeAccessBinding",
     "OutcomeCarrier",
     "OutcomeHydrationError",
     "OutcomeManifest",
-    "OutcomeSpool",
     "content_digest",
 ]

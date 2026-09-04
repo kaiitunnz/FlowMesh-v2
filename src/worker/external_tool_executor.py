@@ -199,22 +199,28 @@ class WorkerExternalToolExecutor:
     ) -> bytes:
         """A manifest frame for a materialized provider result, else an inline datum.
 
-        A successful result materializes through the content store so no result body
-        crosses the origin. A typed control status is a bounded inline datum. With no
-        store or idempotency key the result inlines as the compatibility fallback.
+        A provider result always materializes through the content store so no result
+        body crosses the origin. A typed control status is a bounded inline datum. A
+        successful result the worker cannot reference — no content store or idempotency
+        key — returns a typed unavailable datum rather than inlining an unbounded body.
         """
-        if (
-            self._content_store is None
-            or outcome.status is not ToolOutcomeStatus.SUCCESS
-            or envelope.idempotency_key is None
-        ):
+        if outcome.status is not ToolOutcomeStatus.SUCCESS:
             return encode_msg(KIND_RESULT, outcome=outcome.model_dump(mode="json"))
+        if self._content_store is None or envelope.idempotency_key is None:
+            self._log.warning(
+                "no content store to materialize a tool result by reference"
+            )
+            return encode_msg(
+                KIND_RESULT,
+                outcome=ToolOutcome(
+                    status=ToolOutcomeStatus.UNAVAILABLE,
+                    value="no content store is configured to materialize the result",
+                ).model_dump(mode="json"),
+            )
         manifest = self._content_store.materialize(
-            envelope.tenant,
             envelope.idempotency_key,
             outcome.model_dump_json().encode(),
             media_type="application/json",
-            provenance=f"worker:{self._worker_id}:{envelope.interface}",
         )
         return encode_msg(KIND_MANIFEST, manifest=manifest.model_dump(mode="json"))
 
@@ -224,7 +230,7 @@ class WorkerExternalToolExecutor:
         """The manifest already materialized for this operation's idempotency key."""
         if self._content_store is None or envelope.idempotency_key is None:
             return None
-        return self._content_store.find(envelope.tenant, envelope.idempotency_key)
+        return self._content_store.find(envelope.idempotency_key)
 
     def _fence_reject(
         self, envelope: RemoteToolOperationEnvelope, request: ToolRequest

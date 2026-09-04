@@ -3,11 +3,9 @@
 A worker producer settles a boundary with exactly one of two forms: a reference-backed
 ``ManifestRef`` for any engine/provider/service result, or a bounded, opaque
 ``InlineControl`` datum for a separately declared worker-produced control status. The
-control plane routes the carrier without inspecting a payload — a ``ManifestRef`` lands
-as a bounded manifest on the ledger and an ``InlineControl`` as a bounded value.
+control plane routes the carrier by type without inspecting a payload: a ref lands as a
+bounded manifest on the ledger and an inline datum as a bounded value.
 """
-
-from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -19,7 +17,6 @@ class InlineControl(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    kind: Literal["inline"] = "inline"
     value: str
 
 
@@ -28,7 +25,6 @@ class ManifestRef(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    kind: Literal["manifest"] = "manifest"
     manifest: OutcomeManifest
 
 

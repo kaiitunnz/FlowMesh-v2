@@ -128,17 +128,19 @@ def _executor(
     return ex, sink, calls
 
 
-def test_valid_operation_egresses_in_the_worker_and_replies(
+def test_success_without_a_store_is_unavailable_not_inlined(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # The provider egresses in this worker, but with no content store the result cannot
+    # be referenced; it returns a bounded unavailable datum rather than an unbounded
+    # inline body.
     ex, sink, calls = _executor(monkeypatch)
     ex.submit("xtr-1", FRAME_OPERATION, _op(_fence()))
     assert sink.wait()
     session_id, kind, frame = sink.frames[0]
     assert (session_id, kind) == ("xtr-1", FRAME_REPLY)
     body = decode_msg(frame)
-    assert body["kind"] == KIND_RESULT and body["outcome"]["status"] == "success"
-    # The provider ran in this worker process, exactly once.
+    assert body["kind"] == KIND_RESULT and body["outcome"]["status"] == "unavailable"
     assert calls == ["q"]
 
 
@@ -154,7 +156,7 @@ def test_success_materializes_by_reference_with_a_store(
     # The provider result leaves the worker as a manifest, never an inline result body.
     assert kind == FRAME_REPLY and body["kind"] == KIND_MANIFEST
     manifest = body["manifest"]
-    hydrated = store.read(None, manifest["content_digest"])
+    hydrated = store.read(manifest["content_digest"])
     assert manifest["content_digest"] == content_digest(hydrated)
     assert ToolOutcome.model_validate_json(hydrated).status.value == "success"
     assert calls == ["q"]

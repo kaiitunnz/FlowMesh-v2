@@ -61,9 +61,7 @@ def test_reference_outcome_is_hydrated_before_injection(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store = InMemoryContentStore()
-    manifest = store.materialize(
-        "local", "idm-1", b"the-result", media_type="application/json"
-    )
+    manifest = store.materialize("idm-1", b"the-result", media_type="application/json")
     monkeypatch.setattr(aee, "build_content_store", lambda base_url: store)
     adapter = _RecordingAdapter()
     register_adapter("fake", lambda backend, task, config: adapter)

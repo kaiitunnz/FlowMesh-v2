@@ -1,24 +1,22 @@
 """A filesystem-backed content store for reference-backed outcomes.
 
 The store holds worker-materialized outcome content as immutable, content-addressed
-objects under a per-tenant partition, plus an idempotency index so a re-drive under the
-same fabric ``idempotency_key`` resolves the first materialization rather than writing a
-second object. It stores opaque bytes and metadata only; it never assembles content into
-orchestration state. Writes come from the worker over the content router; the server
-never originates a materialization.
+objects under a per-principal partition, plus an idempotency index so a re-drive under
+the same fabric ``idempotency_key`` resolves the first materialization rather than
+writing a second object. It stores opaque bytes and metadata only; it never assembles
+content into orchestration state. Writes come from the worker over the content router;
+the server never originates a materialization. Isolation is the partition: a read is
+scoped to the requesting principal, so it never reaches another principal's content.
 """
 
 import os
 import tempfile
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 from shared.outcome import (
     ContentStoreError,
-    FabricContentStore,
-    OutcomeAccessBinding,
     OutcomeHydrationError,
     OutcomeManifest,
-    OutcomeSpool,
     content_digest,
 )
 
@@ -26,7 +24,7 @@ _SAFE = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ012345678
 
 
 def _segment(value: str | None) -> str:
-    """A single path segment safe from traversal, or ``_`` for an empty tenant."""
+    """A single path segment safe from traversal, or ``_`` for an empty principal."""
     if not value:
         return "_"
     if value in {".", ".."} or any(c not in _SAFE for c in value):
@@ -34,56 +32,68 @@ def _segment(value: str | None) -> str:
     return value
 
 
-class ServerContentStore(FabricContentStore):
-    """A per-tenant, content-addressed immutable store rooted at a local directory."""
+class ServerContentStore:
+    """A per-principal, content-addressed immutable store under a local directory."""
 
     def __init__(self, root: Path) -> None:
         self._root = root
 
-    def _tenant_dir(self, tenant: str | None) -> Path:
-        return self._root / _segment(tenant)
-
-    def _object_path(self, tenant: str | None, digest: str) -> Path:
+    def _object_path(self, principal: str | None, digest: str) -> Path:
+        digest = _segment(digest)
         return (
-            self._tenant_dir(tenant)
-            / "objects"
-            / _segment(digest[:2])
-            / _segment(digest)
+            self._root / _segment(principal) / "objects" / _segment(digest[:2]) / digest
         )
 
-    def _idem_path(self, tenant: str | None, idempotency_key: str) -> Path:
-        name = _segment(idempotency_key)
-        return self._tenant_dir(tenant) / "idem" / f"{name}.json"
+    def _idem_path(self, principal: str | None, idempotency_key: str) -> Path:
+        return (
+            self._root
+            / _segment(principal)
+            / "idem"
+            / f"{_segment(idempotency_key)}.json"
+        )
 
-    def find(self, tenant: str | None, idempotency_key: str) -> OutcomeManifest | None:
-        path = self._idem_path(tenant, idempotency_key)
+    def find(
+        self, principal: str | None, idempotency_key: str
+    ) -> OutcomeManifest | None:
+        path = self._idem_path(principal, idempotency_key)
         if not path.exists():
             return None
         return OutcomeManifest.model_validate_json(path.read_text())
 
-    def open_spool(self, tenant: str | None, idempotency_key: str) -> OutcomeSpool:
-        return _FileSpool(self, idempotency_key)
-
-    def read(self, tenant: str | None, digest: str) -> bytes:
-        path = self._object_path(tenant, _segment(digest))
-        if not path.exists():
-            raise OutcomeHydrationError(
-                f"no content for {digest} under tenant {tenant}"
-            )
-        return path.read_bytes()
-
-    def _commit(self, tenant: str | None, data: bytes) -> str:
+    def materialize(
+        self,
+        principal: str | None,
+        idempotency_key: str,
+        data: bytes,
+        *,
+        media_type: str,
+        provenance: str | None = None,
+    ) -> OutcomeManifest:
+        if (found := self.find(principal, idempotency_key)) is not None:
+            return found
         digest = content_digest(data)
-        self._atomic_write(self._object_path(tenant, digest), data)
-        return digest
-
-    def _record_idem(
-        self, tenant: str | None, idempotency_key: str, manifest: OutcomeManifest
-    ) -> None:
+        self._atomic_write(self._object_path(principal, digest), data)
+        manifest = OutcomeManifest(
+            content_digest=digest,
+            size_bytes=len(data),
+            media_type=media_type,
+            provenance=provenance,
+            idempotency_key=idempotency_key,
+            tenant=principal,
+        )
         self._atomic_write(
-            self._idem_path(tenant, idempotency_key),
+            self._idem_path(principal, idempotency_key),
             manifest.model_dump_json().encode(),
         )
+        return manifest
+
+    def read(self, principal: str | None, digest: str) -> bytes:
+        path = self._object_path(principal, digest)
+        if not path.exists():
+            raise OutcomeHydrationError(
+                f"no content for {digest} under principal {principal}"
+            )
+        return path.read_bytes()
 
     @staticmethod
     def _atomic_write(path: Path, data: bytes) -> None:
@@ -103,41 +113,3 @@ class ServerContentStore(FabricContentStore):
         except BaseException:
             Path(tmp).unlink(missing_ok=True)
             raise
-
-
-class _FileSpool(OutcomeSpool):
-    def __init__(self, store: ServerContentStore, idempotency_key: str) -> None:
-        self._store = store
-        self._idm = idempotency_key
-        self._buf = bytearray()
-        self._cursor = 0
-
-    def append(self, data: bytes) -> int:
-        self._buf.extend(data)
-        self._cursor += len(data)
-        return self._cursor
-
-    def finalize(
-        self,
-        *,
-        media_type: str,
-        provenance: str | None,
-        access: OutcomeAccessBinding,
-    ) -> OutcomeManifest:
-        data = bytes(self._buf)
-        digest = self._store._commit(access.tenant, data)
-        manifest = OutcomeManifest(
-            content_digest=digest,
-            size_bytes=len(data),
-            media_type=media_type,
-            provenance=provenance,
-            idempotency_key=self._idm,
-            access=access,
-        )
-        self._store._record_idem(access.tenant, self._idm, manifest)
-        return manifest
-
-
-def default_content_root(base: str) -> Path:
-    """The content-store root under a server data directory, as a native path."""
-    return Path(PurePosixPath(base) / "content")

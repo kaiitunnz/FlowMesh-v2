@@ -31,7 +31,7 @@ def test_put_then_hydrate_round_trip(tmp_path) -> None:
     assert put.status_code == 200
     manifest = OutcomeManifest.model_validate(put.json())
     assert manifest.content_digest == content_digest(b"result-body")
-    assert manifest.access.tenant == "local"
+    assert manifest.tenant == "local"
 
     got = client.get(f"{PREFIX}/content/{manifest.content_digest}")
     assert got.status_code == 200

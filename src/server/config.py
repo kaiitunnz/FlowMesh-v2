@@ -525,17 +525,15 @@ class WebSearchConfig:
 
 @dataclass
 class ContentStoreConfig:
-    """The reference-backed outcome content store's local root and inline bound.
+    """The reference-backed outcome content store's local root.
 
     ``root`` is the server-hosted content-addressed object root a worker writes and
-    hydrates over the content router. ``inline_control_max_bytes`` bounds the opaque
-    worker-produced control datum a settle may carry inline; every provider result
-    materializes by reference regardless of size.
+    hydrates over the content router. Every provider result materializes by reference
+    regardless of size; only a bounded worker-produced control datum is carried inline.
     """
 
     enabled: bool = True
     root: Path = Path("./content")
-    inline_control_max_bytes: int = 4096
 
     @classmethod
     def from_env(cls, results_dir: Path) -> "ContentStoreConfig":
@@ -545,12 +543,7 @@ class ContentStoreConfig:
             if override
             else results_dir.parent / "content"
         )
-        return cls(
-            enabled=parse_bool_env("CONTENT_STORE_ENABLED", True),
-            root=root,
-            inline_control_max_bytes=parse_int_env("CONTENT_STORE_INLINE_MAX_BYTES")
-            or 4096,
-        )
+        return cls(enabled=parse_bool_env("CONTENT_STORE_ENABLED", True), root=root)
 
 
 @dataclass
