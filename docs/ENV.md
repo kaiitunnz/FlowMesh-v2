@@ -59,6 +59,9 @@ listed here is in `.env.example`.
 | `WEB_SEARCH_SIDECAR_REMOTE` | `false` | Carry a worker-sidecar search to a remote node |
 | `WEB_SEARCH_SIDECAR_ROUTE` | `127.0.0.1:0` | Remote sidecar bind route |
 | `WEB_SEARCH_SIDECAR_DIRECTLY_ROUTABLE` | `false` | Offer a direct dial to the remote sidecar |
+| `CONTENT_STORE_ENABLED` | `true` | Serve the outcome content store |
+| `CONTENT_STORE_ROOT` | – | Content-store root; under the data dir if empty |
+| `CONTENT_STORE_INLINE_MAX_BYTES` | `4096` | Inline control-datum size bound |
 | `RESIDENT_CAPACITY_ENABLED` | `false` | Serve resident model bindings via admission |
 | `RESIDENT_INFERENCE_SUBSTRATE` | `serve` | Resident replica substrate (`serve` or `dev_model`) |
 | `RESIDENT_SERVE_ACCESS_MODE` | `forward` | Materialized replica endpoint access mode |

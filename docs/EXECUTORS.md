@@ -128,3 +128,14 @@ worker-environment allowlist) — no credential travels in a workflow, envelope,
 message, or log. A delivery for a restarted worker's stale incarnation is rejected before
 egress, and a lost reply leaves the durable boundary pending for a same-`idm-*` re-drive
 rather than a manufactured terminal outcome.
+
+On the `worker_sidecar` locality with the content store enabled, a successful provider
+result is materialized by reference: the executor writes the outcome bytes to the
+content-addressed store under its `idm-*` and returns only an `OutcomeManifest`, so the
+result body never crosses the supervisor or root. A same-`idm-*` re-drive finds the first
+materialization instead of re-sampling; a store-write failure sends no reply, leaving the
+boundary pending. A typed control status (an unavailable provider, a fence reject) stays a
+bounded inline datum. On resume, the `AgentEpisodeExecutor` hydrates and digest-verifies the
+manifest before injecting the value into the harness; a hydration failure fails the step for
+a physical retry of the same reference, never a re-run. With no content store the result
+inlines as the compatibility fallback, and the `server_relay` locality stays inline.
