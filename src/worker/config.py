@@ -44,6 +44,8 @@ class WorkerConfig:
     enable_mp_executors: bool
     enable_dev_model: bool
     dev_model_forward_url: str | None
+    web_search_provider: str
+    web_search_api_key: str | None
     docker_gpu_runtime: str | None
     ssh_limits: SSHLimits | None
     enable_ssh_gpu_limit: bool
@@ -109,6 +111,10 @@ class WorkerConfig:
         enable_mp_executors = parse_bool_env("WORKER_ENABLE_MP_EXECUTORS", True)
         enable_dev_model = parse_bool_env("WORKER_ENABLE_DEV_MODEL", False)
         dev_model_forward_url = os.getenv("DEV_MODEL_FORWARD_URL", "").strip() or None
+        web_search_provider = (
+            (os.getenv("WEB_SEARCH_PROVIDER") or "duckduckgo").strip().lower()
+        )
+        web_search_api_key = os.getenv("WEB_SEARCH_API_KEY", "").strip() or None
         docker_gpu_runtime = os.getenv("DOCKER_GPU_RUNTIME", "").strip() or None
         grpc_keepalive_time_ms = parse_int_env(
             "SUPERVISOR_GRPC_KEEPALIVE_TIME_MS", 300_000
@@ -173,6 +179,8 @@ class WorkerConfig:
             enable_mp_executors=enable_mp_executors,
             enable_dev_model=enable_dev_model,
             dev_model_forward_url=dev_model_forward_url,
+            web_search_provider=web_search_provider,
+            web_search_api_key=web_search_api_key,
             docker_gpu_runtime=docker_gpu_runtime,
             ssh_limits=ssh_limits,
             enable_ssh_gpu_limit=enable_ssh_gpu_limit,

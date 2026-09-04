@@ -30,8 +30,11 @@ _UDDG = re.compile(r"uddg=([^&]+)")
 class ProviderConfig(Protocol):
     """The provider binding a backend is built from: a name and an optional key."""
 
-    provider: str
-    api_key: str | None
+    @property
+    def provider(self) -> str: ...
+
+    @property
+    def api_key(self) -> str | None: ...
 
 
 class SearchResult(BaseModel):

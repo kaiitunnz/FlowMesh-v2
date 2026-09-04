@@ -15,6 +15,15 @@ KIND_OPERATION = "operation"
 KIND_RESULT = "result"
 KIND_REJECT = "reject"
 
+# ToolEgressFrame.kind values on the worker attachment arm, distinct from the inner
+# message-body KIND_* above. The supervisor sets these from the transport action it
+# performs, never by decoding the opaque payload: OPERATION/CANCEL travel down to the
+# worker, REPLY (opaque result/reject bytes) and REAP travel back up.
+FRAME_OPERATION = "operation"
+FRAME_CANCEL = "cancel"
+FRAME_REPLY = "reply"
+FRAME_REAP = "reap"
+
 
 def encode_msg(kind: str, **fields: Any) -> bytes:
     """Serialize one message body; it rides a socket frame or relay payload verbatim."""
@@ -29,4 +38,14 @@ def decode_msg(raw: bytes) -> dict[str, Any]:
     return payload
 
 
-__all__ = ["KIND_OPERATION", "KIND_REJECT", "KIND_RESULT", "decode_msg", "encode_msg"]
+__all__ = [
+    "FRAME_CANCEL",
+    "FRAME_OPERATION",
+    "FRAME_REAP",
+    "FRAME_REPLY",
+    "KIND_OPERATION",
+    "KIND_REJECT",
+    "KIND_RESULT",
+    "decode_msg",
+    "encode_msg",
+]

@@ -25,6 +25,7 @@ from shared.utils.time import now_iso
 from .executors.agent_episode_executor import AgentEpisodeResult
 from .executors.base_executor import ExecutionError, Executor, TaskCancelledError
 from .executors.utils.checkpoints import get_http_destination, write_executor_result
+from .external_tool_executor import WorkerExternalToolExecutor
 from .lifecycle import Lifecycle
 from .utils.logging import TaskLogEmitter
 
@@ -41,6 +42,8 @@ class Runner:
         logger: logging.Logger,
         network_bandwidth_bytes_per_sec: float | None = None,
         executor_idle_cleanup_sec: float | None = None,
+        web_search_provider: str = "duckduckgo",
+        web_search_api_key: str | None = None,
     ):
         self.lifecycle = lifecycle
         self.task_stream = task_stream
@@ -79,6 +82,12 @@ class Runner:
         self._cancel_lock = threading.Lock()
         self._shutdown_requested = threading.Event()
 
+        # The worker-hosted external-tool executor, built on the first operation
+        # delivered over the attachment (once the worker id and incarnation are known).
+        self._web_search_provider = web_search_provider
+        self._web_search_api_key = web_search_api_key
+        self._tool_executor: WorkerExternalToolExecutor | None = None
+
     def _cancel_active_executor(self) -> None:
         with self._active_executor_lock:
             executor = self._active_executor
@@ -114,6 +123,27 @@ class Runner:
         self._shutdown_requested.set()
         self.lifecycle.stop()
         self._cancel_active_executor()
+        if self._tool_executor is not None:
+            self._tool_executor.stop()
+
+    def _ensure_tool_executor(self) -> WorkerExternalToolExecutor | None:
+        """Build the external-tool executor once the worker id/incarnation are known."""
+        if self._tool_executor is not None:
+            return self._tool_executor
+        client = self.lifecycle.client
+        try:
+            worker_id = client.worker_id
+        except RuntimeError:
+            return None
+        self._tool_executor = WorkerExternalToolExecutor(
+            worker_id=worker_id,
+            generation=client.incarnation,
+            provider=self._web_search_provider,
+            api_key=self._web_search_api_key,
+            result_sink=client.push_tool_egress,
+            logger=self.logger,
+        )
+        return self._tool_executor
 
     def _resolve_output_dir(self, task_id: str) -> Path:
         """Prepare and return the canonical output directory for a task's results."""
@@ -359,6 +389,14 @@ class Runner:
                                 executor.stop(task_id)
                             except Exception as exc:
                                 self.logger.warning("Executor stop() raised: %s", exc)
+                    for (
+                        session_id,
+                        kind,
+                        payload,
+                    ) in self.lifecycle.client.iter_egress():
+                        tool_executor = self._ensure_tool_executor()
+                        if tool_executor is not None:
+                            tool_executor.submit(session_id, kind, payload)
                 except Exception as exc:
                     self.logger.warning("Interrupt monitor encountered error: %s", exc)
         except Exception:
