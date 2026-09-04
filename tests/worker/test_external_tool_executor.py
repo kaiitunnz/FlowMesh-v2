@@ -207,6 +207,13 @@ def test_cancel_before_start_drops_the_inflight_entry(
     block = threading.Event()
     ex, sink, calls = _executor(monkeypatch, block=block, max_workers=1)
     ex.submit("xtr-busy", FRAME_OPERATION, _op(_fence()))
+    # Wait until the single worker thread is occupied by the busy op, so the second op
+    # is queued behind it and its cancel wins before it starts.
+    for _ in range(200):
+        if calls:
+            break
+        time.sleep(0.01)
+    assert calls == ["q"]
     ex.submit("xtr-queued", FRAME_OPERATION, _op(_fence(delivery_nonce="xdn-2")))
     ex.submit("xtr-queued", FRAME_CANCEL, b"")
     assert sink.wait()
