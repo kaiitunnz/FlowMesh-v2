@@ -34,14 +34,17 @@ from .tool_egress import (
     EgressLocalityPolicy,
     ExecutionTransport,
     ExternalToolSidecar,
+    OutcomeCarrier,
     ServerRelayAdapter,
     ToolOperationEnvelope,
     ToolRequest,
     WorkerSidecarAdapter,
+    inline_outcome,
 )
 
-# (task_id, call_correlation, serialized ToolOutcome) — the runtime settles it durably.
-SettleCallback = Callable[[str, str, str], None]
+# (task_id, call_correlation, carrier) — an inline control datum or a reference-backed
+# manifest the runtime settles durably; the broker never assembles a result body.
+SettleCallback = Callable[[str, str, OutcomeCarrier], None]
 # (task_id, call_correlation) -> re-dispatched; holds the boundary pending to re-drive.
 RedispatchCallback = Callable[[str, str], bool]
 
@@ -134,42 +137,51 @@ class FabricToolBroker:
             result = self._dispatch(env, key)
         except (
             Exception
-        ) as exc:  # noqa: BLE001 - a broker fault is a typed tool outcome
+        ) as exc:  # noqa: BLE001 - a broker fault is a typed control datum
             self._log.warning("fabric tool dispatch failed: %s", exc)
-            result = ToolOutcome(
-                status=ToolOutcomeStatus.UNAVAILABLE,
-                value=f"the {env.interface} tool is unavailable",
+            result = inline_outcome(
+                ToolOutcome(
+                    status=ToolOutcomeStatus.UNAVAILABLE,
+                    value=f"the {env.interface} tool is unavailable",
+                )
             )
         if isinstance(result, AmbiguousDelivery):
             self._on_ambiguous(env, key, result)
             return
         self._finish(key)
-        self._settle(env.task_id, env.call_correlation, result.model_dump_json())
+        self._settle(env.task_id, env.call_correlation, result)
 
     def _dispatch(
         self, env: ToolInvocationEnvelope, key: tuple[str, str]
     ) -> CarriageResult:
         if env.interface != SEARCH_INTERFACE:
-            return ToolOutcome(
-                status=ToolOutcomeStatus.UNAVAILABLE,
-                value=f"no handler for interface {env.interface}",
+            return inline_outcome(
+                ToolOutcome(
+                    status=ToolOutcomeStatus.UNAVAILABLE,
+                    value=f"no handler for interface {env.interface}",
+                )
             )
         recovery = self._touch(key)
         if not recovery.charged:
             # Draw down the episode budget once per logical operation; a same-idm-*
             # re-drive of a lost delivery reuses it rather than re-charging.
             if not self._charge(env.task_id):
-                return ToolOutcome(
-                    status=ToolOutcomeStatus.QUOTA,
-                    value=(
-                        f"search budget exhausted ({self._cfg.max_calls} calls/episode)"
-                    ),
+                return inline_outcome(
+                    ToolOutcome(
+                        status=ToolOutcomeStatus.QUOTA,
+                        value=(
+                            f"search budget exhausted "
+                            f"({self._cfg.max_calls} calls/episode)"
+                        ),
+                    )
                 )
             recovery.charged = True
         query, max_results = self._parse_request(env.request_payload)
         if not query:
-            return ToolOutcome(
-                status=ToolOutcomeStatus.SUCCESS, value="No query supplied."
+            return inline_outcome(
+                ToolOutcome(
+                    status=ToolOutcomeStatus.SUCCESS, value="No query supplied."
+                )
             )
         request = ToolRequest(
             interface=env.interface, query=query, max_results=max_results
@@ -225,13 +237,15 @@ class FabricToolBroker:
         self._settle(
             env.task_id,
             env.call_correlation,
-            ToolOutcome(
-                status=ToolOutcomeStatus.UNAVAILABLE,
-                value=(
-                    f"the {env.interface} operation was lost and recovery was "
-                    f"exhausted after {attempts} attempts"
-                ),
-            ).model_dump_json(),
+            inline_outcome(
+                ToolOutcome(
+                    status=ToolOutcomeStatus.UNAVAILABLE,
+                    value=(
+                        f"the {env.interface} operation was lost and recovery was "
+                        f"exhausted after {attempts} attempts"
+                    ),
+                )
+            ),
         )
 
     def _touch(self, key: tuple[str, str]) -> _Recovery:

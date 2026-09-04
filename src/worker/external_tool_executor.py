@@ -20,6 +20,7 @@ from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 
+from shared.outcome import FabricContentStore, OutcomeManifest
 from shared.tools.contract import (
     RemoteToolOperationEnvelope,
     ToolOperationEnvelope,
@@ -38,6 +39,7 @@ from shared.tools.wire import (
     FRAME_OPERATION,
     FRAME_REAP,
     FRAME_REPLY,
+    KIND_MANIFEST,
     KIND_OPERATION,
     KIND_REJECT,
     KIND_RESULT,
@@ -69,6 +71,7 @@ class WorkerExternalToolExecutor:
         provider: str,
         api_key: str | None,
         result_sink: EgressResultSink,
+        content_store: FabricContentStore | None = None,
         policy_class: str = "default",
         interfaces: frozenset[str] = frozenset({SEARCH_INTERFACE}),
         max_workers: int = 4,
@@ -77,6 +80,7 @@ class WorkerExternalToolExecutor:
         self._worker_id = worker_id
         self._generation = generation
         self._provider = provider
+        self._content_store = content_store
         self._policy_class = policy_class
         self._interfaces = interfaces
         self._sink = result_sink
@@ -153,6 +157,10 @@ class WorkerExternalToolExecutor:
         if not self._consume_nonce(envelope.delivery_nonce, envelope.deadline_epoch):
             self._log.info("tool fence rejected op reason=replay")
             return encode_msg(KIND_REJECT, reason="replay")
+        if (prior := self._prior_manifest(envelope)) is not None:
+            # A prior materialization under this idempotency key stands: return it
+            # without sampling the provider again.
+            return encode_msg(KIND_MANIFEST, manifest=prior.model_dump(mode="json"))
         colocated = ToolOperationEnvelope(
             interface=envelope.interface,
             idempotency_key=envelope.idempotency_key,
@@ -171,14 +179,52 @@ class WorkerExternalToolExecutor:
         except ValueError as exc:
             # A misprovisioned provider (unknown backend, or a keyed provider with no
             # key) is a deterministic fault: a same-idm re-drive to this worker repeats
-            # it. Return a terminal typed outcome, not a no-reply ambiguous loss that
-            # re-drives until the retry budget exhausts.
+            # it. Return a terminal typed control datum inline, not a no-reply ambiguous
+            # loss that re-drives until the retry budget exhausts.
             self._log.warning("tool provider unavailable: %s", exc)
-            outcome = ToolOutcome(
-                status=ToolOutcomeStatus.UNAVAILABLE,
-                value="the external-tool provider is unavailable",
+            return encode_msg(
+                KIND_RESULT,
+                outcome=ToolOutcome(
+                    status=ToolOutcomeStatus.UNAVAILABLE,
+                    value="the external-tool provider is unavailable",
+                ).model_dump(mode="json"),
             )
-        return encode_msg(KIND_RESULT, outcome=outcome.model_dump(mode="json"))
+        # Materialize a provider result by reference before it leaves the worker; a
+        # store failure raises here, out of _run's guard, leaving no reply so the origin
+        # holds the boundary pending and re-drives under the same idempotency key.
+        return self._deliver_outcome(envelope, outcome)
+
+    def _deliver_outcome(
+        self, envelope: RemoteToolOperationEnvelope, outcome: ToolOutcome
+    ) -> bytes:
+        """A manifest frame for a materialized provider result, else an inline datum.
+
+        A successful result materializes through the content store so no result body
+        crosses the origin. A typed control status is a bounded inline datum. With no
+        store or idempotency key the result inlines as the compatibility fallback.
+        """
+        if (
+            self._content_store is None
+            or outcome.status is not ToolOutcomeStatus.SUCCESS
+            or envelope.idempotency_key is None
+        ):
+            return encode_msg(KIND_RESULT, outcome=outcome.model_dump(mode="json"))
+        manifest = self._content_store.materialize(
+            envelope.tenant,
+            envelope.idempotency_key,
+            outcome.model_dump_json().encode(),
+            media_type="application/json",
+            provenance=f"worker:{self._worker_id}:{envelope.interface}",
+        )
+        return encode_msg(KIND_MANIFEST, manifest=manifest.model_dump(mode="json"))
+
+    def _prior_manifest(
+        self, envelope: RemoteToolOperationEnvelope
+    ) -> OutcomeManifest | None:
+        """The manifest already materialized for this operation's idempotency key."""
+        if self._content_store is None or envelope.idempotency_key is None:
+            return None
+        return self._content_store.find(envelope.tenant, envelope.idempotency_key)
 
     def _fence_reject(
         self, envelope: RemoteToolOperationEnvelope, request: ToolRequest

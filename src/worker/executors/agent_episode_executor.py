@@ -13,14 +13,17 @@ from typing import Any, ClassVar
 
 from shared.harness import (
     REQUIRED_MEDIATED_FACADES,
+    DeliveredOutcome,
     HarnessAdapter,
     HarnessCapsule,
     HarnessResult,
     HarnessResultKind,
 )
+from shared.outcome import ContentStoreError
 from shared.schemas.result import BaseExecutorResult
 from shared.tasks.task_type import TaskType
 
+from ..content_store import build_content_store
 from .base_executor import ExecutionError, Executor, ExecutorTask
 from .harness import build_adapter
 
@@ -68,15 +71,14 @@ class AgentEpisodeExecutor(Executor):
             if dispatch.capsule_blob is not None
             else None
         )
-        for outcome in dispatch.delivered_outcomes:
+        outcomes = tuple(self._hydrate(o) for o in dispatch.delivered_outcomes)
+        for outcome in outcomes:
             _LOG.info(
                 "[fabric] injecting %s outcome at call %s",
                 outcome.kind.value,
                 outcome.call_correlation,
             )
-        result = adapter.start(
-            task.task_id, capsule=capsule, outcomes=dispatch.delivered_outcomes
-        )
+        result = adapter.start(task.task_id, capsule=capsule, outcomes=outcomes)
         if result.kind is HarnessResultKind.BOUNDARY and result.request is not None:
             _LOG.info(
                 "[fabric] episode yielded a %s boundary (interface=%s)",
@@ -85,6 +87,29 @@ class AgentEpisodeExecutor(Executor):
             )
         value = result.value if result.kind is HarnessResultKind.COMPLETION else None
         return AgentEpisodeResult(harness_result=result, value=value)
+
+    def _hydrate(self, outcome: DeliveredOutcome) -> DeliveredOutcome:
+        """Resolve a reference-backed outcome into its injected value.
+
+        A manifest is fetched from the content store and digest-verified before
+        injection; a hydration failure is retried as a physical delivery of the same
+        reference, never a re-run of the invocation, so it fails the step rather than
+        injecting an unverified value. An inline outcome passes through unchanged.
+        """
+        if outcome.outcome_ref is None:
+            return outcome
+        store = build_content_store(self._config.server_base_url)
+        if store is None:
+            raise ExecutionError(
+                f"cannot hydrate outcome at {outcome.call_correlation}: no store"
+            )
+        try:
+            data = store.hydrate(outcome.outcome_ref)
+        except ContentStoreError as exc:
+            raise ExecutionError(
+                f"outcome hydration failed at {outcome.call_correlation}: {exc}"
+            ) from exc
+        return outcome.model_copy(update={"value": data.decode(), "outcome_ref": None})
 
     def cancel(self, task_id: str) -> None:
         if self._adapter is not None:

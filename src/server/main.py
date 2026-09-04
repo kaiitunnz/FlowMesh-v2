@@ -21,6 +21,7 @@ if __name__ == "__main__" and __package__ is None:
     sys.modules.setdefault("server.main", sys.modules[__name__])
 
 from shared._version import FLOWMESH_RELEASE_VERSION
+from shared.outcome import ManifestRef, OutcomeCarrier
 
 from .auth import reconcile_resources, resolve_system_principal
 from .clients import RedisClient
@@ -183,9 +184,16 @@ if IS_ROOT_NODE:
     AGENT_MODEL_GATEWAY.set_facade_fence(RUNTIME.has_pending_facade)
     AGENT_MODEL_GATEWAY.set_facade_resolver(RUNTIME.agent_facade_descriptors)
 
-    def _settle_tool(task_id: str, call_correlation: str, value: str) -> None:
+    def _settle_tool(
+        task_id: str, call_correlation: str, carrier: OutcomeCarrier
+    ) -> None:
         assert RUNTIME is not None
-        RUNTIME.settle_episode_invocation(task_id, call_correlation, value)
+        if isinstance(carrier, ManifestRef):
+            RUNTIME.settle_episode_invocation(
+                task_id, call_correlation, ref=carrier.manifest
+            )
+        else:
+            RUNTIME.settle_episode_invocation(task_id, call_correlation, carrier.value)
 
     def _redispatch_tool(task_id: str, call_correlation: str) -> bool:
         assert RUNTIME is not None

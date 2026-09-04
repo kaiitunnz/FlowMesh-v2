@@ -11,8 +11,11 @@ from typing import Any
 
 # Origin -> executor.
 KIND_OPERATION = "operation"
-# Executor -> origin.
+# Executor -> origin. KIND_RESULT carries an inline control datum; KIND_MANIFEST an
+# outcome manifest for content the worker materialized by reference; KIND_REJECT a fence
+# failure. The origin relays whichever back opaquely; it never assembles a result body.
 KIND_RESULT = "result"
+KIND_MANIFEST = "manifest"
 KIND_REJECT = "reject"
 
 # ToolEgressFrame.kind values on the worker attachment arm, distinct from the inner
@@ -43,6 +46,7 @@ __all__ = [
     "FRAME_OPERATION",
     "FRAME_REAP",
     "FRAME_REPLY",
+    "KIND_MANIFEST",
     "KIND_OPERATION",
     "KIND_REJECT",
     "KIND_RESULT",

@@ -10,6 +10,7 @@ end-to-end.
 import asyncio
 from typing import Any
 
+from shared.tools.wire import KIND_MANIFEST as KIND_MANIFEST
 from shared.tools.wire import KIND_OPERATION as KIND_OPERATION
 from shared.tools.wire import KIND_REJECT as KIND_REJECT
 from shared.tools.wire import KIND_RESULT as KIND_RESULT

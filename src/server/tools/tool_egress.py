@@ -14,6 +14,7 @@ from collections.abc import Callable
 from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol
 
+from shared.outcome import InlineControl, OutcomeCarrier
 from shared.tools.contract import (
     RemoteToolOperationEnvelope as RemoteToolOperationEnvelope,
 )
@@ -24,6 +25,12 @@ from shared.tools.contract import (
 from shared.tools.search.egress import ExternalToolSidecar
 from shared.tools.search.schema import ToolRequest
 from shared.tools.search.schema import tool_request_digest as tool_request_digest
+
+
+def inline_outcome(outcome: ToolOutcome) -> InlineControl:
+    """Wrap a server-produced typed outcome as an opaque inline control datum."""
+    return InlineControl(value=outcome.model_dump_json())
+
 
 if TYPE_CHECKING:
     from ..config import WebSearchConfig
@@ -54,9 +61,10 @@ class AmbiguousDelivery:
 
 
 # Carriage from the control path to an execution surface for one bounded operation. A
-# terminal ``ToolOutcome`` settles the boundary; an ``AmbiguousDelivery`` holds it
-# pending for a same-``idempotency_key`` re-drive.
-CarriageResult = ToolOutcome | AmbiguousDelivery
+# terminal ``OutcomeCarrier`` settles the boundary — an inline control datum or a
+# reference-backed manifest — while an ``AmbiguousDelivery`` holds it pending for a
+# same-``idempotency_key`` re-drive.
+CarriageResult = OutcomeCarrier | AmbiguousDelivery
 ExecutionTransport = Callable[[ToolOperationEnvelope, ToolRequest], CarriageResult]
 
 
@@ -85,7 +93,7 @@ class ServerRelayAdapter:
     def execute(
         self, envelope: ToolOperationEnvelope, request: ToolRequest
     ) -> CarriageResult:
-        return self._sidecar.execute(envelope, request)
+        return inline_outcome(self._sidecar.execute(envelope, request))
 
 
 class WorkerSidecarAdapter:
@@ -111,7 +119,7 @@ class ColocatedSidecarCarriage:
     def __call__(
         self, envelope: ToolOperationEnvelope, request: ToolRequest
     ) -> CarriageResult:
-        return self._sidecar.execute(envelope, request)
+        return inline_outcome(self._sidecar.execute(envelope, request))
 
 
 class EgressLocalityPolicy:

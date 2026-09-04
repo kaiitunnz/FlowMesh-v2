@@ -64,9 +64,14 @@ def _broker(provider: Any, **cfg: Any) -> tuple[FabricToolBroker, list[tuple]]:
     return broker, settled
 
 
+def _carrier_outcome(carrier: Any) -> ToolOutcome:
+    """The typed outcome inside an in-server (inline) settle carrier."""
+    return ToolOutcome.model_validate_json(carrier.value)
+
+
 def _outcome(settled: list[tuple]) -> ToolOutcome:
     assert len(settled) == 1
-    return ToolOutcome.model_validate_json(settled[0][2])
+    return _carrier_outcome(settled[0][2])
 
 
 def test_success_normalizes_results_with_provenance() -> None:
@@ -256,7 +261,7 @@ def _ambiguous_carriage(_env: Any, _req: Any) -> AmbiguousDelivery:
 
 
 def test_ambiguous_delivery_re_drives_then_terminalizes_with_an_audit_outcome() -> None:
-    settled: list[tuple[str, str, str]] = []
+    settled: list[tuple[str, str, Any]] = []
     redispatched: list[tuple[str, str]] = []
 
     def redispatch(task_id: str, correlation: str) -> bool:
@@ -279,13 +284,13 @@ def test_ambiguous_delivery_re_drives_then_terminalizes_with_an_audit_outcome() 
     assert settled == []
     broker._run(env)
     assert len(settled) == 1
-    outcome = ToolOutcome.model_validate_json(settled[0][2])
+    outcome = _carrier_outcome(settled[0][2])
     assert outcome.status is ToolOutcomeStatus.UNAVAILABLE
     assert "recovery was exhausted" in outcome.value
 
 
 def test_ambiguous_delivery_on_a_cancelled_boundary_manufactures_no_terminal() -> None:
-    settled: list[tuple[str, str, str]] = []
+    settled: list[tuple[str, str, Any]] = []
 
     broker = FabricToolBroker.build(
         WebSearchConfig(egress_locality="worker_sidecar"),
