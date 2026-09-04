@@ -28,7 +28,7 @@ class InMemoryContentStore(FabricContentStore):
         return self._idm.get((tenant, idempotency_key))
 
     def open_spool(self, tenant: str | None, idempotency_key: str) -> OutcomeSpool:
-        return _InMemorySpool(self, tenant, idempotency_key)
+        return _InMemorySpool(self, idempotency_key)
 
     def read(self, tenant: str | None, digest: str) -> bytes:
         data = self._objects.get((tenant, digest))
@@ -40,11 +40,8 @@ class InMemoryContentStore(FabricContentStore):
 
 
 class _InMemorySpool(OutcomeSpool):
-    def __init__(
-        self, store: InMemoryContentStore, tenant: str | None, idempotency_key: str
-    ) -> None:
+    def __init__(self, store: InMemoryContentStore, idempotency_key: str) -> None:
         self._store = store
-        self._tenant = tenant
         self._idm = idempotency_key
         self._buf = bytearray()
         self._cursor = 0

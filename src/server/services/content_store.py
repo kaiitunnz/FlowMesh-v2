@@ -62,7 +62,7 @@ class ServerContentStore(FabricContentStore):
         return OutcomeManifest.model_validate_json(path.read_text())
 
     def open_spool(self, tenant: str | None, idempotency_key: str) -> OutcomeSpool:
-        return _FileSpool(self, tenant, idempotency_key)
+        return _FileSpool(self, idempotency_key)
 
     def read(self, tenant: str | None, digest: str) -> bytes:
         path = self._object_path(tenant, _segment(digest))
@@ -72,13 +72,10 @@ class ServerContentStore(FabricContentStore):
             )
         return path.read_bytes()
 
-    def _commit(
-        self, tenant: str | None, idempotency_key: str, data: bytes
-    ) -> tuple[str, bool]:
+    def _commit(self, tenant: str | None, data: bytes) -> str:
         digest = content_digest(data)
-        obj = self._object_path(tenant, digest)
-        wrote = self._atomic_write(obj, data)
-        return digest, wrote
+        self._atomic_write(self._object_path(tenant, digest), data)
+        return digest
 
     def _record_idem(
         self, tenant: str | None, idempotency_key: str, manifest: OutcomeManifest
@@ -89,14 +86,14 @@ class ServerContentStore(FabricContentStore):
         )
 
     @staticmethod
-    def _atomic_write(path: Path, data: bytes) -> bool:
-        """Write ``data`` at ``path`` if absent; return whether it wrote a new object.
+    def _atomic_write(path: Path, data: bytes) -> None:
+        """Write ``data`` at ``path`` if absent, leaving an existing object untouched.
 
-        Content is immutable, so an existing object is left untouched — a concurrent or
-        re-driven write of the same content is a no-op rather than a rewrite.
+        Content is immutable, so a concurrent or re-driven write of the same content is
+        a no-op rather than a rewrite.
         """
         if path.exists():
-            return False
+            return
         path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=path.parent)
         try:
@@ -106,15 +103,11 @@ class ServerContentStore(FabricContentStore):
         except BaseException:
             Path(tmp).unlink(missing_ok=True)
             raise
-        return True
 
 
 class _FileSpool(OutcomeSpool):
-    def __init__(
-        self, store: ServerContentStore, tenant: str | None, idempotency_key: str
-    ) -> None:
+    def __init__(self, store: ServerContentStore, idempotency_key: str) -> None:
         self._store = store
-        self._tenant = tenant
         self._idm = idempotency_key
         self._buf = bytearray()
         self._cursor = 0
@@ -132,7 +125,7 @@ class _FileSpool(OutcomeSpool):
         access: OutcomeAccessBinding,
     ) -> OutcomeManifest:
         data = bytes(self._buf)
-        digest, _ = self._store._commit(access.tenant, self._idm, data)
+        digest = self._store._commit(access.tenant, data)
         manifest = OutcomeManifest(
             content_digest=digest,
             size_bytes=len(data),
