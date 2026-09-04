@@ -61,6 +61,7 @@ class SupervisorClient:
         self._grpc_keepalive_timeout_ms = grpc_keepalive_timeout_ms
 
         self._worker_id: str | None = None
+        self._incarnation: int = 0
         self._worker_register_event: WorkerEvent | None = None
         self._drain = threading.Event()
         self._shutdown = threading.Event()
@@ -83,6 +84,10 @@ class SupervisorClient:
         if self._worker_id is None:
             raise RuntimeError("Worker not registered with supervisor")
         return self._worker_id
+
+    @property
+    def incarnation(self) -> int:
+        return self._incarnation
 
     # ------------------------------------------------------------------ #
     # Lifecycle
@@ -405,6 +410,7 @@ class SupervisorClient:
         if not resp.worker_id:
             raise SystemExit("Supervisor registration response missing worker_id")
         self._worker_id = resp.worker_id
+        self._incarnation = int(resp.incarnation)
 
     def _start_event_stream(self) -> None:
         self._event_ready.clear()

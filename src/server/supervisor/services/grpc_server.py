@@ -156,8 +156,10 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
         if worker is None:
             await context.abort(grpc.StatusCode.UNAUTHENTICATED, "Invalid worker token")
         worker_meta = _payload_from_struct(request.meta)
-        worker_id = new_worker_id(self._redis.incr(WORKER_ID_SEQ_KEY))
+        incarnation = self._redis.incr(WORKER_ID_SEQ_KEY)
+        worker_id = new_worker_id(incarnation)
         worker_meta["id"] = worker_id
+        worker_meta["incarnation"] = incarnation
         worker_meta["node_alias"] = self._node_alias
         # Stamp node_id, persist the record, and insert into the registry as one unit so
         # a concurrent rebind_node either sees this worker in its snapshot or stamps it
@@ -173,7 +175,9 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
         except RuntimeError as exc:
             self._logger.warning(exc)
         self._logger.info("Registered worker %s", worker_id)
-        return supervisor_pb2.RegisterResponse(worker_id=worker_id)
+        return supervisor_pb2.RegisterResponse(
+            worker_id=worker_id, incarnation=incarnation
+        )
 
     async def StreamTasks(
         self, request: Empty, context: grpc.aio.ServicerContext
