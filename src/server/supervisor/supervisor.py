@@ -295,7 +295,6 @@ def _run_supervisor(
 
     from ..clients import RedisClient
     from ..clients.redis import resident_relay_client
-    from ..config import WebSearchConfig
     from ..network.listeners import NetworkPlaneListeners
     from ..network.reverse_relay import TOOL_RELAY_KEYSPACE, BinaryRedis
     from ..registries.node import NodeRegistry
@@ -313,7 +312,7 @@ def _run_supervisor(
     from .services.resident_deputy import ResidentDeputyService
     from .services.reverse_relay_attachment import ReverseRelayAttachment
     from .services.task_listener import TaskListener
-    from .services.tool_egress_deputy import ToolEgressDeputyService
+    from .services.tool_egress_deputy import WorkerToolRouteDeputy
 
     # --- logging (child has its own logger) ---
     sv_log_file = log_cfg.file.replace("server", "supervisor")
@@ -403,7 +402,7 @@ def _run_supervisor(
     )
     resident_deputy: ResidentDeputyService | None = None
     resident_attachment: ReverseRelayAttachment | None = None
-    tool_egress_deputy: ToolEgressDeputyService | None = None
+    tool_egress_deputy: WorkerToolRouteDeputy | None = None
     tool_attachment: ReverseRelayAttachment | None = None
     if network_cfg.enabled:
         relay_redis = cast(
@@ -436,11 +435,11 @@ def _run_supervisor(
             logger=logger,
         )
         # External-tool egress target role: a claim-free xt:* attachment feeds relayed
-        # operations to the bound tool sidecar, whose provider (and any credential) is
-        # read from this process's local environment at the config edge.
+        # operations to the tool route deputy, which forwards each opaque frame to the
+        # target worker's attachment. No provider or credential lives in this process.
         tool_relay_endpoint = ToolRelayEndpoint(relay_redis, node_id, logger=logger)
-        tool_egress_deputy = ToolEgressDeputyService(
-            web_search_config=WebSearchConfig.from_env(), logger=logger
+        tool_egress_deputy = WorkerToolRouteDeputy(
+            task_listener=task_listener, logger=logger
         )
         tool_attachment = ReverseRelayAttachment(
             relay_redis,
@@ -470,6 +469,7 @@ def _run_supervisor(
         task_listener=task_listener,
         relay_service=relay_service,
         logger=logger,
+        tool_egress_deputy=tool_egress_deputy,
     )
 
     network_listeners: NetworkPlaneListeners | None = None

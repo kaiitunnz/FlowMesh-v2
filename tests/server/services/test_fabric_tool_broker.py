@@ -251,16 +251,6 @@ def test_lazy_provider_defers_a_missing_key_to_first_search() -> None:
         pass
 
 
-def test_egress_deputy_construction_defers_a_missing_key() -> None:
-    from server.supervisor.services.tool_egress_deputy import ToolEgressDeputyService
-
-    # The supervisor deputy builds its provider lazily too: a keyed config with the key
-    # only on the server must not crash a worker supervisor at construction.
-    ToolEgressDeputyService(
-        web_search_config=WebSearchConfig(provider="serper", api_key=None)
-    )
-
-
 def _ambiguous_carriage(_env: Any, _req: Any) -> AmbiguousDelivery:
     return AmbiguousDelivery("lost after egress")
 

@@ -26,7 +26,7 @@ from ..manager import WorkerInitConfig, WorkerManager
 from .pubsub_reader import RebindableReader
 from .relay_uplink import RelayUplinkService
 from .resident_deputy import ResidentDeputyService
-from .tool_egress_deputy import ToolEgressDeputyService
+from .tool_egress_deputy import WorkerToolRouteDeputy
 
 type ResponseHandler = Callable[[CommandResponse], None]
 
@@ -143,7 +143,7 @@ class CommandListener:
         cmd_receiver: TaskReceiver[CommandMessage, CommandResponse] | None = None,
         relay_uplink: RelayUplinkService | None = None,
         resident_deputy: ResidentDeputyService | None = None,
-        tool_egress_deputy: ToolEgressDeputyService | None = None,
+        tool_egress_deputy: WorkerToolRouteDeputy | None = None,
         max_inflight: int = _MAX_INFLIGHT_CMDS,
     ) -> None:
         self.logger = logger
