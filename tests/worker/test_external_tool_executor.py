@@ -86,6 +86,8 @@ def _executor(
     generation: int = GEN,
     raises: Exception | None = None,
     block: threading.Event | None = None,
+    api_key: str | None = None,
+    max_workers: int = 4,
 ) -> tuple[WorkerExternalToolExecutor, _Sink, list[str]]:
     calls: list[str] = []
 
@@ -108,8 +110,9 @@ def _executor(
         worker_id=WORKER,
         generation=generation,
         provider="fake",
-        api_key=None,
+        api_key=api_key,
         result_sink=sink,
+        max_workers=max_workers,
     )
     return ex, sink, calls
 
@@ -190,3 +193,26 @@ def test_cancel_reaps_and_fences_a_late_reply(
     # Release the blocked egress: its late reply is fenced by the cancelled set.
     block.set()
     assert sink.wait(0.5) is False
+    # The cancelled egress leaves neither bookkeeping set populated.
+    assert ex._cancelled == set()
+    assert ex._inflight == {}
+
+
+def test_cancel_before_start_drops_the_inflight_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # One worker thread, held by a blocked op, so the second op stays queued and its
+    # cancel wins before it starts. Its future is cancelled, so _run never fires — the
+    # cancel must drop the in-flight entry itself and record nothing to suppress.
+    block = threading.Event()
+    ex, sink, calls = _executor(monkeypatch, block=block, max_workers=1)
+    ex.submit("xtr-busy", FRAME_OPERATION, _op(_fence()))
+    ex.submit("xtr-queued", FRAME_OPERATION, _op(_fence(delivery_nonce="xdn-2")))
+    ex.submit("xtr-queued", FRAME_CANCEL, b"")
+    assert sink.wait()
+    assert sink.frames[0] == ("xtr-queued", FRAME_REAP, b"")
+    assert "xtr-queued" not in ex._inflight
+    assert ex._cancelled == set()
+    # The queued op never reached the provider.
+    block.set()
+    assert calls == ["q"]

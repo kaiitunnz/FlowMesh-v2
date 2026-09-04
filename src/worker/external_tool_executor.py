@@ -108,10 +108,15 @@ class WorkerExternalToolExecutor:
 
     def _cancel(self, session_id: str) -> None:
         with self._lock:
-            self._cancelled.add(session_id)
             fut = self._inflight.get(session_id)
-        if fut is not None:
-            fut.cancel()
+            if fut is not None and fut.cancel():
+                # Cancelled before it started: _run never fires, so drop its in-flight
+                # entry now and record nothing to suppress.
+                self._inflight.pop(session_id, None)
+            elif fut is not None:
+                # Already running: suppress its late reply when _run finishes; _run
+                # discards the marker, so the cancelled set never accumulates.
+                self._cancelled.add(session_id)
         # Ack the reap so the supervisor can retire the routing record; a late reply
         # from an already-running egress is fenced by the cancelled set in _run.
         self._sink(session_id, FRAME_REAP, b"")
@@ -127,8 +132,8 @@ class WorkerExternalToolExecutor:
         finally:
             with self._lock:
                 self._inflight.pop(session_id, None)
-        with self._lock:
-            cancelled = session_id in self._cancelled
+                cancelled = session_id in self._cancelled
+                self._cancelled.discard(session_id)
         if not cancelled:
             self._sink(session_id, FRAME_REPLY, reply)
 
