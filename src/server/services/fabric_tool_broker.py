@@ -179,6 +179,7 @@ class FabricToolBroker:
             max_results=max_results,
             timeout_sec=self._cfg.timeout_sec,
             result_char_cap=self._cfg.result_char_cap,
+            task_id=env.task_id,
         )
         adapter = self._policy.select()
         self._log.info(

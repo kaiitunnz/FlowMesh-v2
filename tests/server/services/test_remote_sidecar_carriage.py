@@ -40,6 +40,8 @@ from tests.server.network._relay_fakes import FakeBinaryRedis
 
 INGRESS = "xt-ingress"
 TARGET_NODE = "nde-t"
+TARGET_WORKER = "wrk-1"
+TARGET_INCARNATION = 7
 QUERY = "what is flowmesh"
 SECRET = "sk-super-secret-key"
 
@@ -111,7 +113,7 @@ class _Harness:
         )
         registry = ToolTargetRegistry(
             exec_node_cmd=self._exec_node_cmd,
-            select_node=self._select_node,
+            resolve_target=self._resolve_target,
             sidecar_route="127.0.0.1:0",
             provider="fake",
             interfaces=("search/v1",),
@@ -160,8 +162,8 @@ class _Harness:
             return {"host": host, "port": port}
         return {}
 
-    async def _select_node(self) -> str:
-        return TARGET_NODE
+    async def _resolve_target(self, task_id: str) -> tuple[str, str, int]:
+        return TARGET_NODE, TARGET_WORKER, TARGET_INCARNATION
 
     async def _target_endpoint_ad(self, node_id: str) -> NetworkEndpointAdvertisement:
         # No inbound URL, so node_relay is unavailable; control_relay stays feasible via
@@ -199,6 +201,7 @@ class _Harness:
             max_results=max_results,
             timeout_sec=5.0,
             result_char_cap=6000,
+            task_id="tsk-1",
         )
         request = ToolRequest(
             interface="search/v1", query=query, max_results=max_results

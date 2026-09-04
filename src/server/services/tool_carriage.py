@@ -26,7 +26,6 @@ from typing import Any
 from shared.schemas.command import CommandType
 from shared.utils.ids import (
     new_route_origin_id,
-    new_sidecar_target_id,
     new_tool_delivery_nonce,
     new_tool_relay_session_id,
 )
@@ -59,7 +58,8 @@ from .tool_relay_delivery import ToolRelayEndpoint
 
 # From the tool-carriage config edge: the target node to bind a sidecar on, and one node
 # command exec against a node id. Both are injected so the carriage stays testable.
-TargetNodeSelector = Callable[[], Awaitable[str | None]]
+# task_id -> (node_id, worker_id, incarnation) of the episode's assigned worker.
+TargetResolver = Callable[[str], Awaitable[tuple[str, str, int] | None]]
 NodeEndpointProvider = Callable[[str], Awaitable[NetworkEndpointAdvertisement | None]]
 ExecNodeCmd = Callable[[str, CommandType, dict[str, Any]], Awaitable[dict[str, Any]]]
 
@@ -180,13 +180,13 @@ class ToolEgressOriginDeputy:
 
 
 class ToolTargetRegistry:
-    """Binds a control-issued sidecar on a worker node and caches its target."""
+    """Binds a route to an episode's assigned worker and caches it per worker."""
 
     def __init__(
         self,
         *,
         exec_node_cmd: ExecNodeCmd,
-        select_node: TargetNodeSelector,
+        resolve_target: TargetResolver,
         sidecar_route: str,
         provider: str,
         interfaces: tuple[str, ...],
@@ -195,33 +195,35 @@ class ToolTargetRegistry:
         logger: logging.Logger | None = None,
     ) -> None:
         self._exec = exec_node_cmd
-        self._select_node = select_node
+        self._resolve_target = resolve_target
         self._route = sidecar_route
         self._provider = provider
         self._interfaces = interfaces
         self._directly_routable = directly_routable
         self._policy_class = policy_class
         self._log = logger
-        self._target: NonresidentSidecarTarget | None = None
-        self._generation = 0
+        self._targets: dict[str, NonresidentSidecarTarget] = {}
         self._lock = asyncio.Lock()
 
-    async def ensure_target(self) -> NonresidentSidecarTarget | None:
+    async def ensure_target(self, task_id: str) -> NonresidentSidecarTarget | None:
         async with self._lock:
-            if self._target is not None:
-                return self._target
-            node_id = await self._select_node()
-            if node_id is None:
+            resolved = await self._resolve_target(task_id)
+            if resolved is None:
                 return None
-            self._generation += 1
-            gen = self._generation
-            target_id = new_sidecar_target_id()
+            node_id, worker_id, incarnation = resolved
+            cached = self._targets.get(worker_id)
+            if cached is not None and cached.target_generation == incarnation:
+                return cached
+            # The worker id and its registration incarnation are the audience fence: a
+            # restart mints a new worker id and incarnation, so a stale delivery targets
+            # a worker that is gone and a re-drive rebinds against the fresh one.
             data = await self._exec(
                 node_id,
                 CommandType.BIND_TOOL_SIDECAR,
                 {
-                    "target_id": target_id,
-                    "target_generation": gen,
+                    "target_id": worker_id,
+                    "target_generation": incarnation,
+                    "worker_id": worker_id,
                     "route": self._route,
                     "interfaces": list(self._interfaces),
                     "policy_class": self._policy_class,
@@ -230,31 +232,43 @@ class ToolTargetRegistry:
             host, port = data.get("host"), data.get("port")
             if not host or not port:
                 return None
-            self._target = NonresidentSidecarTarget(
-                target_id=target_id,
-                target_generation=gen,
+            target = NonresidentSidecarTarget(
+                target_id=worker_id,
+                target_generation=incarnation,
                 node_id=node_id,
-                incarnation=gen,
-                listener_generation=gen,
+                worker_id=worker_id,
+                incarnation=incarnation,
+                listener_generation=incarnation,
                 interfaces=self._interfaces,
                 provider=self._provider,
                 routes=(f"{host}:{port}",),
                 directly_routable=self._directly_routable,
             )
-            return self._target
+            self._targets[worker_id] = target
+            return target
 
     async def invalidate(self, target: NonresidentSidecarTarget) -> None:
         """Drop the cached target after a lost delivery so the next op rebinds.
 
-        Only clears the still-current target, so a concurrent op that already rebound a
-        fresh target is not reset; a bind bumps the generation, fencing the stale one.
-        The old sidecar is unbound best-effort so a rebind against a live node leaves no
-        orphaned listener behind.
+        Only clears the still-current target for its worker, so a concurrent op that
+        already rebound a fresh generation is not reset. The old route is unbound
+        best-effort so a rebind against a live node leaves no orphaned listener behind.
         """
+        worker_id = target.worker_id or target.target_id
         async with self._lock:
-            if self._target is None or self._target.target_id != target.target_id:
+            cached = self._targets.get(worker_id)
+            if cached is None or cached.target_generation != target.target_generation:
                 return
-            self._target = None
+            del self._targets[worker_id]
+        await self._unbind(target)
+
+    async def close(self) -> None:
+        targets = list(self._targets.values())
+        self._targets.clear()
+        for target in targets:
+            await self._unbind(target)
+
+    async def _unbind(self, target: NonresidentSidecarTarget) -> None:
         try:
             await self._exec(
                 target.node_id,
@@ -262,21 +276,6 @@ class ToolTargetRegistry:
                 {"target_id": target.target_id},
             )
         except Exception as exc:  # noqa: BLE001 - unbind is best-effort
-            if self._log is not None:
-                self._log.debug("stale tool sidecar unbind failed: %s", exc)
-
-    async def close(self) -> None:
-        target = self._target
-        self._target = None
-        if target is None:
-            return
-        try:
-            await self._exec(
-                target.node_id,
-                CommandType.UNBIND_TOOL_SIDECAR,
-                {"target_id": target.target_id},
-            )
-        except Exception as exc:  # noqa: BLE001 - unbind is best-effort on shutdown
             if self._log is not None:
                 self._log.debug("tool sidecar unbind failed: %s", exc)
 
@@ -327,6 +326,8 @@ class RemoteSidecarCarriage:
         loop = self._loop
         if loop is None:
             return _unavailable("the remote tool carriage is not ready")
+        if not envelope.task_id:
+            return _unavailable("the remote tool operation has no originating task")
         session_id = new_tool_relay_session_id()
         future = asyncio.run_coroutine_threadsafe(
             self._deliver(envelope, request, session_id), loop
@@ -366,7 +367,7 @@ class RemoteSidecarCarriage:
     async def _deliver(
         self, envelope: ToolOperationEnvelope, request: ToolRequest, session_id: str
     ) -> CarriageResult:
-        target = await self._registry.ensure_target()
+        target = await self._registry.ensure_target(envelope.task_id or "")
         if target is None or envelope.interface not in target.interfaces:
             return _unavailable("no eligible external-tool sidecar target")
         target_endpoint = await self._endpoint_provider(target.node_id)
@@ -536,7 +537,7 @@ __all__ = [
     "ExecNodeCmd",
     "NodeEndpointProvider",
     "RemoteSidecarCarriage",
-    "TargetNodeSelector",
+    "TargetResolver",
     "ToolEgressOriginDeputy",
     "ToolTargetRegistry",
 ]

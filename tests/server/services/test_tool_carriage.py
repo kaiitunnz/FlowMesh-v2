@@ -43,6 +43,8 @@ from shared.schemas.command import CommandType
 from tests.server.network._relay_fakes import FakeBinaryRedis
 
 TARGET_NODE = "nde-t"
+TARGET_WORKER = "wrk-1"
+TARGET_INCARNATION = 7
 
 
 def _ingress() -> NetworkEndpointAdvertisement:
@@ -95,15 +97,15 @@ def _carriage(deputy: _FakeDeputy, exec_calls: list[str]) -> RemoteSidecarCarria
         exec_calls.append(command.value)
         return {"host": "127.0.0.1", "port": 9999}
 
-    async def select_node() -> str:
-        return TARGET_NODE
+    async def resolve_target(task_id: str) -> tuple[str, str, int]:
+        return TARGET_NODE, TARGET_WORKER, TARGET_INCARNATION
 
     async def endpoint_provider(node_id: str) -> NetworkEndpointAdvertisement:
         return _target_endpoint(node_id)
 
     registry = ToolTargetRegistry(
         exec_node_cmd=exec_cmd,
-        select_node=select_node,
+        resolve_target=resolve_target,
         sidecar_route="127.0.0.1:0",
         provider="fake",
         interfaces=("search/v1",),
@@ -122,15 +124,15 @@ def _fast_carriage(deputy: Any) -> RemoteSidecarCarriage:
     async def exec_cmd(node_id: str, command: CommandType, payload: dict) -> dict:
         return {"host": "127.0.0.1", "port": 9999}
 
-    async def select_node() -> str:
-        return TARGET_NODE
+    async def resolve_target(task_id: str) -> tuple[str, str, int]:
+        return TARGET_NODE, TARGET_WORKER, TARGET_INCARNATION
 
     async def endpoint_provider(node_id: str) -> NetworkEndpointAdvertisement:
         return _target_endpoint(node_id)
 
     registry = ToolTargetRegistry(
         exec_node_cmd=exec_cmd,
-        select_node=select_node,
+        resolve_target=resolve_target,
         sidecar_route="127.0.0.1:0",
         provider="fake",
         interfaces=("search/v1",),
@@ -154,6 +156,7 @@ def _run(carriage: RemoteSidecarCarriage) -> Any:
         max_results=3,
         timeout_sec=5.0,
         result_char_cap=6000,
+        task_id="tsk-1",
     )
     request = ToolRequest(interface="search/v1", query="q", max_results=3)
     return asyncio.run(carriage._deliver(envelope, request, "xtr-test"))
@@ -167,19 +170,19 @@ def test_registry_binds_once_and_caches() -> None:
             calls.append(command.value)
             return {"host": "127.0.0.1", "port": 1234}
 
-        async def select_node() -> str:
-            return TARGET_NODE
+        async def resolve_target(task_id: str) -> tuple[str, str, int]:
+            return TARGET_NODE, TARGET_WORKER, TARGET_INCARNATION
 
         registry = ToolTargetRegistry(
             exec_node_cmd=exec_cmd,
-            select_node=select_node,
+            resolve_target=resolve_target,
             sidecar_route="127.0.0.1:0",
             provider="fake",
             interfaces=("search/v1",),
             directly_routable=True,
         )
-        first = await registry.ensure_target()
-        second = await registry.ensure_target()
+        first = await registry.ensure_target("tsk-1")
+        second = await registry.ensure_target("tsk-1")
         assert isinstance(first, NonresidentSidecarTarget)
         assert first is second
         assert calls == [CommandType.BIND_TOOL_SIDECAR.value]
@@ -192,18 +195,18 @@ def test_registry_returns_none_when_no_node() -> None:
         async def exec_cmd(node_id: str, command: CommandType, payload: dict) -> dict:
             raise AssertionError("must not bind when no node is selected")
 
-        async def select_none() -> None:
+        async def resolve_none(task_id: str) -> None:
             return None
 
         registry = ToolTargetRegistry(
             exec_node_cmd=exec_cmd,
-            select_node=select_none,
+            resolve_target=resolve_none,
             sidecar_route="127.0.0.1:0",
             provider="fake",
             interfaces=("search/v1",),
             directly_routable=True,
         )
-        assert await registry.ensure_target() is None
+        assert await registry.ensure_target("tsk-1") is None
 
     asyncio.run(run())
 
@@ -252,6 +255,7 @@ def test_outer_timeout_holds_ambiguous_and_aborts() -> None:
         max_results=3,
         timeout_sec=0.05,
         result_char_cap=6000,
+        task_id="tsk-1",
     )
     request = ToolRequest(interface="search/v1", query="q", max_results=3)
     try:
@@ -285,24 +289,24 @@ def test_registry_invalidate_rebinds_and_unbinds_the_stale_sidecar() -> None:
             cmds.append((command.value, str(payload["target_id"])))
             return {"host": "127.0.0.1", "port": 1}
 
-        async def select_node() -> str:
-            return TARGET_NODE
+        async def resolve_target(task_id: str) -> tuple[str, str, int]:
+            return TARGET_NODE, TARGET_WORKER, TARGET_INCARNATION
 
         registry = ToolTargetRegistry(
             exec_node_cmd=exec_cmd,
-            select_node=select_node,
+            resolve_target=resolve_target,
             sidecar_route="127.0.0.1:0",
             provider="fake",
             interfaces=("search/v1",),
             directly_routable=True,
         )
-        first = await registry.ensure_target()
+        first = await registry.ensure_target("tsk-1")
         assert first is not None
         await registry.invalidate(first)
-        second = await registry.ensure_target()
+        second = await registry.ensure_target("tsk-1")
         assert second is not None
-        assert first.target_generation == 1 and second.target_generation == 2
-        assert first.target_id != second.target_id
+        assert first.target_generation == second.target_generation == TARGET_INCARNATION
+        assert first.target_id == second.target_id == TARGET_WORKER
         # Bind, then unbind the stale target on invalidate, then rebind a fresh one.
         assert cmds == [
             (CommandType.BIND_TOOL_SIDECAR.value, first.target_id),

@@ -303,13 +303,17 @@ if IS_ROOT_NODE:
                 raise RuntimeError(resp.message or "tool node command failed")
             return resp.data or {}
 
-        async def _select_tool_target_node() -> str | None:
-            if _ws_cfg.sidecar_node:
-                return _ws_cfg.sidecar_node
-            for node in await NODE_REGISTRY.list_nodes_async():
-                if node.network_endpoint is not None:
-                    return node.id
-            return None
+        async def _resolve_tool_target(task_id: str) -> tuple[str, str, int] | None:
+            # The blocked Agent episode's assigned worker owns the activation's context;
+            # route the operation to it and fence on its registration incarnation.
+            record = RUNTIME.get_record(task_id) if RUNTIME is not None else None
+            worker_id = record.assigned_worker if record is not None else None
+            if not worker_id or WORKER_REGISTRY is None:
+                return None
+            worker = await WORKER_REGISTRY.get_worker_async(worker_id)
+            if worker is None:
+                return None
+            return worker.node_id, worker.id, worker.incarnation
 
         async def _tool_target_endpoint(
             node_id: str,
@@ -323,7 +327,7 @@ if IS_ROOT_NODE:
 
         TOOL_TARGET_REGISTRY = ToolTargetRegistry(
             exec_node_cmd=_tool_exec_node_cmd,
-            select_node=_select_tool_target_node,
+            resolve_target=_resolve_tool_target,
             sidecar_route=_ws_cfg.sidecar_route,
             provider=_ws_cfg.provider,
             interfaces=("search/v1",),

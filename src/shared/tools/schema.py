@@ -30,6 +30,7 @@ class ToolOperationEnvelope(BaseModel):
     The control path issues it after the authority and quota checks; the execution
     surface egresses only within it. ``idempotency_key`` is the fabric dedupe authority
     a re-drive reuses; the result bounds cap the single authorized operation.
+    ``task_id`` names the originating episode a carriage routes to its assigned worker.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -39,6 +40,7 @@ class ToolOperationEnvelope(BaseModel):
     max_results: int
     timeout_sec: float
     result_char_cap: int
+    task_id: str | None = None
 
 
 def tool_request_digest(interface: str, query: str, max_results: int) -> str:
