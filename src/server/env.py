@@ -94,6 +94,11 @@ SERVER_CUDA_PROBE_IMAGE: str = os.getenv(
 )
 DOCKER_GPU_RUNTIME: str | None = os.getenv("DOCKER_GPU_RUNTIME", "").strip() or None
 
+# Projected to the worker so a worker-hosted external-tool executor builds its provider
+# and reads a keyed provider's credential from its own local environment.
+WEB_SEARCH_PROVIDER: str = os.getenv("WEB_SEARCH_PROVIDER", "").strip() or "duckduckgo"
+WEB_SEARCH_API_KEY: str = os.getenv("WEB_SEARCH_API_KEY", "")
+
 WORKER_CONFIG_PATH: str = os.getenv("WORKER_CONFIG_PATH", "configs/worker_config.yaml")
 CUDA_VISIBLE_DEVICES: str | None = os.getenv("CUDA_VISIBLE_DEVICES")
 if CUDA_VISIBLE_DEVICES is not None:
