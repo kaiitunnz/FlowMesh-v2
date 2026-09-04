@@ -151,6 +151,12 @@ class WorkerExternalToolExecutor:
             timeout_sec=envelope.timeout_sec,
             result_char_cap=envelope.result_char_cap,
         )
+        self._log.info(
+            "tool egress in worker=%s interface=%s provider=%s",
+            self._worker_id,
+            envelope.interface,
+            self._provider,
+        )
         outcome = self._sidecar.execute(colocated, request)
         return encode_msg(KIND_RESULT, outcome=outcome.model_dump(mode="json"))
 
