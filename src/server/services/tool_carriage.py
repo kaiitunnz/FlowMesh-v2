@@ -368,7 +368,13 @@ class RemoteSidecarCarriage:
         self, envelope: ToolOperationEnvelope, request: ToolRequest, session_id: str
     ) -> CarriageResult:
         target = await self._registry.ensure_target(envelope.task_id or "")
-        if target is None or envelope.interface not in target.interfaces:
+        if target is None:
+            # The episode's assigned worker is gone or not yet resolvable: a transient
+            # condition, and nothing egressed. Hold the boundary pending so a reassigned
+            # episode re-resolves to a live worker rather than injecting a spurious
+            # terminal unavailable; bounded retry terminalizes it if it never resolves.
+            return AmbiguousDelivery("the external-tool target is not resolvable")
+        if envelope.interface not in target.interfaces:
             return _unavailable("no eligible external-tool sidecar target")
         target_endpoint = await self._endpoint_provider(target.node_id)
         origin = self._route_origin()

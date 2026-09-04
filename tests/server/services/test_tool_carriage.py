@@ -281,6 +281,36 @@ def test_lost_reply_without_egress_is_terminal_unavailable() -> None:
     assert outcome.status.value == "unavailable"
 
 
+def test_unresolvable_target_is_ambiguous_not_terminal() -> None:
+    # The episode's assigned worker is not resolvable (gone or mid-reassignment): a
+    # transient condition held pending for re-drive, never a spurious terminal outcome.
+    async def resolve_none(task_id: str) -> None:
+        return None
+
+    async def exec_cmd(node_id: str, command: CommandType, payload: dict) -> dict:
+        raise AssertionError("must not bind when the target is unresolvable")
+
+    async def endpoint_provider(node_id: str) -> NetworkEndpointAdvertisement:
+        return _target_endpoint(node_id)
+
+    registry = ToolTargetRegistry(
+        exec_node_cmd=exec_cmd,
+        resolve_target=resolve_none,
+        sidecar_route="127.0.0.1:0",
+        provider="fake",
+        interfaces=("search/v1",),
+        directly_routable=True,
+    )
+    carriage = RemoteSidecarCarriage(
+        origin_deputy=_FakeDeputy(None),  # type: ignore[arg-type]
+        registry=registry,
+        endpoint_provider=endpoint_provider,
+        ingress_endpoint=_ingress(),
+        provider="fake",
+    )
+    assert isinstance(_run(carriage), AmbiguousDelivery)
+
+
 def test_registry_invalidate_rebinds_and_unbinds_the_stale_sidecar() -> None:
     async def run() -> None:
         cmds: list[tuple[str, str]] = []
