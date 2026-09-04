@@ -208,27 +208,17 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   binds it to carry claim-gated resident invocation traffic. Enable with
   `NETWORK_PLANE_ENABLED=true`. See [`NETWORK_PLANE.md`](NETWORK_PLANE.md).
 - **Remote external-tool carriage.** A fabric-served external tool (today `search/v1`)
-  egresses in a worker executor, never in the root or a supervisor: with `worker_sidecar`
-  egress and `WEB_SEARCH_SIDECAR_REMOTE`, the `FabricToolBroker` — still the sole authority
-  for the interface, quota, `idm-*`, and durable pending/terminal outcome — hands the
-  approved operation to a claim-free `RemoteSidecarCarriage` behind the same
-  execution-transport seam. The carriage resolves a route with the pure resolver over its
-  own reachability view from an in-server ingress-edge origin to the blocked Agent episode's
-  assigned worker, and carries the operation over the reused `worker_direct` / `node_relay` /
-  reverse-rendezvous transports in a distinct claim-free session namespace to that worker's
-  node. The node's supervisor is a pure opaque frame router: its `WorkerToolRouteDeputy`
-  forwards the operation frame to the worker over the worker's existing authenticated
-  attachment (a typed arm of the worker's gRPC stream) and relays the reply back, never
-  decoding the envelope, request, or outcome and constructing no provider. The
-  `WorkerExternalToolExecutor` validates a short-lived operation fence (request digest,
-  provider, target worker and registration incarnation, policy, expiry, bounds) and a one-use
-  delivery nonce before any egress — a failed fence is a tool-fence failure, never a
-  reachability demotion — and reads its keyed provider credential only from its own local
-  worker environment (projected from `WEB_SEARCH_*`), so no credential enters a workflow,
-  envelope, frame, message, or log. The carriage mints no `ServiceClaim`, `RouteAuthorization`,
-  or lease; a lost operation stays pending until its `idm-*` outcome terminalizes, and a
-  delivery for a restarted worker's stale incarnation is rejected before egress.
-  See [`EXECUTORS.md`](EXECUTORS.md).
+  egresses in a worker executor, never in the root or a supervisor. With `worker_sidecar`
+  egress and `WEB_SEARCH_SIDECAR_REMOTE`, the `FabricToolBroker` — the sole authority for
+  the interface, quota, `idm-*`, and durable pending/terminal outcome — hands the approved
+  operation to a claim-free `RemoteSidecarCarriage`, which carries it over the network plane
+  to the blocked Agent episode's assigned worker. The node's supervisor is a pure opaque
+  frame router that forwards the operation over the worker's existing attachment and relays
+  the reply back, constructing no provider. The `WorkerExternalToolExecutor` validates an
+  operation fence and a one-use delivery nonce before egress and reads its keyed credential
+  only from its local worker environment, so no credential enters a fabric object. The
+  carriage mints no `ServiceClaim`, `RouteAuthorization`, or lease; a lost operation stays
+  pending until its `idm-*` outcome terminalizes. See [`EXECUTORS.md`](EXECUTORS.md).
 - **Task merging.** Compatible adjacent tasks in a DAG (same `taskType`,
   model, hardware shape, and merge key) coalesce into a single dispatch.
   Merged children ride on `WorkerTaskMessage.merged_children`; the worker
