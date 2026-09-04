@@ -281,6 +281,34 @@ def test_lost_reply_without_egress_is_terminal_unavailable() -> None:
     assert outcome.status.value == "unavailable"
 
 
+def test_target_cache_is_bounded_and_evicts_lru() -> None:
+    async def run() -> None:
+        async def exec_cmd(node_id: str, command: CommandType, payload: dict) -> dict:
+            return {"host": "127.0.0.1", "port": 1}
+
+        async def resolve_target(task_id: str) -> tuple[str, str, int]:
+            # A distinct worker per task, so each ensure_target binds a new entry.
+            return TARGET_NODE, f"wkr-{task_id}", TARGET_INCARNATION
+
+        registry = ToolTargetRegistry(
+            exec_node_cmd=exec_cmd,
+            resolve_target=resolve_target,
+            sidecar_route="127.0.0.1:0",
+            provider="fake",
+            interfaces=("search/v1",),
+            directly_routable=True,
+            max_cached_targets=2,
+        )
+        await registry.ensure_target("a")
+        await registry.ensure_target("b")
+        # Re-touch "a" so "b" becomes the least-recently-used entry.
+        await registry.ensure_target("a")
+        await registry.ensure_target("c")  # over the cap: evicts the LRU ("wkr-b")
+        assert set(registry._targets) == {"wkr-a", "wkr-c"}
+
+    asyncio.run(run())
+
+
 def test_unresolvable_target_is_ambiguous_not_terminal() -> None:
     # The episode's assigned worker is not resolvable (gone or mid-reassignment): a
     # transient condition held pending for re-drive, never a spurious terminal outcome.

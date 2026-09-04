@@ -19,6 +19,7 @@ import logging
 import socket
 import ssl
 import time
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from typing import Any
@@ -62,6 +63,10 @@ from .tool_relay_delivery import ToolRelayEndpoint
 TargetResolver = Callable[[str], Awaitable[tuple[str, str, int] | None]]
 NodeEndpointProvider = Callable[[str], Awaitable[NetworkEndpointAdvertisement | None]]
 ExecNodeCmd = Callable[[str, CommandType, dict[str, Any]], Awaitable[dict[str, Any]]]
+
+# Bound on cached per-worker targets. A vanished worker's target is never explicitly
+# invalidated, so the least-recently-used entry is dropped past this cap.
+_MAX_CACHED_TARGETS = 256
 
 
 def _unavailable(value: str) -> ToolOutcome:
@@ -192,6 +197,7 @@ class ToolTargetRegistry:
         interfaces: tuple[str, ...],
         directly_routable: bool,
         policy_class: str = "default",
+        max_cached_targets: int = _MAX_CACHED_TARGETS,
         logger: logging.Logger | None = None,
     ) -> None:
         self._exec = exec_node_cmd
@@ -201,8 +207,9 @@ class ToolTargetRegistry:
         self._interfaces = interfaces
         self._directly_routable = directly_routable
         self._policy_class = policy_class
+        self._max_cached = max_cached_targets
         self._log = logger
-        self._targets: dict[str, NonresidentSidecarTarget] = {}
+        self._targets: OrderedDict[str, NonresidentSidecarTarget] = OrderedDict()
         self._lock = asyncio.Lock()
 
     async def ensure_target(self, task_id: str) -> NonresidentSidecarTarget | None:
@@ -213,6 +220,7 @@ class ToolTargetRegistry:
             node_id, worker_id, incarnation = resolved
             cached = self._targets.get(worker_id)
             if cached is not None and cached.target_generation == incarnation:
+                self._targets.move_to_end(worker_id)
                 return cached
             # The worker id and its registration incarnation are the audience fence: a
             # restart mints a new worker id and incarnation, so a stale delivery targets
@@ -245,7 +253,16 @@ class ToolTargetRegistry:
                 directly_routable=self._directly_routable,
             )
             self._targets[worker_id] = target
+            self._targets.move_to_end(worker_id)
+            self._evict_lru()
             return target
+
+    def _evict_lru(self) -> None:
+        # A vanished worker's target is never explicitly invalidated, so drop the
+        # least-recently-used entry past the cap. Drop-only, never unbound: a live
+        # worker's next operation simply rebinds rather than tearing down its route.
+        while len(self._targets) > self._max_cached:
+            self._targets.popitem(last=False)
 
     async def invalidate(self, target: NonresidentSidecarTarget) -> None:
         """Drop the cached target after a lost delivery so the next op rebinds.
