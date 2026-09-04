@@ -21,8 +21,6 @@ if __name__ == "__main__" and __package__ is None:
     sys.modules.setdefault("server.main", sys.modules[__name__])
 
 from shared._version import FLOWMESH_RELEASE_VERSION
-from shared.schemas.command import CommandMessage, CommandType
-from shared.schemas.network import NetworkEndpointAdvertisement, ReachabilityClass
 
 from .auth import reconcile_resources, resolve_system_principal
 from .clients import RedisClient
@@ -32,12 +30,11 @@ from .dispatcher.factory import create_dispatcher
 from .hooks import register
 from .network.rendezvous import RootCursorStore, RootRendezvousBridge
 from .network.reverse_relay import (
-    TOOL_RELAY_KEYSPACE,
     BinaryRedis,
     RelaySessionStore,
     RelayStreamStore,
 )
-from .network.service import NetworkPlane, stamp_endpoint
+from .network.service import NetworkPlane
 from .orchestration.tool_dispatch import ToolInvocationEnvelope
 from .registries import WorkerRegistry, WorkflowRegistry
 from .registries.node import NodeRegistry
@@ -63,16 +60,9 @@ from .startup import (
     start_tool_bridge_pump,
 )
 from .supervisor import WorkerSupervisor
-from .supervisor.services.reverse_relay_attachment import ReverseRelayAttachment
 from .task.runtime import TaskRuntime
 from .tools.fabric_tool_broker import FabricToolBroker
-from .tools.tool_carriage import (
-    RemoteSidecarCarriage,
-    ToolEgressOriginDeputy,
-    ToolTargetRegistry,
-)
-from .tools.tool_egress import EgressLocality
-from .tools.tool_relay_delivery import ToolRelayEndpoint
+from .tools.wiring import build_remote_tool_carriage
 from .utils.logging import get_logger
 
 # --------------------------------------------------------------------------- #
@@ -164,13 +154,6 @@ TOOL_TARGET_REGISTRY = None
 REMOTE_TOOL_CARRIAGE = None
 
 
-def _reachability_class(value: str) -> ReachabilityClass:
-    try:
-        return ReachabilityClass(value)
-    except ValueError:
-        return ReachabilityClass.ROUTABLE
-
-
 if IS_ROOT_NODE:
     WORKFLOW_REGISTRY = WorkflowRegistry(REDIS_CLIENT)
     WORKER_REGISTRY = WorkerRegistry(REDIS_CLIENT)
@@ -257,101 +240,20 @@ if IS_ROOT_NODE:
             logger=logger,
         )
 
-    _ws_cfg = config.orchestration.web_search
-    if (
-        config.orchestration.network.enabled
-        and _ws_cfg.sidecar_remote
-        and _ws_cfg.egress_locality == EgressLocality.WORKER_SIDECAR.value
-    ):
-        _net_cfg = config.orchestration.network
-        # The guard requires network.enabled, which is what binds _relay_redis above.
-        assert _relay_redis is not None
-        TOOL_BRIDGE = RootRendezvousBridge(
-            RelayStreamStore(_relay_redis, TOOL_RELAY_KEYSPACE),
-            RelaySessionStore(_relay_redis, TOOL_RELAY_KEYSPACE),
-            RootCursorStore(_relay_redis, TOOL_RELAY_KEYSPACE),
-            logger=logger,
-        )
-        TOOL_INGRESS_NODE_ID = f"xt-ingress-{config.identity.alias or 'root'}"
-        _tool_origin_endpoint = ToolRelayEndpoint(
-            _relay_redis, TOOL_INGRESS_NODE_ID, logger=logger
-        )
-        TOOL_INGRESS_ATTACH = ReverseRelayAttachment(
-            _relay_redis,
-            TOOL_INGRESS_NODE_ID,
-            _tool_origin_endpoint,
-            owner=f"{TOOL_INGRESS_NODE_ID}:{os.getpid()}",
-            keyspace=TOOL_RELAY_KEYSPACE,
-            logger=logger,
-        )
-        _ingress_endpoint = NetworkEndpointAdvertisement(
-            endpoint_id=TOOL_INGRESS_NODE_ID,
-            node_id=TOOL_INGRESS_NODE_ID,
-            url="",
-            generation=1,
-            trust_domain=_net_cfg.trust_domain,
-            reachability_class=_reachability_class(_net_cfg.reachability_class),
-            relay_attachment_id=f"xt-{TOOL_INGRESS_NODE_ID}",
-        )
-
-        async def _tool_exec_node_cmd(
-            node_id: str, command: CommandType, payload: dict[str, object]
-        ) -> dict[str, object]:
-            resp = await NODE_REGISTRY.exec_node_cmd(
-                node_id,
-                CommandMessage(command=command, payload=payload),
-                timeout=_net_cfg.connect_budget_sec + _ws_cfg.timeout_sec + 10.0,
-            )
-            if not resp.success:
-                raise RuntimeError(resp.message or "tool node command failed")
-            return resp.data or {}
-
-        async def _resolve_tool_target(task_id: str) -> tuple[str, str, int] | None:
-            # The blocked Agent episode's assigned worker owns the activation's context;
-            # route the operation to it and fence on its registration incarnation.
-            record = RUNTIME.get_record(task_id) if RUNTIME is not None else None
-            worker_id = record.assigned_worker if record is not None else None
-            if not worker_id or WORKER_REGISTRY is None:
-                return None
-            worker = await WORKER_REGISTRY.get_worker_async(worker_id)
-            if worker is None:
-                return None
-            return worker.node_id, worker.id, worker.incarnation
-
-        async def _tool_target_endpoint(
-            node_id: str,
-        ) -> NetworkEndpointAdvertisement | None:
-            node = await NODE_REGISTRY.get_node_async(node_id)
-            if node is None or node.network_endpoint is None:
-                return None
-            return stamp_endpoint(
-                node.network_endpoint, node.id, attachment_prefix="xt"
-            )
-
-        TOOL_TARGET_REGISTRY = ToolTargetRegistry(
-            exec_node_cmd=_tool_exec_node_cmd,
-            resolve_target=_resolve_tool_target,
-            sidecar_route=_ws_cfg.sidecar_route,
-            provider=_ws_cfg.provider,
-            interfaces=("search/v1",),
-            directly_routable=_ws_cfg.sidecar_directly_routable,
-            logger=logger,
-        )
-        REMOTE_TOOL_CARRIAGE = RemoteSidecarCarriage(
-            origin_deputy=ToolEgressOriginDeputy(
-                relay_endpoint=_tool_origin_endpoint,
-                connect_budget_sec=_net_cfg.connect_budget_sec,
-                logger=logger,
-            ),
-            registry=TOOL_TARGET_REGISTRY,
-            endpoint_provider=_tool_target_endpoint,
-            ingress_endpoint=_ingress_endpoint,
-            provider=_ws_cfg.provider,
-            deadline_sec=_ws_cfg.timeout_sec + 10.0,
-            route_ttl_sec=_net_cfg.route_ttl_sec,
-            connect_budget_sec=_net_cfg.connect_budget_sec,
-            logger=logger,
-        )
+    _tool_carriage = build_remote_tool_carriage(
+        config=config,
+        node_registry=NODE_REGISTRY,
+        worker_registry=WORKER_REGISTRY,
+        runtime=RUNTIME,
+        relay_redis=_relay_redis,
+        logger=logger,
+    )
+    if _tool_carriage is not None:
+        TOOL_BRIDGE = _tool_carriage.bridge
+        TOOL_INGRESS_ATTACH = _tool_carriage.ingress_attach
+        TOOL_INGRESS_NODE_ID = _tool_carriage.ingress_node_id
+        TOOL_TARGET_REGISTRY = _tool_carriage.target_registry
+        REMOTE_TOOL_CARRIAGE = _tool_carriage.carriage
 
     FABRIC_TOOL_BROKER = FabricToolBroker.build(
         config.orchestration.web_search,
