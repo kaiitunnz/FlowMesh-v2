@@ -19,6 +19,7 @@ from shared.harness import (
     InputBinding,
     InputBindingMember,
 )
+from shared.outcome import OutcomeManifest
 from shared.schemas.command import InterruptMessage
 from shared.schemas.result import ResultEnvelope, result_file_path
 from shared.tasks import TaskEnvelopeTemplate
@@ -1186,16 +1187,18 @@ class TaskRuntime:
         self,
         task_id: str,
         call_correlation: str,
-        value: str | None,
+        value: str | None = None,
         *,
         error: str | None = None,
+        ref: OutcomeManifest | None = None,
     ) -> bool:
         """Settle a suspended model/effect boundary and re-ready its episode.
 
-        A value lands durably on the boundary envelope and the work item returns to
-        READY for a re-dispatch that injects it at its originating call. An upstream
-        ``error`` instead fails the boundary terminally, so a gateway failure never
-        resumes the agent as a phantom empty success.
+        An inline ``value`` or a reference-backed ``ref`` manifest lands durably on the
+        boundary envelope and the work item returns to READY for a re-dispatch that
+        injects it at its originating call. An upstream ``error`` instead fails the
+        boundary terminally, so a gateway failure never resumes the agent as a phantom
+        empty success.
         """
         with self._cv:
             record = self._tasks.get(task_id)
@@ -1229,7 +1232,7 @@ class TaskRuntime:
                     self._cv.notify_all()
                 return changed
             advance = engine.settle_boundary_outcome(
-                task_id, call_correlation, value=value
+                task_id, call_correlation, value=value, ref=ref
             )
             invocation_id = engine.terminalize_boundary_invocation(
                 task_id, call_correlation

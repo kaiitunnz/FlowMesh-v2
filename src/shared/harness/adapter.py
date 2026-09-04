@@ -17,6 +17,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict
 
+from ..outcome import OutcomeManifest
 from .boundary import BoundaryRequest, DenialKind
 
 
@@ -89,7 +90,10 @@ class DeliveredOutcome(BaseModel):
     idempotency_key: str | None = None  # fabric-assigned dedupe authority
     kind: OutcomeKind = OutcomeKind.RESULT
     denial: DenialKind | None = None  # set when kind is DENIED
-    value: str | None = None  # opaque result payload when kind is RESULT
+    # A RESULT injects exactly one of these: an inline ``value``, or an ``outcome_ref``
+    # the worker hydrates and digest-verifies into the value before injection.
+    value: str | None = None
+    outcome_ref: OutcomeManifest | None = None
     # The original harness call this outcome injects back at, the tool the model called,
     # and its arguments, so a captured facade result maps faithfully to its own call id.
     injection_target: str | None = None

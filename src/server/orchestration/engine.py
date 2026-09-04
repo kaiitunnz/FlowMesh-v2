@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from typing import Self
 
 from shared.harness import DeliveredOutcome, OutcomeKind
+from shared.outcome import OutcomeManifest
 from shared.utils import (
     new_activation_id,
     new_attempt_id,
@@ -937,12 +938,20 @@ class OrchestrationEngine:
         return members
 
     @staticmethod
-    def _group_awaits_unresolved(members: Sequence[BoundaryEvent]) -> bool:
+    def _boundary_resolved(env: BoundaryEvent) -> bool:
+        """Whether a boundary is settled: an inline value, a reference, or a denial."""
+        return (
+            env.outcome_value is not None
+            or env.outcome_ref is not None
+            or env.denial is not None
+        )
+
+    @classmethod
+    def _group_awaits_unresolved(cls, members: Sequence[BoundaryEvent]) -> bool:
         """Whether the group holds an await-outcome member with no settled outcome."""
         return any(
             e.completion_mode == FacadeCompletionMode.AWAIT_OUTCOME.value
-            and e.outcome_value is None
-            and e.denial is None
+            and not cls._boundary_resolved(e)
             for e in members
         )
 
@@ -974,7 +983,7 @@ class OrchestrationEngine:
         for env in self._group_members(wi.activation_id, group_id):
             if env.kind is not BoundaryEventKind.INVOCATION:
                 continue
-            if env.outcome_value is not None or env.denial is not None:
+            if self._boundary_resolved(env):
                 continue
             if (envelope := self._envelope_from(wi, env)) is not None:
                 out.append(envelope)
@@ -1043,7 +1052,7 @@ class OrchestrationEngine:
                 BoundaryEventKind.EXTERNAL_EFFECT,
             ):
                 continue
-            if env.denial is not None or env.outcome_value is not None:
+            if self._boundary_resolved(env):
                 continue
             wi = self._wi_by_activation.get(activation)
             work_item = self._work_items.get(wi) if wi else None
@@ -1079,7 +1088,7 @@ class OrchestrationEngine:
         if wi is None or wi.status is not WorkItemStatus.BLOCKED:
             return None
         env = self._boundary_events.get((wi.activation_id, call_correlation))
-        if env is None or env.denial is not None or env.outcome_value is not None:
+        if env is None or self._boundary_resolved(env):
             return None
         return self._envelope_from(wi, env)
 
@@ -1125,15 +1134,21 @@ class OrchestrationEngine:
         if wi is None or wi.status is not WorkItemStatus.BLOCKED:
             return False
         env = self._boundary_events.get((wi.activation_id, call_correlation))
-        return env is not None and env.outcome_value is None and env.denial is None
+        return env is not None and not self._boundary_resolved(env)
 
     def settle_boundary_outcome(
-        self, task_id: str, call_correlation: str, *, value: str | None = None
+        self,
+        task_id: str,
+        call_correlation: str,
+        *,
+        value: str | None = None,
+        ref: OutcomeManifest | None = None,
     ) -> Advance:
-        """Persist a mediated outcome's value and re-ready the suspended episode.
+        """Persist a mediated outcome and re-ready the suspended episode.
 
-        The value lands durably on the boundary envelope so a re-dispatch injects it and
-        a restart rehydrates it; the item then returns to READY for a fresh attempt.
+        The outcome — an inline ``value`` or a reference-backed ``ref`` manifest — lands
+        durably on the boundary envelope so a re-dispatch injects it and a restart
+        rehydrates it; the item then returns to READY for a fresh attempt.
         """
         wi = self._work_item_for_task(task_id)
         if wi is None:
@@ -1141,8 +1156,7 @@ class OrchestrationEngine:
         corr = (wi.activation_id, call_correlation)
         env = self._boundary_events.get(corr)
         resolved = wi.status is not WorkItemStatus.BLOCKED or (
-            env is not None
-            and (env.outcome_value is not None or env.denial is not None)
+            env is not None and self._boundary_resolved(env)
         )
         if resolved:
             # A duplicate/late settle of an already-resolved member, or any settle for a
@@ -1150,8 +1164,8 @@ class OrchestrationEngine:
             # no-op: it never re-runs the deliver path, so it cannot re-ready or stamp a
             # stale outcome on a resolved or cancelled boundary.
             return Advance()
-        if env is not None and value is not None:
-            env = env.model_copy(update={"outcome_value": value})
+        if env is not None and (value is not None or ref is not None):
+            env = env.model_copy(update={"outcome_value": value, "outcome_ref": ref})
             self._boundary_events[corr] = env
         if env is not None and env.group_id is not None:
             # A group member settled: hold the resume until every await-outcome member
@@ -1195,11 +1209,7 @@ class OrchestrationEngine:
         """
         ids: list[str] = []
         for env in self._boundary_events.values():
-            if (
-                env.invocation_id is None
-                or env.outcome_value is not None
-                or env.denial is not None
-            ):
+            if env.invocation_id is None or self._boundary_resolved(env):
                 continue
             if (invocation := self._invocations.get(env.invocation_id)) is not None:
                 invocation.state = next_on_terminal(invocation.state)
@@ -1246,6 +1256,7 @@ class OrchestrationEngine:
             idempotency_key=env.idempotency_key,
             kind=OutcomeKind.RESULT,
             value=env.outcome_value,
+            outcome_ref=env.outcome_ref,
             injection_target=env.injection_target,
             injection_tool=env.injection_tool,
         )
