@@ -524,6 +524,36 @@ class WebSearchConfig:
 
 
 @dataclass
+class ContentStoreConfig:
+    """The reference-backed outcome content store's local root and inline bound.
+
+    ``root`` is the server-hosted content-addressed object root a worker writes and
+    hydrates over the content router. ``inline_control_max_bytes`` bounds the opaque
+    worker-produced control datum a settle may carry inline; every provider result
+    materializes by reference regardless of size.
+    """
+
+    enabled: bool = True
+    root: Path = Path("./content")
+    inline_control_max_bytes: int = 4096
+
+    @classmethod
+    def from_env(cls, results_dir: Path) -> "ContentStoreConfig":
+        override = _env_or_none("CONTENT_STORE_ROOT")
+        root = (
+            Path(override).expanduser().resolve()
+            if override
+            else results_dir.parent / "content"
+        )
+        return cls(
+            enabled=parse_bool_env("CONTENT_STORE_ENABLED", True),
+            root=root,
+            inline_control_max_bytes=parse_int_env("CONTENT_STORE_INLINE_MAX_BYTES")
+            or 4096,
+        )
+
+
+@dataclass
 class NetworkPlaneConfig:
     """Feature-gated network-plane route substrate knobs.
 
@@ -634,6 +664,7 @@ class ServerConfig:
     worker_management: WorkerManagementConfig
     log_stream: LogStreamConfig
     orchestration: OrchestrationConfig
+    content_store: ContentStoreConfig = field(default_factory=ContentStoreConfig)
     results_dir: Path = Path("./results")
     plugins: list[str] = field(default_factory=list)
 
@@ -662,6 +693,7 @@ class ServerConfig:
             worker_management=WorkerManagementConfig.from_env(),
             log_stream=LogStreamConfig.from_env(),
             orchestration=OrchestrationConfig.from_env(),
+            content_store=ContentStoreConfig.from_env(results_dir),
             results_dir=results_dir,
             plugins=plugins,
         )

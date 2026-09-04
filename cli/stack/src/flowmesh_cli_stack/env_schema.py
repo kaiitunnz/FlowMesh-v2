@@ -542,6 +542,29 @@ STACK_ENV_SCHEMA = EnvSchema(
             ],
         ),
         EnvSection(
+            title="Reference-backed outcomes",
+            vars=[
+                EnvVar(
+                    "CONTENT_STORE_ENABLED",
+                    "true",
+                    description="Serve the outcome content store.",
+                    var_type=EnvVarType.BOOL,
+                ),
+                EnvVar(
+                    "CONTENT_STORE_ROOT",
+                    "",
+                    description="Content-store root; under the data dir if empty.",
+                ),
+                EnvVar(
+                    "CONTENT_STORE_INLINE_MAX_BYTES",
+                    "4096",
+                    description="Inline control-datum size bound.",
+                    var_type=EnvVarType.INT,
+                    min_value=1,
+                ),
+            ],
+        ),
+        EnvSection(
             title="Network plane",
             vars=[
                 EnvVar(

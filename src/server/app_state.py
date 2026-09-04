@@ -9,6 +9,7 @@ from .hooks import PrincipalContext
 from .network.service import NetworkPlane
 from .registries import NodeRegistry, WorkerRegistry, WorkflowRegistry
 from .resident.service import ResidentCapacityControl
+from .services.content_store import ServerContentStore
 from .services.metrics import MetricsRecorder
 from .services.monitoring import EventMonitor
 from .services.port_forward import PortForwardService
@@ -104,3 +105,7 @@ def get_resident_control(conn: HTTPConnection) -> ResidentCapacityControl | None
 
 def get_network_plane(conn: HTTPConnection) -> NetworkPlane | None:
     return conn.app.state.network_plane
+
+
+def get_content_store(conn: HTTPConnection) -> ServerContentStore | None:
+    return conn.app.state.content_store
