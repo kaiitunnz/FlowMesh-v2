@@ -118,8 +118,13 @@ class WorkerToolRouteDeputy:
         except asyncio.CancelledError:
             self._reap(worker_id, session_id)
             raise
-        await netwire.write_frame(writer, reply)
-        self._pop(session_id)
+        try:
+            # The worker's reply arrived and the egress is complete; only the write back
+            # to the origin can still fail (a disconnected origin). Pop the session
+            # regardless so a failed write-back never leaks the record.
+            await netwire.write_frame(writer, reply)
+        finally:
+            self._pop(session_id)
 
     def deliver_up(self, session_id: str, kind: str, frame_b64: str) -> None:
         """Route a worker's opaque up-leg frame back to its origin, by session id."""

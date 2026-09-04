@@ -11,6 +11,8 @@ import base64
 import inspect
 from typing import Any
 
+import pytest
+
 from server.network import wire as netwire
 from server.supervisor.services import tool_egress_deputy as deputy_mod
 from server.supervisor.services.tool_egress_deputy import WorkerToolRouteDeputy
@@ -91,6 +93,38 @@ def test_a_lost_reply_forwards_a_cancel_and_retains_then_reaps() -> None:
         assert tl.calls[-1][2] == FRAME_CANCEL
         assert deputy._sessions == {}
         writer.close()
+        await deputy.stop()
+
+    asyncio.run(run())
+
+
+def test_a_failed_write_back_to_the_origin_pops_the_session() -> None:
+    async def run() -> None:
+        tl = _FakeTaskListener()
+        deputy = _deputy(tl)
+        deputy._loop = asyncio.get_running_loop()
+        reader = asyncio.StreamReader()
+        op = b"OPAQUE-OPERATION-FRAME"
+        reader.feed_data(len(op).to_bytes(4, "big") + op)
+
+        class _BoomWriter:
+            def write(self, data: bytes) -> None:
+                raise ConnectionResetError("origin gone")
+
+            async def drain(self) -> None:
+                pass
+
+        task = asyncio.create_task(
+            deputy.serve_operation("wrk-1", reader, _BoomWriter())  # type: ignore[arg-type]
+        )
+        await asyncio.wait_for(tl.ev.wait(), 2.0)
+        session_id = tl.calls[0][1]
+        # The worker's reply arrives, but writing it back to the origin fails.
+        deputy.deliver_up(session_id, FRAME_REPLY, base64.b64encode(b"reply").decode())
+        with pytest.raises(ConnectionResetError):
+            await asyncio.wait_for(task, 2.0)
+        # The failed write-back did not leak the session record.
+        assert deputy._sessions == {}
         await deputy.stop()
 
     asyncio.run(run())
