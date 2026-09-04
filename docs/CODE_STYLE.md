@@ -37,8 +37,8 @@ orchestration-ledger `act-`, `scp-`, `wki-`, `att-`, `inv-`, `agr-`, `idm-`, the
 resident-capacity `scl-` (service claim), `rpl-` (replica incarnation), `lse-`
 (allocation lease), `hnd-` (claim-bound admission handoff), `msk-` (a vaulted
 model-secret ref), the network-plane `rog-` (route origin) and `rly-` (relay
-session), and the remote external-tool `stg-` (nonresident sidecar target), `xtr-`
-(tool relay session), and `xdn-` (one-use tool delivery nonce). Always use
+session), and the remote external-tool `xtr-` (tool relay
+session) and `xdn-` (one-use tool delivery nonce). Always use
 `new_*_id()`/`new_idempotency_key()`/
 `new_model_secret_ref()` helpers in `src/shared/utils/ids.py`. Never use `uuid4()`
 or `secrets.token_hex` for IDs.
