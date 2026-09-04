@@ -181,6 +181,34 @@ def test_crashed_egress_sends_no_reply_leaving_it_ambiguous(
     assert sink.wait(0.5) is False
 
 
+def test_a_misprovisioned_provider_is_terminal_not_ambiguous(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The keyed provider has no key, so building it raises: a deterministic config
+    # fault. The executor returns a terminal unavailable outcome rather than crashing
+    # into a no-reply ambiguous loss that the origin would re-drive to exhaustion.
+    def _raise(_cfg: Any) -> None:
+        raise ValueError("the serper web-search provider needs WEB_SEARCH_API_KEY")
+
+    monkeypatch.setattr("shared.tools.providers.build_search_provider", _raise)
+    sink = _Sink()
+    ex = WorkerExternalToolExecutor(
+        worker_id=WORKER,
+        generation=GEN,
+        provider="fake",
+        api_key=None,
+        result_sink=sink,
+    )
+    ex.submit("xtr-1", FRAME_OPERATION, _op(_fence()))
+    assert sink.wait()
+    session_id, kind, frame = sink.frames[0]
+    # A terminal reply frame, not a no-reply ambiguous loss.
+    assert (session_id, kind) == ("xtr-1", FRAME_REPLY)
+    body = decode_msg(frame)
+    assert body["kind"] == KIND_RESULT
+    assert body["outcome"]["status"] == "unavailable"
+
+
 def test_cancel_reaps_and_fences_a_late_reply(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -26,6 +26,8 @@ from shared.tools.schema import (
     SEARCH_INTERFACE,
     RemoteToolOperationEnvelope,
     ToolOperationEnvelope,
+    ToolOutcome,
+    ToolOutcomeStatus,
     ToolRequest,
     tool_request_digest,
 )
@@ -162,7 +164,18 @@ class WorkerExternalToolExecutor:
             envelope.interface,
             self._provider,
         )
-        outcome = self._sidecar.execute(colocated, request)
+        try:
+            outcome = self._sidecar.execute(colocated, request)
+        except ValueError as exc:
+            # A misprovisioned provider (unknown backend, or a keyed provider with no
+            # key) is a deterministic fault: a same-idm re-drive to this worker repeats
+            # it. Return a terminal typed outcome, not a no-reply ambiguous loss that
+            # re-drives until the retry budget exhausts.
+            self._log.warning("tool provider unavailable: %s", exc)
+            outcome = ToolOutcome(
+                status=ToolOutcomeStatus.UNAVAILABLE,
+                value="the external-tool provider is unavailable",
+            )
         return encode_msg(KIND_RESULT, outcome=outcome.model_dump(mode="json"))
 
     def _fence_reject(
