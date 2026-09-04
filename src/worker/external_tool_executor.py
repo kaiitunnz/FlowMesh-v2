@@ -20,14 +20,16 @@ from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 
-from shared.tools.egress import ExternalToolSidecar
-from shared.tools.providers import LazySearchProvider
-from shared.tools.schema import (
-    SEARCH_INTERFACE,
+from shared.tools.contract import (
     RemoteToolOperationEnvelope,
     ToolOperationEnvelope,
     ToolOutcome,
     ToolOutcomeStatus,
+)
+from shared.tools.search.egress import ExternalToolSidecar
+from shared.tools.search.providers import LazySearchProvider
+from shared.tools.search.schema import (
+    SEARCH_INTERFACE,
     ToolRequest,
     tool_request_digest,
 )

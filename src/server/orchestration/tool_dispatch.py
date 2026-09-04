@@ -12,9 +12,9 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict
 
-from shared.tools.schema import SEARCH_INTERFACE
-from shared.tools.schema import ToolOutcome as ToolOutcome
-from shared.tools.schema import ToolOutcomeStatus as ToolOutcomeStatus
+from shared.tools.contract import ToolOutcome as ToolOutcome
+from shared.tools.contract import ToolOutcomeStatus as ToolOutcomeStatus
+from shared.tools.search.schema import SEARCH_INTERFACE
 
 from ..task.v2.representations.operators import BoundaryEventKind
 

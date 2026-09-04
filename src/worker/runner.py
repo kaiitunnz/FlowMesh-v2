@@ -19,7 +19,7 @@ from shared.tasks.specs import (
     TaskSpecStrictBase,
 )
 from shared.tasks.worker_message import HardwareUsage, WorkerHardware, WorkerTaskMessage
-from shared.tools.schema import DEFAULT_SEARCH_PROVIDER
+from shared.tools.search.schema import DEFAULT_SEARCH_PROVIDER
 from shared.utils.manifest import prepare_output_dir, sync_manifest
 from shared.utils.time import now_iso
 

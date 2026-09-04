@@ -14,16 +14,16 @@ from collections.abc import Callable
 from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol
 
-from shared.tools.egress import ExternalToolSidecar
-from shared.tools.schema import (
+from shared.tools.contract import (
     RemoteToolOperationEnvelope as RemoteToolOperationEnvelope,
 )
-from shared.tools.schema import (
+from shared.tools.contract import (
     ToolOperationEnvelope,
     ToolOutcome,
-    ToolRequest,
 )
-from shared.tools.schema import tool_request_digest as tool_request_digest
+from shared.tools.search.egress import ExternalToolSidecar
+from shared.tools.search.schema import ToolRequest
+from shared.tools.search.schema import tool_request_digest as tool_request_digest
 
 if TYPE_CHECKING:
     from ..config import WebSearchConfig

@@ -1,8 +1,7 @@
 """Shared fabric external-tool contract and worker-side execution.
 
-The control plane (root) authorizes and records external-tool operations; a worker
-executor validates the operation fence and performs the provider egress. Both planes
-import these schemas, the provider backends, the egress surface, and the frame codec
-from here, so the execution pieces live outside ``src/server`` where a worker can run
-them.
+The generic operation contract (``contract``) and frame codec (``wire``) are
+tool-agnostic; a per-tool package (today ``search``) supplies the request schema,
+provider backends, and egress surface. These live outside ``src/server`` so a worker
+executor can run the provider egress.
 """

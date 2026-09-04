@@ -20,7 +20,7 @@ from server.tools.tool_egress import (
     ToolRequest,
     tool_request_digest,
 )
-from shared.tools.providers import SearchResult, SearchUnavailable
+from shared.tools.search.providers import SearchResult, SearchUnavailable
 from shared.utils.ids import new_tool_delivery_nonce
 
 TARGET_ID = "stg-1"

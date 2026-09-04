@@ -24,7 +24,7 @@ from server.tools.tool_egress import (
     ToolRequest,
     WorkerSidecarAdapter,
 )
-from shared.tools.providers import SearchResult
+from shared.tools.search.providers import SearchResult
 
 
 class _StubProvider:

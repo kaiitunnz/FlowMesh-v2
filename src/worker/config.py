@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from shared.schemas.worker import SSHLimits
-from shared.tools.schema import DEFAULT_SEARCH_PROVIDER
+from shared.tools.search.schema import DEFAULT_SEARCH_PROVIDER
 from shared.utils.parsing import (
     parse_bool_env,
     parse_float_env,

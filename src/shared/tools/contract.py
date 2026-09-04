@@ -1,30 +1,15 @@
-"""The shared external-tool operation contract: requests, fences, and outcomes.
+"""The generic fabric external-tool operation contract: envelopes and outcomes.
 
 The control path issues a bounded ``ToolOperationEnvelope`` (and a per-delivery
 ``RemoteToolOperationEnvelope`` fence); a worker executor validates the fence and
-returns a normalized ``ToolOutcome``. These mint no identity and hold no credential.
+returns a normalized ``ToolOutcome``. These are tool-agnostic — a per-tool package
+(today ``shared.tools.search``) supplies the request shape and provider egress — and
+they mint no identity and hold no credential.
 """
 
-import hashlib
 from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict
-
-# The reserved fabric-served tool interface. Exact routing keys on this exact value.
-SEARCH_INTERFACE = "search/v1"
-
-# The keyless web-search backend selected when no provider is configured.
-DEFAULT_SEARCH_PROVIDER = "duckduckgo"
-
-
-class ToolRequest(BaseModel):
-    """The parsed, bounds-shaped request the control path derived from a boundary."""
-
-    model_config = ConfigDict(frozen=True)
-
-    interface: str
-    query: str
-    max_results: int
 
 
 class ToolOperationEnvelope(BaseModel):
@@ -44,16 +29,6 @@ class ToolOperationEnvelope(BaseModel):
     timeout_sec: float
     result_char_cap: int
     task_id: str | None = None
-
-
-def tool_request_digest(interface: str, query: str, max_results: int) -> str:
-    """A canonical integrity digest over the bounded request the fence commits to.
-
-    The worker executor recomputes it over the delivered request and rejects a mismatch,
-    so an altered request or an altered digest fails the fence before any provider call.
-    """
-    raw = f"{interface}\x00{query}\x00{max_results}".encode()
-    return hashlib.sha256(raw).hexdigest()
 
 
 class RemoteToolOperationEnvelope(BaseModel):
@@ -117,12 +92,8 @@ class ToolOutcome(BaseModel):
 
 
 __all__ = [
-    "DEFAULT_SEARCH_PROVIDER",
-    "SEARCH_INTERFACE",
     "RemoteToolOperationEnvelope",
     "ToolOperationEnvelope",
     "ToolOutcome",
     "ToolOutcomeStatus",
-    "ToolRequest",
-    "tool_request_digest",
 ]

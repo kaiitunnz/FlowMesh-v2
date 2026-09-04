@@ -153,8 +153,7 @@ def test_the_supervisor_deputy_constructs_no_provider() -> None:
     for forbidden in (
         "ExternalToolSidecar",
         "search_providers",
-        "shared.tools.providers",
-        "shared.tools.egress",
+        "shared.tools.search",
         "WebSearchConfig",
         "LazySearchProvider",
         "build_search_provider",

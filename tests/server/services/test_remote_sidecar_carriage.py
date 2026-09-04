@@ -35,7 +35,7 @@ from server.tools.tool_egress import (
 )
 from server.tools.tool_relay_delivery import ToolRelayEndpoint
 from shared.schemas.command import CommandType
-from shared.tools.providers import SearchResult
+from shared.tools.search.providers import SearchResult
 from tests.server.network._relay_fakes import FakeBinaryRedis
 
 INGRESS = "xt-ingress"

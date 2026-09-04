@@ -31,7 +31,7 @@ from server.tools.tool_egress import (
     tool_request_digest,
 )
 from server.tools.tool_relay_delivery import ToolRelayEndpoint
-from shared.tools.providers import SearchResult
+from shared.tools.search.providers import SearchResult
 from shared.utils.ids import new_tool_delivery_nonce
 from tests.server.network._relay_fakes import FakeBinaryRedis
 

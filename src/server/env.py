@@ -3,7 +3,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from shared.tools.schema import DEFAULT_SEARCH_PROVIDER
+from shared.tools.search.schema import DEFAULT_SEARCH_PROVIDER
 from shared.utils import parse_bool_env, parse_float_env, parse_int_env
 
 NODE_NAMESPACE: str = os.getenv("NODE_NAMESPACE") or "flowmesh"

@@ -8,6 +8,7 @@ executor, or the transitional in-server relay path.
 
 import logging
 
+from ..contract import ToolOperationEnvelope, ToolOutcome, ToolOutcomeStatus
 from .providers import (
     SearchProvider,
     SearchQuotaExceeded,
@@ -15,13 +16,7 @@ from .providers import (
     SearchTimeout,
     SearchUnavailable,
 )
-from .schema import (
-    SEARCH_INTERFACE,
-    ToolOperationEnvelope,
-    ToolOutcome,
-    ToolOutcomeStatus,
-    ToolRequest,
-)
+from .schema import SEARCH_INTERFACE, ToolRequest
 
 _SERVED_INTERFACES = frozenset({SEARCH_INTERFACE})
 

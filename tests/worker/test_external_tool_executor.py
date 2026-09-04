@@ -12,10 +12,10 @@ from typing import Any
 
 import pytest
 
-from shared.tools.providers import SearchResult
-from shared.tools.schema import (
+from shared.tools.contract import RemoteToolOperationEnvelope
+from shared.tools.search.providers import SearchResult
+from shared.tools.search.schema import (
     SEARCH_INTERFACE,
-    RemoteToolOperationEnvelope,
     ToolRequest,
     tool_request_digest,
 )
@@ -107,7 +107,8 @@ def _executor(
             return [SearchResult(title="T", url="https://x", snippet="S")]
 
     monkeypatch.setattr(
-        "shared.tools.providers.build_search_provider", lambda cfg: _FakeProvider()
+        "shared.tools.search.providers.build_search_provider",
+        lambda cfg: _FakeProvider(),
     )
     sink = _Sink()
     ex = WorkerExternalToolExecutor(
@@ -236,7 +237,7 @@ def test_a_misprovisioned_provider_is_terminal_not_ambiguous(
     def _raise(_cfg: Any) -> None:
         raise ValueError("the serper web-search provider needs WEB_SEARCH_API_KEY")
 
-    monkeypatch.setattr("shared.tools.providers.build_search_provider", _raise)
+    monkeypatch.setattr("shared.tools.search.providers.build_search_provider", _raise)
     sink = _Sink()
     ex = WorkerExternalToolExecutor(
         worker_id=WORKER,

@@ -4,7 +4,7 @@ from enum import StrEnum
 from pathlib import Path
 
 from shared.tasks.specs import ModelBindingMode
-from shared.tools.schema import DEFAULT_SEARCH_PROVIDER
+from shared.tools.search.schema import DEFAULT_SEARCH_PROVIDER
 from shared.utils.parsing import parse_bool_env, parse_float_env, parse_int_env
 
 

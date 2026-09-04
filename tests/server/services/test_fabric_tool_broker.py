@@ -18,7 +18,7 @@ from server.orchestration.tool_dispatch import (
 from server.tools.fabric_tool_broker import FabricToolBroker
 from server.tools.tool_egress import AmbiguousDelivery
 from shared.harness import BoundaryEventKind
-from shared.tools.providers import (
+from shared.tools.search.providers import (
     SearchQuotaExceeded,
     SearchResult,
     SearchTimeout,
@@ -139,7 +139,7 @@ GPT-5.6 <b>Sol</b></a>
 
 
 def test_duckduckgo_provider_parses_and_unwraps(monkeypatch: Any) -> None:
-    import shared.tools.providers as mod
+    import shared.tools.search.providers as mod
 
     class _Resp:
         status_code = 200
@@ -154,7 +154,7 @@ def test_duckduckgo_provider_parses_and_unwraps(monkeypatch: Any) -> None:
 
 
 def test_duckduckgo_provider_maps_http_faults(monkeypatch: Any) -> None:
-    import shared.tools.providers as mod
+    import shared.tools.search.providers as mod
 
     class _Resp:
         def __init__(self, code: int) -> None:
@@ -180,7 +180,7 @@ def test_duckduckgo_provider_maps_http_faults(monkeypatch: Any) -> None:
 
 
 def test_serper_provider_parses_organic_and_maps_faults(monkeypatch: Any) -> None:
-    import shared.tools.providers as mod
+    import shared.tools.search.providers as mod
 
     class _Resp:
         def __init__(self, code: int, payload: dict[str, Any]) -> None:
@@ -215,7 +215,7 @@ def test_serper_provider_parses_organic_and_maps_faults(monkeypatch: Any) -> Non
 
 def test_build_search_provider_selects_by_config() -> None:
     from server.config import WebSearchConfig
-    from shared.tools.providers import (
+    from shared.tools.search.providers import (
         DuckDuckGoProvider,
         SerperProvider,
         build_search_provider,
@@ -239,7 +239,7 @@ def test_build_search_provider_selects_by_config() -> None:
 
 
 def test_lazy_provider_defers_a_missing_key_to_first_search() -> None:
-    from shared.tools.providers import LazySearchProvider
+    from shared.tools.search.providers import LazySearchProvider
 
     # A keyed provider with no key must not fail at construction — only on egress,
     # so a deployment that egresses only off-server never builds it on the server.

@@ -18,7 +18,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
-from shared.tools.providers import LazySearchProvider, SearchProvider
+from shared.tools.search.providers import LazySearchProvider, SearchProvider
 
 from ..config import WebSearchConfig
 from ..orchestration.tool_dispatch import (
