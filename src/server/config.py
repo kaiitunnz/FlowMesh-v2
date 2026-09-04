@@ -480,8 +480,8 @@ class WebSearchConfig:
     searches; ``result_char_cap`` bounds the injected result size. ``egress_locality``
     selects where an approved search egresses (``server_relay`` default or
     ``worker_sidecar``). With ``worker_sidecar`` and ``sidecar_remote``, the operation
-    is carried to a remote sidecar on ``sidecar_node`` (empty selects a worker) bound on
-    ``sidecar_route``, offered a direct dial only when ``sidecar_directly_routable``.
+    is carried to the blocked episode's assigned worker, bound on ``sidecar_route`` and
+    offered a direct dial only when ``sidecar_directly_routable``.
     """
 
     provider: str = "duckduckgo"
@@ -493,7 +493,6 @@ class WebSearchConfig:
     max_parallel: int = 4
     egress_locality: str = "server_relay"
     sidecar_remote: bool = False
-    sidecar_node: str | None = None
     sidecar_route: str = "127.0.0.1:0"
     sidecar_directly_routable: bool = False
 
@@ -512,7 +511,6 @@ class WebSearchConfig:
             .strip()
             .lower(),
             sidecar_remote=parse_bool_env(f"{prefix}SIDECAR_REMOTE", False),
-            sidecar_node=_env_or_none(f"{prefix}SIDECAR_NODE"),
             sidecar_route=(
                 os.getenv(f"{prefix}SIDECAR_ROUTE") or "127.0.0.1:0"
             ).strip(),

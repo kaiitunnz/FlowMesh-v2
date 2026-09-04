@@ -402,11 +402,6 @@ STACK_ENV_SCHEMA = EnvSchema(
                     var_type=EnvVarType.BOOL,
                 ),
                 EnvVar(
-                    "WEB_SEARCH_SIDECAR_NODE",
-                    "",
-                    description="Remote sidecar target node (empty selects a worker).",
-                ),
-                EnvVar(
                     "WEB_SEARCH_SIDECAR_ROUTE",
                     "127.0.0.1:0",
                     description="Remote sidecar bind route.",
