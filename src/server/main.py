@@ -235,6 +235,7 @@ if IS_ROOT_NODE:
 
         RUNTIME.set_model_settler(_model_settle)
 
+    _relay_redis: BinaryRedis | None = None
     if config.orchestration.network.enabled:
         NETWORK_PLANE = NetworkPlane(
             config.orchestration.network, NODE_REGISTRY, logger
@@ -263,6 +264,8 @@ if IS_ROOT_NODE:
         and _ws_cfg.egress_locality == EgressLocality.WORKER_SIDECAR.value
     ):
         _net_cfg = config.orchestration.network
+        # The guard requires network.enabled, which is what binds _relay_redis above.
+        assert _relay_redis is not None
         TOOL_BRIDGE = RootRendezvousBridge(
             RelayStreamStore(_relay_redis, TOOL_RELAY_KEYSPACE),
             RelaySessionStore(_relay_redis, TOOL_RELAY_KEYSPACE),
