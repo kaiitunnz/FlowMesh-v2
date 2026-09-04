@@ -70,12 +70,16 @@ def _fence(**over: Any) -> RemoteToolOperationEnvelope:
     return RemoteToolOperationEnvelope(**base)
 
 
-def _op(envelope: RemoteToolOperationEnvelope, query: str = "q") -> bytes:
+def _op(
+    envelope: RemoteToolOperationEnvelope,
+    query: str = "q",
+    req_interface: str = SEARCH_INTERFACE,
+) -> bytes:
     return encode_msg(
         KIND_OPERATION,
         envelope=envelope.model_dump(mode="json"),
         request=ToolRequest(
-            interface=SEARCH_INTERFACE, query=query, max_results=3
+            interface=req_interface, query=query, max_results=3
         ).model_dump(mode="json"),
     )
 
@@ -170,6 +174,48 @@ def test_wrong_audience_and_digest_are_rejected(
     assert sink.wait()
     assert decode_msg(sink.frames[1][2])["reason"] == "digest"
     assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("fence_over", "req_interface", "reason"),
+    [
+        ({"provider": "other"}, SEARCH_INTERFACE, "provider"),
+        ({"policy_class": "strict"}, SEARCH_INTERFACE, "policy"),
+        ({"deadline_epoch": time.time() - 1}, SEARCH_INTERFACE, "expired"),
+        ({"interface": "other/v1"}, SEARCH_INTERFACE, "interface"),
+        ({}, "other/v1", "interface_mismatch"),
+        ({"max_results": 1}, SEARCH_INTERFACE, "budget"),
+    ],
+)
+def test_fence_branches_reject_before_egress(
+    monkeypatch: pytest.MonkeyPatch,
+    fence_over: dict[str, Any],
+    req_interface: str,
+    reason: str,
+) -> None:
+    ex, sink, calls = _executor(monkeypatch)
+    ex.submit(
+        "xtr-1", FRAME_OPERATION, _op(_fence(**fence_over), req_interface=req_interface)
+    )
+    assert sink.wait()
+    assert decode_msg(sink.frames[0][2]) == {"kind": KIND_REJECT, "reason": reason}
+    # Every fence branch rejects before any provider egress.
+    assert calls == []
+
+
+def test_the_keyed_secret_never_enters_the_reply_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The worker reads its keyed credential from its own environment; it must never ride
+    # the outgoing attachment frame back to the supervisor and origin.
+    probe = "KEYED-CREDENTIAL-ABSENT-PROBE"  # nosec B105 - test probe, not a credential
+    ex, sink, _ = _executor(monkeypatch, api_key=probe)
+    ex.submit("xtr-1", FRAME_OPERATION, _op(_fence()))
+    assert sink.wait()
+    _session_id, kind, frame = sink.frames[0]
+    assert kind == FRAME_REPLY
+    assert probe.encode() not in frame
+    assert probe not in frame.decode("latin-1")
 
 
 def test_crashed_egress_sends_no_reply_leaving_it_ambiguous(
