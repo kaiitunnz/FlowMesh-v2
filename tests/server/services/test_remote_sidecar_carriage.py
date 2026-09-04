@@ -18,22 +18,22 @@ from server.network.reverse_relay import (
     RelayStreamStore,
 )
 from server.network.state import NetworkEndpointAdvertisement, ReachabilityClass
-from server.services.external_tool_sidecar import (
+from server.supervisor.services.reverse_relay_attachment import ReverseRelayAttachment
+from server.tools.external_tool_sidecar import (
     ExternalToolSidecarListener,
     ExternalToolSidecarServer,
 )
-from server.services.tool_carriage import (
+from server.tools.tool_carriage import (
     RemoteSidecarCarriage,
     ToolEgressOriginDeputy,
     ToolTargetRegistry,
 )
-from server.services.tool_egress import (
+from server.tools.tool_egress import (
     ExternalToolSidecar,
     ToolOperationEnvelope,
     ToolRequest,
 )
-from server.services.tool_relay_delivery import ToolRelayEndpoint
-from server.supervisor.services.reverse_relay_attachment import ReverseRelayAttachment
+from server.tools.tool_relay_delivery import ToolRelayEndpoint
 from shared.schemas.command import CommandType
 from shared.tools.providers import SearchResult
 from tests.server.network._relay_fakes import FakeBinaryRedis

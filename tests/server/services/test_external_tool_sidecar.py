@@ -9,12 +9,12 @@ import asyncio
 import time
 from collections.abc import Awaitable, Callable
 
-from server.services import tool_sidecar_wire as wire
-from server.services.external_tool_sidecar import (
+from server.tools import tool_sidecar_wire as wire
+from server.tools.external_tool_sidecar import (
     ExternalToolSidecarListener,
     ExternalToolSidecarServer,
 )
-from server.services.tool_egress import (
+from server.tools.tool_egress import (
     ExternalToolSidecar,
     RemoteToolOperationEnvelope,
     ToolRequest,

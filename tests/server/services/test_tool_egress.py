@@ -14,7 +14,7 @@ from server.orchestration.tool_dispatch import (
     ToolOutcome,
     ToolOutcomeStatus,
 )
-from server.services.tool_egress import (
+from server.tools.tool_egress import (
     ColocatedSidecarCarriage,
     EgressLocality,
     EgressLocalityPolicy,

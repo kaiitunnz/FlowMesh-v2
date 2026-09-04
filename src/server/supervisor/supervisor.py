@@ -299,7 +299,7 @@ def _run_supervisor(
     from ..network.reverse_relay import TOOL_RELAY_KEYSPACE, BinaryRedis
     from ..registries.node import NodeRegistry
     from ..resident.relay_delivery import ResidentRelayEndpoint
-    from ..services.tool_relay_delivery import ToolRelayEndpoint
+    from ..tools.tool_relay_delivery import ToolRelayEndpoint
     from ..utils.logging import get_logger as _get_logger
     from .manager import WorkerManager
     from .registry import WorkerRegistry as WorkerAdapterRegistry

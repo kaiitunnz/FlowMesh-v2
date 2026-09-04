@@ -18,19 +18,19 @@ from server.network.reverse_relay import (
     RelayStreamStore,
 )
 from server.network.state import RouteCandidate, RouteHop, Transport
-from server.services import tool_sidecar_wire as wire
-from server.services.external_tool_sidecar import (
+from server.supervisor.services.reverse_relay_attachment import ReverseRelayAttachment
+from server.tools import tool_sidecar_wire as wire
+from server.tools.external_tool_sidecar import (
     ExternalToolSidecarListener,
     ExternalToolSidecarServer,
 )
-from server.services.tool_egress import (
+from server.tools.tool_egress import (
     ExternalToolSidecar,
     RemoteToolOperationEnvelope,
     ToolRequest,
     tool_request_digest,
 )
-from server.services.tool_relay_delivery import ToolRelayEndpoint
-from server.supervisor.services.reverse_relay_attachment import ReverseRelayAttachment
+from server.tools.tool_relay_delivery import ToolRelayEndpoint
 from shared.tools.providers import SearchResult
 from shared.utils.ids import new_tool_delivery_nonce
 from tests.server.network._relay_fakes import FakeBinaryRedis

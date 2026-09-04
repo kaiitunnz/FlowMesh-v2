@@ -50,20 +50,12 @@ from .services.agent_model_gateway import (
     build_agent_model_router,
     to_gateway_binding,
 )
-from .services.fabric_tool_broker import FabricToolBroker
 from .services.log_archiver import TaskLogArchiver
 from .services.metrics import MetricsRecorder
 from .services.model_secret_vault import ModelSecretVault
 from .services.monitoring import EventMonitor
 from .services.port_forward import PortForwardService
 from .services.ssh_audit import SshAuditService
-from .services.tool_carriage import (
-    RemoteSidecarCarriage,
-    ToolEgressOriginDeputy,
-    ToolTargetRegistry,
-)
-from .services.tool_egress import EgressLocality
-from .services.tool_relay_delivery import ToolRelayEndpoint
 from .services.watchdog import WorkerWatchdog
 from .startup import (
     rehydrate_root_state,
@@ -73,6 +65,14 @@ from .startup import (
 from .supervisor import WorkerSupervisor
 from .supervisor.services.reverse_relay_attachment import ReverseRelayAttachment
 from .task.runtime import TaskRuntime
+from .tools.fabric_tool_broker import FabricToolBroker
+from .tools.tool_carriage import (
+    RemoteSidecarCarriage,
+    ToolEgressOriginDeputy,
+    ToolTargetRegistry,
+)
+from .tools.tool_egress import EgressLocality
+from .tools.tool_relay_delivery import ToolRelayEndpoint
 from .utils.logging import get_logger
 
 # --------------------------------------------------------------------------- #

@@ -15,8 +15,8 @@ from server.orchestration.tool_dispatch import (
     ToolOutcome,
     ToolOutcomeStatus,
 )
-from server.services.fabric_tool_broker import FabricToolBroker
-from server.services.tool_egress import AmbiguousDelivery
+from server.tools.fabric_tool_broker import FabricToolBroker
+from server.tools.tool_egress import AmbiguousDelivery
 from shared.harness import BoundaryEventKind
 from shared.tools.providers import (
     SearchQuotaExceeded,

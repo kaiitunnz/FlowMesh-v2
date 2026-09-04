@@ -26,19 +26,19 @@ from server.network.state import (
     Transport,
 )
 from server.orchestration.tool_dispatch import ToolOutcome
-from server.services import tool_sidecar_wire as wire
-from server.services.fabric_tool_broker import FabricToolBroker
-from server.services.tool_carriage import (
+from server.tools import tool_sidecar_wire as wire
+from server.tools.fabric_tool_broker import FabricToolBroker
+from server.tools.tool_carriage import (
     RemoteSidecarCarriage,
     ToolEgressOriginDeputy,
     ToolTargetRegistry,
 )
-from server.services.tool_egress import (
+from server.tools.tool_egress import (
     AmbiguousDelivery,
     ToolOperationEnvelope,
     ToolRequest,
 )
-from server.services.tool_relay_delivery import ToolRelayEndpoint
+from server.tools.tool_relay_delivery import ToolRelayEndpoint
 from shared.schemas.command import CommandType
 from tests.server.network._relay_fakes import FakeBinaryRedis
 
