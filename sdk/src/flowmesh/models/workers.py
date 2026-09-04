@@ -96,6 +96,7 @@ class Worker(BaseModel):
     status: str
     started_at: str | None = None
     pid: int | None = None
+    incarnation: int = 0
     env: dict[str, Any] = Field(default_factory=dict)
     hardware: WorkerHardware | None = None
     capabilities: WorkerCapabilities = Field(default_factory=WorkerCapabilities)

@@ -113,3 +113,18 @@ search; only where the approved operation egresses is a deployment policy. `WEB_
 selects `server_relay` (the default in-server provider call) or `worker_sidecar` (a
 fabric sidecar surface that egresses under the server-issued operation envelope). Either
 locality yields the identical search result.
+
+With `worker_sidecar` and `WEB_SEARCH_SIDECAR_REMOTE`, the approved operation is carried
+over the network plane to the blocked Agent episode's assigned worker and egresses there,
+never in the root or a supervisor; the carriage adds no admission credit and moves only the
+operation and its result. The target node's supervisor is a pure opaque frame router — its
+`WorkerToolRouteDeputy` forwards the operation frame to the worker over the worker's
+existing authenticated attachment and relays the reply back, decoding nothing and building
+no provider. The worker's `WorkerExternalToolExecutor` validates a short-lived operation
+fence (request digest, provider, target worker and registration incarnation, expiry, bounds)
+and a one-use delivery nonce before any egress, and reads its keyed provider credential only
+from its own local worker environment (projected from `WEB_SEARCH_*` through the supervisor
+worker-environment allowlist) — no credential travels in a workflow, envelope, frame,
+message, or log. A delivery for a restarted worker's stale incarnation is rejected before
+egress, and a lost reply leaves the durable boundary pending for a same-`idm-*` re-drive
+rather than a manufactured terminal outcome.

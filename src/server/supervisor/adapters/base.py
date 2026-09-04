@@ -164,6 +164,8 @@ class WorkerAdapter(ABC):
             "WORKER_OWNER_PRINCIPAL_JSON": self.owner.model_dump_json(),
             "OPENAI_API_KEY": to_env_str(config.openai_api_key),
             "GOOGLE_API_KEY": to_env_str(config.google_api_key),
+            "WEB_SEARCH_PROVIDER": env.WEB_SEARCH_PROVIDER,
+            "WEB_SEARCH_API_KEY": to_env_str(env.WEB_SEARCH_API_KEY),
             "HF_TOKEN": to_env_str(config.hf_token),
             "PREDOWNLOAD_MODEL_LIST": config.predownload_model_list,
             "NEBULA_API_TOKEN": to_env_str(config.nebula_api_token),

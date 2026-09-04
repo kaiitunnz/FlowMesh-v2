@@ -3,6 +3,7 @@ import logging
 from collections.abc import AsyncIterator
 from pathlib import Path
 from threading import Lock
+from typing import TYPE_CHECKING
 
 import grpc
 import grpc.aio
@@ -28,6 +29,9 @@ from ..registry import WorkerRegistry
 from ..schemas import WorkerStatus
 from ..services.relay_service import RelayService
 from ..services.task_listener import TaskListener
+
+if TYPE_CHECKING:
+    from .tool_egress_deputy import WorkerToolRouteDeputy
 
 # Rewrite node_id for each worker key that still exists, atomically. KEYS are
 # worker keys; ARGV[1] is the new node id. Returns the count actually rewritten.
@@ -97,10 +101,12 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
         task_listener: TaskListener,
         relay_service: RelayService,
         logger: logging.Logger,
+        tool_egress_deputy: "WorkerToolRouteDeputy | None" = None,
     ) -> None:
         self._registry = registry
         self._task_listener = task_listener
         self._relay_service = relay_service
+        self._tool_egress_deputy = tool_egress_deputy
         self._redis = redis
         self._node_id = node_id
         self._node_alias = node_alias
@@ -156,8 +162,10 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
         if worker is None:
             await context.abort(grpc.StatusCode.UNAUTHENTICATED, "Invalid worker token")
         worker_meta = _payload_from_struct(request.meta)
-        worker_id = new_worker_id(self._redis.incr(WORKER_ID_SEQ_KEY))
+        incarnation = self._redis.incr(WORKER_ID_SEQ_KEY)
+        worker_id = new_worker_id(incarnation)
         worker_meta["id"] = worker_id
+        worker_meta["incarnation"] = incarnation
         worker_meta["node_alias"] = self._node_alias
         # Stamp node_id, persist the record, and insert into the registry as one unit so
         # a concurrent rebind_node either sees this worker in its snapshot or stamps it
@@ -173,7 +181,9 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
         except RuntimeError as exc:
             self._logger.warning(exc)
         self._logger.info("Registered worker %s", worker_id)
-        return supervisor_pb2.RegisterResponse(worker_id=worker_id)
+        return supervisor_pb2.RegisterResponse(
+            worker_id=worker_id, incarnation=incarnation
+        )
 
     async def StreamTasks(
         self, request: Empty, context: grpc.aio.ServicerContext
@@ -201,6 +211,14 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
                         reason=str(event["reason"]),
                     )
                 )
+            elif event.get("kind") == "egress":
+                yield supervisor_pb2.DispatchMessage(
+                    egress=supervisor_pb2.ToolEgressFrame(
+                        session_id=str(event["session_id"]),
+                        kind=str(event["egress_kind"]),
+                        payload=event["payload"],
+                    )
+                )
             else:
                 yield supervisor_pb2.DispatchMessage(
                     task=supervisor_pb2.TaskMessage(payload=_struct_from_payload(event))
@@ -226,6 +244,16 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
         unregistered: bool = False
         async for message in request_iterator:
             payload = _payload_from_struct(message.payload)
+            # An external-tool up-leg frame is routed to the tool deputy as opaque
+            # bytes, never materialized as a task event or sent to the relay service.
+            if payload.get("type") == "TOOL_EGRESS":
+                if self._tool_egress_deputy is not None:
+                    self._tool_egress_deputy.deliver_up(
+                        str(payload.get("session_id", "")),
+                        str(payload.get("kind", "")),
+                        str(payload.get("frame", "")),
+                    )
+                continue
             # Trap register/unregister events
             match payload.get("type"):
                 case "REGISTER":
@@ -293,11 +321,19 @@ class GrpcServer:
         task_listener: TaskListener,
         relay_service: RelayService,
         logger: logging.Logger,
+        tool_egress_deputy: "WorkerToolRouteDeputy | None" = None,
     ) -> None:
         self._logger = logger
         self._server: grpc.aio.Server | None = None
         self._servicer = SupervisorServicer(
-            registry, redis, node_id, node_alias, task_listener, relay_service, logger
+            registry,
+            redis,
+            node_id,
+            node_alias,
+            task_listener,
+            relay_service,
+            logger,
+            tool_egress_deputy=tool_egress_deputy,
         )
         self._listen_addr = f"{host}:{port}"
 

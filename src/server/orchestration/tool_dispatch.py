@@ -12,12 +12,15 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict
 
+from shared.tools.contract import ToolOutcome as ToolOutcome
+from shared.tools.contract import ToolOutcomeStatus as ToolOutcomeStatus
+from shared.tools.search.schema import SEARCH_INTERFACE
+
 from ..task.v2.representations.operators import BoundaryEventKind
 
 # The reserved interface of a deferred managed-model invocation, distinct from a
 # fabric-served tool interface. Exact routing keys on these two exact values.
 MODEL_INTERFACE = "model"
-SEARCH_INTERFACE = "search/v1"
 
 # The interfaces the fabric serves as an injected facade tool (never the model turn).
 FABRIC_TOOL_INTERFACES = frozenset({SEARCH_INTERFACE})
@@ -151,27 +154,3 @@ class AgentInputPlan(BaseModel):
 
     activation_id: str
     ports: tuple[InputPortPlan, ...] = ()
-
-
-class ToolOutcomeStatus(StrEnum):
-    """The typed result class of a fabric-served tool call, all durably injected."""
-
-    SUCCESS = "success"
-    TIMEOUT = "timeout"
-    QUOTA = "quota"
-    UNAVAILABLE = "unavailable"
-
-
-class ToolOutcome(BaseModel):
-    """A normalized, typed tool outcome the broker returns for durable injection.
-
-    ``value`` is the model-facing rendering injected at the originating call; a
-    non-success status still injects a bounded ``value`` (never an empty success and
-    never an agent failure). ``provenance`` carries citation for a successful call.
-    """
-
-    model_config = ConfigDict(frozen=True)
-
-    status: ToolOutcomeStatus
-    value: str
-    provenance: tuple[dict[str, str], ...] = ()

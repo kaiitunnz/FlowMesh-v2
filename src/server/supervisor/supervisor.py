@@ -296,9 +296,10 @@ def _run_supervisor(
     from ..clients import RedisClient
     from ..clients.redis import resident_relay_client
     from ..network.listeners import NetworkPlaneListeners
-    from ..network.reverse_relay import BinaryRedis
+    from ..network.reverse_relay import TOOL_RELAY_KEYSPACE, BinaryRedis
     from ..registries.node import NodeRegistry
     from ..resident.relay_delivery import ResidentRelayEndpoint
+    from ..tools.tool_relay_delivery import ToolRelayEndpoint
     from ..utils.logging import get_logger as _get_logger
     from .manager import WorkerManager
     from .registry import WorkerRegistry as WorkerAdapterRegistry
@@ -309,8 +310,9 @@ def _run_supervisor(
     from .services.relay_service import RelayService
     from .services.relay_uplink import RelayUplinkService
     from .services.resident_deputy import ResidentDeputyService
-    from .services.resident_relay_attachment import ResidentRelayAttachment
+    from .services.reverse_relay_attachment import ReverseRelayAttachment
     from .services.task_listener import TaskListener
+    from .services.tool_egress_deputy import WorkerToolRouteDeputy
 
     # --- logging (child has its own logger) ---
     sv_log_file = log_cfg.file.replace("server", "supervisor")
@@ -399,7 +401,9 @@ def _run_supervisor(
         capacity_change_callback=lifecycle.heartbeat_now,
     )
     resident_deputy: ResidentDeputyService | None = None
-    resident_attachment: ResidentRelayAttachment | None = None
+    resident_attachment: ReverseRelayAttachment | None = None
+    tool_egress_deputy: WorkerToolRouteDeputy | None = None
+    tool_attachment: ReverseRelayAttachment | None = None
     if network_cfg.enabled:
         relay_redis = cast(
             BinaryRedis,
@@ -423,11 +427,26 @@ def _run_supervisor(
             relay_window_bytes=network_cfg.relay_window_bytes,
             logger=logger,
         )
-        resident_attachment = ResidentRelayAttachment(
+        resident_attachment = ReverseRelayAttachment(
             relay_redis,
             node_id,
             relay_endpoint,
             owner=f"{node_id}:{os.getpid()}",
+            logger=logger,
+        )
+        # External-tool egress target role: a claim-free xt:* attachment feeds relayed
+        # operations to the tool route deputy, which forwards each opaque frame to the
+        # target worker's attachment. No provider or credential lives in this process.
+        tool_relay_endpoint = ToolRelayEndpoint(relay_redis, node_id, logger=logger)
+        tool_egress_deputy = WorkerToolRouteDeputy(
+            task_listener=task_listener, logger=logger
+        )
+        tool_attachment = ReverseRelayAttachment(
+            relay_redis,
+            node_id,
+            tool_relay_endpoint,
+            owner=f"{node_id}:tool:{os.getpid()}",
+            keyspace=TOOL_RELAY_KEYSPACE,
             logger=logger,
         )
     command_listener = CommandListener(
@@ -438,6 +457,7 @@ def _run_supervisor(
         cmd_receiver=cmd_receiver,
         relay_uplink=relay_uplink,
         resident_deputy=resident_deputy,
+        tool_egress_deputy=tool_egress_deputy,
     )
     grpc_server = GrpcServer(
         grpc_cfg.host,
@@ -449,6 +469,7 @@ def _run_supervisor(
         task_listener=task_listener,
         relay_service=relay_service,
         logger=logger,
+        tool_egress_deputy=tool_egress_deputy,
     )
 
     network_listeners: NetworkPlaneListeners | None = None
@@ -509,6 +530,8 @@ def _run_supervisor(
             await network_listeners.start()
         if resident_attachment is not None:
             resident_attachment.start(loop)
+        if tool_attachment is not None:
+            tool_attachment.start(loop)
         # Wire the re-register callback only once the reader threads are up
         lifecycle.set_reregister_callback(_on_reregister)
         logger.info("Supervisor ready for node %s", node_id)
@@ -523,10 +546,14 @@ def _run_supervisor(
         lifecycle.publish_unregister()
         if resident_attachment is not None:
             await resident_attachment.stop()
+        if tool_attachment is not None:
+            await tool_attachment.stop()
         if network_listeners is not None:
             await network_listeners.stop()
         if resident_deputy is not None:
             await resident_deputy.stop()
+        if tool_egress_deputy is not None:
+            await tool_egress_deputy.stop()
         await grpc_server.stop()
         await command_listener.stop()
         await worker_manager.stop()

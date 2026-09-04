@@ -52,6 +52,9 @@ class Worker(BaseModel):
     )
     started_at: str | None = Field(default=None, description="Start timestamp.")
     pid: int | None = Field(default=None, description="Worker process ID.")
+    incarnation: int = Field(
+        default=0, description="Monotonic registration incarnation."
+    )
     env: dict[str, Any] = Field(default_factory=dict, description="Runtime metadata.")
     hardware: WorkerHardware | None = Field(
         default=None, description="Hardware metadata."
@@ -97,8 +100,10 @@ class WorkerRegistry:
         node_alias: str,
         worker_meta: dict[str, Any],
     ) -> str:
-        worker_id = self._allocate_worker_id()
+        seq = self._rds.sync.incr(WORKER_ID_SEQ_KEY)
+        worker_id = new_worker_id(seq)
         worker_meta["id"] = worker_id
+        worker_meta["incarnation"] = seq
         worker_meta["node_id"] = node_id
         worker_meta["node_alias"] = node_alias
         with self._rds.sync.control_pipeline() as pipe:
@@ -113,8 +118,10 @@ class WorkerRegistry:
         node_alias: str,
         worker_meta: dict[str, Any],
     ) -> str:
-        worker_id = await self._allocate_worker_id_async()
+        seq = await self._rds.asyncio.incr(WORKER_ID_SEQ_KEY)
+        worker_id = new_worker_id(seq)
         worker_meta["id"] = worker_id
+        worker_meta["incarnation"] = seq
         worker_meta["node_id"] = node_id
         worker_meta["node_alias"] = node_alias
         async with self._rds.asyncio.control_pipeline() as pipe:
@@ -457,14 +464,6 @@ class WorkerRegistry:
         channel = node_dispatch_channel(worker.node_id)
         return await self._rds.asyncio.publish_control(channel, message)
 
-    def _allocate_worker_id(self) -> str:
-        seq = self._rds.sync.incr(WORKER_ID_SEQ_KEY)
-        return new_worker_id(seq)
-
-    async def _allocate_worker_id_async(self) -> str:
-        seq = await self._rds.asyncio.incr(WORKER_ID_SEQ_KEY)
-        return new_worker_id(seq)
-
 
 # --- Helper functions --- #
 
@@ -674,6 +673,11 @@ def _parse_worker_from_redis(
     except (TypeError, ValueError):
         pid = None
 
+    try:
+        incarnation = int(value.get("incarnation", 0) or 0)
+    except (TypeError, ValueError):
+        incarnation = 0
+
     cost_val = value.get("cost_per_hour")
     try:
         cost_per_hour = float(cost_val) if cost_val is not None else None
@@ -691,6 +695,7 @@ def _parse_worker_from_redis(
         status=WorkerStatus(value.get("status", "UNKNOWN")),
         started_at=value.get("started_at"),
         pid=pid,
+        incarnation=incarnation,
         env=env,
         hardware=hardware,
         capabilities=capabilities,

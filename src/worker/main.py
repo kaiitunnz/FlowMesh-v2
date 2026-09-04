@@ -255,6 +255,8 @@ def main() -> None:
         logger,
         network_bandwidth_bytes_per_sec=cfg.network_bandwidth_bytes_per_sec,
         executor_idle_cleanup_sec=cfg.executor_idle_cleanup_sec,
+        web_search_provider=cfg.web_search_provider,
+        web_search_api_key=cfg.web_search_api_key,
     )
 
     # Install signal handlers to allow graceful shutdown

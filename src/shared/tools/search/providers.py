@@ -1,21 +1,18 @@
 """Pluggable web-search backends behind a narrow provider interface.
 
 A provider performs one bounded, read-only query and returns ranked results or raises a
-typed fault; the ``FabricToolBroker`` normalizes both into a typed ``ToolOutcome``. The
+typed fault; the worker executor normalizes both into a typed ``ToolOutcome``. The
 default ``duckduckgo`` provider is keyless; keyed providers take a deployment-env key.
 No provider fetches result pages (snippets only), keeping the SSRF surface minimal.
 """
 
 import html
 import re
-from typing import TYPE_CHECKING, Protocol
+from typing import Protocol
 from urllib.parse import unquote
 
 import requests
 from pydantic import BaseModel, ConfigDict
-
-if TYPE_CHECKING:
-    from ..config import WebSearchConfig
 
 _UA = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -28,6 +25,16 @@ _RESULT = re.compile(
 )
 _TAGS = re.compile(r"<[^>]+>")
 _UDDG = re.compile(r"uddg=([^&]+)")
+
+
+class ProviderConfig(Protocol):
+    """The provider binding a backend is built from: a name and an optional key."""
+
+    @property
+    def provider(self) -> str: ...
+
+    @property
+    def api_key(self) -> str | None: ...
 
 
 class SearchResult(BaseModel):
@@ -53,7 +60,7 @@ class SearchUnavailable(RuntimeError):
 
 
 class SearchProvider(Protocol):
-    """A read-only web-search backend the broker calls off the agent's lane."""
+    """A read-only web-search backend the executor calls off the agent's lane."""
 
     def search(
         self, query: str, *, max_results: int, timeout_sec: float
@@ -144,7 +151,7 @@ class SerperProvider:
         return results
 
 
-def build_search_provider(config: "WebSearchConfig") -> SearchProvider:
+def build_search_provider(config: ProviderConfig) -> SearchProvider:
     """The configured provider; a keyed provider needs ``WEB_SEARCH_API_KEY``."""
     if config.provider == "duckduckgo":
         return DuckDuckGoProvider()
@@ -153,3 +160,40 @@ def build_search_provider(config: "WebSearchConfig") -> SearchProvider:
             raise ValueError("the serper web-search provider needs WEB_SEARCH_API_KEY")
         return SerperProvider(config.api_key)
     raise ValueError(f"unknown web-search provider {config.provider!r}")
+
+
+class LazySearchProvider:
+    """Builds the configured provider on first use.
+
+    Defers ``build_search_provider`` — and a keyed provider's missing-key error — to the
+    first search, so a process bound as a tool target constructs the provider and reads
+    its credential only when it egresses. The credential still lives only in the
+    environment of whichever process actually egresses.
+    """
+
+    def __init__(self, config: ProviderConfig) -> None:
+        self._config = config
+        self._provider: SearchProvider | None = None
+
+    def search(
+        self, query: str, *, max_results: int, timeout_sec: float
+    ) -> list[SearchResult]:
+        if self._provider is None:
+            self._provider = build_search_provider(self._config)
+        return self._provider.search(
+            query, max_results=max_results, timeout_sec=timeout_sec
+        )
+
+
+__all__ = [
+    "DuckDuckGoProvider",
+    "LazySearchProvider",
+    "ProviderConfig",
+    "SearchProvider",
+    "SearchQuotaExceeded",
+    "SearchResult",
+    "SearchTimeout",
+    "SearchUnavailable",
+    "SerperProvider",
+    "build_search_provider",
+]

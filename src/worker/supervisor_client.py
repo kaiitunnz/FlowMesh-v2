@@ -61,6 +61,7 @@ class SupervisorClient:
         self._grpc_keepalive_timeout_ms = grpc_keepalive_timeout_ms
 
         self._worker_id: str | None = None
+        self._incarnation: int = 0
         self._worker_register_event: WorkerEvent | None = None
         self._drain = threading.Event()
         self._shutdown = threading.Event()
@@ -72,6 +73,7 @@ class SupervisorClient:
         self._task_queue: queue.Queue[WorkerTaskMessage | object] = queue.Queue()
         self._interrupt_queue: queue.Queue[tuple[str, str]] = queue.Queue()
         self._stop_queue: queue.Queue[tuple[str, str]] = queue.Queue()
+        self._egress_queue: queue.Queue[tuple[str, str, bytes]] = queue.Queue()
         self._event_queue: queue.Queue[dict[str, Any] | object] = queue.Queue()
         self._event_thread: threading.Thread | None = None
         self._task_thread: threading.Thread | None = None
@@ -83,6 +85,10 @@ class SupervisorClient:
         if self._worker_id is None:
             raise RuntimeError("Worker not registered with supervisor")
         return self._worker_id
+
+    @property
+    def incarnation(self) -> int:
+        return self._incarnation
 
     # ------------------------------------------------------------------ #
     # Lifecycle
@@ -374,6 +380,13 @@ class SupervisorClient:
             except queue.Empty:
                 break
 
+    def iter_egress(self) -> Iterable[tuple[str, str, bytes]]:
+        while True:
+            try:
+                yield self._egress_queue.get_nowait()
+            except queue.Empty:
+                break
+
     # ------------------------------------------------------------------ #
     # Internal helpers
     # ------------------------------------------------------------------ #
@@ -405,6 +418,7 @@ class SupervisorClient:
         if not resp.worker_id:
             raise SystemExit("Supervisor registration response missing worker_id")
         self._worker_id = resp.worker_id
+        self._incarnation = int(resp.incarnation)
 
     def _start_event_stream(self) -> None:
         self._event_ready.clear()
@@ -473,6 +487,14 @@ class SupervisorClient:
                     elif message.HasField("stop"):
                         self._stop_queue.put(
                             (message.stop.task_id, message.stop.reason)
+                        )
+                    elif message.HasField("egress"):
+                        self._egress_queue.put(
+                            (
+                                message.egress.session_id,
+                                message.egress.kind,
+                                message.egress.payload,
+                            )
                         )
                     else:
                         payload = self._payload_from_struct(message.task.payload)
@@ -574,3 +596,19 @@ class SupervisorClient:
         if not self._event_ready.wait():
             raise RuntimeError("Supervisor event stream not ready")
         self._event_queue.put(serialize_event(event))
+
+    def push_tool_egress(self, session_id: str, kind: str, frame: bytes) -> None:
+        """Return one opaque external-tool frame to the supervisor over the events."""
+        if self._stub is None:
+            raise RuntimeError("Supervisor gRPC client not started")
+        if not self._event_ready.wait():
+            raise RuntimeError("Supervisor event stream not ready")
+        self._event_queue.put(
+            {
+                "type": "TOOL_EGRESS",
+                "worker_id": self.worker_id,
+                "session_id": session_id,
+                "kind": kind,
+                "frame": base64.b64encode(frame).decode("ascii"),
+            }
+        )

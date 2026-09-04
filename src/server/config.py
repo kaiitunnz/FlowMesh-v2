@@ -4,6 +4,7 @@ from enum import StrEnum
 from pathlib import Path
 
 from shared.tasks.specs import ModelBindingMode
+from shared.tools.search.schema import DEFAULT_SEARCH_PROVIDER
 from shared.utils.parsing import parse_bool_env, parse_float_env, parse_int_env
 
 
@@ -479,10 +480,12 @@ class WebSearchConfig:
     the deployment credential a keyed provider needs. ``max_calls`` bounds one episode's
     searches; ``result_char_cap`` bounds the injected result size. ``egress_locality``
     selects where an approved search egresses (``server_relay`` default or
-    ``worker_sidecar``).
+    ``worker_sidecar``). With ``worker_sidecar`` and ``sidecar_remote``, the operation
+    is carried to the blocked episode's assigned worker, bound on ``sidecar_route`` and
+    offered a direct dial only when ``sidecar_directly_routable``.
     """
 
-    provider: str = "duckduckgo"
+    provider: str = DEFAULT_SEARCH_PROVIDER
     api_key: str | None = None
     max_results: int = 5
     timeout_sec: float = 20.0
@@ -490,12 +493,17 @@ class WebSearchConfig:
     max_calls: int = 8
     max_parallel: int = 4
     egress_locality: str = "server_relay"
+    sidecar_remote: bool = False
+    sidecar_route: str = "127.0.0.1:0"
+    sidecar_directly_routable: bool = False
 
     @classmethod
     def from_env(cls) -> "WebSearchConfig":
         prefix = "WEB_SEARCH_"
         return cls(
-            provider=(os.getenv(f"{prefix}PROVIDER") or "duckduckgo").strip().lower(),
+            provider=(os.getenv(f"{prefix}PROVIDER") or DEFAULT_SEARCH_PROVIDER)
+            .strip()
+            .lower(),
             api_key=_env_or_none(f"{prefix}API_KEY"),
             max_results=parse_int_env(f"{prefix}MAX_RESULTS") or 5,
             timeout_sec=parse_float_env(f"{prefix}TIMEOUT_SEC") or 20.0,
@@ -505,6 +513,13 @@ class WebSearchConfig:
             egress_locality=(os.getenv(f"{prefix}EGRESS_LOCALITY") or "server_relay")
             .strip()
             .lower(),
+            sidecar_remote=parse_bool_env(f"{prefix}SIDECAR_REMOTE", False),
+            sidecar_route=(
+                os.getenv(f"{prefix}SIDECAR_ROUTE") or "127.0.0.1:0"
+            ).strip(),
+            sidecar_directly_routable=parse_bool_env(
+                f"{prefix}SIDECAR_DIRECTLY_ROUTABLE", False
+            ),
         )
 
 

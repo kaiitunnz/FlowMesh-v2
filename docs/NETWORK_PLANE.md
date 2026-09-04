@@ -119,3 +119,12 @@ origin node's deputy over the trusted node-command seam, and folds the deputy's 
 observations back into the reachability view. The deputy round-trips a small payload over
 the selected transport against a bounded echo sidecar — never a resident engine. See the
 `Network` section of [`API.md`](API.md).
+
+## Reuse without resident contracts
+
+Remote external-tool carriage reuses this substrate — the pure resolver, the
+`worker_direct` / `node_relay` / reverse-rendezvous transports, and the bounded frame,
+cursor, and lease mechanics — over a distinct claim-free session namespace and a
+control-issued nonresident sidecar target, without any resident contract: it mints no
+`ServiceClaim` or `RouteAuthorization`, reuses no resident relay session, and carries only
+the opaque tool operation and its result. See [`EXECUTORS.md`](EXECUTORS.md).

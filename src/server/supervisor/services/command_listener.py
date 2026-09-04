@@ -26,6 +26,7 @@ from ..manager import WorkerInitConfig, WorkerManager
 from .pubsub_reader import RebindableReader
 from .relay_uplink import RelayUplinkService
 from .resident_deputy import ResidentDeputyService
+from .tool_egress_deputy import WorkerToolRouteDeputy
 
 type ResponseHandler = Callable[[CommandResponse], None]
 
@@ -142,6 +143,7 @@ class CommandListener:
         cmd_receiver: TaskReceiver[CommandMessage, CommandResponse] | None = None,
         relay_uplink: RelayUplinkService | None = None,
         resident_deputy: ResidentDeputyService | None = None,
+        tool_egress_deputy: WorkerToolRouteDeputy | None = None,
         max_inflight: int = _MAX_INFLIGHT_CMDS,
     ) -> None:
         self.logger = logger
@@ -150,6 +152,7 @@ class CommandListener:
         self._wm = worker_manager
         self._relay_uplink = relay_uplink
         self._resident_deputy = resident_deputy
+        self._tool_egress_deputy = tool_egress_deputy
         self._cmd_receiver = cmd_receiver
         self._max_inflight = max_inflight
 
@@ -373,6 +376,10 @@ class CommandListener:
                 return await self._handle_resident_cmd(cmd, "stream")
             case CommandType.DELIVER_RESIDENT_CANCEL:
                 return await self._handle_resident_cmd(cmd, "cancel")
+            case CommandType.BIND_TOOL_SIDECAR:
+                return await self._handle_tool_sidecar_cmd(cmd, "bind")
+            case CommandType.UNBIND_TOOL_SIDECAR:
+                return await self._handle_tool_sidecar_cmd(cmd, "unbind")
             case _:
                 return CommandResponse.error(cmd, f"Unknown command: {cmd.command}")
 
@@ -518,6 +525,23 @@ class CommandListener:
                 data = await deputy.stream(payload)
             else:
                 data = await deputy.cancel(payload)
+        except (KeyError, ValidationError, ValueError) as exc:
+            return CommandResponse.error(cmd, f"Invalid {action} payload: {exc}")
+        return CommandResponse.ok(cmd, data=data)
+
+    async def _handle_tool_sidecar_cmd(
+        self, cmd: CommandMessage, action: str
+    ) -> CommandResponse:
+        """Bind or unbind a control-issued external-tool egress sidecar on this node."""
+        deputy = self._tool_egress_deputy
+        if deputy is None:
+            return CommandResponse.error(cmd, "tool egress deputy is not available")
+        payload = cmd.payload or {}
+        try:
+            if action == "bind":
+                data = await deputy.bind_sidecar(payload)
+            else:
+                data = await deputy.unbind_sidecar(payload)
         except (KeyError, ValidationError, ValueError) as exc:
             return CommandResponse.error(cmd, f"Invalid {action} payload: {exc}")
         return CommandResponse.ok(cmd, data=data)

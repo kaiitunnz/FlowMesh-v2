@@ -3,6 +3,7 @@ from .relay import RelaySession
 from .resolver import resolve_route
 from .state import (
     NetworkEndpointAdvertisement,
+    NonresidentSidecarTarget,
     PolicyClass,
     ReachabilityClass,
     ReachabilityEntry,
@@ -14,6 +15,7 @@ from .state import (
     RouteObservation,
     RouteObservationOutcome,
     RouteOrigin,
+    RouteTarget,
     Transport,
     is_demoting,
 )
@@ -21,6 +23,7 @@ from .state import (
 __all__ = [
     "NetworkEndpointAdvertisement",
     "NetworkReachabilityView",
+    "NonresidentSidecarTarget",
     "PolicyClass",
     "ReachabilityBounds",
     "RelaySession",
@@ -34,6 +37,7 @@ __all__ = [
     "RouteObservation",
     "RouteObservationOutcome",
     "RouteOrigin",
+    "RouteTarget",
     "Transport",
     "is_demoting",
     "resolve_route",

@@ -10,6 +10,7 @@ authorization; a route observation is network evidence only.
 """
 
 from enum import StrEnum
+from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -19,6 +20,7 @@ from ..utils.time import now_iso
 
 __all__ = [
     "NetworkEndpointAdvertisement",
+    "NonresidentSidecarTarget",
     "PolicyClass",
     "ReachabilityClass",
     "ReachabilityEntry",
@@ -30,6 +32,7 @@ __all__ = [
     "RouteObservation",
     "RouteObservationOutcome",
     "RouteOrigin",
+    "RouteTarget",
     "Transport",
     "is_demoting",
 ]
@@ -99,6 +102,23 @@ def is_demoting(outcome: RouteObservationOutcome) -> bool:
     return outcome in _DEMOTING_OUTCOMES
 
 
+class RouteTarget(Protocol):
+    """The route-target facts the pure resolver reads.
+
+    Both the resident ``ReplicaListenerAdvertisement`` and the nonresident external-tool
+    ``NonresidentSidecarTarget`` satisfy it, so one resolver serves both without either
+    carrying the other's contract. ``incarnation`` and ``listener_generation`` are
+    distinct reachability-view keys (a resident target moves them independently); a
+    nonresident target mirrors both to its target generation.
+    """
+
+    node_id: str
+    incarnation: int
+    listener_generation: int
+    routes: tuple[str, ...]
+    directly_routable: bool
+
+
 class ReplicaListenerAdvertisement(BaseModel):
     """The non-secret resident-facing listener of one replica incarnation.
 
@@ -115,6 +135,33 @@ class ReplicaListenerAdvertisement(BaseModel):
     listener_generation: int
     node_id: str
     worker_id: str | None = None
+    routes: tuple[str, ...] = ()
+    protocols: tuple[str, ...] = ()
+    directly_routable: bool = False
+
+
+class NonresidentSidecarTarget(BaseModel):
+    """A control-issued, purpose-bound egress sidecar target reached over the network.
+
+    Claim-free: it mints no admission credit and carries no resident replica/family/
+    incarnation fact. ``target_id`` and ``target_generation`` are its audience fence — a
+    bound sidecar rejects an operation naming another target id/generation.
+    ``interfaces`` are the tool interfaces it serves and ``provider`` the egress
+    provider it is provisioned for. ``incarnation`` and ``listener_generation`` mirror
+    ``target_generation`` so the resolver's reachability keys stay stable per
+    generation.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    target_id: str
+    target_generation: int
+    node_id: str
+    worker_id: str | None = None
+    incarnation: int
+    listener_generation: int
+    interfaces: tuple[str, ...] = ()
+    provider: str = ""
     routes: tuple[str, ...] = ()
     protocols: tuple[str, ...] = ()
     directly_routable: bool = False

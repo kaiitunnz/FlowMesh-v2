@@ -176,8 +176,34 @@ def resident_relay_session_key(session_id: str) -> str:
     return f"rr:sess:{session_id}"
 
 
+def resident_relay_down_cursor_key(node_id: str) -> str:
+    return f"rr:node:{node_id}:down_cursor"
+
+
 # The root bridge's durable per-node read cursor over the reverse-attachment up streams.
 RESIDENT_RELAY_ROOT_CURSOR_KEY = "rr:root:up_cursor"
+
+
+# External-tool carriage namespace (xt:*): a claim-free reverse-relay namespace disjoint
+# from the resident rr:* streams, records, leases, and cursors, so a resident and a tool
+# attachment on one node never share a stream, session record, lease, or cursor.
+def tool_relay_up_key(node_id: str) -> str:
+    return f"xt:node:{node_id}:up"
+
+
+def tool_relay_down_key(node_id: str) -> str:
+    return f"xt:node:{node_id}:down"
+
+
+def tool_relay_session_key(session_id: str) -> str:
+    return f"xt:sess:{session_id}"
+
+
+def tool_relay_down_cursor_key(node_id: str) -> str:
+    return f"xt:node:{node_id}:down_cursor"
+
+
+TOOL_RELAY_ROOT_CURSOR_KEY = "xt:root:up_cursor"
 
 
 def ssh_connection_key(connection_id: str) -> str:

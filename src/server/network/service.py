@@ -27,6 +27,28 @@ from .state import (
 )
 
 
+def stamp_endpoint(
+    endpoint: NetworkEndpointAdvertisement,
+    node_id: str,
+    *,
+    attachment_prefix: str = "rr",
+) -> NetworkEndpointAdvertisement:
+    """Stamp a raw advertisement's node id and complete an outbound-only identity.
+
+    A network-plane node always attaches outward to the rendezvous, so it is relay
+    attach-eligible even with no inbound URL. Its endpoint and attachment identities
+    derive from the node id when the advertisement carries none; ``attachment_prefix``
+    selects the namespace whose outbound attachment the presence signals (``rr``
+    resident, ``xt`` tool).
+    """
+    updates: dict[str, str] = {"node_id": node_id}
+    if not endpoint.endpoint_id:
+        updates["endpoint_id"] = f"node-{node_id}"
+    if endpoint.relay_attachment_id is None:
+        updates["relay_attachment_id"] = f"{attachment_prefix}-{node_id}"
+    return endpoint.model_copy(update=updates)
+
+
 class NetworkPlane:
     """Control-plane route discovery over trusted endpoint advertisements."""
 
@@ -60,24 +82,7 @@ class NetworkPlane:
         node = await self._nodes.get_node_async(node_id)
         if node is None or node.network_endpoint is None:
             return None
-        return self._stamp(node.network_endpoint, node.id)
-
-    @staticmethod
-    def _stamp(
-        endpoint: NetworkEndpointAdvertisement, node_id: str
-    ) -> NetworkEndpointAdvertisement:
-        """Stamp the node id and complete the identity an outbound-only node leaves out.
-
-        A network-plane node always attaches outward to the rendezvous, so it is relay
-        attach-eligible even with no inbound URL. Its endpoint and attachment identities
-        derive from the node id when the advertisement carries none.
-        """
-        updates: dict[str, str] = {"node_id": node_id}
-        if not endpoint.endpoint_id:
-            updates["endpoint_id"] = f"node-{node_id}"
-        if endpoint.relay_attachment_id is None:
-            updates["relay_attachment_id"] = f"rr-{node_id}"
-        return endpoint.model_copy(update=updates)
+        return stamp_endpoint(node.network_endpoint, node.id)
 
     async def resolve(
         self, origin_node_id: str, listener: ReplicaListenerAdvertisement
@@ -193,7 +198,7 @@ class NetworkPlane:
     async def endpoints(self) -> list[NetworkEndpointAdvertisement]:
         nodes = await self._nodes.list_nodes_async()
         return [
-            self._stamp(node.network_endpoint, node.id)
+            stamp_endpoint(node.network_endpoint, node.id)
             for node in nodes
             if node.network_endpoint is not None
         ]

@@ -16,6 +16,8 @@ from server.orchestration.tool_dispatch import (
     FacadeCompletionMode,
     FacadeTurnGroup,
     ToolInvocationEnvelope,
+    ToolOutcome,
+    ToolOutcomeStatus,
 )
 from server.task.models import TaskStatus
 from shared.harness import (
@@ -615,3 +617,155 @@ def test_agent_episode_dispatch_ships_the_capsule_and_outcome() -> None:
         assert second.delivered_outcomes[0].call_correlation == "c0"
 
     asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# Absorbing cancellation: a late/duplicate settle against a cancelled or
+# resolved boundary is audit evidence only — never a manufactured terminal.
+# --------------------------------------------------------------------------- #
+
+_MODEL_HELD_SCRIPT = [
+    ScriptedStep(
+        op="boundary",
+        kind=BoundaryEventKind.INVOCATION,
+        call="m0",
+        interface="model",
+        payload="draft",
+    ),
+    ScriptedStep(op="complete", value_from="m0"),
+]
+
+
+async def _held_boundary(runtime):
+    """Drive an agent to a suspended, unsettled model boundary; return its held env."""
+    captured: list[ToolInvocationEnvelope] = []
+    runtime.set_model_settler(
+        captured.append
+    )  # capture without settling: held, BLOCKED
+    workflow_id, ids = await _register(runtime, _AGENT_WF)
+    writer = ids["writer"]
+    adapter = ScriptedHarnessAdapter(_MODEL_HELD_SCRIPT, "v1")
+    engine = runtime.orchestration_engine(workflow_id)
+    assert engine is not None
+    _step(runtime, adapter, writer)
+    assert engine.work_item(writer).status is WorkItemStatus.BLOCKED
+    assert len(captured) == 1
+    return workflow_id, writer, engine, captured[0]
+
+
+def _boundary_env(engine, writer, call: str):
+    return engine._boundary_events[(engine.work_item(writer).activation_id, call)]
+
+
+def test_audit_settle_racing_cancellation_manufactures_no_terminal() -> None:
+    # The residual: a boundary cancelled at bounded-retry exhaustion. The broker's
+    # audit-UNAVAILABLE settle must be a no-op — the durable cancellation is absorbing.
+    async def run() -> None:
+        runtime = _runtime(FakeRegistry())
+        workflow_id, writer, engine, env = await _held_boundary(runtime)
+        runtime.cancel_workflow(workflow_id)
+        assert engine.work_item(writer).status is WorkItemStatus.CANCELLED
+        audit = ToolOutcome(
+            status=ToolOutcomeStatus.UNAVAILABLE, value="lost; recovery exhausted"
+        ).model_dump_json()
+        assert (
+            runtime.settle_episode_invocation(env.task_id, env.call_correlation, audit)
+            is False
+        )
+        rec = _boundary_env(engine, writer, "m0")
+        assert rec.outcome_value is None and rec.denial is None
+
+    asyncio.run(run())
+
+
+def test_late_model_result_after_cancel_neither_stamps_nor_revives() -> None:
+    async def run() -> None:
+        runtime = _runtime(FakeRegistry())
+        workflow_id, writer, engine, env = await _held_boundary(runtime)
+        runtime.cancel_workflow(workflow_id)
+        assert (
+            runtime.settle_episode_invocation(
+                env.task_id, env.call_correlation, "model:late"
+            )
+            is False
+        )
+        # No stamp and no revival: the work item stays CANCELLED, never re-readied.
+        assert engine.work_item(writer).status is WorkItemStatus.CANCELLED
+        assert _boundary_env(engine, writer, "m0").outcome_value is None
+
+    asyncio.run(run())
+
+
+def test_late_resident_result_after_cancel_releases_the_credit_once() -> None:
+    async def run() -> None:
+        runtime = _runtime(FakeRegistry())
+        releases: list[tuple[str, bool]] = []
+        runtime.set_resident_terminal_hook(
+            lambda inv, failed: releases.append((inv, failed))
+        )
+        workflow_id, writer, engine, env = await _held_boundary(runtime)
+        runtime.cancel_workflow(workflow_id)
+        # Cancellation terminalizes the outstanding invocation and releases its credit
+        # exactly once (from the cancellation fact, failed=True).
+        assert len(releases) == 1 and releases[0][1] is True
+        # A late resident result must NOT release the credit a second time.
+        assert (
+            runtime.settle_episode_invocation(
+                env.task_id, env.call_correlation, "resident:late"
+            )
+            is False
+        )
+        assert len(releases) == 1
+        assert _boundary_env(engine, writer, "m0").outcome_value is None
+
+    asyncio.run(run())
+
+
+def test_direct_settle_boundary_outcome_after_cancel_does_not_mutate() -> None:
+    # Defense-in-depth: a direct engine caller cannot stamp a non-BLOCKED work item.
+    async def run() -> None:
+        runtime = _runtime(FakeRegistry())
+        workflow_id, writer, engine, _env = await _held_boundary(runtime)
+        runtime.cancel_workflow(workflow_id)
+        advance = engine.settle_boundary_outcome(writer, "m0", value="direct:late")
+        assert not advance.ready
+        assert _boundary_env(engine, writer, "m0").outcome_value is None
+
+    asyncio.run(run())
+
+
+def test_normal_and_group_settles_are_unchanged_by_the_guard() -> None:
+    # Regression: a legitimate first settle still re-readies; a duplicate is absorbed;
+    # and a BLOCKED group member still stamps (the guard never absorbs a mid-group one).
+    async def run() -> None:
+        runtime = _runtime(FakeRegistry())
+        workflow_id, writer, engine, env = await _held_boundary(runtime)
+        assert (
+            runtime.settle_episode_invocation(
+                env.task_id, env.call_correlation, "model:draft"
+            )
+            is True
+        )
+        assert runtime._tasks[writer].status is TaskStatus.PENDING
+        assert engine.work_item(writer).status is WorkItemStatus.READY
+        # A duplicate settle of the now-resolved, re-readied boundary is absorbed.
+        assert (
+            runtime.settle_episode_invocation(
+                env.task_id, env.call_correlation, "model:draft"
+            )
+            is False
+        )
+
+    asyncio.run(run())
+
+    # A multi-member group settles member by member: each BLOCKED member stamps and the
+    # lane re-readies only at the last — unchanged by the non-BLOCKED resolved guard.
+    from tests.server.task.test_facade_turn_group import _search_engine, _search_group
+
+    eng = _search_engine()
+    eng.route_facade_turn_group("A", _search_group(2))
+    assert eng.work_item("A").status is WorkItemStatus.BLOCKED
+    first = eng.settle_boundary_outcome("A", "A:0:0", value="r0")
+    assert not first.ready and eng.work_item("A").status is WorkItemStatus.BLOCKED
+    last = eng.settle_boundary_outcome("A", "A:0:1", value="r1")
+    assert last.ready == ["A"]

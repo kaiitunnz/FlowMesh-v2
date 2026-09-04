@@ -28,11 +28,11 @@ from .state import (
     NetworkEndpointAdvertisement,
     ReachabilityClass,
     ReachabilityState,
-    ReplicaListenerAdvertisement,
     ResolvedRoute,
     RouteCandidate,
     RouteHop,
     RouteOrigin,
+    RouteTarget,
     Transport,
 )
 
@@ -62,7 +62,7 @@ def _base_index(transport: Transport) -> int:
 
 def resolve_route(
     origin: RouteOrigin,
-    listener: ReplicaListenerAdvertisement,
+    listener: RouteTarget,
     node_endpoint: NetworkEndpointAdvertisement | None,
     reachability: NetworkReachabilityView,
     *,

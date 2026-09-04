@@ -11,9 +11,9 @@ from server.network.reverse_relay import (
     RelayFrameKind,
     RelayStreamStore,
 )
-from server.supervisor.services.resident_relay_attachment import (
+from server.supervisor.services.reverse_relay_attachment import (
     LocalDelivery,
-    ResidentRelayAttachment,
+    ReverseRelayAttachment,
 )
 from tests.server.network._relay_fakes import FakeBinaryRedis, relay_frame
 
@@ -31,10 +31,10 @@ class _RecordingDelivery(LocalDelivery):
 
 def _attachment(
     redis: FakeBinaryRedis, owner: str, delivery: _RecordingDelivery | None = None
-) -> tuple[ResidentRelayAttachment, _RecordingDelivery]:
+) -> tuple[ReverseRelayAttachment, _RecordingDelivery]:
     delivery = delivery or _RecordingDelivery()
     return (
-        ResidentRelayAttachment(redis, "nde-t", delivery, owner=owner),
+        ReverseRelayAttachment(redis, "nde-t", delivery, owner=owner),
         delivery,
     )
 
@@ -97,7 +97,7 @@ def test_a_lease_that_lapses_mid_delivery_does_not_advance_the_cursor() -> None:
                 self.frames.append(f"{frame.session_id}:{frame.seq}")
 
         delivery = _LapsingDelivery()
-        attachment = ResidentRelayAttachment(redis, "nde-t", delivery, owner="owner-1")
+        attachment = ReverseRelayAttachment(redis, "nde-t", delivery, owner="owner-1")
         assert await attachment.pump_once() == 1
         assert delivery.frames == ["rly-1:1"]
         # The lease lapsed during delivery, so the owner must not advance the shared

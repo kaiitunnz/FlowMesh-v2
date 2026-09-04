@@ -51,6 +51,8 @@ class TestCommandMessage:
             "DELIVER_RESIDENT_BOOTSTRAP",
             "DELIVER_RESIDENT_STREAM",
             "DELIVER_RESIDENT_CANCEL",
+            "BIND_TOOL_SIDECAR",
+            "UNBIND_TOOL_SIDECAR",
         }
         assert {t.value for t in CommandType} == expected
 

@@ -3,6 +3,7 @@ import os
 import tempfile
 from pathlib import Path
 
+from shared.tools.search.schema import DEFAULT_SEARCH_PROVIDER
 from shared.utils import parse_bool_env, parse_float_env, parse_int_env
 
 NODE_NAMESPACE: str = os.getenv("NODE_NAMESPACE") or "flowmesh"
@@ -93,6 +94,13 @@ SERVER_CUDA_PROBE_IMAGE: str = os.getenv(
     "SERVER_CUDA_PROBE_IMAGE", "nvidia/cuda:12.9.1-base-ubuntu24.04"
 )
 DOCKER_GPU_RUNTIME: str | None = os.getenv("DOCKER_GPU_RUNTIME", "").strip() or None
+
+# Projected to the worker so a worker-hosted external-tool executor builds its provider
+# and reads a keyed provider's credential from its own local environment.
+WEB_SEARCH_PROVIDER: str = (
+    os.getenv("WEB_SEARCH_PROVIDER", "").strip() or DEFAULT_SEARCH_PROVIDER
+)
+WEB_SEARCH_API_KEY: str = os.getenv("WEB_SEARCH_API_KEY", "")
 
 WORKER_CONFIG_PATH: str = os.getenv("WORKER_CONFIG_PATH", "configs/worker_config.yaml")
 CUDA_VISIBLE_DEVICES: str | None = os.getenv("CUDA_VISIBLE_DEVICES")
