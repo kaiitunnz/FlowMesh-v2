@@ -149,6 +149,11 @@ class BoundaryEvent(BaseModel):
     child_ref: str | None = None
     child_region_ref: str | None = None  # role a spawn/seal selects; never a raw op id
     request_payload: str | None = None
+    # Worker-originated tool path: the canonical request digest and a bounded policy
+    # descriptor stand in for the raw request, which stays worker-private. A set
+    # ``request_digest`` marks a boundary the worker originated and runs off-lane.
+    request_digest: str | None = None
+    policy_descriptor: str | None = None
     injection_target: str | None = None  # the harness call id the outcome returns at
     injection_tool: str | None = None  # facade tool name, to rebuild the call
     continuation: str | None = None

@@ -30,6 +30,7 @@ PREFIX_ROUTE_ORIGIN = "rog"  # nosec B105 - object-id prefix, not a credential
 PREFIX_RELAY_SESSION = "rly"
 PREFIX_TOOL_RELAY_SESSION = "xtr"
 PREFIX_TOOL_DELIVERY_NONCE = "xdn"  # nosec B105 - object-id prefix, not a credential
+PREFIX_MEDIATED_PERMIT = "mop"  # nosec B105 - object-id prefix, not a credential
 
 
 def _uuid_str() -> str:
@@ -132,6 +133,10 @@ def new_tool_delivery_nonce() -> str:
     return f"{PREFIX_TOOL_DELIVERY_NONCE}-{secrets.token_hex(16)}"
 
 
+def new_mediated_permit_id() -> str:
+    return f"{PREFIX_MEDIATED_PERMIT}-{secrets.token_hex(16)}"
+
+
 __all__ = [
     "PREFIX_ACTIVATION",
     "PREFIX_ADMISSION_HANDOFF",
@@ -140,6 +145,7 @@ __all__ = [
     "PREFIX_AUTHORITY_GRANT",
     "PREFIX_IDEMPOTENCY_KEY",
     "PREFIX_INVOCATION",
+    "PREFIX_MEDIATED_PERMIT",
     "PREFIX_MODEL_SECRET",
     "PREFIX_NODE",
     "PREFIX_RELAY_SESSION",
@@ -163,6 +169,7 @@ __all__ = [
     "new_authority_grant_id",
     "new_idempotency_key",
     "new_invocation_id",
+    "new_mediated_permit_id",
     "new_model_secret_ref",
     "new_node_id",
     "new_relay_session_id",

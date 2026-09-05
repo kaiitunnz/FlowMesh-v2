@@ -28,5 +28,7 @@ def to_boundary_event(
         child_region_ref=request.child_region_ref,
         request_payload=request.request_payload,
         state_ref=request.state_ref,
+        request_digest=request.request_digest,
+        policy_descriptor=request.policy_descriptor,
         continuation=continuation,
     )
