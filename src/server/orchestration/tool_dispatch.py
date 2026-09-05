@@ -14,13 +14,10 @@ from pydantic import BaseModel, ConfigDict
 
 from shared.tools.contract import ToolOutcome as ToolOutcome
 from shared.tools.contract import ToolOutcomeStatus as ToolOutcomeStatus
+from shared.tools.model.schema import MODEL_INTERFACE as MODEL_INTERFACE
 from shared.tools.search.schema import SEARCH_INTERFACE
 
 from ..task.v2.representations.operators import BoundaryEventKind
-
-# The reserved interface of a deferred managed-model invocation, distinct from a
-# fabric-served tool interface. Exact routing keys on these two exact values.
-MODEL_INTERFACE = "model"
 
 # The interfaces the fabric serves as an injected facade tool (never the model turn).
 FABRIC_TOOL_INTERFACES = frozenset({SEARCH_INTERFACE})
