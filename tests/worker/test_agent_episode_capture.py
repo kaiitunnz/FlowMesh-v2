@@ -7,7 +7,7 @@ from shared.tools.search.schema import (
     parse_search_request,
     tool_request_digest,
 )
-from worker.executors import pending_tool_request
+from worker import pending_tool_request
 from worker.executors.agent_episode_executor import AgentEpisodeExecutor
 
 _TASK = "tsk-agent"

@@ -18,7 +18,8 @@ from shared.tools.search.schema import (
 from shared.utils.ids import new_mediated_permit_id
 from tests.shared.outcome_helpers import InMemoryContentStore
 from tests.worker.factories import make_worker_config, make_worker_task_message
-from worker.executors import pending_tool_request, tool_operation_executor
+from worker import pending_tool_request
+from worker.executors import tool_operation_executor
 from worker.executors.base_executor import ExecutionError
 from worker.executors.tool_operation_executor import ToolOperationExecutor
 

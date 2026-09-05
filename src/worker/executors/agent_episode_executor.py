@@ -29,8 +29,8 @@ from shared.tools.search.schema import (
     tool_request_digest,
 )
 
+from .. import pending_tool_request
 from ..content_store import build_content_store
-from . import pending_tool_request
 from .base_executor import ExecutionError, Executor, ExecutorTask
 from .harness import build_adapter
 

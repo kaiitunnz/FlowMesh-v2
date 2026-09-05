@@ -27,9 +27,9 @@ from shared.tools.search.egress import ExternalToolSidecar
 from shared.tools.search.providers import LazySearchProvider
 from shared.tools.search.schema import SEARCH_INTERFACE, ToolRequest
 
+from .. import pending_tool_request
 from ..content_store import build_content_store
 from ..tool_fence import ProviderBinding, fence_reason, materialize_tool_outcome
-from . import pending_tool_request
 from .base_executor import ExecutionError, Executor, ExecutorTask
 
 # The durable worker logger (console + rotating worker.log), so the execution-locus
