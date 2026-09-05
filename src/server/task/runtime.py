@@ -1741,8 +1741,16 @@ class TaskRuntime:
             self._fail_v2_records_locked(
                 advance.failed, "ambiguity-terminal effect", persist=True
             )
+            self._discard_op_tasks_for_locked(advance.failed)
         self._save_ledger_locked(record.workflow_id)
         return advance
+
+    def _discard_op_tasks_for_locked(self, agent_task_ids: Sequence[str]) -> None:
+        """Drop pending op carriers whose agent boundary just failed clean."""
+        failed = set(agent_task_ids)
+        for op_task_id, (agent_task_id, _) in list(self._op_boundary.items()):
+            if agent_task_id in failed:
+                self._discard_op_task_locked(op_task_id)
 
     def _save_ledger_locked(self, workflow_id: str) -> None:
         if (engine := self._engines.get(workflow_id)) is not None:

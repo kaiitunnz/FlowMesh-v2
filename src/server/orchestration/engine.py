@@ -1135,6 +1135,7 @@ class OrchestrationEngine:
             call_correlation=env.call_correlation,
             idempotency_key=env.idempotency_key,
             request_payload=env.request_payload,
+            request_digest=env.request_digest,
             grant_snapshot=self._grant_snapshot_for(wi),
         )
 
