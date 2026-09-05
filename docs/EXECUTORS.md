@@ -19,6 +19,7 @@ The worker resolves `spec.taskType` against an executor registry in
 | `ssh` | `SSHExecutor` | Interactive SSH session or non-interactive container job |
 | `serve` | `VLLMServeExecutor` | Persistent vLLM API server for a single model |
 | `dev_model` | `DevModelExecutor` | GPU-free OpenAI-compatible endpoint; forwards to an upstream or returns canned responses |
+| `tool_operation` | `ToolOperationExecutor` | Off-lane egress for a worker-originated mediated tool boundary; server-minted, permit-fenced, never user-submitted |
 
 Helper utilities live in `src/worker/executors/utils/` (`artifacts`,
 `checkpoints`, `data_utils`, `distributed`, `graph_templates`,
@@ -142,3 +143,24 @@ into the harness; a hydration failure fails the step for a physical retry of the
 reference, never a re-run. This reference-backing is wired for the fabric-tool worker path;
 the `server_relay` locality and the model-gateway and resident completions still settle
 inline.
+
+The paths above are server-driven: the server holds the request and dispatches the
+operation to a worker. `ORCHESTRATOR_WORKER_ORIGINATED_BOUNDARIES=true` selects the
+control-authoritative, execution-local path instead. The agent's own worker captures the
+`search/v1` boundary, records the raw request in worker-private state keyed by its stable
+`(agent_task_id, call_correlation)` occurrence, and yields carrying only a canonical
+request digest — the raw request never reaches the control plane. The engine records the
+digest and mints a one-use `MediatedOperationPermit` (`mop-`) audience-bound to that
+worker and its generation, then dispatches a distinct off-lane `tool_operation` task
+pinned to the same worker. Its `ToolOperationExecutor` reads the request back from
+worker-private state, validates the permit against the same worker fence the attachment
+path uses (audience, generation, interface, policy, deadline, digest), egresses through
+the local provider, and reports a permit-fenced typed outcome or an `OutcomeManifest` —
+which the engine commits before the episode resumes. A missing permit or an unrecoverable
+local request fails closed; the operation never egresses. The request and the outcome have
+different homes: the request stays local to the audience-bound worker and is re-derivable,
+while a shared outcome materializes into the content-addressed store; they are not unified.
+A server restart re-mints the permit and re-dispatches to the surviving worker, whose
+in-memory request is intact; a genuine worker loss fails the boundary clean rather than
+resuming past it. The gateway-captured model-turn facade keeps its request on the wire and
+always routes through the broker.

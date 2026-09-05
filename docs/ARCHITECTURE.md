@@ -230,6 +230,22 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   supervisors relay opaque frames and hold only the manifest. Materialization is idempotent
   under `idm-*`. The fabric-tool worker path is the first consumer; the model-gateway and
   resident completions still settle inline. See [`EXECUTORS.md`](EXECUTORS.md).
+- **Worker-originated mediated boundaries.** With
+  `ORCHESTRATOR_WORKER_ORIGINATED_BOUNDARIES=true`, an agent's assigned worker captures a
+  fabric-tool boundary (today `search/v1`), keeps the raw request in worker-private state,
+  and yields the lane carrying only a canonical request digest and a bounded descriptor —
+  no raw arguments cross to the control plane. The engine records the digest, mints a
+  one-use `MediatedOperationPermit` (`mop-`) audience-bound to that worker and its
+  generation, and dispatches a distinct off-lane `tool_operation` task pinned to the same
+  worker; that worker validates the permit and digest, egresses locally, and reports a
+  permit-fenced typed outcome or an `OutcomeManifest`, which settles the boundary before
+  the episode resumes. A server restart re-mints the permit and re-dispatches to the
+  surviving worker; a genuine worker loss fails the boundary clean rather than resuming
+  past it. The request and the outcome have different homes: the request stays local to
+  the audience-bound worker and is re-derivable, while a shared outcome materializes into
+  the content-addressed store. The default-off path routes the boundary through the
+  in-server broker unchanged, and the gateway-captured model-turn facade always does. See
+  [`EXECUTORS.md`](EXECUTORS.md).
 - **Task merging.** Compatible adjacent tasks in a DAG (same `taskType`,
   model, hardware shape, and merge key) coalesce into a single dispatch.
   Merged children ride on `WorkerTaskMessage.merged_children`; the worker
