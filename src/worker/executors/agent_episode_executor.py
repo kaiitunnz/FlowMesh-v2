@@ -103,8 +103,8 @@ class AgentEpisodeExecutor(Executor):
 
         A ``search/v1`` invocation boundary the harness emitted has its raw request
         recorded in worker-private state keyed by ``(task_id, call_correlation)`` and
-        stripped from the returned boundary, which instead carries the request digest
-        and the requested result bound. Any other boundary passes through unchanged.
+        stripped from the returned boundary, which instead carries only the request
+        digest. Any other boundary passes through unchanged.
         """
         req = result.request
         if (
@@ -120,11 +120,7 @@ class AgentEpisodeExecutor(Executor):
         pending_tool_request.put(task_id, req.call_correlation, parsed)
         digest = tool_request_digest(parsed.interface, parsed.query, parsed.max_results)
         stripped = req.model_copy(
-            update={
-                "request_payload": None,
-                "request_digest": digest,
-                "requested_max_results": parsed.max_results,
-            }
+            update={"request_payload": None, "request_digest": digest}
         )
         return result.model_copy(update={"request": stripped})
 

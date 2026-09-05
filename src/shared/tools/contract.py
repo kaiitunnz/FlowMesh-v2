@@ -71,19 +71,21 @@ class MediatedOperationPermit(BaseModel):
     """A one-use control authorization for one worker-originated mediated operation.
 
     The control plane mints it after verifying the live continuation, effective
-    authority, policy, quota, and occurrence idempotence, and returns it to the agent's
-    own worker. That worker's off-lane executor validates it before egress and rejects
-    an expired, altered, wrong-audience, wrong-policy, or over-budget operation as a
-    fence failure. It is neither a ``ServiceClaim`` credit nor an endpoint credential,
-    and it carries no request payload: the raw request stays in worker-private state,
-    looked up by ``(agent_task_id, call_correlation)``.
+    authority, quota, and occurrence idempotence, and returns it to the agent's own
+    worker. That worker's off-lane executor validates it before egress and rejects an
+    expired, altered, wrong-audience, or over-budget operation as a fence failure. It is
+    neither a ``ServiceClaim`` credit nor an endpoint credential, and it carries no
+    request payload: the raw request stays in worker-private state, looked up by
+    ``(agent_task_id, call_correlation)``.
 
     ``request_digest`` binds request integrity; ``target_id`` / ``target_generation``
     bind the audience to the agent's worker incarnation; ``permit_id`` is a one-use,
     unguessable grant a fresh same-``idempotency_key`` re-drive re-mints;
-    ``deadline_epoch`` bounds its lifetime; ``policy_epoch`` pins the policy generation
-    the authorization was granted under. ``invocation_id`` and ``idempotency_key`` are
-    the durable identity the outcome settles against.
+    ``deadline_epoch`` bounds its lifetime; ``invocation_id`` and ``idempotency_key``
+    together are the durable identity the outcome settles against. ``subject``,
+    ``policy_class``, and
+    ``policy_epoch`` are declared here as a forward contract; the paths that bind real
+    subjects and policy generations enforce them.
     """
 
     model_config = ConfigDict(frozen=True)

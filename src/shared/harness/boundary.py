@@ -49,10 +49,9 @@ class BoundaryRequest(BaseModel):
 
     On the worker-originated tool path the worker keeps ``request_payload`` in
     worker-private state and instead emits only control facts: ``request_digest`` (a
-    canonical hash of the raw request), a bounded ``policy_descriptor``, and the
-    ``requested_max_results`` bound. The presence of ``request_digest`` marks a boundary
-    the worker originated and executes locally, so no raw request crosses to the control
-    plane.
+    canonical hash of the raw request) and a bounded ``policy_descriptor``. A set
+    ``request_digest`` marks a boundary the worker originated and runs locally, so no
+    raw request crosses to the control plane.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -66,4 +65,3 @@ class BoundaryRequest(BaseModel):
     state_ref: str | None = None
     request_digest: str | None = None
     policy_descriptor: str | None = None
-    requested_max_results: int | None = None
