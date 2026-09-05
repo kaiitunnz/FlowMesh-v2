@@ -2871,6 +2871,12 @@ class TaskRuntime:
                     continue
                 if record.status not in (TaskStatus.DISPATCHED, TaskStatus.CANCELLING):
                     continue
+                if task_id in self._op_boundary:
+                    # A worker-originated op carrier on the departed worker: its agent
+                    # boundary fails clean through the agent's own uncertainty path, so
+                    # drop the dead carrier rather than requeuing a stale-audience op.
+                    self._discard_op_task_locked(task_id)
+                    continue
                 self._rehydrated_dispatched.pop(task_id, None)
                 # v2 route/worker loss resolves through the uncertainty FSM: a
                 # replayable invocation reissues under its stable id; the caller does

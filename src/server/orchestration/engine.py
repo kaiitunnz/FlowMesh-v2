@@ -661,6 +661,20 @@ class OrchestrationEngine:
         wi = self._work_item_for_task(task_id)
         if wi is None or wi.status in _TERMINAL_WI or wi.invocation_id is None:
             return Advance()
+        if wi.status is WorkItemStatus.BLOCKED and self._has_pending_local_boundary(wi):
+            # The worker that captured this boundary's request is lost, and the
+            # worker-private request cannot be recovered here (a fresh permit would need
+            # a fresh proposal on a new worker). Fail the boundary clean so the workflow
+            # errors rather than resuming the agent past a boundary with no outcome.
+            self._emit(
+                "invocation_ambiguity_terminal",
+                work_item_id=wi.work_item_id,
+                invocation_id=wi.invocation_id,
+            )
+            released = self._agent_terminal_regions(wi.operator_id, wi.activation_id)
+            return Advance(failed=self._settle_failure(wi.work_item_id)).extend(
+                released
+            )
         invocation = self._invocations[wi.invocation_id]
         invocation.state = next_on_uncertain(
             invocation.state,
@@ -946,6 +960,19 @@ class OrchestrationEngine:
             env.outcome_value is not None
             or env.outcome_ref is not None
             or env.denial is not None
+        )
+
+    def _has_pending_local_boundary(self, wi: WorkItem) -> bool:
+        """Whether the work item awaits an unsettled worker-originated boundary.
+
+        A recorded request digest marks a boundary whose raw request lives only on the
+        capturing worker; if that worker is lost the boundary cannot be recovered here.
+        """
+        return any(
+            act == wi.activation_id
+            and env.request_digest is not None
+            and not self._boundary_resolved(env)
+            for (act, _), env in self._boundary_events.items()
         )
 
     @classmethod
