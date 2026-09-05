@@ -153,6 +153,9 @@ class AgentEpisodeDispatch(BaseModel):
     capsule_blob: str | None = None
     delivered_outcomes: tuple[DeliveredOutcome, ...] = ()
     input_bindings: tuple[InputBinding, ...] = ()
+    # When set, the worker keeps a captured tool request in worker-private state and
+    # emits only its digest, so the raw request never crosses to the control plane.
+    worker_originated_boundaries: bool = False
 
 
 class HarnessResultKind(StrEnum):

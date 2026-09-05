@@ -13,6 +13,7 @@ from typing import Any, ClassVar
 
 from shared.harness import (
     REQUIRED_MEDIATED_FACADES,
+    BoundaryEventKind,
     DeliveredOutcome,
     HarnessAdapter,
     HarnessCapsule,
@@ -22,8 +23,14 @@ from shared.harness import (
 from shared.outcome import ContentStoreError, FabricContentStore
 from shared.schemas.result import BaseExecutorResult
 from shared.tasks.task_type import TaskType
+from shared.tools.search.schema import (
+    SEARCH_INTERFACE,
+    parse_search_request,
+    tool_request_digest,
+)
 
 from ..content_store import build_content_store
+from . import pending_tool_request
 from .base_executor import ExecutionError, Executor, ExecutorTask
 from .harness import build_adapter
 
@@ -79,6 +86,8 @@ class AgentEpisodeExecutor(Executor):
                 outcome.call_correlation,
             )
         result = adapter.start(task.task_id, capsule=capsule, outcomes=outcomes)
+        if dispatch.worker_originated_boundaries:
+            result = self._capture_local_request(task.task_id, result)
         if result.kind is HarnessResultKind.BOUNDARY and result.request is not None:
             _LOG.info(
                 "[fabric] episode yielded a %s boundary (interface=%s)",
@@ -87,6 +96,37 @@ class AgentEpisodeExecutor(Executor):
             )
         value = result.value if result.kind is HarnessResultKind.COMPLETION else None
         return AgentEpisodeResult(harness_result=result, value=value)
+
+    @staticmethod
+    def _capture_local_request(task_id: str, result: HarnessResult) -> HarnessResult:
+        """Keep a worker-originated tool request local and emit only its digest.
+
+        A ``search/v1`` invocation boundary the harness emitted has its raw request
+        recorded in worker-private state keyed by ``(task_id, call_correlation)`` and
+        stripped from the returned boundary, which instead carries the request digest
+        and the requested result bound. Any other boundary passes through unchanged.
+        """
+        req = result.request
+        if (
+            result.kind is not HarnessResultKind.BOUNDARY
+            or req is None
+            or req.kind is not BoundaryEventKind.INVOCATION
+            or req.interface != SEARCH_INTERFACE
+            or req.request_payload is None
+            or req.call_correlation is None
+        ):
+            return result
+        parsed = parse_search_request(req.request_payload)
+        pending_tool_request.put(task_id, req.call_correlation, parsed)
+        digest = tool_request_digest(parsed.interface, parsed.query, parsed.max_results)
+        stripped = req.model_copy(
+            update={
+                "request_payload": None,
+                "request_digest": digest,
+                "requested_max_results": parsed.max_results,
+            }
+        )
+        return result.model_copy(update={"request": stripped})
 
     def _hydrate_outcomes(
         self, outcomes: tuple[DeliveredOutcome, ...]
