@@ -12,7 +12,8 @@ from typing import Any
 
 import pytest
 
-from shared.tools.contract import RemoteToolOperationEnvelope
+from shared.outcome import content_digest
+from shared.tools.contract import RemoteToolOperationEnvelope, ToolOutcome
 from shared.tools.search.providers import SearchResult
 from shared.tools.search.schema import (
     SEARCH_INTERFACE,
@@ -24,6 +25,7 @@ from shared.tools.wire import (
     FRAME_OPERATION,
     FRAME_REAP,
     FRAME_REPLY,
+    KIND_MANIFEST,
     KIND_OPERATION,
     KIND_REJECT,
     KIND_RESULT,
@@ -31,6 +33,8 @@ from shared.tools.wire import (
     encode_msg,
 )
 from worker.external_tool_executor import WorkerExternalToolExecutor
+
+from ..shared.outcome_helpers import InMemoryContentStore
 
 WORKER = "wrk-1"
 GEN = 7
@@ -92,6 +96,7 @@ def _executor(
     block: threading.Event | None = None,
     api_key: str | None = None,
     max_workers: int = 4,
+    content_store: InMemoryContentStore | None = None,
 ) -> tuple[WorkerExternalToolExecutor, _Sink, list[str]]:
     calls: list[str] = []
 
@@ -117,23 +122,96 @@ def _executor(
         provider="fake",
         api_key=api_key,
         result_sink=sink,
+        content_store=content_store,
         max_workers=max_workers,
     )
     return ex, sink, calls
 
 
-def test_valid_operation_egresses_in_the_worker_and_replies(
+def test_success_without_a_store_is_unavailable_not_inlined(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # The provider egresses in this worker, but with no content store the result cannot
+    # be referenced; it returns a bounded unavailable datum rather than an unbounded
+    # inline body.
     ex, sink, calls = _executor(monkeypatch)
     ex.submit("xtr-1", FRAME_OPERATION, _op(_fence()))
     assert sink.wait()
     session_id, kind, frame = sink.frames[0]
     assert (session_id, kind) == ("xtr-1", FRAME_REPLY)
     body = decode_msg(frame)
-    assert body["kind"] == KIND_RESULT and body["outcome"]["status"] == "success"
-    # The provider ran in this worker process, exactly once.
+    assert body["kind"] == KIND_RESULT and body["outcome"]["status"] == "unavailable"
     assert calls == ["q"]
+
+
+def test_success_materializes_by_reference_with_a_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = InMemoryContentStore()
+    ex, sink, calls = _executor(monkeypatch, content_store=store)
+    ex.submit("xtr-1", FRAME_OPERATION, _op(_fence()))
+    assert sink.wait()
+    _session, kind, frame = sink.frames[0]
+    body = decode_msg(frame)
+    # The provider result leaves the worker as a manifest, never an inline result body.
+    assert kind == FRAME_REPLY and body["kind"] == KIND_MANIFEST
+    manifest = body["manifest"]
+    hydrated = store.read(manifest["content_digest"])
+    assert manifest["content_digest"] == content_digest(hydrated)
+    assert ToolOutcome.model_validate_json(hydrated).status.value == "success"
+    assert calls == ["q"]
+
+
+def test_success_reference_is_idempotent_under_idem(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = InMemoryContentStore()
+    ex, sink, calls = _executor(monkeypatch, content_store=store)
+    op = _op(_fence())
+    ex.submit("xtr-1", FRAME_OPERATION, op)
+    assert sink.wait()
+    ex.submit("xtr-2", FRAME_OPERATION, _op(_fence(delivery_nonce="xdn-2")))
+    assert sink.wait()
+    # A same-idm re-drive finds the first materialization; the store holds one object,
+    # and the provider is not sampled twice.
+    assert store.write_count == 1
+    assert calls == ["q"]
+
+
+def test_control_status_stays_inline_with_a_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _raise(_cfg: Any) -> None:
+        raise ValueError("the serper web-search provider needs WEB_SEARCH_API_KEY")
+
+    monkeypatch.setattr("shared.tools.search.providers.build_search_provider", _raise)
+    store = InMemoryContentStore()
+    sink = _Sink()
+    ex = WorkerExternalToolExecutor(
+        worker_id=WORKER,
+        generation=GEN,
+        provider="fake",
+        api_key=None,
+        result_sink=sink,
+        content_store=store,
+    )
+    ex.submit("xtr-1", FRAME_OPERATION, _op(_fence()))
+    assert sink.wait()
+    body = decode_msg(sink.frames[0][2])
+    # A typed control status is a bounded inline datum, never materialized by reference.
+    assert body["kind"] == KIND_RESULT
+    assert body["outcome"]["status"] == "unavailable"
+    assert store.write_count == 0
+
+
+def test_store_failure_leaves_it_ambiguous(monkeypatch: pytest.MonkeyPatch) -> None:
+    store = InMemoryContentStore()
+    store.fail_finalize = True
+    ex, sink, _ = _executor(monkeypatch, content_store=store)
+    ex.submit("xtr-1", FRAME_OPERATION, _op(_fence()))
+    # A store-write failure raises out of egress: no reply frame, so the origin holds
+    # the boundary pending and re-drives under the same idempotency key.
+    assert sink.wait(0.5) is False
 
 
 def test_replayed_nonce_is_rejected_before_egress(

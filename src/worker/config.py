@@ -27,6 +27,7 @@ from .utils.health import get_hb_config
 class WorkerConfig:
     worker_token: str
     owner_principal: dict[str, Any] | None
+    server_base_url: str | None
     supervisor_grpc_target: str
     supervisor_grpc_tls_ca_b64: str | None
     results_dir: Path
@@ -71,6 +72,8 @@ class WorkerConfig:
             else:
                 if isinstance(loaded, dict):
                     owner_principal = loaded
+
+        server_base_url = os.getenv("FLOWMESH_BASE_URL", "").strip() or None
 
         supervisor_grpc_target = (os.getenv("SUPERVISOR_GRPC_TARGET") or "").strip()
         if not supervisor_grpc_target:
@@ -164,6 +167,7 @@ class WorkerConfig:
         return WorkerConfig(
             worker_token=worker_token,
             owner_principal=owner_principal,
+            server_base_url=server_base_url,
             supervisor_grpc_target=supervisor_grpc_target,
             supervisor_grpc_tls_ca_b64=supervisor_grpc_tls_ca_b64,
             results_dir=results_dir,

@@ -8,6 +8,7 @@ from shared.tasks.task_type import TaskType
 from shared.tasks.worker_message import WorkerHardware
 
 from .config import WorkerConfig
+from .content_store import build_content_store
 from .executors import EXECUTOR_REGISTRY, IMPORT_ERRORS, get_executor_class_name
 from .executors.base_executor import Executor
 from .executors.mp_executor import MPExecutor
@@ -257,6 +258,7 @@ def main() -> None:
         executor_idle_cleanup_sec=cfg.executor_idle_cleanup_sec,
         web_search_provider=cfg.web_search_provider,
         web_search_api_key=cfg.web_search_api_key,
+        content_store=build_content_store(cfg.server_base_url),
     )
 
     # Install signal handlers to allow graceful shutdown

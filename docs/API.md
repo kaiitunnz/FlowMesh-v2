@@ -51,6 +51,16 @@ self-authenticate the same way, sending `FLOWMESH_API_KEY` as the bearer.
 | GET | `/api/v1/results/{task_id}/files/{filename}` | Download artifact. |
 | GET | `/api/v1/results/{task_id}/logs` | Download archived `logs.jsonl`. |
 
+## Content
+
+Content-addressed, tenant-scoped outcome store for reference-backed invocation outcomes that a worker writes and hydrates.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| PUT | `/api/v1/content?idem={idm}` | Materialize outcome bytes; returns the `OutcomeManifest`. |
+| GET | `/api/v1/content?idem={idm}` | Resolve the manifest already materialized under an idempotency key. |
+| GET | `/api/v1/content/{digest}` | Hydrate content by digest. |
+
 ## Traces
 
 | Method | Path | Description |

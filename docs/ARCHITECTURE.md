@@ -221,6 +221,14 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   only from its local worker environment, so no credential enters a fabric object. The
   carriage mints no `ServiceClaim`, `RouteAuthorization`, or lease; a lost operation stays
   pending until its `idm-*` outcome terminalizes. See [`EXECUTORS.md`](EXECUTORS.md).
+- **Reference-backed invocation outcomes.** A mediated boundary settles by reference: the
+  producing worker materializes its result into the content-addressed `FabricContentStore`
+  and reports a bounded `OutcomeManifest`, never the payload. The manifest commits to the
+  ledger before the continuation re-readies or a linked `ServiceClaim` credit releases, and a
+  resumed worker hydrates and digest-verifies the reference before injection. Root and
+  supervisors relay opaque frames and hold only the manifest. Materialization is idempotent
+  under `idm-*`. The fabric-tool worker path is the first consumer; the model-gateway and
+  resident completions still settle inline. See [`EXECUTORS.md`](EXECUTORS.md).
 - **Task merging.** Compatible adjacent tasks in a DAG (same `taskType`,
   model, hardware shape, and merge key) coalesce into a single dispatch.
   Merged children ride on `WorkerTaskMessage.merged_children`; the worker

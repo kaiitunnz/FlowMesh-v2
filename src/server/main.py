@@ -21,6 +21,7 @@ if __name__ == "__main__" and __package__ is None:
     sys.modules.setdefault("server.main", sys.modules[__name__])
 
 from shared._version import FLOWMESH_RELEASE_VERSION
+from shared.outcome import ManifestRef, OutcomeCarrier
 
 from .auth import reconcile_resources, resolve_system_principal
 from .clients import RedisClient
@@ -47,6 +48,7 @@ from .services.agent_model_gateway import (
     build_agent_model_router,
     to_gateway_binding,
 )
+from .services.content_store import ServerContentStore
 from .services.log_archiver import TaskLogArchiver
 from .services.metrics import MetricsRecorder
 from .services.model_secret_vault import ModelSecretVault
@@ -91,6 +93,12 @@ logger = get_logger(
 # Result & metrics directories
 RESULTS_DIR = config.results_dir
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+
+CONTENT_STORE = (
+    ServerContentStore(config.content_store.root)
+    if IS_ROOT_NODE and config.content_store.enabled
+    else None
+)
 
 assert config.metrics.dir is not None
 METRICS_DIR = config.metrics.dir
@@ -176,9 +184,16 @@ if IS_ROOT_NODE:
     AGENT_MODEL_GATEWAY.set_facade_fence(RUNTIME.has_pending_facade)
     AGENT_MODEL_GATEWAY.set_facade_resolver(RUNTIME.agent_facade_descriptors)
 
-    def _settle_tool(task_id: str, call_correlation: str, value: str) -> None:
+    def _settle_tool(
+        task_id: str, call_correlation: str, carrier: OutcomeCarrier
+    ) -> None:
         assert RUNTIME is not None
-        RUNTIME.settle_episode_invocation(task_id, call_correlation, value)
+        if isinstance(carrier, ManifestRef):
+            RUNTIME.settle_episode_invocation(
+                task_id, call_correlation, ref=carrier.manifest
+            )
+        else:
+            RUNTIME.settle_episode_invocation(task_id, call_correlation, carrier.value)
 
     def _redispatch_tool(task_id: str, call_correlation: str) -> bool:
         assert RUNTIME is not None
@@ -635,6 +650,7 @@ app.state.ssh_proxy_enabled = config.port_forward.ssh_proxy_enabled and IS_ROOT_
 app.state.serve_proxy_enabled = config.port_forward.serve_proxy_enabled and IS_ROOT_NODE
 app.state.resident_control = RESIDENT_CONTROL
 app.state.network_plane = NETWORK_PLANE
+app.state.content_store = CONTENT_STORE
 # Started in lifespan on the root node when the resident relay bridge is enabled.
 app.state.resident_bridge_task = None
 app.state.tool_bridge_task = None
@@ -652,6 +668,7 @@ if IS_ROOT_NODE:
     app.include_router(v1.nodes.router, prefix=v1_prefix)
     app.include_router(v1.tasks.router, prefix=v1_prefix)
     app.include_router(v1.results.router, prefix=v1_prefix)
+    app.include_router(v1.content.router, prefix=v1_prefix)
     app.include_router(v1.ssh.router, prefix=v1_prefix)
     app.include_router(v1.serve.router, prefix=v1_prefix)
     app.include_router(v1.resident.router, prefix=v1_prefix)

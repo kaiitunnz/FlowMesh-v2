@@ -34,7 +34,9 @@ from server.tools.tool_egress import (
     ToolRequest,
 )
 from server.tools.tool_relay_delivery import ToolRelayEndpoint
+from shared.outcome import InlineControl
 from shared.schemas.command import CommandType
+from shared.tools.contract import ToolOutcome
 from shared.tools.search.providers import SearchResult
 from tests.server.network._relay_fakes import FakeBinaryRedis
 
@@ -215,7 +217,12 @@ class _Harness:
         t = threading.Thread(target=call)
         t.start()
         t.join(15.0)
-        return result["outcome"]
+        carrier = result["outcome"]
+        # With no content store the worker inlines its outcome, so unwrap the control
+        # datum back to a typed outcome for the egress/credential assertions here.
+        if isinstance(carrier, InlineControl):
+            return ToolOutcome.model_validate_json(carrier.value)
+        return carrier
 
     def stop(self) -> None:
         if self._pump is not None:

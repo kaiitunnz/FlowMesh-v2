@@ -10,6 +10,7 @@ from typing import Any
 
 import requests
 
+from shared.outcome import FabricContentStore
 from shared.schemas.result import BaseExecutorResult
 from shared.tasks import MergedChildTaskStrict
 from shared.tasks.specs import (
@@ -45,6 +46,7 @@ class Runner:
         executor_idle_cleanup_sec: float | None = None,
         web_search_provider: str = DEFAULT_SEARCH_PROVIDER,
         web_search_api_key: str | None = None,
+        content_store: FabricContentStore | None = None,
     ):
         self.lifecycle = lifecycle
         self.task_stream = task_stream
@@ -87,6 +89,7 @@ class Runner:
         # delivered over the attachment (once the worker id and incarnation are known).
         self._web_search_provider = web_search_provider
         self._web_search_api_key = web_search_api_key
+        self._content_store = content_store
         self._tool_executor: WorkerExternalToolExecutor | None = None
 
     def _cancel_active_executor(self) -> None:
@@ -142,6 +145,7 @@ class Runner:
             provider=self._web_search_provider,
             api_key=self._web_search_api_key,
             result_sink=client.push_tool_egress,
+            content_store=self._content_store,
             logger=self.logger,
         )
         return self._tool_executor

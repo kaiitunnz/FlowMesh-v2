@@ -18,6 +18,7 @@ from enum import StrEnum
 from pydantic import BaseModel, ConfigDict, Field
 
 from shared.harness.boundary import DenialKind
+from shared.outcome import OutcomeManifest
 
 from ..task.v2.representations.operators import (
     BoundaryEventKind,
@@ -161,7 +162,11 @@ class BoundaryEvent(BaseModel):
     group_ordinal: int | None = None
     completion_mode: str | None = None
     denial: DenialKind | None = None
-    outcome_value: str | None = None  # settled result payload injected at re-dispatch
+    # A settled outcome is exactly one of these: ``outcome_value`` an inline, bounded
+    # control datum, or ``outcome_ref`` a manifest for materialized content the resumed
+    # worker hydrates. Both are injected at re-dispatch and rehydrated after a restart.
+    outcome_value: str | None = None
+    outcome_ref: OutcomeManifest | None = None
 
 
 class AuthorityGrant(BaseModel):

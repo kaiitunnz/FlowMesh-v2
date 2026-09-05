@@ -542,6 +542,22 @@ STACK_ENV_SCHEMA = EnvSchema(
             ],
         ),
         EnvSection(
+            title="Reference-backed outcomes",
+            vars=[
+                EnvVar(
+                    "CONTENT_STORE_ENABLED",
+                    "true",
+                    description="Serve the outcome content store.",
+                    var_type=EnvVarType.BOOL,
+                ),
+                EnvVar(
+                    "CONTENT_STORE_ROOT",
+                    "",
+                    description="Content-store root; under the data dir if empty.",
+                ),
+            ],
+        ),
+        EnvSection(
             title="Network plane",
             vars=[
                 EnvVar(

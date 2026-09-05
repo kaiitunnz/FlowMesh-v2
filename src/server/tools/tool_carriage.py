@@ -15,6 +15,7 @@ the server main loop where the network I/O lives.
 """
 
 import asyncio
+import json
 import logging
 import socket
 import ssl
@@ -24,6 +25,7 @@ from collections.abc import Awaitable, Callable
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from typing import Any
 
+from shared.outcome import InlineControl, ManifestRef, OutcomeManifest
 from shared.schemas.command import CommandType
 from shared.utils.ids import (
     new_route_origin_id,
@@ -53,6 +55,7 @@ from .tool_egress import (
     RemoteToolOperationEnvelope,
     ToolOperationEnvelope,
     ToolRequest,
+    inline_outcome,
     tool_request_digest,
 )
 from .tool_relay_delivery import ToolRelayEndpoint
@@ -69,8 +72,10 @@ ExecNodeCmd = Callable[[str, CommandType, dict[str, Any]], Awaitable[dict[str, A
 _MAX_CACHED_TARGETS = 256
 
 
-def _unavailable(value: str) -> ToolOutcome:
-    return ToolOutcome(status=ToolOutcomeStatus.UNAVAILABLE, value=value)
+def _unavailable(value: str) -> InlineControl:
+    return inline_outcome(
+        ToolOutcome(status=ToolOutcomeStatus.UNAVAILABLE, value=value)
+    )
 
 
 class ToolEgressOriginDeputy:
@@ -509,15 +514,22 @@ class RemoteSidecarCarriage:
                 now=now,
             )
 
-    def _decode(self, reply: bytes | None) -> ToolOutcome:
+    def _decode(self, reply: bytes | None) -> CarriageResult:
+        """Relay the worker's opaque reply as a carrier without parsing a result body.
+
+        A manifest frame carries only bounded control metadata; an inline frame carries
+        an opaque control datum. Neither path assembles the provider result here.
+        """
         if reply is None:
             return _unavailable("the remote tool operation was lost")
         try:
             msg = wire.decode_msg(reply)
         except ValueError:
             return _unavailable("the remote tool reply was malformed")
+        if msg["kind"] == wire.KIND_MANIFEST:
+            return ManifestRef(manifest=OutcomeManifest.model_validate(msg["manifest"]))
         if msg["kind"] == wire.KIND_RESULT:
-            return ToolOutcome.model_validate(msg["outcome"])
+            return InlineControl(value=json.dumps(msg["outcome"]))
         if msg["kind"] == wire.KIND_REJECT:
             return _unavailable(
                 f"the remote sidecar rejected the operation: {msg.get('reason')}"

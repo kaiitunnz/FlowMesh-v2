@@ -39,6 +39,7 @@ from server.tools.tool_egress import (
     ToolRequest,
 )
 from server.tools.tool_relay_delivery import ToolRelayEndpoint
+from shared.outcome import InlineControl, ManifestRef, content_digest
 from shared.schemas.command import CommandType
 from tests.server.network._relay_fakes import FakeBinaryRedis
 
@@ -211,20 +212,36 @@ def test_registry_returns_none_when_no_node() -> None:
     asyncio.run(run())
 
 
-def test_result_reply_becomes_the_outcome() -> None:
+def test_manifest_reply_becomes_a_reference() -> None:
+    digest = content_digest(b"hits")
+    reply = wire.encode_msg(
+        wire.KIND_MANIFEST,
+        manifest={
+            "content_digest": digest,
+            "size_bytes": 4,
+            "media_type": "application/json",
+        },
+    )
+    result = _run(_carriage(_FakeDeputy(reply), []))
+    assert isinstance(result, ManifestRef)
+    assert result.manifest.content_digest == digest
+
+
+def test_inline_result_reply_relays_the_control_datum() -> None:
     reply = wire.encode_msg(
         wire.KIND_RESULT,
-        outcome={"status": "success", "value": "hits", "provenance": []},
+        outcome={"status": "unavailable", "value": "no key", "provenance": []},
     )
-    outcome = _run(_carriage(_FakeDeputy(reply), []))
-    assert outcome.status.value == "success"
-    assert outcome.value == "hits"
+    result = _run(_carriage(_FakeDeputy(reply), []))
+    assert isinstance(result, InlineControl)
+    assert ToolOutcome.model_validate_json(result.value).value == "no key"
 
 
 def test_reject_reply_becomes_unavailable() -> None:
     reply = wire.encode_msg(wire.KIND_REJECT, reason="digest")
-    outcome = _run(_carriage(_FakeDeputy(reply), []))
-    assert outcome.status.value == "unavailable"
+    result = _run(_carriage(_FakeDeputy(reply), []))
+    assert isinstance(result, InlineControl)
+    assert ToolOutcome.model_validate_json(result.value).status.value == "unavailable"
 
 
 class _HangDeputy:
@@ -276,9 +293,9 @@ def test_lost_reply_after_egress_is_ambiguous() -> None:
 
 def test_lost_reply_without_egress_is_terminal_unavailable() -> None:
     # The operation never reached a wire (a pre-delivery failure): safe to terminalize.
-    outcome = _run(_carriage(_FakeDeputy(None, egressed=False), []))
-    assert isinstance(outcome, ToolOutcome)
-    assert outcome.status.value == "unavailable"
+    result = _run(_carriage(_FakeDeputy(None, egressed=False), []))
+    assert isinstance(result, InlineControl)
+    assert ToolOutcome.model_validate_json(result.value).status.value == "unavailable"
 
 
 def test_target_cache_is_bounded_and_evicts_lru() -> None:
