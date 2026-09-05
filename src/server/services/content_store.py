@@ -9,8 +9,6 @@ the server never originates a materialization. Isolation is the partition: a rea
 scoped to the requesting principal, so it never reaches another principal's content.
 """
 
-import os
-import tempfile
 from pathlib import Path
 
 from shared.outcome import (
@@ -19,6 +17,7 @@ from shared.outcome import (
     OutcomeManifest,
     content_digest,
 )
+from shared.utils.atomic import atomic_write_bytes
 
 _SAFE = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
 
@@ -72,7 +71,7 @@ class ServerContentStore:
         if (found := self.find(principal, idempotency_key)) is not None:
             return found
         digest = content_digest(data)
-        self._atomic_write(self._object_path(principal, digest), data)
+        atomic_write_bytes(self._object_path(principal, digest), data, if_absent=True)
         manifest = OutcomeManifest(
             content_digest=digest,
             size_bytes=len(data),
@@ -81,9 +80,10 @@ class ServerContentStore:
             idempotency_key=idempotency_key,
             tenant=principal,
         )
-        self._atomic_write(
+        atomic_write_bytes(
             self._idem_path(principal, idempotency_key),
             manifest.model_dump_json().encode(),
+            if_absent=True,
         )
         return manifest
 
@@ -94,22 +94,3 @@ class ServerContentStore:
                 f"no content for {digest} under principal {principal}"
             )
         return path.read_bytes()
-
-    @staticmethod
-    def _atomic_write(path: Path, data: bytes) -> None:
-        """Write ``data`` at ``path`` if absent, leaving an existing object untouched.
-
-        Content is immutable, so a concurrent or re-driven write of the same content is
-        a no-op rather than a rewrite.
-        """
-        if path.exists():
-            return
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=path.parent)
-        try:
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(data)
-            os.replace(tmp, path)
-        except BaseException:
-            Path(tmp).unlink(missing_ok=True)
-            raise
