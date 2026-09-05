@@ -1442,10 +1442,13 @@ class TaskRuntime:
         self._discard_op_task_locked(op_task_id)
 
     def _discard_op_task_locked(self, op_task_id: str) -> None:
-        """Drop a consumed op carrier; it is in-memory only and never persisted."""
+        """Drop a consumed op carrier and its correlation; in-memory only, never
+        persisted, so every teardown path leaves no residual state."""
         self._tasks.pop(op_task_id, None)
         self._original_deps.pop(op_task_id, None)
         self._ready_index.discard(op_task_id)
+        self._op_boundary.pop(op_task_id, None)
+        self._op_permits.pop(op_task_id, None)
 
     def set_model_settler(
         self, settler: Callable[[ToolInvocationEnvelope], None]
@@ -2357,6 +2360,11 @@ class TaskRuntime:
             record.supplier_id = supplier_id
             self._remove_from_ready_locked(task_id)
             self._merge_bucket_remove(task_id)
+            if record.task_type == TaskType.TOOL_OPERATION:
+                # An off-lane op carrier has no ledger work item and is re-derived from
+                # the durable boundary on restart, so it is never persisted: it leaves
+                # no durable task record or dispatched-set member to reap.
+                return
             self._workflow_registry.commit_transition(
                 record.workflow_id,
                 records=self._records_locked(task_id),
