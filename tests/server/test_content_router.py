@@ -47,7 +47,7 @@ def test_put_is_idempotent_under_idem(tmp_path) -> None:
         f"{PREFIX}/content", params={"idem": "idm-2"}, content=b"x"
     ).json()
     assert first == second
-    assert client.get(f"{PREFIX}/content/by-idem/idm-2").json() == first
+    assert client.get(f"{PREFIX}/content", params={"idem": "idm-2"}).json() == first
 
 
 def test_missing_content_is_404(tmp_path) -> None:
@@ -55,7 +55,10 @@ def test_missing_content_is_404(tmp_path) -> None:
     assert (
         client.get(f"{PREFIX}/content/{content_digest(b'absent')}").status_code == 404
     )
-    assert client.get(f"{PREFIX}/content/by-idem/idm-absent").status_code == 404
+    assert (
+        client.get(f"{PREFIX}/content", params={"idem": "idm-absent"}).status_code
+        == 404
+    )
 
 
 def test_store_disabled_is_404(tmp_path) -> None:

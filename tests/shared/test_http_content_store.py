@@ -18,8 +18,10 @@ class _RequestsShim:
     def __init__(self, client: TestClient) -> None:
         self._client = client
 
-    def get(self, url, headers=None, timeout=None):  # noqa: ANN001 - test shim
-        return self._client.get(url, headers=headers)
+    def get(
+        self, url, params=None, headers=None, timeout=None
+    ):  # noqa: ANN001 - test shim
+        return self._client.get(url, params=params, headers=headers)
 
     def put(
         self, url, params=None, data=None, headers=None, timeout=None

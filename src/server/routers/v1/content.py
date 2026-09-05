@@ -66,12 +66,12 @@ async def put_content(
 
 
 @router.get(
-    "/by-idem/{idem}",
+    "",
     summary="Resolve materialized content by idempotency key",
     description="Return the manifest already materialized under an idempotency key.",
 )
 async def get_by_idem(
-    idem: str,
+    idem: str = Query(..., description="The fabric idempotency key to resolve."),
     store: ServerContentStore | None = Depends(get_content_store),
     principal: PrincipalContext = Depends(authenticate_connection),
     logger: logging.Logger = Depends(get_logger),

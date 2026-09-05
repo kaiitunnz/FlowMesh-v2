@@ -25,7 +25,8 @@ class HttpFabricContentStore(FabricContentStore):
 
     def find(self, idempotency_key: str) -> OutcomeManifest | None:
         resp = requests.get(
-            self._url(f"/by-idem/{idempotency_key}"),
+            self._url(""),
+            params={"idem": idempotency_key},
             headers=auth_headers(),
             timeout=self._timeout,
         )
