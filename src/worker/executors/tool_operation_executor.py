@@ -32,7 +32,10 @@ from ..tool_fence import ProviderBinding, fence_reason, materialize_tool_outcome
 from . import pending_tool_request
 from .base_executor import ExecutionError, Executor, ExecutorTask
 
-_LOG = logging.getLogger("tool-operation-executor")
+# The durable worker logger (console + rotating worker.log), so the execution-locus
+# audit marker below is observable in the worker's own logs — like the attachment-path
+# executor, which is handed the same logger — rather than only on the root task stream.
+_LOG = logging.getLogger("worker")
 
 _INTERFACES = frozenset({SEARCH_INTERFACE})
 
