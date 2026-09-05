@@ -28,6 +28,7 @@ from tests.server.task.test_v2_orchestration import (
 )
 from worker.executors.agent_episode_executor import AgentEpisodeExecutor
 from worker.executors.harness.scripted import ScriptedHarnessAdapter, ScriptedStep
+from worker.lifecycle import PendingToolRequestStore
 
 _TS = "2026-04-28T00:00:00Z"
 _QUERY_TOKEN = "supernova-remnants"
@@ -99,7 +100,9 @@ def _dispatch_agent(runtime: TaskRuntime, task_id: str, worker: str = "wkr-1") -
         task_id, capsule=capsule, outcomes=dispatch.delivered_outcomes
     )
     if dispatch.worker_originated_boundaries:
-        result = AgentEpisodeExecutor._capture_local_request(task_id, result)
+        result = AgentEpisodeExecutor._capture_local_request(
+            PendingToolRequestStore(), task_id, result
+        )
     runtime.mark_succeeded(
         task_id, worker, {"agent_episode": result.model_dump(mode="json")}, _TS
     )

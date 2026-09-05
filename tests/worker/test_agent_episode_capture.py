@@ -7,8 +7,8 @@ from shared.tools.search.schema import (
     parse_search_request,
     tool_request_digest,
 )
-from worker import pending_tool_request
 from worker.executors.agent_episode_executor import AgentEpisodeExecutor
+from worker.lifecycle import PendingToolRequestStore
 
 _TASK = "tsk-agent"
 
@@ -28,32 +28,35 @@ def _boundary(
 
 
 def test_search_boundary_is_stripped_and_stored() -> None:
+    store = PendingToolRequestStore()
     result = AgentEpisodeExecutor._capture_local_request(
-        _TASK, _boundary('{"query": "weather", "max_results": 3}')
+        store, _TASK, _boundary('{"query": "weather", "max_results": 3}')
     )
     req = result.request
     assert req is not None
     assert req.request_payload is None
     assert req.request_digest == tool_request_digest(SEARCH_INTERFACE, "weather", 3)
-    stored = pending_tool_request.take(_TASK, "m0")
+    stored = store.take(_TASK, "m0")
     assert stored is not None and stored.query == "weather" and stored.max_results == 3
 
 
 def test_non_search_boundary_passes_through() -> None:
+    store = PendingToolRequestStore()
     original = _boundary("do something", interface="model")
-    result = AgentEpisodeExecutor._capture_local_request(_TASK, original)
+    result = AgentEpisodeExecutor._capture_local_request(store, _TASK, original)
     assert result.request is not None
     assert result.request.request_payload == "do something"
     assert result.request.request_digest is None
-    assert pending_tool_request.peek(_TASK, "m0") is None
+    assert store.peek(_TASK, "m0") is None
 
 
 def test_boundary_without_payload_passes_through() -> None:
+    store = PendingToolRequestStore()
     original = _boundary(None)
-    result = AgentEpisodeExecutor._capture_local_request(_TASK, original)
+    result = AgentEpisodeExecutor._capture_local_request(store, _TASK, original)
     assert result.request is not None
     assert result.request.request_digest is None
-    assert pending_tool_request.peek(_TASK, "m0") is None
+    assert store.peek(_TASK, "m0") is None
 
 
 def test_parse_search_request_accepts_object_and_bare_string() -> None:

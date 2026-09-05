@@ -27,7 +27,6 @@ from shared.tools.search.egress import ExternalToolSidecar
 from shared.tools.search.providers import LazySearchProvider
 from shared.tools.search.schema import SEARCH_INTERFACE, ToolRequest
 
-from .. import pending_tool_request
 from ..content_store import build_content_store
 from ..tool_fence import ProviderBinding, fence_reason, materialize_tool_outcome
 from .base_executor import ExecutionError, Executor, ExecutorTask
@@ -85,7 +84,7 @@ class ToolOperationExecutor(Executor):
         # request — so a successful operation is never re-failed for a missing request.
         if (prior := self._prior_manifest(permit, store)) is not None:
             return ToolOperationResult(outcome_ref=prior)
-        request = pending_tool_request.take(
+        request = self._pending_tool_requests().take(
             permit.agent_task_id, permit.call_correlation
         )
         if request is None:

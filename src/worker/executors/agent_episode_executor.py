@@ -29,8 +29,8 @@ from shared.tools.search.schema import (
     tool_request_digest,
 )
 
-from .. import pending_tool_request
 from ..content_store import build_content_store
+from ..lifecycle import PendingToolRequestStore
 from .base_executor import ExecutionError, Executor, ExecutorTask
 from .harness import build_adapter
 
@@ -87,7 +87,9 @@ class AgentEpisodeExecutor(Executor):
             )
         result = adapter.start(task.task_id, capsule=capsule, outcomes=outcomes)
         if dispatch.worker_originated_boundaries:
-            result = self._capture_local_request(task.task_id, result)
+            result = self._capture_local_request(
+                self._pending_tool_requests(), task.task_id, result
+            )
         if result.kind is HarnessResultKind.BOUNDARY and result.request is not None:
             _LOG.info(
                 "[fabric] episode yielded a %s boundary (interface=%s)",
@@ -98,7 +100,9 @@ class AgentEpisodeExecutor(Executor):
         return AgentEpisodeResult(harness_result=result, value=value)
 
     @staticmethod
-    def _capture_local_request(task_id: str, result: HarnessResult) -> HarnessResult:
+    def _capture_local_request(
+        store: PendingToolRequestStore, task_id: str, result: HarnessResult
+    ) -> HarnessResult:
         """Keep a worker-originated tool request local and emit only its digest.
 
         A ``search/v1`` invocation boundary the harness emitted has its raw request
@@ -117,7 +121,7 @@ class AgentEpisodeExecutor(Executor):
         ):
             return result
         parsed = parse_search_request(req.request_payload)
-        pending_tool_request.put(task_id, req.call_correlation, parsed)
+        store.put(task_id, req.call_correlation, parsed)
         digest = tool_request_digest(parsed.interface, parsed.query, parsed.max_results)
         stripped = req.model_copy(
             update={"request_payload": None, "request_digest": digest}

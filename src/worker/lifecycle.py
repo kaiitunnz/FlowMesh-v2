@@ -13,10 +13,45 @@ from typing import Any
 
 from shared.schemas.worker import SSHLimits, WorkerCapabilities
 from shared.tasks.worker_message import WorkerHardware, WorkerStatus
+from shared.tools.search.schema import ToolRequest
 from shared.utils.time import now_iso
 
 from .power import PowerMonitor
 from .supervisor_client import SupervisorClient
+
+
+class PendingToolRequestStore:
+    """Worker-private store for captured, not-yet-executed tool requests.
+
+    When a worker originates a mediated tool boundary it keeps the raw request here,
+    keyed by the stable ``(agent_task_id, call_correlation)`` occurrence, and sends the
+    control plane only a digest. The off-lane tool-operation executor reads the request
+    back on the same worker, so the raw request never crosses to the control plane. The
+    store lives for one worker incarnation; a restart is a new incarnation whose rotated
+    id and generation invalidate any outstanding permit and force the boundary to be
+    re-proposed on the freshly assigned worker, so a durable backing is not needed.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._store: dict[tuple[str, str], ToolRequest] = {}
+
+    def put(
+        self, agent_task_id: str, call_correlation: str, request: ToolRequest
+    ) -> None:
+        """Store a captured request, overwriting a stale recapture."""
+        with self._lock:
+            self._store[(agent_task_id, call_correlation)] = request
+
+    def take(self, agent_task_id: str, call_correlation: str) -> ToolRequest | None:
+        """Remove and return the request for an occurrence, or None if absent."""
+        with self._lock:
+            return self._store.pop((agent_task_id, call_correlation), None)
+
+    def peek(self, agent_task_id: str, call_correlation: str) -> ToolRequest | None:
+        """Return the request for an occurrence without removing it."""
+        with self._lock:
+            return self._store.get((agent_task_id, call_correlation))
 
 
 class Lifecycle:
@@ -35,6 +70,7 @@ class Lifecycle:
         self.hb_file = hb_file
         self.cost_per_hour = cost_per_hour
         self.power_monitor = power_monitor or PowerMonitor()
+        self.pending_tool_requests = PendingToolRequestStore()
         self._stop_event = threading.Event()
         self._started_ts: float | None = None
 
