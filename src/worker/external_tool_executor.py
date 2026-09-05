@@ -18,7 +18,6 @@ import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass
 
 from shared.outcome import FabricContentStore, OutcomeManifest
 from shared.tools.contract import (
@@ -29,11 +28,7 @@ from shared.tools.contract import (
 )
 from shared.tools.search.egress import ExternalToolSidecar
 from shared.tools.search.providers import LazySearchProvider
-from shared.tools.search.schema import (
-    SEARCH_INTERFACE,
-    ToolRequest,
-    tool_request_digest,
-)
+from shared.tools.search.schema import SEARCH_INTERFACE, ToolRequest
 from shared.tools.wire import (
     FRAME_CANCEL,
     FRAME_OPERATION,
@@ -47,17 +42,11 @@ from shared.tools.wire import (
     encode_msg,
 )
 
+from .tool_fence import ProviderBinding, fence_reason, materialize_tool_outcome
+
 # A sink the executor calls to return one attachment frame to the supervisor: the
 # session id, the ToolEgressFrame.kind (FRAME_REPLY / FRAME_REAP), and payload bytes.
 EgressResultSink = Callable[[str, str, bytes], None]
-
-
-@dataclass(frozen=True)
-class _ProviderBinding:
-    """The provider name and optional key the local worker environment provisions."""
-
-    provider: str
-    api_key: str | None
 
 
 class WorkerExternalToolExecutor:
@@ -86,7 +75,7 @@ class WorkerExternalToolExecutor:
         self._sink = result_sink
         self._log = logger or logging.getLogger("worker-external-tool")
         self._sidecar = ExternalToolSidecar(
-            LazySearchProvider(_ProviderBinding(provider, api_key)), self._log
+            LazySearchProvider(ProviderBinding(provider, api_key)), self._log
         )
         self._pool = ThreadPoolExecutor(
             max_workers=max_workers, thread_name_prefix="tool-egress"
@@ -204,25 +193,16 @@ class WorkerExternalToolExecutor:
         successful result the worker cannot reference — no content store or idempotency
         key — returns a typed unavailable datum rather than inlining an unbounded body.
         """
-        if outcome.status is not ToolOutcomeStatus.SUCCESS:
-            return encode_msg(KIND_RESULT, outcome=outcome.model_dump(mode="json"))
-        if self._content_store is None or envelope.idempotency_key is None:
-            self._log.warning(
-                "no content store to materialize a tool result by reference"
-            )
-            return encode_msg(
-                KIND_RESULT,
-                outcome=ToolOutcome(
-                    status=ToolOutcomeStatus.UNAVAILABLE,
-                    value="no content store is configured to materialize the result",
-                ).model_dump(mode="json"),
-            )
-        manifest = self._content_store.materialize(
-            envelope.idempotency_key,
-            outcome.model_dump_json().encode(),
-            media_type="application/json",
+        materialized = materialize_tool_outcome(
+            outcome,
+            idempotency_key=envelope.idempotency_key,
+            content_store=self._content_store,
         )
-        return encode_msg(KIND_MANIFEST, manifest=manifest.model_dump(mode="json"))
+        if isinstance(materialized, OutcomeManifest):
+            return encode_msg(
+                KIND_MANIFEST, manifest=materialized.model_dump(mode="json")
+            )
+        return encode_msg(KIND_RESULT, outcome=materialized.model_dump(mode="json"))
 
     def _prior_manifest(
         self, envelope: RemoteToolOperationEnvelope
@@ -235,28 +215,25 @@ class WorkerExternalToolExecutor:
     def _fence_reject(
         self, envelope: RemoteToolOperationEnvelope, request: ToolRequest
     ) -> str | None:
-        if envelope.interface not in self._interfaces:
-            return "interface"
+        # The server-driven path additionally binds the provider audience and rejects an
+        # over-budget request; the rest is the shared worker fence.
         if envelope.provider != self._provider:
             return "provider"
-        if envelope.target_id != self._worker_id:
-            return "audience"
-        if envelope.target_generation != self._generation:
-            return "generation"
-        if envelope.policy_class != self._policy_class:
-            return "policy"
-        if time.time() > envelope.deadline_epoch:
-            return "expired"
-        if request.interface != envelope.interface:
-            return "interface_mismatch"
         if request.max_results > envelope.max_results:
             return "budget"
-        if (
-            tool_request_digest(request.interface, request.query, request.max_results)
-            != envelope.request_digest
-        ):
-            return "digest"
-        return None
+        return fence_reason(
+            interface=envelope.interface,
+            target_id=envelope.target_id,
+            target_generation=envelope.target_generation,
+            policy_class=envelope.policy_class,
+            deadline_epoch=envelope.deadline_epoch,
+            request_digest=envelope.request_digest,
+            request=request,
+            worker_id=self._worker_id,
+            worker_generation=self._generation,
+            allowed_interfaces=self._interfaces,
+            expected_policy_class=self._policy_class,
+        )
 
     def _consume_nonce(self, nonce: str, deadline_epoch: float) -> bool:
         """Atomically consume a one-use delivery nonce; ``False`` on an exact replay."""

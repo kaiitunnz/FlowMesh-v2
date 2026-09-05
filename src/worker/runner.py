@@ -26,6 +26,7 @@ from shared.utils.time import now_iso
 
 from .executors.agent_episode_executor import AgentEpisodeResult
 from .executors.base_executor import ExecutionError, Executor, TaskCancelledError
+from .executors.tool_operation_executor import ToolOperationResult
 from .executors.utils.checkpoints import get_http_destination, write_executor_result
 from .external_tool_executor import WorkerExternalToolExecutor
 from .lifecycle import Lifecycle
@@ -578,6 +579,10 @@ class Runner:
                         metadata["agent_episode"] = out.harness_result.model_dump(
                             mode="json"
                         )
+                    elif isinstance(out, ToolOperationResult):
+                        # The fenced outcome rides the metadata so the server settles
+                        # the originating boundary and re-readies the agent.
+                        metadata["tool_operation"] = out.model_dump(mode="json")
                     self.lifecycle.set_succeeded(task_id, metadata=metadata)
                     self.logger.info("Task %s completed successfully", task_id)
                 except TaskCancelledError as e:

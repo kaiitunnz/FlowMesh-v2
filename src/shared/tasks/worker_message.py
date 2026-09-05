@@ -17,6 +17,7 @@ from shared.tasks import (
 )
 from shared.tasks.components import TaskMetadata
 from shared.tasks.merged import MergedChildTaskStrict
+from shared.tools.contract import MediatedOperationPermit
 from shared.utils.json import dedup_json, restore_json
 
 
@@ -45,6 +46,10 @@ class WorkerTaskMessage(BaseModel):
     agent_episode: AgentEpisodeDispatch | None = Field(
         default=None,
         description="Agent-episode continuation context for a run-to-yield step.",
+    )
+    tool_operation: MediatedOperationPermit | None = Field(
+        default=None,
+        description="One-use permit for a worker-originated off-lane tool operation.",
     )
 
     @property

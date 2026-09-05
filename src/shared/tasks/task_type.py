@@ -23,3 +23,4 @@ class TaskType(StrEnum):
     OMNI_TEXT2GENERAL = "omni_text2general"
     SERVE = "serve"
     DEV_MODEL = "dev_model"
+    TOOL_OPERATION = "tool_operation"
