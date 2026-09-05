@@ -283,7 +283,7 @@ STACK_ENV_SCHEMA = EnvSchema(
                 EnvVar(
                     "ORCHESTRATOR_WORKER_ORIGINATED_BOUNDARIES",
                     "0",
-                    description="Originate mediated agent tool boundaries in workers.",
+                    description="Originate mediated tool boundaries from workers.",
                     var_type=EnvVarType.BOOL,
                 ),
                 EnvVar(

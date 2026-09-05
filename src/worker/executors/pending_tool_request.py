@@ -34,6 +34,7 @@ def take(agent_task_id: str, call_correlation: str) -> ToolRequest | None:
 
 
 def peek(agent_task_id: str, call_correlation: str) -> ToolRequest | None:
-    """Return the request for an occurrence without removing it."""
+    """Return the request for an occurrence without removing it (a read-only affordance
+    for tests; the executor always consumes via ``take``)."""
     with _lock:
         return _store.get((agent_task_id, call_correlation))

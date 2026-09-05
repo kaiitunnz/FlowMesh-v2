@@ -40,7 +40,7 @@ listed here is in `.env.example`.
 | `ORCHESTRATOR_MAX_SPAWNS_PER_TURN` | `32` | Max spawn children admitted in one facade turn group |
 | `ORCHESTRATOR_MAX_SPAWNS_PER_REGION` | `256` | Max spawn children admitted per agent child region |
 | `ORCHESTRATOR_EPISODE_LOWERING` | `false` | Lower v2 templates into run-to-yield episodes |
-| `ORCHESTRATOR_WORKER_ORIGINATED_BOUNDARIES` | `false` | Originate mediated agent tool boundaries from workers |
+| `ORCHESTRATOR_WORKER_ORIGINATED_BOUNDARIES` | `false` | Originate mediated tool boundaries from workers |
 | `ORCHESTRATOR_AGENT_INPUT_BUDGET_BYTES` | `262144` | Max resolved first-turn input bytes per agent |
 | `AGENT_HARNESS_DEFAULT_BACKEND` | – | Default agent harness backend when a workflow sets none |
 | `AGENT_HARNESS_DEFAULT_VERSION` | – | Default agent harness backend version |
