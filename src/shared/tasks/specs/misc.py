@@ -158,9 +158,8 @@ class EchoSpecTemplate(TaskSpecTemplateBase):
     data: dict[str, Any] | None = None
 
 
-# The physical carrier for a worker-originated off-lane tool operation. It is minted by
-# the server, never user-submitted; the permit and correlation ride the worker message,
-# so the spec itself is empty.
+# Server-minted off-lane tool-operation carrier; the permit rides the worker message,
+# so the spec is empty.
 class ToolOperationSpecStrict(TaskSpecStrictBase):
     taskType: Literal[TaskType.TOOL_OPERATION]
 
