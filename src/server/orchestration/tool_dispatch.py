@@ -58,6 +58,10 @@ class ToolInvocationEnvelope(BaseModel):
     call_correlation: str
     idempotency_key: str | None = None
     request_payload: str | None = None
+    # Set for a worker-originated boundary (the raw request stays worker-private); its
+    # presence routes the boundary to the off-lane worker path rather than the in-server
+    # broker.
+    request_digest: str | None = None
     grant_snapshot: GrantSnapshot = GrantSnapshot()
 
 

@@ -46,6 +46,12 @@ class BoundaryRequest(BaseModel):
     ``call_correlation`` that survives a re-drive and the opaque ``request_payload``.
     The fabric-assigned identity and the durable continuation are the server's to mint;
     the adapter never sets them.
+
+    On the worker-originated tool path the worker keeps ``request_payload`` in
+    worker-private state and instead emits only control facts: ``request_digest`` (a
+    canonical hash of the raw request) and a bounded ``policy_descriptor``. A set
+    ``request_digest`` marks a boundary the worker originated and runs locally, so no
+    raw request crosses to the control plane.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -57,3 +63,5 @@ class BoundaryRequest(BaseModel):
     child_ref: str | None = None
     request_payload: str | None = None
     state_ref: str | None = None
+    request_digest: str | None = None
+    policy_descriptor: str | None = None

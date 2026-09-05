@@ -23,8 +23,11 @@ from shared.outcome import OutcomeManifest
 from shared.schemas.command import InterruptMessage
 from shared.schemas.result import ResultEnvelope, result_file_path
 from shared.tasks import TaskEnvelopeTemplate
+from shared.tasks.specs import ToolOperationSpecTemplate
+from shared.tasks.task_type import TaskType
+from shared.tools.contract import MediatedOperationPermit
 from shared.utils import new_workflow_id
-from shared.utils.ids import new_model_secret_ref
+from shared.utils.ids import new_model_secret_ref, new_task_id
 
 from ..config import AgentBindingConfig, OrchestrationConfig
 from ..hooks import SUPPLIER_RESOLVERS
@@ -110,6 +113,11 @@ def _sanitize_merge_spec(spec: dict[str, Any]) -> dict[str, Any]:
     return clone
 
 
+# Extra lifetime a worker-originated operation permit gets beyond the request timeout,
+# to cover dispatch and queue latency before the origin worker validates it.
+_OP_PERMIT_SLACK_SEC = 60.0
+
+
 def _compute_merge_key(task: TaskEnvelopeTemplate) -> str | None:
     task_type = str(task.spec.taskType or "").strip().lower()
     if task_type not in {"inference", "rag", "diffusion"}:
@@ -143,6 +151,7 @@ class TaskRuntime:
         self._secret_vault = secret_vault
         self._scope_budget = ScopeBudget.from_config(orchestration)
         self._web_search = orchestration.web_search
+        self._worker_originated_boundaries = orchestration.worker_originated_boundaries
         self._input_budget_bytes = orchestration.agent_input_budget_bytes
         self._agent_binding_defaults = _binding_defaults(orchestration.agent_binding)
         self._lowering_strategy = (
@@ -182,6 +191,11 @@ class TaskRuntime:
         # episode's model turn, keyed by task; the completion path reroutes the clean
         # turn-completion into the pending boundary rather than settling it.
         self._pending_facade_groups: dict[str, FacadeTurnGroup] = {}
+        # Worker-originated tool operations dispatched off the agent lane: the permit to
+        # ship with each op task, and the agent boundary its outcome settles. In-memory
+        # and rebuilt on restart from the pending boundary, never durably persisted.
+        self._op_permits: dict[str, MediatedOperationPermit] = {}
+        self._op_boundary: dict[str, tuple[str, str]] = {}
 
         self._lock = threading.RLock()
         self._cv = threading.Condition(self._lock)
@@ -1291,7 +1305,13 @@ class TaskRuntime:
             env.kind is BoundaryEventKind.INVOCATION
             and env.interface == SEARCH_INTERFACE
         ):
-            if self._tool_broker is not None:
+            # A recorded request digest marks a boundary the worker originated and holds
+            # its raw request privately: run it off-lane on that worker rather than in
+            # the in-server broker. The gateway-captured facade path carries its request
+            # on the wire (no digest) and keeps using the broker.
+            if env.request_digest is not None:
+                self._dispatch_worker_originated_tool_op(env)
+            elif self._tool_broker is not None:
                 self._tool_broker(env)
             return
         outcome = ToolOutcome(
@@ -1301,6 +1321,134 @@ class TaskRuntime:
         self.settle_episode_invocation(
             env.task_id, env.call_correlation, outcome.model_dump_json()
         )
+
+    def _dispatch_worker_originated_tool_op(self, env: ToolInvocationEnvelope) -> None:
+        """Mint a permit and dispatch a boundary's operation to its origin worker.
+
+        The permit is audience-bound to the agent's own worker, and the operation
+        dispatches there as a distinct off-lane task carrying only the permit — never
+        the raw request, which the origin worker holds privately. The op task is an
+        in-memory physical carrier (no ledger work item); a restart re-mints and
+        re-dispatches it from the still-pending boundary. If the origin worker is gone
+        the request cannot be recovered, so the boundary fails clean, never hanging.
+        """
+        agent = self._tasks.get(env.task_id)
+        engine = self._engines.get(agent.workflow_id) if agent else None
+        if agent is None or engine is None:
+            return
+        worker_id = agent.assigned_worker
+        worker = self._worker_registry.get_worker(worker_id) if worker_id else None
+        if worker_id is None or worker is None:
+            self._logger.warning(
+                "worker-originated tool op for %s has no live origin worker; "
+                "failing the boundary clean",
+                env.task_id,
+            )
+            self.settle_episode_invocation(
+                env.task_id, env.call_correlation, error="origin worker unavailable"
+            )
+            return
+        cfg = self._web_search
+        deadline = time.time() + cfg.timeout_sec + _OP_PERMIT_SLACK_SEC
+        permit = engine.mint_operation_permit(
+            env.task_id,
+            env.call_correlation,
+            target_id=worker_id,
+            target_generation=worker.incarnation,
+            max_results=cfg.max_results,
+            timeout_sec=cfg.timeout_sec,
+            result_char_cap=cfg.result_char_cap,
+            deadline_epoch=deadline,
+        )
+        if permit is None:
+            self.settle_episode_invocation(
+                env.task_id, env.call_correlation, error="could not mint a permit"
+            )
+            return
+        op_task_id = new_task_id()
+        self._tasks[op_task_id] = self._build_op_task_record(
+            agent, op_task_id, worker_id
+        )
+        self._original_deps[op_task_id] = set()
+        self._op_permits[op_task_id] = permit
+        self._op_boundary[op_task_id] = (env.task_id, env.call_correlation)
+        self._enqueue_ready_locked(op_task_id)
+
+    @staticmethod
+    def _build_op_task_record(
+        agent: TaskRecord, op_task_id: str, worker_id: str
+    ) -> TaskRecord:
+        envelope = TaskEnvelopeTemplate(
+            apiVersion=agent.task.apiVersion,
+            kind=agent.task.kind,
+            spec=ToolOperationSpecTemplate(taskType=TaskType.TOOL_OPERATION),
+        )
+        return TaskRecord(
+            task_id=op_task_id,
+            workflow_id=agent.workflow_id,
+            owner_id=agent.owner_id,
+            org_id=agent.org_id,
+            raw_yaml="",
+            task=envelope,
+            task_type=TaskType.TOOL_OPERATION,
+            selected_worker=[worker_id],
+        )
+
+    def _settle_worker_originated_op_locked(
+        self, op_task_id: str, op_result: dict[str, Any]
+    ) -> None:
+        """Settle the agent boundary from a completed off-lane tool operation.
+
+        The op result carries exactly one of a reference-backed outcome or a bounded
+        inline outcome; either injects at the originating boundary. A duplicate or late
+        report finds no mapping and is a no-op (the boundary is also absorbing).
+        """
+        mapping = self._op_boundary.pop(op_task_id, None)
+        self._op_permits.pop(op_task_id, None)
+        if mapping is not None:
+            agent_task_id, call = mapping
+            ref = op_result.get("outcome_ref")
+            outcome = op_result.get("outcome")
+            if ref is not None:
+                self.settle_episode_invocation(
+                    agent_task_id, call, ref=OutcomeManifest.model_validate(ref)
+                )
+            elif outcome is not None:
+                self.settle_episode_invocation(
+                    agent_task_id,
+                    call,
+                    value=ToolOutcome.model_validate(outcome).model_dump_json(),
+                )
+            else:
+                self.settle_episode_invocation(
+                    agent_task_id, call, error="tool operation returned no outcome"
+                )
+        self._discard_op_task_locked(op_task_id)
+
+    def _fail_worker_originated_op_locked(self, op_task_id: str, reason: str) -> None:
+        """Fail the agent boundary clean when its off-lane tool operation failed.
+
+        A fence rejection, an unrecoverable local request, or a deterministic egress
+        fault settles the boundary as a fenced failure so the workflow errors rather
+        than resuming the agent past a boundary with no outcome.
+        """
+        mapping = self._op_boundary.pop(op_task_id, None)
+        self._op_permits.pop(op_task_id, None)
+        if mapping is not None:
+            agent_task_id, call = mapping
+            self.settle_episode_invocation(
+                agent_task_id, call, error=f"tool operation failed: {reason}"
+            )
+        self._discard_op_task_locked(op_task_id)
+
+    def _discard_op_task_locked(self, op_task_id: str) -> None:
+        """Drop a consumed op carrier and its correlation; in-memory only, never
+        persisted, so every teardown path leaves no residual state."""
+        self._tasks.pop(op_task_id, None)
+        self._original_deps.pop(op_task_id, None)
+        self._ready_index.discard(op_task_id)
+        self._op_boundary.pop(op_task_id, None)
+        self._op_permits.pop(op_task_id, None)
 
     def set_model_settler(
         self, settler: Callable[[ToolInvocationEnvelope], None]
@@ -1440,7 +1588,13 @@ class TaskRuntime:
                 capsule_blob=capsule_blob,
                 delivered_outcomes=outcomes,
                 input_bindings=input_bindings,
+                worker_originated_boundaries=self._worker_originated_boundaries,
             )
+
+    def tool_operation_dispatch(self, task_id: str) -> MediatedOperationPermit | None:
+        """The permit to ship with a worker-originated tool-operation task, if any."""
+        with self._lock:
+            return self._op_permits.get(task_id)
 
     def _synthesize_ready_children_locked(
         self, workflow_id: str, engine: OrchestrationEngine, advance: Advance
@@ -1590,8 +1744,16 @@ class TaskRuntime:
             self._fail_v2_records_locked(
                 advance.failed, "ambiguity-terminal effect", persist=True
             )
+            self._discard_op_tasks_for_locked(advance.failed)
         self._save_ledger_locked(record.workflow_id)
         return advance
+
+    def _discard_op_tasks_for_locked(self, agent_task_ids: Sequence[str]) -> None:
+        """Drop pending op carriers whose agent boundary just failed clean."""
+        failed = set(agent_task_ids)
+        for op_task_id, (agent_task_id, _) in list(self._op_boundary.items()):
+            if agent_task_id in failed:
+                self._discard_op_task_locked(op_task_id)
 
     def _save_ledger_locked(self, workflow_id: str) -> None:
         if (engine := self._engines.get(workflow_id)) is not None:
@@ -2198,6 +2360,11 @@ class TaskRuntime:
             record.supplier_id = supplier_id
             self._remove_from_ready_locked(task_id)
             self._merge_bucket_remove(task_id)
+            if record.task_type == TaskType.TOOL_OPERATION:
+                # An off-lane op carrier has no ledger work item and is re-derived from
+                # the durable boundary on restart, so it is never persisted: it leaves
+                # no durable task record or dispatched-set member to reap.
+                return
             self._workflow_registry.commit_transition(
                 record.workflow_id,
                 records=self._records_locked(task_id),
@@ -2270,6 +2437,10 @@ class TaskRuntime:
 
         with self._cv:
             record = self._tasks.get(task_id)
+            op_result = payload.get("tool_operation")
+            if op_result is not None and record is not None:
+                self._settle_worker_originated_op_locked(task_id, op_result)
+                return usages
             episode_step = payload.get("agent_episode")
             if episode_step is not None and record is not None:
                 harness_result = HarnessResult.model_validate(episode_step)
@@ -2422,6 +2593,12 @@ class TaskRuntime:
 
         with self._cv:
             record = self._tasks.get(task_id)
+            if task_id in self._op_boundary:
+                # An off-lane tool operation failed (fence rejection, an unrecoverable
+                # local request, or a deterministic egress fault): settle its agent
+                # boundary clean rather than cascading a synthetic task failure.
+                self._fail_worker_originated_op_locked(task_id, message)
+                return [], [], usages
             if record:
                 if record.status == TaskStatus.CANCELLED:
                     return [], [], usages
@@ -2709,6 +2886,12 @@ class TaskRuntime:
                 if record.assigned_worker != worker_id:
                     continue
                 if record.status not in (TaskStatus.DISPATCHED, TaskStatus.CANCELLING):
+                    continue
+                if task_id in self._op_boundary:
+                    # A worker-originated op carrier on the departed worker: its agent
+                    # boundary fails clean through the agent's own uncertainty path, so
+                    # drop the dead carrier rather than requeuing a stale-audience op.
+                    self._discard_op_task_locked(task_id)
                     continue
                 self._rehydrated_dispatched.pop(task_id, None)
                 # v2 route/worker loss resolves through the uncertainty FSM: a

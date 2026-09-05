@@ -20,12 +20,14 @@ from typing import Self
 
 from shared.harness import DeliveredOutcome, OutcomeKind
 from shared.outcome import OutcomeManifest
+from shared.tools.contract import MediatedOperationPermit
 from shared.utils import (
     new_activation_id,
     new_attempt_id,
     new_authority_grant_id,
     new_idempotency_key,
     new_invocation_id,
+    new_mediated_permit_id,
     new_scope_id,
     new_work_item_id,
 )
@@ -659,6 +661,20 @@ class OrchestrationEngine:
         wi = self._work_item_for_task(task_id)
         if wi is None or wi.status in _TERMINAL_WI or wi.invocation_id is None:
             return Advance()
+        if wi.status is WorkItemStatus.BLOCKED and self._has_pending_local_boundary(wi):
+            # The worker that captured this boundary's request is lost, and the
+            # worker-private request cannot be recovered here (a fresh permit would need
+            # a fresh proposal on a new worker). Fail the boundary clean so the workflow
+            # errors rather than resuming the agent past a boundary with no outcome.
+            self._emit(
+                "invocation_ambiguity_terminal",
+                work_item_id=wi.work_item_id,
+                invocation_id=wi.invocation_id,
+            )
+            released = self._agent_terminal_regions(wi.operator_id, wi.activation_id)
+            return Advance(failed=self._settle_failure(wi.work_item_id)).extend(
+                released
+            )
         invocation = self._invocations[wi.invocation_id]
         invocation.state = next_on_uncertain(
             invocation.state,
@@ -946,6 +962,19 @@ class OrchestrationEngine:
             or env.denial is not None
         )
 
+    def _has_pending_local_boundary(self, wi: WorkItem) -> bool:
+        """Whether the work item awaits an unsettled worker-originated boundary.
+
+        A recorded request digest marks a boundary whose raw request lives only on the
+        capturing worker; if that worker is lost the boundary cannot be recovered here.
+        """
+        return any(
+            act == wi.activation_id
+            and env.request_digest is not None
+            and not self._boundary_resolved(env)
+            for (act, _), env in self._boundary_events.items()
+        )
+
     @classmethod
     def _group_awaits_unresolved(cls, members: Sequence[BoundaryEvent]) -> bool:
         """Whether the group holds an await-outcome member with no settled outcome."""
@@ -1106,6 +1135,7 @@ class OrchestrationEngine:
             call_correlation=env.call_correlation,
             idempotency_key=env.idempotency_key,
             request_payload=env.request_payload,
+            request_digest=env.request_digest,
             grant_snapshot=self._grant_snapshot_for(wi),
         )
 
@@ -1116,6 +1146,55 @@ class OrchestrationEngine:
                 grant_id = scope.grant_id or grant_id
         return GrantSnapshot(
             grant_id=grant_id, policy_envelope=self._instance.policy_envelope
+        )
+
+    def mint_operation_permit(
+        self,
+        task_id: str,
+        call_correlation: str,
+        *,
+        target_id: str,
+        target_generation: int,
+        max_results: int,
+        timeout_sec: float,
+        result_char_cap: int,
+        deadline_epoch: float,
+    ) -> MediatedOperationPermit | None:
+        """A one-use permit for a recorded worker-originated boundary, or None.
+
+        The engine owns the durable identity and authority: it fills the invocation,
+        idempotency key, request digest, interface, subject, and the policy epoch the
+        boundary was admitted under. The caller supplies the audience (the agent's
+        worker and its generation) and the policy-bounded budget the operation runs in.
+        Returns None for a boundary that carries no digest — i.e. one the worker did not
+        originate — so a re-mint never fabricates authorization the boundary lacks.
+        """
+        wi = self._work_item_for_task(task_id)
+        if wi is None:
+            return None
+        env = self._boundary_events.get((wi.activation_id, call_correlation))
+        if env is None or env.invocation_id is None or env.request_digest is None:
+            return None
+        interface = env.interface or ""
+        epoch = 0
+        if (act := self._activations.get(wi.activation_id)) is not None:
+            epoch = self._grant_for_scope(act.scope_id).epoch
+        return MediatedOperationPermit(
+            permit_id=new_mediated_permit_id(),
+            agent_task_id=wi.legacy_task_id,
+            call_correlation=call_correlation,
+            interface=interface,
+            subject=interface,
+            invocation_id=env.invocation_id,
+            idempotency_key=env.idempotency_key,
+            request_digest=env.request_digest,
+            target_id=target_id,
+            target_generation=target_generation,
+            policy_epoch=epoch,
+            deadline_epoch=deadline_epoch,
+            max_results=max_results,
+            timeout_sec=timeout_sec,
+            result_char_cap=result_char_cap,
         )
 
     def boundary_settleable(self, task_id: str, call_correlation: str) -> bool:

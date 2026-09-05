@@ -64,7 +64,8 @@ control adds `scl-` service claims, `rpl-` replica incarnations, and `lse-` allo
 leases. `msk-` is an unguessable ref for a workflow's vaulted model credential and `hnd-`
 an unguessable claim-bound admission handoff token. The network plane adds `rog-` route
 origins and `rly-` relay sessions. Remote external-tool carriage adds `xtr-` tool relay
-sessions and `xdn-` one-use tool delivery nonces.
+sessions and `xdn-` one-use tool delivery nonces. Worker-originated mediated boundaries add
+`mop-` one-use mediated-operation permits.
 Always use `new_*_id()`
 helpers in `src/shared/utils/ids.py`. Never use `uuid4()` or `secrets.token_hex`
 for IDs.
@@ -229,6 +230,15 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   supervisors relay opaque frames and hold only the manifest. Materialization is idempotent
   under `idm-*`. The fabric-tool worker path is the first consumer; the model-gateway and
   resident completions still settle inline. See [`EXECUTORS.md`](EXECUTORS.md).
+- **Worker-originated mediated boundaries.** An agent's assigned worker captures a
+  fabric-tool boundary (today `search/v1`), keeps the raw request in worker-private state,
+  and yields the lane carrying only a canonical request digest — no raw arguments cross to
+  the control plane. The worker then runs the operation off-lane locally and reports the
+  outcome, which settles the boundary before the episode resumes. The request stays
+  worker-local while a shared outcome materializes into the content-addressed store. This
+  is the default; setting `ORCHESTRATOR_WORKER_ORIGINATED_BOUNDARIES=false` routes the
+  boundary through the in-server broker instead, and the gateway-captured model-turn
+  facade always uses the broker. See [`EXECUTORS.md`](EXECUTORS.md).
 - **Task merging.** Compatible adjacent tasks in a DAG (same `taskType`,
   model, hardware shape, and merge key) coalesce into a single dispatch.
   Merged children ride on `WorkerTaskMessage.merged_children`; the worker

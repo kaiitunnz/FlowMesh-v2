@@ -37,7 +37,7 @@ from shared.tasks.specs import TaskSpecStrictBase
 from shared.tasks.task_type import TaskType
 from shared.tasks.worker_message import WorkerHardware, WorkerTaskMessage
 from worker.config import WorkerConfig
-from worker.lifecycle import Lifecycle
+from worker.lifecycle import Lifecycle, PendingToolRequestStore
 
 type ExecutorTask = WorkerTaskMessage
 type TaskReference = WorkerTaskMessage | MergedChildTaskStrict
@@ -103,6 +103,16 @@ class Executor(ABC):
         """
         if self._lifecycle is not None:
             self._lifecycle.notify_task_update(task_id, payload)
+
+    def _pending_tool_requests(self) -> PendingToolRequestStore:
+        """The worker-private store for captured, not-yet-executed tool requests.
+
+        Raises if no lifecycle was injected, so a misconfigured worker fails cleanly
+        rather than raising ``AttributeError`` deep in an executor.
+        """
+        if self._lifecycle is None:
+            raise ExecutionError("executor has no worker lifecycle")
+        return self._lifecycle.pending_tool_requests
 
     def prepare(self) -> None:
         """Optional: called once before the first `run`.

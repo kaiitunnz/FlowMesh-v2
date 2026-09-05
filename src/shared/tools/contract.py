@@ -67,6 +67,47 @@ class RemoteToolOperationEnvelope(BaseModel):
     result_char_cap: int
 
 
+class MediatedOperationPermit(BaseModel):
+    """A one-use control authorization for one worker-originated mediated operation.
+
+    The control plane mints it after verifying the live continuation, effective
+    authority, quota, and occurrence idempotence, and returns it to the agent's own
+    worker. That worker's off-lane executor validates it before egress and rejects an
+    expired, altered, wrong-audience, or over-budget operation as a fence failure. It is
+    neither a ``ServiceClaim`` credit nor an endpoint credential, and it carries no
+    request payload: the raw request stays in worker-private state, looked up by
+    ``(agent_task_id, call_correlation)``.
+
+    ``request_digest`` binds request integrity; ``target_id`` / ``target_generation``
+    bind the audience to the agent's worker incarnation; ``permit_id`` is a one-use,
+    unguessable grant a fresh same-``idempotency_key`` re-drive re-mints;
+    ``deadline_epoch`` bounds its lifetime; ``invocation_id`` and ``idempotency_key``
+    together are the durable identity the outcome settles against. ``subject``,
+    ``policy_class``, and
+    ``policy_epoch`` are declared here as a forward contract; the paths that bind real
+    subjects and policy generations enforce them.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    permit_id: str
+    agent_task_id: str
+    call_correlation: str
+    interface: str
+    subject: str
+    invocation_id: str
+    idempotency_key: str | None
+    request_digest: str
+    target_id: str
+    target_generation: int
+    policy_class: str = "default"
+    policy_epoch: int = 0
+    deadline_epoch: float
+    max_results: int
+    timeout_sec: float
+    result_char_cap: int
+
+
 class ToolOutcomeStatus(StrEnum):
     """The typed result class of a fabric-served tool call, all durably injected."""
 
@@ -92,6 +133,7 @@ class ToolOutcome(BaseModel):
 
 
 __all__ = [
+    "MediatedOperationPermit",
     "RemoteToolOperationEnvelope",
     "ToolOperationEnvelope",
     "ToolOutcome",

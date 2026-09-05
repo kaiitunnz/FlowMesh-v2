@@ -611,6 +611,7 @@ class OrchestrationConfig:
     max_spawns_per_turn: int | None = None
     max_spawns_per_region: int | None = None
     episode_lowering: bool = False
+    worker_originated_boundaries: bool = True
     agent_input_budget_bytes: int = 262_144
     gateway: AgentModelGatewayConfig = field(default_factory=AgentModelGatewayConfig)
     agent_binding: AgentBindingConfig = field(default_factory=AgentBindingConfig)
@@ -630,6 +631,9 @@ class OrchestrationConfig:
             max_spawns_per_turn=parse_int_env("ORCHESTRATOR_MAX_SPAWNS_PER_TURN"),
             max_spawns_per_region=parse_int_env("ORCHESTRATOR_MAX_SPAWNS_PER_REGION"),
             episode_lowering=parse_bool_env("ORCHESTRATOR_EPISODE_LOWERING", False),
+            worker_originated_boundaries=parse_bool_env(
+                "ORCHESTRATOR_WORKER_ORIGINATED_BOUNDARIES", True
+            ),
             agent_input_budget_bytes=parse_int_env(
                 "ORCHESTRATOR_AGENT_INPUT_BUDGET_BYTES"
             )

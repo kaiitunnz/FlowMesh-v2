@@ -23,6 +23,8 @@ from .misc import (
     EmbeddingSpecStrict,
     EmbeddingSpecTemplate,
     ModelBindingMode,
+    ToolOperationSpecStrict,
+    ToolOperationSpecTemplate,
 )
 from .omni import (
     OmniText2AudioSpecStrict,
@@ -89,6 +91,8 @@ __all__ = [
     "EchoSpecTemplate",
     "EmbeddingSpecStrict",
     "EmbeddingSpecTemplate",
+    "ToolOperationSpecStrict",
+    "ToolOperationSpecTemplate",
     "ServeSpecStrict",
     "ServeSpecTemplate",
     "SSHSpecStrict",
