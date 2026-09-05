@@ -25,7 +25,11 @@ from shared.tools.contract import (
 )
 from shared.tools.search.egress import ExternalToolSidecar
 from shared.tools.search.providers import LazySearchProvider
-from shared.tools.search.schema import SEARCH_INTERFACE, ToolRequest
+from shared.tools.search.schema import (
+    SEARCH_INTERFACE,
+    ToolRequest,
+    tool_request_digest,
+)
 
 from ..content_store import build_content_store
 from ..tool_fence import ProviderBinding, fence_reason, materialize_tool_outcome
@@ -115,7 +119,9 @@ class ToolOperationExecutor(Executor):
             policy_class=permit.policy_class,
             deadline_epoch=permit.deadline_epoch,
             request_digest=permit.request_digest,
-            request=request,
+            computed_digest=tool_request_digest(
+                request.interface, request.query, request.max_results
+            ),
             worker_id=worker_id,
             worker_generation=generation,
             allowed_interfaces=_INTERFACES,

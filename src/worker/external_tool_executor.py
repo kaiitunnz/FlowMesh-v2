@@ -28,7 +28,11 @@ from shared.tools.contract import (
 )
 from shared.tools.search.egress import ExternalToolSidecar
 from shared.tools.search.providers import LazySearchProvider
-from shared.tools.search.schema import SEARCH_INTERFACE, ToolRequest
+from shared.tools.search.schema import (
+    SEARCH_INTERFACE,
+    ToolRequest,
+    tool_request_digest,
+)
 from shared.tools.wire import (
     FRAME_CANCEL,
     FRAME_OPERATION,
@@ -228,7 +232,9 @@ class WorkerExternalToolExecutor:
             policy_class=envelope.policy_class,
             deadline_epoch=envelope.deadline_epoch,
             request_digest=envelope.request_digest,
-            request=request,
+            computed_digest=tool_request_digest(
+                request.interface, request.query, request.max_results
+            ),
             worker_id=self._worker_id,
             worker_generation=self._generation,
             allowed_interfaces=self._interfaces,

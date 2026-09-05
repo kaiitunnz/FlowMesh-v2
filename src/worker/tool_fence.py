@@ -13,7 +13,6 @@ from dataclasses import dataclass
 
 from shared.outcome import FabricContentStore, OutcomeManifest
 from shared.tools.contract import ToolOutcome, ToolOutcomeStatus
-from shared.tools.search.schema import ToolRequest, tool_request_digest
 
 
 @dataclass(frozen=True)
@@ -32,7 +31,7 @@ def fence_reason(
     policy_class: str,
     deadline_epoch: float,
     request_digest: str,
-    request: ToolRequest,
+    computed_digest: str,
     worker_id: str,
     worker_generation: int,
     allowed_interfaces: frozenset[str],
@@ -41,12 +40,12 @@ def fence_reason(
     """Why an authorized operation fails this worker's fence, or None if it passes.
 
     Checks the audience (worker id + generation), the declared interface, the deadline,
-    and the request integrity digest, verified over the exact request the worker will
-    egress, so an altered request or digest is rejected before any provider call. The
-    policy class is compared only when ``expected_policy_class`` is set; a caller with
-    no independent policy expectation passes ``None`` to skip it. Provider audience and
-    result-budget bounds are the caller's to apply, since they differ between the two
-    fences.
+    and the request integrity digest. ``computed_digest`` is recomputed by the caller
+    over the exact request it will egress, so an altered request or digest is rejected
+    before any provider call; it also binds the interface the request was framed for.
+    The policy class is compared only when ``expected_policy_class`` is set; a caller
+    with no independent policy expectation passes ``None`` to skip it. Provider audience
+    and result-budget bounds are the caller's, since they differ between the fences.
     """
     if interface not in allowed_interfaces:
         return "interface"
@@ -58,12 +57,7 @@ def fence_reason(
         return "policy"
     if time.time() > deadline_epoch:
         return "expired"
-    if request.interface != interface:
-        return "interface_mismatch"
-    if (
-        tool_request_digest(request.interface, request.query, request.max_results)
-        != request_digest
-    ):
+    if computed_digest != request_digest:
         return "digest"
     return None
 

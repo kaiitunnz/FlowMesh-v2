@@ -262,7 +262,9 @@ def test_wrong_audience_and_digest_are_rejected(
         ({"policy_class": "strict"}, SEARCH_INTERFACE, "policy"),
         ({"deadline_epoch": time.time() - 1}, SEARCH_INTERFACE, "expired"),
         ({"interface": "other/v1"}, SEARCH_INTERFACE, "interface"),
-        ({}, "other/v1", "interface_mismatch"),
+        # A request framed for another interface fails the integrity digest, which binds
+        # the interface it was computed over.
+        ({}, "other/v1", "digest"),
         ({"max_results": 1}, SEARCH_INTERFACE, "budget"),
     ],
 )
