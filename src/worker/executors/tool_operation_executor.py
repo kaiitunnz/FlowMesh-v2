@@ -75,21 +75,25 @@ class ToolOperationExecutor(Executor):
             raise ExecutionError(
                 f"{task.task_id} routed to the tool-operation executor without a permit"
             )
+        store = build_content_store(self._config.server_base_url)
+        # Recover an already-produced outcome first: a re-drive after a materialize that
+        # the server never recorded (a crash between materialize and settle) returns the
+        # prior result by its idempotency key, before consuming the worker-private
+        # request — so a successful operation is never re-failed for a missing request.
+        if (prior := self._prior_manifest(permit, store)) is not None:
+            return ToolOperationResult(outcome_ref=prior)
         request = pending_tool_request.take(
             permit.agent_task_id, permit.call_correlation
         )
         if request is None:
-            # The capturing worker incarnation is gone; the request cannot be recovered
-            # here. Fail deterministically so the boundary settles rather than egressing
-            # an unfenced request.
+            # No prior outcome and the capturing worker incarnation is gone: the request
+            # cannot be recovered here. Fail deterministically so the boundary settles
+            # rather than egressing an unfenced request.
             raise ExecutionError(
                 f"no worker-private request for {permit.call_correlation}"
             )
         if (reason := self._fence_reject(permit, request)) is not None:
             raise ExecutionError(f"tool permit fence rejected: {reason}")
-        store = build_content_store(self._config.server_base_url)
-        if (prior := self._prior_manifest(permit, store)) is not None:
-            return ToolOperationResult(outcome_ref=prior)
         outcome = self._egress(permit, request)
         materialized = materialize_tool_outcome(
             outcome, idempotency_key=permit.idempotency_key, content_store=store
@@ -113,7 +117,9 @@ class ToolOperationExecutor(Executor):
             worker_id=worker_id,
             worker_generation=generation,
             allowed_interfaces=_INTERFACES,
-            expected_policy_class=permit.policy_class,
+            # Policy-class enforcement for this path lands when 7e/7f bind real policy
+            # generations; the permit carries the class as a forward contract.
+            expected_policy_class=None,
         )
 
     def _egress(

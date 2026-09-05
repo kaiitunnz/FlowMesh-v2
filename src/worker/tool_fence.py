@@ -36,15 +36,17 @@ def fence_reason(
     worker_id: str,
     worker_generation: int,
     allowed_interfaces: frozenset[str],
-    expected_policy_class: str,
+    expected_policy_class: str | None,
 ) -> str | None:
     """Why an authorized operation fails this worker's fence, or None if it passes.
 
-    Checks the audience (worker id + generation), the declared interface, the policy
-    class, the deadline, and the request integrity digest, verified over the exact
-    request the worker will egress, so an altered request or digest is rejected before
-    any provider call. Provider audience and result-budget bounds are the caller's to
-    apply, since they differ between the two fences.
+    Checks the audience (worker id + generation), the declared interface, the deadline,
+    and the request integrity digest, verified over the exact request the worker will
+    egress, so an altered request or digest is rejected before any provider call. The
+    policy class is compared only when ``expected_policy_class`` is set; a caller with
+    no independent policy expectation passes ``None`` to skip it. Provider audience and
+    result-budget bounds are the caller's to apply, since they differ between the two
+    fences.
     """
     if interface not in allowed_interfaces:
         return "interface"
@@ -52,7 +54,7 @@ def fence_reason(
         return "audience"
     if target_generation != worker_generation:
         return "generation"
-    if policy_class != expected_policy_class:
+    if expected_policy_class is not None and policy_class != expected_policy_class:
         return "policy"
     if time.time() > deadline_epoch:
         return "expired"

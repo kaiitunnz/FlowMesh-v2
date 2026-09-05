@@ -142,3 +142,33 @@ def test_successful_result_is_returned_by_reference(
     assert result.outcome is None
     assert result.outcome_ref is not None
     assert result.outcome_ref.idempotency_key == "idm-1"
+
+
+def test_redrive_after_materialize_recovers_the_prior_outcome(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A crash between materialize and the recorded settle re-dispatches the op; its
+    # worker-private request is already consumed, but a prior materialization under the
+    # same idempotency key must be recovered rather than failing the boundary clean.
+    _stash()
+    store = InMemoryContentStore()
+    monkeypatch.setattr(
+        tool_operation_executor, "build_content_store", lambda _url: store
+    )
+    out = ToolOutcome(status=ToolOutcomeStatus.SUCCESS, value="results...")
+    first = _executor(out)
+    ref = first.run(_task(_permit()), tmp_path).outcome_ref
+    assert ref is not None
+    assert pending_tool_request.peek(_AGENT, _CALL) is None  # request consumed
+
+    # A fresh op (no worker-private request, a fresh sidecar that must not be called)
+    # recovers the prior outcome by reference.
+    redrive = _executor()
+    redrive._sidecar = _Sidecar(  # type: ignore[assignment]
+        ToolOutcome(status=ToolOutcomeStatus.UNAVAILABLE, value="must not egress")
+    )
+    result = redrive.run(_task(_permit()), tmp_path)
+    assert result.outcome is None
+    assert result.outcome_ref is not None
+    assert result.outcome_ref.content_digest == ref.content_digest
+    assert redrive._sidecar.calls == 0  # type: ignore[attr-defined]
