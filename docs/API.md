@@ -53,12 +53,12 @@ self-authenticate the same way, sending `FLOWMESH_API_KEY` as the bearer.
 
 ## Content
 
-Content-addressed, tenant-scoped outcome store for reference-backed invocation outcomes. A worker writes and hydrates; the tenant is the caller's principal.
+Content-addressed, tenant-scoped outcome store for reference-backed invocation outcomes that a worker writes and hydrates.
 
 | Method | Path | Description |
 |--------|------|-------------|
 | PUT | `/api/v1/content?idem={idm}` | Materialize outcome bytes; returns the `OutcomeManifest`. |
-| GET | `/api/v1/content/by-idem/{idm}` | Resolve the manifest already materialized under an idempotency key. |
+| GET | `/api/v1/content?idem={idm}` | Resolve the manifest already materialized under an idempotency key. |
 | GET | `/api/v1/content/{digest}` | Hydrate content by digest. |
 
 ## Traces
