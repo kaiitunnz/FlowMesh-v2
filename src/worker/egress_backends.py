@@ -81,9 +81,7 @@ class ModelEgress:
 
     def digest(self, request: CapturedRequest) -> str:
         assert isinstance(request, ModelRequest)
-        return model_request_digest(
-            request.interface, request.url, request.model, request.prompt
-        )
+        return model_request_digest(request.interface, request.url, request.body)
 
     def execute(
         self,

@@ -100,13 +100,9 @@ class ExternalModelSidecar:
         headers = {"Content-Type": "application/json"}
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
-        body = {
-            "model": request.model,
-            "messages": [{"role": "user", "content": request.prompt}],
-        }
         response = requests.post(
             f"{request.url.rstrip('/')}/chat/completions",
-            json=body,
+            json=request.body,
             headers=headers,
             timeout=timeout_sec,
         )

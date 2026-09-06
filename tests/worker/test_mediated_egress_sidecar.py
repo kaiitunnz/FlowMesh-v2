@@ -209,10 +209,11 @@ def test_redrive_after_materialize_recovers_the_prior_outcome() -> None:
     h.stop()
 
 
+_MODEL_BODY = {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
 _MODEL_REQUEST = ModelRequest(
-    interface=MODEL_INTERFACE, url="http://up/v1", model="m", prompt="hi"
+    interface=MODEL_INTERFACE, url="http://up/v1", body=_MODEL_BODY
 )
-_MODEL_DIGEST = model_request_digest(MODEL_INTERFACE, "http://up/v1", "m", "hi")
+_MODEL_DIGEST = model_request_digest(MODEL_INTERFACE, "http://up/v1", _MODEL_BODY)
 
 
 class _StubModelEgress:
@@ -224,9 +225,7 @@ class _StubModelEgress:
         self.calls = 0
 
     def digest(self, request: Any) -> str:
-        return model_request_digest(
-            request.interface, request.url, request.model, request.prompt
-        )
+        return model_request_digest(request.interface, request.url, request.body)
 
     def execute(self, envelope: Any, request: Any, credential: str | None) -> Any:
         raise AssertionError("a held model turn egresses through complete, not execute")

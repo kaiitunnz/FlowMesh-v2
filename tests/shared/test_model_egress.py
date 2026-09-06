@@ -10,7 +10,9 @@ from shared.tools.model.egress import ExternalModelSidecar, ModelEgressError
 from shared.tools.model.schema import MODEL_INTERFACE, ModelRequest
 
 _REQUEST = ModelRequest(
-    interface=MODEL_INTERFACE, url="http://up/v1", model="m", prompt="hello"
+    interface=MODEL_INTERFACE,
+    url="http://up/v1",
+    body={"model": "m", "messages": [{"role": "user", "content": "hello"}]},
 )
 
 

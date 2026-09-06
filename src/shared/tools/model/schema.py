@@ -8,6 +8,7 @@ stays worker-private while control holds only the digest.
 
 import hashlib
 import json
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
@@ -19,16 +20,17 @@ MODEL_INTERFACE = "model"
 class ModelRequest(BaseModel):
     """The canonical external-model request the worker egresses.
 
-    ``url`` and ``model`` come from the activation's pinned binding (credential-free);
-    the credential is resolved at the worker from its local environment, never here.
+    ``url`` comes from the activation's pinned binding (credential-free). ``body`` is
+    the exact chat-completions payload posted to it — the model, the messages, and any
+    tools the facade injected. The credential is resolved at the worker from the permit
+    or the local environment, never here.
     """
 
     model_config = ConfigDict(frozen=True)
 
     interface: str
     url: str
-    model: str
-    prompt: str
+    body: dict[str, Any]
 
 
 class ModelToolCall(BaseModel):
@@ -55,15 +57,17 @@ class ModelCompletion(BaseModel):
 
 
 def parse_model_request(payload: str | None, *, url: str, model: str) -> ModelRequest:
-    """Build a canonical ``ModelRequest`` from a boundary payload and pinned binding.
+    """Build a ``ModelRequest`` from a single-prompt boundary payload and binding.
 
     The prompt is the ``prompt``/``input``/``content`` field of a JSON payload, or the
-    bare payload string. This is the canonical form the origin worker digests and
-    egresses against; the control plane never sees the payload.
+    bare payload string, wrapped as one user message. This is the deferred-boundary
+    form; a held facade builds its own multi-message body. Control never sees either.
     """
-    return ModelRequest(
-        interface=MODEL_INTERFACE, url=url, model=model, prompt=_extract_prompt(payload)
-    )
+    body: dict[str, Any] = {
+        "model": model,
+        "messages": [{"role": "user", "content": _extract_prompt(payload)}],
+    }
+    return ModelRequest(interface=MODEL_INTERFACE, url=url, body=body)
 
 
 def _extract_prompt(payload: str | None) -> str:
@@ -80,13 +84,15 @@ def _extract_prompt(payload: str | None) -> str:
     return payload
 
 
-def model_request_digest(interface: str, url: str, model: str, prompt: str) -> str:
+def model_request_digest(interface: str, url: str, body: dict[str, Any]) -> str:
     """A canonical integrity digest over the request the fence commits to.
 
-    The worker executor recomputes it over the delivered request and rejects a mismatch,
-    so an altered request or an altered digest fails the fence before any provider call.
+    The worker recomputes it over the delivered request and rejects a mismatch, so an
+    altered request or an altered digest fails the fence before any provider call. The
+    body is serialized canonically so the propose-side and fence-side digests agree.
     """
-    raw = f"{interface}\x00{url}\x00{model}\x00{prompt}".encode()
+    canonical = json.dumps(body, sort_keys=True, separators=(",", ":"))
+    raw = f"{interface}\x00{url}\x00{canonical}".encode()
     return hashlib.sha256(raw).hexdigest()
 
 

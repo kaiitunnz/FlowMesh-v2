@@ -59,12 +59,16 @@ def test_model_boundary_is_stripped_and_stored_for_openai_binding() -> None:
     req = result.request
     assert req is not None
     assert req.request_payload is None
+    expected_body = {
+        "model": "m",
+        "messages": [{"role": "user", "content": "summarize this"}],
+    }
     assert req.request_digest == model_request_digest(
-        MODEL_INTERFACE, "http://up/v1", "m", "summarize this"
+        MODEL_INTERFACE, "http://up/v1", expected_body
     )
     stored = store.peek(_TASK, "m0")
     assert isinstance(stored, ModelRequest)
-    assert stored.prompt == "summarize this"
+    assert stored.body == expected_body
 
 
 def test_model_boundary_passes_through_without_external_binding() -> None:

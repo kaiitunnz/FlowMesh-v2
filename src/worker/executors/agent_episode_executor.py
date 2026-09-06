@@ -172,9 +172,7 @@ class AgentEpisodeExecutor(Executor):
                 model=model_binding.model or "",
             )
             store.put(task_id, req.call_correlation, model)
-            digest = model_request_digest(
-                model.interface, model.url, model.model, model.prompt
-            )
+            digest = model_request_digest(model.interface, model.url, model.body)
         else:
             parsed = parse_search_request(req.request_payload)
             store.put(task_id, req.call_correlation, parsed)
