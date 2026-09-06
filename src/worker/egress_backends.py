@@ -12,6 +12,7 @@ from shared.tools.contract import ToolOperationEnvelope, ToolOutcome, ToolOutcom
 from shared.tools.model.egress import ExternalModelSidecar
 from shared.tools.model.schema import (
     MODEL_INTERFACE,
+    ModelCompletion,
     ModelRequest,
     model_request_digest,
 )
@@ -92,6 +93,17 @@ class ModelEgress:
     ) -> ToolOutcome:
         assert isinstance(request, ModelRequest)
         return self._sidecar.execute(envelope, request, credential or self._env_api_key)
+
+    def complete(
+        self,
+        envelope: ToolOperationEnvelope,
+        request: CapturedRequest,
+        credential: str | None,
+    ) -> ModelCompletion:
+        """Egress a held model turn and return the whole message with its tool calls."""
+        assert isinstance(request, ModelRequest)
+        key = credential or self._env_api_key
+        return self._sidecar.complete(envelope, request, key)
 
 
 __all__ = ["ModelEgress", "SearchEgress"]

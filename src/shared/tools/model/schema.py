@@ -31,6 +31,29 @@ class ModelRequest(BaseModel):
     prompt: str
 
 
+class ModelToolCall(BaseModel):
+    """One tool call in a model's chat completion, carried through the facade."""
+
+    model_config = ConfigDict(frozen=True)
+
+    call_id: str
+    name: str
+    arguments: str
+
+
+class ModelCompletion(BaseModel):
+    """A model's full assistant message: its text and any tool calls it emitted.
+
+    The held-turn facade needs the whole message, not just the text, so it can surface
+    the model's tool calls and capture the fabric-facade ones as boundaries.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    content: str
+    tool_calls: tuple[ModelToolCall, ...] = ()
+
+
 def parse_model_request(payload: str | None, *, url: str, model: str) -> ModelRequest:
     """Build a canonical ``ModelRequest`` from a boundary payload and pinned binding.
 
@@ -69,7 +92,9 @@ def model_request_digest(interface: str, url: str, model: str, prompt: str) -> s
 
 __all__ = [
     "MODEL_INTERFACE",
+    "ModelCompletion",
     "ModelRequest",
+    "ModelToolCall",
     "model_request_digest",
     "parse_model_request",
 ]

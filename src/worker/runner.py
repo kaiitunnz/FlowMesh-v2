@@ -31,6 +31,7 @@ from .executors.base_executor import ExecutionError, Executor, TaskCancelledErro
 from .executors.utils.checkpoints import get_http_destination, write_executor_result
 from .lifecycle import Lifecycle
 from .mediated_egress_sidecar import MediatedEgressSidecar
+from .model_turn_rendezvous import ModelTurnRendezvous
 from .utils.logging import TaskLogEmitter
 
 
@@ -95,6 +96,10 @@ class Runner:
         # The worker-local mediated-egress sidecar, built on the first permit relayed
         # over the attachment (once the worker id and incarnation are known).
         self._mediated_sidecar: MediatedEgressSidecar | None = None
+        # Rendezvous for a held model turn's permit: a facade arms a waiter before it
+        # proposes, so a permit relayed over the attachment wakes the held turn instead
+        # of driving the async sidecar lane.
+        self._model_turn_rendezvous = ModelTurnRendezvous()
 
     def _cancel_active_executor(self) -> None:
         with self._active_executor_lock:
@@ -159,15 +164,30 @@ class Runner:
         return self._mediated_sidecar
 
     def _route_mediated_op(self, frame_kind: str, frame: dict[str, Any]) -> None:
-        sidecar = self._ensure_mediated_sidecar()
-        if sidecar is None:
+        if frame_kind == "deny":
+            # A held model turn's denial: only a facade waiter consumes it.
+            self._model_turn_rendezvous.deliver_deny(
+                str(frame["agent_task_id"]),
+                str(frame["call_correlation"]),
+                str(frame.get("reason", "denied")),
+            )
             return
         if frame_kind == "permit":
-            sidecar.submit_permit(MediatedOperationPermit.model_validate(frame))
-        elif frame_kind == "reap":
-            sidecar.reap(str(frame["agent_task_id"]), str(frame["call_correlation"]))
-        else:
-            self.logger.warning("Unknown mediated-op frame kind: %s", frame_kind)
+            permit = MediatedOperationPermit.model_validate(frame)
+            # A held facade armed a waiter before proposing: hand it the permit for a
+            # synchronous in-turn egress. Otherwise it drives the async sidecar lane.
+            if self._model_turn_rendezvous.deliver_permit(permit):
+                return
+            if (sidecar := self._ensure_mediated_sidecar()) is not None:
+                sidecar.submit_permit(permit)
+            return
+        if frame_kind == "reap":
+            if (sidecar := self._ensure_mediated_sidecar()) is not None:
+                sidecar.reap(
+                    str(frame["agent_task_id"]), str(frame["call_correlation"])
+                )
+            return
+        self.logger.warning("Unknown mediated-op frame kind: %s", frame_kind)
 
     def _resolve_output_dir(self, task_id: str) -> Path:
         """Prepare and return the canonical output directory for a task's results."""

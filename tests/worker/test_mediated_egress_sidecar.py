@@ -8,8 +8,15 @@ import pytest
 from shared.tools.contract import (
     MediatedOperationOutcome,
     MediatedOperationPermit,
+    ToolOperationEnvelope,
     ToolOutcome,
     ToolOutcomeStatus,
+)
+from shared.tools.model.schema import (
+    MODEL_INTERFACE,
+    ModelCompletion,
+    ModelRequest,
+    model_request_digest,
 )
 from shared.tools.search.schema import (
     SEARCH_INTERFACE,
@@ -19,7 +26,7 @@ from shared.tools.search.schema import (
 from shared.utils.ids import new_mediated_permit_id
 from tests.shared.outcome_helpers import InMemoryContentStore
 from worker.lifecycle import PendingEgressRequestStore
-from worker.mediated_egress_sidecar import MediatedEgressSidecar
+from worker.mediated_egress_sidecar import HeldEgressReject, MediatedEgressSidecar
 
 _WORKER = "wkr-1"
 _GEN = 3
@@ -200,3 +207,106 @@ def test_redrive_after_materialize_recovers_the_prior_outcome() -> None:
     assert second.outcome_ref.content_digest == first.outcome_ref.content_digest
     assert h.egress.calls == egressed
     h.stop()
+
+
+_MODEL_REQUEST = ModelRequest(
+    interface=MODEL_INTERFACE, url="http://up/v1", model="m", prompt="hi"
+)
+_MODEL_DIGEST = model_request_digest(MODEL_INTERFACE, "http://up/v1", "m", "hi")
+
+
+class _StubModelEgress:
+    """A held-model egress backend returning a fixed completion, with a call counter."""
+
+    interface = MODEL_INTERFACE
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def digest(self, request: Any) -> str:
+        return model_request_digest(
+            request.interface, request.url, request.model, request.prompt
+        )
+
+    def execute(self, envelope: Any, request: Any, credential: str | None) -> Any:
+        raise AssertionError("a held model turn egresses through complete, not execute")
+
+    def complete(
+        self, envelope: ToolOperationEnvelope, request: Any, credential: str | None
+    ) -> ModelCompletion:
+        self.calls += 1
+        self.credential = credential
+        return ModelCompletion(content="a reply")
+
+
+def _model_sidecar() -> tuple[MediatedEgressSidecar, PendingEgressRequestStore, Any]:
+    pending = PendingEgressRequestStore()
+    egress = _StubModelEgress()
+    sidecar = MediatedEgressSidecar(
+        pending_requests=pending,
+        audience=lambda: (_WORKER, _GEN),
+        egresses=(egress,),
+        outcome_sink=lambda _outcome: None,
+    )
+    return sidecar, pending, egress
+
+
+def _model_permit(**overrides: Any) -> MediatedOperationPermit:
+    fields: dict[str, Any] = {
+        "permit_id": new_mediated_permit_id(),
+        "agent_task_id": _AGENT,
+        "call_correlation": _CALL,
+        "interface": MODEL_INTERFACE,
+        "subject": MODEL_INTERFACE,
+        "invocation_id": "inv-m",
+        "idempotency_key": "idm-m",
+        "request_digest": _MODEL_DIGEST,
+        "target_id": _WORKER,
+        "target_generation": _GEN,
+        "deadline_epoch": 2_000_000_000.0,
+        "max_results": 1,
+        "timeout_sec": 10.0,
+        "result_char_cap": 1_000_000,
+        "credential": "sk-permit",
+    }
+    fields.update(overrides)
+    return MediatedOperationPermit(**fields)
+
+
+def test_egress_now_returns_the_completion_inline() -> None:
+    sidecar, pending, egress = _model_sidecar()
+    pending.put(_AGENT, _CALL, _MODEL_REQUEST)
+    result = sidecar.egress_now(_model_permit())
+    assert isinstance(result, ModelCompletion) and result.content == "a reply"
+    # The per-call permit credential reaches the egress; custody is left for the reap.
+    assert egress.credential == "sk-permit"
+    assert pending.peek(_AGENT, _CALL) is not None
+    sidecar.stop()
+
+
+def test_egress_now_fence_rejection_is_terminal_and_never_egresses() -> None:
+    sidecar, pending, egress = _model_sidecar()
+    pending.put(_AGENT, _CALL, _MODEL_REQUEST)
+    result = sidecar.egress_now(_model_permit(request_digest="deadbeef"))
+    assert isinstance(result, HeldEgressReject) and "fence" in result.reason
+    assert egress.calls == 0
+    sidecar.stop()
+
+
+def test_egress_now_without_a_request_is_terminal() -> None:
+    sidecar, _pending, egress = _model_sidecar()
+    result = sidecar.egress_now(_model_permit())
+    assert isinstance(result, HeldEgressReject)
+    assert egress.calls == 0
+    sidecar.stop()
+
+
+def test_egress_now_permit_replay_is_terminal() -> None:
+    sidecar, pending, egress = _model_sidecar()
+    pending.put(_AGENT, _CALL, _MODEL_REQUEST)
+    permit = _model_permit()
+    assert isinstance(sidecar.egress_now(permit), ModelCompletion)
+    # An exact permit replay is refused, so one authorization drives one egress.
+    replay = sidecar.egress_now(permit)
+    assert isinstance(replay, HeldEgressReject) and egress.calls == 1
+    sidecar.stop()

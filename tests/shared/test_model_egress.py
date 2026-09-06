@@ -6,7 +6,7 @@ import pytest
 import requests
 
 from shared.tools.contract import ToolOperationEnvelope, ToolOutcomeStatus
-from shared.tools.model.egress import ExternalModelSidecar
+from shared.tools.model.egress import ExternalModelSidecar, ModelEgressError
 from shared.tools.model.schema import MODEL_INTERFACE, ModelRequest
 
 _REQUEST = ModelRequest(
@@ -89,3 +89,61 @@ def test_interface_outside_envelope_is_unavailable() -> None:
     envelope = _envelope().model_copy(update={"interface": "search/v1"})
     out = ExternalModelSidecar().execute(envelope, _REQUEST, "k")
     assert out.status is ToolOutcomeStatus.UNAVAILABLE
+
+
+def test_complete_returns_the_whole_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_post(url: str, **kwargs: Any) -> _Response:
+        return _Response(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "thinking",
+                            "tool_calls": [
+                                {
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "web_search",
+                                        "arguments": '{"query": "x"}',
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    out = ExternalModelSidecar().complete(_envelope(), _REQUEST, "k")
+    # complete returns the whole message, tool calls included and uncapped.
+    assert out.content == "thinking"
+    assert len(out.tool_calls) == 1
+    assert out.tool_calls[0].call_id == "call_1"
+    assert out.tool_calls[0].name == "web_search"
+    assert out.tool_calls[0].arguments == '{"query": "x"}'
+
+
+def test_complete_tolerates_a_tool_only_reply(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_post(url: str, **kwargs: Any) -> _Response:
+        return _Response({"choices": [{"message": {"content": None}}]})
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    out = ExternalModelSidecar().complete(_envelope(), _REQUEST, "k")
+    assert out.content == "" and out.tool_calls == ()
+
+
+def test_complete_raises_terminal_on_a_fault(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_post(url: str, **kwargs: Any) -> _Response:
+        raise requests.Timeout()
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    with pytest.raises(ModelEgressError):
+        ExternalModelSidecar().complete(_envelope(), _REQUEST, "k")
+
+
+def test_complete_interface_mismatch_raises() -> None:
+    envelope = _envelope().model_copy(update={"interface": "search/v1"})
+    with pytest.raises(ModelEgressError):
+        ExternalModelSidecar().complete(envelope, _REQUEST, "k")
