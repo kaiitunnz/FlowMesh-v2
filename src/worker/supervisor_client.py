@@ -604,10 +604,9 @@ class SupervisorClient:
             raise RuntimeError("Supervisor gRPC client not started")
         if not self._event_ready.wait():
             raise RuntimeError("Supervisor event stream not ready")
-        self._event_queue.put(
-            {
-                "type": "MEDIATED_OP_OUTCOME",
-                "worker_id": self.worker_id,
-                "outcome": outcome.model_dump(mode="json"),
-            }
+        event = WorkerEvent(
+            type="MEDIATED_OP_OUTCOME",
+            worker_id=self.worker_id,
+            payload={"outcome": outcome.model_dump(mode="json")},
         )
+        self._event_queue.put(serialize_event(event))

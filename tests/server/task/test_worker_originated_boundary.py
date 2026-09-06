@@ -19,6 +19,7 @@ from server.orchestration.tool_dispatch import SEARCH_INTERFACE
 from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime
 from shared.harness import BoundaryEventKind, HarnessCapsule
+from shared.schemas.event import parse_event
 from shared.tools.contract import (
     MediatedOperationOutcome,
     MediatedOperationPermit,
@@ -33,6 +34,7 @@ from tests.server.task.test_v2_orchestration import (
 from worker.executors.agent_episode_executor import AgentEpisodeExecutor
 from worker.executors.harness.scripted import ScriptedHarnessAdapter, ScriptedStep
 from worker.lifecycle import PendingToolRequestStore
+from worker.supervisor_client import SupervisorClient
 
 _TS = "2026-04-28T00:00:00Z"
 _QUERY_TOKEN = "supernova-remnants"
@@ -129,6 +131,24 @@ def _reap_frames(runtime: TaskRuntime) -> list[dict[str, Any]]:
     return [payload for _, kind, payload in frames if kind == "reap"]
 
 
+def _serialize_outcome_frame(outcome: MediatedOperationOutcome) -> dict[str, Any]:
+    """The exact event frame the worker enqueues for a mediated outcome report."""
+    client = SupervisorClient(
+        worker_token="t",
+        owner_principal=None,
+        grpc_target="x",
+        worker_namespace="ns",
+        worker_cluster="c",
+        worker_alias="a",
+        logger=logging.getLogger("wo-frame"),
+    )
+    client._worker_id = "wkr-1"
+    client._stub = cast(Any, object())
+    client._event_ready.set()
+    client.push_mediated_outcome(outcome)
+    return cast(dict[str, Any], client._event_queue.get_nowait())
+
+
 def test_worker_originated_boundary_settles_and_keeps_payload_out_of_ledger() -> None:
     async def run() -> None:
         runtime = _runtime()
@@ -169,6 +189,45 @@ def test_worker_originated_boundary_settles_and_keeps_payload_out_of_ledger() ->
         assert writer_wi is not None and writer_wi.status is WorkItemStatus.SETTLED
         pub = engine.resolve_output(f"legacy:{writer}")
         assert pub is not None and pub.outcome.value == "success"
+
+    asyncio.run(run())
+
+
+def test_worker_outcome_frame_settles_through_event_parse() -> None:
+    """The worker's serialized outcome frame settles the boundary once parsed.
+
+    The report ships as an ordinary worker event and the server reads the outcome from
+    ``event.payload``; a frame that nested the outcome anywhere else would be dropped by
+    the event listener and strand the boundary. This drives the worker's own
+    serialization through ``parse_event`` and into ``settle_mediated_operation``.
+    """
+
+    async def run() -> None:
+        runtime = _runtime()
+        _, ids = await _register(runtime, _SEARCH_WF)
+        writer = ids["writer"]
+
+        engine = _dispatch_agent(runtime, writer)
+        permit = MediatedOperationPermit.model_validate(_permit_frames(runtime)[0])
+
+        outcome = MediatedOperationOutcome(
+            permit_id=permit.permit_id,
+            agent_task_id=writer,
+            call_correlation="m0",
+            invocation_id=permit.invocation_id,
+            idempotency_key=permit.idempotency_key,
+            outcome=ToolOutcome(status=ToolOutcomeStatus.SUCCESS, value="sunny"),
+        )
+        event = parse_event(_serialize_outcome_frame(outcome))
+        assert "outcome" in event.payload  # not absorbed as a top-level extra
+
+        runtime.settle_mediated_operation(
+            MediatedOperationOutcome.model_validate(event.payload["outcome"])
+        )
+        assert len(_reap_frames(runtime)) == 1
+        _dispatch_agent(runtime, writer)  # resume: inject the outcome and complete
+        writer_wi = engine.work_item(writer)
+        assert writer_wi is not None and writer_wi.status is WorkItemStatus.SETTLED
 
     asyncio.run(run())
 
