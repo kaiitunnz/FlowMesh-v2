@@ -49,7 +49,10 @@ class EgressInterface(Protocol):
     def digest(self, request: CapturedRequest) -> str: ...
 
     def execute(
-        self, envelope: ToolOperationEnvelope, request: CapturedRequest
+        self,
+        envelope: ToolOperationEnvelope,
+        request: CapturedRequest,
+        credential: str | None,
     ) -> ToolOutcome: ...
 
 
@@ -183,7 +186,7 @@ class MediatedEgressSidecar:
             permit.target_id,
             permit.interface,
         )
-        return egress.execute(envelope, request)
+        return egress.execute(envelope, request, permit.credential)
 
     def _fence_reject(
         self,

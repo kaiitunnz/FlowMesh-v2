@@ -47,7 +47,10 @@ class SearchEgress:
         )
 
     def execute(
-        self, envelope: ToolOperationEnvelope, request: CapturedRequest
+        self,
+        envelope: ToolOperationEnvelope,
+        request: CapturedRequest,
+        credential: str | None,
     ) -> ToolOutcome:
         assert isinstance(request, ToolRequest)
         try:
@@ -63,12 +66,17 @@ class SearchEgress:
 
 
 class ModelEgress:
-    """The managed external-``model`` egress backend."""
+    """The managed external-``model`` egress backend.
+
+    The permit's per-call ``credential`` is a workflow's own pinned model key; a call
+    without one falls back to this worker's deployment-global environment key.
+    """
 
     interface = MODEL_INTERFACE
 
-    def __init__(self, api_key: str | None, logger: logging.Logger) -> None:
-        self._sidecar = ExternalModelSidecar(api_key, logger)
+    def __init__(self, env_api_key: str | None, logger: logging.Logger) -> None:
+        self._sidecar = ExternalModelSidecar(logger)
+        self._env_api_key = env_api_key
 
     def digest(self, request: CapturedRequest) -> str:
         assert isinstance(request, ModelRequest)
@@ -77,10 +85,13 @@ class ModelEgress:
         )
 
     def execute(
-        self, envelope: ToolOperationEnvelope, request: CapturedRequest
+        self,
+        envelope: ToolOperationEnvelope,
+        request: CapturedRequest,
+        credential: str | None,
     ) -> ToolOutcome:
         assert isinstance(request, ModelRequest)
-        return self._sidecar.execute(envelope, request)
+        return self._sidecar.execute(envelope, request, credential or self._env_api_key)
 
 
 __all__ = ["ModelEgress", "SearchEgress"]

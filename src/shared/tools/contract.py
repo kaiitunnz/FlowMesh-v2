@@ -9,7 +9,7 @@ shape and provider egress — and they mint no identity and hold no credential.
 
 from enum import StrEnum
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from shared.outcome import OutcomeManifest
 
@@ -52,6 +52,11 @@ class MediatedOperationPermit(BaseModel):
     ``policy_class``, and
     ``policy_epoch`` are declared here as a forward contract; the paths that bind real
     subjects and policy generations enforce them.
+
+    ``credential`` is a per-call provider secret the control plane resolves for a
+    workflow that pins its own model key; it rides only this one-use, audience-bound
+    delivery down to the egressing worker, never travels up in a proposal, and is never
+    persisted or logged. A worker without one falls back to its local environment key.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -72,6 +77,7 @@ class MediatedOperationPermit(BaseModel):
     max_results: int
     timeout_sec: float
     result_char_cap: int
+    credential: str | None = Field(default=None, repr=False)
 
 
 class ToolOutcomeStatus(StrEnum):

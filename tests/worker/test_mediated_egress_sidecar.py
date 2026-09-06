@@ -42,8 +42,11 @@ class _StubEgress:
             request.interface, request.query, request.max_results
         )
 
-    def execute(self, envelope: Any, request: Any) -> ToolOutcome:
+    def execute(
+        self, envelope: Any, request: Any, credential: str | None
+    ) -> ToolOutcome:
         self.calls += 1
+        self.credential = credential
         return self._outcome
 
 

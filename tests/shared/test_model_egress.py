@@ -45,7 +45,7 @@ def test_success_returns_the_completion(monkeypatch: pytest.MonkeyPatch) -> None
         return _Response({"choices": [{"message": {"content": "a completion body"}}]})
 
     monkeypatch.setattr(requests, "post", fake_post)
-    out = ExternalModelSidecar("sk-worker").execute(_envelope(), _REQUEST)
+    out = ExternalModelSidecar().execute(_envelope(), _REQUEST, "sk-worker")
     assert out.status is ToolOutcomeStatus.SUCCESS
     # The response is capped at the envelope's char budget.
     assert out.value == "a comp"
@@ -63,7 +63,7 @@ def test_missing_key_sends_no_authorization(monkeypatch: pytest.MonkeyPatch) -> 
         return _Response({"choices": [{"message": {"content": "x"}}]})
 
     monkeypatch.setattr(requests, "post", fake_post)
-    ExternalModelSidecar(None).execute(_envelope(), _REQUEST)
+    ExternalModelSidecar().execute(_envelope(), _REQUEST, None)
     assert "Authorization" not in seen["headers"]
 
 
@@ -72,7 +72,7 @@ def test_timeout_is_typed(monkeypatch: pytest.MonkeyPatch) -> None:
         raise requests.Timeout()
 
     monkeypatch.setattr(requests, "post", fake_post)
-    out = ExternalModelSidecar("k").execute(_envelope(), _REQUEST)
+    out = ExternalModelSidecar().execute(_envelope(), _REQUEST, "k")
     assert out.status is ToolOutcomeStatus.TIMEOUT
 
 
@@ -81,11 +81,11 @@ def test_unreachable_provider_is_typed(monkeypatch: pytest.MonkeyPatch) -> None:
         raise requests.ConnectionError()
 
     monkeypatch.setattr(requests, "post", fake_post)
-    out = ExternalModelSidecar("k").execute(_envelope(), _REQUEST)
+    out = ExternalModelSidecar().execute(_envelope(), _REQUEST, "k")
     assert out.status is ToolOutcomeStatus.UNAVAILABLE
 
 
 def test_interface_outside_envelope_is_unavailable() -> None:
     envelope = _envelope().model_copy(update={"interface": "search/v1"})
-    out = ExternalModelSidecar("k").execute(envelope, _REQUEST)
+    out = ExternalModelSidecar().execute(envelope, _REQUEST, "k")
     assert out.status is ToolOutcomeStatus.UNAVAILABLE

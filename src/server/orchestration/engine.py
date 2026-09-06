@@ -1159,13 +1159,15 @@ class OrchestrationEngine:
         timeout_sec: float,
         result_char_cap: int,
         deadline_epoch: float,
+        credential: str | None = None,
     ) -> MediatedOperationPermit | None:
         """A one-use permit for a recorded worker-originated boundary, or None.
 
         The engine owns the durable identity and authority: it fills the invocation,
         idempotency key, request digest, interface, subject, and the policy epoch the
         boundary was admitted under. The caller supplies the audience (the agent's
-        worker and its generation) and the policy-bounded budget the operation runs in.
+        worker and its generation), the policy-bounded budget the operation runs in, and
+        an optional per-call ``credential`` resolved for a workflow's pinned model key.
         Returns None for a boundary that carries no digest — i.e. one the worker did not
         originate — so a re-mint never fabricates authorization the boundary lacks.
         """
@@ -1195,6 +1197,7 @@ class OrchestrationEngine:
             max_results=max_results,
             timeout_sec=timeout_sec,
             result_char_cap=result_char_cap,
+            credential=credential,
         )
 
     def boundary_settleable(self, task_id: str, call_correlation: str) -> bool:

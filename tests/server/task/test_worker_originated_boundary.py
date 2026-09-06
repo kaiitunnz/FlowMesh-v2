@@ -13,6 +13,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
+from pydantic import SecretStr
+
 from server.config import OrchestrationConfig
 from server.orchestration.state import WorkItemStatus
 from server.orchestration.tool_dispatch import MODEL_INTERFACE, SEARCH_INTERFACE
@@ -112,14 +114,30 @@ class _WorkerStub:
         return 0
 
 
-def _runtime() -> TaskRuntime:
+class _StubVault:
+    """A model-secret vault that stores and resolves a workflow-scoped key in memory."""
+
+    def __init__(self) -> None:
+        self._store: dict[tuple[str, str], SecretStr] = {}
+
+    async def store(self, workflow_id: str, ref: str, secret: SecretStr) -> None:
+        self._store[(workflow_id, ref)] = secret
+
+    def resolve(self, workflow_id: str, ref: str | None) -> SecretStr | None:
+        return self._store.get((workflow_id, ref)) if ref else None
+
+    def purge(self, workflow_id: str) -> None:
+        return None
+
+
+def _runtime(vault: Any | None = None) -> TaskRuntime:
     return TaskRuntime(
         cast(Any, FakeRegistry()),
         cast(Any, _WorkerStub()),
         OrchestrationConfig(),
         Path(tempfile.gettempdir()),
         logging.getLogger("wo-test"),
-        secret_vault=cast(Any, _NoopSecretVault()),
+        secret_vault=cast(Any, vault or _NoopSecretVault()),
     )
 
 
@@ -267,6 +285,45 @@ def test_worker_originated_model_boundary_mints_a_worker_permit() -> None:
         _dispatch_agent(runtime, writer, script=_MODEL_SCRIPT)
         writer_wi = engine.work_item(writer)
         assert writer_wi is not None and writer_wi.status is WorkItemStatus.SETTLED
+
+    asyncio.run(run())
+
+
+_BYOK_WF = """
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {name: byok-agent}
+spec:
+  graph:
+    nodes:
+      - name: writer
+        spec:
+          taskType: agent
+          v2:
+            authority: {invoke: [model], delegate: []}
+            tools: [{name: model}]
+          harness: {backend: scripted, version: v1, params: {script: []}}
+          model_binding:
+            {mode: openai, url: "http://up/v1", model: qwen, api_key: sk-byok-abc}
+"""
+
+
+def test_model_permit_carries_the_workflow_key_and_never_the_ledger() -> None:
+    """A binding that pins its own key resolves it onto the one-use permit; the key
+    rides the permit down to the worker and never enters the ledger."""
+
+    async def run() -> None:
+        runtime = _runtime(_StubVault())
+        _, ids = await _register(runtime, _BYOK_WF)
+        writer = ids["writer"]
+
+        engine = _dispatch_agent(runtime, writer, script=_MODEL_SCRIPT)
+
+        permit = MediatedOperationPermit.model_validate(_permit_frames(runtime)[0])
+        assert permit.credential == "sk-byok-abc"
+        # The key never lands in the durable ledger, and the permit hides it from repr.
+        assert "sk-byok-abc" not in engine.to_snapshot().model_dump_json()
+        assert "sk-byok-abc" not in repr(permit)
 
     asyncio.run(run())
 

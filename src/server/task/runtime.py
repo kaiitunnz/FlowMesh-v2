@@ -1332,6 +1332,21 @@ class TaskRuntime:
         cfg = self._web_search
         return cfg.max_results, cfg.timeout_sec, cfg.result_char_cap
 
+    def _resolve_op_credential(self, agent: TaskRecord, interface: str) -> str | None:
+        """The per-call provider credential a model permit carries, or None.
+
+        A model binding that pins its own key resolves it from the vault here so it
+        rides the one-use permit down to the egressing worker; a worker without one uses
+        its local environment key. Other interfaces read their provider key locally.
+        """
+        if interface != MODEL_INTERFACE:
+            return None
+        binding = self.resolve_model_binding(agent.task_id)
+        if binding is None or binding.secret_ref is None:
+            return None
+        secret = self._secret_vault.resolve(agent.workflow_id, binding.secret_ref)
+        return secret.get_secret_value() if secret is not None else None
+
     def _dispatch_worker_originated_op(self, env: ToolInvocationEnvelope) -> None:
         """Mint a permit and relay a boundary's egress operation to its origin worker.
 
@@ -1370,6 +1385,7 @@ class TaskRuntime:
             timeout_sec=timeout_sec,
             result_char_cap=result_char_cap,
             deadline_epoch=deadline,
+            credential=self._resolve_op_credential(agent, env.interface),
         )
         if permit is None:
             self.settle_episode_invocation(

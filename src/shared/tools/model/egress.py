@@ -17,16 +17,20 @@ _SERVED_INTERFACES = frozenset({MODEL_INTERFACE})
 
 
 class ExternalModelSidecar:
-    """The surface that performs external-model egress under an envelope."""
+    """The surface that performs external-model egress under an envelope.
 
-    def __init__(
-        self, api_key: str | None, logger: logging.Logger | None = None
-    ) -> None:
-        self._api_key = api_key
+    The credential is supplied per call — the workflow's own pinned key carried on the
+    permit, or the worker's deployment-global fallback — never held on the surface.
+    """
+
+    def __init__(self, logger: logging.Logger | None = None) -> None:
         self._log = logger or logging.getLogger("external-model-sidecar")
 
     def execute(
-        self, envelope: ToolOperationEnvelope, request: ModelRequest
+        self,
+        envelope: ToolOperationEnvelope,
+        request: ModelRequest,
+        api_key: str | None,
     ) -> ToolOutcome:
         if envelope.interface not in _SERVED_INTERFACES:
             return ToolOutcome(
@@ -39,8 +43,8 @@ class ExternalModelSidecar:
                 value="the request interface is outside the issued envelope",
             )
         headers = {"Content-Type": "application/json"}
-        if self._api_key:
-            headers["Authorization"] = f"Bearer {self._api_key}"
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
         body = {
             "model": request.model,
             "messages": [{"role": "user", "content": request.prompt}],
