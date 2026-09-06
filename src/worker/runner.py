@@ -25,6 +25,7 @@ from shared.tools.search.schema import DEFAULT_SEARCH_PROVIDER
 from shared.utils.manifest import prepare_output_dir, sync_manifest
 from shared.utils.time import now_iso
 
+from .egress_backends import ModelEgress, SearchEgress
 from .executors.agent_episode_executor import AgentEpisodeResult
 from .executors.base_executor import ExecutionError, Executor, TaskCancelledError
 from .executors.utils.checkpoints import get_http_destination, write_executor_result
@@ -47,6 +48,7 @@ class Runner:
         executor_idle_cleanup_sec: float | None = None,
         web_search_provider: str = DEFAULT_SEARCH_PROVIDER,
         web_search_api_key: str | None = None,
+        model_api_key: str | None = None,
         content_store: FabricContentStore | None = None,
     ):
         self.lifecycle = lifecycle
@@ -88,6 +90,7 @@ class Runner:
 
         self._web_search_provider = web_search_provider
         self._web_search_api_key = web_search_api_key
+        self._model_api_key = model_api_key
         self._content_store = content_store
         # The worker-local mediated-egress sidecar, built on the first permit relayed
         # over the attachment (once the worker id and incarnation are known).
@@ -141,10 +144,14 @@ class Runner:
         except RuntimeError:
             return None
         self._mediated_sidecar = MediatedEgressSidecar(
-            pending_requests=self.lifecycle.pending_tool_requests,
+            pending_requests=self.lifecycle.pending_egress_requests,
             audience=lambda: (client.worker_id, client.incarnation),
-            provider=self._web_search_provider,
-            api_key=self._web_search_api_key,
+            egresses=(
+                SearchEgress(
+                    self._web_search_provider, self._web_search_api_key, self.logger
+                ),
+                ModelEgress(self._model_api_key, self.logger),
+            ),
             outcome_sink=client.push_mediated_outcome,
             content_store=self._content_store,
             logger=self.logger,

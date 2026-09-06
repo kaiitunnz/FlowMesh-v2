@@ -49,6 +49,7 @@ DEFAULT_WORKER_CONFIG: Final[WorkerConfig] = WorkerConfig(
     dev_model_forward_url=None,
     web_search_provider="duckduckgo",
     web_search_api_key=None,
+    model_api_key=None,
     docker_gpu_runtime=None,
     ssh_limits=None,
     enable_ssh_gpu_limit=False,

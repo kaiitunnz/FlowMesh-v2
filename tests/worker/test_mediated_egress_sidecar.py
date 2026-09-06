@@ -18,7 +18,7 @@ from shared.tools.search.schema import (
 )
 from shared.utils.ids import new_mediated_permit_id
 from tests.shared.outcome_helpers import InMemoryContentStore
-from worker.lifecycle import PendingToolRequestStore
+from worker.lifecycle import PendingEgressRequestStore
 from worker.mediated_egress_sidecar import MediatedEgressSidecar
 
 _WORKER = "wkr-1"
@@ -28,10 +28,19 @@ _CALL = "m0"
 _REQUEST = ToolRequest(interface=SEARCH_INTERFACE, query="weather", max_results=3)
 
 
-class _Sidecar:
+class _StubEgress:
+    """A search egress backend with a fixed outcome and an egress-call counter."""
+
+    interface = SEARCH_INTERFACE
+
     def __init__(self, outcome: ToolOutcome) -> None:
         self._outcome = outcome
         self.calls = 0
+
+    def digest(self, request: Any) -> str:
+        return tool_request_digest(
+            request.interface, request.query, request.max_results
+        )
 
     def execute(self, envelope: Any, request: Any) -> ToolOutcome:
         self.calls += 1
@@ -65,18 +74,18 @@ class _Harness:
         outcome: ToolOutcome | None = None,
         store: InMemoryContentStore | None = None,
     ) -> None:
-        self.pending = PendingToolRequestStore()
+        self.pending = PendingEgressRequestStore()
         self.reports: queue.Queue[MediatedOperationOutcome] = queue.Queue()
+        self.egress = _StubEgress(
+            outcome or ToolOutcome(status=ToolOutcomeStatus.SUCCESS, value="x")
+        )
         self.sidecar = MediatedEgressSidecar(
             pending_requests=self.pending,
             audience=lambda: (_WORKER, _GEN),
-            provider="duckduckgo",
-            api_key=None,
+            egresses=(self.egress,),
             outcome_sink=self.reports.put,
             content_store=store,
         )
-        if outcome is not None:
-            self.sidecar._sidecar = _Sidecar(outcome)  # type: ignore[assignment]
 
     def stash(self) -> None:
         self.pending.put(_AGENT, _CALL, _REQUEST)
@@ -115,7 +124,7 @@ def test_fence_rejection_is_terminal_not_retried(
     report = h.report()
     assert report.error is not None and reason in report.error
     # A rejected operation never egresses; custody is retained for the reap.
-    assert h.sidecar._sidecar.calls == 0  # type: ignore[attr-defined]
+    assert h.egress.calls == 0
     assert h.pending.peek(_AGENT, _CALL) is not None
     h.stop()
 
@@ -181,12 +190,10 @@ def test_redrive_after_materialize_recovers_the_prior_outcome() -> None:
     assert first.outcome_ref is not None
     # Custody retained; a fresh permit (same idempotency key) recovers by reference
     # without egressing again.
-    h.sidecar._sidecar = _Sidecar(  # type: ignore[assignment]
-        ToolOutcome(status=ToolOutcomeStatus.UNAVAILABLE, value="must not egress")
-    )
+    egressed = h.egress.calls
     h.sidecar.submit_permit(_permit())
     second = h.report()
     assert second.outcome_ref is not None
     assert second.outcome_ref.content_digest == first.outcome_ref.content_digest
-    assert h.sidecar._sidecar.calls == 0  # type: ignore[attr-defined]
+    assert h.egress.calls == egressed
     h.stop()

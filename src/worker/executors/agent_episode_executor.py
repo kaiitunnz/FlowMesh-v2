@@ -15,6 +15,8 @@ from shared.harness import (
     REQUIRED_MEDIATED_FACADES,
     BoundaryEventKind,
     DeliveredOutcome,
+    EgressHandoffMode,
+    EpisodeModelBinding,
     HarnessAdapter,
     HarnessCapsule,
     HarnessResult,
@@ -22,7 +24,13 @@ from shared.harness import (
 )
 from shared.outcome import ContentStoreError, FabricContentStore
 from shared.schemas.result import BaseExecutorResult
+from shared.tasks.specs.misc import ModelBindingMode
 from shared.tasks.task_type import TaskType
+from shared.tools.model.schema import (
+    MODEL_INTERFACE,
+    model_request_digest,
+    parse_model_request,
+)
 from shared.tools.search.schema import (
     SEARCH_INTERFACE,
     parse_search_request,
@@ -30,7 +38,7 @@ from shared.tools.search.schema import (
 )
 
 from ..content_store import build_content_store
-from ..lifecycle import PendingToolRequestStore
+from ..lifecycle import PendingEgressRequestStore
 from .base_executor import ExecutionError, Executor, ExecutorTask
 from .harness import build_adapter
 
@@ -86,9 +94,20 @@ class AgentEpisodeExecutor(Executor):
                 outcome.call_correlation,
             )
         result = adapter.start(task.task_id, capsule=capsule, outcomes=outcomes)
-        if self._is_capturable_boundary(result):
+        if self._is_capturable_boundary(result, dispatch.model_binding):
+            if (
+                adapter.egress_handoff_mode()
+                is not EgressHandoffMode.DURABLE_PRE_EGRESS_YIELD
+            ):
+                raise ExecutionError(
+                    f"backend {dispatch.backend.backend!r} deferred a mediated egress "
+                    "boundary but is not durable_pre_egress_yield"
+                )
             result = self._capture_local_request(
-                self._pending_tool_requests(), task.task_id, result
+                self._pending_egress_requests(),
+                task.task_id,
+                result,
+                dispatch.model_binding,
             )
         if result.kind is HarnessResultKind.BOUNDARY and result.request is not None:
             _LOG.info(
@@ -100,37 +119,68 @@ class AgentEpisodeExecutor(Executor):
         return AgentEpisodeResult(harness_result=result, value=value)
 
     @staticmethod
-    def _is_capturable_boundary(result: HarnessResult) -> bool:
-        """Whether a step yielded a worker-originatable ``search/v1`` tool boundary."""
+    def _is_capturable_boundary(
+        result: HarnessResult, model_binding: EpisodeModelBinding | None
+    ) -> bool:
+        """Whether a step yielded a worker-originatable egress boundary.
+
+        A ``search/v1`` invocation is always worker-originated; a ``model`` invocation
+        is worker-originated only for an external (``openai``) binding — a
+        ``canned``/``echo``/``resident`` model boundary settles on the control plane.
+        """
         req = result.request
+        if (
+            result.kind is not HarnessResultKind.BOUNDARY
+            or req is None
+            or req.kind is not BoundaryEventKind.INVOCATION
+            or req.request_payload is None
+            or req.call_correlation is None
+        ):
+            return False
+        if req.interface == SEARCH_INTERFACE:
+            return True
         return (
-            result.kind is HarnessResultKind.BOUNDARY
-            and req is not None
-            and req.kind is BoundaryEventKind.INVOCATION
-            and req.interface == SEARCH_INTERFACE
-            and req.request_payload is not None
-            and req.call_correlation is not None
+            req.interface == MODEL_INTERFACE
+            and model_binding is not None
+            and model_binding.mode is ModelBindingMode.OPENAI
         )
 
     @staticmethod
     def _capture_local_request(
-        store: PendingToolRequestStore, task_id: str, result: HarnessResult
+        store: PendingEgressRequestStore,
+        task_id: str,
+        result: HarnessResult,
+        model_binding: EpisodeModelBinding | None,
     ) -> HarnessResult:
-        """Keep a worker-originated tool request local and emit only its digest.
+        """Keep a worker-originated egress request local and emit only its digest.
 
-        A ``search/v1`` invocation boundary the harness emitted has its raw request
-        recorded in worker-private state keyed by ``(task_id, call_correlation)`` and
-        stripped from the returned boundary, which instead carries only the request
-        digest. Any other boundary passes through unchanged.
+        A worker-originated invocation boundary has its raw request recorded in
+        worker-private state keyed by ``(task_id, call_correlation)`` and stripped from
+        the returned boundary, which instead carries only the request digest. Any other
+        boundary passes through unchanged.
         """
         req = result.request
-        if not AgentEpisodeExecutor._is_capturable_boundary(result):
+        if not AgentEpisodeExecutor._is_capturable_boundary(result, model_binding):
             return result
         assert req is not None and req.request_payload is not None
         assert req.call_correlation is not None
-        parsed = parse_search_request(req.request_payload)
-        store.put(task_id, req.call_correlation, parsed)
-        digest = tool_request_digest(parsed.interface, parsed.query, parsed.max_results)
+        if req.interface == MODEL_INTERFACE:
+            assert model_binding is not None
+            model = parse_model_request(
+                req.request_payload,
+                url=model_binding.url or "",
+                model=model_binding.model or "",
+            )
+            store.put(task_id, req.call_correlation, model)
+            digest = model_request_digest(
+                model.interface, model.url, model.model, model.prompt
+            )
+        else:
+            parsed = parse_search_request(req.request_payload)
+            store.put(task_id, req.call_correlation, parsed)
+            digest = tool_request_digest(
+                parsed.interface, parsed.query, parsed.max_results
+            )
         stripped = req.model_copy(
             update={"request_payload": None, "request_digest": digest}
         )

@@ -323,6 +323,11 @@ STACK_ENV_SCHEMA = EnvSchema(
                     description="Upstream model (openai/proxy modes).",
                 ),
                 EnvVar(
+                    "AGENT_MODEL_API_KEY",
+                    "",
+                    description="Worker credential for external managed-model egress.",
+                ),
+                EnvVar(
                     "AGENT_MODEL_GATEWAY_TIMEOUT_SEC",
                     "60",
                     description="Upstream request timeout (seconds).",

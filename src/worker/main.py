@@ -258,6 +258,7 @@ def main() -> None:
         executor_idle_cleanup_sec=cfg.executor_idle_cleanup_sec,
         web_search_provider=cfg.web_search_provider,
         web_search_api_key=cfg.web_search_api_key,
+        model_api_key=cfg.model_api_key,
         content_store=build_content_store(cfg.server_base_url),
     )
 

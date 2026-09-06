@@ -20,6 +20,7 @@ from shared.harness import (
     BoundaryEventKind,
     BoundaryRequest,
     DeliveredOutcome,
+    EgressHandoffMode,
     HarnessAdapter,
     HarnessBackendKey,
     HarnessCapsule,
@@ -65,6 +66,10 @@ class ScriptedHarnessAdapter(HarnessAdapter):
 
     def backend_key(self) -> HarnessBackendKey:
         return HarnessBackendKey(backend=_BACKEND, version=self._version)
+
+    def egress_handoff_mode(self) -> EgressHandoffMode:
+        # Every boundary defers to a capsule and resumes from the committed outcome.
+        return EgressHandoffMode.DURABLE_PRE_EGRESS_YIELD
 
     def start(
         self,

@@ -12,6 +12,7 @@ from typing import Any
 from shared.harness import (
     AgentEpisodeDispatch,
     BoundaryEventKind,
+    EpisodeModelBinding,
     HarnessBackendKey,
     HarnessCapsule,
     HarnessResult,
@@ -114,6 +115,9 @@ def _sanitize_merge_spec(spec: dict[str, Any]) -> dict[str, Any]:
 # Extra lifetime a worker-originated operation permit gets beyond the request timeout,
 # to cover dispatch and queue latency before the origin worker validates it.
 _OP_PERMIT_SLACK_SEC = 60.0
+# A generous bound on a materialized external-model completion; a larger response
+# settles by reference under the reference-backed outcome contract.
+_MODEL_PERMIT_RESULT_CHAR_CAP = 1_000_000
 
 
 def _compute_merge_key(task: TaskEnvelopeTemplate) -> str | None:
@@ -149,6 +153,7 @@ class TaskRuntime:
         self._secret_vault = secret_vault
         self._scope_budget = ScopeBudget.from_config(orchestration)
         self._web_search = orchestration.web_search
+        self._model_egress_timeout_sec = orchestration.gateway.timeout_sec
         self._input_budget_bytes = orchestration.agent_input_budget_bytes
         self._agent_binding_defaults = _binding_defaults(orchestration.agent_binding)
         self._lowering_strategy = (
@@ -1286,28 +1291,29 @@ class TaskRuntime:
     def _dispatch_boundary(self, env: ToolInvocationEnvelope) -> None:
         """Route a recorded mediated boundary to its handler by exact (kind, interface).
 
-        Only ``(INVOCATION, "model")`` reaches the model gateway and only ``(INVOCATION,
-        "search/v1")`` the fabric tool broker. An unrecognized interface is a fabric
-        misconfiguration terminalized as a typed unavailable outcome — never a silent
-        fall-through to the model settler.
+        A recorded request digest marks a boundary the worker originated and holds its
+        raw request privately: it runs off-lane on that worker's egress sidecar. A
+        ``model`` boundary without a digest reaches the model gateway (a
+        ``canned``/``echo``/``resident`` binding); a ``search/v1`` boundary without a
+        digest is the gateway-captured facade path and reaches the fabric broker. An
+        unrecognized interface is a fabric misconfiguration terminalized as a typed
+        unavailable outcome — never a silent fall-through to the model settler.
         """
         if (
             env.kind is BoundaryEventKind.INVOCATION
             and env.interface == MODEL_INTERFACE
         ):
-            if self._model_settler is not None:
+            if env.request_digest is not None:
+                self._dispatch_worker_originated_op(env)
+            elif self._model_settler is not None:
                 self._model_settler(env)
             return
         if (
             env.kind is BoundaryEventKind.INVOCATION
             and env.interface == SEARCH_INTERFACE
         ):
-            # A recorded request digest marks a boundary the worker originated and holds
-            # its raw request privately: run it off-lane on that worker rather than in
-            # the in-server broker. The gateway-captured facade path carries its request
-            # on the wire (no digest) and keeps using the broker.
             if env.request_digest is not None:
-                self._dispatch_worker_originated_tool_op(env)
+                self._dispatch_worker_originated_op(env)
             elif self._tool_broker is not None:
                 self._tool_broker(env)
             return
@@ -1319,8 +1325,15 @@ class TaskRuntime:
             env.task_id, env.call_correlation, outcome.model_dump_json()
         )
 
-    def _dispatch_worker_originated_tool_op(self, env: ToolInvocationEnvelope) -> None:
-        """Mint a permit and relay a boundary's operation to its origin worker.
+    def _op_permit_budget(self, interface: str) -> tuple[int, float, int]:
+        """The (max_results, timeout, result_char_cap) budget a permit runs within."""
+        if interface == MODEL_INTERFACE:
+            return 1, self._model_egress_timeout_sec, _MODEL_PERMIT_RESULT_CHAR_CAP
+        cfg = self._web_search
+        return cfg.max_results, cfg.timeout_sec, cfg.result_char_cap
+
+    def _dispatch_worker_originated_op(self, env: ToolInvocationEnvelope) -> None:
+        """Mint a permit and relay a boundary's egress operation to its origin worker.
 
         The permit is audience-bound to the agent's own worker and relayed there as an
         ordinary control message on the authenticated attachment, never the raw request
@@ -1344,16 +1357,18 @@ class TaskRuntime:
                 env.task_id, env.call_correlation, error="origin worker unavailable"
             )
             return
-        cfg = self._web_search
-        deadline = time.time() + cfg.timeout_sec + _OP_PERMIT_SLACK_SEC
+        max_results, timeout_sec, result_char_cap = self._op_permit_budget(
+            env.interface
+        )
+        deadline = time.time() + timeout_sec + _OP_PERMIT_SLACK_SEC
         permit = engine.mint_operation_permit(
             env.task_id,
             env.call_correlation,
             target_id=worker_id,
             target_generation=worker.incarnation,
-            max_results=cfg.max_results,
-            timeout_sec=cfg.timeout_sec,
-            result_char_cap=cfg.result_char_cap,
+            max_results=max_results,
+            timeout_sec=timeout_sec,
+            result_char_cap=result_char_cap,
             deadline_epoch=deadline,
         )
         if permit is None:
@@ -1572,6 +1587,12 @@ class TaskRuntime:
             harness = op.harness_binding if op is not None else None
             if harness is None:
                 return None
+            model = op.model_binding if op is not None else None
+            model_binding = (
+                EpisodeModelBinding(mode=model.mode, url=model.url, model=model.model)
+                if model is not None
+                else None
+            )
             capsule_blob, outcomes = engine.episode_context(task_id)
             # First-turn dataflow inputs are delivered only on the first dispatch; a
             # resume injects only the harness's own delivered outcomes.
@@ -1587,6 +1608,7 @@ class TaskRuntime:
                 capsule_blob=capsule_blob,
                 delivered_outcomes=outcomes,
                 input_bindings=input_bindings,
+                model_binding=model_binding,
             )
 
     def _synthesize_ready_children_locked(

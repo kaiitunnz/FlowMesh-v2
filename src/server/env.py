@@ -102,6 +102,10 @@ WEB_SEARCH_PROVIDER: str = (
 )
 WEB_SEARCH_API_KEY: str = os.getenv("WEB_SEARCH_API_KEY", "")
 
+# The deployment-global credential a worker uses to egress an external managed-model
+# boundary, read only in the worker that performs the egress.
+AGENT_MODEL_API_KEY: str = os.getenv("AGENT_MODEL_API_KEY", "")
+
 WORKER_CONFIG_PATH: str = os.getenv("WORKER_CONFIG_PATH", "configs/worker_config.yaml")
 CUDA_VISIBLE_DEVICES: str | None = os.getenv("CUDA_VISIBLE_DEVICES")
 if CUDA_VISIBLE_DEVICES is not None:
