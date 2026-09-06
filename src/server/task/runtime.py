@@ -1361,8 +1361,8 @@ class TaskRuntime:
                 env.task_id, env.call_correlation, error="could not mint a permit"
             )
             return
-        # A re-drive re-mints under a fresh permit id; drop any prior entry for the same
-        # occurrence so at most one pending op is tracked per boundary.
+        # A re-drive re-mints under a fresh permit id; keep at most one pending op per
+        # occurrence.
         occurrence = (env.task_id, env.call_correlation)
         for stale_id, (task_id, call, _) in list(self._pending_ops.items()):
             if (task_id, call) == occurrence:
@@ -2719,9 +2719,8 @@ class TaskRuntime:
                     case _:
                         continue
 
-            # Reap any in-flight mediated egress on the cancelled agents so the worker
-            # drops the not-yet-started operation and its custody rather than egressing
-            # to completion and waiting on an outcome no longer wanted.
+            # Reap the cancelled agents' pending mediated egress so the worker drops the
+            # operation and its custody.
             self._reap_ops_for_agents_locked([task_id for task_id, _ in workflow_tasks])
 
             self._workflow_epoch_tasks.pop(workflow_id, None)

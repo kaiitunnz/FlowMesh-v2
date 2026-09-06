@@ -1,12 +1,11 @@
 """The worker-local mediated-egress sidecar: the enforced tool-fence egress lane.
 
-The agent's own worker captured a fabric-tool request in worker-private custody and
-proposed only its digest; central control returned a one-use permit over the worker's
+The agent's own worker captures a fabric-tool request in worker-private custody and
+proposes only its digest; central control returns a one-use permit over the worker's
 authenticated attachment. This bounded lane validates the permit and digest against the
 worker fence, egresses through the local provider, materializes a large result by
 reference, and reports one permit-fenced terminal fact back over the attachment. It is a
-worker-lifecycle execution lane, not a task, replica, endpoint, or authority: it holds
-no admission credit, selects no worker, and discovers no peer.
+worker-lifecycle execution lane, not a task, replica, endpoint, or authority.
 
 Raw-request custody is retained non-destructively: the lane peeks the request, egresses,
 reports the fenced outcome, and deletes the request only on the control plane's
@@ -99,11 +98,10 @@ class MediatedEgressSidecar:
             self._inflight[key] = self._pool.submit(self._drive, permit)
 
     def reap(self, agent_task_id: str, call_correlation: str) -> None:
-        """Delete worker-private custody after a committed-outcome acknowledgement.
+        """Delete worker-private custody after a committed outcome or a cancellation.
 
-        A committed outcome and a cancellation both reap. If the egress has not started
-        it is cancelled and dropped here, since ``_drive`` never runs to clear it; if it
-        is already running its report is suppressed and ``_drive`` clears it on exit.
+        An unstarted egress is cancelled and cleared here; a running egress has its
+        report suppressed and is cleared when it finishes.
         """
         key = (agent_task_id, call_correlation)
         with self._lock:

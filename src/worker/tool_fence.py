@@ -42,7 +42,7 @@ def fence_reason(
     before any provider call; it also binds the interface the request was framed for.
     The policy class is compared only when ``expected_policy_class`` is set; a caller
     with no independent policy expectation passes ``None`` to skip it. Provider audience
-    and result-budget bounds are the caller's rather than checked here.
+    and result-budget bounds are the caller's responsibility.
     """
     if interface not in allowed_interfaces:
         return "interface"

@@ -223,16 +223,16 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   the request non-destructively until the committed outcome is acknowledged. A fence
   rejection is a declared terminal boundary failure, never a retryable provider response;
   a lost outcome holds the boundary pending for a same-`idm-*` re-drive. The
-  `FabricToolBroker` stays a control-only authority (policy and correlation) and holds no
-  provider client or egress path. See [`EXECUTORS.md`](EXECUTORS.md).
+  `FabricToolBroker` applies the tool's policy and correlation. See
+  [`EXECUTORS.md`](EXECUTORS.md).
 - **Reference-backed invocation outcomes.** A mediated boundary settles by reference: the
   producing worker materializes its result into the content-addressed `FabricContentStore`
   and reports a bounded `OutcomeManifest`, never the payload. The manifest commits to the
   ledger before the continuation re-readies or a linked `ServiceClaim` credit releases, and a
   resumed worker hydrates and digest-verifies the reference before injection. Root and
   supervisors relay opaque frames and hold only the manifest. Materialization is idempotent
-  under `idm-*`. The mediated-egress-sidecar tool path is the first consumer; the
-  model-gateway and resident completions still settle inline. See
+  under `idm-*`. The mediated-egress-sidecar tool path settles by reference; the model
+  gateway and resident completions settle inline. See
   [`EXECUTORS.md`](EXECUTORS.md).
 - **Task merging.** Compatible adjacent tasks in a DAG (same `taskType`,
   model, hardware shape, and merge key) coalesce into a single dispatch.

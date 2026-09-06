@@ -477,8 +477,8 @@ class WebSearchConfig:
 
     ``max_results`` / ``result_char_cap`` / ``timeout_sec`` bound the permit the control
     plane mints and ``max_parallel`` bounds a turn's concurrent searches. It holds no
-    credential and names no provider; the worker's mediated-egress sidecar reads both
-    the provider selection and its key from its own local environment and egresses.
+    credential; the worker's mediated-egress sidecar reads the provider selection and
+    its key from its own local environment and egresses.
     """
 
     max_results: int = 5

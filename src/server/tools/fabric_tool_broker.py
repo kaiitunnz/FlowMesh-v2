@@ -1,12 +1,11 @@
-"""The FabricToolBroker — the control-only authority for fabric-served tools.
+"""The FabricToolBroker — control-plane policy and correlation for fabric-served tools.
 
-The broker is the control home for a mediated tool boundary the control plane captured
-server-side (today the agent-model gateway's captured ``search/v1`` facade). It holds no
-provider client and performs no egress: external-tool egress runs only in a worker's
-mediated-egress sidecar, reached by the worker-originated path. A boundary that reaches
-the broker has no worker origin and therefore no in-server egress, so the broker
-terminalizes it durably off the agent's lane as a typed unavailable outcome. It is not a
-semantic authority over the ledger and holds no durable store.
+The broker applies policy and correlation for a mediated tool boundary the control plane
+captured server-side (today the agent-model gateway's captured ``search/v1`` facade).
+External-tool egress runs only in a worker's mediated-egress sidecar, reached by the
+worker-originated path; a boundary that reaches the broker has no worker origin and no
+in-server egress, so the broker terminalizes it durably off the agent's lane as a typed
+unavailable outcome.
 """
 
 import logging
@@ -20,7 +19,7 @@ from ..config import WebSearchConfig
 from ..orchestration.tool_dispatch import ToolInvocationEnvelope
 
 # (task_id, call_correlation, carrier) — a typed inline control datum the runtime
-# settles durably; the broker never assembles a result body.
+# settles durably.
 SettleCallback = Callable[[str, str, OutcomeCarrier], None]
 
 
@@ -30,7 +29,7 @@ def inline_outcome(outcome: ToolOutcome) -> InlineControl:
 
 
 class FabricToolBroker:
-    """Terminalize a server-captured tool boundary; it holds no provider or egress."""
+    """Terminalize a server-captured tool boundary off the agent's lane."""
 
     def __init__(
         self,

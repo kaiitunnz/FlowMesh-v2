@@ -108,8 +108,8 @@ are snippets. An agent must declare `web_search` in its authority to use it, and
 child must carry the interface in its child-region authority ceiling — an undeclared tool is
 a compile error.
 
-The control plane stays authoritative for a search's authority and idempotency;
-the egress itself runs only in the Agent's assigned worker. The agent's own worker
+The control plane holds a search's authority and idempotency; the egress runs only in
+the Agent's assigned worker. The agent's own worker
 captures the `search/v1` boundary, records the raw request in worker-private state keyed
 by its stable `(agent_task_id, call_correlation)` occurrence, and yields carrying only a
 canonical request digest — the raw request never reaches the control plane. The engine
@@ -126,12 +126,12 @@ provider credential only from its own local worker environment (projected from
 `WEB_SEARCH_*` through the supervisor worker-environment allowlist) — no credential
 travels in a workflow, envelope, frame, message, or log. A fence rejection is a declared
 terminal boundary failure, never a retryable provider response; a missing worker-private
-request fails the boundary closed rather than egressing an unfenced request.
+request fails the boundary closed.
 
 A successful provider result is materialized by reference: the sidecar writes the outcome
 bytes to the content-addressed store under its `idm-*` and reports only an
-`OutcomeManifest`, so the result body never crosses the supervisor or root. A typed
-control status (an unavailable provider) stays a bounded inline datum. The request is
+`OutcomeManifest`; the result body never crosses the supervisor or root. A typed
+control status (an unavailable provider) is a bounded inline datum. The request is
 retained non-destructively until the engine acknowledges the committed outcome and reaps
 custody; a same-`idm-*` re-drive finds the first materialization instead of re-sampling,
 and a store-write or egress failure sends no outcome, holding the boundary pending for a
@@ -139,9 +139,7 @@ re-drive under the same `idm-*`. On resume the `AgentEpisodeExecutor` hydrates a
 digest-verifies the manifest before injecting the value into the harness; a hydration
 failure fails the step for a physical retry of the same reference, never a re-run. A
 server restart re-mints the permit and re-relays it to the surviving worker, whose
-in-memory request is intact; a genuine worker loss fails the boundary clean rather than
-resuming past it.
+in-memory request is intact; a genuine worker loss fails the boundary clean.
 
-The `FabricToolBroker` remains the control-only authority for a fabric tool's policy and
-correlation; it terminalizes a server-captured boundary as an unavailable outcome and
-holds no provider client and performs no egress.
+The `FabricToolBroker` applies a fabric tool's policy and correlation on the control
+plane and terminalizes a server-captured boundary as an unavailable outcome.
