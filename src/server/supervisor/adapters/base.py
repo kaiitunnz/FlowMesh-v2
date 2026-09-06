@@ -167,6 +167,9 @@ class WorkerAdapter(ABC):
             "WEB_SEARCH_PROVIDER": env.WEB_SEARCH_PROVIDER,
             "WEB_SEARCH_API_KEY": to_env_str(env.WEB_SEARCH_API_KEY),
             "AGENT_MODEL_API_KEY": to_env_str(env.AGENT_MODEL_API_KEY),
+            "AGENT_MODEL_EGRESS_TIMEOUT_SEC": to_env_str(
+                env.AGENT_MODEL_EGRESS_TIMEOUT_SEC
+            ),
             "HF_TOKEN": to_env_str(config.hf_token),
             "PREDOWNLOAD_MODEL_LIST": config.predownload_model_list,
             "NEBULA_API_TOKEN": to_env_str(config.nebula_api_token),
