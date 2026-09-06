@@ -20,7 +20,13 @@ from server.orchestration.state import WorkItemStatus
 from server.orchestration.tool_dispatch import MODEL_INTERFACE, SEARCH_INTERFACE
 from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime
-from shared.harness import BoundaryEventKind, HarnessCapsule
+from shared.harness import (
+    BoundaryEventKind,
+    HarnessBackendKey,
+    HarnessCapsule,
+    HarnessResult,
+    HarnessResultKind,
+)
 from shared.schemas.event import parse_event
 from shared.tools.contract import (
     AgentModelTurnProposal,
@@ -28,6 +34,11 @@ from shared.tools.contract import (
     MediatedOperationPermit,
     ToolOutcome,
     ToolOutcomeStatus,
+)
+from shared.tools.facade import (
+    FacadeCallMember,
+    FacadeCompletionMode,
+    FacadeTurnGroup,
 )
 from tests.server.task.test_v2_orchestration import (
     FakeRegistry,
@@ -430,6 +441,66 @@ def test_held_model_turn_denied_relays_a_deny_frame() -> None:
         assert len(denies) == 1
         assert denies[0]["agent_task_id"] == writer
         assert denies[0]["call_correlation"] == "t0"
+
+    asyncio.run(run())
+
+
+def _search_group(agent: str, base: int, digest: str) -> FacadeTurnGroup:
+    gid = f"{agent}:{base}"
+    member = FacadeCallMember(
+        ordinal=0,
+        kind=BoundaryEventKind.INVOCATION,
+        completion_mode=FacadeCompletionMode.AWAIT_OUTCOME,
+        call_correlation=f"{gid}:0",
+        harness_call_id="call0",
+        tool_name="web_search",
+        interface_or_region=SEARCH_INTERFACE,
+        request_digest=digest,
+    )
+    return FacadeTurnGroup(
+        group_id=gid, activation_id=agent, turn_id=str(base), members=(member,)
+    )
+
+
+def test_worker_facade_group_routes_search_by_digest_to_worker_egress() -> None:
+    """A worker-reported facade group routes its digest-bearing search to the worker.
+
+    The report records the group under the busy fence; the clean-turn completion routes
+    it, and the search member dispatches to the agent's own worker under its digest — a
+    permit relayed over the attachment, never the in-server broker.
+    """
+
+    async def run() -> None:
+        runtime = _runtime()
+        _, ids = await _register(runtime, _SEARCH_WF)
+        writer = ids["writer"]
+        _hold_dispatch(runtime, writer)
+
+        runtime.receive_worker_facade_group(writer, _search_group(writer, 0, "sha-xyz"))
+        assert runtime.has_pending_facade(writer)
+        # A second group while one is open is refused; the first stays.
+        runtime.receive_worker_facade_group(writer, _search_group(writer, 1, "sha-2"))
+
+        # The clean-turn completion routes the pending group and dispatches the search.
+        capsule = HarnessCapsule(
+            backend=HarnessBackendKey(backend="scripted", version="v1"), blob="cap"
+        )
+        completion = HarnessResult(
+            kind=HarnessResultKind.COMPLETION, value="done", capsule=capsule
+        )
+        runtime.mark_succeeded(
+            writer,
+            "wkr-1",
+            {"agent_episode": completion.model_dump(mode="json")},
+            _TS,
+        )
+
+        permits = _permit_frames(runtime)
+        assert len(permits) == 1
+        permit = MediatedOperationPermit.model_validate(permits[0])
+        assert permit.interface == SEARCH_INTERFACE
+        assert permit.request_digest == "sha-xyz"
+        assert permit.call_correlation == f"{writer}:0:0"
 
     asyncio.run(run())
 

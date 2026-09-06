@@ -1589,6 +1589,23 @@ class TaskRuntime:
                 record.pending_facade_group = group
                 self._persist_locked(task_id)
 
+    def receive_worker_facade_group(self, task_id: str, group: FacadeTurnGroup) -> None:
+        """Record a facade group its origin worker captured on a held model turn.
+
+        The worker facade sees a model turn's facade calls, keeps each search member's
+        request private, and reports the ordered membership with per-member digests. The
+        record here mirrors the control-captured path exactly — the episode's next
+        completion routes the group rather than settling DONE — so the busy fence still
+        holds: a second group while one's await-outcome members are unresolved is
+        refused, never overwriting the open one.
+        """
+        if self.has_pending_facade(task_id):
+            self._logger.warning(
+                "refusing a second facade group for %s while one is open", task_id
+            )
+            return
+        self.originate_facade_turn_group(task_id, group)
+
     def has_pending_facade(self, task_id: str) -> bool:
         """Whether a facade group is already captured or still open for this episode.
 

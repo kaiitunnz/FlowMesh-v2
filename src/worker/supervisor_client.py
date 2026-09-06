@@ -24,6 +24,7 @@ from shared.tasks.worker_message import (
     WorkerTaskMessage,
 )
 from shared.tools.contract import AgentModelTurnProposal, MediatedOperationOutcome
+from shared.tools.facade import FacadeTurnGroup
 from shared.utils.json import normalize_numbers
 from shared.utils.time import now_iso
 
@@ -621,5 +622,18 @@ class SupervisorClient:
             type="MEDIATED_OP_PROPOSE",
             worker_id=self.worker_id,
             payload={"proposal": proposal.model_dump(mode="json")},
+        )
+        self._event_queue.put(serialize_event(event))
+
+    def push_facade_group(self, task_id: str, group: FacadeTurnGroup) -> None:
+        """Report a facade group captured on a held model turn to control."""
+        if self._stub is None:
+            raise RuntimeError("Supervisor gRPC client not started")
+        if not self._event_ready.wait():
+            raise RuntimeError("Supervisor event stream not ready")
+        event = WorkerEvent(
+            type="FACADE_GROUP_REPORT",
+            worker_id=self.worker_id,
+            payload={"task_id": task_id, "group": group.model_dump(mode="json")},
         )
         self._event_queue.put(serialize_event(event))
