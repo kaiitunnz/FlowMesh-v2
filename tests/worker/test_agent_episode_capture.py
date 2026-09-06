@@ -36,7 +36,7 @@ def test_search_boundary_is_stripped_and_stored() -> None:
     assert req is not None
     assert req.request_payload is None
     assert req.request_digest == tool_request_digest(SEARCH_INTERFACE, "weather", 3)
-    stored = store.take(_TASK, "m0")
+    stored = store.peek(_TASK, "m0")
     assert stored is not None and stored.query == "weather" and stored.max_results == 3
 
 
