@@ -29,10 +29,6 @@ class CommandType(StrEnum):
         "DELIVER_RESIDENT_STREAM"  # phase 2: stream under the fence
     )
     DELIVER_RESIDENT_CANCEL = "DELIVER_RESIDENT_CANCEL"  # cancel a held invocation
-    BIND_TOOL_SIDECAR = (
-        "BIND_TOOL_SIDECAR"  # bind a node's external-tool egress sidecar
-    )
-    UNBIND_TOOL_SIDECAR = "UNBIND_TOOL_SIDECAR"  # drop a node's external-tool sidecar
 
 
 class CommandMessage(BaseModel):

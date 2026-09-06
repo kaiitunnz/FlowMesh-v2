@@ -2,8 +2,8 @@
 
 It egresses only within a server-issued ``ToolOperationEnvelope``, refusing an interface
 it does not serve or a request beyond the issued budget, and maps a provider fault to a
-typed ``ToolOutcome``. It runs in whichever process actually egresses — a worker
-executor, or the transitional in-server relay path.
+typed ``ToolOutcome``. It runs in the worker's mediated-egress sidecar, the process that
+actually egresses.
 """
 
 import logging

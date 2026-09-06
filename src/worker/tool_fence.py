@@ -1,11 +1,8 @@
-"""The shared worker-side fence and outcome materialization for fabric tool egress.
+"""The worker-side fence and outcome materialization for fabric tool egress.
 
-Both worker-side entry points to external-tool egress validate the same fence and
-materialize a successful result the same way: the server-driven attachment path
-(:class:`WorkerExternalToolExecutor`, fenced by a ``RemoteToolOperationEnvelope``) and
-the worker-originated path (:class:`MediatedEgressSidecar`, fenced by a
-``MediatedOperationPermit``). These helpers are that one egress boundary; the callers
-differ only in how they source the request and frame the result.
+The worker's :class:`MediatedEgressSidecar` validates a ``MediatedOperationPermit``
+against this fence and materializes a successful result through the content store before
+it leaves the worker. These helpers are that one egress boundary.
 """
 
 import time

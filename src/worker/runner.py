@@ -28,7 +28,6 @@ from shared.utils.time import now_iso
 from .executors.agent_episode_executor import AgentEpisodeResult
 from .executors.base_executor import ExecutionError, Executor, TaskCancelledError
 from .executors.utils.checkpoints import get_http_destination, write_executor_result
-from .external_tool_executor import WorkerExternalToolExecutor
 from .lifecycle import Lifecycle
 from .mediated_egress_sidecar import MediatedEgressSidecar
 from .utils.logging import TaskLogEmitter
@@ -87,12 +86,9 @@ class Runner:
         self._cancel_lock = threading.Lock()
         self._shutdown_requested = threading.Event()
 
-        # The worker-hosted external-tool executor, built on the first operation
-        # delivered over the attachment (once the worker id and incarnation are known).
         self._web_search_provider = web_search_provider
         self._web_search_api_key = web_search_api_key
         self._content_store = content_store
-        self._tool_executor: WorkerExternalToolExecutor | None = None
         # The worker-local mediated-egress sidecar, built on the first permit relayed
         # over the attachment (once the worker id and incarnation are known).
         self._mediated_sidecar: MediatedEgressSidecar | None = None
@@ -132,8 +128,6 @@ class Runner:
         self._shutdown_requested.set()
         self.lifecycle.stop()
         self._cancel_active_executor()
-        if self._tool_executor is not None:
-            self._tool_executor.stop()
         if self._mediated_sidecar is not None:
             self._mediated_sidecar.stop()
 
@@ -156,26 +150,6 @@ class Runner:
             logger=self.logger,
         )
         return self._mediated_sidecar
-
-    def _ensure_tool_executor(self) -> WorkerExternalToolExecutor | None:
-        """Build the external-tool executor once the worker id/incarnation are known."""
-        if self._tool_executor is not None:
-            return self._tool_executor
-        client = self.lifecycle.client
-        try:
-            worker_id = client.worker_id
-        except RuntimeError:
-            return None
-        self._tool_executor = WorkerExternalToolExecutor(
-            worker_id=worker_id,
-            generation=client.incarnation,
-            provider=self._web_search_provider,
-            api_key=self._web_search_api_key,
-            result_sink=client.push_tool_egress,
-            content_store=self._content_store,
-            logger=self.logger,
-        )
-        return self._tool_executor
 
     def _route_mediated_op(self, frame_kind: str, frame: dict[str, Any]) -> None:
         sidecar = self._ensure_mediated_sidecar()
@@ -432,14 +406,6 @@ class Runner:
                                 executor.stop(task_id)
                             except Exception as exc:
                                 self.logger.warning("Executor stop() raised: %s", exc)
-                    for (
-                        session_id,
-                        kind,
-                        payload,
-                    ) in self.lifecycle.client.iter_egress():
-                        tool_executor = self._ensure_tool_executor()
-                        if tool_executor is not None:
-                            tool_executor.submit(session_id, kind, payload)
                     for frame_kind, frame in self.lifecycle.client.iter_mediated_ops():
                         self._route_mediated_op(frame_kind, frame)
                 except Exception as exc:

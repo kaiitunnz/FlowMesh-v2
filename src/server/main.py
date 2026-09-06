@@ -59,12 +59,10 @@ from .services.watchdog import WorkerWatchdog
 from .startup import (
     rehydrate_root_state,
     start_resident_bridge_pump,
-    start_tool_bridge_pump,
 )
 from .supervisor import WorkerSupervisor
 from .task.runtime import TaskRuntime
 from .tools.fabric_tool_broker import FabricToolBroker
-from .tools.wiring import build_remote_tool_carriage
 from .utils.logging import get_logger
 
 # --------------------------------------------------------------------------- #
@@ -155,11 +153,6 @@ RESIDENT_REGISTRY = None
 NETWORK_PLANE = None
 RESIDENT_BRIDGE = None
 RESIDENT_BRIDGE_TASK = None
-TOOL_BRIDGE = None
-TOOL_INGRESS_ATTACH = None
-TOOL_INGRESS_NODE_ID = None
-TOOL_TARGET_REGISTRY = None
-REMOTE_TOOL_CARRIAGE = None
 
 
 if IS_ROOT_NODE:
@@ -194,10 +187,6 @@ if IS_ROOT_NODE:
             )
         else:
             RUNTIME.settle_episode_invocation(task_id, call_correlation, carrier.value)
-
-    def _redispatch_tool(task_id: str, call_correlation: str) -> bool:
-        assert RUNTIME is not None
-        return RUNTIME.redispatch_episode_invocation(task_id, call_correlation)
 
     def _resolve_gateway_binding(task_id: str) -> ResolvedGatewayBinding | None:
         assert RUNTIME is not None
@@ -255,27 +244,10 @@ if IS_ROOT_NODE:
             logger=logger,
         )
 
-    _tool_carriage = build_remote_tool_carriage(
-        config=config,
-        node_registry=NODE_REGISTRY,
-        worker_registry=WORKER_REGISTRY,
-        runtime=RUNTIME,
-        relay_redis=_relay_redis,
-        logger=logger,
-    )
-    if _tool_carriage is not None:
-        TOOL_BRIDGE = _tool_carriage.bridge
-        TOOL_INGRESS_ATTACH = _tool_carriage.ingress_attach
-        TOOL_INGRESS_NODE_ID = _tool_carriage.ingress_node_id
-        TOOL_TARGET_REGISTRY = _tool_carriage.target_registry
-        REMOTE_TOOL_CARRIAGE = _tool_carriage.carriage
-
     FABRIC_TOOL_BROKER = FabricToolBroker.build(
         config.orchestration.web_search,
         _settle_tool,
         logger=logger,
-        worker_carriage=REMOTE_TOOL_CARRIAGE,
-        redispatch=_redispatch_tool,
     )
     RUNTIME.set_tool_broker(FABRIC_TOOL_BROKER.submit)
 
@@ -537,19 +509,6 @@ async def _lifespan(_: FastAPI):
                 app.state.resident_bridge_task = start_resident_bridge_pump(
                     RESIDENT_BRIDGE, NODE_REGISTRY, logger
                 )
-            if (
-                TOOL_BRIDGE is not None
-                and TOOL_INGRESS_ATTACH is not None
-                and REMOTE_TOOL_CARRIAGE is not None
-                and TOOL_INGRESS_NODE_ID is not None
-                and NODE_REGISTRY is not None
-            ):
-                loop = asyncio.get_running_loop()
-                REMOTE_TOOL_CARRIAGE.bind_loop(loop)
-                TOOL_INGRESS_ATTACH.start(loop)
-                app.state.tool_bridge_task = start_tool_bridge_pump(
-                    TOOL_BRIDGE, NODE_REGISTRY, TOOL_INGRESS_NODE_ID, logger
-                )
             if PORT_FORWARD_SERVICE is not None:
                 await PORT_FORWARD_SERVICE.start()
             _start_root_threads()
@@ -598,17 +557,6 @@ async def _lifespan(_: FastAPI):
                     await _bridge_task
                 except (asyncio.CancelledError, Exception):
                     pass
-            _tool_bridge_task = getattr(app.state, "tool_bridge_task", None)
-            if _tool_bridge_task is not None:
-                _tool_bridge_task.cancel()
-                try:
-                    await _tool_bridge_task
-                except (asyncio.CancelledError, Exception):
-                    pass
-            if TOOL_INGRESS_ATTACH is not None:
-                await TOOL_INGRESS_ATTACH.stop()
-            if TOOL_TARGET_REGISTRY is not None:
-                await TOOL_TARGET_REGISTRY.close()
             if RESIDENT_CONTROL is not None:
                 RESIDENT_CONTROL.shutdown()
             if AGENT_MODEL_GATEWAY is not None:
@@ -653,7 +601,6 @@ app.state.network_plane = NETWORK_PLANE
 app.state.content_store = CONTENT_STORE
 # Started in lifespan on the root node when the resident relay bridge is enabled.
 app.state.resident_bridge_task = None
-app.state.tool_bridge_task = None
 
 # Routers — shared
 app.include_router(health.router)

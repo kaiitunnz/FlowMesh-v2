@@ -48,16 +48,6 @@ message TaskMessage {
   google.protobuf.Struct payload = 1;
 }
 
-// External-tool operation frame relayed to a worker executor over its attachment.
-message ToolEgressFrame {
-  // Transport session id the supervisor correlates the reply by.
-  string session_id = 1;
-  // Routing discriminator the supervisor sets from the transport action, never the payload.
-  string kind = 2;
-  // Opaque carriage frame bytes; only the worker executor decodes them.
-  bytes payload = 3;
-}
-
 // Mediated-operation control frame relayed to a worker's egress sidecar.
 message MediatedOperationFrame {
   // Frame kind the supervisor forwards: "permit" to drive one operation, "reap" to
@@ -76,8 +66,6 @@ message DispatchMessage {
     InterruptMessage interrupt = 2;
     // Graceful stop signal for an active task.
     StopMessage stop = 3;
-    // External-tool operation frame for a worker executor.
-    ToolEgressFrame egress = 4;
     // Mediated-operation permit/reap for a worker's egress sidecar.
     MediatedOperationFrame mediated_op = 5;
   }
