@@ -53,6 +53,11 @@ class PendingToolRequestStore:
         with self._lock:
             return self._store.get((agent_task_id, call_correlation))
 
+    def delete(self, agent_task_id: str, call_correlation: str) -> None:
+        """Drop the request for an occurrence once its outcome has committed."""
+        with self._lock:
+            self._store.pop((agent_task_id, call_correlation), None)
+
 
 class Lifecycle:
     def __init__(

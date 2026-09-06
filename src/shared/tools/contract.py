@@ -11,6 +11,8 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict
 
+from shared.outcome import OutcomeManifest
+
 
 class ToolOperationEnvelope(BaseModel):
     """A server-issued authorization for exactly one bounded external-tool operation.
@@ -132,7 +134,32 @@ class ToolOutcome(BaseModel):
     provenance: tuple[dict[str, str], ...] = ()
 
 
+class MediatedOperationOutcome(BaseModel):
+    """The fenced terminal fact a worker reports for one mediated operation.
+
+    The agent's own worker egressed the operation under its permit and reports the
+    result back over the authenticated attachment. Exactly one of ``outcome`` (a bounded
+    typed control datum), ``outcome_ref`` (a reference to materialized content), or
+    ``error`` (a worker-fault fence failure) is set; the control plane settles the
+    originating boundary from it. ``permit_id`` correlates the report to the minted
+    permit; ``agent_task_id`` / ``call_correlation`` name the boundary;
+    ``invocation_id`` and ``idempotency_key`` are its durable identity.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    permit_id: str
+    agent_task_id: str
+    call_correlation: str
+    invocation_id: str
+    idempotency_key: str | None
+    outcome: ToolOutcome | None = None
+    outcome_ref: OutcomeManifest | None = None
+    error: str | None = None
+
+
 __all__ = [
+    "MediatedOperationOutcome",
     "MediatedOperationPermit",
     "RemoteToolOperationEnvelope",
     "ToolOperationEnvelope",
