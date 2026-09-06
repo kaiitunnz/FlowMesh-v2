@@ -223,9 +223,8 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   the request non-destructively until the committed outcome is acknowledged. A fence
   rejection is a declared terminal boundary failure, never a retryable provider response;
   a lost outcome holds the boundary pending for a same-`idm-*` re-drive. The
-  `FabricToolBroker` stays a control-only authority (policy, quota, idempotency,
-  correlation) and holds no provider client or egress path. See
-  [`EXECUTORS.md`](EXECUTORS.md).
+  `FabricToolBroker` stays a control-only authority (policy and correlation) and holds no
+  provider client or egress path. See [`EXECUTORS.md`](EXECUTORS.md).
 - **Reference-backed invocation outcomes.** A mediated boundary settles by reference: the
   producing worker materializes its result into the content-addressed `FabricContentStore`
   and reports a bounded `OutcomeManifest`, never the payload. The manifest commits to the

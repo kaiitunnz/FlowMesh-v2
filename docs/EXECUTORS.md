@@ -108,7 +108,7 @@ are snippets. An agent must declare `web_search` in its authority to use it, and
 child must carry the interface in its child-region authority ceiling — an undeclared tool is
 a compile error.
 
-The control plane stays authoritative for a search's authority, quota, and idempotency;
+The control plane stays authoritative for a search's authority and idempotency;
 the egress itself runs only in the Agent's assigned worker. The agent's own worker
 captures the `search/v1` boundary, records the raw request in worker-private state keyed
 by its stable `(agent_task_id, call_correlation)` occurrence, and yields carrying only a
@@ -142,5 +142,6 @@ server restart re-mints the permit and re-relays it to the surviving worker, who
 in-memory request is intact; a genuine worker loss fails the boundary clean rather than
 resuming past it.
 
-The `FabricToolBroker` remains the control-only authority for a fabric tool's policy,
-quota, idempotency, and correlation; it holds no provider client and performs no egress.
+The `FabricToolBroker` remains the control-only authority for a fabric tool's policy and
+correlation; it terminalizes a server-captured boundary as an unavailable outcome and
+holds no provider client and performs no egress.
