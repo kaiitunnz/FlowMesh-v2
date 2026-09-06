@@ -43,10 +43,10 @@ listed here is in `.env.example`.
 | `ORCHESTRATOR_AGENT_INPUT_BUDGET_BYTES` | `262144` | Max resolved first-turn input bytes per agent |
 | `AGENT_HARNESS_DEFAULT_BACKEND` | – | Default agent harness backend when a workflow sets none |
 | `AGENT_HARNESS_DEFAULT_VERSION` | – | Default agent harness backend version |
-| `AGENT_MODEL_GATEWAY_MODE` | `canned` | Managed model upstream mode (`canned`/`echo`/`openai`/`proxy`) |
-| `AGENT_MODEL_GATEWAY_URL` | – | Upstream base URL (openai/proxy modes) |
-| `AGENT_MODEL_GATEWAY_MODEL` | – | Upstream model (openai/proxy modes) |
-| `AGENT_MODEL_GATEWAY_TIMEOUT_SEC` | `60` | Upstream request timeout (seconds) |
+| `AGENT_MODEL_GATEWAY_MODE` | `canned` | Default model binding mode (`canned`/`echo`/`openai`/`proxy`) |
+| `AGENT_MODEL_GATEWAY_URL` | – | Default model binding upstream URL (openai) |
+| `AGENT_MODEL_GATEWAY_MODEL` | – | Default model binding upstream model (openai) |
+| `AGENT_MODEL_GATEWAY_TIMEOUT_SEC` | `60` | Held model turn egress permit bound (seconds) |
 | `AGENT_MODEL_API_KEY` | – | Worker credential for external managed-model egress |
 | `AGENT_MODEL_EGRESS_TIMEOUT_SEC` | `120` | Held model turn permit-await bound (seconds) |
 | `AGENT_MODEL_SECRET_TTL_SEC` | `86400` | Expiry for a workflow's vaulted model credential |

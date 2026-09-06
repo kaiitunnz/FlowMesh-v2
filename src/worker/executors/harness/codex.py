@@ -183,10 +183,8 @@ def build_codex_adapter(
         if isinstance(override, str)
         else _isolated_codex_home(config.results_dir, task.workflow_id, task.task_id)
     )
-    # Codex runs its model turns through the worker-local facade: it registers the
-    # episode's upstream binding and pinned facades to obtain a per-episode token, binds
-    # the codex provider to the facade's loopback surface, and carries the token as the
-    # provider's key so one episode can never drive another's egress.
+    # Bind Codex to the facade's loopback surface with a per-episode token so one
+    # episode can't drive another's egress.
     token = facade.register_episode(
         task.task_id, binding.url, binding.model, list(dispatch.facade_descriptors)
     )

@@ -3,7 +3,7 @@
 The control path derives a canonical ``ModelRequest`` from an agent's managed-model
 boundary and commits to it with ``model_request_digest``; the worker executor recomputes
 the digest over the delivered request before any provider egress, so the raw request
-stays worker-private while control holds only the digest.
+is worker-private while control holds only the digest.
 """
 
 import hashlib

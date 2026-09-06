@@ -1,9 +1,8 @@
 """The fabric-facade contract shared between the worker facade and control.
 
 A held facade injects an agent's pinned fabric tools into a model turn, captures the
-calls the model co-emits, and reports them as a turn group; control records the group
-and routes each member kind-specifically. These types cross that boundary, so they live
-here rather than in either side's internals.
+calls the model co-emits, and carries them as a turn group; control records the group
+and routes each member kind-specifically. These types cross that boundary.
 """
 
 from enum import StrEnum
@@ -63,7 +62,7 @@ class FacadeCallMember(BaseModel):
     tool_name: str
     interface_or_region: str | None = None
     request_payload: str | None = None
-    # Set for a worker-captured search member: the raw request stays worker-private and
+    # Set for a worker-captured search member: the raw request is worker-private and
     # its presence routes the recorded boundary to the off-lane worker egress, never the
     # in-server broker. A spawn member carries its args in ``request_payload`` instead.
     request_digest: str | None = None

@@ -158,10 +158,10 @@ digest, and the boundary settles through the worker-originated path above. A
 `synchronous_turn_only` backend (`codex`) holds its own lane through one bounded
 same-worker egress within a turn, under a no-conflicting-capacity, deadline, and
 cancellation bound. The turn's durable anchors are its turn-completion boundaries;
-recovery re-runs the whole turn from the last completion under a fresh permit, safe
-because a model inference is side-effect-free. A backend advertises
-`durable_pre_egress_yield` only once its request-capsule and outcome-reinjection recovery
-protocol is demonstrated; the default is `synchronous_turn_only`.
+recovery re-runs the whole turn from the last completion under a fresh permit, and a
+re-run injects the same idempotency key so a settled effect never double-applies. A
+backend advertises `durable_pre_egress_yield` only if it implements request-capsule
+capture and outcome-reinjection recovery; the default is `synchronous_turn_only`.
 
 ## Managed external-model egress
 
@@ -172,10 +172,9 @@ episode drives only its own egress. Codex's model provider targets the facade at
 
 For each turn the facade translates the Responses request into a Chat Completions request,
 injects the agent's pinned fabric facades, and runs the held egress: it proposes the
-request digest to control, arms a permit waiter before proposing so a fast permit cannot
-outrace it, awaits the one-use `MediatedOperationPermit` over the worker's attachment, and
-egresses synchronously through the `MediatedEgressSidecar`, returning the model's whole
-message inline. The per-workflow model credential rides the permit to the worker; a worker
+request digest to control, awaits the one-use `MediatedOperationPermit` over the worker's
+attachment, and egresses synchronously through the `MediatedEgressSidecar`, returning the
+model's whole message inline. The per-workflow model credential rides the permit to the worker; a worker
 without one uses its deployment-global `AGENT_MODEL_API_KEY`. The `Authorization` header is
 redacted in the facade's own logs, and the credential is kept out of the ledger, the
 control stores, and the logs. A denial, a permit that never arrives within

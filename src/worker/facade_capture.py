@@ -2,7 +2,7 @@
 
 The facade injects an agent's pinned fabric tools into a model turn; when the model
 co-emits calls to them, this captures them into a ``FacadeTurnGroup`` whose search
-members carry a request digest (their raw request stays worker-private, kept in custody
+members carry a request digest (their raw request is worker-private, kept in custody
 for the worker egress) and whose spawn members carry their args for control to admit a
 child. The digest is what routes a search member to the worker egress rather than the
 in-server broker. The group id and each member's correlation derive from ``(task, turn

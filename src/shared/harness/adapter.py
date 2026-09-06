@@ -57,10 +57,9 @@ class EgressHandoffMode(StrEnum):
     """How a backend hands a mediated egress boundary to the worker egress lane.
 
     A ``durable_pre_egress_yield`` backend releases its episode lane at the boundary and
-    resumes only from the committed outcome. A ``synchronous_turn_only`` backend cannot
-    prove a durable mid-turn handoff and instead holds its own lane through one bounded
-    same-worker egress within a turn, under a no-conflicting-capacity, deadline, and
-    cancellation bound.
+    resumes only from the committed outcome. A ``synchronous_turn_only`` backend holds
+    its own lane through one bounded same-worker egress within a turn, under a
+    no-conflicting-capacity, deadline, and cancellation bound.
     """
 
     DURABLE_PRE_EGRESS_YIELD = "durable_pre_egress_yield"
@@ -261,8 +260,8 @@ class HarnessAdapter(ABC):
         """This backend's mediated-egress handoff mode.
 
         The default is ``synchronous_turn_only``; a backend advertises
-        ``durable_pre_egress_yield`` only after its request-capsule and
-        outcome-reinjection recovery protocol is demonstrated.
+        ``durable_pre_egress_yield`` only if it implements request-capsule capture and
+        outcome-reinjection recovery.
         """
         return EgressHandoffMode.SYNCHRONOUS_TURN_ONLY
 

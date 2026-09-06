@@ -192,8 +192,7 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   (the `codex` binding) holds its own lane through one bounded same-worker egress within
   a turn, under a no-conflicting-capacity, deadline, and cancellation bound; the turn's
   durable anchors are its turn-completion boundaries, and recovery re-runs the whole turn
-  from the last completion under a fresh permit, safe because a model inference is
-  side-effect-free.
+  from the last completion under a fresh permit.
 - **External-model egress.** A managed external (`openai`) model turn egresses on the
   Agent's own worker through a worker-local Responses facade, bound to loopback and
   authenticated per episode so one episode drives only its own egress. Codex's model
