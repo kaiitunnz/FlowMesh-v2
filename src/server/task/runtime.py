@@ -149,7 +149,6 @@ class TaskRuntime:
         self._secret_vault = secret_vault
         self._scope_budget = ScopeBudget.from_config(orchestration)
         self._web_search = orchestration.web_search
-        self._worker_originated_boundaries = orchestration.worker_originated_boundaries
         self._input_budget_bytes = orchestration.agent_input_budget_bytes
         self._agent_binding_defaults = _binding_defaults(orchestration.agent_binding)
         self._lowering_strategy = (
@@ -1582,7 +1581,6 @@ class TaskRuntime:
                 capsule_blob=capsule_blob,
                 delivered_outcomes=outcomes,
                 input_bindings=input_bindings,
-                worker_originated_boundaries=self._worker_originated_boundaries,
             )
 
     def _synthesize_ready_children_locked(

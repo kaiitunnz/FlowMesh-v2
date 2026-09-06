@@ -86,7 +86,7 @@ class AgentEpisodeExecutor(Executor):
                 outcome.call_correlation,
             )
         result = adapter.start(task.task_id, capsule=capsule, outcomes=outcomes)
-        if dispatch.worker_originated_boundaries:
+        if self._is_capturable_boundary(result):
             result = self._capture_local_request(
                 self._pending_tool_requests(), task.task_id, result
             )
@@ -100,6 +100,19 @@ class AgentEpisodeExecutor(Executor):
         return AgentEpisodeResult(harness_result=result, value=value)
 
     @staticmethod
+    def _is_capturable_boundary(result: HarnessResult) -> bool:
+        """Whether a step yielded a worker-originatable ``search/v1`` tool boundary."""
+        req = result.request
+        return (
+            result.kind is HarnessResultKind.BOUNDARY
+            and req is not None
+            and req.kind is BoundaryEventKind.INVOCATION
+            and req.interface == SEARCH_INTERFACE
+            and req.request_payload is not None
+            and req.call_correlation is not None
+        )
+
+    @staticmethod
     def _capture_local_request(
         store: PendingToolRequestStore, task_id: str, result: HarnessResult
     ) -> HarnessResult:
@@ -111,15 +124,10 @@ class AgentEpisodeExecutor(Executor):
         digest. Any other boundary passes through unchanged.
         """
         req = result.request
-        if (
-            result.kind is not HarnessResultKind.BOUNDARY
-            or req is None
-            or req.kind is not BoundaryEventKind.INVOCATION
-            or req.interface != SEARCH_INTERFACE
-            or req.request_payload is None
-            or req.call_correlation is None
-        ):
+        if not AgentEpisodeExecutor._is_capturable_boundary(result):
             return result
+        assert req is not None and req.request_payload is not None
+        assert req.call_correlation is not None
         parsed = parse_search_request(req.request_payload)
         store.put(task_id, req.call_correlation, parsed)
         digest = tool_request_digest(parsed.interface, parsed.query, parsed.max_results)

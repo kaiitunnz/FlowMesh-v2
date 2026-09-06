@@ -1,11 +1,9 @@
 """The worker-originated mediated-tool-boundary path through the real runtime.
 
-With the flag on, a ``search/v1`` boundary an agent emits is stripped to its digest by
-the worker; the runtime mints an audience-bound permit and relays it to the agent's own
-worker over the attachment, and the worker's fenced outcome settles the boundary — the
-raw request never entering the ledger. With the flag off the same boundary keeps its
-request and routes to the in-server broker. If the origin worker is lost the boundary
-fails clean.
+A ``search/v1`` boundary an agent emits is stripped to its digest by the worker; the
+runtime mints an audience-bound permit and relays it to the agent's own worker over the
+attachment, and the worker's fenced outcome settles the boundary — the raw request never
+entering the ledger. If the origin worker is lost the boundary fails clean.
 """
 
 import asyncio
@@ -17,7 +15,7 @@ from typing import Any, cast
 
 from server.config import OrchestrationConfig
 from server.orchestration.state import WorkItemStatus
-from server.orchestration.tool_dispatch import SEARCH_INTERFACE, ToolInvocationEnvelope
+from server.orchestration.tool_dispatch import SEARCH_INTERFACE
 from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime
 from shared.harness import BoundaryEventKind, HarnessCapsule
@@ -83,11 +81,11 @@ class _WorkerStub:
         return 0
 
 
-def _runtime(*, flag: bool) -> TaskRuntime:
+def _runtime() -> TaskRuntime:
     return TaskRuntime(
         cast(Any, FakeRegistry()),
         cast(Any, _WorkerStub()),
-        OrchestrationConfig(worker_originated_boundaries=flag),
+        OrchestrationConfig(),
         Path(tempfile.gettempdir()),
         logging.getLogger("wo-test"),
         secret_vault=cast(Any, _NoopSecretVault()),
@@ -112,10 +110,9 @@ def _dispatch_agent(runtime: TaskRuntime, task_id: str, worker: str = "wkr-1") -
     result = ScriptedHarnessAdapter(_SCRIPT, "v1").start(
         task_id, capsule=capsule, outcomes=dispatch.delivered_outcomes
     )
-    if dispatch.worker_originated_boundaries:
-        result = AgentEpisodeExecutor._capture_local_request(
-            PendingToolRequestStore(), task_id, result
-        )
+    result = AgentEpisodeExecutor._capture_local_request(
+        PendingToolRequestStore(), task_id, result
+    )
     runtime.mark_succeeded(
         task_id, worker, {"agent_episode": result.model_dump(mode="json")}, _TS
     )
@@ -134,7 +131,7 @@ def _reap_frames(runtime: TaskRuntime) -> list[dict[str, Any]]:
 
 def test_worker_originated_boundary_settles_and_keeps_payload_out_of_ledger() -> None:
     async def run() -> None:
-        runtime = _runtime(flag=True)
+        runtime = _runtime()
         _, ids = await _register(runtime, _SEARCH_WF)
         writer = ids["writer"]
 
@@ -176,28 +173,9 @@ def test_worker_originated_boundary_settles_and_keeps_payload_out_of_ledger() ->
     asyncio.run(run())
 
 
-def test_flag_off_routes_the_boundary_to_the_broker_with_its_request() -> None:
-    async def run() -> None:
-        runtime = _runtime(flag=False)
-        broker: list[ToolInvocationEnvelope] = []
-        runtime.set_tool_broker(broker.append)
-        _, ids = await _register(runtime, _SEARCH_WF)
-        writer = ids["writer"]
-
-        _dispatch_agent(runtime, writer)
-
-        # No permit relay; the broker gets the boundary with its raw request intact.
-        assert not _permit_frames(runtime)
-        assert [e.interface for e in broker] == [SEARCH_INTERFACE]
-        assert broker[0].request_payload is not None
-        assert _QUERY_TOKEN in broker[0].request_payload
-
-    asyncio.run(run())
-
-
 def test_origin_worker_loss_fails_the_boundary_clean() -> None:
     async def run() -> None:
-        runtime = _runtime(flag=True)
+        runtime = _runtime()
         _, ids = await _register(runtime, _SEARCH_WF)
         writer = ids["writer"]
 
