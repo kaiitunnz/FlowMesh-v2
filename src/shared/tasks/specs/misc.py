@@ -158,15 +158,6 @@ class EchoSpecTemplate(TaskSpecTemplateBase):
     data: dict[str, Any] | None = None
 
 
-# Server-minted off-lane tool-operation carrier; never user-submitted.
-class ToolOperationSpecStrict(TaskSpecStrictBase):
-    taskType: Literal[TaskType.TOOL_OPERATION]
-
-
-class ToolOperationSpecTemplate(TaskSpecTemplateBase):
-    taskType: Literal[TaskType.TOOL_OPERATION]
-
-
 class AgentSpecStrict(TaskSpecStrictBase):
     taskType: Literal[TaskType.AGENT]
 

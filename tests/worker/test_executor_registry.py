@@ -31,7 +31,6 @@ class TestExecutorRegistry:
             "default",
             "rag",
             "agent_episode",
-            "tool_operation",
             "echo",
             "data_profiling",
             "data_retrieval",

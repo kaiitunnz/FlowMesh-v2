@@ -3,7 +3,7 @@
 Both worker-side entry points to external-tool egress validate the same fence and
 materialize a successful result the same way: the server-driven attachment path
 (:class:`WorkerExternalToolExecutor`, fenced by a ``RemoteToolOperationEnvelope``) and
-the worker-originated path (:class:`ToolOperationExecutor`, fenced by a
+the worker-originated path (:class:`MediatedEgressSidecar`, fenced by a
 ``MediatedOperationPermit``). These helpers are that one egress boundary; the callers
 differ only in how they source the request and frame the result.
 """
