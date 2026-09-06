@@ -389,29 +389,6 @@ STACK_ENV_SCHEMA = EnvSchema(
                     var_type=EnvVarType.INT,
                     min_value=1,
                 ),
-                EnvVar(
-                    "WEB_SEARCH_EGRESS_LOCALITY",
-                    "server_relay",
-                    description="Where a search egresses.",
-                    choices=["server_relay", "worker_sidecar"],
-                ),
-                EnvVar(
-                    "WEB_SEARCH_SIDECAR_REMOTE",
-                    "false",
-                    description="Carry a worker-sidecar search to a remote node.",
-                    var_type=EnvVarType.BOOL,
-                ),
-                EnvVar(
-                    "WEB_SEARCH_SIDECAR_ROUTE",
-                    "127.0.0.1:0",
-                    description="Remote sidecar bind route.",
-                ),
-                EnvVar(
-                    "WEB_SEARCH_SIDECAR_DIRECTLY_ROUTABLE",
-                    "false",
-                    description="Offer a direct dial to the remote sidecar.",
-                    var_type=EnvVarType.BOOL,
-                ),
             ],
         ),
         EnvSection(

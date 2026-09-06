@@ -55,10 +55,6 @@ listed here is in `.env.example`.
 | `WEB_SEARCH_RESULT_CHAR_CAP` | `6000` | Injected result size cap |
 | `WEB_SEARCH_MAX_CALLS` | `8` | Searches per episode |
 | `WEB_SEARCH_MAX_PARALLEL_CALLS_PER_TURN` | `4` | Parallel searches per turn |
-| `WEB_SEARCH_EGRESS_LOCALITY` | `server_relay` | Where a search egresses (`server_relay` or `worker_sidecar`) |
-| `WEB_SEARCH_SIDECAR_REMOTE` | `false` | Carry a worker-sidecar search to a remote node |
-| `WEB_SEARCH_SIDECAR_ROUTE` | `127.0.0.1:0` | Remote sidecar bind route |
-| `WEB_SEARCH_SIDECAR_DIRECTLY_ROUTABLE` | `false` | Offer a direct dial to the remote sidecar |
 | `CONTENT_STORE_ENABLED` | `true` | Serve the outcome content store |
 | `CONTENT_STORE_ROOT` | – | Content-store root; under the data dir if empty |
 | `RESIDENT_CAPACITY_ENABLED` | `false` | Serve resident model bindings via admission |

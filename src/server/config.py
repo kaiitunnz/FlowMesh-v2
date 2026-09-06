@@ -474,28 +474,21 @@ class ResidentCapacityConfig:
 
 @dataclass
 class WebSearchConfig:
-    """The fabric web-search tool's provider binding and bounds.
+    """The fabric web-search tool's control-plane policy metadata.
 
-    ``provider`` selects the backend (keyless ``duckduckgo`` default); ``api_key`` is
-    the deployment credential a keyed provider needs. ``max_calls`` bounds one episode's
-    searches; ``result_char_cap`` bounds the injected result size. ``egress_locality``
-    selects where an approved search egresses (``server_relay`` default or
-    ``worker_sidecar``). With ``worker_sidecar`` and ``sidecar_remote``, the operation
-    is carried to the blocked episode's assigned worker, bound on ``sidecar_route`` and
-    offered a direct dial only when ``sidecar_directly_routable``.
+    ``provider`` names the backend (keyless ``duckduckgo`` default); ``max_calls``
+    bounds one episode's searches and ``max_results`` / ``result_char_cap`` /
+    ``timeout_sec`` bound the permit the control plane mints. It holds no credential;
+    the worker's mediated-egress sidecar reads the provider key from its own local
+    environment and performs the egress.
     """
 
     provider: str = DEFAULT_SEARCH_PROVIDER
-    api_key: str | None = None
     max_results: int = 5
     timeout_sec: float = 20.0
     result_char_cap: int = 6000
     max_calls: int = 8
     max_parallel: int = 4
-    egress_locality: str = "server_relay"
-    sidecar_remote: bool = False
-    sidecar_route: str = "127.0.0.1:0"
-    sidecar_directly_routable: bool = False
 
     @classmethod
     def from_env(cls) -> "WebSearchConfig":
@@ -504,22 +497,11 @@ class WebSearchConfig:
             provider=(os.getenv(f"{prefix}PROVIDER") or DEFAULT_SEARCH_PROVIDER)
             .strip()
             .lower(),
-            api_key=_env_or_none(f"{prefix}API_KEY"),
             max_results=parse_int_env(f"{prefix}MAX_RESULTS") or 5,
             timeout_sec=parse_float_env(f"{prefix}TIMEOUT_SEC") or 20.0,
             result_char_cap=parse_int_env(f"{prefix}RESULT_CHAR_CAP") or 6000,
             max_calls=parse_int_env(f"{prefix}MAX_CALLS") or 8,
             max_parallel=parse_int_env(f"{prefix}MAX_PARALLEL_CALLS_PER_TURN") or 4,
-            egress_locality=(os.getenv(f"{prefix}EGRESS_LOCALITY") or "server_relay")
-            .strip()
-            .lower(),
-            sidecar_remote=parse_bool_env(f"{prefix}SIDECAR_REMOTE", False),
-            sidecar_route=(
-                os.getenv(f"{prefix}SIDECAR_ROUTE") or "127.0.0.1:0"
-            ).strip(),
-            sidecar_directly_routable=parse_bool_env(
-                f"{prefix}SIDECAR_DIRECTLY_ROUTABLE", False
-            ),
         )
 
 

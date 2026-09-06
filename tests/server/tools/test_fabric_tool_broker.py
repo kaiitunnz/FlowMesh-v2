@@ -7,6 +7,7 @@ broker settles it off the agent's lane as a typed unavailable outcome. This file
 covers the retained search provider backends the sidecar egresses through.
 """
 
+from dataclasses import dataclass
 from typing import Any
 
 from server.config import WebSearchConfig
@@ -47,6 +48,14 @@ def _broker() -> tuple[FabricToolBroker, list[tuple[str, str, Any]]]:
         lambda t, c, v: settled.append((t, c, v)),
     )
     return broker, settled
+
+
+@dataclass(frozen=True)
+class _ProviderCfg:
+    """A minimal provider-config double (the worker builds the real binding)."""
+
+    provider: str
+    api_key: str | None = None
 
 
 def _carrier_outcome(carrier: Any) -> ToolOutcome:
@@ -156,7 +165,6 @@ def test_serper_provider_parses_organic_and_maps_faults(monkeypatch: Any) -> Non
 
 
 def test_build_search_provider_selects_by_config() -> None:
-    from server.config import WebSearchConfig
     from shared.tools.search.providers import (
         DuckDuckGoProvider,
         SerperProvider,
@@ -164,14 +172,14 @@ def test_build_search_provider_selects_by_config() -> None:
     )
 
     assert isinstance(
-        build_search_provider(WebSearchConfig(provider="duckduckgo")),
+        build_search_provider(_ProviderCfg("duckduckgo")),
         DuckDuckGoProvider,
     )
-    keyed = build_search_provider(WebSearchConfig(provider="serper", api_key="k-abc"))
+    keyed = build_search_provider(_ProviderCfg("serper", "k-abc"))
     assert isinstance(keyed, SerperProvider)
     for bad in (
-        WebSearchConfig(provider="serper"),  # keyed provider with no key
-        WebSearchConfig(provider="nope"),  # unknown provider
+        _ProviderCfg("serper"),  # keyed provider with no key
+        _ProviderCfg("nope"),  # unknown provider
     ):
         try:
             build_search_provider(bad)
@@ -185,7 +193,7 @@ def test_lazy_provider_defers_a_missing_key_to_first_search() -> None:
 
     # A keyed provider with no key must not fail at construction — only on egress,
     # so a deployment that egresses only off-server never builds it on the server.
-    lazy = LazySearchProvider(WebSearchConfig(provider="serper", api_key=None))
+    lazy = LazySearchProvider(_ProviderCfg("serper", None))
     try:
         lazy.search("q", max_results=1, timeout_sec=1.0)
         raise AssertionError("expected the missing key to raise on first search")
