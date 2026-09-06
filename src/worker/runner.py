@@ -21,6 +21,7 @@ from shared.tasks.specs import (
 )
 from shared.tasks.worker_message import HardwareUsage, WorkerHardware, WorkerTaskMessage
 from shared.tools.contract import MediatedOperationPermit
+from shared.tools.model.schema import MODEL_INTERFACE
 from shared.tools.search.schema import DEFAULT_SEARCH_PROVIDER
 from shared.utils.manifest import prepare_output_dir, sync_manifest
 from shared.utils.time import now_iso
@@ -197,7 +198,6 @@ class Runner:
         facade = ResponsesFacade(
             held_egress=held_egress,
             pending=self.lifecycle.pending_egress_requests,
-            report_group=client.push_facade_group,
             logger=self.logger,
         )
         facade.start()
@@ -219,6 +219,18 @@ class Runner:
             # A held facade armed a waiter before proposing: hand it the permit for a
             # synchronous in-turn egress. Otherwise it drives the async sidecar lane.
             if self._model_turn_rendezvous.deliver_permit(permit):
+                return
+            # A held-turn MODEL permit whose waiter is gone is stale (its turn timed
+            # out, or a duplicate): the deferred-op lane would egress it again and reap
+            # a concurrent retry's private request, so drop it — recovery re-proposes it
+            # under a fresh permit. A durable-yield MODEL permit never armed a waiter,
+            # so it drives the async lane like any other.
+            stale_held = permit.interface == MODEL_INTERFACE and (
+                self._model_turn_rendezvous.was_held(
+                    permit.agent_task_id, permit.call_correlation
+                )
+            )
+            if stale_held:
                 return
             if (sidecar := self._ensure_mediated_sidecar()) is not None:
                 sidecar.submit_permit(permit)
@@ -652,10 +664,15 @@ class Runner:
                     if isinstance(out, AgentEpisodeResult):
                         # The step rides the success metadata so the server routes the
                         # boundary and re-dispatches; the attempt still ends here, which
-                        # is what releases the lane.
+                        # is what releases the lane. A captured facade group rides the
+                        # same metadata so control routes it with the completion.
                         metadata["agent_episode"] = out.harness_result.model_dump(
                             mode="json"
                         )
+                        if out.facade_group is not None:
+                            metadata["agent_episode_facade_group"] = (
+                                out.facade_group.model_dump(mode="json")
+                            )
                     self.lifecycle.set_succeeded(task_id, metadata=metadata)
                     self.logger.info("Task %s completed successfully", task_id)
                 except TaskCancelledError as e:

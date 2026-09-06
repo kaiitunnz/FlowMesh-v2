@@ -1589,14 +1589,13 @@ class TaskRuntime:
                 self._persist_locked(task_id)
 
     def receive_worker_facade_group(self, task_id: str, group: FacadeTurnGroup) -> None:
-        """Record a facade group its origin worker captured on a held model turn.
+        """Record a facade group the worker carried on its held model turn's completion.
 
-        The worker facade sees a model turn's facade calls, keeps each search member's
-        request private, and reports the ordered membership with per-member digests. The
-        record here mirrors the control-captured path exactly — the episode's next
-        completion routes the group rather than settling DONE — so the busy fence still
-        holds: a second group while one's await-outcome members are unresolved is
-        refused, never overwriting the open one.
+        The worker facade keeps each search member's request private and carries the
+        ordered membership with per-member digests on the completion. Recording it under
+        the busy fence refuses a second group while one's await-outcome members are
+        unresolved, so the open one is never overwritten; the episode's next completion
+        routes the recorded group rather than settling DONE.
         """
         if self.has_pending_facade(task_id):
             self._logger.warning(
@@ -2528,6 +2527,14 @@ class TaskRuntime:
             episode_step = payload.get("agent_episode")
             if episode_step is not None and record is not None:
                 harness_result = HarnessResult.model_validate(episode_step)
+                # A facade group the worker captured on this turn rides the completion's
+                # own metadata on the durable task stream, so it is ingested here rather
+                # than on a separate channel that could deliver it after the completion
+                # (settling the episode DONE and dropping its searches) or drop it.
+                if (carried := payload.get("agent_episode_facade_group")) is not None:
+                    self.receive_worker_facade_group(
+                        task_id, FacadeTurnGroup.model_validate(carried)
+                    )
                 # The durable record is the source of truth: a restart drops the
                 # in-memory stash, but a replayed completion still finds its captured
                 # boundary and reroute rather than settling the episode DONE.

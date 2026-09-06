@@ -7,23 +7,27 @@ facade translates the Responses request into a chat request, injects the agent's
 fabric tools, and runs the held model egress (propose the digest, await the one-use
 permit, egress synchronously) — the server never egresses, the worker sidecar does. It
 then maps the reply back to Responses items; if the model called a fabric tool, the
-calls are captured into a turn group reported to control and the turn is cleaned, so
-the episode suspends on the group rather than running the raw call. The provider
-credential and the permit are handled by the egress path and never logged here.
+calls are captured into a turn group the turn completion carries to control and the turn
+is cleaned, so the episode suspends on the group rather than running the raw call. The
+provider credential and the permit are handled by the egress path and never logged here.
 """
 
 import json
 import logging
 import secrets
 import threading
-from collections.abc import Callable
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 from shared.harness import BoundaryEventKind
 from shared.tools.facade import FacadeDescriptor, FacadeTurnGroup
-from shared.tools.model.schema import MODEL_INTERFACE, ModelCompletion, ModelRequest
+from shared.tools.model.schema import (
+    MODEL_INTERFACE,
+    ModelCompletion,
+    ModelRequest,
+    ModelToolCall,
+)
 
 from .facade_capture import build_facade_capture, partition_facade_calls, turn_base
 from .held_model_egress import HeldModelEgress
@@ -32,15 +36,13 @@ from .mediated_egress_sidecar import HeldEgressReject
 from .responses_translation import (
     chat_tools,
     completion_to_responses_output,
+    function_call_item,
     message_output_item,
     responses_input_to_messages,
     responses_sse,
 )
 
 _MAX_BODY_BYTES = 20 * 1024 * 1024
-
-# Reports a captured facade group to control (a bound ``push_facade_group``).
-GroupReporter = Callable[[str, FacadeTurnGroup], None]
 
 
 class FacadeTurnError(RuntimeError):
@@ -65,14 +67,16 @@ class ResponsesFacade:
         *,
         held_egress: HeldModelEgress,
         pending: PendingEgressRequestStore,
-        report_group: GroupReporter,
         logger: logging.Logger | None = None,
     ) -> None:
         self._held_egress = held_egress
         self._pending = pending
-        self._report_group = report_group
         self._log = logger or logging.getLogger("responses-facade")
         self._episodes: dict[str, EpisodeContext] = {}
+        # A facade group captured on the episode's current turn, handed to the executor
+        # so the completion carries it ordered-with the turn rather than on a separate
+        # lossy channel that could race or drop it.
+        self._captured: dict[str, FacadeTurnGroup] = {}
         self._lock = threading.Lock()
         self._server: _FacadeHTTPServer | None = None
         self._serve_thread: threading.Thread | None = None
@@ -92,6 +96,12 @@ class ResponsesFacade:
     def unregister_episode(self, task_id: str) -> None:
         with self._lock:
             self._episodes.pop(task_id, None)
+            self._captured.pop(task_id, None)
+
+    def take_captured_group(self, task_id: str) -> FacadeTurnGroup | None:
+        """Return and clear the facade group captured on this episode's last turn."""
+        with self._lock:
+            return self._captured.pop(task_id, None)
 
     def base_url(self) -> str:
         """The loopback base url a codex provider binds to, once the server is up."""
@@ -129,12 +139,14 @@ class ResponsesFacade:
         ctx = self._episode_for(task_id, token)
         base = turn_base(body.get("input"))
         completion = self._egress_turn(task_id, ctx, body, base)
-        facade_calls, _ = partition_facade_calls(
+        facade_calls, other = partition_facade_calls(
             completion.tool_calls, list(ctx.descriptors)
         )
         if not facade_calls:
             return completion_to_responses_output(completion)
-        return self._capture_and_clean(task_id, ctx, completion, facade_calls, base)
+        return self._capture_and_clean(
+            task_id, ctx, completion, facade_calls, other, base
+        )
 
     def _episode_for(self, task_id: str, token: str | None) -> EpisodeContext:
         with self._lock:
@@ -164,7 +176,8 @@ class ResponsesFacade:
         task_id: str,
         ctx: EpisodeContext,
         completion: ModelCompletion,
-        facade_calls: list[Any],
+        facade_calls: list[ModelToolCall],
+        other: list[ModelToolCall],
         base: int,
     ) -> list[dict[str, Any]]:
         capture = build_facade_capture(
@@ -172,16 +185,16 @@ class ResponsesFacade:
         )
         for correlation, request in capture.stashes:
             self._pending.put(task_id, correlation, request)
-        self._report_group(task_id, capture.group)
+        with self._lock:
+            self._captured[task_id] = capture.group
         output: list[dict[str, Any]] = []
         if completion.content:
             output.append(message_output_item(completion.content))
+        # A native tool call co-emitted with the facade calls stays in the turn so the
+        # harness runs it; only the fabric-facade calls become the dispatch summary.
+        output.extend(function_call_item(call) for call in other)
         output.append(message_output_item(_dispatch_summary(capture.group)))
         return output
-
-    # The bound-server handler reaches this for redacted failure logging.
-    def _log_ref(self) -> logging.Logger:
-        return self._log
 
 
 def _dispatch_summary(group: FacadeTurnGroup) -> str:
@@ -253,7 +266,7 @@ class _FacadeHandler(BaseHTTPRequestHandler):
             output = facade.handle_turn(task_id, token, body)
         except FacadeTurnError as exc:
             # Redact: the reason never carries the request, credential, or permit.
-            facade._log_ref().info("facade turn failed for %s", task_id)
+            facade._log.info("facade turn failed for %s", task_id)
             self._write_json(502, {"error": str(exc)})
             return
         sse = responses_sse(output)

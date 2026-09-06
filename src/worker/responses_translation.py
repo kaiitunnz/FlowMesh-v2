@@ -10,7 +10,7 @@ formats. Tool schemas are authored in the Responses-flat shape and nest for chat
 import json
 from typing import Any
 
-from shared.tools.model.schema import ModelCompletion
+from shared.tools.model.schema import ModelCompletion, ModelToolCall
 
 _ASSISTANT_MESSAGE_ID = "msg_fm"
 
@@ -124,16 +124,18 @@ def completion_to_responses_output(completion: ModelCompletion) -> list[dict[str
     output: list[dict[str, Any]] = []
     if completion.content:
         output.append(message_output_item(completion.content))
-    for call in completion.tool_calls:
-        output.append(
-            {
-                "type": "function_call",
-                "name": call.name,
-                "arguments": call.arguments,
-                "call_id": call.call_id,
-            }
-        )
+    output.extend(function_call_item(call) for call in completion.tool_calls)
     return output
+
+
+def function_call_item(call: ModelToolCall) -> dict[str, Any]:
+    """One Responses ``function_call`` output item for a model's tool call."""
+    return {
+        "type": "function_call",
+        "name": call.name,
+        "arguments": call.arguments,
+        "call_id": call.call_id,
+    }
 
 
 def message_output_item(text: str) -> dict[str, Any]:

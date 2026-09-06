@@ -194,25 +194,28 @@ class MediatedEgressSidecar:
             return self._report(permit, outcome_ref=materialized)
         return self._report(permit, outcome=materialized)
 
-    def _egress(
-        self,
-        permit: MediatedOperationPermit,
-        request: CapturedRequest,
-        egress: EgressInterface,
-    ) -> ToolOutcome:
-        envelope = ToolOperationEnvelope(
+    @staticmethod
+    def _envelope(permit: MediatedOperationPermit) -> ToolOperationEnvelope:
+        return ToolOperationEnvelope(
             interface=permit.interface,
             idempotency_key=permit.idempotency_key,
             max_results=permit.max_results,
             timeout_sec=permit.timeout_sec,
             result_char_cap=permit.result_char_cap,
         )
+
+    def _egress(
+        self,
+        permit: MediatedOperationPermit,
+        request: CapturedRequest,
+        egress: EgressInterface,
+    ) -> ToolOutcome:
         self._log.info(
             "mediated egress in worker=%s interface=%s",
             permit.target_id,
             permit.interface,
         )
-        return egress.execute(envelope, request, permit.credential)
+        return egress.execute(self._envelope(permit), request, permit.credential)
 
     def egress_now(
         self, permit: MediatedOperationPermit
@@ -241,20 +244,13 @@ class MediatedEgressSidecar:
             )
         if (reason := self._fence_reject(permit, egress.digest(request))) is not None:
             return HeldEgressReject(reason=f"permit fence rejected: {reason}")
-        envelope = ToolOperationEnvelope(
-            interface=permit.interface,
-            idempotency_key=permit.idempotency_key,
-            max_results=permit.max_results,
-            timeout_sec=permit.timeout_sec,
-            result_char_cap=permit.result_char_cap,
-        )
         self._log.info(
             "held model egress in worker=%s interface=%s",
             permit.target_id,
             permit.interface,
         )
         try:
-            return egress.complete(envelope, request, permit.credential)
+            return egress.complete(self._envelope(permit), request, permit.credential)
         except ModelEgressError as exc:
             return HeldEgressReject(reason=str(exc))
 

@@ -505,6 +505,53 @@ def test_worker_facade_group_routes_search_by_digest_to_worker_egress() -> None:
     asyncio.run(run())
 
 
+def test_completion_carrying_its_facade_group_routes_it_not_done() -> None:
+    """A captured group rides the completion's own metadata and routes atomically.
+
+    The worker carries the captured group in the same ``TASK_SUCCEEDED`` payload as the
+    turn completion, so the group is ingested and routed in one ordered event — never on
+    a separate channel that could deliver it after the completion (settling the episode
+    DONE and dropping its searches) or drop it entirely. The completion here carries the
+    group with no prior report: the search must still dispatch and the episode must not
+    settle DONE.
+    """
+
+    async def run() -> None:
+        runtime = _runtime()
+        _, ids = await _register(runtime, _SEARCH_WF)
+        writer = ids["writer"]
+        _hold_dispatch(runtime, writer)
+
+        group = _search_group(writer, 0, "sha-carry")
+        capsule = HarnessCapsule(
+            backend=HarnessBackendKey(backend="scripted", version="v1"), blob="cap"
+        )
+        completion = HarnessResult(
+            kind=HarnessResultKind.COMPLETION, value="done", capsule=capsule
+        )
+        runtime.mark_succeeded(
+            writer,
+            "wkr-1",
+            {
+                "agent_episode": completion.model_dump(mode="json"),
+                "agent_episode_facade_group": group.model_dump(mode="json"),
+            },
+            _TS,
+        )
+
+        # The carried group routed its search to the worker; the episode did not settle
+        # DONE on the clean-turn placeholder.
+        permits = _permit_frames(runtime)
+        assert len(permits) == 1
+        permit = MediatedOperationPermit.model_validate(permits[0])
+        assert permit.interface == SEARCH_INTERFACE
+        assert permit.request_digest == "sha-carry"
+        record = runtime.get_record(writer)
+        assert record is not None and record.status is not TaskStatus.DONE
+
+    asyncio.run(run())
+
+
 def test_worker_outcome_frame_settles_through_event_parse() -> None:
     """The worker's serialized outcome frame settles the boundary once parsed.
 

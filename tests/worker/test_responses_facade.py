@@ -7,7 +7,7 @@ import httpx
 import pytest
 
 from shared.harness import BoundaryEventKind
-from shared.tools.facade import FacadeDescriptor, FacadeTurnGroup
+from shared.tools.facade import FacadeDescriptor
 from shared.tools.model.schema import ModelCompletion, ModelToolCall
 from shared.tools.search.schema import SEARCH_INTERFACE
 from worker.lifecycle import PendingEgressRequestStore
@@ -35,25 +35,22 @@ class _StubEgress:
         return self._result
 
 
-def _facade(result: Any) -> tuple[ResponsesFacade, _StubEgress, list[Any], Any]:
+def _facade(
+    result: Any,
+) -> tuple[ResponsesFacade, _StubEgress, PendingEgressRequestStore]:
     egress = _StubEgress(result)
     pending = PendingEgressRequestStore()
-    reported: list[tuple[str, FacadeTurnGroup]] = []
-    facade = ResponsesFacade(
-        held_egress=cast(Any, egress),
-        pending=pending,
-        report_group=lambda t, g: reported.append((t, g)),
-    )
-    return facade, egress, reported, pending
+    facade = ResponsesFacade(held_egress=cast(Any, egress), pending=pending)
+    return facade, egress, pending
 
 
-def test_plain_turn_returns_the_reply_and_reports_no_group() -> None:
-    facade, egress, reported, _ = _facade(ModelCompletion(content="just thinking"))
+def test_plain_turn_returns_the_reply_and_captures_no_group() -> None:
+    facade, egress, _ = _facade(ModelCompletion(content="just thinking"))
     token = facade.register_episode(_TASK, "http://up/v1", "m", [_SEARCH])
     output = facade.handle_turn(_TASK, token, {"input": "hello"})
     assert [item["type"] for item in output] == ["message"]
     assert output[0]["content"][0]["text"] == "just thinking"
-    assert reported == []
+    assert facade.take_captured_group(_TASK) is None
     # The egress ran on the translated chat body with the injected facade tool.
     _, correlation, request = egress.seen[0]
     assert correlation == "model:0"
@@ -61,7 +58,7 @@ def test_plain_turn_returns_the_reply_and_reports_no_group() -> None:
     assert request.body["tools"][0]["function"]["name"] == "web_search"
 
 
-def test_facade_call_is_captured_reported_and_the_turn_is_cleaned() -> None:
+def test_facade_call_is_captured_and_the_turn_is_cleaned() -> None:
     completion = ModelCompletion(
         content="searching",
         tool_calls=(
@@ -70,14 +67,14 @@ def test_facade_call_is_captured_reported_and_the_turn_is_cleaned() -> None:
             ),
         ),
     )
-    facade, _, reported, pending = _facade(completion)
+    facade, _, pending = _facade(completion)
     token = facade.register_episode(_TASK, "http://up/v1", "m", [_SEARCH])
     output = facade.handle_turn(_TASK, token, {"input": "find the weather"})
 
-    # The group is reported to control and the search request is kept in worker custody.
-    assert len(reported) == 1
-    task_id, group = reported[0]
-    assert task_id == _TASK and group.group_id == f"{_TASK}:0"
+    # The group is captured for the completion to carry; the search request is kept in
+    # worker custody.
+    group = facade.take_captured_group(_TASK)
+    assert group is not None and group.group_id == f"{_TASK}:0"
     assert pending.peek(_TASK, f"{_TASK}:0:0") is not None
     # The turn is cleaned: the raw facade call never returns to codex, only a summary.
     texts = [item["content"][0]["text"] for item in output if item["type"] == "message"]
@@ -85,8 +82,27 @@ def test_facade_call_is_captured_reported_and_the_turn_is_cleaned() -> None:
     assert "web search" in texts[-1]
 
 
+def test_a_native_call_co_emitted_with_a_facade_call_is_preserved() -> None:
+    completion = ModelCompletion(
+        content="",
+        tool_calls=(
+            ModelToolCall(call_id="s1", name="web_search", arguments='{"query": "x"}'),
+            ModelToolCall(call_id="n1", name="native_fn", arguments="{}"),
+        ),
+    )
+    facade, _, _ = _facade(completion)
+    token = facade.register_episode(_TASK, "http://up/v1", "m", [_SEARCH])
+    output = facade.handle_turn(_TASK, token, {"input": "hi"})
+    # The facade call is captured; the co-emitted native call stays in the turn so the
+    # harness runs it, and a dispatch summary follows.
+    assert facade.take_captured_group(_TASK) is not None
+    calls = [item for item in output if item["type"] == "function_call"]
+    assert [c["call_id"] for c in calls] == ["n1"]
+    assert any(item["type"] == "message" for item in output)
+
+
 def test_unknown_episode_or_bad_token_is_a_turn_error() -> None:
-    facade, _, _, _ = _facade(ModelCompletion(content="x"))
+    facade, _, _ = _facade(ModelCompletion(content="x"))
     with pytest.raises(FacadeTurnError):
         facade.handle_turn("nope", "t", {"input": "hi"})
     token = facade.register_episode(_TASK, "http://up/v1", "m", [_SEARCH])
@@ -95,14 +111,14 @@ def test_unknown_episode_or_bad_token_is_a_turn_error() -> None:
 
 
 def test_a_rejected_egress_fails_the_turn() -> None:
-    facade, _, _, _ = _facade(HeldEgressReject(reason="permit fence rejected: digest"))
+    facade, _, _ = _facade(HeldEgressReject(reason="permit fence rejected: digest"))
     token = facade.register_episode(_TASK, "http://up/v1", "m", [_SEARCH])
     with pytest.raises(FacadeTurnError):
         facade.handle_turn(_TASK, token, {"input": "hi"})
 
 
 def test_http_server_serves_a_turn_over_loopback() -> None:
-    facade, _, _, _ = _facade(ModelCompletion(content="hi there"))
+    facade, _, _ = _facade(ModelCompletion(content="hi there"))
     token = facade.register_episode(_TASK, "http://up/v1", "m", [_SEARCH])
     facade.start()
     try:
@@ -127,8 +143,10 @@ def test_a_native_tool_call_passes_through_uncaptured() -> None:
         content="",
         tool_calls=(ModelToolCall(call_id="c1", name="native_fn", arguments="{}"),),
     )
-    facade, _, reported, _ = _facade(completion)
+    facade, _, _ = _facade(completion)
     token = facade.register_episode(_TASK, "http://up/v1", "m", [_SEARCH])
     output = facade.handle_turn(_TASK, token, {"input": "hi"})
-    assert reported == []  # a non-facade call is not captured
+    assert (
+        facade.take_captured_group(_TASK) is None
+    )  # a non-facade call is not captured
     assert [item["type"] for item in output] == ["function_call"]

@@ -26,6 +26,7 @@ from shared.outcome import ContentStoreError, FabricContentStore
 from shared.schemas.result import BaseExecutorResult
 from shared.tasks.specs.misc import ModelBindingMode
 from shared.tasks.task_type import TaskType
+from shared.tools.facade import FacadeTurnGroup
 from shared.tools.model.schema import (
     MODEL_INTERFACE,
     model_request_digest,
@@ -50,10 +51,13 @@ class AgentEpisodeResult(BaseExecutorResult):
 
     ``harness_result`` carries the step back to the server through the success metadata;
     ``value`` is the agent's declared output on a completion step, readable over REST.
+    ``facade_group`` is a turn group the worker facade captured on this step, carried
+    with the completion so control routes it ordered-with the turn.
     """
 
     harness_result: HarnessResult
     value: str | None = None
+    facade_group: FacadeTurnGroup | None = None
 
 
 class AgentEpisodeExecutor(Executor):
@@ -75,6 +79,11 @@ class AgentEpisodeExecutor(Executor):
                 "agent-episode dispatch context"
             )
         facade = self._lifecycle.responses_facade if self._lifecycle else None
+        prior = self._episode_task_id
+        if facade is not None and prior is not None and prior != task.task_id:
+            # A different task means the prior episode finished; drop its facade context
+            # so a worker running episodes back-to-back does not accumulate them.
+            facade.unregister_episode(prior)
         adapter = build_adapter(dispatch.backend, task, self._config, facade)
         self._episode_task_id = task.task_id
         missing = REQUIRED_MEDIATED_FACADES - adapter.mediated_facades()
@@ -119,7 +128,10 @@ class AgentEpisodeExecutor(Executor):
                 result.request.interface or "-",
             )
         value = result.value if result.kind is HarnessResultKind.COMPLETION else None
-        return AgentEpisodeResult(harness_result=result, value=value)
+        group = facade.take_captured_group(task.task_id) if facade is not None else None
+        return AgentEpisodeResult(
+            harness_result=result, value=value, facade_group=group
+        )
 
     @staticmethod
     def _is_capturable_boundary(

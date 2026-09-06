@@ -10,6 +10,7 @@ so a permit that never arrives, a denial, or a cancelled turn ends it rather tha
 
 import queue
 import threading
+import time
 from dataclasses import dataclass
 from types import TracebackType
 from typing import Self
@@ -17,6 +18,11 @@ from typing import Self
 from shared.tools.contract import MediatedOperationPermit
 
 _BoundaryKey = tuple[str, str]
+
+# How long a held occurrence stays recognizable after its waiter is registered, so a
+# permit that arrives once the held turn has already timed out is still identified as a
+# stale held-turn permit rather than a durable-yield one.
+_HELD_KEY_TTL_SEC = 300.0
 
 
 @dataclass(frozen=True)
@@ -35,19 +41,41 @@ class ModelTurnRendezvous:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._waiters: dict[_BoundaryKey, queue.Queue[PermitDelivery]] = {}
+        # Occurrences a held waiter was registered for, retained past the waiter's exit
+        # so a late permit is still known as a held-turn permit; expiry epoch per key.
+        self._held: dict[_BoundaryKey, float] = {}
 
     def register(self, agent_task_id: str, call_correlation: str) -> "PermitWaiter":
         """Arm a waiter for one held occurrence before its propose is emitted."""
         key = (agent_task_id, call_correlation)
         box: queue.Queue[PermitDelivery] = queue.Queue(maxsize=1)
         with self._lock:
+            self._prune_held_locked()
             self._waiters[key] = box
+            self._held[key] = time.monotonic() + _HELD_KEY_TTL_SEC
         return PermitWaiter(self, key, box)
 
     def has_waiter(self, agent_task_id: str, call_correlation: str) -> bool:
         """Whether a held facade is waiting on this occurrence's permit."""
         with self._lock:
             return (agent_task_id, call_correlation) in self._waiters
+
+    def was_held(self, agent_task_id: str, call_correlation: str) -> bool:
+        """Whether a held waiter was recently registered for this occurrence.
+
+        A held-turn model permit routes through the rendezvous; a durable-yield model
+        permit never arms a waiter and drives the async sidecar. This distinguishes a
+        stale held-turn permit (its waiter timed out) from a durable-yield one so only
+        the former is dropped rather than egressed on the async lane.
+        """
+        with self._lock:
+            self._prune_held_locked()
+            return (agent_task_id, call_correlation) in self._held
+
+    def _prune_held_locked(self) -> None:
+        now = time.monotonic()
+        for key in [k for k, exp in self._held.items() if exp <= now]:
+            self._held.pop(key, None)
 
     def deliver_permit(self, permit: MediatedOperationPermit) -> bool:
         """Wake the held facade with its permit; False if no waiter is armed."""

@@ -2,9 +2,9 @@
 
 A real ``codex app-server`` runs against the worker-local Responses facade, whose model
 provider is a local Chat Completions backend. The backend emits a native ``spawn_agent``
-tool call; the facade captures it into a turn group, reports the group to control, and
-returns Codex a clean turn-completing message, so the rollout never records the raw
-call. The fabric then settles the boundary and the outcome injects back over
+tool call; the facade captures it into a turn group the completion carries, and returns
+Codex a clean turn-completing message, so the rollout never records the raw call. The
+fabric then settles the boundary and the outcome injects back over
 ``thread/inject_items``.
 
 What is real and load-bearing is the recovery: across a ``kill -9`` the same rollout
@@ -191,17 +191,16 @@ class _UpstreamStub:
 
 
 class _Fabric:
-    """The control plane's role: mint a per-turn permit and settle the group once.
+    """The control plane's role: mint a per-turn permit and settle a captured group.
 
     ``propose`` stands in for the worker→control propose: it mints the audience-bound,
     digest-fenced permit for the held turn and hands it to the rendezvous, so the facade
-    egresses synchronously. ``report`` records the captured group; ``settle`` builds the
-    single delivered outcome injected back on recovery.
+    egresses synchronously. ``settle`` builds the single delivered outcome injected back
+    on recovery from the group the facade captured.
     """
 
     def __init__(self, rendezvous: ModelTurnRendezvous) -> None:
         self._rendezvous = rendezvous
-        self.originated: list[tuple[str, FacadeTurnGroup]] = []
         self._settled: dict[str, DeliveredOutcome] = {}
 
     def propose(self, proposal: AgentModelTurnProposal) -> None:
@@ -223,14 +222,10 @@ class _Fabric:
         )
         self._rendezvous.deliver_permit(permit)
 
-    def report(self, task_id: str, group: FacadeTurnGroup) -> None:
-        # A re-drive re-reports the same stable group id; record it once.
-        if all(g.group_id != group.group_id for _, g in self.originated):
-            self.originated.append((task_id, group))
-
-    def settle(self, value: str = _FINAL_TEXT) -> DeliveredOutcome:
-        assert self.originated, "the facade never reported a group"
-        corr = self.originated[0][1].members[0].call_correlation
+    def settle(
+        self, group: FacadeTurnGroup, value: str = _FINAL_TEXT
+    ) -> DeliveredOutcome:
+        corr = group.members[0].call_correlation
         assert corr is not None
         if corr not in self._settled:
             self._settled[corr] = DeliveredOutcome(
@@ -266,10 +261,7 @@ class _FacadeServer:
             logger=_LOG,
         )
         self._facade = ResponsesFacade(
-            held_egress=held_egress,
-            pending=pending,
-            report_group=self.fabric.report,
-            logger=_LOG,
+            held_egress=held_egress, pending=pending, logger=_LOG
         )
         self._upstream = upstream
 
@@ -282,6 +274,10 @@ class _FacadeServer:
 
     def __exit__(self, *exc: object) -> None:
         self._facade.stop()
+
+    def captured_group(self) -> FacadeTurnGroup | None:
+        """The facade group captured on the last turn — what the completion carries."""
+        return self._facade.take_captured_group(_TASK_ID)
 
     @property
     def base_url(self) -> str:
@@ -326,18 +322,19 @@ def test_kill9_before_injection_injects_the_outcome_once(
         first = CodexAppServerHarnessAdapter(issue, "v1").start(
             _TASK_ID, capsule=None, outcomes=[]
         )
-        # The facade captured the native spawn_agent and clean-completed the turn.
+        # The facade captured the native spawn_agent and clean-completed the turn; the
+        # completion carries the captured group.
         assert first.kind is HarnessResultKind.COMPLETION
-        assert len(facade.fabric.originated) == 1
-        member = facade.fabric.originated[0][1].members[0]
-        assert member.interface_or_region == "reviewer"
+        group = facade.captured_group()
+        assert group is not None
+        assert group.members[0].interface_or_region == "reviewer"
 
         # The app-server dies after the boundary originates, before its outcome injects.
         os.kill(issue.pid, 9)
 
         recover = transports(facade.base_url, facade.token, home)
         done = CodexAppServerHarnessAdapter(recover, "v1").start(
-            _TASK_ID, capsule=first.capsule, outcomes=[facade.fabric.settle()]
+            _TASK_ID, capsule=first.capsule, outcomes=[facade.fabric.settle(group)]
         )
 
     assert done.kind is HarnessResultKind.COMPLETION
@@ -353,7 +350,9 @@ def test_kill9_after_injection_does_not_reinject(
         adapter = CodexAppServerHarnessAdapter(run, "v1")
         first = adapter.start(_TASK_ID, capsule=None, outcomes=[])
         assert first.kind is HarnessResultKind.COMPLETION
-        outcome = facade.fabric.settle()
+        group = facade.captured_group()
+        assert group is not None
+        outcome = facade.fabric.settle(group)
 
         completed = adapter.start(_TASK_ID, capsule=first.capsule, outcomes=[outcome])
         assert completed.kind is HarnessResultKind.COMPLETION
