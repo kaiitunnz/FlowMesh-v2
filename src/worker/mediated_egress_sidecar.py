@@ -99,12 +99,21 @@ class MediatedEgressSidecar:
             self._inflight[key] = self._pool.submit(self._drive, permit)
 
     def reap(self, agent_task_id: str, call_correlation: str) -> None:
-        """Delete worker-private custody after a committed-outcome acknowledgement."""
+        """Delete worker-private custody after a committed-outcome acknowledgement.
+
+        A committed outcome and a cancellation both reap. If the egress has not started
+        it is cancelled and dropped here, since ``_drive`` never runs to clear it; if it
+        is already running its report is suppressed and ``_drive`` clears it on exit.
+        """
         key = (agent_task_id, call_correlation)
         with self._lock:
             fut = self._inflight.get(key)
-            if fut is not None and not fut.cancel():
-                self._cancelled.add(key)
+            if fut is not None:
+                if fut.cancel():
+                    self._inflight.pop(key, None)
+                    self._cancelled.discard(key)
+                else:
+                    self._cancelled.add(key)
         self._pending.delete(agent_task_id, call_correlation)
 
     def stop(self) -> None:

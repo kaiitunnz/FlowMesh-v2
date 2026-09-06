@@ -232,6 +232,29 @@ def test_worker_outcome_frame_settles_through_event_parse() -> None:
     asyncio.run(run())
 
 
+def test_cancellation_reaps_a_pending_mediated_op() -> None:
+    """Cancelling a workflow reaps its agents' outstanding mediated egress.
+
+    A cancelled agent's in-flight operation is dropped rather than left to egress and
+    report into a boundary no longer wanted: the worker gets a reap and the pending-op
+    mapping clears.
+    """
+
+    async def run() -> None:
+        runtime = _runtime()
+        _, ids = await _register(runtime, _SEARCH_WF)
+        writer = ids["writer"]
+
+        _dispatch_agent(runtime, writer)
+        assert runtime._pending_ops  # a permit is outstanding on the origin worker
+
+        runtime.cancel_workflow(runtime._tasks[writer].workflow_id)
+        assert len(_reap_frames(runtime)) == 1
+        assert not runtime._pending_ops
+
+    asyncio.run(run())
+
+
 def test_origin_worker_loss_fails_the_boundary_clean() -> None:
     async def run() -> None:
         runtime = _runtime()
