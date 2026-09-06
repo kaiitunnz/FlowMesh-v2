@@ -23,6 +23,7 @@ from server.task.runtime import TaskRuntime
 from shared.harness import BoundaryEventKind, HarnessCapsule
 from shared.schemas.event import parse_event
 from shared.tools.contract import (
+    AgentModelTurnProposal,
     MediatedOperationOutcome,
     MediatedOperationPermit,
     ToolOutcome,
@@ -183,6 +184,27 @@ def _reap_frames(runtime: TaskRuntime) -> list[dict[str, Any]]:
     return [payload for _, kind, payload in frames if kind == "reap"]
 
 
+def _deny_frames(runtime: TaskRuntime) -> list[dict[str, Any]]:
+    frames = cast(Any, runtime._worker_registry).frames
+    return [payload for _, kind, payload in frames if kind == "deny"]
+
+
+def _hold_dispatch(runtime: TaskRuntime, task_id: str, worker: str = "wkr-1") -> Any:
+    """Pin a worker and hold the agent mid-turn without running the episode.
+
+    Mimics a synchronous-turn-only harness (Codex) whose lane is held across an in-turn
+    model call: the activation and work item are live and DISPATCHED, but no boundary
+    settles, so ``authorize_model_turn`` mints from the propose alone.
+    """
+    engine = runtime.orchestration_engine(runtime._tasks[task_id].workflow_id)
+    assert engine is not None
+    engine.on_dispatched(task_id, worker)
+    record = runtime._tasks[task_id]
+    record.assigned_worker = worker
+    record.status = TaskStatus.DISPATCHED
+    return engine
+
+
 def _serialize_outcome_frame(outcome: MediatedOperationOutcome) -> dict[str, Any]:
     """The exact event frame the worker enqueues for a mediated outcome report."""
     client = SupervisorClient(
@@ -324,6 +346,90 @@ def test_model_permit_carries_the_workflow_key_and_never_the_ledger() -> None:
         # The key never lands in the durable ledger, and the permit hides it from repr.
         assert "sk-byok-abc" not in engine.to_snapshot().model_dump_json()
         assert "sk-byok-abc" not in repr(permit)
+
+    asyncio.run(run())
+
+
+def test_held_model_turn_mints_a_worker_permit_without_a_settle() -> None:
+    """A held in-turn model propose mints a permit relayed to the agent's worker.
+
+    The permit is model-interface, audience-bound, and fenced on the worker-computed
+    digest, yet no suspending boundary is recorded and no server settle is expected: the
+    held turn consumes the outcome in-worker, so the runtime tracks no pending op.
+    """
+
+    async def run() -> None:
+        runtime = _runtime()
+        _, ids = await _register(runtime, _MODEL_WF)
+        writer = ids["writer"]
+
+        _hold_dispatch(runtime, writer)
+        runtime.authorize_model_turn(
+            AgentModelTurnProposal(
+                agent_task_id=writer, call_correlation="t0", request_digest="deadbeef"
+            )
+        )
+
+        permits = _permit_frames(runtime)
+        assert len(permits) == 1 and not _deny_frames(runtime)
+        permit = MediatedOperationPermit.model_validate(permits[0])
+        assert permit.interface == MODEL_INTERFACE
+        assert permit.target_id == "wkr-1" and permit.target_generation == 7
+        assert permit.agent_task_id == writer and permit.call_correlation == "t0"
+        assert permit.request_digest == "deadbeef"
+        assert permit.invocation_id and permit.idempotency_key
+        # No suspending boundary and no pending op: the held turn settles in-worker.
+        assert not runtime._pending_ops
+
+    asyncio.run(run())
+
+
+def test_held_model_turn_permit_carries_the_workflow_key() -> None:
+    """A held model turn on a byok binding resolves the pinned key onto the permit."""
+
+    async def run() -> None:
+        runtime = _runtime(_StubVault())
+        _, ids = await _register(runtime, _BYOK_WF)
+        writer = ids["writer"]
+
+        _hold_dispatch(runtime, writer)
+        runtime.authorize_model_turn(
+            AgentModelTurnProposal(
+                agent_task_id=writer, call_correlation="t0", request_digest="d"
+            )
+        )
+
+        permit = MediatedOperationPermit.model_validate(_permit_frames(runtime)[0])
+        assert permit.credential == "sk-byok-abc"
+        assert "sk-byok-abc" not in repr(permit)
+
+    asyncio.run(run())
+
+
+def test_held_model_turn_denied_relays_a_deny_frame() -> None:
+    """An agent with no model authority is denied: a deny frame, never a permit.
+
+    The held turn fails fast on the deny frame rather than waiting out the permit
+    deadline, and no permit is minted for an unauthorized egress.
+    """
+
+    async def run() -> None:
+        runtime = _runtime()
+        _, ids = await _register(runtime, _SEARCH_WF)
+        writer = ids["writer"]
+
+        _hold_dispatch(runtime, writer)
+        runtime.authorize_model_turn(
+            AgentModelTurnProposal(
+                agent_task_id=writer, call_correlation="t0", request_digest="d"
+            )
+        )
+
+        assert not _permit_frames(runtime)
+        denies = _deny_frames(runtime)
+        assert len(denies) == 1
+        assert denies[0]["agent_task_id"] == writer
+        assert denies[0]["call_correlation"] == "t0"
 
     asyncio.run(run())
 

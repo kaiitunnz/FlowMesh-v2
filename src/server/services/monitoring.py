@@ -22,7 +22,7 @@ from shared.schemas.event import (
 )
 from shared.schemas.result import result_file_path
 from shared.schemas.worker import WorkerStatus
-from shared.tools.contract import MediatedOperationOutcome
+from shared.tools.contract import AgentModelTurnProposal, MediatedOperationOutcome
 from shared.utils.manifest import RESULTS_NAME, sync_manifest
 
 from ..auth import default_principal, deregister_resource, register_resource
@@ -728,6 +728,10 @@ class EventMonitor:
             case "MEDIATED_OP_OUTCOME":
                 self._runtime.settle_mediated_operation(
                     MediatedOperationOutcome.model_validate(event.payload["outcome"])
+                )
+            case "MEDIATED_OP_PROPOSE":
+                self._runtime.authorize_model_turn(
+                    AgentModelTurnProposal.model_validate(event.payload["proposal"])
                 )
             case "UNREGISTER":
                 worker_id = (event.worker_id or "").strip()

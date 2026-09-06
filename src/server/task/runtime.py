@@ -24,7 +24,8 @@ from shared.outcome import OutcomeManifest
 from shared.schemas.command import InterruptMessage, MediatedOpMessage
 from shared.schemas.result import ResultEnvelope, result_file_path
 from shared.tasks import TaskEnvelopeTemplate
-from shared.tools.contract import MediatedOperationOutcome
+from shared.tasks.specs import ModelBindingMode
+from shared.tools.contract import AgentModelTurnProposal, MediatedOperationOutcome
 from shared.utils import new_workflow_id
 from shared.utils.ids import new_model_secret_ref
 
@@ -1411,6 +1412,71 @@ class TaskRuntime:
                 payload=permit.model_dump(mode="json"),
             ),
         )
+
+    def authorize_model_turn(self, proposal: AgentModelTurnProposal) -> None:
+        """Authorize a held agent's in-turn model egress and relay a one-use permit.
+
+        The agent's own worker holds the model request privately and proposes only its
+        digest; the control plane validates the activation's model-invoke authority and
+        its external binding, mints an audience-bound permit, and relays it over the
+        worker's authenticated attachment. A denial — no live worker, a non-external
+        binding, or an authority failure — relays a deny frame so the held turn fails
+        fast rather than waiting out its deadline. No settle is expected: the held turn
+        consumes the outcome in-worker and its durable progress rests on its
+        turn-completion boundaries.
+        """
+        with self._cv:
+            agent = self._tasks.get(proposal.agent_task_id)
+            engine = self._engines.get(agent.workflow_id) if agent else None
+            if agent is None or engine is None:
+                return
+            worker_id = agent.assigned_worker
+            worker = self._worker_registry.get_worker(worker_id) if worker_id else None
+            if worker_id is None or worker is None:
+                # A gone origin worker cannot receive a relay: the held turn fails on
+                # its own permit deadline.
+                return
+            binding = self.resolve_model_binding(proposal.agent_task_id)
+            external = binding is not None and binding.mode is ModelBindingMode.OPENAI
+            permit = None
+            if external:
+                _, timeout_sec, result_char_cap = self._op_permit_budget(
+                    MODEL_INTERFACE
+                )
+                deadline = time.time() + timeout_sec + _OP_PERMIT_SLACK_SEC
+                permit = engine.authorize_model_turn(
+                    proposal.agent_task_id,
+                    proposal.call_correlation,
+                    proposal.request_digest,
+                    target_id=worker_id,
+                    target_generation=worker.incarnation,
+                    timeout_sec=timeout_sec,
+                    result_char_cap=result_char_cap,
+                    deadline_epoch=deadline,
+                    credential=self._resolve_op_credential(agent, MODEL_INTERFACE),
+                )
+            if permit is None:
+                self._worker_registry.publish_mediated_op(
+                    worker,
+                    MediatedOpMessage(
+                        worker_id=worker_id,
+                        frame_kind="deny",
+                        payload={
+                            "agent_task_id": proposal.agent_task_id,
+                            "call_correlation": proposal.call_correlation,
+                            "reason": "model turn egress denied",
+                        },
+                    ),
+                )
+                return
+            self._worker_registry.publish_mediated_op(
+                worker,
+                MediatedOpMessage(
+                    worker_id=worker_id,
+                    frame_kind="permit",
+                    payload=permit.model_dump(mode="json"),
+                ),
+            )
 
     def settle_mediated_operation(self, outcome: MediatedOperationOutcome) -> None:
         """Settle an agent boundary from its origin worker's fenced outcome report.
