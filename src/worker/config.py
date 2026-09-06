@@ -49,6 +49,7 @@ class WorkerConfig:
     web_search_provider: str
     web_search_api_key: str | None
     model_api_key: str | None
+    model_egress_timeout_sec: float
     docker_gpu_runtime: str | None
     ssh_limits: SSHLimits | None
     enable_ssh_gpu_limit: bool
@@ -123,6 +124,9 @@ class WorkerConfig:
         )
         web_search_api_key = os.getenv("WEB_SEARCH_API_KEY", "").strip() or None
         model_api_key = os.getenv("AGENT_MODEL_API_KEY", "").strip() or None
+        model_egress_timeout_sec = parse_float_env(
+            "AGENT_MODEL_EGRESS_TIMEOUT_SEC", 120.0
+        )
         docker_gpu_runtime = os.getenv("DOCKER_GPU_RUNTIME", "").strip() or None
         grpc_keepalive_time_ms = parse_int_env(
             "SUPERVISOR_GRPC_KEEPALIVE_TIME_MS", 300_000
@@ -191,6 +195,7 @@ class WorkerConfig:
             web_search_provider=web_search_provider,
             web_search_api_key=web_search_api_key,
             model_api_key=model_api_key,
+            model_egress_timeout_sec=model_egress_timeout_sec,
             docker_gpu_runtime=docker_gpu_runtime,
             ssh_limits=ssh_limits,
             enable_ssh_gpu_limit=enable_ssh_gpu_limit,

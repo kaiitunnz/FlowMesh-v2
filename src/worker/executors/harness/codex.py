@@ -2,11 +2,11 @@
 
 The Codex binding maps the app-server's turn and inject-items surface onto the generic
 harness contract: a delivered outcome is injected back at its originating call, and a
-turn that finishes completes the episode. A mediated facade originates at the FlowMesh
-agent-model gateway — Codex's model provider — which captures the model's native facade
-call and clean-completes the turn, so the adapter here only ever completes or fails and
-never observes a facade. Native multi-agent mode is off, so every side effect crosses
-the fabric's validation.
+turn that finishes completes the episode. Codex's model provider is the worker-local
+Responses facade, which runs each held model turn's egress and captures the model's
+native facade call into a turn group before clean-completing the turn, so the adapter
+here only ever completes or fails and never observes a facade. Native multi-agent mode
+is off, so every side effect crosses the fabric's validation.
 
 Durability is a turn-boundary property of the on-disk rollout: recovery is a restart
 against the same persisted rollout, reattached through ``thread/resume``. The capsule
@@ -35,6 +35,7 @@ from shared.harness import (
 from shared.tasks.specs import AgentSpecStrict
 from shared.tasks.worker_message import WorkerTaskMessage
 from worker.config import WorkerConfig
+from worker.responses_facade import ResponsesFacade
 
 _BACKEND = "codex"
 _CODEX_ADAPTER_VERSION = "v1"
@@ -158,36 +159,50 @@ class CodexAppServerHarnessAdapter(HarnessAdapter):
 
 
 def build_codex_adapter(
-    backend: HarnessBackendKey, task: WorkerTaskMessage, config: WorkerConfig
+    backend: HarnessBackendKey,
+    task: WorkerTaskMessage,
+    config: WorkerConfig,
+    facade: ResponsesFacade | None = None,
 ) -> CodexAppServerHarnessAdapter:
     spec = task.spec
     if not isinstance(spec, AgentSpecStrict) or spec.harness is None:
         raise ValueError("the codex backend requires an agent harness spec")
-    params = spec.harness.params
-    base_url, model = params.get("base_url"), params.get("model")
-    if not isinstance(base_url, str) or not isinstance(model, str):
+    if facade is None:
+        raise ValueError("the codex backend requires the worker-local Responses facade")
+    dispatch = task.agent_episode
+    if dispatch is None:
+        raise ValueError("the codex backend requires an agent-episode dispatch context")
+    binding = dispatch.model_binding
+    if binding is None or not binding.url or not binding.model:
         raise ValueError(
-            "the codex backend requires string 'base_url' and 'model' harness params"
+            "the codex backend requires a managed model binding with a url and model"
         )
-    override = params.get("codex_home")
+    override = spec.harness.params.get("codex_home")
     codex_home = (
         Path(override)
         if isinstance(override, str)
         else _isolated_codex_home(config.results_dir, task.workflow_id, task.task_id)
     )
+    # Codex runs its model turns through the worker-local facade: it registers the
+    # episode's upstream binding and pinned facades to obtain a per-episode token, binds
+    # the codex provider to the facade's loopback surface, and carries the token as the
+    # provider's key so one episode can never drive another's egress.
+    token = facade.register_episode(
+        task.task_id, binding.url, binding.model, list(dispatch.facade_descriptors)
+    )
     # The live binding pulls in the openai-codex SDK and its bundled app-server binary;
     # keep both off the import path of a worker that never selects the codex backend.
     from .codex_transport import CodexTransportConfig, RealCodexAppServerTransport
 
-    dispatch = task.agent_episode
-    bindings = dispatch.input_bindings if dispatch is not None else ()
+    bindings = dispatch.input_bindings
     transport = RealCodexAppServerTransport(
         CodexTransportConfig(
-            base_url=base_url,
-            model=model,
+            base_url=facade.base_url(),
+            model=binding.model,
             codex_home=codex_home,
             initial_input=render_input_envelope(_agent_task(spec), bindings),
             task_id=task.task_id,
+            env_key_value=token,
         )
     )
     return CodexAppServerHarnessAdapter(transport, backend.version)

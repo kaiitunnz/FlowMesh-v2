@@ -86,7 +86,9 @@ def test_worker_advertises_agent_through_the_episode_executor() -> None:
 
 def test_step_returns_the_harness_result(tmp_path: Path) -> None:
     completion = HarnessResult(kind=HarnessResultKind.COMPLETION, value="done")
-    register_adapter("fake", lambda backend, task, config: _FakeAdapter(completion))
+    register_adapter(
+        "fake", lambda backend, task, config, facade: _FakeAdapter(completion)
+    )
     ex = AgentEpisodeExecutor(make_worker_config())
     out = ex.run(_dispatch_msg(capsule_blob="after:c0"), tmp_path)
     assert isinstance(out, AgentEpisodeResult)
@@ -101,7 +103,9 @@ def test_boundary_step_carries_no_terminal_value(tmp_path: Path) -> None:
             kind=BoundaryEventKind.INVOCATION, call_correlation="c0", interface="model"
         ),
     )
-    register_adapter("fake", lambda backend, task, config: _FakeAdapter(boundary))
+    register_adapter(
+        "fake", lambda backend, task, config, facade: _FakeAdapter(boundary)
+    )
     ex = AgentEpisodeExecutor(make_worker_config())
     out = ex.run(_dispatch_msg(), tmp_path)
     assert out.harness_result.kind is HarnessResultKind.BOUNDARY and out.value is None
@@ -110,7 +114,8 @@ def test_boundary_step_carries_no_terminal_value(tmp_path: Path) -> None:
 def test_native_bypass_backend_is_refused(tmp_path: Path) -> None:
     completion = HarnessResult(kind=HarnessResultKind.COMPLETION, value="x")
     register_adapter(
-        "fake", lambda backend, task, config: _FakeAdapter(completion, bypass=False)
+        "fake",
+        lambda backend, task, config, facade: _FakeAdapter(completion, bypass=False),
     )
     ex = AgentEpisodeExecutor(make_worker_config())
     with pytest.raises(ExecutionError, match="mediate"):

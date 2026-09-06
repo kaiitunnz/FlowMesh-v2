@@ -31,6 +31,7 @@ from shared.harness import (
 from shared.tasks.specs import AgentSpecStrict
 from shared.tasks.worker_message import WorkerTaskMessage
 from worker.config import WorkerConfig
+from worker.responses_facade import ResponsesFacade
 
 _BACKEND = "scripted"
 
@@ -125,8 +126,12 @@ class ScriptedHarnessAdapter(HarnessAdapter):
 
 
 def build_scripted_adapter(
-    backend: HarnessBackendKey, task: WorkerTaskMessage, config: WorkerConfig
+    backend: HarnessBackendKey,
+    task: WorkerTaskMessage,
+    config: WorkerConfig,
+    facade: ResponsesFacade | None = None,
 ) -> ScriptedHarnessAdapter:
+    # The scripted backend yields its lane per boundary, so it never binds the facade.
     spec = task.spec
     if not isinstance(spec, AgentSpecStrict) or spec.harness is None:
         raise ValueError("the scripted backend requires an agent harness spec")

@@ -9,7 +9,7 @@ import os
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from shared.schemas.worker import SSHLimits, WorkerCapabilities
 from shared.tasks.worker_message import WorkerHardware, WorkerStatus
@@ -19,6 +19,9 @@ from shared.utils.time import now_iso
 
 from .power import PowerMonitor
 from .supervisor_client import SupervisorClient
+
+if TYPE_CHECKING:
+    from .responses_facade import ResponsesFacade
 
 # A captured worker-originated egress request: a fabric-tool request or a managed-model
 # request, both held in worker-private custody behind their control-plane digest.
@@ -76,6 +79,10 @@ class Lifecycle:
         self.cost_per_hour = cost_per_hour
         self.power_monitor = power_monitor or PowerMonitor()
         self.pending_egress_requests = PendingEgressRequestStore()
+        # The worker-local Responses facade held Codex episodes run their model turns
+        # through, built by the runner once the worker id is known and read by the
+        # agent-episode executor to bind a codex adapter.
+        self.responses_facade: ResponsesFacade | None = None
         self._stop_event = threading.Event()
         self._started_ts: float | None = None
 

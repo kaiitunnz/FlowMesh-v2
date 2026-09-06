@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict
 
 from ..outcome import OutcomeManifest
 from ..tasks.specs.misc import ModelBindingMode
+from ..tools.facade import FacadeDescriptor
 from .boundary import BoundaryRequest, DenialKind
 
 
@@ -176,7 +177,8 @@ class AgentEpisodeDispatch(BaseModel):
     resolved first-turn dataflow inputs and are populated only on the first dispatch
     (``capsule_blob`` is None); a resume injects only ``delivered_outcomes`` and never
     re-applies the initial context. ``model_binding`` is the credential-free binding the
-    worker captures an external model boundary against.
+    worker captures an external model boundary against. ``facade_descriptors`` are the
+    agent's compile-pinned fabric facades the worker injects into a held model turn.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -186,6 +188,7 @@ class AgentEpisodeDispatch(BaseModel):
     delivered_outcomes: tuple[DeliveredOutcome, ...] = ()
     input_bindings: tuple[InputBinding, ...] = ()
     model_binding: EpisodeModelBinding | None = None
+    facade_descriptors: tuple[FacadeDescriptor, ...] = ()
 
 
 class HarnessResultKind(StrEnum):

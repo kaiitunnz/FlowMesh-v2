@@ -80,7 +80,7 @@ from .v2 import (
 )
 from .v2.compiler.agent_binding import AgentBindingDefaults
 from .v2.credentials import pop_inline_model_secrets, redact_source_text
-from .v2.representations.operators import AgentModelGatewayBinding, FacadeDescriptor
+from .v2.representations.operators import AgentModelGatewayBinding
 from .v2.representations.plan import EpisodeSpec
 
 # A live-feasibility check: whether a lowered episode's declared alternative can be
@@ -1573,15 +1573,14 @@ class TaskRuntime:
             self._resident_terminal_hook(invocation_id, failed)
 
     def originate_facade_turn_group(self, task_id: str, group: FacadeTurnGroup) -> None:
-        """Record a turn-scoped facade group the gateway captured, before it acks.
+        """Record a turn-scoped facade group a worker captured on a held model turn.
 
-        The agent-model gateway sees a model turn's native facade calls before the
-        harness does and clean-completes the turn; the whole ordered membership and its
-        single continuation are persisted on the task record before the gateway acks the
-        clean turn, so the episode's next completion routes the group rather than
-        settling the episode DONE, and a restart-replayed completion still routes it. At
-        most one group is open per episode; a second capture while one holds the gate is
-        refused by the gateway fence, not stored here.
+        The worker facade captures a model turn's native facade calls and cleans the
+        turn; the whole ordered membership and its single continuation are persisted
+        on the task record before the turn resumes, so the episode's next completion
+        routes the group rather than settling the episode DONE, and a restart-replayed
+        completion still routes it. At most one group is open per episode; a second one
+        while one holds the gate is refused by the busy fence, not stored here.
         """
         with self._lock:
             self._pending_facade_groups[task_id] = group
@@ -1609,7 +1608,7 @@ class TaskRuntime:
     def has_pending_facade(self, task_id: str) -> bool:
         """Whether a facade group is already captured or still open for this episode.
 
-        The gateway fence reads this to refuse a distinct second group before the open
+        The busy fence reads this to refuse a distinct second group before the open
         one's await-outcome members settle, so a group is never overwritten mid-flight.
         A spawn-only group holds nothing here once routed, so a later turn may issue it.
         """
@@ -1638,20 +1637,6 @@ class TaskRuntime:
                 return None
             op = engine.agent_operator(task_id)
             return op.model_binding if op is not None else None
-
-    def agent_facade_descriptors(self, task_id: str) -> list[FacadeDescriptor]:
-        """The fabric facades pinned on a task's agent, for the gateway to inject.
-
-        Only an agent's compile-pinned facades are injectable, so the model can never be
-        offered a fabric tool the agent did not declare.
-        """
-        with self._lock:
-            record = self._tasks.get(task_id)
-            engine = self._engines.get(record.workflow_id) if record else None
-            if engine is None:
-                return []
-            op = engine.agent_operator(task_id)
-            return list(op.facades) if op is not None else []
 
     def gateway_binding_for(
         self, task_id: str
@@ -1708,6 +1693,7 @@ class TaskRuntime:
                 delivered_outcomes=outcomes,
                 input_bindings=input_bindings,
                 model_binding=model_binding,
+                facade_descriptors=tuple(op.facades) if op is not None else (),
             )
 
     def _synthesize_ready_children_locked(

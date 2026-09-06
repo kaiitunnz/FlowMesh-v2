@@ -328,6 +328,14 @@ STACK_ENV_SCHEMA = EnvSchema(
                     description="Worker credential for external managed-model egress.",
                 ),
                 EnvVar(
+                    "AGENT_MODEL_EGRESS_TIMEOUT_SEC",
+                    "120",
+                    description="Held model turn permit-await bound (seconds).",
+                    var_type=EnvVarType.FLOAT,
+                    min_value=0,
+                    min_inclusive=False,
+                ),
+                EnvVar(
                     "AGENT_MODEL_GATEWAY_TIMEOUT_SEC",
                     "60",
                     description="Upstream request timeout (seconds).",

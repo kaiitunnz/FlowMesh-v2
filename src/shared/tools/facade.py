@@ -10,7 +10,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict
 
-from shared.harness import BoundaryEventKind
+from shared.harness.boundary import BoundaryEventKind
 
 
 class FacadeDescriptor(BaseModel):

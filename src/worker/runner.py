@@ -29,9 +29,11 @@ from .egress_backends import ModelEgress, SearchEgress
 from .executors.agent_episode_executor import AgentEpisodeResult
 from .executors.base_executor import ExecutionError, Executor, TaskCancelledError
 from .executors.utils.checkpoints import get_http_destination, write_executor_result
+from .held_model_egress import HeldModelEgress
 from .lifecycle import Lifecycle
 from .mediated_egress_sidecar import MediatedEgressSidecar
 from .model_turn_rendezvous import ModelTurnRendezvous
+from .responses_facade import ResponsesFacade
 from .utils.logging import TaskLogEmitter
 
 
@@ -50,6 +52,7 @@ class Runner:
         web_search_provider: str = DEFAULT_SEARCH_PROVIDER,
         web_search_api_key: str | None = None,
         model_api_key: str | None = None,
+        model_egress_timeout_sec: float = 120.0,
         content_store: FabricContentStore | None = None,
     ):
         self.lifecycle = lifecycle
@@ -92,6 +95,7 @@ class Runner:
         self._web_search_provider = web_search_provider
         self._web_search_api_key = web_search_api_key
         self._model_api_key = model_api_key
+        self._model_egress_timeout_sec = model_egress_timeout_sec
         self._content_store = content_store
         # The worker-local mediated-egress sidecar, built on the first permit relayed
         # over the attachment (once the worker id and incarnation are known).
@@ -100,6 +104,9 @@ class Runner:
         # proposes, so a permit relayed over the attachment wakes the held turn instead
         # of driving the async sidecar lane.
         self._model_turn_rendezvous = ModelTurnRendezvous()
+        # The worker-local Responses facade, built alongside the sidecar once the worker
+        # id is known and the first agent episode arrives.
+        self._responses_facade: ResponsesFacade | None = None
 
     def _cancel_active_executor(self) -> None:
         with self._active_executor_lock:
@@ -138,6 +145,8 @@ class Runner:
         self._cancel_active_executor()
         if self._mediated_sidecar is not None:
             self._mediated_sidecar.stop()
+        if self._responses_facade is not None:
+            self._responses_facade.stop()
 
     def _ensure_mediated_sidecar(self) -> MediatedEgressSidecar | None:
         """Build the mediated-egress sidecar once the worker id is known."""
@@ -162,6 +171,39 @@ class Runner:
             logger=self.logger,
         )
         return self._mediated_sidecar
+
+    def _ensure_responses_facade(self) -> ResponsesFacade | None:
+        """Build and start the worker-local Responses facade once the worker id is set.
+
+        A held Codex episode runs each model turn through this facade: it proposes the
+        request digest, awaits the one-use permit over the rendezvous, and egresses
+        synchronously through the same mediated-egress sidecar. It is reachable to the
+        agent-episode executor through the lifecycle.
+        """
+        if self._responses_facade is not None:
+            return self._responses_facade
+        sidecar = self._ensure_mediated_sidecar()
+        if sidecar is None:
+            return None
+        client = self.lifecycle.client
+        held_egress = HeldModelEgress(
+            rendezvous=self._model_turn_rendezvous,
+            pending=self.lifecycle.pending_egress_requests,
+            propose=client.push_mediated_propose,
+            sidecar=sidecar,
+            timeout_sec=self._model_egress_timeout_sec,
+            logger=self.logger,
+        )
+        facade = ResponsesFacade(
+            held_egress=held_egress,
+            pending=self.lifecycle.pending_egress_requests,
+            report_group=client.push_facade_group,
+            logger=self.logger,
+        )
+        facade.start()
+        self._responses_facade = facade
+        self.lifecycle.responses_facade = facade
+        return facade
 
     def _route_mediated_op(self, frame_kind: str, frame: dict[str, Any]) -> None:
         if frame_kind == "deny":
@@ -547,6 +589,9 @@ class Runner:
                                 "harness binding; every agent runs the harness "
                                 "episode path"
                             )
+                        # A held backend runs its model turns through the worker-local
+                        # facade; build it before the executor binds an adapter.
+                        self._ensure_responses_facade()
                         desired_key = "agent_episode"
                     else:
                         desired_key = "default" if task_type is None else task_type

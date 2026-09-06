@@ -259,6 +259,7 @@ def main() -> None:
         web_search_provider=cfg.web_search_provider,
         web_search_api_key=cfg.web_search_api_key,
         model_api_key=cfg.model_api_key,
+        model_egress_timeout_sec=cfg.model_egress_timeout_sec,
         content_store=build_content_store(cfg.server_base_url),
     )
 

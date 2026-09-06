@@ -1,11 +1,8 @@
-import asyncio
 from types import SimpleNamespace
 
 import pytest
-from fastapi import HTTPException
 from pydantic import SecretStr
 
-import server.services.agent_model_gateway as gw
 from server.config import AgentModelGatewayConfig, GatewayMode
 from server.services.agent_model_gateway import (
     AgentModelGateway,
@@ -42,14 +39,6 @@ def _gateway() -> AgentModelGateway:
     return AgentModelGateway(settler, AgentModelGatewayConfig(mode=GatewayMode.CANNED))
 
 
-class _Resp:
-    def raise_for_status(self) -> None:
-        return None
-
-    def json(self) -> dict:
-        return {"choices": [{"message": {"content": "ok"}}]}
-
-
 def test_two_tasks_resolve_different_upstreams_without_cross_talk():
     gateway = _gateway()
     bindings = {
@@ -61,45 +50,29 @@ def test_two_tasks_resolve_different_upstreams_without_cross_talk():
     assert gateway.invoke("hello", "tsk-b") == "canned-response:hello"
 
 
-def test_body_cannot_override_the_pinned_upstream(monkeypatch):
-    captured: list[tuple] = []
-
-    def _post(url, json, headers, timeout):  # noqa: A002 - mirror requests.post
-        captured.append((url, json, headers))
-        return _Resp()
-
-    monkeypatch.setattr(gw.requests, "post", _post)
-    gateway = _gateway()
-    gateway.set_binding_resolver(
-        lambda tid: ResolvedGatewayBinding(
-            mode=GatewayMode.OPENAI,
-            url="https://pinned/v1",
-            model="pinned-model",
-            api_key="sk-pinned",
-        )
-    )
-    gateway.invoke('{"prompt": "hi", "model": "evil", "url": "https://evil"}', "tsk-a")
-    url, body, headers = captured[0]
-    assert url == "https://pinned/v1/chat/completions"
-    assert body["model"] == "pinned-model"
-    assert headers["Authorization"] == "Bearer sk-pinned"
-
-
-def test_canned_and_echo_make_no_upstream_call(monkeypatch):
-    called: list[int] = []
-    monkeypatch.setattr(gw.requests, "post", lambda *a, **k: called.append(1))
+def test_canned_and_echo_settle_without_an_external_binding():
     gateway = _gateway()
     gateway.set_binding_resolver(
         lambda tid: ResolvedGatewayBinding(mode=GatewayMode.ECHO)
     )
     assert gateway.invoke("x", "tsk") == "x"
-    assert not called
 
 
 def test_no_resolver_falls_back_to_deployment_default():
     settler = SimpleNamespace(settle_episode_invocation=lambda *a, **k: True)
     gateway = AgentModelGateway(settler, AgentModelGatewayConfig(mode=GatewayMode.ECHO))
     assert gateway.invoke("echoed", "tsk") == "echoed"
+
+
+def test_an_external_binding_never_settles_on_the_server():
+    gateway = _gateway()
+    gateway.set_binding_resolver(
+        lambda tid: ResolvedGatewayBinding(
+            mode=GatewayMode.OPENAI, url="https://pinned/v1", model="m"
+        )
+    )
+    with pytest.raises(RuntimeError, match="egresses on the worker"):
+        gateway.invoke("hi", "tsk-a")
 
 
 def _openai_binding(secret_ref: str | None = None) -> AgentModelGatewayBinding:
@@ -136,29 +109,3 @@ def test_to_gateway_binding_rejects_resident_for_external_gateway():
     )
     with pytest.raises(ResidentBindingNotServable, match="not served externally"):
         to_gateway_binding(pinned, _FakeVault({}), "wfl-1")
-
-
-def test_originate_reports_a_resident_binding_as_not_implemented():
-    # A resident binding is detection-only in this transition: the episode surface must
-    # fail with a typed 501, not an unhandled exception rendered as a 500.
-    gateway = _gateway()
-
-    def _resident(_task_id):
-        raise ResidentBindingNotServable("resident is not served externally")
-
-    gateway.set_binding_resolver(_resident)
-    with pytest.raises(HTTPException) as excinfo:
-        asyncio.run(gateway.originate_or_forward("tsk", {"input": "hi"}))
-    assert excinfo.value.status_code == 501
-
-
-def test_originate_surfaces_a_resolution_failure_as_a_clean_502():
-    gateway = _gateway()
-
-    def _broken(_task_id):
-        raise RuntimeError("resolver blew up")
-
-    gateway.set_binding_resolver(_broken)
-    with pytest.raises(HTTPException) as excinfo:
-        asyncio.run(gateway.originate_or_forward("tsk", {"input": "hi"}))
-    assert excinfo.value.status_code == 502

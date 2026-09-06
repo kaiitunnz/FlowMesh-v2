@@ -65,6 +65,7 @@ class AgentEpisodeExecutor(Executor):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._adapter: HarnessAdapter | None = None
+        self._episode_task_id: str | None = None
 
     def run(self, task: ExecutorTask, out_dir: Path) -> AgentEpisodeResult:
         dispatch = task.agent_episode
@@ -73,7 +74,9 @@ class AgentEpisodeExecutor(Executor):
                 f"{task.task_id} routed to the agent-episode executor without an "
                 "agent-episode dispatch context"
             )
-        adapter = build_adapter(dispatch.backend, task, self._config)
+        facade = self._lifecycle.responses_facade if self._lifecycle else None
+        adapter = build_adapter(dispatch.backend, task, self._config, facade)
+        self._episode_task_id = task.task_id
         missing = REQUIRED_MEDIATED_FACADES - adapter.mediated_facades()
         if missing:
             raise ExecutionError(
@@ -220,4 +223,8 @@ class AgentEpisodeExecutor(Executor):
             self._adapter.cancel(task_id)
 
     def cleanup_after_run(self) -> None:
+        facade = self._lifecycle.responses_facade if self._lifecycle else None
+        if facade is not None and self._episode_task_id is not None:
+            facade.unregister_episode(self._episode_task_id)
+        self._episode_task_id = None
         self._adapter = None
