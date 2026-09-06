@@ -53,7 +53,6 @@ listed here is in `.env.example`.
 | `WEB_SEARCH_MAX_RESULTS` | `5` | Results per search |
 | `WEB_SEARCH_TIMEOUT_SEC` | `20` | Search request timeout (seconds) |
 | `WEB_SEARCH_RESULT_CHAR_CAP` | `6000` | Injected result size cap |
-| `WEB_SEARCH_MAX_CALLS` | `8` | Searches per episode |
 | `WEB_SEARCH_MAX_PARALLEL_CALLS_PER_TURN` | `4` | Parallel searches per turn |
 | `CONTENT_STORE_ENABLED` | `true` | Serve the outcome content store |
 | `CONTENT_STORE_ROOT` | – | Content-store root; under the data dir if empty |

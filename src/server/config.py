@@ -4,7 +4,6 @@ from enum import StrEnum
 from pathlib import Path
 
 from shared.tasks.specs import ModelBindingMode
-from shared.tools.search.schema import DEFAULT_SEARCH_PROVIDER
 from shared.utils.parsing import parse_bool_env, parse_float_env, parse_int_env
 
 
@@ -476,31 +475,24 @@ class ResidentCapacityConfig:
 class WebSearchConfig:
     """The fabric web-search tool's control-plane policy metadata.
 
-    ``provider`` names the backend (keyless ``duckduckgo`` default); ``max_calls``
-    bounds one episode's searches and ``max_results`` / ``result_char_cap`` /
-    ``timeout_sec`` bound the permit the control plane mints. It holds no credential;
-    the worker's mediated-egress sidecar reads the provider key from its own local
-    environment and performs the egress.
+    ``max_results`` / ``result_char_cap`` / ``timeout_sec`` bound the permit the control
+    plane mints and ``max_parallel`` bounds a turn's concurrent searches. It holds no
+    credential and names no provider; the worker's mediated-egress sidecar reads both
+    the provider selection and its key from its own local environment and egresses.
     """
 
-    provider: str = DEFAULT_SEARCH_PROVIDER
     max_results: int = 5
     timeout_sec: float = 20.0
     result_char_cap: int = 6000
-    max_calls: int = 8
     max_parallel: int = 4
 
     @classmethod
     def from_env(cls) -> "WebSearchConfig":
         prefix = "WEB_SEARCH_"
         return cls(
-            provider=(os.getenv(f"{prefix}PROVIDER") or DEFAULT_SEARCH_PROVIDER)
-            .strip()
-            .lower(),
             max_results=parse_int_env(f"{prefix}MAX_RESULTS") or 5,
             timeout_sec=parse_float_env(f"{prefix}TIMEOUT_SEC") or 20.0,
             result_char_cap=parse_int_env(f"{prefix}RESULT_CHAR_CAP") or 6000,
-            max_calls=parse_int_env(f"{prefix}MAX_CALLS") or 8,
             max_parallel=parse_int_env(f"{prefix}MAX_PARALLEL_CALLS_PER_TURN") or 4,
         )
 
