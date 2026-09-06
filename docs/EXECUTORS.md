@@ -19,7 +19,6 @@ The worker resolves `spec.taskType` against an executor registry in
 | `ssh` | `SSHExecutor` | Interactive SSH session or non-interactive container job |
 | `serve` | `VLLMServeExecutor` | Persistent vLLM API server for a single model |
 | `dev_model` | `DevModelExecutor` | GPU-free OpenAI-compatible endpoint; forwards to an upstream or returns canned responses |
-| `tool_operation` | `ToolOperationExecutor` | Off-lane egress for a worker-originated mediated tool boundary; server-minted, permit-fenced, never user-submitted |
 
 Helper utilities live in `src/worker/executors/utils/` (`artifacts`,
 `checkpoints`, `data_utils`, `distributed`, `graph_templates`,
@@ -109,58 +108,38 @@ are snippets. An agent must declare `web_search` in its authority to use it, and
 child must carry the interface in its child-region authority ceiling — an undeclared tool is
 a compile error.
 
-The control plane stays authoritative for the authority, quota, and idempotency of a
-search; only where the approved operation egresses is a deployment policy. `WEB_SEARCH_EGRESS_LOCALITY`
-selects `server_relay` (the default in-server provider call) or `worker_sidecar` (a
-fabric sidecar surface that egresses under the server-issued operation envelope). Either
-locality yields the identical search result.
+The control plane holds a search's authority and idempotency; the egress runs only in
+the Agent's assigned worker. The agent's own worker
+captures the `search/v1` boundary, records the raw request in worker-private state keyed
+by its stable `(agent_task_id, call_correlation)` occurrence, and yields carrying only a
+canonical request digest — the raw request never reaches the control plane. The engine
+records the digest and mints a one-use `MediatedOperationPermit` (`mop-`) audience-bound
+to that worker and its generation, and relays it to the worker as an ordinary control
+message on the worker's authenticated attachment, never a dispatched task.
 
-With `worker_sidecar` and `WEB_SEARCH_SIDECAR_REMOTE`, the approved operation is carried
-over the network plane to the blocked Agent episode's assigned worker and egresses there,
-never in the root or a supervisor; the carriage adds no admission credit and moves only the
-operation and its result. The target node's supervisor is a pure opaque frame router — its
-`WorkerToolRouteDeputy` forwards the operation frame to the worker over the worker's
-existing authenticated attachment and relays the reply back, decoding nothing and building
-no provider. The worker's `WorkerExternalToolExecutor` validates a short-lived operation
-fence (request digest, provider, target worker and registration incarnation, expiry, bounds)
-and a one-use delivery nonce before any egress, and reads its keyed provider credential only
-from its own local worker environment (projected from `WEB_SEARCH_*` through the supervisor
-worker-environment allowlist) — no credential travels in a workflow, envelope, frame,
-message, or log. A delivery for a restarted worker's stale incarnation is rejected before
-egress, and a lost reply leaves the durable boundary pending for a same-`idm-*` re-drive
-rather than a manufactured terminal outcome.
+The worker's `MediatedEgressSidecar` — a bounded worker-local egress lane, not a task,
+replica, endpoint, or authority — reads the request back from worker-private state,
+validates the permit fence (audience, generation, interface, deadline, request digest)
+and consumes the one-use permit, egresses through the local provider, and reports a
+permit-fenced outcome the engine commits before the episode resumes. It reads its keyed
+provider credential only from its own local worker environment (projected from
+`WEB_SEARCH_*` through the supervisor worker-environment allowlist) — no credential
+travels in a workflow, envelope, frame, message, or log. A fence rejection is a declared
+terminal boundary failure, never a retryable provider response; a missing worker-private
+request fails the boundary closed.
 
-On the `worker_sidecar` locality a successful provider result is materialized by
-reference: the executor writes the outcome bytes to the content-addressed store under its
-`idm-*` and returns only an `OutcomeManifest`, so the result body never crosses the
-supervisor or root. A same-`idm-*` re-drive finds the first materialization instead of
-re-sampling; a store-write failure sends no reply, leaving the boundary pending. A typed
-control status (an unavailable provider, a fence reject) stays a bounded inline datum, and a
-successful result the worker cannot reference — no content store or idempotency key — returns
-a typed unavailable datum rather than an unbounded inline body. On resume, the
-`AgentEpisodeExecutor` hydrates and digest-verifies the manifest before injecting the value
-into the harness; a hydration failure fails the step for a physical retry of the same
-reference, never a re-run. This reference-backing is wired for the fabric-tool worker path;
-the `server_relay` locality and the model-gateway and resident completions still settle
-inline.
+A successful provider result is materialized by reference: the sidecar writes the outcome
+bytes to the content-addressed store under its `idm-*` and reports only an
+`OutcomeManifest`; the result body never crosses the supervisor or root. A typed
+control status (an unavailable provider) is a bounded inline datum. The request is
+retained non-destructively until the engine acknowledges the committed outcome and reaps
+custody; a same-`idm-*` re-drive finds the first materialization instead of re-sampling,
+and a store-write or egress failure sends no outcome, holding the boundary pending for a
+re-drive under the same `idm-*`. On resume the `AgentEpisodeExecutor` hydrates and
+digest-verifies the manifest before injecting the value into the harness; a hydration
+failure fails the step for a physical retry of the same reference, never a re-run. A
+server restart re-mints the permit and re-relays it to the surviving worker, whose
+in-memory request is intact; a genuine worker loss fails the boundary clean.
 
-The paths above are server-driven: the server holds the request and dispatches the
-operation to a worker. `ORCHESTRATOR_WORKER_ORIGINATED_BOUNDARIES=true` selects the
-control-authoritative, execution-local path instead. The agent's own worker captures the
-`search/v1` boundary, records the raw request in worker-private state keyed by its stable
-`(agent_task_id, call_correlation)` occurrence, and yields carrying only a canonical
-request digest — the raw request never reaches the control plane. The engine records the
-digest and mints a one-use `MediatedOperationPermit` (`mop-`) audience-bound to that
-worker and its generation, then dispatches a distinct off-lane `tool_operation` task
-pinned to the same worker. Its `ToolOperationExecutor` reads the request back from
-worker-private state, validates the permit against the same worker fence the attachment
-path uses (audience, generation, interface, policy, deadline, digest), egresses through
-the local provider, and reports a permit-fenced typed outcome or an `OutcomeManifest` —
-which the engine commits before the episode resumes. A missing permit or an unrecoverable
-local request fails closed; the operation never egresses. The request and the outcome have
-different homes: the request stays local to the audience-bound worker and is re-derivable,
-while a shared outcome materializes into the content-addressed store; they are not unified.
-A server restart re-mints the permit and re-dispatches to the surviving worker, whose
-in-memory request is intact; a genuine worker loss fails the boundary clean rather than
-resuming past it. The gateway-captured model-turn facade keeps its request on the wire and
-always routes through the broker.
+The `FabricToolBroker` applies a fabric tool's policy and correlation on the control
+plane and terminalizes a server-captured boundary as an unavailable outcome.

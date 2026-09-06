@@ -23,6 +23,7 @@ from shared.tasks.worker_message import (
     WorkerStatus,
     WorkerTaskMessage,
 )
+from shared.tools.contract import MediatedOperationOutcome
 from shared.utils.json import normalize_numbers
 from shared.utils.time import now_iso
 
@@ -73,7 +74,7 @@ class SupervisorClient:
         self._task_queue: queue.Queue[WorkerTaskMessage | object] = queue.Queue()
         self._interrupt_queue: queue.Queue[tuple[str, str]] = queue.Queue()
         self._stop_queue: queue.Queue[tuple[str, str]] = queue.Queue()
-        self._egress_queue: queue.Queue[tuple[str, str, bytes]] = queue.Queue()
+        self._mediated_op_queue: queue.Queue[tuple[str, dict[str, Any]]] = queue.Queue()
         self._event_queue: queue.Queue[dict[str, Any] | object] = queue.Queue()
         self._event_thread: threading.Thread | None = None
         self._task_thread: threading.Thread | None = None
@@ -380,10 +381,11 @@ class SupervisorClient:
             except queue.Empty:
                 break
 
-    def iter_egress(self) -> Iterable[tuple[str, str, bytes]]:
+    def iter_mediated_ops(self) -> Iterable[tuple[str, dict[str, Any]]]:
+        """Yield ``(frame_kind, payload)`` mediated-op frames the supervisor relayed."""
         while True:
             try:
-                yield self._egress_queue.get_nowait()
+                yield self._mediated_op_queue.get_nowait()
             except queue.Empty:
                 break
 
@@ -488,12 +490,11 @@ class SupervisorClient:
                         self._stop_queue.put(
                             (message.stop.task_id, message.stop.reason)
                         )
-                    elif message.HasField("egress"):
-                        self._egress_queue.put(
+                    elif message.HasField("mediated_op"):
+                        self._mediated_op_queue.put(
                             (
-                                message.egress.session_id,
-                                message.egress.kind,
-                                message.egress.payload,
+                                message.mediated_op.kind,
+                                self._payload_from_struct(message.mediated_op.payload),
                             )
                         )
                     else:
@@ -597,18 +598,15 @@ class SupervisorClient:
             raise RuntimeError("Supervisor event stream not ready")
         self._event_queue.put(serialize_event(event))
 
-    def push_tool_egress(self, session_id: str, kind: str, frame: bytes) -> None:
-        """Return one opaque external-tool frame to the supervisor over the events."""
+    def push_mediated_outcome(self, outcome: MediatedOperationOutcome) -> None:
+        """Report one fenced mediated-operation outcome over the event stream."""
         if self._stub is None:
             raise RuntimeError("Supervisor gRPC client not started")
         if not self._event_ready.wait():
             raise RuntimeError("Supervisor event stream not ready")
-        self._event_queue.put(
-            {
-                "type": "TOOL_EGRESS",
-                "worker_id": self.worker_id,
-                "session_id": session_id,
-                "kind": kind,
-                "frame": base64.b64encode(frame).decode("ascii"),
-            }
+        event = WorkerEvent(
+            type="MEDIATED_OP_OUTCOME",
+            worker_id=self.worker_id,
+            payload={"outcome": outcome.model_dump(mode="json")},
         )
+        self._event_queue.put(serialize_event(event))

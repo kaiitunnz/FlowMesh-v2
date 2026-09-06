@@ -25,15 +25,10 @@ from typing import Any, Protocol
 
 from ..clients.redis import (
     RESIDENT_RELAY_ROOT_CURSOR_KEY,
-    TOOL_RELAY_ROOT_CURSOR_KEY,
     resident_relay_down_cursor_key,
     resident_relay_down_key,
     resident_relay_session_key,
     resident_relay_up_key,
-    tool_relay_down_cursor_key,
-    tool_relay_down_key,
-    tool_relay_session_key,
-    tool_relay_up_key,
 )
 
 # A crashed origin can never trim its own session record; a generous TTL bounds the leak
@@ -49,9 +44,9 @@ class RelayKeyspace:
 
     A keyspace isolates a namespace's per-node up/down streams, per-session routing
     record and its lease, the root bridge's per-node read cursor, and each node
-    attachment's own down-stream cursor. Distinct keyspaces (resident ``rr:*`` and
-    external-tool ``xt:*``) never share a stream, record, lease, or cursor, so both can
-    run on one node at once.
+    attachment's own down-stream cursor. The parameterization lets another namespace run
+    a disjoint ``RelayKeyspace`` beside the resident ``rr:*`` streams without sharing a
+    stream, record, lease, or cursor.
     """
 
     up: Callable[[str], str]
@@ -67,14 +62,6 @@ RESIDENT_RELAY_KEYSPACE = RelayKeyspace(
     session=resident_relay_session_key,
     root_cursor=RESIDENT_RELAY_ROOT_CURSOR_KEY,
     down_cursor=resident_relay_down_cursor_key,
-)
-
-TOOL_RELAY_KEYSPACE = RelayKeyspace(
-    up=tool_relay_up_key,
-    down=tool_relay_down_key,
-    session=tool_relay_session_key,
-    root_cursor=TOOL_RELAY_ROOT_CURSOR_KEY,
-    down_cursor=tool_relay_down_cursor_key,
 )
 
 
@@ -369,7 +356,6 @@ class DirectionWindow:
 
 __all__ = [
     "RESIDENT_RELAY_KEYSPACE",
-    "TOOL_RELAY_KEYSPACE",
     "BinaryRedis",
     "DirectionWindow",
     "RelayDirection",

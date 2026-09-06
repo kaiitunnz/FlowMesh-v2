@@ -5,6 +5,7 @@ from typing import Any
 
 from shared.schemas.command import (
     InterruptMessage,
+    MediatedOpMessage,
     StopMessage,
     TaskMessage,
 )
@@ -80,22 +81,6 @@ class TaskListener(RebindableReader):
             raise RuntimeError(f"Worker {worker_id} is not registered")
         return await self._qs[worker_id].get()
 
-    def enqueue_egress(
-        self, worker_id: str, session_id: str, egress_kind: str, payload: bytes
-    ) -> bool:
-        """Queue an opaque tool-egress frame for a worker's arm; False if it is gone."""
-        loop = self._loop
-        if loop is None or worker_id not in self._qs:
-            return False
-        event = {
-            "kind": "egress",
-            "session_id": session_id,
-            "egress_kind": egress_kind,
-            "payload": payload,
-        }
-        asyncio.run_coroutine_threadsafe(self._qs[worker_id].put(event), loop)
-        return True
-
     def _handle_message(self, data: Any) -> None:
         loop = self._loop
         if loop is None:
@@ -123,6 +108,14 @@ class TaskListener(RebindableReader):
                     "kind": "stop",
                     "task_id": stop_message.task_id,
                     "reason": stop_message.reason,
+                }
+            case "mediated_op":
+                op_message = MediatedOpMessage.model_validate(data)
+                worker_id = op_message.worker_id
+                payload = {
+                    "kind": "mediated_op",
+                    "frame_kind": op_message.frame_kind,
+                    "payload": op_message.payload,
                 }
             case _:
                 self.logger.warning(

@@ -40,7 +40,6 @@ listed here is in `.env.example`.
 | `ORCHESTRATOR_MAX_SPAWNS_PER_TURN` | `32` | Max spawn children admitted in one facade turn group |
 | `ORCHESTRATOR_MAX_SPAWNS_PER_REGION` | `256` | Max spawn children admitted per agent child region |
 | `ORCHESTRATOR_EPISODE_LOWERING` | `false` | Lower v2 templates into run-to-yield episodes |
-| `ORCHESTRATOR_WORKER_ORIGINATED_BOUNDARIES` | `true` | Originate mediated tool boundaries from workers |
 | `ORCHESTRATOR_AGENT_INPUT_BUDGET_BYTES` | `262144` | Max resolved first-turn input bytes per agent |
 | `AGENT_HARNESS_DEFAULT_BACKEND` | – | Default agent harness backend when a workflow sets none |
 | `AGENT_HARNESS_DEFAULT_VERSION` | – | Default agent harness backend version |
@@ -54,12 +53,7 @@ listed here is in `.env.example`.
 | `WEB_SEARCH_MAX_RESULTS` | `5` | Results per search |
 | `WEB_SEARCH_TIMEOUT_SEC` | `20` | Search request timeout (seconds) |
 | `WEB_SEARCH_RESULT_CHAR_CAP` | `6000` | Injected result size cap |
-| `WEB_SEARCH_MAX_CALLS` | `8` | Searches per episode |
 | `WEB_SEARCH_MAX_PARALLEL_CALLS_PER_TURN` | `4` | Parallel searches per turn |
-| `WEB_SEARCH_EGRESS_LOCALITY` | `server_relay` | Where a search egresses (`server_relay` or `worker_sidecar`) |
-| `WEB_SEARCH_SIDECAR_REMOTE` | `false` | Carry a worker-sidecar search to a remote node |
-| `WEB_SEARCH_SIDECAR_ROUTE` | `127.0.0.1:0` | Remote sidecar bind route |
-| `WEB_SEARCH_SIDECAR_DIRECTLY_ROUTABLE` | `false` | Offer a direct dial to the remote sidecar |
 | `CONTENT_STORE_ENABLED` | `true` | Serve the outcome content store |
 | `CONTENT_STORE_ROOT` | – | Content-store root; under the data dir if empty |
 | `RESIDENT_CAPACITY_ENABLED` | `false` | Serve resident model bindings via admission |

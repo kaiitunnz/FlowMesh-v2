@@ -61,39 +61,36 @@ class TaskMessage(_message.Message):
         self, payload: _Optional[_Union[_struct_pb2.Struct, _Mapping]] = ...
     ) -> None: ...
 
-class ToolEgressFrame(_message.Message):
-    __slots__ = ("session_id", "kind", "payload")
-    SESSION_ID_FIELD_NUMBER: _ClassVar[int]
+class MediatedOperationFrame(_message.Message):
+    __slots__ = ("kind", "payload")
     KIND_FIELD_NUMBER: _ClassVar[int]
     PAYLOAD_FIELD_NUMBER: _ClassVar[int]
-    session_id: str
     kind: str
-    payload: bytes
+    payload: _struct_pb2.Struct
 
     def __init__(
         self,
-        session_id: _Optional[str] = ...,
         kind: _Optional[str] = ...,
-        payload: _Optional[bytes] = ...,
+        payload: _Optional[_Union[_struct_pb2.Struct, _Mapping]] = ...,
     ) -> None: ...
 
 class DispatchMessage(_message.Message):
-    __slots__ = ("task", "interrupt", "stop", "egress")
+    __slots__ = ("task", "interrupt", "stop", "mediated_op")
     TASK_FIELD_NUMBER: _ClassVar[int]
     INTERRUPT_FIELD_NUMBER: _ClassVar[int]
     STOP_FIELD_NUMBER: _ClassVar[int]
-    EGRESS_FIELD_NUMBER: _ClassVar[int]
+    MEDIATED_OP_FIELD_NUMBER: _ClassVar[int]
     task: TaskMessage
     interrupt: InterruptMessage
     stop: StopMessage
-    egress: ToolEgressFrame
+    mediated_op: MediatedOperationFrame
 
     def __init__(
         self,
         task: _Optional[_Union[TaskMessage, _Mapping]] = ...,
         interrupt: _Optional[_Union[InterruptMessage, _Mapping]] = ...,
         stop: _Optional[_Union[StopMessage, _Mapping]] = ...,
-        egress: _Optional[_Union[ToolEgressFrame, _Mapping]] = ...,
+        mediated_op: _Optional[_Union[MediatedOperationFrame, _Mapping]] = ...,
     ) -> None: ...
 
 class EventMessage(_message.Message):

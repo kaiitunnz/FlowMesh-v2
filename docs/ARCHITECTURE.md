@@ -63,9 +63,8 @@ keys (the fabric-assigned dedupe authority for a mediated boundary). Resident-ca
 control adds `scl-` service claims, `rpl-` replica incarnations, and `lse-` allocation
 leases. `msk-` is an unguessable ref for a workflow's vaulted model credential and `hnd-`
 an unguessable claim-bound admission handoff token. The network plane adds `rog-` route
-origins and `rly-` relay sessions. Remote external-tool carriage adds `xtr-` tool relay
-sessions and `xdn-` one-use tool delivery nonces. Worker-originated mediated boundaries add
-`mop-` one-use mediated-operation permits.
+origins and `rly-` relay sessions. Worker-originated mediated boundaries add `mop-`
+one-use mediated-operation permits.
 Always use `new_*_id()`
 helpers in `src/shared/utils/ids.py`. Never use `uuid4()` or `secrets.token_hex`
 for IDs.
@@ -101,13 +100,13 @@ src/
     supervisor/           Per-node agent (gRPC server, adapters, lifecycle)
     task/                 parser, runtime, models, merge / epoch helpers
       v2/                   versioned representations, compiler
-    tools/                Fabric-served external-tool broker, carriage, egress
+    tools/                Fabric-served external-tool control authority (broker)
     utils/                concurrent, helpers, logging, misc, time
   shared/
     grpc/supervisor/v1/   Generated proto stubs (server + worker)
     schemas/              Cross-cutting schemas
     tasks/                Workflow/task spec models
-    tools/                External-tool contract, frame codec, search backends
+    tools/                External-tool contract and search backends
     utils/                JSON, parsing, time, ids
   worker/
     docker/               Worker Dockerfiles (CPU + GPU)
@@ -210,35 +209,31 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   and its transports carry only what a caller frames over them; resident-capacity control
   binds it to carry claim-gated resident invocation traffic. Enable with
   `NETWORK_PLANE_ENABLED=true`. See [`NETWORK_PLANE.md`](NETWORK_PLANE.md).
-- **Remote external-tool carriage.** A fabric-served external tool (today `search/v1`)
-  egresses in a worker executor, never in the root or a supervisor. With `worker_sidecar`
-  egress and `WEB_SEARCH_SIDECAR_REMOTE`, the `FabricToolBroker` — the sole authority for
-  the interface, quota, `idm-*`, and durable pending/terminal outcome — hands the approved
-  operation to a claim-free `RemoteSidecarCarriage`, which carries it over the network plane
-  to the blocked Agent episode's assigned worker. The node's supervisor is a pure opaque
-  frame router that forwards the operation over the worker's existing attachment and relays
-  the reply back, constructing no provider. The `WorkerExternalToolExecutor` validates an
-  operation fence and a one-use delivery nonce before egress and reads its keyed credential
-  only from its local worker environment, so no credential enters a fabric object. The
-  carriage mints no `ServiceClaim`, `RouteAuthorization`, or lease; a lost operation stays
-  pending until its `idm-*` outcome terminalizes. See [`EXECUTORS.md`](EXECUTORS.md).
+- **Worker-originated mediated boundaries.** A fabric-served external tool (today
+  `search/v1`) egresses only in the Agent's assigned worker, never in the root or a
+  supervisor. The worker captures the boundary, keeps the raw request in worker-private
+  state, and yields the lane carrying only a canonical request digest — no raw arguments
+  cross to the control plane. Central control mints a one-use, audience-bound
+  `MediatedOperationPermit` and relays it to that worker as an ordinary control message on
+  its authenticated attachment, never a dispatched task. The worker's
+  `MediatedEgressSidecar` — a bounded worker-local egress lane, not a task, replica,
+  endpoint, or authority — validates the permit fence and request digest, reads the
+  provider credential only from its local environment, egresses, and reports a
+  permit-fenced outcome that settles the boundary before the episode resumes. It retains
+  the request non-destructively until the committed outcome is acknowledged. A fence
+  rejection is a declared terminal boundary failure, never a retryable provider response;
+  a lost outcome holds the boundary pending for a same-`idm-*` re-drive. The
+  `FabricToolBroker` applies the tool's policy and correlation. See
+  [`EXECUTORS.md`](EXECUTORS.md).
 - **Reference-backed invocation outcomes.** A mediated boundary settles by reference: the
   producing worker materializes its result into the content-addressed `FabricContentStore`
   and reports a bounded `OutcomeManifest`, never the payload. The manifest commits to the
   ledger before the continuation re-readies or a linked `ServiceClaim` credit releases, and a
   resumed worker hydrates and digest-verifies the reference before injection. Root and
   supervisors relay opaque frames and hold only the manifest. Materialization is idempotent
-  under `idm-*`. The fabric-tool worker path is the first consumer; the model-gateway and
-  resident completions still settle inline. See [`EXECUTORS.md`](EXECUTORS.md).
-- **Worker-originated mediated boundaries.** An agent's assigned worker captures a
-  fabric-tool boundary (today `search/v1`), keeps the raw request in worker-private state,
-  and yields the lane carrying only a canonical request digest — no raw arguments cross to
-  the control plane. The worker then runs the operation off-lane locally and reports the
-  outcome, which settles the boundary before the episode resumes. The request stays
-  worker-local while a shared outcome materializes into the content-addressed store. This
-  is the default; setting `ORCHESTRATOR_WORKER_ORIGINATED_BOUNDARIES=false` routes the
-  boundary through the in-server broker instead, and the gateway-captured model-turn
-  facade always uses the broker. See [`EXECUTORS.md`](EXECUTORS.md).
+  under `idm-*`. The mediated-egress-sidecar tool path settles by reference; the model
+  gateway and resident completions settle inline. See
+  [`EXECUTORS.md`](EXECUTORS.md).
 - **Task merging.** Compatible adjacent tasks in a DAG (same `taskType`,
   model, hardware shape, and merge key) coalesce into a single dispatch.
   Merged children ride on `WorkerTaskMessage.merged_children`; the worker

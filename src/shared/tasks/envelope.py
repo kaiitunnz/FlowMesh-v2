@@ -48,8 +48,6 @@ from .specs import (
     SFTSpecTemplate,
     SSHSpecStrict,
     SSHSpecTemplate,
-    ToolOperationSpecStrict,
-    ToolOperationSpecTemplate,
 )
 
 type TaskSpecStrict = Annotated[
@@ -73,8 +71,7 @@ type TaskSpecStrict = Annotated[
     | OmniText2ImageSpecStrict
     | OmniText2SpeechSpecStrict
     | OmniText2AudioSpecStrict
-    | OmniText2GeneralSpecStrict
-    | ToolOperationSpecStrict,
+    | OmniText2GeneralSpecStrict,
     Field(discriminator="taskType"),
 ]
 
@@ -99,8 +96,7 @@ type TaskSpecTemplate = Annotated[
     | OmniText2ImageSpecTemplate
     | OmniText2SpeechSpecTemplate
     | OmniText2AudioSpecTemplate
-    | OmniText2GeneralSpecTemplate
-    | ToolOperationSpecTemplate,
+    | OmniText2GeneralSpecTemplate,
     Field(discriminator="taskType"),
 ]
 

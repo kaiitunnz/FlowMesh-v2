@@ -22,6 +22,7 @@ from shared.schemas.event import (
 )
 from shared.schemas.result import result_file_path
 from shared.schemas.worker import WorkerStatus
+from shared.tools.contract import MediatedOperationOutcome
 from shared.utils.manifest import RESULTS_NAME, sync_manifest
 
 from ..auth import default_principal, deregister_resource, register_resource
@@ -723,6 +724,10 @@ class EventMonitor:
                 status = event.status or WorkerStatus.UNKNOWN
                 self._worker_registry.set_worker_status(
                     worker_id, status, event.ts, event.payload
+                )
+            case "MEDIATED_OP_OUTCOME":
+                self._runtime.settle_mediated_operation(
+                    MediatedOperationOutcome.model_validate(event.payload["outcome"])
                 )
             case "UNREGISTER":
                 worker_id = (event.worker_id or "").strip()

@@ -1,15 +1,17 @@
 """The generic fabric external-tool operation contract: envelopes and outcomes.
 
-The control path issues a bounded ``ToolOperationEnvelope`` (and a per-delivery
-``RemoteToolOperationEnvelope`` fence); a worker executor validates the fence and
-returns a normalized ``ToolOutcome``. These are tool-agnostic — a per-tool package
-(today ``shared.tools.search``) supplies the request shape and provider egress — and
-they mint no identity and hold no credential.
+The control path mints a one-use ``MediatedOperationPermit`` and issues a bounded
+``ToolOperationEnvelope``; a worker's egress sidecar validates the permit fence and
+returns a normalized ``ToolOutcome`` or ``MediatedOperationOutcome``. These are
+tool-agnostic — a per-tool package (today ``shared.tools.search``) supplies the request
+shape and provider egress — and they mint no identity and hold no credential.
 """
 
 from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict
+
+from shared.outcome import OutcomeManifest
 
 
 class ToolOperationEnvelope(BaseModel):
@@ -29,42 +31,6 @@ class ToolOperationEnvelope(BaseModel):
     timeout_sec: float
     result_char_cap: int
     task_id: str | None = None
-
-
-class RemoteToolOperationEnvelope(BaseModel):
-    """A short-lived operation fence for one bounded off-server external-tool operation.
-
-    The control path issues it per physical delivery attempt; the worker executor
-    validates it before egress and rejects an expired, altered, wrong-provider,
-    wrong-audience, wrong-policy, over-budget, or replayed operation as a tool-fence
-    failure — never a reachability-demoting observation. It is not a ``ServiceClaim``,
-    ``RouteAuthorization``, or lease, and holds no credential. ``request_digest`` binds
-    request integrity; ``provider`` and ``target_id`` / ``target_generation`` bind the
-    audience, both provisioned out-of-band over the authenticated attachment and never
-    guessable from a frame; ``delivery_nonce`` is a one-use, target-scoped authorization
-    the executor consumes atomically before egress, so an exact replay of one authorized
-    delivery is refused while a fresh same-``idempotency_key`` re-drive with a new nonce
-    is accepted; ``deadline_epoch`` bounds its lifetime. ``tenant`` is carried as audit
-    context only; per-tenant enforcement is deferred with per-tenant credential
-    delegation. ``policy_class`` binds the operation's policy to the target's bound
-    policy.
-    """
-
-    model_config = ConfigDict(frozen=True)
-
-    interface: str
-    provider: str
-    idempotency_key: str | None
-    request_digest: str
-    target_id: str
-    target_generation: int
-    delivery_nonce: str
-    tenant: str | None = None
-    policy_class: str = "default"
-    deadline_epoch: float
-    max_results: int
-    timeout_sec: float
-    result_char_cap: int
 
 
 class MediatedOperationPermit(BaseModel):
@@ -132,9 +98,33 @@ class ToolOutcome(BaseModel):
     provenance: tuple[dict[str, str], ...] = ()
 
 
+class MediatedOperationOutcome(BaseModel):
+    """The fenced terminal fact a worker reports for one mediated operation.
+
+    The agent's own worker egressed the operation under its permit and reports the
+    result back over the authenticated attachment. Exactly one of ``outcome`` (a bounded
+    typed control datum), ``outcome_ref`` (a reference to materialized content), or
+    ``error`` (a worker-fault fence failure) is set; the control plane settles the
+    originating boundary from it. ``permit_id`` correlates the report to the minted
+    permit; ``agent_task_id`` / ``call_correlation`` name the boundary;
+    ``invocation_id`` and ``idempotency_key`` are its durable identity.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    permit_id: str
+    agent_task_id: str
+    call_correlation: str
+    invocation_id: str
+    idempotency_key: str | None
+    outcome: ToolOutcome | None = None
+    outcome_ref: OutcomeManifest | None = None
+    error: str | None = None
+
+
 __all__ = [
+    "MediatedOperationOutcome",
     "MediatedOperationPermit",
-    "RemoteToolOperationEnvelope",
     "ToolOperationEnvelope",
     "ToolOutcome",
     "ToolOutcomeStatus",

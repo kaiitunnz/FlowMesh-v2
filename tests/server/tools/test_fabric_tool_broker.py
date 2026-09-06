@@ -1,10 +1,13 @@
-"""The fabric tool broker executes a search boundary and normalizes a typed outcome.
+"""The fabric tool broker terminalizes a server-captured tool boundary.
 
-The broker runs off the agent's lane, maps a provider fault to a typed ``ToolOutcome``,
-bounds an episode's search budget, and settles the durable envelope through the runtime
-callback — never an empty success and never the model settler.
+The broker holds no provider client and performs no egress: external-tool egress runs
+only in a worker's mediated-egress sidecar. A boundary reaching the broker (a
+server-captured, no-worker-origin facade boundary) has no in-server egress, so the
+broker settles it off the agent's lane as a typed unavailable outcome. This file also
+covers the retained search provider backends the sidecar egresses through.
 """
 
+from dataclasses import dataclass
 from typing import Any
 
 from server.config import WebSearchConfig
@@ -16,13 +19,10 @@ from server.orchestration.tool_dispatch import (
     ToolOutcomeStatus,
 )
 from server.tools.fabric_tool_broker import FabricToolBroker
-from server.tools.tool_egress import AmbiguousDelivery
 from shared.harness import BoundaryEventKind
 from shared.tools.search.providers import (
     SearchQuotaExceeded,
-    SearchResult,
     SearchTimeout,
-    SearchUnavailable,
 )
 
 
@@ -41,99 +41,45 @@ def _env(
     )
 
 
-class _StubProvider:
-    def __init__(self, results=None, error: Exception | None = None) -> None:
-        self._results = results or []
-        self._error = error
-        self.calls: list[tuple[str, int]] = []
-
-    def search(self, query: str, *, max_results: int, timeout_sec: float):
-        self.calls.append((query, max_results))
-        if self._error is not None:
-            raise self._error
-        return self._results
-
-
-def _broker(provider: Any, **cfg: Any) -> tuple[FabricToolBroker, list[tuple]]:
-    settled: list[tuple] = []
+def _broker() -> tuple[FabricToolBroker, list[tuple[str, str, Any]]]:
+    settled: list[tuple[str, str, Any]] = []
     broker = FabricToolBroker.build(
-        WebSearchConfig(**cfg),
+        WebSearchConfig(),
         lambda t, c, v: settled.append((t, c, v)),
-        provider=provider,
     )
     return broker, settled
 
 
+@dataclass(frozen=True)
+class _ProviderCfg:
+    """A minimal provider-config double (the worker builds the real binding)."""
+
+    provider: str
+    api_key: str | None = None
+
+
 def _carrier_outcome(carrier: Any) -> ToolOutcome:
-    """The typed outcome inside an in-server (inline) settle carrier."""
+    """The typed outcome inside an inline settle carrier."""
     return ToolOutcome.model_validate_json(carrier.value)
 
 
-def _outcome(settled: list[tuple]) -> ToolOutcome:
-    assert len(settled) == 1
-    return _carrier_outcome(settled[0][2])
-
-
-def test_success_normalizes_results_with_provenance() -> None:
-    provider = _StubProvider(
-        [
-            SearchResult(
-                title="GPT-5.6 Sol", url="https://openai.com/x", snippet="new"
-            ),
-            SearchResult(title="Other", url="https://e.com/y", snippet="more"),
-        ]
-    )
-    broker, settled = _broker(provider)
+def test_captured_boundary_has_no_in_server_egress() -> None:
+    broker, settled = _broker()
     broker._run(_env('{"query": "latest openai model 2026", "max_results": 2}'))
-    outcome = _outcome(settled)
-    assert outcome.status is ToolOutcomeStatus.SUCCESS
-    assert "GPT-5.6 Sol" in outcome.value and "https://openai.com/x" in outcome.value
-    assert outcome.provenance[0] == {
-        "title": "GPT-5.6 Sol",
-        "url": "https://openai.com/x",
-    }
-    assert provider.calls == [("latest openai model 2026", 2)]
+    assert len(settled) == 1
+    task_id, call, carrier = settled[0]
+    assert (task_id, call) == ("tsk-1", "c0")
+    outcome = _carrier_outcome(carrier)
+    assert outcome.status is ToolOutcomeStatus.UNAVAILABLE
+    assert "no in-server egress" in outcome.value
 
 
-def test_empty_results_is_a_clear_success_not_a_hallucination() -> None:
-    broker, settled = _broker(_StubProvider([]))
-    broker._run(_env('{"query": "obscure"}'))
-    outcome = _outcome(settled)
-    assert outcome.status is ToolOutcomeStatus.SUCCESS and "No results" in outcome.value
-
-
-def test_provider_faults_map_to_typed_outcomes() -> None:
-    for error, status in (
-        (SearchTimeout("t"), ToolOutcomeStatus.TIMEOUT),
-        (SearchQuotaExceeded("q"), ToolOutcomeStatus.QUOTA),
-        (SearchUnavailable("u"), ToolOutcomeStatus.UNAVAILABLE),
-    ):
-        broker, settled = _broker(_StubProvider(error=error))
-        broker._run(_env('{"query": "x"}'))
-        assert _outcome(settled).status is status
-
-
-def test_per_episode_budget_exhausts_to_quota() -> None:
-    broker, settled = _broker(_StubProvider([]), max_calls=2)
-    for _ in range(3):
-        settled.clear()
-        broker._run(_env('{"query": "x"}'))
-    assert _outcome(settled).status is ToolOutcomeStatus.QUOTA
-
-
-def test_an_unknown_interface_is_unavailable_never_executed() -> None:
-    provider = _StubProvider([SearchResult(title="a", url="u", snippet="s")])
-    broker, settled = _broker(provider)
-    broker._run(_env('{"query": "x"}', interface="mystery/v1"))
-    assert _outcome(settled).status is ToolOutcomeStatus.UNAVAILABLE
-    assert provider.calls == []
-
-
-def test_max_results_is_capped_to_config() -> None:
-    provider = _StubProvider([])
-    broker, _ = _broker(provider, max_results=3)
-    broker._run(_env('{"query": "x", "max_results": 99}'))
-    assert provider.calls == [("x", 3)]
+def test_build_holds_no_provider_client() -> None:
+    broker, _ = _broker()
+    # The control-only broker constructs with no provider or carriage; egress is the
+    # worker's mediated-egress sidecar.
+    assert not hasattr(broker, "_policy")
+    assert not hasattr(broker, "_provider")
 
 
 _DDG_HTML = """
@@ -219,7 +165,6 @@ def test_serper_provider_parses_organic_and_maps_faults(monkeypatch: Any) -> Non
 
 
 def test_build_search_provider_selects_by_config() -> None:
-    from server.config import WebSearchConfig
     from shared.tools.search.providers import (
         DuckDuckGoProvider,
         SerperProvider,
@@ -227,14 +172,14 @@ def test_build_search_provider_selects_by_config() -> None:
     )
 
     assert isinstance(
-        build_search_provider(WebSearchConfig(provider="duckduckgo")),
+        build_search_provider(_ProviderCfg("duckduckgo")),
         DuckDuckGoProvider,
     )
-    keyed = build_search_provider(WebSearchConfig(provider="serper", api_key="k-abc"))
+    keyed = build_search_provider(_ProviderCfg("serper", "k-abc"))
     assert isinstance(keyed, SerperProvider)
     for bad in (
-        WebSearchConfig(provider="serper"),  # keyed provider with no key
-        WebSearchConfig(provider="nope"),  # unknown provider
+        _ProviderCfg("serper"),  # keyed provider with no key
+        _ProviderCfg("nope"),  # unknown provider
     ):
         try:
             build_search_provider(bad)
@@ -248,57 +193,9 @@ def test_lazy_provider_defers_a_missing_key_to_first_search() -> None:
 
     # A keyed provider with no key must not fail at construction — only on egress,
     # so a deployment that egresses only off-server never builds it on the server.
-    lazy = LazySearchProvider(WebSearchConfig(provider="serper", api_key=None))
+    lazy = LazySearchProvider(_ProviderCfg("serper", None))
     try:
         lazy.search("q", max_results=1, timeout_sec=1.0)
         raise AssertionError("expected the missing key to raise on first search")
     except ValueError:
         pass
-
-
-def _ambiguous_carriage(_env: Any, _req: Any) -> AmbiguousDelivery:
-    return AmbiguousDelivery("lost after egress")
-
-
-def test_ambiguous_delivery_re_drives_then_terminalizes_with_an_audit_outcome() -> None:
-    settled: list[tuple[str, str, Any]] = []
-    redispatched: list[tuple[str, str]] = []
-
-    def redispatch(task_id: str, correlation: str) -> bool:
-        redispatched.append((task_id, correlation))
-        return True
-
-    broker = FabricToolBroker.build(
-        WebSearchConfig(egress_locality="worker_sidecar", max_calls=1),
-        lambda t, c, v: settled.append((t, c, v)),
-        worker_carriage=_ambiguous_carriage,
-        redispatch=redispatch,
-    )
-    env = _env('{"query": "x"}')
-    # An ambiguous delivery holds the boundary pending and re-drives under the same
-    # correlation; a single episode charge covers every attempt (max_calls=1 but no
-    # attempt terminalizes as QUOTA), until the bounded retry policy is exhausted.
-    broker._run(env)
-    broker._run(env)
-    assert redispatched == [("tsk-1", "c0"), ("tsk-1", "c0")]
-    assert settled == []
-    broker._run(env)
-    assert len(settled) == 1
-    outcome = _carrier_outcome(settled[0][2])
-    assert outcome.status is ToolOutcomeStatus.UNAVAILABLE
-    assert "recovery was exhausted" in outcome.value
-
-
-def test_ambiguous_delivery_on_a_cancelled_boundary_manufactures_no_terminal() -> None:
-    settled: list[tuple[str, str, Any]] = []
-
-    broker = FabricToolBroker.build(
-        WebSearchConfig(egress_locality="worker_sidecar"),
-        lambda t, c, v: settled.append((t, c, v)),
-        worker_carriage=_ambiguous_carriage,
-        redispatch=lambda _t, _c: False,  # the boundary is cancelled or already settled
-    )
-    broker._run(_env('{"query": "x"}'))
-    # A refused re-drive means the boundary is already terminal: its outcome stands and
-    # the broker manufactures no terminal over it (contract: cleanup never settles).
-    assert settled == []
