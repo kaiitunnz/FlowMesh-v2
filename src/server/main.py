@@ -189,8 +189,8 @@ if IS_ROOT_NODE:
         resolved = RUNTIME.gateway_binding_for(task_id)
         if resolved is None:
             return None
-        workflow_id, pinned = resolved
-        return to_gateway_binding(pinned, MODEL_SECRET_VAULT, workflow_id)
+        _workflow_id, pinned = resolved
+        return to_gateway_binding(pinned)
 
     AGENT_MODEL_GATEWAY.set_binding_resolver(_resolve_gateway_binding)
 

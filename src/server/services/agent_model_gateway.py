@@ -19,7 +19,6 @@ from shared.tasks.specs import ModelBindingMode
 from ..config import AgentModelGatewayConfig, GatewayMode
 from ..orchestration.tool_dispatch import ToolInvocationEnvelope
 from ..task.v2.representations.operators import AgentModelGatewayBinding
-from .model_secret_vault import ModelSecretVault
 
 _BINDING_MODE_TO_GATEWAY = {
     ModelBindingMode.CANNED: GatewayMode.CANNED,
@@ -30,16 +29,14 @@ _BINDING_MODE_TO_GATEWAY = {
 
 @dataclass(frozen=True)
 class ResolvedGatewayBinding:
-    """The effective per-invocation upstream a mediated model request resolves to.
+    """The control-plane settle mode a mediated model request resolves to.
 
-    Resolved server-side from the pinned binding: ``api_key`` is materialized from a
-    ``secret_ref`` here and never leaves the server-to-upstream path.
+    Only the mode is resolved: a canned/echo boundary settles here, and an external
+    boundary egresses on the worker with its credential carried on the worker permit, so
+    no upstream or credential is materialized server-side.
     """
 
     mode: GatewayMode
-    url: str | None = None
-    model: str | None = None
-    api_key: str | None = None
 
 
 GatewayBindingResolver = Callable[[str], ResolvedGatewayBinding | None]
@@ -49,28 +46,19 @@ class ResidentBindingNotServable(RuntimeError):
     """A resident model binding needs capacity admission the external gateway lacks."""
 
 
-def to_gateway_binding(
-    pinned: AgentModelGatewayBinding,
-    vault: ModelSecretVault,
-    workflow_id: str,
-) -> ResolvedGatewayBinding:
-    """Map a pinned model binding to its effective upstream, resolving the credential.
+def to_gateway_binding(pinned: AgentModelGatewayBinding) -> ResolvedGatewayBinding:
+    """Map a pinned model binding to its control-plane settle mode.
 
-    The credential is the workflow's own inline key, vaulted at submission under its
-    workflow and named here by the generated ``secret_ref``; it resolves only within
-    that workflow. Without a resolvable ref the upstream is unauthenticated. A resident
-    binding is not served by the external gateway.
+    A canned/echo binding settles on the control plane; an external binding egresses on
+    the worker and a resident binding admits through resident-capacity control, so only
+    the mode is resolved here — the credential rides the worker permit, never this path.
     """
     mode = _BINDING_MODE_TO_GATEWAY.get(pinned.mode)
     if mode is None:
         raise ResidentBindingNotServable(
             f"model binding mode {pinned.mode.value!r} is not served externally"
         )
-    secret = vault.resolve(workflow_id, pinned.secret_ref)
-    api_key = secret.get_secret_value() if secret is not None else None
-    return ResolvedGatewayBinding(
-        mode=mode, url=pinned.url, model=pinned.model, api_key=api_key
-    )
+    return ResolvedGatewayBinding(mode=mode)
 
 
 class _EpisodeSettler(Protocol):
@@ -120,11 +108,7 @@ class AgentModelGateway:
         if task_id is not None and self._binding_resolver is not None:
             if (resolved := self._binding_resolver(task_id)) is not None:
                 return resolved
-        return ResolvedGatewayBinding(
-            mode=self._cfg.mode,
-            url=self._cfg.url,
-            model=self._cfg.model,
-        )
+        return ResolvedGatewayBinding(mode=self._cfg.mode)
 
     def settle(self, env: ToolInvocationEnvelope) -> None:
         """Settle a suspended model boundary off the caller's lane, never inline."""
