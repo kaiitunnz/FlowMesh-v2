@@ -150,6 +150,20 @@ def test_reverse_order_completion_yields_one_ordered_resume() -> None:
     assert [o.injection_tool for o in outcomes] == ["web_search"] * 3
 
 
+def test_worker_captured_search_member_dispatches_by_digest() -> None:
+    eng = _search_engine()
+    member = _search_member(0).model_copy(
+        update={"request_payload": None, "request_digest": "sha-d0"}
+    )
+    eng.route_facade_turn_group("A", _group(member))
+    # The recorded boundary carries the worker digest, so a dispatch routes it to the
+    # off-lane worker egress; a no-digest member would fall to the in-server broker.
+    dispatch = next(
+        e for e in eng.pending_tool_dispatches() if e.call_correlation == "A:0:0"
+    )
+    assert dispatch.request_digest == "sha-d0"
+
+
 def test_a_crash_reissues_only_unresolved_members() -> None:
     eng = _search_engine()
     eng.route_facade_turn_group("A", _search_group(3))

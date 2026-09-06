@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from shared.harness.boundary import BoundaryEventKind
 from shared.tasks import TaskType
 from shared.tasks.specs import ModelBindingMode
+from shared.tools.facade import FacadeDescriptor as FacadeDescriptor
 
 
 class DeterminismClass(StrEnum):
@@ -236,23 +237,6 @@ class BoundarySignature(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     events: tuple[BoundaryEventKind, ...] = ()
-
-
-class FacadeDescriptor(BaseModel):
-    """A fabric-owned facade tool the model gateway injects for one agent.
-
-    ``name`` is the model-facing tool name whose call the gateway captures;
-    ``tool_schema`` is the function-tool JSON injected into the model turn; ``kind`` and
-    ``interface`` are the boundary the captured call originates. The compiler pins the
-    exact set an agent may use, so the gateway injects only its declared facades.
-    """
-
-    model_config = ConfigDict(frozen=True)
-
-    name: str
-    kind: BoundaryEventKind
-    interface: str | None = None
-    tool_schema: str  # the injected function-tool schema, serialized
 
 
 class ChildRegionRef(BaseModel):

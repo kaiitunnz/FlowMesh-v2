@@ -825,6 +825,7 @@ class OrchestrationEngine:
             child_region_ref=member.interface_or_region if is_spawn else None,
             call_correlation=member.call_correlation,
             request_payload=member.request_payload,
+            request_digest=member.request_digest,
             injection_target=member.harness_call_id,
             injection_tool=member.tool_name,
             group_id=group_id,
