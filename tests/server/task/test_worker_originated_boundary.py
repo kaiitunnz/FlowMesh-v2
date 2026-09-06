@@ -1,10 +1,11 @@
 """The worker-originated mediated-tool-boundary path through the real runtime.
 
 With the flag on, a ``search/v1`` boundary an agent emits is stripped to its digest by
-the worker, dispatched as an off-lane operation pinned to the agent's own worker, and
-its fenced outcome settles the boundary — the raw request never entering the ledger.
-With the flag off the same boundary keeps its request and routes to the in-server
-broker. If the origin worker is lost the boundary fails clean.
+the worker; the runtime mints an audience-bound permit and relays it to the agent's own
+worker over the attachment, and the worker's fenced outcome settles the boundary — the
+raw request never entering the ledger. With the flag off the same boundary keeps its
+request and routes to the in-server broker. If the origin worker is lost the boundary
+fails clean.
 """
 
 import asyncio
@@ -20,7 +21,12 @@ from server.orchestration.tool_dispatch import SEARCH_INTERFACE, ToolInvocationE
 from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime
 from shared.harness import BoundaryEventKind, HarnessCapsule
-from shared.tasks.task_type import TaskType
+from shared.tools.contract import (
+    MediatedOperationOutcome,
+    MediatedOperationPermit,
+    ToolOutcome,
+    ToolOutcomeStatus,
+)
 from tests.server.task.test_v2_orchestration import (
     FakeRegistry,
     _NoopSecretVault,
@@ -63,10 +69,17 @@ _SCRIPT = [
 
 
 class _WorkerStub:
+    def __init__(self) -> None:
+        self.frames: list[tuple[str, str, dict[str, Any]]] = []
+
     def get_worker(self, worker_id: str) -> Any:
         return SimpleNamespace(id=worker_id, node_id="nde-1", incarnation=7)
 
     def publish_interrupt(self, *args: Any) -> int:
+        return 0
+
+    def publish_mediated_op(self, worker: Any, payload: Any) -> int:
+        self.frames.append((worker.id, payload.frame_kind, payload.payload))
         return 0
 
 
@@ -109,6 +122,16 @@ def _dispatch_agent(runtime: TaskRuntime, task_id: str, worker: str = "wkr-1") -
     return engine
 
 
+def _permit_frames(runtime: TaskRuntime) -> list[dict[str, Any]]:
+    frames = cast(Any, runtime._worker_registry).frames
+    return [payload for _, kind, payload in frames if kind == "permit"]
+
+
+def _reap_frames(runtime: TaskRuntime) -> list[dict[str, Any]]:
+    frames = cast(Any, runtime._worker_registry).frames
+    return [payload for _, kind, payload in frames if kind == "reap"]
+
+
 def test_worker_originated_boundary_settles_and_keeps_payload_out_of_ledger() -> None:
     async def run() -> None:
         runtime = _runtime(flag=True)
@@ -117,18 +140,12 @@ def test_worker_originated_boundary_settles_and_keeps_payload_out_of_ledger() ->
 
         engine = _dispatch_agent(runtime, writer)
 
-        # An off-lane op is pinned to the agent's worker, carrying a permit bound to it.
-        op_ids = [
-            t
-            for t, r in runtime._tasks.items()
-            if r.task_type == TaskType.TOOL_OPERATION
-        ]
-        assert len(op_ids) == 1
-        op_id = op_ids[0]
-        assert runtime._tasks[op_id].selected_worker == ["wkr-1"]
-        permit = runtime.tool_operation_dispatch(op_id)
-        assert permit is not None and permit.target_id == "wkr-1"
-        assert permit.target_generation == 7 and permit.agent_task_id == writer
+        # A permit bound to the agent's worker is relayed over the attachment; no task.
+        permits = _permit_frames(runtime)
+        assert len(permits) == 1
+        permit = MediatedOperationPermit.model_validate(permits[0])
+        assert permit.target_id == "wkr-1" and permit.target_generation == 7
+        assert permit.agent_task_id == writer
 
         # The ledger holds the digest, never the raw request.
         snap = engine.to_snapshot()
@@ -137,15 +154,19 @@ def test_worker_originated_boundary_settles_and_keeps_payload_out_of_ledger() ->
         assert m0.request_payload is None
         assert _QUERY_TOKEN not in snap.model_dump_json()
 
-        # The origin worker runs the op and reports a bounded outcome; it settles the
-        # boundary and the resumed episode injects it and completes.
-        runtime.mark_succeeded(
-            op_id,
-            "wkr-1",
-            {"tool_operation": {"outcome": {"status": "success", "value": "sunny"}}},
-            _TS,
+        # The origin worker reports a bounded outcome over the attachment; it settles
+        # the boundary, reaps custody, and the resumed episode injects it and completes.
+        runtime.settle_mediated_operation(
+            MediatedOperationOutcome(
+                permit_id=permit.permit_id,
+                agent_task_id=writer,
+                call_correlation="m0",
+                invocation_id=permit.invocation_id,
+                idempotency_key=permit.idempotency_key,
+                outcome=ToolOutcome(status=ToolOutcomeStatus.SUCCESS, value="sunny"),
+            )
         )
-        assert op_id not in runtime._tasks  # the carrier is consumed
+        assert len(_reap_frames(runtime)) == 1  # delete-on-committed-ack
         _dispatch_agent(runtime, writer)  # resume: inject the outcome and complete
         writer_wi = engine.work_item(writer)
         assert writer_wi is not None and writer_wi.status is WorkItemStatus.SETTLED
@@ -165,12 +186,8 @@ def test_flag_off_routes_the_boundary_to_the_broker_with_its_request() -> None:
 
         _dispatch_agent(runtime, writer)
 
-        # No off-lane op; the broker gets the boundary with its raw request intact.
-        assert not [
-            t
-            for t, r in runtime._tasks.items()
-            if r.task_type == TaskType.TOOL_OPERATION
-        ]
+        # No permit relay; the broker gets the boundary with its raw request intact.
+        assert not _permit_frames(runtime)
         assert [e.interface for e in broker] == [SEARCH_INTERFACE]
         assert broker[0].request_payload is not None
         assert _QUERY_TOKEN in broker[0].request_payload
@@ -189,15 +206,9 @@ def test_origin_worker_loss_fails_the_boundary_clean() -> None:
 
         # The origin worker departs before the op settles: the boundary fails clean and
         # the workflow errors rather than resuming the agent with no outcome, and the
-        # dead operation carrier is dropped.
+        # stale pending-op mapping is dropped.
         runtime.recover_tasks_for_worker("wkr-1")
-        assert (
-            runtime._tasks[writer].status == TaskStatus.FAILED
-        )  # workflow errors clean
-        assert not [
-            t
-            for t, r in runtime._tasks.items()
-            if r.task_type == TaskType.TOOL_OPERATION
-        ]
+        assert runtime._tasks[writer].status == TaskStatus.FAILED
+        assert not runtime._pending_ops
 
     asyncio.run(run())
