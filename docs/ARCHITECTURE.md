@@ -179,9 +179,34 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   pinned on its compiled operator; the backend comes from `spec.harness.backend` or the
   `AGENT_HARNESS_DEFAULT_BACKEND` default, and an agent with neither fails template
   validation. `agent` is a v2-only task type: a legacy v1 agent submission is rejected.
-- **Agent-model gateway.** A managed model request an agent defers becomes a durable
-  invocation the agent-model gateway settles off the agent's lane, injecting the result
-  back at the originating call.
+- **Agent-model gateway.** A model boundary an agent defers with a `canned` or `echo`
+  binding settles on the control plane off the agent's lane, injecting the result back at
+  the originating call. The gateway resolves the activation's pinned binding and its
+  vaulted credential; a `resident` binding admits through resident-capacity control, and
+  an external (`openai`) binding egresses on the agent's own worker.
+- **Harness egress-handoff modes.** A backend declares how it hands a mediated egress
+  boundary to the worker egress lane. A `durable_pre_egress_yield` backend (the
+  `scripted` binding) releases its episode lane at the boundary and resumes from the
+  committed outcome: the worker captures the request, yields only its digest, and the
+  boundary settles through the worker-originated path. A `synchronous_turn_only` backend
+  (the `codex` binding) holds its own lane through one bounded same-worker egress within
+  a turn, under a no-conflicting-capacity, deadline, and cancellation bound; the turn's
+  durable anchors are its turn-completion boundaries, and recovery re-runs the whole turn
+  from the last completion under a fresh permit, safe because a model inference is
+  side-effect-free.
+- **External-model egress.** A managed external (`openai`) model turn egresses on the
+  Agent's own worker through a worker-local Responses facade, bound to loopback and
+  authenticated per episode so one episode drives only its own egress. Codex's model
+  provider targets the facade: the facade translates each turn between the Responses wire
+  and Chat Completions, injects the agent's pinned fabric facades, and runs the held
+  egress — it proposes the request digest to control, awaits the one-use
+  `MediatedOperationPermit` over the worker's attachment, and egresses synchronously
+  through the `MediatedEgressSidecar`, returning the model's whole message inline. The
+  per-workflow model credential rides the permit to the worker; a worker without one uses
+  its deployment-global key. A fabric facade the model calls on the turn is captured into
+  a `FacadeTurnGroup` reported to control, which records the group so the episode's next
+  completion routes its members and the turn returns Codex a clean summary. The
+  credential is kept out of the ledger, the control stores, and the logs.
 - **Resident-capacity control.** A `resident` model binding is served from reusable
   physical capacity rather than an external endpoint. Two control-plane actors — an
   Admission controller and a Lifecycle & scale manager — over durable control-state
@@ -209,9 +234,10 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   and its transports carry only what a caller frames over them; resident-capacity control
   binds it to carry claim-gated resident invocation traffic. Enable with
   `NETWORK_PLANE_ENABLED=true`. See [`NETWORK_PLANE.md`](NETWORK_PLANE.md).
-- **Worker-originated mediated boundaries.** A fabric-served external tool (today
-  `search/v1`) egresses only in the Agent's assigned worker, never in the root or a
-  supervisor. The worker captures the boundary, keeps the raw request in worker-private
+- **Worker-originated mediated boundaries.** A fabric-served external tool (`search/v1`)
+  or a managed external model turn egresses only in the Agent's assigned worker, never in
+  the root or a supervisor. The worker captures the boundary, keeps the raw request in
+  worker-private
   state, and yields the lane carrying only a canonical request digest — no raw arguments
   cross to the control plane. Central control mints a one-use, audience-bound
   `MediatedOperationPermit` and relays it to that worker as an ordinary control message on
