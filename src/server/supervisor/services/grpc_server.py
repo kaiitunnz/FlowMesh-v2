@@ -219,6 +219,13 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
                         payload=event["payload"],
                     )
                 )
+            elif event.get("kind") == "mediated_op":
+                yield supervisor_pb2.DispatchMessage(
+                    mediated_op=supervisor_pb2.MediatedOperationFrame(
+                        kind=str(event["frame_kind"]),
+                        payload=_struct_from_payload(event["payload"]),
+                    )
+                )
             else:
                 yield supervisor_pb2.DispatchMessage(
                     task=supervisor_pb2.TaskMessage(payload=_struct_from_payload(event))

@@ -20,6 +20,7 @@ from shared.tasks.specs import (
     TaskSpecStrictBase,
 )
 from shared.tasks.worker_message import HardwareUsage, WorkerHardware, WorkerTaskMessage
+from shared.tools.contract import MediatedOperationPermit
 from shared.tools.search.schema import DEFAULT_SEARCH_PROVIDER
 from shared.utils.manifest import prepare_output_dir, sync_manifest
 from shared.utils.time import now_iso
@@ -30,6 +31,7 @@ from .executors.tool_operation_executor import ToolOperationResult
 from .executors.utils.checkpoints import get_http_destination, write_executor_result
 from .external_tool_executor import WorkerExternalToolExecutor
 from .lifecycle import Lifecycle
+from .mediated_egress_sidecar import MediatedEgressSidecar
 from .utils.logging import TaskLogEmitter
 
 
@@ -92,6 +94,9 @@ class Runner:
         self._web_search_api_key = web_search_api_key
         self._content_store = content_store
         self._tool_executor: WorkerExternalToolExecutor | None = None
+        # The worker-local mediated-egress sidecar, built on the first permit relayed
+        # over the attachment (once the worker id and incarnation are known).
+        self._mediated_sidecar: MediatedEgressSidecar | None = None
 
     def _cancel_active_executor(self) -> None:
         with self._active_executor_lock:
@@ -130,6 +135,28 @@ class Runner:
         self._cancel_active_executor()
         if self._tool_executor is not None:
             self._tool_executor.stop()
+        if self._mediated_sidecar is not None:
+            self._mediated_sidecar.stop()
+
+    def _ensure_mediated_sidecar(self) -> MediatedEgressSidecar | None:
+        """Build the mediated-egress sidecar once the worker id is known."""
+        if self._mediated_sidecar is not None:
+            return self._mediated_sidecar
+        client = self.lifecycle.client
+        try:
+            client.worker_id
+        except RuntimeError:
+            return None
+        self._mediated_sidecar = MediatedEgressSidecar(
+            pending_requests=self.lifecycle.pending_tool_requests,
+            audience=lambda: (client.worker_id, client.incarnation),
+            provider=self._web_search_provider,
+            api_key=self._web_search_api_key,
+            outcome_sink=client.push_mediated_outcome,
+            content_store=self._content_store,
+            logger=self.logger,
+        )
+        return self._mediated_sidecar
 
     def _ensure_tool_executor(self) -> WorkerExternalToolExecutor | None:
         """Build the external-tool executor once the worker id/incarnation are known."""
@@ -150,6 +177,17 @@ class Runner:
             logger=self.logger,
         )
         return self._tool_executor
+
+    def _route_mediated_op(self, frame_kind: str, frame: dict[str, Any]) -> None:
+        sidecar = self._ensure_mediated_sidecar()
+        if sidecar is None:
+            return
+        if frame_kind == "permit":
+            sidecar.submit_permit(MediatedOperationPermit.model_validate(frame))
+        elif frame_kind == "reap":
+            sidecar.reap(str(frame["agent_task_id"]), str(frame["call_correlation"]))
+        else:
+            self.logger.warning("Unknown mediated-op frame kind: %s", frame_kind)
 
     def _resolve_output_dir(self, task_id: str) -> Path:
         """Prepare and return the canonical output directory for a task's results."""
@@ -403,6 +441,8 @@ class Runner:
                         tool_executor = self._ensure_tool_executor()
                         if tool_executor is not None:
                             tool_executor.submit(session_id, kind, payload)
+                    for frame_kind, frame in self.lifecycle.client.iter_mediated_ops():
+                        self._route_mediated_op(frame_kind, frame)
                 except Exception as exc:
                     self.logger.warning("Interrupt monitor encountered error: %s", exc)
         except Exception:

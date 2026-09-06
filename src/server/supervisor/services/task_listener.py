@@ -5,6 +5,7 @@ from typing import Any
 
 from shared.schemas.command import (
     InterruptMessage,
+    MediatedOpMessage,
     StopMessage,
     TaskMessage,
 )
@@ -123,6 +124,14 @@ class TaskListener(RebindableReader):
                     "kind": "stop",
                     "task_id": stop_message.task_id,
                     "reason": stop_message.reason,
+                }
+            case "mediated_op":
+                op_message = MediatedOpMessage.model_validate(data)
+                worker_id = op_message.worker_id
+                payload = {
+                    "kind": "mediated_op",
+                    "frame_kind": op_message.frame_kind,
+                    "payload": op_message.payload,
                 }
             case _:
                 self.logger.warning(

@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 
 from shared.schemas.command import (
     InterruptMessage,
+    MediatedOpMessage,
     StopMessage,
     TaskMessage,
 )
@@ -460,6 +461,18 @@ class WorkerRegistry:
         return self._rds.sync.publish_control(channel, message)
 
     async def publish_stop_async(self, worker: Worker, payload: StopMessage) -> int:
+        message = payload.model_dump_json()
+        channel = node_dispatch_channel(worker.node_id)
+        return await self._rds.asyncio.publish_control(channel, message)
+
+    def publish_mediated_op(self, worker: Worker, payload: MediatedOpMessage) -> int:
+        message = payload.model_dump_json()
+        channel = node_dispatch_channel(worker.node_id)
+        return self._rds.sync.publish_control(channel, message)
+
+    async def publish_mediated_op_async(
+        self, worker: Worker, payload: MediatedOpMessage
+    ) -> int:
         message = payload.model_dump_json()
         channel = node_dispatch_channel(worker.node_id)
         return await self._rds.asyncio.publish_control(channel, message)

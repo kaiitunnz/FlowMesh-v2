@@ -78,7 +78,22 @@ class TaskMessage(BaseModel):
     payload: dict[str, Any]
 
 
-type DispatchMessage = TaskMessage | InterruptMessage | StopMessage
+class MediatedOpMessage(BaseModel):
+    """A mediated-operation control frame routed to a worker's egress sidecar.
+
+    ``frame_kind`` is ``"permit"`` (drive one operation; ``payload`` is the permit) or
+    ``"reap"`` (release custody; ``payload`` names the boundary).
+    """
+
+    kind: Literal["mediated_op"] = "mediated_op"
+    worker_id: str
+    frame_kind: str
+    payload: dict[str, Any]
+
+
+type DispatchMessage = (
+    TaskMessage | InterruptMessage | StopMessage | MediatedOpMessage
+)
 
 
 __all__ = [
@@ -88,5 +103,6 @@ __all__ = [
     "DispatchMessage",
     "TaskMessage",
     "InterruptMessage",
+    "MediatedOpMessage",
     "StopMessage",
 ]
