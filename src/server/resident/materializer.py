@@ -48,6 +48,10 @@ async def materialize_resident_replica(
         },
         "accessMode": config.access_mode,
     }
+    if family.interface == "embedding" and spec_type == "serve":
+        # A real vLLM embedding replica serves the pooling route; the GPU-free dev_model
+        # stand-in forwards by path and needs no serving-mode flag.
+        spec["model"]["vllm"] = {"task": "embed"}
     if config.serve_ttl_sec:
         spec["ttlSeconds"] = config.serve_ttl_sec
     payload = {

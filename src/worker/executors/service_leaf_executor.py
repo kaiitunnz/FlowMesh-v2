@@ -37,8 +37,10 @@ _CALL_CORRELATION = "resident-model/0"
 
 _PROMPT_FIELDS = ("prompt", "input", "content", "text")
 
-# The resident transport serves a chat/completions interface.
-_CHAT_INTERFACE = "chat"
+_EMBEDDING_INTERFACE = "embedding"
+# Inline spec.data fields an embedding leaf reads its inputs from, in order.
+_EMBEDDING_INPUT_FIELDS = ("input", "items", "inputs", "texts", "prompts")
+_EMBEDDING_SCALAR_FIELDS = ("input", "text", "content", "prompt")
 
 
 class ServiceLeafExecutor(Executor):
@@ -60,11 +62,6 @@ class ServiceLeafExecutor(Executor):
         outcomes = hydrate_delivered_outcomes(
             self._config.server_base_url, dispatch.delivered_outcomes
         )
-        if dispatch.interface != _CHAT_INTERFACE:
-            raise ExecutionError(
-                f"resident {dispatch.interface} execution is not supported; the "
-                "resident transport serves a chat/completions interface"
-            )
         settled = next(
             (o for o in outcomes if o.call_correlation == _CALL_CORRELATION), None
         )
@@ -118,9 +115,10 @@ class ServiceLeafExecutor(Executor):
 def _resident_request_payload(task: ExecutorTask, interface: str) -> str:
     """Build the resident engine request payload from the leaf's spec.
 
-    The payload is the model request the replica serves: an explicit chat ``messages``
-    array, or a bare prompt the engine wraps as one user message. The prompt is read
-    from ``spec.inference`` or ``spec.data``.
+    For a chat interface the payload is an explicit ``messages`` array or a bare prompt
+    the engine wraps as one user message. For an embedding interface it is a JSON object
+    carrying the ``input`` list of texts to embed. Inputs are read from ``spec.data`` or
+    ``spec.inference``.
     """
     spec = task.spec
     data: dict[str, Any] = (
@@ -134,6 +132,9 @@ def _resident_request_payload(task: ExecutorTask, interface: str) -> str:
         if isinstance(spec, InferenceSpecStrict) and isinstance(spec.inference, dict)
         else {}
     )
+
+    if interface == _EMBEDDING_INTERFACE:
+        return _embedding_payload(task, data, inference)
 
     for source in (inference, data):
         if isinstance(messages := source.get("messages"), list):
@@ -149,4 +150,23 @@ def _resident_request_payload(task: ExecutorTask, interface: str) -> str:
     raise ExecutionError(
         f"resident {interface} leaf {task.task_id} declares no prompt or messages "
         "in spec.data or spec.inference"
+    )
+
+
+def _embedding_payload(
+    task: ExecutorTask, data: dict[str, Any], inference: dict[str, Any]
+) -> str:
+    """Collect an embedding leaf's inputs into one ``{input: [...]}`` payload."""
+    for source in (data, inference):
+        for field in _EMBEDDING_INPUT_FIELDS:
+            value = source.get(field)
+            if isinstance(value, list) and value:
+                return json.dumps({"input": [str(item) for item in value]})
+        for field in _EMBEDDING_SCALAR_FIELDS:
+            if isinstance(value := source.get(field), str) and value:
+                return json.dumps({"input": [value]})
+
+    raise ExecutionError(
+        f"resident embedding leaf {task.task_id} declares no input in spec.data or "
+        "spec.inference"
     )

@@ -32,7 +32,10 @@ from server.resident import (
 )
 from server.resident.service import ResidentWorkerDelivery
 from server.resident.state import ReplicaIncarnation
-from server.task.v2.representations.operators import ServiceDependency
+from server.task.v2.representations.operators import (
+    ServiceDependency,
+    ServiceInterface,
+)
 from shared.harness import BoundaryEventKind
 from shared.outcome import OutcomeManifest
 from shared.resident.reports import (
@@ -130,6 +133,7 @@ def _build(
     limits: ResidentPolicyLimits | None = None,
     materialize_fn: Any = None,
     deliver: bool = True,
+    dependency: ServiceDependency | None = None,
 ) -> tuple[ResidentCapacityControl, ResidentStores, list[Any], _Delivery]:
     stores = ResidentStores()
     limits = limits or ResidentPolicyLimits()
@@ -166,7 +170,7 @@ def _build(
         admission=admission,
         lifecycle=lifecycle,
         limits=limits,
-        dependency_resolver=lambda task_id: ("wfl-1", _dependency()),
+        dependency_resolver=lambda task_id: ("wfl-1", dependency or _dependency()),
         settle_cb=settle_cb,
         redispatch_cb=redispatch_cb,
         endpoint_probe=lambda serve_task_id: ReplicaEndpoint(
@@ -225,6 +229,7 @@ def test_originate_binds_sidecar_resolves_fence_and_relays_handoff():
     assert delivery.kinds() == ["resident_sidecar_bind", "resident_handoff"]
     bind = delivery.frame("resident_sidecar_bind")
     assert bind["engine"]["base_url"] == "http://replica"
+    assert bind["engine"]["interface"] == "chat"
     handoff = delivery.frame("resident_handoff")["handoff"]
     assert handoff["origin_id"] == "rog-1"
 
@@ -233,11 +238,27 @@ def test_originate_binds_sidecar_resolves_fence_and_relays_handoff():
     assert stores.credit_ledger.held(claim.replica_id) == 1
     assert stores.directory.get(claim.replica_id).state is ReplicaState.WARM
 
+    family = stores.families.get(stores.claims.by_invocation("inv-1")[0].family)
+    assert family is not None and family.interface == "chat"
+
     session_id = svc._attempts["inv-1"].session_id
     record = delivery.sessions.records[session_id]
     assert record["origin_worker"] == "wkr-origin"
     assert record["target_worker"] == "wkr-replica"
     assert record["invocation_id"] == "inv-1"
+
+
+def test_embedding_dependency_relays_the_embedding_interface_to_the_sidecar():
+    dependency = ServiceDependency(
+        service_ref="m", interface=ServiceInterface.EMBEDDING
+    )
+    svc, stores, _settled, delivery = _build(dependency=dependency)
+    asyncio.run(svc._originate(_env()))
+
+    bind = delivery.frame("resident_sidecar_bind")
+    assert bind["engine"]["interface"] == "embedding"
+    family = stores.families.get(stores.claims.by_invocation("inv-1")[0].family)
+    assert family is not None and family.interface == "embedding"
 
 
 def test_ack_accepts_and_authorizes_then_terminal_releases_credit():

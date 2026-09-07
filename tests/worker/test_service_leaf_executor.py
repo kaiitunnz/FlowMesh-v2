@@ -39,6 +39,14 @@ def _msg(spec_data: dict, **episode: object):
     )
 
 
+def _embedding_msg(spec_data: dict, **episode: object):
+    return make_worker_task_message(
+        {"taskType": "embedding", "data": spec_data},
+        task_type=TaskType.EMBEDDING,
+        service_episode={"interface": "embedding", **episode},
+    )
+
+
 def test_service_leaf_key_is_registered() -> None:
     assert "service_leaf" in EXECUTOR_REGISTRY
     cls = EXECUTOR_REGISTRY.get("service_leaf")
@@ -112,3 +120,44 @@ def test_missing_prompt_fails_cleanly(tmp_path: Path) -> None:
     ex, _store = _executor()
     with pytest.raises(ExecutionError, match="no prompt or messages"):
         ex.run(_msg({}), tmp_path)
+
+
+def test_embedding_leaf_captures_the_input_list_and_yields_a_boundary(
+    tmp_path: Path,
+) -> None:
+    ex, store = _executor()
+    out = ex.run(_embedding_msg({"input": ["alpha", "beta"]}), tmp_path)
+
+    req = out.harness_result.request
+    assert out.harness_result.kind is HarnessResultKind.BOUNDARY
+    assert req is not None and req.interface == MODEL_INTERFACE
+    assert req.request_payload is None and req.request_digest is not None
+    stashed = store.peek("tsk-test", _CALL_CORRELATION)
+    assert stashed is not None and json.loads(stashed) == {"input": ["alpha", "beta"]}
+
+
+def test_embedding_resume_completes_with_the_settled_vectors(tmp_path: Path) -> None:
+    ex, _store = _executor()
+    vectors = json.dumps([{"index": 0, "embedding": [0.1, 0.2]}])
+    out = ex.run(
+        _embedding_msg(
+            {"input": ["alpha"]},
+            delivered_outcomes=[
+                {
+                    "call_correlation": _CALL_CORRELATION,
+                    "kind": "result",
+                    "value": vectors,
+                }
+            ],
+        ),
+        tmp_path,
+    )
+    assert out.harness_result.kind is HarnessResultKind.COMPLETION
+    assert out.value is not None
+    assert json.loads(out.value) == [{"index": 0, "embedding": [0.1, 0.2]}]
+
+
+def test_embedding_missing_input_fails_cleanly(tmp_path: Path) -> None:
+    ex, _store = _executor()
+    with pytest.raises(ExecutionError, match="no input"):
+        ex.run(_embedding_msg({}), tmp_path)

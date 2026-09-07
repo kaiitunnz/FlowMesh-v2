@@ -165,6 +165,7 @@ class ServiceFamily(BaseModel):
     family: str
     engine_batch_key: str
     model_ref: str
+    interface: str = "chat"
     isolation: str | None = None
     selection_strategy: str = "batch-aware-best-fit"
     warmth: str | None = None

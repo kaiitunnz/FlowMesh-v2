@@ -30,3 +30,25 @@ def chat_body(request_payload: str | None, model: str) -> dict[str, Any]:
                 }
     prompt = request_payload or ""
     return {"model": model, "messages": [{"role": "user", "content": prompt}]}
+
+
+def embeddings_body(request_payload: str | None, model: str) -> dict[str, Any]:
+    """Build the OpenAI embeddings request from a boundary payload.
+
+    A payload that is already an embeddings request (a JSON object carrying ``input``)
+    is forwarded faithfully with the replica's model pinned; a bare string or a payload
+    naming a single ``input``/``text``/``content`` field becomes the one input to embed.
+    """
+    parsed: Any = None
+    if request_payload:
+        try:
+            parsed = json.loads(request_payload)
+        except (json.JSONDecodeError, TypeError):
+            parsed = None
+    if isinstance(parsed, dict) and "input" in parsed:
+        return {**parsed, "model": model}
+    if isinstance(parsed, dict):
+        for key in ("text", "content"):
+            if isinstance(value := parsed.get(key), str):
+                return {"model": model, "input": [value]}
+    return {"model": model, "input": [request_payload or ""]}

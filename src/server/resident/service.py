@@ -707,6 +707,8 @@ class ResidentCapacityControl:
         engine = replica.endpoint
         if engine.api_key is None and deps.forward_api_key is not None:
             engine = engine.model_copy(update={"api_key": deps.forward_api_key})
+        family = self._stores.families.get(replica.family)
+        interface = family.interface if family is not None else engine.interface
         delivered = deps.relay(
             worker_id,
             "resident_sidecar_bind",
@@ -718,6 +720,7 @@ class ResidentCapacityControl:
                     "base_url": engine.base_url,
                     "model": engine.model,
                     "api_key": engine.api_key,
+                    "interface": interface,
                 },
             },
         )
@@ -750,6 +753,7 @@ class ResidentCapacityControl:
                 family=family,
                 engine_batch_key=dependency.engine_batch_key,
                 model_ref=model_ref,
+                interface=dependency.interface.value,
                 isolation=dependency.isolation,
                 selection_strategy=self._limits.selection_strategy,
             )

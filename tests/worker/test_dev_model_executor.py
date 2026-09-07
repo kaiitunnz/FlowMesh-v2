@@ -136,9 +136,21 @@ class TestCannedResponses:
             ).json()
         assert payload["model"] == "fallback-model"
 
+    def test_embeddings_returns_one_vector_per_input(self) -> None:
+        with _running_server() as base:
+            payload = httpx.post(
+                f"{base}/v1/embeddings",
+                json={"model": "m", "input": ["a", "b", "c"]},
+                timeout=5.0,
+            ).json()
+        assert payload["object"] == "list"
+        assert payload["model"] == "m"
+        assert [d["index"] for d in payload["data"]] == [0, 1, 2]
+        assert all(isinstance(d["embedding"], list) for d in payload["data"])
+
     def test_unknown_route_returns_404(self) -> None:
         with _running_server() as base:
-            resp = httpx.post(f"{base}/v1/embeddings", json={}, timeout=5.0)
+            resp = httpx.post(f"{base}/v1/unknown", json={}, timeout=5.0)
         assert resp.status_code == 404
 
 

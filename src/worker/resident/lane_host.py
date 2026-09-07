@@ -173,6 +173,7 @@ class ResidentLaneHost:
                 base_url=str(engine["base_url"]),
                 model=str(engine.get("model") or ""),
                 api_key=engine.get("api_key"),
+                interface=str(engine.get("interface") or "chat"),
             ),
         )
 

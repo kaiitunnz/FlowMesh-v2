@@ -3,16 +3,19 @@
 The replica sidecar reaches the serve task running on the same worker over loopback. The
 call is non-streaming — it fits a stock vLLM replica and the GPU-free ``dev_model``
 stand-in alike — but the content is emitted in bounded pieces so the windowed relay
-session flow-controls a large completion rather than framing it whole.
+session flow-controls a large completion rather than framing it whole. A chat replica
+returns the assistant message text; an embedding replica returns the ``data`` array of
+vectors serialized as JSON — both ride the content path as opaque bytes.
 """
 
+import json
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 
 import httpx
 
 from shared.resident.contracts import ReplicaEndpoint
-from shared.resident.engine_request import chat_body
+from shared.resident.engine_request import chat_body, embeddings_body
 
 
 @dataclass
@@ -38,16 +41,25 @@ class HttpEngineDelivery:
     async def __call__(
         self, endpoint: ReplicaEndpoint, request_payload: str | None
     ) -> EngineResponse:
-        body = chat_body(request_payload, endpoint.model)
+        embedding = endpoint.interface == "embedding"
+        if embedding:
+            body = embeddings_body(request_payload, endpoint.model)
+            path = "/embeddings"
+        else:
+            body = chat_body(request_payload, endpoint.model)
+            path = "/chat/completions"
         headers = {"Content-Type": "application/json"}
         if endpoint.api_key:
             headers["Authorization"] = f"Bearer {endpoint.api_key}"
-        url = f"{endpoint.base_url.rstrip('/')}/chat/completions"
+        url = f"{endpoint.base_url.rstrip('/')}{path}"
         async with httpx.AsyncClient(timeout=self._timeout) as client:
             response = await client.post(url, json=body, headers=headers)
             response.raise_for_status()
             data = response.json()
-        content = str(data["choices"][0]["message"]["content"])
+        if embedding:
+            content = json.dumps(data["data"])
+        else:
+            content = str(data["choices"][0]["message"]["content"])
         size = self._chunk_chars
 
         async def chunks() -> AsyncIterator[str]:

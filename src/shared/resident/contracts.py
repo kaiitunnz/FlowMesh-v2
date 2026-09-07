@@ -15,7 +15,8 @@ class ReplicaEndpoint(BaseModel):
     ``api_key`` never reaches a workflow; it is held out of the durable snapshot
     (``exclude=True``) so no credential is persisted in cleartext, and is re-attached
     from a live probe on rehydrate. ``base_url`` is OpenAI-compatible for the inference
-    family.
+    family. ``interface`` selects the engine route the replica serves (``chat`` or
+    ``embedding``).
     """
 
     model_config = ConfigDict(frozen=True)
@@ -24,6 +25,7 @@ class ReplicaEndpoint(BaseModel):
     model: str
     api_key: str | None = Field(default=None, exclude=True)
     protocol: str = "openai"
+    interface: str = "chat"
 
 
 class AdmissionHandoff(BaseModel):

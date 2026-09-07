@@ -1,9 +1,9 @@
 """GPU-free model-serving executor.
 
-Stands up an OpenAI-compatible HTTP endpoint (Chat Completions + Responses)
-without a GPU, emits a TASK_UPDATE with the endpoint details, and blocks until
-the TTL expires or a stop command arrives. Requests either forward to a live
-upstream model endpoint (``dev_model_forward_url``) or return deterministic
+Stands up an OpenAI-compatible HTTP endpoint (Chat Completions, Responses, and
+Embeddings) without a GPU, emits a TASK_UPDATE with the endpoint details, and
+blocks until the TTL expires or a stop command arrives. Requests either forward to a
+live upstream model endpoint (``dev_model_forward_url``) or return deterministic
 canned responses when no upstream is configured.
 """
 
@@ -34,8 +34,9 @@ _MAX_TTL_SEC = 86400.0
 _POLL_INTERVAL_SEC = 5.0
 _FORWARD_TIMEOUT_SEC = 120.0
 _MAX_BODY_BYTES = 10 * 1024 * 1024
-_ROUTES = frozenset({"/v1/chat/completions", "/v1/responses"})
+_ROUTES = frozenset({"/v1/chat/completions", "/v1/responses", "/v1/embeddings"})
 _CANNED_TEXT = "This is a deterministic dev_model response."
+_CANNED_EMBEDDING = [0.0, 0.0, 0.0, 0.0]
 
 
 def _request_model(body: bytes, fallback: str) -> str:
@@ -45,6 +46,24 @@ def _request_model(body: bytes, fallback: str) -> str:
         return fallback
     model = payload.get("model") if isinstance(payload, dict) else None
     return model if isinstance(model, str) and model else fallback
+
+
+def _canned_embeddings(body: bytes, model: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(body or b"{}")
+    except ValueError:
+        payload = {}
+    raw = payload.get("input") if isinstance(payload, dict) else None
+    inputs = raw if isinstance(raw, list) else [raw]
+    return {
+        "object": "list",
+        "model": model,
+        "data": [
+            {"object": "embedding", "index": i, "embedding": list(_CANNED_EMBEDDING)}
+            for i, _ in enumerate(inputs)
+        ],
+        "usage": {"prompt_tokens": 0, "total_tokens": 0},
+    }
 
 
 def _canned_response(path: str, model: str) -> dict[str, Any]:
@@ -141,7 +160,10 @@ class _DevModelHandler(BaseHTTPRequestHandler):
             )
         else:
             model = _request_model(body, server.model_name)
-            self._write_json(200, _canned_response(path, model))
+            if path == "/v1/embeddings":
+                self._write_json(200, _canned_embeddings(body, model))
+            else:
+                self._write_json(200, _canned_response(path, model))
 
     def _forward(
         self,

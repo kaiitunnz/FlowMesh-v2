@@ -200,14 +200,17 @@ and both raise the same control-admitted `ServiceClaim`. A resident inference le
 no worker-local GPU requirement, since its model runs on the replica.
 
 The leaf runs through the `ServiceLeafExecutor` as a run-to-yield episode with no harness:
-its first step builds the chat request from `spec.inference`/`spec.data` (an explicit
-`messages` array or a prompt), keeps it in worker-private resident custody, and yields one
-resident model boundary carrying only its digest. The fabric admits the claim and drives
-the worker-originated resident protocol to the replica exactly as for an Agent resident
-call; the settled completion is injected on a resume and becomes the leaf's result. The
-resident-request capture and reference-backed outcome hydration are the same caller-neutral
-substrate the agent-episode executor uses. The leaf invocation never routes through the
-Agent model gateway.
+its first step builds the model request from `spec.inference`/`spec.data` — a chat leaf
+builds an explicit `messages` array or a prompt, an embedding leaf the `input` list of
+texts — keeps it in worker-private resident custody, and yields one resident model boundary
+carrying only its digest. The fabric admits the claim and drives the worker-originated
+resident protocol to the replica exactly as for an Agent resident call; the replica reaches
+its co-located engine on the route its family's interface selects (`/chat/completions` or
+`/embeddings`), and the settled outcome — the completion text or the embedding vectors as
+JSON — is injected on a resume and becomes the leaf's result. The resident-request capture
+and reference-backed outcome hydration are the same caller-neutral substrate the
+agent-episode executor uses. The leaf invocation never routes through the Agent model
+gateway.
 
 A service dependency's family folds the service interface, base model, and isolation
 domain, and an adapter rides the admission profile's adapter slot. A shared base model and
