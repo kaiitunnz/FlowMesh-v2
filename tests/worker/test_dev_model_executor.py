@@ -36,9 +36,15 @@ def _running_server(
     forward_url: str | None = None,
     model_name: str = "test-model",
     client: httpx.Client | None = None,
+    max_loras: int | None = None,
 ) -> Iterator[str]:
     server = _DevModelHTTPServer(
-        ("127.0.0.1", 0), _DevModelHandler, forward_url, model_name, client
+        ("127.0.0.1", 0),
+        _DevModelHandler,
+        forward_url,
+        model_name,
+        client,
+        max_loras=max_loras,
     )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -114,7 +120,7 @@ class TestCannedResponses:
             ).json()
         assert first == second
         assert first["object"] == "chat.completion"
-        assert first["choices"][0]["message"]["content"] == _CANNED_TEXT
+        assert _CANNED_TEXT in first["choices"][0]["message"]["content"]
         assert first["model"] == "m"
 
     def test_responses_is_deterministic(self) -> None:
@@ -126,8 +132,8 @@ class TestCannedResponses:
             ).json()
         assert payload["object"] == "response"
         assert payload["status"] == "completed"
-        assert payload["output_text"] == _CANNED_TEXT
-        assert payload["output"][0]["content"][0]["text"] == _CANNED_TEXT
+        assert _CANNED_TEXT in payload["output_text"]
+        assert _CANNED_TEXT in payload["output"][0]["content"][0]["text"]
 
     def test_model_falls_back_when_absent(self) -> None:
         with _running_server(model_name="fallback-model") as base:
@@ -136,10 +142,105 @@ class TestCannedResponses:
             ).json()
         assert payload["model"] == "fallback-model"
 
+    def test_embeddings_returns_one_vector_per_input(self) -> None:
+        with _running_server() as base:
+            payload = httpx.post(
+                f"{base}/v1/embeddings",
+                json={"model": "m", "input": ["a", "b", "c"]},
+                timeout=5.0,
+            ).json()
+        assert payload["object"] == "list"
+        assert payload["model"] == "m"
+        assert [d["index"] for d in payload["data"]] == [0, 1, 2]
+        assert all(isinstance(d["embedding"], list) for d in payload["data"])
+
     def test_unknown_route_returns_404(self) -> None:
         with _running_server() as base:
-            resp = httpx.post(f"{base}/v1/embeddings", json={}, timeout=5.0)
+            resp = httpx.post(f"{base}/v1/unknown", json={}, timeout=5.0)
         assert resp.status_code == 404
+
+    def test_load_lora_adapter_records_and_succeeds(self) -> None:
+        with _running_server() as base:
+            resp = httpx.post(
+                f"{base}/v1/load_lora_adapter",
+                json={"lora_name": "my-lora", "lora_path": "hf/my-lora"},
+                timeout=5.0,
+            )
+        assert resp.status_code == 200
+        assert resp.json()["lora_name"] == "my-lora"
+
+    def test_loaded_adapter_is_selectable_after_load(self) -> None:
+        with _running_server() as base:
+            httpx.post(
+                f"{base}/v1/load_lora_adapter",
+                json={"lora_name": "my-lora", "lora_path": "hf/my-lora"},
+                timeout=5.0,
+            )
+            resp = httpx.post(
+                f"{base}/v1/chat/completions",
+                json={"model": "my-lora", "messages": []},
+                timeout=5.0,
+            )
+        assert resp.status_code == 200
+        assert resp.json()["model"] == "my-lora"
+
+    def test_selecting_an_unloaded_adapter_after_a_load_is_404(self) -> None:
+        with _running_server() as base:
+            httpx.post(
+                f"{base}/v1/load_lora_adapter",
+                json={"lora_name": "my-lora", "lora_path": "hf/my-lora"},
+                timeout=5.0,
+            )
+            resp = httpx.post(
+                f"{base}/v1/chat/completions",
+                json={"model": "other-lora", "messages": []},
+                timeout=5.0,
+            )
+        assert resp.status_code == 404
+
+    def test_a_full_adapter_registry_refuses_a_new_distinct_load(self) -> None:
+        with _running_server(max_loras=1) as base:
+            first = httpx.post(
+                f"{base}/v1/load_lora_adapter",
+                json={"lora_name": "lora-a", "lora_path": "hf/lora-a"},
+                timeout=5.0,
+            )
+            second = httpx.post(
+                f"{base}/v1/load_lora_adapter",
+                json={"lora_name": "lora-b", "lora_path": "hf/lora-b"},
+                timeout=5.0,
+            )
+        assert first.status_code == 200
+        assert second.status_code == 400  # no free slot until one is unloaded
+
+    def test_unload_frees_a_slot_for_a_later_distinct_load(self) -> None:
+        with _running_server(max_loras=1) as base:
+            httpx.post(
+                f"{base}/v1/load_lora_adapter",
+                json={"lora_name": "lora-a", "lora_path": "hf/lora-a"},
+                timeout=5.0,
+            )
+            unloaded = httpx.post(
+                f"{base}/v1/unload_lora_adapter",
+                json={"lora_name": "lora-a"},
+                timeout=5.0,
+            )
+            reused = httpx.post(
+                f"{base}/v1/load_lora_adapter",
+                json={"lora_name": "lora-b", "lora_path": "hf/lora-b"},
+                timeout=5.0,
+            )
+        assert unloaded.status_code == 200
+        assert reused.status_code == 200  # the freed slot admits the new adapter
+
+    def test_unload_of_an_absent_adapter_is_idempotent(self) -> None:
+        with _running_server(max_loras=1) as base:
+            resp = httpx.post(
+                f"{base}/v1/unload_lora_adapter",
+                json={"lora_name": "never-loaded"},
+                timeout=5.0,
+            )
+        assert resp.status_code == 200
 
 
 class _UpstreamHandler(BaseHTTPRequestHandler):
@@ -328,7 +429,7 @@ class TestRunLifecycle:
 
         payload = reached["payload"]
         assert isinstance(payload, dict)
-        assert payload["choices"][0]["message"]["content"] == _CANNED_TEXT
+        assert _CANNED_TEXT in payload["choices"][0]["message"]["content"]
 
 
 class TestCancelStop:

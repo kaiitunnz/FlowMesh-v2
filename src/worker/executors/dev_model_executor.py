@@ -1,12 +1,13 @@
 """GPU-free model-serving executor.
 
-Stands up an OpenAI-compatible HTTP endpoint (Chat Completions + Responses)
-without a GPU, emits a TASK_UPDATE with the endpoint details, and blocks until
-the TTL expires or a stop command arrives. Requests either forward to a live
-upstream model endpoint (``dev_model_forward_url``) or return deterministic
+Stands up an OpenAI-compatible HTTP endpoint (Chat Completions, Responses, and
+Embeddings) without a GPU, emits a TASK_UPDATE with the endpoint details, and
+blocks until the TTL expires or a stop command arrives. Requests either forward to a
+live upstream model endpoint (``dev_model_forward_url``) or return deterministic
 canned responses when no upstream is configured.
 """
 
+import contextlib
 import json
 import logging
 import socket
@@ -34,8 +35,11 @@ _MAX_TTL_SEC = 86400.0
 _POLL_INTERVAL_SEC = 5.0
 _FORWARD_TIMEOUT_SEC = 120.0
 _MAX_BODY_BYTES = 10 * 1024 * 1024
-_ROUTES = frozenset({"/v1/chat/completions", "/v1/responses"})
+_ROUTES = frozenset({"/v1/chat/completions", "/v1/responses", "/v1/embeddings"})
+_LOAD_ADAPTER_ROUTE = "/v1/load_lora_adapter"
+_UNLOAD_ADAPTER_ROUTE = "/v1/unload_lora_adapter"
 _CANNED_TEXT = "This is a deterministic dev_model response."
+_CANNED_EMBEDDING = [0.0, 0.0, 0.0, 0.0]
 
 
 def _request_model(body: bytes, fallback: str) -> str:
@@ -47,7 +51,32 @@ def _request_model(body: bytes, fallback: str) -> str:
     return model if isinstance(model, str) and model else fallback
 
 
+def _canned_embeddings(body: bytes, model: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(body or b"{}")
+    except ValueError:
+        payload = {}
+    raw = payload.get("input") if isinstance(payload, dict) else None
+    inputs = raw if isinstance(raw, list) else [raw]
+    return {
+        "object": "list",
+        "model": model,
+        "data": [
+            {"object": "embedding", "index": i, "embedding": list(_CANNED_EMBEDDING)}
+            for i, _ in enumerate(inputs)
+        ],
+        "usage": {"prompt_tokens": 0, "total_tokens": 0},
+    }
+
+
+def _canned_text(model: str) -> str:
+    # The served model rides the response text so a caller can tell an adapter's output
+    # from the base model's on the GPU-free stand-in.
+    return f"{_CANNED_TEXT} [model={model}]"
+
+
 def _canned_response(path: str, model: str) -> dict[str, Any]:
+    text = _canned_text(model)
     if path == "/v1/responses":
         return {
             "id": "dev-model-resp",
@@ -62,11 +91,11 @@ def _canned_response(path: str, model: str) -> dict[str, Any]:
                     "role": "assistant",
                     "status": "completed",
                     "content": [
-                        {"type": "output_text", "text": _CANNED_TEXT, "annotations": []}
+                        {"type": "output_text", "text": text, "annotations": []}
                     ],
                 }
             ],
-            "output_text": _CANNED_TEXT,
+            "output_text": text,
             "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
         }
     return {
@@ -77,7 +106,7 @@ def _canned_response(path: str, model: str) -> dict[str, Any]:
         "choices": [
             {
                 "index": 0,
-                "message": {"role": "assistant", "content": _CANNED_TEXT},
+                "message": {"role": "assistant", "content": text},
                 "finish_reason": "stop",
             }
         ],
@@ -95,11 +124,16 @@ class _DevModelHTTPServer(ThreadingHTTPServer):
         forward_url: str | None,
         model_name: str,
         client: httpx.Client | None,
+        response_delay_sec: float = 0.0,
+        max_loras: int | None = None,
     ) -> None:
         super().__init__(address, handler)
         self.forward_url = forward_url
         self.model_name = model_name
         self.client = client
+        self.response_delay_sec = max(0.0, response_delay_sec)
+        self.max_loras = max_loras
+        self.loaded_adapters: set[str] = set()
 
 
 class _DevModelHandler(BaseHTTPRequestHandler):
@@ -116,8 +150,75 @@ class _DevModelHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _adapter_name(self) -> tuple[str, bytes] | None:
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            self._write_json(400, {"error": "invalid Content-Length"})
+            return None
+        body = self.rfile.read(length) if 0 < length <= _MAX_BODY_BYTES else b""
+        try:
+            payload = json.loads(body or b"{}")
+        except ValueError:
+            payload = {}
+        name = payload.get("lora_name") if isinstance(payload, dict) else None
+        if not isinstance(name, str) or not name:
+            self._write_json(400, {"error": "lora_name is required"})
+            return None
+        return name, body
+
+    def _forward_adapter(self, route: str, body: bytes) -> None:
+        server = self.server
+        if server.forward_url is not None and server.client is not None:
+            # Mirror the load/unload to the upstream so a real serve tracks the same
+            # registry; a non-fatal upstream response (already loaded, or gone) is
+            # tolerated.
+            with contextlib.suppress(httpx.RequestError):
+                server.client.post(
+                    server.forward_url.rstrip("/") + route,
+                    content=body,
+                    headers={"Content-Type": "application/json"},
+                    timeout=_FORWARD_TIMEOUT_SEC,
+                )
+
+    def _load_adapter(self) -> None:
+        parsed = self._adapter_name()
+        if parsed is None:
+            return
+        name, body = parsed
+        server = self.server
+        if (
+            server.max_loras is not None
+            and name not in server.loaded_adapters
+            and len(server.loaded_adapters) >= server.max_loras
+        ):
+            # A finite adapter registry, like a real engine's slot budget: a new
+            # distinct adapter cannot load until an occupied slot is unloaded. This is
+            # what the last-holder unload frees, so a lifetime-distinct sequence serves.
+            self._write_json(400, {"error": f"no free LoRA slot for {name!r}"})
+            return
+        server.loaded_adapters.add(name)
+        self._forward_adapter(_LOAD_ADAPTER_ROUTE, body)
+        self._write_json(200, {"status": "success", "lora_name": name})
+
+    def _unload_adapter(self) -> None:
+        parsed = self._adapter_name()
+        if parsed is None:
+            return
+        name, body = parsed
+        # Idempotent: an adapter already gone is not an error; the slot frees anyway.
+        self.server.loaded_adapters.discard(name)
+        self._forward_adapter(_UNLOAD_ADAPTER_ROUTE, body)
+        self._write_json(200, {"status": "success", "lora_name": name})
+
     def do_POST(self) -> None:
         path = self.path.rstrip("/") or "/"
+        if path == _LOAD_ADAPTER_ROUTE:
+            self._load_adapter()
+            return
+        if path == _UNLOAD_ADAPTER_ROUTE:
+            self._unload_adapter()
+            return
         if path not in _ROUTES:
             self._write_json(404, {"error": f"unknown route {self.path}"})
             return
@@ -131,6 +232,22 @@ class _DevModelHandler(BaseHTTPRequestHandler):
             return
         body = self.rfile.read(length) if length else b""
         server = self.server
+        if server.response_delay_sec > 0:
+            # A test seam (DEV_MODEL_RESPONSE_DELAY_SEC): hold each response so an
+            # in-flight invocation keeps its admission slot occupied, making a
+            # slot-exhaustion race deterministic without a body marker.
+            time.sleep(server.response_delay_sec)
+        requested = _request_model(body, server.model_name)
+        if (
+            server.loaded_adapters
+            and requested != server.model_name
+            and requested not in server.loaded_adapters
+        ):
+            # Load-before-select: once the replica holds adapters, a request selecting a
+            # non-base model must name a loaded adapter, so it never silently serves the
+            # base in place of an unloaded adapter.
+            self._write_json(404, {"error": f"adapter {requested!r} is not loaded"})
+            return
         if server.forward_url is not None and server.client is not None:
             self._forward(
                 server.client,
@@ -141,7 +258,10 @@ class _DevModelHandler(BaseHTTPRequestHandler):
             )
         else:
             model = _request_model(body, server.model_name)
-            self._write_json(200, _canned_response(path, model))
+            if path == "/v1/embeddings":
+                self._write_json(200, _canned_embeddings(body, model))
+            else:
+                self._write_json(200, _canned_response(path, model))
 
     def _forward(
         self,
@@ -197,6 +317,9 @@ class DevModelExecutor(Executor):
             parse_float_env("SERVE_MAX_TTL_SEC", _MAX_TTL_SEC),
         )
         access_mode = spec.accessMode or "forward"
+        vllm = (spec.model.vllm if spec.model is not None else None) or {}
+        raw_max_loras = vllm.get("max_loras")
+        max_loras = raw_max_loras if isinstance(raw_max_loras, int) else None
         bind_host = (
             "0.0.0.0" if access_mode == "direct" else "127.0.0.1"
         )  # nosec B104 - direct mode is an explicit opt-in to a client-reachable endpoint
@@ -212,7 +335,13 @@ class DevModelExecutor(Executor):
         client = httpx.Client() if forward_url is not None else None
         try:
             server = _DevModelHTTPServer(
-                (bind_host, port), _DevModelHandler, forward_url, model_id, client
+                (bind_host, port),
+                _DevModelHandler,
+                forward_url,
+                model_id,
+                client,
+                self._config.dev_model_response_delay_sec,
+                max_loras,
             )
         except BaseException:
             if client is not None:

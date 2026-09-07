@@ -92,7 +92,7 @@ def _control(stores: ResidentStores) -> ResidentCapacityControl:
         admission=AdmissionController(stores),
         lifecycle=LifecycleScaleManager(stores, limits=limits, admission_slots=2),
         limits=limits,
-        binding_resolver=lambda task_id: None,
+        dependency_resolver=lambda task_id: None,
         settle_cb=lambda *a, **k: True,
         redispatch_cb=lambda *a, **k: False,
         endpoint_probe=lambda serve_task_id: None,

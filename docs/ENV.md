@@ -62,6 +62,7 @@ listed here is in `.env.example`.
 | `RESIDENT_INFERENCE_SUBSTRATE` | `serve` | Resident replica substrate (`serve` or `dev_model`) |
 | `RESIDENT_SERVE_ACCESS_MODE` | `forward` | Materialized replica endpoint access mode |
 | `RESIDENT_ADMISSION_SLOTS` | `8` | Conservative safe admission slots per replica |
+| `RESIDENT_ADAPTER_SLOTS` | `4` | Distinct adapters a replica may hold concurrently |
 | `RESIDENT_MAX_REPLICAS_PER_FAMILY` | `1` | Replica quota per service family |
 | `RESIDENT_MAX_COLD_STARTS` | `1` | Concurrent cold starts |
 | `RESIDENT_COLD_START_DEADLINE_SEC` | `300` | Cold-start / admission wait budget (seconds) |
@@ -134,6 +135,7 @@ Spark), set `DOCKER_GPU_RUNTIME=` in the stack env.
 | `SERVE_MAX_TTL_SEC` | `86400` | Upper bound on vLLM serve session TTL, regardless of `spec.ttlSeconds` |
 | `WORKER_ENABLE_DEV_MODEL` | `false` | Advertise the GPU-free `dev_model` executor |
 | `DEV_MODEL_FORWARD_URL` | – | Upstream URL `dev_model` forwards to; canned if unset |
+| `DEV_MODEL_RESPONSE_DELAY_SEC` | `0` | Per-response delay the `dev_model` stand-in applies |
 
 ## Supervisor
 

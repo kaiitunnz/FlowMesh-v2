@@ -47,6 +47,7 @@ DEFAULT_WORKER_CONFIG: Final[WorkerConfig] = WorkerConfig(
     enable_mp_executors=False,
     enable_dev_model=False,
     dev_model_forward_url=None,
+    dev_model_response_delay_sec=0.0,
     web_search_provider="duckduckgo",
     web_search_api_key=None,
     model_api_key=None,

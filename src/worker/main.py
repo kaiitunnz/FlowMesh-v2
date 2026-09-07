@@ -121,6 +121,7 @@ def initialize_executors(
         "echo",
         "rag",
         "agent_episode",
+        "service_leaf",
         "dev_model",
         "sft",
         "lora_sft",

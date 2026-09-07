@@ -1,5 +1,6 @@
 from .common import (
     ConditionSpec,
+    ServiceBindingSpec,
     TaskSpecBase,
     TaskSpecStrictBase,
     TaskSpecTemplateBase,
@@ -55,6 +56,7 @@ __all__ = [
     "AgentModelBindingSpec",
     "ModelBindingMode",
     "ConditionSpec",
+    "ServiceBindingSpec",
     "TaskSpecBase",
     "TaskSpecStrictBase",
     "TaskSpecTemplateBase",

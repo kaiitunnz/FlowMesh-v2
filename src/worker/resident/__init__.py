@@ -6,6 +6,7 @@ claim gate. Both own the windowed relay session end to end; the servers relay it
 opaquely and never read its cursor or window.
 """
 
+from .capture import capture_resident_request
 from .engine import EngineOpen, EngineResponse, HttpEngineDelivery
 from .lane_host import ResidentLaneHost
 from .origin_driver import ResidentOriginDriver, ResidentOriginRequest
@@ -18,6 +19,7 @@ __all__ = [
     "EngineOpen",
     "EngineResponse",
     "HttpEngineDelivery",
+    "capture_resident_request",
     "ResidentFrameSink",
     "ResidentLaneHost",
     "ResidentOriginDriver",

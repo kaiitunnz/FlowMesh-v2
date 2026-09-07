@@ -188,3 +188,49 @@ recovers the same identities. The facade reports the group to control, which rec
 the episode's next completion routes the members, and returns Codex a clean summary in
 place of the raw calls. A search member routes to the same worker egress by its digest; a
 spawn member admits a child region.
+
+## Resident service-backed leaves
+
+An inference or embedding leaf declares a resident service binding with `spec.service`
+(`{mode: resident}`, optionally `service_model_ref` and `isolation`) to consume a
+FlowMesh-served model from resident capacity. The
+binding normalizes to the same service dependency an Agent's resident model binding uses,
+so both pin one plan-derived service-family requirement and a required residency intent,
+and both raise the same control-admitted `ServiceClaim`. A resident inference leaf carries
+no worker-local GPU requirement, since its model runs on the replica.
+
+The leaf runs through the `ServiceLeafExecutor` as a run-to-yield episode with no harness:
+its first step builds the model request from `spec.inference`/`spec.data` — a chat leaf
+builds an explicit `messages` array or a prompt, an embedding leaf the `input` list of
+texts — keeps it in worker-private resident custody, and yields one resident model boundary
+carrying only its digest. The fabric admits the claim and drives the worker-originated
+resident protocol to the replica exactly as for an Agent resident call; the replica reaches
+its co-located engine on the route its family's interface selects (`/chat/completions` or
+`/embeddings`), and the settled outcome — the completion text or the embedding vectors as
+JSON — is injected on a resume and becomes the leaf's result. The resident-request capture
+and reference-backed outcome hydration are the same caller-neutral substrate the
+agent-episode executor uses.
+
+A service dependency's family folds the service interface, base model, and isolation
+domain. A shared base model and interface reuse a warm replica; a differing interface, base
+model, or isolation domain resolves to a distinct family and cannot share a batch or route
+on a matching model name alone. An adapter does not fork a family: it co-batches on the
+base replica through its own slot — the resident consumer loads its adapter into a replica
+slot and selects it as the request model. Adapter serving is supported only on the chat
+interface; a resident embedding leaf that declares an adapter is rejected at compile. An
+adapter-bound leaf declares a single adapter with a loadable `path`, `url`, or `task_id`.
+
+`RESIDENT_ADAPTER_SLOTS` bounds the distinct adapters a replica holds concurrently. A claim
+for a base model or an already-resident adapter admits without consuming a new slot, and a
+same-adapter claim admits at exhaustion by sharing its slot; a new distinct adapter that
+finds no free slot and no room to materialize another replica is denied promptly rather
+than waiting out the cold-start deadline. When a claim releases at its fenced terminal, the
+server reclaims the accounting slot and, once no remaining credit-bearing claim on the
+replica references the adapter, unloads it from the engine's registry, so the engine frees a
+slot symmetrically with the accounting and a replica serves an unbounded number of
+lifetime-distinct adapters. The unload fires only on the last holder's release, never while
+a concurrent same-adapter claim still holds the slot. A rare failed unload is logged and
+leaves its slot occupied until the replica is re-materialized — on a preempt, or an idle
+teardown only when a retain window or serve TTL is configured (not the default) — no worse
+than serving without the reclaim. One tradeoff is known: every chat resident replica enables
+runtime LoRA, so a base model incompatible with `--enable-lora` would fail to serve.

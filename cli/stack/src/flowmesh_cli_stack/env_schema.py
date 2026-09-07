@@ -441,6 +441,13 @@ STACK_ENV_SCHEMA = EnvSchema(
                     min_value=1,
                 ),
                 EnvVar(
+                    "RESIDENT_ADAPTER_SLOTS",
+                    "4",
+                    description="Distinct adapters a replica may hold concurrently.",
+                    var_type=EnvVarType.INT,
+                    min_value=1,
+                ),
+                EnvVar(
                     "RESIDENT_MAX_REPLICAS_PER_FAMILY",
                     "1",
                     description="Replica quota per service family.",
@@ -970,6 +977,13 @@ STACK_ENV_SCHEMA = EnvSchema(
                     var_type=EnvVarType.URL,
                     url_schemes={"http", "https"},
                     description="Upstream URL dev_model forwards to; canned if unset.",
+                ),
+                EnvVar(
+                    "DEV_MODEL_RESPONSE_DELAY_SEC",
+                    "0",
+                    var_type=EnvVarType.FLOAT,
+                    min_value=0,
+                    description="Per-response delay the dev_model stand-in applies.",
                 ),
             ],
         ),

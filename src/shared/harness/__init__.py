@@ -15,6 +15,7 @@ from .adapter import (
     InputBindingMember,
     MediatedFacade,
     OutcomeKind,
+    ServiceLeafEpisodeDispatch,
 )
 from .boundary import BoundaryEventKind, BoundaryRequest, DenialKind
 from .input_render import render_input_envelope
@@ -39,5 +40,6 @@ __all__ = [
     "InputBindingMember",
     "MediatedFacade",
     "OutcomeKind",
+    "ServiceLeafEpisodeDispatch",
     "render_input_envelope",
 ]

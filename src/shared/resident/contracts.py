@@ -15,7 +15,8 @@ class ReplicaEndpoint(BaseModel):
     ``api_key`` never reaches a workflow; it is held out of the durable snapshot
     (``exclude=True``) so no credential is persisted in cleartext, and is re-attached
     from a live probe on rehydrate. ``base_url`` is OpenAI-compatible for the inference
-    family.
+    family. ``interface`` selects the engine route the replica serves (``chat`` or
+    ``embedding``).
     """
 
     model_config = ConfigDict(frozen=True)
@@ -24,6 +25,7 @@ class ReplicaEndpoint(BaseModel):
     model: str
     api_key: str | None = Field(default=None, exclude=True)
     protocol: str = "openai"
+    interface: str = "chat"
 
 
 class AdmissionHandoff(BaseModel):
@@ -35,7 +37,9 @@ class AdmissionHandoff(BaseModel):
     selected replica incarnation and listener generation, and an expiry. The origin
     worker carries the resolved route alongside this handoff; the replica claim gate
     validates these bindings and trusts that only the authorized origin reaches its
-    route. It never carries the raw engine endpoint or credential.
+    route. It never carries the raw engine endpoint or credential. For an adapter-bound
+    invocation it also names the adapter to load into a replica slot and select on the
+    request; the adapter rides the per-claim handoff, not the base-keyed replica.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -51,6 +55,8 @@ class AdmissionHandoff(BaseModel):
     incarnation: int
     listener_generation: int = 0
     expires_at: str | None = None
+    adapter_name: str | None = None
+    adapter_source: str | None = None
 
 
 class RouteAuthorization(BaseModel):

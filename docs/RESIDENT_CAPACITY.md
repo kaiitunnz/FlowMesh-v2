@@ -1,10 +1,13 @@
 # Resident-capacity control
 
 Resident-capacity control serves a workflow's `resident` model bindings from reusable
-physical capacity. An agent whose managed model resolves to a resident binding does not call
-an external endpoint: the invocation is admitted to a compatible model-serving replica the
-fabric materializes, sizes, and reclaims. Inference (vLLM) is the first resident family; the
-GPU-free `dev_model` executor is a serving stand-in for the same admission path.
+physical capacity. A consumer whose model resolves to a resident binding does not call an
+external endpoint: the invocation is admitted to a compatible model-serving replica the
+fabric materializes, sizes, and reclaims. Both an agent's managed model binding and an
+inference/embedding leaf's `spec.service` binding normalize to the same service dependency
+and raise the same claim — the leaf consumes resident capacity directly, not through the
+agent model gateway. Inference (vLLM) is the first resident family; the GPU-free `dev_model`
+executor is a serving stand-in for the same admission path.
 
 The subsystem is two actors over durable control-state (`CS`) stores. Actors do; stores
 hold. It adds no worker-local service plane: a worker generically hosts a leased replica and
@@ -89,9 +92,9 @@ an expiry. It carries no route, raw engine endpoint, or credential and is neithe
 control object nor a `RouteAuthorization`.
 
 Resident capacity requires [`NETWORK_PLANE_ENABLED`](NETWORK_PLANE.md); the invocation runs
-in the workers, and control never constructs, parses, or carries engine traffic. The agent's
-own worker captures the resident model boundary, holds the raw request worker-private, and
-proposes only its digest. Control admits the claim, binds the replica's **resident-facing
+in the workers, and control never constructs, parses, or carries engine traffic. The
+consuming episode's own worker — an agent or a service-backed leaf — captures the resident
+model boundary, holds the raw request worker-private, and proposes only its digest. Control admits the claim, binds the replica's **resident-facing
 sidecar** on its serving worker with the replica incarnation fence and the co-located engine
 endpoint, resolves the trusted origin over the network plane, writes the relay-session
 routing record, and relays the claim-bound handoff to the origin worker — a control message

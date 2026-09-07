@@ -37,8 +37,7 @@ from ..network.state import (
     RouteOrigin,
 )
 from ..orchestration.tool_dispatch import ToolInvocationEnvelope
-from ..task.v2.compiler.agent_binding import service_family_for_ref
-from ..task.v2.representations.operators import AgentModelGatewayBinding
+from ..task.v2.representations.operators import ServiceDependency
 from .admission import AdmissionController
 from .lifecycle import LifecycleScaleManager
 from .policy import ResidentPolicyLimits
@@ -56,8 +55,8 @@ from .state import (
 )
 from .stores import ResidentStores
 
-# Resolves a task's pinned model binding: (workflow_id, binding) or None.
-BindingResolver = Callable[[str], tuple[str, AgentModelGatewayBinding] | None]
+# Resolves a task's normalized resident dependency: (workflow_id, dependency) or None.
+DependencyResolver = Callable[[str], tuple[str, ServiceDependency] | None]
 # Settles a mediated boundary back at its originating call, or fails it with an error.
 SettleCallback = Callable[..., bool]
 # Re-drives a still-pending mediated boundary off-lane without settling it.
@@ -140,6 +139,7 @@ class _Attempt:
     origin_id: str
     deadline_at: str | None
     replica_id: str
+    adapter_ref: str | None
 
 
 class ResidentCapacityControl:
@@ -152,7 +152,7 @@ class ResidentCapacityControl:
         admission: AdmissionController,
         lifecycle: LifecycleScaleManager,
         limits: ResidentPolicyLimits,
-        binding_resolver: BindingResolver,
+        dependency_resolver: DependencyResolver,
         settle_cb: SettleCallback,
         redispatch_cb: RedispatchCallback,
         endpoint_probe: EndpointProbe,
@@ -168,7 +168,7 @@ class ResidentCapacityControl:
         self._admission = admission
         self._lifecycle = lifecycle
         self._limits = limits
-        self._resolve_binding = binding_resolver
+        self._resolve_dependency = dependency_resolver
         self._settle = settle_cb
         self._redispatch = redispatch_cb
         self._probe_endpoint = endpoint_probe
@@ -286,8 +286,32 @@ class ResidentCapacityControl:
             "resident_sidecar_reap",
             {"invocation_id": attempt.invocation_id},
         )
+        self._reclaim_adapter_slot(attempt)
         if self._loop is not None:
             self._loop.create_task(self._delivery.sessions.delete(attempt.session_id))
+
+    def _reclaim_adapter_slot(self, attempt: _Attempt) -> None:
+        """Unload the invocation's adapter iff its last credit-bearing claim released.
+
+        The credit is released before the reap, so the held-adapter set no longer
+        counts this invocation: if no remaining claim on the replica references the
+        adapter, the engine slot may be freed. A concurrent same-adapter claim still
+        holds the slot, so the adapter is never unloaded out from under a peer.
+        """
+        if self._delivery is None or attempt.adapter_ref is None:
+            return
+        if self._lifecycle.replica_holds_adapter(
+            attempt.replica_id, attempt.adapter_ref
+        ):
+            return
+        self._delivery.relay(
+            attempt.serve_worker,
+            "resident_adapter_unload",
+            {
+                "replica_id": attempt.replica_id,
+                "adapter_name": attempt.adapter_ref,
+            },
+        )
 
     def list_service_families(self) -> list[ServiceFamily]:
         """The registered service families, for operator read access."""
@@ -372,8 +396,8 @@ class ResidentCapacityControl:
                 error="resident-capacity control requires the network plane",
             )
             return
-        resolved = self._resolve_binding(env.task_id)
-        if resolved is None or resolved[1].service_model_ref is None:
+        resolved = self._resolve_dependency(env.task_id)
+        if resolved is None or not resolved[1].service_ref:
             self._settle(
                 env.task_id,
                 env.call_correlation,
@@ -381,12 +405,15 @@ class ResidentCapacityControl:
                 error="resident model binding is unresolved",
             )
             return
-        workflow_id, binding = resolved
-        model_ref = binding.service_model_ref
-        assert model_ref is not None
-        family = service_family_for_ref(model_ref)
+        workflow_id, dependency = resolved
+        model_ref = dependency.service_ref
+        family = dependency.service_family
 
-        profile = AdmissionProfile(engine_batch_key=family)
+        profile = AdmissionProfile(
+            engine_batch_key=dependency.engine_batch_key,
+            adapter_ref=dependency.adapter,
+            adapter_source=dependency.adapter_source,
+        )
         existing = self._admission.active_claim(env.invocation_id)
         if existing is not None and existing.holds_credit:
             # Resume a re-driven boundary on the in-flight claim: reissue to the same
@@ -407,7 +434,7 @@ class ResidentCapacityControl:
         else:
             if existing is not None:
                 claim = existing
-            elif not self._ensure_family(family, model_ref):
+            elif not self._ensure_family(dependency):
                 self._fail(
                     env,
                     ProvisioningDenialReason.MODEL_NOT_ALLOWED,
@@ -502,6 +529,7 @@ class ResidentCapacityControl:
             origin_id=origin.origin_id,
             deadline_at=profile.deadline_at,
             replica_id=replica.replica_id,
+            adapter_ref=profile.adapter_ref,
         )
         delivered = deps.relay(
             origin_worker,
@@ -707,6 +735,8 @@ class ResidentCapacityControl:
         engine = replica.endpoint
         if engine.api_key is None and deps.forward_api_key is not None:
             engine = engine.model_copy(update={"api_key": deps.forward_api_key})
+        family = self._stores.families.get(replica.family)
+        interface = family.interface if family is not None else engine.interface
         delivered = deps.relay(
             worker_id,
             "resident_sidecar_bind",
@@ -718,6 +748,7 @@ class ResidentCapacityControl:
                     "base_url": engine.base_url,
                     "model": engine.model,
                     "api_key": engine.api_key,
+                    "interface": interface,
                 },
             },
         )
@@ -738,16 +769,20 @@ class ResidentCapacityControl:
         self._persist()
         return replica.listener
 
-    def _ensure_family(self, family: str, model_ref: str) -> bool:
+    def _ensure_family(self, dependency: ServiceDependency) -> bool:
+        family = dependency.service_family
         if family in self._stores.families:
             return True
+        model_ref = dependency.service_ref
         if self._limits.allowed_models and model_ref not in self._limits.allowed_models:
             return False
         self._stores.families.register(
             ServiceFamily(
                 family=family,
-                engine_batch_key=family,
+                engine_batch_key=dependency.engine_batch_key,
                 model_ref=model_ref,
+                interface=dependency.interface.value,
+                isolation=dependency.isolation,
                 selection_strategy=self._limits.selection_strategy,
             )
         )
@@ -766,12 +801,13 @@ class ResidentCapacityControl:
         while True:
             async with self._admit_lock:
                 self._promote_ready_replicas(family)
+                self._lifecycle.refresh_family_reports(family)
                 handoff = self._admission.admit(
                     claim, profile, idempotency_key=env.idempotency_key
                 )
                 if handoff is not None:
                     return handoff
-                plan = self._lifecycle.plan_capacity(family, model_ref)
+                plan = self._lifecycle.plan_capacity(family, model_ref, profile)
                 if plan.action == "deny" and plan.denial is not None:
                     self._admission.on_denied(claim)
                     self._fail(env, plan.denial.reason, plan.denial.detail or "")

@@ -85,6 +85,7 @@ class ProvisioningDenialReason(StrEnum):
     EGRESS_CAP = "egress_cap"
     COLD_START_LIMIT = "cold_start_limit"
     COLD_START_BUDGET = "cold_start_budget"
+    ADAPTER_SLOT_CAP = "adapter_slot_cap"
 
 
 class AdmissionProfile(BaseModel):
@@ -93,7 +94,7 @@ class AdmissionProfile(BaseModel):
     The engine/batch key identifies a compatible model runner and configuration; it is
     stricter than broad reuse. ``adapter_ref`` names an adapter delta (a LoRA) that
     constrains a compatible base-model replica's adapter slot rather than crossing base
-    versions.
+    versions; ``adapter_source`` is the loadable source the replica loads for it.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -103,6 +104,7 @@ class AdmissionProfile(BaseModel):
     deadline_at: str | None = None
     max_output_tokens: int | None = None
     adapter_ref: str | None = None
+    adapter_source: str | None = None
 
 
 class ClaimCredit(BaseModel):
@@ -137,7 +139,9 @@ class ReplicaCapacityReport(BaseModel):
     It carries the replica incarnation and report epoch so a stale report cannot fence a
     newer decision. It may tighten the safe-capacity budget, but never creates,
     overwrites, or releases a claim credit. ``adapter_slots_free`` constrains an
-    adapter-scoped claim's feasibility (see ``AdmissionProfile.adapter_ref``).
+    adapter-scoped claim's feasibility (see ``AdmissionProfile.adapter_ref``), and
+    ``held_adapters`` names the adapters already resident so a claim for one of them
+    shares its slot rather than being denied at exhaustion.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -149,6 +153,7 @@ class ReplicaCapacityReport(BaseModel):
     healthy: bool
     safe: SafeCapacityVector
     adapter_slots_free: int | None = None
+    held_adapters: tuple[str, ...] = ()
     at: str = Field(default_factory=now_iso)
 
 
@@ -165,6 +170,7 @@ class ServiceFamily(BaseModel):
     family: str
     engine_batch_key: str
     model_ref: str
+    interface: str = "chat"
     isolation: str | None = None
     selection_strategy: str = "batch-aware-best-fit"
     warmth: str | None = None

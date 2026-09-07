@@ -8,6 +8,8 @@ from .common import (
     ModelInferSpecTemplate,
     ParallelSpec,
     ParallelSpecTemplate,
+    ServiceBindingSpec,
+    validate_adapters_loadable,
 )
 
 
@@ -25,6 +27,7 @@ class InferenceSpecStrict(ModelInferSpecStrict):
     sloSeconds: int | None = None
     parallel: ParallelSpec | None = None
     enforce_cpu: bool | None = None
+    service: ServiceBindingSpec | None = None
 
     def backend(self) -> InferenceBackend:
         return _inference_backend(self)
@@ -39,6 +42,7 @@ class InferenceSpecTemplate(ModelInferSpecTemplate):
     sloSeconds: TemplateInt | None = None
     parallel: ParallelSpecTemplate | None = None
     enforce_cpu: TemplateBool | None = None
+    service: ServiceBindingSpec | None = None
 
     def backend(self) -> InferenceBackend:
         return _inference_backend(self)
@@ -72,15 +76,14 @@ def _inference_backend(
 def _validate_inference_dispatchable(
     spec: InferenceSpecStrict | InferenceSpecTemplate,
 ) -> None:
-    model = spec.model
-    if model and (adapters := model.adapters):
-        for adapter in adapters:
-            if not adapter.path and not adapter.url and not adapter.task_id:
-                raise ValueError(
-                    f"adapter {adapter.name or adapter.type!r} specifies no path, "
-                    "url, or task_id and cannot be loaded."
-                )
+    if spec.service is not None:
+        # A resident-served leaf admits to a replica, so it carries no worker-local GPU
+        # requirement; its adapter still must be loadable on that replica.
+        validate_adapters_loadable(spec.adapters, resident=True)
+        return
+    validate_adapters_loadable(spec.adapters, resident=False)
 
+    model = spec.model
     if isinstance(spec.enforce_cpu, str):  # Unresolved template placeholder
         return
     if spec.enforce_cpu is True:

@@ -71,7 +71,12 @@ class _ToPeer:
 
 
 def _engine(calls: list[int]) -> Callable[..., Awaitable[EngineResponse]]:
-    async def engine(endpoint: ReplicaEndpoint, request: str | None) -> EngineResponse:
+    async def engine(
+        endpoint: ReplicaEndpoint,
+        request: str | None,
+        adapter_name: str | None = None,
+        adapter_source: str | None = None,
+    ) -> EngineResponse:
         calls.append(1)
         size = 8
 

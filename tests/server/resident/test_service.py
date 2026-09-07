@@ -33,9 +33,8 @@ from server.resident import (
 from server.resident.service import ResidentWorkerDelivery
 from server.resident.state import ReplicaIncarnation
 from server.task.v2.representations.operators import (
-    AgentModelGatewayBinding,
-    BindingProvenance,
-    ModelBindingProvenance,
+    ServiceDependency,
+    ServiceInterface,
 )
 from shared.harness import BoundaryEventKind
 from shared.outcome import OutcomeManifest
@@ -45,19 +44,10 @@ from shared.resident.reports import (
     ResidentOpOutcome,
     ResidentStreamStatus,
 )
-from shared.tasks.specs import ModelBindingMode
-
-_PROV = ModelBindingProvenance(
-    mode=BindingProvenance.SOURCE,
-    url=BindingProvenance.SOURCE,
-    model=BindingProvenance.SOURCE,
-)
 
 
-def _binding(model_ref: str = "m") -> AgentModelGatewayBinding:
-    return AgentModelGatewayBinding(
-        mode=ModelBindingMode.RESIDENT, service_model_ref=model_ref, provenance=_PROV
-    )
+def _dependency(model_ref: str = "m") -> ServiceDependency:
+    return ServiceDependency(service_ref=model_ref)
 
 
 def _env(invocation_id: str = "inv-1") -> ToolInvocationEnvelope:
@@ -143,6 +133,7 @@ def _build(
     limits: ResidentPolicyLimits | None = None,
     materialize_fn: Any = None,
     deliver: bool = True,
+    dependency: ServiceDependency | None = None,
 ) -> tuple[ResidentCapacityControl, ResidentStores, list[Any], _Delivery]:
     stores = ResidentStores()
     limits = limits or ResidentPolicyLimits()
@@ -179,7 +170,7 @@ def _build(
         admission=admission,
         lifecycle=lifecycle,
         limits=limits,
-        binding_resolver=lambda task_id: ("wfl-1", _binding()),
+        dependency_resolver=lambda task_id: ("wfl-1", dependency or _dependency()),
         settle_cb=settle_cb,
         redispatch_cb=redispatch_cb,
         endpoint_probe=lambda serve_task_id: ReplicaEndpoint(
@@ -238,6 +229,7 @@ def test_originate_binds_sidecar_resolves_fence_and_relays_handoff():
     assert delivery.kinds() == ["resident_sidecar_bind", "resident_handoff"]
     bind = delivery.frame("resident_sidecar_bind")
     assert bind["engine"]["base_url"] == "http://replica"
+    assert bind["engine"]["interface"] == "chat"
     handoff = delivery.frame("resident_handoff")["handoff"]
     assert handoff["origin_id"] == "rog-1"
 
@@ -246,11 +238,41 @@ def test_originate_binds_sidecar_resolves_fence_and_relays_handoff():
     assert stores.credit_ledger.held(claim.replica_id) == 1
     assert stores.directory.get(claim.replica_id).state is ReplicaState.WARM
 
+    family = stores.families.get(stores.claims.by_invocation("inv-1")[0].family)
+    assert family is not None and family.interface == "chat"
+
     session_id = svc._attempts["inv-1"].session_id
     record = delivery.sessions.records[session_id]
     assert record["origin_worker"] == "wkr-origin"
     assert record["target_worker"] == "wkr-replica"
     assert record["invocation_id"] == "inv-1"
+
+
+def test_embedding_dependency_relays_the_embedding_interface_to_the_sidecar():
+    dependency = ServiceDependency(
+        service_ref="m", interface=ServiceInterface.EMBEDDING
+    )
+    svc, stores, _settled, delivery = _build(dependency=dependency)
+    asyncio.run(svc._originate(_env()))
+
+    bind = delivery.frame("resident_sidecar_bind")
+    assert bind["engine"]["interface"] == "embedding"
+    family = stores.families.get(stores.claims.by_invocation("inv-1")[0].family)
+    assert family is not None and family.interface == "embedding"
+
+
+def test_adapter_dependency_relays_the_adapter_on_the_handoff():
+    dependency = ServiceDependency(
+        service_ref="m", adapter="my-lora", adapter_source="hf/my-lora"
+    )
+    svc, stores, _settled, delivery = _build(dependency=dependency)
+    asyncio.run(svc._originate(_env()))
+
+    handoff = delivery.frame("resident_handoff")["handoff"]
+    assert handoff["adapter_name"] == "my-lora"
+    assert handoff["adapter_source"] == "hf/my-lora"
+    request = stores.invocations.get("inv-1")
+    assert request is not None and request.profile.adapter_ref == "my-lora"
 
 
 def test_ack_accepts_and_authorizes_then_terminal_releases_credit():
@@ -276,6 +298,71 @@ def test_ack_accepts_and_authorizes_then_terminal_releases_credit():
     assert claim.state is ClaimState.TERMINAL
     assert stores.credit_ledger.held(claim.replica_id) == 0
     assert "resident_reap" in delivery.kinds()
+
+
+def _adapter_env(invocation_id: str) -> ToolInvocationEnvelope:
+    return ToolInvocationEnvelope(
+        kind=BoundaryEventKind.INVOCATION,
+        interface="model",
+        invocation_id=invocation_id,
+        task_id=f"tsk-{invocation_id}",
+        activation_id="act-1",
+        call_correlation=f"c-{invocation_id}",
+        idempotency_key=f"idm-{invocation_id}",
+        request_digest="sha-req",
+    )
+
+
+def _unload_frames(delivery: _Delivery) -> list[dict[str, Any]]:
+    return [p for _w, k, p in delivery.relays if k == "resident_adapter_unload"]
+
+
+def test_last_holder_release_unloads_the_adapter_slot():
+    dependency = ServiceDependency(
+        service_ref="m", adapter="my-lora", adapter_source="hf/my-lora"
+    )
+    svc, stores, _settled, delivery = _build(dependency=dependency)
+    asyncio.run(svc._originate(_adapter_env("inv-1")))
+    replica_id = stores.claims.by_invocation("inv-1")[0].replica_id
+
+    svc.on_invocation_terminal("inv-1")
+
+    frames = _unload_frames(delivery)
+    assert len(frames) == 1
+    assert frames[0] == {"replica_id": replica_id, "adapter_name": "my-lora"}
+    unload_target = next(
+        w for w, k, _p in delivery.relays if k == "resident_adapter_unload"
+    )
+    assert unload_target == "wkr-replica"
+
+
+def test_a_concurrent_same_adapter_claim_is_not_unloaded():
+    dependency = ServiceDependency(
+        service_ref="m", adapter="my-lora", adapter_source="hf/my-lora"
+    )
+    svc, stores, _settled, delivery = _build(dependency=dependency)
+    asyncio.run(svc._originate(_adapter_env("inv-1")))
+    asyncio.run(svc._originate(_adapter_env("inv-2")))
+    # Both claims share one warm replica and hold the same adapter's single slot.
+    r1 = stores.claims.by_invocation("inv-1")[0].replica_id
+    r2 = stores.claims.by_invocation("inv-2")[0].replica_id
+    assert r1 == r2 and stores.credit_ledger.held(r1) == 2
+
+    # The first holder's release must NOT unload the adapter out from under its peer.
+    svc.on_invocation_terminal("inv-1")
+    assert _unload_frames(delivery) == []
+
+    # Only the last holder's release frees the slot.
+    svc.on_invocation_terminal("inv-2")
+    frames = _unload_frames(delivery)
+    assert len(frames) == 1 and frames[0]["adapter_name"] == "my-lora"
+
+
+def test_a_base_claim_release_relays_no_unload():
+    svc, _stores, _settled, delivery = _build()  # base dependency, no adapter
+    asyncio.run(svc._originate(_env()))
+    svc.on_invocation_terminal("inv-1")
+    assert _unload_frames(delivery) == []
 
 
 def test_rejected_ack_releases_the_reservation_and_settles_an_error():
@@ -402,7 +489,7 @@ def test_originate_settles_an_error_when_an_internal_path_raises():
     def boom(task_id: str) -> Any:
         raise RuntimeError("resolver exploded")
 
-    svc._resolve_binding = boom  # type: ignore[method-assign]
+    svc._resolve_dependency = boom  # type: ignore[method-assign]
     asyncio.run(svc._originate(_env()))
     assert len(settled) == 1
     assert settled[0][3] is not None and "resident origination error" in settled[0][3]

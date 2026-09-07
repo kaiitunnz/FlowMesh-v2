@@ -5,7 +5,10 @@ from shared.tasks import TaskType
 from shared.tasks.specs import (
     AgentSpecStrict,
     AgentSpecTemplate,
-    ModelBindingMode,
+    EmbeddingSpecStrict,
+    EmbeddingSpecTemplate,
+    InferenceSpecStrict,
+    InferenceSpecTemplate,
 )
 from shared.tasks.specs.common import ModelSpecTemplate
 
@@ -22,6 +25,9 @@ from ..representations.operators import (
     ModelRef,
     Port,
     PortKind,
+    ServiceDependency,
+    ServiceInterface,
+    operator_service_dependency,
 )
 from ..representations.plan import (
     PhysicalNode,
@@ -45,7 +51,6 @@ from ..representations.template import (
 from .agent_binding import (
     AgentBindingDefaults,
     resolve_agent_bindings,
-    service_family_for_ref,
 )
 from .bindings import (
     BindingClass,
@@ -144,7 +149,105 @@ def _leaf_operator(
         profile=leaf_profile(task_type),
         guard=_condition_guard(task, name_to_op, operator_ids),
         residency_only=binding_class(task_type) is BindingClass.RESIDENCY,
+        service_dependency=_leaf_service_dependency(task, task_type),
     )
+
+
+def _leaf_service_dependency(
+    task: ParsedTask, task_type: TaskType
+) -> ServiceDependency | None:
+    """Normalize an inference/embedding leaf's resident binding into a dependency.
+
+    The service reference defaults to the task's own model source; a declared adapter
+    rides ``adapter`` so it constrains a compatible base replica's slot. The interface
+    is the leaf's own — an embedding leaf never shares a chat batch for the same model.
+    """
+    spec = task.task.spec
+    if not isinstance(
+        spec,
+        (
+            InferenceSpecStrict,
+            InferenceSpecTemplate,
+            EmbeddingSpecStrict,
+            EmbeddingSpecTemplate,
+        ),
+    ):
+        return None
+    binding = spec.service
+    if binding is None:
+        return None
+    service_ref = binding.service_model_ref or spec.model_name
+    if not service_ref:
+        source_kind, source_id = _task_source(task)
+        raise compile_error(
+            "service.missing-ref",
+            "resident service binding names no model reference and the task "
+            "declares no model source",
+            source_id,
+            source_kind,
+        )
+    interface = (
+        ServiceInterface.EMBEDDING
+        if task_type is TaskType.EMBEDDING
+        else ServiceInterface.CHAT
+    )
+    adapter = _leaf_adapter_ref(spec)
+    if interface is ServiceInterface.EMBEDDING and adapter is not None:
+        source_kind, source_id = _task_source(task)
+        raise compile_error(
+            "service.embedding-adapter-unsupported",
+            "a resident embedding leaf cannot declare an adapter; adapter serving is "
+            "supported only for the chat interface",
+            source_id,
+            source_kind,
+        )
+    return ServiceDependency(
+        service_ref=service_ref.strip(),
+        interface=interface,
+        adapter=adapter,
+        adapter_source=_leaf_adapter_source(spec),
+        isolation=binding.isolation,
+    )
+
+
+def _leaf_adapter_ref(
+    spec: (
+        InferenceSpecStrict
+        | InferenceSpecTemplate
+        | EmbeddingSpecStrict
+        | EmbeddingSpecTemplate
+    ),
+) -> str | None:
+    """A stable adapter key for a leaf's declared adapters, or None."""
+    adapters = spec.adapters
+    if not adapters:
+        return None
+    names = sorted(adapter.name or adapter.type for adapter in adapters)
+    return ",".join(names)
+
+
+def _leaf_adapter_source(
+    spec: (
+        InferenceSpecStrict
+        | InferenceSpecTemplate
+        | EmbeddingSpecStrict
+        | EmbeddingSpecTemplate
+    ),
+) -> str | None:
+    """The loadable source a resident replica loads for the leaf's adapter, or None.
+
+    A resident leaf carries a single adapter (enforced by dispatchability validation);
+    its ``path``/``url``/``task_id`` is the source the replica loads into its slot.
+    """
+    adapters = spec.adapters
+    if not adapters:
+        return None
+    adapter = adapters[0]
+    if adapter.path:
+        return adapter.path
+    if adapter.url:
+        return adapter.url
+    return f"task:{adapter.task_id}" if adapter.task_id else None
 
 
 def _agent_operator(
@@ -243,9 +346,7 @@ def lower_tasks(
             acc.operators.append(_leaf_operator(task, task_type, name_to_op, task_ids))
         acc.source_map.append(_source_map_entry(task))
 
-    agent_ops = {
-        op.operator_id: op for op in acc.operators if isinstance(op, AgentOperator)
-    }
+    ops_by_id = {op.operator_id: op for op in acc.operators}
 
     # Pass 2: wiring, induced outputs, and physical nodes.
     for task in parsed.tasks:
@@ -290,7 +391,8 @@ def lower_tasks(
                 source_ref=operator_id,
             )
         )
-        requirement, intent = _resident_annotations(agent_ops.get(operator_id))
+        dependency = operator_service_dependency(ops_by_id.get(operator_id))
+        requirement, intent = _service_family_annotations(dependency)
         acc.nodes.append(
             PhysicalNode(
                 node_id=f"phys:{operator_id}",
@@ -302,25 +404,25 @@ def lower_tasks(
         )
 
 
-def _resident_annotations(
-    agent: AgentOperator | None,
+def _service_family_annotations(
+    dependency: ServiceDependency | None,
 ) -> tuple[ServiceFamilyRequirement | None, ResidencyIntent | None]:
-    """Derive the plan-derived resident requirement for a resident-bound agent.
+    """Derive the plan-derived resident requirement from a service dependency.
 
-    Detection only: it pins the finite dependency a resident model binding needs, with
-    no allocation, claim, or replica. The service family is derived canonically from
-    the reference, so identical references pin one shared demand family; engine-batch
-    and isolation policy are the residency scheduler's to set.
+    Detection only: it pins the finite dependency a resident invocation needs, with no
+    allocation, claim, or replica. The family and engine-batch key fold interface, base
+    model, and isolation so incompatible dependencies pin distinct families rather than
+    collapsing on a shared model name.
     """
-    if agent is None or agent.model_binding is None:
+    if dependency is None:
         return None, None
-    binding = agent.model_binding
-    if binding.mode is not ModelBindingMode.RESIDENT or not binding.service_model_ref:
-        return None, None
-    family = service_family_for_ref(binding.service_model_ref)
     return (
-        ServiceFamilyRequirement(family=family),
-        ResidencyIntent(service_family=family, required=True),
+        ServiceFamilyRequirement(
+            family=dependency.service_family,
+            engine_batch_key=dependency.engine_batch_key,
+            isolation=dependency.isolation,
+        ),
+        ResidencyIntent(service_family=dependency.service_family, required=True),
     )
 
 

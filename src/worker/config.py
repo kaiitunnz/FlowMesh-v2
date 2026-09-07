@@ -46,6 +46,7 @@ class WorkerConfig:
     enable_mp_executors: bool
     enable_dev_model: bool
     dev_model_forward_url: str | None
+    dev_model_response_delay_sec: float
     web_search_provider: str
     web_search_api_key: str | None
     model_api_key: str | None
@@ -117,6 +118,9 @@ class WorkerConfig:
         enable_mp_executors = parse_bool_env("WORKER_ENABLE_MP_EXECUTORS", True)
         enable_dev_model = parse_bool_env("WORKER_ENABLE_DEV_MODEL", False)
         dev_model_forward_url = os.getenv("DEV_MODEL_FORWARD_URL", "").strip() or None
+        dev_model_response_delay_sec = (
+            parse_float_env("DEV_MODEL_RESPONSE_DELAY_SEC") or 0.0
+        )
         web_search_provider = (
             (os.getenv("WEB_SEARCH_PROVIDER") or DEFAULT_SEARCH_PROVIDER)
             .strip()
@@ -192,6 +196,7 @@ class WorkerConfig:
             enable_mp_executors=enable_mp_executors,
             enable_dev_model=enable_dev_model,
             dev_model_forward_url=dev_model_forward_url,
+            dev_model_response_delay_sec=dev_model_response_delay_sec,
             web_search_provider=web_search_provider,
             web_search_api_key=web_search_api_key,
             model_api_key=model_api_key,

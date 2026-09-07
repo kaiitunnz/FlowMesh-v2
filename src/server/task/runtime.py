@@ -19,6 +19,7 @@ from shared.harness import (
     HarnessResultKind,
     InputBinding,
     InputBindingMember,
+    ServiceLeafEpisodeDispatch,
 )
 from shared.outcome import OutcomeManifest
 from shared.resident.reports import ResidentBootstrapAck, ResidentOpOutcome
@@ -81,7 +82,7 @@ from .v2 import (
 )
 from .v2.compiler.agent_binding import AgentBindingDefaults
 from .v2.credentials import pop_inline_model_secrets, redact_source_text
-from .v2.representations.operators import AgentModelGatewayBinding
+from .v2.representations.operators import AgentModelGatewayBinding, ServiceDependency
 from .v2.representations.plan import EpisodeSpec
 
 # A live-feasibility check: whether a lowered episode's declared alternative can be
@@ -1338,8 +1339,7 @@ class TaskRuntime:
         )
 
     def _is_resident_env(self, env: ToolInvocationEnvelope) -> bool:
-        binding = self.resolve_model_binding(env.task_id)
-        return binding is not None and binding.mode is ModelBindingMode.RESIDENT
+        return self.resolve_service_dependency(env.task_id) is not None
 
     def _dispatch_resident_op(self, env: ToolInvocationEnvelope) -> None:
         """Originate a worker-captured resident boundary through resident admission."""
@@ -1703,6 +1703,23 @@ class TaskRuntime:
                 return None
             return record.workflow_id, op.model_binding
 
+    def resolve_service_dependency(
+        self, task_id: str
+    ) -> tuple[str, ServiceDependency] | None:
+        """The task's owning workflow and its normalized resident dependency.
+
+        Resolves for both an agent whose model binding is resident and an inference or
+        embedding leaf that consumes a resident family; a non-resident task resolves to
+        None. The workflow id scopes admission bookkeeping to the submitting workflow.
+        """
+        with self._lock:
+            record = self._tasks.get(task_id)
+            engine = self._engines.get(record.workflow_id) if record else None
+            if record is None or engine is None:
+                return None
+            dependency = engine.service_dependency(task_id)
+            return (record.workflow_id, dependency) if dependency is not None else None
+
     def agent_episode_dispatch(self, task_id: str) -> AgentEpisodeDispatch | None:
         """The agent-episode context to ship with a dispatch, or None for a non-agent.
 
@@ -1741,6 +1758,28 @@ class TaskRuntime:
                 input_bindings=input_bindings,
                 model_binding=model_binding,
                 facade_descriptors=tuple(op.facades) if op is not None else (),
+            )
+
+    def service_episode_dispatch(
+        self, task_id: str
+    ) -> ServiceLeafEpisodeDispatch | None:
+        """The service-episode context for a resident leaf, or None.
+
+        Only a resident-backed inference/embedding leaf takes this path; an agent whose
+        model binding is resident runs its resident boundary through the agent episode.
+        A resume ships the settled outcome to inject; a first dispatch ships none.
+        """
+        with self._lock:
+            record = self._tasks.get(task_id)
+            engine = self._engines.get(record.workflow_id) if record else None
+            if engine is None:
+                return None
+            dependency = engine.service_dependency(task_id)
+            if dependency is None or engine.agent_operator(task_id) is not None:
+                return None
+            _capsule, outcomes = engine.episode_context(task_id)
+            return ServiceLeafEpisodeDispatch(
+                interface=dependency.interface.value, delivered_outcomes=outcomes
             )
 
     def _synthesize_ready_children_locked(

@@ -122,6 +122,55 @@ class StateReference(BaseModel):
     identity: str | None = Field(default=None, description="Logical state identity.")
 
 
+class ServiceInterface(StrEnum):
+    """The service interface a resident invocation targets.
+
+    Distinct interfaces never share an engine batch or replica pool: a chat/completion
+    runner and an embedding runner are different services even for the same model name.
+    """
+
+    CHAT = "chat"
+    EMBEDDING = "embedding"
+
+
+class ServiceDependency(BaseModel):
+    """A normalized resident service dependency an invocation must satisfy.
+
+    Names the logical model/service reference, the service interface, and the adapter
+    and isolation constraints the invocation must satisfy; it names no replica or
+    worker. An Agent's resident model binding and an inference/embedding leaf's resident
+    binding both normalize into this one form.
+
+    ``service_family`` and ``engine_batch_key`` key the reuse domain on the base model,
+    interface, and isolation domain, so a matching model reference alone does not share
+    a service across a differing interface, base model, or isolation domain. An adapter
+    co-batches within a compatible base engine through its own slot: it loads into the
+    base replica and the request selects it, so it rides ``adapter`` (with its loadable
+    ``adapter_source``) rather than the family key.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    service_ref: str
+    interface: ServiceInterface = ServiceInterface.CHAT
+    adapter: str | None = None
+    adapter_source: str | None = None
+    isolation: str | None = None
+
+    @property
+    def service_family(self) -> str:
+        """The reuse-domain identity: one base model, interface, isolation domain."""
+        parts = [self.service_ref.strip(), self.interface.value]
+        if self.isolation:
+            parts.append(f"iso={self.isolation}")
+        return "|".join(parts)
+
+    @property
+    def engine_batch_key(self) -> str:
+        """The compatible model-runner and config key an admitted batch shares."""
+        return "|".join([self.service_ref.strip(), self.interface.value])
+
+
 class Port(BaseModel):
     """A typed input/output port on a logical operator or region."""
 
@@ -215,6 +264,36 @@ class AgentModelGatewayBinding(BaseModel):
     secret_ref: str | None = None
     service_model_ref: str | None = None
     provenance: ModelBindingProvenance
+
+
+def agent_service_dependency(
+    binding: AgentModelGatewayBinding | None,
+) -> ServiceDependency | None:
+    """Normalize an agent's resident model binding into a generic service dependency.
+
+    A non-resident or reference-less binding names no resident dependency. An agent's
+    managed model boundary is a chat/completion interface.
+    """
+    if (
+        binding is None
+        or binding.mode is not ModelBindingMode.RESIDENT
+        or not binding.service_model_ref
+    ):
+        return None
+    return ServiceDependency(
+        service_ref=binding.service_model_ref, interface=ServiceInterface.CHAT
+    )
+
+
+def operator_service_dependency(
+    op: "LogicalOperator | None",
+) -> ServiceDependency | None:
+    """The normalized resident dependency an operator consumes, agent or leaf."""
+    if isinstance(op, AgentOperator):
+        return agent_service_dependency(op.model_binding)
+    if isinstance(op, LeafOperator):
+        return op.service_dependency
+    return None
 
 
 class AuthorityCeiling(BaseModel):
@@ -312,6 +391,9 @@ class LeafOperator(_OperatorBase):
     profile: LeafProfile
     guard: ConditionGuard | None = None
     residency_only: bool = False
+    # A resident-required service dependency this leaf consumes (an inference/embedding
+    # leaf served by resident capacity). None for an ordinary in-process leaf.
+    service_dependency: ServiceDependency | None = None
 
 
 class AgentOperator(_OperatorBase):

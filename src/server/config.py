@@ -385,7 +385,8 @@ class ResidentCapacityConfig:
     ``substrate`` selects the serving stand-in a materialized replica runs: ``serve`` is
     a GPU vLLM replica; ``dev_model`` is the GPU-free stand-in. ``allowed_models`` empty
     permits any plan-derived model; a non-empty list enforces an explicit catalog.
-    ``admission_slots`` is the conservative safe-slot count reported per replica.
+    ``admission_slots`` is the conservative safe-slot count reported per replica, and
+    ``adapter_slots`` the number of distinct adapters a replica may hold concurrently.
     ``forward_api_key`` is the credential control relays to a replica's sidecar when the
     replica reports none, so the ``dev_model`` stand-in can forward it to a keyed
     upstream.
@@ -395,6 +396,7 @@ class ResidentCapacityConfig:
     substrate: str = "serve"
     access_mode: str = "forward"
     admission_slots: int = 8
+    adapter_slots: int = 4
     max_replicas_per_family: int = 1
     max_concurrent_cold_starts: int = 1
     cold_start_deadline_sec: float = 300.0
@@ -433,6 +435,7 @@ class ResidentCapacityConfig:
             substrate=substrate,
             access_mode=access,
             admission_slots=max(1, parse_int_env(f"{prefix}ADMISSION_SLOTS") or 8),
+            adapter_slots=max(1, parse_int_env(f"{prefix}ADAPTER_SLOTS") or 4),
             max_replicas_per_family=max(
                 1, parse_int_env(f"{prefix}MAX_REPLICAS_PER_FAMILY") or 1
             ),

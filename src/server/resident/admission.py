@@ -56,11 +56,14 @@ class AdmissionController:
         idempotency_key: str | None,
         tenant: str | None,
         deadline_at: str | None,
+        adapter_name: str | None = None,
+        adapter_source: str | None = None,
     ) -> AdmissionHandoff:
         """A single-use fence handoff for a reserved claim's replica incarnation.
 
         It carries no route or origin: the network path resolves and attaches those. It
-        never carries the raw engine endpoint.
+        never carries the raw engine endpoint. For an adapter-bound claim it names the
+        adapter the replica loads into a slot and the request selects.
         """
         return AdmissionHandoff(
             token=new_admission_handoff_token(),
@@ -73,6 +76,8 @@ class AdmissionController:
             incarnation=replica.incarnation,
             listener_generation=replica.listener_generation,
             expires_at=deadline_at,
+            adapter_name=adapter_name,
+            adapter_source=adapter_source,
         )
 
     def _strategy_for(self, family: str) -> SelectionStrategy:
@@ -174,6 +179,8 @@ class AdmissionController:
             idempotency_key=idempotency_key,
             tenant=profile.tenant if profile is not None else None,
             deadline_at=profile.deadline_at if profile is not None else None,
+            adapter_name=profile.adapter_ref if profile is not None else None,
+            adapter_source=profile.adapter_source if profile is not None else None,
         )
 
     def admit(
@@ -215,6 +222,8 @@ class AdmissionController:
             idempotency_key=idempotency_key,
             tenant=profile.tenant,
             deadline_at=profile.deadline_at,
+            adapter_name=profile.adapter_ref,
+            adapter_source=profile.adapter_source,
         )
 
     def accept_and_authorize(

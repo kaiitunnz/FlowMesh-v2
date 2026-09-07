@@ -213,7 +213,8 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   from zero on demand under policy. `ServiceClaim` facts are the sole credit authority;
   a credit releases only from a fenced ledger terminal consumed by `invocation_id`. The
   invocation runs in the workers over the network plane (required), so control never
-  constructs, parses, or carries engine traffic: the agent's own worker captures the
+  constructs, parses, or carries engine traffic: the consuming episode's own worker — an
+  agent or an inference/embedding leaf bound to a resident service — captures the
   boundary and holds the raw request worker-private, control admits the claim, binds the
   replica's claim-gated sidecar, and relays the claim-bound handoff to the origin worker,
   which carries the request to the replica worker over the reverse-rendezvous relay and

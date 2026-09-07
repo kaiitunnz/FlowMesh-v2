@@ -9,7 +9,9 @@ holds no admitted credit.
 import asyncio
 
 from server.resident import (
+    AdmissionProfile,
     ClaimCredit,
+    InvocationRequest,
     LifecycleScaleManager,
     ProvisioningDenialReason,
     ReplicaEndpoint,
@@ -37,6 +39,92 @@ def _manager(stores, **kw):
         admission_slots=kw.pop("admission_slots", 2),
         **kw,
     )
+
+
+def test_refresh_report_arms_the_adapter_slot_budget():
+    stores = warm_stores()
+    mgr = _manager(stores, adapter_slots=2)
+    for inv, adapter in (("inv-1", "lora-a"), ("inv-2", "lora-b"), ("inv-3", "lora-a")):
+        stores.invocations.put(
+            InvocationRequest(
+                invocation_id=inv,
+                workflow_id="w",
+                family="fam",
+                profile=AdmissionProfile(engine_batch_key="fam", adapter_ref=adapter),
+            )
+        )
+        claim = new_claim(invocation_id=inv, family="fam", admission_epoch=0)
+        reserve(claim, replica_id="rpl-1", incarnation=1, credit=ClaimCredit(slots=1))
+        stores.claims.add(claim)
+
+    mgr.refresh_report("rpl-1")
+    report = stores.reports.latest("rpl-1")
+    # Two distinct adapters held (the repeat shares its slot) against a budget of 2.
+    assert report is not None and report.adapter_slots_free == 0
+
+
+def test_plan_capacity_is_adapter_aware_at_exhaustion():
+    stores = warm_stores()
+    mgr = _manager(stores, adapter_slots=1)
+    # Fill the single adapter slot with a held claim for lora-a on the warm replica.
+    stores.invocations.put(
+        InvocationRequest(
+            invocation_id="inv-1",
+            workflow_id="w",
+            family="fam",
+            profile=AdmissionProfile(engine_batch_key="fam", adapter_ref="lora-a"),
+        )
+    )
+    claim = new_claim(invocation_id="inv-1", family="fam", admission_epoch=0)
+    reserve(claim, replica_id="rpl-1", incarnation=1, credit=ClaimCredit(slots=1))
+    stores.claims.add(claim)
+
+    base = AdmissionProfile(engine_batch_key="fam")
+    same = AdmissionProfile(engine_batch_key="fam", adapter_ref="lora-a")
+    distinct = AdmissionProfile(engine_batch_key="fam", adapter_ref="lora-b")
+
+    assert mgr.plan_capacity("fam", "m", base).action == "join"
+    assert mgr.plan_capacity("fam", "m", same).action == "join"
+    denied = mgr.plan_capacity("fam", "m", distinct)
+    assert denied.action == "deny"
+    assert denied.denial is not None
+    assert denied.denial.reason is ProvisioningDenialReason.ADAPTER_SLOT_CAP
+
+
+def _hold_adapter(stores, inv, adapter, replica_id="rpl-1"):
+    stores.invocations.put(
+        InvocationRequest(
+            invocation_id=inv,
+            workflow_id="w",
+            family="fam",
+            profile=AdmissionProfile(engine_batch_key="fam", adapter_ref=adapter),
+        )
+    )
+    claim = new_claim(invocation_id=inv, family="fam", admission_epoch=0)
+    reserve(claim, replica_id=replica_id, incarnation=1, credit=ClaimCredit(slots=1))
+    stores.claims.add(claim)
+
+
+def test_replica_holds_adapter_reads_the_credit_bearing_set():
+    stores = warm_stores()
+    mgr = _manager(stores, adapter_slots=2)
+    _hold_adapter(stores, "inv-1", "lora-a")
+    assert mgr.replica_holds_adapter("rpl-1", "lora-a") is True
+    assert mgr.replica_holds_adapter("rpl-1", "lora-b") is False
+
+
+def test_adapter_slot_cap_denial_surfaces_the_co_occurring_quota_reason():
+    stores = warm_stores()
+    mgr = _manager(stores, adapter_slots=1)
+    # The single adapter slot is full and the family is at its one-replica quota, so a
+    # new distinct adapter can neither fit nor add a replica: the denial names both.
+    _hold_adapter(stores, "inv-1", "lora-a")
+    denied = mgr.plan_capacity(
+        "fam", "m", AdmissionProfile(engine_batch_key="fam", adapter_ref="lora-b")
+    )
+    assert denied.action == "deny" and denied.denial is not None
+    assert denied.denial.reason is ProvisioningDenialReason.ADAPTER_SLOT_CAP
+    assert ProvisioningDenialReason.QUOTA_EXCEEDED.value in (denied.denial.detail or "")
 
 
 def test_scale_from_zero_then_warm():

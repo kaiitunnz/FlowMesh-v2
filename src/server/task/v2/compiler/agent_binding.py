@@ -39,16 +39,6 @@ def neutral_defaults() -> AgentBindingDefaults:
     return AgentBindingDefaults()
 
 
-def service_family_for_ref(ref: str) -> str:
-    """The canonical service family a resident model reference belongs to.
-
-    The reference is the model identifier (a served name or repository id), and the
-    family is derived from it deterministically so identical references group into one
-    demand family for downstream residency scheduling.
-    """
-    return ref.strip()
-
-
 def _resolve_harness(
     harness: AgentHarnessSpec | None, defaults: AgentBindingDefaults
 ) -> AgentHarnessBinding | None:

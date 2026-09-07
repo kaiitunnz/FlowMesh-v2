@@ -1,6 +1,6 @@
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import Field, SerializeAsAny, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny, model_validator
 
 from ...schemas.result import BaseExecutorResult
 from .._base import StrictBaseModel, TemplateBaseModel
@@ -18,6 +18,47 @@ from ..components import (
     ShardSpecTemplate,
 )
 from ..placeholders import TemplateBool, TemplateInt
+
+
+def validate_adapters_loadable(
+    adapters: "list[AdapterConfig] | list[AdapterConfigTemplate] | None",
+    *,
+    resident: bool,
+) -> None:
+    """Reject a declared adapter with no loadable source.
+
+    A resident service binding serves a single adapter (the request selects one model),
+    so more than one is rejected; every adapter must name a ``path``, ``url``, or
+    ``task_id`` the runner or replica can load.
+    """
+    if not adapters:
+        return
+    if resident and len(adapters) > 1:
+        raise ValueError(
+            "a resident service binding supports a single adapter; declare at most one."
+        )
+    for adapter in adapters:
+        if not adapter.path and not adapter.url and not adapter.task_id:
+            raise ValueError(
+                f"adapter {adapter.name or adapter.type!r} specifies no path, url, or "
+                "task_id and cannot be loaded."
+            )
+
+
+class ServiceBindingSpec(BaseModel):
+    """Binds a service-backed leaf to resident-served capacity.
+
+    A ``resident`` binding admits the leaf's invocation to a compatible model-serving
+    replica the fabric materializes and reuses. ``service_model_ref`` names the served
+    model, defaulting to the task's own model source; ``isolation`` names a co-batch and
+    cache isolation domain that is never shared across domains even for the same model.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["resident"] = "resident"
+    service_model_ref: str | None = None
+    isolation: str | None = None
 
 
 class ParallelSpec(StrictBaseModel):

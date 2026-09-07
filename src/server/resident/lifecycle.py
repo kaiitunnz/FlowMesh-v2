@@ -18,7 +18,9 @@ from ..utils.time import now_iso, parse_iso_ts
 from .policy import ProvisioningDecision, ResidentPolicyLimits, decide_materialization
 from .state import (
     SERVABLE_REPLICA_STATES,
+    AdmissionProfile,
     AllocationLease,
+    ProvisioningDenialReason,
     ReplicaCapacityReport,
     ReplicaEndpoint,
     ReplicaIncarnation,
@@ -61,6 +63,7 @@ class LifecycleScaleManager:
         *,
         limits: ResidentPolicyLimits,
         admission_slots: int,
+        adapter_slots: int = 4,
         idle_retain_sec: float = 0.0,
         persist: Callable[[], None] | None = None,
         materialize_fn: MaterializeFn | None = None,
@@ -69,6 +72,7 @@ class LifecycleScaleManager:
         self._stores = stores
         self._limits = limits
         self._admission_slots = max(1, admission_slots)
+        self._adapter_slots = max(1, adapter_slots)
         self._idle_retain_sec = max(0.0, idle_retain_sec)
         self._persist = persist or (lambda: None)
         self._materialize_fn = materialize_fn
@@ -81,10 +85,20 @@ class LifecycleScaleManager:
             if r.state in _ACTIVE_REPLICA_STATES
         ]
 
-    def plan_capacity(self, family: str, model_ref: str) -> CapacityPlan:
-        """Decide, from the directory and policy, how to satisfy a family's demand."""
+    def plan_capacity(
+        self, family: str, model_ref: str, profile: AdmissionProfile | None = None
+    ) -> CapacityPlan:
+        """Decide, from the directory and policy, how to satisfy a family's demand.
+
+        A servable replica is joinable only if it can serve the claim's adapter; a base
+        or held-adapter claim joins a warm replica, while a new distinct adapter joins
+        only where a free adapter slot remains. When no servable replica can take the
+        adapter and policy cannot materialize another, the demand is denied promptly and
+        correctly rather than waiting out the cold-start deadline.
+        """
         active = self._active_replicas(family)
-        joinable = next((r for r in active if r.state in SERVABLE_REPLICA_STATES), None)
+        servable = [r for r in active if r.state in SERVABLE_REPLICA_STATES]
+        joinable = next((r for r in servable if self._adapter_fits(r, profile)), None)
         if joinable is not None:
             return CapacityPlan(action="join", replica_id=joinable.replica_id)
         if any(r.state is ReplicaState.MATERIALIZING for r in active):
@@ -97,9 +111,23 @@ class LifecycleScaleManager:
                 1 for r in active if r.state is ReplicaState.MATERIALIZING
             ),
         )
-        if not decision.allowed:
-            return CapacityPlan(action="deny", denial=decision)
-        return CapacityPlan(action="materialize")
+        if decision.allowed:
+            return CapacityPlan(action="materialize")
+        if servable and profile is not None and profile.adapter_ref is not None:
+            # A warm replica exists but its adapter slots are full for this new adapter
+            # and no replica can be added: an adapter-budget denial, not a cold start.
+            # The co-occurring capacity reason is surfaced in the detail so the denial
+            # names both why the adapter does not fit and why no replica can be added.
+            reason = decision.reason.value if decision.reason is not None else "no room"
+            return CapacityPlan(
+                action="deny",
+                denial=ProvisioningDecision.deny(
+                    ProvisioningDenialReason.ADAPTER_SLOT_CAP,
+                    f"no free adapter slot for {profile.adapter_ref!r} and the family "
+                    f"cannot add a replica ({reason}: {decision.detail or ''})",
+                ),
+            )
+        return CapacityPlan(action="deny", denial=decision)
 
     async def materialize(self, family: ServiceFamily) -> ReplicaIncarnation:
         """Begin a bounded cold start: register the lease and replica, then start it."""
@@ -154,6 +182,7 @@ class LifecycleScaleManager:
         if replica is None:
             return
         replica.report_epoch += 1
+        held = self._held_adapters(replica_id)
         self._stores.reports.ingest(
             ReplicaCapacityReport(
                 replica_id=replica_id,
@@ -162,8 +191,55 @@ class LifecycleScaleManager:
                 state=replica.state,
                 healthy=replica.healthy and replica.state in SERVABLE_REPLICA_STATES,
                 safe=SafeCapacityVector(admission_slots=self._admission_slots),
+                adapter_slots_free=max(0, self._adapter_slots - len(held)),
+                held_adapters=held,
             )
         )
+
+    def refresh_family_reports(self, family: str) -> None:
+        """Re-report every servable replica of a family, so the adapter-slot gate reads
+        the current held-adapter count before an admission decision.
+        """
+        for replica in self._stores.directory.by_family(family):
+            if replica.state in SERVABLE_REPLICA_STATES:
+                self.refresh_report(replica.replica_id)
+
+    def _held_adapters(self, replica_id: str) -> tuple[str, ...]:
+        """The distinct adapters a replica's credit-bearing claims currently hold.
+
+        Multiple claims for the same adapter share one slot; a base (adapterless) claim
+        holds none. A claim for a held adapter shares its slot rather than being denied.
+        """
+        held = {
+            request.profile.adapter_ref
+            for claim in self._stores.claims.credit_bearing_for_replica(replica_id)
+            if (request := self._stores.invocations.get(claim.invocation_id))
+            is not None
+            and request.profile.adapter_ref is not None
+        }
+        return tuple(sorted(held))
+
+    def replica_holds_adapter(self, replica_id: str, adapter_ref: str) -> bool:
+        """Whether a credit-bearing claim on the replica still holds the adapter.
+
+        Read on a claim release to decide whether the adapter's engine slot may be
+        unloaded: it may be freed only once no remaining credit-bearing claim on the
+        replica references it, so a peer's adapter is never unloaded out from under it.
+        """
+        return adapter_ref in self._held_adapters(replica_id)
+
+    def _adapter_fits(
+        self, replica: ReplicaIncarnation, profile: "AdmissionProfile | None"
+    ) -> bool:
+        """Whether the replica can serve the profile's adapter (or it needs none).
+
+        A base claim always fits; an adapter already resident shares its slot; a new
+        distinct adapter fits only while a free adapter slot remains.
+        """
+        if profile is None or profile.adapter_ref is None:
+            return True
+        held = self._held_adapters(replica.replica_id)
+        return profile.adapter_ref in held or len(held) < self._adapter_slots
 
     def drain(self, replica_id: str) -> None:
         """Reject new claims on a replica while its admitted work reaches a safe

@@ -60,7 +60,10 @@ class _MemStore(FabricContentStore):
 
 
 async def _fake_engine(
-    endpoint: ReplicaEndpoint, request: str | None
+    endpoint: ReplicaEndpoint,
+    request: str | None,
+    adapter_name: str | None = None,
+    adapter_source: str | None = None,
 ) -> EngineResponse:
     async def chunks() -> AsyncIterator[str]:
         for start in range(0, len(_COMPLETION), 7):

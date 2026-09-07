@@ -35,7 +35,7 @@ from shared.resident.wire import (
     KIND_STREAM,
 )
 
-from .engine import EngineOpen
+from .engine import EngineOpen, EngineUnload, unload_adapter
 from .session import ResidentRelaySession, ResidentSessionRole
 from .transport import ResidentFrameSink
 
@@ -59,6 +59,7 @@ class ResidentReplicaSidecar:
         *,
         sink: ResidentFrameSink,
         engine_open: EngineOpen,
+        engine_unload: EngineUnload | None = None,
         window_bytes: int = 65536,
         stream_deadline_sec: float = 300.0,
         on_load: LoadSink | None = None,
@@ -66,6 +67,7 @@ class ResidentReplicaSidecar:
     ) -> None:
         self._sink = sink
         self._engine_open = engine_open
+        self._engine_unload = engine_unload or unload_adapter
         self._window_bytes = window_bytes
         self._stream_deadline = stream_deadline_sec
         self._on_load = on_load or (lambda _ev: None)
@@ -98,6 +100,29 @@ class ResidentReplicaSidecar:
     def unbind(self, replica_id: str) -> None:
         """Drop a replica's binding; in-flight sessions run to their own terminal."""
         self._bindings.pop(replica_id, None)
+
+    async def unload_adapter(self, replica_id: str, adapter_name: str) -> None:
+        """Free an adapter's engine slot once its last credit-bearing claim released.
+
+        Control decides the last holder released — gated on the same held-adapter set
+        that arms admission — so this only frees the slot the server already reclaimed;
+        it never unloads an adapter a peer still holds. Best effort and fail-loud: an
+        unbound replica is a no-op, and a rare failed unload is logged and leaves the
+        slot occupied until the replica is re-materialized — on a preempt, or an idle
+        teardown when a retain window or serve TTL is configured (not the default).
+        """
+        binding = self._bindings.get(replica_id)
+        if binding is None:
+            return
+        try:
+            await self._engine_unload(binding.endpoint, adapter_name)
+        except (httpx.HTTPError, OSError) as exc:
+            self._logger.warning(
+                "resident adapter unload failed (replica=%s adapter=%s): %s",
+                replica_id,
+                adapter_name,
+                exc,
+            )
 
     def reap_invocation(self, invocation_id: str) -> None:
         """Cancel the live serve task for an invocation on a fenced terminal or cancel.
@@ -170,7 +195,12 @@ class ResidentReplicaSidecar:
             # receipt, not completion, so control can authorize the response stream
             # before inference finishes.
             engine_task = asyncio.ensure_future(
-                self._engine_open(binding.endpoint, opening.get("request"))
+                self._engine_open(
+                    binding.endpoint,
+                    opening.get("request"),
+                    handoff.adapter_name,
+                    handoff.adapter_source,
+                )
             )
             try:
                 await session.send_wire(KIND_ACK)

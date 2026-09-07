@@ -27,8 +27,8 @@ from shared.utils.manifest import prepare_output_dir, sync_manifest
 from shared.utils.time import now_iso
 
 from .egress import MediatedEgressSidecar, ModelEgress, SearchEgress
-from .executors.agent_episode_executor import AgentEpisodeResult
 from .executors.base_executor import ExecutionError, Executor, TaskCancelledError
+from .executors.episode_support import EpisodeStepResult
 from .executors.utils.checkpoints import get_http_destination, write_executor_result
 from .lifecycle import Lifecycle
 from .model_turn import HeldModelEgress, ModelTurnRendezvous, ResponsesFacade
@@ -614,7 +614,12 @@ class Runner:
                             f"Task {task_id} was cancelled before execution"
                         )
                     self._current_task_id = task_id
-                    if task_type == "inference":
+                    if msg.service_episode is not None:
+                        # A resident service-backed leaf runs the service-episode path
+                        # (capture the model request, yield a resident boundary, resume
+                        # on the settled completion) rather than loading a local model.
+                        desired_key = "service_leaf"
+                    elif task_type == "inference":
                         assert isinstance(spec, InferenceSpecStrict)
                         desired_key = self._select_inference_executor_key(spec)
                     elif task_type == "diffusion":
@@ -654,6 +659,19 @@ class Runner:
                             self._active_executor_key = None
 
                         if not self._active_executor:
+                            if (
+                                desired_key == "service_leaf"
+                                and "service_leaf" not in self.executors
+                            ):
+                                # A resident leaf must run the service-episode path;
+                                # never fall back to a local model executor, which would
+                                # run the model on this worker and yield a boundary the
+                                # resident path never settles.
+                                raise ExecutionError(
+                                    f"task {task_id} requires the service-leaf "
+                                    "executor for its resident service binding, but "
+                                    "it is not available on this worker"
+                                )
                             self._active_executor = self.executors.get(
                                 desired_key, self.default_executor
                             )
@@ -691,7 +709,7 @@ class Runner:
                         shard_index=shard_index,
                         shard_total=shard_total,
                     )
-                    if isinstance(out, AgentEpisodeResult):
+                    if isinstance(out, EpisodeStepResult):
                         # The step rides the success metadata so the server routes the
                         # boundary and re-dispatches; the attempt still ends here, which
                         # is what releases the lane. A captured facade group rides the

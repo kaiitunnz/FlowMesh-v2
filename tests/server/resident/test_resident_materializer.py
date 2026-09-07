@@ -145,6 +145,95 @@ def test_gpu_serve_substrate_requests_a_gpu_replica() -> None:
     assert "resident" not in spec
 
 
+def test_embedding_serve_substrate_requests_a_pooling_replica() -> None:
+    runtime: Any = _FakeRuntime()
+    config = ResidentCapacityConfig(substrate="serve", serve_ttl_sec=600)
+    family = ServiceFamily(
+        family="m|embedding",
+        engine_batch_key="m|embedding",
+        model_ref="m",
+        interface="embedding",
+    )
+
+    RESOURCE_REGISTRARS.clear()
+    try:
+        asyncio.run(
+            materialize_resident_replica(
+                runtime, _SYSTEM, config, family, _REPLICA, _LOGGER
+            )
+        )
+    finally:
+        RESOURCE_REGISTRARS.clear()
+
+    assert runtime.register_call is not None
+    spec = json.loads(runtime.register_call[2])["spec"]
+    assert spec["model"]["vllm"] == {"runner": "pooling"}
+
+
+def test_chat_serve_substrate_enables_lora() -> None:
+    runtime: Any = _FakeRuntime()
+    config = ResidentCapacityConfig(substrate="serve", adapter_slots=3)
+
+    RESOURCE_REGISTRARS.clear()
+    try:
+        asyncio.run(
+            materialize_resident_replica(
+                runtime, _SYSTEM, config, _FAMILY, _REPLICA, _LOGGER
+            )
+        )
+    finally:
+        RESOURCE_REGISTRARS.clear()
+
+    assert runtime.register_call is not None
+    spec = json.loads(runtime.register_call[2])["spec"]
+    assert spec["model"]["vllm"] == {"enable_lora": True, "max_loras": 3}
+
+
+def test_embedding_dev_model_substrate_needs_no_serving_flag() -> None:
+    runtime: Any = _FakeRuntime()
+    config = ResidentCapacityConfig(substrate="dev_model")
+    family = ServiceFamily(
+        family="m|embedding",
+        engine_batch_key="m|embedding",
+        model_ref="m",
+        interface="embedding",
+    )
+
+    RESOURCE_REGISTRARS.clear()
+    try:
+        asyncio.run(
+            materialize_resident_replica(
+                runtime, _SYSTEM, config, family, _REPLICA, _LOGGER
+            )
+        )
+    finally:
+        RESOURCE_REGISTRARS.clear()
+
+    assert runtime.register_call is not None
+    spec = json.loads(runtime.register_call[2])["spec"]
+    assert "vllm" not in spec["model"]
+
+
+def test_chat_dev_model_substrate_models_a_finite_adapter_registry() -> None:
+    runtime: Any = _FakeRuntime()
+    config = ResidentCapacityConfig(substrate="dev_model", adapter_slots=2)
+
+    RESOURCE_REGISTRARS.clear()
+    try:
+        asyncio.run(
+            materialize_resident_replica(
+                runtime, _SYSTEM, config, _FAMILY, _REPLICA, _LOGGER
+            )
+        )
+    finally:
+        RESOURCE_REGISTRARS.clear()
+
+    assert runtime.register_call is not None
+    spec = json.loads(runtime.register_call[2])["spec"]
+    assert spec["taskType"] == "dev_model"
+    assert spec["model"]["vllm"] == {"max_loras": 2}
+
+
 def test_materialization_survives_without_registered_registrars() -> None:
     runtime = _FakeRuntime()
     config = ResidentCapacityConfig(substrate="dev_model")
