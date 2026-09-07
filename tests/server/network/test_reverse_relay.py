@@ -9,15 +9,14 @@ import asyncio
 
 from server.clients.redis import resident_relay_down_key
 from server.network.reverse_relay import (
-    DirectionWindow,
     RelayDirection,
     RelayFrame,
     RelayFrameKind,
     RelayLease,
     RelaySessionStore,
     RelayStreamStore,
-    WindowState,
 )
+from shared.network.relay_frame import DirectionWindow, WindowState
 
 from ._relay_fakes import FakeBinaryRedis, relay_frame
 

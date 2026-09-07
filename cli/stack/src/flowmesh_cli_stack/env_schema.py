@@ -1,6 +1,7 @@
 """Stack env schema."""
 
 from flowmesh.models.nodes import NodeRole
+from flowmesh_stack.env import parse_bool
 from flowmesh_stack.env_schema import (
     EnvSchema,
     EnvSection,
@@ -9,6 +10,20 @@ from flowmesh_stack.env_schema import (
     require_all_or_none,
     require_if_true,
 )
+
+
+def _require_network_plane_for_resident(
+    env: dict[str, str], errors: list[str], warnings: list[str]
+) -> None:
+    """Resident capacity runs on the network plane and must be enabled with it."""
+    if parse_bool(env.get("RESIDENT_CAPACITY_ENABLED", "")) and not parse_bool(
+        env.get("NETWORK_PLANE_ENABLED", "")
+    ):
+        errors.append(
+            "RESIDENT_CAPACITY_ENABLED requires NETWORK_PLANE_ENABLED: resident "
+            "capacity runs on the network plane and has no in-server execution path"
+        )
+
 
 STACK_ENV_SCHEMA = EnvSchema(
     name="stack",
@@ -482,7 +497,7 @@ STACK_ENV_SCHEMA = EnvSchema(
                 EnvVar(
                     "RESIDENT_FORWARD_API_KEY",
                     "",
-                    description="Credential the adapter presents to a keyless replica.",
+                    description="Credential control relays to a keyless replica.",
                 ),
                 EnvVar(
                     "RESIDENT_SELECTION_STRATEGY",
@@ -506,20 +521,9 @@ STACK_ENV_SCHEMA = EnvSchema(
                     min_inclusive=False,
                 ),
                 EnvVar(
-                    "RESIDENT_SIDECAR_BIND_HOST",
-                    "127.0.0.1",
-                    description="Host a resident sidecar binds on the replica node.",
-                ),
-                EnvVar(
                     "RESIDENT_SIDECAR_DIRECTLY_ROUTABLE",
                     "false",
                     description="Advertise the resident sidecar as directly routable.",
-                    var_type=EnvVarType.BOOL,
-                ),
-                EnvVar(
-                    "RESIDENT_RELAY_ONLY",
-                    "false",
-                    description="Mandate the reverse-relay for resident traffic.",
                     var_type=EnvVarType.BOOL,
                 ),
             ],
@@ -628,13 +632,6 @@ STACK_ENV_SCHEMA = EnvSchema(
                     "NETWORK_PLANE_RELAY_BUFFER_BYTES",
                     "65536",
                     description="Bounded relay-session in-flight buffer (bytes).",
-                    var_type=EnvVarType.INT,
-                    min_value=1024,
-                ),
-                EnvVar(
-                    "NETWORK_PLANE_RELAY_WINDOW_BYTES",
-                    "65536",
-                    description="Reverse-relay per-direction in-flight window (bytes).",
                     var_type=EnvVarType.INT,
                     min_value=1024,
                 ),
@@ -1081,6 +1078,7 @@ STACK_ENV_SCHEMA = EnvSchema(
             ],
             errors,
         ),
+        _require_network_plane_for_resident,
     ],
 )
 

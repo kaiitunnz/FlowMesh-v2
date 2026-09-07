@@ -24,8 +24,8 @@ from shared.tools.search.schema import (
     tool_request_digest,
 )
 
-from ..lifecycle import CapturedRequest
 from .fence import ProviderBinding
+from .request_store import CapturedRequest
 
 
 class SearchEgress:

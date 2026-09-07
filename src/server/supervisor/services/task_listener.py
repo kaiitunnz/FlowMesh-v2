@@ -81,6 +81,21 @@ class TaskListener(RebindableReader):
             raise RuntimeError(f"Worker {worker_id} is not registered")
         return await self._qs[worker_id].get()
 
+    async def enqueue_local(self, worker_id: str, payload: dict[str, Any]) -> bool:
+        """Enqueue a dispatch payload straight to a co-located worker, bypassing Redis.
+
+        The node-local resident bridge forwards a relay frame to the worker it is bound
+        to without the control-dispatch round-trip. Returns whether the worker is local.
+        """
+        queue = self._qs.get(worker_id)
+        if queue is None:
+            self.logger.warning(
+                "resident frame for worker not local to this node: %s", worker_id
+            )
+            return False
+        await queue.put(payload)
+        return True
+
     def _handle_message(self, data: Any) -> None:
         loop = self._loop
         if loop is None:

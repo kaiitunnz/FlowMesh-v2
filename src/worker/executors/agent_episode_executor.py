@@ -23,6 +23,7 @@ from shared.harness import (
     HarnessResultKind,
 )
 from shared.outcome import ContentStoreError, FabricContentStore
+from shared.resident.wire import resident_request_digest
 from shared.schemas.result import BaseExecutorResult
 from shared.tasks.specs.misc import ModelBindingMode
 from shared.tasks.task_type import TaskType
@@ -39,7 +40,8 @@ from shared.tools.search.schema import (
 )
 
 from ..content_store import build_content_store
-from ..lifecycle import PendingEgressRequestStore
+from ..egress import PendingEgressRequestStore
+from ..resident import ResidentRequestStore
 from .base_executor import ExecutionError, Executor, ExecutorTask
 from .harness import build_adapter
 
@@ -121,6 +123,10 @@ class AgentEpisodeExecutor(Executor):
                 result,
                 dispatch.model_binding,
             )
+        elif self._is_resident_boundary(result, dispatch.model_binding):
+            result = self._capture_resident_request(
+                self._resident_requests(), task.task_id, result
+            )
         if result.kind is HarnessResultKind.BOUNDARY and result.request is not None:
             _LOG.info(
                 "[fabric] episode yielded a %s boundary (interface=%s)",
@@ -196,6 +202,53 @@ class AgentEpisodeExecutor(Executor):
             )
         stripped = req.model_copy(
             update={"request_payload": None, "request_digest": digest}
+        )
+        return result.model_copy(update={"request": stripped})
+
+    @staticmethod
+    def _is_resident_boundary(
+        result: HarnessResult, model_binding: EpisodeModelBinding | None
+    ) -> bool:
+        """Whether a step yielded a resident model boundary the origin worker drives.
+
+        A resident model invocation is worker-originated like an external one, but its
+        raw request is held in a separate resident custody and it settles through the
+        claim-gated resident path rather than the egress sidecar.
+        """
+        req = result.request
+        if (
+            result.kind is not HarnessResultKind.BOUNDARY
+            or req is None
+            or req.kind is not BoundaryEventKind.INVOCATION
+            or req.request_payload is None
+            or req.call_correlation is None
+        ):
+            return False
+        return (
+            req.interface == MODEL_INTERFACE
+            and model_binding is not None
+            and model_binding.mode is ModelBindingMode.RESIDENT
+        )
+
+    @staticmethod
+    def _capture_resident_request(
+        store: ResidentRequestStore, task_id: str, result: HarnessResult
+    ) -> HarnessResult:
+        """Keep a resident request worker-private and emit only its digest.
+
+        The raw request is recorded in resident custody keyed by
+        ``(task_id, call_correlation)``, read back only by the origin worker's resident
+        driver, and stripped from the boundary that crosses to control.
+        """
+        req = result.request
+        assert req is not None and req.request_payload is not None
+        assert req.call_correlation is not None
+        store.put(task_id, req.call_correlation, req.request_payload)
+        stripped = req.model_copy(
+            update={
+                "request_payload": None,
+                "request_digest": resident_request_digest(req.request_payload),
+            }
         )
         return result.model_copy(update={"request": stripped})
 

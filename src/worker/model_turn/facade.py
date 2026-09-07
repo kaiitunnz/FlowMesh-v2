@@ -29,8 +29,7 @@ from shared.tools.model.schema import (
     ModelToolCall,
 )
 
-from ..egress import HeldEgressReject
-from ..lifecycle import PendingEgressRequestStore
+from ..egress import HeldEgressReject, PendingEgressRequestStore
 from .capture import build_facade_capture, partition_facade_calls, turn_base
 from .held_egress import HeldModelEgress
 from .translation import (

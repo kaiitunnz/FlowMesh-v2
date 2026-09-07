@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlparse
 
+from shared.resident.reports import ResidentBootstrapAck, ResidentOpOutcome
 from shared.schemas.command import InterruptMessage
 from shared.schemas.event import (
     Event,
@@ -732,6 +733,14 @@ class EventMonitor:
             case "MEDIATED_OP_PROPOSE":
                 self._runtime.authorize_model_turn(
                     AgentModelTurnProposal.model_validate(event.payload["proposal"])
+                )
+            case "RESIDENT_BOOTSTRAP_ACK":
+                self._runtime.on_resident_bootstrap_ack(
+                    ResidentBootstrapAck.model_validate(event.payload["ack"])
+                )
+            case "RESIDENT_OP_OUTCOME":
+                self._runtime.on_resident_outcome(
+                    ResidentOpOutcome.model_validate(event.payload["outcome"])
                 )
             case "UNREGISTER":
                 worker_id = (event.worker_id or "").strip()

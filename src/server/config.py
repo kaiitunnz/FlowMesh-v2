@@ -386,10 +386,9 @@ class ResidentCapacityConfig:
     a GPU vLLM replica; ``dev_model`` is the GPU-free stand-in. ``allowed_models`` empty
     permits any plan-derived model; a non-empty list enforces an explicit catalog.
     ``admission_slots`` is the conservative safe-slot count reported per replica.
-    ``forward_api_key`` is the credential the in-server adapter presents to a replica
-    that reports none, so the ``dev_model`` stand-in can forward it to a keyed upstream.
-    ``relay_only`` mandates the reverse-rendezvous relay for resident traffic, the mode
-    an outbound-only fleet uses so no invocation attempts a forward-dial offload.
+    ``forward_api_key`` is the credential control relays to a replica's sidecar when the
+    replica reports none, so the ``dev_model`` stand-in can forward it to a keyed
+    upstream.
     """
 
     enabled: bool = False
@@ -408,9 +407,7 @@ class ResidentCapacityConfig:
     selection_strategy: str = field(default_factory=_default_selection_strategy)
     idle_retain_sec: float = 0.0
     idle_sweep_interval_sec: float = 30.0
-    sidecar_bind_host: str = "127.0.0.1"
     sidecar_directly_routable: bool = False
-    relay_only: bool = False
 
     @classmethod
     def from_env(cls) -> "ResidentCapacityConfig":
@@ -456,14 +453,9 @@ class ResidentCapacityConfig:
             idle_retain_sec=parse_float_env(f"{prefix}IDLE_RETAIN_SEC") or 0.0,
             idle_sweep_interval_sec=parse_float_env(f"{prefix}IDLE_SWEEP_INTERVAL_SEC")
             or 30.0,
-            sidecar_bind_host=(
-                os.getenv(f"{prefix}SIDECAR_BIND_HOST") or "127.0.0.1"
-            ).strip()
-            or "127.0.0.1",
             sidecar_directly_routable=parse_bool_env(
                 f"{prefix}SIDECAR_DIRECTLY_ROUTABLE", False
             ),
-            relay_only=parse_bool_env(f"{prefix}RELAY_ONLY", False),
         )
 
 
@@ -522,8 +514,8 @@ class NetworkPlaneConfig:
 
     ``endpoint_url`` is the operator-configured node-relay endpoint advertised on
     registration; ``sidecar_url`` is the node-local echo listener the relay uplinks to.
-    TTL/backoff bounds drive the reachability state machine. ``relay_window_bytes`` is
-    the reverse-rendezvous relay's per-direction in-flight byte window.
+    TTL/backoff bounds drive the reachability state machine. ``relay_buffer_bytes`` is
+    the echo relay session's bounded in-flight buffer.
     """
 
     enabled: bool = False
@@ -539,7 +531,6 @@ class NetworkPlaneConfig:
     connect_budget_sec: float = 5.0
     route_ttl_sec: float = 30.0
     relay_buffer_bytes: int = 65536
-    relay_window_bytes: int = 65536
 
     @classmethod
     def from_env(cls) -> "NetworkPlaneConfig":
@@ -567,9 +558,6 @@ class NetworkPlaneConfig:
             relay_buffer_bytes=max(
                 1024, parse_int_env(f"{prefix}RELAY_BUFFER_BYTES") or 65536
             ),
-            relay_window_bytes=max(
-                1024, parse_int_env(f"{prefix}RELAY_WINDOW_BYTES") or 65536
-            ),
         )
 
 
@@ -593,6 +581,13 @@ class OrchestrationConfig:
 
     @classmethod
     def from_env(cls) -> "OrchestrationConfig":
+        resident = ResidentCapacityConfig.from_env()
+        network = NetworkPlaneConfig.from_env()
+        if resident.enabled and not network.enabled:
+            raise ValueError(
+                "RESIDENT_CAPACITY_ENABLED requires NETWORK_PLANE_ENABLED: resident "
+                "capacity runs on the network plane and has no in-server execution path"
+            )
         return cls(
             max_scope_depth=parse_int_env("ORCHESTRATOR_MAX_SCOPE_DEPTH"),
             max_loop_iterations=parse_int_env("ORCHESTRATOR_MAX_LOOP_ITERATIONS"),
@@ -608,8 +603,8 @@ class OrchestrationConfig:
             agent_binding=AgentBindingConfig.from_env(),
             model_secret_vault=ModelSecretVaultConfig.from_env(),
             web_search=WebSearchConfig.from_env(),
-            resident=ResidentCapacityConfig.from_env(),
-            network=NetworkPlaneConfig.from_env(),
+            resident=resident,
+            network=network,
         )
 
 

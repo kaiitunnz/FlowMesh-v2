@@ -16,6 +16,7 @@ from google.protobuf.struct_pb2 import Struct
 
 from shared._version import FLOWMESH_RELEASE_VERSION
 from shared.grpc.supervisor.v1 import supervisor_pb2, supervisor_pb2_grpc
+from shared.resident.reports import ResidentBootstrapAck, ResidentOpOutcome
 from shared.schemas.event import Event, TaskEvent, WorkerEvent, serialize_event
 from shared.schemas.worker import SSHLimits, WorkerCapabilities
 from shared.tasks.worker_message import (
@@ -621,5 +622,44 @@ class SupervisorClient:
             type="MEDIATED_OP_PROPOSE",
             worker_id=self.worker_id,
             payload={"proposal": proposal.model_dump(mode="json")},
+        )
+        self._event_queue.put(serialize_event(event))
+
+    def push_resident_frame(self, frame: dict[str, Any]) -> None:
+        """Send one resident relay frame up for the supervisor to bridge onward."""
+        if self._stub is None:
+            raise RuntimeError("Supervisor gRPC client not started")
+        if not self._event_ready.wait():
+            raise RuntimeError("Supervisor event stream not ready")
+        event = WorkerEvent(
+            type="RESIDENT_FRAME",
+            worker_id=self.worker_id,
+            payload={"frame": frame},
+        )
+        self._event_queue.put(serialize_event(event))
+
+    def push_resident_ack(self, ack: ResidentBootstrapAck) -> None:
+        """Report the resident bootstrap acknowledgement to control."""
+        if self._stub is None:
+            raise RuntimeError("Supervisor gRPC client not started")
+        if not self._event_ready.wait():
+            raise RuntimeError("Supervisor event stream not ready")
+        event = WorkerEvent(
+            type="RESIDENT_BOOTSTRAP_ACK",
+            worker_id=self.worker_id,
+            payload={"ack": ack.model_dump(mode="json")},
+        )
+        self._event_queue.put(serialize_event(event))
+
+    def push_resident_outcome(self, outcome: ResidentOpOutcome) -> None:
+        """Report the fenced resident terminal outcome to control."""
+        if self._stub is None:
+            raise RuntimeError("Supervisor gRPC client not started")
+        if not self._event_ready.wait():
+            raise RuntimeError("Supervisor event stream not ready")
+        event = WorkerEvent(
+            type="RESIDENT_OP_OUTCOME",
+            worker_id=self.worker_id,
+            payload={"outcome": outcome.model_dump(mode="json")},
         )
         self._event_queue.put(serialize_event(event))

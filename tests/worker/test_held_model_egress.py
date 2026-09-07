@@ -10,8 +10,7 @@ from shared.tools.model.schema import (
     model_request_digest,
 )
 from shared.utils.ids import new_mediated_permit_id
-from worker.egress import HeldEgressReject
-from worker.lifecycle import PendingEgressRequestStore
+from worker.egress import HeldEgressReject, PendingEgressRequestStore
 from worker.model_turn import HeldModelEgress, ModelTurnRendezvous
 
 _AGENT = "tsk-agent"

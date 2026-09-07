@@ -36,11 +36,10 @@ from .network.reverse_relay import (
     RelayStreamStore,
 )
 from .network.service import NetworkPlane
-from .orchestration.tool_dispatch import ToolInvocationEnvelope
 from .registries import WorkerRegistry, WorkflowRegistry
 from .registries.node import NodeRegistry
 from .registries.resident import ResidentRegistry
-from .resident.wiring import build_resident_capacity, wire_native_delivery
+from .resident.wiring import build_resident_capacity, wire_worker_delivery
 from .routers import docs, health, v1
 from .services.agent_model_gateway import (
     AgentModelGateway,
@@ -208,15 +207,11 @@ if IS_ROOT_NODE:
             logger=logger,
         )
         RUNTIME.set_resident_terminal_hook(RESIDENT_CONTROL.on_invocation_terminal)
-
-        def _model_settle(env: ToolInvocationEnvelope) -> None:
-            assert RESIDENT_CONTROL is not None and AGENT_MODEL_GATEWAY is not None
-            if RESIDENT_CONTROL.is_resident(env.task_id):
-                RESIDENT_CONTROL.settle(env)
-            else:
-                AGENT_MODEL_GATEWAY.settle(env)
-
-        RUNTIME.set_model_settler(_model_settle)
+        RUNTIME.set_resident_handlers(
+            originate=RESIDENT_CONTROL.originate,
+            on_ack=RESIDENT_CONTROL.on_bootstrap_ack,
+            on_outcome=RESIDENT_CONTROL.on_outcome,
+        )
 
     _relay_redis: BinaryRedis | None = None
     if config.orchestration.network.enabled:
@@ -251,20 +246,16 @@ if IS_ROOT_NODE:
         RESIDENT_CONTROL is not None
         and NETWORK_PLANE is not None
         and WORKER_REGISTRY is not None
+        and _relay_redis is not None
     ):
         assert RUNTIME is not None
-        _resident_cfg = config.orchestration.resident
-        wire_native_delivery(
+        wire_worker_delivery(
             RESIDENT_CONTROL,
             network=NETWORK_PLANE,
             worker_registry=WORKER_REGISTRY,
             runtime=RUNTIME,
-            node_registry=NODE_REGISTRY,
-            resident_cfg=_resident_cfg,
-            cmd_timeout_sec=max(
-                config.orchestration.gateway.timeout_sec,
-                _resident_cfg.cold_start_deadline_sec,
-            ),
+            sessions=RelaySessionStore(_relay_redis),
+            resident_cfg=config.orchestration.resident,
         )
 
     DISPATCHER = create_dispatcher(

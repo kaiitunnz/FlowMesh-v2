@@ -45,9 +45,9 @@ from tests.server.task.test_v2_orchestration import (
     _NoopSecretVault,
     _register,
 )
+from worker.egress import PendingEgressRequestStore
 from worker.executors.agent_episode_executor import AgentEpisodeExecutor
 from worker.executors.harness.scripted import ScriptedHarnessAdapter, ScriptedStep
-from worker.lifecycle import PendingEgressRequestStore
 from worker.supervisor_client import SupervisorClient
 
 _TS = "2026-04-28T00:00:00Z"

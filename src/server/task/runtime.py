@@ -21,6 +21,7 @@ from shared.harness import (
     InputBindingMember,
 )
 from shared.outcome import OutcomeManifest
+from shared.resident.reports import ResidentBootstrapAck, ResidentOpOutcome
 from shared.schemas.command import InterruptMessage, MediatedOpMessage
 from shared.schemas.result import ResultEnvelope, result_file_path
 from shared.tasks import TaskEnvelopeTemplate
@@ -190,6 +191,12 @@ class TaskRuntime:
         self._model_settler: Callable[[ToolInvocationEnvelope], None] | None = None
         self._tool_broker: Callable[[ToolInvocationEnvelope], None] | None = None
         self._resident_terminal_hook: Callable[[str, bool], None] | None = None
+        # The worker-originated resident path: originate admits and relays the handoff
+        # to the origin worker; the ack and outcome handlers consume the worker's fenced
+        # transition reports. Set when resident-capacity control is enabled.
+        self._resident_originate: Callable[[ToolInvocationEnvelope], None] | None = None
+        self._resident_ack: Callable[[ResidentBootstrapAck], None] | None = None
+        self._resident_outcome: Callable[[ResidentOpOutcome], None] | None = None
         # Facade boundaries the agent-model gateway captured server-side during an
         # episode's model turn, keyed by task; the completion path reroutes the clean
         # turn-completion into the pending boundary rather than settling it.
@@ -1293,9 +1300,10 @@ class TaskRuntime:
         """Route a recorded mediated boundary to its handler by exact (kind, interface).
 
         A recorded request digest marks a boundary the worker originated and holds its
-        raw request privately: it runs off-lane on that worker's egress sidecar. A
-        ``model`` boundary without a digest reaches the model gateway (a
-        ``canned``/``echo``/``resident`` binding); a ``search/v1`` boundary without a
+        raw request privately: an external ``model`` runs off-lane on that worker's
+        egress sidecar, while a ``resident`` ``model`` originates the claim-gated
+        resident path from the worker. A ``model`` boundary without a digest reaches the
+        model gateway (a ``canned``/``echo`` binding); a ``search/v1`` boundary with no
         digest is the gateway-captured facade path and reaches the fabric broker. An
         unrecognized interface is a fabric misconfiguration terminalized as a typed
         unavailable outcome — never a silent fall-through to the model settler.
@@ -1305,7 +1313,10 @@ class TaskRuntime:
             and env.interface == MODEL_INTERFACE
         ):
             if env.request_digest is not None:
-                self._dispatch_worker_originated_op(env)
+                if self._is_resident_env(env):
+                    self._dispatch_resident_op(env)
+                else:
+                    self._dispatch_worker_originated_op(env)
             elif self._model_settler is not None:
                 self._model_settler(env)
             return
@@ -1325,6 +1336,31 @@ class TaskRuntime:
         self.settle_episode_invocation(
             env.task_id, env.call_correlation, outcome.model_dump_json()
         )
+
+    def _is_resident_env(self, env: ToolInvocationEnvelope) -> bool:
+        binding = self.resolve_model_binding(env.task_id)
+        return binding is not None and binding.mode is ModelBindingMode.RESIDENT
+
+    def _dispatch_resident_op(self, env: ToolInvocationEnvelope) -> None:
+        """Originate a worker-captured resident boundary through resident admission."""
+        if self._resident_originate is not None:
+            self._resident_originate(env)
+        else:
+            self.settle_episode_invocation(
+                env.task_id,
+                env.call_correlation,
+                error="resident-capacity control is not enabled",
+            )
+
+    def on_resident_bootstrap_ack(self, ack: ResidentBootstrapAck) -> None:
+        """Consume an origin worker's resident bootstrap-phase report."""
+        if self._resident_ack is not None:
+            self._resident_ack(ack)
+
+    def on_resident_outcome(self, outcome: ResidentOpOutcome) -> None:
+        """Consume an origin worker's fenced resident terminal outcome report."""
+        if self._resident_outcome is not None:
+            self._resident_outcome(outcome)
 
     def _op_permit_budget(self, interface: str) -> tuple[int, float, int]:
         """The (max_results, timeout, result_char_cap) budget a permit runs within."""
@@ -1555,6 +1591,18 @@ class TaskRuntime:
     def set_tool_broker(self, broker: Callable[[ToolInvocationEnvelope], None]) -> None:
         """Install the off-lane handler for fabric-served tool interfaces."""
         self._tool_broker = broker
+
+    def set_resident_handlers(
+        self,
+        *,
+        originate: Callable[[ToolInvocationEnvelope], None],
+        on_ack: Callable[[ResidentBootstrapAck], None],
+        on_outcome: Callable[[ResidentOpOutcome], None],
+    ) -> None:
+        """Install the worker-originated resident origination and report handlers."""
+        self._resident_originate = originate
+        self._resident_ack = on_ack
+        self._resident_outcome = on_outcome
 
     def set_resident_terminal_hook(self, hook: Callable[[str, bool], None]) -> None:
         """Install the consumer that releases a resident admission credit on DS

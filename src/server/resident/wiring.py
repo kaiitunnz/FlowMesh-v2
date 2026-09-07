@@ -1,8 +1,9 @@
 """Assemble resident-capacity control from the server runtime and configuration.
 
-Builds the CS stores, the two admission/lifecycle actors, the inference adapter, and the
-serve-substrate glue (materialize, stop, endpoint probe), returning the wired
-``ResidentCapacityControl``. The materialized serve task is owned by the resolved system
+Builds the CS stores, the two admission/lifecycle actors, and the serve-substrate glue
+(materialize, stop, endpoint probe), returning the wired ``ResidentCapacityControl``.
+The worker-owned data path is wired separately once the network plane and worker
+registry are available. The materialized serve task is owned by the resolved system
 principal so an operator reads its logs through the normal owner-scoped path.
 """
 
@@ -12,23 +13,22 @@ from typing import Any
 
 from lumid_hooks import PrincipalContext
 
-from shared.schemas.command import CommandMessage, CommandType
+from shared.resident.contracts import ReplicaEndpoint
+from shared.schemas.command import MediatedOpMessage
 
 from ..config import OrchestrationConfig, ResidentCapacityConfig
+from ..network.reverse_relay import RelaySessionStore
 from ..network.service import NetworkPlane
 from ..registries import WorkerRegistry
-from ..registries.node import NodeRegistry
 from ..registries.resident import ResidentRegistry
 from ..task.models import TERMINAL_TASK_STATUSES
 from ..task.runtime import TaskRuntime
-from .adapter import HttpInferenceAdapter
 from .admission import AdmissionController
 from .lifecycle import LifecycleScaleManager
 from .materializer import materialize_resident_replica
-from .native import NativeTransport, NativeTransportError
 from .policy import ResidentPolicyLimits
-from .service import NativeDeliveryDeps, ResidentCapacityControl
-from .state import ReplicaEndpoint, ReplicaIncarnation, ServiceFamily
+from .service import ResidentCapacityControl, ResidentWorkerDelivery
+from .state import ReplicaIncarnation, ServiceFamily
 from .stores import ResidentStores
 
 # Yields the resolved system principal, read lazily so materialization uses the
@@ -107,10 +107,6 @@ def build_resident_capacity(
         stores=stores,
         admission=AdmissionController(stores, persist),
         lifecycle=lifecycle,
-        adapter=HttpInferenceAdapter(
-            timeout_sec=orchestration.gateway.timeout_sec,
-            forward_api_key=cfg.forward_api_key,
-        ),
         limits=limits,
         binding_resolver=runtime.gateway_binding_for,
         settle_cb=runtime.settle_episode_invocation,
@@ -124,22 +120,34 @@ def build_resident_capacity(
     )
 
 
-def wire_native_delivery(
+def wire_worker_delivery(
     resident_control: ResidentCapacityControl,
     *,
     network: NetworkPlane,
     worker_registry: WorkerRegistry,
     runtime: TaskRuntime,
-    node_registry: NodeRegistry,
+    sessions: RelaySessionStore,
     resident_cfg: ResidentCapacityConfig,
-    cmd_timeout_sec: float,
 ) -> None:
-    """Wire native two-phase delivery into resident-capacity control.
+    """Wire the worker-owned resident data path into resident-capacity control.
 
-    Resolves an origin task's node and a replica's node through the worker registry and
-    carries the bootstrap/stream/cancel pokes as node commands, so a resident invocation
-    is delivered data-direct over the fabric rather than relayed in-server.
+    Resolves an agent task's origin worker and a worker's node through the worker
+    registry, relays resident control frames over the worker attachment, and writes the
+    per-session routing record the reverse-relay bridges route frames by. The origin
+    worker carries the request and serves the engine stream data-direct over the fabric.
     """
+
+    def _relay(worker_id: str, frame_kind: str, payload: dict[str, Any]) -> bool:
+        worker = worker_registry.get_worker(worker_id)
+        if worker is None:
+            return False
+        worker_registry.publish_mediated_op(
+            worker,
+            MediatedOpMessage(
+                worker_id=worker_id, frame_kind=frame_kind, payload=payload
+            ),
+        )
+        return True
 
     def _node_of_worker(worker_id: str | None) -> str | None:
         if worker_id is None:
@@ -147,37 +155,25 @@ def wire_native_delivery(
         worker = worker_registry.get_worker(worker_id)
         return worker.node_id if worker is not None else None
 
-    def _origin_node_of_task(task_id: str) -> str | None:
+    def _origin_worker_of_task(task_id: str) -> str | None:
         record = runtime.get_record(task_id)
-        return _node_of_worker(record.assigned_worker) if record else None
+        return record.assigned_worker if record else None
 
-    def _node_of_replica(replica: ReplicaIncarnation) -> str | None:
+    def _serve_worker_of(replica: ReplicaIncarnation) -> str | None:
         if replica.serve_task_id is None:
             return None
         record = runtime.get_record(replica.serve_task_id)
-        return _node_of_worker(record.assigned_worker) if record else None
+        return record.assigned_worker if record else None
 
-    async def _exec_node_cmd(
-        node_id: str, command: CommandType, payload: dict[str, Any]
-    ) -> dict[str, Any]:
-        resp = await node_registry.exec_node_cmd(
-            node_id,
-            CommandMessage(command=command, payload=payload),
-            timeout=cmd_timeout_sec,
-        )
-        if not resp.success:
-            raise NativeTransportError(resp.message or "resident node command failed")
-        return resp.data or {}
-
-    resident_control.set_native_delivery(
-        NativeDeliveryDeps(
+    resident_control.set_worker_delivery(
+        ResidentWorkerDelivery(
+            relay=_relay,
+            origin_worker_of_task=_origin_worker_of_task,
+            serve_worker_of=_serve_worker_of,
+            node_of_worker=_node_of_worker,
             network=network,
-            transport=NativeTransport(_exec_node_cmd),
-            origin_node_of_task=_origin_node_of_task,
-            node_of_replica=_node_of_replica,
-            sidecar_bind_host=resident_cfg.sidecar_bind_host,
+            sessions=sessions,
             directly_routable=resident_cfg.sidecar_directly_routable,
             forward_api_key=resident_cfg.forward_api_key,
-            relay_only=resident_cfg.relay_only,
         )
     )

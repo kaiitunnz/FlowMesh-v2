@@ -37,7 +37,9 @@ from shared.tasks.specs import TaskSpecStrictBase
 from shared.tasks.task_type import TaskType
 from shared.tasks.worker_message import WorkerHardware, WorkerTaskMessage
 from worker.config import WorkerConfig
-from worker.lifecycle import Lifecycle, PendingEgressRequestStore
+from worker.egress import PendingEgressRequestStore
+from worker.lifecycle import Lifecycle
+from worker.resident import ResidentRequestStore
 
 type ExecutorTask = WorkerTaskMessage
 type TaskReference = WorkerTaskMessage | MergedChildTaskStrict
@@ -113,6 +115,12 @@ class Executor(ABC):
         if self._lifecycle is None:
             raise ExecutionError("executor has no worker lifecycle")
         return self._lifecycle.pending_egress_requests
+
+    def _resident_requests(self) -> ResidentRequestStore:
+        """The worker-private store for a captured resident boundary's raw request."""
+        if self._lifecycle is None:
+            raise ExecutionError("executor has no worker lifecycle")
+        return self._lifecycle.resident_requests
 
     def prepare(self) -> None:
         """Optional: called once before the first `run`.
