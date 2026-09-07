@@ -34,6 +34,11 @@ class _Control(_Recorder):
         self.calls.append("start")
 
 
+class _Ingress(_Recorder):
+    def reconcile_terminals(self) -> None:
+        self.calls.append("ingress.reconcile")
+
+
 def test_root_startup_loads_resident_capacity_before_the_runtime() -> None:
     calls: list[str] = []
     runtime, control, registry = _Runtime(calls), _Control(calls), _Registry(calls)
@@ -47,6 +52,25 @@ def test_root_startup_loads_resident_capacity_before_the_runtime() -> None:
         "bind_loop",
         "load_snapshot",
         "control.rehydrate",
+        "runtime.rehydrate",
+        "start",
+    ]
+
+
+def test_root_startup_reconciles_ingress_terminals_after_the_claim_store() -> None:
+    calls: list[str] = []
+    runtime, control, registry = _Runtime(calls), _Control(calls), _Registry(calls)
+    ingress = _Ingress(calls)
+    asyncio.run(
+        rehydrate_root_state(runtime, control, registry, ingress)  # type: ignore[arg-type]
+    )
+    # Ingress terminals replay after the claim store loads (so an UNCERTAIN claim from a
+    # crash window settles) and before the runtime re-drives suspended boundaries.
+    assert calls == [
+        "bind_loop",
+        "load_snapshot",
+        "control.rehydrate",
+        "ingress.reconcile",
         "runtime.rehydrate",
         "start",
     ]

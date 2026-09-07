@@ -61,7 +61,8 @@ def _ingress_request(
         invocation_id=invocation_id,
         idempotency_key=f"idm-{invocation_id}",
         task_id=invocation_id,
-        call_correlation="ingress",
+        # The edge fences an ingress correlation per invocation; the reap keys on it.
+        call_correlation=f"ingress/{invocation_id}",
         subject=InvocationSubject(
             kind=InvocationSubjectKind.INGRESS, id="prn-1", tenant=tenant
         ),
@@ -286,6 +287,62 @@ def test_a_redrive_reaps_every_deputy_it_touched():
         if kind == "resident_reap"
     }
     assert reaped == {"wkr-a", "wkr-b"}
+
+
+def test_a_terminal_reap_does_not_cancel_a_peer_ingress_on_a_shared_deputy():
+    # A reap is fenced per invocation by its call correlation, so terminalizing one
+    # ingress invocation never cancels a peer's live driver on a reused worker — the
+    # cross-invocation hazard the reap-all-deputies change would otherwise open.
+    svc, stores, _settled, relay = _build(deliver=True)
+    d1, d2 = _FakeDelivery(), _FakeDelivery()
+    # inv-1 drives on wkr-a then re-drives to wkr-b (both deputies injected).
+    asyncio.run(
+        svc._originate_ingress(
+            _ingress_request(d1, invocation_id="inv-1", origin_worker="wkr-a")
+        )
+    )
+    asyncio.run(
+        svc._originate_ingress(
+            _ingress_request(d1, invocation_id="inv-1", origin_worker="wkr-b")
+        )
+    )
+    # A different request, inv-2, lands on the reused wkr-a.
+    asyncio.run(
+        svc._originate_ingress(
+            _ingress_request(d2, invocation_id="inv-2", origin_worker="wkr-a")
+        )
+    )
+    cc1 = svc._attempts["inv-1"].call_correlation
+    cc2 = svc._attempts["inv-2"].call_correlation
+    assert cc1 != cc2  # fenced per invocation (equal under a constant correlation)
+
+    asyncio.run(
+        svc._on_ack(_ack(svc, ResidentBootstrapOutcome.ACKED, invocation_id="inv-1"))
+    )
+    manifest = OutcomeManifest(
+        content_digest="sha", size_bytes=2, media_type="text/plain"
+    )
+    asyncio.run(
+        svc._on_outcome(
+            _outcome(
+                svc,
+                ResidentStreamStatus.SUCCESS,
+                invocation_id="inv-1",
+                manifest=manifest,
+            )
+        )
+    )
+    # Every reap inv-1 sent carries inv-1's correlation, never inv-2's, so inv-2's live
+    # driver on the shared wkr-a is untouched and its claim is still credit-bearing.
+    reap_ccs = {
+        payload["call_correlation"]
+        for _w, kind, payload in relay.relays
+        if kind == "resident_reap"
+    }
+    assert reap_ccs == {cc1}
+    assert cc2 not in reap_ccs
+    assert svc._attempts.get("inv-2") is not None
+    assert stores.claims.by_invocation("inv-2")[0].holds_credit
 
 
 def test_workflow_and_ingress_terminals_do_not_overwrite():

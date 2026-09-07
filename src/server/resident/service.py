@@ -953,6 +953,12 @@ class ResidentCapacityControl:
             "resident delivery held uncertain (attempt %d): %s", count, detail
         )
         await asyncio.sleep(self._redrive_backoff)
+        if claim.state is ClaimState.TERMINAL:
+            # A terminal that raced the backoff (a cancel, or a duplicate/out-of-order
+            # settle) already released the credit; re-driving now would find no active
+            # claim and raise a successor, re-admitting the credit and duplicating the
+            # engine call.
+            return
         if ingress is not None:
             ingress.redrive()
         else:

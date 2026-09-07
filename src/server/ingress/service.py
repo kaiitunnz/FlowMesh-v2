@@ -38,7 +38,16 @@ from .state import IngressTerminal, IngressTerminalStatus, IngressTerminalStore
 # Selects a live worker to serve as an ingress request's origin deputy, or None.
 WorkerSelector = Callable[[], str | None]
 
-_CALL_CORRELATION = "ingress"
+# The worker keys its origin-driver slot and its reap by call correlation alone, so an
+# ingress correlation is fenced per invocation: stable across a re-drive of the same
+# invocation, yet a terminal reap of one invocation never touches a peer's live driver
+# on a reused worker. Distinct from the leaf and agent correlation namespaces.
+_CALL_CORRELATION_PREFIX = "ingress/"
+
+
+def _call_correlation(invocation_id: str) -> str:
+    return f"{_CALL_CORRELATION_PREFIX}{invocation_id}"
+
 
 _TERMINAL_STATUS = {
     ClaimTerminalReason.COMPLETED: IngressTerminalStatus.COMPLETED,
@@ -142,7 +151,7 @@ class _IngressStream:
             invocation_id=self._context.invocation_id,
             idempotency_key=self._context.idempotency_key,
             task_id=self._context.invocation_id,
-            call_correlation=_CALL_CORRELATION,
+            call_correlation=_call_correlation(self._context.invocation_id),
             subject=self._context.subject,
             dependency=self._context.dependency,
             profile=self._context.profile,

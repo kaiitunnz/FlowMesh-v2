@@ -128,6 +128,25 @@ def test_submit_injects_then_originates_and_streams_the_completion():
     assert control.originations[0].origin_worker == "wkr-1"
 
 
+def test_ingress_correlation_is_fenced_per_invocation():
+    # Each ingress request gets a distinct worker-lane correlation, so a terminal reap
+    # of one invocation never cancels a peer's driver on a reused worker (the worker
+    # keys its driver slot and reap by correlation alone).
+    def behavior(_control, origination: IngressOrigination) -> None:
+        origination.delivery.complete()
+
+    control = _FakeControl(behavior)
+    ingress = _ingress(control)
+    asyncio.run(_chunks(ingress.submit(_principal(), "open", "{}")))
+    asyncio.run(_chunks(ingress.submit(_principal(), "open", "{}")))
+
+    cc0 = control.originations[0].call_correlation
+    cc1 = control.originations[1].call_correlation
+    assert cc0 != cc1
+    assert cc0.startswith("ingress/") and cc1.startswith("ingress/")
+    assert cc0.endswith(control.originations[0].invocation_id)
+
+
 def test_no_deputy_available_releases_the_quota():
     control = _FakeControl(lambda *_: None)
     ingress = InferenceIngress(
