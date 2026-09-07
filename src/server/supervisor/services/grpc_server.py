@@ -14,6 +14,7 @@ from shared.grpc.supervisor.v1 import (
     supervisor_pb2,
     supervisor_pb2_grpc,
 )
+from shared.network.relay_frame import RelayFrame
 from shared.utils import new_worker_id
 
 from ... import env
@@ -23,6 +24,7 @@ from ...clients.redis import (
     SyncRedisClient,
     worker_key,
 )
+from ...resident.worker_bridge import ResidentWorkerBridge
 from ..adapters.base import WorkerAdapter, WorkerTokenType
 from ..registry import WorkerRegistry
 from ..schemas import WorkerStatus
@@ -97,6 +99,7 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
         task_listener: TaskListener,
         relay_service: RelayService,
         logger: logging.Logger,
+        resident_bridge: ResidentWorkerBridge | None = None,
     ) -> None:
         self._registry = registry
         self._task_listener = task_listener
@@ -104,6 +107,7 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
         self._redis = redis
         self._node_id = node_id
         self._node_alias = node_alias
+        self._resident_bridge = resident_bridge
         self._logger = logger
         # Guards _node_id and the registry-vs-rehome window against concurrent
         # RegisterWorker (grpc loop thread) and rebind_node (heartbeat thread).
@@ -244,6 +248,13 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
                     worker.set_status(WorkerStatus.RUNNING)
                 case "UNREGISTER":
                     unregistered = True
+                case "RESIDENT_FRAME" if self._resident_bridge is not None:
+                    # A resident data-plane frame rides the node-local reverse-relay to
+                    # its peer worker, never the control-event bus: publish it up to the
+                    # root bridge opaquely rather than forwarding it as a control event.
+                    frame = RelayFrame.from_wire(payload["payload"]["frame"])
+                    await self._resident_bridge.publish_up(frame)
+                    continue
             self._relay_service.add_event(payload)
         self._logger.info("Event stream closed for worker %s", worker_id)
         if registered and not unregistered:
@@ -304,6 +315,7 @@ class GrpcServer:
         task_listener: TaskListener,
         relay_service: RelayService,
         logger: logging.Logger,
+        resident_bridge: ResidentWorkerBridge | None = None,
     ) -> None:
         self._logger = logger
         self._server: grpc.aio.Server | None = None
@@ -315,6 +327,7 @@ class GrpcServer:
             task_listener,
             relay_service,
             logger,
+            resident_bridge=resident_bridge,
         )
         self._listen_addr = f"{host}:{port}"
 

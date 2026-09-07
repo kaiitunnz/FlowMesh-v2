@@ -298,7 +298,7 @@ def _run_supervisor(
     from ..network.listeners import NetworkPlaneListeners
     from ..network.reverse_relay import BinaryRedis
     from ..registries.node import NodeRegistry
-    from ..resident.relay_delivery import ResidentRelayEndpoint
+    from ..resident.worker_bridge import ResidentWorkerBridge
     from ..utils.logging import get_logger as _get_logger
     from .manager import WorkerManager
     from .registry import WorkerRegistry as WorkerAdapterRegistry
@@ -308,7 +308,6 @@ def _run_supervisor(
     from .services.lifecycle import Lifecycle
     from .services.relay_service import RelayService
     from .services.relay_uplink import RelayUplinkService
-    from .services.resident_deputy import ResidentDeputyService
     from .services.reverse_relay_attachment import ReverseRelayAttachment
     from .services.task_listener import TaskListener
 
@@ -398,7 +397,7 @@ def _run_supervisor(
         logger,
         capacity_change_callback=lifecycle.heartbeat_now,
     )
-    resident_deputy: ResidentDeputyService | None = None
+    resident_bridge: ResidentWorkerBridge | None = None
     resident_attachment: ReverseRelayAttachment | None = None
     if network_cfg.enabled:
         relay_redis = cast(
@@ -411,22 +410,16 @@ def _run_supervisor(
                 tls_ca_file=redis_cfg.tls_ca_file,
             ),
         )
-        relay_endpoint = ResidentRelayEndpoint(
+        resident_bridge = ResidentWorkerBridge(
             relay_redis,
             node_id,
-            window_bytes=network_cfg.relay_window_bytes,
-            logger=logger,
-        )
-        resident_deputy = ResidentDeputyService(
-            connect_budget_sec=network_cfg.connect_budget_sec,
-            endpoint=relay_endpoint,
-            relay_window_bytes=network_cfg.relay_window_bytes,
+            task_listener.enqueue_local,
             logger=logger,
         )
         resident_attachment = ReverseRelayAttachment(
             relay_redis,
             node_id,
-            relay_endpoint,
+            resident_bridge,
             owner=f"{node_id}:{os.getpid()}",
             logger=logger,
         )
@@ -437,7 +430,6 @@ def _run_supervisor(
         logger=logger,
         cmd_receiver=cmd_receiver,
         relay_uplink=relay_uplink,
-        resident_deputy=resident_deputy,
     )
     grpc_server = GrpcServer(
         grpc_cfg.host,
@@ -449,6 +441,7 @@ def _run_supervisor(
         task_listener=task_listener,
         relay_service=relay_service,
         logger=logger,
+        resident_bridge=resident_bridge,
     )
 
     network_listeners: NetworkPlaneListeners | None = None
@@ -525,8 +518,6 @@ def _run_supervisor(
             await resident_attachment.stop()
         if network_listeners is not None:
             await network_listeners.stop()
-        if resident_deputy is not None:
-            await resident_deputy.stop()
         await grpc_server.stop()
         await command_listener.stop()
         await worker_manager.stop()

@@ -91,7 +91,6 @@ def _control(stores: ResidentStores) -> ResidentCapacityControl:
         stores=stores,
         admission=AdmissionController(stores),
         lifecycle=LifecycleScaleManager(stores, limits=limits, admission_slots=2),
-        adapter=object(),  # type: ignore[arg-type]  # read accessors never touch it
         limits=limits,
         binding_resolver=lambda task_id: None,
         settle_cb=lambda *a, **k: True,
