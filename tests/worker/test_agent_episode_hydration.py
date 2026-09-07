@@ -17,7 +17,7 @@ from shared.outcome import OutcomeManifest, content_digest
 from shared.tasks.task_type import TaskType
 from tests.shared.outcome_helpers import InMemoryContentStore
 from tests.worker.factories import make_worker_config, make_worker_task_message
-from worker.executors import agent_episode_executor as aee
+from worker.executors import episode_support as es
 from worker.executors.agent_episode_executor import AgentEpisodeExecutor
 from worker.executors.base_executor import ExecutionError
 from worker.executors.harness import register_adapter
@@ -62,7 +62,7 @@ def test_reference_outcome_is_hydrated_before_injection(
 ) -> None:
     store = InMemoryContentStore()
     manifest = store.materialize("idm-1", b"the-result", media_type="application/json")
-    monkeypatch.setattr(aee, "build_content_store", lambda base_url: store)
+    monkeypatch.setattr(es, "build_content_store", lambda base_url: store)
     adapter = _RecordingAdapter()
     register_adapter("fake", lambda backend, task, config, facade: adapter)
 
@@ -83,7 +83,7 @@ def test_hydration_failure_fails_the_step(
         size_bytes=6,
         media_type="application/json",
     )
-    monkeypatch.setattr(aee, "build_content_store", lambda base_url: store)
+    monkeypatch.setattr(es, "build_content_store", lambda base_url: store)
     register_adapter("fake", lambda backend, task, config, facade: _RecordingAdapter())
 
     ex = AgentEpisodeExecutor(make_worker_config())

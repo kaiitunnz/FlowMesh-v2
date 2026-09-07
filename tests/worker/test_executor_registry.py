@@ -31,6 +31,7 @@ class TestExecutorRegistry:
             "default",
             "rag",
             "agent_episode",
+            "service_leaf",
             "echo",
             "data_profiling",
             "data_retrieval",
@@ -100,8 +101,10 @@ class _StubInference(_StubExecutor):
 
 class TestSupportedTaskTypes:
     def test_every_available_executor_declares_task_types(self) -> None:
+        # service_leaf is selected by the service-episode dispatch signal, not by
+        # task-type capability, so it deliberately advertises none.
         for key, cls in EXECUTOR_REGISTRY.items():
-            if cls is not None:
+            if cls is not None and key != "service_leaf":
                 assert cls.supported_task_types, f"{key} declares no task types"
 
     def test_default_executor_serves_inference_and_embedding(self) -> None:
