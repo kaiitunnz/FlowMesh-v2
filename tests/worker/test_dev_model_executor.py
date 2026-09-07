@@ -36,9 +36,15 @@ def _running_server(
     forward_url: str | None = None,
     model_name: str = "test-model",
     client: httpx.Client | None = None,
+    max_loras: int | None = None,
 ) -> Iterator[str]:
     server = _DevModelHTTPServer(
-        ("127.0.0.1", 0), _DevModelHandler, forward_url, model_name, client
+        ("127.0.0.1", 0),
+        _DevModelHandler,
+        forward_url,
+        model_name,
+        client,
+        max_loras=max_loras,
     )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -191,6 +197,50 @@ class TestCannedResponses:
                 timeout=5.0,
             )
         assert resp.status_code == 404
+
+    def test_a_full_adapter_registry_refuses_a_new_distinct_load(self) -> None:
+        with _running_server(max_loras=1) as base:
+            first = httpx.post(
+                f"{base}/v1/load_lora_adapter",
+                json={"lora_name": "lora-a", "lora_path": "hf/lora-a"},
+                timeout=5.0,
+            )
+            second = httpx.post(
+                f"{base}/v1/load_lora_adapter",
+                json={"lora_name": "lora-b", "lora_path": "hf/lora-b"},
+                timeout=5.0,
+            )
+        assert first.status_code == 200
+        assert second.status_code == 400  # no free slot until one is unloaded
+
+    def test_unload_frees_a_slot_for_a_later_distinct_load(self) -> None:
+        with _running_server(max_loras=1) as base:
+            httpx.post(
+                f"{base}/v1/load_lora_adapter",
+                json={"lora_name": "lora-a", "lora_path": "hf/lora-a"},
+                timeout=5.0,
+            )
+            unloaded = httpx.post(
+                f"{base}/v1/unload_lora_adapter",
+                json={"lora_name": "lora-a"},
+                timeout=5.0,
+            )
+            reused = httpx.post(
+                f"{base}/v1/load_lora_adapter",
+                json={"lora_name": "lora-b", "lora_path": "hf/lora-b"},
+                timeout=5.0,
+            )
+        assert unloaded.status_code == 200
+        assert reused.status_code == 200  # the freed slot admits the new adapter
+
+    def test_unload_of_an_absent_adapter_is_idempotent(self) -> None:
+        with _running_server(max_loras=1) as base:
+            resp = httpx.post(
+                f"{base}/v1/unload_lora_adapter",
+                json={"lora_name": "never-loaded"},
+                timeout=5.0,
+            )
+        assert resp.status_code == 200
 
 
 class _UpstreamHandler(BaseHTTPRequestHandler):

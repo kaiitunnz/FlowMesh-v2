@@ -214,6 +214,26 @@ def test_embedding_dev_model_substrate_needs_no_serving_flag() -> None:
     assert "vllm" not in spec["model"]
 
 
+def test_chat_dev_model_substrate_models_a_finite_adapter_registry() -> None:
+    runtime: Any = _FakeRuntime()
+    config = ResidentCapacityConfig(substrate="dev_model", adapter_slots=2)
+
+    RESOURCE_REGISTRARS.clear()
+    try:
+        asyncio.run(
+            materialize_resident_replica(
+                runtime, _SYSTEM, config, _FAMILY, _REPLICA, _LOGGER
+            )
+        )
+    finally:
+        RESOURCE_REGISTRARS.clear()
+
+    assert runtime.register_call is not None
+    spec = json.loads(runtime.register_call[2])["spec"]
+    assert spec["taskType"] == "dev_model"
+    assert spec["model"]["vllm"] == {"max_loras": 2}
+
+
 def test_materialization_survives_without_registered_registrars() -> None:
     runtime = _FakeRuntime()
     config = ResidentCapacityConfig(substrate="dev_model")

@@ -37,6 +37,7 @@ _FORWARD_TIMEOUT_SEC = 120.0
 _MAX_BODY_BYTES = 10 * 1024 * 1024
 _ROUTES = frozenset({"/v1/chat/completions", "/v1/responses", "/v1/embeddings"})
 _LOAD_ADAPTER_ROUTE = "/v1/load_lora_adapter"
+_UNLOAD_ADAPTER_ROUTE = "/v1/unload_lora_adapter"
 _CANNED_TEXT = "This is a deterministic dev_model response."
 _CANNED_EMBEDDING = [0.0, 0.0, 0.0, 0.0]
 
@@ -124,12 +125,14 @@ class _DevModelHTTPServer(ThreadingHTTPServer):
         model_name: str,
         client: httpx.Client | None,
         response_delay_sec: float = 0.0,
+        max_loras: int | None = None,
     ) -> None:
         super().__init__(address, handler)
         self.forward_url = forward_url
         self.model_name = model_name
         self.client = client
         self.response_delay_sec = max(0.0, response_delay_sec)
+        self.max_loras = max_loras
         self.loaded_adapters: set[str] = set()
 
 
@@ -147,12 +150,12 @@ class _DevModelHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _load_adapter(self) -> None:
+    def _adapter_name(self) -> tuple[str, bytes] | None:
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
             self._write_json(400, {"error": "invalid Content-Length"})
-            return
+            return None
         body = self.rfile.read(length) if 0 < length <= _MAX_BODY_BYTES else b""
         try:
             payload = json.loads(body or b"{}")
@@ -161,25 +164,60 @@ class _DevModelHandler(BaseHTTPRequestHandler):
         name = payload.get("lora_name") if isinstance(payload, dict) else None
         if not isinstance(name, str) or not name:
             self._write_json(400, {"error": "lora_name is required"})
-            return
+            return None
+        return name, body
+
+    def _forward_adapter(self, route: str, body: bytes) -> None:
         server = self.server
-        server.loaded_adapters.add(name)
         if server.forward_url is not None and server.client is not None:
-            # Forward the load to the upstream so a real serve loads the adapter too; a
-            # non-fatal upstream response (already loaded, or a stand-in) is tolerated.
+            # Mirror the load/unload to the upstream so a real serve tracks the same
+            # registry; a non-fatal upstream response (already loaded, or gone) is
+            # tolerated.
             with contextlib.suppress(httpx.RequestError):
                 server.client.post(
-                    server.forward_url.rstrip("/") + _LOAD_ADAPTER_ROUTE,
+                    server.forward_url.rstrip("/") + route,
                     content=body,
                     headers={"Content-Type": "application/json"},
                     timeout=_FORWARD_TIMEOUT_SEC,
                 )
+
+    def _load_adapter(self) -> None:
+        parsed = self._adapter_name()
+        if parsed is None:
+            return
+        name, body = parsed
+        server = self.server
+        if (
+            server.max_loras is not None
+            and name not in server.loaded_adapters
+            and len(server.loaded_adapters) >= server.max_loras
+        ):
+            # A finite adapter registry, like a real engine's slot budget: a new
+            # distinct adapter cannot load until an occupied slot is unloaded. This is
+            # what the last-holder unload frees, so a lifetime-distinct sequence serves.
+            self._write_json(400, {"error": f"no free LoRA slot for {name!r}"})
+            return
+        server.loaded_adapters.add(name)
+        self._forward_adapter(_LOAD_ADAPTER_ROUTE, body)
+        self._write_json(200, {"status": "success", "lora_name": name})
+
+    def _unload_adapter(self) -> None:
+        parsed = self._adapter_name()
+        if parsed is None:
+            return
+        name, body = parsed
+        # Idempotent: an adapter already gone is not an error; the slot frees anyway.
+        self.server.loaded_adapters.discard(name)
+        self._forward_adapter(_UNLOAD_ADAPTER_ROUTE, body)
         self._write_json(200, {"status": "success", "lora_name": name})
 
     def do_POST(self) -> None:
         path = self.path.rstrip("/") or "/"
         if path == _LOAD_ADAPTER_ROUTE:
             self._load_adapter()
+            return
+        if path == _UNLOAD_ADAPTER_ROUTE:
+            self._unload_adapter()
             return
         if path not in _ROUTES:
             self._write_json(404, {"error": f"unknown route {self.path}"})
@@ -279,6 +317,9 @@ class DevModelExecutor(Executor):
             parse_float_env("SERVE_MAX_TTL_SEC", _MAX_TTL_SEC),
         )
         access_mode = spec.accessMode or "forward"
+        vllm = (spec.model.vllm if spec.model is not None else None) or {}
+        raw_max_loras = vllm.get("max_loras")
+        max_loras = raw_max_loras if isinstance(raw_max_loras, int) else None
         bind_host = (
             "0.0.0.0" if access_mode == "direct" else "127.0.0.1"
         )  # nosec B104 - direct mode is an explicit opt-in to a client-reachable endpoint
@@ -300,6 +341,7 @@ class DevModelExecutor(Executor):
                 model_id,
                 client,
                 self._config.dev_model_response_delay_sec,
+                max_loras,
             )
         except BaseException:
             if client is not None:
