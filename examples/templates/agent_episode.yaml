@@ -5,11 +5,11 @@ metadata:
   owner: researcher
   annotations:
     description: >-
-      Agent driven by the Codex app-server harness, bound to a GPU-free dev_model
-      endpoint for a deterministic run. Codex runs a real agent turn; its model
-      turns egress on the agent's own worker through the worker-local Responses
-      facade to the bound endpoint. Serve a dev_model task first and set
-      model_binding.url to its published endpoint.
+      The canonical agent example: the Codex app-server harness driving a real
+      agent turn, whose model turns egress on the agent's own worker through the
+      worker-local Responses facade to model_binding.url. Bound to a GPU-free
+      dev_model endpoint for a deterministic run; serve a dev_model task first and
+      set model_binding.url to its published endpoint.
 
 spec:
   taskType: agent
@@ -44,4 +44,3 @@ spec:
       type: local
     artifacts:
       - results.json
-      - agent_output.txt

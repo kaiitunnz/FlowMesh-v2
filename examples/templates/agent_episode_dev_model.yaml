@@ -6,10 +6,10 @@ metadata:
   annotations:
     description: >-
       Codex-harness agent whose model boundary fronts a GPU-free dev_model serve
-      task. Codex runs a real agent turn; its model calls route through the
-      FlowMesh agent-model gateway, which forwards to the dev_model endpoint. Run a
+      task. Codex runs a real agent turn; its model turns egress on the agent's own
+      worker through the worker-local Responses facade to model_binding.url. Run a
       dev_model serve task first and set model_binding.url to its published
-      endpoint; point harness.params.base_url at your FlowMesh agent-model gateway.
+      endpoint.
 
 spec:
   taskType: agent
@@ -24,9 +24,6 @@ spec:
   harness:
     backend: codex
     version: v1
-    params:
-      base_url: http://FLOWMESH_GATEWAY_HOST:PORT
-      model: dev-model
 
   model_binding:
     mode: openai
@@ -47,4 +44,3 @@ spec:
       type: local
     artifacts:
       - results.json
-      - agent_output.txt

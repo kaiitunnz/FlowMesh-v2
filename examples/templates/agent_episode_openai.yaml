@@ -6,11 +6,10 @@ metadata:
   annotations:
     description: >-
       Codex-harness agent bound to an external OpenAI-compatible model. Codex runs
-      a real agent turn; its model calls route through the FlowMesh agent-model
-      gateway, which forwards to model_binding.url with the workflow's own inline
-      api_key (vaulted server-side at submission). Fill model_binding url/model/
-      api_key with your provider's values; point harness.params.base_url at your
-      FlowMesh agent-model gateway.
+      a real agent turn; its model turns egress on the agent's own worker through
+      the worker-local Responses facade to model_binding.url, using the workflow's
+      own inline api_key (vaulted server-side at submission). Fill model_binding
+      url/model/api_key with your provider's values.
 
 spec:
   taskType: agent
@@ -25,9 +24,6 @@ spec:
   harness:
     backend: codex
     version: v1
-    params:
-      base_url: http://FLOWMESH_GATEWAY_HOST:PORT
-      model: gpt-4o-mini
 
   model_binding:
     mode: openai
@@ -48,4 +44,3 @@ spec:
       type: local
     artifacts:
       - results.json
-      - agent_output.txt

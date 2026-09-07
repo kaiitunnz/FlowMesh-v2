@@ -43,4 +43,3 @@ spec:
       type: local
     artifacts:
       - results.json
-      - agent_output.txt
