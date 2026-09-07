@@ -16,7 +16,11 @@ from google.protobuf.struct_pb2 import Struct
 
 from shared._version import FLOWMESH_RELEASE_VERSION
 from shared.grpc.supervisor.v1 import supervisor_pb2, supervisor_pb2_grpc
-from shared.resident.reports import ResidentBootstrapAck, ResidentOpOutcome
+from shared.resident.reports import (
+    ResidentBootstrapAck,
+    ResidentOpOutcome,
+    ResidentStreamChunk,
+)
 from shared.schemas.event import Event, TaskEvent, WorkerEvent, serialize_event
 from shared.schemas.worker import SSHLimits, WorkerCapabilities
 from shared.tasks.worker_message import (
@@ -661,5 +665,18 @@ class SupervisorClient:
             type="RESIDENT_OP_OUTCOME",
             worker_id=self.worker_id,
             payload={"outcome": outcome.model_dump(mode="json")},
+        )
+        self._event_queue.put(serialize_event(event))
+
+    def push_resident_stream_chunk(self, chunk: ResidentStreamChunk) -> None:
+        """Tee one authorized response frame of an ingress request up to control."""
+        if self._stub is None:
+            raise RuntimeError("Supervisor gRPC client not started")
+        if not self._event_ready.wait():
+            raise RuntimeError("Supervisor event stream not ready")
+        event = WorkerEvent(
+            type="RESIDENT_STREAM_CHUNK",
+            worker_id=self.worker_id,
+            payload={"chunk": chunk.model_dump(mode="json")},
         )
         self._event_queue.put(serialize_event(event))

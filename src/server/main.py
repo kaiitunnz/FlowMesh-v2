@@ -22,6 +22,7 @@ if __name__ == "__main__" and __package__ is None:
 
 from shared._version import FLOWMESH_RELEASE_VERSION
 from shared.outcome import ManifestRef, OutcomeCarrier
+from shared.tasks.worker_message import WorkerStatus
 
 from .auth import reconcile_resources, resolve_system_principal
 from .clients import RedisClient
@@ -29,6 +30,12 @@ from .clients.redis import resident_relay_client
 from .config import NodeRole, ServerConfig
 from .dispatcher.factory import create_dispatcher
 from .hooks import register
+from .ingress import (
+    AliasCatalog,
+    InferenceIngress,
+    IngressTerminalStore,
+    PrincipalQuota,
+)
 from .network.rendezvous import RootCursorStore, RootRendezvousBridge
 from .network.reverse_relay import (
     BinaryRedis,
@@ -148,6 +155,7 @@ AGENT_MODEL_GATEWAY = None
 FABRIC_TOOL_BROKER = None
 RESIDENT_CONTROL = None
 RESIDENT_REGISTRY = None
+INFERENCE_INGRESS = None
 NETWORK_PLANE = None
 RESIDENT_BRIDGE = None
 RESIDENT_BRIDGE_TASK = None
@@ -211,6 +219,7 @@ if IS_ROOT_NODE:
             originate=RESIDENT_CONTROL.originate,
             on_ack=RESIDENT_CONTROL.on_bootstrap_ack,
             on_outcome=RESIDENT_CONTROL.on_outcome,
+            on_stream_chunk=RESIDENT_CONTROL.on_stream_chunk,
         )
 
     _relay_redis: BinaryRedis | None = None
@@ -256,6 +265,40 @@ if IS_ROOT_NODE:
             runtime=RUNTIME,
             sessions=RelaySessionStore(_relay_redis),
             resident_cfg=config.orchestration.resident,
+        )
+
+    if (
+        config.orchestration.inference_ingress.enabled
+        and RESIDENT_CONTROL is not None
+        and RESIDENT_REGISTRY is not None
+        and WORKER_REGISTRY is not None
+    ):
+        ingress_cfg = config.orchestration.inference_ingress
+        ingress_registry = RESIDENT_REGISTRY
+        ingress_workers = WORKER_REGISTRY
+        ingress_terminals = IngressTerminalStore()
+        if (stored := ingress_registry.load_ingress_snapshot()) is not None:
+            ingress_terminals.load_snapshot(stored)
+
+        def _persist_ingress() -> None:
+            ingress_registry.save_ingress_snapshot(ingress_terminals.to_snapshot())
+
+        _LIVE_WORKER_STATES = (WorkerStatus.IDLE, WorkerStatus.BUSY)
+
+        def _select_ingress_deputy() -> str | None:
+            for info in ingress_workers.list_workers():
+                if not info.stale and info.status in _LIVE_WORKER_STATES:
+                    return info.id
+            return None
+
+        INFERENCE_INGRESS = InferenceIngress(
+            catalog=AliasCatalog.from_json(ingress_cfg.aliases_json),
+            quota=PrincipalQuota(ingress_cfg.max_concurrent_per_principal),
+            terminals=ingress_terminals,
+            control=RESIDENT_CONTROL,
+            select_worker=_select_ingress_deputy,
+            persist=_persist_ingress,
+            logger=logger,
         )
 
     DISPATCHER = create_dispatcher(
@@ -584,6 +627,7 @@ app.state.ssh_audit = SSH_AUDIT_SERVICE
 app.state.ssh_proxy_enabled = config.port_forward.ssh_proxy_enabled and IS_ROOT_NODE
 app.state.serve_proxy_enabled = config.port_forward.serve_proxy_enabled and IS_ROOT_NODE
 app.state.resident_control = RESIDENT_CONTROL
+app.state.inference_ingress = INFERENCE_INGRESS
 app.state.network_plane = NETWORK_PLANE
 app.state.content_store = CONTENT_STORE
 # Started in lifespan on the root node when the resident relay bridge is enabled.
@@ -606,6 +650,7 @@ if IS_ROOT_NODE:
     app.include_router(v1.ssh.router, prefix=v1_prefix)
     app.include_router(v1.serve.router, prefix=v1_prefix)
     app.include_router(v1.resident.router, prefix=v1_prefix)
+    app.include_router(v1.inference.router, prefix=v1_prefix)
     app.include_router(v1.network.router, prefix=v1_prefix)
     app.include_router(v1.system.router, prefix=v1_prefix)
     app.include_router(v1.traces.router, prefix=v1_prefix)

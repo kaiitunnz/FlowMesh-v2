@@ -12,7 +12,11 @@ from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlparse
 
-from shared.resident.reports import ResidentBootstrapAck, ResidentOpOutcome
+from shared.resident.reports import (
+    ResidentBootstrapAck,
+    ResidentOpOutcome,
+    ResidentStreamChunk,
+)
 from shared.schemas.command import InterruptMessage
 from shared.schemas.event import (
     Event,
@@ -741,6 +745,10 @@ class EventMonitor:
             case "RESIDENT_OP_OUTCOME":
                 self._runtime.on_resident_outcome(
                     ResidentOpOutcome.model_validate(event.payload["outcome"])
+                )
+            case "RESIDENT_STREAM_CHUNK":
+                self._runtime.on_resident_stream_chunk(
+                    ResidentStreamChunk.model_validate(event.payload["chunk"])
                 )
             case "UNREGISTER":
                 worker_id = (event.worker_id or "").strip()

@@ -106,6 +106,10 @@ def resident_cs_key() -> str:
     return "resident:cs"
 
 
+def ingress_cs_key() -> str:
+    return "ingress:cs"
+
+
 def task_state_key(task_id: str) -> str:
     return f"task:{task_id}:state"
 

@@ -1,5 +1,6 @@
 from . import (
     content,
+    inference,
     network,
     nodes,
     resident,
@@ -16,6 +17,7 @@ from . import (
 
 __all__ = [
     "content",
+    "inference",
     "network",
     "nodes",
     "resident",

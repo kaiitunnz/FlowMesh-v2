@@ -30,7 +30,11 @@ from .selection import (
     SelectionStrategy,
     build_selection_strategy,
 )
-from .service import ResidentCapacityControl
+from .service import (
+    IngressDelivery,
+    IngressOrigination,
+    ResidentCapacityControl,
+)
 from .state import (
     CREDIT_BEARING_CLAIM_STATES,
     SERVABLE_REPLICA_STATES,
@@ -100,6 +104,8 @@ __all__ = [
     "ReplicaIncarnation",
     "ReplicaState",
     "ReportStore",
+    "IngressDelivery",
+    "IngressOrigination",
     "ResidentCapacityControl",
     "ResidentPolicyLimits",
     "ResidentSnapshot",

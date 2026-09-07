@@ -222,8 +222,10 @@ class Runner:
             push_frame=client.push_resident_frame,
             report_ack=client.push_resident_ack,
             report_outcome=client.push_resident_outcome,
+            report_stream_chunk=client.push_resident_stream_chunk,
             content_store=self._content_store,
             peek_request=self.lifecycle.resident_requests.peek,
+            put_request=self.lifecycle.resident_requests.put,
             delete_request=self.lifecycle.resident_requests.delete,
             logger=self.logger,
         )

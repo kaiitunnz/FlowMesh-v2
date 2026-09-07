@@ -22,7 +22,11 @@ from shared.harness import (
     ServiceLeafEpisodeDispatch,
 )
 from shared.outcome import OutcomeManifest
-from shared.resident.reports import ResidentBootstrapAck, ResidentOpOutcome
+from shared.resident.reports import (
+    ResidentBootstrapAck,
+    ResidentOpOutcome,
+    ResidentStreamChunk,
+)
 from shared.schemas.command import InterruptMessage, MediatedOpMessage
 from shared.schemas.result import ResultEnvelope, result_file_path
 from shared.tasks import TaskEnvelopeTemplate
@@ -198,6 +202,7 @@ class TaskRuntime:
         self._resident_originate: Callable[[ToolInvocationEnvelope], None] | None = None
         self._resident_ack: Callable[[ResidentBootstrapAck], None] | None = None
         self._resident_outcome: Callable[[ResidentOpOutcome], None] | None = None
+        self._resident_stream_chunk: Callable[[ResidentStreamChunk], None] | None = None
         # Facade boundaries the agent-model gateway captured server-side during an
         # episode's model turn, keyed by task; the completion path reroutes the clean
         # turn-completion into the pending boundary rather than settling it.
@@ -1362,6 +1367,11 @@ class TaskRuntime:
         if self._resident_outcome is not None:
             self._resident_outcome(outcome)
 
+    def on_resident_stream_chunk(self, chunk: ResidentStreamChunk) -> None:
+        """Relay an ingress request's teed response frame to its edge."""
+        if self._resident_stream_chunk is not None:
+            self._resident_stream_chunk(chunk)
+
     def _op_permit_budget(self, interface: str) -> tuple[int, float, int]:
         """The (max_results, timeout, result_char_cap) budget a permit runs within."""
         if interface == MODEL_INTERFACE:
@@ -1598,11 +1608,13 @@ class TaskRuntime:
         originate: Callable[[ToolInvocationEnvelope], None],
         on_ack: Callable[[ResidentBootstrapAck], None],
         on_outcome: Callable[[ResidentOpOutcome], None],
+        on_stream_chunk: Callable[[ResidentStreamChunk], None] | None = None,
     ) -> None:
         """Install the worker-originated resident origination and report handlers."""
         self._resident_originate = originate
         self._resident_ack = on_ack
         self._resident_outcome = on_outcome
+        self._resident_stream_chunk = on_stream_chunk
 
     def set_resident_terminal_hook(self, hook: Callable[[str, bool], None]) -> None:
         """Install the consumer that releases a resident admission credit on DS

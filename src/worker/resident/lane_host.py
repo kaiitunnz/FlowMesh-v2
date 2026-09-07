@@ -23,7 +23,11 @@ from shared.resident.contracts import (
     RouteAuthorization,
 )
 from shared.resident.gate import LoadEvidence
-from shared.resident.reports import ResidentBootstrapAck, ResidentOpOutcome
+from shared.resident.reports import (
+    ResidentBootstrapAck,
+    ResidentOpOutcome,
+    ResidentStreamChunk,
+)
 
 from .engine import EngineOpen, HttpEngineDelivery
 from .origin_driver import ResidentOriginDriver, ResidentOriginRequest
@@ -32,10 +36,13 @@ from .transport import ResidentFrameSink
 
 # Peeks the worker-private raw request for a captured resident boundary, or None.
 RequestLookup = Callable[[str, str], str | None]
+# Puts a worker-private raw request an ingress edge injects for its designated deputy.
+RequestPut = Callable[[str, str, str], None]
 # Drops the worker-private raw request once its boundary reaches a fenced terminal.
 RequestDelete = Callable[[str, str], None]
 AckSink = Callable[[ResidentBootstrapAck], None]
 OutcomeSink = Callable[[ResidentOpOutcome], None]
+StreamChunkSink = Callable[[ResidentStreamChunk], None]
 
 
 class _EventFrameSink:
@@ -57,8 +64,10 @@ class ResidentLaneHost:
         push_frame: Callable[[dict[str, Any]], None],
         report_ack: AckSink,
         report_outcome: OutcomeSink,
+        report_stream_chunk: StreamChunkSink,
         content_store: FabricContentStore | None,
         peek_request: RequestLookup,
+        put_request: RequestPut,
         delete_request: RequestDelete,
         engine_open: EngineOpen | None = None,
         engine_timeout_sec: float = 300.0,
@@ -67,8 +76,10 @@ class ResidentLaneHost:
         self._push_frame = push_frame
         self._report_ack = report_ack
         self._report_outcome = report_outcome
+        self._report_stream_chunk = report_stream_chunk
         self._content_store = content_store
         self._peek_request = peek_request
+        self._put_request = put_request
         self._delete_request = delete_request
         self._engine_open = engine_open or HttpEngineDelivery(
             timeout_sec=engine_timeout_sec
@@ -93,6 +104,7 @@ class ResidentLaneHost:
             content_store=self._content_store,
             report_ack=self._report_ack,
             report_outcome=self._report_outcome,
+            report_stream_chunk=self._report_stream_chunk,
             logger=self._logger,
         )
         self._replica = ResidentReplicaSidecar(
@@ -123,7 +135,9 @@ class ResidentLaneHost:
 
     def route(self, frame_kind: str, frame: dict[str, Any]) -> bool:
         """Marshal one resident control frame onto the lane loop; return handled."""
-        if frame_kind == "resident_handoff":
+        if frame_kind == "resident_request_inject":
+            self._loop.call_soon_threadsafe(self._inject, frame)
+        elif frame_kind == "resident_handoff":
             self._loop.call_soon_threadsafe(self._begin, frame)
         elif frame_kind == "resident_authorization":
             self._loop.call_soon_threadsafe(self._authorize, frame)
@@ -141,6 +155,16 @@ class ResidentLaneHost:
             return False
         return True
 
+    def _inject(self, frame: dict[str, Any]) -> None:
+        # An ingress edge injects the raw request into this designated deputy's private
+        # custody before the handoff arrives, so the origin driver peeks it like a
+        # worker that captured its own boundary. The raw request never enters a fact.
+        self._put_request(
+            str(frame["task_id"]),
+            str(frame["call_correlation"]),
+            str(frame["request"]),
+        )
+
     def _begin(self, frame: dict[str, Any]) -> None:
         if self._origin is None:
             return
@@ -153,6 +177,7 @@ class ResidentLaneHost:
                 session_id=str(frame["session_id"]),
                 handoff=handoff,
                 request_payload=request,
+                tee=bool(frame.get("tee")),
             )
         )
 

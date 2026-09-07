@@ -67,3 +67,20 @@ class ResidentOpOutcome(BaseModel):
     status: ResidentStreamStatus
     manifest: OutcomeManifest | None = None
     error: str | None = None
+
+
+class ResidentStreamChunk(BaseModel):
+    """One authorized response frame teed to a live ingress request's client.
+
+    An ingress request has no continuation to resume, so the origin worker tees each
+    response frame to control as it streams — in addition to assembling and
+    materializing the completion — and control relays the opaque frame to the client
+    unparsed. The payload is opaque bytes-as-text; control and ingress never parse it.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    invocation_id: str
+    session_id: str
+    seq: int
+    payload: str

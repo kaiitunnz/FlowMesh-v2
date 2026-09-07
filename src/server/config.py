@@ -463,6 +463,45 @@ class ResidentCapacityConfig:
 
 
 @dataclass
+class InferenceIngressConfig:
+    """The controlled external inference ingress edge's policy.
+
+    ``aliases_json`` is the deployment-published alias catalog (read from
+    ``INFERENCE_INGRESS_ALIASES_FILE`` or supplied inline), which maps a tenant-visible
+    alias to a resident service family and its authorized tenants and request bounds. A
+    client selects only an alias; it never names a model image, worker, endpoint, or
+    routing policy. ``max_concurrent_per_principal`` bounds a principal's in-flight
+    ingress requests at the edge.
+    """
+
+    enabled: bool = False
+    aliases_json: str = ""
+    max_concurrent_per_principal: int = 8
+
+    @classmethod
+    def from_env(cls) -> "InferenceIngressConfig":
+        prefix = "INFERENCE_INGRESS_"
+        enabled = parse_bool_env(f"{prefix}ENABLED", False)
+        inline = _env_or_none(f"{prefix}ALIASES")
+        path = _env_or_none(f"{prefix}ALIASES_FILE")
+        aliases_json = inline or ""
+        if path:
+            aliases_json = Path(path).expanduser().read_text(encoding="utf-8")
+        if enabled and not aliases_json.strip():
+            raise ValueError(
+                "INFERENCE_INGRESS_ENABLED requires a published alias catalog: set "
+                "INFERENCE_INGRESS_ALIASES_FILE or INFERENCE_INGRESS_ALIASES"
+            )
+        return cls(
+            enabled=enabled,
+            aliases_json=aliases_json,
+            max_concurrent_per_principal=max(
+                1, parse_int_env(f"{prefix}MAX_CONCURRENT_PER_PRINCIPAL") or 8
+            ),
+        )
+
+
+@dataclass
 class WebSearchConfig:
     """The fabric web-search tool's control-plane policy metadata.
 
@@ -581,15 +620,24 @@ class OrchestrationConfig:
     web_search: WebSearchConfig = field(default_factory=WebSearchConfig)
     resident: ResidentCapacityConfig = field(default_factory=ResidentCapacityConfig)
     network: NetworkPlaneConfig = field(default_factory=NetworkPlaneConfig)
+    inference_ingress: InferenceIngressConfig = field(
+        default_factory=InferenceIngressConfig
+    )
 
     @classmethod
     def from_env(cls) -> "OrchestrationConfig":
         resident = ResidentCapacityConfig.from_env()
         network = NetworkPlaneConfig.from_env()
+        inference_ingress = InferenceIngressConfig.from_env()
         if resident.enabled and not network.enabled:
             raise ValueError(
                 "RESIDENT_CAPACITY_ENABLED requires NETWORK_PLANE_ENABLED: resident "
                 "capacity runs on the network plane and has no in-server execution path"
+            )
+        if inference_ingress.enabled and not resident.enabled:
+            raise ValueError(
+                "INFERENCE_INGRESS_ENABLED requires RESIDENT_CAPACITY_ENABLED: the "
+                "ingress admits through the same resident claim gate as a workflow"
             )
         return cls(
             max_scope_depth=parse_int_env("ORCHESTRATOR_MAX_SCOPE_DEPTH"),
@@ -608,6 +656,7 @@ class OrchestrationConfig:
             web_search=WebSearchConfig.from_env(),
             resident=resident,
             network=network,
+            inference_ingress=inference_ingress,
         )
 
 
