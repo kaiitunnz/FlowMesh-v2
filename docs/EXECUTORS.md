@@ -188,3 +188,29 @@ recovers the same identities. The facade reports the group to control, which rec
 the episode's next completion routes the members, and returns Codex a clean summary in
 place of the raw calls. A search member routes to the same worker egress by its digest; a
 spawn member admits a child region.
+
+## Resident service-backed leaves
+
+An inference or embedding leaf declares a resident service binding with `spec.service`
+(`{mode: resident}`, optionally `service_model_ref` and `isolation`) to consume a
+FlowMesh-served model from resident capacity instead of loading one in the worker. The
+binding normalizes to the same service dependency an Agent's resident model binding uses,
+so both pin one plan-derived service-family requirement and a required residency intent,
+and both raise the same control-admitted `ServiceClaim`. A resident inference leaf carries
+no worker-local GPU requirement, since its model runs on the replica.
+
+The leaf runs through the `ServiceLeafExecutor` as a run-to-yield episode with no harness:
+its first step builds the chat request from `spec.inference`/`spec.data` (an explicit
+`messages` array or a prompt), keeps it in worker-private resident custody, and yields one
+resident model boundary carrying only its digest. The fabric admits the claim and drives
+the worker-originated resident protocol to the replica exactly as for an Agent resident
+call; the settled completion is injected on a resume and becomes the leaf's result. The
+resident-request capture and reference-backed outcome hydration are the same caller-neutral
+substrate the agent-episode executor uses. The leaf invocation never routes through the
+Agent model gateway.
+
+A service dependency's family folds the service interface, base model, and isolation
+domain, and an adapter rides the admission profile's adapter slot. A shared base model and
+interface reuse a warm replica; a differing interface, base model, adapter, or isolation
+domain resolves to a distinct family and cannot share a batch or route on a matching model
+name alone.
