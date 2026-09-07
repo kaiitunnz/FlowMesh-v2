@@ -1,6 +1,7 @@
 """Stack env schema."""
 
 from flowmesh.models.nodes import NodeRole
+from flowmesh_stack.env import parse_bool
 from flowmesh_stack.env_schema import (
     EnvSchema,
     EnvSection,
@@ -9,6 +10,20 @@ from flowmesh_stack.env_schema import (
     require_all_or_none,
     require_if_true,
 )
+
+
+def _require_network_plane_for_resident(
+    env: dict[str, str], errors: list[str], warnings: list[str]
+) -> None:
+    """Resident capacity runs on the network plane and must be enabled with it."""
+    if parse_bool(env.get("RESIDENT_CAPACITY_ENABLED", "")) and not parse_bool(
+        env.get("NETWORK_PLANE_ENABLED", "")
+    ):
+        errors.append(
+            "RESIDENT_CAPACITY_ENABLED requires NETWORK_PLANE_ENABLED: resident "
+            "capacity runs on the network plane and has no in-server execution path"
+        )
+
 
 STACK_ENV_SCHEMA = EnvSchema(
     name="stack",
@@ -1063,6 +1078,7 @@ STACK_ENV_SCHEMA = EnvSchema(
             ],
             errors,
         ),
+        _require_network_plane_for_resident,
     ],
 )
 

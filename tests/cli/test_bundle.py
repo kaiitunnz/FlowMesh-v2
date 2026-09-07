@@ -320,6 +320,25 @@ def test_worker_role_render_passes_schema_validation() -> None:
     assert errors == []
 
 
+_RESIDENT_COUPLING = "RESIDENT_CAPACITY_ENABLED requires NETWORK_PLANE_ENABLED"
+
+
+def test_resident_capacity_requires_network_plane() -> None:
+    errors, _ = validate_env_values(
+        STACK_ENV_SCHEMA,
+        {"RESIDENT_CAPACITY_ENABLED": "true", "NETWORK_PLANE_ENABLED": "false"},
+    )
+    assert any(_RESIDENT_COUPLING in error for error in errors)
+
+
+def test_resident_capacity_with_network_plane_has_no_coupling_error() -> None:
+    errors, _ = validate_env_values(
+        STACK_ENV_SCHEMA,
+        {"RESIDENT_CAPACITY_ENABLED": "true", "NETWORK_PLANE_ENABLED": "true"},
+    )
+    assert not any(_RESIDENT_COUPLING in error for error in errors)
+
+
 def test_stack_init_deploy_writes_resolved_version(tmp_path: Path, monkeypatch) -> None:
     from flowmesh_cli_stack import stack as stack_module
 
