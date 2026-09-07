@@ -23,6 +23,10 @@ from shared.resident.engine_request import chat_body, embeddings_body
 # narrowly so a precise load error is not swallowed.
 _ADAPTER_ALREADY_LOADED = ("already loaded", "already been loaded", "already exists")
 
+# The not-loaded shapes an engine reports for an idempotent unload of an adapter already
+# gone; matched narrowly for the same reason.
+_ADAPTER_NOT_LOADED = ("not found", "not loaded", "does not exist", "no adapter")
+
 
 @dataclass
 class EngineResponse:
@@ -38,6 +42,37 @@ class EngineResponse:
 EngineOpen = Callable[
     [ReplicaEndpoint, str | None, str | None, str | None], Awaitable[EngineResponse]
 ]
+
+# Unloads a LoRA adapter from a replica slot when its last credit-bearing claim
+# releases, so the engine's adapter registry frees a slot with the server accounting.
+EngineUnload = Callable[[ReplicaEndpoint, str], Awaitable[None]]
+
+
+async def unload_adapter(
+    endpoint: ReplicaEndpoint, name: str, *, timeout_sec: float = 30.0
+) -> None:
+    """Unload a LoRA adapter from the co-located engine's slot.
+
+    Called only after the last credit-bearing claim for the adapter on the replica has
+    released, so it never unloads an adapter a peer still holds. Idempotent: an adapter
+    already gone is not an error.
+    """
+    headers = {"Content-Type": "application/json"}
+    if endpoint.api_key:
+        headers["Authorization"] = f"Bearer {endpoint.api_key}"
+    base = endpoint.base_url.rstrip("/")
+    async with httpx.AsyncClient(timeout=timeout_sec) as client:
+        response = await client.post(
+            f"{base}/unload_lora_adapter",
+            json={"lora_name": name},
+            headers=headers,
+        )
+        if response.status_code < 400:
+            return
+        body = response.text.lower()
+        if any(phrase in body for phrase in _ADAPTER_NOT_LOADED):
+            return
+        response.raise_for_status()
 
 
 class HttpEngineDelivery:
@@ -111,6 +146,9 @@ class HttpEngineDelivery:
         if response.status_code < 400:
             return
         body = response.text.lower()
+        # _ADAPTER_ALREADY_LOADED is a narrow phrase list coupled to vLLM's own
+        # already-loaded error text: matching the specific phrasing rather than a broad
+        # "already" swallow keeps a genuine load error (a wrong path, an OOM) loud.
         if any(phrase in body for phrase in _ADAPTER_ALREADY_LOADED):
             return
         response.raise_for_status()

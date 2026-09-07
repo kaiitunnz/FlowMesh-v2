@@ -133,6 +133,8 @@ class ResidentLaneHost:
             self._loop.call_soon_threadsafe(self._reap, frame)
         elif frame_kind == "resident_sidecar_reap":
             self._loop.call_soon_threadsafe(self._sidecar_reap, frame)
+        elif frame_kind == "resident_adapter_unload":
+            asyncio.run_coroutine_threadsafe(self._adapter_unload(frame), self._loop)
         elif frame_kind == "resident_frame":
             asyncio.run_coroutine_threadsafe(self._on_frame(frame), self._loop)
         else:
@@ -189,6 +191,14 @@ class ResidentLaneHost:
         # request so a cancelled invocation stops promptly.
         if self._replica is not None:
             self._replica.reap_invocation(str(frame["invocation_id"]))
+
+    async def _adapter_unload(self, frame: dict[str, Any]) -> None:
+        # Control relays this only when an adapter's last credit-bearing claim released,
+        # so the engine frees the slot the server already reclaimed.
+        if self._replica is not None:
+            await self._replica.unload_adapter(
+                str(frame["replica_id"]), str(frame["adapter_name"])
+            )
 
     async def _on_frame(self, frame: dict[str, Any]) -> None:
         relay = RelayFrame.from_wire(frame)

@@ -17,7 +17,7 @@ import httpx
 import pytest
 
 from shared.resident.contracts import ReplicaEndpoint
-from worker.resident.engine import HttpEngineDelivery
+from worker.resident.engine import HttpEngineDelivery, unload_adapter
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -40,6 +40,16 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(loaded)))
             self.end_headers()
             self.wfile.write(loaded)
+            return
+        if self.path == "/v1/unload_lora_adapter":
+            self.server.unloaded.append(body.get("lora_name"))
+            status, message = self.server.unload_response
+            unloaded = json.dumps({"message": message}).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(unloaded)))
+            self.end_headers()
+            self.wfile.write(unloaded)
             return
         if self.path == "/v1/embeddings":
             n = len(body.get("input") or [])
@@ -71,6 +81,8 @@ class _Server(ThreadingHTTPServer):
         self.bodies: list[dict[str, Any]] = []
         self.loaded: list[str | None] = []
         self.load_response: tuple[int, str] = (200, "success")
+        self.unloaded: list[str | None] = []
+        self.unload_response: tuple[int, str] = (200, "success")
 
 
 @contextmanager
@@ -145,6 +157,34 @@ def test_a_precise_load_error_fails_the_invocation() -> None:
             )
     # The engine request is never sent when the load fails loudly.
     assert server.paths == ["/v1/load_lora_adapter"]
+
+
+def test_unload_adapter_posts_unload_lora_adapter() -> None:
+    with _running() as server:
+        base = f"http://127.0.0.1:{server.server_address[1]}/v1"
+        endpoint = ReplicaEndpoint(base_url=base, model="m", interface="chat")
+        asyncio.run(unload_adapter(endpoint, "my-lora"))
+    assert server.paths == ["/v1/unload_lora_adapter"]
+    assert server.bodies[0] == {"lora_name": "my-lora"}
+    assert server.unloaded == ["my-lora"]
+
+
+def test_unload_of_a_missing_adapter_is_idempotent() -> None:
+    with _running() as server:
+        server.unload_response = (404, "adapter 'my-lora' not found")
+        base = f"http://127.0.0.1:{server.server_address[1]}/v1"
+        endpoint = ReplicaEndpoint(base_url=base, model="m", interface="chat")
+        asyncio.run(unload_adapter(endpoint, "my-lora"))  # no raise
+    assert server.paths == ["/v1/unload_lora_adapter"]
+
+
+def test_a_precise_unload_error_raises() -> None:
+    with _running() as server:
+        server.unload_response = (500, "internal engine error")
+        base = f"http://127.0.0.1:{server.server_address[1]}/v1"
+        endpoint = ReplicaEndpoint(base_url=base, model="m", interface="chat")
+        with pytest.raises(httpx.HTTPStatusError):
+            asyncio.run(unload_adapter(endpoint, "my-lora"))
 
 
 def test_embedding_interface_posts_embeddings_and_streams_vectors() -> None:

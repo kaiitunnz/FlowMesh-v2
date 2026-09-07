@@ -116,12 +116,15 @@ class LifecycleScaleManager:
         if servable and profile is not None and profile.adapter_ref is not None:
             # A warm replica exists but its adapter slots are full for this new adapter
             # and no replica can be added: an adapter-budget denial, not a cold start.
+            # The co-occurring capacity reason is surfaced in the detail so the denial
+            # names both why the adapter does not fit and why no replica can be added.
+            reason = decision.reason.value if decision.reason is not None else "no room"
             return CapacityPlan(
                 action="deny",
                 denial=ProvisioningDecision.deny(
                     ProvisioningDenialReason.ADAPTER_SLOT_CAP,
                     f"no free adapter slot for {profile.adapter_ref!r} and the family "
-                    "cannot add a replica",
+                    f"cannot add a replica ({reason}: {decision.detail or ''})",
                 ),
             )
         return CapacityPlan(action="deny", denial=decision)
@@ -215,6 +218,15 @@ class LifecycleScaleManager:
             and request.profile.adapter_ref is not None
         }
         return tuple(sorted(held))
+
+    def replica_holds_adapter(self, replica_id: str, adapter_ref: str) -> bool:
+        """Whether a credit-bearing claim on the replica still holds the adapter.
+
+        Read on a claim release to decide whether the adapter's engine slot may be
+        unloaded: it may be freed only once no remaining credit-bearing claim on the
+        replica references it, so a peer's adapter is never unloaded out from under it.
+        """
+        return adapter_ref in self._held_adapters(replica_id)
 
     def _adapter_fits(
         self, replica: ReplicaIncarnation, profile: "AdmissionProfile | None"

@@ -224,8 +224,11 @@ adapter-bound leaf declares a single adapter with a loadable `path`, `url`, or `
 for a base model or an already-resident adapter admits without consuming a new slot, and a
 same-adapter claim admits at exhaustion by sharing its slot; a new distinct adapter that
 finds no free slot and no room to materialize another replica is denied promptly rather
-than waiting out the cold-start deadline. Two limitations are known: the server reclaims a
-slot when a claim releases, but the engine does not unload the adapter, so a replica serves
-up to `RESIDENT_ADAPTER_SLOTS` lifetime-distinct adapters before a further distinct load may
-be refused (adapter unload / LRU reclaim is a follow-up); and every chat resident replica
-enables runtime LoRA, so a base model incompatible with `--enable-lora` would fail to serve.
+than waiting out the cold-start deadline. When a claim releases at its fenced terminal, the
+server reclaims the accounting slot and, once no remaining credit-bearing claim on the
+replica references the adapter, unloads it from the engine's registry, so the engine frees a
+slot symmetrically with the accounting and a replica serves an unbounded number of
+lifetime-distinct adapters. The unload fires only on the last holder's release, never while
+a concurrent same-adapter claim still holds the slot. One tradeoff is known: every chat
+resident replica enables runtime LoRA, so a base model incompatible with `--enable-lora`
+would fail to serve.

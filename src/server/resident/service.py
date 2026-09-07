@@ -139,6 +139,7 @@ class _Attempt:
     origin_id: str
     deadline_at: str | None
     replica_id: str
+    adapter_ref: str | None
 
 
 class ResidentCapacityControl:
@@ -285,8 +286,32 @@ class ResidentCapacityControl:
             "resident_sidecar_reap",
             {"invocation_id": attempt.invocation_id},
         )
+        self._reclaim_adapter_slot(attempt)
         if self._loop is not None:
             self._loop.create_task(self._delivery.sessions.delete(attempt.session_id))
+
+    def _reclaim_adapter_slot(self, attempt: _Attempt) -> None:
+        """Unload the invocation's adapter iff its last credit-bearing claim released.
+
+        The credit is released before the reap, so the held-adapter set no longer
+        counts this invocation: if no remaining claim on the replica references the
+        adapter, the engine slot may be freed. A concurrent same-adapter claim still
+        holds the slot, so the adapter is never unloaded out from under a peer.
+        """
+        if self._delivery is None or attempt.adapter_ref is None:
+            return
+        if self._lifecycle.replica_holds_adapter(
+            attempt.replica_id, attempt.adapter_ref
+        ):
+            return
+        self._delivery.relay(
+            attempt.serve_worker,
+            "resident_adapter_unload",
+            {
+                "replica_id": attempt.replica_id,
+                "adapter_name": attempt.adapter_ref,
+            },
+        )
 
     def list_service_families(self) -> list[ServiceFamily]:
         """The registered service families, for operator read access."""
@@ -504,6 +529,7 @@ class ResidentCapacityControl:
             origin_id=origin.origin_id,
             deadline_at=profile.deadline_at,
             replica_id=replica.replica_id,
+            adapter_ref=profile.adapter_ref,
         )
         delivered = deps.relay(
             origin_worker,

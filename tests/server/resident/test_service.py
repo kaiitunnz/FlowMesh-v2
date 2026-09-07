@@ -300,6 +300,71 @@ def test_ack_accepts_and_authorizes_then_terminal_releases_credit():
     assert "resident_reap" in delivery.kinds()
 
 
+def _adapter_env(invocation_id: str) -> ToolInvocationEnvelope:
+    return ToolInvocationEnvelope(
+        kind=BoundaryEventKind.INVOCATION,
+        interface="model",
+        invocation_id=invocation_id,
+        task_id=f"tsk-{invocation_id}",
+        activation_id="act-1",
+        call_correlation=f"c-{invocation_id}",
+        idempotency_key=f"idm-{invocation_id}",
+        request_digest="sha-req",
+    )
+
+
+def _unload_frames(delivery: _Delivery) -> list[dict[str, Any]]:
+    return [p for _w, k, p in delivery.relays if k == "resident_adapter_unload"]
+
+
+def test_last_holder_release_unloads_the_adapter_slot():
+    dependency = ServiceDependency(
+        service_ref="m", adapter="my-lora", adapter_source="hf/my-lora"
+    )
+    svc, stores, _settled, delivery = _build(dependency=dependency)
+    asyncio.run(svc._originate(_adapter_env("inv-1")))
+    replica_id = stores.claims.by_invocation("inv-1")[0].replica_id
+
+    svc.on_invocation_terminal("inv-1")
+
+    frames = _unload_frames(delivery)
+    assert len(frames) == 1
+    assert frames[0] == {"replica_id": replica_id, "adapter_name": "my-lora"}
+    unload_target = next(
+        w for w, k, _p in delivery.relays if k == "resident_adapter_unload"
+    )
+    assert unload_target == "wkr-replica"
+
+
+def test_a_concurrent_same_adapter_claim_is_not_unloaded():
+    dependency = ServiceDependency(
+        service_ref="m", adapter="my-lora", adapter_source="hf/my-lora"
+    )
+    svc, stores, _settled, delivery = _build(dependency=dependency)
+    asyncio.run(svc._originate(_adapter_env("inv-1")))
+    asyncio.run(svc._originate(_adapter_env("inv-2")))
+    # Both claims share one warm replica and hold the same adapter's single slot.
+    r1 = stores.claims.by_invocation("inv-1")[0].replica_id
+    r2 = stores.claims.by_invocation("inv-2")[0].replica_id
+    assert r1 == r2 and stores.credit_ledger.held(r1) == 2
+
+    # The first holder's release must NOT unload the adapter out from under its peer.
+    svc.on_invocation_terminal("inv-1")
+    assert _unload_frames(delivery) == []
+
+    # Only the last holder's release frees the slot.
+    svc.on_invocation_terminal("inv-2")
+    frames = _unload_frames(delivery)
+    assert len(frames) == 1 and frames[0]["adapter_name"] == "my-lora"
+
+
+def test_a_base_claim_release_relays_no_unload():
+    svc, _stores, _settled, delivery = _build()  # base dependency, no adapter
+    asyncio.run(svc._originate(_env()))
+    svc.on_invocation_terminal("inv-1")
+    assert _unload_frames(delivery) == []
+
+
 def test_rejected_ack_releases_the_reservation_and_settles_an_error():
     svc, stores, settled, _delivery = _build()
     asyncio.run(svc._originate(_env()))

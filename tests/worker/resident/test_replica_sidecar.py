@@ -194,6 +194,58 @@ def test_not_yet_bound_signals_a_transient_loss_not_a_definite_reject() -> None:
     asyncio.run(run())
 
 
+def test_unload_adapter_calls_the_engine_for_a_bound_replica() -> None:
+    async def run() -> None:
+        calls: list[tuple[str, str]] = []
+
+        async def fake_unload(endpoint: ReplicaEndpoint, name: str) -> None:
+            calls.append((endpoint.base_url, name))
+
+        sink = _ToPeer()
+        sidecar = ResidentReplicaSidecar(
+            sink=sink, engine_open=_fake_engine, engine_unload=fake_unload
+        )
+        sidecar.bind(
+            replica_id="rpl-1",
+            incarnation=1,
+            listener_generation=1,
+            endpoint=ReplicaEndpoint(base_url="http://engine/v1", model="m"),
+        )
+        await sidecar.unload_adapter("rpl-1", "my-lora")
+        assert calls == [("http://engine/v1", "my-lora")]
+
+        # An unbound replica is a no-op: nothing to unload against.
+        await sidecar.unload_adapter("rpl-unknown", "my-lora")
+        assert calls == [("http://engine/v1", "my-lora")]
+
+    asyncio.run(run())
+
+
+def test_unload_adapter_swallows_an_engine_error() -> None:
+    async def run() -> None:
+        async def failing_unload(endpoint: ReplicaEndpoint, name: str) -> None:
+            request = httpx.Request("POST", "http://engine/v1/unload_lora_adapter")
+            raise httpx.HTTPStatusError(
+                "boom",
+                request=request,
+                response=httpx.Response(500, request=request),
+            )
+
+        sidecar = ResidentReplicaSidecar(
+            sink=_ToPeer(), engine_open=_fake_engine, engine_unload=failing_unload
+        )
+        sidecar.bind(
+            replica_id="rpl-1",
+            incarnation=1,
+            listener_generation=1,
+            endpoint=ReplicaEndpoint(base_url="http://engine/v1", model="m"),
+        )
+        # Best effort: a failed unload does not raise out of the lane.
+        await sidecar.unload_adapter("rpl-1", "my-lora")
+
+    asyncio.run(run())
+
+
 def test_reap_invocation_tears_down_the_inflight_serve() -> None:
     async def run() -> None:
         aclosed = asyncio.Event()
