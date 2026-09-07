@@ -33,6 +33,23 @@ _CREDENTIAL_SUBSTRINGS = (
 )
 _CREDENTIAL_SEGMENTS = frozenset({"auth"})
 
+# A harness owns its own workspace, working directory, and rollout home; an author may
+# not aim one at an arbitrary filesystem path through an opaque harness param.
+_FILESYSTEM_PATH_PARAM_KEYS = frozenset(
+    {
+        "codex_home",
+        "cwd",
+        "workdir",
+        "working_dir",
+        "workspace",
+        "workspace_dir",
+        "mount",
+        "mounts",
+        "volume",
+        "volumes",
+    }
+)
+
 
 def _looks_credential(key: str) -> bool:
     lowered = key.lower()
@@ -52,6 +69,21 @@ def _find_credential_key(value: Any) -> str | None:
     elif isinstance(value, list):
         for item in value:
             if (found := _find_credential_key(item)) is not None:
+                return found
+    return None
+
+
+def _find_path_override_key(value: Any) -> str | None:
+    """The first filesystem-path override key anywhere in a nested params structure."""
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            if str(key).lower() in _FILESYSTEM_PATH_PARAM_KEYS:
+                return str(key)
+            if (found := _find_path_override_key(nested)) is not None:
+                return found
+    elif isinstance(value, list):
+        for item in value:
+            if (found := _find_path_override_key(item)) is not None:
                 return found
     return None
 
@@ -134,6 +166,16 @@ class AgentHarnessSpec(BaseModel):
             raise ValueError(
                 f"harness param {key!r} looks credential-bearing; put a model "
                 "credential in model_binding.api_key"
+            )
+        return params
+
+    @field_validator("params")
+    @classmethod
+    def _reject_path_override_params(cls, params: dict[str, Any]) -> dict[str, Any]:
+        if (key := _find_path_override_key(params)) is not None:
+            raise ValueError(
+                f"harness param {key!r} sets a filesystem path; the harness owns its "
+                "own workspace and rollout home"
             )
         return params
 

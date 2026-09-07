@@ -177,11 +177,8 @@ def build_codex_adapter(
         raise ValueError(
             "the codex backend requires a managed model binding with a url and model"
         )
-    override = spec.harness.params.get("codex_home")
-    codex_home = (
-        Path(override)
-        if isinstance(override, str)
-        else _isolated_codex_home(config.results_dir, task.workflow_id, task.task_id)
+    codex_home = _isolated_codex_home(
+        config.results_dir, task.workflow_id, task.task_id
     )
     # Bind Codex to the facade's loopback surface with a per-episode token so one
     # episode can't drive another's egress.

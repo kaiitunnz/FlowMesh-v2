@@ -19,10 +19,12 @@ injected at most once on a resume from the committed capsule. The untyped
 ``_CodexExperimentalSurface`` and pinned to this Codex version.
 """
 
+import contextlib
 import logging
+import os
 import threading
 import weakref
-from collections.abc import Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -47,6 +49,61 @@ _INJECT_TOOL = "fabric_mediated"
 # never passes through Codex.
 _KEY_ENV = "FLOWMESH_CODEX_API_KEY"
 _LOG = logging.getLogger("codex-transport")
+
+# The codex app-server, and the native shell it may run, inherits the launcher's process
+# environment. Restrict that inheritance to a fixed, secret-free allowlist so no worker
+# provider credential reaches the child: only scratch roots, a runtime PATH, and locale.
+# CODEX_HOME and the per-episode facade token arrive through the SDK's own config.env
+# overlay, so they need no allowlist entry.
+_LAUNCH_ENV_ALLOWLIST = frozenset(
+    {
+        "PATH",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "SHELL",
+        "TERM",
+        "TZ",
+        "LANG",
+        "LANGUAGE",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+    }
+)
+_LAUNCH_ENV_ALLOWLIST_PREFIXES = ("LC_", "XDG_")
+_LAUNCH_ENV_LOCK = threading.Lock()
+
+
+def _allowed_launch_var(name: str) -> bool:
+    return name in _LAUNCH_ENV_ALLOWLIST or name.startswith(
+        _LAUNCH_ENV_ALLOWLIST_PREFIXES
+    )
+
+
+def sanitized_launch_env(source: Mapping[str, str]) -> dict[str, str]:
+    """The secret-free child environment kept from the launcher's own environment."""
+    return {k: v for k, v in source.items() if _allowed_launch_var(k)}
+
+
+@contextlib.contextmanager
+def clean_launch_environ() -> Iterator[None]:
+    """Hold ``os.environ`` at the launch allowlist while the app-server spawns.
+
+    The SDK spawns the app-server from ``os.environ.copy()``, so the child captures only
+    the allowlisted environment for the span of the spawn; the launcher's full
+    environment is restored immediately after. The swap is serialized so concurrent
+    spawns on one worker never observe each other's stripped environment.
+    """
+    with _LAUNCH_ENV_LOCK:
+        saved = dict(os.environ)
+        os.environ.clear()
+        os.environ.update(sanitized_launch_env(saved))
+        try:
+            yield
+        finally:
+            os.environ.clear()
+            os.environ.update(saved)
 
 
 class CodexTransportError(RuntimeError):
@@ -195,7 +252,8 @@ class RealCodexAppServerTransport:
             # Arm teardown before the process spawns, so a failure during start or
             # initialize still reaps the app-server rather than leaking it.
             self._finalizer = weakref.finalize(self, _close_client, client)
-            client.start()
+            with clean_launch_environ():
+                client.start()
             client.initialize()
             self._client = client
         return self._client

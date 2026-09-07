@@ -75,6 +75,19 @@ def test_nested_credential_harness_params_are_rejected():
 
 
 @pytest.mark.parametrize(
+    "key", ["codex_home", "cwd", "workdir", "workspace", "mount", "volumes"]
+)
+def test_filesystem_path_override_harness_params_are_rejected(key):
+    with pytest.raises(ValidationError):
+        AgentHarnessSpec(backend="codex", params={key: "/some/path"})
+
+
+def test_nested_path_override_harness_params_are_rejected():
+    with pytest.raises(ValidationError):
+        AgentHarnessSpec(backend="codex", params={"sandbox": {"cwd": "/etc"}})
+
+
+@pytest.mark.parametrize(
     "key", ["max_tokens", "token_limit", "token_budget", "n_tokens", "model"]
 )
 def test_generation_params_are_not_mistaken_for_credentials(key):

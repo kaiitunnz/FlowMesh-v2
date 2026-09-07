@@ -369,6 +369,23 @@ def test_kill9_after_injection_does_not_reinject(
     assert stub.max_injected == 1
 
 
+def test_app_server_child_env_excludes_worker_secrets(
+    tmp_path: Path, transports: TransportFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FLOWMESH_SENTINEL_SECRET", "sentinel-leak-value")
+    home = tmp_path / "codex_home"
+    with _UpstreamStub() as stub, _FacadeServer(stub.base_url) as facade:
+        issue = transports(facade.base_url, facade.token, home)
+        result = CodexAppServerHarnessAdapter(issue, "v1").start(
+            _TASK_ID, capsule=None, outcomes=[]
+        )
+        assert result.kind is HarnessResultKind.COMPLETION
+        # The live child's environment, captured at exec, holds no worker secret.
+        environ = Path(f"/proc/{issue.pid}/environ").read_bytes()
+    assert b"FLOWMESH_SENTINEL_SECRET" not in environ
+    assert b"sentinel-leak-value" not in environ
+
+
 def test_stalled_turn_raises_a_transport_error(
     tmp_path: Path, transports: TransportFactory
 ) -> None:
