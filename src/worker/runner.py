@@ -224,6 +224,7 @@ class Runner:
             report_outcome=client.push_resident_outcome,
             content_store=self._content_store,
             peek_request=self.lifecycle.resident_requests.peek,
+            delete_request=self.lifecycle.resident_requests.delete,
             logger=self.logger,
         )
         host.start()

@@ -162,3 +162,62 @@ def test_definite_engine_failure_is_carried_definite() -> None:
         await sidecar.aclose()
 
     asyncio.run(run())
+
+
+def test_not_yet_bound_signals_a_transient_loss_not_a_definite_reject() -> None:
+    async def run() -> None:
+        origin_sink, replica_sink = _ToPeer(), _ToPeer()
+        # No bind for rpl-1: the bind frame has not arrived yet (a cold-start race).
+        sidecar = ResidentReplicaSidecar(sink=replica_sink, engine_open=_fake_engine)
+        origin = ResidentRelaySession(
+            session_id="s1",
+            invocation_id="inv-1",
+            idm="idm-1",
+            role=ResidentSessionRole.ORIGIN,
+            sink=origin_sink,
+        )
+        origin_sink.on_peer = sidecar.on_frame
+        replica_sink.on_peer = origin.on_frame
+        await origin.send_wire("bootstrap", handoff=_handoff(), request='{"p":"hi"}')
+        reply = await origin.recv_wire(timeout=5.0)
+        # Transient, not a definite fence reject: the origin holds and re-drives.
+        assert reply is not None and reply["kind"] == KIND_FAILED
+        assert reply["definite"] is False
+        await sidecar.aclose()
+
+    asyncio.run(run())
+
+
+def test_reap_invocation_tears_down_the_inflight_serve() -> None:
+    async def run() -> None:
+        aclosed = asyncio.Event()
+
+        async def hanging_engine(
+            endpoint: ReplicaEndpoint, request: str | None
+        ) -> EngineResponse:
+            async def chunks() -> AsyncIterator[str]:
+                await asyncio.Event().wait()  # never yields — the engine is slow
+                yield ""  # pragma: no cover
+
+            async def aclose() -> None:
+                aclosed.set()
+
+            return EngineResponse(chunks=chunks(), aclose=aclose)
+
+        origin, sidecar = _harness(engine=hanging_engine)
+        await origin.send_wire("bootstrap", handoff=_handoff(), request='{"p":"hi"}')
+        ack = await origin.recv_wire(timeout=5.0)
+        assert ack is not None and ack["kind"] == KIND_ACK
+        await origin.send_wire("stream", auth=_auth())
+        for _ in range(100):
+            await asyncio.sleep(0.01)
+            if sidecar._inflight.get("inv-1") is not None:
+                break
+        assert sidecar._inflight.get("inv-1") is not None  # in-flight
+
+        # A fenced terminal reaps the serve task: teardown closes the engine request.
+        sidecar.reap_invocation("inv-1")
+        await asyncio.wait_for(aclosed.wait(), timeout=5.0)
+        await sidecar.aclose()
+
+    asyncio.run(run())

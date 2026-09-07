@@ -148,12 +148,15 @@ def test_two_hosts_complete_a_resident_invocation() -> None:
     def peek(_task: str, _call: str) -> str | None:
         return '{"prompt": "hi"}'
 
+    deleted: list[tuple[str, str]] = []
+
     origin = ResidentLaneHost(
         push_frame=origin_pushes,
         report_ack=on_ack,
         report_outcome=on_outcome,
         content_store=store,
         peek_request=peek,
+        delete_request=lambda t, c: deleted.append((t, c)),
     )
     replica = ResidentLaneHost(
         push_frame=replica_pushes,
@@ -161,6 +164,7 @@ def test_two_hosts_complete_a_resident_invocation() -> None:
         report_outcome=noop_outcome,
         content_store=None,
         peek_request=lambda _t, _c: None,
+        delete_request=lambda _t, _c: None,
         engine_open=_fake_engine,
     )
     hosts["origin"], hosts["replica"] = origin, replica
@@ -195,6 +199,18 @@ def test_two_hosts_complete_a_resident_invocation() -> None:
         assert outcome.status is ResidentStreamStatus.SUCCESS
         assert outcome.manifest is not None
         assert store.hydrate(outcome.manifest).decode() == _COMPLETION
+
+        # The fenced-terminal reap drops the worker-private raw request so it does not
+        # outlive the invocation (the leak the delete hook closes).
+        assert deleted == []
+        origin.route(
+            "resident_reap", {"task_id": "tsk-1", "call_correlation": "call-1"}
+        )
+        for _ in range(100):
+            if deleted:
+                break
+            threading.Event().wait(0.02)
+        assert deleted == [("tsk-1", "call-1")]
     finally:
         origin.stop()
         replica.stop()

@@ -5,8 +5,8 @@ traffic only after the claim gate validates the fence it carries against the bou
 incarnation and listener generation, then serves the co-located engine's response over
 the invocation's windowed relay session. One engine runs per invocation under one
 credit; a fresh-session re-drive supersedes its prior attempt, and a cancel reaps both
-the session and its engine request. It is not the external ``MediatedEgressSidecar`` and
-mints no permit — a resident allocation is reachable only through this gate.
+the session and its engine request. A resident allocation is reachable only through this
+gate.
 """
 
 import asyncio
@@ -99,6 +99,17 @@ class ResidentReplicaSidecar:
         """Drop a replica's binding; in-flight sessions run to their own terminal."""
         self._bindings.pop(replica_id, None)
 
+    def reap_invocation(self, invocation_id: str) -> None:
+        """Cancel the live serve task for an invocation on a fenced terminal or cancel.
+
+        Cancelling the serve task runs its teardown — closing the engine request and
+        reaping the session — so a cancelled or terminalized invocation stops the engine
+        promptly rather than blocking on a receiver that stopped draining.
+        """
+        task = self._inflight.get(invocation_id)
+        if task is not None and task is not asyncio.current_task() and not task.done():
+            task.cancel()
+
     async def on_frame(self, frame: RelayFrame) -> None:
         """Route one inbound relay frame to its session, opening one on a bootstrap."""
         session = self._sessions.get(frame.session_id)
@@ -140,7 +151,13 @@ class ResidentReplicaSidecar:
             handoff = AdmissionHandoff.model_validate(opening["handoff"])
             binding = self._bindings.get(handoff.replica_id)
             if binding is None:
-                await session.send_wire(KIND_REJECT, reason="wrong_replica")
+                # The bind frame has not arrived yet (a cold-start bootstrap/bind race):
+                # a transient not-yet-bound condition, not a genuine fence rejection, so
+                # signal a loss the origin holds and re-drives rather than a definite
+                # reject that would release the credit and preempt a healthy replica.
+                await session.send_wire(
+                    KIND_FAILED, definite=False, reason="sidecar not bound"
+                )
                 return
             decision = binding.gate.check_bootstrap(handoff)
             if not decision.admitted:

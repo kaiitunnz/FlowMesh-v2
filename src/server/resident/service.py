@@ -29,7 +29,6 @@ from shared.resident.reports import (
     ResidentOpOutcome,
     ResidentStreamStatus,
 )
-from shared.tasks.specs import ModelBindingMode
 from shared.utils.ids import new_relay_session_id
 
 from ..network.state import (
@@ -137,6 +136,7 @@ class _Attempt:
     idempotency_key: str | None
     session_id: str
     origin_worker: str
+    serve_worker: str
     origin_id: str
     deadline_at: str | None
     replica_id: str
@@ -218,11 +218,6 @@ class ResidentCapacityControl:
         except asyncio.CancelledError:
             return
 
-    def is_resident(self, task_id: str) -> bool:
-        """Whether a task's pinned model binding is served by resident capacity."""
-        resolved = self._resolve_binding(task_id)
-        return resolved is not None and resolved[1].mode is ModelBindingMode.RESIDENT
-
     def originate(self, env: ToolInvocationEnvelope) -> None:
         """Originate a worker-captured resident boundary through resident admission."""
         if self._loop is None:
@@ -268,14 +263,28 @@ class ResidentCapacityControl:
         self._reap_attempt(invocation_id)
 
     def _reap_attempt(self, invocation_id: str) -> None:
-        """Cancel the origin worker's lane and drop the session record on a terminal."""
+        """Reap both ends of a resident invocation on its fenced terminal.
+
+        The origin reap cancels the origin driver's lane and drops the worker-private
+        raw request; the serve-worker reap tears down the replica's serve task and its
+        engine request; then the durable session record is deleted. Every step is best
+        effort — a gone worker simply has nothing to reap.
+        """
         attempt = self._attempts.pop(invocation_id, None)
         if attempt is None or self._delivery is None:
             return
         self._delivery.relay(
             attempt.origin_worker,
             "resident_reap",
-            {"call_correlation": attempt.call_correlation},
+            {
+                "task_id": attempt.task_id,
+                "call_correlation": attempt.call_correlation,
+            },
+        )
+        self._delivery.relay(
+            attempt.serve_worker,
+            "resident_sidecar_reap",
+            {"invocation_id": attempt.invocation_id},
         )
         if self._loop is not None:
             self._loop.create_task(self._delivery.sessions.delete(attempt.session_id))
@@ -489,6 +498,7 @@ class ResidentCapacityControl:
             idempotency_key=env.idempotency_key,
             session_id=session_id,
             origin_worker=origin_worker,
+            serve_worker=target_worker,
             origin_id=origin.origin_id,
             deadline_at=profile.deadline_at,
             replica_id=replica.replica_id,

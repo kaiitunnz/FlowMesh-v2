@@ -152,14 +152,16 @@ class _Harness:
         self.outcomes.append(outcome)
         self.done.set()
 
-    def begin(self, session_no: int = 1) -> None:
+    def begin(
+        self, session_no: int = 1, request_payload: str | None = '{"prompt": "hi"}'
+    ) -> None:
         self.origin.begin(
             ResidentOriginRequest(
                 task_id="tsk-1",
                 call_correlation="call-1",
                 session_id=f"rly-{session_no}",
                 handoff=_handoff(session_no),
-                request_payload='{"prompt": "hi"}',
+                request_payload=request_payload,
             )
         )
 
@@ -176,6 +178,23 @@ def test_origin_and_replica_complete_by_reference() -> None:
         # The completion materialized by reference; it never crossed as an inline value.
         assert h.store.hydrate(outcome.manifest).decode() == _COMPLETION
         assert h.engine_calls == [1]
+        await h.sidecar.aclose()
+
+    asyncio.run(run())
+
+
+def test_uncaptured_request_holds_uncertain_without_running_the_engine() -> None:
+    async def run() -> None:
+        h = _Harness()
+        # A re-drive landed on a worker that never captured the request (peek miss):
+        # the driver must hold the credit UNCERTAIN, never bootstrap an empty-prompt
+        # request that could settle a bogus success.
+        h.begin(request_payload=None)
+        await asyncio.wait_for(h.done.wait(), timeout=10.0)
+        assert len(h.outcomes) == 1
+        assert h.outcomes[0].status is ResidentStreamStatus.UNCERTAIN
+        assert h.engine_calls == []  # the engine never ran
+        assert h.acks == []  # no bootstrap was even attempted
         await h.sidecar.aclose()
 
     asyncio.run(run())

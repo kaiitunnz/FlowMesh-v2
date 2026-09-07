@@ -22,6 +22,7 @@ from shared.resident.contracts import (
     ReplicaEndpoint,
     RouteAuthorization,
 )
+from shared.resident.gate import LoadEvidence
 from shared.resident.reports import ResidentBootstrapAck, ResidentOpOutcome
 
 from .engine import EngineOpen, HttpEngineDelivery
@@ -31,6 +32,8 @@ from .transport import ResidentFrameSink
 
 # Peeks the worker-private raw request for a captured resident boundary, or None.
 RequestLookup = Callable[[str, str], str | None]
+# Drops the worker-private raw request once its boundary reaches a fenced terminal.
+RequestDelete = Callable[[str, str], None]
 AckSink = Callable[[ResidentBootstrapAck], None]
 OutcomeSink = Callable[[ResidentOpOutcome], None]
 
@@ -56,6 +59,7 @@ class ResidentLaneHost:
         report_outcome: OutcomeSink,
         content_store: FabricContentStore | None,
         peek_request: RequestLookup,
+        delete_request: RequestDelete,
         engine_open: EngineOpen | None = None,
         engine_timeout_sec: float = 300.0,
         logger: logging.Logger | None = None,
@@ -65,6 +69,7 @@ class ResidentLaneHost:
         self._report_outcome = report_outcome
         self._content_store = content_store
         self._peek_request = peek_request
+        self._delete_request = delete_request
         self._engine_open = engine_open or HttpEngineDelivery(
             timeout_sec=engine_timeout_sec
         )
@@ -93,7 +98,18 @@ class ResidentLaneHost:
         self._replica = ResidentReplicaSidecar(
             sink=sink,
             engine_open=self._engine_open,
+            on_load=self._on_load,
             logger=self._logger,
+        )
+
+    def _on_load(self, evidence: LoadEvidence) -> None:
+        """Emit one admitted operation's claim-tagged load evidence for accounting."""
+        self._logger.debug(
+            "resident load: claim=%s inv=%s op=%s class=%s",
+            evidence.claim_id,
+            evidence.invocation_id,
+            evidence.operation,
+            evidence.traffic_class.value,
         )
 
     def _run(self) -> None:
@@ -115,6 +131,8 @@ class ResidentLaneHost:
             self._loop.call_soon_threadsafe(self._bind, frame)
         elif frame_kind == "resident_reap":
             self._loop.call_soon_threadsafe(self._reap, frame)
+        elif frame_kind == "resident_sidecar_reap":
+            self._loop.call_soon_threadsafe(self._sidecar_reap, frame)
         elif frame_kind == "resident_frame":
             asyncio.run_coroutine_threadsafe(self._on_frame(frame), self._loop)
         else:
@@ -159,8 +177,17 @@ class ResidentLaneHost:
         )
 
     def _reap(self, frame: dict[str, Any]) -> None:
+        # A fenced terminal reaps the origin driver and drops the worker-private request
+        # so it does not outlive the invocation.
         if self._origin is not None:
             self._origin.reap(str(frame["call_correlation"]))
+        self._delete_request(str(frame["task_id"]), str(frame["call_correlation"]))
+
+    def _sidecar_reap(self, frame: dict[str, Any]) -> None:
+        # A fenced terminal on the origin reaps the replica's serve task and its engine
+        # request so a cancelled invocation stops promptly.
+        if self._replica is not None:
+            self._replica.reap_invocation(str(frame["invocation_id"]))
 
     async def _on_frame(self, frame: dict[str, Any]) -> None:
         relay = RelayFrame.from_wire(frame)

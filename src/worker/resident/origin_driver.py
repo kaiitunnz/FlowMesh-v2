@@ -17,6 +17,7 @@ import contextlib
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 from shared.network.relay_frame import RelayFrame
 from shared.outcome import FabricContentStore, OutcomeManifest
@@ -49,8 +50,8 @@ class ResidentOriginRequest:
     """What control hands the origin worker to drive one bootstrap attempt.
 
     ``session_id`` is fresh per attempt; ``handoff`` is the claim-bound fence control
-    minted for the reserved claim; ``request_payload`` is the raw request the worker
-    held private and now sends over the data path.
+    minted for the reserved claim; ``request_payload`` is the worker-private raw request
+    the driver sends over the data path.
     """
 
     task_id: str
@@ -150,6 +151,13 @@ class ResidentOriginDriver:
                     self._outcome(req, ResidentStreamStatus.SUCCESS, manifest=prior)
                 )
                 return
+            if req.request_payload is None:
+                # The raw request was not captured on this worker (a re-drive landed on
+                # a worker that never held it): hold the credit and re-drive rather than
+                # bootstrapping an empty-prompt request that could settle a bogus
+                # success.
+                self._report_outcome(self._uncertain(req, "request not captured here"))
+                return
             await origin.session.send_wire(
                 KIND_BOOTSTRAP,
                 handoff=req.handoff.model_dump(mode="json"),
@@ -181,7 +189,9 @@ class ResidentOriginDriver:
             if self._by_call.get(req.call_correlation) is origin:
                 self._by_call.pop(req.call_correlation, None)
 
-    def _handle_ack(self, req: ResidentOriginRequest, ack: dict | None) -> bool:
+    def _handle_ack(
+        self, req: ResidentOriginRequest, ack: dict[str, Any] | None
+    ) -> bool:
         """Report the bootstrap outcome; return whether to proceed to the stream."""
         if ack is None:
             self._report_ack(self._ack(req, ResidentBootstrapOutcome.UNCERTAIN))
