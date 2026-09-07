@@ -167,7 +167,7 @@ def test_embedding_serve_substrate_requests_a_pooling_replica() -> None:
 
     assert runtime.register_call is not None
     spec = json.loads(runtime.register_call[2])["spec"]
-    assert spec["model"]["vllm"] == {"task": "embed"}
+    assert spec["model"]["vllm"] == {"runner": "pooling"}
 
 
 def test_embedding_dev_model_substrate_needs_no_serving_flag() -> None:
