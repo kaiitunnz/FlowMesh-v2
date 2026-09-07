@@ -106,8 +106,10 @@ class ResidentReplicaSidecar:
 
         Control decides the last holder released — gated on the same held-adapter set
         that arms admission — so this only frees the slot the server already reclaimed;
-        it never unloads an adapter a peer still holds. Best effort: an unbound replica
-        or a failed unload leaves the slot to a later unload or the replica's teardown.
+        it never unloads an adapter a peer still holds. Best effort and fail-loud: an
+        unbound replica is a no-op, and a rare failed unload is logged and leaves the
+        slot occupied until the replica is re-materialized — on a preempt, or an idle
+        teardown when a retain window or serve TTL is configured (not the default).
         """
         binding = self._bindings.get(replica_id)
         if binding is None:

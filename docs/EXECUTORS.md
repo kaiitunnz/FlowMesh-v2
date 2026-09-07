@@ -229,6 +229,8 @@ server reclaims the accounting slot and, once no remaining credit-bearing claim 
 replica references the adapter, unloads it from the engine's registry, so the engine frees a
 slot symmetrically with the accounting and a replica serves an unbounded number of
 lifetime-distinct adapters. The unload fires only on the last holder's release, never while
-a concurrent same-adapter claim still holds the slot. One tradeoff is known: every chat
-resident replica enables runtime LoRA, so a base model incompatible with `--enable-lora`
-would fail to serve.
+a concurrent same-adapter claim still holds the slot. A rare failed unload is logged and
+leaves its slot occupied until the replica is re-materialized — on a preempt, or an idle
+teardown only when a retain window or serve TTL is configured (not the default) — no worse
+than serving without the reclaim. One tradeoff is known: every chat resident replica enables
+runtime LoRA, so a base model incompatible with `--enable-lora` would fail to serve.
