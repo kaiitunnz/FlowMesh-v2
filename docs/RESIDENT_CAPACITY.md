@@ -84,45 +84,43 @@ TERMINAL --(permitted reissue)--> successor PENDING (same invocation_id, fresh e
 
 A `RESERVED` claim authorizes one single-use, claim-bound admission handoff — the
 pre-`ACCEPTED` bootstrap fence that binds the tenant subject, the fabric `idm-*` request
-identity, the selected replica incarnation and listener generation, an expiry, and a
-candidate route snapshot. It carries no raw engine endpoint or credential and is neither a
-persisted control object nor a `RouteAuthorization`.
+identity, the trusted origin, the selected replica incarnation and listener generation, and
+an expiry. It carries no route, raw engine endpoint, or credential and is neither a persisted
+control object nor a `RouteAuthorization`.
 
-When the network plane is off, an in-server adapter consumes the handoff and relays the
-request to the replica's OpenAI-compatible endpoint (read from the replica directory), the
-claim-gated compatibility path. This path is single-shot: a post-acceptance ambiguous loss
-settles the boundary, so its fenced terminal releases the credit rather than holding and
-re-driving it as the native path does. That narrower ambiguous-loss window is a tracked
-follow-up to bring onto the same hold-and-re-drive split.
+Resident capacity requires [`NETWORK_PLANE_ENABLED`](NETWORK_PLANE.md); the invocation runs
+in the workers, and control never constructs, parses, or carries engine traffic. The agent's
+own worker captures the resident model boundary, holds the raw request worker-private, and
+proposes only its digest. Control admits the claim, binds the replica's **resident-facing
+sidecar** on its serving worker with the replica incarnation fence and the co-located engine
+endpoint, resolves the trusted origin over the network plane, writes the relay-session
+routing record, and relays the claim-bound handoff to the origin worker — a control message
+on the worker's authenticated attachment, never a dispatched task or the raw request.
 
-When [`NETWORK_PLANE_ENABLED`](NETWORK_PLANE.md) is also on, the invocation is carried over
-the native fabric path, whose live stream never crosses the server — though the deputy
-returns the assembled completion to it to settle the invocation. The Lifecycle & scale
-manager binds a per-replica **resident-facing sidecar** on the replica node and advertises
-its non-secret listener; the sidecar is the enforced claim gate, validating every fence
-against its own incarnation and listener generation before reaching the co-located engine.
-Delivery is two-phase, server-driven over the node-command seam: a bootstrap poke delivers
-the handoff over the origin node's deputy and obtains the engine enqueue acknowledgement, at
-which point the Admission controller records `ACCEPTED` and issues the immutable
-`RouteAuthorization`; a stream poke then carries the authorized response, with cancellation
-and backpressure. The universal path is the reverse-rendezvous `control_relay`: the origin
-deputy and the target sidecar each attach outward to the root, which bridges the framed
-request and response between their per-node streams, so neither the origin nor the replica
-node needs an inbound connection; the exact resident wire messages ride as opaque relay
-payloads, so the sidecar and its claim gate serve them unchanged. The response is carried
-under the relay's per-direction byte window, so a large completion is chunked and
-flow-controlled rather than framed whole. A verified `worker_direct` or `node_relay` offload
-may carry a reachable pair instead; an outbound-only fleet sets `RESIDENT_RELAY_ONLY` to
-mandate the relay so no invocation attempts a forward-dial offload that would always fail. A pre-delivery offload connect
-failure takes the already-resolved base candidate with no re-admission; a fence rejection or
-a clean engine refusal is a definite release; a lost acknowledgement, ambiguous bootstrap,
-or stream loss is `UNCERTAIN`, holds the credit, and re-drives until a definite outcome or
-the fenced DS terminal, resuming from the durable relay cursor rather than re-running the
-engine. The sidecar classifies a clean engine status as definite so no held slot leaks its
-credit. A cancellation reaps both ends — the deputy pokes a cancel that closes the sidecar
-connection and aborts the co-located engine request — so a cancelled invocation stops
-promptly rather than waiting out the stream deadline. Request and stream emit claim-tagged
-load evidence, tagged latency-sensitive service traffic versus bulk transfer.
+The origin worker drives the two-phase protocol end to end. It carries the request to the
+replica worker over the reverse-rendezvous `control_relay` and reports the engine enqueue
+acknowledgement to control, at which point the Admission controller records `ACCEPTED` and
+mints the immutable `RouteAuthorization`, which control relays back; the origin worker then
+streams the authorized response, assembles the completion, materializes it into the content
+store, and reports the bounded outcome manifest. The replica worker's sidecar is the enforced
+claim gate: it validates every fence against its own incarnation and listener generation
+before reaching the co-located engine, and serves the response stream under the relay's
+per-direction byte window so a large completion is chunked and flow-controlled. The origin
+and replica workers each attach outward to the root, which bridges the framed request and
+response between their per-node streams by session and direction, so neither node needs an
+inbound connection and the resident wire messages ride as opaque relay payloads — root and
+supervisors relay them without decoding a body, cursor, or window.
+
+Every transition is safe under loss. Control records `ACCEPTED` and mints the fence only on
+the origin worker's acknowledgement, and the credit releases only from the fenced `DS`
+terminal consumed by `invocation_id` — never on an acknowledgement, a relay ack, or a partial
+materialization. A fence rejection or a clean engine refusal is a definite release; a lost
+acknowledgement, an ambiguous bootstrap, or a stream loss is `UNCERTAIN`, holds the credit,
+and re-drives under the same invocation identity, resuming from the origin worker's already
+materialized manifest rather than re-running the engine. A cancellation reaps both ends so a
+cancelled invocation stops promptly rather than waiting out the stream deadline. Request and
+stream emit claim-tagged load evidence, tagged latency-sensitive service traffic versus bulk
+transfer.
 
 The legacy serve proxy cannot reach a resident allocation: a resident replica's serve task
 is marked resident and the proxy refuses it by allocation identity, independent of its
@@ -156,12 +154,13 @@ scheduling, and KV allocation.
 
 ## Configuration
 
-Resident-capacity control is off by default and enabled per deployment. See the `RESIDENT_*`
-rows in [`ENV.md`](ENV.md) for enablement, the serving substrate (`serve` or `dev_model`),
-the policy caps, the conservative admission-slot count, the cold-start budget, the per-family
-selection strategy, the idle-teardown retain window (`RESIDENT_IDLE_RETAIN_SEC`, `0`
-disables), and the relay-only mode (`RESIDENT_RELAY_ONLY`) that mandates the reverse-relay
-for an outbound-only fleet.
+Resident-capacity control is off by default and enabled per deployment. Enablement requires
+[`NETWORK_PLANE_ENABLED`](NETWORK_PLANE.md): resident capacity runs in the workers over the
+network plane and has no in-server execution path, so `RESIDENT_CAPACITY_ENABLED` without the
+network plane fails closed at startup. See the `RESIDENT_*` rows in [`ENV.md`](ENV.md) for
+enablement, the serving substrate (`serve` or `dev_model`), the policy caps, the conservative
+admission-slot count, the cold-start budget, the per-family selection strategy, and the
+idle-teardown retain window (`RESIDENT_IDLE_RETAIN_SEC`, `0` disables).
 
 ## Observability
 

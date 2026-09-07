@@ -89,7 +89,8 @@ requires a url and a `resident` binding requires a reference.
 A model boundary the agent defers with a `canned` or `echo` binding settles on the control
 plane, against that workflow's own binding; an `openai` binding egresses on the agent's own
 worker (see [Managed external-model egress](#managed-external-model-egress)), and a
-`resident` binding admits through resident-capacity control. The model credential is the
+`resident` binding admits through resident-capacity control and runs in the workers over the
+network plane (see [`RESIDENT_CAPACITY.md`](RESIDENT_CAPACITY.md)). The model credential is the
 workflow's own inline `api_key`, vaulted server-side at submission so only a reference is
 stored, resolved within its own workflow, and carried to the egressing worker on the one-use
 permit — the raw key never persists in the source, template, ledger, or logs, and the

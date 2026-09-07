@@ -211,18 +211,21 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   Admission controller and a Lifecycle & scale manager — over durable control-state
   stores admit an invocation to a compatible model-serving replica, materializing one
   from zero on demand under policy. `ServiceClaim` facts are the sole credit authority;
-  a credit releases only from a fenced ledger terminal consumed by `invocation_id`. When
-  the network plane is also enabled, the invocation is carried data-direct over the fabric
-  path: a per-replica claim-gated sidecar fronts the engine, and delivery is two-phase and
-  server-driven — a bootstrap poke over the origin node's deputy obtains the engine
-  acknowledgement, the Admission controller records `ACCEPTED` and issues the immutable
-  `RouteAuthorization`, then a stream poke carries the authorized response over the
-  data-direct deputy-to-sidecar channel — the live stream never crosses the server, though
-  the deputy returns the assembled completion to it to settle the invocation; a lost
-  or ambiguous delivery is `UNCERTAIN`, holds the credit, and re-drives, releasing only on a
-  definite outcome, and a cancellation reaps both ends of the channel. Otherwise an in-server
-  adapter relays the request as the claim-gated compatibility path. Enable with
-  `RESIDENT_CAPACITY_ENABLED=true`. See [`RESIDENT_CAPACITY.md`](RESIDENT_CAPACITY.md).
+  a credit releases only from a fenced ledger terminal consumed by `invocation_id`. The
+  invocation runs in the workers over the network plane (required), so control never
+  constructs, parses, or carries engine traffic: the agent's own worker captures the
+  boundary and holds the raw request worker-private, control admits the claim, binds the
+  replica's claim-gated sidecar, and relays the claim-bound handoff to the origin worker,
+  which carries the request to the replica worker over the reverse-rendezvous relay and
+  drives the two-phase protocol. The origin worker reports the engine acknowledgement, at
+  which the Admission controller records `ACCEPTED` and mints the immutable
+  `RouteAuthorization` control relays back; the origin worker then streams the authorized
+  response, materializes the completion into the content store, and reports the fenced
+  outcome manifest. Root and supervisors relay opaque frames without decoding a body,
+  cursor, or window; a lost or ambiguous delivery is `UNCERTAIN`, holds the credit, and
+  re-drives from the materialized manifest, releasing only on the fenced terminal, and a
+  cancellation reaps both ends. Enable with `RESIDENT_CAPACITY_ENABLED=true` (which
+  requires `NETWORK_PLANE_ENABLED=true`). See [`RESIDENT_CAPACITY.md`](RESIDENT_CAPACITY.md).
 - **Network-plane route substrate.** A topology-aware, control-resolved routing substrate
   turns trusted node endpoint advertisements and directional reachability evidence into an
   ordered route resolved by a pure resolver, carried by an origin-side deputy that never
@@ -256,8 +259,8 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   ledger before the continuation re-readies or a linked `ServiceClaim` credit releases, and a
   resumed worker hydrates and digest-verifies the reference before injection. Root and
   supervisors relay opaque frames and hold only the manifest. Materialization is idempotent
-  under `idm-*`. The mediated-egress-sidecar tool path settles by reference; the model
-  gateway and resident completions settle inline. See
+  under `idm-*`. The mediated-egress-sidecar tool path and the worker-materialized resident
+  completion settle by reference; the model gateway settles inline. See
   [`EXECUTORS.md`](EXECUTORS.md).
 - **Task merging.** Compatible adjacent tasks in a DAG (same `taskType`,
   model, hardware shape, and merge key) coalesce into a single dispatch.
