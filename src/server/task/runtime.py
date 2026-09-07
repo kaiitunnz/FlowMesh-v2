@@ -19,6 +19,7 @@ from shared.harness import (
     HarnessResultKind,
     InputBinding,
     InputBindingMember,
+    ServiceLeafEpisodeDispatch,
 )
 from shared.outcome import OutcomeManifest
 from shared.resident.reports import ResidentBootstrapAck, ResidentOpOutcome
@@ -1757,6 +1758,28 @@ class TaskRuntime:
                 input_bindings=input_bindings,
                 model_binding=model_binding,
                 facade_descriptors=tuple(op.facades) if op is not None else (),
+            )
+
+    def service_episode_dispatch(
+        self, task_id: str
+    ) -> ServiceLeafEpisodeDispatch | None:
+        """The service-episode context for a resident leaf, or None.
+
+        Only a resident-backed inference/embedding leaf takes this path; an agent whose
+        model binding is resident runs its resident boundary through the agent episode.
+        A resume ships the settled outcome to inject; a first dispatch ships none.
+        """
+        with self._lock:
+            record = self._tasks.get(task_id)
+            engine = self._engines.get(record.workflow_id) if record else None
+            if engine is None:
+                return None
+            dependency = engine.service_dependency(task_id)
+            if dependency is None or engine.agent_operator(task_id) is not None:
+                return None
+            _capsule, outcomes = engine.episode_context(task_id)
+            return ServiceLeafEpisodeDispatch(
+                interface=dependency.interface.value, delivered_outcomes=outcomes
             )
 
     def _synthesize_ready_children_locked(

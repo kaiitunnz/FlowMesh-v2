@@ -190,6 +190,21 @@ class AgentEpisodeDispatch(BaseModel):
     facade_descriptors: tuple[FacadeDescriptor, ...] = ()
 
 
+class ServiceLeafEpisodeDispatch(BaseModel):
+    """The resident service-leaf episode context the fabric ships for one step.
+
+    A service-backed inference/embedding leaf runs as a run-to-yield episode with no
+    harness: its first step builds the model request from the task spec and yields one
+    resident model boundary; a resume injects the settled ``delivered_outcomes`` and
+    completes. ``interface`` selects how the request and result are shaped.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    interface: str
+    delivered_outcomes: tuple[DeliveredOutcome, ...] = ()
+
+
 class HarnessResultKind(StrEnum):
     """What a harness step returned."""
 

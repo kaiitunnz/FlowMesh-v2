@@ -491,6 +491,7 @@ class Dispatcher:
                 record, rendered_task.spec
             ),
             agent_episode=self._runtime.agent_episode_dispatch(task_id),
+            service_episode=self._runtime.service_episode_dispatch(task_id),
         )
 
         # 8. Publish task

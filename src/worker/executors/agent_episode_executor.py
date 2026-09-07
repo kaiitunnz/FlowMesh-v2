@@ -14,7 +14,6 @@ from typing import Any, ClassVar
 from shared.harness import (
     REQUIRED_MEDIATED_FACADES,
     BoundaryEventKind,
-    DeliveredOutcome,
     EgressHandoffMode,
     EpisodeModelBinding,
     HarnessAdapter,
@@ -22,12 +21,8 @@ from shared.harness import (
     HarnessResult,
     HarnessResultKind,
 )
-from shared.outcome import ContentStoreError, FabricContentStore
-from shared.resident.wire import resident_request_digest
-from shared.schemas.result import BaseExecutorResult
 from shared.tasks.specs.misc import ModelBindingMode
 from shared.tasks.task_type import TaskType
-from shared.tools.facade import FacadeTurnGroup
 from shared.tools.model.schema import (
     MODEL_INTERFACE,
     model_request_digest,
@@ -39,27 +34,13 @@ from shared.tools.search.schema import (
     tool_request_digest,
 )
 
-from ..content_store import build_content_store
 from ..egress import PendingEgressRequestStore
-from ..resident import ResidentRequestStore
+from ..resident import capture_resident_request
 from .base_executor import ExecutionError, Executor, ExecutorTask
+from .episode_support import EpisodeStepResult, hydrate_delivered_outcomes
 from .harness import build_adapter
 
 _LOG = logging.getLogger("agent-episode-executor")
-
-
-class AgentEpisodeResult(BaseExecutorResult):
-    """One agent-episode step's result: the harness step plus its terminal value.
-
-    ``harness_result`` carries the step back to the server through the success metadata;
-    ``value`` is the agent's declared output on a completion step, readable over REST.
-    ``facade_group`` is a turn group the worker facade captured on this step, carried
-    with the completion so control routes it ordered-with the turn.
-    """
-
-    harness_result: HarnessResult
-    value: str | None = None
-    facade_group: FacadeTurnGroup | None = None
 
 
 class AgentEpisodeExecutor(Executor):
@@ -73,7 +54,7 @@ class AgentEpisodeExecutor(Executor):
         self._adapter: HarnessAdapter | None = None
         self._episode_task_id: str | None = None
 
-    def run(self, task: ExecutorTask, out_dir: Path) -> AgentEpisodeResult:
+    def run(self, task: ExecutorTask, out_dir: Path) -> EpisodeStepResult:
         dispatch = task.agent_episode
         if dispatch is None:
             raise ExecutionError(
@@ -100,7 +81,9 @@ class AgentEpisodeExecutor(Executor):
             if dispatch.capsule_blob is not None
             else None
         )
-        outcomes = self._hydrate_outcomes(dispatch.delivered_outcomes)
+        outcomes = hydrate_delivered_outcomes(
+            self._config.server_base_url, dispatch.delivered_outcomes
+        )
         for outcome in outcomes:
             _LOG.info(
                 "[fabric] injecting %s outcome at call %s",
@@ -124,7 +107,7 @@ class AgentEpisodeExecutor(Executor):
                 dispatch.model_binding,
             )
         elif self._is_resident_boundary(result, dispatch.model_binding):
-            result = self._capture_resident_request(
+            result = capture_resident_request(
                 self._resident_requests(), task.task_id, result
             )
         if result.kind is HarnessResultKind.BOUNDARY and result.request is not None:
@@ -135,9 +118,7 @@ class AgentEpisodeExecutor(Executor):
             )
         value = result.value if result.kind is HarnessResultKind.COMPLETION else None
         group = facade.take_captured_group(task.task_id) if facade is not None else None
-        return AgentEpisodeResult(
-            harness_result=result, value=value, facade_group=group
-        )
+        return EpisodeStepResult(harness_result=result, value=value, facade_group=group)
 
     @staticmethod
     def _is_capturable_boundary(
@@ -229,59 +210,6 @@ class AgentEpisodeExecutor(Executor):
             and model_binding is not None
             and model_binding.mode is ModelBindingMode.RESIDENT
         )
-
-    @staticmethod
-    def _capture_resident_request(
-        store: ResidentRequestStore, task_id: str, result: HarnessResult
-    ) -> HarnessResult:
-        """Keep a resident request worker-private and emit only its digest.
-
-        The raw request is recorded in resident custody keyed by
-        ``(task_id, call_correlation)``, read back only by the origin worker's resident
-        driver, and stripped from the boundary that crosses to control.
-        """
-        req = result.request
-        assert req is not None and req.request_payload is not None
-        assert req.call_correlation is not None
-        store.put(task_id, req.call_correlation, req.request_payload)
-        stripped = req.model_copy(
-            update={
-                "request_payload": None,
-                "request_digest": resident_request_digest(req.request_payload),
-            }
-        )
-        return result.model_copy(update={"request": stripped})
-
-    def _hydrate_outcomes(
-        self, outcomes: tuple[DeliveredOutcome, ...]
-    ) -> tuple[DeliveredOutcome, ...]:
-        """Resolve any reference-backed outcome into its injected value.
-
-        A manifest is fetched from the content store and digest-verified before
-        injection; a hydration failure fails the step for a physical retry of the same
-        reference, never a re-run of the invocation, so an unverified value is never
-        injected. An inline outcome passes through unchanged.
-        """
-        if not any(o.outcome_ref is not None for o in outcomes):
-            return outcomes
-        store = build_content_store(self._config.server_base_url)
-        if store is None:
-            raise ExecutionError("cannot hydrate a reference-backed outcome: no store")
-        return tuple(self._hydrate(o, store) for o in outcomes)
-
-    @staticmethod
-    def _hydrate(
-        outcome: DeliveredOutcome, store: FabricContentStore
-    ) -> DeliveredOutcome:
-        if outcome.outcome_ref is None:
-            return outcome
-        try:
-            value = store.hydrate(outcome.outcome_ref).decode()
-        except (ContentStoreError, UnicodeDecodeError) as exc:
-            raise ExecutionError(
-                f"outcome hydration failed at {outcome.call_correlation}: {exc}"
-            ) from exc
-        return outcome.model_copy(update={"value": value, "outcome_ref": None})
 
     def cancel(self, task_id: str) -> None:
         if self._adapter is not None:

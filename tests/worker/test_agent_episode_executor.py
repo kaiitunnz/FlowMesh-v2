@@ -23,11 +23,9 @@ from shared.tasks.task_type import TaskType
 from shared.tasks.worker_message import WorkerTaskMessage
 from tests.worker.factories import make_worker_config, make_worker_task_message
 from worker.executors import EXECUTOR_REGISTRY
-from worker.executors.agent_episode_executor import (
-    AgentEpisodeExecutor,
-    AgentEpisodeResult,
-)
+from worker.executors.agent_episode_executor import AgentEpisodeExecutor
 from worker.executors.base_executor import ExecutionError, Executor
+from worker.executors.episode_support import EpisodeStepResult
 from worker.executors.harness import UnknownHarnessBackendError, register_adapter
 from worker.main import build_capabilities
 from worker.runner import Runner
@@ -91,7 +89,7 @@ def test_step_returns_the_harness_result(tmp_path: Path) -> None:
     )
     ex = AgentEpisodeExecutor(make_worker_config())
     out = ex.run(_dispatch_msg(capsule_blob="after:c0"), tmp_path)
-    assert isinstance(out, AgentEpisodeResult)
+    assert isinstance(out, EpisodeStepResult)
     assert out.harness_result.kind is HarnessResultKind.COMPLETION
     assert out.value == "done"
 
@@ -173,8 +171,8 @@ def _runner(tmp_path: Path, executors: dict[str, Executor]) -> Runner:
     )
 
 
-def _agent_result() -> AgentEpisodeResult:
-    return AgentEpisodeResult(
+def _agent_result() -> EpisodeStepResult:
+    return EpisodeStepResult(
         harness_result=HarnessResult(kind=HarnessResultKind.COMPLETION, value="done"),
         value="done",
     )
