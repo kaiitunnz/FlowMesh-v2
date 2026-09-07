@@ -18,10 +18,12 @@ from tests.worker.factories import make_worker_config, make_worker_task_message
 from worker.executors import EXECUTOR_REGISTRY
 from worker.executors.base_executor import ExecutionError
 from worker.executors.service_leaf_executor import (
-    _CALL_CORRELATION,
     ServiceLeafExecutor,
+    _call_correlation,
 )
 from worker.resident import ResidentRequestStore
+
+_CORR = _call_correlation("tsk-test")
 
 
 def _executor() -> tuple[ServiceLeafExecutor, ResidentRequestStore]:
@@ -68,14 +70,14 @@ def test_first_step_captures_the_request_and_yields_a_resident_boundary(
     # The raw request is stripped to a digest and kept worker-private.
     assert req.request_payload is None
     assert req.request_digest is not None
-    assert store.peek("tsk-test", _CALL_CORRELATION) == "hello there"
+    assert store.peek("tsk-test", _CORR) == "hello there"
 
 
 def test_explicit_messages_pass_through_as_a_chat_request(tmp_path: Path) -> None:
     ex, store = _executor()
     messages = [{"role": "user", "content": "summarize"}]
     ex.run(_msg({"messages": messages}), tmp_path)
-    stashed = store.peek("tsk-test", _CALL_CORRELATION)
+    stashed = store.peek("tsk-test", _CORR)
     assert stashed is not None and json.loads(stashed) == {"messages": messages}
 
 
@@ -86,7 +88,7 @@ def test_resume_completes_with_the_settled_value(tmp_path: Path) -> None:
             {"prompt": "hello"},
             delivered_outcomes=[
                 {
-                    "call_correlation": _CALL_CORRELATION,
+                    "call_correlation": _CORR,
                     "kind": "result",
                     "value": "the answer",
                 }
@@ -105,7 +107,7 @@ def test_resume_on_a_denied_outcome_fails_the_leaf(tmp_path: Path) -> None:
             {"prompt": "hello"},
             delivered_outcomes=[
                 {
-                    "call_correlation": _CALL_CORRELATION,
+                    "call_correlation": _CORR,
                     "kind": "denied",
                     "denial": "authority",
                 }
@@ -132,7 +134,7 @@ def test_embedding_leaf_captures_the_input_list_and_yields_a_boundary(
     assert out.harness_result.kind is HarnessResultKind.BOUNDARY
     assert req is not None and req.interface == MODEL_INTERFACE
     assert req.request_payload is None and req.request_digest is not None
-    stashed = store.peek("tsk-test", _CALL_CORRELATION)
+    stashed = store.peek("tsk-test", _CORR)
     assert stashed is not None and json.loads(stashed) == {"input": ["alpha", "beta"]}
 
 
@@ -144,7 +146,7 @@ def test_embedding_resume_completes_with_the_settled_vectors(tmp_path: Path) -> 
             {"input": ["alpha"]},
             delivered_outcomes=[
                 {
-                    "call_correlation": _CALL_CORRELATION,
+                    "call_correlation": _CORR,
                     "kind": "result",
                     "value": vectors,
                 }

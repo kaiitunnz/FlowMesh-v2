@@ -31,9 +31,16 @@ from .episode_support import EpisodeStepResult, hydrate_delivered_outcomes
 
 _LOG = logging.getLogger("service-leaf-executor")
 
-# The single resident model boundary a service leaf emits; stable across a re-drive so
-# the worker-private request and its settled outcome key to one occurrence.
-_CALL_CORRELATION = "resident-model/0"
+# The single resident model boundary a service leaf emits. The correlation is unique per
+# leaf task (and stable across a re-drive of that task) so two resident leaves running
+# concurrently on one worker never collide in the worker's per-correlation origin
+# driver.
+_CALL_CORRELATION_PREFIX = "resident-model/"
+
+
+def _call_correlation(task_id: str) -> str:
+    return f"{_CALL_CORRELATION_PREFIX}{task_id}"
+
 
 _PROMPT_FIELDS = ("prompt", "input", "content", "text")
 
@@ -61,19 +68,20 @@ class ServiceLeafExecutor(Executor):
         outcomes = hydrate_delivered_outcomes(
             self._config.server_base_url, dispatch.delivered_outcomes
         )
-        settled = next(
-            (o for o in outcomes if o.call_correlation == _CALL_CORRELATION), None
-        )
+        correlation = _call_correlation(task.task_id)
+        settled = next((o for o in outcomes if o.call_correlation == correlation), None)
         if settled is not None:
             return self._complete(settled)
-        return self._yield_boundary(task, dispatch.interface)
+        return self._yield_boundary(task, dispatch.interface, correlation)
 
-    def _yield_boundary(self, task: ExecutorTask, interface: str) -> EpisodeStepResult:
+    def _yield_boundary(
+        self, task: ExecutorTask, interface: str, correlation: str
+    ) -> EpisodeStepResult:
         payload = _resident_request_payload(task, interface)
         request = BoundaryRequest(
             kind=BoundaryEventKind.INVOCATION,
             interface=MODEL_INTERFACE,
-            call_correlation=_CALL_CORRELATION,
+            call_correlation=correlation,
             request_payload=payload,
         )
         result = capture_resident_request(
