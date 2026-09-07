@@ -15,6 +15,8 @@ import contextlib
 import logging
 from collections.abc import Awaitable, Callable
 
+from shared.resident.contracts import AdmissionHandoff, RouteAuthorization
+
 from ..network import wire as netwire
 from ..network.reverse_relay import (
     BinaryRedis,
@@ -28,7 +30,6 @@ from ..network.reverse_relay import (
 from ..network.state import ResolvedRoute
 from . import wire
 from .deputy import BootstrapResult, StreamResult
-from .state import AdmissionHandoff, RouteAuthorization
 
 # Opens a loopback connection to the co-located sidecar's advertised route.
 _Conn = tuple[asyncio.StreamReader, asyncio.StreamWriter]

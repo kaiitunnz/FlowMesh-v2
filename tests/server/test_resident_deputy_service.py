@@ -12,8 +12,12 @@ from typing import Any
 from server.network.state import ResolvedRoute, RouteCandidate, RouteHop, Transport
 from server.resident.deputy import BootstrapResult, StreamResult
 from server.resident.sidecar_server import EngineResponse
-from server.resident.state import AdmissionHandoff, ReplicaEndpoint, RouteAuthorization
 from server.supervisor.services.resident_deputy import ResidentDeputyService
+from shared.resident.contracts import (
+    AdmissionHandoff,
+    ReplicaEndpoint,
+    RouteAuthorization,
+)
 
 _CHUNKS = ["ready ", "set ", "go"]
 

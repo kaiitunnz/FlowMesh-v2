@@ -20,10 +20,15 @@ from typing import Any
 import httpx
 from pydantic import ValidationError
 
+from shared.resident.contracts import (
+    AdmissionHandoff,
+    ReplicaEndpoint,
+    RouteAuthorization,
+)
+from shared.resident.engine_request import chat_body
+from shared.resident.gate import LoadEvidence, SidecarClaimGate
+
 from . import wire
-from .adapter import chat_body
-from .sidecar import LoadEvidence, SidecarClaimGate
-from .state import AdmissionHandoff, ReplicaEndpoint, RouteAuthorization
 
 
 @dataclass

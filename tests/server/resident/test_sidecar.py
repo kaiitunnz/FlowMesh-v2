@@ -8,12 +8,12 @@ mismatch is a distinct authorization rejection, never a path failure.
 
 from typing import Any
 
-from server.resident.sidecar import (
+from shared.resident.contracts import AdmissionHandoff, RouteAuthorization
+from shared.resident.gate import (
     GateRejection,
     SidecarClaimGate,
     TrafficClass,
 )
-from server.resident.state import AdmissionHandoff, RouteAuthorization
 
 
 def _gate(clock="2026-01-01T00:00:00Z") -> SidecarClaimGate:

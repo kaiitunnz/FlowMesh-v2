@@ -27,14 +27,18 @@ from server.network.state import (
     Transport,
 )
 from server.resident.relay_delivery import ResidentRelayEndpoint
-from server.resident.sidecar import SidecarClaimGate
 from server.resident.sidecar_server import (
     EngineResponse,
     ResidentSidecarListener,
     ResidentSidecarServer,
 )
-from server.resident.state import AdmissionHandoff, ReplicaEndpoint, RouteAuthorization
 from server.supervisor.services.reverse_relay_attachment import ReverseRelayAttachment
+from shared.resident.contracts import (
+    AdmissionHandoff,
+    ReplicaEndpoint,
+    RouteAuthorization,
+)
+from shared.resident.gate import SidecarClaimGate
 from tests.server.network._relay_fakes import FakeBinaryRedis
 
 _CHUNKS = ["once ", "upon ", "a time"]

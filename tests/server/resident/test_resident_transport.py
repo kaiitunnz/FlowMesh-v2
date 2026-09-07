@@ -27,13 +27,17 @@ from server.network.state import (
 )
 from server.resident import wire
 from server.resident.deputy import ResidentInvocationDeputy
-from server.resident.sidecar import SidecarClaimGate
 from server.resident.sidecar_server import (
     EngineResponse,
     ResidentSidecarListener,
     ResidentSidecarServer,
 )
-from server.resident.state import AdmissionHandoff, ReplicaEndpoint, RouteAuthorization
+from shared.resident.contracts import (
+    AdmissionHandoff,
+    ReplicaEndpoint,
+    RouteAuthorization,
+)
+from shared.resident.gate import SidecarClaimGate
 
 _CHUNKS = ["one ", "two ", "three"]
 

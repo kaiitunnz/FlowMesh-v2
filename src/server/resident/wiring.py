@@ -12,6 +12,7 @@ from typing import Any
 
 from lumid_hooks import PrincipalContext
 
+from shared.resident.contracts import ReplicaEndpoint
 from shared.schemas.command import CommandMessage, CommandType
 
 from ..config import OrchestrationConfig, ResidentCapacityConfig
@@ -28,7 +29,7 @@ from .materializer import materialize_resident_replica
 from .native import NativeTransport, NativeTransportError
 from .policy import ResidentPolicyLimits
 from .service import NativeDeliveryDeps, ResidentCapacityControl
-from .state import ReplicaEndpoint, ReplicaIncarnation, ServiceFamily
+from .state import ReplicaIncarnation, ServiceFamily
 from .stores import ResidentStores
 
 # Yields the resolved system principal, read lazily so materialization uses the

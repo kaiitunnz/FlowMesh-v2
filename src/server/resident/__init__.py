@@ -1,3 +1,9 @@
+from shared.resident.contracts import (
+    AdmissionHandoff,
+    ReplicaEndpoint,
+    RouteAuthorization,
+)
+
 from .adapter import AdapterError, EngineInvocationAdapter, HttpInferenceAdapter
 from .admission import AdmissionController
 from .capacity import default_credit, is_feasible, outstanding_slots, residual_after
@@ -29,7 +35,6 @@ from .service import ResidentCapacityControl
 from .state import (
     CREDIT_BEARING_CLAIM_STATES,
     SERVABLE_REPLICA_STATES,
-    AdmissionHandoff,
     AdmissionProfile,
     AllocationLease,
     ClaimCredit,
@@ -39,11 +44,9 @@ from .state import (
     InvocationRequest,
     ProvisioningDenialReason,
     ReplicaCapacityReport,
-    ReplicaEndpoint,
     ReplicaIncarnation,
     ReplicaState,
     ResidentSnapshot,
-    RouteAuthorization,
     SafeCapacityVector,
     ServiceClaim,
     ServiceFamily,

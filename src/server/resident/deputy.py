@@ -19,6 +19,8 @@ import socket
 import ssl
 from dataclasses import dataclass, field
 
+from shared.resident.contracts import AdmissionHandoff, RouteAuthorization
+
 from ..network import wire as netwire
 from ..network.state import (
     ResolvedRoute,
@@ -27,7 +29,6 @@ from ..network.state import (
     Transport,
 )
 from . import wire
-from .state import AdmissionHandoff, RouteAuthorization
 
 
 @dataclass

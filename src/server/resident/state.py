@@ -11,6 +11,8 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from shared.resident.contracts import ReplicaEndpoint
+
 from ..network.state import ReplicaListenerAdvertisement
 from ..utils.time import now_iso
 
@@ -127,23 +129,6 @@ class SafeCapacityVector(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     admission_slots: int
-
-
-class ReplicaEndpoint(BaseModel):
-    """The reachable address of a materialized replica.
-
-    ``api_key`` stays server-side and never reaches a workflow; it is held out of the
-    durable snapshot (``exclude=True``) so no credential is persisted in cleartext, and
-    is re-attached from a live probe on rehydrate. ``base_url`` is OpenAI-compatible for
-    the inference family.
-    """
-
-    model_config = ConfigDict(frozen=True)
-
-    base_url: str
-    model: str
-    api_key: str | None = Field(default=None, exclude=True)
-    protocol: str = "openai"
 
 
 class ReplicaCapacityReport(BaseModel):
@@ -297,60 +282,3 @@ class ResidentSnapshot(BaseModel):
     leases: list[AllocationLease] = Field(default_factory=list)
     invocations: list[InvocationRequest] = Field(default_factory=list)
     claims: list[ServiceClaim] = Field(default_factory=list)
-
-
-class AdmissionHandoff(BaseModel):
-    """A claim-bound pre-``ACCEPTED`` bootstrap fence for one reserved claim.
-
-    A ``RESERVED`` claim authorizes one bootstrap delivery that reaches the selected
-    replica incarnation's resident-facing sidecar and obtains an engine enqueue
-    acknowledgement. It binds the tenant-scoped invocation subject, the fabric ``idm-*``
-    request identity, the selected replica incarnation and listener generation, and an
-    expiry. The deputy carries the resolved route alongside this handoff; the sidecar
-    validates these bindings and trusts that only the origin deputy reaches its
-    per-replica route; it does not itself track ``token`` to reject a replayed
-    bootstrap — that credential handshake is deferred. It is neither general service
-    access nor the post-``ACCEPTED`` ``RouteAuthorization``, and it never carries the
-    raw engine endpoint or credential — the sidecar reaches its co-located engine.
-    """
-
-    model_config = ConfigDict(frozen=True)
-
-    token: str
-    claim_id: str
-    invocation_id: str
-    idempotency_key: str | None = None
-    family: str
-    tenant: str | None = None
-    origin_id: str | None = None
-    replica_id: str
-    incarnation: int
-    listener_generation: int = 0
-    expires_at: str | None = None
-
-
-class RouteAuthorization(BaseModel):
-    """The immutable post-``ACCEPTED`` fence for one accepted-claim response stream.
-
-    Issued only after the engine enqueue acknowledgement, it authorizes the response
-    stream, cancellation, and backpressure for a single tenant-scoped invocation. It is
-    distinct from the ephemeral ``ResolvedRoute``: it stamps no path and is never
-    refreshed. The resident-facing sidecar validates it per stream and rejects it once
-    any bound fence — expiry, replica incarnation, listener generation, subject, claim,
-    invocation, or request identity — no longer holds. A permitted reissue is a fresh
-    successor claim under the same invocation, so the claim fence alone rejects a
-    superseded authorization. It carries no bearer credential; its fence fields are the
-    authority.
-    """
-
-    model_config = ConfigDict(frozen=True)
-
-    claim_id: str
-    invocation_id: str
-    idempotency_key: str | None = None
-    tenant: str | None = None
-    origin_id: str | None = None
-    replica_id: str
-    incarnation: int
-    listener_generation: int = 0
-    expires_at: str | None = None

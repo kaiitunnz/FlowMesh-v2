@@ -12,17 +12,22 @@ that seam — they ride the data-direct channel between this deputy and the side
 import logging
 from typing import Any
 
+from shared.resident.contracts import (
+    AdmissionHandoff,
+    ReplicaEndpoint,
+    RouteAuthorization,
+)
+from shared.resident.gate import LoadEvidence, SidecarClaimGate
+
 from ...network.state import ResolvedRoute, Transport
 from ...resident.deputy import BootstrapResult, ResidentInvocationDeputy, StreamResult
 from ...resident.relay_delivery import ResidentRelayEndpoint
-from ...resident.sidecar import LoadEvidence, SidecarClaimGate
 from ...resident.sidecar_server import (
     EngineOpen,
     HttpEngineDelivery,
     ResidentSidecarListener,
     ResidentSidecarServer,
 )
-from ...resident.state import AdmissionHandoff, ReplicaEndpoint, RouteAuthorization
 
 
 class ResidentDeputyService:

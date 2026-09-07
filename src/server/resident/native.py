@@ -11,10 +11,14 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from shared.resident.contracts import (
+    AdmissionHandoff,
+    ReplicaEndpoint,
+    RouteAuthorization,
+)
 from shared.schemas.command import CommandType
 
 from ..network.state import ResolvedRoute, RouteObservationOutcome, Transport
-from .state import AdmissionHandoff, ReplicaEndpoint, RouteAuthorization
 
 # Sends one node command and returns its result data, raising on a failed command.
 ExecNodeCmd = Callable[[str, CommandType, dict[str, Any]], Awaitable[dict[str, Any]]]

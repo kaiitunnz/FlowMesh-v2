@@ -10,6 +10,7 @@ through the injected hook so the credit survives a restart.
 
 from collections.abc import Callable
 
+from shared.resident.contracts import AdmissionHandoff, RouteAuthorization
 from shared.utils.ids import new_admission_handoff_token
 
 from ..utils.time import now_iso
@@ -26,14 +27,12 @@ from .claim import (
 from .selection import SelectionStrategy, build_selection_strategy
 from .state import (
     SERVABLE_REPLICA_STATES,
-    AdmissionHandoff,
     AdmissionProfile,
     ClaimState,
     ClaimTerminalReason,
     DemandEntry,
     InvocationRequest,
     ReplicaIncarnation,
-    RouteAuthorization,
     ServiceClaim,
 )
 from .stores import ResidentStores

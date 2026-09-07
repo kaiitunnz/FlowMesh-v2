@@ -14,6 +14,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
 
+from shared.resident.contracts import AdmissionHandoff, ReplicaEndpoint
 from shared.tasks.specs import ModelBindingMode
 from shared.utils.ids import new_relay_session_id
 
@@ -34,12 +35,10 @@ from .native import NativeTransport, NativeTransportError
 from .policy import ResidentPolicyLimits
 from .state import (
     SERVABLE_REPLICA_STATES,
-    AdmissionHandoff,
     AdmissionProfile,
     ClaimState,
     ClaimTerminalReason,
     ProvisioningDenialReason,
-    ReplicaEndpoint,
     ReplicaIncarnation,
     ReplicaState,
     ResidentSnapshot,
