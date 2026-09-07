@@ -2,9 +2,8 @@
 
 A client selects only an alias from this deployment-published catalog; it never names a
 model image, worker, endpoint, or routing policy. Each alias maps to a resident service
-family and carries the tenants authorized to use it and the request bounds the edge
-enforces. The catalog is loaded from deployment configuration; a future admin
-publication API binds the same records.
+family and carries the tenants authorized to use it and its request profile. The catalog
+is loaded from deployment configuration.
 """
 
 import json
@@ -19,10 +18,11 @@ class PublishedAlias(BaseModel):
     """One published alias binding a tenant-visible name to a resident family.
 
     ``allowed_tenants`` is the set of tenant ids authorized to select the alias; an
-    empty set authorizes any authenticated tenant. ``max_output_tokens`` bounds the
-    request profile the edge admits. The service reference, interface, and isolation
-    resolve to the same ``ServiceDependency`` a workflow leaf would, so an authorized
-    ingress request reuses a warm compatible family rather than a private one.
+    empty set authorizes any authenticated tenant. ``max_output_tokens`` sizes the
+    invocation's admission profile (its credit demand); it does not clamp the engine's
+    own token limit, which the opaque client request still carries. The service
+    reference, interface, and isolation resolve to the same ``ServiceDependency`` a
+    workflow leaf would, so an authorized ingress request reuses a warm family.
     """
 
     model_config = ConfigDict(frozen=True)

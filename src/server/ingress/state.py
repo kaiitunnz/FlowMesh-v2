@@ -65,6 +65,9 @@ class IngressTerminalStore:
     def get(self, invocation_id: str) -> IngressTerminal | None:
         return self._terminals.get(invocation_id)
 
+    def all(self) -> list[IngressTerminal]:
+        return list(self._terminals.values())
+
     def to_snapshot(self) -> IngressSnapshot:
         return IngressSnapshot(terminals=list(self._terminals.values()))
 

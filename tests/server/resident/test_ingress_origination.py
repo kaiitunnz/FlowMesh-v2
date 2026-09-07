@@ -11,7 +11,7 @@ invocation ids, never overwrite one another.
 import asyncio
 from typing import Any
 
-from server.resident import AdmissionProfile, ClaimState
+from server.resident import AdmissionProfile, ClaimState, ClaimTerminalReason
 from server.resident.service import IngressOrigination
 from server.resident.state import InvocationSubject, InvocationSubjectKind
 from shared.outcome import OutcomeManifest
@@ -54,6 +54,7 @@ def _ingress_request(
     *,
     invocation_id: str = "inv-ing",
     tenant: str = "acme",
+    origin_worker: str = "wkr-origin",
 ) -> IngressOrigination:
     dependency = _dependency()
     return IngressOrigination(
@@ -68,7 +69,7 @@ def _ingress_request(
         profile=AdmissionProfile(
             engine_batch_key=dependency.engine_batch_key, tenant=tenant
         ),
-        origin_worker="wkr-origin",
+        origin_worker=origin_worker,
         delivery=delivery,  # type: ignore[arg-type]
     )
 
@@ -181,16 +182,110 @@ def test_teed_chunk_routes_to_the_ingress_delivery():
 
     svc._tee_chunk(
         ResidentStreamChunk(
-            invocation_id="inv-ing", session_id=session_id, seq=1, payload="tok"
+            invocation_id="inv-ing", session_id=session_id, payload="tok"
         )
     )
     # A chunk for a stale session is ignored.
     svc._tee_chunk(
         ResidentStreamChunk(
-            invocation_id="inv-ing", session_id="rly-stale", seq=1, payload="drop"
+            invocation_id="inv-ing", session_id="rly-stale", payload="drop"
         )
     )
     assert delivery.chunks == ["tok"]
+
+
+def test_redrive_give_up_terminalizes_the_held_claim_and_releases_credit():
+    # H1: when a re-drive can find no deputy, the give-up must release the held credit
+    # through the fenced path — an ingress claim has no DS terminal to save it.
+    svc, stores, _settled, _relay = _build()
+    delivery = _FakeDelivery()
+    asyncio.run(svc._originate_ingress(_ingress_request(delivery)))
+    asyncio.run(
+        svc._on_ack(_ack(svc, ResidentBootstrapOutcome.ACKED, invocation_id="inv-ing"))
+    )
+    asyncio.run(
+        svc._on_outcome(
+            _outcome(
+                svc,
+                ResidentStreamStatus.UNCERTAIN,
+                invocation_id="inv-ing",
+                error="stream lost",
+            )
+        )
+    )
+    claim = stores.claims.by_invocation("inv-ing")[0]
+    assert claim.state is ClaimState.UNCERTAIN  # credit held, pending the re-drive
+    assert stores.credit_ledger.held(claim.replica_id) == 1
+
+    # The edge's re-drive gave up (no deputy): it terminalizes through the fenced path.
+    svc.fail_ingress("inv-ing", delivery, "no worker to re-drive")  # type: ignore[arg-type]
+    assert claim.state is ClaimState.TERMINAL
+    assert stores.credit_ledger.held(claim.replica_id) == 0
+    assert delivery.failures  # the client is failed after the credit releases
+
+
+def test_reconcile_terminal_settles_a_rehydrated_uncertain_claim():
+    # M1: a crash between the terminal-fact write and the claim release leaves the claim
+    # UNCERTAIN; replaying the recorded terminal on startup settles it.
+    svc, stores, _settled, _relay = _build()
+    delivery = _FakeDelivery()
+    asyncio.run(svc._originate_ingress(_ingress_request(delivery)))
+    asyncio.run(
+        svc._on_ack(_ack(svc, ResidentBootstrapOutcome.ACKED, invocation_id="inv-ing"))
+    )
+    asyncio.run(
+        svc._on_outcome(
+            _outcome(
+                svc,
+                ResidentStreamStatus.UNCERTAIN,
+                invocation_id="inv-ing",
+                error="stream lost",
+            )
+        )
+    )
+    claim = stores.claims.by_invocation("inv-ing")[0]
+    assert claim.state is ClaimState.UNCERTAIN
+
+    # Startup replays the recorded ingress terminal through the FSM (no live client).
+    svc.reconcile_ingress_terminal("inv-ing", ClaimTerminalReason.COMPLETED)
+    assert claim.state is ClaimState.TERMINAL
+    assert stores.credit_ledger.held(claim.replica_id) == 0
+
+
+def test_a_redrive_reaps_every_deputy_it_touched():
+    # M2: a re-drive that moves to a fresh deputy injected the request into both; the
+    # terminal reap must reach every deputy, not only the last.
+    svc, stores, _settled, delivery_relay = _build(deliver=True)
+    delivery = _FakeDelivery()
+    asyncio.run(
+        svc._originate_ingress(_ingress_request(delivery, origin_worker="wkr-a"))
+    )
+    # A re-drive of the same invocation lands on a fresh deputy under the held claim.
+    asyncio.run(
+        svc._originate_ingress(_ingress_request(delivery, origin_worker="wkr-b"))
+    )
+    asyncio.run(
+        svc._on_ack(_ack(svc, ResidentBootstrapOutcome.ACKED, invocation_id="inv-ing"))
+    )
+    manifest = OutcomeManifest(
+        content_digest="sha", size_bytes=2, media_type="text/plain"
+    )
+    asyncio.run(
+        svc._on_outcome(
+            _outcome(
+                svc,
+                ResidentStreamStatus.SUCCESS,
+                invocation_id="inv-ing",
+                manifest=manifest,
+            )
+        )
+    )
+    reaped = {
+        worker
+        for worker, kind, _payload in delivery_relay.relays
+        if kind == "resident_reap"
+    }
+    assert reaped == {"wkr-a", "wkr-b"}
 
 
 def test_workflow_and_ingress_terminals_do_not_overwrite():

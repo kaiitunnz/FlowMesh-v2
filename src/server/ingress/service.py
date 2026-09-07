@@ -45,6 +45,12 @@ _TERMINAL_STATUS = {
     ClaimTerminalReason.CANCELLED: IngressTerminalStatus.CANCELLED,
 }
 
+_STATUS_REASON = {
+    IngressTerminalStatus.COMPLETED: ClaimTerminalReason.COMPLETED,
+    IngressTerminalStatus.CANCELLED: ClaimTerminalReason.CANCELLED,
+    IngressTerminalStatus.FAILED: ClaimTerminalReason.FAILED,
+}
+
 
 class AliasNotFound(Exception):
     """The requested alias is not published."""
@@ -249,10 +255,20 @@ class InferenceIngress:
             raise
 
     def redrive(self, stream: _IngressStream) -> None:
-        """Re-drive an uncertain ingress request onto a freshly selected deputy."""
+        """Re-drive an uncertain ingress request onto a freshly selected deputy.
+
+        A give-up — no deputy available, or the inject relay failed — must terminalize
+        the held claim through the fenced path rather than only closing the client:
+        no DS terminal will ever consume an ingress claim, so a bare client failure
+        would strand the credit and pin the replica.
+        """
         deputy = self._select_worker()
         if deputy is None or not self._drive_attempt(stream, deputy):
-            stream.fail("no worker available to re-drive the ingress request")
+            self._control.fail_ingress(
+                stream.invocation_id,
+                stream,
+                "no worker available to re-drive the ingress request",
+            )
 
     def _drive_attempt(self, stream: _IngressStream, deputy: str) -> bool:
         """Inject the retained request into the deputy and originate the attempt.
@@ -286,3 +302,16 @@ class InferenceIngress:
     def release_quota(self, principal_id: str) -> None:
         """Return the principal's in-flight slot when its request stream closes."""
         self._quota.release(principal_id)
+
+    def reconcile_terminals(self) -> None:
+        """Replay recorded ingress terminals through the FSM on startup.
+
+        A crash between recording a terminal fact and releasing its claim leaves the
+        claim rehydrated UNCERTAIN with credit held. Replaying each recorded terminal
+        settles it, so the crash window never strands a credit. Idempotent on an
+        already-terminal claim.
+        """
+        for terminal in self._terminals.all():
+            self._control.reconcile_ingress_terminal(
+                terminal.invocation_id, _STATUS_REASON[terminal.status]
+            )

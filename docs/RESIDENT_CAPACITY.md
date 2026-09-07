@@ -161,6 +161,11 @@ never releases it. A route loss is `UNCERTAIN` and re-drives under the same invo
 identity onto a freshly selected deputy. Enable with `INFERENCE_INGRESS_ENABLED=true`,
 which requires `RESIDENT_CAPACITY_ENABLED`.
 
+The ingress authenticates and quota-limits the principal through the deployment's identity
+provider. With no identity provider registered every caller resolves to one default
+principal and tenant, so a deployment that exposes the ingress registers an identity
+provider or fronts the endpoint with authentication.
+
 ## Replica lifecycle and policy
 
 ```

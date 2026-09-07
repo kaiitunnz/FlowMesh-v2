@@ -82,5 +82,4 @@ class ResidentStreamChunk(BaseModel):
 
     invocation_id: str
     session_id: str
-    seq: int
     payload: str

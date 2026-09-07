@@ -24,7 +24,7 @@ from ...ingress.service import (
 
 router = APIRouter(prefix="/inference", tags=["Inference"])
 
-_MAX_REQUEST_BYTES = 1 * 1024 * 1024
+_MAX_REQUEST_BYTES = 1024 * 1024
 
 
 @router.post(
@@ -52,7 +52,11 @@ async def inference(
             status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "request body too large"
         )
     try:
-        result = ingress.submit(principal, alias, body.decode("utf-8"))
+        payload = body.decode("utf-8")
+    except UnicodeDecodeError:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "request body must be UTF-8")
+    try:
+        result = ingress.submit(principal, alias, payload)
     except AliasNotFound:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"unknown alias {alias!r}")
     except TenantNotAuthorized:

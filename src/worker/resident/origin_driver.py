@@ -232,7 +232,6 @@ class ResidentOriginDriver:
                         ResidentStreamChunk(
                             invocation_id=req.handoff.invocation_id,
                             session_id=req.session_id,
-                            seq=len(parts),
                             payload=data,
                         )
                     )

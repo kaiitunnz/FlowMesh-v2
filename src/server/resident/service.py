@@ -254,6 +254,9 @@ class ResidentCapacityControl:
         self._max_transient_redrives = max_transient_redrives
         self._transient_failures: dict[str, int] = {}
         self._attempts: dict[str, _Attempt] = {}
+        # Every deputy an ingress invocation injected its request into, so a re-drive
+        # onto a fresh deputy reaps them all (the request key is stable per attempt).
+        self._ingress_deputies: dict[str, set[str]] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
         self._admit_lock = asyncio.Lock()
         self._sweep_task: asyncio.Task[None] | None = None
@@ -384,19 +387,23 @@ class ResidentCapacityControl:
         The origin reap cancels the origin driver's lane and drops the worker-private
         raw request; the serve-worker reap tears down the replica's serve task and its
         engine request; then the durable session record is deleted. Every step is best
-        effort — a gone worker simply has nothing to reap.
+        effort — a gone worker simply has nothing to reap. An ingress re-drive may
+        inject the request into several deputies under one invocation, so every deputy
+        it touched is reaped, not only the last.
         """
+        deputies = self._ingress_deputies.pop(invocation_id, set())
         attempt = self._attempts.pop(invocation_id, None)
         if attempt is None or self._delivery is None:
             return
-        self._delivery.relay(
-            attempt.origin_worker,
-            "resident_reap",
-            {
-                "task_id": attempt.task_id,
-                "call_correlation": attempt.call_correlation,
-            },
-        )
+        for worker in {attempt.origin_worker} | deputies:
+            self._delivery.relay(
+                worker,
+                "resident_reap",
+                {
+                    "task_id": attempt.task_id,
+                    "call_correlation": attempt.call_correlation,
+                },
+            )
         self._delivery.relay(
             attempt.serve_worker,
             "resident_sidecar_reap",
@@ -650,6 +657,31 @@ class ResidentCapacityControl:
         else:
             delivery.fail(detail or "resident ingress failed")
 
+    def fail_ingress(
+        self, invocation_id: str, delivery: IngressDelivery, detail: str
+    ) -> None:
+        """Terminalize an ingress invocation whose re-drive gave up.
+
+        A give-up (no deputy available, or the inject relay failed) leaves the claim
+        UNCERTAIN holding credit; unlike a workflow, no DS terminal consumes it. This
+        releases the credit through the fenced path — a FAILED ingress-terminal fact
+        consumed by the same FSM — then fails the client, so the credit never strands.
+        """
+        self._finalize_ingress(
+            invocation_id, delivery, ClaimTerminalReason.FAILED, detail, success=False
+        )
+
+    def reconcile_ingress_terminal(
+        self, invocation_id: str, reason: ClaimTerminalReason
+    ) -> None:
+        """Settle a claim left credit-bearing by a crash between its terminal writes.
+
+        On startup a recorded ingress-terminal fact replays through the same FSM so a
+        claim rehydrated UNCERTAIN releases; there is no live client to finalize.
+        """
+        self._admission.settle_invocation_terminal(invocation_id, reason)
+        self._reap_attempt(invocation_id)
+
     async def _relay_bootstrap(
         self,
         orig: _Origination,
@@ -720,6 +752,10 @@ class ResidentCapacityControl:
             subject=orig.subject,
             ingress=orig.ingress,
         )
+        if orig.ingress is not None:
+            self._ingress_deputies.setdefault(orig.invocation_id, set()).add(
+                origin_worker
+            )
         delivered = deps.relay(
             origin_worker,
             "resident_handoff",

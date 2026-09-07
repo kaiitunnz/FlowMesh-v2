@@ -238,9 +238,8 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   opaque response frames to the client unparsed. The request's terminal is a durable
   ingress-terminal fact the Admission controller consumes by `invocation_id` to release the
   credit, and a route loss is `UNCERTAIN` and re-drives — the same fences as a workflow
-  invocation. Legacy `serve` stays capacity administration. Enable with
-  `INFERENCE_INGRESS_ENABLED=true` (which requires `RESIDENT_CAPACITY_ENABLED=true`). See
-  [`RESIDENT_CAPACITY.md`](RESIDENT_CAPACITY.md).
+  invocation. Enable with `INFERENCE_INGRESS_ENABLED=true` (which requires
+  `RESIDENT_CAPACITY_ENABLED=true`). See [`RESIDENT_CAPACITY.md`](RESIDENT_CAPACITY.md).
 - **Network-plane route substrate.** A topology-aware, control-resolved routing substrate
   turns trusted node endpoint advertisements and directional reachability evidence into an
   ordered route resolved by a pure resolver, carried by an origin-side deputy that never

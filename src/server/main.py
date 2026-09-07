@@ -534,7 +534,9 @@ async def _lifespan(_: FastAPI):
 
         # --- Root-only startup ---
         if IS_ROOT_NODE:
-            await rehydrate_root_state(RUNTIME, RESIDENT_CONTROL, RESIDENT_REGISTRY)
+            await rehydrate_root_state(
+                RUNTIME, RESIDENT_CONTROL, RESIDENT_REGISTRY, INFERENCE_INGRESS
+            )
             if RESIDENT_BRIDGE is not None and NODE_REGISTRY is not None:
                 app.state.resident_bridge_task = start_resident_bridge_pump(
                     RESIDENT_BRIDGE, NODE_REGISTRY, logger

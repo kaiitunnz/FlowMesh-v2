@@ -14,8 +14,10 @@ from lumid_hooks import PrincipalContext
 from server.ingress import (
     AliasCatalog,
     InferenceIngress,
+    IngressTerminal,
     IngressTerminalStore,
     PrincipalQuota,
+    QuotaExceeded,
 )
 from server.ingress.service import (
     AliasNotFound,
@@ -23,6 +25,7 @@ from server.ingress.service import (
     NoDeputyAvailable,
     TenantNotAuthorized,
 )
+from server.ingress.state import IngressTerminalStatus
 from server.resident.service import IngressOrigination
 
 _CATALOG = AliasCatalog.from_json("""
@@ -46,20 +49,30 @@ def _principal(principal_id: str = "p1", org_id: str = "acme") -> PrincipalConte
 class _FakeControl:
     """Records the injects and originations and drives each attempt's delivery."""
 
-    def __init__(self, behavior) -> None:
+    def __init__(self, behavior, *, inject_ok: bool = True) -> None:
         self.injects: list[tuple[str, str, str, str]] = []
         self.originations: list[IngressOrigination] = []
+        self.failed: list[str] = []
+        self.reconciled: list[str] = []
         self._behavior = behavior
+        self._inject_ok = inject_ok
 
     def inject_ingress_request(
         self, worker_id: str, task_id: str, call_correlation: str, request: str
     ) -> bool:
         self.injects.append((worker_id, task_id, call_correlation, request))
-        return True
+        return self._inject_ok
 
     def originate_ingress(self, origination: IngressOrigination) -> None:
         self.originations.append(origination)
         self._behavior(self, origination)
+
+    def fail_ingress(self, invocation_id: str, delivery, detail: str) -> None:
+        self.failed.append(invocation_id)
+        delivery.fail(detail)
+
+    def reconcile_ingress_terminal(self, invocation_id: str, reason) -> None:
+        self.reconciled.append(invocation_id)
 
 
 def _ingress(control, *, quota: int = 4) -> InferenceIngress:
@@ -136,7 +149,6 @@ def test_quota_bounds_in_flight_requests():
     # A behavior that never terminates leaves the request in flight, holding its slot.
     control = _FakeControl(lambda *_: None)
     ingress = _ingress(control, quota=1)
-    from server.ingress import QuotaExceeded
 
     ingress.submit(_principal(), "open", "{}")
     try:
@@ -179,6 +191,53 @@ def test_uncertain_loss_redrives_onto_a_fresh_deputy():
     assert (
         control.originations[0].invocation_id == control.originations[1].invocation_id
     )
+
+
+def test_redrive_give_up_terminalizes_the_claim_via_control():
+    # H1: when a re-drive finds no deputy, the edge must release the held claim through
+    # control's fenced path, not a bare client failure that would strand the credit.
+    def behavior(_control, origination: IngressOrigination) -> None:
+        origination.delivery.redrive()
+
+    control = _FakeControl(behavior)
+    # The first attempt gets a deputy; the re-drive finds none and must give up.
+    deputies = iter(["wkr-1"])
+    ingress = InferenceIngress(
+        catalog=_CATALOG,
+        quota=PrincipalQuota(2),
+        terminals=IngressTerminalStore(),
+        control=control,  # type: ignore[arg-type]
+        select_worker=lambda: next(deputies, None),
+    )
+
+    async def run() -> list[Any]:
+        result = ingress.submit(_principal(), "open", "{}")
+        return [ev async for ev in result.events()]
+
+    events = asyncio.run(run())
+    assert control.failed == [control.originations[0].invocation_id]
+    assert events[-1].kind == "error"
+
+
+def test_reconcile_terminals_replays_recorded_facts_on_startup():
+    # M1: startup reconciliation replays each recorded ingress terminal through control.
+    terminals = IngressTerminalStore()
+    terminals.record(
+        IngressTerminal(invocation_id="inv-x", status=IngressTerminalStatus.COMPLETED)
+    )
+    terminals.record(
+        IngressTerminal(invocation_id="inv-y", status=IngressTerminalStatus.FAILED)
+    )
+    control = _FakeControl(lambda *_: None)
+    ingress = InferenceIngress(
+        catalog=_CATALOG,
+        quota=PrincipalQuota(1),
+        terminals=terminals,
+        control=control,  # type: ignore[arg-type]
+        select_worker=lambda: "wkr-1",
+    )
+    ingress.reconcile_terminals()
+    assert set(control.reconciled) == {"inv-x", "inv-y"}
 
 
 def test_post_flush_loss_fails_the_client_without_duplicating_the_prefix():
