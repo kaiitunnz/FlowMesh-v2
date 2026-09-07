@@ -22,11 +22,9 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from shared.network.relay_frame import (
-    DirectionWindow,
     RelayDirection,
     RelayFrame,
     RelayFrameKind,
-    WindowState,
 )
 
 from ..clients.redis import (
@@ -244,7 +242,6 @@ class RelayLease:
 __all__ = [
     "RESIDENT_RELAY_KEYSPACE",
     "BinaryRedis",
-    "DirectionWindow",
     "RelayDirection",
     "RelayFrame",
     "RelayFrameKind",
@@ -253,5 +250,4 @@ __all__ = [
     "RelaySessionStore",
     "RelayStreamStore",
     "StreamEntry",
-    "WindowState",
 ]

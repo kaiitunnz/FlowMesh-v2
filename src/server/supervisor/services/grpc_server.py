@@ -249,9 +249,8 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
                 case "UNREGISTER":
                     unregistered = True
                 case "RESIDENT_FRAME" if self._resident_bridge is not None:
-                    # A resident data-plane frame rides the node-local reverse-relay to
-                    # its peer worker, never the control-event bus: publish it up to the
-                    # root bridge opaquely rather than forwarding it as a control event.
+                    # A resident data-plane frame publishes up to the root bridge
+                    # opaquely for the reverse-relay to carry to its peer worker.
                     frame = RelayFrame.from_wire(payload["payload"]["frame"])
                     await self._resident_bridge.publish_up(frame)
                     continue

@@ -7,9 +7,7 @@ bootstrap handoff to open a session, then admits the authorized response stream 
 under a matching immutable route authorization, rejecting a fence that is expired, names
 another replica incarnation or a superseded listener generation, or does not continue
 the session's tenant subject, claim, invocation, or request identity. It validates those
-bindings and trusts that only the authorized origin reaches its per-replica route; it
-does not track the handoff token to reject a replay, which the deferred credential
-handshake would add.
+bindings and trusts that only the authorized origin reaches its per-replica route.
 
 The gate is the target-side authority: an intermediate relay may validate its own hop,
 but never substitutes for this check before engine delivery. A rejection is an

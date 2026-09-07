@@ -35,8 +35,7 @@ class AdmissionHandoff(BaseModel):
     selected replica incarnation and listener generation, and an expiry. The origin
     worker carries the resolved route alongside this handoff; the replica claim gate
     validates these bindings and trusts that only the authorized origin reaches its
-    route. It is neither general service access nor the post-``ACCEPTED``
-    ``RouteAuthorization``, and never carries the raw engine endpoint or credential.
+    route. It never carries the raw engine endpoint or credential.
     """
 
     model_config = ConfigDict(frozen=True)

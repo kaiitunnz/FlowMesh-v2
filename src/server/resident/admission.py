@@ -59,9 +59,8 @@ class AdmissionController:
     ) -> AdmissionHandoff:
         """A single-use fence handoff for a reserved claim's replica incarnation.
 
-        It carries no route or origin: the network path resolves and attaches those, and
-        the compatibility path reaches the replica endpoint from the directory. It never
-        carries the raw engine endpoint.
+        It carries no route or origin: the network path resolves and attaches those. It
+        never carries the raw engine endpoint.
         """
         return AdmissionHandoff(
             token=new_admission_handoff_token(),
@@ -217,16 +216,6 @@ class AdmissionController:
             tenant=profile.tenant,
             deadline_at=profile.deadline_at,
         )
-
-    def on_enqueue_ack(self, claim: ServiceClaim) -> None:
-        """Record a single-shot enqueue acknowledgement, then the response stream.
-
-        Used by the in-server compatibility path, where acknowledgement and completion
-        arrive together, so there is no separate authorized stream to fence.
-        """
-        accept(claim)
-        begin_stream(claim)
-        self._persist()
 
     def accept_and_authorize(
         self,

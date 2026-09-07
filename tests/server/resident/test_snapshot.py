@@ -21,7 +21,8 @@ def _seed():
         invocation_id="inv-1", workflow_id="wfl-1", family="fam", profile=PROFILE
     )
     ctl.admit(reserved, PROFILE, idempotency_key="idm-x")
-    ctl.on_enqueue_ack(reserved)
+    ctl.accept_and_authorize(reserved, idempotency_key="idm-x", origin_id="rog-1")
+    ctl.on_stream_started(reserved)
     pending = ctl.raise_claim(
         invocation_id="inv-2", workflow_id="wfl-1", family="fam", profile=PROFILE
     )

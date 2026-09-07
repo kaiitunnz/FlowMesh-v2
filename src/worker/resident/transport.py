@@ -6,7 +6,6 @@ over the reverse-rendezvous relay to the peer worker. Inbound frames are pushed 
 session by the runtime through ``ResidentRelaySession.on_frame``.
 """
 
-from collections.abc import Awaitable, Callable
 from typing import Protocol
 
 from shared.network.relay_frame import RelayFrame
@@ -16,6 +15,3 @@ class ResidentFrameSink(Protocol):
     """Carries one produced relay frame toward the peer worker."""
 
     async def send(self, frame: RelayFrame) -> None: ...
-
-
-FrameSend = Callable[[RelayFrame], Awaitable[None]]

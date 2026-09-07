@@ -156,8 +156,8 @@ scheduling, and KV allocation.
 
 Resident-capacity control is off by default and enabled per deployment. Enablement requires
 [`NETWORK_PLANE_ENABLED`](NETWORK_PLANE.md): resident capacity runs in the workers over the
-network plane and has no in-server execution path, so `RESIDENT_CAPACITY_ENABLED` without the
-network plane fails closed at startup. See the `RESIDENT_*` rows in [`ENV.md`](ENV.md) for
+network plane, so `RESIDENT_CAPACITY_ENABLED` without the network plane fails closed at
+startup. See the `RESIDENT_*` rows in [`ENV.md`](ENV.md) for
 enablement, the serving substrate (`serve` or `dev_model`), the policy caps, the conservative
 admission-slot count, the cold-start budget, the per-family selection strategy, and the
 idle-teardown retain window (`RESIDENT_IDLE_RETAIN_SEC`, `0` disables).

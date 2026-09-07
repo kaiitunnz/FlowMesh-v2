@@ -514,8 +514,8 @@ class NetworkPlaneConfig:
 
     ``endpoint_url`` is the operator-configured node-relay endpoint advertised on
     registration; ``sidecar_url`` is the node-local echo listener the relay uplinks to.
-    TTL/backoff bounds drive the reachability state machine. ``relay_window_bytes`` is
-    the reverse-rendezvous relay's per-direction in-flight byte window.
+    TTL/backoff bounds drive the reachability state machine. ``relay_buffer_bytes`` is
+    the echo relay session's bounded in-flight buffer.
     """
 
     enabled: bool = False
@@ -531,7 +531,6 @@ class NetworkPlaneConfig:
     connect_budget_sec: float = 5.0
     route_ttl_sec: float = 30.0
     relay_buffer_bytes: int = 65536
-    relay_window_bytes: int = 65536
 
     @classmethod
     def from_env(cls) -> "NetworkPlaneConfig":
@@ -558,9 +557,6 @@ class NetworkPlaneConfig:
             route_ttl_sec=parse_float_env(f"{prefix}ROUTE_TTL_SEC") or 30.0,
             relay_buffer_bytes=max(
                 1024, parse_int_env(f"{prefix}RELAY_BUFFER_BYTES") or 65536
-            ),
-            relay_window_bytes=max(
-                1024, parse_int_env(f"{prefix}RELAY_WINDOW_BYTES") or 65536
             ),
         )
 

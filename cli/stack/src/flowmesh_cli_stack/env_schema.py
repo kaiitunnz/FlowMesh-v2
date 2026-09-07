@@ -620,13 +620,6 @@ STACK_ENV_SCHEMA = EnvSchema(
                     var_type=EnvVarType.INT,
                     min_value=1024,
                 ),
-                EnvVar(
-                    "NETWORK_PLANE_RELAY_WINDOW_BYTES",
-                    "65536",
-                    description="Reverse-relay per-direction in-flight window (bytes).",
-                    var_type=EnvVarType.INT,
-                    min_value=1024,
-                ),
             ],
         ),
         EnvSection(

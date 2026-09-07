@@ -35,7 +35,8 @@ def test_reserve_accept_release_cycle():
     assert stores.credit_ledger.held("rpl-1") == 1
     assert stores.demand.get(claim.claim_id).admitted is True
 
-    ctl.on_enqueue_ack(claim)
+    ctl.accept_and_authorize(claim, idempotency_key="idm-x", origin_id="rog-1")
+    ctl.on_stream_started(claim)
     assert claim.state is ClaimState.STREAMING
     assert stores.credit_ledger.held("rpl-1") == 1
 
@@ -74,7 +75,8 @@ def test_route_loss_holds_credit_until_ds_terminal():
     ctl = AdmissionController(stores)
     claim = _raise(ctl)
     ctl.admit(claim, PROFILE, idempotency_key="idm-x")
-    ctl.on_enqueue_ack(claim)
+    ctl.accept_and_authorize(claim, idempotency_key="idm-x", origin_id="rog-1")
+    ctl.on_stream_started(claim)
 
     ctl.on_route_loss(claim)
     assert claim.state is ClaimState.UNCERTAIN
@@ -92,7 +94,8 @@ def test_redrive_resumes_the_in_flight_claim_then_a_successor_after_terminal():
     ctl = AdmissionController(stores)
     first = _raise(ctl, "inv-1")
     ctl.admit(first, PROFILE, idempotency_key="idm-x")
-    ctl.on_enqueue_ack(first)
+    ctl.accept_and_authorize(first, idempotency_key="idm-x", origin_id="rog-1")
+    ctl.on_stream_started(first)
     ctl.on_route_loss(first)  # a lost attempt, parked and still holding credit
 
     # A re-drive attaches to the in-flight claim (dedup) and can resume its replica; it
@@ -157,6 +160,7 @@ def test_persist_hook_fires_on_mutation():
     ctl = AdmissionController(stores, persist=lambda: calls.append(1))
     claim = _raise(ctl)
     ctl.admit(claim, PROFILE, idempotency_key="idm-x")
-    ctl.on_enqueue_ack(claim)
+    ctl.accept_and_authorize(claim, idempotency_key="idm-x", origin_id="rog-1")
+    ctl.on_stream_started(claim)
     ctl.on_ds_terminal("inv-1", ClaimTerminalReason.COMPLETED)
     assert len(calls) >= 4

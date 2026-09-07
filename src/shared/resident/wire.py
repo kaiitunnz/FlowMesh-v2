@@ -1,4 +1,4 @@
-"""Framed protocol bodies for a native resident invocation.
+"""Framed protocol bodies for a resident invocation.
 
 Two-phase between the origin worker and the replica sidecar: a bootstrap delivers the
 claim-bound handoff and the request and receives an enqueue acknowledgement; then, under

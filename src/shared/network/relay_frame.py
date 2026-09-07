@@ -3,8 +3,7 @@
 Content-agnostic transport primitives shared by the servers that carry the relay and the
 worker endpoints that own the protocol: a frame carries an opaque payload (the resident
 fence and body ride inside it) plus routing and flow-control metadata, and a direction's
-sender-side window bounds its in-flight bytes against the receiver's grants. They hold
-no resident, claim, or admission concept.
+sender-side window bounds its in-flight bytes against the receiver's grants.
 """
 
 import asyncio
