@@ -65,6 +65,8 @@ class WorkerConfig(BaseModel):
     """Whether the worker advertises the GPU-free dev_model serving executor"""
     dev_model_forward_url: str = env.DEV_MODEL_FORWARD_URL
     """Upstream OpenAI-compatible base URL dev_model forwards to (empty = canned)"""
+    dev_model_response_delay_sec: float = env.DEV_MODEL_RESPONSE_DELAY_SEC
+    """Per-response delay the dev_model stand-in applies (a test seam; 0 = none)"""
 
 
 WorkerTokenType = NewType("WorkerTokenType", str)
@@ -159,6 +161,9 @@ class WorkerAdapter(ABC):
             ),
             "WORKER_ENABLE_DEV_MODEL": to_env_str(config.enable_dev_model),
             "DEV_MODEL_FORWARD_URL": config.dev_model_forward_url,
+            "DEV_MODEL_RESPONSE_DELAY_SEC": to_env_str(
+                config.dev_model_response_delay_sec
+            ),
             "DOCKER_GPU_RUNTIME": to_env_str(env.DOCKER_GPU_RUNTIME),
             "FLOWMESH_API_KEY": to_env_str(env.FLOWMESH_API_KEY),
             "WORKER_OWNER_PRINCIPAL_JSON": self.owner.model_dump_json(),

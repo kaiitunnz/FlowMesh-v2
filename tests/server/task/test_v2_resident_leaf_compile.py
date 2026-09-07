@@ -82,6 +82,27 @@ spec:
     assert resident[0].service_family_requirement.family == "Qwen/Qwen3-4B|chat"
 
 
+def test_resident_embedding_leaf_with_an_adapter_is_rejected():
+    text = """
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {name: t}
+spec:
+  taskType: echo
+  graph:
+    nodes:
+      - name: a
+        spec:
+          taskType: embedding
+          model:
+            source: {identifier: BAAI/bge-small-en-v1.5}
+            adapters: [{type: lora, name: my-lora, path: hf/my-lora}]
+          service: {mode: resident}
+"""
+    with pytest.raises(CompileError, match="embedding leaf cannot declare an adapter"):
+        _compile(text)
+
+
 def test_resident_leaf_lowers_to_a_service_issue_episode():
     template, plan = _compile(_resident_inference("{mode: resident}"))
     leaf_id = _resident_leaf(template).operator_id

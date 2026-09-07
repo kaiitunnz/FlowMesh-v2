@@ -978,6 +978,13 @@ STACK_ENV_SCHEMA = EnvSchema(
                     url_schemes={"http", "https"},
                     description="Upstream URL dev_model forwards to; canned if unset.",
                 ),
+                EnvVar(
+                    "DEV_MODEL_RESPONSE_DELAY_SEC",
+                    "0",
+                    var_type=EnvVarType.FLOAT,
+                    min_value=0,
+                    description="Per-response delay the dev_model stand-in applies.",
+                ),
             ],
         ),
         EnvSection(

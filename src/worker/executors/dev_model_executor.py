@@ -39,8 +39,6 @@ _ROUTES = frozenset({"/v1/chat/completions", "/v1/responses", "/v1/embeddings"})
 _LOAD_ADAPTER_ROUTE = "/v1/load_lora_adapter"
 _CANNED_TEXT = "This is a deterministic dev_model response."
 _CANNED_EMBEDDING = [0.0, 0.0, 0.0, 0.0]
-_SLOW_MARKER = b"__FORCE_SLOW__"
-_SLOW_HOLD_SEC = 120.0
 
 
 def _request_model(body: bytes, fallback: str) -> str:
@@ -125,11 +123,13 @@ class _DevModelHTTPServer(ThreadingHTTPServer):
         forward_url: str | None,
         model_name: str,
         client: httpx.Client | None,
+        response_delay_sec: float = 0.0,
     ) -> None:
         super().__init__(address, handler)
         self.forward_url = forward_url
         self.model_name = model_name
         self.client = client
+        self.response_delay_sec = max(0.0, response_delay_sec)
         self.loaded_adapters: set[str] = set()
 
 
@@ -193,11 +193,12 @@ class _DevModelHandler(BaseHTTPRequestHandler):
             self._write_json(413, {"error": "request body too large"})
             return
         body = self.rfile.read(length) if length else b""
-        if _SLOW_MARKER in body:
-            # A test hook: hold the request so its admission slot stays occupied while a
-            # concurrent claim is admitted, making a slot-exhaustion race deterministic.
-            time.sleep(_SLOW_HOLD_SEC)
         server = self.server
+        if server.response_delay_sec > 0:
+            # A test seam (DEV_MODEL_RESPONSE_DELAY_SEC): hold each response so an
+            # in-flight invocation keeps its admission slot occupied, making a
+            # slot-exhaustion race deterministic without a body marker.
+            time.sleep(server.response_delay_sec)
         requested = _request_model(body, server.model_name)
         if (
             server.loaded_adapters
@@ -293,7 +294,12 @@ class DevModelExecutor(Executor):
         client = httpx.Client() if forward_url is not None else None
         try:
             server = _DevModelHTTPServer(
-                (bind_host, port), _DevModelHandler, forward_url, model_id, client
+                (bind_host, port),
+                _DevModelHandler,
+                forward_url,
+                model_id,
+                client,
+                self._config.dev_model_response_delay_sec,
             )
         except BaseException:
             if client is not None:

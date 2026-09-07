@@ -216,6 +216,16 @@ domain. A shared base model and interface reuse a warm replica; a differing inte
 model, or isolation domain resolves to a distinct family and cannot share a batch or route
 on a matching model name alone. An adapter does not fork a family: it co-batches on the
 base replica through its own slot — the resident consumer loads its adapter into a replica
-slot and selects it as the request model, and the admission profile's adapter slot bounds
-how many distinct adapters a replica holds. An adapter-bound leaf declares a single
-adapter with a loadable `path`, `url`, or `task_id`.
+slot and selects it as the request model. Adapter serving is supported only on the chat
+interface; a resident embedding leaf that declares an adapter is rejected at compile. An
+adapter-bound leaf declares a single adapter with a loadable `path`, `url`, or `task_id`.
+
+`RESIDENT_ADAPTER_SLOTS` bounds the distinct adapters a replica holds concurrently. A claim
+for a base model or an already-resident adapter admits without consuming a new slot, and a
+same-adapter claim admits at exhaustion by sharing its slot; a new distinct adapter that
+finds no free slot and no room to materialize another replica is denied promptly rather
+than waiting out the cold-start deadline. Two limitations are known: the server reclaims a
+slot when a claim releases, but the engine does not unload the adapter, so a replica serves
+up to `RESIDENT_ADAPTER_SLOTS` lifetime-distinct adapters before a further distinct load may
+be refused (adapter unload / LRU reclaim is a follow-up); and every chat resident replica
+enables runtime LoRA, so a base model incompatible with `--enable-lora` would fail to serve.

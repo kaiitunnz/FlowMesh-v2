@@ -62,6 +62,16 @@ def test_base_claim_ignores_the_adapter_slot_gate():
     assert is_feasible(_report(adapter_slots_free=0), _PROFILE, held_slots=0)
 
 
+def test_same_adapter_admits_at_exhaustion_by_sharing_its_slot():
+    profile = AdmissionProfile(engine_batch_key="k", adapter_ref="lora-x")
+    # The adapter is already resident, so a further claim for it shares the held slot.
+    report = _report(adapter_slots_free=0, held_adapters=("lora-x",))
+    assert is_feasible(report, profile, held_slots=0)
+    # A different adapter still finds no free slot.
+    other = AdmissionProfile(engine_batch_key="k", adapter_ref="lora-y")
+    assert not is_feasible(report, other, held_slots=0)
+
+
 def test_expired_deadline_excluded():
     profile = AdmissionProfile(
         engine_batch_key="k", deadline_at="2000-01-01T00:00:00+00:00"

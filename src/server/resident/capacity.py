@@ -50,6 +50,7 @@ def is_feasible(
         return False
     if (
         profile.adapter_ref is not None
+        and profile.adapter_ref not in report.held_adapters
         and report.adapter_slots_free is not None
         and report.adapter_slots_free <= 0
     ):

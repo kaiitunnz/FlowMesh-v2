@@ -13,6 +13,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
 from typing import Any
 
+import httpx
+import pytest
+
 from shared.resident.contracts import ReplicaEndpoint
 from worker.resident.engine import HttpEngineDelivery
 
@@ -30,8 +33,9 @@ class _Handler(BaseHTTPRequestHandler):
         self.server.bodies.append(body)
         if self.path == "/v1/load_lora_adapter":
             self.server.loaded.append(body.get("lora_name"))
-            loaded = json.dumps({"status": "success"}).encode()
-            self.send_response(200)
+            status, message = self.server.load_response
+            loaded = json.dumps({"message": message}).encode()
+            self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(loaded)))
             self.end_headers()
@@ -66,6 +70,7 @@ class _Server(ThreadingHTTPServer):
         self.paths: list[str] = []
         self.bodies: list[dict[str, Any]] = []
         self.loaded: list[str | None] = []
+        self.load_response: tuple[int, str] = (200, "success")
 
 
 @contextmanager
@@ -114,6 +119,32 @@ def test_adapter_bound_invocation_loads_then_selects_the_adapter() -> None:
     # The request selects the adapter as its model, not the base.
     assert server.bodies[1]["model"] == "my-lora"
     assert content == "hi there"
+
+
+def test_already_loaded_adapter_is_idempotent_and_still_selects() -> None:
+    with _running() as server:
+        server.load_response = (400, "LoRA adapter 'my-lora' has already been loaded")
+        base = f"http://127.0.0.1:{server.server_address[1]}/v1"
+        endpoint = ReplicaEndpoint(base_url=base, model="base-model", interface="chat")
+        content = asyncio.run(
+            _drain(endpoint, "hi", adapter_name="my-lora", adapter_source="hf/my-lora")
+        )
+    # An already-loaded response is tolerated; the request still selects the adapter.
+    assert server.paths == ["/v1/load_lora_adapter", "/v1/chat/completions"]
+    assert content == "hi there"
+
+
+def test_a_precise_load_error_fails_the_invocation() -> None:
+    with _running() as server:
+        server.load_response = (400, "invalid lora_path: no adapter_config.json found")
+        base = f"http://127.0.0.1:{server.server_address[1]}/v1"
+        endpoint = ReplicaEndpoint(base_url=base, model="base-model", interface="chat")
+        with pytest.raises(httpx.HTTPStatusError):
+            asyncio.run(
+                _drain(endpoint, "hi", adapter_name="my-lora", adapter_source="bad")
+            )
+    # The engine request is never sent when the load fails loudly.
+    assert server.paths == ["/v1/load_lora_adapter"]
 
 
 def test_embedding_interface_posts_embeddings_and_streams_vectors() -> None:

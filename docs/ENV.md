@@ -135,6 +135,7 @@ Spark), set `DOCKER_GPU_RUNTIME=` in the stack env.
 | `SERVE_MAX_TTL_SEC` | `86400` | Upper bound on vLLM serve session TTL, regardless of `spec.ttlSeconds` |
 | `WORKER_ENABLE_DEV_MODEL` | `false` | Advertise the GPU-free `dev_model` executor |
 | `DEV_MODEL_FORWARD_URL` | – | Upstream URL `dev_model` forwards to; canned if unset |
+| `DEV_MODEL_RESPONSE_DELAY_SEC` | `0` | Per-response delay the `dev_model` stand-in applies |
 
 ## Supervisor
 

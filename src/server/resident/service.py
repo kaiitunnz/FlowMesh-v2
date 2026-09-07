@@ -781,7 +781,7 @@ class ResidentCapacityControl:
                 )
                 if handoff is not None:
                     return handoff
-                plan = self._lifecycle.plan_capacity(family, model_ref)
+                plan = self._lifecycle.plan_capacity(family, model_ref, profile)
                 if plan.action == "deny" and plan.denial is not None:
                     self._admission.on_denied(claim)
                     self._fail(env, plan.denial.reason, plan.denial.detail or "")

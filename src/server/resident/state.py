@@ -85,6 +85,7 @@ class ProvisioningDenialReason(StrEnum):
     EGRESS_CAP = "egress_cap"
     COLD_START_LIMIT = "cold_start_limit"
     COLD_START_BUDGET = "cold_start_budget"
+    ADAPTER_SLOT_CAP = "adapter_slot_cap"
 
 
 class AdmissionProfile(BaseModel):
@@ -138,7 +139,9 @@ class ReplicaCapacityReport(BaseModel):
     It carries the replica incarnation and report epoch so a stale report cannot fence a
     newer decision. It may tighten the safe-capacity budget, but never creates,
     overwrites, or releases a claim credit. ``adapter_slots_free`` constrains an
-    adapter-scoped claim's feasibility (see ``AdmissionProfile.adapter_ref``).
+    adapter-scoped claim's feasibility (see ``AdmissionProfile.adapter_ref``), and
+    ``held_adapters`` names the adapters already resident so a claim for one of them
+    shares its slot rather than being denied at exhaustion.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -150,6 +153,7 @@ class ReplicaCapacityReport(BaseModel):
     healthy: bool
     safe: SafeCapacityVector
     adapter_slots_free: int | None = None
+    held_adapters: tuple[str, ...] = ()
     at: str = Field(default_factory=now_iso)
 
 

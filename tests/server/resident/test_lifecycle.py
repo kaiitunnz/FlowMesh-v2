@@ -63,6 +63,34 @@ def test_refresh_report_arms_the_adapter_slot_budget():
     assert report is not None and report.adapter_slots_free == 0
 
 
+def test_plan_capacity_is_adapter_aware_at_exhaustion():
+    stores = warm_stores()
+    mgr = _manager(stores, adapter_slots=1)
+    # Fill the single adapter slot with a held claim for lora-a on the warm replica.
+    stores.invocations.put(
+        InvocationRequest(
+            invocation_id="inv-1",
+            workflow_id="w",
+            family="fam",
+            profile=AdmissionProfile(engine_batch_key="fam", adapter_ref="lora-a"),
+        )
+    )
+    claim = new_claim(invocation_id="inv-1", family="fam", admission_epoch=0)
+    reserve(claim, replica_id="rpl-1", incarnation=1, credit=ClaimCredit(slots=1))
+    stores.claims.add(claim)
+
+    base = AdmissionProfile(engine_batch_key="fam")
+    same = AdmissionProfile(engine_batch_key="fam", adapter_ref="lora-a")
+    distinct = AdmissionProfile(engine_batch_key="fam", adapter_ref="lora-b")
+
+    assert mgr.plan_capacity("fam", "m", base).action == "join"
+    assert mgr.plan_capacity("fam", "m", same).action == "join"
+    denied = mgr.plan_capacity("fam", "m", distinct)
+    assert denied.action == "deny"
+    assert denied.denial is not None
+    assert denied.denial.reason is ProvisioningDenialReason.ADAPTER_SLOT_CAP
+
+
 def test_scale_from_zero_then_warm():
     stores = ResidentStores()
     stores.families.register(_FAMILY)

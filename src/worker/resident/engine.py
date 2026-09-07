@@ -19,6 +19,10 @@ import httpx
 from shared.resident.contracts import ReplicaEndpoint
 from shared.resident.engine_request import chat_body, embeddings_body
 
+# The already-loaded shapes an engine reports for an idempotent adapter re-load; matched
+# narrowly so a precise load error is not swallowed.
+_ADAPTER_ALREADY_LOADED = ("already loaded", "already been loaded", "already exists")
+
 
 @dataclass
 class EngineResponse:
@@ -104,6 +108,9 @@ class HttpEngineDelivery:
             json={"lora_name": name, "lora_path": source},
             headers=headers,
         )
-        if response.status_code < 400 or "already" in response.text.lower():
+        if response.status_code < 400:
+            return
+        body = response.text.lower()
+        if any(phrase in body for phrase in _ADAPTER_ALREADY_LOADED):
             return
         response.raise_for_status()

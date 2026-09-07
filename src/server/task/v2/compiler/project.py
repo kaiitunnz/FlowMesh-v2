@@ -191,10 +191,20 @@ def _leaf_service_dependency(
         if task_type is TaskType.EMBEDDING
         else ServiceInterface.CHAT
     )
+    adapter = _leaf_adapter_ref(spec)
+    if interface is ServiceInterface.EMBEDDING and adapter is not None:
+        source_kind, source_id = _task_source(task)
+        raise compile_error(
+            "service.embedding-adapter-unsupported",
+            "a resident embedding leaf cannot declare an adapter; adapter serving is "
+            "supported only for the chat interface",
+            source_id,
+            source_kind,
+        )
     return ServiceDependency(
         service_ref=service_ref.strip(),
         interface=interface,
-        adapter=_leaf_adapter_ref(spec),
+        adapter=adapter,
         adapter_source=_leaf_adapter_source(spec),
         isolation=binding.isolation,
     )
