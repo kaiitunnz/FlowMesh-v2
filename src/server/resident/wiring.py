@@ -108,7 +108,7 @@ def build_resident_capacity(
         admission=AdmissionController(stores, persist),
         lifecycle=lifecycle,
         limits=limits,
-        binding_resolver=runtime.gateway_binding_for,
+        dependency_resolver=runtime.resolve_service_dependency,
         settle_cb=runtime.settle_episode_invocation,
         redispatch_cb=runtime.redispatch_episode_invocation,
         endpoint_probe=endpoint,

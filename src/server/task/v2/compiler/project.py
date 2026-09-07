@@ -5,7 +5,6 @@ from shared.tasks import TaskType
 from shared.tasks.specs import (
     AgentSpecStrict,
     AgentSpecTemplate,
-    ModelBindingMode,
 )
 from shared.tasks.specs.common import ModelSpecTemplate
 
@@ -22,6 +21,8 @@ from ..representations.operators import (
     ModelRef,
     Port,
     PortKind,
+    ServiceDependency,
+    agent_service_dependency,
 )
 from ..representations.plan import (
     PhysicalNode,
@@ -45,7 +46,6 @@ from ..representations.template import (
 from .agent_binding import (
     AgentBindingDefaults,
     resolve_agent_bindings,
-    service_family_for_ref,
 )
 from .bindings import (
     BindingClass,
@@ -243,9 +243,7 @@ def lower_tasks(
             acc.operators.append(_leaf_operator(task, task_type, name_to_op, task_ids))
         acc.source_map.append(_source_map_entry(task))
 
-    agent_ops = {
-        op.operator_id: op for op in acc.operators if isinstance(op, AgentOperator)
-    }
+    ops_by_id = {op.operator_id: op for op in acc.operators}
 
     # Pass 2: wiring, induced outputs, and physical nodes.
     for task in parsed.tasks:
@@ -290,7 +288,8 @@ def lower_tasks(
                 source_ref=operator_id,
             )
         )
-        requirement, intent = _resident_annotations(agent_ops.get(operator_id))
+        dependency = _task_service_dependency(ops_by_id.get(operator_id))
+        requirement, intent = _service_family_annotations(dependency)
         acc.nodes.append(
             PhysicalNode(
                 node_id=f"phys:{operator_id}",
@@ -302,25 +301,36 @@ def lower_tasks(
         )
 
 
-def _resident_annotations(
-    agent: AgentOperator | None,
-) -> tuple[ServiceFamilyRequirement | None, ResidencyIntent | None]:
-    """Derive the plan-derived resident requirement for a resident-bound agent.
+def _task_service_dependency(
+    op: LogicalOperator | None,
+) -> ServiceDependency | None:
+    """The normalized resident dependency an operator consumes, agent or leaf."""
+    if isinstance(op, AgentOperator):
+        return agent_service_dependency(op.model_binding)
+    if isinstance(op, LeafOperator):
+        return op.service_dependency
+    return None
 
-    Detection only: it pins the finite dependency a resident model binding needs, with
-    no allocation, claim, or replica. The service family is derived canonically from
-    the reference, so identical references pin one shared demand family; engine-batch
-    and isolation policy are the residency scheduler's to set.
+
+def _service_family_annotations(
+    dependency: ServiceDependency | None,
+) -> tuple[ServiceFamilyRequirement | None, ResidencyIntent | None]:
+    """Derive the plan-derived resident requirement from a service dependency.
+
+    Detection only: it pins the finite dependency a resident invocation needs, with no
+    allocation, claim, or replica. The family and engine-batch key fold interface, base
+    model, and isolation so incompatible dependencies pin distinct families rather than
+    collapsing on a shared model name.
     """
-    if agent is None or agent.model_binding is None:
+    if dependency is None:
         return None, None
-    binding = agent.model_binding
-    if binding.mode is not ModelBindingMode.RESIDENT or not binding.service_model_ref:
-        return None, None
-    family = service_family_for_ref(binding.service_model_ref)
     return (
-        ServiceFamilyRequirement(family=family),
-        ResidencyIntent(service_family=family, required=True),
+        ServiceFamilyRequirement(
+            family=dependency.service_family,
+            engine_batch_key=dependency.engine_batch_key,
+            isolation=dependency.isolation,
+        ),
+        ResidencyIntent(service_family=dependency.service_family, required=True),
     )
 
 

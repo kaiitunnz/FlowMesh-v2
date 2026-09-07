@@ -32,11 +32,7 @@ from server.resident import (
 )
 from server.resident.service import ResidentWorkerDelivery
 from server.resident.state import ReplicaIncarnation
-from server.task.v2.representations.operators import (
-    AgentModelGatewayBinding,
-    BindingProvenance,
-    ModelBindingProvenance,
-)
+from server.task.v2.representations.operators import ServiceDependency
 from shared.harness import BoundaryEventKind
 from shared.outcome import OutcomeManifest
 from shared.resident.reports import (
@@ -45,19 +41,10 @@ from shared.resident.reports import (
     ResidentOpOutcome,
     ResidentStreamStatus,
 )
-from shared.tasks.specs import ModelBindingMode
-
-_PROV = ModelBindingProvenance(
-    mode=BindingProvenance.SOURCE,
-    url=BindingProvenance.SOURCE,
-    model=BindingProvenance.SOURCE,
-)
 
 
-def _binding(model_ref: str = "m") -> AgentModelGatewayBinding:
-    return AgentModelGatewayBinding(
-        mode=ModelBindingMode.RESIDENT, service_model_ref=model_ref, provenance=_PROV
-    )
+def _dependency(model_ref: str = "m") -> ServiceDependency:
+    return ServiceDependency(service_ref=model_ref)
 
 
 def _env(invocation_id: str = "inv-1") -> ToolInvocationEnvelope:
@@ -179,7 +166,7 @@ def _build(
         admission=admission,
         lifecycle=lifecycle,
         limits=limits,
-        binding_resolver=lambda task_id: ("wfl-1", _binding()),
+        dependency_resolver=lambda task_id: ("wfl-1", _dependency()),
         settle_cb=settle_cb,
         redispatch_cb=redispatch_cb,
         endpoint_probe=lambda serve_task_id: ReplicaEndpoint(
@@ -402,7 +389,7 @@ def test_originate_settles_an_error_when_an_internal_path_raises():
     def boom(task_id: str) -> Any:
         raise RuntimeError("resolver exploded")
 
-    svc._resolve_binding = boom  # type: ignore[method-assign]
+    svc._resolve_dependency = boom  # type: ignore[method-assign]
     asyncio.run(svc._originate(_env()))
     assert len(settled) == 1
     assert settled[0][3] is not None and "resident origination error" in settled[0][3]

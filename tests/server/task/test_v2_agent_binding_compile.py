@@ -1,13 +1,15 @@
 import pytest
 
 from server.task.parser import parse_workflow
-from server.task.v2.compiler.agent_binding import (
-    AgentBindingDefaults,
-    service_family_for_ref,
-)
+from server.task.v2.compiler.agent_binding import AgentBindingDefaults
 from server.task.v2.compiler.diagnostics import CompileError
 from server.task.v2.compiler.pipeline import compile_workflow
-from server.task.v2.representations.operators import AgentOperator, BindingProvenance
+from server.task.v2.representations.operators import (
+    AgentOperator,
+    BindingProvenance,
+    ServiceDependency,
+    ServiceInterface,
+)
 from server.task.v2.representations.source import FrontendWorkflowSource
 from shared.tasks import TaskType
 from shared.tasks.specs import ModelBindingMode
@@ -137,7 +139,9 @@ def test_any_resident_reference_pins_a_canonical_service_family():
     assert binding.url is None
     resident = [n for n in plan.nodes if n.service_family_requirement is not None]
     assert len(resident) == 1
-    assert resident[0].service_family_requirement.family == "Qwen/Qwen3-4B"
+    requirement = resident[0].service_family_requirement
+    assert requirement.family == "Qwen/Qwen3-4B|chat"
+    assert requirement.engine_batch_key == "Qwen/Qwen3-4B|chat"
     assert resident[0].residency_intent.required is True
 
 
@@ -148,9 +152,24 @@ def test_resident_binding_without_a_reference_is_rejected():
 
 
 def test_identical_resident_references_derive_the_same_family():
-    assert service_family_for_ref("Qwen/Qwen3-4B ") == service_family_for_ref(
-        "Qwen/Qwen3-4B"
+    padded = ServiceDependency(
+        service_ref="Qwen/Qwen3-4B ", interface=ServiceInterface.CHAT
     )
+    trimmed = ServiceDependency(
+        service_ref="Qwen/Qwen3-4B", interface=ServiceInterface.CHAT
+    )
+    assert padded.service_family == trimmed.service_family
+
+
+def test_service_dependency_folds_interface_and_isolation_into_the_family():
+    chat = ServiceDependency(service_ref="m", interface=ServiceInterface.CHAT)
+    embedding = ServiceDependency(service_ref="m", interface=ServiceInterface.EMBEDDING)
+    tenant_a = ServiceDependency(
+        service_ref="m", interface=ServiceInterface.CHAT, isolation="a"
+    )
+    assert chat.service_family != embedding.service_family
+    assert chat.engine_batch_key != embedding.engine_batch_key
+    assert chat.service_family != tenant_a.service_family
 
 
 def test_compat_sugar_normalizes_harness_params_to_openai_binding():

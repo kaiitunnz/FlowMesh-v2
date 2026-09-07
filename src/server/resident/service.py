@@ -37,8 +37,7 @@ from ..network.state import (
     RouteOrigin,
 )
 from ..orchestration.tool_dispatch import ToolInvocationEnvelope
-from ..task.v2.compiler.agent_binding import service_family_for_ref
-from ..task.v2.representations.operators import AgentModelGatewayBinding
+from ..task.v2.representations.operators import ServiceDependency
 from .admission import AdmissionController
 from .lifecycle import LifecycleScaleManager
 from .policy import ResidentPolicyLimits
@@ -56,8 +55,8 @@ from .state import (
 )
 from .stores import ResidentStores
 
-# Resolves a task's pinned model binding: (workflow_id, binding) or None.
-BindingResolver = Callable[[str], tuple[str, AgentModelGatewayBinding] | None]
+# Resolves a task's normalized resident dependency: (workflow_id, dependency) or None.
+DependencyResolver = Callable[[str], tuple[str, ServiceDependency] | None]
 # Settles a mediated boundary back at its originating call, or fails it with an error.
 SettleCallback = Callable[..., bool]
 # Re-drives a still-pending mediated boundary off-lane without settling it.
@@ -152,7 +151,7 @@ class ResidentCapacityControl:
         admission: AdmissionController,
         lifecycle: LifecycleScaleManager,
         limits: ResidentPolicyLimits,
-        binding_resolver: BindingResolver,
+        dependency_resolver: DependencyResolver,
         settle_cb: SettleCallback,
         redispatch_cb: RedispatchCallback,
         endpoint_probe: EndpointProbe,
@@ -168,7 +167,7 @@ class ResidentCapacityControl:
         self._admission = admission
         self._lifecycle = lifecycle
         self._limits = limits
-        self._resolve_binding = binding_resolver
+        self._resolve_dependency = dependency_resolver
         self._settle = settle_cb
         self._redispatch = redispatch_cb
         self._probe_endpoint = endpoint_probe
@@ -372,8 +371,8 @@ class ResidentCapacityControl:
                 error="resident-capacity control requires the network plane",
             )
             return
-        resolved = self._resolve_binding(env.task_id)
-        if resolved is None or resolved[1].service_model_ref is None:
+        resolved = self._resolve_dependency(env.task_id)
+        if resolved is None or not resolved[1].service_ref:
             self._settle(
                 env.task_id,
                 env.call_correlation,
@@ -381,12 +380,13 @@ class ResidentCapacityControl:
                 error="resident model binding is unresolved",
             )
             return
-        workflow_id, binding = resolved
-        model_ref = binding.service_model_ref
-        assert model_ref is not None
-        family = service_family_for_ref(model_ref)
+        workflow_id, dependency = resolved
+        model_ref = dependency.service_ref
+        family = dependency.service_family
 
-        profile = AdmissionProfile(engine_batch_key=family)
+        profile = AdmissionProfile(
+            engine_batch_key=dependency.engine_batch_key, adapter_ref=dependency.adapter
+        )
         existing = self._admission.active_claim(env.invocation_id)
         if existing is not None and existing.holds_credit:
             # Resume a re-driven boundary on the in-flight claim: reissue to the same
@@ -407,7 +407,7 @@ class ResidentCapacityControl:
         else:
             if existing is not None:
                 claim = existing
-            elif not self._ensure_family(family, model_ref):
+            elif not self._ensure_family(dependency):
                 self._fail(
                     env,
                     ProvisioningDenialReason.MODEL_NOT_ALLOWED,
@@ -738,16 +738,19 @@ class ResidentCapacityControl:
         self._persist()
         return replica.listener
 
-    def _ensure_family(self, family: str, model_ref: str) -> bool:
+    def _ensure_family(self, dependency: ServiceDependency) -> bool:
+        family = dependency.service_family
         if family in self._stores.families:
             return True
+        model_ref = dependency.service_ref
         if self._limits.allowed_models and model_ref not in self._limits.allowed_models:
             return False
         self._stores.families.register(
             ServiceFamily(
                 family=family,
-                engine_batch_key=family,
+                engine_batch_key=dependency.engine_batch_key,
                 model_ref=model_ref,
+                isolation=dependency.isolation,
                 selection_strategy=self._limits.selection_strategy,
             )
         )
