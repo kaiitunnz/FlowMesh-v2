@@ -32,6 +32,7 @@ from .executors.base_executor import ExecutionError, Executor, TaskCancelledErro
 from .executors.utils.checkpoints import get_http_destination, write_executor_result
 from .lifecycle import Lifecycle
 from .model_turn import HeldModelEgress, ModelTurnRendezvous, ResponsesFacade
+from .resident.lane_host import ResidentLaneHost
 from .utils.logging import TaskLogEmitter
 
 
@@ -105,6 +106,10 @@ class Runner:
         # The worker-local Responses facade, built alongside the sidecar once the worker
         # id is known and the first agent episode arrives.
         self._responses_facade: ResponsesFacade | None = None
+        # The worker-local resident lanes (origin driver + replica sidecar) on their own
+        # asyncio loop, built on the first resident control frame relayed over the
+        # attachment (once the worker id is known).
+        self._resident_host: ResidentLaneHost | None = None
 
     def _cancel_active_executor(self) -> None:
         with self._active_executor_lock:
@@ -145,6 +150,8 @@ class Runner:
             self._mediated_sidecar.stop()
         if self._responses_facade is not None:
             self._responses_facade.stop()
+        if self._resident_host is not None:
+            self._resident_host.stop()
 
     def _ensure_mediated_sidecar(self) -> MediatedEgressSidecar | None:
         """Build the mediated-egress sidecar once the worker id is known."""
@@ -202,7 +209,32 @@ class Runner:
         self.lifecycle.responses_facade = facade
         return facade
 
+    def _ensure_resident_host(self) -> ResidentLaneHost | None:
+        """Build the resident lane host once the worker id is known."""
+        if self._resident_host is not None:
+            return self._resident_host
+        client = self.lifecycle.client
+        try:
+            client.worker_id
+        except RuntimeError:
+            return None
+        host = ResidentLaneHost(
+            push_frame=client.push_resident_frame,
+            report_ack=client.push_resident_ack,
+            report_outcome=client.push_resident_outcome,
+            content_store=self._content_store,
+            peek_request=self.lifecycle.resident_requests.peek,
+            logger=self.logger,
+        )
+        host.start()
+        self._resident_host = host
+        return host
+
     def _route_mediated_op(self, frame_kind: str, frame: dict[str, Any]) -> None:
+        if frame_kind.startswith("resident_"):
+            if (host := self._ensure_resident_host()) is not None:
+                host.route(frame_kind, frame)
+            return
         if frame_kind == "deny":
             # A held model turn's denial: only a facade waiter consumes it.
             self._model_turn_rendezvous.deliver_deny(

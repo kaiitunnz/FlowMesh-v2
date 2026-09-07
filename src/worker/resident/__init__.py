@@ -7,6 +7,7 @@ opaquely and never read its cursor or window.
 """
 
 from .engine import EngineOpen, EngineResponse, HttpEngineDelivery
+from .lane_host import ResidentLaneHost
 from .origin_driver import ResidentOriginDriver, ResidentOriginRequest
 from .replica_sidecar import ResidentReplicaSidecar
 from .session import ResidentRelaySession, ResidentSessionRole
@@ -17,6 +18,7 @@ __all__ = [
     "EngineResponse",
     "HttpEngineDelivery",
     "ResidentFrameSink",
+    "ResidentLaneHost",
     "ResidentOriginDriver",
     "ResidentOriginRequest",
     "ResidentRelaySession",

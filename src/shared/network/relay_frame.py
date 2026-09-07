@@ -8,8 +8,10 @@ no resident, claim, or admission concept.
 """
 
 import asyncio
+import base64
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Any
 
 
 class RelayFrameKind(StrEnum):
@@ -75,6 +77,33 @@ class RelayFrame:
             seq=int(fields[b"q"]),
             ack=int(fields[b"a"]),
             payload=fields.get(b"y", b""),
+        )
+
+    def to_wire(self) -> dict[str, Any]:
+        """A JSON-shaped dict for the worker↔supervisor attachment (payload base64)."""
+        return {
+            "kind": self.kind.value,
+            "session_id": self.session_id,
+            "invocation_id": self.invocation_id,
+            "idm": self.idm,
+            "direction": self.direction.value,
+            "seq": self.seq,
+            "ack": self.ack,
+            "payload": base64.b64encode(self.payload).decode() if self.payload else "",
+        }
+
+    @staticmethod
+    def from_wire(data: dict[str, Any]) -> "RelayFrame":
+        raw = data.get("payload") or ""
+        return RelayFrame(
+            kind=RelayFrameKind(data["kind"]),
+            session_id=str(data["session_id"]),
+            invocation_id=str(data["invocation_id"]),
+            idm=str(data["idm"]),
+            direction=RelayDirection(data["direction"]),
+            seq=int(data.get("seq", 0)),
+            ack=int(data.get("ack", 0)),
+            payload=base64.b64decode(raw) if raw else b"",
         )
 
 
