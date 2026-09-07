@@ -20,7 +20,7 @@ from .claim import (
     begin_stream,
     mark_uncertain,
     new_claim,
-    release_on_ds_terminal,
+    release_on_terminal,
     reserve,
     settle_terminal,
 )
@@ -32,6 +32,7 @@ from .state import (
     ClaimTerminalReason,
     DemandEntry,
     InvocationRequest,
+    InvocationSubject,
     ReplicaIncarnation,
     ServiceClaim,
 )
@@ -107,7 +108,7 @@ class AdmissionController:
         self,
         *,
         invocation_id: str,
-        workflow_id: str,
+        subject: InvocationSubject,
         family: str,
         profile: AdmissionProfile,
         replayable: bool = True,
@@ -117,12 +118,12 @@ class AdmissionController:
         Called only when no claim for the invocation is in flight. A permitted reissue
         is a successor: the admission epoch advances past every prior terminal claim,
         and no prior credit is released here — release happens only through the fenced
-        DS terminal.
+        terminal fact.
         """
         self._stores.invocations.put(
             InvocationRequest(
                 invocation_id=invocation_id,
-                workflow_id=workflow_id,
+                subject=subject,
                 family=family,
                 profile=profile,
                 replayable=replayable,
@@ -333,17 +334,21 @@ class AdmissionController:
             mark_uncertain(claim)
             self._persist()
 
-    def on_ds_terminal(self, invocation_id: str, reason: ClaimTerminalReason) -> None:
-        """Settle every non-terminal claim of an invocation from a fenced DS outcome.
+    def settle_invocation_terminal(
+        self, invocation_id: str, reason: ClaimTerminalReason
+    ) -> None:
+        """Settle every non-terminal claim of an invocation from a fenced terminal fact.
 
-        This is the sole normal release path for an accepted credit: the orchestration
-        engine records the terminal outcome and the controller consumes it by
-        ``invocation_id``, tolerant of the claim's source state.
+        This is the sole normal release path for an accepted credit. A workflow
+        subject's fact is the orchestration engine's ``DS`` outcome; an ingress
+        subject's is a durable ingress-terminal fact. The controller consumes either by
+        ``invocation_id``, tolerant of the claim's source state; it never assumes a
+        ``DS`` record exists.
         """
         released = False
         for claim in self._stores.claims.by_invocation(invocation_id):
             if claim.state is not ClaimState.TERMINAL:
-                release_on_ds_terminal(claim, reason)
+                release_on_terminal(claim, reason)
                 self._stores.demand.remove(claim.claim_id)
                 self._touch_replica(claim)
                 released = True

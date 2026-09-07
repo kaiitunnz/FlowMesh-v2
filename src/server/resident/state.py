@@ -232,17 +232,41 @@ class DemandEntry(BaseModel):
     created_at: str = Field(default_factory=now_iso)
 
 
+class InvocationSubjectKind(StrEnum):
+    """Who owns an invocation."""
+
+    WORKFLOW = "workflow"
+    INGRESS = "ingress"
+
+
+class InvocationSubject(BaseModel):
+    """The tenant-scoped owner of an invocation.
+
+    A workflow subject links the request to its submitting workflow instance and
+    settles its terminal in ``DS``; an ingress subject is an authenticated external
+    principal that settles its terminal as a durable ingress fact. The tenant scopes
+    admission and the claim gate without requiring a workflow activation.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: InvocationSubjectKind
+    id: str
+    tenant: str | None = None
+
+
 class InvocationRequest(BaseModel):
     """The durable ``CS`` request record keyed by ``invocation_id``.
 
-    ``DS`` retains the same identity's causal linkage and terminal semantics; this
-    record holds the admission profile and request context. Retries reuse this identity.
+    It holds the admission profile, the tenant-scoped subject, and the request context.
+    A workflow subject links to ``DS`` only by ``invocation_id`` and fenced outcomes; an
+    ingress subject has no ``DS`` state. Retries reuse this identity.
     """
 
     model_config = ConfigDict(frozen=True)
 
     invocation_id: str
-    workflow_id: str
+    subject: InvocationSubject
     family: str
     profile: AdmissionProfile
     replayable: bool = True

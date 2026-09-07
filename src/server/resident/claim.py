@@ -109,11 +109,12 @@ def settle_terminal(claim: ServiceClaim, reason: ClaimTerminalReason) -> None:
     _touch(claim, ClaimState.TERMINAL)
 
 
-def release_on_ds_terminal(claim: ServiceClaim, reason: ClaimTerminalReason) -> None:
-    """Release a claim's credit from a fenced DS terminal outcome.
+def release_on_terminal(claim: ServiceClaim, reason: ClaimTerminalReason) -> None:
+    """Release a claim's credit from a fenced terminal fact.
 
-    A terminal recorded in the ledger and consumed by ``invocation_id`` is
-    authoritative, so it settles any non-terminal claim regardless of its source state —
+    A workflow subject's terminal is recorded in ``DS``; an ingress subject's is a
+    durable ingress-terminal fact. Either, consumed by ``invocation_id``, is
+    authoritative and settles any non-terminal claim regardless of its source state —
     the sole normal path by which an accepted credit disappears. Idempotent on an
     already-terminal claim.
     """

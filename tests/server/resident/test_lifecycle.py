@@ -12,6 +12,8 @@ from server.resident import (
     AdmissionProfile,
     ClaimCredit,
     InvocationRequest,
+    InvocationSubject,
+    InvocationSubjectKind,
     LifecycleScaleManager,
     ProvisioningDenialReason,
     ReplicaEndpoint,
@@ -24,6 +26,7 @@ from server.resident import (
 )
 from tests.server.resident._helpers import PROFILE, warm_stores
 
+_SUBJECT = InvocationSubject(kind=InvocationSubjectKind.WORKFLOW, id="w")
 _PAST = "2000-01-01T00:00:00Z"
 _FUTURE = "2999-01-01T00:00:00Z"
 
@@ -48,7 +51,7 @@ def test_refresh_report_arms_the_adapter_slot_budget():
         stores.invocations.put(
             InvocationRequest(
                 invocation_id=inv,
-                workflow_id="w",
+                subject=_SUBJECT,
                 family="fam",
                 profile=AdmissionProfile(engine_batch_key="fam", adapter_ref=adapter),
             )
@@ -70,7 +73,7 @@ def test_plan_capacity_is_adapter_aware_at_exhaustion():
     stores.invocations.put(
         InvocationRequest(
             invocation_id="inv-1",
-            workflow_id="w",
+            subject=_SUBJECT,
             family="fam",
             profile=AdmissionProfile(engine_batch_key="fam", adapter_ref="lora-a"),
         )
@@ -95,7 +98,7 @@ def _hold_adapter(stores, inv, adapter, replica_id="rpl-1"):
     stores.invocations.put(
         InvocationRequest(
             invocation_id=inv,
-            workflow_id="w",
+            subject=_SUBJECT,
             family="fam",
             profile=AdmissionProfile(engine_batch_key="fam", adapter_ref=adapter),
         )

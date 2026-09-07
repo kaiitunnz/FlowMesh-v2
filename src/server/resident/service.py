@@ -46,6 +46,8 @@ from .state import (
     AdmissionProfile,
     ClaimState,
     ClaimTerminalReason,
+    InvocationSubject,
+    InvocationSubjectKind,
     ProvisioningDenialReason,
     ReplicaIncarnation,
     ReplicaState,
@@ -258,7 +260,7 @@ class ResidentCapacityControl:
 
     def _settle_terminal_local(self, invocation_id: str, failed: bool) -> None:
         reason = ClaimTerminalReason.FAILED if failed else ClaimTerminalReason.COMPLETED
-        self._admission.on_ds_terminal(invocation_id, reason)
+        self._admission.settle_invocation_terminal(invocation_id, reason)
         self._transient_failures.pop(invocation_id, None)
         self._reap_attempt(invocation_id)
 
@@ -444,7 +446,9 @@ class ResidentCapacityControl:
             else:
                 claim = self._admission.raise_claim(
                     invocation_id=env.invocation_id,
-                    workflow_id=workflow_id,
+                    subject=InvocationSubject(
+                        kind=InvocationSubjectKind.WORKFLOW, id=workflow_id
+                    ),
                     family=family,
                     profile=profile,
                 )

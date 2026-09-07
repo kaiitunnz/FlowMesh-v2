@@ -1,7 +1,7 @@
 """The Admission controller advances claims and their credits over the stores.
 
 A claim reserves a fenced credit on a warm replica, outstanding credit cannot overcommit
-a replica, an accepted credit releases only from a fenced DS terminal consumed by
+a replica, an accepted credit releases only from a fenced terminal fact consumed by
 ``invocation_id`` (tolerant of any credit-bearing source), and a re-drive resumes the
 in-flight claim rather than minting a successor before that terminal.
 """
@@ -10,6 +10,8 @@ from server.resident import (
     AdmissionController,
     ClaimState,
     ClaimTerminalReason,
+    InvocationSubject,
+    InvocationSubjectKind,
 )
 from tests.server.resident._helpers import PROFILE, warm_stores
 
@@ -17,7 +19,7 @@ from tests.server.resident._helpers import PROFILE, warm_stores
 def _raise(ctl, invocation_id="inv-1"):
     return ctl.raise_claim(
         invocation_id=invocation_id,
-        workflow_id="wfl-1",
+        subject=InvocationSubject(kind=InvocationSubjectKind.WORKFLOW, id="wfl-1"),
         family="fam",
         profile=PROFILE,
     )
@@ -40,7 +42,7 @@ def test_reserve_accept_release_cycle():
     assert claim.state is ClaimState.STREAMING
     assert stores.credit_ledger.held("rpl-1") == 1
 
-    ctl.on_ds_terminal("inv-1", ClaimTerminalReason.COMPLETED)
+    ctl.settle_invocation_terminal("inv-1", ClaimTerminalReason.COMPLETED)
     assert claim.state is ClaimState.TERMINAL
     assert stores.credit_ledger.held("rpl-1") == 0
 
@@ -83,7 +85,7 @@ def test_route_loss_holds_credit_until_ds_terminal():
     assert stores.credit_ledger.held("rpl-1") == 1  # held, not released on loss
 
     # Only the fenced DS terminal releases the credit.
-    ctl.on_ds_terminal("inv-1", ClaimTerminalReason.FAILED)
+    ctl.settle_invocation_terminal("inv-1", ClaimTerminalReason.FAILED)
     assert claim.state is ClaimState.TERMINAL
     assert claim.terminal_reason is ClaimTerminalReason.FAILED
     assert stores.credit_ledger.held("rpl-1") == 0
@@ -105,7 +107,7 @@ def test_redrive_resumes_the_in_flight_claim_then_a_successor_after_terminal():
     assert stores.credit_ledger.held("rpl-1") == 1
 
     # Only after the fenced DS terminal releases it is a fresh claim a successor.
-    ctl.on_ds_terminal("inv-1", ClaimTerminalReason.FAILED)
+    ctl.settle_invocation_terminal("inv-1", ClaimTerminalReason.FAILED)
     assert ctl.active_claim("inv-1") is None
     assert stores.credit_ledger.held("rpl-1") == 0
     successor = _raise(ctl, "inv-1")
@@ -114,15 +116,15 @@ def test_redrive_resumes_the_in_flight_claim_then_a_successor_after_terminal():
 
 
 def test_ds_terminal_releases_a_reserved_credit_on_cancellation():
-    # A cancellation while the adapter issue is in flight reaches on_ds_terminal on a
-    # still-RESERVED claim; the release tolerates any credit-bearing source state.
+    # A cancellation while the adapter issue is in flight settles a still-RESERVED
+    # claim; the release tolerates any credit-bearing source state.
     stores = warm_stores()
     ctl = AdmissionController(stores)
     claim = _raise(ctl)
     ctl.admit(claim, PROFILE, idempotency_key="idm-x")
     assert claim.state is ClaimState.RESERVED
 
-    ctl.on_ds_terminal("inv-1", ClaimTerminalReason.CANCELLED)
+    ctl.settle_invocation_terminal("inv-1", ClaimTerminalReason.CANCELLED)
     assert claim.state is ClaimState.TERMINAL
     assert stores.credit_ledger.held("rpl-1") == 0
 
@@ -162,5 +164,5 @@ def test_persist_hook_fires_on_mutation():
     ctl.admit(claim, PROFILE, idempotency_key="idm-x")
     ctl.accept_and_authorize(claim, idempotency_key="idm-x", origin_id="rog-1")
     ctl.on_stream_started(claim)
-    ctl.on_ds_terminal("inv-1", ClaimTerminalReason.COMPLETED)
+    ctl.settle_invocation_terminal("inv-1", ClaimTerminalReason.COMPLETED)
     assert len(calls) >= 4
