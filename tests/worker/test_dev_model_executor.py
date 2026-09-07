@@ -114,7 +114,7 @@ class TestCannedResponses:
             ).json()
         assert first == second
         assert first["object"] == "chat.completion"
-        assert first["choices"][0]["message"]["content"] == _CANNED_TEXT
+        assert _CANNED_TEXT in first["choices"][0]["message"]["content"]
         assert first["model"] == "m"
 
     def test_responses_is_deterministic(self) -> None:
@@ -126,8 +126,8 @@ class TestCannedResponses:
             ).json()
         assert payload["object"] == "response"
         assert payload["status"] == "completed"
-        assert payload["output_text"] == _CANNED_TEXT
-        assert payload["output"][0]["content"][0]["text"] == _CANNED_TEXT
+        assert _CANNED_TEXT in payload["output_text"]
+        assert _CANNED_TEXT in payload["output"][0]["content"][0]["text"]
 
     def test_model_falls_back_when_absent(self) -> None:
         with _running_server(model_name="fallback-model") as base:
@@ -379,7 +379,7 @@ class TestRunLifecycle:
 
         payload = reached["payload"]
         assert isinstance(payload, dict)
-        assert payload["choices"][0]["message"]["content"] == _CANNED_TEXT
+        assert _CANNED_TEXT in payload["choices"][0]["message"]["content"]
 
 
 class TestCancelStop:

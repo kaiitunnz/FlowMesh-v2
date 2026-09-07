@@ -39,6 +39,8 @@ _ROUTES = frozenset({"/v1/chat/completions", "/v1/responses", "/v1/embeddings"})
 _LOAD_ADAPTER_ROUTE = "/v1/load_lora_adapter"
 _CANNED_TEXT = "This is a deterministic dev_model response."
 _CANNED_EMBEDDING = [0.0, 0.0, 0.0, 0.0]
+_SLOW_MARKER = b"__FORCE_SLOW__"
+_SLOW_HOLD_SEC = 120.0
 
 
 def _request_model(body: bytes, fallback: str) -> str:
@@ -68,7 +70,14 @@ def _canned_embeddings(body: bytes, model: str) -> dict[str, Any]:
     }
 
 
+def _canned_text(model: str) -> str:
+    # The served model rides the response text so a caller can tell an adapter's output
+    # from the base model's on the GPU-free stand-in.
+    return f"{_CANNED_TEXT} [model={model}]"
+
+
 def _canned_response(path: str, model: str) -> dict[str, Any]:
+    text = _canned_text(model)
     if path == "/v1/responses":
         return {
             "id": "dev-model-resp",
@@ -83,11 +92,11 @@ def _canned_response(path: str, model: str) -> dict[str, Any]:
                     "role": "assistant",
                     "status": "completed",
                     "content": [
-                        {"type": "output_text", "text": _CANNED_TEXT, "annotations": []}
+                        {"type": "output_text", "text": text, "annotations": []}
                     ],
                 }
             ],
-            "output_text": _CANNED_TEXT,
+            "output_text": text,
             "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
         }
     return {
@@ -98,7 +107,7 @@ def _canned_response(path: str, model: str) -> dict[str, Any]:
         "choices": [
             {
                 "index": 0,
-                "message": {"role": "assistant", "content": _CANNED_TEXT},
+                "message": {"role": "assistant", "content": text},
                 "finish_reason": "stop",
             }
         ],
@@ -184,6 +193,10 @@ class _DevModelHandler(BaseHTTPRequestHandler):
             self._write_json(413, {"error": "request body too large"})
             return
         body = self.rfile.read(length) if length else b""
+        if _SLOW_MARKER in body:
+            # A test hook: hold the request so its admission slot stays occupied while a
+            # concurrent claim is admitted, making a slot-exhaustion race deterministic.
+            time.sleep(_SLOW_HOLD_SEC)
         server = self.server
         requested = _request_model(body, server.model_name)
         if (
