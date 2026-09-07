@@ -1,6 +1,6 @@
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import Field, SerializeAsAny, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny, model_validator
 
 from ...schemas.result import BaseExecutorResult
 from .._base import StrictBaseModel, TemplateBaseModel
@@ -18,6 +18,23 @@ from ..components import (
     ShardSpecTemplate,
 )
 from ..placeholders import TemplateBool, TemplateInt
+
+
+class ServiceBindingSpec(BaseModel):
+    """Binds a service-backed leaf to resident-served capacity.
+
+    A ``resident`` binding admits the leaf's invocation to a compatible model-serving
+    replica the fabric materializes and reuses, rather than loading the model in the
+    worker. ``service_model_ref`` names the served model, defaulting to the task's own
+    model source; ``isolation`` names a co-batch and cache isolation domain that is
+    never shared across domains even for the same model.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["resident"] = "resident"
+    service_model_ref: str | None = None
+    isolation: str | None = None
 
 
 class ParallelSpec(StrictBaseModel):

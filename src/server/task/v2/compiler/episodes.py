@@ -32,6 +32,8 @@ def _boundary_for(op: LogicalOperator) -> EpisodeBoundaryKind | None:
     if isinstance(op, LeafOperator):
         if op.residency_only:
             return None
+        if op.service_dependency is not None:
+            return EpisodeBoundaryKind.SERVICE_ISSUE
         if op.profile.effect is EffectClass.EXTERNAL_EFFECT:
             return EpisodeBoundaryKind.EFFECT
         if op.profile.effect is EffectClass.PRIVATE_STATE:
@@ -55,6 +57,7 @@ def _is_fusible(op: LogicalOperator | None) -> bool:
     return (
         isinstance(op, LeafOperator)
         and not op.residency_only
+        and op.service_dependency is None
         and op.profile.effect is EffectClass.PURE
         and op.profile.determinism is not DeterminismClass.SAMPLED
     )

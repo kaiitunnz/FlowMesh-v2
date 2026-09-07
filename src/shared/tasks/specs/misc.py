@@ -9,6 +9,7 @@ from ..task_type import TaskType
 from .common import (
     ModelSpecStrict,
     ModelSpecTemplate,
+    ServiceBindingSpec,
     TaskSpecStrictBase,
     TaskSpecTemplateBase,
 )
@@ -241,8 +242,10 @@ class DataRetrievalSpecTemplate(TaskSpecTemplateBase):
 class EmbeddingSpecStrict(ModelSpecStrict):
     taskType: Literal[TaskType.EMBEDDING]
     data: dict[str, Any] | None = None
+    service: ServiceBindingSpec | None = None
 
 
 class EmbeddingSpecTemplate(ModelSpecTemplate):
     taskType: Literal[TaskType.EMBEDDING]
     data: dict[str, Any] | None = None
+    service: ServiceBindingSpec | None = None

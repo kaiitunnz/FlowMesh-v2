@@ -8,6 +8,7 @@ from .common import (
     ModelInferSpecTemplate,
     ParallelSpec,
     ParallelSpecTemplate,
+    ServiceBindingSpec,
 )
 
 
@@ -25,6 +26,7 @@ class InferenceSpecStrict(ModelInferSpecStrict):
     sloSeconds: int | None = None
     parallel: ParallelSpec | None = None
     enforce_cpu: bool | None = None
+    service: ServiceBindingSpec | None = None
 
     def backend(self) -> InferenceBackend:
         return _inference_backend(self)
@@ -39,6 +41,7 @@ class InferenceSpecTemplate(ModelInferSpecTemplate):
     sloSeconds: TemplateInt | None = None
     parallel: ParallelSpecTemplate | None = None
     enforce_cpu: TemplateBool | None = None
+    service: ServiceBindingSpec | None = None
 
     def backend(self) -> InferenceBackend:
         return _inference_backend(self)
@@ -72,6 +75,10 @@ def _inference_backend(
 def _validate_inference_dispatchable(
     spec: InferenceSpecStrict | InferenceSpecTemplate,
 ) -> None:
+    if spec.service is not None:
+        # A resident-served leaf admits to a replica rather than loading a local engine,
+        # so it carries no worker-local GPU requirement.
+        return
     model = spec.model
     if model and (adapters := model.adapters):
         for adapter in adapters:

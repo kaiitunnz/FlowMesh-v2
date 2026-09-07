@@ -5,6 +5,10 @@ from shared.tasks import TaskType
 from shared.tasks.specs import (
     AgentSpecStrict,
     AgentSpecTemplate,
+    EmbeddingSpecStrict,
+    EmbeddingSpecTemplate,
+    InferenceSpecStrict,
+    InferenceSpecTemplate,
 )
 from shared.tasks.specs.common import ModelSpecTemplate
 
@@ -22,6 +26,7 @@ from ..representations.operators import (
     Port,
     PortKind,
     ServiceDependency,
+    ServiceInterface,
     agent_service_dependency,
 )
 from ..representations.plan import (
@@ -144,7 +149,70 @@ def _leaf_operator(
         profile=leaf_profile(task_type),
         guard=_condition_guard(task, name_to_op, operator_ids),
         residency_only=binding_class(task_type) is BindingClass.RESIDENCY,
+        service_dependency=_leaf_service_dependency(task, task_type),
     )
+
+
+def _leaf_service_dependency(
+    task: ParsedTask, task_type: TaskType
+) -> ServiceDependency | None:
+    """Normalize an inference/embedding leaf's resident binding into a dependency.
+
+    The service reference defaults to the task's own model source; a declared adapter
+    rides ``adapter`` so it constrains a compatible base replica's slot. The interface
+    is the leaf's own — an embedding leaf never shares a chat batch for the same model.
+    """
+    spec = task.task.spec
+    if not isinstance(
+        spec,
+        (
+            InferenceSpecStrict,
+            InferenceSpecTemplate,
+            EmbeddingSpecStrict,
+            EmbeddingSpecTemplate,
+        ),
+    ):
+        return None
+    binding = spec.service
+    if binding is None:
+        return None
+    service_ref = binding.service_model_ref or spec.model_name
+    if not service_ref:
+        source_kind, source_id = _task_source(task)
+        raise compile_error(
+            "service.missing-ref",
+            "resident service binding names no model reference and the task "
+            "declares no model source",
+            source_id,
+            source_kind,
+        )
+    interface = (
+        ServiceInterface.EMBEDDING
+        if task_type is TaskType.EMBEDDING
+        else ServiceInterface.CHAT
+    )
+    return ServiceDependency(
+        service_ref=service_ref.strip(),
+        interface=interface,
+        adapter=_leaf_adapter_ref(spec),
+        isolation=binding.isolation,
+    )
+
+
+def _leaf_adapter_ref(
+    spec: (
+        InferenceSpecStrict
+        | InferenceSpecTemplate
+        | EmbeddingSpecStrict
+        | EmbeddingSpecTemplate
+    ),
+) -> str | None:
+    """A stable adapter key for a leaf's declared adapters, or None."""
+    adapters = spec.adapters
+    if not adapters:
+        return None
+    names = sorted(adapter.name or adapter.type for adapter in adapters)
+    return ",".join(names)
 
 
 def _agent_operator(
