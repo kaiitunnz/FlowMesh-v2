@@ -8,6 +8,7 @@ opaque relay payload, so the servers relay it without decoding and the sidecar v
 and serves it identically on either transport.
 """
 
+import hashlib
 import json
 from typing import Any
 
@@ -33,3 +34,12 @@ def decode_msg(raw: bytes) -> dict[str, Any]:
     if not isinstance(payload, dict) or "kind" not in payload:
         raise ValueError("malformed resident wire frame")
     return payload
+
+
+def resident_request_digest(request_payload: str) -> str:
+    """A canonical digest of a captured resident request.
+
+    It marks the boundary as worker-originated so the raw request stays worker-private
+    behind it; the target-side fence is the claim incarnation, not this digest.
+    """
+    return hashlib.sha256(request_payload.encode()).hexdigest()
