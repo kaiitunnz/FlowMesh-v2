@@ -118,6 +118,20 @@ capacity is disabled.
 Endpoint responses carry host and port only — never an `api_key`. Read a replica's serving
 logs via its `serve_task_id` through `GET /api/v1/tasks/{id}/logs`.
 
+## Inference
+
+Controlled external inference against a published, tenant-authorized service alias. Present
+only when the ingress is enabled.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/v1/inference/{alias}` | Run one inference request against a published alias; the response body streams the model's completion. |
+
+The request body is the model request (chat messages or a bare prompt; the served model is
+pinned by the alias). The caller's tenant must be authorized for the alias, and each
+principal is bounded to a fixed number of in-flight requests. The caller never receives or
+discovers a resident endpoint.
+
 ## Network
 
 SYSTEM/ADMIN-gated route-discovery diagnostics and a test echo. Present only when

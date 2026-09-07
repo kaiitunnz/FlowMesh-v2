@@ -25,6 +25,19 @@ def _require_network_plane_for_resident(
         )
 
 
+def _require_resident_for_ingress(
+    env: dict[str, str], errors: list[str], warnings: list[str]
+) -> None:
+    """The inference ingress admits through the resident claim gate."""
+    if parse_bool(env.get("INFERENCE_INGRESS_ENABLED", "")) and not parse_bool(
+        env.get("RESIDENT_CAPACITY_ENABLED", "")
+    ):
+        errors.append(
+            "INFERENCE_INGRESS_ENABLED requires RESIDENT_CAPACITY_ENABLED: the "
+            "ingress admits through the same resident claim gate as a workflow"
+        )
+
+
 STACK_ENV_SCHEMA = EnvSchema(
     name="stack",
     header=[
@@ -532,6 +545,34 @@ STACK_ENV_SCHEMA = EnvSchema(
                     "false",
                     description="Advertise the resident sidecar as directly routable.",
                     var_type=EnvVarType.BOOL,
+                ),
+            ],
+        ),
+        EnvSection(
+            title="Inference ingress",
+            vars=[
+                EnvVar(
+                    "INFERENCE_INGRESS_ENABLED",
+                    "false",
+                    description="Serve external inference through the resident gate.",
+                    var_type=EnvVarType.BOOL,
+                ),
+                EnvVar(
+                    "INFERENCE_INGRESS_ALIASES_FILE",
+                    "",
+                    description="Path to the published-alias catalog JSON.",
+                ),
+                EnvVar(
+                    "INFERENCE_INGRESS_ALIASES",
+                    "",
+                    description="Inline published-alias catalog JSON.",
+                ),
+                EnvVar(
+                    "INFERENCE_INGRESS_MAX_CONCURRENT_PER_PRINCIPAL",
+                    "8",
+                    description="In-flight ingress requests per principal.",
+                    var_type=EnvVarType.INT,
+                    min_value=1,
                 ),
             ],
         ),
@@ -1093,6 +1134,7 @@ STACK_ENV_SCHEMA = EnvSchema(
             errors,
         ),
         _require_network_plane_for_resident,
+        _require_resident_for_ingress,
     ],
 )
 

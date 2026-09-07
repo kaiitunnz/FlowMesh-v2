@@ -129,6 +129,38 @@ The legacy serve proxy cannot reach a resident allocation: a resident replica's 
 is marked resident and the proxy refuses it by allocation identity, independent of its
 access mode. A resident allocation is reachable only through its claim-gated sidecar.
 
+## Inference ingress
+
+An authenticated external principal consumes resident capacity through the inference
+ingress, an authentication and control edge under `/api/v1/inference`. It admits through
+the same Admission controller and `ServiceClaim` FSM as a workflow consumer; it selects no
+replica, owns no credit, and never reaches the engine.
+
+A client selects only a published alias and a request profile — never a model image,
+worker, endpoint, or routing policy. The published-alias catalog is a deployment config
+surface (`INFERENCE_INGRESS_ALIASES_FILE` or `INFERENCE_INGRESS_ALIASES`): each alias maps
+a tenant-visible name to a resident service family, the tenants authorized to select it,
+and its request bounds. The alias resolves to the same service family a workflow leaf
+would, so an authorized request reuses a warm compatible replica. The edge resolves the
+alias under the caller's `org_id` and refuses an unauthorized tenant before admission, and
+bounds each principal's in-flight requests (`INFERENCE_INGRESS_MAX_CONCURRENT_PER_PRINCIPAL`).
+A refused request raises no claim and consumes no credit.
+
+An ingress invocation is tenant-scoped to the external principal and has no workflow
+activation, continuation, or result slot. The edge records a durable `Invocation` with the
+principal subject, mints its `invocation_id`, and asks admission to raise the claim. It
+selects a designated origin worker — a live worker that runs the origin side of the
+worker-executed resident protocol — injects the raw request into that worker's private
+custody, and drives the same two-phase relay as a workflow consumer. The designated worker
+constructs the engine request, uses engine credentials, parses the response, and
+materializes the completion; the edge relays the opaque response frames to the client
+unparsed. The request's terminal is a durable ingress-terminal fact the Admission
+controller consumes by `invocation_id` to release the credit, exactly as it consumes a
+workflow's fenced outcome — a client disconnect, stream close, or telemetry report alone
+never releases it. A route loss is `UNCERTAIN` and re-drives under the same invocation
+identity onto a freshly selected deputy. Enable with `INFERENCE_INGRESS_ENABLED=true`,
+which requires `RESIDENT_CAPACITY_ENABLED`.
+
 ## Replica lifecycle and policy
 
 ```

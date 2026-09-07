@@ -227,6 +227,20 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   re-drives from the materialized manifest, releasing only on the fenced terminal, and a
   cancellation reaps both ends. Enable with `RESIDENT_CAPACITY_ENABLED=true` (which
   requires `NETWORK_PLANE_ENABLED=true`). See [`RESIDENT_CAPACITY.md`](RESIDENT_CAPACITY.md).
+- **Controlled external inference ingress.** An authenticated external principal consumes
+  resident capacity through an authentication and control edge under `/api/v1/inference`,
+  not a workflow. It resolves only a published, tenant-authorized service-family alias (a
+  deployment config surface), quota-limits the principal, records a durable `Invocation`
+  with an external-principal subject, and asks the same Admission controller to raise the
+  same `ServiceClaim` — fabricating no `DS` workflow state. A designated origin worker runs
+  the worker-executed resident path (constructs the engine request, parses the response,
+  materializes the completion); the edge injects the raw request worker-private and relays
+  opaque response frames to the client unparsed. The request's terminal is a durable
+  ingress-terminal fact the Admission controller consumes by `invocation_id` to release the
+  credit, and a route loss is `UNCERTAIN` and re-drives — the same fences as a workflow
+  invocation. Legacy `serve` stays capacity administration. Enable with
+  `INFERENCE_INGRESS_ENABLED=true` (which requires `RESIDENT_CAPACITY_ENABLED=true`). See
+  [`RESIDENT_CAPACITY.md`](RESIDENT_CAPACITY.md).
 - **Network-plane route substrate.** A topology-aware, control-resolved routing substrate
   turns trusted node endpoint advertisements and directional reachability evidence into an
   ordered route resolved by a pure resolver, carried by an origin-side deputy that never
