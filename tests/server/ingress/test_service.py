@@ -7,6 +7,7 @@ pre-admission rejection raises and consumes no quota beyond its own release.
 """
 
 import asyncio
+from typing import Any
 
 from lumid_hooks import PrincipalContext
 
@@ -178,3 +179,31 @@ def test_uncertain_loss_redrives_onto_a_fresh_deputy():
     assert (
         control.originations[0].invocation_id == control.originations[1].invocation_id
     )
+
+
+def test_post_flush_loss_fails_the_client_without_duplicating_the_prefix():
+    # Attempt one flushes a partial frame, then loses; the re-drive must not re-stream
+    # onto the same connection (which would duplicate the delivered prefix).
+    state = {"attempts": 0}
+
+    def behavior(_control, origination: IngressOrigination) -> None:
+        state["attempts"] += 1
+        if state["attempts"] == 1:
+            origination.delivery.tee("partial")
+            origination.delivery.redrive()
+        else:
+            origination.delivery.tee("RESTARTED")
+            origination.delivery.complete()
+
+    control = _FakeControl(behavior)
+    ingress = _ingress(control)
+
+    async def run() -> list[Any]:
+        result = ingress.submit(_principal(), "open", "{}")
+        return [ev async for ev in result.events()]
+
+    events = asyncio.run(run())
+    assert (events[0].kind, events[0].payload) == ("chunk", "partial")
+    assert events[-1].kind == "error"
+    # The re-driven attempt's frames never reach this connection.
+    assert all(ev.payload != "RESTARTED" for ev in events)

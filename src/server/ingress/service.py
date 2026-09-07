@@ -112,6 +112,7 @@ class _IngressStream:
         self._context = context
         self.queue: asyncio.Queue[IngressEvent] = asyncio.Queue()
         self._closed = False
+        self._flushed = False
 
     @property
     def invocation_id(self) -> str:
@@ -144,6 +145,11 @@ class _IngressStream:
         )
 
     def tee(self, payload: str) -> None:
+        # Once the client response is closed (a post-flush loss failed it, or it already
+        # terminated), a re-drive's frames are dropped rather than duplicated onto it.
+        if self._closed:
+            return
+        self._flushed = True
         self.queue.put_nowait(IngressEvent(kind="chunk", payload=payload))
 
     def record_terminal(self, reason: ClaimTerminalReason, detail: str | None) -> None:
@@ -162,6 +168,17 @@ class _IngressStream:
             self._ingress.release_quota(self.principal_id)
 
     def redrive(self) -> None:
+        # A loss after bytes already reached the client cannot transparently re-stream:
+        # re-teeing onto the same connection would duplicate the delivered prefix. Fail
+        # this client response instead (the caller retries as a fresh request). A loss
+        # before any flush re-drives transparently. Either way the held credit still
+        # reconciles through the re-drive, settling on its own fenced terminal.
+        if self._flushed:
+            self._finish(
+                IngressEvent(
+                    kind="error", detail="resident stream lost after partial delivery"
+                )
+            )
         self._ingress.redrive(self)
 
 
