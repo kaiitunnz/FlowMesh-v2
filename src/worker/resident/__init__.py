@@ -10,6 +10,7 @@ from .engine import EngineOpen, EngineResponse, HttpEngineDelivery
 from .lane_host import ResidentLaneHost
 from .origin_driver import ResidentOriginDriver, ResidentOriginRequest
 from .replica_sidecar import ResidentReplicaSidecar
+from .request_store import ResidentRequestStore
 from .session import ResidentRelaySession, ResidentSessionRole
 from .transport import ResidentFrameSink
 
@@ -23,5 +24,6 @@ __all__ = [
     "ResidentOriginRequest",
     "ResidentRelaySession",
     "ResidentReplicaSidecar",
+    "ResidentRequestStore",
     "ResidentSessionRole",
 ]

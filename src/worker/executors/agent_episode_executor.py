@@ -40,7 +40,8 @@ from shared.tools.search.schema import (
 )
 
 from ..content_store import build_content_store
-from ..lifecycle import PendingEgressRequestStore, ResidentRequestStore
+from ..egress import PendingEgressRequestStore
+from ..resident import ResidentRequestStore
 from .base_executor import ExecutionError, Executor, ExecutorTask
 from .harness import build_adapter
 

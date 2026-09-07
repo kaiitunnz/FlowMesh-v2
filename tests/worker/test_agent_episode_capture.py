@@ -14,8 +14,8 @@ from shared.tools.search.schema import (
     parse_search_request,
     tool_request_digest,
 )
+from worker.egress import PendingEgressRequestStore
 from worker.executors.agent_episode_executor import AgentEpisodeExecutor
-from worker.lifecycle import PendingEgressRequestStore
 
 _TASK = "tsk-agent"
 _OPENAI = EpisodeModelBinding(

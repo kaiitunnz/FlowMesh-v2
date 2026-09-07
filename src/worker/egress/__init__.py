@@ -7,6 +7,7 @@ this package; the dependency runs one way.
 
 from .backends import ModelEgress, SearchEgress
 from .fence import ProviderBinding, fence_reason, materialize_tool_outcome
+from .request_store import CapturedRequest, PendingEgressRequestStore
 from .sidecar import (
     AudienceFn,
     EgressInterface,
@@ -18,11 +19,13 @@ from .sidecar import (
 
 __all__ = [
     "AudienceFn",
+    "CapturedRequest",
     "EgressInterface",
     "HeldEgressReject",
     "MediatedEgressSidecar",
     "ModelEgress",
     "OutcomeSink",
+    "PendingEgressRequestStore",
     "ProviderBinding",
     "SearchEgress",
     "SyncModelEgress",

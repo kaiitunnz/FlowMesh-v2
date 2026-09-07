@@ -37,11 +37,9 @@ from shared.tasks.specs import TaskSpecStrictBase
 from shared.tasks.task_type import TaskType
 from shared.tasks.worker_message import WorkerHardware, WorkerTaskMessage
 from worker.config import WorkerConfig
-from worker.lifecycle import (
-    Lifecycle,
-    PendingEgressRequestStore,
-    ResidentRequestStore,
-)
+from worker.egress import PendingEgressRequestStore
+from worker.lifecycle import Lifecycle
+from worker.resident import ResidentRequestStore
 
 type ExecutorTask = WorkerTaskMessage
 type TaskReference = WorkerTaskMessage | MergedChildTaskStrict
