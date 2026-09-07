@@ -1,10 +1,10 @@
-"""The run-to-yield executor for a resident service-backed inference leaf.
+"""The run-to-yield executor for a resident service-backed inference or embedding leaf.
 
-A leaf whose binding requires resident capacity runs here instead of loading a model in
-the worker. Its first step builds the model request from the task spec, keeps it in
+A leaf whose binding requires resident capacity serves its model from a resident
+replica. Its first step builds the model request from the task spec, keeps it in
 worker-private resident custody, and yields one resident model boundary carrying only a
 digest; the fabric admits a ``ServiceClaim`` and drives the worker-originated resident
-protocol. A resume injects the settled completion and finishes the leaf. There is no
+protocol. A resume injects the settled outcome and finishes the leaf. There is no
 harness, scope, or child region — the model request is the leaf's whole body.
 """
 
@@ -38,7 +38,6 @@ _CALL_CORRELATION = "resident-model/0"
 _PROMPT_FIELDS = ("prompt", "input", "content", "text")
 
 _EMBEDDING_INTERFACE = "embedding"
-# Inline spec.data fields an embedding leaf reads its inputs from, in order.
 _EMBEDDING_INPUT_FIELDS = ("input", "items", "inputs", "texts", "prompts")
 _EMBEDDING_SCALAR_FIELDS = ("input", "text", "content", "prompt")
 
@@ -159,8 +158,7 @@ def _embedding_payload(
     """Collect an embedding leaf's inputs into one ``{input: [...]}`` payload."""
     for source in (data, inference):
         for field in _EMBEDDING_INPUT_FIELDS:
-            value = source.get(field)
-            if isinstance(value, list) and value:
+            if isinstance(value := source.get(field), list) and value:
                 return json.dumps({"input": [str(item) for item in value]})
         for field in _EMBEDDING_SCALAR_FIELDS:
             if isinstance(value := source.get(field), str) and value:

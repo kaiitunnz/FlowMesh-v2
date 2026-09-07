@@ -31,7 +31,7 @@ def hydrate_delivered_outcomes(
     A manifest is fetched from the content store and digest-verified before injection;
     a hydration failure fails the step for a physical retry of the same reference, never
     a re-run of the invocation, so an unverified value is never injected. An inline
-    outcome passes through unchanged.
+    outcome passes through.
     """
     if not any(o.outcome_ref is not None for o in outcomes):
         return outcomes

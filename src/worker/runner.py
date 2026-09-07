@@ -659,6 +659,19 @@ class Runner:
                             self._active_executor_key = None
 
                         if not self._active_executor:
+                            if (
+                                desired_key == "service_leaf"
+                                and "service_leaf" not in self.executors
+                            ):
+                                # A resident leaf must run the service-episode path;
+                                # never fall back to a local model executor, which would
+                                # run the model on this worker and yield a boundary the
+                                # resident path never settles.
+                                raise ExecutionError(
+                                    f"task {task_id} requires the service-leaf "
+                                    "executor for its resident service binding, but "
+                                    "it is not available on this worker"
+                                )
                             self._active_executor = self.executors.get(
                                 desired_key, self.default_executor
                             )
