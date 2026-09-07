@@ -12,6 +12,7 @@ from typing import Any
 from shared.harness import (
     AgentEpisodeDispatch,
     BoundaryEventKind,
+    EpisodeModelBinding,
     HarnessBackendKey,
     HarnessCapsule,
     HarnessResult,
@@ -23,7 +24,8 @@ from shared.outcome import OutcomeManifest
 from shared.schemas.command import InterruptMessage, MediatedOpMessage
 from shared.schemas.result import ResultEnvelope, result_file_path
 from shared.tasks import TaskEnvelopeTemplate
-from shared.tools.contract import MediatedOperationOutcome
+from shared.tasks.specs import ModelBindingMode
+from shared.tools.contract import AgentModelTurnProposal, MediatedOperationOutcome
 from shared.utils import new_workflow_id
 from shared.utils.ids import new_model_secret_ref
 
@@ -78,7 +80,7 @@ from .v2 import (
 )
 from .v2.compiler.agent_binding import AgentBindingDefaults
 from .v2.credentials import pop_inline_model_secrets, redact_source_text
-from .v2.representations.operators import AgentModelGatewayBinding, FacadeDescriptor
+from .v2.representations.operators import AgentModelGatewayBinding
 from .v2.representations.plan import EpisodeSpec
 
 # A live-feasibility check: whether a lowered episode's declared alternative can be
@@ -114,6 +116,9 @@ def _sanitize_merge_spec(spec: dict[str, Any]) -> dict[str, Any]:
 # Extra lifetime a worker-originated operation permit gets beyond the request timeout,
 # to cover dispatch and queue latency before the origin worker validates it.
 _OP_PERMIT_SLACK_SEC = 60.0
+# A generous bound on a materialized external-model completion; a larger response
+# settles by reference under the reference-backed outcome contract.
+_MODEL_PERMIT_RESULT_CHAR_CAP = 1_000_000
 
 
 def _compute_merge_key(task: TaskEnvelopeTemplate) -> str | None:
@@ -149,6 +154,7 @@ class TaskRuntime:
         self._secret_vault = secret_vault
         self._scope_budget = ScopeBudget.from_config(orchestration)
         self._web_search = orchestration.web_search
+        self._model_egress_timeout_sec = orchestration.gateway.timeout_sec
         self._input_budget_bytes = orchestration.agent_input_budget_bytes
         self._agent_binding_defaults = _binding_defaults(orchestration.agent_binding)
         self._lowering_strategy = (
@@ -1286,28 +1292,29 @@ class TaskRuntime:
     def _dispatch_boundary(self, env: ToolInvocationEnvelope) -> None:
         """Route a recorded mediated boundary to its handler by exact (kind, interface).
 
-        Only ``(INVOCATION, "model")`` reaches the model gateway and only ``(INVOCATION,
-        "search/v1")`` the fabric tool broker. An unrecognized interface is a fabric
-        misconfiguration terminalized as a typed unavailable outcome — never a silent
-        fall-through to the model settler.
+        A recorded request digest marks a boundary the worker originated and holds its
+        raw request privately: it runs off-lane on that worker's egress sidecar. A
+        ``model`` boundary without a digest reaches the model gateway (a
+        ``canned``/``echo``/``resident`` binding); a ``search/v1`` boundary without a
+        digest is the gateway-captured facade path and reaches the fabric broker. An
+        unrecognized interface is a fabric misconfiguration terminalized as a typed
+        unavailable outcome — never a silent fall-through to the model settler.
         """
         if (
             env.kind is BoundaryEventKind.INVOCATION
             and env.interface == MODEL_INTERFACE
         ):
-            if self._model_settler is not None:
+            if env.request_digest is not None:
+                self._dispatch_worker_originated_op(env)
+            elif self._model_settler is not None:
                 self._model_settler(env)
             return
         if (
             env.kind is BoundaryEventKind.INVOCATION
             and env.interface == SEARCH_INTERFACE
         ):
-            # A recorded request digest marks a boundary the worker originated and holds
-            # its raw request privately: run it off-lane on that worker rather than in
-            # the in-server broker. The gateway-captured facade path carries its request
-            # on the wire (no digest) and keeps using the broker.
             if env.request_digest is not None:
-                self._dispatch_worker_originated_tool_op(env)
+                self._dispatch_worker_originated_op(env)
             elif self._tool_broker is not None:
                 self._tool_broker(env)
             return
@@ -1319,8 +1326,30 @@ class TaskRuntime:
             env.task_id, env.call_correlation, outcome.model_dump_json()
         )
 
-    def _dispatch_worker_originated_tool_op(self, env: ToolInvocationEnvelope) -> None:
-        """Mint a permit and relay a boundary's operation to its origin worker.
+    def _op_permit_budget(self, interface: str) -> tuple[int, float, int]:
+        """The (max_results, timeout, result_char_cap) budget a permit runs within."""
+        if interface == MODEL_INTERFACE:
+            return 1, self._model_egress_timeout_sec, _MODEL_PERMIT_RESULT_CHAR_CAP
+        cfg = self._web_search
+        return cfg.max_results, cfg.timeout_sec, cfg.result_char_cap
+
+    def _resolve_op_credential(self, agent: TaskRecord, interface: str) -> str | None:
+        """The per-call provider credential a model permit carries, or None.
+
+        A model binding that pins its own key resolves it from the vault here so it
+        rides the one-use permit down to the egressing worker; a worker without one uses
+        its local environment key. Other interfaces read their provider key locally.
+        """
+        if interface != MODEL_INTERFACE:
+            return None
+        binding = self.resolve_model_binding(agent.task_id)
+        if binding is None or binding.secret_ref is None:
+            return None
+        secret = self._secret_vault.resolve(agent.workflow_id, binding.secret_ref)
+        return secret.get_secret_value() if secret is not None else None
+
+    def _dispatch_worker_originated_op(self, env: ToolInvocationEnvelope) -> None:
+        """Mint a permit and relay a boundary's egress operation to its origin worker.
 
         The permit is audience-bound to the agent's own worker and relayed there as an
         ordinary control message on the authenticated attachment, never the raw request
@@ -1344,17 +1373,20 @@ class TaskRuntime:
                 env.task_id, env.call_correlation, error="origin worker unavailable"
             )
             return
-        cfg = self._web_search
-        deadline = time.time() + cfg.timeout_sec + _OP_PERMIT_SLACK_SEC
+        max_results, timeout_sec, result_char_cap = self._op_permit_budget(
+            env.interface
+        )
+        deadline = time.time() + timeout_sec + _OP_PERMIT_SLACK_SEC
         permit = engine.mint_operation_permit(
             env.task_id,
             env.call_correlation,
             target_id=worker_id,
             target_generation=worker.incarnation,
-            max_results=cfg.max_results,
-            timeout_sec=cfg.timeout_sec,
-            result_char_cap=cfg.result_char_cap,
+            max_results=max_results,
+            timeout_sec=timeout_sec,
+            result_char_cap=result_char_cap,
             deadline_epoch=deadline,
+            credential=self._resolve_op_credential(agent, env.interface),
         )
         if permit is None:
             self.settle_episode_invocation(
@@ -1380,6 +1412,71 @@ class TaskRuntime:
                 payload=permit.model_dump(mode="json"),
             ),
         )
+
+    def authorize_model_turn(self, proposal: AgentModelTurnProposal) -> None:
+        """Authorize a held agent's in-turn model egress and relay a one-use permit.
+
+        The agent's own worker holds the model request privately and proposes only its
+        digest; the control plane validates the activation's model-invoke authority and
+        its external binding, mints an audience-bound permit, and relays it over the
+        worker's authenticated attachment. A denial — no live worker, a non-external
+        binding, or an authority failure — relays a deny frame so the held turn fails
+        fast rather than waiting out its deadline. No settle is expected: the held turn
+        consumes the outcome in-worker and its durable progress rests on its
+        turn-completion boundaries.
+        """
+        with self._cv:
+            agent = self._tasks.get(proposal.agent_task_id)
+            engine = self._engines.get(agent.workflow_id) if agent else None
+            if agent is None or engine is None:
+                return
+            worker_id = agent.assigned_worker
+            worker = self._worker_registry.get_worker(worker_id) if worker_id else None
+            if worker_id is None or worker is None:
+                # A gone origin worker cannot receive a relay: the held turn fails on
+                # its own permit deadline.
+                return
+            binding = self.resolve_model_binding(proposal.agent_task_id)
+            external = binding is not None and binding.mode is ModelBindingMode.OPENAI
+            permit = None
+            if external:
+                _, timeout_sec, result_char_cap = self._op_permit_budget(
+                    MODEL_INTERFACE
+                )
+                deadline = time.time() + timeout_sec + _OP_PERMIT_SLACK_SEC
+                permit = engine.authorize_model_turn(
+                    proposal.agent_task_id,
+                    proposal.call_correlation,
+                    proposal.request_digest,
+                    target_id=worker_id,
+                    target_generation=worker.incarnation,
+                    timeout_sec=timeout_sec,
+                    result_char_cap=result_char_cap,
+                    deadline_epoch=deadline,
+                    credential=self._resolve_op_credential(agent, MODEL_INTERFACE),
+                )
+            if permit is None:
+                self._worker_registry.publish_mediated_op(
+                    worker,
+                    MediatedOpMessage(
+                        worker_id=worker_id,
+                        frame_kind="deny",
+                        payload={
+                            "agent_task_id": proposal.agent_task_id,
+                            "call_correlation": proposal.call_correlation,
+                            "reason": "model turn egress denied",
+                        },
+                    ),
+                )
+                return
+            self._worker_registry.publish_mediated_op(
+                worker,
+                MediatedOpMessage(
+                    worker_id=worker_id,
+                    frame_kind="permit",
+                    payload=permit.model_dump(mode="json"),
+                ),
+            )
 
     def settle_mediated_operation(self, outcome: MediatedOperationOutcome) -> None:
         """Settle an agent boundary from its origin worker's fenced outcome report.
@@ -1476,15 +1573,14 @@ class TaskRuntime:
             self._resident_terminal_hook(invocation_id, failed)
 
     def originate_facade_turn_group(self, task_id: str, group: FacadeTurnGroup) -> None:
-        """Record a turn-scoped facade group the gateway captured, before it acks.
+        """Record a turn-scoped facade group a worker captured on a held model turn.
 
-        The agent-model gateway sees a model turn's native facade calls before the
-        harness does and clean-completes the turn; the whole ordered membership and its
-        single continuation are persisted on the task record before the gateway acks the
-        clean turn, so the episode's next completion routes the group rather than
-        settling the episode DONE, and a restart-replayed completion still routes it. At
-        most one group is open per episode; a second capture while one holds the gate is
-        refused by the gateway fence, not stored here.
+        The worker facade captures a model turn's native facade calls and cleans the
+        turn; the whole ordered membership and its single continuation are persisted
+        on the task record before the turn resumes, so the episode's next completion
+        routes the group rather than settling the episode DONE, and a restart-replayed
+        completion still routes it. At most one group is open per episode; a second one
+        while one holds the gate is refused by the busy fence, not stored here.
         """
         with self._lock:
             self._pending_facade_groups[task_id] = group
@@ -1492,10 +1588,26 @@ class TaskRuntime:
                 record.pending_facade_group = group
                 self._persist_locked(task_id)
 
+    def receive_worker_facade_group(self, task_id: str, group: FacadeTurnGroup) -> None:
+        """Record a facade group the worker carried on its held model turn's completion.
+
+        The worker facade keeps each search member's request private and carries the
+        ordered membership with per-member digests on the completion. Recording it under
+        the busy fence refuses a second group while one's await-outcome members are
+        unresolved, so the open one is never overwritten; the episode's next completion
+        routes the recorded group rather than settling DONE.
+        """
+        if self.has_pending_facade(task_id):
+            self._logger.warning(
+                "refusing a second facade group for %s while one is open", task_id
+            )
+            return
+        self.originate_facade_turn_group(task_id, group)
+
     def has_pending_facade(self, task_id: str) -> bool:
         """Whether a facade group is already captured or still open for this episode.
 
-        The gateway fence reads this to refuse a distinct second group before the open
+        The busy fence reads this to refuse a distinct second group before the open
         one's await-outcome members settle, so a group is never overwritten mid-flight.
         A spawn-only group holds nothing here once routed, so a later turn may issue it.
         """
@@ -1524,20 +1636,6 @@ class TaskRuntime:
                 return None
             op = engine.agent_operator(task_id)
             return op.model_binding if op is not None else None
-
-    def agent_facade_descriptors(self, task_id: str) -> list[FacadeDescriptor]:
-        """The fabric facades pinned on a task's agent, for the gateway to inject.
-
-        Only an agent's compile-pinned facades are injectable, so the model can never be
-        offered a fabric tool the agent did not declare.
-        """
-        with self._lock:
-            record = self._tasks.get(task_id)
-            engine = self._engines.get(record.workflow_id) if record else None
-            if engine is None:
-                return []
-            op = engine.agent_operator(task_id)
-            return list(op.facades) if op is not None else []
 
     def gateway_binding_for(
         self, task_id: str
@@ -1572,6 +1670,12 @@ class TaskRuntime:
             harness = op.harness_binding if op is not None else None
             if harness is None:
                 return None
+            model = op.model_binding if op is not None else None
+            model_binding = (
+                EpisodeModelBinding(mode=model.mode, url=model.url, model=model.model)
+                if model is not None
+                else None
+            )
             capsule_blob, outcomes = engine.episode_context(task_id)
             # First-turn dataflow inputs are delivered only on the first dispatch; a
             # resume injects only the harness's own delivered outcomes.
@@ -1587,6 +1691,8 @@ class TaskRuntime:
                 capsule_blob=capsule_blob,
                 delivered_outcomes=outcomes,
                 input_bindings=input_bindings,
+                model_binding=model_binding,
+                facade_descriptors=tuple(op.facades) if op is not None else (),
             )
 
     def _synthesize_ready_children_locked(
@@ -2421,6 +2527,14 @@ class TaskRuntime:
             episode_step = payload.get("agent_episode")
             if episode_step is not None and record is not None:
                 harness_result = HarnessResult.model_validate(episode_step)
+                # A facade group the worker captured on this turn rides the completion's
+                # own metadata on the durable task stream, so it is ingested here rather
+                # than on a separate channel that could deliver it after the completion
+                # (settling the episode DONE and dropping its searches) or drop it.
+                if (carried := payload.get("agent_episode_facade_group")) is not None:
+                    self.receive_worker_facade_group(
+                        task_id, FacadeTurnGroup.model_validate(carried)
+                    )
                 # The durable record is the source of truth: a restart drops the
                 # in-memory stash, but a replayed completion still finds its captured
                 # boundary and reroute rather than settling the episode DONE.

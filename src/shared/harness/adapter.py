@@ -18,6 +18,8 @@ from enum import StrEnum
 from pydantic import BaseModel, ConfigDict
 
 from ..outcome import OutcomeManifest
+from ..tasks.specs.misc import ModelBindingMode
+from ..tools.facade import FacadeDescriptor
 from .boundary import BoundaryRequest, DenialKind
 
 
@@ -49,6 +51,19 @@ class MediatedFacade(StrEnum):
 REQUIRED_MEDIATED_FACADES = frozenset(
     {MediatedFacade.MODEL, MediatedFacade.SPAWN_AGENT, MediatedFacade.SEARCH}
 )
+
+
+class EgressHandoffMode(StrEnum):
+    """How a backend hands a mediated egress boundary to the worker egress lane.
+
+    A ``durable_pre_egress_yield`` backend releases its episode lane at the boundary and
+    resumes only from the committed outcome. A ``synchronous_turn_only`` backend holds
+    its own lane through one bounded same-worker egress within a turn, under a
+    no-conflicting-capacity, deadline, and cancellation bound.
+    """
+
+    DURABLE_PRE_EGRESS_YIELD = "durable_pre_egress_yield"
+    SYNCHRONOUS_TURN_ONLY = "synchronous_turn_only"
 
 
 class HarnessBackendKey(BaseModel):
@@ -136,6 +151,22 @@ class InputBinding(BaseModel):
     members: tuple[InputBindingMember, ...] = ()
 
 
+class EpisodeModelBinding(BaseModel):
+    """The credential-free managed-model binding the fabric ships to a worker.
+
+    The worker captures an ``openai`` model boundary as a worker-originated egress and
+    builds its request from ``url``/``model``; a ``canned``/``echo``/``resident`` mode
+    settles on the control plane and is not captured. The credential is read at the
+    worker from its local environment, never carried here.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    mode: ModelBindingMode
+    url: str | None = None
+    model: str | None = None
+
+
 class AgentEpisodeDispatch(BaseModel):
     """The agent-episode context the fabric ships to a worker for one run-to-yield step.
 
@@ -144,7 +175,9 @@ class AgentEpisodeDispatch(BaseModel):
     their originating calls before the adapter steps. ``input_bindings`` carry the
     resolved first-turn dataflow inputs and are populated only on the first dispatch
     (``capsule_blob`` is None); a resume injects only ``delivered_outcomes`` and never
-    re-applies the initial context.
+    re-applies the initial context. ``model_binding`` is the credential-free binding the
+    worker captures an external model boundary against. ``facade_descriptors`` are the
+    agent's compile-pinned fabric facades the worker injects into a held model turn.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -153,6 +186,8 @@ class AgentEpisodeDispatch(BaseModel):
     capsule_blob: str | None = None
     delivered_outcomes: tuple[DeliveredOutcome, ...] = ()
     input_bindings: tuple[InputBinding, ...] = ()
+    model_binding: EpisodeModelBinding | None = None
+    facade_descriptors: tuple[FacadeDescriptor, ...] = ()
 
 
 class HarnessResultKind(StrEnum):
@@ -220,6 +255,15 @@ class HarnessAdapter(ABC):
         capability outside the set may still run as an ordinary native harness tool.
         """
         return REQUIRED_MEDIATED_FACADES
+
+    def egress_handoff_mode(self) -> EgressHandoffMode:
+        """This backend's mediated-egress handoff mode.
+
+        The default is ``synchronous_turn_only``; a backend advertises
+        ``durable_pre_egress_yield`` only if it implements request-capsule capture and
+        outcome-reinjection recovery.
+        """
+        return EgressHandoffMode.SYNCHRONOUS_TURN_ONLY
 
     def export_state(self, activation_id: str) -> str | None:
         """Export activation-private harness state for a relocatable capsule.

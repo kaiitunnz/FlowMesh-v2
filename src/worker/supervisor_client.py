@@ -23,7 +23,7 @@ from shared.tasks.worker_message import (
     WorkerStatus,
     WorkerTaskMessage,
 )
-from shared.tools.contract import MediatedOperationOutcome
+from shared.tools.contract import AgentModelTurnProposal, MediatedOperationOutcome
 from shared.utils.json import normalize_numbers
 from shared.utils.time import now_iso
 
@@ -608,5 +608,18 @@ class SupervisorClient:
             type="MEDIATED_OP_OUTCOME",
             worker_id=self.worker_id,
             payload={"outcome": outcome.model_dump(mode="json")},
+        )
+        self._event_queue.put(serialize_event(event))
+
+    def push_mediated_propose(self, proposal: AgentModelTurnProposal) -> None:
+        """Propose a held in-turn model egress for a one-use permit, digest-only."""
+        if self._stub is None:
+            raise RuntimeError("Supervisor gRPC client not started")
+        if not self._event_ready.wait():
+            raise RuntimeError("Supervisor event stream not ready")
+        event = WorkerEvent(
+            type="MEDIATED_OP_PROPOSE",
+            worker_id=self.worker_id,
+            payload={"proposal": proposal.model_dump(mode="json")},
         )
         self._event_queue.put(serialize_event(event))

@@ -94,4 +94,4 @@ def test_spawn_boundary_is_never_a_sidecar_egress() -> None:
             request_payload="{}",
         ),
     )
-    assert not AgentEpisodeExecutor._is_capturable_boundary(spawn)
+    assert not AgentEpisodeExecutor._is_capturable_boundary(spawn, None)

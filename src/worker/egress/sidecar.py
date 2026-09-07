@@ -1,11 +1,12 @@
-"""The worker-local mediated-egress sidecar: the enforced tool-fence egress lane.
+"""The worker-local mediated-egress sidecar: the enforced egress lane for a boundary.
 
-The agent's own worker captures a fabric-tool request in worker-private custody and
-proposes only its digest; central control returns a one-use permit over the worker's
-authenticated attachment. This bounded lane validates the permit and digest against the
-worker fence, egresses through the local provider, materializes a large result by
-reference, and reports one permit-fenced terminal fact back over the attachment. It is a
-worker-lifecycle execution lane, not a task, replica, endpoint, or authority.
+The agent's own worker captures a fabric-tool or managed-model request in worker-private
+custody and proposes only its digest; central control returns a one-use permit over the
+worker's authenticated attachment. This bounded lane validates the permit and digest
+against the worker fence, egresses through the local provider for the permit interface,
+materializes a large result by reference, and reports one permit-fenced terminal fact
+back over the attachment. It is a worker-lifecycle execution lane, not a task, replica,
+endpoint, or authority.
 
 Raw-request custody is retained non-destructively: the lane peeks the request, egresses,
 reports the fenced outcome, and deletes the request only on the control plane's
@@ -17,8 +18,10 @@ failure, never a retryable provider response.
 import logging
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass
+from typing import Protocol, runtime_checkable
 
 from shared.outcome import FabricContentStore, OutcomeManifest
 from shared.tools.contract import (
@@ -26,18 +29,12 @@ from shared.tools.contract import (
     MediatedOperationPermit,
     ToolOperationEnvelope,
     ToolOutcome,
-    ToolOutcomeStatus,
 )
-from shared.tools.search.egress import ExternalToolSidecar
-from shared.tools.search.providers import LazySearchProvider
-from shared.tools.search.schema import (
-    SEARCH_INTERFACE,
-    ToolRequest,
-    tool_request_digest,
-)
+from shared.tools.model.egress import ModelEgressError
+from shared.tools.model.schema import ModelCompletion
 
-from .lifecycle import PendingToolRequestStore
-from .tool_fence import ProviderBinding, fence_reason, materialize_tool_outcome
+from ..lifecycle import CapturedRequest, PendingEgressRequestStore
+from .fence import fence_reason, materialize_tool_outcome
 
 # Resolves this worker's id and incarnation once it is registered.
 AudienceFn = Callable[[], tuple[str, int]]
@@ -47,34 +44,67 @@ OutcomeSink = Callable[[MediatedOperationOutcome], None]
 _BoundaryKey = tuple[str, str]
 
 
+class EgressInterface(Protocol):
+    """One interface's egress: the request digest and the provider execution surface."""
+
+    interface: str
+
+    def digest(self, request: CapturedRequest) -> str: ...
+
+    def execute(
+        self,
+        envelope: ToolOperationEnvelope,
+        request: CapturedRequest,
+        credential: str | None,
+    ) -> ToolOutcome: ...
+
+
+@runtime_checkable
+class SyncModelEgress(Protocol):
+    """A model egress that returns the whole message inline for a held turn."""
+
+    interface: str
+
+    def digest(self, request: CapturedRequest) -> str: ...
+
+    def complete(
+        self,
+        envelope: ToolOperationEnvelope,
+        request: CapturedRequest,
+        credential: str | None,
+    ) -> ModelCompletion: ...
+
+
+@dataclass(frozen=True)
+class HeldEgressReject:
+    """A terminal rejection of a held model turn: a fence failure or provider fault."""
+
+    reason: str
+
+
 class MediatedEgressSidecar:
-    """Validate a permit and egress one worker-originated fabric-tool operation."""
+    """Validate a permit and egress one worker-originated mediated operation."""
 
     def __init__(
         self,
         *,
-        pending_requests: PendingToolRequestStore,
+        pending_requests: PendingEgressRequestStore,
         audience: AudienceFn,
-        provider: str,
-        api_key: str | None,
+        egresses: Sequence[EgressInterface],
         outcome_sink: OutcomeSink,
         content_store: FabricContentStore | None = None,
         policy_class: str = "default",
-        interfaces: frozenset[str] = frozenset({SEARCH_INTERFACE}),
         max_workers: int = 4,
         logger: logging.Logger | None = None,
     ) -> None:
         self._pending = pending_requests
         self._audience = audience
-        self._provider = provider
         self._content_store = content_store
         self._policy_class = policy_class
-        self._interfaces = interfaces
+        self._egresses = {egress.interface: egress for egress in egresses}
+        self._interfaces = frozenset(self._egresses)
         self._sink = outcome_sink
         self._log = logger or logging.getLogger("worker-mediated-egress")
-        self._sidecar = ExternalToolSidecar(
-            LazySearchProvider(ProviderBinding(provider, api_key)), self._log
-        )
         self._pool = ThreadPoolExecutor(
             max_workers=max_workers, thread_name_prefix="mediated-egress"
         )
@@ -140,6 +170,11 @@ class MediatedEgressSidecar:
         # key, before consuming the worker-private request.
         if (prior := self._prior_manifest(permit)) is not None:
             return self._report(permit, outcome_ref=prior)
+        egress = self._egresses.get(permit.interface)
+        if egress is None:
+            return self._report(
+                permit, error=f"no egress for interface {permit.interface!r}"
+            )
         request = self._pending.peek(permit.agent_task_id, permit.call_correlation)
         if request is None:
             # No prior outcome and the capturing incarnation is gone: fail terminally
@@ -147,9 +182,9 @@ class MediatedEgressSidecar:
             return self._report(
                 permit, error=f"no worker-private request for {permit.call_correlation}"
             )
-        if (reason := self._fence_reject(permit, request)) is not None:
-            return self._report(permit, error=f"tool permit fence rejected: {reason}")
-        outcome = self._egress(permit, request)
+        if (reason := self._fence_reject(permit, egress.digest(request))) is not None:
+            return self._report(permit, error=f"permit fence rejected: {reason}")
+        outcome = self._egress(permit, request, egress)
         materialized = materialize_tool_outcome(
             outcome,
             idempotency_key=permit.idempotency_key,
@@ -159,34 +194,68 @@ class MediatedEgressSidecar:
             return self._report(permit, outcome_ref=materialized)
         return self._report(permit, outcome=materialized)
 
-    def _egress(
-        self, permit: MediatedOperationPermit, request: ToolRequest
-    ) -> ToolOutcome:
-        envelope = ToolOperationEnvelope(
+    @staticmethod
+    def _envelope(permit: MediatedOperationPermit) -> ToolOperationEnvelope:
+        return ToolOperationEnvelope(
             interface=permit.interface,
             idempotency_key=permit.idempotency_key,
-            max_results=min(request.max_results, permit.max_results),
+            max_results=permit.max_results,
             timeout_sec=permit.timeout_sec,
             result_char_cap=permit.result_char_cap,
         )
+
+    def _egress(
+        self,
+        permit: MediatedOperationPermit,
+        request: CapturedRequest,
+        egress: EgressInterface,
+    ) -> ToolOutcome:
         self._log.info(
             "mediated egress in worker=%s interface=%s",
             permit.target_id,
             permit.interface,
         )
-        try:
-            return self._sidecar.execute(envelope, request)
-        except ValueError as exc:
-            # A misprovisioned provider is a deterministic fault: a typed terminal
-            # outcome rather than an ambiguous retry loop.
-            self._log.warning("tool provider unavailable: %s", exc)
-            return ToolOutcome(
-                status=ToolOutcomeStatus.UNAVAILABLE,
-                value="the external-tool provider is unavailable",
+        return egress.execute(self._envelope(permit), request, permit.credential)
+
+    def egress_now(
+        self, permit: MediatedOperationPermit
+    ) -> ModelCompletion | HeldEgressReject:
+        """Egress a held model turn synchronously, returning its completion inline.
+
+        Distinct from ``submit_permit``: a synchronous-turn-only facade consumes the
+        permit in its own thread and needs the model's whole message back inline, not a
+        control-plane settle. The permit is consumed one-use and the worker-private
+        request is fenced before egress; a fence rejection or a provider fault is a
+        terminal reject the facade fails the turn on. Custody is left for the facade to
+        reap once the turn resolves.
+        """
+        with self._lock:
+            if not self._consume_permit(permit.permit_id, permit.deadline_epoch):
+                return HeldEgressReject(reason="permit replay")
+        egress = self._egresses.get(permit.interface)
+        if not isinstance(egress, SyncModelEgress):
+            return HeldEgressReject(
+                reason=f"no held egress for interface {permit.interface!r}"
             )
+        request = self._pending.peek(permit.agent_task_id, permit.call_correlation)
+        if request is None:
+            return HeldEgressReject(
+                reason=f"no worker-private request for {permit.call_correlation}"
+            )
+        if (reason := self._fence_reject(permit, egress.digest(request))) is not None:
+            return HeldEgressReject(reason=f"permit fence rejected: {reason}")
+        self._log.info(
+            "held model egress in worker=%s interface=%s",
+            permit.target_id,
+            permit.interface,
+        )
+        try:
+            return egress.complete(self._envelope(permit), request, permit.credential)
+        except ModelEgressError as exc:
+            return HeldEgressReject(reason=str(exc))
 
     def _fence_reject(
-        self, permit: MediatedOperationPermit, request: ToolRequest
+        self, permit: MediatedOperationPermit, computed_digest: str
     ) -> str | None:
         worker_id, generation = self._audience()
         return fence_reason(
@@ -196,9 +265,7 @@ class MediatedEgressSidecar:
             policy_class=permit.policy_class,
             deadline_epoch=permit.deadline_epoch,
             request_digest=permit.request_digest,
-            computed_digest=tool_request_digest(
-                request.interface, request.query, request.max_results
-            ),
+            computed_digest=computed_digest,
             worker_id=worker_id,
             worker_generation=generation,
             allowed_interfaces=self._interfaces,
@@ -242,4 +309,11 @@ class MediatedEgressSidecar:
         )
 
 
-__all__ = ["AudienceFn", "MediatedEgressSidecar", "OutcomeSink"]
+__all__ = [
+    "AudienceFn",
+    "EgressInterface",
+    "HeldEgressReject",
+    "MediatedEgressSidecar",
+    "OutcomeSink",
+    "SyncModelEgress",
+]

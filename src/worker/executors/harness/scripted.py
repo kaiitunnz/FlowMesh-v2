@@ -20,6 +20,7 @@ from shared.harness import (
     BoundaryEventKind,
     BoundaryRequest,
     DeliveredOutcome,
+    EgressHandoffMode,
     HarnessAdapter,
     HarnessBackendKey,
     HarnessCapsule,
@@ -30,6 +31,7 @@ from shared.harness import (
 from shared.tasks.specs import AgentSpecStrict
 from shared.tasks.worker_message import WorkerTaskMessage
 from worker.config import WorkerConfig
+from worker.model_turn import ResponsesFacade
 
 _BACKEND = "scripted"
 
@@ -65,6 +67,10 @@ class ScriptedHarnessAdapter(HarnessAdapter):
 
     def backend_key(self) -> HarnessBackendKey:
         return HarnessBackendKey(backend=_BACKEND, version=self._version)
+
+    def egress_handoff_mode(self) -> EgressHandoffMode:
+        # Every boundary defers to a capsule and resumes from the committed outcome.
+        return EgressHandoffMode.DURABLE_PRE_EGRESS_YIELD
 
     def start(
         self,
@@ -120,8 +126,12 @@ class ScriptedHarnessAdapter(HarnessAdapter):
 
 
 def build_scripted_adapter(
-    backend: HarnessBackendKey, task: WorkerTaskMessage, config: WorkerConfig
+    backend: HarnessBackendKey,
+    task: WorkerTaskMessage,
+    config: WorkerConfig,
+    facade: ResponsesFacade | None = None,
 ) -> ScriptedHarnessAdapter:
+    # The scripted backend yields its lane per boundary, so it never binds the facade.
     spec = task.spec
     if not isinstance(spec, AgentSpecStrict) or spec.harness is None:
         raise ValueError("the scripted backend requires an agent harness spec")

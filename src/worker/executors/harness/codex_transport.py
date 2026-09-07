@@ -6,11 +6,11 @@ the adapter already speaks. Each step runs against a persisted on-disk rollout u
 stable ``CODEX_HOME``: a fresh thread's first turn carries the agent's task, ``thread/
 resume`` reattaches by thread id after the process is gone, ``thread/inject_items``
 appends a settled outcome as raw Responses items the next turn sees, and a turn's
-notification stream collapses to one ``CodexEvent``. The model backend is FlowMesh's
-Responses gateway, which is Codex's native wire.
+notification stream collapses to one ``CodexEvent``. The model backend is the
+worker-local Responses facade, which is Codex's native wire.
 
-A mediated facade call originates at the FlowMesh agent-model gateway, Codex's model
-provider: the gateway injects the facade tool, captures the model's native call, and
+A mediated facade call originates at the worker-local Responses facade, Codex's model
+provider: the facade injects the facade tool, captures the model's native call, and
 clean-completes the turn, so a turn here only ever completes or errors — the transport
 never parses the rollout for a facade. Resolution injects the settled result as raw
 Responses items the next turn sees; the adapter's committed-key dedup keeps the outcome
@@ -19,10 +19,12 @@ injected at most once on a resume from the committed capsule. The untyped
 ``_CodexExperimentalSurface`` and pinned to this Codex version.
 """
 
+import contextlib
 import logging
+import os
 import threading
 import weakref
-from collections.abc import Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -41,12 +43,67 @@ from .codex import CodexEvent, CodexInjectItem
 
 _INJECT_CALL_PREFIX = "fab-"
 _INJECT_TOOL = "fabric_mediated"
-# Codex authenticates to the internal FlowMesh Responses gateway with this trusted
-# placeholder token (requires_openai_auth=false). The user's model credential is
-# supplied at the gateway from the per-workflow secret_ref, resolved server-side, and
-# never passes through Codex — so the placeholder is correct here, not a missing one.
+# Codex authenticates to the worker-local Responses facade with the per-episode token
+# the facade issued (requires_openai_auth=false), so one episode cannot drive another's
+# egress. The user's model credential rides the mediated permit to the worker egress and
+# never passes through Codex.
 _KEY_ENV = "FLOWMESH_CODEX_API_KEY"
 _LOG = logging.getLogger("codex-transport")
+
+# The codex app-server, and the native shell it may run, inherits the launcher's process
+# environment. Restrict that inheritance to a fixed, secret-free allowlist so no worker
+# provider credential reaches the child: only scratch roots, a runtime PATH, and locale.
+# CODEX_HOME and the per-episode facade token arrive through the SDK's own config.env
+# overlay, so they need no allowlist entry.
+_LAUNCH_ENV_ALLOWLIST = frozenset(
+    {
+        "PATH",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "SHELL",
+        "TERM",
+        "TZ",
+        "LANG",
+        "LANGUAGE",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+    }
+)
+_LAUNCH_ENV_ALLOWLIST_PREFIXES = ("LC_", "XDG_")
+_LAUNCH_ENV_LOCK = threading.Lock()
+
+
+def _allowed_launch_var(name: str) -> bool:
+    return name in _LAUNCH_ENV_ALLOWLIST or name.startswith(
+        _LAUNCH_ENV_ALLOWLIST_PREFIXES
+    )
+
+
+def sanitized_launch_env(source: Mapping[str, str]) -> dict[str, str]:
+    """The secret-free child environment kept from the launcher's own environment."""
+    return {k: v for k, v in source.items() if _allowed_launch_var(k)}
+
+
+@contextlib.contextmanager
+def clean_launch_environ() -> Iterator[None]:
+    """Hold ``os.environ`` at the launch allowlist while the app-server spawns.
+
+    The SDK spawns the app-server from ``os.environ.copy()``, so the child captures only
+    the allowlisted environment for the span of the spawn; the launcher's full
+    environment is restored immediately after. The swap is serialized so concurrent
+    spawns on one worker never observe each other's stripped environment.
+    """
+    with _LAUNCH_ENV_LOCK:
+        saved = dict(os.environ)
+        os.environ.clear()
+        os.environ.update(sanitized_launch_env(saved))
+        try:
+            yield
+        finally:
+            os.environ.clear()
+            os.environ.update(saved)
 
 
 class CodexTransportError(RuntimeError):
@@ -66,6 +123,9 @@ class CodexTransportConfig:
     codex_home: Path
     initial_input: str
     task_id: str
+    # The per-episode token the facade issued; codex carries it as the provider key so
+    # the facade authenticates each turn to its own episode.
+    env_key_value: str = "placeholder"
     provider_id: str = "flowmesh"
     approval_policy: str = "never"
     # Permit native shell in a workspace-write sandbox but deny it network egress, so
@@ -85,8 +145,8 @@ class CodexTransportConfig:
                 raise ValueError(f"the codex {name} may not contain a quote or newline")
 
     def provider_base_url(self) -> str:
-        # The per-episode gateway surface: the task id in the path correlates a facade
-        # the gateway captures on a turn to this agent activation.
+        # The per-episode facade surface: the task id in the path routes each turn to
+        # this agent activation's registered episode.
         return f"{self.base_url.rstrip('/')}/agent/{self.task_id}/v1"
 
     def to_codex_config(self) -> CodexConfig:
@@ -109,7 +169,7 @@ class CodexTransportConfig:
             # the mediated search facade.
             "sandbox_workspace_write.network_access=false",
         )
-        env = {"CODEX_HOME": self.codex_home.as_posix(), _KEY_ENV: "placeholder"}
+        env = {"CODEX_HOME": self.codex_home.as_posix(), _KEY_ENV: self.env_key_value}
         return CodexConfig(
             config_overrides=overrides,
             env=env,
@@ -192,7 +252,8 @@ class RealCodexAppServerTransport:
             # Arm teardown before the process spawns, so a failure during start or
             # initialize still reaps the app-server rather than leaking it.
             self._finalizer = weakref.finalize(self, _close_client, client)
-            client.start()
+            with clean_launch_environ():
+                client.start()
             client.initialize()
             self._client = client
         return self._client

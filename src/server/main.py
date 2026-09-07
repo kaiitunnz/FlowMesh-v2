@@ -45,7 +45,6 @@ from .routers import docs, health, v1
 from .services.agent_model_gateway import (
     AgentModelGateway,
     ResolvedGatewayBinding,
-    build_agent_model_router,
     to_gateway_binding,
 )
 from .services.content_store import ServerContentStore
@@ -173,9 +172,6 @@ if IS_ROOT_NODE:
         RUNTIME, config.orchestration.gateway, logger
     )
     RUNTIME.set_model_settler(AGENT_MODEL_GATEWAY.settle)
-    AGENT_MODEL_GATEWAY.set_facade_group_originator(RUNTIME.originate_facade_turn_group)
-    AGENT_MODEL_GATEWAY.set_facade_fence(RUNTIME.has_pending_facade)
-    AGENT_MODEL_GATEWAY.set_facade_resolver(RUNTIME.agent_facade_descriptors)
 
     def _settle_tool(
         task_id: str, call_correlation: str, carrier: OutcomeCarrier
@@ -193,8 +189,8 @@ if IS_ROOT_NODE:
         resolved = RUNTIME.gateway_binding_for(task_id)
         if resolved is None:
             return None
-        workflow_id, pinned = resolved
-        return to_gateway_binding(pinned, MODEL_SECRET_VAULT, workflow_id)
+        _workflow_id, pinned = resolved
+        return to_gateway_binding(pinned)
 
     AGENT_MODEL_GATEWAY.set_binding_resolver(_resolve_gateway_binding)
 
@@ -622,9 +618,6 @@ if IS_ROOT_NODE:
     app.include_router(v1.network.router, prefix=v1_prefix)
     app.include_router(v1.system.router, prefix=v1_prefix)
     app.include_router(v1.traces.router, prefix=v1_prefix)
-    if AGENT_MODEL_GATEWAY is not None:
-        # The agent-model gateway's Responses API surface a harness provider targets.
-        app.include_router(build_agent_model_router(AGENT_MODEL_GATEWAY))
 
 # Routers — supervisor (any node with worker management)
 if config.worker_management.enabled:

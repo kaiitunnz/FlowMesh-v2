@@ -825,6 +825,7 @@ class OrchestrationEngine:
             child_region_ref=member.interface_or_region if is_spawn else None,
             call_correlation=member.call_correlation,
             request_payload=member.request_payload,
+            request_digest=member.request_digest,
             injection_target=member.harness_call_id,
             injection_tool=member.tool_name,
             group_id=group_id,
@@ -1159,13 +1160,15 @@ class OrchestrationEngine:
         timeout_sec: float,
         result_char_cap: int,
         deadline_epoch: float,
+        credential: str | None = None,
     ) -> MediatedOperationPermit | None:
         """A one-use permit for a recorded worker-originated boundary, or None.
 
         The engine owns the durable identity and authority: it fills the invocation,
         idempotency key, request digest, interface, subject, and the policy epoch the
         boundary was admitted under. The caller supplies the audience (the agent's
-        worker and its generation) and the policy-bounded budget the operation runs in.
+        worker and its generation), the policy-bounded budget the operation runs in, and
+        an optional per-call ``credential`` resolved for a workflow's pinned model key.
         Returns None for a boundary that carries no digest — i.e. one the worker did not
         originate — so a re-mint never fabricates authorization the boundary lacks.
         """
@@ -1195,6 +1198,59 @@ class OrchestrationEngine:
             max_results=max_results,
             timeout_sec=timeout_sec,
             result_char_cap=result_char_cap,
+            credential=credential,
+        )
+
+    def authorize_model_turn(
+        self,
+        task_id: str,
+        call_correlation: str,
+        request_digest: str,
+        *,
+        target_id: str,
+        target_generation: int,
+        timeout_sec: float,
+        result_char_cap: int,
+        deadline_epoch: float,
+        credential: str | None = None,
+    ) -> MediatedOperationPermit | None:
+        """A one-use permit for a held agent's in-turn model egress, or None on denial.
+
+        A harness that holds its lane across a model call has no recorded suspending
+        boundary, so the engine mints from the worker's propose rather than a ledger
+        event: it validates the activation's model-invoke authority against the operator
+        face, mints a fresh invocation identity, fences the permit on the worker's
+        ``request_digest``, and binds the audience to the agent's worker. The permit
+        authorizes one egress and records no resumable state; the turn's durable
+        progress rests on its turn-completion boundaries. A missing activation, or a
+        model invocation outside the operator's face, returns None, which the caller
+        relays as a definitive denial.
+        """
+        wi = self._work_item_for_task(task_id)
+        act = self._activations.get(wi.activation_id) if wi is not None else None
+        op = self._operators.get(act.operator_id) if act is not None else None
+        if wi is None or act is None or not isinstance(op, AgentOperator):
+            return None
+        invoke, _ = self._agent_faces(op, wi)
+        if MODEL_INTERFACE not in invoke:
+            return None
+        return MediatedOperationPermit(
+            permit_id=new_mediated_permit_id(),
+            agent_task_id=wi.legacy_task_id,
+            call_correlation=call_correlation,
+            interface=MODEL_INTERFACE,
+            subject=MODEL_INTERFACE,
+            invocation_id=new_invocation_id(),
+            idempotency_key=new_idempotency_key(),
+            request_digest=request_digest,
+            target_id=target_id,
+            target_generation=target_generation,
+            policy_epoch=self._grant_for_scope(act.scope_id).epoch,
+            deadline_epoch=deadline_epoch,
+            max_results=1,
+            timeout_sec=timeout_sec,
+            result_char_cap=result_char_cap,
+            credential=credential,
         )
 
     def boundary_settleable(self, task_id: str, call_correlation: str) -> bool:

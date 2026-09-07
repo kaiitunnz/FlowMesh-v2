@@ -5,11 +5,11 @@ metadata:
   owner: researcher
   annotations:
     description: >-
-      Agent driven by the Codex app-server harness with a credential-free canned
-      model binding. Codex runs a real agent turn; its model calls route through
-      the FlowMesh agent-model gateway, which settles the boundary deterministically
-      with no GPU and no external provider. Point harness.params.base_url at your
-      FlowMesh server's agent-model gateway.
+      The canonical agent example: the Codex app-server harness driving a real
+      agent turn, whose model turns egress on the agent's own worker through the
+      worker-local Responses facade to model_binding.url. Bound to a GPU-free
+      dev_model endpoint for a deterministic run; serve a dev_model task first and
+      set model_binding.url to its published endpoint.
 
 spec:
   taskType: agent
@@ -24,12 +24,12 @@ spec:
   harness:
     backend: codex
     version: v1
-    params:
-      base_url: http://FLOWMESH_GATEWAY_HOST:PORT
-      model: gpt-4o-mini
 
   model_binding:
-    mode: canned
+    mode: openai
+    url: http://DEV_MODEL_HOST:PORT/v1
+    model: dev-model
+    api_key: "REPLACE_WITH_YOUR_DEV_MODEL_KEY"
 
   resources:
     hardware:
@@ -44,4 +44,3 @@ spec:
       type: local
     artifacts:
       - results.json
-      - agent_output.txt

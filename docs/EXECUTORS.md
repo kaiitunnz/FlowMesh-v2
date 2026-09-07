@@ -64,10 +64,11 @@ Declared per agent under `spec.harness`:
   declared step sequence from `params.script`) or `codex` (the version-pinned Codex
   app-server binding).
 - `version` — pins the adapter/protocol so a capsule resumes only on a match.
-- `params` — non-secret backend configuration. The `codex` backend reads `base_url` and
-  `model` (the Responses gateway it drives) and an optional `codex_home` override (the
-  rollout directory, by default isolated per workflow and agent under the results dir). A
-  credential-bearing param is rejected; a model credential goes in `model_binding.api_key`.
+- `params` — non-secret backend configuration. The `codex` backend takes an optional
+  `codex_home` override (the rollout directory, by default isolated per workflow and agent
+  under the results dir); its model upstream comes from `model_binding`, which it reaches
+  through the worker-local Responses facade. A credential-bearing param is rejected; a
+  model credential goes in `model_binding.api_key`.
 
 ## Per-workflow harness and model binding
 
@@ -85,11 +86,15 @@ a FlowMesh-served model, with no url or credential). Each field falls back to th
 `AGENT_MODEL_GATEWAY_*` deployment default, then a `canned` default; an `openai` binding
 requires a url and a `resident` binding requires a reference.
 
-A mediated model request the agent defers is settled by the agent-model gateway against that
-workflow's own binding. The deployment holds no model key: the credential is the workflow's
-inline `api_key`, vaulted server-side at submission so only a reference is stored and used on
-the server-to-upstream path — the raw key never persists in the source, template, ledger, or
-logs. A credential embedded in a `url` or a harness param is rejected. The
+A model boundary the agent defers with a `canned` or `echo` binding settles on the control
+plane, against that workflow's own binding; an `openai` binding egresses on the agent's own
+worker (see [Managed external-model egress](#managed-external-model-egress)), and a
+`resident` binding admits through resident-capacity control. The model credential is the
+workflow's own inline `api_key`, vaulted server-side at submission so only a reference is
+stored, resolved within its own workflow, and carried to the egressing worker on the one-use
+permit — the raw key never persists in the source, template, ledger, or logs, and the
+deployment key serves only as a fallback. A credential embedded in a `url` or a harness
+param is rejected. The
 `AGENT_MODEL_GATEWAY_*` defaults are in [`ENV.md`](ENV.md).
 
 Vaulted credentials live in the Redis control store's trust boundary (ACL, auth, TLS) and are
@@ -143,3 +148,42 @@ in-memory request is intact; a genuine worker loss fails the boundary clean.
 
 The `FabricToolBroker` applies a fabric tool's policy and correlation on the control
 plane and terminalizes a server-captured boundary as an unavailable outcome.
+
+## Harness egress-handoff modes
+
+A backend declares how it hands a mediated egress boundary to the worker egress lane. A
+`durable_pre_egress_yield` backend (`scripted`) releases its episode lane at the boundary
+and resumes from the committed outcome: the worker captures the request, yields only its
+digest, and the boundary settles through the worker-originated path above. A
+`synchronous_turn_only` backend (`codex`) holds its own lane through one bounded
+same-worker egress within a turn, under a no-conflicting-capacity, deadline, and
+cancellation bound. The turn's durable anchors are its turn-completion boundaries;
+recovery re-runs the whole turn from the last completion under a fresh permit, and a
+re-run injects the same idempotency key so a settled effect never double-applies. A
+backend advertises `durable_pre_egress_yield` only if it implements request-capsule
+capture and outcome-reinjection recovery; the default is `synchronous_turn_only`.
+
+## Managed external-model egress
+
+An agent's managed external (`openai`) model turns egress on its own worker through a
+worker-local Responses facade, bound to loopback and authenticated per episode so one
+episode drives only its own egress. Codex's model provider targets the facade at
+`/agent/{task_id}/v1/responses`, carrying the per-episode token the facade issued.
+
+For each turn the facade translates the Responses request into a Chat Completions request,
+injects the agent's pinned fabric facades, and runs the held egress: it proposes the
+request digest to control, awaits the one-use `MediatedOperationPermit` over the worker's
+attachment, and egresses synchronously through the `MediatedEgressSidecar`, returning the
+model's whole message inline. The per-workflow model credential rides the permit to the worker; a worker
+without one uses its deployment-global `AGENT_MODEL_API_KEY`. The `Authorization` header is
+redacted in the facade's own logs, and the credential is kept out of the ledger, the
+control stores, and the logs. A denial, a permit that never arrives within
+`AGENT_MODEL_EGRESS_TIMEOUT_SEC`, or a fence rejection is a terminal turn failure.
+
+A fabric facade the model calls on the turn is captured into a `FacadeTurnGroup`: each
+search member carries the digest of its worker-private request and each spawn member
+carries its args, ordered by emission with identities derived from the turn so a re-drive
+recovers the same identities. The facade reports the group to control, which records it so
+the episode's next completion routes the members, and returns Codex a clean summary in
+place of the raw calls. A search member routes to the same worker egress by its digest; a
+spawn member admits a child region.

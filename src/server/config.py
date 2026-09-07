@@ -300,17 +300,15 @@ def _env_or_none(name: str) -> str | None:
 
 @dataclass
 class AgentModelGatewayConfig:
-    """The agent-model gateway's upstream binding for mediated model invocations.
+    """The agent-model gateway's control-plane settle configuration.
 
-    ``mode`` selects how a durable model invocation settles: ``canned`` and ``echo`` are
-    deterministic and credential-free; ``openai`` forwards to an OpenAI-compatible
-    endpoint; ``proxy`` targets an upstream Responses API, streaming a harness's own
-    model turns and settling a deferred facade with a single-shot call.
+    ``mode`` selects how a canned or echo model boundary settles: both are deterministic
+    and credential-free. An external (``openai``) binding egresses on the worker and a
+    resident binding admits through resident-capacity control, so neither settles here.
+    ``timeout_sec`` bounds a held model turn's one-use egress permit.
     """
 
     mode: GatewayMode = GatewayMode.CANNED
-    url: str | None = None
-    model: str | None = None
     timeout_sec: float = 60.0
 
     @classmethod
@@ -323,8 +321,6 @@ class AgentModelGatewayConfig:
             mode = GatewayMode.CANNED
         return cls(
             mode=mode,
-            url=_env_or_none(f"{prefix}URL"),
-            model=_env_or_none(f"{prefix}MODEL"),
             timeout_sec=parse_float_env(f"{prefix}TIMEOUT_SEC") or 60.0,
         )
 

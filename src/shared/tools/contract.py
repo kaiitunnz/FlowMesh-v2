@@ -9,7 +9,7 @@ shape and provider egress — and they mint no identity and hold no credential.
 
 from enum import StrEnum
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from shared.outcome import OutcomeManifest
 
@@ -52,6 +52,11 @@ class MediatedOperationPermit(BaseModel):
     ``policy_class``, and
     ``policy_epoch`` are declared here as a forward contract; the paths that bind real
     subjects and policy generations enforce them.
+
+    ``credential`` is a per-call provider secret the control plane resolves for a
+    workflow that pins its own model key; it rides only this one-use, audience-bound
+    delivery down to the egressing worker, never travels up in a proposal, and is never
+    persisted or logged. A worker without one falls back to its local environment key.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -72,6 +77,7 @@ class MediatedOperationPermit(BaseModel):
     max_results: int
     timeout_sec: float
     result_char_cap: int
+    credential: str | None = Field(default=None, repr=False)
 
 
 class ToolOutcomeStatus(StrEnum):
@@ -122,7 +128,25 @@ class MediatedOperationOutcome(BaseModel):
     error: str | None = None
 
 
+class AgentModelTurnProposal(BaseModel):
+    """A worker's request to authorize one held in-turn model egress.
+
+    A harness that holds its lane across a model call keeps the raw request in
+    worker-private custody and proposes only its digest, so the control plane authorizes
+    the egress and mints a one-use permit without the request ever crossing up.
+    ``agent_task_id`` and ``call_correlation`` name the held occurrence; the
+    ``request_digest`` is the fence the minted permit binds and the worker re-validates.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    agent_task_id: str
+    call_correlation: str
+    request_digest: str
+
+
 __all__ = [
+    "AgentModelTurnProposal",
     "MediatedOperationOutcome",
     "MediatedOperationPermit",
     "ToolOperationEnvelope",

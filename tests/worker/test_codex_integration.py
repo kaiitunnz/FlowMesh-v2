@@ -1,8 +1,8 @@
-"""A live Codex app-server proves the bounded gateway-captured facade recovery.
+"""A live Codex app-server proves the bounded worker-facade recovery.
 
-A real ``codex app-server`` runs against the real FlowMesh agent-model gateway, which
-proxies to a local Responses backend. The backend emits a native ``spawn_agent`` tool
-call; the gateway captures it server-side, originates the fabric boundary, and returns
+A real ``codex app-server`` runs against the worker-local Responses facade, whose model
+provider is a local Chat Completions backend. The backend emits a native ``spawn_agent``
+tool call; the facade captures it into a turn group the completion carries, and returns
 Codex a clean turn-completing message, so the rollout never records the raw call. The
 fabric then settles the boundary and the outcome injects back over
 ``thread/inject_items``.
@@ -21,8 +21,8 @@ recovery.
 
 import json
 import os
-import socket
 import threading
+import time
 from collections.abc import Callable, Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -34,25 +34,43 @@ pytest.importorskip(
     "openai_codex", reason="needs the openai-codex worker harness dependency"
 )
 
-import uvicorn  # noqa: E402
-from fastapi import FastAPI  # noqa: E402
+import logging  # noqa: E402
 
-from server.config import AgentModelGatewayConfig, GatewayMode  # noqa: E402
-from server.orchestration.tool_dispatch import FacadeTurnGroup  # noqa: E402
-from server.services.agent_model_gateway import (  # noqa: E402
-    AgentModelGateway,
-    build_agent_model_router,
-)
-from server.task.v2.representations.operators import (  # noqa: E402
-    FacadeDescriptor,
-)
 from shared.harness import (  # noqa: E402
     BoundaryEventKind,
     DeliveredOutcome,
     HarnessResultKind,
     OutcomeKind,
 )
+from shared.tools.contract import (  # noqa: E402
+    AgentModelTurnProposal,
+    MediatedOperationPermit,
+)
+from shared.tools.facade import FacadeDescriptor, FacadeTurnGroup  # noqa: E402
+from shared.tools.model.schema import MODEL_INTERFACE  # noqa: E402
+from shared.utils.ids import (  # noqa: E402
+    new_idempotency_key,
+    new_invocation_id,
+    new_mediated_permit_id,
+)
+from worker.egress import MediatedEgressSidecar  # noqa: E402
+from worker.egress import ModelEgress  # noqa: E402
 from worker.executors.harness.codex import CodexAppServerHarnessAdapter  # noqa: E402
+from worker.executors.harness.codex_transport import (  # noqa: E402
+    CodexTransportConfig,
+    CodexTransportError,
+    RealCodexAppServerTransport,
+)
+from worker.lifecycle import PendingEgressRequestStore  # noqa: E402
+from worker.model_turn import HeldModelEgress  # noqa: E402
+from worker.model_turn import ModelTurnRendezvous  # noqa: E402
+from worker.model_turn import ResponsesFacade  # noqa: E402
+
+_TASK_ID = "tsk-codex-int"
+_FINAL_TEXT = "final"
+_WORKER_ID = "wkr-int"
+_WORKER_GEN = 1
+_LOG = logging.getLogger("codex-integration-test")
 
 
 def _spawn_facade() -> FacadeDescriptor:
@@ -73,16 +91,6 @@ def _spawn_facade() -> FacadeDescriptor:
     )
 
 
-from worker.executors.harness.codex_transport import (  # noqa: E402
-    CodexTransportConfig,
-    CodexTransportError,
-    RealCodexAppServerTransport,
-)
-
-_TASK_ID = "tsk-codex-int"
-_FINAL_TEXT = "final"
-
-
 def _codex_available() -> bool:
     # _resolve_codex_bin is private to the SDK; the exact version pin keeps it stable.
     from openai_codex.client import CodexConfig, _resolve_codex_bin
@@ -99,21 +107,13 @@ pytestmark = [
 ]
 
 
-def _free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
-
-
 class _UpstreamStub:
-    """A local Responses backend that emits a facade call and counts injected outcomes.
+    """A local Chat Completions backend that emits a facade call and counts injections.
 
-    ``max_injected`` is the most ``function_call_output`` items keyed to a mediated
-    correlation seen in a request's history — one if the outcome injected exactly once,
-    more if a recovery re-injected it. Before any outcome is in history it returns a
-    native ``spawn_agent`` call; after one is, it returns a plain completion.
-    ``stall_release``, when set, holds each turn open until the event fires, standing in
-    for a hung upstream.
+    ``max_injected`` is the most tool-result messages keyed to a mediated correlation
+    seen in a request's chat history — one if the outcome injected exactly once, more if
+    a recovery re-injected it. Before any outcome is in history it returns a native
+    ``spawn_agent`` tool call; after one is, it returns a plain completion.
     """
 
     def __init__(self, stall_release: threading.Event | None = None) -> None:
@@ -129,10 +129,10 @@ class _UpstreamStub:
         def _injected(body: dict[str, Any]) -> int:
             return sum(
                 1
-                for item in body.get("input", [])
+                for item in body.get("messages", [])
                 if isinstance(item, dict)
-                and item.get("type") == "function_call_output"
-                and str(item.get("call_id", "")).startswith("fab-")
+                and item.get("role") == "tool"
+                and str(item.get("tool_call_id", "")).startswith("fab-")
             )
 
         class Handler(BaseHTTPRequestHandler):
@@ -147,27 +147,25 @@ class _UpstreamStub:
                     stub.max_injected = max(stub.max_injected, injected)
                 if stub._stall is not None:
                     stub._stall.wait(30)
+                message: dict[str, Any]
                 if injected:
-                    output = [
-                        {
-                            "type": "message",
-                            "role": "assistant",
-                            "status": "completed",
-                            "content": [{"type": "output_text", "text": _FINAL_TEXT}],
-                        }
-                    ]
+                    message = {"role": "assistant", "content": _FINAL_TEXT}
                 else:
-                    output = [
-                        {
-                            "type": "function_call",
-                            "name": "spawn_agent",
-                            "call_id": "call_review",
-                            "arguments": json.dumps({"region": "reviewer"}),
-                        }
-                    ]
-                data = json.dumps(
-                    {"object": "response", "status": "completed", "output": output}
-                ).encode()
+                    message = {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_review",
+                                "type": "function",
+                                "function": {
+                                    "name": "spawn_agent",
+                                    "arguments": json.dumps({"region": "reviewer"}),
+                                },
+                            }
+                        ],
+                    }
+                data = json.dumps({"choices": [{"message": message}]}).encode()
                 try:
                     self.send_response(200)
                     self.send_header("Content-Type", "application/json")
@@ -193,20 +191,41 @@ class _UpstreamStub:
 
 
 class _Fabric:
-    """The fabric's role: record the gateway-originated boundary and settle it once."""
+    """The control plane's role: mint a per-turn permit and settle a captured group.
 
-    def __init__(self) -> None:
-        self.originated: list[tuple[str, FacadeTurnGroup]] = []
+    ``propose`` stands in for the worker→control propose: it mints the audience-bound,
+    digest-fenced permit for the held turn and hands it to the rendezvous, so the facade
+    egresses synchronously. ``settle`` builds the single delivered outcome injected back
+    on recovery from the group the facade captured.
+    """
+
+    def __init__(self, rendezvous: ModelTurnRendezvous) -> None:
+        self._rendezvous = rendezvous
         self._settled: dict[str, DeliveredOutcome] = {}
 
-    def originate(self, task_id: str, group: FacadeTurnGroup) -> None:
-        # A re-drive re-originates the same stable group id; record it once.
-        if all(g.group_id != group.group_id for _, g in self.originated):
-            self.originated.append((task_id, group))
+    def propose(self, proposal: AgentModelTurnProposal) -> None:
+        permit = MediatedOperationPermit(
+            permit_id=new_mediated_permit_id(),
+            agent_task_id=proposal.agent_task_id,
+            call_correlation=proposal.call_correlation,
+            interface=MODEL_INTERFACE,
+            subject="test",
+            invocation_id=new_invocation_id(),
+            idempotency_key=new_idempotency_key(),
+            request_digest=proposal.request_digest,
+            target_id=_WORKER_ID,
+            target_generation=_WORKER_GEN,
+            deadline_epoch=time.time() + 120.0,
+            max_results=1,
+            timeout_sec=60.0,
+            result_char_cap=1_000_000,
+        )
+        self._rendezvous.deliver_permit(permit)
 
-    def settle(self, value: str = _FINAL_TEXT) -> DeliveredOutcome:
-        assert self.originated, "the gateway never originated a group"
-        corr = self.originated[0][1].members[0].call_correlation
+    def settle(
+        self, group: FacadeTurnGroup, value: str = _FINAL_TEXT
+    ) -> DeliveredOutcome:
+        corr = group.members[0].call_correlation
         assert corr is not None
         if corr not in self._settled:
             self._settled[corr] = DeliveredOutcome(
@@ -218,38 +237,51 @@ class _Fabric:
         return self._settled[corr]
 
 
-class _GatewayServer:
-    """The real agent-model gateway, served over HTTP for Codex to target."""
+class _FacadeServer:
+    """The worker-local Responses facade, serving Codex its held model turns."""
 
-    def __init__(self, upstream: str, fabric: _Fabric) -> None:
-        cfg = AgentModelGatewayConfig(
-            mode=GatewayMode.PROXY, url=upstream, model="codex-model"
+    def __init__(self, upstream: str) -> None:
+        pending = PendingEgressRequestStore()
+        rendezvous = ModelTurnRendezvous()
+        self.fabric = _Fabric(rendezvous)
+        sidecar = MediatedEgressSidecar(
+            pending_requests=pending,
+            audience=lambda: (_WORKER_ID, _WORKER_GEN),
+            egresses=(ModelEgress(None, _LOG),),
+            outcome_sink=lambda outcome: None,
+            content_store=None,
+            logger=_LOG,
         )
-        gateway = AgentModelGateway(None, cfg)  # type: ignore[arg-type]
-        gateway.set_facade_group_originator(fabric.originate)
-        gateway.set_facade_resolver(lambda task: [_spawn_facade()])
-        app = FastAPI()
-        app.include_router(build_agent_model_router(gateway))
-        self._port = _free_port()
-        config = uvicorn.Config(
-            app, host="127.0.0.1", port=self._port, log_level="warning"
+        held_egress = HeldModelEgress(
+            rendezvous=rendezvous,
+            pending=pending,
+            propose=self.fabric.propose,
+            sidecar=sidecar,
+            timeout_sec=30.0,
+            logger=_LOG,
         )
-        self._server = uvicorn.Server(config)
-        self._thread = threading.Thread(target=self._server.run, daemon=True)
+        self._facade = ResponsesFacade(
+            held_egress=held_egress, pending=pending, logger=_LOG
+        )
+        self._upstream = upstream
 
-    @property
-    def base_url(self) -> str:
-        return f"http://127.0.0.1:{self._port}"
-
-    def __enter__(self) -> "_GatewayServer":
-        self._thread.start()
-        while not self._server.started:
-            threading.Event().wait(0.05)
+    def __enter__(self) -> "_FacadeServer":
+        self._facade.start()
+        self.token = self._facade.register_episode(
+            _TASK_ID, self._upstream, "codex-model", [_spawn_facade()]
+        )
         return self
 
     def __exit__(self, *exc: object) -> None:
-        self._server.should_exit = True
-        self._thread.join(timeout=5)
+        self._facade.stop()
+
+    def captured_group(self) -> FacadeTurnGroup | None:
+        """The facade group captured on the last turn — what the completion carries."""
+        return self._facade.take_captured_group(_TASK_ID)
+
+    @property
+    def base_url(self) -> str:
+        return self._facade.base_url()
 
 
 TransportFactory = Callable[..., RealCodexAppServerTransport]
@@ -259,7 +291,9 @@ TransportFactory = Callable[..., RealCodexAppServerTransport]
 def transports() -> Iterator[TransportFactory]:
     made: list[RealCodexAppServerTransport] = []
 
-    def _make(base_url: str, home: Path, **kwargs: Any) -> RealCodexAppServerTransport:
+    def _make(
+        base_url: str, token: str, home: Path, **kwargs: Any
+    ) -> RealCodexAppServerTransport:
         transport = RealCodexAppServerTransport(
             CodexTransportConfig(
                 base_url=base_url,
@@ -267,6 +301,7 @@ def transports() -> Iterator[TransportFactory]:
                 codex_home=home,
                 initial_input="review the auth module for security issues",
                 task_id=_TASK_ID,
+                env_key_value=token,
                 **kwargs,
             )
         )
@@ -282,23 +317,24 @@ def test_kill9_before_injection_injects_the_outcome_once(
     tmp_path: Path, transports: TransportFactory
 ) -> None:
     home = tmp_path / "codex_home"
-    fabric = _Fabric()
-    with _UpstreamStub() as stub, _GatewayServer(stub.base_url, fabric) as gateway:
-        issue = transports(gateway.base_url, home)
+    with _UpstreamStub() as stub, _FacadeServer(stub.base_url) as facade:
+        issue = transports(facade.base_url, facade.token, home)
         first = CodexAppServerHarnessAdapter(issue, "v1").start(
             _TASK_ID, capsule=None, outcomes=[]
         )
-        # The gateway captured the native spawn_agent and clean-completed the turn.
+        # The facade captured the native spawn_agent and clean-completed the turn; the
+        # completion carries the captured group.
         assert first.kind is HarnessResultKind.COMPLETION
-        assert len(fabric.originated) == 1
-        assert fabric.originated[0][1].members[0].interface_or_region == "reviewer"
+        group = facade.captured_group()
+        assert group is not None
+        assert group.members[0].interface_or_region == "reviewer"
 
         # The app-server dies after the boundary originates, before its outcome injects.
         os.kill(issue.pid, 9)
 
-        recover = transports(gateway.base_url, home)
+        recover = transports(facade.base_url, facade.token, home)
         done = CodexAppServerHarnessAdapter(recover, "v1").start(
-            _TASK_ID, capsule=first.capsule, outcomes=[fabric.settle()]
+            _TASK_ID, capsule=first.capsule, outcomes=[facade.fabric.settle(group)]
         )
 
     assert done.kind is HarnessResultKind.COMPLETION
@@ -309,13 +345,14 @@ def test_kill9_after_injection_does_not_reinject(
     tmp_path: Path, transports: TransportFactory
 ) -> None:
     home = tmp_path / "codex_home"
-    fabric = _Fabric()
-    with _UpstreamStub() as stub, _GatewayServer(stub.base_url, fabric) as gateway:
-        run = transports(gateway.base_url, home)
+    with _UpstreamStub() as stub, _FacadeServer(stub.base_url) as facade:
+        run = transports(facade.base_url, facade.token, home)
         adapter = CodexAppServerHarnessAdapter(run, "v1")
         first = adapter.start(_TASK_ID, capsule=None, outcomes=[])
         assert first.kind is HarnessResultKind.COMPLETION
-        outcome = fabric.settle()
+        group = facade.captured_group()
+        assert group is not None
+        outcome = facade.fabric.settle(group)
 
         completed = adapter.start(_TASK_ID, capsule=first.capsule, outcomes=[outcome])
         assert completed.kind is HarnessResultKind.COMPLETION
@@ -323,13 +360,30 @@ def test_kill9_after_injection_does_not_reinject(
 
         # Recover from the durable capsule that already committed the key; the adapter's
         # dedup must keep it from injecting the outcome into the rollout a second time.
-        recover = transports(gateway.base_url, home)
+        recover = transports(facade.base_url, facade.token, home)
         again = CodexAppServerHarnessAdapter(recover, "v1").start(
             _TASK_ID, capsule=completed.capsule, outcomes=[outcome]
         )
 
     assert again.kind is HarnessResultKind.COMPLETION
     assert stub.max_injected == 1
+
+
+def test_app_server_child_env_excludes_worker_secrets(
+    tmp_path: Path, transports: TransportFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FLOWMESH_SENTINEL_SECRET", "sentinel-leak-value")
+    home = tmp_path / "codex_home"
+    with _UpstreamStub() as stub, _FacadeServer(stub.base_url) as facade:
+        issue = transports(facade.base_url, facade.token, home)
+        result = CodexAppServerHarnessAdapter(issue, "v1").start(
+            _TASK_ID, capsule=None, outcomes=[]
+        )
+        assert result.kind is HarnessResultKind.COMPLETION
+        # The live child's environment, captured at exec, holds no worker secret.
+        environ = Path(f"/proc/{issue.pid}/environ").read_bytes()
+    assert b"FLOWMESH_SENTINEL_SECRET" not in environ
+    assert b"sentinel-leak-value" not in environ
 
 
 def test_stalled_turn_raises_a_transport_error(
@@ -339,9 +393,11 @@ def test_stalled_turn_raises_a_transport_error(
     release = threading.Event()
     with (
         _UpstreamStub(stall_release=release) as stub,
-        _GatewayServer(stub.base_url, _Fabric()) as gateway,
+        _FacadeServer(stub.base_url) as facade,
     ):
-        transport = transports(gateway.base_url, home, turn_timeout_sec=2.0)
+        transport = transports(
+            facade.base_url, facade.token, home, turn_timeout_sec=2.0
+        )
         adapter = CodexAppServerHarnessAdapter(transport, "v1")
         try:
             with pytest.raises(CodexTransportError):

@@ -21,15 +21,17 @@ from shared.tasks.specs import (
 )
 from shared.tasks.worker_message import HardwareUsage, WorkerHardware, WorkerTaskMessage
 from shared.tools.contract import MediatedOperationPermit
+from shared.tools.model.schema import MODEL_INTERFACE
 from shared.tools.search.schema import DEFAULT_SEARCH_PROVIDER
 from shared.utils.manifest import prepare_output_dir, sync_manifest
 from shared.utils.time import now_iso
 
+from .egress import MediatedEgressSidecar, ModelEgress, SearchEgress
 from .executors.agent_episode_executor import AgentEpisodeResult
 from .executors.base_executor import ExecutionError, Executor, TaskCancelledError
 from .executors.utils.checkpoints import get_http_destination, write_executor_result
 from .lifecycle import Lifecycle
-from .mediated_egress_sidecar import MediatedEgressSidecar
+from .model_turn import HeldModelEgress, ModelTurnRendezvous, ResponsesFacade
 from .utils.logging import TaskLogEmitter
 
 
@@ -47,6 +49,8 @@ class Runner:
         executor_idle_cleanup_sec: float | None = None,
         web_search_provider: str = DEFAULT_SEARCH_PROVIDER,
         web_search_api_key: str | None = None,
+        model_api_key: str | None = None,
+        model_egress_timeout_sec: float = 120.0,
         content_store: FabricContentStore | None = None,
     ):
         self.lifecycle = lifecycle
@@ -88,10 +92,19 @@ class Runner:
 
         self._web_search_provider = web_search_provider
         self._web_search_api_key = web_search_api_key
+        self._model_api_key = model_api_key
+        self._model_egress_timeout_sec = model_egress_timeout_sec
         self._content_store = content_store
         # The worker-local mediated-egress sidecar, built on the first permit relayed
         # over the attachment (once the worker id and incarnation are known).
         self._mediated_sidecar: MediatedEgressSidecar | None = None
+        # Rendezvous for a held model turn's permit: a facade arms a waiter before it
+        # proposes, so a permit relayed over the attachment wakes the held turn instead
+        # of driving the async sidecar lane.
+        self._model_turn_rendezvous = ModelTurnRendezvous()
+        # The worker-local Responses facade, built alongside the sidecar once the worker
+        # id is known and the first agent episode arrives.
+        self._responses_facade: ResponsesFacade | None = None
 
     def _cancel_active_executor(self) -> None:
         with self._active_executor_lock:
@@ -130,6 +143,8 @@ class Runner:
         self._cancel_active_executor()
         if self._mediated_sidecar is not None:
             self._mediated_sidecar.stop()
+        if self._responses_facade is not None:
+            self._responses_facade.stop()
 
     def _ensure_mediated_sidecar(self) -> MediatedEgressSidecar | None:
         """Build the mediated-egress sidecar once the worker id is known."""
@@ -141,26 +156,89 @@ class Runner:
         except RuntimeError:
             return None
         self._mediated_sidecar = MediatedEgressSidecar(
-            pending_requests=self.lifecycle.pending_tool_requests,
+            pending_requests=self.lifecycle.pending_egress_requests,
             audience=lambda: (client.worker_id, client.incarnation),
-            provider=self._web_search_provider,
-            api_key=self._web_search_api_key,
+            egresses=(
+                SearchEgress(
+                    self._web_search_provider, self._web_search_api_key, self.logger
+                ),
+                ModelEgress(self._model_api_key, self.logger),
+            ),
             outcome_sink=client.push_mediated_outcome,
             content_store=self._content_store,
             logger=self.logger,
         )
         return self._mediated_sidecar
 
-    def _route_mediated_op(self, frame_kind: str, frame: dict[str, Any]) -> None:
+    def _ensure_responses_facade(self) -> ResponsesFacade | None:
+        """Build and start the worker-local Responses facade once the worker id is set.
+
+        A held Codex episode runs each model turn through this facade: it proposes the
+        request digest, awaits the one-use permit over the rendezvous, and egresses
+        synchronously through the same mediated-egress sidecar. It is reachable to the
+        agent-episode executor through the lifecycle.
+        """
+        if self._responses_facade is not None:
+            return self._responses_facade
         sidecar = self._ensure_mediated_sidecar()
         if sidecar is None:
+            return None
+        client = self.lifecycle.client
+        held_egress = HeldModelEgress(
+            rendezvous=self._model_turn_rendezvous,
+            pending=self.lifecycle.pending_egress_requests,
+            propose=client.push_mediated_propose,
+            sidecar=sidecar,
+            timeout_sec=self._model_egress_timeout_sec,
+            logger=self.logger,
+        )
+        facade = ResponsesFacade(
+            held_egress=held_egress,
+            pending=self.lifecycle.pending_egress_requests,
+            logger=self.logger,
+        )
+        facade.start()
+        self._responses_facade = facade
+        self.lifecycle.responses_facade = facade
+        return facade
+
+    def _route_mediated_op(self, frame_kind: str, frame: dict[str, Any]) -> None:
+        if frame_kind == "deny":
+            # A held model turn's denial: only a facade waiter consumes it.
+            self._model_turn_rendezvous.deliver_deny(
+                str(frame["agent_task_id"]),
+                str(frame["call_correlation"]),
+                str(frame.get("reason", "denied")),
+            )
             return
         if frame_kind == "permit":
-            sidecar.submit_permit(MediatedOperationPermit.model_validate(frame))
-        elif frame_kind == "reap":
-            sidecar.reap(str(frame["agent_task_id"]), str(frame["call_correlation"]))
-        else:
-            self.logger.warning("Unknown mediated-op frame kind: %s", frame_kind)
+            permit = MediatedOperationPermit.model_validate(frame)
+            # A held facade armed a waiter before proposing: hand it the permit for a
+            # synchronous in-turn egress. Otherwise it drives the async sidecar lane.
+            if self._model_turn_rendezvous.deliver_permit(permit):
+                return
+            # A held-turn MODEL permit whose waiter is gone is stale (its turn timed
+            # out, or a duplicate): the deferred-op lane would egress it again and reap
+            # a concurrent retry's private request, so drop it — recovery re-proposes it
+            # under a fresh permit. A durable-yield MODEL permit never armed a waiter,
+            # so it drives the async lane like any other.
+            stale_held = permit.interface == MODEL_INTERFACE and (
+                self._model_turn_rendezvous.was_held(
+                    permit.agent_task_id, permit.call_correlation
+                )
+            )
+            if stale_held:
+                return
+            if (sidecar := self._ensure_mediated_sidecar()) is not None:
+                sidecar.submit_permit(permit)
+            return
+        if frame_kind == "reap":
+            if (sidecar := self._ensure_mediated_sidecar()) is not None:
+                sidecar.reap(
+                    str(frame["agent_task_id"]), str(frame["call_correlation"])
+                )
+            return
+        self.logger.warning("Unknown mediated-op frame kind: %s", frame_kind)
 
     def _resolve_output_dir(self, task_id: str) -> Path:
         """Prepare and return the canonical output directory for a task's results."""
@@ -520,6 +598,9 @@ class Runner:
                                 "harness binding; every agent runs the harness "
                                 "episode path"
                             )
+                        # A held backend runs its model turns through the worker-local
+                        # facade; build it before the executor binds an adapter.
+                        self._ensure_responses_facade()
                         desired_key = "agent_episode"
                     else:
                         desired_key = "default" if task_type is None else task_type
@@ -580,10 +661,15 @@ class Runner:
                     if isinstance(out, AgentEpisodeResult):
                         # The step rides the success metadata so the server routes the
                         # boundary and re-dispatches; the attempt still ends here, which
-                        # is what releases the lane.
+                        # is what releases the lane. A captured facade group rides the
+                        # same metadata so control routes it with the completion.
                         metadata["agent_episode"] = out.harness_result.model_dump(
                             mode="json"
                         )
+                        if out.facade_group is not None:
+                            metadata["agent_episode_facade_group"] = (
+                                out.facade_group.model_dump(mode="json")
+                            )
                     self.lifecycle.set_succeeded(task_id, metadata=metadata)
                     self.logger.info("Task %s completed successfully", task_id)
                 except TaskCancelledError as e:

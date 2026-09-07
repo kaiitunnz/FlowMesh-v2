@@ -9,21 +9,29 @@ import os
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from shared.schemas.worker import SSHLimits, WorkerCapabilities
 from shared.tasks.worker_message import WorkerHardware, WorkerStatus
+from shared.tools.model.schema import ModelRequest
 from shared.tools.search.schema import ToolRequest
 from shared.utils.time import now_iso
 
 from .power import PowerMonitor
 from .supervisor_client import SupervisorClient
 
+if TYPE_CHECKING:
+    from .model_turn import ResponsesFacade
 
-class PendingToolRequestStore:
-    """Worker-private store for captured, not-yet-executed tool requests.
+# A captured worker-originated egress request: a fabric-tool request or a managed-model
+# request, both held in worker-private custody behind their control-plane digest.
+CapturedRequest = ToolRequest | ModelRequest
 
-    When a worker originates a mediated tool boundary it keeps the raw request here,
+
+class PendingEgressRequestStore:
+    """Worker-private store for captured, not-yet-executed mediated-egress requests.
+
+    When a worker originates a mediated egress boundary it keeps the raw request here,
     keyed by the stable ``(agent_task_id, call_correlation)`` occurrence, and sends the
     control plane only a digest. The mediated-egress sidecar reads the request back on
     the same worker, so the raw request never crosses to the control plane. The
@@ -34,16 +42,16 @@ class PendingToolRequestStore:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._store: dict[tuple[str, str], ToolRequest] = {}
+        self._store: dict[tuple[str, str], CapturedRequest] = {}
 
     def put(
-        self, agent_task_id: str, call_correlation: str, request: ToolRequest
+        self, agent_task_id: str, call_correlation: str, request: CapturedRequest
     ) -> None:
         """Store a captured request, overwriting a stale recapture."""
         with self._lock:
             self._store[(agent_task_id, call_correlation)] = request
 
-    def peek(self, agent_task_id: str, call_correlation: str) -> ToolRequest | None:
+    def peek(self, agent_task_id: str, call_correlation: str) -> CapturedRequest | None:
         """Return the request for an occurrence without removing it."""
         with self._lock:
             return self._store.get((agent_task_id, call_correlation))
@@ -70,7 +78,11 @@ class Lifecycle:
         self.hb_file = hb_file
         self.cost_per_hour = cost_per_hour
         self.power_monitor = power_monitor or PowerMonitor()
-        self.pending_tool_requests = PendingToolRequestStore()
+        self.pending_egress_requests = PendingEgressRequestStore()
+        # The worker-local Responses facade held Codex episodes run their model turns
+        # through, built by the runner once the worker id is known and read by the
+        # agent-episode executor to bind a codex adapter.
+        self.responses_facade: ResponsesFacade | None = None
         self._stop_event = threading.Event()
         self._started_ts: float | None = None
 

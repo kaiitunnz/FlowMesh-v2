@@ -15,6 +15,8 @@ from shared.harness import (
     REQUIRED_MEDIATED_FACADES,
     BoundaryEventKind,
     DeliveredOutcome,
+    EgressHandoffMode,
+    EpisodeModelBinding,
     HarnessAdapter,
     HarnessCapsule,
     HarnessResult,
@@ -22,7 +24,14 @@ from shared.harness import (
 )
 from shared.outcome import ContentStoreError, FabricContentStore
 from shared.schemas.result import BaseExecutorResult
+from shared.tasks.specs.misc import ModelBindingMode
 from shared.tasks.task_type import TaskType
+from shared.tools.facade import FacadeTurnGroup
+from shared.tools.model.schema import (
+    MODEL_INTERFACE,
+    model_request_digest,
+    parse_model_request,
+)
 from shared.tools.search.schema import (
     SEARCH_INTERFACE,
     parse_search_request,
@@ -30,7 +39,7 @@ from shared.tools.search.schema import (
 )
 
 from ..content_store import build_content_store
-from ..lifecycle import PendingToolRequestStore
+from ..lifecycle import PendingEgressRequestStore
 from .base_executor import ExecutionError, Executor, ExecutorTask
 from .harness import build_adapter
 
@@ -42,10 +51,13 @@ class AgentEpisodeResult(BaseExecutorResult):
 
     ``harness_result`` carries the step back to the server through the success metadata;
     ``value`` is the agent's declared output on a completion step, readable over REST.
+    ``facade_group`` is a turn group the worker facade captured on this step, carried
+    with the completion so control routes it ordered-with the turn.
     """
 
     harness_result: HarnessResult
     value: str | None = None
+    facade_group: FacadeTurnGroup | None = None
 
 
 class AgentEpisodeExecutor(Executor):
@@ -57,6 +69,7 @@ class AgentEpisodeExecutor(Executor):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._adapter: HarnessAdapter | None = None
+        self._episode_task_id: str | None = None
 
     def run(self, task: ExecutorTask, out_dir: Path) -> AgentEpisodeResult:
         dispatch = task.agent_episode
@@ -65,7 +78,14 @@ class AgentEpisodeExecutor(Executor):
                 f"{task.task_id} routed to the agent-episode executor without an "
                 "agent-episode dispatch context"
             )
-        adapter = build_adapter(dispatch.backend, task, self._config)
+        facade = self._lifecycle.responses_facade if self._lifecycle else None
+        prior = self._episode_task_id
+        if facade is not None and prior is not None and prior != task.task_id:
+            # A different task means the prior episode finished; drop its facade context
+            # so a worker running episodes back-to-back does not accumulate them.
+            facade.unregister_episode(prior)
+        adapter = build_adapter(dispatch.backend, task, self._config, facade)
+        self._episode_task_id = task.task_id
         missing = REQUIRED_MEDIATED_FACADES - adapter.mediated_facades()
         if missing:
             raise ExecutionError(
@@ -86,9 +106,20 @@ class AgentEpisodeExecutor(Executor):
                 outcome.call_correlation,
             )
         result = adapter.start(task.task_id, capsule=capsule, outcomes=outcomes)
-        if self._is_capturable_boundary(result):
+        if self._is_capturable_boundary(result, dispatch.model_binding):
+            if (
+                adapter.egress_handoff_mode()
+                is not EgressHandoffMode.DURABLE_PRE_EGRESS_YIELD
+            ):
+                raise ExecutionError(
+                    f"backend {dispatch.backend.backend!r} deferred a mediated egress "
+                    "boundary but is not durable_pre_egress_yield"
+                )
             result = self._capture_local_request(
-                self._pending_tool_requests(), task.task_id, result
+                self._pending_egress_requests(),
+                task.task_id,
+                result,
+                dispatch.model_binding,
             )
         if result.kind is HarnessResultKind.BOUNDARY and result.request is not None:
             _LOG.info(
@@ -97,40 +128,72 @@ class AgentEpisodeExecutor(Executor):
                 result.request.interface or "-",
             )
         value = result.value if result.kind is HarnessResultKind.COMPLETION else None
-        return AgentEpisodeResult(harness_result=result, value=value)
+        group = facade.take_captured_group(task.task_id) if facade is not None else None
+        return AgentEpisodeResult(
+            harness_result=result, value=value, facade_group=group
+        )
 
     @staticmethod
-    def _is_capturable_boundary(result: HarnessResult) -> bool:
-        """Whether a step yielded a worker-originatable ``search/v1`` tool boundary."""
+    def _is_capturable_boundary(
+        result: HarnessResult, model_binding: EpisodeModelBinding | None
+    ) -> bool:
+        """Whether a step yielded a worker-originatable egress boundary.
+
+        A ``search/v1`` invocation is always worker-originated; a ``model`` invocation
+        is worker-originated only for an external (``openai``) binding — a
+        ``canned``/``echo``/``resident`` model boundary settles on the control plane.
+        """
         req = result.request
+        if (
+            result.kind is not HarnessResultKind.BOUNDARY
+            or req is None
+            or req.kind is not BoundaryEventKind.INVOCATION
+            or req.request_payload is None
+            or req.call_correlation is None
+        ):
+            return False
+        if req.interface == SEARCH_INTERFACE:
+            return True
         return (
-            result.kind is HarnessResultKind.BOUNDARY
-            and req is not None
-            and req.kind is BoundaryEventKind.INVOCATION
-            and req.interface == SEARCH_INTERFACE
-            and req.request_payload is not None
-            and req.call_correlation is not None
+            req.interface == MODEL_INTERFACE
+            and model_binding is not None
+            and model_binding.mode is ModelBindingMode.OPENAI
         )
 
     @staticmethod
     def _capture_local_request(
-        store: PendingToolRequestStore, task_id: str, result: HarnessResult
+        store: PendingEgressRequestStore,
+        task_id: str,
+        result: HarnessResult,
+        model_binding: EpisodeModelBinding | None,
     ) -> HarnessResult:
-        """Keep a worker-originated tool request local and emit only its digest.
+        """Keep a worker-originated egress request local and emit only its digest.
 
-        A ``search/v1`` invocation boundary the harness emitted has its raw request
-        recorded in worker-private state keyed by ``(task_id, call_correlation)`` and
-        stripped from the returned boundary, which instead carries only the request
-        digest. Any other boundary passes through unchanged.
+        A worker-originated invocation boundary has its raw request recorded in
+        worker-private state keyed by ``(task_id, call_correlation)`` and stripped from
+        the returned boundary, which instead carries only the request digest. Any other
+        boundary passes through unchanged.
         """
         req = result.request
-        if not AgentEpisodeExecutor._is_capturable_boundary(result):
+        if not AgentEpisodeExecutor._is_capturable_boundary(result, model_binding):
             return result
         assert req is not None and req.request_payload is not None
         assert req.call_correlation is not None
-        parsed = parse_search_request(req.request_payload)
-        store.put(task_id, req.call_correlation, parsed)
-        digest = tool_request_digest(parsed.interface, parsed.query, parsed.max_results)
+        if req.interface == MODEL_INTERFACE:
+            assert model_binding is not None
+            model = parse_model_request(
+                req.request_payload,
+                url=model_binding.url or "",
+                model=model_binding.model or "",
+            )
+            store.put(task_id, req.call_correlation, model)
+            digest = model_request_digest(model.interface, model.url, model.body)
+        else:
+            parsed = parse_search_request(req.request_payload)
+            store.put(task_id, req.call_correlation, parsed)
+            digest = tool_request_digest(
+                parsed.interface, parsed.query, parsed.max_results
+            )
         stripped = req.model_copy(
             update={"request_payload": None, "request_digest": digest}
         )
@@ -172,4 +235,8 @@ class AgentEpisodeExecutor(Executor):
             self._adapter.cancel(task_id)
 
     def cleanup_after_run(self) -> None:
+        facade = self._lifecycle.responses_facade if self._lifecycle else None
+        if facade is not None and self._episode_task_id is not None:
+            facade.unregister_episode(self._episode_task_id)
+        self._episode_task_id = None
         self._adapter = None

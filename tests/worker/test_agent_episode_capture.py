@@ -1,16 +1,26 @@
-"""Worker-side capture of a worker-originated tool request off the returned boundary."""
+"""Worker-side capture of a worker-originated egress request off a returned boundary."""
 
 from shared.harness import BoundaryEventKind, BoundaryRequest, HarnessResult
-from shared.harness.adapter import HarnessResultKind
+from shared.harness.adapter import EpisodeModelBinding, HarnessResultKind
+from shared.tasks.specs.misc import ModelBindingMode
+from shared.tools.model.schema import (
+    MODEL_INTERFACE,
+    ModelRequest,
+    model_request_digest,
+)
 from shared.tools.search.schema import (
     SEARCH_INTERFACE,
+    ToolRequest,
     parse_search_request,
     tool_request_digest,
 )
 from worker.executors.agent_episode_executor import AgentEpisodeExecutor
-from worker.lifecycle import PendingToolRequestStore
+from worker.lifecycle import PendingEgressRequestStore
 
 _TASK = "tsk-agent"
+_OPENAI = EpisodeModelBinding(
+    mode=ModelBindingMode.OPENAI, url="http://up/v1", model="m"
+)
 
 
 def _boundary(
@@ -28,22 +38,44 @@ def _boundary(
 
 
 def test_search_boundary_is_stripped_and_stored() -> None:
-    store = PendingToolRequestStore()
+    store = PendingEgressRequestStore()
     result = AgentEpisodeExecutor._capture_local_request(
-        store, _TASK, _boundary('{"query": "weather", "max_results": 3}')
+        store, _TASK, _boundary('{"query": "weather", "max_results": 3}'), None
     )
     req = result.request
     assert req is not None
     assert req.request_payload is None
     assert req.request_digest == tool_request_digest(SEARCH_INTERFACE, "weather", 3)
     stored = store.peek(_TASK, "m0")
-    assert stored is not None and stored.query == "weather" and stored.max_results == 3
+    assert isinstance(stored, ToolRequest)
+    assert stored.query == "weather" and stored.max_results == 3
 
 
-def test_non_search_boundary_passes_through() -> None:
-    store = PendingToolRequestStore()
-    original = _boundary("do something", interface="model")
-    result = AgentEpisodeExecutor._capture_local_request(store, _TASK, original)
+def test_model_boundary_is_stripped_and_stored_for_openai_binding() -> None:
+    store = PendingEgressRequestStore()
+    result = AgentEpisodeExecutor._capture_local_request(
+        store, _TASK, _boundary("summarize this", interface=MODEL_INTERFACE), _OPENAI
+    )
+    req = result.request
+    assert req is not None
+    assert req.request_payload is None
+    expected_body = {
+        "model": "m",
+        "messages": [{"role": "user", "content": "summarize this"}],
+    }
+    assert req.request_digest == model_request_digest(
+        MODEL_INTERFACE, "http://up/v1", expected_body
+    )
+    stored = store.peek(_TASK, "m0")
+    assert isinstance(stored, ModelRequest)
+    assert stored.body == expected_body
+
+
+def test_model_boundary_passes_through_without_external_binding() -> None:
+    store = PendingEgressRequestStore()
+    canned = EpisodeModelBinding(mode=ModelBindingMode.CANNED)
+    original = _boundary("do something", interface=MODEL_INTERFACE)
+    result = AgentEpisodeExecutor._capture_local_request(store, _TASK, original, canned)
     assert result.request is not None
     assert result.request.request_payload == "do something"
     assert result.request.request_digest is None
@@ -51,9 +83,9 @@ def test_non_search_boundary_passes_through() -> None:
 
 
 def test_boundary_without_payload_passes_through() -> None:
-    store = PendingToolRequestStore()
+    store = PendingEgressRequestStore()
     original = _boundary(None)
-    result = AgentEpisodeExecutor._capture_local_request(store, _TASK, original)
+    result = AgentEpisodeExecutor._capture_local_request(store, _TASK, original, None)
     assert result.request is not None
     assert result.request.request_digest is None
     assert store.peek(_TASK, "m0") is None
