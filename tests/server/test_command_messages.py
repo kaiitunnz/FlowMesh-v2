@@ -46,11 +46,6 @@ class TestCommandMessage:
             "DESTROY_WORKERS",
             "START_RELAY",
             "DELIVER_ROUTE_PLAN",
-            "BIND_RESIDENT_SIDECAR",
-            "UNBIND_RESIDENT_SIDECAR",
-            "DELIVER_RESIDENT_BOOTSTRAP",
-            "DELIVER_RESIDENT_STREAM",
-            "DELIVER_RESIDENT_CANCEL",
         }
         assert {t.value for t in CommandType} == expected
 

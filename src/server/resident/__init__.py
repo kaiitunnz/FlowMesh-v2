@@ -4,7 +4,6 @@ from shared.resident.contracts import (
     RouteAuthorization,
 )
 
-from .adapter import AdapterError, EngineInvocationAdapter, HttpInferenceAdapter
 from .admission import AdmissionController
 from .capacity import default_credit, is_feasible, outstanding_slots, residual_after
 from .claim import (
@@ -68,7 +67,6 @@ __all__ = [
     "CREDIT_BEARING_CLAIM_STATES",
     "DEFAULT_SELECTION_STRATEGY",
     "SERVABLE_REPLICA_STATES",
-    "AdapterError",
     "AdmissionController",
     "AdmissionCreditLedger",
     "AdmissionHandoff",
@@ -84,8 +82,6 @@ __all__ = [
     "ClaimTransitionError",
     "DemandEntry",
     "DemandLedger",
-    "EngineInvocationAdapter",
-    "HttpInferenceAdapter",
     "InvocationRequest",
     "InvocationStore",
     "LeaseStore",

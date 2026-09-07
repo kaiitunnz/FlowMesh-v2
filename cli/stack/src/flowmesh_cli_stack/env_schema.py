@@ -482,7 +482,7 @@ STACK_ENV_SCHEMA = EnvSchema(
                 EnvVar(
                     "RESIDENT_FORWARD_API_KEY",
                     "",
-                    description="Credential the adapter presents to a keyless replica.",
+                    description="Credential control relays to a keyless replica.",
                 ),
                 EnvVar(
                     "RESIDENT_SELECTION_STRATEGY",
@@ -506,20 +506,9 @@ STACK_ENV_SCHEMA = EnvSchema(
                     min_inclusive=False,
                 ),
                 EnvVar(
-                    "RESIDENT_SIDECAR_BIND_HOST",
-                    "127.0.0.1",
-                    description="Host a resident sidecar binds on the replica node.",
-                ),
-                EnvVar(
                     "RESIDENT_SIDECAR_DIRECTLY_ROUTABLE",
                     "false",
                     description="Advertise the resident sidecar as directly routable.",
-                    var_type=EnvVarType.BOOL,
-                ),
-                EnvVar(
-                    "RESIDENT_RELAY_ONLY",
-                    "false",
-                    description="Mandate the reverse-relay for resident traffic.",
                     var_type=EnvVarType.BOOL,
                 ),
             ],
