@@ -141,12 +141,12 @@ class ServiceDependency(BaseModel):
     worker. An Agent's resident model binding and an inference/embedding leaf's resident
     binding both normalize into this one form.
 
-    A model reference match alone never authorizes sharing a service across a differing
-    interface, base model, adapter, or isolation domain. ``service_family`` and
-    ``engine_batch_key`` fold those distinctions so incompatible dependencies resolve to
-    distinct families and cannot share a batch or route; an adapter co-batches within a
-    compatible base engine through its own slot and so rides ``adapter`` rather than the
-    family key.
+    ``service_family`` and ``engine_batch_key`` key the reuse domain on the base model,
+    interface, and isolation domain, so a matching model reference alone does not share
+    a service across a differing interface, base model, or isolation domain. An adapter
+    co-batches within a compatible base engine through its own slot: it loads into the
+    base replica and the request selects it, so it rides ``adapter`` (with its loadable
+    ``adapter_source``) rather than the family key.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -154,6 +154,7 @@ class ServiceDependency(BaseModel):
     service_ref: str
     interface: ServiceInterface = ServiceInterface.CHAT
     adapter: str | None = None
+    adapter_source: str | None = None
     isolation: str | None = None
 
     @property
@@ -282,6 +283,17 @@ def agent_service_dependency(
     return ServiceDependency(
         service_ref=binding.service_model_ref, interface=ServiceInterface.CHAT
     )
+
+
+def operator_service_dependency(
+    op: "LogicalOperator | None",
+) -> ServiceDependency | None:
+    """The normalized resident dependency an operator consumes, agent or leaf."""
+    if isinstance(op, AgentOperator):
+        return agent_service_dependency(op.model_binding)
+    if isinstance(op, LeafOperator):
+        return op.service_dependency
+    return None
 
 
 class AuthorityCeiling(BaseModel):

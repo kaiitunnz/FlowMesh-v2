@@ -93,7 +93,7 @@ class AdmissionProfile(BaseModel):
     The engine/batch key identifies a compatible model runner and configuration; it is
     stricter than broad reuse. ``adapter_ref`` names an adapter delta (a LoRA) that
     constrains a compatible base-model replica's adapter slot rather than crossing base
-    versions.
+    versions; ``adapter_source`` is the loadable source the replica loads for it.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -103,6 +103,7 @@ class AdmissionProfile(BaseModel):
     deadline_at: str | None = None
     max_output_tokens: int | None = None
     adapter_ref: str | None = None
+    adapter_source: str | None = None
 
 
 class ClaimCredit(BaseModel):

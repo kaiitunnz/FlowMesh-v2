@@ -141,6 +141,10 @@ class VLLMServeExecutor(Executor):
         env = dict(os.environ)
         env.setdefault("VLLM_CONFIGURE_LOGGING", "0")
         env["PYTHONUNBUFFERED"] = "1"
+        if "--enable-lora" in rendered_flags:
+            # A LoRA-enabled serve accepts runtime adapter loads so a resident consumer
+            # can load its adapter into a slot on demand.
+            env["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] = "True"
 
         logger.info(
             "Starting vLLM server for model %s on port %d "

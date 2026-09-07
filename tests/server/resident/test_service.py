@@ -261,6 +261,20 @@ def test_embedding_dependency_relays_the_embedding_interface_to_the_sidecar():
     assert family is not None and family.interface == "embedding"
 
 
+def test_adapter_dependency_relays_the_adapter_on_the_handoff():
+    dependency = ServiceDependency(
+        service_ref="m", adapter="my-lora", adapter_source="hf/my-lora"
+    )
+    svc, stores, _settled, delivery = _build(dependency=dependency)
+    asyncio.run(svc._originate(_env()))
+
+    handoff = delivery.frame("resident_handoff")["handoff"]
+    assert handoff["adapter_name"] == "my-lora"
+    assert handoff["adapter_source"] == "hf/my-lora"
+    request = stores.invocations.get("inv-1")
+    assert request is not None and request.profile.adapter_ref == "my-lora"
+
+
 def test_ack_accepts_and_authorizes_then_terminal_releases_credit():
     svc, stores, settled, delivery = _build()
     asyncio.run(svc._originate(_env()))

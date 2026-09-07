@@ -28,6 +28,15 @@ class _Handler(BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(length) or b"{}")
         self.server.paths.append(self.path)
         self.server.bodies.append(body)
+        if self.path == "/v1/load_lora_adapter":
+            self.server.loaded.append(body.get("lora_name"))
+            loaded = json.dumps({"status": "success"}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(loaded)))
+            self.end_headers()
+            self.wfile.write(loaded)
+            return
         if self.path == "/v1/embeddings":
             n = len(body.get("input") or [])
             payload: dict[str, Any] = {
@@ -56,6 +65,7 @@ class _Server(ThreadingHTTPServer):
         super().__init__(("127.0.0.1", 0), _Handler)
         self.paths: list[str] = []
         self.bodies: list[dict[str, Any]] = []
+        self.loaded: list[str | None] = []
 
 
 @contextmanager
@@ -71,8 +81,13 @@ def _running() -> Iterator[_Server]:
         thread.join(timeout=5.0)
 
 
-async def _drain(endpoint: ReplicaEndpoint, payload: str | None) -> str:
-    opened = await HttpEngineDelivery()(endpoint, payload)
+async def _drain(
+    endpoint: ReplicaEndpoint,
+    payload: str | None,
+    adapter_name: str | None = None,
+    adapter_source: str | None = None,
+) -> str:
+    opened = await HttpEngineDelivery()(endpoint, payload, adapter_name, adapter_source)
     parts = [chunk async for chunk in opened.chunks]
     await opened.aclose()
     return "".join(parts)
@@ -84,6 +99,20 @@ def test_chat_interface_posts_chat_completions_and_streams_text() -> None:
         endpoint = ReplicaEndpoint(base_url=base, model="m", interface="chat")
         content = asyncio.run(_drain(endpoint, "hello"))
     assert server.paths == ["/v1/chat/completions"]
+    assert content == "hi there"
+
+
+def test_adapter_bound_invocation_loads_then_selects_the_adapter() -> None:
+    with _running() as server:
+        base = f"http://127.0.0.1:{server.server_address[1]}/v1"
+        endpoint = ReplicaEndpoint(base_url=base, model="base-model", interface="chat")
+        content = asyncio.run(
+            _drain(endpoint, "hi", adapter_name="my-lora", adapter_source="hf/my-lora")
+        )
+    assert server.loaded == ["my-lora"]
+    assert server.paths == ["/v1/load_lora_adapter", "/v1/chat/completions"]
+    # The request selects the adapter as its model, not the base.
+    assert server.bodies[1]["model"] == "my-lora"
     assert content == "hi there"
 
 

@@ -385,7 +385,9 @@ class ResidentCapacityControl:
         family = dependency.service_family
 
         profile = AdmissionProfile(
-            engine_batch_key=dependency.engine_batch_key, adapter_ref=dependency.adapter
+            engine_batch_key=dependency.engine_batch_key,
+            adapter_ref=dependency.adapter,
+            adapter_source=dependency.adapter_source,
         )
         existing = self._admission.active_claim(env.invocation_id)
         if existing is not None and existing.holds_credit:
@@ -773,6 +775,7 @@ class ResidentCapacityControl:
         while True:
             async with self._admit_lock:
                 self._promote_ready_replicas(family)
+                self._lifecycle.refresh_family_reports(family)
                 handoff = self._admission.admit(
                     claim, profile, idempotency_key=env.idempotency_key
                 )

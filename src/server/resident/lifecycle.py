@@ -61,6 +61,7 @@ class LifecycleScaleManager:
         *,
         limits: ResidentPolicyLimits,
         admission_slots: int,
+        adapter_slots: int = 4,
         idle_retain_sec: float = 0.0,
         persist: Callable[[], None] | None = None,
         materialize_fn: MaterializeFn | None = None,
@@ -69,6 +70,7 @@ class LifecycleScaleManager:
         self._stores = stores
         self._limits = limits
         self._admission_slots = max(1, admission_slots)
+        self._adapter_slots = max(1, adapter_slots)
         self._idle_retain_sec = max(0.0, idle_retain_sec)
         self._persist = persist or (lambda: None)
         self._materialize_fn = materialize_fn
@@ -162,8 +164,32 @@ class LifecycleScaleManager:
                 state=replica.state,
                 healthy=replica.healthy and replica.state in SERVABLE_REPLICA_STATES,
                 safe=SafeCapacityVector(admission_slots=self._admission_slots),
+                adapter_slots_free=self._adapter_slots_free(replica_id),
             )
         )
+
+    def refresh_family_reports(self, family: str) -> None:
+        """Re-report every servable replica of a family, so the adapter-slot gate reads
+        the current held-adapter count before an admission decision.
+        """
+        for replica in self._stores.directory.by_family(family):
+            if replica.state in SERVABLE_REPLICA_STATES:
+                self.refresh_report(replica.replica_id)
+
+    def _adapter_slots_free(self, replica_id: str) -> int:
+        """Free adapter slots: the budget less the distinct adapters currently held.
+
+        Multiple claims for the same adapter share one slot; a base (adapterless) claim
+        consumes none. The count is conservative — it never packs past the budget.
+        """
+        held = {
+            request.profile.adapter_ref
+            for claim in self._stores.claims.credit_bearing_for_replica(replica_id)
+            if (request := self._stores.invocations.get(claim.invocation_id))
+            is not None
+            and request.profile.adapter_ref is not None
+        }
+        return max(0, self._adapter_slots - len(held))
 
     def drain(self, replica_id: str) -> None:
         """Reject new claims on a replica while its admitted work reaches a safe

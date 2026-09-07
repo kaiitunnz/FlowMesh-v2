@@ -37,7 +37,9 @@ class AdmissionHandoff(BaseModel):
     selected replica incarnation and listener generation, and an expiry. The origin
     worker carries the resolved route alongside this handoff; the replica claim gate
     validates these bindings and trusts that only the authorized origin reaches its
-    route. It never carries the raw engine endpoint or credential.
+    route. It never carries the raw engine endpoint or credential. For an adapter-bound
+    invocation it also names the adapter to load into a replica slot and select on the
+    request; the adapter rides the per-claim handoff, not the base-keyed replica.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -53,6 +55,8 @@ class AdmissionHandoff(BaseModel):
     incarnation: int
     listener_generation: int = 0
     expires_at: str | None = None
+    adapter_name: str | None = None
+    adapter_source: str | None = None
 
 
 class RouteAuthorization(BaseModel):

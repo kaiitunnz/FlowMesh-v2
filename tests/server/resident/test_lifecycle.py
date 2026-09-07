@@ -9,7 +9,9 @@ holds no admitted credit.
 import asyncio
 
 from server.resident import (
+    AdmissionProfile,
     ClaimCredit,
+    InvocationRequest,
     LifecycleScaleManager,
     ProvisioningDenialReason,
     ReplicaEndpoint,
@@ -37,6 +39,28 @@ def _manager(stores, **kw):
         admission_slots=kw.pop("admission_slots", 2),
         **kw,
     )
+
+
+def test_refresh_report_arms_the_adapter_slot_budget():
+    stores = warm_stores()
+    mgr = _manager(stores, adapter_slots=2)
+    for inv, adapter in (("inv-1", "lora-a"), ("inv-2", "lora-b"), ("inv-3", "lora-a")):
+        stores.invocations.put(
+            InvocationRequest(
+                invocation_id=inv,
+                workflow_id="w",
+                family="fam",
+                profile=AdmissionProfile(engine_batch_key="fam", adapter_ref=adapter),
+            )
+        )
+        claim = new_claim(invocation_id=inv, family="fam", admission_epoch=0)
+        reserve(claim, replica_id="rpl-1", incarnation=1, credit=ClaimCredit(slots=1))
+        stores.claims.add(claim)
+
+    mgr.refresh_report("rpl-1")
+    report = stores.reports.latest("rpl-1")
+    # Two distinct adapters held (the repeat shares its slot) against a budget of 2.
+    assert report is not None and report.adapter_slots_free == 0
 
 
 def test_scale_from_zero_then_warm():

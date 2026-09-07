@@ -170,7 +170,12 @@ class ResidentReplicaSidecar:
             # receipt, not completion, so control can authorize the response stream
             # before inference finishes.
             engine_task = asyncio.ensure_future(
-                self._engine_open(binding.endpoint, opening.get("request"))
+                self._engine_open(
+                    binding.endpoint,
+                    opening.get("request"),
+                    handoff.adapter_name,
+                    handoff.adapter_source,
+                )
             )
             try:
                 await session.send_wire(KIND_ACK)

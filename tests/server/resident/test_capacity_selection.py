@@ -57,6 +57,11 @@ def test_adapter_slot_constraint():
     assert is_feasible(_report(adapter_slots_free=2), profile, held_slots=0)
 
 
+def test_base_claim_ignores_the_adapter_slot_gate():
+    # A base (adapterless) claim co-batches even with no free adapter slot.
+    assert is_feasible(_report(adapter_slots_free=0), _PROFILE, held_slots=0)
+
+
 def test_expired_deadline_excluded():
     profile = AdmissionProfile(
         engine_batch_key="k", deadline_at="2000-01-01T00:00:00+00:00"

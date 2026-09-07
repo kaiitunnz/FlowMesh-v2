@@ -9,6 +9,7 @@ from .common import (
     ParallelSpec,
     ParallelSpecTemplate,
     ServiceBindingSpec,
+    validate_adapters_loadable,
 )
 
 
@@ -76,18 +77,13 @@ def _validate_inference_dispatchable(
     spec: InferenceSpecStrict | InferenceSpecTemplate,
 ) -> None:
     if spec.service is not None:
-        # A resident-served leaf admits to a replica rather than loading a local engine,
-        # so it carries no worker-local GPU requirement.
+        # A resident-served leaf admits to a replica, so it carries no worker-local GPU
+        # requirement; its adapter still must be loadable on that replica.
+        validate_adapters_loadable(spec.adapters, resident=True)
         return
-    model = spec.model
-    if model and (adapters := model.adapters):
-        for adapter in adapters:
-            if not adapter.path and not adapter.url and not adapter.task_id:
-                raise ValueError(
-                    f"adapter {adapter.name or adapter.type!r} specifies no path, "
-                    "url, or task_id and cannot be loaded."
-                )
+    validate_adapters_loadable(spec.adapters, resident=False)
 
+    model = spec.model
     if isinstance(spec.enforce_cpu, str):  # Unresolved template placeholder
         return
     if spec.enforce_cpu is True:

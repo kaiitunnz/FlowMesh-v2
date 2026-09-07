@@ -74,6 +74,7 @@ def build_resident_capacity(
         stores,
         limits=limits,
         admission_slots=cfg.admission_slots,
+        adapter_slots=cfg.adapter_slots,
         idle_retain_sec=cfg.idle_retain_sec,
         persist=persist,
         materialize_fn=materialize,

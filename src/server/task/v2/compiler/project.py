@@ -27,7 +27,7 @@ from ..representations.operators import (
     PortKind,
     ServiceDependency,
     ServiceInterface,
-    agent_service_dependency,
+    operator_service_dependency,
 )
 from ..representations.plan import (
     PhysicalNode,
@@ -195,6 +195,7 @@ def _leaf_service_dependency(
         service_ref=service_ref.strip(),
         interface=interface,
         adapter=_leaf_adapter_ref(spec),
+        adapter_source=_leaf_adapter_source(spec),
         isolation=binding.isolation,
     )
 
@@ -213,6 +214,30 @@ def _leaf_adapter_ref(
         return None
     names = sorted(adapter.name or adapter.type for adapter in adapters)
     return ",".join(names)
+
+
+def _leaf_adapter_source(
+    spec: (
+        InferenceSpecStrict
+        | InferenceSpecTemplate
+        | EmbeddingSpecStrict
+        | EmbeddingSpecTemplate
+    ),
+) -> str | None:
+    """The loadable source a resident replica loads for the leaf's adapter, or None.
+
+    A resident leaf carries a single adapter (enforced by dispatchability validation);
+    its ``path``/``url``/``task_id`` is the source the replica loads into its slot.
+    """
+    adapters = spec.adapters
+    if not adapters:
+        return None
+    adapter = adapters[0]
+    if adapter.path:
+        return adapter.path
+    if adapter.url:
+        return adapter.url
+    return f"task:{adapter.task_id}" if adapter.task_id else None
 
 
 def _agent_operator(
@@ -356,7 +381,7 @@ def lower_tasks(
                 source_ref=operator_id,
             )
         )
-        dependency = _task_service_dependency(ops_by_id.get(operator_id))
+        dependency = operator_service_dependency(ops_by_id.get(operator_id))
         requirement, intent = _service_family_annotations(dependency)
         acc.nodes.append(
             PhysicalNode(
@@ -367,17 +392,6 @@ def lower_tasks(
                 residency_intent=intent,
             )
         )
-
-
-def _task_service_dependency(
-    op: LogicalOperator | None,
-) -> ServiceDependency | None:
-    """The normalized resident dependency an operator consumes, agent or leaf."""
-    if isinstance(op, AgentOperator):
-        return agent_service_dependency(op.model_binding)
-    if isinstance(op, LeafOperator):
-        return op.service_dependency
-    return None
 
 
 def _service_family_annotations(

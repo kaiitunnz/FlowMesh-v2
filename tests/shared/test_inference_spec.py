@@ -86,3 +86,28 @@ class TestValidateDispatchable:
 
     def test_unhinted_auto_ok(self) -> None:
         _spec(model={"source": {"identifier": "gpt2"}}).validate_dispatchable()
+
+    def test_resident_adapter_without_source_raises(self) -> None:
+        with pytest.raises(ValueError, match="no path, url, or task_id"):
+            _spec(
+                model={"adapters": [{"type": "lora"}]},
+                service={"mode": "resident"},
+            ).validate_dispatchable()
+
+    def test_resident_multiple_adapters_raise(self) -> None:
+        with pytest.raises(ValueError, match="single adapter"):
+            _spec(
+                model={
+                    "adapters": [
+                        {"type": "lora", "name": "a", "path": "hf/a"},
+                        {"type": "lora", "name": "b", "path": "hf/b"},
+                    ]
+                },
+                service={"mode": "resident"},
+            ).validate_dispatchable()
+
+    def test_resident_single_adapter_with_source_ok(self) -> None:
+        _spec(
+            model={"adapters": [{"type": "lora", "name": "a", "path": "hf/a"}]},
+            service={"mode": "resident"},
+        ).validate_dispatchable()

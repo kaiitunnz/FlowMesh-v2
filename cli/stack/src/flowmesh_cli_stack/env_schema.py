@@ -441,6 +441,13 @@ STACK_ENV_SCHEMA = EnvSchema(
                     min_value=1,
                 ),
                 EnvVar(
+                    "RESIDENT_ADAPTER_SLOTS",
+                    "4",
+                    description="Distinct adapters a replica may hold concurrently.",
+                    var_type=EnvVarType.INT,
+                    min_value=1,
+                ),
+                EnvVar(
                     "RESIDENT_MAX_REPLICAS_PER_FAMILY",
                     "1",
                     description="Replica quota per service family.",

@@ -48,10 +48,17 @@ async def materialize_resident_replica(
         },
         "accessMode": config.access_mode,
     }
-    if family.interface == "embedding" and spec_type == "serve":
-        # A real vLLM embedding replica runs the pooling runner; the GPU-free dev_model
-        # stand-in forwards by path and needs no serving-mode flag.
-        spec["model"]["vllm"] = {"runner": "pooling"}
+    if spec_type == "serve":
+        # A real vLLM embedding replica runs the pooling runner; a chat replica enables
+        # LoRA so a resident consumer can load its adapter into a slot on demand. The
+        # GPU-free dev_model stand-in forwards by path and needs no serving-mode flag.
+        if family.interface == "embedding":
+            spec["model"]["vllm"] = {"runner": "pooling"}
+        else:
+            spec["model"]["vllm"] = {
+                "enable_lora": True,
+                "max_loras": config.adapter_slots,
+            }
     if config.serve_ttl_sec:
         spec["ttlSeconds"] = config.serve_ttl_sec
     payload = {

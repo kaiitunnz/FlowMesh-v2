@@ -7,6 +7,7 @@ live upstream model endpoint (``dev_model_forward_url``) or return deterministic
 canned responses when no upstream is configured.
 """
 
+import contextlib
 import json
 import logging
 import socket
@@ -35,6 +36,7 @@ _POLL_INTERVAL_SEC = 5.0
 _FORWARD_TIMEOUT_SEC = 120.0
 _MAX_BODY_BYTES = 10 * 1024 * 1024
 _ROUTES = frozenset({"/v1/chat/completions", "/v1/responses", "/v1/embeddings"})
+_LOAD_ADAPTER_ROUTE = "/v1/load_lora_adapter"
 _CANNED_TEXT = "This is a deterministic dev_model response."
 _CANNED_EMBEDDING = [0.0, 0.0, 0.0, 0.0]
 
@@ -119,6 +121,7 @@ class _DevModelHTTPServer(ThreadingHTTPServer):
         self.forward_url = forward_url
         self.model_name = model_name
         self.client = client
+        self.loaded_adapters: set[str] = set()
 
 
 class _DevModelHandler(BaseHTTPRequestHandler):
@@ -135,8 +138,40 @@ class _DevModelHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _load_adapter(self) -> None:
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            self._write_json(400, {"error": "invalid Content-Length"})
+            return
+        body = self.rfile.read(length) if 0 < length <= _MAX_BODY_BYTES else b""
+        try:
+            payload = json.loads(body or b"{}")
+        except ValueError:
+            payload = {}
+        name = payload.get("lora_name") if isinstance(payload, dict) else None
+        if not isinstance(name, str) or not name:
+            self._write_json(400, {"error": "lora_name is required"})
+            return
+        server = self.server
+        server.loaded_adapters.add(name)
+        if server.forward_url is not None and server.client is not None:
+            # Forward the load to the upstream so a real serve loads the adapter too; a
+            # non-fatal upstream response (already loaded, or a stand-in) is tolerated.
+            with contextlib.suppress(httpx.RequestError):
+                server.client.post(
+                    server.forward_url.rstrip("/") + _LOAD_ADAPTER_ROUTE,
+                    content=body,
+                    headers={"Content-Type": "application/json"},
+                    timeout=_FORWARD_TIMEOUT_SEC,
+                )
+        self._write_json(200, {"status": "success", "lora_name": name})
+
     def do_POST(self) -> None:
         path = self.path.rstrip("/") or "/"
+        if path == _LOAD_ADAPTER_ROUTE:
+            self._load_adapter()
+            return
         if path not in _ROUTES:
             self._write_json(404, {"error": f"unknown route {self.path}"})
             return
@@ -150,6 +185,17 @@ class _DevModelHandler(BaseHTTPRequestHandler):
             return
         body = self.rfile.read(length) if length else b""
         server = self.server
+        requested = _request_model(body, server.model_name)
+        if (
+            server.loaded_adapters
+            and requested != server.model_name
+            and requested not in server.loaded_adapters
+        ):
+            # Load-before-select: once the replica holds adapters, a request selecting a
+            # non-base model must name a loaded adapter, so it never silently serves the
+            # base in place of an unloaded adapter.
+            self._write_json(404, {"error": f"adapter {requested!r} is not loaded"})
+            return
         if server.forward_url is not None and server.client is not None:
             self._forward(
                 server.client,

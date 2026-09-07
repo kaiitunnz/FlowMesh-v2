@@ -48,7 +48,7 @@ from ..task.v2.representations.operators import (
     ResidualPolicy,
     ServiceDependency,
     SpawnRegion,
-    agent_service_dependency,
+    operator_service_dependency,
 )
 from ..task.v2.representations.plan import EpisodeSpec
 from ..task.v2.representations.results import CardinalityKind
@@ -3188,12 +3188,7 @@ class OrchestrationEngine:
         """The normalized resident dependency a dispatched task consumes, or None."""
         wi = self._work_item_for_task(task_id)
         operator_id = wi.operator_id if wi is not None else task_id
-        op = self._operators.get(operator_id)
-        if isinstance(op, AgentOperator):
-            return agent_service_dependency(op.model_binding)
-        if isinstance(op, LeafOperator):
-            return op.service_dependency
-        return None
+        return operator_service_dependency(self._operators.get(operator_id))
 
     def invocation_for_task(self, task_id: str) -> Invocation | None:
         wi = self._work_item_for_task(task_id)

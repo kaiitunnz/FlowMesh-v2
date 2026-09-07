@@ -31,7 +31,10 @@ _CHUNKS = ["resi", "dent ", "reply"]
 
 
 async def _fake_engine(
-    endpoint: ReplicaEndpoint, request: str | None
+    endpoint: ReplicaEndpoint,
+    request: str | None,
+    adapter_name: str | None = None,
+    adapter_source: str | None = None,
 ) -> EngineResponse:
     async def chunks() -> AsyncIterator[str]:
         for part in _CHUNKS:
@@ -44,7 +47,10 @@ async def _fake_engine(
 
 
 async def _failing_engine(
-    endpoint: ReplicaEndpoint, request: str | None
+    endpoint: ReplicaEndpoint,
+    request: str | None,
+    adapter_name: str | None = None,
+    adapter_source: str | None = None,
 ) -> EngineResponse:
     response = httpx.Response(400, request=httpx.Request("POST", "http://engine/v1"))
     raise httpx.HTTPStatusError(
@@ -193,7 +199,10 @@ def test_reap_invocation_tears_down_the_inflight_serve() -> None:
         aclosed = asyncio.Event()
 
         async def hanging_engine(
-            endpoint: ReplicaEndpoint, request: str | None
+            endpoint: ReplicaEndpoint,
+            request: str | None,
+            adapter_name: str | None = None,
+            adapter_source: str | None = None,
         ) -> EngineResponse:
             async def chunks() -> AsyncIterator[str]:
                 await asyncio.Event().wait()  # never yields — the engine is slow

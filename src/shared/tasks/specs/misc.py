@@ -12,6 +12,7 @@ from .common import (
     ServiceBindingSpec,
     TaskSpecStrictBase,
     TaskSpecTemplateBase,
+    validate_adapters_loadable,
 )
 
 # A harness param key is credential-bearing when it contains one of these substrings
@@ -244,8 +245,14 @@ class EmbeddingSpecStrict(ModelSpecStrict):
     data: dict[str, Any] | None = None
     service: ServiceBindingSpec | None = None
 
+    def validate_dispatchable(self) -> None:
+        validate_adapters_loadable(self.adapters, resident=self.service is not None)
+
 
 class EmbeddingSpecTemplate(ModelSpecTemplate):
     taskType: Literal[TaskType.EMBEDDING]
     data: dict[str, Any] | None = None
     service: ServiceBindingSpec | None = None
+
+    def validate_dispatchable(self) -> None:
+        validate_adapters_loadable(self.adapters, resident=self.service is not None)

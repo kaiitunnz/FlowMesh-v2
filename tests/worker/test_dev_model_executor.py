@@ -153,6 +153,45 @@ class TestCannedResponses:
             resp = httpx.post(f"{base}/v1/unknown", json={}, timeout=5.0)
         assert resp.status_code == 404
 
+    def test_load_lora_adapter_records_and_succeeds(self) -> None:
+        with _running_server() as base:
+            resp = httpx.post(
+                f"{base}/v1/load_lora_adapter",
+                json={"lora_name": "my-lora", "lora_path": "hf/my-lora"},
+                timeout=5.0,
+            )
+        assert resp.status_code == 200
+        assert resp.json()["lora_name"] == "my-lora"
+
+    def test_loaded_adapter_is_selectable_after_load(self) -> None:
+        with _running_server() as base:
+            httpx.post(
+                f"{base}/v1/load_lora_adapter",
+                json={"lora_name": "my-lora", "lora_path": "hf/my-lora"},
+                timeout=5.0,
+            )
+            resp = httpx.post(
+                f"{base}/v1/chat/completions",
+                json={"model": "my-lora", "messages": []},
+                timeout=5.0,
+            )
+        assert resp.status_code == 200
+        assert resp.json()["model"] == "my-lora"
+
+    def test_selecting_an_unloaded_adapter_after_a_load_is_404(self) -> None:
+        with _running_server() as base:
+            httpx.post(
+                f"{base}/v1/load_lora_adapter",
+                json={"lora_name": "my-lora", "lora_path": "hf/my-lora"},
+                timeout=5.0,
+            )
+            resp = httpx.post(
+                f"{base}/v1/chat/completions",
+                json={"model": "other-lora", "messages": []},
+                timeout=5.0,
+            )
+        assert resp.status_code == 404
+
 
 class _UpstreamHandler(BaseHTTPRequestHandler):
     def log_message(self, *args: object) -> None:

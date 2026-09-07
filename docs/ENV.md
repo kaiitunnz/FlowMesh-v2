@@ -62,6 +62,7 @@ listed here is in `.env.example`.
 | `RESIDENT_INFERENCE_SUBSTRATE` | `serve` | Resident replica substrate (`serve` or `dev_model`) |
 | `RESIDENT_SERVE_ACCESS_MODE` | `forward` | Materialized replica endpoint access mode |
 | `RESIDENT_ADMISSION_SLOTS` | `8` | Conservative safe admission slots per replica |
+| `RESIDENT_ADAPTER_SLOTS` | `4` | Distinct adapters a replica may hold concurrently |
 | `RESIDENT_MAX_REPLICAS_PER_FAMILY` | `1` | Replica quota per service family |
 | `RESIDENT_MAX_COLD_STARTS` | `1` | Concurrent cold starts |
 | `RESIDENT_COLD_START_DEADLINE_SEC` | `300` | Cold-start / admission wait budget (seconds) |

@@ -193,7 +193,7 @@ spawn member admits a child region.
 
 An inference or embedding leaf declares a resident service binding with `spec.service`
 (`{mode: resident}`, optionally `service_model_ref` and `isolation`) to consume a
-FlowMesh-served model from resident capacity instead of loading one in the worker. The
+FlowMesh-served model from resident capacity. The
 binding normalizes to the same service dependency an Agent's resident model binding uses,
 so both pin one plan-derived service-family requirement and a required residency intent,
 and both raise the same control-admitted `ServiceClaim`. A resident inference leaf carries
@@ -209,11 +209,13 @@ its co-located engine on the route its family's interface selects (`/chat/comple
 `/embeddings`), and the settled outcome — the completion text or the embedding vectors as
 JSON — is injected on a resume and becomes the leaf's result. The resident-request capture
 and reference-backed outcome hydration are the same caller-neutral substrate the
-agent-episode executor uses. The leaf invocation never routes through the Agent model
-gateway.
+agent-episode executor uses.
 
 A service dependency's family folds the service interface, base model, and isolation
-domain, and an adapter rides the admission profile's adapter slot. A shared base model and
-interface reuse a warm replica; a differing interface, base model, adapter, or isolation
-domain resolves to a distinct family and cannot share a batch or route on a matching model
-name alone.
+domain. A shared base model and interface reuse a warm replica; a differing interface, base
+model, or isolation domain resolves to a distinct family and cannot share a batch or route
+on a matching model name alone. An adapter does not fork a family: it co-batches on the
+base replica through its own slot — the resident consumer loads its adapter into a replica
+slot and selects it as the request model, and the admission profile's adapter slot bounds
+how many distinct adapters a replica holds. An adapter-bound leaf declares a single
+adapter with a loadable `path`, `url`, or `task_id`.
