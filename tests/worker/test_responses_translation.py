@@ -3,7 +3,7 @@
 import json
 
 from shared.tools.model.schema import ModelCompletion, ModelToolCall
-from worker.responses_translation import (
+from worker.model_turn.translation import (
     chat_tools,
     completion_to_responses_output,
     responses_input_to_messages,

@@ -35,7 +35,7 @@ from shared.harness import (
 from shared.tasks.specs import AgentSpecStrict
 from shared.tasks.worker_message import WorkerTaskMessage
 from worker.config import WorkerConfig
-from worker.responses_facade import ResponsesFacade
+from worker.model_turn import ResponsesFacade
 
 _BACKEND = "codex"
 _CODEX_ADAPTER_VERSION = "v1"

@@ -25,8 +25,8 @@ from shared.tools.search.schema import (
 )
 from shared.utils.ids import new_mediated_permit_id
 from tests.shared.outcome_helpers import InMemoryContentStore
+from worker.egress import HeldEgressReject, MediatedEgressSidecar
 from worker.lifecycle import PendingEgressRequestStore
-from worker.mediated_egress_sidecar import HeldEgressReject, MediatedEgressSidecar
 
 _WORKER = "wkr-1"
 _GEN = 3

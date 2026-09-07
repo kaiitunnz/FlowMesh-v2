@@ -4,7 +4,7 @@ from shared.harness import BoundaryEventKind
 from shared.tools.facade import FacadeCompletionMode, FacadeDescriptor
 from shared.tools.model.schema import ModelToolCall
 from shared.tools.search.schema import SEARCH_INTERFACE, tool_request_digest
-from worker.facade_capture import (
+from worker.model_turn.capture import (
     build_facade_capture,
     partition_facade_calls,
     turn_base,

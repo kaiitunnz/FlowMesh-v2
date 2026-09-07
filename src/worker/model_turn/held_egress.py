@@ -19,9 +19,9 @@ from shared.tools.model.schema import (
     model_request_digest,
 )
 
-from .lifecycle import PendingEgressRequestStore
-from .mediated_egress_sidecar import HeldEgressReject, MediatedEgressSidecar
-from .model_turn_rendezvous import ModelTurnRendezvous, PermitDenied
+from ..egress import HeldEgressReject, MediatedEgressSidecar
+from ..lifecycle import PendingEgressRequestStore
+from .rendezvous import ModelTurnRendezvous, PermitDenied
 
 ProposeFn = Callable[[AgentModelTurnProposal], None]
 

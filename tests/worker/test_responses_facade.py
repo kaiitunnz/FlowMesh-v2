@@ -10,9 +10,9 @@ from shared.harness import BoundaryEventKind
 from shared.tools.facade import FacadeDescriptor
 from shared.tools.model.schema import ModelCompletion, ModelToolCall
 from shared.tools.search.schema import SEARCH_INTERFACE
+from worker.egress import HeldEgressReject
 from worker.lifecycle import PendingEgressRequestStore
-from worker.mediated_egress_sidecar import HeldEgressReject
-from worker.responses_facade import FacadeTurnError, ResponsesFacade
+from worker.model_turn import FacadeTurnError, ResponsesFacade
 
 _TASK = "tsk-agent"
 _SEARCH = FacadeDescriptor(

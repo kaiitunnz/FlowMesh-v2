@@ -4,7 +4,7 @@ import threading
 
 from shared.tools.contract import MediatedOperationPermit
 from shared.utils.ids import new_mediated_permit_id
-from worker.model_turn_rendezvous import ModelTurnRendezvous, PermitDenied
+from worker.model_turn import ModelTurnRendezvous, PermitDenied
 
 _AGENT = "tsk-agent"
 _CALL = "t0"

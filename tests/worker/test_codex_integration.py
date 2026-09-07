@@ -53,18 +53,18 @@ from shared.utils.ids import (  # noqa: E402
     new_invocation_id,
     new_mediated_permit_id,
 )
-from worker.egress_backends import ModelEgress  # noqa: E402
+from worker.egress import MediatedEgressSidecar  # noqa: E402
+from worker.egress import ModelEgress  # noqa: E402
 from worker.executors.harness.codex import CodexAppServerHarnessAdapter  # noqa: E402
 from worker.executors.harness.codex_transport import (  # noqa: E402
     CodexTransportConfig,
     CodexTransportError,
     RealCodexAppServerTransport,
 )
-from worker.held_model_egress import HeldModelEgress  # noqa: E402
 from worker.lifecycle import PendingEgressRequestStore  # noqa: E402
-from worker.mediated_egress_sidecar import MediatedEgressSidecar  # noqa: E402
-from worker.model_turn_rendezvous import ModelTurnRendezvous  # noqa: E402
-from worker.responses_facade import ResponsesFacade  # noqa: E402
+from worker.model_turn import HeldModelEgress  # noqa: E402
+from worker.model_turn import ModelTurnRendezvous  # noqa: E402
+from worker.model_turn import ResponsesFacade  # noqa: E402
 
 _TASK_ID = "tsk-codex-int"
 _FINAL_TEXT = "final"

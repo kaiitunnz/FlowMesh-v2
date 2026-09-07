@@ -33,8 +33,8 @@ from shared.tools.contract import (
 from shared.tools.model.egress import ModelEgressError
 from shared.tools.model.schema import ModelCompletion
 
-from .lifecycle import CapturedRequest, PendingEgressRequestStore
-from .tool_fence import fence_reason, materialize_tool_outcome
+from ..lifecycle import CapturedRequest, PendingEgressRequestStore
+from .fence import fence_reason, materialize_tool_outcome
 
 # Resolves this worker's id and incarnation once it is registered.
 AudienceFn = Callable[[], tuple[str, int]]

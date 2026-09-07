@@ -12,7 +12,7 @@ from collections.abc import Callable
 from shared.harness import HarnessAdapter, HarnessBackendKey
 from shared.tasks.worker_message import WorkerTaskMessage
 from worker.config import WorkerConfig
-from worker.responses_facade import ResponsesFacade
+from worker.model_turn import ResponsesFacade
 
 type AdapterFactory = Callable[
     [HarnessBackendKey, WorkerTaskMessage, WorkerConfig, ResponsesFacade | None],

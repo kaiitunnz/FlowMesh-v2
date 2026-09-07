@@ -21,7 +21,7 @@ from .power import PowerMonitor
 from .supervisor_client import SupervisorClient
 
 if TYPE_CHECKING:
-    from .responses_facade import ResponsesFacade
+    from .model_turn import ResponsesFacade
 
 # A captured worker-originated egress request: a fabric-tool request or a managed-model
 # request, both held in worker-private custody behind their control-plane digest.
