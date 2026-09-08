@@ -864,17 +864,39 @@ class EventMonitor:
 
         The raw listener host/port and engine key stay worker-private (``_``-prefixed);
         the only public serve endpoint is the FlowMesh-authenticated, claim-gated route.
+        The route is published at the ingress the task's binding pins, so a task pinned
+        to a mode whose ingress this deployment has not registered is advertised with no
+        url at all: an address that could only fail closed is worse than none.
         """
         inner = payload.get("serve") if isinstance(payload, dict) else None
         if not isinstance(inner, dict) or not inner.get("_port"):
             return payload
         payload = payload.copy()
         inner = inner.copy()
-        inner["url"] = (
-            f"{self._server_base_url.rstrip('/')}/api/v1/serve/tasks/{task_id}"
-        )
+        base = self._serve_base_url(task_id)
+        if base is None:
+            inner.pop("url", None)
+        else:
+            inner["url"] = f"{base}/api/v1/serve/tasks/{task_id}"
         payload["serve"] = inner
         return payload
+
+    def _serve_base_url(self, task_id: str) -> str | None:
+        """The base url the task's pinned ingress is reached at, or None when it has no
+        registered ingress.
+
+        A forward ingress supplies the base it registered, never a value read from a
+        request; the root-local proxy is reached at the server's own base url.
+        """
+        if self._gated_serve is None:
+            return None
+        record = self._runtime.get_record(task_id)
+        if record is None:
+            return None
+        ingress = self._gated_serve.ingresses.live(_serve_access_mode(record))
+        if ingress is None:
+            return None
+        return (ingress.public_url or self._server_base_url).rstrip("/")
 
     def _maybe_adopt_serve(self, task_id: str) -> None:
         """Adopt a serve task as a standing resident allocation once its endpoint is up.
