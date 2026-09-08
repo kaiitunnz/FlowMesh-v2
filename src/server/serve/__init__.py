@@ -18,7 +18,6 @@ from .service import (
     BindingNotFound,
     GatedServe,
     MethodNotAllowed,
-    PathNotAllowed,
     ServeResult,
 )
 from .state import (
@@ -33,7 +32,6 @@ __all__ = [
     "BindingNotFound",
     "GatedServe",
     "MethodNotAllowed",
-    "PathNotAllowed",
     "ServeBindingSnapshot",
     "ServeBindingStore",
     "ServeRelayExecutor",

@@ -25,7 +25,8 @@ from shared.resident.contracts import (
     ReplicaEndpoint,
     RouteAuthorization,
 )
-from shared.resident.gate import LoadEvidence, SidecarClaimGate
+from shared.resident.envelope import EnvelopeRejected, ServeRequestEnvelope
+from shared.resident.gate import GateRejection, LoadEvidence, SidecarClaimGate
 from shared.resident.session import ResidentRelaySession, ResidentSessionRole
 from shared.resident.transport import ResidentFrameSink
 from shared.resident.wire import (
@@ -189,8 +190,11 @@ class ResidentReplicaSidecar:
 
     async def _serve(self, session_id: str, session: ResidentRelaySession) -> None:
         try:
-            opening = await session.recv_wire(self._stream_deadline)
-            if opening is None or opening.get("kind") != KIND_BOOTSTRAP:
+            received = await session.recv_body_wire(self._stream_deadline)
+            if received is None:
+                return
+            opening, request_body = received
+            if opening.get("kind") != KIND_BOOTSTRAP:
                 return
             handoff = AdmissionHandoff.model_validate(opening["handoff"])
             binding = self._bindings.get(handoff.replica_id)
@@ -207,9 +211,27 @@ class ResidentReplicaSidecar:
             if not decision.admitted:
                 await session.send_wire(KIND_REJECT, reason=str(decision.rejection))
                 return
-            digest = binding.gate.check_request_digest(
-                handoff, resident_request_digest(str(opening.get("request") or ""))
+            serve_mode = (
+                handoff.serve_task_id is not None and self._engine_open_raw is not None
             )
+            # A task-addressed request is admitted on the whole frozen envelope, so the
+            # gate recomputes the descriptor from what was relayed rather than from
+            # mutable request state; a workflow request digests its captured payload.
+            envelope: ServeRequestEnvelope | None = None
+            if serve_mode:
+                try:
+                    envelope = ServeRequestEnvelope.from_parts(
+                        opening.get("request"), request_body
+                    )
+                except (EnvelopeRejected, ValidationError):
+                    await session.send_wire(
+                        KIND_REJECT, reason=str(GateRejection.WRONG_DIGEST)
+                    )
+                    return
+                computed = envelope.digest()
+            else:
+                computed = resident_request_digest(str(opening.get("request") or ""))
+            digest = binding.gate.check_request_digest(handoff, computed)
             if not digest.admitted:
                 await session.send_wire(KIND_REJECT, reason=str(digest.rejection))
                 return
@@ -219,17 +241,15 @@ class ResidentReplicaSidecar:
             # Open the engine request and acknowledge immediately: the ack marks engine
             # receipt, not completion, so control can authorize the response stream
             # before inference finishes.
-            serve_mode = (
-                handoff.serve_task_id is not None and self._engine_open_raw is not None
-            )
             engine_task = self._open_engine(
-                serve_mode, binding.endpoint, opening, handoff
+                binding.endpoint, opening, handoff, envelope
             )
             try:
                 await session.send_wire(KIND_ACK)
-                follow = await session.recv_wire(self._stream_deadline)
-                if follow is None:
+                following = await session.recv_body_wire(self._stream_deadline)
+                if following is None:
                     return
+                follow, _ = following
                 auth = RouteAuthorization.model_validate(follow["auth"])
                 gate = binding.gate.check_stream(auth, gate_session)
                 if not gate.admitted:
@@ -238,7 +258,7 @@ class ResidentReplicaSidecar:
                 if follow.get("kind") != KIND_STREAM:
                     return
                 self._on_load(binding.gate.load_evidence(auth, "stream"))
-                if serve_mode:
+                if envelope is not None:
                     await self._relay_raw(session, engine_task)
                 else:
                     await self._relay_parsed(session, engine_task)
@@ -258,27 +278,26 @@ class ResidentReplicaSidecar:
 
     def _open_engine(
         self,
-        serve_mode: bool,
         endpoint: ReplicaEndpoint,
         opening: dict[str, Any],
         handoff: AdmissionHandoff,
+        envelope: ServeRequestEnvelope | None,
     ) -> "asyncio.Task[Any]":
         """Open the engine request whose response the stream fence later authorizes.
 
         The task starts before the acknowledgement so the engine runs while control
-        authorizes the response stream. A task-addressed serve invocation opens the raw
-        reverse-proxy delivery; a workflow consumer opens the parsed content delivery.
+        authorizes the response stream. A task-addressed serve invocation replays its
+        frozen envelope through the raw reverse-proxy delivery; a workflow consumer
+        opens the parsed content delivery.
         """
-        request = opening.get("request")
-        if serve_mode and self._engine_open_raw is not None:
-            return asyncio.ensure_future(
-                self._engine_open_raw(
-                    endpoint, request, handoff.adapter_name, handoff.adapter_source
-                )
-            )
+        if envelope is not None and self._engine_open_raw is not None:
+            return asyncio.ensure_future(self._engine_open_raw(endpoint, envelope))
         return asyncio.ensure_future(
             self._engine_open(
-                endpoint, request, handoff.adapter_name, handoff.adapter_source
+                endpoint,
+                opening.get("request"),
+                handoff.adapter_name,
+                handoff.adapter_source,
             )
         )
 
@@ -313,8 +332,8 @@ class ResidentReplicaSidecar:
         """Reverse-proxy a serve request's raw engine response, always ending on a
         terminal frame.
 
-        The engine's status and content type precede the opaque body so the client sees
-        the engine's own envelope, and any status streams through. A transport loss
+        The engine's status and response headers precede the opaque body so the client
+        sees the engine's own envelope, and any status streams through. A transport loss
         reaching or draining the engine is uncertain and holds the credit to re-drive;
         a request the engine cannot accept is a definite failure that releases it —
         neither ends the session without a terminal.
@@ -340,20 +359,21 @@ class ResidentReplicaSidecar:
             return
         try:
             await session.send_wire(
-                KIND_HEAD, status=raw.status, content_type=raw.content_type
+                KIND_HEAD,
+                status=raw.status,
+                headers=[[name, value] for name, value in raw.headers],
             )
             async for chunk in raw.chunks:
-                await session.send_wire(KIND_CHUNK, data=chunk)
+                await session.send_body_wire(KIND_CHUNK, chunk)
             await session.send_wire(KIND_DONE)
         except (httpx.HTTPError, OSError) as exc:
             await session.send_wire(
                 KIND_FAILED, definite=False, reason=f"engine stream lost: {exc}"
             )
-        except Exception as exc:  # noqa: BLE001 - a decode error still terminates
-            # A non-UTF-8 body (UnicodeDecodeError) or any other after-HEAD failure
-            # holds the credit uncertain rather than dying silently after the head; a
-            # reap's CancelledError is a BaseException and still propagates, emitting no
-            # terminal.
+        except Exception as exc:  # noqa: BLE001 - any after-head error still terminates
+            # Any other after-HEAD failure holds the credit uncertain rather than dying
+            # silently after the head; a reap's CancelledError is a BaseException and
+            # still propagates, emitting no terminal.
             await session.send_wire(
                 KIND_FAILED, definite=False, reason=f"engine stream error: {exc}"
             )

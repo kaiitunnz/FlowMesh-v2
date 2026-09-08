@@ -19,7 +19,7 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 
 from shared.resident.contracts import AdmissionHandoff, RouteAuthorization
-from shared.resident.wire import resident_request_digest
+from shared.resident.envelope import ServeRequestEnvelope
 from shared.utils.ids import new_idempotency_key, new_invocation_id
 
 from ..resident.service import ResidentCapacityControl, ServeOrigination
@@ -41,11 +41,6 @@ _CALL_CORRELATION_PREFIX = "serve/"
 # unbounded memory: further frames are dropped past the bound, while the terminal always
 # lands (evicting the oldest frame if needed) so the client stream still closes.
 _TEE_QUEUE_MAX = 2048
-
-_ALLOWED_PATHS: dict[ServiceInterface, frozenset[str]] = {
-    ServiceInterface.CHAT: frozenset({"chat/completions", "v1/chat/completions"}),
-    ServiceInterface.EMBEDDING: frozenset({"embeddings", "v1/embeddings"}),
-}
 
 _TERMINAL_STATUS = {
     ClaimTerminalReason.COMPLETED: ServeTerminalStatus.COMPLETED,
@@ -71,19 +66,15 @@ class MethodNotAllowed(Exception):
     """The request method is not one the binding permits."""
 
 
-class PathNotAllowed(Exception):
-    """The request path is not one the binding's interface serves."""
-
-
 @dataclass(frozen=True)
 class ServeEvent:
     """One event on a request's response stream: the head, a chunk, or a terminal."""
 
     kind: str  # "head" | "chunk" | "done" | "error"
-    payload: str = ""
+    payload: bytes = b""
     detail: str | None = None
     status: int = 200
-    content_type: str = "application/json"
+    headers: tuple[tuple[str, str], ...] = ()
 
     @property
     def terminal(self) -> bool:
@@ -117,8 +108,7 @@ class _RequestContext:
     idempotency_key: str
     subject: InvocationSubject
     binding: ServeTaskResidencyBinding
-    descriptor_digest: str
-    request_payload: str
+    envelope: ServeRequestEnvelope
 
 
 class _ServeStream:
@@ -154,8 +144,8 @@ class _ServeStream:
             subject=self._context.subject,
             family=binding.family,
             dependency=binding.dependency(),
-            profile=binding.profile(descriptor_digest=self._context.descriptor_digest),
-            request_payload=self._context.request_payload,
+            profile=binding.profile(descriptor_digest=self._context.envelope.digest()),
+            envelope=self._context.envelope,
             delivery=self,
         )
 
@@ -167,7 +157,7 @@ class _ServeStream:
             task_id=self._context.invocation_id,
             call_correlation=_call_correlation(self._context.invocation_id),
             handoff=handoff,
-            request_payload=self._context.request_payload,
+            envelope=self._context.envelope,
         )
 
     def authorize(self, session_id: str, auth: RouteAuthorization) -> None:
@@ -182,17 +172,17 @@ class _ServeStream:
         # releases it, so the drive settles the claim independent of this stream.
         self._closed = True
 
-    def head(self, status: int, content_type: str) -> None:
-        # The engine response head commits the client response's status and content type
+    def head(self, status: int, headers: tuple[tuple[str, str], ...]) -> None:
+        # The engine response head commits the client response's status and headers
         # ahead of its body. Once committed, a later loss can no longer transparently
         # re-stream under a fresh attempt's head, so the head marks the response
         # flushed: a post-head loss fails this response rather than re-driving it.
         if self._closed:
             return
         self._flushed = True
-        self._offer(ServeEvent(kind="head", status=status, content_type=content_type))
+        self._offer(ServeEvent(kind="head", status=status, headers=headers))
 
-    def tee(self, payload: str) -> None:
+    def tee(self, payload: bytes) -> None:
         # Once the client response is closed (a post-flush loss failed it, or it already
         # terminated), a re-drive's frames are dropped rather than duplicated onto it.
         if self._closed:
@@ -275,25 +265,21 @@ class GatedServe:
         principal_id: str,
         tenant: str,
         serve_task_id: str,
-        method: str,
-        upstream_path: str,
-        request_payload: str,
+        envelope: ServeRequestEnvelope,
     ) -> ServeResult:
         """Resolve the live binding, admit the request, and begin streaming.
 
         The caller has already authenticated and passed task-read authorization at the
-        router. A missing live binding, a disallowed method, or a disallowed path raises
-        before any credit.
+        router, and its request is frozen into the transparent envelope relayed to the
+        engine. A missing live binding or a method the binding does not permit raises
+        before any credit. The binding's ``interface`` selects the family it was adopted
+        under; it constrains neither the path nor the body, which the engine resolves.
         """
         binding = self._bindings.live(serve_task_id)
         if binding is None:
             raise BindingNotFound(serve_task_id)
-        if method.upper() not in {m.upper() for m in binding.allowed_methods}:
-            raise MethodNotAllowed(method)
-        if upstream_path.strip("/") not in _ALLOWED_PATHS.get(
-            binding.interface, frozenset()
-        ):
-            raise PathNotAllowed(upstream_path)
+        if envelope.method not in {m.upper() for m in binding.allowed_methods}:
+            raise MethodNotAllowed(envelope.method)
         context = _RequestContext(
             invocation_id=new_invocation_id(),
             idempotency_key=new_idempotency_key(),
@@ -301,8 +287,7 @@ class GatedServe:
                 kind=InvocationSubjectKind.EXTERNAL, id=principal_id, tenant=tenant
             ),
             binding=binding,
-            descriptor_digest=resident_request_digest(request_payload),
-            request_payload=request_payload,
+            envelope=envelope,
         )
         stream = _ServeStream(self, context)
         self.control.originate_serve(stream.origination())

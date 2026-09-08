@@ -1,8 +1,10 @@
-"""The replica engine delivery routes by interface and carries opaque content.
+"""The replica engine deliveries: parsed content for workflows, verbatim serve proxy.
 
-A chat endpoint POSTs ``/chat/completions`` and streams the assistant message text; an
-embedding endpoint POSTs ``/embeddings`` and streams the ``data`` vectors serialized as
-JSON, so both ride the same content path.
+A workflow consumer routes by interface — a chat endpoint POSTs ``/chat/completions``
+and streams the assistant message text, an embedding endpoint POSTs ``/embeddings`` and
+streams the ``data`` vectors as JSON — so both ride the same content path. A
+task-addressed serve request is instead replayed against the engine exactly as the
+client sent it and its response relayed back unchanged.
 """
 
 import asyncio
@@ -17,6 +19,7 @@ import httpx
 import pytest
 
 from shared.resident.contracts import ReplicaEndpoint
+from shared.resident.envelope import ServeRequestEnvelope, freeze_request_envelope
 from worker.resident.engine import (
     HttpEngineDelivery,
     RawHttpEngineDelivery,
@@ -30,9 +33,50 @@ class _Handler(BaseHTTPRequestHandler):
     def log_message(self, *args: Any) -> None:
         pass
 
+    def _record(self) -> bytes:
+        raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        self.server.seen.append(
+            {
+                "method": self.command,
+                "path": self.path,
+                "headers": list(self.headers.items()),
+                "body": raw,
+            }
+        )
+        return raw
+
+    def _reply(self, status: int, ctype: str, raw: bytes) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(raw)))
+        for name, value in self.server.extra_response_headers:
+            self.send_header(name, value)
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def do_GET(self) -> None:
+        self._record()
+        if self.server.chat_override is not None:
+            self._reply(*self.server.chat_override)
+            return
+        self._reply(
+            200, "application/json", json.dumps({"data": [{"id": "m"}]}).encode()
+        )
+
+    def do_PUT(self) -> None:
+        self._record()
+        self._reply(200, "application/json", b"{}")
+
+    def do_DELETE(self) -> None:
+        self._record()
+        self._reply(204, "application/json", b"")
+
     def do_POST(self) -> None:
-        length = int(self.headers.get("Content-Length") or 0)
-        body = json.loads(self.rfile.read(length) or b"{}")
+        raw = self._record()
+        try:
+            body = json.loads(raw or b"{}")
+        except ValueError:
+            body = {}
         self.server.paths.append(self.path)
         self.server.bodies.append(body)
         if self.path == "/v1/load_lora_adapter":
@@ -66,22 +110,12 @@ class _Handler(BaseHTTPRequestHandler):
             }
         else:
             if self.server.chat_override is not None:
-                status, ctype, raw = self.server.chat_override
-                self.send_response(status)
-                self.send_header("Content-Type", ctype)
-                self.send_header("Content-Length", str(len(raw)))
-                self.end_headers()
-                self.wfile.write(raw)
+                self._reply(*self.server.chat_override)
                 return
             payload = {
                 "choices": [{"message": {"role": "assistant", "content": "hi there"}}]
             }
-        raw = json.dumps(payload).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(raw)))
-        self.end_headers()
-        self.wfile.write(raw)
+        self._reply(200, "application/json", json.dumps(payload).encode())
 
 
 class _Server(ThreadingHTTPServer):
@@ -96,6 +130,8 @@ class _Server(ThreadingHTTPServer):
         self.unloaded: list[str | None] = []
         self.unload_response: tuple[int, str] = (200, "success")
         self.chat_override: tuple[int, str, bytes] | None = None
+        self.seen: list[dict[str, Any]] = []
+        self.extra_response_headers: list[tuple[str, str]] = []
 
 
 @contextmanager
@@ -201,24 +237,112 @@ def test_a_precise_unload_error_raises() -> None:
 
 
 async def _drain_raw(
-    endpoint: ReplicaEndpoint, payload: str | None
-) -> tuple[int, str, str]:
-    opened = await RawHttpEngineDelivery()(endpoint, payload)
+    endpoint: ReplicaEndpoint, envelope: ServeRequestEnvelope
+) -> tuple[int, tuple[tuple[str, str], ...], bytes]:
+    opened = await RawHttpEngineDelivery()(endpoint, envelope)
     parts = [chunk async for chunk in opened.chunks]
     await opened.aclose()
-    return opened.status, opened.content_type, "".join(parts)
+    return opened.status, opened.headers, b"".join(parts)
 
 
-def test_raw_delivery_relays_status_content_type_and_body_verbatim() -> None:
+def _serve_envelope(
+    method: str = "POST",
+    path: str = "v1/chat/completions",
+    body: bytes = b"{}",
+    query: str = "",
+    headers: list[tuple[str, str]] | None = None,
+) -> ServeRequestEnvelope:
+    return freeze_request_envelope(
+        method=method,
+        upstream_path=path,
+        query=query,
+        headers=[("content-type", "application/json")] if headers is None else headers,
+        body=body,
+    )
+
+
+def _content_type(headers: tuple[tuple[str, str], ...]) -> str:
+    return next(v for k, v in headers if k.lower() == "content-type")
+
+
+def test_raw_delivery_relays_status_headers_and_body_verbatim() -> None:
     with _running() as server:
         base = f"http://127.0.0.1:{server.server_address[1]}/v1"
         endpoint = ReplicaEndpoint(base_url=base, model="m", interface="chat")
-        status, content_type, body = asyncio.run(_drain_raw(endpoint, "hello"))
+        status, headers, body = asyncio.run(
+            _drain_raw(endpoint, _serve_envelope(body=b'{"messages":[]}'))
+        )
     assert server.paths == ["/v1/chat/completions"]
     assert status == 200
-    assert content_type.startswith("application/json")
+    assert _content_type(headers).startswith("application/json")
     # The raw path relays the engine envelope verbatim, not the extracted content.
     assert json.loads(body)["choices"][0]["message"]["content"] == "hi there"
+
+
+def test_raw_delivery_forwards_the_client_method_path_query_and_body_unchanged() -> (
+    None
+):
+    # The client's own request reaches the engine: an endpoint outside the interface's
+    # classification, a non-POST method, its query string, and its exact body bytes.
+    with _running() as server:
+        base = f"http://127.0.0.1:{server.server_address[1]}/v1"
+        endpoint = ReplicaEndpoint(base_url=base, model="m", interface="chat")
+        asyncio.run(
+            _drain_raw(
+                endpoint,
+                _serve_envelope(method="GET", path="v1/models", query="limit=2"),
+            )
+        )
+        asyncio.run(
+            _drain_raw(
+                endpoint,
+                _serve_envelope(path="v1/responses", body=b'{"model":"other","x":1}'),
+            )
+        )
+    assert [(s["method"], s["path"]) for s in server.seen] == [
+        ("GET", "/v1/models?limit=2"),
+        ("POST", "/v1/responses"),
+    ]
+    # No body rebuild and no model override: the client's bytes arrive untouched.
+    assert server.seen[1]["body"] == b'{"model":"other","x":1}'
+
+
+def test_raw_delivery_swaps_the_client_credential_for_the_engine_one() -> None:
+    with _running() as server:
+        base = f"http://127.0.0.1:{server.server_address[1]}/v1"
+        endpoint = ReplicaEndpoint(
+            base_url=base, model="m", interface="chat", api_key="engine-key"
+        )
+        # A client Authorization never survives the freeze, so it cannot reach upstream.
+        envelope = _serve_envelope(
+            headers=[("authorization", "Bearer client-token"), ("x-trace", "t1")]
+        )
+        asyncio.run(_drain_raw(endpoint, envelope))
+    sent = {name.lower(): value for name, value in server.seen[0]["headers"]}
+    assert sent["authorization"] == "Bearer engine-key"
+    assert sent["x-trace"] == "t1"
+
+
+def test_raw_delivery_does_not_invent_headers_the_client_never_sent() -> None:
+    with _running() as server:
+        base = f"http://127.0.0.1:{server.server_address[1]}/v1"
+        endpoint = ReplicaEndpoint(base_url=base, model="m", interface="chat")
+        asyncio.run(_drain_raw(endpoint, _serve_envelope(headers=[("x-only", "1")])))
+    sent = {name.lower() for name, _ in server.seen[0]["headers"]}
+    assert "x-only" in sent
+    assert not sent & {"accept", "accept-encoding", "user-agent"}
+
+
+def test_raw_delivery_preserves_every_non_hop_by_hop_response_header() -> None:
+    with _running() as server:
+        server.extra_response_headers = [("X-Request-Id", "r1"), ("Keep-Alive", "t=5")]
+        base = f"http://127.0.0.1:{server.server_address[1]}/v1"
+        endpoint = ReplicaEndpoint(base_url=base, model="m", interface="chat")
+        _status, headers, _body = asyncio.run(_drain_raw(endpoint, _serve_envelope()))
+    names = {name.lower() for name, _ in headers}
+    assert ("X-Request-Id", "r1") in headers
+    # Hop-by-hop fields belong to the engine hop and are not relayed onward.
+    assert "keep-alive" not in names
 
 
 def test_raw_delivery_streams_an_sse_body_and_content_type() -> None:
@@ -227,12 +351,12 @@ def test_raw_delivery_streams_an_sse_body_and_content_type() -> None:
         server.chat_override = (200, "text/event-stream", sse.encode())
         base = f"http://127.0.0.1:{server.server_address[1]}/v1"
         endpoint = ReplicaEndpoint(base_url=base, model="m", interface="chat")
-        status, content_type, body = asyncio.run(
-            _drain_raw(endpoint, '{"messages":[],"stream":true}')
+        status, headers, body = asyncio.run(
+            _drain_raw(endpoint, _serve_envelope(body=b'{"messages":[],"stream":true}'))
         )
     assert status == 200
-    assert content_type.startswith("text/event-stream")
-    assert body == sse
+    assert _content_type(headers).startswith("text/event-stream")
+    assert body == sse.encode()
 
 
 def test_raw_delivery_relays_an_engine_error_status_without_raising() -> None:
@@ -240,9 +364,27 @@ def test_raw_delivery_relays_an_engine_error_status_without_raising() -> None:
         server.chat_override = (400, "application/json", b'{"error":"bad request"}')
         base = f"http://127.0.0.1:{server.server_address[1]}/v1"
         endpoint = ReplicaEndpoint(base_url=base, model="m", interface="chat")
-        status, _content_type, body = asyncio.run(_drain_raw(endpoint, "hi"))
+        status, _headers, body = asyncio.run(_drain_raw(endpoint, _serve_envelope()))
     assert status == 400
     assert json.loads(body)["error"] == "bad request"
+
+
+def test_raw_delivery_carries_a_binary_body_unchanged() -> None:
+    blob = bytes(range(256))
+    with _running() as server:
+        base = f"http://127.0.0.1:{server.server_address[1]}/v1"
+        endpoint = ReplicaEndpoint(base_url=base, model="m", interface="chat")
+        asyncio.run(
+            _drain_raw(
+                endpoint,
+                _serve_envelope(
+                    path="v1/audio/transcriptions",
+                    body=blob,
+                    headers=[("content-type", "application/octet-stream")],
+                ),
+            )
+        )
+    assert server.seen[0]["body"] == blob
 
 
 def test_embedding_interface_posts_embeddings_and_streams_vectors() -> None:

@@ -19,6 +19,7 @@ from typing import Protocol
 
 from shared.network.relay_frame import RelayFrame
 from shared.resident.contracts import AdmissionHandoff, RouteAuthorization
+from shared.resident.envelope import ServeRequestEnvelope
 from shared.resident.reports import (
     ResidentBootstrapAck,
     ResidentBootstrapOutcome,
@@ -151,7 +152,7 @@ class ServeRelayExecutor:
         task_id: str,
         call_correlation: str,
         handoff: AdmissionHandoff,
-        request_payload: str,
+        envelope: ServeRequestEnvelope,
     ) -> None:
         """Start one origin drive: send the bootstrap and stream the response."""
         session = ResidentRelaySession(
@@ -164,7 +165,7 @@ class ServeRelayExecutor:
         )
         drive = _Drive(session, task_id, call_correlation, invocation_id)
         self._by_session[session_id] = drive
-        drive.task = asyncio.ensure_future(self._drive(drive, handoff, request_payload))
+        drive.task = asyncio.ensure_future(self._drive(drive, handoff, envelope))
 
     def authorize(self, session_id: str, auth: RouteAuthorization) -> None:
         """Deliver control's post-acceptance route authorization to a waiting drive."""
@@ -182,16 +183,17 @@ class ServeRelayExecutor:
             task.cancel()
 
     async def _drive(
-        self, drive: _Drive, handoff: AdmissionHandoff, request_payload: str
+        self, drive: _Drive, handoff: AdmissionHandoff, envelope: ServeRequestEnvelope
     ) -> None:
         try:
-            await drive.session.send_wire(
+            await drive.session.send_body_wire(
                 KIND_BOOTSTRAP,
+                envelope.body,
                 handoff=handoff.model_dump(mode="json"),
-                request=request_payload,
+                request=envelope.header_fields(),
             )
-            ack = await drive.session.recv_wire(self._stream_deadline)
-            if not self._handle_ack(drive, ack):
+            ack = await drive.session.recv_body_wire(self._stream_deadline)
+            if not self._handle_ack(drive, ack[0] if ack is not None else None):
                 return
             try:
                 auth = await asyncio.wait_for(
@@ -245,20 +247,25 @@ class ServeRelayExecutor:
 
     async def _stream(self, drive: _Drive) -> None:
         while True:
-            msg = await drive.session.recv_wire(self._stream_deadline)
-            if msg is None:
+            received = await drive.session.recv_body_wire(self._stream_deadline)
+            if received is None:
                 self._control.on_outcome(self._uncertain(drive, "serve stream lost"))
                 return
+            msg, body = received
             kind = msg.get("kind")
             if kind == KIND_HEAD:
-                # The engine response's own status and content type, relayed opaquely so
-                # the client response carries them ahead of the streamed body.
+                # The engine response's own status and headers, relayed opaquely so the
+                # client response carries them ahead of the streamed body.
                 self._control.on_stream_head(
                     ResidentStreamHead(
                         invocation_id=drive.invocation_id,
                         session_id=drive.session.session_id,
                         status=int(msg.get("status", 200)),
-                        content_type=str(msg.get("content_type", "application/json")),
+                        headers=tuple(
+                            (str(item[0]), str(item[1]))
+                            for item in msg.get("headers") or ()
+                            if item
+                        ),
                     )
                 )
             elif kind == KIND_CHUNK:
@@ -266,7 +273,7 @@ class ServeRelayExecutor:
                     ResidentStreamChunk(
                         invocation_id=drive.invocation_id,
                         session_id=drive.session.session_id,
-                        payload=str(msg.get("data", "")),
+                        payload=body,
                     )
                 )
             elif kind == KIND_DONE:

@@ -1,9 +1,11 @@
 """The gated serve edge resolves a live binding, admits, streams, and adopts/drains.
 
 The edge authenticates and authorizes at the router; here it resolves only a live
-binding, rejects a bad method/path before any credit, mints an external-principal
-origination against the binding's own allocation family, and relays opaque frames to the
-client. Adoption is idempotent and gated by the allowed-model policy; a stop drains.
+binding, rejects a method the binding does not permit before any credit, mints an
+external-principal origination against the binding's own allocation family, and relays
+the engine's opaque frames to the client. Any path the client sends is forwarded rather
+than matched against an allowlist. Adoption is idempotent and gated by the allowed-model
+policy; a stop drains.
 """
 
 import asyncio
@@ -19,10 +21,10 @@ from server.serve import (
     ServeTerminalStatus,
     ServeTerminalStore,
 )
-from server.serve.service import BindingNotFound, MethodNotAllowed, PathNotAllowed
+from server.serve.service import BindingNotFound, MethodNotAllowed
 from server.task.v2.representations.operators import ServiceInterface
 from shared.resident.contracts import ReplicaEndpoint
-from shared.resident.wire import resident_request_digest
+from shared.resident.envelope import ServeRequestEnvelope, freeze_request_envelope
 
 
 class _FakeControl:
@@ -114,46 +116,88 @@ async def _events(result: ServeResult) -> list:
     return [ev async for ev in result.events()]
 
 
+def _envelope(
+    method: str = "POST",
+    path: str = "v1/chat/completions",
+    body: bytes = b"{}",
+    query: str = "",
+    headers: list[tuple[str, str]] | None = None,
+) -> ServeRequestEnvelope:
+    return freeze_request_envelope(
+        method=method,
+        upstream_path=path,
+        query=query,
+        headers=[("content-type", "application/json")] if headers is None else headers,
+        body=body,
+    )
+
+
 def test_submit_without_a_live_binding_raises_before_any_credit() -> None:
     control = _FakeControl()
     edge = _edge(control)
     try:
-        edge.submit("p1", "acme", "tsk-1", "POST", "v1/chat/completions", "{}")
+        edge.submit("p1", "acme", "tsk-1", _envelope())
         raise AssertionError("expected BindingNotFound")
     except BindingNotFound:
         pass
     assert control.originations == []
 
 
-def test_submit_rejects_bad_method_and_path() -> None:
+def test_submit_rejects_a_method_the_binding_does_not_permit() -> None:
     control = _FakeControl()
     edge = _edge(control)
     _bind(edge)
+    store = edge._bindings
+    store._bindings["tsk-1"] = store._bindings["tsk-1"].model_copy(
+        update={"allowed_methods": ("POST",)}
+    )
     try:
-        edge.submit("p1", "acme", "tsk-1", "GET", "v1/chat/completions", "{}")
+        edge.submit("p1", "acme", "tsk-1", _envelope(method="GET"))
         raise AssertionError("expected MethodNotAllowed")
     except MethodNotAllowed:
         pass
-    try:
-        edge.submit("p1", "acme", "tsk-1", "POST", "v1/embeddings", "{}")
-        raise AssertionError("expected PathNotAllowed")
-    except PathNotAllowed:
-        pass
     assert control.originations == []
+
+
+def test_submit_forwards_any_engine_path_rather_than_an_allowlist() -> None:
+    # The binding's interface selects the adopted family; it must not restrict which
+    # engine endpoint the client may drive, or a transparent proxy is not transparent.
+    control = _FakeControl()
+    edge = _edge(control)
+    _bind(edge)
+    for method, path in (
+        ("GET", "v1/models"),
+        ("POST", "v1/responses"),
+        ("POST", "v1/messages"),
+        ("POST", "v1/embeddings"),
+    ):
+        edge.submit("p1", "acme", "tsk-1", _envelope(method=method, path=path))
+    assert [o.envelope.method for o in control.originations] == [
+        "GET",
+        "POST",
+        "POST",
+        "POST",
+    ]
+    assert [o.envelope.path for o in control.originations] == [
+        "/v1/models",
+        "/v1/responses",
+        "/v1/messages",
+        "/v1/embeddings",
+    ]
 
 
 def test_submit_originates_an_external_subject_against_the_binding_family() -> None:
     control = _FakeControl()
     edge = _edge(control)
     _bind(edge)
-    body = '{"messages": []}'
-    edge.submit("p1", "acme", "tsk-1", "POST", "v1/chat/completions", body)
+    envelope = _envelope(body=b'{"messages": []}')
+    edge.submit("p1", "acme", "tsk-1", envelope)
     assert len(control.originations) == 1
     orig = control.originations[0]
     assert orig.subject.kind is InvocationSubjectKind.EXTERNAL
     assert orig.subject.id == "p1" and orig.subject.tenant == "acme"
     assert orig.family == "serve/tsk-1"
-    assert orig.profile.descriptor_digest == resident_request_digest(body)
+    assert orig.profile.descriptor_digest == envelope.digest()
 
 
 def test_submit_streams_teed_frames_then_terminates() -> None:
@@ -162,61 +206,66 @@ def test_submit_streams_teed_frames_then_terminates() -> None:
     _bind(edge)
 
     async def run() -> None:
-        result = edge.submit("p1", "acme", "tsk-1", "POST", "v1/chat/completions", "{}")
+        result = edge.submit("p1", "acme", "tsk-1", _envelope())
         delivery = control.originations[0].delivery
-        delivery.tee("he")
-        delivery.tee("llo")
+        delivery.tee(b"he")
+        delivery.tee(b"llo")
         delivery.complete()
         events = await _events(result)
-        assert [e.payload for e in events if e.kind == "chunk"] == ["he", "llo"]
+        assert [e.payload for e in events if e.kind == "chunk"] == [b"he", b"llo"]
         assert events[-1].kind == "done"
 
     asyncio.run(run())
 
 
-def test_head_event_precedes_chunks_and_carries_status_and_content_type() -> None:
+def test_head_event_precedes_chunks_and_carries_status_and_headers() -> None:
     control = _FakeControl()
     edge = _edge(control)
     _bind(edge)
 
     async def run() -> None:
-        result = edge.submit(
-            "p1", "acme", "tsk-1", "POST", "v1/chat/completions", '{"stream": true}'
-        )
+        result = edge.submit("p1", "acme", "tsk-1", _envelope(body=b'{"stream": true}'))
         delivery = control.originations[0].delivery
-        delivery.head(200, "text/event-stream")
-        delivery.tee("data: {}\n\n")
+        delivery.head(
+            200, (("content-type", "text/event-stream"), ("x-request-id", "r1"))
+        )
+        delivery.tee(b"data: {}\n\n")
         delivery.complete()
         events = await _events(result)
         assert events[0].kind == "head"
         assert events[0].status == 200
-        assert events[0].content_type == "text/event-stream"
-        assert [e.payload for e in events if e.kind == "chunk"] == ["data: {}\n\n"]
+        assert events[0].headers == (
+            ("content-type", "text/event-stream"),
+            ("x-request-id", "r1"),
+        )
+        assert [e.payload for e in events if e.kind == "chunk"] == [b"data: {}\n\n"]
 
     asyncio.run(run())
 
 
-def test_router_sets_the_client_status_and_content_type_from_the_head() -> None:
+def test_router_sets_the_client_status_and_headers_from_the_head() -> None:
     control = _FakeControl()
     edge = _edge(control)
     _bind(edge)
 
     async def run() -> None:
-        result = edge.submit(
-            "p1", "acme", "tsk-1", "POST", "v1/chat/completions", '{"stream": true}'
-        )
+        result = edge.submit("p1", "acme", "tsk-1", _envelope(body=b'{"stream": true}'))
         delivery = control.originations[0].delivery
-        delivery.head(200, "text/event-stream")
-        delivery.tee("data: {}\n\n")
+        delivery.head(
+            201, (("content-type", "text/event-stream"), ("x-request-id", "r1"))
+        )
+        delivery.tee(b"data: {}\n\n")
         delivery.complete()
         response = await _stream(result)
-        assert response.status_code == 200
-        assert response.media_type == "text/event-stream"
+        assert response.status_code == 201
+        # Every non-hop-by-hop engine header reaches the client, not just content type.
+        assert response.headers["content-type"] == "text/event-stream"
+        assert response.headers["x-request-id"] == "r1"
         parts = [chunk async for chunk in response.body_iterator]
-        body = "".join(
-            part if isinstance(part, str) else bytes(part).decode() for part in parts
+        body = b"".join(
+            part.encode() if isinstance(part, str) else bytes(part) for part in parts
         )
-        assert body == "data: {}\n\n"
+        assert body == b"data: {}\n\n"
 
     asyncio.run(run())
 
@@ -227,12 +276,12 @@ def test_a_non_draining_client_cannot_pin_unbounded_memory() -> None:
     _bind(edge)
 
     async def run() -> None:
-        result = edge.submit("p1", "acme", "tsk-1", "POST", "v1/chat/completions", "{}")
+        result = edge.submit("p1", "acme", "tsk-1", _envelope())
         stream = control.originations[0].delivery
         for i in range(
             stream.queue.maxsize * 3
         ):  # flood past the bound, never draining
-            stream.tee(f"f{i}")
+            stream.tee(f"f{i}".encode())
         assert stream.queue.qsize() <= stream.queue.maxsize
         stream.complete()
         events = await _events(result)
@@ -246,12 +295,12 @@ def test_client_disconnect_stops_teeing_and_records_no_terminal() -> None:
     control = _FakeControl()
     edge = _edge(control)
     _bind(edge)
-    result = edge.submit("p1", "acme", "tsk-1", "POST", "v1/chat/completions", "{}")
+    result = edge.submit("p1", "acme", "tsk-1", _envelope())
     stream = control.originations[0].delivery
-    stream.tee("early")
+    stream.tee(b"early")
     result.close_client()
     size = stream.queue.qsize()
-    stream.tee("after")
+    stream.tee(b"after")
     # The disconnect stops teeing: a later frame is dropped, not buffered.
     assert stream.queue.qsize() == size
     # Closing the client records no fenced terminal, so the disconnect never releases
@@ -265,19 +314,19 @@ def test_preflush_loss_redrives_while_postflush_loss_fails_the_client() -> None:
     _bind(edge)
 
     # A loss before any flush re-drives transparently, not failing the client.
-    edge.submit("p1", "acme", "tsk-1", "POST", "v1/chat/completions", "{}")
+    edge.submit("p1", "acme", "tsk-1", _envelope())
     control.originations[0].delivery.redrive()
     assert len(control.redrives) == 1
 
     async def postflush() -> None:
-        result = edge.submit("p1", "acme", "tsk-1", "POST", "v1/chat/completions", "{}")
+        result = edge.submit("p1", "acme", "tsk-1", _envelope())
         delivery = control.originations[1].delivery
-        delivery.tee("partial")
+        delivery.tee(b"partial")
         delivery.redrive()  # flushed: fail via the fenced terminal, do NOT re-run
         events = await _events(result)
-        assert (events[0].kind, events[0].payload) == ("chunk", "partial")
+        assert (events[0].kind, events[0].payload) == ("chunk", b"partial")
         assert events[-1].kind == "error"
-        assert all(e.payload != "partial" for e in events[1:])
+        assert all(e.payload != b"partial" for e in events[1:])
 
     asyncio.run(postflush())
     # A flushed loss terminalizes FAILED through the fenced path and does NOT re-run the
@@ -290,7 +339,7 @@ def test_a_disconnected_client_fails_rather_than_re_running_the_engine() -> None
     control = _FakeControl()
     edge = _edge(control)
     _bind(edge)
-    result = edge.submit("p1", "acme", "tsk-1", "POST", "v1/chat/completions", "{}")
+    result = edge.submit("p1", "acme", "tsk-1", _envelope())
     delivery = control.originations[0].delivery
     result.close_client()  # the client is gone
     delivery.redrive()  # a loss under a gone client fails, not re-runs the engine

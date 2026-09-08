@@ -72,10 +72,11 @@ class ResidentOpOutcome(BaseModel):
 class ResidentStreamHead(BaseModel):
     """The engine response head a task-addressed serve client receives before its body.
 
-    The replica sidecar reads the engine response's HTTP status and content type and the
-    gated edge relays them opaquely, so the client's response carries the engine's own
-    status and content type ahead of the streamed body. It is transport metadata the
-    edge forwards without interpreting; the body itself streams as opaque chunks.
+    The replica sidecar reads the engine response's HTTP status and its non-hop-by-hop
+    header fields, including repeated ones, and the gated edge relays them opaquely, so
+    the client's response carries the engine's own status and headers ahead of the
+    streamed body. It is transport metadata the edge forwards without interpreting; the
+    body itself streams as opaque chunks.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -83,7 +84,7 @@ class ResidentStreamHead(BaseModel):
     invocation_id: str
     session_id: str
     status: int
-    content_type: str
+    headers: tuple[tuple[str, str], ...] = ()
 
 
 class ResidentStreamChunk(BaseModel):
@@ -91,12 +92,13 @@ class ResidentStreamChunk(BaseModel):
 
     A task-addressed serve invocation has no continuation to resume, so the gated edge's
     relay executor tees each response frame to control as it streams and control relays
-    the opaque frame to the client unparsed. The payload is opaque bytes-as-text that
-    control and the edge never parse; neither assembles or materializes a completion.
+    the opaque frame to the client unparsed. The payload is the engine's raw response
+    bytes, which control and the edge never parse; neither assembles or materializes a
+    completion.
     """
 
     model_config = ConfigDict(frozen=True)
 
     invocation_id: str
     session_id: str
-    payload: str
+    payload: bytes

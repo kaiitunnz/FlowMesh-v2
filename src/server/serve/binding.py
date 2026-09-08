@@ -12,6 +12,8 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from shared.resident.envelope import TRANSPARENT_METHODS
+
 from ..resident.state import AdmissionProfile
 from ..task.v2.representations.operators import ServiceDependency, ServiceInterface
 from ..utils.time import now_iso
@@ -40,8 +42,10 @@ class ServeTaskResidencyBinding(BaseModel):
 
     Keyed by ``(serve_task_id, binding_generation)``. It carries the normalized service
     reference, interface, isolation, and adapter that key the reuse domain, the fixed
-    request/output bounds the caller cannot widen, and the allowed method/path the gate
-    enforces. It never records an engine URL, listener, credential, or public alias.
+    request/output bounds the caller cannot widen, and the methods the binding
+    permits. Its ``interface`` selects the family the task was adopted under; it
+    constrains neither the client's path nor its body, which the engine resolves. It
+    never records an engine URL, listener, credential, or public alias.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -55,7 +59,7 @@ class ServeTaskResidencyBinding(BaseModel):
     adapter_source: str | None = None
     engine_batch_key: str
     max_output_tokens: int | None = None
-    allowed_methods: tuple[str, ...] = ("POST",)
+    allowed_methods: tuple[str, ...] = TRANSPARENT_METHODS
     status: ServeBindingStatus = ServeBindingStatus.LIVE
     created_at: str = Field(default_factory=now_iso)
 

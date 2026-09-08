@@ -36,6 +36,7 @@ from server.resident.state import (
 )
 from server.task.v2.representations.operators import ServiceDependency
 from shared.resident.contracts import AdmissionHandoff, RouteAuthorization
+from shared.resident.envelope import freeze_request_envelope
 from shared.resident.reports import (
     ResidentBootstrapAck,
     ResidentBootstrapOutcome,
@@ -95,8 +96,8 @@ class _ServeDelivery:
         self.opened: list[tuple[str, AdmissionHandoff]] = []
         self.authorized: list[tuple[str, RouteAuthorization]] = []
         self.closed: list[str] = []
-        self.heads: list[tuple[int, str]] = []
-        self.chunks: list[str] = []
+        self.heads: list[tuple[int, tuple[tuple[str, str], ...]]] = []
+        self.chunks: list[bytes] = []
         self.terminals: list[tuple[ClaimTerminalReason, str | None]] = []
         self.completed = False
         self.failed: str | None = None
@@ -111,10 +112,10 @@ class _ServeDelivery:
     def close_session(self, session_id: str) -> None:
         self.closed.append(session_id)
 
-    def head(self, status: int, content_type: str) -> None:
-        self.heads.append((status, content_type))
+    def head(self, status: int, headers: tuple[tuple[str, str], ...]) -> None:
+        self.heads.append((status, headers))
 
-    def tee(self, payload: str) -> None:
+    def tee(self, payload: bytes) -> None:
         self.chunks.append(payload)
 
     def record_terminal(self, reason: ClaimTerminalReason, detail: str | None) -> None:
@@ -223,7 +224,13 @@ def _origination(delivery: _ServeDelivery, invocation_id: str = "inv-1"):
             binding_generation=0,
             descriptor_digest="sha-req",
         ),
-        request_payload='{"messages": []}',
+        envelope=freeze_request_envelope(
+            method="POST",
+            upstream_path="v1/chat/completions",
+            query="",
+            headers=[("content-type", "application/json")],
+            body=b'{"messages": []}',
+        ),
         delivery=delivery,
     )
 
@@ -390,14 +397,14 @@ def test_stream_chunk_tees_only_to_a_matching_session() -> None:
     session_id = svc._attempts["inv-1"].session_id
 
     svc._tee_chunk(
-        ResidentStreamChunk(invocation_id="inv-1", session_id=session_id, payload="hi")
+        ResidentStreamChunk(invocation_id="inv-1", session_id=session_id, payload=b"hi")
     )
     svc._tee_chunk(
         ResidentStreamChunk(
-            invocation_id="inv-1", session_id="rly-stale", payload="dropped"
+            invocation_id="inv-1", session_id="rly-stale", payload=b"dropped"
         )
     )
-    assert delivery.chunks == ["hi"]
+    assert delivery.chunks == [b"hi"]
 
 
 def test_stream_head_routes_only_to_a_matching_session() -> None:
@@ -412,7 +419,7 @@ def test_stream_head_routes_only_to_a_matching_session() -> None:
             invocation_id="inv-1",
             session_id=session_id,
             status=200,
-            content_type="text/event-stream",
+            headers=(("content-type", "text/event-stream"),),
         )
     )
     svc._head(
@@ -420,10 +427,10 @@ def test_stream_head_routes_only_to_a_matching_session() -> None:
             invocation_id="inv-1",
             session_id="rly-stale",
             status=500,
-            content_type="application/json",
+            headers=(("content-type", "application/json"),),
         )
     )
-    assert delivery.heads == [(200, "text/event-stream")]
+    assert delivery.heads == [(200, (("content-type", "text/event-stream"),))]
 
 
 def test_a_client_close_alone_never_releases_credit() -> None:

@@ -27,6 +27,7 @@ from shared.resident.contracts import (
     ReplicaEndpoint,
     RouteAuthorization,
 )
+from shared.resident.envelope import ServeRequestEnvelope
 from shared.resident.reports import (
     ResidentBootstrapAck,
     ResidentBootstrapOutcome,
@@ -157,11 +158,11 @@ class ServeDelivery(Protocol):
         """Cancel and forget the origin relay for one attempt's session."""
         ...
 
-    def head(self, status: int, content_type: str) -> None:
-        """Carry the engine response's status and content type to the client."""
+    def head(self, status: int, headers: tuple[tuple[str, str], ...]) -> None:
+        """Carry the engine response's status and headers to the client."""
         ...
 
-    def tee(self, payload: str) -> None:
+    def tee(self, payload: bytes) -> None:
         """Relay one authorized response frame to the client, unparsed."""
         ...
 
@@ -186,11 +187,11 @@ class ServeDelivery(Protocol):
 class ServeOrigination:
     """One authenticated task-addressed serve request driven through resident admission.
 
-    The gated edge resolves the request's live binding, holds the raw request, and
-    drives the origin relay itself; control admits the same claim against only the
-    binding's allocation ``family`` and drives the same two-phase delivery as a workflow
-    consumer. ``task_id`` and ``call_correlation`` are the invocation's worker-lane
-    correlation, fenced per invocation.
+    The gated edge resolves the request's live binding, freezes the client's transparent
+    request envelope, and drives the origin relay itself; control admits the same claim
+    against only the binding's allocation ``family`` and drives the same two-phase
+    delivery as a workflow consumer. ``task_id`` and ``call_correlation`` are the
+    invocation's worker-lane correlation, fenced per invocation.
     """
 
     invocation_id: str
@@ -201,7 +202,7 @@ class ServeOrigination:
     family: str
     dependency: ServiceDependency
     profile: AdmissionProfile
-    request_payload: str
+    envelope: ServeRequestEnvelope
     delivery: ServeDelivery
 
 
@@ -1030,7 +1031,7 @@ class ResidentCapacityControl:
             or attempt.session_id != head.session_id
         ):
             return
-        attempt.serve.head(head.status, head.content_type)
+        attempt.serve.head(head.status, head.headers)
 
     def on_stream_chunk(self, chunk: ResidentStreamChunk) -> None:
         """Tee one authorized response frame to a live serve request's client."""
