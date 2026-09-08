@@ -104,6 +104,7 @@ def build_resident_capacity(
             base_url=f"http://{host}:{port}/v1",
             model=str(serve.get("model") or ""),
             api_key=serve.get("_api_key"),
+            interface=str(serve.get("interface") or "chat"),
         )
 
     sweep_interval = cfg.idle_sweep_interval_sec if cfg.idle_retain_sec > 0 else 0.0

@@ -298,7 +298,8 @@ class TestServeLoopbackEndpoint:
         assert serve["_host"] == "127.0.0.1"
         assert serve["model"] == "m"
         # No raw routable host, listener, or credential is ever publicly exposed.
-        assert set(serve) == {"model", "_host", "_port", "_api_key"}
+        assert set(serve) == {"model", "interface", "_host", "_port", "_api_key"}
+        assert serve["interface"] == "chat"
 
     def test_result_never_carries_api_key(self, tmp_path: Path) -> None:
         spec = ServeSpecStrict(

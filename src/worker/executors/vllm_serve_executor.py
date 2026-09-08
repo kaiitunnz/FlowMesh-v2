@@ -191,9 +191,15 @@ class VLLMServeExecutor(Executor):
             # Worker-private endpoint facts ("_"-prefixed so task metadata never
             # discloses the raw loopback listener or engine key); the resident endpoint
             # probe reads them to bind the claim-gated sidecar in front of the engine.
+            interface = (
+                "embedding"
+                if (vllm_kwargs or {}).get("runner") == "pooling"
+                else "chat"
+            )
             update_payload: dict[str, Any] = {
                 "serve": {
                     "model": model_id,
+                    "interface": interface,
                     "_host": "127.0.0.1",
                     "_port": port,
                     "_api_key": api_key,

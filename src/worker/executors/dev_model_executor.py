@@ -363,11 +363,13 @@ class DevModelExecutor(Executor):
             # Worker-private endpoint facts ("_"-prefixed so task metadata never
             # discloses the raw loopback listener); the resident endpoint probe reads
             # them to bind the claim-gated sidecar in front of the endpoint.
+            interface = "embedding" if vllm.get("runner") == "pooling" else "chat"
             self.emit_update(
                 task.task_id,
                 {
                     "serve": {
                         "model": model_id,
+                        "interface": interface,
                         "_host": "127.0.0.1",
                         "_port": port,
                         "_api_key": None,

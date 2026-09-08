@@ -376,12 +376,34 @@ class TestRunLifecycle:
         serve = emit.call_args.args[1]["serve"]
         assert serve["_host"] == "127.0.0.1"
         assert serve["model"] == "dev/model"
-        # Only worker-private ("_"-prefixed) endpoint facts plus the model name; no raw
-        # routable host, public listener, or credential is ever exposed.
-        assert set(serve) == {"model", "_host", "_port", "_api_key"}
+        # Only worker-private ("_"-prefixed) endpoint facts plus the model name and
+        # served interface; no raw routable host, public listener, or credential.
+        assert set(serve) == {"model", "interface", "_host", "_port", "_api_key"}
+        assert serve["interface"] == "chat"
         assert isinstance(result, DevModelResult)
         assert result.model == "dev/model"
         assert result.port == serve["_port"]
+
+    def test_pooling_runner_serves_the_embedding_interface(
+        self, tmp_path: Path
+    ) -> None:
+        # A pooling-runner serve task serves embeddings, so it advertises the embedding
+        # interface and is adopted as an embedding allocation rather than always chat.
+        spec = DevModelSpecStrict(
+            taskType=TaskType.DEV_MODEL,
+            model=ModelConfig(
+                source=ModelSource(identifier="dev/embed"), vllm={"runner": "pooling"}
+            ),
+        )
+        task = make_worker_task_message(spec=spec, task_type=TaskType.DEV_MODEL)
+        ex = self._make_executor()
+        emit = MagicMock()
+        with (
+            patch.object(ex, "emit_update", emit),
+            patch.object(ex, "_wait_for_serve"),
+        ):
+            ex.run(task, tmp_path)
+        assert emit.call_args.args[1]["serve"]["interface"] == "embedding"
 
     def test_binds_loopback_only(self, tmp_path: Path) -> None:
         spec = DevModelSpecStrict(taskType=TaskType.DEV_MODEL)
