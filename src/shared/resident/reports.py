@@ -70,12 +70,12 @@ class ResidentOpOutcome(BaseModel):
 
 
 class ResidentStreamChunk(BaseModel):
-    """One authorized response frame teed to a live ingress request's client.
+    """One authorized response frame teed to a live task-addressed serve client.
 
-    An ingress request has no continuation to resume, so the origin worker tees each
-    response frame to control as it streams — in addition to assembling and
-    materializing the completion — and control relays the opaque frame to the client
-    unparsed. The payload is opaque bytes-as-text; control and ingress never parse it.
+    A task-addressed serve invocation has no continuation to resume, so the gated edge's
+    relay executor tees each response frame to control as it streams and control relays
+    the opaque frame to the client unparsed. The payload is opaque bytes-as-text that
+    control and the edge never parse; neither assembles or materializes a completion.
     """
 
     model_config = ConfigDict(frozen=True)

@@ -363,10 +363,10 @@ class AdmissionController:
         """Settle every non-terminal claim of an invocation from a fenced terminal fact.
 
         This is the sole normal release path for an accepted credit. A workflow
-        subject's fact is the orchestration engine's ``DS`` outcome; an ingress
-        subject's is a durable ingress-terminal fact. The controller consumes either by
-        ``invocation_id``, tolerant of the claim's source state; it never assumes a
-        ``DS`` record exists.
+        subject's fact is the orchestration engine's ``DS`` outcome; an external
+        subject's is a durable external status-terminal fact. The controller consumes
+        either by ``invocation_id``, tolerant of the claim's source state; it never
+        assumes a ``DS`` record exists.
         """
         released = False
         for claim in self._stores.claims.by_invocation(invocation_id):
