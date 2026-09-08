@@ -9,14 +9,13 @@ from concurrent.futures import Future
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 from shared.resident.reports import (
     ResidentBootstrapAck,
     ResidentOpOutcome,
 )
-from shared.schemas.command import InterruptMessage
 from shared.schemas.event import (
     Event,
     NodeEvent,
@@ -154,8 +153,8 @@ class EventMonitor:
         self._own_node_deregistered: asyncio.Event = asyncio.Event()
 
     def _validate_server_base_url(self, server_base_url: str) -> str:
-        """Validate the server's public base URL used to advertise serve-proxy
-        endpoints, falling back to a safe default instead of silently producing a broken
+        """Validate the server's public base URL used to advertise the gated serve
+        route, falling back to a safe default instead of silently producing a broken
         advertised URL."""
         fallback = "http://localhost:8000"
         try:
@@ -166,8 +165,7 @@ class EventMonitor:
         if valid:
             return server_base_url
         self._logger.error(
-            "Invalid server_base_url %r; falling back to %r for serve-proxy URL "
-            "advertisement",
+            "Invalid server_base_url %r; falling back to %r for the gated serve route",
             server_base_url,
             fallback,
         )
@@ -810,39 +808,20 @@ class EventMonitor:
     # SSH / serve forward task handling
     # ------------------------------------------------------------------ #
 
-    def _handle_port_forward_update(
-        self,
-        task_id: str,
-        worker_id: str | None,
-        payload: dict[str, Any],
-        *,
-        key: str,
-        normalize_mode: Callable[[str, str | None], str | None],
-        inject_session_id: bool,
-        strip_relay_target_after: bool,
-        on_registration_failure: Literal["fall_back_direct", "fail_task", "drop"],
-        proxy_endpoint_path: Callable[[str], str] | None = None,
+    def _handle_ssh_task_update(
+        self, task_id: str, worker_id: str | None, payload: dict[str, Any]
     ) -> dict[str, Any]:
-        """Register a port-forward relay for a task update payload."""
-        inner = payload.get(key)
+        """Register an SSH forward relay for a task update payload.
+
+        Direct and proxy modes pass through unchanged; a forward mode registers a
+        server-allocated relay port, falling back to direct if registration fails.
+        """
+        inner = payload.get("ssh")
         if not isinstance(inner, dict):
             return payload
         payload = payload.copy()
-
         mode = str(inner.get("mode") or "direct")
-        normalized_mode = normalize_mode(mode, worker_id)
-        if normalized_mode is None:
-            match on_registration_failure:
-                case "fail_task":
-                    payload.pop(key, None)
-                    self._fail_forward_task(
-                        task_id,
-                        worker_id,
-                        f"{key} access mode {mode!r} could not be served",
-                    )
-                case "drop":
-                    payload.pop(key, None)
-            return payload
+        normalized_mode = self._normalize_ssh_mode(mode, worker_id)
         if normalized_mode != mode:
             inner = inner.copy()
             inner["mode"] = normalized_mode
@@ -850,23 +829,7 @@ class EventMonitor:
                 inner.pop("directHost", None)
                 inner.pop("directPort", None)
                 inner.pop("_relay_target", None)
-            payload[key] = inner
-
-        if normalized_mode == "proxy" and proxy_endpoint_path is not None:
-            inner = inner.copy()
-            parsed_base = urlparse(self._server_base_url)
-            inner["mode"] = "proxy"
-            inner["host"] = parsed_base.hostname or self._server_base_url
-            if parsed_base.port is not None:
-                inner["port"] = parsed_base.port
-            else:
-                inner.pop("port", None)
-            inner["url"] = (
-                f"{self._server_base_url.rstrip('/')}{proxy_endpoint_path(task_id)}"
-            )
-            payload[key] = inner
-            return payload
-
+            payload["ssh"] = inner
         if normalized_mode != "forward":
             return payload
 
@@ -874,87 +837,24 @@ class EventMonitor:
         assert worker_id is not None
         record = self._runtime.get_record(task_id)
         try:
-            forward_input = inner.copy()
-            if inject_session_id:
-                forward_input.setdefault("session_id", task_id)
             inner = self._port_forward.register_port_forward(
                 task_id,
                 record.workflow_id if record is not None else None,
                 worker_id,
-                forward_input,
+                inner.copy(),
             )
-            if inject_session_id:
-                inner.pop("session_id", None)
-            if strip_relay_target_after:
-                inner.pop("_relay_target", None)
         except Exception as exc:
             self._logger.warning(
-                "Failed to register forward target for task %s (%s): %s",
-                task_id,
-                key,
-                exc,
+                "Failed to register ssh forward target for task %s: %s", task_id, exc
             )
-            match on_registration_failure:
-                case "fall_back_direct":
-                    inner = inner.copy()
-                    inner["mode"] = "direct"
-                    inner.pop("_relay_target", None)
-                    payload[key] = inner
-                    return payload
-                case "fail_task":
-                    payload.pop(key, None)
-                    self._fail_forward_task(
-                        task_id,
-                        worker_id,
-                        f"failed to register {key} forward target: {exc}",
-                    )
-                case "drop":
-                    payload.pop(key, None)
+            inner = inner.copy()
+            inner["mode"] = "direct"
+            inner.pop("_relay_target", None)
+            payload["ssh"] = inner
             return payload
 
-        payload[key] = inner
+        payload["ssh"] = inner
         return payload
-
-    def _fail_forward_task(
-        self, task_id: str, worker_id: str | None, reason: str
-    ) -> None:
-        """Fail a task whose forward endpoint was dropped with no fallback and stop its
-        executor to free the resources it holds."""
-        self._dispatcher.fail_task(
-            task_id, reason, worker_id=worker_id, payload={"error": reason}
-        )
-        if not worker_id:
-            return
-        worker = self._worker_registry.get_worker(worker_id)
-        if worker is None:
-            return
-        try:
-            self._worker_registry.publish_interrupt(
-                worker,
-                InterruptMessage(task_id=task_id, worker_id=worker.id, reason=reason),
-            )
-        except Exception as exc:
-            self._logger.warning(
-                "Failed to publish interrupt for task %s on worker %s: %s",
-                task_id,
-                worker_id,
-                exc,
-            )
-
-    def _handle_ssh_task_update(
-        self, task_id: str, worker_id: str | None, payload: dict[str, Any]
-    ) -> dict[str, Any]:
-        """Handle SSH forward registration for task updates."""
-        return self._handle_port_forward_update(
-            task_id,
-            worker_id,
-            payload,
-            key="ssh",
-            normalize_mode=self._normalize_ssh_mode,
-            inject_session_id=False,
-            strip_relay_target_after=False,
-            on_registration_failure="fall_back_direct",
-        )
 
     def _handle_serve_task_update(
         self, task_id: str, worker_id: str | None, payload: dict[str, Any]
