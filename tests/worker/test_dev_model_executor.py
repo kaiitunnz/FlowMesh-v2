@@ -74,7 +74,6 @@ class TestDevModelSpec:
         assert spec.model is None
         assert spec.model_name is None
         assert spec.ttlSeconds is None
-        assert spec.accessMode is None
         assert spec.port is None
 
     def test_spec_with_all_fields(self) -> None:
@@ -82,17 +81,15 @@ class TestDevModelSpec:
             taskType=TaskType.DEV_MODEL,
             model=ModelConfig(source=ModelSource(identifier="dev/model")),
             ttlSeconds=60.0,
-            accessMode="forward",
             port=8123,
         )
         assert spec.model_name == "dev/model"
         assert spec.ttlSeconds == 60.0
-        assert spec.accessMode == "forward"
         assert spec.port == 8123
 
-    def test_invalid_access_mode(self) -> None:
+    def test_rejects_removed_access_mode_field(self) -> None:
         with pytest.raises(Exception):
-            DevModelSpecStrict(taskType=TaskType.DEV_MODEL, accessMode="invalid")  # type: ignore[arg-type]
+            DevModelSpecStrict(taskType=TaskType.DEV_MODEL, accessMode="forward")  # type: ignore[call-arg]
 
     def test_ttl_must_be_positive(self) -> None:
         with pytest.raises(Exception):
@@ -377,19 +374,17 @@ class TestRunLifecycle:
             result = ex.run(task, tmp_path)
 
         serve = emit.call_args.args[1]["serve"]
-        assert serve["mode"] == "forward"
-        assert serve["host"] == "127.0.0.1"
-        assert serve["_relay_target"] == {"host": "127.0.0.1", "port": serve["port"]}
+        assert serve["_host"] == "127.0.0.1"
         assert serve["model"] == "dev/model"
+        # Only worker-private ("_"-prefixed) endpoint facts plus the model name; no raw
+        # routable host, public listener, or credential is ever exposed.
+        assert set(serve) == {"model", "_host", "_port", "_api_key"}
         assert isinstance(result, DevModelResult)
         assert result.model == "dev/model"
-        assert result.port == serve["port"]
-        assert "api_key" not in serve
+        assert result.port == serve["_port"]
 
-    def test_direct_mode_binds_all_interfaces_and_advertises_fqdn(
-        self, tmp_path: Path
-    ) -> None:
-        spec = DevModelSpecStrict(taskType=TaskType.DEV_MODEL, accessMode="direct")
+    def test_binds_loopback_only(self, tmp_path: Path) -> None:
+        spec = DevModelSpecStrict(taskType=TaskType.DEV_MODEL)
         task = make_worker_task_message(spec=spec, task_type=TaskType.DEV_MODEL)
         ex = self._make_executor()
         emit = MagicMock()
@@ -399,16 +394,14 @@ class TestRunLifecycle:
             bind["host"] = ex._server.server_address[0]  # type: ignore[union-attr]
 
         with (
-            patch("socket.getfqdn", return_value="worker-1.cluster.local"),
             patch.object(ex, "emit_update", emit),
             patch.object(ex, "_wait_for_serve", side_effect=capture_bind),
         ):
             ex.run(task, tmp_path)
 
         serve = emit.call_args.args[1]["serve"]
-        assert bind["host"] == "0.0.0.0"
-        assert serve["mode"] == "direct"
-        assert serve["host"] == "worker-1.cluster.local"
+        assert bind["host"] == "127.0.0.1"
+        assert serve["_host"] == "127.0.0.1"
 
     def test_run_serves_canned_endpoint_while_alive(self, tmp_path: Path) -> None:
         spec = DevModelSpecStrict(taskType=TaskType.DEV_MODEL)

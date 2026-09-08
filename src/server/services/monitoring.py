@@ -9,13 +9,12 @@ from concurrent.futures import Future
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urlparse
 
 from shared.resident.reports import (
     ResidentBootstrapAck,
     ResidentOpOutcome,
-    ResidentStreamChunk,
 )
 from shared.schemas.command import InterruptMessage
 from shared.schemas.event import (
@@ -27,6 +26,7 @@ from shared.schemas.event import (
 )
 from shared.schemas.result import result_file_path
 from shared.schemas.worker import WorkerStatus
+from shared.tasks import TaskType
 from shared.tools.contract import AgentModelTurnProposal, MediatedOperationOutcome
 from shared.utils.manifest import RESULTS_NAME, sync_manifest
 
@@ -67,6 +67,9 @@ from .metrics import MetricsRecorder
 from .port_forward import PortForwardService
 from .watchdog import WorkerWatchdog
 
+if TYPE_CHECKING:
+    from ..serve import GatedServe
+
 TASK_EVENT_HANDLER_MAX_ATTEMPTS = 5
 
 
@@ -106,7 +109,7 @@ class EventMonitor:
         metrics_recorder: MetricsRecorder,
         watchdog: WorkerWatchdog,
         ssh_proxy_enabled: bool = False,
-        serve_proxy_enabled: bool = False,
+        gated_serve: "GatedServe | None" = None,
         port_forward: PortForwardService | None = None,
         results_dir: Path | str = ".",
         log_stream_ttl_sec: int = 0,
@@ -124,7 +127,7 @@ class EventMonitor:
         self._metrics = metrics_recorder
         self._watchdog = watchdog
         self._ssh_proxy_enabled = ssh_proxy_enabled
-        self._serve_proxy_enabled = serve_proxy_enabled
+        self._gated_serve = gated_serve
         self._port_forward = port_forward
         self._results_dir = Path(results_dir)
         self._log_stream_ttl_sec = max(0, int(log_stream_ttl_sec))
@@ -459,8 +462,10 @@ class EventMonitor:
                     event.task_id, event.worker_id, payload
                 )
                 self._runtime.mark_updated(event.task_id, payload)
+                self._maybe_adopt_serve(event.task_id)
             case "TASK_SUCCEEDED":
                 self._unregister_port_forward(event.task_id)
+                self._maybe_drain_serve(event.task_id)
                 self._metrics.record_task_event(event)
                 merged_children = self._runtime.get_merged_children(event.task_id)
                 if merged_children:
@@ -562,6 +567,7 @@ class EventMonitor:
                     return
 
                 self._unregister_port_forward(event.task_id)
+                self._maybe_drain_serve(event.task_id)
                 self._metrics.record_task_event(event)
                 impacted, merged_children, usages = self._runtime.mark_failed(
                     event.task_id,
@@ -603,6 +609,7 @@ class EventMonitor:
                 self._maybe_close_workflow_log_stream(event.task_id)
             case "TASK_CANCELLED":
                 self._unregister_port_forward(event.task_id)
+                self._maybe_drain_serve(event.task_id)
                 self._metrics.record_task_event(event)
                 usages = self._runtime.mark_cancelled(
                     event.task_id,
@@ -745,10 +752,6 @@ class EventMonitor:
             case "RESIDENT_OP_OUTCOME":
                 self._runtime.on_resident_outcome(
                     ResidentOpOutcome.model_validate(event.payload["outcome"])
-                )
-            case "RESIDENT_STREAM_CHUNK":
-                self._runtime.on_resident_stream_chunk(
-                    ResidentStreamChunk.model_validate(event.payload["chunk"])
                 )
             case "UNREGISTER":
                 worker_id = (event.worker_id or "").strip()
@@ -952,18 +955,45 @@ class EventMonitor:
     def _handle_serve_task_update(
         self, task_id: str, worker_id: str | None, payload: dict[str, Any]
     ) -> dict[str, Any]:
-        """Handle serve forward/proxy registration for task updates."""
-        return self._handle_port_forward_update(
-            task_id,
-            worker_id,
-            payload,
-            key="serve",
-            normalize_mode=self._normalize_serve_mode,
-            inject_session_id=True,
-            strip_relay_target_after=True,
-            on_registration_failure="fail_task",
-            proxy_endpoint_path=lambda tid: f"/api/v1/serve/tasks/{tid}",
+        """Advertise the gated task-ID route for a serve task's endpoint update.
+
+        The raw listener host/port and engine key stay worker-private (``_``-prefixed);
+        the only public serve endpoint is the FlowMesh-authenticated, claim-gated route.
+        """
+        inner = payload.get("serve") if isinstance(payload, dict) else None
+        if not isinstance(inner, dict) or not inner.get("_port"):
+            return payload
+        payload = payload.copy()
+        inner = inner.copy()
+        inner["url"] = (
+            f"{self._server_base_url.rstrip('/')}/api/v1/serve/tasks/{task_id}"
         )
+        payload["serve"] = inner
+        return payload
+
+    def _maybe_adopt_serve(self, task_id: str) -> None:
+        """Adopt a serve task as a standing resident allocation once its endpoint is up.
+
+        Idempotent: the gated edge skips a task that already has a live binding, so
+        repeated updates do not re-adopt. Runs after the record's endpoint is stored so
+        the adoption probe reads it.
+        """
+        if self._gated_serve is None:
+            return
+        record = self._runtime.get_record(task_id)
+        if record is None or record.task_type != TaskType.SERVE or record.resident:
+            return
+        serve = record.latest_update.get("serve") if record.latest_update else None
+        if isinstance(serve, dict) and serve.get("_port"):
+            self._gated_serve.adopt(task_id)
+
+    def _maybe_drain_serve(self, task_id: str) -> None:
+        """Drain a stopped serve task's binding and standing replica on its terminal."""
+        if self._gated_serve is None:
+            return
+        record = self._runtime.get_record(task_id)
+        if record is not None and record.task_type == TaskType.SERVE:
+            self._gated_serve.drain(task_id)
 
     def _track_pending(self, fut: Future[Any]) -> None:
         fut.add_done_callback(self._untrack_pending)
@@ -1142,44 +1172,6 @@ class EventMonitor:
                 return "proxy"
             return "direct"
         return "direct"
-
-    def _normalize_serve_mode(self, mode: str, worker_id: str | None) -> str | None:
-        """Normalize the serve access mode.
-
-        Returns None when the endpoint cannot be served (e.g. no forward service).
-        """
-        if mode == "direct":
-            return "direct"
-        if mode == "forward":
-            if not worker_id:
-                self._logger.warning(
-                    "Serve task with forward mode has no worker_id; dropping endpoint"
-                )
-                return None
-            if self._port_forward is None:
-                self._logger.error(
-                    "Serve task requested forward mode but no port-forward service "
-                    "is configured; dropping endpoint"
-                )
-                return None
-            return "forward"
-        if mode == "proxy":
-            if not worker_id:
-                self._logger.warning(
-                    "Serve task with proxy mode has no worker_id; dropping endpoint"
-                )
-                return None
-            if not self._serve_proxy_enabled:
-                self._logger.error(
-                    "Serve task requested proxy mode but serve proxy is disabled; "
-                    "dropping endpoint"
-                )
-                return None
-            return "proxy"
-        self._logger.warning(
-            "Unsupported serve access mode %r; dropping endpoint", mode
-        )
-        return None
 
     # ------------------------------------------------------------------ #
     # Helper methods

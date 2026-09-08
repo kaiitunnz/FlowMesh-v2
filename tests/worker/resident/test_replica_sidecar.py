@@ -16,6 +16,7 @@ from shared.resident.contracts import (
     ReplicaEndpoint,
     RouteAuthorization,
 )
+from shared.resident.session import ResidentRelaySession, ResidentSessionRole
 from shared.resident.wire import (
     KIND_ACK,
     KIND_CHUNK,
@@ -25,7 +26,6 @@ from shared.resident.wire import (
 )
 from worker.resident.engine import EngineResponse
 from worker.resident.replica_sidecar import ResidentReplicaSidecar
-from worker.resident.session import ResidentRelaySession, ResidentSessionRole
 
 _CHUNKS = ["resi", "dent ", "reply"]
 

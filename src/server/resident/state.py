@@ -105,6 +105,9 @@ class AdmissionProfile(BaseModel):
     max_output_tokens: int | None = None
     adapter_ref: str | None = None
     adapter_source: str | None = None
+    serve_task_id: str | None = None
+    binding_generation: int | None = None
+    descriptor_digest: str | None = None
 
 
 class ClaimCredit(BaseModel):
@@ -196,6 +199,8 @@ class ReplicaIncarnation(BaseModel):
     listener_generation: int = 0
     healthy: bool = False
     serve_task_id: str | None = None
+    binding_generation: int | None = None
+    standing: bool = False
     worker_id: str | None = None
     lease_id: str | None = None
     report_epoch: int = 0
@@ -236,16 +241,17 @@ class InvocationSubjectKind(StrEnum):
     """Who owns an invocation."""
 
     WORKFLOW = "workflow"
-    INGRESS = "ingress"
+    EXTERNAL = "external"
 
 
 class InvocationSubject(BaseModel):
     """The tenant-scoped owner of an invocation.
 
     A workflow subject links the request to its submitting workflow instance and
-    settles its terminal in ``DS``; an ingress subject is an authenticated external
-    principal that settles its terminal as a durable ingress fact. The tenant scopes
-    admission and the claim gate without requiring a workflow activation.
+    settles its terminal in ``DS``; an external subject is an authenticated external
+    principal reaching a task-addressed gated serve surface, which settles its terminal
+    as a durable external status fact. The tenant scopes admission and the claim gate
+    without requiring a workflow activation.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -260,7 +266,7 @@ class InvocationRequest(BaseModel):
 
     It holds the admission profile, the tenant-scoped subject, and the request context.
     A workflow subject links to ``DS`` only by ``invocation_id`` and fenced outcomes; an
-    ingress subject has no ``DS`` state. Retries reuse this identity.
+    external subject has no ``DS`` state. Retries reuse this identity.
     """
 
     model_config = ConfigDict(frozen=True)

@@ -22,7 +22,6 @@ if __name__ == "__main__" and __package__ is None:
 
 from shared._version import FLOWMESH_RELEASE_VERSION
 from shared.outcome import ManifestRef, OutcomeCarrier
-from shared.tasks.worker_message import WorkerStatus
 
 from .auth import reconcile_resources, resolve_system_principal
 from .clients import RedisClient
@@ -30,12 +29,6 @@ from .clients.redis import resident_relay_client
 from .config import NodeRole, ServerConfig
 from .dispatcher.factory import create_dispatcher
 from .hooks import register
-from .ingress import (
-    AliasCatalog,
-    InferenceIngress,
-    IngressTerminalStore,
-    PrincipalQuota,
-)
 from .network.rendezvous import RootCursorStore, RootRendezvousBridge
 from .network.reverse_relay import (
     BinaryRedis,
@@ -48,6 +41,14 @@ from .registries.node import NodeRegistry
 from .registries.resident import ResidentRegistry
 from .resident.wiring import build_resident_capacity, wire_worker_delivery
 from .routers import docs, health, v1
+from .serve import (
+    SERVE_EDGE_STREAM_ID,
+    GatedServe,
+    ServeBindingStore,
+    ServeRelayExecutor,
+    ServeSnapshot,
+    ServeTerminalStore,
+)
 from .services.agent_model_gateway import (
     AgentModelGateway,
     ResolvedGatewayBinding,
@@ -155,10 +156,14 @@ AGENT_MODEL_GATEWAY = None
 FABRIC_TOOL_BROKER = None
 RESIDENT_CONTROL = None
 RESIDENT_REGISTRY = None
-INFERENCE_INGRESS = None
+GATED_SERVE = None
+SERVE_BINDINGS = None
 NETWORK_PLANE = None
 RESIDENT_BRIDGE = None
 RESIDENT_BRIDGE_TASK = None
+# The root node id, resolved after the supervisor handshake; the gated serve edge reads
+# it lazily to fence its transport-only route origin.
+ROOT_NODE_ID: str | None = None
 
 
 if IS_ROOT_NODE:
@@ -219,7 +224,6 @@ if IS_ROOT_NODE:
             originate=RESIDENT_CONTROL.originate,
             on_ack=RESIDENT_CONTROL.on_bootstrap_ack,
             on_outcome=RESIDENT_CONTROL.on_outcome,
-            on_stream_chunk=RESIDENT_CONTROL.on_stream_chunk,
         )
 
     _relay_redis: BinaryRedis | None = None
@@ -265,39 +269,44 @@ if IS_ROOT_NODE:
             runtime=RUNTIME,
             sessions=RelaySessionStore(_relay_redis),
             resident_cfg=config.orchestration.resident,
+            root_node_id=lambda: ROOT_NODE_ID,
+            edge_id=SERVE_EDGE_STREAM_ID,
         )
 
     if (
-        config.orchestration.inference_ingress.enabled
-        and RESIDENT_CONTROL is not None
+        RESIDENT_CONTROL is not None
         and RESIDENT_REGISTRY is not None
-        and WORKER_REGISTRY is not None
+        and _relay_redis is not None
     ):
-        ingress_cfg = config.orchestration.inference_ingress
-        ingress_registry = RESIDENT_REGISTRY
-        ingress_workers = WORKER_REGISTRY
-        ingress_terminals = IngressTerminalStore()
-        if (stored := ingress_registry.load_ingress_snapshot()) is not None:
-            ingress_terminals.load_snapshot(stored)
+        serve_registry = RESIDENT_REGISTRY
+        SERVE_BINDINGS = ServeBindingStore()
+        serve_terminals = ServeTerminalStore()
+        if (stored := serve_registry.load_serve_snapshot()) is not None:
+            SERVE_BINDINGS.load_snapshot(stored.bindings)
+            serve_terminals.load_snapshot(stored.terminals)
 
-        def _persist_ingress() -> None:
-            ingress_registry.save_ingress_snapshot(ingress_terminals.to_snapshot())
+        _serve_bindings = SERVE_BINDINGS
 
-        _LIVE_WORKER_STATES = (WorkerStatus.IDLE, WorkerStatus.BUSY)
+        def _persist_serve() -> None:
+            serve_registry.save_serve_snapshot(
+                ServeSnapshot(
+                    bindings=_serve_bindings.to_snapshot(),
+                    terminals=serve_terminals.to_snapshot(),
+                )
+            )
 
-        def _select_ingress_deputy() -> str | None:
-            for info in ingress_workers.list_workers():
-                if not info.stale and info.status in _LIVE_WORKER_STATES:
-                    return info.id
-            return None
-
-        INFERENCE_INGRESS = InferenceIngress(
-            catalog=AliasCatalog.from_json(ingress_cfg.aliases_json),
-            quota=PrincipalQuota(ingress_cfg.max_concurrent_per_principal),
-            terminals=ingress_terminals,
+        SERVE_RELAY = ServeRelayExecutor(
+            relay_redis=_relay_redis,
+            edge_id=SERVE_EDGE_STREAM_ID,
             control=RESIDENT_CONTROL,
-            select_worker=_select_ingress_deputy,
-            persist=_persist_ingress,
+            logger=logger,
+        )
+        GATED_SERVE = GatedServe(
+            bindings=SERVE_BINDINGS,
+            terminals=serve_terminals,
+            control=RESIDENT_CONTROL,
+            relay=SERVE_RELAY,
+            persist=_persist_serve,
             logger=logger,
         )
 
@@ -350,7 +359,7 @@ if IS_ROOT_NODE:
         metrics_recorder=METRICS_RECORDER,
         watchdog=WATCHDOG,
         ssh_proxy_enabled=config.port_forward.ssh_proxy_enabled,
-        serve_proxy_enabled=config.port_forward.serve_proxy_enabled,
+        gated_serve=GATED_SERVE,
         port_forward=PORT_FORWARD_SERVICE,
         results_dir=RESULTS_DIR,
         log_stream_ttl_sec=config.log_stream.ttl_sec,
@@ -535,12 +544,15 @@ async def _lifespan(_: FastAPI):
         # --- Root-only startup ---
         if IS_ROOT_NODE:
             await rehydrate_root_state(
-                RUNTIME, RESIDENT_CONTROL, RESIDENT_REGISTRY, INFERENCE_INGRESS
+                RUNTIME, RESIDENT_CONTROL, RESIDENT_REGISTRY, GATED_SERVE
             )
             if RESIDENT_BRIDGE is not None and NODE_REGISTRY is not None:
+                edge_ids = (SERVE_EDGE_STREAM_ID,) if GATED_SERVE is not None else ()
                 app.state.resident_bridge_task = start_resident_bridge_pump(
-                    RESIDENT_BRIDGE, NODE_REGISTRY, logger
+                    RESIDENT_BRIDGE, NODE_REGISTRY, logger, edge_ids
                 )
+            if GATED_SERVE is not None:
+                GATED_SERVE.relay.start(asyncio.get_running_loop())
             if PORT_FORWARD_SERVICE is not None:
                 await PORT_FORWARD_SERVICE.start()
             _start_root_threads()
@@ -552,6 +564,8 @@ async def _lifespan(_: FastAPI):
             await SUPERVISOR.start(system_principal)
 
             def _on_node_id_change(new_node_id: str) -> None:
+                global ROOT_NODE_ID
+                ROOT_NODE_ID = new_node_id
                 app.state.node_id = new_node_id
                 # Tell EventMonitor which node this server belongs to so that it can
                 # wait for the supervisor's SV_UNREGISTER event on shutdown.
@@ -589,6 +603,8 @@ async def _lifespan(_: FastAPI):
                     await _bridge_task
                 except (asyncio.CancelledError, Exception):
                     pass
+            if GATED_SERVE is not None:
+                await GATED_SERVE.relay.stop()
             if RESIDENT_CONTROL is not None:
                 RESIDENT_CONTROL.shutdown()
             if AGENT_MODEL_GATEWAY is not None:
@@ -627,9 +643,9 @@ app.state.event_monitor = EVENT_MONITOR
 app.state.port_forward = PORT_FORWARD_SERVICE
 app.state.ssh_audit = SSH_AUDIT_SERVICE
 app.state.ssh_proxy_enabled = config.port_forward.ssh_proxy_enabled and IS_ROOT_NODE
-app.state.serve_proxy_enabled = config.port_forward.serve_proxy_enabled and IS_ROOT_NODE
 app.state.resident_control = RESIDENT_CONTROL
-app.state.inference_ingress = INFERENCE_INGRESS
+app.state.gated_serve = GATED_SERVE
+app.state.serve_bindings = SERVE_BINDINGS
 app.state.network_plane = NETWORK_PLANE
 app.state.content_store = CONTENT_STORE
 # Started in lifespan on the root node when the resident relay bridge is enabled.
@@ -652,7 +668,6 @@ if IS_ROOT_NODE:
     app.include_router(v1.ssh.router, prefix=v1_prefix)
     app.include_router(v1.serve.router, prefix=v1_prefix)
     app.include_router(v1.resident.router, prefix=v1_prefix)
-    app.include_router(v1.inference.router, prefix=v1_prefix)
     app.include_router(v1.network.router, prefix=v1_prefix)
     app.include_router(v1.system.router, prefix=v1_prefix)
     app.include_router(v1.traces.router, prefix=v1_prefix)

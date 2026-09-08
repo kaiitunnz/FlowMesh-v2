@@ -15,7 +15,6 @@ from .n8n_parser import translate_n8n_workflow
 
 _ALLOWED_TASK_TYPES = ", ".join(member.value for member in TaskType)
 _ENABLE_SERVER_SSH_PROXY = parse_bool_env("ENABLE_SERVER_SSH_PROXY", True)
-_ENABLE_SERVER_SERVE_PROXY = parse_bool_env("ENABLE_SERVER_SERVE_PROXY", True)
 _ENABLE_SERVER_PORT_FORWARD = parse_bool_env("ENABLE_SERVER_PORT_FORWARD", True)
 
 
@@ -234,7 +233,6 @@ def _build_task_template(
             raise _unsupported_task_type_error(context, task_type) from exc
         raise ValueError(f"Invalid task payload{context}: {exc}") from exc
     _validate_ssh_access_mode(task, context)
-    _validate_serve_access_mode(task, context)
     try:
         task.spec.validate_dispatchable()
     except ValueError as exc:
@@ -707,22 +705,6 @@ def _validate_ssh_access_mode(task: TaskEnvelopeTemplate, context: str) -> None:
     if access_mode == "forward" and not _ENABLE_SERVER_PORT_FORWARD:
         raise ValueError(
             f"Invalid task payload{context}: SSH accessMode 'forward' "
-            "is disabled on this server"
-        )
-
-
-def _validate_serve_access_mode(task: TaskEnvelopeTemplate, context: str) -> None:
-    if task.spec.taskType != TaskType.SERVE:
-        return
-    access_mode = task.spec.accessMode or "direct"
-    if access_mode == "proxy" and not _ENABLE_SERVER_SERVE_PROXY:
-        raise ValueError(
-            f"Invalid task payload{context}: serve accessMode 'proxy' "
-            "is disabled on this server"
-        )
-    if access_mode == "forward" and not _ENABLE_SERVER_PORT_FORWARD:
-        raise ValueError(
-            f"Invalid task payload{context}: serve accessMode 'forward' "
             "is disabled on this server"
         )
 

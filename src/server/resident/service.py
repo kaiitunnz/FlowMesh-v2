@@ -22,7 +22,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from shared.resident.contracts import AdmissionHandoff, ReplicaEndpoint
+from shared.resident.contracts import (
+    AdmissionHandoff,
+    ReplicaEndpoint,
+    RouteAuthorization,
+)
 from shared.resident.reports import (
     ResidentBootstrapAck,
     ResidentBootstrapOutcome,
@@ -120,24 +124,44 @@ class ResidentWorkerDelivery:
     sessions: ResidentSessionWriter
     directly_routable: bool = False
     forward_api_key: str | None = None
+    # The gated serve edge is the transport-only origin: it resolves its fence from the
+    # root node's registered endpoint (read lazily — the node id is known only after the
+    # supervisor handshake) and rides its own dedicated relay stream id, so a
+    # task-addressed invocation needs no caller-worker origin driver.
+    root_node_id: Callable[[], str | None] | None = None
+    edge_id: str = ""
 
 
-class IngressDelivery(Protocol):
-    """The per-request seam an ingress origination binds for its result and re-drive.
+class ServeDelivery(Protocol):
+    """The per-request seam a task-addressed serve origination binds.
 
-    An ingress invocation has no ``DS`` boundary to settle back to, so control routes an
-    ingress attempt's outcome through this handle: the authorized response frames tee to
-    the client, the fenced terminal records a durable ingress-terminal fact, and a lost
-    attempt re-drives the origination. The handle carries no engine or payload
-    semantics; it moves opaque frames the ingress relays to the client unparsed.
+    A task-addressed external invocation has no ``DS`` boundary to settle back to, and
+    the gated edge — not a caller worker — is its transport-only origin. Control routes
+    the origin transport and the outcome through this handle: it opens and authorizes
+    the edge-to-sidecar relay, teed frames relay to the client unparsed, the fenced
+    terminal records a durable external status fact, and a lost attempt re-drives the
+    origination. The handle carries no engine or payload semantics beyond relaying
+    opaque frames.
     """
+
+    def open(self, session_id: str, handoff: AdmissionHandoff) -> None:
+        """Open the origin relay to the sidecar and send the bootstrap."""
+        ...
+
+    def authorize(self, session_id: str, auth: RouteAuthorization) -> None:
+        """Deliver the post-``ACCEPTED`` route authorization to the origin relay."""
+        ...
+
+    def close_session(self, session_id: str) -> None:
+        """Cancel and forget the origin relay for one attempt's session."""
+        ...
 
     def tee(self, payload: str) -> None:
         """Relay one authorized response frame to the client, unparsed."""
         ...
 
     def record_terminal(self, reason: ClaimTerminalReason, detail: str | None) -> None:
-        """Record the fenced ingress-terminal fact before the credit releases."""
+        """Record the fenced external status fact before the credit releases."""
         ...
 
     def complete(self) -> None:
@@ -154,14 +178,14 @@ class IngressDelivery(Protocol):
 
 
 @dataclass
-class IngressOrigination:
-    """One authenticated ingress request driven through resident admission.
+class ServeOrigination:
+    """One authenticated task-addressed serve request driven through resident admission.
 
-    The ingress edge selects the designated origin worker (a placement decision, never a
-    replica or credit) and holds the raw request; control admits the same claim and
-    drives the same two-phase delivery as a workflow consumer. ``task_id`` and
-    ``call_correlation`` are the worker-lane correlation the designated worker keys its
-    private request custody by.
+    The gated edge resolves the request's live binding, holds the raw request, and
+    drives the origin relay itself; control admits the same claim against only the
+    binding's allocation ``family`` and drives the same two-phase delivery as a workflow
+    consumer. ``task_id`` and ``call_correlation`` are the invocation's worker-lane
+    correlation, fenced per invocation.
     """
 
     invocation_id: str
@@ -169,10 +193,11 @@ class IngressOrigination:
     task_id: str
     call_correlation: str
     subject: InvocationSubject
+    family: str
     dependency: ServiceDependency
     profile: AdmissionProfile
-    origin_worker: str
-    delivery: IngressDelivery
+    request_payload: str
+    delivery: ServeDelivery
 
 
 @dataclass
@@ -185,7 +210,8 @@ class _Origination:
     idempotency_key: str | None
     subject: InvocationSubject
     origin_worker: str | None
-    ingress: IngressDelivery | None = None
+    family: str | None = None
+    serve: ServeDelivery | None = None
 
 
 @dataclass
@@ -195,9 +221,10 @@ class _Attempt:
     It carries the fence subject (``origin_id``) and the relay wiring so the ack handler
     mints a matching authorization and the terminal reap relays a cancel and drops the
     session record. It is rebuilt by a re-drive after a restart, so a lost entry only
-    ignores a stale report rather than releasing a credit. An ingress attempt also
-    carries its delivery handle so the outcome tees, terminalizes, and re-drives through
-    the edge.
+    ignores a stale report rather than releasing a credit. A task-addressed serve
+    attempt carries its delivery handle (the gated edge is its transport-only origin, so
+    ``origin_worker`` is ``None``) so the outcome tees, terminalizes, and re-drives
+    through the edge.
     """
 
     task_id: str
@@ -205,14 +232,14 @@ class _Attempt:
     invocation_id: str
     idempotency_key: str | None
     session_id: str
-    origin_worker: str
+    origin_worker: str | None
     serve_worker: str
     origin_id: str
     deadline_at: str | None
     replica_id: str
     adapter_ref: str | None
     subject: InvocationSubject
-    ingress: IngressDelivery | None = None
+    serve: ServeDelivery | None = None
 
 
 class ResidentCapacityControl:
@@ -254,9 +281,6 @@ class ResidentCapacityControl:
         self._max_transient_redrives = max_transient_redrives
         self._transient_failures: dict[str, int] = {}
         self._attempts: dict[str, _Attempt] = {}
-        # Every deputy an ingress invocation injected its request into, so a re-drive
-        # onto a fresh deputy reaps them all (the request key is stable per attempt).
-        self._ingress_deputies: dict[str, set[str]] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
         self._admit_lock = asyncio.Lock()
         self._sweep_task: asyncio.Task[None] | None = None
@@ -306,48 +330,33 @@ class ResidentCapacityControl:
             return
         asyncio.run_coroutine_threadsafe(self._originate(env), self._loop)
 
-    def originate_ingress(self, request: IngressOrigination) -> None:
-        """Originate an authenticated ingress request through resident admission.
+    def originate_serve(self, request: ServeOrigination) -> None:
+        """Originate an authenticated task-addressed serve request through admission.
 
-        The ingress edge has already authenticated the principal, resolved a published
-        alias, and selected the designated origin worker; this drives the same admission
-        gate and two-phase delivery as a workflow consumer.
+        The gated edge has authenticated the principal and resolved the request's live
+        binding; this drives the same admission gate and two-phase delivery as a
+        workflow consumer, against only the binding's own allocation family, with the
+        edge itself as the transport-only origin.
         """
         if self._loop is None:
             request.delivery.fail("resident-capacity control is not running")
             return
-        asyncio.run_coroutine_threadsafe(self._originate_ingress(request), self._loop)
+        asyncio.run_coroutine_threadsafe(self._originate_serve(request), self._loop)
 
-    def inject_ingress_request(
-        self, worker_id: str, task_id: str, call_correlation: str, request: str
-    ) -> bool:
-        """Place an ingress request into its designated deputy's worker-private custody.
+    def redrive_serve(self, request: ServeOrigination) -> None:
+        """Re-drive a serve origination onto a fresh session under its held claim."""
+        if self._loop is not None:
+            self._loop.create_task(self._originate_serve(request))
 
-        The raw request rides an opaque control frame to the deputy, where the origin
-        driver peeks it like a worker that captured its own boundary; it never enters a
-        durable fact. Returns whether the frame was delivered.
-        """
-        if self._delivery is None:
-            return False
-        return self._delivery.relay(
-            worker_id,
-            "resident_request_inject",
-            {
-                "task_id": task_id,
-                "call_correlation": call_correlation,
-                "request": request,
-            },
-        )
-
-    async def _originate_ingress(self, request: IngressOrigination) -> None:
+    async def _originate_serve(self, request: ServeOrigination) -> None:
         try:
-            await self._originate_ingress_inner(request)
+            await self._originate_serve_inner(request)
         except Exception as exc:
             self._logger.exception(
-                "resident ingress origination failed for invocation %s",
+                "resident serve origination failed for invocation %s",
                 request.invocation_id,
             )
-            request.delivery.fail(f"resident ingress origination error: {exc}")
+            request.delivery.fail(f"resident serve origination error: {exc}")
 
     def on_bootstrap_ack(self, ack: ResidentBootstrapAck) -> None:
         """Consume an origin worker's bootstrap-phase report off the calling lane."""
@@ -385,19 +394,20 @@ class ResidentCapacityControl:
         """Reap both ends of a resident invocation on its fenced terminal.
 
         The origin reap cancels the origin driver's lane and drops the worker-private
-        raw request; the serve-worker reap tears down the replica's serve task and its
-        engine request; then the durable session record is deleted. Every step is best
-        effort — a gone worker simply has nothing to reap. An ingress re-drive may
-        inject the request into several deputies under one invocation, so every deputy
-        it touched is reaped, not only the last.
+        raw request (a workflow invocation), or closes the gated edge's origin relay
+        session (a task-addressed serve invocation); the serve-worker reap tears down
+        the replica's engine request; then the durable session record is deleted. Every
+        step is best effort — a gone worker or an already-closed session simply has
+        nothing to reap.
         """
-        deputies = self._ingress_deputies.pop(invocation_id, set())
         attempt = self._attempts.pop(invocation_id, None)
         if attempt is None or self._delivery is None:
             return
-        for worker in {attempt.origin_worker} | deputies:
+        if attempt.serve is not None:
+            attempt.serve.close_session(attempt.session_id)
+        elif attempt.origin_worker is not None:
             self._delivery.relay(
-                worker,
+                attempt.origin_worker,
                 "resident_reap",
                 {
                     "task_id": attempt.task_id,
@@ -435,6 +445,86 @@ class ResidentCapacityControl:
                 "adapter_name": attempt.adapter_ref,
             },
         )
+
+    def call_on_loop(self, fn: Callable[[], None]) -> None:
+        """Run a mutation on the origination loop so all store access is
+        single-threaded.
+
+        Serve adoption and drain arrive off the event-monitor thread; marshaling them
+        onto the control loop keeps every access to the family/replica/binding stores on
+        one thread with admission.
+        """
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(fn)
+        else:
+            fn()
+
+    def serve_model_allowed(self, model_ref: str) -> bool:
+        """Whether a serve task's model may be adopted as a standing resident
+        allocation.
+
+        Reuses the resident allowed-model policy; there is no alias catalog or
+        per-tenant allowlist.
+        """
+        return (
+            not self._limits.allowed_models or model_ref in self._limits.allowed_models
+        )
+
+    def probe_serve_endpoint(self, serve_task_id: str) -> ReplicaEndpoint | None:
+        """The serve task's reported engine endpoint once ready, else None."""
+        return self._probe_endpoint(serve_task_id)
+
+    def adopt_serve_replica(
+        self,
+        *,
+        serve_task_id: str,
+        family: str,
+        dependency: ServiceDependency,
+        endpoint: ReplicaEndpoint,
+        binding_generation: int,
+    ) -> None:
+        """Register a serve task's per-task family and adopt its running replica.
+
+        The family key is unique to the serve task, so admission for its requests
+        selects only its own replica. Adoption pins the replica for the serve task's
+        lifetime and never materializes from zero — the serve task already runs the
+        engine.
+        """
+        if family not in self._stores.families:
+            self._stores.families.register(
+                ServiceFamily(
+                    family=family,
+                    engine_batch_key=dependency.engine_batch_key,
+                    model_ref=dependency.service_ref,
+                    interface=dependency.interface.value,
+                    isolation=dependency.isolation,
+                    selection_strategy=self._limits.selection_strategy,
+                )
+            )
+        definition = self._stores.families.get(family)
+        if definition is None:
+            return
+        self._lifecycle.adopt_standing_replica(
+            definition,
+            serve_task_id=serve_task_id,
+            binding_generation=binding_generation,
+            endpoint=endpoint,
+        )
+        self._persist()
+
+    def drain_serve_replica(self, serve_task_id: str) -> None:
+        """Drain the standing replica of a stopped serve task, denying new claims.
+
+        Accepted claims reconcile on their own fenced terminals; the replica is not
+        idle-torn-down but drained because its serve task is ending.
+        """
+        for replica in self._stores.directory.all():
+            if (
+                replica.standing
+                and replica.serve_task_id == serve_task_id
+                and replica.state in SERVABLE_REPLICA_STATES
+            ):
+                self._lifecycle.drain(replica.replica_id)
 
     def list_service_families(self) -> list[ServiceFamily]:
         """The registered service families, for operator read access."""
@@ -551,10 +641,12 @@ class ResidentCapacityControl:
     ) -> None:
         """Admit the invocation's claim and relay its bootstrap, subject-neutrally.
 
-        A workflow subject and an ingress subject funnel through the same admission
-        gate, two-phase relay, and terminal fences; only the settle/re-drive routing
-        differs,
-        which the origination's delivery handle carries.
+        A workflow subject and a task-addressed serve subject funnel through the same
+        admission gate, two-phase relay, and terminal fences; only the origin (a caller
+        worker vs the gated edge) and the settle/re-drive routing differ, which the
+        origination's delivery handle carries. A serve subject admits against only its
+        binding's pre-registered allocation family; a workflow subject derives and
+        lazily registers its plan family.
         """
         if self._delivery is None:
             self._settle_origination_error(
@@ -562,7 +654,7 @@ class ResidentCapacityControl:
             )
             return
         model_ref = dependency.service_ref
-        family = dependency.service_family
+        family = orig.family or dependency.service_family
         existing = self._admission.active_claim(orig.invocation_id)
         if existing is not None and existing.holds_credit:
             # Resume a re-driven boundary on the in-flight claim: reissue to the same
@@ -580,7 +672,14 @@ class ResidentCapacityControl:
         else:
             if existing is not None:
                 claim = existing
-            elif not self._ensure_family(dependency):
+            elif orig.serve is not None and family not in self._stores.families:
+                # A serve family is registered when its task is adopted; a request that
+                # finds none has no live standing allocation to admit against.
+                self._settle_origination_error(
+                    orig, "serve task has no live standing allocation"
+                )
+                return
+            elif orig.serve is None and not self._ensure_family(dependency):
                 self._fail(
                     orig,
                     ProvisioningDenialReason.MODEL_NOT_ALLOWED,
@@ -608,24 +707,25 @@ class ResidentCapacityControl:
             return
         await self._relay_bootstrap(orig, claim, profile, handoff, replica)
 
-    async def _originate_ingress_inner(self, request: IngressOrigination) -> None:
+    async def _originate_serve_inner(self, request: ServeOrigination) -> None:
         orig = _Origination(
             task_id=request.task_id,
             call_correlation=request.call_correlation,
             invocation_id=request.invocation_id,
             idempotency_key=request.idempotency_key,
             subject=request.subject,
-            origin_worker=request.origin_worker,
-            ingress=request.delivery,
+            origin_worker=None,
+            family=request.family,
+            serve=request.delivery,
         )
         await self._drive_claim(orig, request.dependency, request.profile)
 
     def _settle_origination_error(self, orig: _Origination, detail: str) -> None:
         """Route an origination-phase error to its subject's settle path."""
-        if orig.ingress is not None:
-            self._finalize_ingress(
+        if orig.serve is not None:
+            self._finalize_serve(
                 orig.invocation_id,
-                orig.ingress,
+                orig.serve,
                 ClaimTerminalReason.FAILED,
                 detail,
                 success=False,
@@ -633,16 +733,16 @@ class ResidentCapacityControl:
         else:
             self._settle(orig.task_id, orig.call_correlation, None, error=detail)
 
-    def _finalize_ingress(
+    def _finalize_serve(
         self,
         invocation_id: str,
-        delivery: IngressDelivery,
+        delivery: ServeDelivery,
         reason: ClaimTerminalReason,
         detail: str | None,
         *,
         success: bool,
     ) -> None:
-        """Record the fenced ingress-terminal fact, release the credit, and finalize.
+        """Record the fenced external status fact, release the credit, and finalize.
 
         The durable terminal fact is recorded before the credit releases, so a restart
         reconciles the claim against it. The release is idempotent and the reap
@@ -655,28 +755,28 @@ class ResidentCapacityControl:
         if success:
             delivery.complete()
         else:
-            delivery.fail(detail or "resident ingress failed")
+            delivery.fail(detail or "resident serve failed")
 
-    def fail_ingress(
-        self, invocation_id: str, delivery: IngressDelivery, detail: str
+    def fail_serve(
+        self, invocation_id: str, delivery: ServeDelivery, detail: str
     ) -> None:
-        """Terminalize an ingress invocation whose re-drive gave up.
+        """Terminalize a serve invocation whose re-drive gave up.
 
-        A give-up (no deputy available, or the inject relay failed) leaves the claim
-        UNCERTAIN holding credit; unlike a workflow, no DS terminal consumes it. This
-        releases the credit through the fenced path — a FAILED ingress-terminal fact
-        consumed by the same FSM — then fails the client, so the credit never strands.
+        A give-up leaves the claim UNCERTAIN holding credit; unlike a workflow, no DS
+        terminal consumes it. This releases the credit through the fenced path — a
+        FAILED external status fact consumed by the same FSM — then fails the client, so
+        the credit never strands.
         """
-        self._finalize_ingress(
+        self._finalize_serve(
             invocation_id, delivery, ClaimTerminalReason.FAILED, detail, success=False
         )
 
-    def reconcile_ingress_terminal(
+    def reconcile_serve_terminal(
         self, invocation_id: str, reason: ClaimTerminalReason
     ) -> None:
         """Settle a claim left credit-bearing by a crash between its terminal writes.
 
-        On startup a recorded ingress-terminal fact replays through the same FSM so a
+        On startup a recorded external status fact replays through the same FSM so a
         claim rehydrated UNCERTAIN releases; there is no live client to finalize.
         """
         self._admission.settle_invocation_terminal(invocation_id, reason)
@@ -690,19 +790,37 @@ class ResidentCapacityControl:
         handoff: AdmissionHandoff,
         replica: ReplicaIncarnation,
     ) -> None:
-        """Bind the sidecar, resolve the origin fence, and relay the handoff.
+        """Bind the sidecar, resolve the origin fence, and deliver the bootstrap.
 
-        The origin worker carries the request and drives the engine ack over the
-        reverse-relay; an unreachable origin, an unbindable sidecar, or an unresolved
-        origin holds the credit uncertain and re-drives rather than terminalizing.
+        For a workflow boundary the origin worker carries the request and drives the
+        engine ack over the reverse-relay; for a task-addressed serve request the gated
+        edge is the transport-only origin and drives the relay itself. An unreachable
+        origin, an unbindable sidecar, or an unresolved origin holds the credit
+        uncertain and re-drives rather than terminalizing.
         """
         deps = self._delivery
         assert deps is not None
-        origin_worker = orig.origin_worker
-        origin_node = deps.node_of_worker(origin_worker)
-        if origin_worker is None or origin_node is None:
-            await self._hold_and_redrive(orig, claim, "no origin worker for boundary")
-            return
+        serve = orig.serve
+        # The route fence resolves from the origin's registered endpoint: a workflow
+        # origin worker's node, or (for the gated edge) the root node.
+        if serve is not None:
+            origin_worker = None
+            resolve_node: str | None = (
+                deps.root_node_id() if deps.root_node_id is not None else None
+            )
+            routing_node = deps.edge_id or None
+            if resolve_node is None or routing_node is None:
+                await self._hold_and_redrive(orig, claim, "no serve edge origin")
+                return
+        else:
+            origin_worker = orig.origin_worker
+            resolve_node = deps.node_of_worker(origin_worker)
+            routing_node = resolve_node
+            if origin_worker is None or resolve_node is None:
+                await self._hold_and_redrive(
+                    orig, claim, "no origin worker for boundary"
+                )
+                return
         target_worker = deps.serve_worker_of(replica)
         target_node = deps.node_of_worker(target_worker)
         if target_worker is None or target_node is None:
@@ -712,7 +830,7 @@ class ResidentCapacityControl:
         if listener is None:
             await self._hold_and_redrive(orig, claim, "resident sidecar is unavailable")
             return
-        resolved = await deps.network.resolve(origin_node, listener)
+        resolved = await deps.network.resolve(resolve_node, listener)
         if resolved is None:
             await self._hold_and_redrive(
                 orig, claim, "no origin route for the boundary"
@@ -730,9 +848,9 @@ class ResidentCapacityControl:
         session_id = new_relay_session_id()
         await deps.sessions.update(
             session_id,
-            origin_node=origin_node,
+            origin_node=routing_node or "",
             target_node=target_node,
-            origin_worker=origin_worker,
+            origin_worker=origin_worker or "",
             target_worker=target_worker,
             invocation_id=orig.invocation_id,
             idm=orig.idempotency_key or "",
@@ -750,12 +868,12 @@ class ResidentCapacityControl:
             replica_id=replica.replica_id,
             adapter_ref=profile.adapter_ref,
             subject=orig.subject,
-            ingress=orig.ingress,
+            serve=serve,
         )
-        if orig.ingress is not None:
-            self._ingress_deputies.setdefault(orig.invocation_id, set()).add(
-                origin_worker
-            )
+        if serve is not None:
+            serve.open(session_id, handoff)
+            return
+        assert origin_worker is not None
         delivered = deps.relay(
             origin_worker,
             "resident_handoff",
@@ -764,7 +882,6 @@ class ResidentCapacityControl:
                 "call_correlation": orig.call_correlation,
                 "session_id": session_id,
                 "handoff": handoff.model_dump(mode="json"),
-                "tee": orig.ingress is not None,
             },
         )
         if not delivered:
@@ -804,6 +921,10 @@ class ResidentCapacityControl:
                     origin_id=attempt.origin_id,
                     deadline_at=attempt.deadline_at,
                 )
+            if attempt.serve is not None:
+                attempt.serve.authorize(attempt.session_id, auth)
+                return
+            assert attempt.origin_worker is not None
             delivered = deps.relay(
                 attempt.origin_worker,
                 "resident_authorization",
@@ -836,39 +957,38 @@ class ResidentCapacityControl:
         """Settle the boundary from the origin worker's fenced terminal, or hold.
 
         A workflow ``SUCCESS`` settles by reference from the completed manifest and the
-        fenced DS terminal releases the credit; an ingress ``SUCCESS`` records the
-        fenced ingress-terminal fact, releases the credit, and finalizes the client
-        response (whose frames already teed live). ``DEFINITE_FAILURE`` settles an error
-        the same way per subject. ``UNCERTAIN`` holds the credit and re-drives. A report
-        that does not match the live attempt is ignored, leaving the boundary pending
-        for a same-invocation re-drive.
+        fenced DS terminal releases the credit; a serve ``SUCCESS`` records the fenced
+        external status fact (no manifest — the live relay is the serve-data mode),
+        releases the credit, and finalizes the client response (whose frames already
+        teed live). ``DEFINITE_FAILURE`` settles an error the same way per subject.
+        ``UNCERTAIN`` holds the credit and re-drives. A report that does not match the
+        live attempt is ignored, leaving the boundary pending for a same-invocation
+        re-drive.
         """
         attempt = self._attempts.get(outcome.invocation_id)
         claim = self._admission.active_claim(outcome.invocation_id)
         if attempt is None or attempt.session_id != outcome.session_id:
             return
         if outcome.status is ResidentStreamStatus.SUCCESS:
-            if outcome.manifest is None:
-                return
-            if attempt.ingress is not None:
-                self._finalize_ingress(
+            if attempt.serve is not None:
+                self._finalize_serve(
                     attempt.invocation_id,
-                    attempt.ingress,
+                    attempt.serve,
                     ClaimTerminalReason.COMPLETED,
                     None,
                     success=True,
                 )
-            else:
+            elif outcome.manifest is not None:
                 self._settle(
                     attempt.task_id, attempt.call_correlation, ref=outcome.manifest
                 )
             return
         if outcome.status is ResidentStreamStatus.DEFINITE_FAILURE:
             detail = f"resident invocation failed: {outcome.error or 'unknown'}"
-            if attempt.ingress is not None:
-                self._finalize_ingress(
+            if attempt.serve is not None:
+                self._finalize_serve(
                     attempt.invocation_id,
-                    attempt.ingress,
+                    attempt.serve,
                     ClaimTerminalReason.FAILED,
                     detail,
                     success=False,
@@ -884,7 +1004,7 @@ class ResidentCapacityControl:
             )
 
     def on_stream_chunk(self, chunk: ResidentStreamChunk) -> None:
-        """Tee one authorized response frame to a live ingress request's client."""
+        """Tee one authorized response frame to a live serve request's client."""
         if self._loop is not None:
             self._loop.call_soon_threadsafe(self._tee_chunk, chunk)
 
@@ -892,11 +1012,11 @@ class ResidentCapacityControl:
         attempt = self._attempts.get(chunk.invocation_id)
         if (
             attempt is None
-            or attempt.ingress is None
+            or attempt.serve is None
             or attempt.session_id != chunk.session_id
         ):
             return
-        attempt.ingress.tee(chunk.payload)
+        attempt.serve.tee(chunk.payload)
 
     async def _hold_and_redrive(
         self, orig: _Origination, claim: ServiceClaim, detail: str
@@ -908,7 +1028,7 @@ class ResidentCapacityControl:
             orig.call_correlation,
             claim,
             detail,
-            orig.ingress,
+            orig.serve,
         )
 
     async def _hold_and_redrive_claim(
@@ -920,7 +1040,7 @@ class ResidentCapacityControl:
             attempt.call_correlation,
             claim,
             detail,
-            attempt.ingress,
+            attempt.serve,
         )
 
     async def _hold_locked(
@@ -930,7 +1050,7 @@ class ResidentCapacityControl:
         call_correlation: str,
         claim: ServiceClaim,
         detail: str,
-        ingress: IngressDelivery | None,
+        serve: ServeDelivery | None,
     ) -> None:
         """Hold the credit uncertain and re-drive the boundary under its held claim.
 
@@ -959,8 +1079,8 @@ class ResidentCapacityControl:
             # claim and raise a successor, re-admitting the credit and duplicating the
             # engine call.
             return
-        if ingress is not None:
-            ingress.redrive()
+        if serve is not None:
+            serve.redrive()
         else:
             self._redispatch(task_id, call_correlation)
 
@@ -983,10 +1103,10 @@ class ResidentCapacityControl:
             self._admission.on_enqueue_failed(claim)
         if preempt and claim.replica_id is not None:
             self._lifecycle.on_preempt(claim.replica_id)
-        if attempt.ingress is not None:
-            self._finalize_ingress(
+        if attempt.serve is not None:
+            self._finalize_serve(
                 attempt.invocation_id,
-                attempt.ingress,
+                attempt.serve,
                 ClaimTerminalReason.FAILED,
                 detail,
                 success=False,
@@ -1028,6 +1148,8 @@ class ResidentCapacityControl:
                 "replica_id": replica.replica_id,
                 "incarnation": replica.incarnation,
                 "listener_generation": generation,
+                "serve_task_id": replica.serve_task_id,
+                "binding_generation": replica.binding_generation,
                 "engine": {
                     "base_url": engine.base_url,
                     "model": engine.model,

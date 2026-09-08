@@ -8,9 +8,9 @@ pattern:
 the snapshot is written after each authoritative mutation and rehydrated on startup.
 """
 
-from ..clients.redis import RedisClient, ingress_cs_key, resident_cs_key
-from ..ingress.state import IngressSnapshot
+from ..clients.redis import RedisClient, resident_cs_key, serve_cs_key
 from ..resident.state import ResidentSnapshot
+from ..serve import ServeSnapshot
 
 
 class ResidentRegistry:
@@ -33,9 +33,9 @@ class ResidentRegistry:
         blob = await self._rds.asyncio.get(resident_cs_key())
         return ResidentSnapshot.model_validate_json(blob) if blob else None
 
-    def save_ingress_snapshot(self, snapshot: IngressSnapshot) -> None:
-        self._rds.sync.set_value(ingress_cs_key(), snapshot.model_dump_json())
+    def save_serve_snapshot(self, snapshot: ServeSnapshot) -> None:
+        self._rds.sync.set_value(serve_cs_key(), snapshot.model_dump_json())
 
-    def load_ingress_snapshot(self) -> IngressSnapshot | None:
-        blob = self._rds.sync.get(ingress_cs_key())
-        return IngressSnapshot.model_validate_json(blob) if blob else None
+    def load_serve_snapshot(self) -> ServeSnapshot | None:
+        blob = self._rds.sync.get(serve_cs_key())
+        return ServeSnapshot.model_validate_json(blob) if blob else None

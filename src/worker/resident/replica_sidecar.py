@@ -25,6 +25,8 @@ from shared.resident.contracts import (
     RouteAuthorization,
 )
 from shared.resident.gate import LoadEvidence, SidecarClaimGate
+from shared.resident.session import ResidentRelaySession, ResidentSessionRole
+from shared.resident.transport import ResidentFrameSink
 from shared.resident.wire import (
     KIND_ACK,
     KIND_BOOTSTRAP,
@@ -33,11 +35,10 @@ from shared.resident.wire import (
     KIND_FAILED,
     KIND_REJECT,
     KIND_STREAM,
+    resident_request_digest,
 )
 
 from .engine import EngineOpen, EngineUnload, unload_adapter
-from .session import ResidentRelaySession, ResidentSessionRole
-from .transport import ResidentFrameSink
 
 # Claim-tagged load evidence one admitted operation emits for control-plane accounting.
 LoadSink = Callable[[LoadEvidence], None]
@@ -86,13 +87,22 @@ class ResidentReplicaSidecar:
         incarnation: int,
         listener_generation: int,
         endpoint: ReplicaEndpoint,
+        serve_task_id: str | None = None,
+        binding_generation: int | None = None,
     ) -> None:
-        """Bind (or rebind) the claim gate and engine endpoint for one incarnation."""
+        """Bind (or rebind) the claim gate and engine endpoint for one incarnation.
+
+        A replica adopted from a standing serve task carries its serve-task and
+        residency-binding generation so the gate refuses a fence that names another
+        serve task or a superseded binding; a workflow replica leaves them unset.
+        """
         self._bindings[replica_id] = _Binding(
             gate=SidecarClaimGate(
                 replica_id=replica_id,
                 incarnation=incarnation,
                 listener_generation=listener_generation,
+                serve_task_id=serve_task_id,
+                binding_generation=binding_generation,
             ),
             endpoint=endpoint,
         )
@@ -187,6 +197,12 @@ class ResidentReplicaSidecar:
             decision = binding.gate.check_bootstrap(handoff)
             if not decision.admitted:
                 await session.send_wire(KIND_REJECT, reason=str(decision.rejection))
+                return
+            digest = binding.gate.check_request_digest(
+                handoff, resident_request_digest(str(opening.get("request") or ""))
+            )
+            if not digest.admitted:
+                await session.send_wire(KIND_REJECT, reason=str(digest.rejection))
                 return
             gate_session = binding.gate.session_for(handoff)
             self._supersede(handoff.invocation_id)

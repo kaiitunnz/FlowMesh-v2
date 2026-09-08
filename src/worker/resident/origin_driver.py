@@ -26,9 +26,10 @@ from shared.resident.reports import (
     ResidentBootstrapAck,
     ResidentBootstrapOutcome,
     ResidentOpOutcome,
-    ResidentStreamChunk,
     ResidentStreamStatus,
 )
+from shared.resident.session import ResidentRelaySession, ResidentSessionRole
+from shared.resident.transport import ResidentFrameSink
 from shared.resident.wire import (
     KIND_ACK,
     KIND_BOOTSTRAP,
@@ -39,12 +40,8 @@ from shared.resident.wire import (
     KIND_STREAM,
 )
 
-from .session import ResidentRelaySession, ResidentSessionRole
-from .transport import ResidentFrameSink
-
 AckSink = Callable[[ResidentBootstrapAck], None]
 OutcomeSink = Callable[[ResidentOpOutcome], None]
-StreamChunkSink = Callable[[ResidentStreamChunk], None]
 
 
 @dataclass(frozen=True)
@@ -53,8 +50,7 @@ class ResidentOriginRequest:
 
     ``session_id`` is fresh per attempt; ``handoff`` is the claim-bound fence control
     minted for the reserved claim; ``request_payload`` is the worker-private raw request
-    the driver sends over the data path. ``tee`` marks an ingress request whose response
-    frames are teed to control as they stream, so the ingress relays them to the client.
+    the driver sends over the data path.
     """
 
     task_id: str
@@ -62,7 +58,6 @@ class ResidentOriginRequest:
     session_id: str
     handoff: AdmissionHandoff
     request_payload: str | None
-    tee: bool = False
 
 
 @dataclass
@@ -83,7 +78,6 @@ class ResidentOriginDriver:
         content_store: FabricContentStore | None,
         report_ack: AckSink,
         report_outcome: OutcomeSink,
-        report_stream_chunk: StreamChunkSink | None = None,
         window_bytes: int = 65536,
         stream_deadline_sec: float = 300.0,
         auth_deadline_sec: float = 60.0,
@@ -93,7 +87,6 @@ class ResidentOriginDriver:
         self._content_store = content_store
         self._report_ack = report_ack
         self._report_outcome = report_outcome
-        self._report_stream_chunk = report_stream_chunk
         self._window_bytes = window_bytes
         self._stream_deadline = stream_deadline_sec
         self._auth_deadline = auth_deadline_sec
@@ -225,16 +218,7 @@ class ResidentOriginDriver:
                 return
             kind = msg.get("kind")
             if kind == KIND_CHUNK:
-                data = str(msg.get("data", ""))
-                parts.append(data)
-                if req.tee and self._report_stream_chunk is not None:
-                    self._report_stream_chunk(
-                        ResidentStreamChunk(
-                            invocation_id=req.handoff.invocation_id,
-                            session_id=req.session_id,
-                            payload=data,
-                        )
-                    )
+                parts.append(str(msg.get("data", "")))
             elif kind == KIND_DONE:
                 self._finalize(req, "".join(parts))
                 return

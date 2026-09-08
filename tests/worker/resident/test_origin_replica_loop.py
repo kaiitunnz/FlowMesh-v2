@@ -23,10 +23,10 @@ from shared.resident.reports import (
     ResidentOpOutcome,
     ResidentStreamStatus,
 )
+from shared.resident.session import ResidentRelaySession  # noqa: F401 - re-export check
 from worker.resident.engine import EngineResponse
 from worker.resident.origin_driver import ResidentOriginDriver, ResidentOriginRequest
 from worker.resident.replica_sidecar import ResidentReplicaSidecar
-from worker.resident.session import ResidentRelaySession  # noqa: F401 - re-export check
 
 _COMPLETION = "the resident model reply, streamed in pieces"
 

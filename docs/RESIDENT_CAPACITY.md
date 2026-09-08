@@ -125,46 +125,50 @@ cancelled invocation stops promptly rather than waiting out the stream deadline.
 stream emit claim-tagged load evidence, tagged latency-sensitive service traffic versus bulk
 transfer.
 
-The legacy serve proxy cannot reach a resident allocation: a resident replica's serve task
-is marked resident and the proxy refuses it by allocation identity, independent of its
-access mode. A resident allocation is reachable only through its claim-gated sidecar.
+## Task-ID-gated resident serve
 
-## Inference ingress
+Every public user-declared `serve` task is a resident-gated standing allocation reached
+only by its task ID over one FlowMesh-authenticated, claim-gated endpoint: `POST
+/api/v1/serve/tasks/{task_id}/{upstream_path}`. There is no raw serve proxy, direct-bind,
+or vLLM-key passthrough — the serve task binds its engine to loopback, and only the
+task's claim-gated sidecar reaches it.
 
-An authenticated external principal consumes resident capacity through the inference
-ingress, an authentication and control edge under `/api/v1/inference`. It admits through
-the same Admission controller and `ServiceClaim` FSM as a workflow consumer; it selects no
-replica, owns no credit, and never reaches the engine.
+At serve-task start the task is adopted as its own standing resident allocation: a
+per-task `ServiceFamily`, a `ServeTaskResidencyBinding` from the task ID to that
+allocation group, and a directory replica pinned for the task's lifetime (never idle-torn
+down while the task is live). The model is validated under `RESIDENT_ALLOWED_MODELS`; a
+disallowed model is not adopted. The internal replica identity is never a public handle;
+a caller names only the task ID and can choose no model, worker, endpoint, credential, or
+routing policy.
 
-A client selects only a published alias and a request profile — never a model image,
-worker, endpoint, or routing policy. The published-alias catalog is a deployment config
-surface (`INFERENCE_INGRESS_ALIASES_FILE` or `INFERENCE_INGRESS_ALIASES`): each alias maps
-a tenant-visible name to a resident service family, the tenants authorized to select it,
-and its request bounds. The alias resolves to the same service family a workflow leaf
-would, so an authorized request reuses a warm compatible replica. The edge resolves the
-alias under the caller's `org_id` and refuses an unauthorized tenant before admission, and
-bounds each principal's in-flight requests (`INFERENCE_INGRESS_MAX_CONCURRENT_PER_PRINCIPAL`).
-A refused request raises no claim and consumes no credit.
+The edge authenticates the FlowMesh principal on a non-forwarded channel (the client's
+`Authorization` neither grants access here nor is forwarded upstream), checks the existing
+`TASK` read permission, resolves the task's live binding, and derives a bounded canonical
+request descriptor and the fixed profile bounds. It records a durable external-principal
+`Invocation` with no `DS` state and asks the same Admission controller to raise the same
+`ServiceClaim` against only the binding's allocation group. As the registered
+transport-only `RouteOrigin`, the edge relays the binding-derived request and opaque
+response frames over the resolved route; the selected replica worker's claim-gated sidecar
+verifies the descriptor and fence, constructs the engine request, owns the engine
+credential, parses/streams the response, and emits the fenced status terminal. Root and
+supervisor never perform engine work.
 
-An ingress invocation is tenant-scoped to the external principal and has no workflow
-activation, continuation, or result slot. The edge records a durable `Invocation` with the
-principal subject, mints its `invocation_id`, and asks admission to raise the claim. It
-selects a designated origin worker — a live worker that runs the origin side of the
-worker-executed resident protocol — injects the raw request into that worker's private
-custody, and drives the same two-phase relay as a workflow consumer. The designated worker
-constructs the engine request, uses engine credentials, parses the response, and
-materializes the completion; the edge relays the opaque response frames to the client
-unparsed. The request's terminal is a durable ingress-terminal fact the Admission
-controller consumes by `invocation_id` to release the credit, exactly as it consumes a
-workflow's fenced outcome — a client disconnect, stream close, or telemetry report alone
-never releases it. A route loss is `UNCERTAIN` and re-drives under the same invocation
-identity onto a freshly selected deputy. Enable with `INFERENCE_INGRESS_ENABLED=true`,
-which requires `RESIDENT_CAPACITY_ENABLED`.
+The sidecar's fence-matching status terminal, recorded by the Admission controller by
+`invocation_id`, is the only thing that releases the credit — a client disconnect, stream
+close, relay-window acknowledgement, or timer never does. The engine/claim lifetime and
+the client-relay drain are separate: already-emitted frames remain deliverable after the
+credit releases. An ambiguous loss leaves the claim `UNCERTAIN` holding credit; a client
+retry is a separately admitted new invocation that cannot reopen the original claim. A
+live response requires only the fenced terminal; reference-backed materialization is
+optional. On task stop, cancellation, TTL, or failure the binding drains, denies new
+calls, lets accepted calls reconcile, and then stops. This surface is available whenever
+`RESIDENT_CAPACITY_ENABLED` is set; it adds no per-principal ingress quota, alias catalog,
+or tenant allowlist beyond ordinary task access.
 
-The ingress authenticates and quota-limits the principal through the deployment's identity
-provider. With no identity provider registered every caller resolves to one default
-principal and tenant, so a deployment that exposes the ingress registers an identity
-provider or fronts the endpoint with authentication.
+A deployment gates access through its identity and permission plugins. With none
+registered every caller resolves to one default admin principal, so a deployment that
+exposes the serve endpoint registers identity/permission plugins or fronts it with
+authentication.
 
 ## Replica lifecycle and policy
 

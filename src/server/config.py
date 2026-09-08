@@ -112,7 +112,6 @@ class PortForwardConfig:
     persistent_listeners: bool = True
     ssh_proxy_enabled: bool = True
     ssh_audit_enabled: bool = True
-    serve_proxy_enabled: bool = True
     bind_host: str = "0.0.0.0"
     public_host: str = "localhost"
     port_start: int = 32000
@@ -127,7 +126,6 @@ class PortForwardConfig:
             ssh_audit_enabled=parse_bool_env(
                 "ENABLE_SERVER_SSH_CONNECTION_AUDIT", True
             ),
-            serve_proxy_enabled=parse_bool_env("ENABLE_SERVER_SERVE_PROXY", True),
             bind_host=os.getenv("SERVER_PORT_FORWARD_BIND_HOST", "0.0.0.0").strip(),
             public_host=os.getenv(
                 "SERVER_PORT_FORWARD_PUBLIC_HOST", "localhost"
@@ -394,7 +392,6 @@ class ResidentCapacityConfig:
 
     enabled: bool = False
     substrate: str = "serve"
-    access_mode: str = "forward"
     admission_slots: int = 8
     adapter_slots: int = 4
     max_replicas_per_family: int = 1
@@ -423,9 +420,6 @@ class ResidentCapacityConfig:
         substrate = (
             os.getenv(f"{prefix}INFERENCE_SUBSTRATE") or "serve"
         ).strip().lower() or "serve"
-        access = (
-            os.getenv(f"{prefix}SERVE_ACCESS_MODE") or "forward"
-        ).strip().lower() or "forward"
         default_strategy = _default_selection_strategy()
         strategy = (
             os.getenv(f"{prefix}SELECTION_STRATEGY") or default_strategy
@@ -433,7 +427,6 @@ class ResidentCapacityConfig:
         return cls(
             enabled=parse_bool_env(f"{prefix}CAPACITY_ENABLED", False),
             substrate=substrate,
-            access_mode=access,
             admission_slots=max(1, parse_int_env(f"{prefix}ADMISSION_SLOTS") or 8),
             adapter_slots=max(1, parse_int_env(f"{prefix}ADAPTER_SLOTS") or 4),
             max_replicas_per_family=max(
@@ -458,45 +451,6 @@ class ResidentCapacityConfig:
             or 30.0,
             sidecar_directly_routable=parse_bool_env(
                 f"{prefix}SIDECAR_DIRECTLY_ROUTABLE", False
-            ),
-        )
-
-
-@dataclass
-class InferenceIngressConfig:
-    """The controlled external inference ingress edge's policy.
-
-    ``aliases_json`` is the deployment-published alias catalog (read from
-    ``INFERENCE_INGRESS_ALIASES_FILE`` or supplied inline), which maps a tenant-visible
-    alias to a resident service family and its authorized tenants and request bounds. A
-    client selects only an alias; it never names a model image, worker, endpoint, or
-    routing policy. ``max_concurrent_per_principal`` bounds a principal's in-flight
-    ingress requests at the edge.
-    """
-
-    enabled: bool = False
-    aliases_json: str = ""
-    max_concurrent_per_principal: int = 8
-
-    @classmethod
-    def from_env(cls) -> "InferenceIngressConfig":
-        prefix = "INFERENCE_INGRESS_"
-        enabled = parse_bool_env(f"{prefix}ENABLED", False)
-        inline = _env_or_none(f"{prefix}ALIASES")
-        path = _env_or_none(f"{prefix}ALIASES_FILE")
-        aliases_json = inline or ""
-        if path:
-            aliases_json = Path(path).expanduser().read_text(encoding="utf-8")
-        if enabled and not aliases_json.strip():
-            raise ValueError(
-                "INFERENCE_INGRESS_ENABLED requires a published alias catalog: set "
-                "INFERENCE_INGRESS_ALIASES_FILE or INFERENCE_INGRESS_ALIASES"
-            )
-        return cls(
-            enabled=enabled,
-            aliases_json=aliases_json,
-            max_concurrent_per_principal=max(
-                1, parse_int_env(f"{prefix}MAX_CONCURRENT_PER_PRINCIPAL") or 8
             ),
         )
 
@@ -620,24 +574,15 @@ class OrchestrationConfig:
     web_search: WebSearchConfig = field(default_factory=WebSearchConfig)
     resident: ResidentCapacityConfig = field(default_factory=ResidentCapacityConfig)
     network: NetworkPlaneConfig = field(default_factory=NetworkPlaneConfig)
-    inference_ingress: InferenceIngressConfig = field(
-        default_factory=InferenceIngressConfig
-    )
 
     @classmethod
     def from_env(cls) -> "OrchestrationConfig":
         resident = ResidentCapacityConfig.from_env()
         network = NetworkPlaneConfig.from_env()
-        inference_ingress = InferenceIngressConfig.from_env()
         if resident.enabled and not network.enabled:
             raise ValueError(
                 "RESIDENT_CAPACITY_ENABLED requires NETWORK_PLANE_ENABLED: resident "
                 "capacity runs on the network plane and has no in-server execution path"
-            )
-        if inference_ingress.enabled and not resident.enabled:
-            raise ValueError(
-                "INFERENCE_INGRESS_ENABLED requires RESIDENT_CAPACITY_ENABLED: the "
-                "ingress admits through the same resident claim gate as a workflow"
             )
         return cls(
             max_scope_depth=parse_int_env("ORCHESTRATOR_MAX_SCOPE_DEPTH"),
@@ -656,7 +601,6 @@ class OrchestrationConfig:
             web_search=WebSearchConfig.from_env(),
             resident=resident,
             network=network,
-            inference_ingress=inference_ingress,
         )
 
 

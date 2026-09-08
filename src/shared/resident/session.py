@@ -66,6 +66,10 @@ class ResidentRelaySession:
         self._recv_consumed = 0
 
     @property
+    def session_id(self) -> str:
+        return self._session_id
+
+    @property
     def cancelled(self) -> bool:
         return self._cancelled.is_set()
 

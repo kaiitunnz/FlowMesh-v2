@@ -157,20 +157,16 @@ def test_two_hosts_complete_a_resident_invocation() -> None:
         push_frame=origin_pushes,
         report_ack=on_ack,
         report_outcome=on_outcome,
-        report_stream_chunk=lambda _chunk: None,
         content_store=store,
         peek_request=peek,
-        put_request=lambda _t, _c, _r: None,
         delete_request=lambda t, c: deleted.append((t, c)),
     )
     replica = ResidentLaneHost(
         push_frame=replica_pushes,
         report_ack=noop_ack,
         report_outcome=noop_outcome,
-        report_stream_chunk=lambda _chunk: None,
         content_store=None,
         peek_request=lambda _t, _c: None,
-        put_request=lambda _t, _c, _r: None,
         delete_request=lambda _t, _c: None,
         engine_open=_fake_engine,
     )

@@ -10,7 +10,6 @@ canned responses when no upstream is configured.
 import contextlib
 import json
 import logging
-import socket
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -316,13 +315,12 @@ class DevModelExecutor(Executor):
             or parse_float_env("SERVE_DEFAULT_TTL_SEC", _DEFAULT_TTL_SEC),
             parse_float_env("SERVE_MAX_TTL_SEC", _MAX_TTL_SEC),
         )
-        access_mode = spec.accessMode or "forward"
         vllm = (spec.model.vllm if spec.model is not None else None) or {}
         raw_max_loras = vllm.get("max_loras")
         max_loras = raw_max_loras if isinstance(raw_max_loras, int) else None
-        bind_host = (
-            "0.0.0.0" if access_mode == "direct" else "127.0.0.1"
-        )  # nosec B104 - direct mode is an explicit opt-in to a client-reachable endpoint
+        # Loopback only: the endpoint is reached solely by its co-located claim-gated
+        # sidecar and, externally, only through the gated task-ID serve route.
+        bind_host = "127.0.0.1"
         port = resolve_bind_port(spec.port, bind_host)
         forward_url = self._config.dev_model_forward_url
 
@@ -353,28 +351,26 @@ class DevModelExecutor(Executor):
 
         logger.info(
             "dev_model server ready for model %s on port %d "
-            "(task=%s mode=%s ttl=%.0fs forward=%s)",
+            "(task=%s ttl=%.0fs forward=%s)",
             model_id,
             port,
             task.task_id,
-            access_mode,
             ttl_sec,
             forward_url or "canned",
         )
 
         try:
-            advertised_host = (
-                socket.getfqdn() if access_mode == "direct" else "127.0.0.1"
-            )
+            # Worker-private endpoint facts ("_"-prefixed so task metadata never
+            # discloses the raw loopback listener); the resident endpoint probe reads
+            # them to bind the claim-gated sidecar in front of the endpoint.
             self.emit_update(
                 task.task_id,
                 {
                     "serve": {
-                        "mode": access_mode,
-                        "_relay_target": {"host": "127.0.0.1", "port": port},
-                        "host": advertised_host,
-                        "port": port,
                         "model": model_id,
+                        "_host": "127.0.0.1",
+                        "_port": port,
+                        "_api_key": None,
                     }
                 },
             )

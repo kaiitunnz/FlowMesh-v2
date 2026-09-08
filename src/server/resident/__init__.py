@@ -31,9 +31,9 @@ from .selection import (
     build_selection_strategy,
 )
 from .service import (
-    IngressDelivery,
-    IngressOrigination,
     ResidentCapacityControl,
+    ServeDelivery,
+    ServeOrigination,
 )
 from .state import (
     CREDIT_BEARING_CLAIM_STATES,
@@ -104,8 +104,8 @@ __all__ = [
     "ReplicaIncarnation",
     "ReplicaState",
     "ReportStore",
-    "IngressDelivery",
-    "IngressOrigination",
+    "ServeDelivery",
+    "ServeOrigination",
     "ResidentCapacityControl",
     "ResidentPolicyLimits",
     "ResidentSnapshot",

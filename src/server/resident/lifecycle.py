@@ -161,6 +161,51 @@ class LifecycleScaleManager:
         self._persist()
         return replica
 
+    def adopt_standing_replica(
+        self,
+        family: ServiceFamily,
+        *,
+        serve_task_id: str,
+        binding_generation: int,
+        endpoint: ReplicaEndpoint,
+    ) -> ReplicaIncarnation:
+        """Register a public serve task's running replica as a standing allocation.
+
+        Unlike a demand-managed replica, this is not materialized from zero: the serve
+        task already runs the engine, so the replica is adopted directly into the
+        directory as warm and task-lifetime pinned (``standing``), and is never
+        idle-torn down while its serve task is live. It replaces any prior incarnation
+        for the same serve task so a re-adoption supersedes the old fence.
+        """
+        for prior in self._stores.directory.by_family(family.family):
+            if prior.serve_task_id == serve_task_id and prior.state in (
+                _ACTIVE_REPLICA_STATES
+            ):
+                self.on_preempt(prior.replica_id)
+        replica = ReplicaIncarnation(
+            replica_id=new_replica_id(),
+            family=family.family,
+            incarnation=1,
+            state=ReplicaState.WARM,
+            endpoint=endpoint,
+            healthy=True,
+            serve_task_id=serve_task_id,
+            binding_generation=binding_generation,
+            standing=True,
+        )
+        lease = AllocationLease(
+            lease_id=new_allocation_lease_id(),
+            family=family.family,
+            replica_id=replica.replica_id,
+            state=ReplicaState.WARM,
+        )
+        replica.lease_id = lease.lease_id
+        self._stores.leases.add(lease)
+        self._stores.directory.add(replica)
+        self.refresh_report(replica.replica_id)
+        self._persist()
+        return replica
+
     def on_replica_ready(self, replica_id: str, endpoint: ReplicaEndpoint) -> None:
         """Transition a materializing replica to warm with its reachable endpoint."""
         replica = self._stores.directory.get(replica_id)
@@ -281,6 +326,10 @@ class LifecycleScaleManager:
             return
         reference = now_ts if now_ts is not None else parse_iso_ts(now_iso())
         for replica in self._stores.directory.all():
+            if replica.standing:
+                # A standing serve allocation is pinned to its live serve task; it is
+                # drained only by task stop/cancel/TTL/failure, never idle teardown.
+                continue
             held = self._stores.credit_ledger.held(replica.replica_id)
             if replica.state in SERVABLE_REPLICA_STATES:
                 if held == 0 and self._idle_past_retain(replica, reference):

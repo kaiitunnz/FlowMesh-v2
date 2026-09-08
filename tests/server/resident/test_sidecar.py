@@ -110,6 +110,74 @@ def test_stream_rejects_a_fence_that_does_not_continue_the_session() -> None:
         assert gate.check_stream(_auth(**overrides), session).rejection is expected
 
 
+def _serve_gate() -> SidecarClaimGate:
+    return SidecarClaimGate(
+        replica_id="rpl-1",
+        incarnation=3,
+        listener_generation=2,
+        serve_task_id="tsk-serve",
+        binding_generation=4,
+        clock=lambda: "2026-01-01T00:00:00Z",
+    )
+
+
+def test_bootstrap_validates_the_serve_binding_fence() -> None:
+    gate = _serve_gate()
+    ok = _handoff(serve_task_id="tsk-serve", binding_generation=4)
+    assert gate.check_bootstrap(ok).admitted
+    assert (
+        gate.check_bootstrap(
+            _handoff(serve_task_id="tsk-other", binding_generation=4)
+        ).rejection
+        is GateRejection.WRONG_SERVE_TASK
+    )
+    assert (
+        gate.check_bootstrap(
+            _handoff(serve_task_id="tsk-serve", binding_generation=3)
+        ).rejection
+        is GateRejection.STALE_BINDING
+    )
+
+
+def test_stream_validates_the_serve_binding_fence() -> None:
+    gate = _serve_gate()
+    session = gate.session_for(
+        _handoff(serve_task_id="tsk-serve", binding_generation=4)
+    )
+    assert gate.check_stream(
+        _auth(serve_task_id="tsk-serve", binding_generation=4), session
+    ).admitted
+    assert (
+        gate.check_stream(
+            _auth(serve_task_id="tsk-other", binding_generation=4), session
+        ).rejection
+        is GateRejection.WRONG_SERVE_TASK
+    )
+
+
+def test_request_digest_rejects_a_mismatched_descriptor() -> None:
+    gate = _serve_gate()
+    handoff = _handoff(descriptor_digest="sha-admitted")
+    assert gate.check_request_digest(handoff, "sha-admitted").admitted
+    assert (
+        gate.check_request_digest(handoff, "sha-other").rejection
+        is GateRejection.WRONG_DIGEST
+    )
+
+
+def test_workflow_fence_carries_no_serve_binding_and_passes() -> None:
+    # A workflow fence leaves the serve fields and digest unset, so a serve-bound gate
+    # never falsely rejects it.
+    gate = _serve_gate()
+    handoff = (
+        _handoff()
+    )  # serve_task_id / binding_generation / descriptor_digest = None
+    assert gate.check_bootstrap(handoff).admitted
+    assert gate.check_request_digest(handoff, "anything").admitted
+    session = gate.session_for(handoff)
+    assert gate.check_stream(_auth(), session).admitted
+
+
 def test_load_evidence_is_claim_tagged() -> None:
     ev = _gate().load_evidence(_handoff(), "request")
     assert ev.claim_id == "scl-1" and ev.invocation_id == "inv-1"

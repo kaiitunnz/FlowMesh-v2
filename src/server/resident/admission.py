@@ -59,12 +59,17 @@ class AdmissionController:
         deadline_at: str | None,
         adapter_name: str | None = None,
         adapter_source: str | None = None,
+        serve_task_id: str | None = None,
+        binding_generation: int | None = None,
+        descriptor_digest: str | None = None,
     ) -> AdmissionHandoff:
         """A single-use fence handoff for a reserved claim's replica incarnation.
 
         It carries no route or origin: the network path resolves and attaches those. It
         never carries the raw engine endpoint. For an adapter-bound claim it names the
-        adapter the replica loads into a slot and the request selects.
+        adapter the replica loads into a slot and the request selects. A task-addressed
+        external claim also binds its authorized serve task, residency-binding
+        generation, and the bounded canonical request digest the gate recomputes.
         """
         return AdmissionHandoff(
             token=new_admission_handoff_token(),
@@ -79,6 +84,9 @@ class AdmissionController:
             expires_at=deadline_at,
             adapter_name=adapter_name,
             adapter_source=adapter_source,
+            serve_task_id=serve_task_id,
+            binding_generation=binding_generation,
+            descriptor_digest=descriptor_digest,
         )
 
     def _strategy_for(self, family: str) -> SelectionStrategy:
@@ -182,6 +190,13 @@ class AdmissionController:
             deadline_at=profile.deadline_at if profile is not None else None,
             adapter_name=profile.adapter_ref if profile is not None else None,
             adapter_source=profile.adapter_source if profile is not None else None,
+            serve_task_id=profile.serve_task_id if profile is not None else None,
+            binding_generation=(
+                profile.binding_generation if profile is not None else None
+            ),
+            descriptor_digest=(
+                profile.descriptor_digest if profile is not None else None
+            ),
         )
 
     def admit(
@@ -225,6 +240,9 @@ class AdmissionController:
             deadline_at=profile.deadline_at,
             adapter_name=profile.adapter_ref,
             adapter_source=profile.adapter_source,
+            serve_task_id=profile.serve_task_id,
+            binding_generation=profile.binding_generation,
+            descriptor_digest=profile.descriptor_digest,
         )
 
     def accept_and_authorize(
@@ -280,11 +298,12 @@ class AdmissionController:
         assert claim.replica_id is not None and claim.incarnation is not None
         replica = self._stores.directory.get(claim.replica_id)
         request = self._stores.invocations.get(claim.invocation_id)
+        profile = request.profile if request is not None else None
         return RouteAuthorization(
             claim_id=claim.claim_id,
             invocation_id=claim.invocation_id,
             idempotency_key=idempotency_key,
-            tenant=request.profile.tenant if request is not None else None,
+            tenant=profile.tenant if profile is not None else None,
             origin_id=origin_id,
             replica_id=claim.replica_id,
             incarnation=claim.incarnation,
@@ -292,6 +311,10 @@ class AdmissionController:
                 replica.listener_generation if replica is not None else 0
             ),
             expires_at=deadline_at,
+            serve_task_id=profile.serve_task_id if profile is not None else None,
+            binding_generation=(
+                profile.binding_generation if profile is not None else None
+            ),
         )
 
     def on_stream_started(self, claim: ServiceClaim) -> None:
