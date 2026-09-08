@@ -1,18 +1,15 @@
 """The gated serve edge's transport-only relay executor.
 
 The gated serve edge is the registered transport-only ``RouteOrigin`` for a
-task-addressed external invocation. Unlike a workflow call, no caller-worker origin
-driver is involved: this executor drives the origin side of the invocation's
-reverse-relay session directly in the root, carrying the binding-derived request and
-relaying opaque response frames. It never constructs or parses an engine request,
-assembles a completion, materializes a result, or owns an engine credential — the
-selected replica worker's claim-gated sidecar does all of that. It reads only relay
-frame kinds (transport framing) and reports the sidecar's attested acknowledgement and
-terminal to control, which validates every fence.
+task-addressed external invocation: this executor drives the origin side of the
+invocation's reverse-relay session directly in the root, carrying the binding-derived
+request and relaying opaque response frames. It reads only relay frame kinds (transport
+framing) and reports the sidecar's attested acknowledgement and terminal to control,
+which validates every fence; the selected replica worker's claim-gated sidecar
+constructs and parses the engine request, owns its credential, and serves the response.
 
-Distinct from the worker ``ResidentOriginDriver``: it tees each response frame to the
-client through control rather than assembling and materializing a completion, and its
-success terminal carries no manifest — the live relay is the only serve-data mode.
+It tees each response frame to the client through control as it streams, and its success
+terminal carries no manifest — the live relay is the serve-data mode.
 """
 
 import asyncio

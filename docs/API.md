@@ -99,13 +99,16 @@ Server policy toggles: `ENABLE_SERVER_SSH_PROXY`,
 
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/api/v1/serve/tasks/{task_id}/{upstream_path:path}` | Submit an inference request to a public `serve` task by its task ID (e.g. `.../v1/chat/completions`). |
+| POST | `/api/v1/serve/tasks/{task_id}/{upstream_path:path}` | Send an OpenAI-compatible inference request to a public `serve` task by its task ID (e.g. `.../v1/chat/completions`). |
 
+Point an OpenAI SDK at the task-ID route: the request envelope relays to the task's
+standing replica and the engine's own response envelope streams back, with the engine's
+status and content type — a `stream: true` server-sent-event body included.
 FlowMesh-authenticated and claim-gated: the caller authenticates with a FlowMesh
-credential and needs `TASK` read access to the serve task; the client `Authorization`
-neither grants access here nor is forwarded upstream. The request is admitted through
-resident-capacity control and served by the task's standing replica; the caller never
-sees a raw engine endpoint, credential, model, worker, or routing choice.
+credential and holds `TASK` read access to the serve task, on a channel that does not
+forward the client `Authorization` upstream. The caller addresses the task by ID alone and
+the edge relays opaque frames; the engine endpoint, credential, model, worker, and routing
+stay resolved behind the binding.
 
 ## Resident
 

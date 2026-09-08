@@ -1,11 +1,12 @@
-"""One resident invocation's windowed relay session, owned by a worker.
+"""One resident invocation's windowed relay session, owned by its endpoint.
 
-Each side of an invocation — the origin worker that drives it and the replica worker
-that serves it — runs one session. A session sends its role's data direction and reads
-the other, bounding its in-flight bytes with a sender-side window and granting the peer
-only as fast as it drains, so a slow consumer backpressures a fast producer end to end.
-The servers relay the frames opaquely: the session owns the cursor, window, and the
-protocol, and the supervisors never read them.
+Each side of an invocation runs one session: the origin — a caller worker's origin
+driver or the gated serve edge in the root — that drives it, and the replica worker that
+serves it. A session sends its role's data direction and reads the other, bounding its
+in-flight bytes with a sender-side window and granting the peer only as fast as it
+drains, so a slow consumer backpressures a fast producer end to end. The servers relay
+the frames opaquely: the session owns the cursor, window, and the protocol, and the
+supervisors never read them.
 """
 
 import asyncio

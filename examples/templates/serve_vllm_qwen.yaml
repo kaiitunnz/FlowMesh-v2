@@ -26,10 +26,11 @@ spec:
       trust_remote_code: true
       max_model_len: 4096
 
-  # A serve task is reached only through the FlowMesh-authenticated, claim-gated
-  # task-ID route: POST /api/v1/serve/tasks/<task_id>/v1/chat/completions with a
-  # FlowMesh credential and TASK read access. The worker binds the engine to
-  # loopback and never exposes a raw listener or engine key.
+  # Reach this task by its ID over the FlowMesh-authenticated, claim-gated route:
+  # POST /api/v1/serve/tasks/<task_id>/v1/chat/completions with a FlowMesh credential
+  # and TASK read access. Point an OpenAI SDK at that path — the request and the
+  # engine's own response envelope relay through, a stream: true body included. The
+  # worker binds the engine to loopback behind the task's claim-gated sidecar.
 
   # Task TTL (seconds): the executor tears down the endpoint on expiry.
   ttlSeconds: 3600

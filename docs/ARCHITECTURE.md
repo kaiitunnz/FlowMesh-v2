@@ -230,19 +230,22 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
 - **Unified task-ID-gated resident serve surface.** Every public user-declared `serve`
   task is a resident-gated standing allocation reached only by its task ID over one
   FlowMesh-authenticated, claim-gated endpoint (`POST /api/v1/serve/tasks/{task_id}/
-  {upstream_path}`); there is no raw serve proxy, direct-bind, or vLLM-key passthrough. At
-  start the serve task is adopted as its own standing resident replica (a per-task
-  `ServiceFamily` + a `ServeTaskResidencyBinding` + a task-lifetime-pinned directory
-  replica), validated under `RESIDENT_ALLOWED_MODELS`. The edge authenticates the principal
-  on a non-forwarded channel, checks `TASK` read access, records a durable external-principal
-  `Invocation` with no `DS` state, and asks the same Admission controller to raise the same
-  `ServiceClaim` against only that binding's allocation group. As a transport-only
-  `RouteOrigin` the edge relays the binding-derived request and opaque response frames; the
-  selected replica worker's claim-gated sidecar constructs the engine request, owns the
-  credential, parses/streams the response, and emits the fenced status terminal the
-  Admission controller consumes by `invocation_id` to release the credit — a client
-  disconnect, stream close, or timer never does. A loss is `UNCERTAIN` and a client retry is
-  a new independently-admitted invocation. Available when `RESIDENT_CAPACITY_ENABLED=true`
+  {upstream_path}`). An OpenAI-compatible client drives the task by its ID: the request
+  envelope relays to the task's standing replica and the engine's own response envelope
+  streams back, a `stream: true` server-sent-event body included; the engine binds to
+  loopback behind the task's claim-gated sidecar. At start the serve task is adopted as its
+  own standing resident replica (a per-task `ServiceFamily` + a `ServeTaskResidencyBinding`
+  + a task-lifetime-pinned directory replica), validated under `RESIDENT_ALLOWED_MODELS`.
+  The edge authenticates the principal on a non-forwarded channel, checks `TASK` read
+  access, records a durable external-principal `Invocation` with no `DS` state, and asks the
+  same Admission controller to raise the same `ServiceClaim` against only that binding's
+  allocation group. As a transport-only `RouteOrigin` the edge relays the binding-derived
+  request and opaque response frames; the selected replica worker's claim-gated sidecar
+  constructs the engine request, owns the credential, reverse-proxies the raw engine
+  response, and emits the fenced status terminal the Admission controller consumes by
+  `invocation_id` to release the credit — a client disconnect, stream close, or timer never
+  does. A loss is `UNCERTAIN` and a client retry is a new independently-admitted invocation.
+  Available when `RESIDENT_CAPACITY_ENABLED=true`
   (which requires `NETWORK_PLANE_ENABLED=true`). See
   [`RESIDENT_CAPACITY.md`](RESIDENT_CAPACITY.md).
 - **Network-plane route substrate.** A topology-aware, control-resolved routing substrate

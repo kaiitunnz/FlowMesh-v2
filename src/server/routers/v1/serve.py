@@ -6,9 +6,9 @@ non-forwarded channel (the client's ``Authorization`` neither grants access here
 forwarded upstream), checks the existing ``TASK`` read permission, resolves the task's
 live standing serve binding, and admits the request through the same resident claim gate
 as a workflow consumer. It relays the binding-derived request and the opaque response
-frames; the selected replica worker's claim-gated sidecar does all engine work. No raw
-resident listener, engine credential, model, worker, or routing choice is ever exposed
-to the caller.
+frames; the selected replica worker's claim-gated sidecar does all engine work. The
+caller holds only the task ID, and the engine listener, credential, model, worker, and
+routing stay resolved behind the binding.
 """
 
 import logging

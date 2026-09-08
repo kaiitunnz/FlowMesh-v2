@@ -129,17 +129,18 @@ transfer.
 
 Every public user-declared `serve` task is a resident-gated standing allocation reached
 only by its task ID over one FlowMesh-authenticated, claim-gated endpoint: `POST
-/api/v1/serve/tasks/{task_id}/{upstream_path}`. There is no raw serve proxy, direct-bind,
-or vLLM-key passthrough — the serve task binds its engine to loopback, and only the
-task's claim-gated sidecar reaches it.
+/api/v1/serve/tasks/{task_id}/{upstream_path}`. The task's engine binds to loopback and is
+reached only through its claim-gated sidecar; the endpoint relays the request to the
+task's standing replica and streams back the engine's own response envelope — a
+`stream: true` server-sent-event body included — so an OpenAI-compatible client drives the
+task by its ID alone.
 
 At serve-task start the task is adopted as its own standing resident allocation: a
 per-task `ServiceFamily`, a `ServeTaskResidencyBinding` from the task ID to that
 allocation group, and a directory replica pinned for the task's lifetime (never idle-torn
 down while the task is live). The model is validated under `RESIDENT_ALLOWED_MODELS`; a
-disallowed model is not adopted. The internal replica identity is never a public handle;
-a caller names only the task ID and can choose no model, worker, endpoint, credential, or
-routing policy.
+disallowed model is not adopted. A caller names only the task ID; the model, worker,
+endpoint, credential, and routing are fixed by the binding.
 
 The edge authenticates the FlowMesh principal on a non-forwarded channel (the client's
 `Authorization` neither grants access here nor is forwarded upstream), checks the existing
@@ -150,8 +151,8 @@ request descriptor and the fixed profile bounds. It records a durable external-p
 transport-only `RouteOrigin`, the edge relays the binding-derived request and opaque
 response frames over the resolved route; the selected replica worker's claim-gated sidecar
 verifies the descriptor and fence, constructs the engine request, owns the engine
-credential, parses/streams the response, and emits the fenced status terminal. Root and
-supervisor never perform engine work.
+credential, reverse-proxies the raw engine response envelope, and emits the fenced status
+terminal. Root and supervisor relay opaque frames and never perform engine work.
 
 The sidecar's fence-matching status terminal, recorded by the Admission controller by
 `invocation_id`, is the only thing that releases the credit — a client disconnect, stream
@@ -162,8 +163,8 @@ retry is a separately admitted new invocation that cannot reopen the original cl
 live response requires only the fenced terminal; reference-backed materialization is
 optional. On task stop, cancellation, TTL, or failure the binding drains, denies new
 calls, lets accepted calls reconcile, and then stops. This surface is available whenever
-`RESIDENT_CAPACITY_ENABLED` is set; it adds no per-principal ingress quota, alias catalog,
-or tenant allowlist beyond ordinary task access.
+`RESIDENT_CAPACITY_ENABLED` is set; access is exactly the task's ordinary `TASK` read
+permission.
 
 A deployment gates access through its identity and permission plugins. With none
 registered every caller resolves to one default admin principal, so a deployment that
