@@ -1,45 +1,26 @@
-"""The gated serve edge's transport-only relay executor.
+"""The root-local proxy ingress's transport-only relay executor.
 
-The gated serve edge is the registered transport-only ``RouteOrigin`` for a
-task-addressed external invocation: this executor drives the origin side of the
-invocation's reverse-relay session directly in the root, carrying the binding-derived
-request and relaying opaque response frames. It reads only relay frame kinds (transport
-framing) and reports the sidecar's attested acknowledgement and terminal to control,
-which validates every fence; the selected replica worker's claim-gated sidecar
-constructs and parses the engine request, owns its credential, and serves the response.
+The root-local gated serve ingress is a registered transport-only ``RouteOrigin`` for a
+task-addressed external invocation. This executor is its transport: it holds the
+root-internal rendezvous attachment that consumes the edge stream's down leg, publishes
+origin-produced frames onto its up leg, and runs the shared serve origin drive over that
+sink. Because the root cannot dial a worker, its frames always ride the universal
+``control_relay``.
 
-It tees each response frame to the client through control as it streams, and its success
-terminal carries no manifest — the live relay is the serve-data mode.
+The drive itself — the two-phase bootstrap, the opaque response relay, and the fenced
+terminal reported to control — is shared with the worker-hosted forward ingress, so one
+credit-reporting path serves both gated modes.
 """
 
 import asyncio
 import logging
 import os
-from typing import Protocol
 
 from shared.network.relay_frame import RelayFrame
 from shared.resident.contracts import AdmissionHandoff, RouteAuthorization
 from shared.resident.envelope import ServeRequestEnvelope
-from shared.resident.reports import (
-    ResidentBootstrapAck,
-    ResidentBootstrapOutcome,
-    ResidentOpOutcome,
-    ResidentStreamChunk,
-    ResidentStreamHead,
-    ResidentStreamStatus,
-)
-from shared.resident.session import ResidentRelaySession, ResidentSessionRole
+from shared.resident.serve_drive import ServeControl, ServeOriginDrive
 from shared.resident.transport import ResidentFrameSink
-from shared.resident.wire import (
-    KIND_ACK,
-    KIND_BOOTSTRAP,
-    KIND_CHUNK,
-    KIND_DONE,
-    KIND_FAILED,
-    KIND_HEAD,
-    KIND_REJECT,
-    KIND_STREAM,
-)
 
 from ..network.reverse_relay import BinaryRedis, RelayStreamStore
 from ..supervisor.services.reverse_relay_attachment import ReverseRelayAttachment
@@ -50,17 +31,7 @@ from ..supervisor.services.reverse_relay_attachment import ReverseRelayAttachmen
 # both directions by the session record.
 SERVE_EDGE_STREAM_ID = "serve-edge"
 
-
-class ServeControl(Protocol):
-    """The subset of resident-capacity control this executor reports transitions to."""
-
-    def on_bootstrap_ack(self, ack: ResidentBootstrapAck) -> None: ...
-
-    def on_stream_head(self, head: ResidentStreamHead) -> None: ...
-
-    def on_stream_chunk(self, chunk: ResidentStreamChunk) -> None: ...
-
-    def on_outcome(self, outcome: ResidentOpOutcome) -> None: ...
+__all__ = ["SERVE_EDGE_STREAM_ID", "ServeControl", "ServeRelayExecutor"]
 
 
 class _EdgeSink(ResidentFrameSink):
@@ -74,33 +45,8 @@ class _EdgeSink(ResidentFrameSink):
         await self._streams.publish_up(self._edge_id, frame)
 
 
-class _Drive:
-    def __init__(
-        self,
-        session: ResidentRelaySession,
-        task_id: str,
-        call_correlation: str,
-        invocation_id: str,
-    ) -> None:
-        self.session = session
-        self.task_id = task_id
-        self.call_correlation = call_correlation
-        self.invocation_id = invocation_id
-        self.authorization: asyncio.Future[RouteAuthorization] = (
-            asyncio.get_event_loop().create_future()
-        )
-        self.task: asyncio.Task[None] | None = None
-
-
 class ServeRelayExecutor:
-    """Drives the origin side of every gated serve invocation's relay session.
-
-    One main-process reverse-relay attachment consumes the edge stream's down leg and
-    routes each frame to its session; per invocation, an origin session sends the
-    binding-derived bootstrap and authorized-stream frames and reads the sidecar's
-    response, reporting the acknowledgement and terminal to control while teeing each
-    response frame to the client.
-    """
+    """Runs the serve origin drive over the root's own rendezvous attachment."""
 
     def __init__(
         self,
@@ -115,16 +61,17 @@ class ServeRelayExecutor:
     ) -> None:
         self._streams = RelayStreamStore(relay_redis)
         self._edge_id = edge_id
-        self._control = control
-        self._window_bytes = window_bytes
-        self._stream_deadline = stream_deadline_sec
-        self._auth_deadline = auth_deadline_sec
-        self._logger = logger or logging.getLogger("serve-relay")
-        self._sink = _EdgeSink(self._streams, edge_id)
         self._attachment = ReverseRelayAttachment(
             relay_redis, edge_id, self, owner=f"serve-edge:{os.getpid()}"
         )
-        self._by_session: dict[str, _Drive] = {}
+        self._drive = ServeOriginDrive(
+            sink=_EdgeSink(self._streams, edge_id),
+            control=control,
+            window_bytes=window_bytes,
+            stream_deadline_sec=stream_deadline_sec,
+            auth_deadline_sec=auth_deadline_sec,
+            logger=logger,
+        )
 
     @property
     def edge_id(self) -> str:
@@ -139,9 +86,7 @@ class ServeRelayExecutor:
 
     async def on_frame(self, frame: RelayFrame) -> None:
         """Route one inbound relay frame to its session (the attachment's delivery)."""
-        drive = self._by_session.get(frame.session_id)
-        if drive is not None:
-            await drive.session.on_frame(frame)
+        await self._drive.on_frame(frame)
 
     def open(
         self,
@@ -155,187 +100,20 @@ class ServeRelayExecutor:
         envelope: ServeRequestEnvelope,
     ) -> None:
         """Start one origin drive: send the bootstrap and stream the response."""
-        session = ResidentRelaySession(
+        self._drive.open(
             session_id=session_id,
             invocation_id=invocation_id,
             idm=idm,
-            role=ResidentSessionRole.ORIGIN,
-            sink=self._sink,
-            window_bytes=self._window_bytes,
+            task_id=task_id,
+            call_correlation=call_correlation,
+            handoff=handoff,
+            envelope=envelope,
         )
-        drive = _Drive(session, task_id, call_correlation, invocation_id)
-        self._by_session[session_id] = drive
-        drive.task = asyncio.ensure_future(self._drive(drive, handoff, envelope))
 
     def authorize(self, session_id: str, auth: RouteAuthorization) -> None:
         """Deliver control's post-acceptance route authorization to a waiting drive."""
-        drive = self._by_session.get(session_id)
-        if drive is not None and not drive.authorization.done():
-            drive.authorization.set_result(auth)
+        self._drive.authorize(session_id, auth)
 
     def close(self, session_id: str) -> None:
         """Cancel and forget one drive, e.g. on a fenced terminal or reap."""
-        drive = self._by_session.pop(session_id, None)
-        if drive is None:
-            return
-        task = drive.task
-        if task is not None and task is not asyncio.current_task() and not task.done():
-            task.cancel()
-
-    async def _drive(
-        self, drive: _Drive, handoff: AdmissionHandoff, envelope: ServeRequestEnvelope
-    ) -> None:
-        try:
-            await drive.session.send_body_wire(
-                KIND_BOOTSTRAP,
-                envelope.body,
-                handoff=handoff.model_dump(mode="json"),
-                request=envelope.header_fields(),
-            )
-            ack = await drive.session.recv_body_wire(self._stream_deadline)
-            if not self._handle_ack(drive, ack[0] if ack is not None else None):
-                return
-            try:
-                auth = await asyncio.wait_for(
-                    drive.authorization, timeout=self._auth_deadline
-                )
-            except TimeoutError:
-                self._control.on_outcome(
-                    self._uncertain(drive, "authorization not delivered")
-                )
-                return
-            await drive.session.send_wire(
-                KIND_STREAM, auth=auth.model_dump(mode="json")
-            )
-            await self._stream(drive)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001 - any escape holds the credit uncertain
-            self._logger.exception("serve relay drive failed")
-            self._control.on_outcome(
-                self._uncertain(drive, f"serve relay error: {exc}")
-            )
-        finally:
-            self._by_session.pop(drive.session.session_id, None)
-
-    def _handle_ack(self, drive: _Drive, ack: dict[str, object] | None) -> bool:
-        if ack is None:
-            self._control.on_bootstrap_ack(
-                self._ack(drive, ResidentBootstrapOutcome.UNCERTAIN)
-            )
-            return False
-        kind = ack.get("kind")
-        if kind == KIND_ACK:
-            self._control.on_bootstrap_ack(
-                self._ack(drive, ResidentBootstrapOutcome.ACKED)
-            )
-            return True
-        if kind == KIND_REJECT:
-            reason = ack.get("reason")
-            self._control.on_bootstrap_ack(
-                self._ack(
-                    drive,
-                    ResidentBootstrapOutcome.REJECTED,
-                    rejection=str(reason) if reason is not None else None,
-                )
-            )
-            return False
-        self._control.on_bootstrap_ack(
-            self._ack(drive, ResidentBootstrapOutcome.UNCERTAIN)
-        )
-        return False
-
-    async def _stream(self, drive: _Drive) -> None:
-        while True:
-            received = await drive.session.recv_body_wire(self._stream_deadline)
-            if received is None:
-                self._control.on_outcome(self._uncertain(drive, "serve stream lost"))
-                return
-            msg, body = received
-            kind = msg.get("kind")
-            if kind == KIND_HEAD:
-                # The engine response's own status and headers, relayed opaquely so the
-                # client response carries them ahead of the streamed body.
-                self._control.on_stream_head(
-                    ResidentStreamHead(
-                        invocation_id=drive.invocation_id,
-                        session_id=drive.session.session_id,
-                        status=int(msg.get("status", 200)),
-                        headers=tuple(
-                            (str(item[0]), str(item[1]))
-                            for item in msg.get("headers") or ()
-                            if item
-                        ),
-                    )
-                )
-            elif kind == KIND_CHUNK:
-                self._control.on_stream_chunk(
-                    ResidentStreamChunk(
-                        invocation_id=drive.invocation_id,
-                        session_id=drive.session.session_id,
-                        payload=body,
-                    )
-                )
-            elif kind == KIND_DONE:
-                # Live-only serve: the fenced status terminal releases the credit; no
-                # completion is assembled or materialized.
-                self._control.on_outcome(
-                    self._outcome(drive, ResidentStreamStatus.SUCCESS)
-                )
-                return
-            elif kind == KIND_FAILED:
-                if bool(msg.get("definite")):
-                    self._control.on_outcome(
-                        self._outcome(
-                            drive,
-                            ResidentStreamStatus.DEFINITE_FAILURE,
-                            error=f"resident engine refused: {msg.get('reason')}",
-                        )
-                    )
-                else:
-                    self._control.on_outcome(
-                        self._uncertain(drive, f"resident engine: {msg.get('reason')}")
-                    )
-                return
-            else:
-                self._control.on_outcome(
-                    self._uncertain(drive, "serve stream protocol")
-                )
-                return
-
-    @staticmethod
-    def _ack(
-        drive: _Drive,
-        outcome: ResidentBootstrapOutcome,
-        *,
-        rejection: str | None = None,
-    ) -> ResidentBootstrapAck:
-        return ResidentBootstrapAck(
-            task_id=drive.task_id,
-            call_correlation=drive.call_correlation,
-            invocation_id=drive.invocation_id,
-            session_id=drive.session.session_id,
-            outcome=outcome,
-            rejection=rejection,
-        )
-
-    @staticmethod
-    def _outcome(
-        drive: _Drive,
-        status: ResidentStreamStatus,
-        *,
-        error: str | None = None,
-    ) -> ResidentOpOutcome:
-        return ResidentOpOutcome(
-            task_id=drive.task_id,
-            call_correlation=drive.call_correlation,
-            invocation_id=drive.invocation_id,
-            session_id=drive.session.session_id,
-            status=status,
-            manifest=None,
-            error=error,
-        )
-
-    @classmethod
-    def _uncertain(cls, drive: _Drive, detail: str) -> ResidentOpOutcome:
-        return cls._outcome(drive, ResidentStreamStatus.UNCERTAIN, error=detail)
+        self._drive.close(session_id)
