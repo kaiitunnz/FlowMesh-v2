@@ -278,7 +278,19 @@ class Runner:
             new_request_id=new_serve_request_id,
             logger=self.logger,
         )
-        ingress.start()
+        try:
+            ingress.start()
+        except OSError as exc:
+            # The ingress is an optional transport role; a worker that cannot bind its
+            # configured port (e.g. another local worker already holds it) keeps serving
+            # tasks rather than failing, and simply registers no ingress with control.
+            self.logger.warning(
+                "forward serve ingress could not bind %s:%d (%s); not hosting it",
+                self._serve_ingress_bind_host,
+                self._serve_ingress_port,
+                exc,
+            )
+            return
         self._serve_ingress = ingress
         # Build the resident lane host up front so the serve lane is ready before the
         # first admitted request; register the listener with control in the background
