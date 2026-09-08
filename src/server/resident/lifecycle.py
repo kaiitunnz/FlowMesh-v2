@@ -346,9 +346,13 @@ class LifecycleScaleManager:
 
         Reaps the invalidated incarnation's backing serve task so a replica the family
         will re-materialize from zero does not leave an orphaned serve workflow running.
+        A standing serve allocation is exempt: it is the user's long-running task,
+        drained
+        only by its own lifecycle (stop/cancel/TTL/failure), and preempt-and-recreate
+        cannot recover it — so a per-request failure never invalidates or reaps it.
         """
         replica = self._stores.directory.get(replica_id)
-        if replica is None:
+        if replica is None or replica.standing:
             return
         serve_task_id = replica.serve_task_id
         replica.state = ReplicaState.PREEMPTED

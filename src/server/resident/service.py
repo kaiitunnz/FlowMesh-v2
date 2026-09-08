@@ -1068,6 +1068,15 @@ class ResidentCapacityControl:
         count = self._transient_failures.get(invocation_id, 0) + 1
         self._transient_failures[invocation_id] = count
         if count >= self._max_transient_redrives and claim.replica_id is not None:
+            if self._replica_is_standing(claim.replica_id):
+                # A standing serve replica is the user's shared, long-running task: it
+                # cannot re-materialize, so a per-request failure fails ONLY this
+                # request
+                # via its fenced terminal and never preempts the endpoint for its peers.
+                self._terminalize_failed(
+                    invocation_id, task_id, call_correlation, serve, detail
+                )
+                return
             self._lifecycle.on_preempt(claim.replica_id)
         self._logger.info(
             "resident delivery held uncertain (attempt %d): %s", count, detail
@@ -1083,6 +1092,44 @@ class ResidentCapacityControl:
             serve.redrive()
         else:
             self._redispatch(task_id, call_correlation)
+
+    def _replica_is_standing(self, replica_id: str | None) -> bool:
+        """Whether a replica is a task-lifetime standing serve allocation.
+
+        A standing replica is the user's own long-running serve task; resident recovery
+        never preempts or reaps it, so a per-request failure on it fails only that
+        request rather than tearing the endpoint down for every client.
+        """
+        if replica_id is None:
+            return False
+        replica = self._stores.directory.get(replica_id)
+        return replica is not None and replica.standing
+
+    def _terminalize_failed(
+        self,
+        invocation_id: str,
+        task_id: str,
+        call_correlation: str,
+        serve: ServeDelivery | None,
+        detail: str,
+    ) -> None:
+        """Fail one request via its fenced terminal without preempting its replica.
+
+        Used when a per-request failure exhausts its re-drives on a standing serve
+        replica: the credit releases through the same fenced terminal as any settled
+        failure, and the replica stays live for its other clients.
+        """
+        if serve is not None:
+            self._finalize_serve(
+                invocation_id, serve, ClaimTerminalReason.FAILED, detail, success=False
+            )
+        else:
+            self._admission.settle_invocation_terminal(
+                invocation_id, ClaimTerminalReason.FAILED
+            )
+            self._transient_failures.pop(invocation_id, None)
+            self._reap_attempt(invocation_id)
+            self._settle(task_id, call_correlation, None, error=detail)
 
     def _release_definite(
         self,
@@ -1101,7 +1148,14 @@ class ResidentCapacityControl:
         """
         if pre_acceptance and claim.state is ClaimState.RESERVED:
             self._admission.on_enqueue_failed(claim)
-        if preempt and claim.replica_id is not None:
+        if (
+            preempt
+            and claim.replica_id is not None
+            and not self._replica_is_standing(claim.replica_id)
+        ):
+            # A standing serve replica is never preempted by a per-request rejection:
+            # the
+            # request fails alone via its fenced terminal and the endpoint survives.
             self._lifecycle.on_preempt(claim.replica_id)
         if attempt.serve is not None:
             self._finalize_serve(

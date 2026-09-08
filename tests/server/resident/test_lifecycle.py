@@ -210,6 +210,24 @@ def test_preempt_invalidates_incarnation_and_reaps_serve_task():
     assert stopped == ["tsk-serve-1"]
 
 
+def test_preempt_never_reaps_a_standing_serve_replica():
+    # A standing serve replica is the user's own long-running task: a per-request
+    # failure that reaches preempt must never invalidate the incarnation or cancel the
+    # backing serve task, or one bad request would tear the endpoint down for every
+    # client. It cannot re-materialize, so preempt-and-recreate is the wrong recovery.
+    stores = warm_stores()
+    stopped = []
+    replica = stores.directory.get("rpl-1")
+    replica.serve_task_id = "tsk-serve-1"
+    replica.standing = True
+    mgr = _manager(stores, stop_fn=lambda tid: stopped.append(tid))
+    mgr.on_preempt("rpl-1")
+    replica = stores.directory.get("rpl-1")
+    assert replica.state is ReplicaState.WARM
+    assert replica.incarnation == 1
+    assert stopped == []
+
+
 def test_idle_sweep_drains_then_stops_an_idle_replica():
     stores = warm_stores()
     stopped = []

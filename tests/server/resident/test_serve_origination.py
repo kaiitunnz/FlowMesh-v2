@@ -326,6 +326,57 @@ def test_definite_failure_finalizes_the_client_and_releases_credit() -> None:
     assert delivery.failed is not None and "engine refused" in delivery.failed
 
 
+def test_a_reject_on_a_standing_replica_fails_only_the_request() -> None:
+    # BLOCKER guard: a definite per-request rejection on the user's standing serve
+    # replica fails ONLY that request via its fenced terminal; it never preempts or
+    # reaps the shared endpoint (which cannot re-materialize). Without the guard,
+    # _release_definite(preempt=True) invalidates the incarnation and cancels the user's
+    # serve task, tearing the endpoint down for every other client.
+    svc, stores, _settled, _deps = _build()
+    _adopt(svc)
+    delivery = _ServeDelivery()
+    asyncio.run(svc._originate_serve(_origination(delivery)))
+    replica = stores.directory.by_family(_FAMILY)[0]
+    asyncio.run(
+        svc._on_ack(_ack(svc, ResidentBootstrapOutcome.REJECTED, rejection="stale"))
+    )
+    claim = stores.claims.by_invocation("inv-1")[0]
+    assert claim.state is ClaimState.TERMINAL
+    assert delivery.terminals[-1][0] is ClaimTerminalReason.FAILED
+    assert delivery.failed is not None
+    assert _held(stores, replica.replica_id) == 0  # this request's credit released
+    survivor = stores.directory.get(replica.replica_id)
+    assert survivor is not None
+    assert survivor.state is ReplicaState.WARM  # not preempted
+    assert survivor.incarnation == 1  # not invalidated
+
+
+def test_redrive_exhaustion_on_a_standing_replica_fails_only_the_request() -> None:
+    # BLOCKER guard: an uncertain per-request loss that exhausts its re-drives on a
+    # standing replica fails ONLY that request via a fenced terminal: _hold_locked
+    # never
+    # preempts the shared endpoint (its max-redrive preempt would reap the user's task).
+    svc, stores, _settled, _deps = _build()
+    _adopt(svc)
+    delivery = _ServeDelivery()
+    asyncio.run(svc._originate_serve(_origination(delivery)))
+    asyncio.run(svc._on_ack(_ack(svc, ResidentBootstrapOutcome.ACKED)))
+    claim = stores.claims.by_invocation("inv-1")[0]
+    replica = stores.directory.by_family(_FAMILY)[0]
+    attempt = svc._attempts["inv-1"]
+    # One loss short of the threshold; the next uncertain loss exhausts the re-drives.
+    svc._transient_failures["inv-1"] = svc._max_transient_redrives - 1
+    asyncio.run(svc._hold_and_redrive_claim(attempt, claim, "stream lost"))
+    claim = stores.claims.by_invocation("inv-1")[0]
+    assert claim.state is ClaimState.TERMINAL
+    assert delivery.terminals[-1][0] is ClaimTerminalReason.FAILED
+    assert _held(stores, replica.replica_id) == 0
+    survivor = stores.directory.get(replica.replica_id)
+    assert survivor is not None
+    assert survivor.state is ReplicaState.WARM  # never preempted
+    assert survivor.incarnation == 1
+
+
 def test_stream_chunk_tees_only_to_a_matching_session() -> None:
     svc, _stores, _settled, _deps = _build()
     _adopt(svc)
