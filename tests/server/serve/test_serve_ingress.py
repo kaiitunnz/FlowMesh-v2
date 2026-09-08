@@ -5,7 +5,23 @@ ingress exists only where a deployment registered one, so a task pinned to ``for
 without one fails closed rather than being served over the proxy.
 """
 
+import pytest
+
 from server.serve.ingress import ServeAccessMode, ServeIngressRegistry
+
+
+def _register(
+    registry: ServeIngressRegistry,
+    *,
+    generation: int = 1,
+    public_url: str = "http://ingress.example:8100",
+) -> bool:
+    return registry.register_forward(
+        origin_id="node-a",
+        worker_id="wrk-a",
+        public_url=public_url,
+        generation=generation,
+    )
 
 
 def test_the_root_local_proxy_ingress_is_registered_when_permitted() -> None:
@@ -25,24 +41,46 @@ def test_a_deployment_that_refuses_public_serve_registers_no_proxy_ingress() -> 
 def test_forward_resolves_to_nothing_until_a_deployment_registers_one() -> None:
     registry = ServeIngressRegistry("serve-edge")
     assert registry.live(ServeAccessMode.FORWARD) is None
-    registry.register_forward("node-a", generation=3)
+    assert registry.register_forward(
+        origin_id="node-a",
+        worker_id="wrk-a",
+        public_url="http://ingress.example:8100/",
+        generation=3,
+    )
     forward = registry.live(ServeAccessMode.FORWARD)
     assert forward is not None
-    assert (forward.origin_id, forward.generation) == ("node-a", 3)
+    assert (forward.origin_id, forward.worker_id, forward.generation) == (
+        "node-a",
+        "wrk-a",
+        3,
+    )
+    # The trailing slash is normalised away so the task-qualified url joins cleanly.
+    assert forward.public_url == "http://ingress.example:8100"
 
 
 def test_a_superseded_forward_registration_does_not_replace_a_newer_one() -> None:
     registry = ServeIngressRegistry("serve-edge")
-    registry.register_forward("node-a", generation=5)
-    registry.register_forward("node-a", generation=4)
+    _register(registry, generation=5)
+    assert not _register(registry, generation=4)
     forward = registry.live(ServeAccessMode.FORWARD)
     assert forward is not None and forward.generation == 5
 
 
 def test_withdrawing_the_forward_ingress_fails_its_mode_closed_again() -> None:
     registry = ServeIngressRegistry("serve-edge")
-    registry.register_forward("node-a", generation=1)
+    _register(registry, generation=1)
     registry.withdraw_forward()
     assert registry.live(ServeAccessMode.FORWARD) is None
     # Withdrawing forward never disturbs the root-local proxy.
     assert registry.live(ServeAccessMode.PROXY) is not None
+
+
+@pytest.mark.parametrize(
+    "url", ["", "not-a-url", "ftp://ingress.example", "http://", "://ingress"]
+)
+def test_a_registration_that_cannot_address_the_ingress_is_refused(url: str) -> None:
+    # The url is reported by the worker once and fenced by its generation, so it is
+    # validated on the way in rather than trusted and published broken.
+    registry = ServeIngressRegistry("serve-edge")
+    assert not _register(registry, public_url=url)
+    assert registry.live(ServeAccessMode.FORWARD) is None

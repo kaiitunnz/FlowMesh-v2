@@ -13,7 +13,12 @@ from .binding import (
     ServeTaskResidencyBinding,
     serve_family_key,
 )
-from .ingress import ServeAccessMode, ServeIngress, ServeIngressRegistry
+from .ingress import (
+    ServeAccessMode,
+    ServeIngress,
+    ServeIngressRegistry,
+    is_public_base_url,
+)
 from .relay import SERVE_EDGE_STREAM_ID, ServeRelayExecutor
 from .service import (
     BindingNotFound,
@@ -38,6 +43,7 @@ __all__ = [
     "ServeAccessMode",
     "ServeIngress",
     "ServeIngressRegistry",
+    "is_public_base_url",
     "GatedServe",
     "MethodNotAllowed",
     "ServeBindingSnapshot",

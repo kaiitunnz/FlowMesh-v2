@@ -231,7 +231,12 @@ def test_forward_is_admitted_once_its_ingress_is_registered() -> None:
     registry = ServeIngressRegistry("serve-edge")
     edge = _edge(control, registry, forward_transport=_FakeRelay())
     _bind(edge, access_mode=ServeAccessMode.FORWARD)
-    registry.register_forward("node-a", generation=1)
+    registry.register_forward(
+        origin_id="node-a",
+        worker_id="wrk-a",
+        public_url="http://ingress.example:8100",
+        generation=1,
+    )
     edge.submit("p1", "acme", "tsk-1", _envelope(), ServeAccessMode.FORWARD)
     assert len(control.originations) == 1
 
@@ -464,7 +469,12 @@ def test_a_binding_is_refused_on_an_ingress_it_does_not_pin() -> None:
     # traffic off the root still carries it there whenever a client uses the root URL.
     control = _FakeControl()
     registry = ServeIngressRegistry("serve-edge")
-    registry.register_forward("node-a", generation=1)
+    registry.register_forward(
+        origin_id="node-a",
+        worker_id="wrk-a",
+        public_url="http://ingress.example:8100",
+        generation=1,
+    )
 
     edge = _edge(control, registry)
     _bind(edge, task_id="tsk-fwd", access_mode=ServeAccessMode.FORWARD)
@@ -487,7 +497,12 @@ def _forward_edge() -> tuple[_FakeControl, GatedServe]:
     registry = ServeIngressRegistry("serve-edge")
     edge = _edge(control, registry, forward_transport=_FakeRelay())
     _bind(edge, access_mode=ServeAccessMode.FORWARD)
-    registry.register_forward("node-a", generation=1)
+    registry.register_forward(
+        origin_id="node-a",
+        worker_id="wrk-a",
+        public_url="http://ingress.example:8100",
+        generation=1,
+    )
     return control, edge
 
 

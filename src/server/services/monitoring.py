@@ -10,7 +10,6 @@ from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlparse
 
 from shared.resident.reports import (
     ResidentBootstrapAck,
@@ -57,7 +56,7 @@ from ..hooks import (
 from ..registries.node import NodeRegistry
 from ..registries.worker import WorkerRegistry
 from ..schemas.logs import LogEvent
-from ..serve import ServeAccessMode
+from ..serve import ServeAccessMode, is_public_base_url
 from ..task.metadata import extract_model_dataset_names
 from ..task.models import TaskRecord, TaskStatus, TaskUsage
 from ..task.runtime import TaskRuntime
@@ -164,12 +163,7 @@ class EventMonitor:
         route, falling back to a safe default instead of silently producing a broken
         advertised URL."""
         fallback = "http://localhost:8000"
-        try:
-            parsed = urlparse(server_base_url)
-            valid = parsed.scheme in ("http", "https") and bool(parsed.hostname)
-        except ValueError:
-            valid = False
-        if valid:
+        if is_public_base_url(server_base_url):
             return server_base_url
         self._logger.error(
             "Invalid server_base_url %r; falling back to %r for the gated serve route",
