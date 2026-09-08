@@ -36,6 +36,7 @@ class _FakeControl:
     ) -> None:
         self.originations: list = []
         self.redrives: list = []
+        self.failed_serve: list[tuple[str, str]] = []
         self.adopt_calls: list[dict] = []
         self.drained: list[str] = []
         self.reconciled: list[tuple[str, ClaimTerminalReason]] = []
@@ -50,6 +51,10 @@ class _FakeControl:
 
     def redrive_serve(self, origination) -> None:
         self.redrives.append(origination)
+
+    def fail_serve(self, invocation_id: str, delivery, detail: str) -> None:
+        self.failed_serve.append((invocation_id, detail))
+        delivery.fail(detail)
 
     def serve_model_allowed(self, model_ref: str) -> bool:
         return self._model_allowed
@@ -268,15 +273,29 @@ def test_preflush_loss_redrives_while_postflush_loss_fails_the_client() -> None:
         result = edge.submit("p1", "acme", "tsk-1", "POST", "v1/chat/completions", "{}")
         delivery = control.originations[1].delivery
         delivery.tee("partial")
-        delivery.redrive()  # flushed: must fail the client, not re-stream onto it
+        delivery.redrive()  # flushed: fail via the fenced terminal, do NOT re-run
         events = await _events(result)
         assert (events[0].kind, events[0].payload) == ("chunk", "partial")
         assert events[-1].kind == "error"
         assert all(e.payload != "partial" for e in events[1:])
 
     asyncio.run(postflush())
-    # The held credit still reconciles through a re-drive on either loss.
-    assert len(control.redrives) == 2
+    # A flushed loss terminalizes FAILED through the fenced path and does NOT re-run the
+    # engine (the output could not reach the client) — exactly one drive, no re-drive.
+    assert len(control.redrives) == 1
+    assert len(control.failed_serve) == 1
+
+
+def test_a_disconnected_client_fails_rather_than_re_running_the_engine() -> None:
+    control = _FakeControl()
+    edge = _edge(control)
+    _bind(edge)
+    result = edge.submit("p1", "acme", "tsk-1", "POST", "v1/chat/completions", "{}")
+    delivery = control.originations[0].delivery
+    result.close_client()  # the client is gone
+    delivery.redrive()  # a loss under a gone client fails, not re-runs the engine
+    assert control.redrives == []
+    assert len(control.failed_serve) == 1
 
 
 def test_adopt_is_idempotent_and_model_gated() -> None:

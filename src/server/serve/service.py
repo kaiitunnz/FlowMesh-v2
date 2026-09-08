@@ -235,17 +235,18 @@ class _ServeStream:
                     return
 
     def redrive(self) -> None:
-        # A loss after bytes already reached the client cannot transparently re-stream:
-        # re-teeing onto the same connection would duplicate the delivered prefix. Fail
-        # this client response instead (the caller retries as a fresh, separately
-        # admitted request). A loss before any flush re-drives transparently on a fresh
-        # session under the held claim, settling on its own fenced terminal.
-        if self._flushed:
-            self._finish(
-                ServeEvent(
-                    kind="error", detail="resident stream lost after partial delivery"
-                )
+        # When the client response can no longer receive a transparent re-stream — bytes
+        # already committed to it (``_flushed``), or the client is gone (``_closed``) —
+        # re-running the engine would only discard its output. Terminalize the credit
+        # FAILED through the fenced path instead of re-driving, and fail this client
+        # response (the caller retries as a fresh, separately admitted request). A loss
+        # before any flush, with the client still connected, re-drives transparently on
+        # a fresh session under the held claim, settling on its own fenced terminal.
+        if self._flushed or self._closed:
+            self._edge.control.fail_serve(
+                self.invocation_id, self, "resident stream lost after partial delivery"
             )
+            return
         self._edge.control.redrive_serve(self.origination())
 
 
