@@ -114,9 +114,17 @@ class TestServeSpecStrict:
         spec = ServeSpecStrict(taskType=TaskType.SERVE)
         assert spec.taskType == TaskType.SERVE
 
-    def test_rejects_removed_access_mode_field(self) -> None:
+    def test_accepts_both_gated_access_modes(self) -> None:
+        for mode in ("proxy", "forward"):
+            assert (
+                ServeSpecStrict(taskType=TaskType.SERVE, accessMode=mode).accessMode
+                == mode
+            )
+
+    def test_rejects_the_removed_direct_access_mode(self) -> None:
+        # ``direct`` named a raw ungated listener, which is no longer a mode at all.
         with pytest.raises(Exception):
-            ServeSpecStrict(taskType=TaskType.SERVE, accessMode="forward")  # type: ignore[call-arg]
+            ServeSpecStrict(taskType=TaskType.SERVE, accessMode="direct")  # type: ignore[arg-type]
 
     def test_rejects_removed_api_key_field(self) -> None:
         with pytest.raises(Exception):

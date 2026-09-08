@@ -13,10 +13,12 @@ from .binding import (
     ServeTaskResidencyBinding,
     serve_family_key,
 )
+from .ingress import ServeAccessMode, ServeIngress, ServeIngressRegistry
 from .relay import SERVE_EDGE_STREAM_ID, ServeRelayExecutor
 from .service import (
     BindingNotFound,
     GatedServe,
+    IngressUnavailable,
     MethodNotAllowed,
     ServeResult,
 )
@@ -30,6 +32,10 @@ from .state import (
 __all__ = [
     "SERVE_EDGE_STREAM_ID",
     "BindingNotFound",
+    "IngressUnavailable",
+    "ServeAccessMode",
+    "ServeIngress",
+    "ServeIngressRegistry",
     "GatedServe",
     "MethodNotAllowed",
     "ServeBindingSnapshot",

@@ -9,17 +9,18 @@ import logging
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+from server.serve.ingress import ServeAccessMode
 from server.services.monitoring import EventMonitor
 from shared.tasks import TaskType
 
 
 class _GatedServe:
     def __init__(self) -> None:
-        self.adopted: list[str] = []
+        self.adopted: list[tuple[str, ServeAccessMode]] = []
         self.drained: list[str] = []
 
-    def adopt(self, task_id: str) -> None:
-        self.adopted.append(task_id)
+    def adopt(self, task_id: str, access_mode: ServeAccessMode) -> None:
+        self.adopted.append((task_id, access_mode))
 
     def drain(self, task_id: str) -> None:
         self.drained.append(task_id)
@@ -39,10 +40,19 @@ def _monitor(runtime: MagicMock, gated_serve: _GatedServe | None) -> EventMonito
     )
 
 
-def _record(task_type: TaskType, *, resident: bool = False, port: int | None = 8123):
+def _record(
+    task_type: TaskType,
+    *,
+    resident: bool = False,
+    port: int | None = 8123,
+    access_mode: str | None = None,
+):
     serve = {"model": "m", "_host": "127.0.0.1", "_port": port} if port else {}
     return SimpleNamespace(
-        task_type=task_type, resident=resident, latest_update={"serve": serve}
+        task_type=task_type,
+        resident=resident,
+        latest_update={"serve": serve},
+        task=SimpleNamespace(spec=SimpleNamespace(accessMode=access_mode)),
     )
 
 
@@ -52,7 +62,7 @@ def test_serve_and_dev_model_endpoints_are_adopted() -> None:
         runtime.get_record.return_value = _record(task_type)
         gated = _GatedServe()
         _monitor(runtime, gated)._maybe_adopt_serve("tsk-1")
-        assert gated.adopted == ["tsk-1"]
+        assert gated.adopted == [("tsk-1", ServeAccessMode.PROXY)]
 
 
 def test_internal_resident_backing_task_is_not_adopted() -> None:
@@ -101,3 +111,13 @@ def test_adopt_and_drain_are_noops_without_a_gated_serve() -> None:
     monitor = _monitor(runtime, None)
     monitor._maybe_adopt_serve("tsk-1")
     monitor._maybe_drain_serve("tsk-1")  # no raise
+
+
+def test_the_tasks_pinned_access_mode_reaches_adoption() -> None:
+    # The binding must pin the mode the user declared, so a forward task is never
+    # adopted as a proxy one and silently exposed over the root instead.
+    runtime = MagicMock()
+    runtime.get_record.return_value = _record(TaskType.SERVE, access_mode="forward")
+    gated = _GatedServe()
+    _monitor(runtime, gated)._maybe_adopt_serve("tsk-1")
+    assert gated.adopted == [("tsk-1", ServeAccessMode.FORWARD)]

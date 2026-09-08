@@ -57,6 +57,7 @@ from ..hooks import (
 from ..registries.node import NodeRegistry
 from ..registries.worker import WorkerRegistry
 from ..schemas.logs import LogEvent
+from ..serve import ServeAccessMode
 from ..task.metadata import extract_model_dataset_names
 from ..task.models import TaskRecord, TaskStatus, TaskUsage
 from ..task.runtime import TaskRuntime
@@ -83,6 +84,12 @@ def _stream_id_tuple(entry_id: str) -> tuple[int, int]:
         return int(ms), int(seq or 0)
     except ValueError:
         return 0, 0
+
+
+def _serve_access_mode(record: TaskRecord) -> ServeAccessMode:
+    """The gated exposure mode a serve task pinned, defaulting to the local proxy."""
+    declared = getattr(record.task.spec, "accessMode", None)
+    return ServeAccessMode(declared) if declared else ServeAccessMode.PROXY
 
 
 def failed_task_can_retry(record: TaskRecord | None, retryable: bool | None) -> bool:
@@ -893,7 +900,7 @@ class EventMonitor:
             return
         serve = record.latest_update.get("serve") if record.latest_update else None
         if isinstance(serve, dict) and serve.get("_port"):
-            self._gated_serve.adopt(task_id)
+            self._gated_serve.adopt(task_id, _serve_access_mode(record))
 
     def _maybe_drain_serve(self, task_id: str) -> None:
         """Drain a stopped serve task's binding and standing replica on its terminal."""

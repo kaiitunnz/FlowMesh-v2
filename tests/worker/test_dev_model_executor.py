@@ -87,9 +87,19 @@ class TestDevModelSpec:
         assert spec.ttlSeconds == 60.0
         assert spec.port == 8123
 
-    def test_rejects_removed_access_mode_field(self) -> None:
+    def test_accepts_both_gated_access_modes(self) -> None:
+        for mode in ("proxy", "forward"):
+            assert (
+                DevModelSpecStrict(
+                    taskType=TaskType.DEV_MODEL, accessMode=mode
+                ).accessMode
+                == mode
+            )
+
+    def test_rejects_the_removed_direct_access_mode(self) -> None:
+        # ``direct`` named a raw ungated listener, which is no longer a mode at all.
         with pytest.raises(Exception):
-            DevModelSpecStrict(taskType=TaskType.DEV_MODEL, accessMode="forward")  # type: ignore[call-arg]
+            DevModelSpecStrict(taskType=TaskType.DEV_MODEL, accessMode="direct")  # type: ignore[arg-type]
 
     def test_ttl_must_be_positive(self) -> None:
         with pytest.raises(Exception):

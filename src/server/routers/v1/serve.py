@@ -37,7 +37,12 @@ from ...auth.security import (
 )
 from ...hooks import ResourceAction, ResourceKind
 from ...serve import GatedServe
-from ...serve.service import BindingNotFound, MethodNotAllowed, ServeResult
+from ...serve.service import (
+    BindingNotFound,
+    IngressUnavailable,
+    MethodNotAllowed,
+    ServeResult,
+)
 
 router = APIRouter(prefix="/serve", tags=["Serve"])
 
@@ -109,6 +114,13 @@ async def serve_gated(
     except MethodNotAllowed as exc:
         raise HTTPException(
             status.HTTP_405_METHOD_NOT_ALLOWED, "method not allowed"
+        ) from exc
+    except IngressUnavailable as exc:
+        # The task pins a gated ingress this deployment has not registered. It fails
+        # closed: no other mode serves it, and no raw listener is exposed.
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "serve task ingress is not available",
         ) from exc
 
     return await _stream(result)

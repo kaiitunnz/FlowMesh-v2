@@ -11,7 +11,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from server.routers.v1 import serve as serve_router
-from server.serve.service import ServeEvent
+from server.serve.service import IngressUnavailable, ServeEvent
 from shared.resident.envelope import TRANSPARENT_METHODS
 
 PREFIX = "/api/v1"
@@ -115,3 +115,12 @@ def test_a_body_past_the_bound_is_refused_before_admission() -> None:
     response = _client(edge).post(_url(), content=oversized)
     assert response.status_code == 413
     assert edge.submitted == []
+
+
+def test_a_task_whose_ingress_is_unregistered_fails_closed_to_the_client() -> None:
+    class _Closed(_Edge):
+        def submit(self, principal_id, tenant, serve_task_id, envelope):
+            raise IngressUnavailable("forward")
+
+    response = _client(_Closed()).get(_url("v1/models"))
+    assert response.status_code == 503

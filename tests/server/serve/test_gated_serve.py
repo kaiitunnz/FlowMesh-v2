@@ -21,7 +21,12 @@ from server.serve import (
     ServeTerminalStatus,
     ServeTerminalStore,
 )
-from server.serve.service import BindingNotFound, MethodNotAllowed
+from server.serve.ingress import ServeAccessMode, ServeIngressRegistry
+from server.serve.service import (
+    BindingNotFound,
+    IngressUnavailable,
+    MethodNotAllowed,
+)
 from server.task.v2.representations.operators import ServiceInterface
 from shared.resident.contracts import ReplicaEndpoint
 from shared.resident.envelope import ServeRequestEnvelope, freeze_request_envelope
@@ -89,17 +94,25 @@ class _FakeRelay:
         pass
 
 
-def _edge(control: _FakeControl) -> GatedServe:
+def _edge(
+    control: _FakeControl, ingresses: ServeIngressRegistry | None = None
+) -> GatedServe:
     bindings = ServeBindingStore()
     return GatedServe(
         bindings=bindings,
         terminals=ServeTerminalStore(),
         control=control,  # type: ignore[arg-type]
         relay=_FakeRelay(),  # type: ignore[arg-type]
+        ingresses=ingresses or ServeIngressRegistry("serve-edge"),
     )
 
 
-def _bind(edge: GatedServe, task_id: str = "tsk-1", model: str = "org/model") -> None:
+def _bind(
+    edge: GatedServe,
+    task_id: str = "tsk-1",
+    model: str = "org/model",
+    access_mode: ServeAccessMode = ServeAccessMode.PROXY,
+) -> None:
     edge._bindings.adopt(
         task_id,
         service_ref=model,
@@ -109,6 +122,7 @@ def _bind(edge: GatedServe, task_id: str = "tsk-1", model: str = "org/model") ->
         adapter_source=None,
         engine_batch_key=f"{model}|chat",
         max_output_tokens=None,
+        access_mode=access_mode,
     )
 
 
@@ -184,6 +198,38 @@ def test_submit_forwards_any_engine_path_rather_than_an_allowlist() -> None:
         "/v1/messages",
         "/v1/embeddings",
     ]
+
+
+def test_forward_fails_closed_without_a_registered_ingress() -> None:
+    # A task pinned to forward must never be quietly served over the root-local proxy:
+    # with no forward ingress registered the request is refused before any credit.
+    control = _FakeControl()
+    edge = _edge(control)
+    _bind(edge, access_mode=ServeAccessMode.FORWARD)
+    try:
+        edge.submit("p1", "acme", "tsk-1", _envelope())
+        raise AssertionError("expected IngressUnavailable")
+    except IngressUnavailable:
+        pass
+    assert control.originations == []
+
+
+def test_forward_is_admitted_once_its_ingress_is_registered() -> None:
+    control = _FakeControl()
+    registry = ServeIngressRegistry("serve-edge")
+    edge = _edge(control, registry)
+    _bind(edge, access_mode=ServeAccessMode.FORWARD)
+    registry.register_forward("node-a", generation=1)
+    edge.submit("p1", "acme", "tsk-1", _envelope())
+    assert len(control.originations) == 1
+
+
+def test_a_proxy_binding_is_admitted_without_any_forward_ingress() -> None:
+    control = _FakeControl()
+    edge = _edge(control)
+    _bind(edge, access_mode=ServeAccessMode.PROXY)
+    edge.submit("p1", "acme", "tsk-1", _envelope())
+    assert len(control.originations) == 1
 
 
 def test_submit_originates_an_external_subject_against_the_binding_family() -> None:

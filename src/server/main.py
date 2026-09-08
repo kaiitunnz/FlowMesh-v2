@@ -45,6 +45,7 @@ from .serve import (
     SERVE_EDGE_STREAM_ID,
     GatedServe,
     ServeBindingStore,
+    ServeIngressRegistry,
     ServeRelayExecutor,
     ServeSnapshot,
     ServeTerminalStore,
@@ -306,6 +307,10 @@ if IS_ROOT_NODE:
             terminals=serve_terminals,
             control=RESIDENT_CONTROL,
             relay=SERVE_RELAY,
+            # The root-local proxy ingress is internal to the root, so it is registered
+            # with the gated surface itself; a forward ingress is registered only where
+            # a deployment hosts one.
+            ingresses=ServeIngressRegistry(SERVE_EDGE_STREAM_ID),
             persist=_persist_serve,
             logger=logger,
         )

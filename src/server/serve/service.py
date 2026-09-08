@@ -30,6 +30,7 @@ from ..resident.state import (
 )
 from ..task.v2.representations.operators import ServiceInterface
 from .binding import ServeBindingStore, ServeTaskResidencyBinding
+from .ingress import ServeAccessMode, ServeIngressRegistry
 from .relay import ServeRelayExecutor
 from .state import ServeStatusTerminal, ServeTerminalStatus, ServeTerminalStore
 
@@ -64,6 +65,10 @@ class BindingNotFound(Exception):
 
 class MethodNotAllowed(Exception):
     """The request method is not one the binding permits."""
+
+
+class IngressUnavailable(Exception):
+    """The binding pins a gated ingress this deployment has not registered."""
 
 
 @dataclass(frozen=True)
@@ -250,11 +255,13 @@ class GatedServe:
         terminals: ServeTerminalStore,
         control: ResidentCapacityControl,
         relay: ServeRelayExecutor,
+        ingresses: ServeIngressRegistry,
         persist: Callable[[], None] | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self._bindings = bindings
         self._terminals = terminals
+        self.ingresses = ingresses
         self.control = control
         self.relay = relay
         self._persist = persist or (lambda: None)
@@ -280,6 +287,10 @@ class GatedServe:
             raise BindingNotFound(serve_task_id)
         if envelope.method not in {m.upper() for m in binding.allowed_methods}:
             raise MethodNotAllowed(envelope.method)
+        # A binding pinned to an ingress this deployment has not registered is
+        # unavailable: fail closed rather than serve it over the other mode.
+        if self.ingresses.live(binding.access_mode) is None:
+            raise IngressUnavailable(binding.access_mode)
         context = _RequestContext(
             invocation_id=new_invocation_id(),
             idempotency_key=new_idempotency_key(),
@@ -293,7 +304,11 @@ class GatedServe:
         self.control.originate_serve(stream.origination())
         return ServeResult(stream)
 
-    def adopt(self, serve_task_id: str) -> None:
+    def adopt(
+        self,
+        serve_task_id: str,
+        access_mode: ServeAccessMode = ServeAccessMode.PROXY,
+    ) -> None:
         """Adopt a live public serve task as a standing resident allocation.
 
         Called when the serve task reports its engine endpoint. It validates the model
@@ -331,6 +346,7 @@ class GatedServe:
                 adapter_source=None,
                 engine_batch_key=f"{endpoint.model}|{interface.value}",
                 max_output_tokens=None,
+                access_mode=access_mode,
             )
             self.control.adopt_serve_replica(
                 serve_task_id=serve_task_id,
