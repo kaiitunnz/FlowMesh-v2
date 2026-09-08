@@ -22,12 +22,44 @@ from shared.resident.wire import (
     KIND_CHUNK,
     KIND_DONE,
     KIND_FAILED,
+    KIND_HEAD,
     KIND_REJECT,
+    resident_request_digest,
 )
-from worker.resident.engine import EngineResponse
+from worker.resident.engine import EngineResponse, RawEngineResponse
 from worker.resident.replica_sidecar import ResidentReplicaSidecar
 
 _CHUNKS = ["resi", "dent ", "reply"]
+
+_SSE_CHUNKS = [
+    'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n',
+    "data: [DONE]\n\n",
+]
+
+_SERVE_TASK = "tsk-serve"
+
+
+def _make_raw_engine(
+    status: int, content_type: str, parts: list[str]
+) -> Callable[..., Awaitable[RawEngineResponse]]:
+    async def engine(
+        endpoint: ReplicaEndpoint,
+        request: str | None,
+        adapter_name: str | None = None,
+        adapter_source: str | None = None,
+    ) -> RawEngineResponse:
+        async def chunks() -> AsyncIterator[str]:
+            for part in parts:
+                yield part
+
+        async def aclose() -> None:
+            return None
+
+        return RawEngineResponse(
+            status=status, content_type=content_type, chunks=chunks(), aclose=aclose
+        )
+
+    return engine
 
 
 async def _fake_engine(
@@ -165,6 +197,172 @@ def test_definite_engine_failure_is_carried_definite() -> None:
         failed = await origin.recv_wire(timeout=5.0)
         assert failed is not None and failed["kind"] == KIND_FAILED
         assert failed["definite"] is True
+        await sidecar.aclose()
+
+    asyncio.run(run())
+
+
+def _serve_handoff(request: str) -> dict:
+    return AdmissionHandoff(
+        token="hnd-1",
+        claim_id="scl-1",
+        invocation_id="inv-1",
+        idempotency_key="idm-1",
+        family=f"serve/{_SERVE_TASK}",
+        tenant="t1",
+        origin_id="rog-1",
+        replica_id="rpl-1",
+        incarnation=1,
+        listener_generation=1,
+        serve_task_id=_SERVE_TASK,
+        binding_generation=0,
+        descriptor_digest=resident_request_digest(request),
+    ).model_dump(mode="json")
+
+
+def _serve_auth() -> dict:
+    return RouteAuthorization(
+        claim_id="scl-1",
+        invocation_id="inv-1",
+        idempotency_key="idm-1",
+        tenant="t1",
+        origin_id="rog-1",
+        replica_id="rpl-1",
+        incarnation=1,
+        listener_generation=1,
+        serve_task_id=_SERVE_TASK,
+        binding_generation=0,
+    ).model_dump(mode="json")
+
+
+def _serve_harness(
+    engine_open_raw: Callable[..., Awaitable[RawEngineResponse]],
+) -> tuple[ResidentRelaySession, ResidentReplicaSidecar]:
+    origin_sink, replica_sink = _ToPeer(), _ToPeer()
+    sidecar = ResidentReplicaSidecar(
+        sink=replica_sink, engine_open=_fake_engine, engine_open_raw=engine_open_raw
+    )
+    sidecar.bind(
+        replica_id="rpl-1",
+        incarnation=1,
+        listener_generation=1,
+        endpoint=ReplicaEndpoint(base_url="http://engine/v1", model="m"),
+        serve_task_id=_SERVE_TASK,
+        binding_generation=0,
+    )
+    origin = ResidentRelaySession(
+        session_id="s1",
+        invocation_id="inv-1",
+        idm="idm-1",
+        role=ResidentSessionRole.ORIGIN,
+        sink=origin_sink,
+    )
+    origin_sink.on_peer = sidecar.on_frame
+    replica_sink.on_peer = origin.on_frame
+    return origin, sidecar
+
+
+def test_serve_invocation_reverse_proxies_the_raw_engine_response() -> None:
+    async def run() -> None:
+        request = '{"messages":[{"role":"user","content":"hi"}],"stream":true}'
+        origin, sidecar = _serve_harness(
+            _make_raw_engine(200, "text/event-stream", _SSE_CHUNKS)
+        )
+        await origin.send_wire(
+            "bootstrap", handoff=_serve_handoff(request), request=request
+        )
+        ack = await origin.recv_wire(timeout=5.0)
+        assert ack is not None and ack["kind"] == KIND_ACK
+        await origin.send_wire("stream", auth=_serve_auth())
+        head = await origin.recv_wire(timeout=5.0)
+        # The engine response head is relayed before the body: the raw serve path frames
+        # the engine's own status and content type, which the parsed path never emits.
+        assert head is not None and head["kind"] == KIND_HEAD
+        assert head["status"] == 200
+        assert head["content_type"] == "text/event-stream"
+        parts: list[str] = []
+        while True:
+            msg = await origin.recv_wire(timeout=5.0)
+            assert msg is not None
+            if msg["kind"] == KIND_CHUNK:
+                parts.append(str(msg["data"]))
+            elif msg["kind"] == KIND_DONE:
+                break
+        assert "".join(parts) == "".join(_SSE_CHUNKS)
+        await sidecar.aclose()
+
+    asyncio.run(run())
+
+
+def test_serve_relays_an_engine_error_status_without_failing() -> None:
+    async def run() -> None:
+        request = '{"messages":[{"role":"user","content":"hi"}]}'
+        origin, sidecar = _serve_harness(
+            _make_raw_engine(400, "application/json", ['{"error":"bad request"}'])
+        )
+        await origin.send_wire(
+            "bootstrap", handoff=_serve_handoff(request), request=request
+        )
+        ack = await origin.recv_wire(timeout=5.0)
+        assert ack is not None and ack["kind"] == KIND_ACK
+        await origin.send_wire("stream", auth=_serve_auth())
+        head = await origin.recv_wire(timeout=5.0)
+        # A raw proxy relays the engine's 4xx as a response, not a fenced failure: the
+        # client sees the engine's own error envelope, and the credit still releases on
+        # the terminal.
+        assert head is not None and head["kind"] == KIND_HEAD
+        assert head["status"] == 400
+        body: list[str] = []
+        terminal = None
+        while True:
+            msg = await origin.recv_wire(timeout=5.0)
+            assert msg is not None
+            if msg["kind"] == KIND_CHUNK:
+                body.append(str(msg["data"]))
+            else:
+                terminal = msg
+                break
+        assert terminal is not None and terminal["kind"] == KIND_DONE
+        assert "".join(body) == '{"error":"bad request"}'
+        await sidecar.aclose()
+
+    asyncio.run(run())
+
+
+def test_serve_bootstrap_is_refused_when_the_replica_serves_another_task() -> None:
+    async def run() -> None:
+        origin_sink, replica_sink = _ToPeer(), _ToPeer()
+        sidecar = ResidentReplicaSidecar(
+            sink=replica_sink,
+            engine_open=_fake_engine,
+            engine_open_raw=_make_raw_engine(200, "text/event-stream", _SSE_CHUNKS),
+        )
+        # Bound for a different serve task: the fence names tsk-serve, this replica
+        # serves tsk-other, so the gate refuses before any engine call.
+        sidecar.bind(
+            replica_id="rpl-1",
+            incarnation=1,
+            listener_generation=1,
+            endpoint=ReplicaEndpoint(base_url="http://engine/v1", model="m"),
+            serve_task_id="tsk-other",
+            binding_generation=0,
+        )
+        origin = ResidentRelaySession(
+            session_id="s1",
+            invocation_id="inv-1",
+            idm="idm-1",
+            role=ResidentSessionRole.ORIGIN,
+            sink=origin_sink,
+        )
+        origin_sink.on_peer = sidecar.on_frame
+        replica_sink.on_peer = origin.on_frame
+        request = '{"messages":[]}'
+        await origin.send_wire(
+            "bootstrap", handoff=_serve_handoff(request), request=request
+        )
+        reply = await origin.recv_wire(timeout=5.0)
+        assert reply is not None and reply["kind"] == KIND_REJECT
+        assert reply["reason"] == "wrong_serve_task"
         await sidecar.aclose()
 
     asyncio.run(run())

@@ -10,6 +10,7 @@ import asyncio
 from collections.abc import Callable
 
 from server.resident.state import ClaimTerminalReason, InvocationSubjectKind
+from server.routers.v1.serve import _stream
 from server.serve import (
     GatedServe,
     ServeBindingStore,
@@ -164,6 +165,53 @@ def test_submit_streams_teed_frames_then_terminates() -> None:
         events = await _events(result)
         assert [e.payload for e in events if e.kind == "chunk"] == ["he", "llo"]
         assert events[-1].kind == "done"
+
+    asyncio.run(run())
+
+
+def test_head_event_precedes_chunks_and_carries_status_and_content_type() -> None:
+    control = _FakeControl()
+    edge = _edge(control)
+    _bind(edge)
+
+    async def run() -> None:
+        result = edge.submit(
+            "p1", "acme", "tsk-1", "POST", "v1/chat/completions", '{"stream": true}'
+        )
+        delivery = control.originations[0].delivery
+        delivery.head(200, "text/event-stream")
+        delivery.tee("data: {}\n\n")
+        delivery.complete()
+        events = await _events(result)
+        assert events[0].kind == "head"
+        assert events[0].status == 200
+        assert events[0].content_type == "text/event-stream"
+        assert [e.payload for e in events if e.kind == "chunk"] == ["data: {}\n\n"]
+
+    asyncio.run(run())
+
+
+def test_router_sets_the_client_status_and_content_type_from_the_head() -> None:
+    control = _FakeControl()
+    edge = _edge(control)
+    _bind(edge)
+
+    async def run() -> None:
+        result = edge.submit(
+            "p1", "acme", "tsk-1", "POST", "v1/chat/completions", '{"stream": true}'
+        )
+        delivery = control.originations[0].delivery
+        delivery.head(200, "text/event-stream")
+        delivery.tee("data: {}\n\n")
+        delivery.complete()
+        response = await _stream(result)
+        assert response.status_code == 200
+        assert response.media_type == "text/event-stream"
+        parts = [chunk async for chunk in response.body_iterator]
+        body = "".join(
+            part if isinstance(part, str) else bytes(part).decode() for part in parts
+        )
+        assert body == "data: {}\n\n"
 
     asyncio.run(run())
 

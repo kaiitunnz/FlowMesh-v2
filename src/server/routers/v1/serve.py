@@ -110,10 +110,12 @@ async def serve_gated(
 
 
 async def _stream(result: ServeResult) -> StreamingResponse:
-    """Peek the first frame for a clean HTTP status, then stream the opaque body.
+    """Read the engine response head, then stream the opaque body verbatim.
 
-    A failure before any content maps to a bad-gateway status; once content has begun
-    streaming the terminal disposition rides the stream itself.
+    The head carries the engine's own status and content type, set on the client
+    response so an OpenAI-compatible client sees the engine envelope and a streamed body
+    passes through. A failure before the head maps to a bad-gateway status; once the
+    body has begun streaming the terminal disposition rides the stream itself.
     """
     events = result.events()
     first = await anext(events, None)
@@ -125,11 +127,20 @@ async def _stream(result: ServeResult) -> StreamingResponse:
             status.HTTP_502_BAD_GATEWAY, detail or "resident serve error"
         )
 
+    status_code = status.HTTP_200_OK
+    media_type = "text/plain; charset=utf-8"
+    leading_chunk: str | None = None
+    if first.kind == "head":
+        status_code = first.status
+        media_type = first.content_type
+    elif first.kind == "chunk":
+        leading_chunk = first.payload
+
     async def body() -> AsyncIterator[str]:
-        if first.kind == "chunk":
-            yield first.payload
+        if leading_chunk is not None:
+            yield leading_chunk
         async for event in events:
             if event.kind == "chunk":
                 yield event.payload
 
-    return StreamingResponse(body(), media_type="text/plain; charset=utf-8")
+    return StreamingResponse(body(), status_code=status_code, media_type=media_type)

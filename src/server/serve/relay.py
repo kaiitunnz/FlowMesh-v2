@@ -27,6 +27,7 @@ from shared.resident.reports import (
     ResidentBootstrapOutcome,
     ResidentOpOutcome,
     ResidentStreamChunk,
+    ResidentStreamHead,
     ResidentStreamStatus,
 )
 from shared.resident.session import ResidentRelaySession, ResidentSessionRole
@@ -37,6 +38,7 @@ from shared.resident.wire import (
     KIND_CHUNK,
     KIND_DONE,
     KIND_FAILED,
+    KIND_HEAD,
     KIND_REJECT,
     KIND_STREAM,
 )
@@ -55,6 +57,8 @@ class ServeControl(Protocol):
     """The subset of resident-capacity control this executor reports transitions to."""
 
     def on_bootstrap_ack(self, ack: ResidentBootstrapAck) -> None: ...
+
+    def on_stream_head(self, head: ResidentStreamHead) -> None: ...
 
     def on_stream_chunk(self, chunk: ResidentStreamChunk) -> None: ...
 
@@ -249,7 +253,18 @@ class ServeRelayExecutor:
                 self._control.on_outcome(self._uncertain(drive, "serve stream lost"))
                 return
             kind = msg.get("kind")
-            if kind == KIND_CHUNK:
+            if kind == KIND_HEAD:
+                # The engine response's own status and content type, relayed opaquely so
+                # the client response carries them ahead of the streamed body.
+                self._control.on_stream_head(
+                    ResidentStreamHead(
+                        invocation_id=drive.invocation_id,
+                        session_id=drive.session.session_id,
+                        status=int(msg.get("status", 200)),
+                        content_type=str(msg.get("content_type", "application/json")),
+                    )
+                )
+            elif kind == KIND_CHUNK:
                 self._control.on_stream_chunk(
                     ResidentStreamChunk(
                         invocation_id=drive.invocation_id,

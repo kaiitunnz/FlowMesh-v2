@@ -69,6 +69,23 @@ class ResidentOpOutcome(BaseModel):
     error: str | None = None
 
 
+class ResidentStreamHead(BaseModel):
+    """The engine response head a task-addressed serve client receives before its body.
+
+    The replica sidecar reads the engine response's HTTP status and content type and the
+    gated edge relays them opaquely, so the client's response carries the engine's own
+    status and content type ahead of the streamed body. It is transport metadata the
+    edge forwards without interpreting; the body itself streams as opaque chunks.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    invocation_id: str
+    session_id: str
+    status: int
+    content_type: str
+
+
 class ResidentStreamChunk(BaseModel):
     """One authorized response frame teed to a live task-addressed serve client.
 

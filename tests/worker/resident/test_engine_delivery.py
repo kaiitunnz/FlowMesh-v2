@@ -17,7 +17,11 @@ import httpx
 import pytest
 
 from shared.resident.contracts import ReplicaEndpoint
-from worker.resident.engine import HttpEngineDelivery, unload_adapter
+from worker.resident.engine import (
+    HttpEngineDelivery,
+    RawHttpEngineDelivery,
+    unload_adapter,
+)
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -61,6 +65,14 @@ class _Handler(BaseHTTPRequestHandler):
                 ],
             }
         else:
+            if self.server.chat_override is not None:
+                status, ctype, raw = self.server.chat_override
+                self.send_response(status)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+                return
             payload = {
                 "choices": [{"message": {"role": "assistant", "content": "hi there"}}]
             }
@@ -83,6 +95,7 @@ class _Server(ThreadingHTTPServer):
         self.load_response: tuple[int, str] = (200, "success")
         self.unloaded: list[str | None] = []
         self.unload_response: tuple[int, str] = (200, "success")
+        self.chat_override: tuple[int, str, bytes] | None = None
 
 
 @contextmanager
@@ -185,6 +198,51 @@ def test_a_precise_unload_error_raises() -> None:
         endpoint = ReplicaEndpoint(base_url=base, model="m", interface="chat")
         with pytest.raises(httpx.HTTPStatusError):
             asyncio.run(unload_adapter(endpoint, "my-lora"))
+
+
+async def _drain_raw(
+    endpoint: ReplicaEndpoint, payload: str | None
+) -> tuple[int, str, str]:
+    opened = await RawHttpEngineDelivery()(endpoint, payload)
+    parts = [chunk async for chunk in opened.chunks]
+    await opened.aclose()
+    return opened.status, opened.content_type, "".join(parts)
+
+
+def test_raw_delivery_relays_status_content_type_and_body_verbatim() -> None:
+    with _running() as server:
+        base = f"http://127.0.0.1:{server.server_address[1]}/v1"
+        endpoint = ReplicaEndpoint(base_url=base, model="m", interface="chat")
+        status, content_type, body = asyncio.run(_drain_raw(endpoint, "hello"))
+    assert server.paths == ["/v1/chat/completions"]
+    assert status == 200
+    assert content_type.startswith("application/json")
+    # The raw path relays the engine envelope verbatim, not the extracted content.
+    assert json.loads(body)["choices"][0]["message"]["content"] == "hi there"
+
+
+def test_raw_delivery_streams_an_sse_body_and_content_type() -> None:
+    sse = 'data: {"delta":"hi"}\n\ndata: [DONE]\n\n'
+    with _running() as server:
+        server.chat_override = (200, "text/event-stream", sse.encode())
+        base = f"http://127.0.0.1:{server.server_address[1]}/v1"
+        endpoint = ReplicaEndpoint(base_url=base, model="m", interface="chat")
+        status, content_type, body = asyncio.run(
+            _drain_raw(endpoint, '{"messages":[],"stream":true}')
+        )
+    assert status == 200
+    assert content_type.startswith("text/event-stream")
+    assert body == sse
+
+
+def test_raw_delivery_relays_an_engine_error_status_without_raising() -> None:
+    with _running() as server:
+        server.chat_override = (400, "application/json", b'{"error":"bad request"}')
+        base = f"http://127.0.0.1:{server.server_address[1]}/v1"
+        endpoint = ReplicaEndpoint(base_url=base, model="m", interface="chat")
+        status, _content_type, body = asyncio.run(_drain_raw(endpoint, "hi"))
+    assert status == 400
+    assert json.loads(body)["error"] == "bad request"
 
 
 def test_embedding_interface_posts_embeddings_and_streams_vectors() -> None:

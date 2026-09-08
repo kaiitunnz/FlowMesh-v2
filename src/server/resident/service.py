@@ -32,6 +32,7 @@ from shared.resident.reports import (
     ResidentBootstrapOutcome,
     ResidentOpOutcome,
     ResidentStreamChunk,
+    ResidentStreamHead,
     ResidentStreamStatus,
 )
 from shared.utils.ids import new_relay_session_id
@@ -154,6 +155,10 @@ class ServeDelivery(Protocol):
 
     def close_session(self, session_id: str) -> None:
         """Cancel and forget the origin relay for one attempt's session."""
+        ...
+
+    def head(self, status: int, content_type: str) -> None:
+        """Carry the engine response's status and content type to the client."""
         ...
 
     def tee(self, payload: str) -> None:
@@ -1002,6 +1007,21 @@ class ResidentCapacityControl:
             await self._hold_and_redrive_claim(
                 attempt, claim, outcome.error or "resident stream uncertain"
             )
+
+    def on_stream_head(self, head: ResidentStreamHead) -> None:
+        """Carry the engine response head to a live serve request's client."""
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(self._head, head)
+
+    def _head(self, head: ResidentStreamHead) -> None:
+        attempt = self._attempts.get(head.invocation_id)
+        if (
+            attempt is None
+            or attempt.serve is None
+            or attempt.session_id != head.session_id
+        ):
+            return
+        attempt.serve.head(head.status, head.content_type)
 
     def on_stream_chunk(self, chunk: ResidentStreamChunk) -> None:
         """Tee one authorized response frame to a live serve request's client."""

@@ -1,15 +1,18 @@
 """The replica worker's call to its co-located engine.
 
-The replica sidecar reaches the serve task running on the same worker over loopback. The
-call is non-streaming — it fits a stock vLLM replica and the GPU-free ``dev_model``
-stand-in alike — but the content is emitted in bounded pieces so the windowed relay
-session flow-controls a large completion rather than framing it whole. A chat replica
-returns the assistant message text; an embedding replica returns the ``data`` array of
-vectors serialized as JSON — both ride the content path as opaque bytes. An
+The replica sidecar reaches the serve task running on the same worker over loopback. A
+workflow consumer receives the extracted completion content in bounded pieces so the
+windowed relay session flow-controls a large completion rather than framing it whole: a
+chat replica returns the assistant message text and an embedding replica the ``data``
+array of vectors serialized as JSON, both riding the content path as opaque bytes. A
+task-addressed serve request instead receives the engine's raw HTTP response — status,
+content type, and body bytes — reverse-proxied verbatim, so an OpenAI-compatible client
+sees the engine's own envelope and a ``stream: true`` body passes through unbuffered. An
 adapter-bound invocation loads its adapter into a replica slot and selects it as the
 request model before the call.
 """
 
+import contextlib
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
@@ -41,6 +44,29 @@ class EngineResponse:
 # adapter-bound invocation carries the adapter name and its loadable source.
 EngineOpen = Callable[
     [ReplicaEndpoint, str | None, str | None, str | None], Awaitable[EngineResponse]
+]
+
+
+@dataclass
+class RawEngineResponse:
+    """An opened engine request whose raw response is reverse-proxied verbatim.
+
+    ``status`` and ``content_type`` are the engine response's own, relayed ahead of the
+    body so the client sees the engine's envelope; ``chunks`` streams the body text as
+    it arrives, unbuffered, so a ``stream: true`` response passes straight through.
+    """
+
+    status: int
+    content_type: str
+    chunks: AsyncIterator[str]
+    aclose: Callable[[], Awaitable[None]]
+
+
+# Opens the engine request and returns its raw streaming response for a task-addressed
+# serve invocation, whose sidecar relays the engine envelope verbatim rather than
+# extracting completion content.
+RawEngineOpen = Callable[
+    [ReplicaEndpoint, str | None, str | None, str | None], Awaitable[RawEngineResponse]
 ]
 
 # Unloads a LoRA adapter from a replica slot when its last credit-bearing claim
@@ -152,3 +178,64 @@ class HttpEngineDelivery:
         if any(phrase in body for phrase in _ADAPTER_ALREADY_LOADED):
             return
         response.raise_for_status()
+
+
+class RawHttpEngineDelivery:
+    """Reverse-proxies the co-located engine's raw response for a task-addressed serve.
+
+    The engine's status, content type, and body bytes relay verbatim: the response is
+    never parsed, any status is carried through, and a ``stream: true`` body passes
+    unbuffered. Only a request the engine cannot be reached with fails the invocation.
+    """
+
+    def __init__(self, *, timeout_sec: float = 300.0) -> None:
+        self._timeout = timeout_sec
+
+    async def __call__(
+        self,
+        endpoint: ReplicaEndpoint,
+        request_payload: str | None,
+        adapter_name: str | None = None,
+        adapter_source: str | None = None,
+    ) -> RawEngineResponse:
+        model = adapter_name or endpoint.model
+        if endpoint.interface == "embedding":
+            body = embeddings_body(request_payload, model)
+            path = "/embeddings"
+        else:
+            body = chat_body(request_payload, model)
+            path = "/chat/completions"
+        headers = {"Content-Type": "application/json"}
+        if endpoint.api_key:
+            headers["Authorization"] = f"Bearer {endpoint.api_key}"
+        base = endpoint.base_url.rstrip("/")
+        client = httpx.AsyncClient(timeout=self._timeout)
+        try:
+            if adapter_name is not None and adapter_source is not None:
+                await HttpEngineDelivery._ensure_adapter(
+                    client, base, headers, adapter_name, adapter_source
+                )
+            request = client.build_request("POST", f"{base}{path}", json=body)
+            request.headers.update(headers)
+            response = await client.send(request, stream=True)
+        except BaseException:
+            await client.aclose()
+            raise
+        content_type = response.headers.get("content-type", "application/json")
+
+        async def chunks() -> AsyncIterator[str]:
+            async for text in response.aiter_text():
+                if text:
+                    yield text
+
+        async def aclose() -> None:
+            with contextlib.suppress(Exception):
+                await response.aclose()
+            await client.aclose()
+
+        return RawEngineResponse(
+            status=response.status_code,
+            content_type=content_type,
+            chunks=chunks(),
+            aclose=aclose,
+        )

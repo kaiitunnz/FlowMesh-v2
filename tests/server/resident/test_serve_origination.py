@@ -41,6 +41,7 @@ from shared.resident.reports import (
     ResidentBootstrapOutcome,
     ResidentOpOutcome,
     ResidentStreamChunk,
+    ResidentStreamHead,
     ResidentStreamStatus,
 )
 
@@ -94,6 +95,7 @@ class _ServeDelivery:
         self.opened: list[tuple[str, AdmissionHandoff]] = []
         self.authorized: list[tuple[str, RouteAuthorization]] = []
         self.closed: list[str] = []
+        self.heads: list[tuple[int, str]] = []
         self.chunks: list[str] = []
         self.terminals: list[tuple[ClaimTerminalReason, str | None]] = []
         self.completed = False
@@ -108,6 +110,9 @@ class _ServeDelivery:
 
     def close_session(self, session_id: str) -> None:
         self.closed.append(session_id)
+
+    def head(self, status: int, content_type: str) -> None:
+        self.heads.append((status, content_type))
 
     def tee(self, payload: str) -> None:
         self.chunks.append(payload)
@@ -393,6 +398,32 @@ def test_stream_chunk_tees_only_to_a_matching_session() -> None:
         )
     )
     assert delivery.chunks == ["hi"]
+
+
+def test_stream_head_routes_only_to_a_matching_session() -> None:
+    svc, _stores, _settled, _deps = _build()
+    _adopt(svc)
+    delivery = _ServeDelivery()
+    asyncio.run(svc._originate_serve(_origination(delivery)))
+    session_id = svc._attempts["inv-1"].session_id
+
+    svc._head(
+        ResidentStreamHead(
+            invocation_id="inv-1",
+            session_id=session_id,
+            status=200,
+            content_type="text/event-stream",
+        )
+    )
+    svc._head(
+        ResidentStreamHead(
+            invocation_id="inv-1",
+            session_id="rly-stale",
+            status=500,
+            content_type="application/json",
+        )
+    )
+    assert delivery.heads == [(200, "text/event-stream")]
 
 
 def test_a_client_close_alone_never_releases_credit() -> None:

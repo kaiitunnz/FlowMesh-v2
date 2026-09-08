@@ -17,6 +17,7 @@ KIND_BOOTSTRAP = "bootstrap"
 KIND_STREAM = "stream"
 # Replica -> origin.
 KIND_ACK = "ack"
+KIND_HEAD = "head"
 KIND_CHUNK = "chunk"
 KIND_DONE = "done"
 KIND_REJECT = "reject"

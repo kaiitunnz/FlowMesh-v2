@@ -72,15 +72,17 @@ class PathNotAllowed(Exception):
 
 @dataclass(frozen=True)
 class ServeEvent:
-    """One event on a request's response stream: a chunk, or a terminal."""
+    """One event on a request's response stream: the head, a chunk, or a terminal."""
 
-    kind: str  # "chunk" | "done" | "error"
+    kind: str  # "head" | "chunk" | "done" | "error"
     payload: str = ""
     detail: str | None = None
+    status: int = 200
+    content_type: str = "application/json"
 
     @property
     def terminal(self) -> bool:
-        return self.kind != "chunk"
+        return self.kind in ("done", "error")
 
 
 class ServeResult:
@@ -164,6 +166,18 @@ class _ServeStream:
 
     def close_session(self, session_id: str) -> None:
         self._edge.relay.close(session_id)
+
+    def head(self, status: int, content_type: str) -> None:
+        # The engine response head commits the client response's status and content type
+        # ahead of its body. Once committed, a later loss can no longer transparently
+        # re-stream under a fresh attempt's head, so the head marks the response
+        # flushed: a post-head loss fails this response rather than re-driving it.
+        if self._closed:
+            return
+        self._flushed = True
+        self.queue.put_nowait(
+            ServeEvent(kind="head", status=status, content_type=content_type)
+        )
 
     def tee(self, payload: str) -> None:
         # Once the client response is closed (a post-flush loss failed it, or it already

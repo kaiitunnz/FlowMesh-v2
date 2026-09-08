@@ -26,7 +26,7 @@ from shared.resident.gate import LoadEvidence
 from shared.resident.reports import ResidentBootstrapAck, ResidentOpOutcome
 from shared.resident.transport import ResidentFrameSink
 
-from .engine import EngineOpen, HttpEngineDelivery
+from .engine import EngineOpen, HttpEngineDelivery, RawEngineOpen, RawHttpEngineDelivery
 from .origin_driver import ResidentOriginDriver, ResidentOriginRequest
 from .replica_sidecar import ResidentReplicaSidecar
 
@@ -61,6 +61,7 @@ class ResidentLaneHost:
         peek_request: RequestLookup,
         delete_request: RequestDelete,
         engine_open: EngineOpen | None = None,
+        engine_open_raw: RawEngineOpen | None = None,
         engine_timeout_sec: float = 300.0,
         logger: logging.Logger | None = None,
     ) -> None:
@@ -71,6 +72,9 @@ class ResidentLaneHost:
         self._peek_request = peek_request
         self._delete_request = delete_request
         self._engine_open = engine_open or HttpEngineDelivery(
+            timeout_sec=engine_timeout_sec
+        )
+        self._engine_open_raw = engine_open_raw or RawHttpEngineDelivery(
             timeout_sec=engine_timeout_sec
         )
         self._logger = logger or logging.getLogger("resident-lane-host")
@@ -98,6 +102,7 @@ class ResidentLaneHost:
         self._replica = ResidentReplicaSidecar(
             sink=sink,
             engine_open=self._engine_open,
+            engine_open_raw=self._engine_open_raw,
             on_load=self._on_load,
             logger=self._logger,
         )
@@ -167,6 +172,8 @@ class ResidentLaneHost:
         if self._replica is None:
             return
         engine = frame["engine"]
+        serve_task_id = frame.get("serve_task_id")
+        binding_generation = frame.get("binding_generation")
         self._replica.bind(
             replica_id=str(frame["replica_id"]),
             incarnation=int(frame["incarnation"]),
@@ -176,6 +183,10 @@ class ResidentLaneHost:
                 model=str(engine.get("model") or ""),
                 api_key=engine.get("api_key"),
                 interface=str(engine.get("interface") or "chat"),
+            ),
+            serve_task_id=str(serve_task_id) if serve_task_id is not None else None,
+            binding_generation=(
+                int(binding_generation) if binding_generation is not None else None
             ),
         )
 
