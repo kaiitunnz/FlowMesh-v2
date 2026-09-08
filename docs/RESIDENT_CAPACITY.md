@@ -128,48 +128,24 @@ transfer.
 ## Task-ID-gated resident serve
 
 Every public user-declared `serve` task is a resident-gated standing allocation reached
-only by its task ID over one FlowMesh-authenticated, claim-gated endpoint: `POST
-/api/v1/serve/tasks/{task_id}/{upstream_path}`. The task's engine binds to loopback and is
-reached only through its claim-gated sidecar; the endpoint relays the request to the
-task's standing replica and streams back the engine's own response envelope — a
-`stream: true` server-sent-event body included — so an OpenAI-compatible client drives the
-task by its ID alone.
+only by its task ID, over one FlowMesh-authenticated, claim-gated endpoint:
+`/api/v1/serve/tasks/{task_id}/{upstream_path}`. The request relays to the task's standing
+replica unchanged and the engine's own response comes back unchanged, so an
+OpenAI-compatible client can drive any endpoint the engine serves. The engine binds to
+loopback and is reached only through its claim-gated sidecar.
 
-At serve-task start the task is adopted as its own standing resident allocation: a
-per-task `ServiceFamily`, a `ServeTaskResidencyBinding` from the task ID to that
-allocation group, and a directory replica pinned for the task's lifetime (never idle-torn
-down while the task is live). The model is validated under `RESIDENT_ALLOWED_MODELS`; a
-disallowed model is not adopted. A caller names only the task ID; the model, worker,
-endpoint, credential, and routing are fixed by the binding.
+At serve-task start the task is adopted as its own standing allocation: a per-task
+`ServiceFamily`, a `ServeTaskResidencyBinding` from the task ID to that allocation group,
+and a replica pinned for the task's lifetime. The model is validated under
+`RESIDENT_ALLOWED_MODELS`; a disallowed model is not adopted. A caller names only the task
+ID — the model, worker, endpoint, credential, and routing are fixed by the binding — and
+each request is admitted as its own claim. On task stop, cancellation, TTL, or failure the
+binding drains before it stops.
 
-The edge authenticates the FlowMesh principal on a non-forwarded channel (the client's
-`Authorization` neither grants access here nor is forwarded upstream), checks the existing
-`TASK` read permission, resolves the task's live binding, and derives a bounded canonical
-request descriptor and the fixed profile bounds. It records a durable external-principal
-`Invocation` with no `DS` state and asks the same Admission controller to raise the same
-`ServiceClaim` against only the binding's allocation group. As the registered
-transport-only `RouteOrigin`, the edge relays the binding-derived request and opaque
-response frames over the resolved route; the selected replica worker's claim-gated sidecar
-verifies the descriptor and fence, constructs the engine request, owns the engine
-credential, reverse-proxies the raw engine response envelope, and emits the fenced status
-terminal. Root and supervisor relay opaque frames and never perform engine work.
-
-The sidecar's fence-matching status terminal, recorded by the Admission controller by
-`invocation_id`, is the only thing that releases the credit — a client disconnect, stream
-close, relay-window acknowledgement, or timer never does. The engine/claim lifetime and
-the client-relay drain are separate: already-emitted frames remain deliverable after the
-credit releases. An ambiguous loss leaves the claim `UNCERTAIN` holding credit; a client
-retry is a separately admitted new invocation that cannot reopen the original claim. A
-live response requires only the fenced terminal; reference-backed materialization is
-optional. On task stop, cancellation, TTL, or failure the binding drains, denies new
-calls, lets accepted calls reconcile, and then stops. This surface is available whenever
-`RESIDENT_CAPACITY_ENABLED` is set; access is exactly the task's ordinary `TASK` read
-permission.
-
-A deployment gates access through its identity and permission plugins. With none
-registered every caller resolves to one default admin principal, so a deployment that
-exposes the serve endpoint registers identity/permission plugins or fronts it with
-authentication.
+A serve task pins one gated exposure mode: `proxy`, the default, terminating at the
+root-local ingress, or `forward`, terminating at an externally reachable ingress a
+deployment registers. A mode whose ingress is not registered fails closed. Access is the
+task's ordinary `TASK` read permission.
 
 ## Replica lifecycle and policy
 
