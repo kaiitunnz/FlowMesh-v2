@@ -307,10 +307,14 @@ if IS_ROOT_NODE:
             terminals=serve_terminals,
             control=RESIDENT_CONTROL,
             relay=SERVE_RELAY,
-            # The root-local proxy ingress is internal to the root, so it is registered
-            # with the gated surface itself; a forward ingress is registered only where
-            # a deployment hosts one.
-            ingresses=ServeIngressRegistry(SERVE_EDGE_STREAM_ID),
+            # An operator that refuses public serve exposure registers no root-local
+            # proxy ingress, so every proxy-pinned request fails closed; a forward
+            # ingress is registered only where a deployment hosts one.
+            ingresses=ServeIngressRegistry(
+                SERVE_EDGE_STREAM_ID
+                if config.port_forward.serve_proxy_enabled
+                else None
+            ),
             persist=_persist_serve,
             logger=logger,
         )

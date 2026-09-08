@@ -98,6 +98,7 @@ listed here is in `.env.example`.
 | `FLOWMESH_API_KEY` | – | Forwarded to spawned workers as their server-callback bearer |
 | `ENABLE_PERSISTENT_PORT_FORWARD` | `true` | Keep port-forward listeners bound between task sessions; disable to bind listeners only for active sessions |
 | `ENABLE_SERVER_SSH_PROXY` | `true` | Enable the WebSocket proxy for interactive SSH tasks |
+| `ENABLE_SERVER_SERVE_PROXY` | `true` | Enable the root-local gated serve ingress |
 | `LOG_LEVEL` | `INFO` | Server log level |
 
 **Notes:**

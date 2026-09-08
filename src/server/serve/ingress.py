@@ -41,17 +41,19 @@ class ServeIngress:
 class ServeIngressRegistry:
     """The gated ingresses this deployment has registered, one per mode.
 
-    The root-local proxy ingress is registered whenever the gated serve surface is up,
-    since it is internal to the root. A forward ingress exists only where a deployment
-    configured and registered one, so resolving that mode returns nothing until it has.
+    The root-local proxy ingress is internal to the root, so it is registered whenever a
+    deployment permits it; an operator that refuses public serve exposure registers none
+    and every proxy request fails closed. A forward ingress exists only where a
+    deployment configured and registered one, so resolving that mode returns nothing
+    until it has.
     """
 
-    def __init__(self, proxy_origin_id: str) -> None:
-        self._by_mode: dict[ServeAccessMode, ServeIngress] = {
-            ServeAccessMode.PROXY: ServeIngress(
+    def __init__(self, proxy_origin_id: str | None) -> None:
+        self._by_mode: dict[ServeAccessMode, ServeIngress] = {}
+        if proxy_origin_id is not None:
+            self._by_mode[ServeAccessMode.PROXY] = ServeIngress(
                 mode=ServeAccessMode.PROXY, origin_id=proxy_origin_id
             )
-        }
 
     def register_forward(self, origin_id: str, generation: int) -> None:
         """Register (or re-register at a newer generation) the forward ingress."""

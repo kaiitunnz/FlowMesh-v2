@@ -59,3 +59,21 @@ def test_a_serve_task_may_leave_the_mode_unset() -> None:
 def test_direct_is_rejected_as_invalid_input() -> None:
     with pytest.raises(ValueError, match="Invalid task payload"):
         parse_workflow(_serve_workflow("direct"), format="native")
+
+
+def test_proxy_is_rejected_when_the_deployment_disables_the_proxy_ingress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An operator must be able to refuse public serve exposure at the deployment level.
+    monkeypatch.setattr("server.task.parser._ENABLE_SERVER_SERVE_PROXY", False)
+    with pytest.raises(ValueError, match="serve accessMode 'proxy' is disabled"):
+        parse_workflow(_serve_workflow("proxy"), format="native")
+
+
+def test_forward_is_not_gated_by_the_proxy_switch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The forward ingress has its own registration knob; its availability is resolved
+    # per request, so the proxy switch must not reject it at submission.
+    monkeypatch.setattr("server.task.parser._ENABLE_SERVER_SERVE_PROXY", False)
+    assert _parsed_mode("forward") == "forward"

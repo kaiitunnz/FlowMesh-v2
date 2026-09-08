@@ -703,6 +703,7 @@ STACK_ENV_SCHEMA = EnvSchema(
             title="SSH Task Support",
             vars=[
                 EnvVar("ENABLE_SERVER_SSH_PROXY", "true", var_type=EnvVarType.BOOL),
+                EnvVar("ENABLE_SERVER_SERVE_PROXY", "true", var_type=EnvVarType.BOOL),
                 EnvVar(
                     "ENABLE_SERVER_SSH_CONNECTION_AUDIT",
                     "true",
