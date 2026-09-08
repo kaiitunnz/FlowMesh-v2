@@ -96,7 +96,9 @@ class _FakeRelay:
 
 
 def _edge(
-    control: _FakeControl, ingresses: ServeIngressRegistry | None = None
+    control: _FakeControl,
+    ingresses: ServeIngressRegistry | None = None,
+    forward_transport: object | None = None,
 ) -> GatedServe:
     bindings = ServeBindingStore()
     return GatedServe(
@@ -105,6 +107,7 @@ def _edge(
         control=control,  # type: ignore[arg-type]
         relay=_FakeRelay(),  # type: ignore[arg-type]
         ingresses=ingresses or ServeIngressRegistry("serve-edge"),
+        forward_transport=forward_transport,  # type: ignore[arg-type]
     )
 
 
@@ -226,7 +229,7 @@ def test_forward_fails_closed_without_a_registered_ingress() -> None:
 def test_forward_is_admitted_once_its_ingress_is_registered() -> None:
     control = _FakeControl()
     registry = ServeIngressRegistry("serve-edge")
-    edge = _edge(control, registry)
+    edge = _edge(control, registry, forward_transport=_FakeRelay())
     _bind(edge, access_mode=ServeAccessMode.FORWARD)
     registry.register_forward("node-a", generation=1)
     edge.submit("p1", "acme", "tsk-1", _envelope(), ServeAccessMode.FORWARD)
@@ -477,3 +480,50 @@ def test_a_binding_is_refused_on_an_ingress_it_does_not_pin() -> None:
         except WrongIngress:
             pass
     assert control.originations == []
+
+
+def _forward_edge() -> tuple[_FakeControl, GatedServe]:
+    control = _FakeControl()
+    registry = ServeIngressRegistry("serve-edge")
+    edge = _edge(control, registry, forward_transport=_FakeRelay())
+    _bind(edge, access_mode=ServeAccessMode.FORWARD)
+    registry.register_forward("node-a", generation=1)
+    return control, edge
+
+
+def test_a_forward_loss_before_any_delivery_re_drives_transparently() -> None:
+    control, edge = _forward_edge()
+    edge.submit("p1", "acme", "tsk-1", _envelope(), ServeAccessMode.FORWARD)
+    delivery = control.originations[0].delivery
+    delivery.redrive()
+    # Nothing reached the client yet, so the request re-runs and the caller still sees
+    # exactly one clean response.
+    assert len(control.redrives) == 1
+    assert control.failed_serve == []
+
+
+def test_a_forward_loss_after_the_response_is_committed_never_re_drives() -> None:
+    # The ingress delivers frames to its own client, so control never sees them. Without
+    # the commit signal this loss would re-run the engine over a response the client
+    # already holds — duplicate bytes under a status it cannot take back.
+    control, edge = _forward_edge()
+    edge.submit("p1", "acme", "tsk-1", _envelope(), ServeAccessMode.FORWARD)
+    invocation_id = control.originations[0].invocation_id
+    delivery = control.originations[0].delivery
+
+    edge.committed(invocation_id, 200, (("content-type", "application/json"),))
+    delivery.redrive()
+
+    assert control.redrives == []
+    assert len(control.failed_serve) == 1
+
+
+def test_a_committed_forward_response_enqueues_nothing_for_the_root() -> None:
+    # A forward ingress already wrote its head to its own client; control must not also
+    # queue it, or the root would hold frames no one drains.
+    control, edge = _forward_edge()
+    result = edge.submit("p1", "acme", "tsk-1", _envelope(), ServeAccessMode.FORWARD)
+    invocation_id = control.originations[0].invocation_id
+    edge.committed(invocation_id, 200, (("content-type", "application/json"),))
+    control.originations[0].delivery.tee(b"body")
+    assert result._stream.queue.qsize() == 0

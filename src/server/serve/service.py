@@ -17,6 +17,7 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
+from typing import Protocol
 
 from shared.resident.contracts import AdmissionHandoff, RouteAuthorization
 from shared.resident.envelope import ServeRequestEnvelope
@@ -75,6 +76,31 @@ class WrongIngress(Exception):
     """The request arrived on a gated ingress other than the one its binding pins."""
 
 
+class ServeTransport(Protocol):
+    """How one gated ingress's origin relay is opened, authorized, and reaped.
+
+    The root-local proxy drives its relay in this process; a forward ingress drives it
+    on its own worker and is reached over that worker's authenticated attachment. Both
+    carry the same frozen envelope under the same fence.
+    """
+
+    def open(
+        self,
+        *,
+        session_id: str,
+        invocation_id: str,
+        idm: str,
+        task_id: str,
+        call_correlation: str,
+        handoff: AdmissionHandoff,
+        envelope: ServeRequestEnvelope,
+    ) -> None: ...
+
+    def authorize(self, session_id: str, auth: RouteAuthorization) -> None: ...
+
+    def close(self, session_id: str) -> None: ...
+
+
 @dataclass(frozen=True)
 class ServeEvent:
     """One event on a request's response stream: the head, a chunk, or a terminal."""
@@ -118,6 +144,11 @@ class _RequestContext:
     subject: InvocationSubject
     binding: ServeTaskResidencyBinding
     envelope: ServeRequestEnvelope
+    transport: ServeTransport
+    # A root-local proxy delivers response frames to a client attached to this process;
+    # a forward ingress delivers them to its own client and reports only that the
+    # response is committed, so nothing is enqueued here.
+    local_delivery: bool
 
 
 class _ServeStream:
@@ -159,7 +190,7 @@ class _ServeStream:
         )
 
     def open(self, session_id: str, handoff: AdmissionHandoff) -> None:
-        self._edge.relay.open(
+        self._context.transport.open(
             session_id=session_id,
             invocation_id=self._context.invocation_id,
             idm=self._context.idempotency_key,
@@ -170,10 +201,10 @@ class _ServeStream:
         )
 
     def authorize(self, session_id: str, auth: RouteAuthorization) -> None:
-        self._edge.relay.authorize(session_id, auth)
+        self._context.transport.authorize(session_id, auth)
 
     def close_session(self, session_id: str) -> None:
-        self._edge.relay.close(session_id)
+        self._context.transport.close(session_id)
 
     def close_client(self) -> None:
         # The client stream is gone (it disconnected). Stop teeing so a still-running
@@ -188,8 +219,12 @@ class _ServeStream:
         # flushed: a post-head loss fails this response rather than re-driving it.
         if self._closed:
             return
+        # Marking the response flushed is what stops a later loss from re-driving over
+        # bytes a client already holds, so it happens for both ingresses — a forward
+        # ingress reports its own commit here even though its frames are already gone.
         self._flushed = True
-        self._offer(ServeEvent(kind="head", status=status, headers=headers))
+        if self._context.local_delivery:
+            self._offer(ServeEvent(kind="head", status=status, headers=headers))
 
     def tee(self, payload: bytes) -> None:
         # Once the client response is closed (a post-flush loss failed it, or it already
@@ -197,7 +232,8 @@ class _ServeStream:
         if self._closed:
             return
         self._flushed = True
-        self._offer(ServeEvent(kind="chunk", payload=payload))
+        if self._context.local_delivery:
+            self._offer(ServeEvent(kind="chunk", payload=payload))
 
     def _offer(self, event: ServeEvent) -> None:
         # A frame past the backlog bound is dropped rather than buffered without limit,
@@ -221,6 +257,7 @@ class _ServeStream:
         if self._closed:
             return
         self._closed = True
+        self._edge.forget(self.invocation_id)
         # The terminal must reach the consumer so its stream closes; if the bounded
         # backlog is full, evict the oldest frame to make room for it.
         while True:
@@ -260,16 +297,33 @@ class GatedServe:
         control: ResidentCapacityControl,
         relay: ServeRelayExecutor,
         ingresses: ServeIngressRegistry,
+        forward_transport: ServeTransport | None = None,
         persist: Callable[[], None] | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self._bindings = bindings
         self._terminals = terminals
         self.ingresses = ingresses
+        self._forward_transport = forward_transport
         self.control = control
         self.relay = relay
         self._persist = persist or (lambda: None)
         self._logger = logger or logging.getLogger("gated-serve")
+        self._streams: dict[str, _ServeStream] = {}
+
+    def committed(
+        self, invocation_id: str, status: int, headers: tuple[tuple[str, str], ...]
+    ) -> None:
+        """Mark a forward ingress's response committed to its own client.
+
+        The ingress delivers response frames itself, so control never sees them. Without
+        this signal a loss after the ingress had already written a status, headers, and
+        part of a body would look like a loss before anything was delivered and re-drive
+        the engine over a response the client already holds.
+        """
+        stream = self._streams.get(invocation_id)
+        if stream is not None:
+            stream.head(status, headers)
 
     def submit(
         self,
@@ -302,6 +356,12 @@ class GatedServe:
         # unavailable: fail closed rather than serve it over the other mode.
         if self.ingresses.live(binding.access_mode) is None:
             raise IngressUnavailable(binding.access_mode)
+        local = arrived_on is ServeAccessMode.PROXY
+        transport: ServeTransport | None = (
+            self.relay if local else self._forward_transport
+        )
+        if transport is None:
+            raise IngressUnavailable(binding.access_mode)
         context = _RequestContext(
             invocation_id=new_invocation_id(),
             idempotency_key=new_idempotency_key(),
@@ -310,8 +370,11 @@ class GatedServe:
             ),
             binding=binding,
             envelope=envelope,
+            transport=transport,
+            local_delivery=local,
         )
         stream = _ServeStream(self, context)
+        self._streams[context.invocation_id] = stream
         self.control.originate_serve(stream.origination())
         return ServeResult(stream)
 
@@ -387,6 +450,10 @@ class GatedServe:
             self._persist()
 
         self.control.call_on_loop(_drain)
+
+    def forget(self, invocation_id: str) -> None:
+        """Drop a settled request's stream once its claim has reached a terminal."""
+        self._streams.pop(invocation_id, None)
 
     def record_terminal(
         self, invocation_id: str, reason: ClaimTerminalReason, detail: str | None
