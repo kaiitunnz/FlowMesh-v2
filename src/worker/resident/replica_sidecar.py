@@ -331,6 +331,13 @@ class ResidentReplicaSidecar:
                 KIND_FAILED, definite=True, reason=f"engine request rejected: {exc}"
             )
             return
+        except (
+            Exception
+        ) as exc:  # noqa: BLE001 - any other open failure still terminates
+            await session.send_wire(
+                KIND_FAILED, definite=False, reason=f"engine open failed: {exc}"
+            )
+            return
         try:
             await session.send_wire(
                 KIND_HEAD, status=raw.status, content_type=raw.content_type
@@ -341,6 +348,14 @@ class ResidentReplicaSidecar:
         except (httpx.HTTPError, OSError) as exc:
             await session.send_wire(
                 KIND_FAILED, definite=False, reason=f"engine stream lost: {exc}"
+            )
+        except Exception as exc:  # noqa: BLE001 - a decode error still terminates
+            # A non-UTF-8 body (UnicodeDecodeError) or any other after-HEAD failure
+            # holds the credit uncertain rather than dying silently after the head; a
+            # reap's CancelledError is a BaseException and still propagates, emitting no
+            # terminal.
+            await session.send_wire(
+                KIND_FAILED, definite=False, reason=f"engine stream error: {exc}"
             )
         finally:
             with contextlib.suppress(Exception):

@@ -329,6 +329,85 @@ def test_serve_relays_an_engine_error_status_without_failing() -> None:
     asyncio.run(run())
 
 
+def _raw_engine_decode_fail() -> Callable[..., Awaitable[RawEngineResponse]]:
+    async def engine(
+        endpoint: ReplicaEndpoint,
+        request: str | None,
+        adapter_name: str | None = None,
+        adapter_source: str | None = None,
+    ) -> RawEngineResponse:
+        async def chunks() -> AsyncIterator[str]:
+            yield "data: partial\n\n"
+            raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+
+        async def aclose() -> None:
+            return None
+
+        return RawEngineResponse(
+            status=200, content_type="text/event-stream", chunks=chunks(), aclose=aclose
+        )
+
+    return engine
+
+
+def _raw_engine_open_boom() -> Callable[..., Awaitable[RawEngineResponse]]:
+    async def engine(
+        endpoint: ReplicaEndpoint,
+        request: str | None,
+        adapter_name: str | None = None,
+        adapter_source: str | None = None,
+    ) -> RawEngineResponse:
+        raise RuntimeError("unexpected open failure")
+
+    return engine
+
+
+def test_serve_terminates_on_a_decode_error_after_the_head() -> None:
+    async def run() -> None:
+        origin, sidecar = _serve_harness(_raw_engine_decode_fail())
+        request = '{"messages":[]}'
+        await origin.send_wire(
+            "bootstrap", handoff=_serve_handoff(request), request=request
+        )
+        ack = await origin.recv_wire(timeout=5.0)
+        assert ack is not None and ack["kind"] == KIND_ACK
+        await origin.send_wire("stream", auth=_serve_auth())
+        head = await origin.recv_wire(timeout=5.0)
+        assert head is not None and head["kind"] == KIND_HEAD
+        # A non-UTF-8/decode error after the head still emits a terminal rather than
+        # dying silently and leaving the origin to stall on the stream deadline.
+        terminal = None
+        while True:
+            msg = await origin.recv_wire(timeout=5.0)
+            assert msg is not None
+            if msg["kind"] in (KIND_DONE, KIND_FAILED):
+                terminal = msg
+                break
+        assert terminal["kind"] == KIND_FAILED
+        assert terminal["definite"] is False
+        await sidecar.aclose()
+
+    asyncio.run(run())
+
+
+def test_serve_terminates_on_an_unexpected_open_error() -> None:
+    async def run() -> None:
+        origin, sidecar = _serve_harness(_raw_engine_open_boom())
+        request = '{"messages":[]}'
+        await origin.send_wire(
+            "bootstrap", handoff=_serve_handoff(request), request=request
+        )
+        ack = await origin.recv_wire(timeout=5.0)
+        assert ack is not None and ack["kind"] == KIND_ACK
+        await origin.send_wire("stream", auth=_serve_auth())
+        # An unexpected open failure emits a terminal, not a silent session death.
+        failed = await origin.recv_wire(timeout=5.0)
+        assert failed is not None and failed["kind"] == KIND_FAILED
+        await sidecar.aclose()
+
+    asyncio.run(run())
+
+
 def test_serve_bootstrap_is_refused_when_the_replica_serves_another_task() -> None:
     async def run() -> None:
         origin_sink, replica_sink = _ToPeer(), _ToPeer()
