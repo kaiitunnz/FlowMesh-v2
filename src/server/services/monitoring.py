@@ -70,6 +70,10 @@ from .watchdog import WorkerWatchdog
 if TYPE_CHECKING:
     from ..serve import GatedServe
 
+# Model-serving task types adopted as standing resident allocations: the GPU vLLM serve
+# task and its GPU-free dev_model stand-in, both reached only through the gated route.
+_SERVE_TASK_TYPES = frozenset({TaskType.SERVE, TaskType.DEV_MODEL})
+
 TASK_EVENT_HANDLER_MAX_ATTEMPTS = 5
 
 
@@ -981,7 +985,11 @@ class EventMonitor:
         if self._gated_serve is None:
             return
         record = self._runtime.get_record(task_id)
-        if record is None or record.task_type != TaskType.SERVE or record.resident:
+        if (
+            record is None
+            or record.task_type not in _SERVE_TASK_TYPES
+            or record.resident
+        ):
             return
         serve = record.latest_update.get("serve") if record.latest_update else None
         if isinstance(serve, dict) and serve.get("_port"):
@@ -992,7 +1000,7 @@ class EventMonitor:
         if self._gated_serve is None:
             return
         record = self._runtime.get_record(task_id)
-        if record is not None and record.task_type == TaskType.SERVE:
+        if record is not None and record.task_type in _SERVE_TASK_TYPES:
             self._gated_serve.drain(task_id)
 
     def _track_pending(self, fut: Future[Any]) -> None:
