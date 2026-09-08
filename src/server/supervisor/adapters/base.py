@@ -62,6 +62,10 @@ class WorkerConfig(BaseModel):
     executor_idle_cleanup_sec: float = env.WORKER_EXECUTOR_IDLE_CLEANUP_SEC
     """Seconds an executor may sit idle before the worker unloads it"""
     enable_dev_model: bool = env.WORKER_ENABLE_DEV_MODEL
+    serve_ingress_enabled: bool = env.WORKER_SERVE_INGRESS_ENABLED
+    serve_ingress_bind_host: str = env.WORKER_SERVE_INGRESS_BIND_HOST
+    serve_ingress_port: int = env.WORKER_SERVE_INGRESS_PORT
+    serve_ingress_public_url: str = env.WORKER_SERVE_INGRESS_PUBLIC_URL
     """Whether the worker advertises the GPU-free dev_model serving executor"""
     dev_model_forward_url: str = env.DEV_MODEL_FORWARD_URL
     """Upstream OpenAI-compatible base URL dev_model forwards to (empty = canned)"""
@@ -160,6 +164,10 @@ class WorkerAdapter(ABC):
                 config.executor_idle_cleanup_sec
             ),
             "WORKER_ENABLE_DEV_MODEL": to_env_str(config.enable_dev_model),
+            "WORKER_SERVE_INGRESS_ENABLED": to_env_str(config.serve_ingress_enabled),
+            "WORKER_SERVE_INGRESS_BIND_HOST": config.serve_ingress_bind_host,
+            "WORKER_SERVE_INGRESS_PORT": to_env_str(config.serve_ingress_port),
+            "WORKER_SERVE_INGRESS_PUBLIC_URL": config.serve_ingress_public_url,
             "DEV_MODEL_FORWARD_URL": config.dev_model_forward_url,
             "DEV_MODEL_RESPONSE_DELAY_SEC": to_env_str(
                 config.dev_model_response_delay_sec

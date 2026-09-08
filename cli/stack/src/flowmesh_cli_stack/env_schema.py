@@ -962,6 +962,28 @@ STACK_ENV_SCHEMA = EnvSchema(
                     description="Advertise the GPU-free dev_model executor.",
                 ),
                 EnvVar(
+                    "WORKER_SERVE_INGRESS_ENABLED",
+                    "false",
+                    var_type=EnvVarType.BOOL,
+                    description="Host the gated forward serve ingress on this worker.",
+                ),
+                EnvVar(
+                    "WORKER_SERVE_INGRESS_BIND_HOST",
+                    "0.0.0.0",
+                    description="Interface the gated forward serve ingress binds.",
+                ),
+                EnvVar(
+                    "WORKER_SERVE_INGRESS_PORT",
+                    "8100",
+                    var_type=EnvVarType.INT,
+                    description="Port the gated forward serve ingress listens on.",
+                ),
+                EnvVar(
+                    "WORKER_SERVE_INGRESS_PUBLIC_URL",
+                    "",
+                    description="Public base url clients reach the forward ingress at.",
+                ),
+                EnvVar(
                     "DEV_MODEL_FORWARD_URL",
                     var_type=EnvVarType.URL,
                     url_schemes={"http", "https"},

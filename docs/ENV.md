@@ -133,6 +133,10 @@ Spark), set `DOCKER_GPU_RUNTIME=` in the stack env.
 | `SERVE_DEFAULT_TTL_SEC` | `3600` | Default vLLM serve session TTL when `spec.ttlSeconds` is unset |
 | `SERVE_MAX_TTL_SEC` | `86400` | Upper bound on vLLM serve session TTL, regardless of `spec.ttlSeconds` |
 | `WORKER_ENABLE_DEV_MODEL` | `false` | Advertise the GPU-free `dev_model` executor |
+| `WORKER_SERVE_INGRESS_ENABLED` | `false` | Host the gated forward serve ingress on this worker |
+| `WORKER_SERVE_INGRESS_BIND_HOST` | `0.0.0.0` | Interface the gated forward serve ingress binds |
+| `WORKER_SERVE_INGRESS_PORT` | `8100` | Port the gated forward serve ingress listens on |
+| `WORKER_SERVE_INGRESS_PUBLIC_URL` | | Public base url clients reach the forward ingress at |
 | `DEV_MODEL_FORWARD_URL` | – | Upstream URL `dev_model` forwards to; canned if unset |
 | `DEV_MODEL_RESPONSE_DELAY_SEC` | `0` | Per-response delay the `dev_model` stand-in applies |
 
