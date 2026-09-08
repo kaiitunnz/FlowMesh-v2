@@ -30,6 +30,9 @@ from .channel import ServeIngressChannel
 
 AckSink = Callable[[ResidentBootstrapAck], None]
 OutcomeSink = Callable[[ResidentOpOutcome], None]
+# Reports the response committed to this ingress's own client (invocation, status,
+# headers) up to control, so a post-commit loss fails rather than re-drives.
+CommittedSink = Callable[[str, int, tuple[tuple[str, str], ...]], None]
 
 
 class ServeIngressLane:
@@ -41,6 +44,7 @@ class ServeIngressLane:
         sink: ResidentFrameSink,
         report_ack: AckSink,
         report_outcome: OutcomeSink,
+        report_committed: CommittedSink,
         window_bytes: int = 65536,
         stream_deadline_sec: float = 300.0,
         auth_deadline_sec: float = 60.0,
@@ -48,7 +52,9 @@ class ServeIngressLane:
     ) -> None:
         self._report_ack = report_ack
         self._report_outcome = report_outcome
+        self._report_committed = report_committed
         self._channels: dict[str, ServeIngressChannel] = {}
+        self._committed: set[str] = set()
         self._drive = ServeOriginDrive(
             sink=sink,
             control=self,
@@ -92,6 +98,7 @@ class ServeIngressLane:
     def close(self, session_id: str, invocation_id: str) -> None:
         self._drive.close(session_id)
         self._channels.pop(invocation_id, None)
+        self._committed.discard(invocation_id)
 
     def on_bootstrap_ack(self, ack: ResidentBootstrapAck) -> None:
         self._report_ack(ack)
@@ -99,6 +106,12 @@ class ServeIngressLane:
     def on_stream_head(self, head: ResidentStreamHead) -> None:
         if (channel := self._channels.get(head.invocation_id)) is not None:
             channel.head(head.status, head.headers)
+        # The head commits the response to this ingress's own client, so control marks
+        # it flushed and never re-drives it. Report it once per invocation, ahead of the
+        # outcome that rides the same ordered event stream.
+        if head.invocation_id not in self._committed:
+            self._committed.add(head.invocation_id)
+            self._report_committed(head.invocation_id, head.status, head.headers)
 
     def on_stream_chunk(self, chunk: ResidentStreamChunk) -> None:
         if (channel := self._channels.get(chunk.invocation_id)) is not None:
@@ -108,6 +121,7 @@ class ServeIngressLane:
         # Control consumes the terminal and owns the credit; the connection is finished
         # either way, so a client that is already gone changes nothing about the claim.
         self._report_outcome(outcome)
+        self._committed.discard(outcome.invocation_id)
         channel = self._channels.pop(outcome.invocation_id, None)
         if channel is None:
             return

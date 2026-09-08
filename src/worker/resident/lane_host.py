@@ -22,10 +22,14 @@ from shared.resident.contracts import (
     ReplicaEndpoint,
     RouteAuthorization,
 )
+from shared.resident.envelope import ServeRequestEnvelope
 from shared.resident.gate import LoadEvidence
 from shared.resident.reports import ResidentBootstrapAck, ResidentOpOutcome
 from shared.resident.transport import ResidentFrameSink
 
+from ..serve_ingress.channel import ServeIngressChannel
+from ..serve_ingress.lane import ServeIngressLane
+from ..serve_ingress.rendezvous import ServeIngressAdmission
 from .engine import EngineOpen, HttpEngineDelivery, RawEngineOpen, RawHttpEngineDelivery
 from .origin_driver import ResidentOriginDriver, ResidentOriginRequest
 from .replica_sidecar import ResidentReplicaSidecar
@@ -36,6 +40,9 @@ RequestLookup = Callable[[str, str], str | None]
 RequestDelete = Callable[[str, str], None]
 AckSink = Callable[[ResidentBootstrapAck], None]
 OutcomeSink = Callable[[ResidentOpOutcome], None]
+# Reports one forward-ingress response's commit (invocation, status, headers) to the
+# control plane.
+CommittedSink = Callable[[str, int, tuple[tuple[str, str], ...]], None]
 
 
 class _EventFrameSink:
@@ -63,11 +70,15 @@ class ResidentLaneHost:
         engine_open: EngineOpen | None = None,
         engine_open_raw: RawEngineOpen | None = None,
         engine_timeout_sec: float = 300.0,
+        serve_ingress: bool = False,
+        report_committed: CommittedSink | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self._push_frame = push_frame
         self._report_ack = report_ack
         self._report_outcome = report_outcome
+        self._report_committed = report_committed or (lambda _i, _s, _h: None)
+        self._serve_ingress = serve_ingress
         self._content_store = content_store
         self._peek_request = peek_request
         self._delete_request = delete_request
@@ -84,9 +95,10 @@ class ResidentLaneHost:
         )
         self._origin: ResidentOriginDriver | None = None
         self._replica: ResidentReplicaSidecar | None = None
+        self._serve_lane: ServeIngressLane | None = None
 
     def start(self) -> None:
-        """Start the loop thread and build both lanes on it."""
+        """Start the loop thread and build the lanes on it."""
         self._thread.start()
         self._call(self._build).result()
 
@@ -106,6 +118,17 @@ class ResidentLaneHost:
             on_load=self._on_load,
             logger=self._logger,
         )
+        if self._serve_ingress:
+            # The forward ingress's origin lane runs the same drive as the root-local
+            # proxy over this worker's frame sink; its head and body frames tee to the
+            # client connected here while its ack and terminal report up to control.
+            self._serve_lane = ServeIngressLane(
+                sink=sink,
+                report_ack=self._report_ack,
+                report_outcome=self._report_outcome,
+                report_committed=self._report_committed,
+                logger=self._logger,
+            )
 
     def _on_load(self, evidence: LoadEvidence) -> None:
         """Emit one admitted operation's claim-tagged load evidence for accounting."""
@@ -145,6 +168,53 @@ class ResidentLaneHost:
         else:
             return False
         return True
+
+    def begin_serve(
+        self,
+        decision: ServeIngressAdmission,
+        envelope: ServeRequestEnvelope,
+        channel: ServeIngressChannel,
+    ) -> None:
+        """Start one admitted forward-ingress request's origin drive on the loop."""
+        self._loop.call_soon_threadsafe(self._begin_serve, decision, envelope, channel)
+
+    def _begin_serve(
+        self,
+        decision: ServeIngressAdmission,
+        envelope: ServeRequestEnvelope,
+        channel: ServeIngressChannel,
+    ) -> None:
+        if self._serve_lane is None:
+            channel.fail("serve ingress lane is not running")
+            return
+        handoff = decision.handoff
+        self._serve_lane.begin(
+            session_id=decision.session_id,
+            invocation_id=handoff.invocation_id,
+            idm=handoff.idempotency_key or "",
+            task_id=decision.task_id,
+            call_correlation=decision.call_correlation,
+            handoff=handoff,
+            envelope=envelope,
+            channel=channel,
+        )
+
+    def authorize_serve(self, session_id: str, auth: RouteAuthorization) -> None:
+        """Deliver control's route authorization to a forward-ingress drive on the
+        loop."""
+        self._loop.call_soon_threadsafe(self._authorize_serve, session_id, auth)
+
+    def _authorize_serve(self, session_id: str, auth: RouteAuthorization) -> None:
+        if self._serve_lane is not None:
+            self._serve_lane.authorize(session_id, auth)
+
+    def close_serve(self, session_id: str, invocation_id: str) -> None:
+        """Reap one forward-ingress drive and drop its channel on the loop."""
+        self._loop.call_soon_threadsafe(self._close_serve, session_id, invocation_id)
+
+    def _close_serve(self, session_id: str, invocation_id: str) -> None:
+        if self._serve_lane is not None:
+            self._serve_lane.close(session_id, invocation_id)
 
     def _begin(self, frame: dict[str, Any]) -> None:
         if self._origin is None:
@@ -213,11 +283,15 @@ class ResidentLaneHost:
 
     async def _on_frame(self, frame: dict[str, Any]) -> None:
         relay = RelayFrame.from_wire(frame)
-        # A frame's direction names the receiver's role: the origin receives
-        # target-to-origin, the replica receives origin-to-target.
+        # A frame's direction names the receiver's role: an origin receives
+        # target-to-origin, the replica receives origin-to-target. Both the workflow
+        # origin driver and the forward-ingress serve lane are origin-role; a session id
+        # is globally unique, so each ignores a frame for a session it does not own.
         if relay.direction is RelayDirection.TARGET_TO_ORIGIN:
             if self._origin is not None:
                 await self._origin.on_frame(relay)
+            if self._serve_lane is not None:
+                await self._serve_lane.drive.on_frame(relay)
         elif self._replica is not None:
             await self._replica.on_frame(relay)
 

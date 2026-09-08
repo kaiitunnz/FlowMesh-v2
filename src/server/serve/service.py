@@ -19,10 +19,15 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from typing import Protocol
 
+from fastapi import HTTPException
+
 from shared.resident.contracts import AdmissionHandoff, RouteAuthorization
 from shared.resident.envelope import ServeRequestEnvelope
+from shared.resident.serve_ingress import ServeIngressRequest
 from shared.utils.ids import new_idempotency_key, new_invocation_id
 
+from ..auth.security import authenticate_api_key, require_permission
+from ..hooks import ResourceAction, ResourceKind
 from ..resident.service import ResidentCapacityControl, ServeOrigination
 from ..resident.state import (
     ClaimTerminalReason,
@@ -31,9 +36,12 @@ from ..resident.state import (
 )
 from ..task.v2.representations.operators import ServiceInterface
 from .binding import ServeBindingStore, ServeTaskResidencyBinding
+from .forward import ServeForwardTransport
 from .ingress import ServeAccessMode, ServeIngressRegistry
 from .relay import ServeRelayExecutor
 from .state import ServeStatusTerminal, ServeTerminalStatus, ServeTerminalStore
+
+_BEARER_PREFIX = "Bearer "
 
 # The gate keys each serve invocation's worker-lane correlation per invocation, so a
 # terminal reap of one invocation never disturbs a peer's live drive on the shared edge.
@@ -145,10 +153,16 @@ class _RequestContext:
     binding: ServeTaskResidencyBinding
     envelope: ServeRequestEnvelope
     transport: ServeTransport
+    descriptor_digest: str
     # A root-local proxy delivers response frames to a client attached to this process;
     # a forward ingress delivers them to its own client and reports only that the
     # response is committed, so nothing is enqueued here.
     local_delivery: bool
+    # A worker-hosted forward request carries its ingress worker (the route resolves
+    # from its node) and the worker-minted request id its ingress rendezvous keys on; a
+    # proxy request leaves both unset.
+    origin_worker: str | None = None
+    request_id: str | None = None
 
 
 class _ServeStream:
@@ -184,9 +198,11 @@ class _ServeStream:
             subject=self._context.subject,
             family=binding.family,
             dependency=binding.dependency(),
-            profile=binding.profile(descriptor_digest=self._context.envelope.digest()),
+            profile=binding.profile(descriptor_digest=self._context.descriptor_digest),
             envelope=self._context.envelope,
             delivery=self,
+            origin_worker=self._context.origin_worker,
+            request_id=self._context.request_id,
         )
 
     def open(self, session_id: str, handoff: AdmissionHandoff) -> None:
@@ -297,7 +313,7 @@ class GatedServe:
         control: ResidentCapacityControl,
         relay: ServeRelayExecutor,
         ingresses: ServeIngressRegistry,
-        forward_transport: ServeTransport | None = None,
+        forward_transport: ServeForwardTransport | None = None,
         persist: Callable[[], None] | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
@@ -371,12 +387,149 @@ class GatedServe:
             binding=binding,
             envelope=envelope,
             transport=transport,
+            descriptor_digest=envelope.digest(),
             local_delivery=local,
         )
         stream = _ServeStream(self, context)
         self._streams[context.invocation_id] = stream
         self.control.originate_serve(stream.origination())
         return ServeResult(stream)
+
+    def admit_forward(self, request: ServeIngressRequest, worker_id: str) -> None:
+        """Authenticate, authorize, and admit one worker-hosted forward request.
+
+        The ingress relayed the presented credential and the frozen request's descriptor
+        up; control authenticates the principal, checks task-read access, resolves the
+        live binding, and admits — the same gate the root-local proxy runs at the
+        router, moved to control because a forward ingress authenticates nothing itself.
+        Its response frames are teed to the ingress's own client, never through control.
+        """
+        self.control.schedule(self._admit_forward(request, worker_id))
+
+    async def _admit_forward(
+        self, request: ServeIngressRequest, worker_id: str
+    ) -> None:
+        try:
+            raw = request.credential or ""
+            if raw.startswith(_BEARER_PREFIX):
+                raw = raw[len(_BEARER_PREFIX) :]
+            principal = await authenticate_api_key(raw, self._logger)
+            await require_permission(
+                principal,
+                ResourceKind.TASK,
+                request.serve_task_id,
+                ResourceAction.READ,
+                self._logger,
+            )
+            self._submit_forward(request, worker_id, principal.principal_id)
+        except HTTPException as exc:
+            self._deny_forward(request, worker_id, exc.status_code, str(exc.detail))
+        except (BindingNotFound, WrongIngress):
+            self._deny_forward(request, worker_id, 404, "serve task not found")
+        except MethodNotAllowed:
+            self._deny_forward(request, worker_id, 405, "method not allowed")
+        except IngressUnavailable:
+            self._deny_forward(
+                request, worker_id, 503, "serve task ingress is not available"
+            )
+        except Exception:
+            self._logger.exception(
+                "forward serve admission failed for task %s", request.serve_task_id
+            )
+            self._deny_forward(request, worker_id, 502, "serve admission error")
+
+    def _submit_forward(
+        self, request: ServeIngressRequest, worker_id: str, principal_id: str
+    ) -> None:
+        """Resolve the live binding and admit a forward request against its group.
+
+        The server holds the request's bounded descriptor, never its body: the ingress
+        worker relays the frozen request to the sidecar itself, so the profile binds the
+        worker-computed descriptor digest and the transport relays only the fence down.
+        """
+        transport = self._forward_transport
+        if transport is None:
+            raise IngressUnavailable(ServeAccessMode.FORWARD)
+        binding = self._bindings.live(request.serve_task_id)
+        if binding is None:
+            raise BindingNotFound(request.serve_task_id)
+        if request.method.upper() not in {m.upper() for m in binding.allowed_methods}:
+            raise MethodNotAllowed(request.method)
+        if binding.access_mode is not ServeAccessMode.FORWARD:
+            raise WrongIngress(binding.access_mode)
+        if self.ingresses.live(ServeAccessMode.FORWARD) is None:
+            raise IngressUnavailable(ServeAccessMode.FORWARD)
+        context = _RequestContext(
+            invocation_id=new_invocation_id(),
+            idempotency_key=new_idempotency_key(),
+            subject=InvocationSubject(
+                kind=InvocationSubjectKind.EXTERNAL, id=principal_id, tenant=None
+            ),
+            binding=binding,
+            # The forward ingress holds the real request; the server carries only the
+            # descriptor, so its envelope names the request line and the worker-computed
+            # digest travels explicitly rather than being recomputed from a body the
+            # server never sees.
+            envelope=ServeRequestEnvelope(
+                method=request.method.upper(),
+                path=request.path,
+                query=request.query,
+            ),
+            transport=transport,
+            descriptor_digest=request.descriptor_digest,
+            local_delivery=False,
+            origin_worker=worker_id,
+            request_id=request.request_id,
+        )
+        transport.track(
+            invocation_id=context.invocation_id,
+            worker_id=worker_id,
+            request_id=request.request_id,
+        )
+        stream = _ServeStream(self, context)
+        self._streams[context.invocation_id] = stream
+        self.control.originate_serve(stream.origination())
+
+    def _deny_forward(
+        self, request: ServeIngressRequest, worker_id: str, status: int, detail: str
+    ) -> None:
+        # A synchronous rejection is refused before the request was tracked, so the
+        # denial is relayed to the waiting ingress directly by its worker and request id
+        # rather than through the transport's per-invocation tracking.
+        self.control.relay_to_worker(
+            worker_id,
+            "serve_ingress_denied",
+            {"request_id": request.request_id, "status": status, "detail": detail},
+        )
+
+    def withdraw_forward(self, worker_id: str) -> None:
+        """Drop the forward ingress when the worker hosting it unregisters.
+
+        Guarded by the worker id so a stale worker's unregister never withdraws a newer
+        worker's registration.
+        """
+        ingress = self.ingresses.live(ServeAccessMode.FORWARD)
+        if ingress is not None and ingress.worker_id == worker_id:
+            self.ingresses.withdraw_forward()
+
+    def register_forward(
+        self, worker_id: str, public_url: str, generation: int
+    ) -> bool:
+        """Register a worker's forward ingress from its advertisement.
+
+        Control derives the ingress's route origin from the reporting worker's own node,
+        so a request that arrives on it resolves an offload-capable origin. A newer
+        generation supersedes; an older one is refused.
+        """
+        origin_id = self.control.node_of_worker(worker_id)
+        if origin_id is None:
+            return False
+        return self.ingresses.register_forward(
+            origin_id=origin_id,
+            worker_id=worker_id,
+            public_url=public_url,
+            generation=generation,
+        )
 
     def adopt(
         self,
@@ -454,6 +607,12 @@ class GatedServe:
     def forget(self, invocation_id: str) -> None:
         """Drop a settled request's stream once its claim has reached a terminal."""
         self._streams.pop(invocation_id, None)
+        if self._forward_transport is not None:
+            # A forward request that settled before its drive opened (a synchronous
+            # rejection or an admission that gave up) still has a waiting ingress
+            # rendezvous; forget denies it. One whose session opened was already reaped
+            # through close_session, so this is a no-op for it.
+            self._forward_transport.forget(invocation_id)
 
     def record_terminal(
         self, invocation_id: str, reason: ClaimTerminalReason, detail: str | None

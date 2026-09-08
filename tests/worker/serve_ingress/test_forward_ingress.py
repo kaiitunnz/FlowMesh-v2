@@ -46,7 +46,12 @@ class _Control:
         self.requests.append(request)
         decision = self.decision
         if decision is None:
-            decision = ServeIngressAdmission(session_id="rly-1", handoff=_handoff())
+            decision = ServeIngressAdmission(
+                session_id="rly-1",
+                task_id="inv-1",
+                call_correlation="serve/inv-1",
+                handoff=_handoff(),
+            )
         assert self.ingress is not None
         # Control answers on its own thread, as it would over the attachment.
         threading.Thread(

@@ -37,7 +37,8 @@ orchestration-ledger `act-`, `scp-`, `wki-`, `att-`, `inv-`, `agr-`, `idm-`, the
 resident-capacity `scl-` (service claim), `rpl-` (replica incarnation), `lse-`
 (allocation lease), `hnd-` (claim-bound admission handoff), `msk-` (a vaulted
 model-secret ref), the network-plane `rog-` (route origin) and `rly-` (relay
-session), and the worker-originated `mop-` (one-use mediated-operation permit).
+session), and the worker-originated `mop-` (one-use mediated-operation permit) and
+`srq-` (forward serve ingress request).
 Always use
 `new_*_id()`/`new_idempotency_key()`/
 `new_model_secret_ref()` helpers in `src/shared/utils/ids.py`. Never use `uuid4()`

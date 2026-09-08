@@ -262,6 +262,10 @@ def main() -> None:
         model_api_key=cfg.model_api_key,
         model_egress_timeout_sec=cfg.model_egress_timeout_sec,
         content_store=build_content_store(cfg.server_base_url),
+        serve_ingress_enabled=cfg.serve_ingress_enabled,
+        serve_ingress_bind_host=cfg.serve_ingress_bind_host,
+        serve_ingress_port=cfg.serve_ingress_port,
+        serve_ingress_public_url=cfg.serve_ingress_public_url,
     )
 
     # Install signal handlers to allow graceful shutdown

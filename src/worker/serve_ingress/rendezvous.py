@@ -21,9 +21,16 @@ from shared.resident.contracts import AdmissionHandoff
 
 @dataclass(frozen=True)
 class ServeIngressAdmission:
-    """Control admitted the request: the fence and session to relay it under."""
+    """Control admitted the request: the fence and session to relay it under.
+
+    ``task_id`` and ``call_correlation`` are the invocation's worker-lane correlation
+    that control assigned; the ingress lane echoes them on the ack and outcome it sends
+    back so control matches every report to the same in-flight attempt.
+    """
 
     session_id: str
+    task_id: str
+    call_correlation: str
     handoff: AdmissionHandoff
 
 

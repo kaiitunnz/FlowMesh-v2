@@ -15,7 +15,6 @@ own. The listener relays opaque frames and applies no engine semantics of its ow
 import logging
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import urlsplit
@@ -25,6 +24,7 @@ from shared.resident.envelope import (
     ServeRequestEnvelope,
     freeze_request_envelope,
 )
+from shared.resident.serve_ingress import ServeIngressRequest
 
 from .channel import ServeIngressChannel
 from .rendezvous import (
@@ -37,25 +37,6 @@ from .rendezvous import (
 _ROUTE_PREFIX = "/api/v1/serve/tasks/"
 
 _MAX_REQUEST_BYTES = 4 * 1024 * 1024
-
-
-@dataclass(frozen=True)
-class ServeIngressRequest:
-    """What the ingress asks control to authenticate, authorize, and admit.
-
-    It carries the frozen request's descriptor, never its body: the raw request stays
-    worker-private behind the digest, so control admits the request without the payload
-    ever entering control state.
-    """
-
-    request_id: str
-    serve_task_id: str
-    credential: str | None
-    method: str
-    path: str
-    query: str
-    descriptor_digest: str
-    body_bytes: int
 
 
 # Sends one admission request up over the worker's authenticated attachment.

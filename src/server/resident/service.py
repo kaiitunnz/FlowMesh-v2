@@ -18,7 +18,7 @@ the same invocation identity rather than falling through to a wrong terminal.
 
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -204,6 +204,12 @@ class ServeOrigination:
     profile: AdmissionProfile
     envelope: ServeRequestEnvelope
     delivery: ServeDelivery
+    # A root-local proxy origination leaves these unset; a worker-hosted forward ingress
+    # sets its own worker as the origin (so the route resolves offload-capable from its
+    # node) and the worker-minted request id the ingress rendezvous keys the admission
+    # decision by.
+    origin_worker: str | None = None
+    request_id: str | None = None
 
 
 @dataclass
@@ -218,6 +224,7 @@ class _Origination:
     origin_worker: str | None
     family: str | None = None
     serve: ServeDelivery | None = None
+    request_id: str | None = None
 
 
 @dataclass
@@ -228,9 +235,11 @@ class _Attempt:
     mints a matching authorization and the terminal reap relays a cancel and drops the
     session record. It is rebuilt by a re-drive after a restart, so a lost entry only
     ignores a stale report rather than releasing a credit. A task-addressed serve
-    attempt carries its delivery handle (the gated edge is its transport-only origin, so
-    ``origin_worker`` is ``None``) so the outcome tees, terminalizes, and re-drives
-    through the edge.
+    attempt carries its delivery handle so the outcome tees, terminalizes, and re-drives
+    through the ingress. A root-local proxy attempt's ``origin_worker`` is ``None`` (the
+    edge is its transport-only origin); a worker-hosted forward attempt carries the
+    ingress worker as its origin and the ingress's ``request_id`` so a reap tears down
+    that request's rendezvous entry.
     """
 
     task_id: str
@@ -246,6 +255,7 @@ class _Attempt:
     adapter_ref: str | None
     subject: InvocationSubject
     serve: ServeDelivery | None = None
+    request_id: str | None = None
 
 
 class ResidentCapacityControl:
@@ -469,6 +479,32 @@ class ResidentCapacityControl:
             self._loop.call_soon_threadsafe(fn)
         else:
             fn()
+
+    def schedule(self, coro: "Coroutine[Any, Any, None]") -> None:
+        """Run a coroutine on the origination loop from another thread.
+
+        A forward serve admission (its authentication and authorization are async)
+        arrives off the event-monitor thread; running it on the control loop keeps its
+        store access single-threaded with admission.
+        """
+        if self._loop is not None:
+            asyncio.run_coroutine_threadsafe(coro, self._loop)
+        else:
+            coro.close()
+
+    def relay_to_worker(
+        self, worker_id: str, frame_kind: str, payload: dict[str, Any]
+    ) -> bool:
+        """Relay one control frame to a worker over its attachment, or False if gone."""
+        if self._delivery is None:
+            return False
+        return self._delivery.relay(worker_id, frame_kind, payload)
+
+    def node_of_worker(self, worker_id: str | None) -> str | None:
+        """The node a worker runs on, resolved through the worker registry."""
+        if self._delivery is None:
+            return None
+        return self._delivery.node_of_worker(worker_id)
 
     def serve_model_allowed(self, model_ref: str) -> bool:
         """Whether a serve task's model may be adopted as a standing resident
@@ -729,9 +765,10 @@ class ResidentCapacityControl:
             invocation_id=request.invocation_id,
             idempotency_key=request.idempotency_key,
             subject=request.subject,
-            origin_worker=None,
+            origin_worker=request.origin_worker,
             family=request.family,
             serve=request.delivery,
+            request_id=request.request_id,
         )
         await self._drive_claim(orig, request.dependency, request.profile)
 
@@ -816,9 +853,12 @@ class ResidentCapacityControl:
         deps = self._delivery
         assert deps is not None
         serve = orig.serve
-        # The route fence resolves from the origin's registered endpoint: a workflow
-        # origin worker's node, or (for the gated edge) the root node.
-        if serve is not None:
+        # The route fence resolves from the origin's registered endpoint. Only the
+        # root-local proxy (a serve origination with no origin worker) resolves from the
+        # root node over the edge stream — the root cannot dial a worker, so it always
+        # rides control_relay. A workflow boundary and a worker-hosted forward serve
+        # both resolve from the origin worker's own node, so a reachable pair offloads.
+        if serve is not None and orig.origin_worker is None:
             origin_worker = None
             resolve_node: str | None = (
                 deps.root_node_id() if deps.root_node_id is not None else None
@@ -884,6 +924,7 @@ class ResidentCapacityControl:
             adapter_ref=profile.adapter_ref,
             subject=orig.subject,
             serve=serve,
+            request_id=orig.request_id,
         )
         if serve is not None:
             serve.open(session_id, handoff)

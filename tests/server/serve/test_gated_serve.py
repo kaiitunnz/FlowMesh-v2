@@ -94,6 +94,15 @@ class _FakeRelay:
     def close(self, *args, **kwargs) -> None:
         pass
 
+    def track(self, *args, **kwargs) -> None:
+        pass
+
+    def deny(self, *args, **kwargs) -> None:
+        pass
+
+    def forget(self, *args, **kwargs) -> None:
+        pass
+
 
 def _edge(
     control: _FakeControl,

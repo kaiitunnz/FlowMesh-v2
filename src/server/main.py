@@ -45,6 +45,7 @@ from .serve import (
     SERVE_EDGE_STREAM_ID,
     GatedServe,
     ServeBindingStore,
+    ServeForwardTransport,
     ServeIngressRegistry,
     ServeRelayExecutor,
     ServeSnapshot,
@@ -314,6 +315,12 @@ if IS_ROOT_NODE:
                 SERVE_EDGE_STREAM_ID
                 if config.port_forward.serve_proxy_enabled
                 else None
+            ),
+            # A forward-pinned request is admitted by control and relayed to its ingress
+            # worker over that worker's attachment; the worker tees the response to its
+            # own client data-direct.
+            forward_transport=ServeForwardTransport(
+                RESIDENT_CONTROL.relay_to_worker, logger=logger
             ),
             persist=_persist_serve,
             logger=logger,

@@ -15,6 +15,10 @@ from shared.resident.reports import (
     ResidentBootstrapAck,
     ResidentOpOutcome,
 )
+from shared.resident.serve_ingress import (
+    ServeIngressAdvertisement,
+    ServeIngressRequest,
+)
 from shared.schemas.event import (
     Event,
     NodeEvent,
@@ -756,9 +760,39 @@ class EventMonitor:
                 self._runtime.on_resident_outcome(
                     ResidentOpOutcome.model_validate(event.payload["outcome"])
                 )
+            case "SERVE_INGRESS_REGISTER":
+                if self._gated_serve is not None:
+                    advertisement = ServeIngressAdvertisement.model_validate(
+                        event.payload["advertisement"]
+                    )
+                    self._gated_serve.register_forward(
+                        (event.worker_id or "").strip(),
+                        advertisement.public_url,
+                        advertisement.generation,
+                    )
+            case "SERVE_INGRESS_REQUEST":
+                if self._gated_serve is not None:
+                    self._gated_serve.admit_forward(
+                        ServeIngressRequest.model_validate(event.payload["request"]),
+                        (event.worker_id or "").strip(),
+                    )
+            case "SERVE_COMMITTED":
+                if self._gated_serve is not None:
+                    payload = event.payload
+                    self._gated_serve.committed(
+                        str(payload["invocation_id"]),
+                        int(payload["status"]),
+                        tuple(
+                            (str(item[0]), str(item[1]))
+                            for item in payload.get("headers") or ()
+                            if item
+                        ),
+                    )
             case "UNREGISTER":
                 worker_id = (event.worker_id or "").strip()
                 self._worker_registry.unregister_workers(worker_id)
+                if self._gated_serve is not None and worker_id:
+                    self._gated_serve.withdraw_forward(worker_id)
                 if worker_id:
                     self._schedule_deregister(
                         ResourceKind.WORKER, worker_id, self._actor_from_event(event)
