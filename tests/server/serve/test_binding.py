@@ -5,7 +5,15 @@ re-adoption supersedes the prior generation, a drain refuses new calls, and the 
 round-trips via its snapshot.
 """
 
-from server.serve import ServeBindingSnapshot, ServeBindingStore, serve_family_key
+from server.serve import (
+    ServeBindingSnapshot,
+    ServeBindingStore,
+    ServeSnapshot,
+    ServeStatusTerminal,
+    ServeTerminalStatus,
+    ServeTerminalStore,
+    serve_family_key,
+)
 from server.serve.binding import ServeBindingStatus
 from server.task.v2.representations.operators import ServiceInterface
 
@@ -76,3 +84,25 @@ def test_snapshot_round_trips() -> None:
     restored.load_snapshot(snapshot)
     assert {b.serve_task_id for b in restored.all()} == {"tsk-a", "tsk-b"}
     assert restored.live("tsk-a") is not None
+
+
+def test_serve_snapshot_json_round_trips_bindings_and_terminals() -> None:
+    # The registry persists the combined ServeSnapshot as JSON and rehydrates it on
+    # start, so a crash-window terminal survives to reconcile a stranded serve credit.
+    bindings = ServeBindingStore()
+    _adopt(bindings, task_id="tsk-a")
+    terminals = ServeTerminalStore()
+    terminals.record(
+        ServeStatusTerminal(invocation_id="inv-1", status=ServeTerminalStatus.COMPLETED)
+    )
+    blob = ServeSnapshot(
+        bindings=bindings.to_snapshot(), terminals=terminals.to_snapshot()
+    ).model_dump_json()
+
+    restored = ServeSnapshot.model_validate_json(blob)
+    bindings_back = ServeBindingStore()
+    bindings_back.load_snapshot(restored.bindings)
+    terminals_back = ServeTerminalStore()
+    terminals_back.load_snapshot(restored.terminals)
+    assert bindings_back.live("tsk-a") is not None
+    assert terminals_back.get("inv-1") is not None
