@@ -36,12 +36,13 @@ from ...auth.security import (
     require_permission,
 )
 from ...hooks import ResourceAction, ResourceKind
-from ...serve import GatedServe
+from ...serve import GatedServe, ServeAccessMode
 from ...serve.service import (
     BindingNotFound,
     IngressUnavailable,
     MethodNotAllowed,
     ServeResult,
+    WrongIngress,
 )
 
 router = APIRouter(prefix="/serve", tags=["Serve"])
@@ -107,10 +108,19 @@ async def serve_gated(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
     try:
         result = gated_serve.submit(
-            principal.principal_id, principal.org_id, task_id, envelope
+            principal.principal_id,
+            principal.org_id,
+            task_id,
+            envelope,
+            ServeAccessMode.PROXY,
         )
     except BindingNotFound as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "serve task not found") from exc
+    except WrongIngress as exc:
+        # The task pins a different ingress, so it is not addressable here at all.
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, "serve task is not served on this ingress"
+        ) from exc
     except MethodNotAllowed as exc:
         raise HTTPException(
             status.HTTP_405_METHOD_NOT_ALLOWED, "method not allowed"

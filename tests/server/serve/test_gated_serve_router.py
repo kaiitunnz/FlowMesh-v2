@@ -11,7 +11,12 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from server.routers.v1 import serve as serve_router
-from server.serve.service import IngressUnavailable, ServeEvent
+from server.serve import ServeAccessMode
+from server.serve.service import (
+    IngressUnavailable,
+    ServeEvent,
+    WrongIngress,
+)
 from shared.resident.envelope import TRANSPARENT_METHODS
 
 PREFIX = "/api/v1"
@@ -38,8 +43,10 @@ class _Edge:
     def __init__(self) -> None:
         self.submitted: list = []
 
-    def submit(self, principal_id, tenant, serve_task_id, envelope):
-        self.submitted.append((principal_id, tenant, serve_task_id, envelope))
+    def submit(self, principal_id, tenant, serve_task_id, envelope, arrived_on):
+        self.submitted.append(
+            (principal_id, tenant, serve_task_id, envelope, arrived_on)
+        )
         return _Result()
 
 
@@ -61,7 +68,7 @@ def test_every_transparent_method_reaches_the_edge() -> None:
     for method in TRANSPARENT_METHODS:
         response = client.request(method, _url("v1/models"))
         assert response.status_code == 200, method
-    assert [e.method for _p, _t, _task, e in edge.submitted] == list(
+    assert [e.method for _p, _t, _task, e, _mode in edge.submitted] == list(
         TRANSPARENT_METHODS
     )
 
@@ -119,8 +126,24 @@ def test_a_body_past_the_bound_is_refused_before_admission() -> None:
 
 def test_a_task_whose_ingress_is_unregistered_fails_closed_to_the_client() -> None:
     class _Closed(_Edge):
-        def submit(self, principal_id, tenant, serve_task_id, envelope):
+        def submit(self, principal_id, tenant, serve_task_id, envelope, arrived_on):
             raise IngressUnavailable("forward")
 
     response = _client(_Closed()).get(_url("v1/models"))
     assert response.status_code == 503
+
+
+def test_the_root_router_presents_itself_as_the_proxy_ingress() -> None:
+    # The arriving ingress is what lets the edge enforce a binding's pinned mode.
+    edge = _Edge()
+    _client(edge).get(_url("v1/models"))
+    assert edge.submitted[0][4] is ServeAccessMode.PROXY
+
+
+def test_a_task_pinned_to_another_ingress_is_not_found_here() -> None:
+    class _Wrong(_Edge):
+        def submit(self, principal_id, tenant, serve_task_id, envelope, arrived_on):
+            raise WrongIngress("forward")
+
+    response = _client(_Wrong()).get(_url("v1/models"))
+    assert response.status_code == 404

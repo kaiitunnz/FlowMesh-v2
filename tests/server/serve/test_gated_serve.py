@@ -26,6 +26,7 @@ from server.serve.service import (
     BindingNotFound,
     IngressUnavailable,
     MethodNotAllowed,
+    WrongIngress,
 )
 from server.task.v2.representations.operators import ServiceInterface
 from shared.resident.contracts import ReplicaEndpoint
@@ -150,7 +151,7 @@ def test_submit_without_a_live_binding_raises_before_any_credit() -> None:
     control = _FakeControl()
     edge = _edge(control)
     try:
-        edge.submit("p1", "acme", "tsk-1", _envelope())
+        edge.submit("p1", "acme", "tsk-1", _envelope(), ServeAccessMode.PROXY)
         raise AssertionError("expected BindingNotFound")
     except BindingNotFound:
         pass
@@ -166,7 +167,9 @@ def test_submit_rejects_a_method_the_binding_does_not_permit() -> None:
         update={"allowed_methods": ("POST",)}
     )
     try:
-        edge.submit("p1", "acme", "tsk-1", _envelope(method="GET"))
+        edge.submit(
+            "p1", "acme", "tsk-1", _envelope(method="GET"), ServeAccessMode.PROXY
+        )
         raise AssertionError("expected MethodNotAllowed")
     except MethodNotAllowed:
         pass
@@ -185,7 +188,13 @@ def test_submit_forwards_any_engine_path_rather_than_an_allowlist() -> None:
         ("POST", "v1/messages"),
         ("POST", "v1/embeddings"),
     ):
-        edge.submit("p1", "acme", "tsk-1", _envelope(method=method, path=path))
+        edge.submit(
+            "p1",
+            "acme",
+            "tsk-1",
+            _envelope(method=method, path=path),
+            ServeAccessMode.PROXY,
+        )
     assert [o.envelope.method for o in control.originations] == [
         "GET",
         "POST",
@@ -207,7 +216,7 @@ def test_forward_fails_closed_without_a_registered_ingress() -> None:
     edge = _edge(control)
     _bind(edge, access_mode=ServeAccessMode.FORWARD)
     try:
-        edge.submit("p1", "acme", "tsk-1", _envelope())
+        edge.submit("p1", "acme", "tsk-1", _envelope(), ServeAccessMode.FORWARD)
         raise AssertionError("expected IngressUnavailable")
     except IngressUnavailable:
         pass
@@ -220,7 +229,7 @@ def test_forward_is_admitted_once_its_ingress_is_registered() -> None:
     edge = _edge(control, registry)
     _bind(edge, access_mode=ServeAccessMode.FORWARD)
     registry.register_forward("node-a", generation=1)
-    edge.submit("p1", "acme", "tsk-1", _envelope())
+    edge.submit("p1", "acme", "tsk-1", _envelope(), ServeAccessMode.FORWARD)
     assert len(control.originations) == 1
 
 
@@ -228,7 +237,7 @@ def test_a_proxy_binding_is_admitted_without_any_forward_ingress() -> None:
     control = _FakeControl()
     edge = _edge(control)
     _bind(edge, access_mode=ServeAccessMode.PROXY)
-    edge.submit("p1", "acme", "tsk-1", _envelope())
+    edge.submit("p1", "acme", "tsk-1", _envelope(), ServeAccessMode.PROXY)
     assert len(control.originations) == 1
 
 
@@ -237,7 +246,7 @@ def test_submit_originates_an_external_subject_against_the_binding_family() -> N
     edge = _edge(control)
     _bind(edge)
     envelope = _envelope(body=b'{"messages": []}')
-    edge.submit("p1", "acme", "tsk-1", envelope)
+    edge.submit("p1", "acme", "tsk-1", envelope, ServeAccessMode.PROXY)
     assert len(control.originations) == 1
     orig = control.originations[0]
     assert orig.subject.kind is InvocationSubjectKind.EXTERNAL
@@ -252,7 +261,7 @@ def test_submit_streams_teed_frames_then_terminates() -> None:
     _bind(edge)
 
     async def run() -> None:
-        result = edge.submit("p1", "acme", "tsk-1", _envelope())
+        result = edge.submit("p1", "acme", "tsk-1", _envelope(), ServeAccessMode.PROXY)
         delivery = control.originations[0].delivery
         delivery.tee(b"he")
         delivery.tee(b"llo")
@@ -270,7 +279,13 @@ def test_head_event_precedes_chunks_and_carries_status_and_headers() -> None:
     _bind(edge)
 
     async def run() -> None:
-        result = edge.submit("p1", "acme", "tsk-1", _envelope(body=b'{"stream": true}'))
+        result = edge.submit(
+            "p1",
+            "acme",
+            "tsk-1",
+            _envelope(body=b'{"stream": true}'),
+            ServeAccessMode.PROXY,
+        )
         delivery = control.originations[0].delivery
         delivery.head(
             200, (("content-type", "text/event-stream"), ("x-request-id", "r1"))
@@ -295,7 +310,13 @@ def test_router_sets_the_client_status_and_headers_from_the_head() -> None:
     _bind(edge)
 
     async def run() -> None:
-        result = edge.submit("p1", "acme", "tsk-1", _envelope(body=b'{"stream": true}'))
+        result = edge.submit(
+            "p1",
+            "acme",
+            "tsk-1",
+            _envelope(body=b'{"stream": true}'),
+            ServeAccessMode.PROXY,
+        )
         delivery = control.originations[0].delivery
         delivery.head(
             201, (("content-type", "text/event-stream"), ("x-request-id", "r1"))
@@ -322,7 +343,7 @@ def test_a_non_draining_client_cannot_pin_unbounded_memory() -> None:
     _bind(edge)
 
     async def run() -> None:
-        result = edge.submit("p1", "acme", "tsk-1", _envelope())
+        result = edge.submit("p1", "acme", "tsk-1", _envelope(), ServeAccessMode.PROXY)
         stream = control.originations[0].delivery
         for i in range(
             stream.queue.maxsize * 3
@@ -341,7 +362,7 @@ def test_client_disconnect_stops_teeing_and_records_no_terminal() -> None:
     control = _FakeControl()
     edge = _edge(control)
     _bind(edge)
-    result = edge.submit("p1", "acme", "tsk-1", _envelope())
+    result = edge.submit("p1", "acme", "tsk-1", _envelope(), ServeAccessMode.PROXY)
     stream = control.originations[0].delivery
     stream.tee(b"early")
     result.close_client()
@@ -360,12 +381,12 @@ def test_preflush_loss_redrives_while_postflush_loss_fails_the_client() -> None:
     _bind(edge)
 
     # A loss before any flush re-drives transparently, not failing the client.
-    edge.submit("p1", "acme", "tsk-1", _envelope())
+    edge.submit("p1", "acme", "tsk-1", _envelope(), ServeAccessMode.PROXY)
     control.originations[0].delivery.redrive()
     assert len(control.redrives) == 1
 
     async def postflush() -> None:
-        result = edge.submit("p1", "acme", "tsk-1", _envelope())
+        result = edge.submit("p1", "acme", "tsk-1", _envelope(), ServeAccessMode.PROXY)
         delivery = control.originations[1].delivery
         delivery.tee(b"partial")
         delivery.redrive()  # flushed: fail via the fenced terminal, do NOT re-run
@@ -385,7 +406,7 @@ def test_a_disconnected_client_fails_rather_than_re_running_the_engine() -> None
     control = _FakeControl()
     edge = _edge(control)
     _bind(edge)
-    result = edge.submit("p1", "acme", "tsk-1", _envelope())
+    result = edge.submit("p1", "acme", "tsk-1", _envelope(), ServeAccessMode.PROXY)
     delivery = control.originations[0].delivery
     result.close_client()  # the client is gone
     delivery.redrive()  # a loss under a gone client fails, not re-runs the engine
@@ -432,3 +453,27 @@ def test_reconcile_replays_recorded_terminals() -> None:
     )
     edge.reconcile_terminals()
     assert {inv for inv, _ in control.reconciled} == {"inv-x", "inv-y"}
+
+
+def test_a_binding_is_refused_on_an_ingress_it_does_not_pin() -> None:
+    # accessMode is policy, not a hint: a task pinned to one ingress must not be
+    # servable through the other, or an operator who chose forward to keep serve
+    # traffic off the root still carries it there whenever a client uses the root URL.
+    control = _FakeControl()
+    registry = ServeIngressRegistry("serve-edge")
+    registry.register_forward("node-a", generation=1)
+
+    edge = _edge(control, registry)
+    _bind(edge, task_id="tsk-fwd", access_mode=ServeAccessMode.FORWARD)
+    _bind(edge, task_id="tsk-pxy", access_mode=ServeAccessMode.PROXY)
+
+    for task_id, arrived_on in (
+        ("tsk-fwd", ServeAccessMode.PROXY),
+        ("tsk-pxy", ServeAccessMode.FORWARD),
+    ):
+        try:
+            edge.submit("p1", "acme", task_id, _envelope(), arrived_on)
+            raise AssertionError(f"expected WrongIngress for {task_id}")
+        except WrongIngress:
+            pass
+    assert control.originations == []

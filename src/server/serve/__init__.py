@@ -21,6 +21,7 @@ from .service import (
     IngressUnavailable,
     MethodNotAllowed,
     ServeResult,
+    WrongIngress,
 )
 from .state import (
     ServeStatusTerminal,
@@ -33,6 +34,7 @@ __all__ = [
     "SERVE_EDGE_STREAM_ID",
     "BindingNotFound",
     "IngressUnavailable",
+    "WrongIngress",
     "ServeAccessMode",
     "ServeIngress",
     "ServeIngressRegistry",

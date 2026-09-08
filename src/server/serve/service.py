@@ -71,6 +71,10 @@ class IngressUnavailable(Exception):
     """The binding pins a gated ingress this deployment has not registered."""
 
 
+class WrongIngress(Exception):
+    """The request arrived on a gated ingress other than the one its binding pins."""
+
+
 @dataclass(frozen=True)
 class ServeEvent:
     """One event on a request's response stream: the head, a chunk, or a terminal."""
@@ -273,6 +277,7 @@ class GatedServe:
         tenant: str,
         serve_task_id: str,
         envelope: ServeRequestEnvelope,
+        arrived_on: ServeAccessMode,
     ) -> ServeResult:
         """Resolve the live binding, admit the request, and begin streaming.
 
@@ -287,6 +292,12 @@ class GatedServe:
             raise BindingNotFound(serve_task_id)
         if envelope.method not in {m.upper() for m in binding.allowed_methods}:
             raise MethodNotAllowed(envelope.method)
+        # A binding pins one exposure mode, so serving it on another ingress would make
+        # the mode a hint rather than policy: an operator who pinned forward to keep
+        # serve traffic off the root would still carry it there whenever a client used
+        # the root URL.
+        if arrived_on is not binding.access_mode:
+            raise WrongIngress(binding.access_mode)
         # A binding pinned to an ingress this deployment has not registered is
         # unavailable: fail closed rather than serve it over the other mode.
         if self.ingresses.live(binding.access_mode) is None:
