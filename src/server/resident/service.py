@@ -425,6 +425,11 @@ class ResidentCapacityControl:
             {"invocation_id": attempt.invocation_id},
         )
         self._reclaim_adapter_slot(attempt)
+        # A standing serve replica drained by its task's stop is left DRAINING while an
+        # in-flight claim held credit; its last release settles here, so stop it now
+        # rather than leave it lingering in the directory (the idle sweep is off by
+        # default). A live standing replica is untouched — only a DRAINING one stops.
+        self._lifecycle.stop_if_drained_standing(attempt.replica_id)
         if self._loop is not None:
             self._loop.create_task(self._delivery.sessions.delete(attempt.session_id))
 

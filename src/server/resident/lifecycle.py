@@ -314,6 +314,27 @@ class LifecycleScaleManager:
         self._persist()
         self._reap_serve_task(replica.serve_task_id)
 
+    def stop_if_drained_standing(self, replica_id: str | None) -> None:
+        """Stop a drained standing replica once its last admitted work has released.
+
+        A standing serve replica drained by its task's stop is left DRAINING while an
+        in-flight claim still holds credit; when that credit releases on the settle/reap
+        path this stops it, so it does not linger in the directory in a deployment whose
+        idle sweep is disabled (the default). A live (non-draining) standing replica, or
+        a replica still holding credit, is left untouched.
+        """
+        if replica_id is None:
+            return
+        replica = self._stores.directory.get(replica_id)
+        if (
+            replica is None
+            or not replica.standing
+            or replica.state is not ReplicaState.DRAINING
+        ):
+            return
+        if self._stores.credit_ledger.held(replica_id) == 0:
+            self.stop(replica_id)
+
     def sweep_idle(self, *, now_ts: float | None = None) -> None:
         """Drain idle servable replicas past the retain window, then stop drained ones.
 

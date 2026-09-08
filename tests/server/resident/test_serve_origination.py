@@ -495,3 +495,11 @@ def test_drain_keeps_an_in_flight_standing_replica_draining_until_it_settles() -
     # Admitted work still holds credit, so the replica drains rather than stopping,
     # letting the accepted claim reconcile on its own fenced terminal.
     assert replica.state is ReplicaState.DRAINING
+
+    # When the in-flight claim settles, its last credit release stops the drained
+    # standing replica so it does not linger DRAINING in the directory (the idle sweep
+    # is off by default and never reaps it).
+    asyncio.run(svc._on_outcome(_outcome(svc, ResidentStreamStatus.SUCCESS)))
+    settled_replica = stores.directory.get(replica.replica_id)
+    assert settled_replica is not None and settled_replica.state is ReplicaState.STOPPED
+    assert stores.directory.live_by_family(_FAMILY) == []
