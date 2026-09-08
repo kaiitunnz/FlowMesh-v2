@@ -326,11 +326,14 @@ class LifecycleScaleManager:
             return
         reference = now_ts if now_ts is not None else parse_iso_ts(now_iso())
         for replica in self._stores.directory.all():
-            if replica.standing:
-                # A standing serve allocation is pinned to its live serve task; it is
-                # drained only by task stop/cancel/TTL/failure, never idle teardown.
-                continue
             held = self._stores.credit_ledger.held(replica.replica_id)
+            if replica.standing:
+                # A live standing serve allocation is pinned to its serve task and never
+                # idle-torn-down; once drained by its task's stop it is stopped when its
+                # admitted work has drained, so it does not linger DRAINING.
+                if replica.state is ReplicaState.DRAINING and held == 0:
+                    self.stop(replica.replica_id)
+                continue
             if replica.state in SERVABLE_REPLICA_STATES:
                 if held == 0 and self._idle_past_retain(replica, reference):
                     self.drain(replica.replica_id)

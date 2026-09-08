@@ -530,6 +530,10 @@ class ResidentCapacityControl:
                 and replica.state in SERVABLE_REPLICA_STATES
             ):
                 self._lifecycle.drain(replica.replica_id)
+                # Stop it once its admitted work has drained so the stopped serve task's
+                # replica does not linger DRAINING in the directory; an in-flight claim
+                # keeps it draining until its own terminal releases the last credit.
+                self._lifecycle.stop(replica.replica_id)
 
     def list_service_families(self) -> list[ServiceFamily]:
         """The registered service families, for operator read access."""

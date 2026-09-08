@@ -471,9 +471,27 @@ def test_reconcile_serve_terminal_settles_a_rehydrated_uncertain_claim() -> None
     assert _held(stores, claim.replica_id) == 0
 
 
-def test_drain_serve_replica_denies_new_claims() -> None:
+def test_drain_stops_a_drained_standing_replica_with_no_credit() -> None:
     svc, stores, _settled, _deps = _build()
     _adopt(svc)
     svc.drain_serve_replica(_SERVE_TASK)
     replica = stores.directory.by_family(_FAMILY)[0]
+    # With no admitted work, the stopped serve task's replica leaves the live directory
+    # rather than lingering DRAINING forever (the idle sweep skips standing replicas).
+    assert replica.state is ReplicaState.STOPPED
+    assert stores.directory.live_by_family(_FAMILY) == []
+
+
+def test_drain_keeps_an_in_flight_standing_replica_draining_until_it_settles() -> None:
+    svc, stores, _settled, _deps = _build()
+    _adopt(svc)
+    delivery = _ServeDelivery()
+    asyncio.run(svc._originate_serve(_origination(delivery)))
+    asyncio.run(svc._on_ack(_ack(svc, ResidentBootstrapOutcome.ACKED)))
+    assert _held(stores, stores.claims.by_invocation("inv-1")[0].replica_id) == 1
+
+    svc.drain_serve_replica(_SERVE_TASK)
+    replica = stores.directory.by_family(_FAMILY)[0]
+    # Admitted work still holds credit, so the replica drains rather than stopping,
+    # letting the accepted claim reconcile on its own fenced terminal.
     assert replica.state is ReplicaState.DRAINING
