@@ -173,3 +173,34 @@ def test_a_head_request_carries_no_body() -> None:
         )
     assert response.status_code == 200
     assert response.content == b""
+
+
+def _serve_status_only(control: _Control, status: int) -> None:
+    """Deliver a head-then-terminal response, as a no-body status produces."""
+    for _ in range(500):
+        if control.begun:
+            break
+        threading.Event().wait(0.01)
+    _envelope, channel = control.begun[-1]
+    channel.head(status, (("x-probe", "1"),))
+    channel.complete()
+
+
+@pytest.mark.parametrize("status", [204, 304])
+def test_a_no_body_status_is_not_chunk_framed(status: int) -> None:
+    # A CORS preflight answering 204 is a live path now that OPTIONS is served, and
+    # framing a body for a status defined to have none makes real clients hang.
+    control = _Control()
+    with _running(control) as base:
+        threading.Thread(
+            target=_serve_status_only, args=(control, status), daemon=True
+        ).start()
+        response = httpx.request(
+            "OPTIONS",
+            f"{base}/api/v1/serve/tasks/tsk-1/v1/chat/completions",
+            timeout=10.0,
+        )
+    assert response.status_code == status
+    assert "transfer-encoding" not in {k.lower() for k in response.headers}
+    assert response.content == b""
+    assert response.headers["x-probe"] == "1"

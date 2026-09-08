@@ -246,9 +246,10 @@ class _IngressHandler(BaseHTTPRequestHandler):
     def _relay(self, channel: ServeIngressChannel, idle_timeout: float) -> None:
         """Write the engine's own head, then its body frames, as they arrive."""
         started = False
-        # A HEAD response carries the headers its GET would produce and no body at all,
-        # so its frames are drained to completion but never written out.
-        body_allowed = self.command != "HEAD"
+        # A HEAD response carries the headers its GET would produce and no body, and a
+        # no-body status carries neither a body nor the framing for one.
+        write_body = self.command != "HEAD"
+        framed = False
         try:
             while True:
                 frame = channel.drain(idle_timeout)
@@ -257,24 +258,25 @@ class _IngressHandler(BaseHTTPRequestHandler):
                         self._refuse(504, "resident serve timed out")
                     return
                 if frame.kind == "head":
-                    self._send_head(frame.status, frame.headers)
+                    framed = _status_allows_body(frame.status)
+                    write_body = write_body and framed
+                    self._send_head(frame.status, frame.headers, framed=framed)
                     started = True
                 elif frame.kind == "chunk":
                     if not started:
-                        self._send_head(200, ())
+                        framed = True
+                        self._send_head(200, (), framed=True)
                         started = True
-                    if body_allowed and frame.payload:
+                    if write_body and frame.payload:
                         self._write_chunk(frame.payload)
                 elif frame.terminal:
                     if not started:
                         if frame.kind == "error":
                             self._refuse(502, frame.detail or "resident serve error")
-                        else:
-                            self._send_head(200, ())
-                            if body_allowed:
-                                self._end_chunks()
-                        return
-                    if body_allowed:
+                            return
+                        framed = True
+                        self._send_head(200, (), framed=True)
+                    if write_body:
                         self._end_chunks()
                     return
         except (BrokenPipeError, ConnectionResetError):
@@ -282,14 +284,19 @@ class _IngressHandler(BaseHTTPRequestHandler):
             # own fenced terminal, never on this connection ending.
             channel.close()
 
-    def _send_head(self, status: int, headers: tuple[tuple[str, str], ...]) -> None:
+    def _send_head(
+        self, status: int, headers: tuple[tuple[str, str], ...], *, framed: bool
+    ) -> None:
         self.send_response(status)
         for name, value in headers:
             # The body is re-framed for this hop, so the engine's own framing headers
             # are not carried onto it.
             if name.lower() not in ("content-length", "transfer-encoding"):
                 self.send_header(name, value)
-        self.send_header("Transfer-Encoding", "chunked")
+        if framed:
+            # A HEAD response still advertises the framing its GET would use; it just
+            # carries no body.
+            self.send_header("Transfer-Encoding", "chunked")
         self.end_headers()
 
     def _write_chunk(self, payload: bytes) -> None:
@@ -299,3 +306,12 @@ class _IngressHandler(BaseHTTPRequestHandler):
     def _end_chunks(self) -> None:
         self.wfile.write(b"0\r\n\r\n")
         self.wfile.flush()
+
+
+def _status_allows_body(status: int) -> bool:
+    """Whether a response with this status may carry a body at all.
+
+    ``204`` and ``304`` are defined to have none, and a ``1xx`` is informational, so
+    framing a body for them is a protocol violation a client mis-parses or hangs on.
+    """
+    return not (status in (204, 304) or 100 <= status < 200)
