@@ -216,6 +216,44 @@ def test_router_sets_the_client_status_and_content_type_from_the_head() -> None:
     asyncio.run(run())
 
 
+def test_a_non_draining_client_cannot_pin_unbounded_memory() -> None:
+    control = _FakeControl()
+    edge = _edge(control)
+    _bind(edge)
+
+    async def run() -> None:
+        result = edge.submit("p1", "acme", "tsk-1", "POST", "v1/chat/completions", "{}")
+        stream = control.originations[0].delivery
+        for i in range(
+            stream.queue.maxsize * 3
+        ):  # flood past the bound, never draining
+            stream.tee(f"f{i}")
+        assert stream.queue.qsize() <= stream.queue.maxsize
+        stream.complete()
+        events = await _events(result)
+        # The terminal still lands despite the overflow, so the client stream closes.
+        assert events[-1].kind == "done"
+
+    asyncio.run(run())
+
+
+def test_client_disconnect_stops_teeing_and_records_no_terminal() -> None:
+    control = _FakeControl()
+    edge = _edge(control)
+    _bind(edge)
+    result = edge.submit("p1", "acme", "tsk-1", "POST", "v1/chat/completions", "{}")
+    stream = control.originations[0].delivery
+    stream.tee("early")
+    result.close_client()
+    size = stream.queue.qsize()
+    stream.tee("after")
+    # The disconnect stops teeing: a later frame is dropped, not buffered.
+    assert stream.queue.qsize() == size
+    # Closing the client records no fenced terminal, so the disconnect never releases
+    # the credit — only the drive's own fenced terminal does.
+    assert edge._terminals.all() == []
+
+
 def test_preflush_loss_redrives_while_postflush_loss_fails_the_client() -> None:
     control = _FakeControl()
     edge = _edge(control)

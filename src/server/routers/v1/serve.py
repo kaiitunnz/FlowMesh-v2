@@ -137,10 +137,20 @@ async def _stream(result: ServeResult) -> StreamingResponse:
         leading_chunk = first.payload
 
     async def body() -> AsyncIterator[str]:
-        if leading_chunk is not None:
-            yield leading_chunk
-        async for event in events:
-            if event.kind == "chunk":
-                yield event.payload
+        terminated = False
+        try:
+            if leading_chunk is not None:
+                yield leading_chunk
+            async for event in events:
+                if event.kind == "chunk":
+                    yield event.payload
+                elif event.terminal:
+                    terminated = True
+        finally:
+            # A client that disconnects mid-stream stops the body generator before its
+            # terminal: close the client stream so a still-running drive stops teeing.
+            # The credit is untouched — its own fenced terminal releases it.
+            if not terminated:
+                result.close_client()
 
     return StreamingResponse(body(), status_code=status_code, media_type=media_type)

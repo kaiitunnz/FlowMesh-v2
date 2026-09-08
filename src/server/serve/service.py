@@ -37,6 +37,11 @@ from .state import ServeStatusTerminal, ServeTerminalStatus, ServeTerminalStore
 # terminal reap of one invocation never disturbs a peer's live drive on the shared edge.
 _CALL_CORRELATION_PREFIX = "serve/"
 
+# The bound on a client's teed-frame backlog. A client that stops draining cannot pin
+# unbounded memory: further frames are dropped past the bound, while the terminal always
+# lands (evicting the oldest frame if needed) so the client stream still closes.
+_TEE_QUEUE_MAX = 2048
+
 _ALLOWED_PATHS: dict[ServiceInterface, frozenset[str]] = {
     ServiceInterface.CHAT: frozenset({"chat/completions", "v1/chat/completions"}),
     ServiceInterface.EMBEDDING: frozenset({"embeddings", "v1/embeddings"}),
@@ -99,6 +104,10 @@ class ServeResult:
             if event.terminal:
                 return
 
+    def close_client(self) -> None:
+        """Stop delivering to a gone client without releasing the held credit."""
+        self._stream.close_client()
+
 
 @dataclass
 class _RequestContext:
@@ -125,7 +134,7 @@ class _ServeStream:
     def __init__(self, edge: "GatedServe", context: _RequestContext) -> None:
         self._edge = edge
         self._context = context
-        self.queue: asyncio.Queue[ServeEvent] = asyncio.Queue()
+        self.queue: asyncio.Queue[ServeEvent] = asyncio.Queue(maxsize=_TEE_QUEUE_MAX)
         self._closed = False
         self._flushed = False
 
@@ -167,6 +176,12 @@ class _ServeStream:
     def close_session(self, session_id: str) -> None:
         self._edge.relay.close(session_id)
 
+    def close_client(self) -> None:
+        # The client stream is gone (it disconnected). Stop teeing so a still-running
+        # drive cannot pin memory; the credit is untouched — only its fenced terminal
+        # releases it, so the drive settles the claim independent of this stream.
+        self._closed = True
+
     def head(self, status: int, content_type: str) -> None:
         # The engine response head commits the client response's status and content type
         # ahead of its body. Once committed, a later loss can no longer transparently
@@ -175,9 +190,7 @@ class _ServeStream:
         if self._closed:
             return
         self._flushed = True
-        self.queue.put_nowait(
-            ServeEvent(kind="head", status=status, content_type=content_type)
-        )
+        self._offer(ServeEvent(kind="head", status=status, content_type=content_type))
 
     def tee(self, payload: str) -> None:
         # Once the client response is closed (a post-flush loss failed it, or it already
@@ -185,7 +198,16 @@ class _ServeStream:
         if self._closed:
             return
         self._flushed = True
-        self.queue.put_nowait(ServeEvent(kind="chunk", payload=payload))
+        self._offer(ServeEvent(kind="chunk", payload=payload))
+
+    def _offer(self, event: ServeEvent) -> None:
+        # A frame past the backlog bound is dropped rather than buffered without limit,
+        # so a client that stops draining cannot pin unbounded memory. The terminal
+        # never takes this path, so a dropped frame still yields a closing stream.
+        try:
+            self.queue.put_nowait(event)
+        except asyncio.QueueFull:
+            pass
 
     def record_terminal(self, reason: ClaimTerminalReason, detail: str | None) -> None:
         self._edge.record_terminal(self.invocation_id, reason, detail)
@@ -197,9 +219,20 @@ class _ServeStream:
         self._finish(ServeEvent(kind="error", detail=detail))
 
     def _finish(self, event: ServeEvent) -> None:
-        if not self._closed:
-            self._closed = True
-            self.queue.put_nowait(event)
+        if self._closed:
+            return
+        self._closed = True
+        # The terminal must reach the consumer so its stream closes; if the bounded
+        # backlog is full, evict the oldest frame to make room for it.
+        while True:
+            try:
+                self.queue.put_nowait(event)
+                return
+            except asyncio.QueueFull:
+                try:
+                    self.queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    return
 
     def redrive(self) -> None:
         # A loss after bytes already reached the client cannot transparently re-stream:
