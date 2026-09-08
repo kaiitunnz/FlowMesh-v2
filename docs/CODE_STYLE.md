@@ -116,9 +116,9 @@ CVE exposure tracks PyPI `vllm 0.24.0` regardless of the build variant.
 | CVE-2026-69112 | accelerate | (none) | no fix version published; the latest release (1.14.0) is still affected |
 
 The worker GPU audit ignores `GHSA-rrmf-rvhw-rf47`,
-`GHSA-w8v5-vhqr-4h9v`, and `PYSEC-2026-3447`; the worker CPU audit
-ignores `GHSA-rrmf-rvhw-rf47`, `PYSEC-2026-3447`, and `CVE-2026-69112`;
-the server audit ignores nothing.
+`GHSA-w8v5-vhqr-4h9v`, `PYSEC-2026-3447`, and `CVE-2026-69112`; the worker
+CPU audit ignores `GHSA-rrmf-rvhw-rf47`, `PYSEC-2026-3447`, and
+`CVE-2026-69112`; the server audit ignores nothing.
 
 When a blocker lifts (e.g. crawl4ai unpins lxml, or a fixed torch
 release ships), drop the corresponding `--ignore-vuln` flag from the
