@@ -175,10 +175,12 @@ async def list_network_endpoints(
 )
 async def list_resident_legs(
     principal: PrincipalContext = Depends(authenticate_connection),
+    plane: NetworkPlane | None = Depends(get_network_plane),
     metrics: ResidentLegMetrics = Depends(get_resident_leg_metrics),
     logger: logging.Logger = Depends(get_logger),
 ) -> list[ResidentLegTrafficInfo]:
     await _require_admin(principal, logger)
+    _require_plane(plane)
     return [
         ResidentLegTrafficInfo(
             leg=str(entry["leg"]),

@@ -7,11 +7,12 @@ of three transports. It is control-resolved and data-direct: the resolver runs i
 control plane and the origin-side deputy executes only the resolved candidate ladder —
 workers never scan addresses or discover peers.
 
-The plane is a routing substrate only. It carries no resident traffic, exposes no resident
-engine listener, and never mints a `ServiceClaim`, releases a credit, or issues a
-`RouteAuthorization`. A route observation is network evidence; it can never promote,
-release, or overwrite a capacity credit. Enable it with `NETWORK_PLANE_ENABLED=true`
-(`docs/ENV.md` lists the knobs).
+The plane is a routing substrate: it resolves and carries what a caller frames over it, and
+authority stays with the caller. It mints no `ServiceClaim`, releases no credit, and issues
+no `RouteAuthorization`; a route resolves to a resident-facing sidecar listener, never to an
+engine. A route observation is network evidence; it can never promote, release, or overwrite
+a capacity credit. Enable it with `NETWORK_PLANE_ENABLED=true` (`docs/ENV.md` lists the
+knobs).
 
 ## The four facts
 
@@ -67,12 +68,12 @@ carried whenever the origin and target both advertise an outbound relay attachme
 policy may rank a verified `worker_direct` or `node_relay` offload ahead of it, and a
 demoted offload drops out until its backoff cools.
 
-- **`worker_direct`** — caller to the listener. A forward-dial offload legal only for an
-  explicitly directly routable listener whose endpoint class the origin's network class can
+- **`worker_direct`** — the dialer to the listener. A forward-dial offload legal only for an
+  explicitly directly routable listener whose endpoint class the dialer's network class can
   reach, under a bounded optimistic connect budget. Shared-node placement alone does not
   make it legal.
-- **`node_relay`** — caller to the target node's announced endpoint, which uplinks over an
-  authenticated node-local relay session to the target listener the route names. A
+- **`node_relay`** — the dialer to the target node's announced endpoint, which uplinks over
+  an authenticated node-local relay session to the target listener the route names. A
   forward-dial offload; the initial same-node path as well as the normal cross-node path.
 - **`control_relay`** — the universal reverse-rendezvous base. Its descriptor names the
   origin and target reverse attachments by node (the delivery routes by node id) and the
@@ -80,10 +81,50 @@ demoted offload drops out until its backoff cools.
   whenever both ends hold a live outbound attachment, so it resolves for an outbound-only
   node where the forward-dial offloads do not.
 
-A `worker_direct` or `node_relay` hop is target-addressed and forward-dialed: the deputy
-reads one leading frame naming its next hop, dials it, and byte-relays the rest, chaining a
-multi-hop ladder through the relays; a `RelaySession` bridges the two stream pairs with a
-bounded in-flight buffer so a slow consumer backpressures a fast producer.
+A route has two origins. The logical `RouteOrigin` — a worker-side deputy or the root's
+gated serve ingress — grades `control_relay` and is the route's identity. The two
+forward-dial candidates are opened by the root, so they are graded against the root's own
+origin and their reachability evidence accumulates once for the root rather than separately
+under every caller. A reachability probe passes its own origin for both and admits no
+offload.
+
+## Trusted target-leg offloads
+
+A resident invocation's target leg leaves the reverse-rendezvous relay for a direct socket
+only where the deployment declares the root-to-target pair trusted. The resolver marks a
+forward-dial candidate as admitted when the target node advertises the required trust
+domain, one of the trusted reachability classes, and the mutually authenticated transport,
+under its current endpoint and listener generation, with root-to-target reachability
+evidence that has not demoted; a `worker_direct` candidate additionally needs the listener
+itself to advertise that transport, and a `node_relay` candidate the node's purpose-scoped
+target-leg listener. Anything else is carried over `control_relay`. Enable the policy with
+`NETWORK_PLANE_TARGET_LEG_ENABLED=true`.
+
+Both ends authenticate with mutual TLS from the configured CA bundle, and the target pins
+the configured root identity, so a certificate the CA signed for another party is refused
+before any frame is read. The `worker_direct` target is the replica worker's own claim-gated
+listener, whose port the worker reports at registration and control composes with the node's
+advertised host. The `node_relay` target is a node listener that resolves each frame's
+control-minted relay session to that node's local sidecar uplink — the dialer supplies no
+host, port, or engine endpoint.
+
+An offloaded leg carries the same frames as the relay: the claim-bound handoff before
+acceptance, the route authorization after it, the invocation and request identities,
+descriptor and generation fences, byte windows, cursors, and cancellation. The root writes
+frames through and reads no payload, engine token, cursor, or window, and the target
+sidecar's claim gate remains the only authority over what reaches an engine.
+
+A dial that fails before any frame is delivered records a classified path observation and
+carries the attempt over `control_relay` under the same claim, request identity, and held
+credit. Once a frame has been written the leg never switches transport: a loss from there on
+leaves the outcome ambiguous, which the origin reports as uncertain with its credit held.
+Fence, tenant, descriptor, application, and engine rejections are authorization failures, so
+they neither demote a path nor select a fallback.
+
+Only the target leg moves. A workflow origin keeps carrying its source-to-root leg over its
+own outbound attachment; a root-sourced gated serve call is its own origin, so both of its
+legs leave the rendezvous. `GET /api/v1/network/legs` counts resident frames and payload
+bytes per leg and transport, so the two read apart.
 
 ## Reverse-rendezvous relay
 

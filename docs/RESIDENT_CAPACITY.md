@@ -114,6 +114,17 @@ response between their per-node streams by session and direction, so neither nod
 inbound connection and the resident wire messages ride as opaque relay payloads — root and
 supervisors relay them without decoding a body, cursor, or window.
 
+Where the deployment declares the root-to-target pair trusted, control selects a target-leg
+offload for the attempt and the root carries the leg into the target over a mutually
+authenticated direct socket instead of the target node's relay stream — reaching either the
+replica worker's own claim-gated listener or the target node's purpose-scoped listener and
+its local sidecar uplink. The handoff, route authorization, fences, windows, and
+cancellation are the frames they always were, and the replica sidecar's claim gate still
+gates the engine; the origin worker's own leg to the root is untouched. A dial that fails
+before delivery carries the attempt over `control_relay` under the same claim, `idm-*`, and
+held credit, and a loss after delivery is `UNCERTAIN` rather than a transport switch. See
+[`NETWORK_PLANE.md`](NETWORK_PLANE.md).
+
 Every transition is safe under loss. Control records `ACCEPTED` and mints the fence only on
 the origin worker's acknowledgement, and the credit releases only from the fenced `DS`
 terminal consumed by `invocation_id` — never on an acknowledgement, a relay ack, or a partial
@@ -157,9 +168,9 @@ may request a specific port within the range, else one is
 auto-allocated. On root restart each persisted live exposure rebinds its same port under a
 fresh listener generation before it serves; a failed rebind stays unavailable rather than
 publishing a new port. A forward binding with no live exposure fails closed. Access is the
-task's ordinary `TASK` read permission. Both modes carry traffic over `control_relay`;
-trusted `worker_direct`/`node_relay` target legs resolve behind the shared claim-gated
-carriage seam.
+task's ordinary `TASK` read permission. The root is the origin for both modes, so a trusted
+target-leg offload carries the whole call over a direct socket and leaves the rendezvous
+unused.
 
 ## Replica lifecycle and policy
 

@@ -131,6 +131,7 @@ resident traffic. See [`NETWORK_PLANE.md`](NETWORK_PLANE.md).
 | POST | `/api/v1/network/echo` | Resolve a route to a target listener and echo a payload over the selected transport, updating reachability. |
 | GET | `/api/v1/network/endpoints` | List advertised node network-plane endpoints. |
 | GET | `/api/v1/network/reachability` | List derived directional reachability entries. |
+| GET | `/api/v1/network/legs` | List resident payload frames and bytes per leg and transport. |
 
 ## System
 

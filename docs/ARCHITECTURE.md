@@ -239,20 +239,35 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   port, authenticates and admits the request over the
   same gate as `proxy`, and relays it to the task's standing replica; a mode with no live
   exposure fails closed. At start the task is adopted as its own standing replica,
-  validated under `RESIDENT_ALLOWED_MODELS`. Both modes carry traffic over `control_relay`;
-  trusted direct target legs resolve behind the shared carriage seam. Available
+  validated under `RESIDENT_ALLOWED_MODELS`. The root is the origin for both modes, so a
+  trusted target-leg offload carries the whole call over a direct socket. Available
   when `RESIDENT_CAPACITY_ENABLED=true` (which requires `NETWORK_PLANE_ENABLED=true`). See
   [`RESIDENT_CAPACITY.md`](RESIDENT_CAPACITY.md).
 - **Network-plane route substrate.** A topology-aware, control-resolved routing substrate
   turns trusted node endpoint advertisements and directional reachability evidence into an
-  ordered route resolved by a pure resolver, carried by an origin-side deputy that never
-  peer-discovers over the universal reverse-rendezvous `control_relay` — both ends attach
-  outward to a root bridge, so neither needs an inbound connection — or a verified
-  forward-dial `worker_direct` / `node_relay` offload for a reachable pair. The
-  substrate holds no admission authority — it mints no `ServiceClaim` or `RouteAuthorization`
-  and its transports carry only what a caller frames over them; resident-capacity control
-  binds it to carry claim-gated resident invocation traffic. Enable with
-  `NETWORK_PLANE_ENABLED=true`. See [`NETWORK_PLANE.md`](NETWORK_PLANE.md).
+  ordered route resolved by a pure resolver, carried over the universal reverse-rendezvous
+  `control_relay` — both ends attach outward to a root bridge, so neither needs an inbound
+  connection — or a verified forward-dial `worker_direct` / `node_relay` offload for a
+  reachable pair. The substrate holds no admission authority — it mints no `ServiceClaim` or
+  `RouteAuthorization` and its transports carry only what a caller frames over them;
+  resident-capacity control binds it to carry claim-gated resident invocation traffic.
+  Enable with `NETWORK_PLANE_ENABLED=true`. See [`NETWORK_PLANE.md`](NETWORK_PLANE.md).
+- **Trusted target-leg offloads.** Where a deployment declares the root-to-target pair
+  trusted, an admitted resident invocation's target leg leaves the reverse-rendezvous relay
+  for a direct socket the root opens: `worker_direct` reaches the selected worker's
+  claim-gated replica-sidecar listener, `node_relay` reaches the target node's
+  purpose-scoped listener, which hands the session to its local sidecar uplink. Both carry
+  the same frames, fences, windows, and cancellation as the relay, and the target sidecar's
+  claim gate stays the only authority over the traffic. A logical origin's own leg is
+  unchanged — a workflow origin keeps carrying its source-to-root leg over its attachment,
+  while a root-sourced gated serve call moves both legs — and per-leg counters at
+  `GET /api/v1/network/legs` read the two apart. Eligibility requires the configured
+  trusted class and trust domain, the target's current endpoint and listener generation,
+  mutual TLS with the pinned root identity, and root-to-target reachability evidence; a
+  target missing any of them is carried over `control_relay`. A dial that fails before
+  delivery falls back to the relay under the same claim, request identity, and held credit;
+  a loss after delivery is ambiguous and holds the credit. Enable with
+  `NETWORK_PLANE_TARGET_LEG_ENABLED=true`. See [`NETWORK_PLANE.md`](NETWORK_PLANE.md).
 - **Worker-originated mediated boundaries.** A fabric-served external tool (`search/v1`)
   or a managed external model turn egresses only in the Agent's assigned worker, never in
   the root or a supervisor. The worker captures the boundary, keeps the raw request in
