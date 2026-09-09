@@ -158,5 +158,101 @@ def test_listener_refuses_a_request_on_a_released_port() -> None:
     asyncio.run(run())
 
 
+def test_listener_times_out_a_stalled_request_read() -> None:
+    async def run() -> None:
+        async def _admit(cred, task_id, envelope):
+            raise AssertionError("admit must not run for a stalled read")
+
+        listener = RootForwardIngress(
+            bind_host="127.0.0.1",
+            authority="local",
+            admit=_admit,
+            on_bound=_noop,
+            request_read_timeout_sec=0.2,
+        )
+        listener.start(asyncio.get_running_loop())
+        port = _free_port()
+        await listener._bind_and_report("tsk-1", 0, port)
+
+        # Open a socket and send a partial header that never terminates: without the
+        # read timeout the listener would block on the header forever and pin the port.
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        writer.write(b"GET /v1/models HTTP/1.1\r\nHost: x\r\n")
+        await writer.drain()
+        raw = await asyncio.wait_for(reader.read(), timeout=5)
+        assert b"408" in raw.split(b"\r\n")[0]
+        writer.close()
+        await listener.stop()
+
+    asyncio.run(run())
+
+
+def test_listener_refuses_a_connection_past_the_concurrency_cap() -> None:
+    async def run() -> None:
+        release = asyncio.Event()
+
+        async def _admit(cred, task_id, envelope):
+            await release.wait()  # hold the one slot open
+            return _FakeResult([_Event("head", status=200), _Event("done")])
+
+        listener = RootForwardIngress(
+            bind_host="127.0.0.1",
+            authority="local",
+            admit=_admit,
+            on_bound=_noop,
+            max_connections=1,
+        )
+        listener.start(asyncio.get_running_loop())
+        port = _free_port()
+        await listener._bind_and_report("tsk-1", 0, port)
+
+        # The first connection occupies the only slot (held inside admit).
+        r1, w1 = await asyncio.open_connection("127.0.0.1", port)
+        w1.write(b"GET /v1/models HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n")
+        await w1.drain()
+        while listener._active < 1:
+            await asyncio.sleep(0)
+        # A second connection is over the cap and refused fast.
+        raw = await asyncio.wait_for(_request(port), timeout=5)
+        assert b"503" in raw.split(b"\r\n")[0]
+
+        release.set()
+        await asyncio.wait_for(r1.read(), timeout=5)
+        w1.close()
+        await listener.stop()
+
+    asyncio.run(run())
+
+
+def test_listener_rejects_expect_100_continue_before_reading_the_body() -> None:
+    async def run() -> None:
+        async def _admit(cred, task_id, envelope):
+            raise AssertionError("admit must not run for a rejected request")
+
+        listener = RootForwardIngress(
+            bind_host="127.0.0.1", authority="local", admit=_admit, on_bound=_noop
+        )
+        listener.start(asyncio.get_running_loop())
+        port = _free_port()
+        await listener._bind_and_report("tsk-1", 0, port)
+
+        # A body-bearing request that declares Expect: 100-continue and sends no body:
+        # the listener must refuse it from the head, never block waiting for a body the
+        # client withholds pending a 100 Continue this listener never speaks.
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        writer.write(
+            b"POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\n"
+            b"Authorization: Bearer k\r\nContent-Length: 5\r\n"
+            b"Expect: 100-continue\r\n\r\n"
+        )
+        await writer.drain()
+        raw = await asyncio.wait_for(reader.read(), timeout=5)
+        assert b"400" in raw.split(b"\r\n")[0]
+        writer.close()
+        await listener.stop()
+
+    asyncio.run(run())
+
+
 def _noop(_task_id: str, _exposure_generation: int, _listener_generation: int) -> None:
     pass

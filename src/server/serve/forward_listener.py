@@ -14,6 +14,11 @@ frames back. Those frames are written to the client socket here; the credential 
 leaves this process for the engine. Binding a port is two-phase: control reserves it and
 asks this listener to bind, and only the bound listener's evidence commits the exposure
 live.
+
+The deployment's front proxy is expected to terminate TLS and throttle abusive clients
+ahead of the root, but the listener does not lean on it alone: it bounds its own request
+read and caps concurrent connections so a stalled or flooding client cannot pin the
+control plane the root runs on.
 """
 
 import asyncio
@@ -34,6 +39,12 @@ if TYPE_CHECKING:
 _MAX_REQUEST_BYTES = 4 * 1024 * 1024
 _MAX_HEADER_BYTES = 64 * 1024
 _STREAM_IDLE_TIMEOUT_SEC = 300.0
+# The request read (head and body) must complete within this bound: a client that opens
+# a socket and stalls before finishing the request cannot pin a port and a task open.
+_REQUEST_READ_TIMEOUT_SEC = 30.0
+# The most requests served concurrently across every forward port. A flood past it is
+# refused fast rather than allowed to exhaust the root's sockets and memory.
+_MAX_CONCURRENT_CONNECTIONS = 512
 
 
 class ServeForwardDenied(Exception):
@@ -63,6 +74,8 @@ class RootForwardIngress:
         admit: AdmitFn,
         on_bound: BoundFn,
         stream_idle_timeout_sec: float = _STREAM_IDLE_TIMEOUT_SEC,
+        request_read_timeout_sec: float = _REQUEST_READ_TIMEOUT_SEC,
+        max_connections: int = _MAX_CONCURRENT_CONNECTIONS,
         logger: logging.Logger | None = None,
     ) -> None:
         self._bind_host = bind_host
@@ -70,6 +83,9 @@ class RootForwardIngress:
         self._admit = admit
         self._on_bound = on_bound
         self._idle_timeout = stream_idle_timeout_sec
+        self._read_timeout = request_read_timeout_sec
+        self._max_connections = max_connections
+        self._active = 0
         self._log = logger or logging.getLogger("serve-forward-ingress")
         self._loop: asyncio.AbstractEventLoop | None = None
         self._servers: dict[int, asyncio.AbstractServer] = {}
@@ -158,26 +174,50 @@ class RootForwardIngress:
     async def _handle_client(
         self, port: int, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
+        if self._active >= self._max_connections:
+            # A flood past the cap is refused before it is admitted or streamed, so it
+            # cannot exhaust the root; the front proxy is expected to throttle ahead of
+            # this, but the cap holds even when a client reaches the bind host directly.
+            # Consume the request head (bounded) first so the refusal closes cleanly
+            # rather than racing a reset that loses the response.
+            try:
+                await asyncio.wait_for(
+                    reader.readuntil(b"\r\n\r\n"), self._read_timeout
+                )
+            except (
+                asyncio.IncompleteReadError,
+                asyncio.LimitOverrunError,
+                ConnectionError,
+                TimeoutError,
+            ):
+                pass
+            await self._refuse(writer, 503, "forward serve ingress is at capacity")
+            await _close_writer(writer)
+            return
+        self._active += 1
+        try:
+            await self._serve_client(port, reader, writer)
+        finally:
+            self._active -= 1
+            await _close_writer(writer)
+
+    async def _serve_client(
+        self, port: int, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
         try:
             parsed = await self._read_request(reader)
             if parsed is None:
                 return
-            method, target, header_items, body = parsed
+            envelope, credential = parsed
             serve_task_id = self._port_to_task.get(port)
             if serve_task_id is None:
                 await self._refuse(writer, 404, "serve task not found")
                 return
-            credential = _bearer(header_items)
-            path, _, query = target.partition("?")
-            envelope = freeze_request_envelope(
-                method=method,
-                upstream_path=path.lstrip("/"),
-                query=query,
-                headers=header_items,
-                body=body,
-            )
             result = await self._admit(credential, serve_task_id, envelope)
-            await self._write_response(writer, method, result)
+            # From here the response is streamed; ``_write_response`` owns every failure
+            # after a head reaches the wire, so no head-committed request is ever
+            # followed by a status line the catch-all below would append.
+            await self._write_response(writer, envelope.method, result)
         except EnvelopeRejected as exc:
             await self._refuse(writer, 400, str(exc))
         except ServeForwardDenied as exc:
@@ -187,14 +227,18 @@ class RootForwardIngress:
         except Exception:
             self._log.exception("forward serve request failed on port %d", port)
             await self._refuse(writer, 502, "serve request error")
-        finally:
-            await _close_writer(writer)
 
     async def _read_request(
         self, reader: asyncio.StreamReader
-    ) -> tuple[str, str, list[tuple[str, str]], bytes] | None:
+    ) -> tuple[ServeRequestEnvelope, str | None] | None:
         try:
-            head = await reader.readuntil(b"\r\n\r\n")
+            head = await asyncio.wait_for(
+                reader.readuntil(b"\r\n\r\n"), self._read_timeout
+            )
+        except TimeoutError as exc:
+            # A client that stalls before completing the header is timed out rather than
+            # left to pin the port; without this bound the read would block forever.
+            raise ServeForwardDenied(408, "request header read timed out") from exc
         except (
             asyncio.IncompleteReadError,
             asyncio.LimitOverrunError,
@@ -226,15 +270,33 @@ class RootForwardIngress:
             header_items.append((name, value))
             if name.lower() == "content-length" and value.isdigit():
                 content_length = int(value)
+        path, _, query = target.partition("?")
+        # Freeze the head with an empty body first: this rejects ambiguous framing —
+        # Expect: 100-continue, any Transfer-Encoding, a duplicate Content-Length —
+        # before the body is read, so a client waiting on a ``100 Continue`` this
+        # listener never speaks is refused rather than left blocking on ``readexactly``.
+        # The validated envelope carries the real body once it is read.
+        credential = _bearer(header_items)
+        envelope = freeze_request_envelope(
+            method=method,
+            upstream_path=path.lstrip("/"),
+            query=query,
+            headers=header_items,
+            body=b"",
+        )
         if content_length > _MAX_REQUEST_BYTES:
             raise EnvelopeRejected("request body too large")
-        body = b""
         if content_length:
             try:
-                body = await reader.readexactly(content_length)
+                body = await asyncio.wait_for(
+                    reader.readexactly(content_length), self._read_timeout
+                )
+            except TimeoutError as exc:
+                raise ServeForwardDenied(408, "request body read timed out") from exc
             except (asyncio.IncompleteReadError, ConnectionError):
                 return None
-        return method, target, header_items, body
+            envelope = envelope.model_copy(update={"body": body})
+        return envelope, credential
 
     async def _write_response(
         self,
@@ -244,27 +306,22 @@ class RootForwardIngress:
     ) -> None:
         events = aiter(result.events())
         first = await _next_event(events, self._idle_timeout)
-        if first is None or (first.terminal and first.kind == "error"):
+        if first is None or first.kind != "head":
+            # The sidecar commits its head first; a stream that opens with no head, a
+            # bare terminal, or an error terminal never produced a response, so fail
+            # closed rather than synthesize a 200 over a status the client never saw.
             detail = (
                 first.detail
                 if first is not None and first.detail
                 else "resident serve produced no response"
             )
             await self._refuse(writer, 502, detail)
+            if first is not None and not first.terminal:
+                result.close_client()
             return
-        write_body = method.upper() != "HEAD"
-        started = False
-        if first.kind == "head":
-            framed = write_body and _status_allows_body(first.status)
-            self._send_head(writer, first.status, first.headers, framed=framed)
-            write_body = framed
-            started = True
-        elif first.kind == "chunk":
-            self._send_head(writer, 200, (), framed=write_body)
-            started = True
-            if write_body and first.payload:
-                self._write_chunk(writer, first.payload)
-        terminated = first.terminal
+        write_body = method.upper() != "HEAD" and _status_allows_body(first.status)
+        self._send_head(writer, first.status, first.headers, framed=write_body)
+        terminated = False
         try:
             while not terminated:
                 event = await _next_event(events, self._idle_timeout)
@@ -274,21 +331,37 @@ class RootForwardIngress:
                 if event.kind == "chunk":
                     if write_body and event.payload:
                         self._write_chunk(writer, event.payload)
+                        # Drain each chunk so a slow client backpressures the write
+                        # instead of the root buffering the whole response in memory.
+                        await self._drain(writer)
                 elif event.terminal:
                     terminated = True
                     if event.kind == "error":
+                        # A stream that dropped frames or failed after the head was sent
+                        # is aborted, so the client sees a truncated body rather than a
+                        # well-formed one silently missing bytes.
                         self._abort(writer)
-                    elif write_body:
-                        self._end_chunks(writer)
-            await writer.drain()
-        except (BrokenPipeError, ConnectionResetError):
-            # The client is gone: stop delivering. The claim settles on the sidecar's
-            # own fenced terminal, never on this connection ending.
-            result.close_client()
+                    else:
+                        if write_body:
+                            self._end_chunks(writer)
+                        await self._drain(writer)
+        except (BrokenPipeError, ConnectionResetError, TimeoutError):
+            # The client is gone or stopped draining: abort and stop delivering. The
+            # claim settles on the sidecar's own fenced terminal, never on this
+            # connection ending.
+            self._abort(writer)
+        except Exception:
+            # A head is already on the wire, so a failure here cannot become a status:
+            # abort rather than let it surface as a second response line upstream.
+            self._log.exception("forward serve response streaming failed")
+            self._abort(writer)
         finally:
             if not terminated:
                 result.close_client()
-        _ = started
+
+    async def _drain(self, writer: asyncio.StreamWriter) -> None:
+        """Flush buffered bytes, bounded so a stalled client cannot block forever."""
+        await asyncio.wait_for(writer.drain(), self._idle_timeout)
 
     def _send_head(
         self,
