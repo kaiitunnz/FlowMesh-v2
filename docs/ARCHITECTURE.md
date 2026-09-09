@@ -240,7 +240,7 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   same gate as `proxy`, and relays it to the task's standing replica; a mode with no live
   exposure fails closed. At start the task is adopted as its own standing replica,
   validated under `RESIDENT_ALLOWED_MODELS`. Both modes carry traffic over `control_relay`;
-  trusted direct target legs are a later addition behind the shared carriage seam. Available
+  trusted direct target legs resolve behind the shared carriage seam. Available
   when `RESIDENT_CAPACITY_ENABLED=true` (which requires `NETWORK_PLANE_ENABLED=true`). See
   [`RESIDENT_CAPACITY.md`](RESIDENT_CAPACITY.md).
 - **Network-plane route substrate.** A topology-aware, control-resolved routing substrate

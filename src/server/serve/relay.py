@@ -8,7 +8,7 @@ sink. Because the root cannot dial a worker, its frames always ride the universa
 ``control_relay``.
 
 The drive itself — the two-phase bootstrap, the opaque response relay, and the fenced
-terminal reported to control — is shared with the worker-hosted forward ingress, so one
+terminal reported to control — is shared with the root forward ingress, so one
 credit-reporting path serves both gated modes.
 """
 

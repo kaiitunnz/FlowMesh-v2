@@ -11,7 +11,7 @@ The drive reads only relay frame kinds — never a body, cursor, or window — s
 running it applies no engine semantics and assembles nothing. Its success terminal
 carries no manifest: the live relay is the serve-data mode. Both gated ingresses run
 this same drive over their own frame sink, so one fenced-terminal and credit-reporting
-path serves the root-local proxy and a worker-hosted forward ingress alike.
+path serves the root-local proxy and the root forward ingress alike.
 """
 
 import asyncio

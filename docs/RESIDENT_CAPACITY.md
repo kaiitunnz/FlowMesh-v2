@@ -152,14 +152,14 @@ authority and an allowed port range (`SERVE_FORWARD_AUTHORITY`, `SERVE_FORWARD_P
 `SERVE_FORWARD_PORT_HIGH`); each forward binding owns a `ForwardPortExposure` that control
 reserves, the root binds a plain-HTTP listener on, and control commits live only from that
 bound listener's evidence, publishing the port url on the task. The deployment's own front
-proxy terminates TLS and forwards plain HTTP to the root, so FlowMesh holds no certificate
-of its own. `forwardPort` may request a specific port within the range, else one is
+proxy terminates TLS and forwards plain HTTP to the root. `forwardPort` may request a
+specific port within the range, else one is
 auto-allocated. On root restart each persisted live exposure rebinds its same port under a
 fresh listener generation before it serves; a failed rebind stays unavailable rather than
 publishing a new port. A forward binding with no live exposure fails closed. Access is the
-task's ordinary `TASK` read permission. In this release both modes carry traffic over
-`control_relay`; trusted `worker_direct`/`node_relay` target legs are a later addition
-behind the shared claim-gated carriage seam.
+task's ordinary `TASK` read permission. Both modes carry traffic over `control_relay`;
+trusted `worker_direct`/`node_relay` target legs resolve behind the shared claim-gated
+carriage seam.
 
 ## Replica lifecycle and policy
 

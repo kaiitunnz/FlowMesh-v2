@@ -208,10 +208,10 @@ class ServeOrigination:
     profile: AdmissionProfile
     envelope: ServeRequestEnvelope
     delivery: ServeDelivery
-    # A root-local proxy origination leaves these unset; a worker-hosted forward ingress
-    # sets its own worker as the origin (so the route resolves offload-capable from its
-    # node) and the worker-minted request id the ingress rendezvous keys the admission
-    # decision by.
+    # Both gated serve modes (proxy and the root forward ingress) originate on the root
+    # and leave these unset. A worker-originated workflow boundary sets its own worker
+    # as the origin (so the route resolves offload-capable from that worker's node) and
+    # the worker-minted request id its rendezvous keys the admission decision by.
     origin_worker: str | None = None
     request_id: str | None = None
 
@@ -240,10 +240,10 @@ class _Attempt:
     session record. It is rebuilt by a re-drive after a restart, so a lost entry only
     ignores a stale report rather than releasing a credit. A task-addressed serve
     attempt carries its delivery handle so the outcome tees, terminalizes, and re-drives
-    through the ingress. A root-local proxy attempt's ``origin_worker`` is ``None`` (the
-    edge is its transport-only origin); a worker-hosted forward attempt carries the
-    ingress worker as its origin and the ingress's ``request_id`` so a reap tears down
-    that request's rendezvous entry.
+    through the ingress. A gated serve attempt's ``origin_worker`` is ``None`` (the root
+    edge is its transport-only origin); a worker-originated workflow attempt carries the
+    origin worker and its ``request_id`` so a reap tears down that request's rendezvous
+    entry.
     """
 
     task_id: str
@@ -857,11 +857,11 @@ class ResidentCapacityControl:
         deps = self._delivery
         assert deps is not None
         serve = orig.serve
-        # The route fence resolves from the origin's registered endpoint. Only the
-        # root-local proxy (a serve origination with no origin worker) resolves from the
-        # root node over the edge stream — the root cannot dial a worker, so it always
-        # rides control_relay. A workflow boundary and a worker-hosted forward serve
-        # both resolve from the origin worker's own node, so a reachable pair offloads.
+        # The route fence resolves from the origin's registered endpoint. A gated serve
+        # origination has no origin worker, so it resolves from the root node over the
+        # edge stream — the root cannot dial a worker, so it always rides control_relay.
+        # A worker-originated workflow boundary resolves from the origin worker's own
+        # node, so a reachable pair offloads.
         if serve is not None and orig.origin_worker is None:
             origin_worker = None
             resolve_node: str | None = (
