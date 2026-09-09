@@ -26,17 +26,11 @@ spec:
       trust_remote_code: true
       max_model_len: 4096
 
-  # How the endpoint is exposed to an external client:
-  #   forward — TCP relay through the FlowMesh server (server_host:<port>)
-  #   proxy   — HTTP reverse-proxy through the FlowMesh server (recommended
-  #             when the worker has no direct network path to the server)
-  #   direct  — connect straight to the worker (must be network-reachable)
-  accessMode: proxy
-
-  # Pre-set the endpoint API key instead of letting the worker generate a
-  # random one, so tests can authenticate with a known key. Omit to
-  # auto-generate.
-  apiKey: flowmesh-serve-demo-key
+  # Reach this task by its ID over the FlowMesh-authenticated, claim-gated route:
+  # POST /api/v1/serve/tasks/<task_id>/v1/chat/completions with a FlowMesh credential
+  # and TASK read access. Point an OpenAI SDK at that path — the request and the
+  # engine's own response envelope relay through, a stream: true body included. The
+  # worker binds the engine to loopback behind the task's claim-gated sidecar.
 
   # Task TTL (seconds): the executor tears down the endpoint on expiry.
   ttlSeconds: 3600

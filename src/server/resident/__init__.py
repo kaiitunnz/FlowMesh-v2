@@ -30,7 +30,11 @@ from .selection import (
     SelectionStrategy,
     build_selection_strategy,
 )
-from .service import ResidentCapacityControl
+from .service import (
+    ResidentCapacityControl,
+    ServeDelivery,
+    ServeOrigination,
+)
 from .state import (
     CREDIT_BEARING_CLAIM_STATES,
     SERVABLE_REPLICA_STATES,
@@ -41,6 +45,8 @@ from .state import (
     ClaimTerminalReason,
     DemandEntry,
     InvocationRequest,
+    InvocationSubject,
+    InvocationSubjectKind,
     ProvisioningDenialReason,
     ReplicaCapacityReport,
     ReplicaIncarnation,
@@ -84,6 +90,8 @@ __all__ = [
     "DemandLedger",
     "InvocationRequest",
     "InvocationStore",
+    "InvocationSubject",
+    "InvocationSubjectKind",
     "LeaseStore",
     "LeastLoad",
     "LifecycleScaleManager",
@@ -96,6 +104,8 @@ __all__ = [
     "ReplicaIncarnation",
     "ReplicaState",
     "ReportStore",
+    "ServeDelivery",
+    "ServeOrigination",
     "ResidentCapacityControl",
     "ResidentPolicyLimits",
     "ResidentSnapshot",

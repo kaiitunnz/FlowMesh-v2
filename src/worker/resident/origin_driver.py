@@ -21,6 +21,11 @@ from typing import Any
 
 from shared.network.relay_frame import RelayFrame
 from shared.outcome import FabricContentStore, OutcomeManifest
+from shared.resident.carriage import (
+    CarriageUnavailable,
+    ClaimGatedServiceCarriage,
+    ResidentCarriagePlan,
+)
 from shared.resident.contracts import AdmissionHandoff, RouteAuthorization
 from shared.resident.reports import (
     ResidentBootstrapAck,
@@ -28,6 +33,7 @@ from shared.resident.reports import (
     ResidentOpOutcome,
     ResidentStreamStatus,
 )
+from shared.resident.session import ResidentRelaySession, ResidentSessionRole
 from shared.resident.wire import (
     KIND_ACK,
     KIND_BOOTSTRAP,
@@ -37,9 +43,6 @@ from shared.resident.wire import (
     KIND_REJECT,
     KIND_STREAM,
 )
-
-from .session import ResidentRelaySession, ResidentSessionRole
-from .transport import ResidentFrameSink
 
 AckSink = Callable[[ResidentBootstrapAck], None]
 OutcomeSink = Callable[[ResidentOpOutcome], None]
@@ -51,7 +54,8 @@ class ResidentOriginRequest:
 
     ``session_id`` is fresh per attempt; ``handoff`` is the claim-bound fence control
     minted for the reserved claim; ``request_payload`` is the worker-private raw request
-    the driver sends over the data path.
+    the driver sends over the data path; ``carriage_plan`` names the transport control
+    selected for the attempt, which the driver realizes as its frame sink.
     """
 
     task_id: str
@@ -59,6 +63,7 @@ class ResidentOriginRequest:
     session_id: str
     handoff: AdmissionHandoff
     request_payload: str | None
+    carriage_plan: ResidentCarriagePlan
 
 
 @dataclass
@@ -75,7 +80,7 @@ class ResidentOriginDriver:
     def __init__(
         self,
         *,
-        sink: ResidentFrameSink,
+        carriage: ClaimGatedServiceCarriage,
         content_store: FabricContentStore | None,
         report_ack: AckSink,
         report_outcome: OutcomeSink,
@@ -84,7 +89,7 @@ class ResidentOriginDriver:
         auth_deadline_sec: float = 60.0,
         logger: logging.Logger | None = None,
     ) -> None:
-        self._sink = sink
+        self._carriage = carriage
         self._content_store = content_store
         self._report_ack = report_ack
         self._report_outcome = report_outcome
@@ -98,12 +103,21 @@ class ResidentOriginDriver:
     def begin(self, request: ResidentOriginRequest) -> None:
         """Start one bootstrap attempt for a control-relayed handoff."""
         self._reap(request.call_correlation)
+        try:
+            sink = self._carriage.select(request.carriage_plan)
+        except CarriageUnavailable as exc:
+            # Control selected a transport this worker has no carriage for; hold the
+            # credit uncertain rather than bootstrap over the wrong sink.
+            self._report_outcome(
+                self._uncertain(request, f"no carriage for transport {exc}")
+            )
+            return
         session = ResidentRelaySession(
             session_id=request.session_id,
             invocation_id=request.handoff.invocation_id,
             idm=request.handoff.idempotency_key or "",
             role=ResidentSessionRole.ORIGIN,
-            sink=self._sink,
+            sink=sink,
             window_bytes=self._window_bytes,
         )
         origin = _Origin(

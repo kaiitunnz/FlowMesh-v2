@@ -18,15 +18,23 @@ the same invocation identity rather than falling through to a wrong terminal.
 
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from shared.resident.contracts import AdmissionHandoff, ReplicaEndpoint
+from shared.resident.carriage import CONTROL_RELAY, ResidentCarriagePlan
+from shared.resident.contracts import (
+    AdmissionHandoff,
+    ReplicaEndpoint,
+    RouteAuthorization,
+)
+from shared.resident.envelope import ServeRequestEnvelope
 from shared.resident.reports import (
     ResidentBootstrapAck,
     ResidentBootstrapOutcome,
     ResidentOpOutcome,
+    ResidentStreamChunk,
+    ResidentStreamHead,
     ResidentStreamStatus,
 )
 from shared.utils.ids import new_relay_session_id
@@ -35,6 +43,7 @@ from ..network.state import (
     ReplicaListenerAdvertisement,
     ResolvedRoute,
     RouteOrigin,
+    Transport,
 )
 from ..orchestration.tool_dispatch import ToolInvocationEnvelope
 from ..task.v2.representations.operators import ServiceDependency
@@ -46,6 +55,8 @@ from .state import (
     AdmissionProfile,
     ClaimState,
     ClaimTerminalReason,
+    InvocationSubject,
+    InvocationSubjectKind,
     ProvisioningDenialReason,
     ReplicaIncarnation,
     ReplicaState,
@@ -117,6 +128,107 @@ class ResidentWorkerDelivery:
     sessions: ResidentSessionWriter
     directly_routable: bool = False
     forward_api_key: str | None = None
+    # The gated serve edge is the transport-only origin: it resolves its fence from the
+    # root node's registered endpoint (read lazily — the node id is known only after the
+    # supervisor handshake) and rides its own dedicated relay stream id, so a
+    # task-addressed invocation needs no caller-worker origin driver.
+    root_node_id: Callable[[], str | None] | None = None
+    edge_id: str = ""
+
+
+class ServeDelivery(Protocol):
+    """The per-request seam a task-addressed serve origination binds.
+
+    A task-addressed external invocation has no ``DS`` boundary to settle back to, and
+    the gated edge — not a caller worker — is its transport-only origin. Control routes
+    the origin transport and the outcome through this handle: it opens and authorizes
+    the edge-to-sidecar relay, teed frames relay to the client unparsed, the fenced
+    terminal records a durable external status fact, and a lost attempt re-drives the
+    origination. The handle carries no engine or payload semantics beyond relaying
+    opaque frames.
+    """
+
+    def open(
+        self, session_id: str, handoff: AdmissionHandoff, plan: ResidentCarriagePlan
+    ) -> None:
+        """Open the origin relay to the sidecar and send the bootstrap."""
+        ...
+
+    def authorize(self, session_id: str, auth: RouteAuthorization) -> None:
+        """Deliver the post-``ACCEPTED`` route authorization to the origin relay."""
+        ...
+
+    def close_session(self, session_id: str) -> None:
+        """Cancel and forget the origin relay for one attempt's session."""
+        ...
+
+    def head(self, status: int, headers: tuple[tuple[str, str], ...]) -> None:
+        """Carry the engine response's status and headers to the client."""
+        ...
+
+    def tee(self, payload: bytes) -> None:
+        """Relay one authorized response frame to the client, unparsed."""
+        ...
+
+    def record_terminal(self, reason: ClaimTerminalReason, detail: str | None) -> None:
+        """Record the fenced external status fact before the credit releases."""
+        ...
+
+    def complete(self) -> None:
+        """Finalize the client response on a successful terminal."""
+        ...
+
+    def fail(self, detail: str) -> None:
+        """Finalize the client response on a definite failure."""
+        ...
+
+    def redrive(self) -> None:
+        """Re-drive the origination after an uncertain loss, under the held claim."""
+        ...
+
+
+@dataclass
+class ServeOrigination:
+    """One authenticated task-addressed serve request driven through resident admission.
+
+    The gated edge resolves the request's live binding, freezes the client's transparent
+    request envelope, and drives the origin relay itself; control admits the same claim
+    against only the binding's allocation ``family`` and drives the same two-phase
+    delivery as a workflow consumer. ``task_id`` and ``call_correlation`` are the
+    invocation's worker-lane correlation, fenced per invocation.
+    """
+
+    invocation_id: str
+    idempotency_key: str
+    task_id: str
+    call_correlation: str
+    subject: InvocationSubject
+    family: str
+    dependency: ServiceDependency
+    profile: AdmissionProfile
+    envelope: ServeRequestEnvelope
+    delivery: ServeDelivery
+    # Both gated serve modes (proxy and the root forward ingress) originate on the root
+    # and leave these unset. A worker-originated workflow boundary sets its own worker
+    # as the origin (so the route resolves offload-capable from that worker's node) and
+    # the worker-minted request id its rendezvous keys the admission decision by.
+    origin_worker: str | None = None
+    request_id: str | None = None
+
+
+@dataclass
+class _Origination:
+    """The subject-neutral identity and routing an origination drives its claim."""
+
+    task_id: str
+    call_correlation: str
+    invocation_id: str
+    idempotency_key: str | None
+    subject: InvocationSubject
+    origin_worker: str | None
+    family: str | None = None
+    serve: ServeDelivery | None = None
+    request_id: str | None = None
 
 
 @dataclass
@@ -126,7 +238,12 @@ class _Attempt:
     It carries the fence subject (``origin_id``) and the relay wiring so the ack handler
     mints a matching authorization and the terminal reap relays a cancel and drops the
     session record. It is rebuilt by a re-drive after a restart, so a lost entry only
-    ignores a stale report rather than releasing a credit.
+    ignores a stale report rather than releasing a credit. A task-addressed serve
+    attempt carries its delivery handle so the outcome tees, terminalizes, and re-drives
+    through the ingress. A gated serve attempt's ``origin_worker`` is ``None`` (the root
+    edge is its transport-only origin); a worker-originated workflow attempt carries the
+    origin worker and its ``request_id`` so a reap tears down that request's rendezvous
+    entry.
     """
 
     task_id: str
@@ -134,12 +251,15 @@ class _Attempt:
     invocation_id: str
     idempotency_key: str | None
     session_id: str
-    origin_worker: str
+    origin_worker: str | None
     serve_worker: str
     origin_id: str
     deadline_at: str | None
     replica_id: str
     adapter_ref: str | None
+    subject: InvocationSubject
+    serve: ServeDelivery | None = None
+    request_id: str | None = None
 
 
 class ResidentCapacityControl:
@@ -230,6 +350,34 @@ class ResidentCapacityControl:
             return
         asyncio.run_coroutine_threadsafe(self._originate(env), self._loop)
 
+    def originate_serve(self, request: ServeOrigination) -> None:
+        """Originate an authenticated task-addressed serve request through admission.
+
+        The gated edge has authenticated the principal and resolved the request's live
+        binding; this drives the same admission gate and two-phase delivery as a
+        workflow consumer, against only the binding's own allocation family, with the
+        edge itself as the transport-only origin.
+        """
+        if self._loop is None:
+            request.delivery.fail("resident-capacity control is not running")
+            return
+        asyncio.run_coroutine_threadsafe(self._originate_serve(request), self._loop)
+
+    def redrive_serve(self, request: ServeOrigination) -> None:
+        """Re-drive a serve origination onto a fresh session under its held claim."""
+        if self._loop is not None:
+            self._loop.create_task(self._originate_serve(request))
+
+    async def _originate_serve(self, request: ServeOrigination) -> None:
+        try:
+            await self._originate_serve_inner(request)
+        except Exception as exc:
+            self._logger.exception(
+                "resident serve origination failed for invocation %s",
+                request.invocation_id,
+            )
+            request.delivery.fail(f"resident serve origination error: {exc}")
+
     def on_bootstrap_ack(self, ack: ResidentBootstrapAck) -> None:
         """Consume an origin worker's bootstrap-phase report off the calling lane."""
         if self._loop is not None:
@@ -258,7 +406,7 @@ class ResidentCapacityControl:
 
     def _settle_terminal_local(self, invocation_id: str, failed: bool) -> None:
         reason = ClaimTerminalReason.FAILED if failed else ClaimTerminalReason.COMPLETED
-        self._admission.on_ds_terminal(invocation_id, reason)
+        self._admission.settle_invocation_terminal(invocation_id, reason)
         self._transient_failures.pop(invocation_id, None)
         self._reap_attempt(invocation_id)
 
@@ -266,27 +414,37 @@ class ResidentCapacityControl:
         """Reap both ends of a resident invocation on its fenced terminal.
 
         The origin reap cancels the origin driver's lane and drops the worker-private
-        raw request; the serve-worker reap tears down the replica's serve task and its
-        engine request; then the durable session record is deleted. Every step is best
-        effort — a gone worker simply has nothing to reap.
+        raw request (a workflow invocation), or closes the gated edge's origin relay
+        session (a task-addressed serve invocation); the serve-worker reap tears down
+        the replica's engine request; then the durable session record is deleted. Every
+        step is best effort — a gone worker or an already-closed session simply has
+        nothing to reap.
         """
         attempt = self._attempts.pop(invocation_id, None)
         if attempt is None or self._delivery is None:
             return
-        self._delivery.relay(
-            attempt.origin_worker,
-            "resident_reap",
-            {
-                "task_id": attempt.task_id,
-                "call_correlation": attempt.call_correlation,
-            },
-        )
+        if attempt.serve is not None:
+            attempt.serve.close_session(attempt.session_id)
+        elif attempt.origin_worker is not None:
+            self._delivery.relay(
+                attempt.origin_worker,
+                "resident_reap",
+                {
+                    "task_id": attempt.task_id,
+                    "call_correlation": attempt.call_correlation,
+                },
+            )
         self._delivery.relay(
             attempt.serve_worker,
             "resident_sidecar_reap",
             {"invocation_id": attempt.invocation_id},
         )
         self._reclaim_adapter_slot(attempt)
+        # A standing serve replica drained by its task's stop is left DRAINING while an
+        # in-flight claim held credit; its last release settles here, so stop it now
+        # rather than leave it lingering in the directory (the idle sweep is off by
+        # default). A live standing replica is untouched — only a DRAINING one stops.
+        self._lifecycle.stop_if_drained_standing(attempt.replica_id)
         if self._loop is not None:
             self._loop.create_task(self._delivery.sessions.delete(attempt.session_id))
 
@@ -312,6 +470,116 @@ class ResidentCapacityControl:
                 "adapter_name": attempt.adapter_ref,
             },
         )
+
+    def call_on_loop(self, fn: Callable[[], None]) -> None:
+        """Run a mutation on the origination loop so all store access is
+        single-threaded.
+
+        Serve adoption and drain arrive off the event-monitor thread; marshaling them
+        onto the control loop keeps every access to the family/replica/binding stores on
+        one thread with admission.
+        """
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(fn)
+        else:
+            fn()
+
+    def schedule(self, coro: "Coroutine[Any, Any, None]") -> None:
+        """Run a coroutine on the origination loop from another thread.
+
+        A forward serve admission (its authentication and authorization are async)
+        arrives off the event-monitor thread; running it on the control loop keeps its
+        store access single-threaded with admission.
+        """
+        if self._loop is not None:
+            asyncio.run_coroutine_threadsafe(coro, self._loop)
+        else:
+            coro.close()
+
+    def relay_to_worker(
+        self, worker_id: str, frame_kind: str, payload: dict[str, Any]
+    ) -> bool:
+        """Relay one control frame to a worker over its attachment, or False if gone."""
+        if self._delivery is None:
+            return False
+        return self._delivery.relay(worker_id, frame_kind, payload)
+
+    def node_of_worker(self, worker_id: str | None) -> str | None:
+        """The node a worker runs on, resolved through the worker registry."""
+        if self._delivery is None:
+            return None
+        return self._delivery.node_of_worker(worker_id)
+
+    def serve_model_allowed(self, model_ref: str) -> bool:
+        """Whether a serve task's model may be adopted as a standing resident
+        allocation.
+
+        Reuses the resident allowed-model policy; there is no alias catalog or
+        per-tenant allowlist.
+        """
+        return (
+            not self._limits.allowed_models or model_ref in self._limits.allowed_models
+        )
+
+    def probe_serve_endpoint(self, serve_task_id: str) -> ReplicaEndpoint | None:
+        """The serve task's reported engine endpoint once ready, else None."""
+        return self._probe_endpoint(serve_task_id)
+
+    def adopt_serve_replica(
+        self,
+        *,
+        serve_task_id: str,
+        family: str,
+        dependency: ServiceDependency,
+        endpoint: ReplicaEndpoint,
+        binding_generation: int,
+    ) -> None:
+        """Register a serve task's per-task family and adopt its running replica.
+
+        The family key is unique to the serve task, so admission for its requests
+        selects only its own replica. Adoption pins the replica for the serve task's
+        lifetime and never materializes from zero — the serve task already runs the
+        engine.
+        """
+        if family not in self._stores.families:
+            self._stores.families.register(
+                ServiceFamily(
+                    family=family,
+                    engine_batch_key=dependency.engine_batch_key,
+                    model_ref=dependency.service_ref,
+                    interface=dependency.interface.value,
+                    isolation=dependency.isolation,
+                    selection_strategy=self._limits.selection_strategy,
+                )
+            )
+        definition = self._stores.families.get(family)
+        if definition is None:
+            return
+        self._lifecycle.adopt_standing_replica(
+            definition,
+            serve_task_id=serve_task_id,
+            binding_generation=binding_generation,
+            endpoint=endpoint,
+        )
+        self._persist()
+
+    def drain_serve_replica(self, serve_task_id: str) -> None:
+        """Drain the standing replica of a stopped serve task, denying new claims.
+
+        Accepted claims reconcile on their own fenced terminals; the replica is not
+        idle-torn-down but drained because its serve task is ending.
+        """
+        for replica in self._stores.directory.all():
+            if (
+                replica.standing
+                and replica.serve_task_id == serve_task_id
+                and replica.state in SERVABLE_REPLICA_STATES
+            ):
+                self._lifecycle.drain(replica.replica_id)
+                # Stop it once its admitted work has drained so the stopped serve task's
+                # replica does not linger DRAINING in the directory; an in-flight claim
+                # keeps it draining until its own terminal releases the last credit.
+                self._lifecycle.stop(replica.replica_id)
 
     def list_service_families(self) -> list[ServiceFamily]:
         """The registered service families, for operator read access."""
@@ -388,14 +656,6 @@ class ResidentCapacityControl:
             )
 
     async def _originate_inner(self, env: ToolInvocationEnvelope) -> None:
-        if self._delivery is None:
-            self._settle(
-                env.task_id,
-                env.call_correlation,
-                None,
-                error="resident-capacity control requires the network plane",
-            )
-            return
         resolved = self._resolve_dependency(env.task_id)
         if resolved is None or not resolved[1].service_ref:
             self._settle(
@@ -406,100 +666,246 @@ class ResidentCapacityControl:
             )
             return
         workflow_id, dependency = resolved
-        model_ref = dependency.service_ref
-        family = dependency.service_family
-
+        origin_worker = (
+            self._delivery.origin_worker_of_task(env.task_id)
+            if self._delivery is not None
+            else None
+        )
+        orig = _Origination(
+            task_id=env.task_id,
+            call_correlation=env.call_correlation,
+            invocation_id=env.invocation_id,
+            idempotency_key=env.idempotency_key,
+            subject=InvocationSubject(
+                kind=InvocationSubjectKind.WORKFLOW, id=workflow_id
+            ),
+            origin_worker=origin_worker,
+        )
         profile = AdmissionProfile(
             engine_batch_key=dependency.engine_batch_key,
             adapter_ref=dependency.adapter,
             adapter_source=dependency.adapter_source,
         )
-        existing = self._admission.active_claim(env.invocation_id)
+        await self._drive_claim(orig, dependency, profile)
+
+    async def _drive_claim(
+        self,
+        orig: _Origination,
+        dependency: ServiceDependency,
+        profile: AdmissionProfile,
+    ) -> None:
+        """Admit the invocation's claim and relay its bootstrap, subject-neutrally.
+
+        A workflow subject and a task-addressed serve subject funnel through the same
+        admission gate, two-phase relay, and terminal fences; only the origin (a caller
+        worker vs the gated edge) and the settle/re-drive routing differ, which the
+        origination's delivery handle carries. A serve subject admits against only its
+        binding's pre-registered allocation family; a workflow subject derives and
+        lazily registers its plan family.
+        """
+        if self._delivery is None:
+            self._settle_origination_error(
+                orig, "resident-capacity control requires the network plane"
+            )
+            return
+        model_ref = dependency.service_ref
+        family = orig.family or dependency.service_family
+        existing = self._admission.active_claim(orig.invocation_id)
         if existing is not None and existing.holds_credit:
             # Resume a re-driven boundary on the in-flight claim: reissue to the same
             # fenced replica under the held credit, never re-admitting or releasing.
             claim = existing
             handoff = self._admission.rebuild_handoff(
-                existing, idempotency_key=env.idempotency_key
+                existing, idempotency_key=orig.idempotency_key
             )
             if handoff is None:
                 self._admission.on_route_loss(existing)
-                self._settle(
-                    env.task_id,
-                    env.call_correlation,
-                    None,
-                    error="resident replica is unavailable to resume the invocation",
+                self._settle_origination_error(
+                    orig, "resident replica is unavailable to resume the invocation"
                 )
                 return
         else:
             if existing is not None:
                 claim = existing
-            elif not self._ensure_family(dependency):
+            elif orig.serve is not None and family not in self._stores.families:
+                # A serve family is registered when its task is adopted; a request that
+                # finds none has no live standing allocation to admit against.
+                self._settle_origination_error(
+                    orig, "serve task has no live standing allocation"
+                )
+                return
+            elif orig.serve is None and not self._ensure_family(dependency):
                 self._fail(
-                    env,
+                    orig,
                     ProvisioningDenialReason.MODEL_NOT_ALLOWED,
                     f"model {model_ref!r} is not in the allowed catalog",
                 )
                 return
             else:
                 claim = self._admission.raise_claim(
-                    invocation_id=env.invocation_id,
-                    workflow_id=workflow_id,
+                    invocation_id=orig.invocation_id,
+                    subject=orig.subject,
                     family=family,
                     profile=profile,
                 )
             handoff = await self._acquire_capacity(
-                env, family, model_ref, claim, profile
+                orig, family, model_ref, claim, profile
             )
             if handoff is None:
                 return
         replica = self._stores.directory.get(handoff.replica_id)
         if replica is None or replica.endpoint is None:
             self._admission.on_route_loss(claim)
-            self._settle(
-                env.task_id,
-                env.call_correlation,
-                None,
-                error="resident replica endpoint is unavailable",
+            self._settle_origination_error(
+                orig, "resident replica endpoint is unavailable"
             )
             return
-        await self._relay_bootstrap(env, claim, profile, handoff, replica)
+        await self._relay_bootstrap(orig, claim, profile, handoff, replica)
+
+    async def _originate_serve_inner(self, request: ServeOrigination) -> None:
+        orig = _Origination(
+            task_id=request.task_id,
+            call_correlation=request.call_correlation,
+            invocation_id=request.invocation_id,
+            idempotency_key=request.idempotency_key,
+            subject=request.subject,
+            origin_worker=request.origin_worker,
+            family=request.family,
+            serve=request.delivery,
+            request_id=request.request_id,
+        )
+        await self._drive_claim(orig, request.dependency, request.profile)
+
+    def _settle_origination_error(self, orig: _Origination, detail: str) -> None:
+        """Route an origination-phase error to its subject's settle path."""
+        if orig.serve is not None:
+            self._finalize_serve(
+                orig.invocation_id,
+                orig.serve,
+                ClaimTerminalReason.FAILED,
+                detail,
+                success=False,
+            )
+        else:
+            self._settle(orig.task_id, orig.call_correlation, None, error=detail)
+
+    def _finalize_serve(
+        self,
+        invocation_id: str,
+        delivery: ServeDelivery,
+        reason: ClaimTerminalReason,
+        detail: str | None,
+        *,
+        success: bool,
+    ) -> None:
+        """Record the fenced external status fact, release the credit, and finalize.
+
+        The durable terminal fact is recorded before the credit releases, so a restart
+        reconciles the claim against it. The release is idempotent and the reap
+        tolerates an already-gone attempt, so a duplicate or late report is a no-op.
+        """
+        delivery.record_terminal(reason, detail)
+        self._admission.settle_invocation_terminal(invocation_id, reason)
+        self._transient_failures.pop(invocation_id, None)
+        self._reap_attempt(invocation_id)
+        if success:
+            delivery.complete()
+        else:
+            delivery.fail(detail or "resident serve failed")
+
+    def fail_serve(
+        self, invocation_id: str, delivery: ServeDelivery, detail: str
+    ) -> None:
+        """Terminalize a serve invocation whose re-drive gave up.
+
+        A give-up leaves the claim UNCERTAIN holding credit; unlike a workflow, no DS
+        terminal consumes it. This releases the credit through the fenced path — a
+        FAILED external status fact consumed by the same FSM — then fails the client, so
+        the credit never strands.
+        """
+        self._finalize_serve(
+            invocation_id, delivery, ClaimTerminalReason.FAILED, detail, success=False
+        )
+
+    def reconcile_serve_terminal(
+        self, invocation_id: str, reason: ClaimTerminalReason
+    ) -> None:
+        """Settle a claim left credit-bearing by a crash between its terminal writes.
+
+        On startup a recorded external status fact replays through the same FSM so a
+        claim rehydrated UNCERTAIN releases; there is no live client to finalize.
+        """
+        self._admission.settle_invocation_terminal(invocation_id, reason)
+        self._reap_attempt(invocation_id)
 
     async def _relay_bootstrap(
         self,
-        env: ToolInvocationEnvelope,
+        orig: _Origination,
         claim: ServiceClaim,
         profile: AdmissionProfile,
         handoff: AdmissionHandoff,
         replica: ReplicaIncarnation,
     ) -> None:
-        """Bind the sidecar, resolve the origin fence, and relay the handoff.
+        """Bind the sidecar, resolve the origin fence, and deliver the bootstrap.
 
-        The origin worker carries the request and drives the engine ack over the
-        reverse-relay; an unreachable origin, an unbindable sidecar, or an unresolved
-        origin holds the credit uncertain and re-drives rather than terminalizing.
+        For a workflow boundary the origin worker carries the request and drives the
+        engine ack over the reverse-relay; for a task-addressed serve request the gated
+        edge is the transport-only origin and drives the relay itself. An unreachable
+        origin, an unbindable sidecar, or an unresolved origin holds the credit
+        uncertain and re-drives rather than terminalizing.
         """
         deps = self._delivery
         assert deps is not None
-        origin_worker = deps.origin_worker_of_task(env.task_id)
-        origin_node = deps.node_of_worker(origin_worker)
-        if origin_worker is None or origin_node is None:
-            await self._hold_and_redrive(env, claim, "no origin worker for boundary")
-            return
+        serve = orig.serve
+        # The route fence resolves from the origin's registered endpoint. A gated serve
+        # origination has no origin worker, so it resolves from the root node over the
+        # edge stream — the root cannot dial a worker, so it always rides control_relay.
+        # A worker-originated workflow boundary resolves from the origin worker's own
+        # node, so a reachable pair offloads.
+        if serve is not None and orig.origin_worker is None:
+            origin_worker = None
+            resolve_node: str | None = (
+                deps.root_node_id() if deps.root_node_id is not None else None
+            )
+            routing_node = deps.edge_id or None
+            if resolve_node is None or routing_node is None:
+                await self._hold_and_redrive(orig, claim, "no serve edge origin")
+                return
+        else:
+            origin_worker = orig.origin_worker
+            resolve_node = deps.node_of_worker(origin_worker)
+            routing_node = resolve_node
+            if origin_worker is None or resolve_node is None:
+                await self._hold_and_redrive(
+                    orig, claim, "no origin worker for boundary"
+                )
+                return
         target_worker = deps.serve_worker_of(replica)
         target_node = deps.node_of_worker(target_worker)
         if target_worker is None or target_node is None:
-            await self._hold_and_redrive(env, claim, "resident replica worker is gone")
+            await self._hold_and_redrive(orig, claim, "resident replica worker is gone")
             return
         listener = await self._ensure_sidecar(replica, target_worker, target_node)
         if listener is None:
-            await self._hold_and_redrive(env, claim, "resident sidecar is unavailable")
+            await self._hold_and_redrive(orig, claim, "resident sidecar is unavailable")
             return
-        resolved = await deps.network.resolve(origin_node, listener)
+        resolved = await deps.network.resolve(resolve_node, listener)
         if resolved is None:
-            await self._hold_and_redrive(env, claim, "no origin route for the boundary")
+            await self._hold_and_redrive(
+                orig, claim, "no origin route for the boundary"
+            )
             return
-        origin, _route = resolved
+        origin, route = resolved
+        # Control selects the transport candidate for the attempt from the resolved
+        # route; this PR realizes only control_relay, so without it as a base candidate
+        # the attempt cannot be carried — hold the credit and re-drive rather than
+        # reinterpret a direct/node candidate as a relay.
+        if not any(
+            candidate.transport is Transport.CONTROL_RELAY
+            for candidate in route.candidates
+        ):
+            await self._hold_and_redrive(orig, claim, "no control_relay carriage")
+            return
         handoff = handoff.model_copy(
             update={
                 "origin_id": origin.origin_id,
@@ -509,20 +915,28 @@ class ResidentCapacityControl:
         # A fresh relay session per delivery attempt: a re-drive gets its own session,
         # so its bridge and per-direction sequence never collide with an old one.
         session_id = new_relay_session_id()
+        plan = ResidentCarriagePlan(
+            session_id=session_id,
+            selected_transport=CONTROL_RELAY,
+            route_epoch=route.route_epoch,
+            listener_generation=listener.listener_generation,
+        )
         await deps.sessions.update(
             session_id,
-            origin_node=origin_node,
+            origin_node=routing_node or "",
             target_node=target_node,
-            origin_worker=origin_worker,
+            origin_worker=origin_worker or "",
             target_worker=target_worker,
-            invocation_id=env.invocation_id,
-            idm=env.idempotency_key or "",
+            invocation_id=orig.invocation_id,
+            idm=orig.idempotency_key or "",
+            selected_transport=CONTROL_RELAY,
+            route_epoch=route.route_epoch,
         )
-        self._attempts[env.invocation_id] = _Attempt(
-            task_id=env.task_id,
-            call_correlation=env.call_correlation,
-            invocation_id=env.invocation_id,
-            idempotency_key=env.idempotency_key,
+        self._attempts[orig.invocation_id] = _Attempt(
+            task_id=orig.task_id,
+            call_correlation=orig.call_correlation,
+            invocation_id=orig.invocation_id,
+            idempotency_key=orig.idempotency_key,
             session_id=session_id,
             origin_worker=origin_worker,
             serve_worker=target_worker,
@@ -530,19 +944,27 @@ class ResidentCapacityControl:
             deadline_at=profile.deadline_at,
             replica_id=replica.replica_id,
             adapter_ref=profile.adapter_ref,
+            subject=orig.subject,
+            serve=serve,
+            request_id=orig.request_id,
         )
+        if serve is not None:
+            serve.open(session_id, handoff, plan)
+            return
+        assert origin_worker is not None
         delivered = deps.relay(
             origin_worker,
             "resident_handoff",
             {
-                "task_id": env.task_id,
-                "call_correlation": env.call_correlation,
+                "task_id": orig.task_id,
+                "call_correlation": orig.call_correlation,
                 "session_id": session_id,
                 "handoff": handoff.model_dump(mode="json"),
+                "carriage_plan": plan.model_dump(mode="json"),
             },
         )
         if not delivered:
-            await self._hold_and_redrive(env, claim, "origin worker relay failed")
+            await self._hold_and_redrive(orig, claim, "origin worker relay failed")
 
     async def _on_ack(self, ack: ResidentBootstrapAck) -> None:
         """Record the engine enqueue ack and issue the route authorization, or hold.
@@ -578,6 +1000,10 @@ class ResidentCapacityControl:
                     origin_id=attempt.origin_id,
                     deadline_at=attempt.deadline_at,
                 )
+            if attempt.serve is not None:
+                attempt.serve.authorize(attempt.session_id, auth)
+                return
+            assert attempt.origin_worker is not None
             delivered = deps.relay(
                 attempt.origin_worker,
                 "resident_authorization",
@@ -609,42 +1035,94 @@ class ResidentCapacityControl:
     async def _on_outcome(self, outcome: ResidentOpOutcome) -> None:
         """Settle the boundary from the origin worker's fenced terminal, or hold.
 
-        ``SUCCESS`` settles by reference from the completed manifest; the fenced DS
-        terminal then releases the credit. ``DEFINITE_FAILURE`` settles an error, whose
-        fenced terminal likewise releases. ``UNCERTAIN`` holds the credit and re-drives.
-        A report that does not match the live attempt is ignored, leaving the boundary
-        pending for a same-invocation re-drive.
+        A workflow ``SUCCESS`` settles by reference from the completed manifest and the
+        fenced DS terminal releases the credit; a serve ``SUCCESS`` records the fenced
+        external status fact (no manifest — the live relay is the serve-data mode),
+        releases the credit, and finalizes the client response (whose frames already
+        teed live). ``DEFINITE_FAILURE`` settles an error the same way per subject.
+        ``UNCERTAIN`` holds the credit and re-drives. A report that does not match the
+        live attempt is ignored, leaving the boundary pending for a same-invocation
+        re-drive.
         """
         attempt = self._attempts.get(outcome.invocation_id)
         claim = self._admission.active_claim(outcome.invocation_id)
         if attempt is None or attempt.session_id != outcome.session_id:
             return
         if outcome.status is ResidentStreamStatus.SUCCESS:
-            if outcome.manifest is None:
-                return
-            self._settle(
-                attempt.task_id, attempt.call_correlation, ref=outcome.manifest
-            )
+            if attempt.serve is not None:
+                self._finalize_serve(
+                    attempt.invocation_id,
+                    attempt.serve,
+                    ClaimTerminalReason.COMPLETED,
+                    None,
+                    success=True,
+                )
+            elif outcome.manifest is not None:
+                self._settle(
+                    attempt.task_id, attempt.call_correlation, ref=outcome.manifest
+                )
             return
         if outcome.status is ResidentStreamStatus.DEFINITE_FAILURE:
-            self._settle(
-                attempt.task_id,
-                attempt.call_correlation,
-                None,
-                error=f"resident invocation failed: {outcome.error or 'unknown'}",
-            )
+            detail = f"resident invocation failed: {outcome.error or 'unknown'}"
+            if attempt.serve is not None:
+                self._finalize_serve(
+                    attempt.invocation_id,
+                    attempt.serve,
+                    ClaimTerminalReason.FAILED,
+                    detail,
+                    success=False,
+                )
+            else:
+                self._settle(
+                    attempt.task_id, attempt.call_correlation, None, error=detail
+                )
             return
         if claim is not None:
             await self._hold_and_redrive_claim(
                 attempt, claim, outcome.error or "resident stream uncertain"
             )
 
+    def on_stream_head(self, head: ResidentStreamHead) -> None:
+        """Carry the engine response head to a live serve request's client."""
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(self._head, head)
+
+    def _head(self, head: ResidentStreamHead) -> None:
+        attempt = self._attempts.get(head.invocation_id)
+        if (
+            attempt is None
+            or attempt.serve is None
+            or attempt.session_id != head.session_id
+        ):
+            return
+        attempt.serve.head(head.status, head.headers)
+
+    def on_stream_chunk(self, chunk: ResidentStreamChunk) -> None:
+        """Tee one authorized response frame to a live serve request's client."""
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(self._tee_chunk, chunk)
+
+    def _tee_chunk(self, chunk: ResidentStreamChunk) -> None:
+        attempt = self._attempts.get(chunk.invocation_id)
+        if (
+            attempt is None
+            or attempt.serve is None
+            or attempt.session_id != chunk.session_id
+        ):
+            return
+        attempt.serve.tee(chunk.payload)
+
     async def _hold_and_redrive(
-        self, env: ToolInvocationEnvelope, claim: ServiceClaim, detail: str
+        self, orig: _Origination, claim: ServiceClaim, detail: str
     ) -> None:
         """Hold the credit uncertain and re-drive the boundary under its held claim."""
         await self._hold_locked(
-            env.invocation_id, env.task_id, env.call_correlation, claim, detail
+            orig.invocation_id,
+            orig.task_id,
+            orig.call_correlation,
+            claim,
+            detail,
+            orig.serve,
         )
 
     async def _hold_and_redrive_claim(
@@ -656,6 +1134,7 @@ class ResidentCapacityControl:
             attempt.call_correlation,
             claim,
             detail,
+            attempt.serve,
         )
 
     async def _hold_locked(
@@ -665,6 +1144,7 @@ class ResidentCapacityControl:
         call_correlation: str,
         claim: ServiceClaim,
         detail: str,
+        serve: ServeDelivery | None,
     ) -> None:
         """Hold the credit uncertain and re-drive the boundary under its held claim.
 
@@ -682,12 +1162,68 @@ class ResidentCapacityControl:
         count = self._transient_failures.get(invocation_id, 0) + 1
         self._transient_failures[invocation_id] = count
         if count >= self._max_transient_redrives and claim.replica_id is not None:
+            if self._replica_is_standing(claim.replica_id):
+                # A standing serve replica is the user's shared, long-running task: it
+                # cannot re-materialize, so a per-request failure fails ONLY this
+                # request
+                # via its fenced terminal and never preempts the endpoint for its peers.
+                self._terminalize_failed(
+                    invocation_id, task_id, call_correlation, serve, detail
+                )
+                return
             self._lifecycle.on_preempt(claim.replica_id)
         self._logger.info(
             "resident delivery held uncertain (attempt %d): %s", count, detail
         )
         await asyncio.sleep(self._redrive_backoff)
-        self._redispatch(task_id, call_correlation)
+        if claim.state is ClaimState.TERMINAL:
+            # A terminal that raced the backoff (a cancel, or a duplicate/out-of-order
+            # settle) already released the credit; re-driving now would find no active
+            # claim and raise a successor, re-admitting the credit and duplicating the
+            # engine call.
+            return
+        if serve is not None:
+            serve.redrive()
+        else:
+            self._redispatch(task_id, call_correlation)
+
+    def _replica_is_standing(self, replica_id: str | None) -> bool:
+        """Whether a replica is a task-lifetime standing serve allocation.
+
+        A standing replica is the user's own long-running serve task; resident recovery
+        never preempts or reaps it, so a per-request failure on it fails only that
+        request rather than tearing the endpoint down for every client.
+        """
+        if replica_id is None:
+            return False
+        replica = self._stores.directory.get(replica_id)
+        return replica is not None and replica.standing
+
+    def _terminalize_failed(
+        self,
+        invocation_id: str,
+        task_id: str,
+        call_correlation: str,
+        serve: ServeDelivery | None,
+        detail: str,
+    ) -> None:
+        """Fail one request via its fenced terminal without preempting its replica.
+
+        Used when a per-request failure exhausts its re-drives on a standing serve
+        replica: the credit releases through the same fenced terminal as any settled
+        failure, and the replica stays live for its other clients.
+        """
+        if serve is not None:
+            self._finalize_serve(
+                invocation_id, serve, ClaimTerminalReason.FAILED, detail, success=False
+            )
+        else:
+            self._admission.settle_invocation_terminal(
+                invocation_id, ClaimTerminalReason.FAILED
+            )
+            self._transient_failures.pop(invocation_id, None)
+            self._reap_attempt(invocation_id)
+            self._settle(task_id, call_correlation, None, error=detail)
 
     def _release_definite(
         self,
@@ -701,14 +1237,30 @@ class ResidentCapacityControl:
         """Terminalize a definite failure so the fenced terminal releases the credit.
 
         A pre-acceptance refusal releases the still-reserved credit directly; the settle
-        then terminalizes the boundary, and the fenced DS terminal is idempotent over
-        the already-released claim.
+        then terminalizes the boundary, and the fenced terminal is idempotent over the
+        already-released claim.
         """
         if pre_acceptance and claim.state is ClaimState.RESERVED:
             self._admission.on_enqueue_failed(claim)
-        if preempt and claim.replica_id is not None:
+        if (
+            preempt
+            and claim.replica_id is not None
+            and not self._replica_is_standing(claim.replica_id)
+        ):
+            # A standing serve replica is never preempted by a per-request rejection:
+            # the
+            # request fails alone via its fenced terminal and the endpoint survives.
             self._lifecycle.on_preempt(claim.replica_id)
-        self._settle(attempt.task_id, attempt.call_correlation, None, error=detail)
+        if attempt.serve is not None:
+            self._finalize_serve(
+                attempt.invocation_id,
+                attempt.serve,
+                ClaimTerminalReason.FAILED,
+                detail,
+                success=False,
+            )
+        else:
+            self._settle(attempt.task_id, attempt.call_correlation, None, error=detail)
 
     async def _ensure_sidecar(
         self, replica: ReplicaIncarnation, worker_id: str, node_id: str
@@ -744,6 +1296,8 @@ class ResidentCapacityControl:
                 "replica_id": replica.replica_id,
                 "incarnation": replica.incarnation,
                 "listener_generation": generation,
+                "serve_task_id": replica.serve_task_id,
+                "binding_generation": replica.binding_generation,
                 "engine": {
                     "base_url": engine.base_url,
                     "model": engine.model,
@@ -790,7 +1344,7 @@ class ResidentCapacityControl:
 
     async def _acquire_capacity(
         self,
-        env: ToolInvocationEnvelope,
+        orig: _Origination,
         family: str,
         model_ref: str,
         claim: ServiceClaim,
@@ -803,14 +1357,14 @@ class ResidentCapacityControl:
                 self._promote_ready_replicas(family)
                 self._lifecycle.refresh_family_reports(family)
                 handoff = self._admission.admit(
-                    claim, profile, idempotency_key=env.idempotency_key
+                    claim, profile, idempotency_key=orig.idempotency_key
                 )
                 if handoff is not None:
                     return handoff
                 plan = self._lifecycle.plan_capacity(family, model_ref, profile)
                 if plan.action == "deny" and plan.denial is not None:
                     self._admission.on_denied(claim)
-                    self._fail(env, plan.denial.reason, plan.denial.detail or "")
+                    self._fail(orig, plan.denial.reason, plan.denial.detail or "")
                     return None
                 if plan.action == "materialize" and not self._has_materializing(family):
                     definition = self._stores.families.get(family)
@@ -820,7 +1374,7 @@ class ResidentCapacityControl:
                         except Exception as exc:  # cold start could not be started
                             self._admission.on_denied(claim)
                             self._fail(
-                                env,
+                                orig,
                                 ProvisioningDenialReason.RESOURCE_CAP,
                                 f"resident materialization failed: {exc}",
                             )
@@ -828,7 +1382,7 @@ class ResidentCapacityControl:
             if loop.time() >= deadline:
                 self._admission.on_expired(claim)
                 self._fail(
-                    env,
+                    orig,
                     ProvisioningDenialReason.COLD_START_BUDGET,
                     "resident cold start did not become ready in time",
                 )
@@ -853,15 +1407,12 @@ class ResidentCapacityControl:
 
     def _fail(
         self,
-        env: ToolInvocationEnvelope,
+        orig: _Origination,
         reason: ProvisioningDenialReason | None,
         detail: str,
     ) -> None:
         label = reason.value if reason is not None else "denied"
         self._logger.info("resident admission denied (%s): %s", label, detail)
-        self._settle(
-            env.task_id,
-            env.call_correlation,
-            None,
-            error=f"resident admission denied ({label}): {detail}",
+        self._settle_origination_error(
+            orig, f"resident admission denied ({label}): {detail}"
         )

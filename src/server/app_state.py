@@ -9,6 +9,7 @@ from .hooks import PrincipalContext
 from .network.service import NetworkPlane
 from .registries import NodeRegistry, WorkerRegistry, WorkflowRegistry
 from .resident.service import ResidentCapacityControl
+from .serve import GatedServe, ServeBindingStore
 from .services.content_store import ServerContentStore
 from .services.metrics import MetricsRecorder
 from .services.monitoring import EventMonitor
@@ -95,12 +96,16 @@ def get_ssh_proxy_enabled(conn: HTTPConnection) -> bool:
     return conn.app.state.ssh_proxy_enabled
 
 
-def get_serve_proxy_enabled(conn: HTTPConnection) -> bool:
-    return conn.app.state.serve_proxy_enabled
-
-
 def get_resident_control(conn: HTTPConnection) -> ResidentCapacityControl | None:
     return conn.app.state.resident_control
+
+
+def get_gated_serve(conn: HTTPConnection) -> GatedServe | None:
+    return conn.app.state.gated_serve
+
+
+def get_serve_bindings(conn: HTTPConnection) -> ServeBindingStore | None:
+    return conn.app.state.serve_bindings
 
 
 def get_network_plane(conn: HTTPConnection) -> NetworkPlane | None:

@@ -41,6 +41,8 @@ from .registries.node import NodeRegistry
 from .registries.resident import ResidentRegistry
 from .resident.wiring import build_resident_capacity, wire_worker_delivery
 from .routers import docs, health, v1
+from .serve import SERVE_EDGE_STREAM_ID
+from .serve.wiring import build_gated_serve
 from .services.agent_model_gateway import (
     AgentModelGateway,
     ResolvedGatewayBinding,
@@ -74,8 +76,8 @@ IS_ROOT_NODE = NODE_ROLE is NodeRole.ROOT
 if NODE_ROLE is NodeRole.WORKER and not config.worker_management.enabled:
     raise SystemExit("Worker node role requires ENABLE_SUPERVISOR=true")
 
-# --------------------------------------------------------------------------- #
-# Shared services (all node roles)
+# --------------------------------------------------------------------------- # Shared
+# services (all node roles)
 # --------------------------------------------------------------------------- #
 
 logger = get_logger(
@@ -131,8 +133,8 @@ if config.worker_management.enabled:
         network=config.orchestration.network,
     )
 
-# --------------------------------------------------------------------------- #
-# Root node services (orchestrator)
+# --------------------------------------------------------------------------- # Root
+# node services (orchestrator)
 # --------------------------------------------------------------------------- #
 
 WORKFLOW_REGISTRY = None
@@ -148,9 +150,15 @@ AGENT_MODEL_GATEWAY = None
 FABRIC_TOOL_BROKER = None
 RESIDENT_CONTROL = None
 RESIDENT_REGISTRY = None
+GATED_SERVE = None
+SERVE_FORWARD_INGRESS = None
+SERVE_BINDINGS = None
 NETWORK_PLANE = None
 RESIDENT_BRIDGE = None
 RESIDENT_BRIDGE_TASK = None
+# The root node id, resolved after the supervisor handshake; the gated serve edge reads
+# it lazily to fence its transport-only route origin.
+ROOT_NODE_ID: str | None = None
 
 
 if IS_ROOT_NODE:
@@ -256,7 +264,25 @@ if IS_ROOT_NODE:
             runtime=RUNTIME,
             sessions=RelaySessionStore(_relay_redis),
             resident_cfg=config.orchestration.resident,
+            root_node_id=lambda: ROOT_NODE_ID,
+            edge_id=SERVE_EDGE_STREAM_ID,
         )
+
+    if (
+        RESIDENT_CONTROL is not None
+        and RESIDENT_REGISTRY is not None
+        and _relay_redis is not None
+    ):
+        _serve_wiring = build_gated_serve(
+            control=RESIDENT_CONTROL,
+            registry=RESIDENT_REGISTRY,
+            relay_redis=_relay_redis,
+            port_forward=config.port_forward,
+            logger=logger,
+        )
+        GATED_SERVE = _serve_wiring.gated_serve
+        SERVE_FORWARD_INGRESS = _serve_wiring.forward_ingress
+        SERVE_BINDINGS = _serve_wiring.bindings
 
     DISPATCHER = create_dispatcher(
         config.dispatch,
@@ -307,7 +333,7 @@ if IS_ROOT_NODE:
         metrics_recorder=METRICS_RECORDER,
         watchdog=WATCHDOG,
         ssh_proxy_enabled=config.port_forward.ssh_proxy_enabled,
-        serve_proxy_enabled=config.port_forward.serve_proxy_enabled,
+        gated_serve=GATED_SERVE,
         port_forward=PORT_FORWARD_SERVICE,
         results_dir=RESULTS_DIR,
         log_stream_ttl_sec=config.log_stream.ttl_sec,
@@ -316,6 +342,11 @@ if IS_ROOT_NODE:
             NETWORK_PLANE.forget_node if NETWORK_PLANE is not None else None
         ),
     )
+    if GATED_SERVE is not None:
+        # A forward exposure goes live off the request path (its listener binds after
+        # the adopting endpoint update), so republish the task's url through the monitor
+        # when it commits, surfacing the port without waiting for another report.
+        GATED_SERVE.set_advertise_route(EVENT_MONITOR._advertise_serve_route_for)
 
     LOG_ARCHIVER = TaskLogArchiver(
         redis=REDIS_CLIENT.sync,
@@ -326,8 +357,8 @@ if IS_ROOT_NODE:
         flush_max_entries=config.log_stream.archive_flush_max_entries,
     )
 
-# --------------------------------------------------------------------------- #
-# Metrics export hook
+# --------------------------------------------------------------------------- # Metrics
+# export hook
 # --------------------------------------------------------------------------- #
 
 
@@ -395,8 +426,8 @@ def _stop_background() -> None:
     BACKGROUND_THREADS.clear()
 
 
-# --------------------------------------------------------------------------- #
-# FastAPI application
+# --------------------------------------------------------------------------- # FastAPI
+# application
 # --------------------------------------------------------------------------- #
 
 openapi_tags = [
@@ -429,8 +460,8 @@ async def _load_plugins(stack: AsyncExitStack) -> None:
     A plugin's `install()` is either:
       - a sync function returning a `HookBindings`, or
       - an `@asynccontextmanager async def` yielding a `HookBindings` (the
-        ctx manager registers on enter, cleans up on exit; e.g. closes a
-        SQLAlchemy engine).
+        ctx manager registers on enter, cleans up on exit; e.g. closes a SQLAlchemy
+        engine).
     """
     for plugin_name in config.plugins:
         mod = importlib.import_module(plugin_name)
@@ -451,8 +482,8 @@ async def _load_plugins(stack: AsyncExitStack) -> None:
 
 async def _reconcile_resources() -> None:
     """Refresh registrar-tracked records for every live resource, then purge
-    anything the sweep didn't touch. Runs once at startup after plugins load
-    so registrars don't drop grants on resources that outlived their TTL.
+    anything the sweep didn't touch. Runs once at startup after plugins load so
+    registrars don't drop grants on resources that outlived their TTL.
     """
     refs: list[ResourceRef] = []
 
@@ -491,11 +522,22 @@ async def _lifespan(_: FastAPI):
 
         # --- Root-only startup ---
         if IS_ROOT_NODE:
-            await rehydrate_root_state(RUNTIME, RESIDENT_CONTROL, RESIDENT_REGISTRY)
+            await rehydrate_root_state(
+                RUNTIME, RESIDENT_CONTROL, RESIDENT_REGISTRY, GATED_SERVE
+            )
             if RESIDENT_BRIDGE is not None and NODE_REGISTRY is not None:
+                edge_ids = (SERVE_EDGE_STREAM_ID,) if GATED_SERVE is not None else ()
                 app.state.resident_bridge_task = start_resident_bridge_pump(
-                    RESIDENT_BRIDGE, NODE_REGISTRY, logger
+                    RESIDENT_BRIDGE, NODE_REGISTRY, logger, edge_ids
                 )
+            if GATED_SERVE is not None:
+                GATED_SERVE.relay.start(asyncio.get_running_loop())
+            if SERVE_FORWARD_INGRESS is not None and GATED_SERVE is not None:
+                # Bind the forward listeners on the server loop, then rebind every
+                # persisted exposure to its same port under a fresh listener generation
+                # before it serves.
+                SERVE_FORWARD_INGRESS.start(asyncio.get_running_loop())
+                GATED_SERVE.rebind_forward_exposures()
             if PORT_FORWARD_SERVICE is not None:
                 await PORT_FORWARD_SERVICE.start()
             _start_root_threads()
@@ -507,6 +549,8 @@ async def _lifespan(_: FastAPI):
             await SUPERVISOR.start(system_principal)
 
             def _on_node_id_change(new_node_id: str) -> None:
+                global ROOT_NODE_ID
+                ROOT_NODE_ID = new_node_id
                 app.state.node_id = new_node_id
                 # Tell EventMonitor which node this server belongs to so that it can
                 # wait for the supervisor's SV_UNREGISTER event on shutdown.
@@ -518,9 +562,8 @@ async def _lifespan(_: FastAPI):
             _on_node_id_change(SUPERVISOR.node_id)
             SUPERVISOR.add_node_id_listener(_on_node_id_change)
 
-        # --- Startup reconcile ---
-        # Runs after the supervisor handshake so this node is in NODE_REGISTRY
-        # and is included in the live batch.
+        # --- Startup reconcile --- Runs after the supervisor handshake so this node is
+        # in NODE_REGISTRY and is included in the live batch.
         await _reconcile_resources()
 
         try:
@@ -544,6 +587,10 @@ async def _lifespan(_: FastAPI):
                     await _bridge_task
                 except (asyncio.CancelledError, Exception):
                     pass
+            if SERVE_FORWARD_INGRESS is not None:
+                await SERVE_FORWARD_INGRESS.stop()
+            if GATED_SERVE is not None:
+                await GATED_SERVE.relay.stop()
             if RESIDENT_CONTROL is not None:
                 RESIDENT_CONTROL.shutdown()
             if AGENT_MODEL_GATEWAY is not None:
@@ -556,8 +603,8 @@ async def _lifespan(_: FastAPI):
 
 app.router.lifespan_context = _lifespan
 
-# --------------------------------------------------------------------------- #
-# App state & routers
+# --------------------------------------------------------------------------- # App
+# state & routers
 # --------------------------------------------------------------------------- #
 
 # Shared state (all nodes)
@@ -582,8 +629,9 @@ app.state.event_monitor = EVENT_MONITOR
 app.state.port_forward = PORT_FORWARD_SERVICE
 app.state.ssh_audit = SSH_AUDIT_SERVICE
 app.state.ssh_proxy_enabled = config.port_forward.ssh_proxy_enabled and IS_ROOT_NODE
-app.state.serve_proxy_enabled = config.port_forward.serve_proxy_enabled and IS_ROOT_NODE
 app.state.resident_control = RESIDENT_CONTROL
+app.state.gated_serve = GATED_SERVE
+app.state.serve_bindings = SERVE_BINDINGS
 app.state.network_plane = NETWORK_PLANE
 app.state.content_store = CONTENT_STORE
 # Started in lifespan on the root node when the resident relay bridge is enabled.
@@ -615,9 +663,8 @@ if config.worker_management.enabled:
     app.include_router(v1.stack.router, prefix=v1_prefix)
 
 
-# --------------------------------------------------------------------------- #
-# Entry point
-# --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- # Entry
+# point --------------------------------------------------------------------------- #
 
 
 def main(argv: list[str] | None = None) -> None:

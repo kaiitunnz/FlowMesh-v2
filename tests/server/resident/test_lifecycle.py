@@ -12,6 +12,8 @@ from server.resident import (
     AdmissionProfile,
     ClaimCredit,
     InvocationRequest,
+    InvocationSubject,
+    InvocationSubjectKind,
     LifecycleScaleManager,
     ProvisioningDenialReason,
     ReplicaEndpoint,
@@ -24,6 +26,7 @@ from server.resident import (
 )
 from tests.server.resident._helpers import PROFILE, warm_stores
 
+_SUBJECT = InvocationSubject(kind=InvocationSubjectKind.WORKFLOW, id="w")
 _PAST = "2000-01-01T00:00:00Z"
 _FUTURE = "2999-01-01T00:00:00Z"
 
@@ -48,7 +51,7 @@ def test_refresh_report_arms_the_adapter_slot_budget():
         stores.invocations.put(
             InvocationRequest(
                 invocation_id=inv,
-                workflow_id="w",
+                subject=_SUBJECT,
                 family="fam",
                 profile=AdmissionProfile(engine_batch_key="fam", adapter_ref=adapter),
             )
@@ -70,7 +73,7 @@ def test_plan_capacity_is_adapter_aware_at_exhaustion():
     stores.invocations.put(
         InvocationRequest(
             invocation_id="inv-1",
-            workflow_id="w",
+            subject=_SUBJECT,
             family="fam",
             profile=AdmissionProfile(engine_batch_key="fam", adapter_ref="lora-a"),
         )
@@ -95,7 +98,7 @@ def _hold_adapter(stores, inv, adapter, replica_id="rpl-1"):
     stores.invocations.put(
         InvocationRequest(
             invocation_id=inv,
-            workflow_id="w",
+            subject=_SUBJECT,
             family="fam",
             profile=AdmissionProfile(engine_batch_key="fam", adapter_ref=adapter),
         )
@@ -205,6 +208,24 @@ def test_preempt_invalidates_incarnation_and_reaps_serve_task():
     assert replica.state is ReplicaState.PREEMPTED
     assert replica.incarnation == 2
     assert stopped == ["tsk-serve-1"]
+
+
+def test_preempt_never_reaps_a_standing_serve_replica():
+    # A standing serve replica is the user's own long-running task: a per-request
+    # failure that reaches preempt must never invalidate the incarnation or cancel the
+    # backing serve task, or one bad request would tear the endpoint down for every
+    # client. It cannot re-materialize, so preempt-and-recreate is the wrong recovery.
+    stores = warm_stores()
+    stopped = []
+    replica = stores.directory.get("rpl-1")
+    replica.serve_task_id = "tsk-serve-1"
+    replica.standing = True
+    mgr = _manager(stores, stop_fn=lambda tid: stopped.append(tid))
+    mgr.on_preempt("rpl-1")
+    replica = stores.directory.get("rpl-1")
+    assert replica.state is ReplicaState.WARM
+    assert replica.incarnation == 1
+    assert stopped == []
 
 
 def test_idle_sweep_drains_then_stops_an_idle_replica():

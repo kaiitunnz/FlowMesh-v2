@@ -46,7 +46,6 @@ async def materialize_resident_replica(
                 "revision": "main",
             }
         },
-        "accessMode": config.access_mode,
     }
     if spec_type == "serve":
         # A real vLLM embedding replica runs the pooling runner; a chat replica enables

@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from shared.tasks import TaskEnvelopeTemplate, TaskType
 from shared.tasks.components import TaskAnnotations
+from shared.tasks.specs import DevModelSpecTemplate, ServeSpecTemplate
 from shared.utils import new_task_id, parse_bool_env
 from shared.utils.json import safe_get
 
@@ -16,6 +17,7 @@ from .n8n_parser import translate_n8n_workflow
 _ALLOWED_TASK_TYPES = ", ".join(member.value for member in TaskType)
 _ENABLE_SERVER_SSH_PROXY = parse_bool_env("ENABLE_SERVER_SSH_PROXY", True)
 _ENABLE_SERVER_SERVE_PROXY = parse_bool_env("ENABLE_SERVER_SERVE_PROXY", True)
+_ENABLE_SERVER_SERVE_FORWARD = parse_bool_env("ENABLE_SERVER_SERVE_FORWARD", False)
 _ENABLE_SERVER_PORT_FORWARD = parse_bool_env("ENABLE_SERVER_PORT_FORWARD", True)
 
 
@@ -712,15 +714,22 @@ def _validate_ssh_access_mode(task: TaskEnvelopeTemplate, context: str) -> None:
 
 
 def _validate_serve_access_mode(task: TaskEnvelopeTemplate, context: str) -> None:
-    if task.spec.taskType != TaskType.SERVE:
+    """Refuse a serve task whose pinned exposure mode is disabled on this server.
+
+    The static deployment enable for each mode is gated here at submission — proxy and
+    forward alike — so a task pinned to a mode the server does not host fails fast
+    rather than being adopted and failing every request. The dynamic per-request
+    exposure availability stays resolved at runtime.
+    """
+    if not isinstance(task.spec, (ServeSpecTemplate, DevModelSpecTemplate)):
         return
-    access_mode = task.spec.accessMode or "direct"
+    access_mode = task.spec.accessMode
     if access_mode == "proxy" and not _ENABLE_SERVER_SERVE_PROXY:
         raise ValueError(
             f"Invalid task payload{context}: serve accessMode 'proxy' "
             "is disabled on this server"
         )
-    if access_mode == "forward" and not _ENABLE_SERVER_PORT_FORWARD:
+    if access_mode == "forward" and not _ENABLE_SERVER_SERVE_FORWARD:
         raise ValueError(
             f"Invalid task payload{context}: serve accessMode 'forward' "
             "is disabled on this server"

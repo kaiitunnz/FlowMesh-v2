@@ -227,6 +227,22 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   re-drives from the materialized manifest, releasing only on the fenced terminal, and a
   cancellation reaps both ends. Enable with `RESIDENT_CAPACITY_ENABLED=true` (which
   requires `NETWORK_PLANE_ENABLED=true`). See [`RESIDENT_CAPACITY.md`](RESIDENT_CAPACITY.md).
+- **Unified task-ID-gated resident serve surface.** Every public user-declared `serve`
+  task is a resident-gated standing allocation reached only by its task ID, over one
+  FlowMesh-authenticated, claim-gated endpoint
+  (`/api/v1/serve/tasks/{task_id}/{upstream_path}`). The request relays to the task's
+  standing replica unchanged and the engine's own response comes back unchanged, so an
+  OpenAI-compatible client can drive any endpoint the engine serves. A serve task pins one
+  gated exposure mode — `proxy`, the default root-local ingress reached at the task-qualified
+  route above, or `forward`, a per-task public port on the root's public host reached at
+  `http://<public_host>:<forward_port>/` with the engine's own paths. The root binds the
+  port, authenticates and admits the request over the
+  same gate as `proxy`, and relays it to the task's standing replica; a mode with no live
+  exposure fails closed. At start the task is adopted as its own standing replica,
+  validated under `RESIDENT_ALLOWED_MODELS`. Both modes carry traffic over `control_relay`;
+  trusted direct target legs resolve behind the shared carriage seam. Available
+  when `RESIDENT_CAPACITY_ENABLED=true` (which requires `NETWORK_PLANE_ENABLED=true`). See
+  [`RESIDENT_CAPACITY.md`](RESIDENT_CAPACITY.md).
 - **Network-plane route substrate.** A topology-aware, control-resolved routing substrate
   turns trusted node endpoint advertisements and directional reachability evidence into an
   ordered route resolved by a pure resolver, carried by an origin-side deputy that never

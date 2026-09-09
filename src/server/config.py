@@ -113,6 +113,10 @@ class PortForwardConfig:
     ssh_proxy_enabled: bool = True
     ssh_audit_enabled: bool = True
     serve_proxy_enabled: bool = True
+    serve_forward_enabled: bool = False
+    serve_forward_port_start: int = 34000
+    serve_forward_port_end: int = 34099
+    serve_forward_body_budget_bytes: int = 512 * 1024 * 1024
     bind_host: str = "0.0.0.0"
     public_host: str = "localhost"
     port_start: int = 32000
@@ -128,6 +132,16 @@ class PortForwardConfig:
                 "ENABLE_SERVER_SSH_CONNECTION_AUDIT", True
             ),
             serve_proxy_enabled=parse_bool_env("ENABLE_SERVER_SERVE_PROXY", True),
+            serve_forward_enabled=parse_bool_env("ENABLE_SERVER_SERVE_FORWARD", False),
+            serve_forward_port_start=parse_int_env(
+                "SERVER_SERVE_FORWARD_PORT_START", 34000
+            ),
+            serve_forward_port_end=parse_int_env(
+                "SERVER_SERVE_FORWARD_PORT_END", 34099
+            ),
+            serve_forward_body_budget_bytes=parse_int_env(
+                "SERVER_SERVE_FORWARD_BODY_BUDGET_BYTES", 512 * 1024 * 1024
+            ),
             bind_host=os.getenv("SERVER_PORT_FORWARD_BIND_HOST", "0.0.0.0").strip(),
             public_host=os.getenv(
                 "SERVER_PORT_FORWARD_PUBLIC_HOST", "localhost"
@@ -394,7 +408,6 @@ class ResidentCapacityConfig:
 
     enabled: bool = False
     substrate: str = "serve"
-    access_mode: str = "forward"
     admission_slots: int = 8
     adapter_slots: int = 4
     max_replicas_per_family: int = 1
@@ -423,9 +436,6 @@ class ResidentCapacityConfig:
         substrate = (
             os.getenv(f"{prefix}INFERENCE_SUBSTRATE") or "serve"
         ).strip().lower() or "serve"
-        access = (
-            os.getenv(f"{prefix}SERVE_ACCESS_MODE") or "forward"
-        ).strip().lower() or "forward"
         default_strategy = _default_selection_strategy()
         strategy = (
             os.getenv(f"{prefix}SELECTION_STRATEGY") or default_strategy
@@ -433,7 +443,6 @@ class ResidentCapacityConfig:
         return cls(
             enabled=parse_bool_env(f"{prefix}CAPACITY_ENABLED", False),
             substrate=substrate,
-            access_mode=access,
             admission_slots=max(1, parse_int_env(f"{prefix}ADMISSION_SLOTS") or 8),
             adapter_slots=max(1, parse_int_env(f"{prefix}ADAPTER_SLOTS") or 4),
             max_replicas_per_family=max(

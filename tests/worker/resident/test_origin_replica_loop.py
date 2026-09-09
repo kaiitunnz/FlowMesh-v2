@@ -12,6 +12,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from shared.network.relay_frame import RelayFrame
 from shared.outcome import FabricContentStore, OutcomeManifest
 from shared.outcome.manifest import content_digest
+from shared.resident.carriage import ControlRelayCarriage, ResidentCarriagePlan
 from shared.resident.contracts import (
     AdmissionHandoff,
     ReplicaEndpoint,
@@ -23,10 +24,10 @@ from shared.resident.reports import (
     ResidentOpOutcome,
     ResidentStreamStatus,
 )
+from shared.resident.session import ResidentRelaySession  # noqa: F401 - re-export check
 from worker.resident.engine import EngineResponse
 from worker.resident.origin_driver import ResidentOriginDriver, ResidentOriginRequest
 from worker.resident.replica_sidecar import ResidentReplicaSidecar
-from worker.resident.session import ResidentRelaySession  # noqa: F401 - re-export check
 
 _COMPLETION = "the resident model reply, streamed in pieces"
 
@@ -139,7 +140,7 @@ class _Harness:
             endpoint=ReplicaEndpoint(base_url="http://engine/v1", model="m"),
         )
         self.origin = ResidentOriginDriver(
-            sink=origin_sink,
+            carriage=ControlRelayCarriage(origin_sink),
             content_store=self.store,
             report_ack=self._on_ack,
             report_outcome=self._on_outcome,
@@ -167,6 +168,7 @@ class _Harness:
                 session_id=f"rly-{session_no}",
                 handoff=_handoff(session_no),
                 request_payload=request_payload,
+                carriage_plan=ResidentCarriagePlan(session_id=f"rly-{session_no}"),
             )
         )
 

@@ -6,14 +6,15 @@ claim gate. Both own the windowed relay session end to end; the servers relay it
 opaquely and never read its cursor or window.
 """
 
+from shared.resident.session import ResidentRelaySession, ResidentSessionRole
+from shared.resident.transport import ResidentFrameSink
+
 from .capture import capture_resident_request
 from .engine import EngineOpen, EngineResponse, HttpEngineDelivery
 from .lane_host import ResidentLaneHost
 from .origin_driver import ResidentOriginDriver, ResidentOriginRequest
 from .replica_sidecar import ResidentReplicaSidecar
 from .request_store import ResidentRequestStore
-from .session import ResidentRelaySession, ResidentSessionRole
-from .transport import ResidentFrameSink
 
 __all__ = [
     "EngineOpen",

@@ -36,6 +36,9 @@ class GateRejection(StrEnum):
     WRONG_CLAIM = "wrong_claim"
     WRONG_INVOCATION = "wrong_invocation"
     WRONG_REQUEST = "wrong_request"
+    WRONG_SERVE_TASK = "wrong_serve_task"
+    STALE_BINDING = "stale_binding"
+    WRONG_DIGEST = "wrong_digest"
     NO_SESSION = "no_session"
 
 
@@ -99,12 +102,30 @@ class SidecarClaimGate:
         replica_id: str,
         incarnation: int,
         listener_generation: int,
+        serve_task_id: str | None = None,
+        binding_generation: int | None = None,
         clock: Callable[[], str] = now_iso,
     ) -> None:
         self._replica_id = replica_id
         self._incarnation = incarnation
         self._listener_generation = listener_generation
+        self._serve_task_id = serve_task_id
+        self._binding_generation = binding_generation
         self._clock = clock
+
+    def _check_serve_binding(
+        self, serve_task_id: str | None, binding_generation: int | None
+    ) -> GateDecision | None:
+        """Reject a task-addressed fence that names another serve task or a superseded
+        binding generation. A workflow fence carries neither and is unaffected."""
+        if serve_task_id is not None and serve_task_id != self._serve_task_id:
+            return GateDecision.deny(GateRejection.WRONG_SERVE_TASK)
+        if (
+            binding_generation is not None
+            and binding_generation != self._binding_generation
+        ):
+            return GateDecision.deny(GateRejection.STALE_BINDING)
+        return None
 
     def _expired(self, expires_at: str | None) -> bool:
         return expires_at is not None and parse_iso_ts(self._clock()) >= parse_iso_ts(
@@ -121,6 +142,25 @@ class SidecarClaimGate:
             return GateDecision.deny(GateRejection.STALE_LISTENER)
         if self._expired(handoff.expires_at):
             return GateDecision.deny(GateRejection.EXPIRED)
+        if (
+            serve := self._check_serve_binding(
+                handoff.serve_task_id, handoff.binding_generation
+            )
+        ) is not None:
+            return serve
+        return GateDecision.ok()
+
+    def check_request_digest(
+        self, handoff: AdmissionHandoff, computed_digest: str
+    ) -> GateDecision:
+        """Reject a bootstrap whose relayed request bytes do not match the admitted
+        bounded canonical descriptor. A workflow handoff carries no digest and
+        passes."""
+        if (
+            handoff.descriptor_digest is not None
+            and handoff.descriptor_digest != computed_digest
+        ):
+            return GateDecision.deny(GateRejection.WRONG_DIGEST)
         return GateDecision.ok()
 
     def session_for(self, handoff: AdmissionHandoff) -> SidecarSession:
@@ -161,6 +201,12 @@ class SidecarClaimGate:
             return GateDecision.deny(GateRejection.WRONG_REQUEST)
         if auth.tenant != session.tenant or auth.origin_id != session.origin_id:
             return GateDecision.deny(GateRejection.WRONG_SUBJECT)
+        if (
+            serve := self._check_serve_binding(
+                auth.serve_task_id, auth.binding_generation
+            )
+        ) is not None:
+            return serve
         return GateDecision.ok()
 
     def load_evidence(

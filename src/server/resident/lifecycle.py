@@ -161,6 +161,51 @@ class LifecycleScaleManager:
         self._persist()
         return replica
 
+    def adopt_standing_replica(
+        self,
+        family: ServiceFamily,
+        *,
+        serve_task_id: str,
+        binding_generation: int,
+        endpoint: ReplicaEndpoint,
+    ) -> ReplicaIncarnation:
+        """Register a public serve task's running replica as a standing allocation.
+
+        Unlike a demand-managed replica, this is not materialized from zero: the serve
+        task already runs the engine, so the replica is adopted directly into the
+        directory as warm and task-lifetime pinned (``standing``), and is never
+        idle-torn down while its serve task is live. It replaces any prior incarnation
+        for the same serve task so a re-adoption supersedes the old fence.
+        """
+        for prior in self._stores.directory.by_family(family.family):
+            if prior.serve_task_id == serve_task_id and prior.state in (
+                _ACTIVE_REPLICA_STATES
+            ):
+                self.on_preempt(prior.replica_id)
+        replica = ReplicaIncarnation(
+            replica_id=new_replica_id(),
+            family=family.family,
+            incarnation=1,
+            state=ReplicaState.WARM,
+            endpoint=endpoint,
+            healthy=True,
+            serve_task_id=serve_task_id,
+            binding_generation=binding_generation,
+            standing=True,
+        )
+        lease = AllocationLease(
+            lease_id=new_allocation_lease_id(),
+            family=family.family,
+            replica_id=replica.replica_id,
+            state=ReplicaState.WARM,
+        )
+        replica.lease_id = lease.lease_id
+        self._stores.leases.add(lease)
+        self._stores.directory.add(replica)
+        self.refresh_report(replica.replica_id)
+        self._persist()
+        return replica
+
     def on_replica_ready(self, replica_id: str, endpoint: ReplicaEndpoint) -> None:
         """Transition a materializing replica to warm with its reachable endpoint."""
         replica = self._stores.directory.get(replica_id)
@@ -269,6 +314,27 @@ class LifecycleScaleManager:
         self._persist()
         self._reap_serve_task(replica.serve_task_id)
 
+    def stop_if_drained_standing(self, replica_id: str | None) -> None:
+        """Stop a drained standing replica once its last admitted work has released.
+
+        A standing serve replica drained by its task's stop is left DRAINING while an
+        in-flight claim still holds credit; when that credit releases on the settle/reap
+        path this stops it, so it does not linger in the directory in a deployment whose
+        idle sweep is disabled (the default). A live (non-draining) standing replica, or
+        a replica still holding credit, is left untouched.
+        """
+        if replica_id is None:
+            return
+        replica = self._stores.directory.get(replica_id)
+        if (
+            replica is None
+            or not replica.standing
+            or replica.state is not ReplicaState.DRAINING
+        ):
+            return
+        if self._stores.credit_ledger.held(replica_id) == 0:
+            self.stop(replica_id)
+
     def sweep_idle(self, *, now_ts: float | None = None) -> None:
         """Drain idle servable replicas past the retain window, then stop drained ones.
 
@@ -282,6 +348,13 @@ class LifecycleScaleManager:
         reference = now_ts if now_ts is not None else parse_iso_ts(now_iso())
         for replica in self._stores.directory.all():
             held = self._stores.credit_ledger.held(replica.replica_id)
+            if replica.standing:
+                # A live standing serve allocation is pinned to its serve task and never
+                # idle-torn-down; once drained by its task's stop it is stopped when its
+                # admitted work has drained, so it does not linger DRAINING.
+                if replica.state is ReplicaState.DRAINING and held == 0:
+                    self.stop(replica.replica_id)
+                continue
             if replica.state in SERVABLE_REPLICA_STATES:
                 if held == 0 and self._idle_past_retain(replica, reference):
                     self.drain(replica.replica_id)
@@ -297,9 +370,13 @@ class LifecycleScaleManager:
 
         Reaps the invalidated incarnation's backing serve task so a replica the family
         will re-materialize from zero does not leave an orphaned serve workflow running.
+        A standing serve allocation is exempt: it is the user's long-running task,
+        drained
+        only by its own lifecycle (stop/cancel/TTL/failure), and preempt-and-recreate
+        cannot recover it — so a per-request failure never invalidates or reaps it.
         """
         replica = self._stores.directory.get(replica_id)
-        if replica is None:
+        if replica is None or replica.standing:
             return
         serve_task_id = replica.serve_task_id
         replica.state = ReplicaState.PREEMPTED

@@ -10,7 +10,6 @@ import logging
 import os
 import secrets
 import signal
-import socket
 import subprocess  # nosec B404
 import sys
 import threading
@@ -99,12 +98,11 @@ class VLLMServeExecutor(Executor):
         readiness_timeout = (
             spec.readinessTimeoutSeconds or _DEFAULT_READINESS_TIMEOUT_SEC
         )
-        access_mode = spec.accessMode or "forward"
-        api_key = spec.apiKey or secrets.token_hex(32)
-
-        bind_host = (
-            "0.0.0.0" if access_mode == "direct" else "127.0.0.1"
-        )  # nosec B104 - direct mode is an explicit opt-in to a client-reachable endpoint
+        # The engine listens on loopback only and is reached solely by its co-located
+        # claim-gated sidecar; the api key is generated internally, never from the
+        # caller. External access is only through the gated task-ID serve route.
+        api_key = secrets.token_hex(32)
+        bind_host = "127.0.0.1"
         port = resolve_bind_port(spec.port, bind_host)
 
         cmd = [
@@ -190,17 +188,21 @@ class VLLMServeExecutor(Executor):
             self._poll_health(
                 proc, port, task.task_id, readiness_timeout, tail, eof_event
             )
-            advertised_host = (
-                socket.getfqdn() if access_mode == "direct" else "127.0.0.1"
+            # Worker-private endpoint facts ("_"-prefixed so task metadata never
+            # discloses the raw loopback listener or engine key); the resident endpoint
+            # probe reads them to bind the claim-gated sidecar in front of the engine.
+            interface = (
+                "embedding"
+                if (vllm_kwargs or {}).get("runner") == "pooling"
+                else "chat"
             )
             update_payload: dict[str, Any] = {
                 "serve": {
-                    "mode": access_mode,
-                    "_relay_target": {"host": "127.0.0.1", "port": port},
-                    "host": advertised_host,
-                    "port": port,
-                    "api_key": api_key,
                     "model": model_id,
+                    "interface": interface,
+                    "_host": "127.0.0.1",
+                    "_port": port,
+                    "_api_key": api_key,
                 }
             }
             self.emit_update(task.task_id, update_payload)

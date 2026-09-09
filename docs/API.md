@@ -99,10 +99,12 @@ Server policy toggles: `ENABLE_SERVER_SSH_PROXY`,
 
 | Method | Path | Description |
 |--------|------|-------------|
-| ANY | `/api/v1/serve/tasks/{task_id}/{upstream_path:path}` | HTTP reverse proxy to a `proxy`-mode serve task's vLLM server. |
+| GET, POST, PUT, DELETE, OPTIONS, HEAD | `/api/v1/serve/tasks/{task_id}/{upstream_path:path}` | Reach any endpoint a public `serve` task's engine serves, by its task ID (e.g. `.../v1/chat/completions`, `.../v1/models`). |
 
-PAT-exempt: authenticated solely by the task's vLLM api-key, not a Lumid PAT.
-Gated by `ENABLE_SERVER_SERVE_PROXY`.
+The request relays to the task's standing replica unchanged and the engine's own response
+comes back unchanged, so an OpenAI-compatible client works against the task-ID route.
+Requires a FlowMesh credential with `TASK` read access; the client `Authorization` is not
+forwarded upstream.
 
 ## Resident
 

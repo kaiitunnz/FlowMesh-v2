@@ -8,8 +8,8 @@ re-forwarded frame lands once, and a cancel wakes a blocked receiver.
 import asyncio
 
 from shared.network.relay_frame import RelayDirection, RelayFrame, RelayFrameKind
+from shared.resident.session import ResidentRelaySession, ResidentSessionRole
 from shared.resident.wire import KIND_CHUNK, KIND_DONE, KIND_STREAM
-from worker.resident.session import ResidentRelaySession, ResidentSessionRole
 
 
 class _PairSink:

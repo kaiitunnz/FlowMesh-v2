@@ -40,6 +40,11 @@ class AdmissionHandoff(BaseModel):
     route. It never carries the raw engine endpoint or credential. For an adapter-bound
     invocation it also names the adapter to load into a replica slot and select on the
     request; the adapter rides the per-claim handoff, not the base-keyed replica.
+
+    A task-addressed external invocation additionally binds its authorized
+    ``serve_task_id`` and residency-binding generation, and the bounded canonical
+    request ``descriptor_digest`` the gate recomputes before engine delivery; a workflow
+    invocation leaves them unset.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -57,6 +62,9 @@ class AdmissionHandoff(BaseModel):
     expires_at: str | None = None
     adapter_name: str | None = None
     adapter_source: str | None = None
+    serve_task_id: str | None = None
+    binding_generation: int | None = None
+    descriptor_digest: str | None = None
 
 
 class RouteAuthorization(BaseModel):
@@ -68,7 +76,10 @@ class RouteAuthorization(BaseModel):
     stream and rejects it once any bound fence — expiry, replica incarnation, listener
     generation, subject, claim, invocation, or request identity — no longer holds. A
     permitted reissue is a fresh successor claim under the same invocation, so the claim
-    fence alone rejects a superseded authorization. It carries no bearer credential.
+    fence alone rejects a superseded authorization. It carries no bearer credential. A
+    task-addressed external invocation additionally binds its authorized
+    ``serve_task_id`` and residency-binding generation; a workflow invocation leaves
+    them unset.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -82,3 +93,5 @@ class RouteAuthorization(BaseModel):
     incarnation: int
     listener_generation: int = 0
     expires_at: str | None = None
+    serve_task_id: str | None = None
+    binding_generation: int | None = None

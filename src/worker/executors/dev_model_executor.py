@@ -10,7 +10,6 @@ canned responses when no upstream is configured.
 import contextlib
 import json
 import logging
-import socket
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -211,6 +210,35 @@ class _DevModelHandler(BaseHTTPRequestHandler):
         self._forward_adapter(_UNLOAD_ADAPTER_ROUTE, body)
         self._write_json(200, {"status": "success", "lora_name": name})
 
+    def do_GET(self) -> None:
+        # A read-only endpoint (e.g. GET /v1/models): a real engine serves these, so the
+        # stand-in forwards them upstream too, or answers a canned model list when no
+        # upstream is configured, so the transparent serve surface reaches any path.
+        server = self.server
+        if server.forward_url is not None and server.client is not None:
+            self._forward_get(
+                server.client,
+                server.forward_url,
+                self.path,
+                self.headers.get("Authorization"),
+            )
+        elif self.path.rstrip("/") == "/v1/models":
+            self._write_json(
+                200,
+                {
+                    "object": "list",
+                    "data": [
+                        {
+                            "id": server.model_name,
+                            "object": "model",
+                            "owned_by": "flowmesh-dev",
+                        }
+                    ],
+                },
+            )
+        else:
+            self._write_json(404, {"error": f"unknown route {self.path}"})
+
     def do_POST(self) -> None:
         path = self.path.rstrip("/") or "/"
         if path == _LOAD_ADAPTER_ROUTE:
@@ -292,6 +320,33 @@ class _DevModelHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(resp.content)
 
+    def _forward_get(
+        self,
+        client: httpx.Client,
+        forward_url: str,
+        path: str,
+        authorization: str | None,
+    ) -> None:
+        headers = {}
+        if authorization:
+            headers["Authorization"] = authorization
+        try:
+            resp = client.get(
+                forward_url.rstrip("/") + path,
+                headers=headers,
+                timeout=_FORWARD_TIMEOUT_SEC,
+            )
+        except httpx.RequestError as exc:
+            self._write_json(502, {"error": f"dev_model forward failed: {exc}"})
+            return
+        self.send_response(resp.status_code)
+        self.send_header(
+            "Content-Type", resp.headers.get("Content-Type", "application/json")
+        )
+        self.send_header("Content-Length", str(len(resp.content)))
+        self.end_headers()
+        self.wfile.write(resp.content)
+
 
 class DevModelExecutor(Executor):
     name = "dev_model"
@@ -316,13 +371,12 @@ class DevModelExecutor(Executor):
             or parse_float_env("SERVE_DEFAULT_TTL_SEC", _DEFAULT_TTL_SEC),
             parse_float_env("SERVE_MAX_TTL_SEC", _MAX_TTL_SEC),
         )
-        access_mode = spec.accessMode or "forward"
         vllm = (spec.model.vllm if spec.model is not None else None) or {}
         raw_max_loras = vllm.get("max_loras")
         max_loras = raw_max_loras if isinstance(raw_max_loras, int) else None
-        bind_host = (
-            "0.0.0.0" if access_mode == "direct" else "127.0.0.1"
-        )  # nosec B104 - direct mode is an explicit opt-in to a client-reachable endpoint
+        # Loopback only: the endpoint is reached solely by its co-located claim-gated
+        # sidecar and, externally, only through the gated task-ID serve route.
+        bind_host = "127.0.0.1"
         port = resolve_bind_port(spec.port, bind_host)
         forward_url = self._config.dev_model_forward_url
 
@@ -353,28 +407,28 @@ class DevModelExecutor(Executor):
 
         logger.info(
             "dev_model server ready for model %s on port %d "
-            "(task=%s mode=%s ttl=%.0fs forward=%s)",
+            "(task=%s ttl=%.0fs forward=%s)",
             model_id,
             port,
             task.task_id,
-            access_mode,
             ttl_sec,
             forward_url or "canned",
         )
 
         try:
-            advertised_host = (
-                socket.getfqdn() if access_mode == "direct" else "127.0.0.1"
-            )
+            # Worker-private endpoint facts ("_"-prefixed so task metadata never
+            # discloses the raw loopback listener); the resident endpoint probe reads
+            # them to bind the claim-gated sidecar in front of the endpoint.
+            interface = "embedding" if vllm.get("runner") == "pooling" else "chat"
             self.emit_update(
                 task.task_id,
                 {
                     "serve": {
-                        "mode": access_mode,
-                        "_relay_target": {"host": "127.0.0.1", "port": port},
-                        "host": advertised_host,
-                        "port": port,
                         "model": model_id,
+                        "interface": interface,
+                        "_host": "127.0.0.1",
+                        "_port": port,
+                        "_api_key": None,
                     }
                 },
             )

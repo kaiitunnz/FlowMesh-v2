@@ -17,6 +17,7 @@ from typing import Any
 
 from shared.network.relay_frame import RelayDirection, RelayFrame
 from shared.outcome import FabricContentStore
+from shared.resident.carriage import ControlRelayCarriage, ResidentCarriagePlan
 from shared.resident.contracts import (
     AdmissionHandoff,
     ReplicaEndpoint,
@@ -24,11 +25,11 @@ from shared.resident.contracts import (
 )
 from shared.resident.gate import LoadEvidence
 from shared.resident.reports import ResidentBootstrapAck, ResidentOpOutcome
+from shared.resident.transport import ResidentFrameSink
 
-from .engine import EngineOpen, HttpEngineDelivery
+from .engine import EngineOpen, HttpEngineDelivery, RawEngineOpen, RawHttpEngineDelivery
 from .origin_driver import ResidentOriginDriver, ResidentOriginRequest
 from .replica_sidecar import ResidentReplicaSidecar
-from .transport import ResidentFrameSink
 
 # Peeks the worker-private raw request for a captured resident boundary, or None.
 RequestLookup = Callable[[str, str], str | None]
@@ -61,6 +62,7 @@ class ResidentLaneHost:
         peek_request: RequestLookup,
         delete_request: RequestDelete,
         engine_open: EngineOpen | None = None,
+        engine_open_raw: RawEngineOpen | None = None,
         engine_timeout_sec: float = 300.0,
         logger: logging.Logger | None = None,
     ) -> None:
@@ -73,6 +75,9 @@ class ResidentLaneHost:
         self._engine_open = engine_open or HttpEngineDelivery(
             timeout_sec=engine_timeout_sec
         )
+        self._engine_open_raw = engine_open_raw or RawHttpEngineDelivery(
+            timeout_sec=engine_timeout_sec
+        )
         self._logger = logger or logging.getLogger("resident-lane-host")
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(
@@ -82,14 +87,18 @@ class ResidentLaneHost:
         self._replica: ResidentReplicaSidecar | None = None
 
     def start(self) -> None:
-        """Start the loop thread and build both lanes on it."""
+        """Start the loop thread and build the lanes on it."""
         self._thread.start()
         self._call(self._build).result()
 
     async def _build(self) -> None:
         sink: ResidentFrameSink = _EventFrameSink(self._push_frame)
+        # Every origin attempt on this worker rides control_relay over the one
+        # authenticated attachment; a later PR adds direct/node carriages behind the
+        # same factory without changing the drives that take their sink from it.
+        carriage = ControlRelayCarriage(sink)
         self._origin = ResidentOriginDriver(
-            sink=sink,
+            carriage=carriage,
             content_store=self._content_store,
             report_ack=self._report_ack,
             report_outcome=self._report_outcome,
@@ -98,6 +107,7 @@ class ResidentLaneHost:
         self._replica = ResidentReplicaSidecar(
             sink=sink,
             engine_open=self._engine_open,
+            engine_open_raw=self._engine_open_raw,
             on_load=self._on_load,
             logger=self._logger,
         )
@@ -153,6 +163,9 @@ class ResidentLaneHost:
                 session_id=str(frame["session_id"]),
                 handoff=handoff,
                 request_payload=request,
+                carriage_plan=ResidentCarriagePlan.model_validate(
+                    frame["carriage_plan"]
+                ),
             )
         )
 
@@ -167,6 +180,8 @@ class ResidentLaneHost:
         if self._replica is None:
             return
         engine = frame["engine"]
+        serve_task_id = frame.get("serve_task_id")
+        binding_generation = frame.get("binding_generation")
         self._replica.bind(
             replica_id=str(frame["replica_id"]),
             incarnation=int(frame["incarnation"]),
@@ -176,6 +191,10 @@ class ResidentLaneHost:
                 model=str(engine.get("model") or ""),
                 api_key=engine.get("api_key"),
                 interface=str(engine.get("interface") or "chat"),
+            ),
+            serve_task_id=str(serve_task_id) if serve_task_id is not None else None,
+            binding_generation=(
+                int(binding_generation) if binding_generation is not None else None
             ),
         )
 
@@ -202,7 +221,7 @@ class ResidentLaneHost:
 
     async def _on_frame(self, frame: dict[str, Any]) -> None:
         relay = RelayFrame.from_wire(frame)
-        # A frame's direction names the receiver's role: the origin receives
+        # A frame's direction names the receiver's role: an origin receives
         # target-to-origin, the replica receives origin-to-target.
         if relay.direction is RelayDirection.TARGET_TO_ORIGIN:
             if self._origin is not None:

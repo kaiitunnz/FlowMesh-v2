@@ -14,6 +14,7 @@ from typing import Any
 from shared.network.relay_frame import RelayDirection, RelayFrame, RelayFrameKind
 from shared.outcome import FabricContentStore, OutcomeManifest
 from shared.outcome.manifest import content_digest
+from shared.resident.carriage import ResidentCarriagePlan
 from shared.resident.contracts import (
     AdmissionHandoff,
     ReplicaEndpoint,
@@ -194,6 +195,9 @@ def test_two_hosts_complete_a_resident_invocation() -> None:
                 "call_correlation": "call-1",
                 "session_id": "rly-1",
                 "handoff": _handoff(),
+                "carriage_plan": ResidentCarriagePlan(session_id="rly-1").model_dump(
+                    mode="json"
+                ),
             },
         )
         assert done.wait(timeout=10.0)
@@ -217,3 +221,43 @@ def test_two_hosts_complete_a_resident_invocation() -> None:
     finally:
         origin.stop()
         replica.stop()
+
+
+def test_bind_frame_threads_the_serve_task_fence_to_the_sidecar() -> None:
+    captured: dict[str, Any] = {}
+
+    class _Spy:
+        def bind(self, **kwargs: Any) -> None:
+            captured.update(kwargs)
+
+    host = ResidentLaneHost(
+        push_frame=lambda _f: None,
+        report_ack=lambda _a: None,
+        report_outcome=lambda _o: None,
+        content_store=None,
+        peek_request=lambda _t, _c: None,
+        delete_request=lambda _t, _c: None,
+    )
+    host._replica = _Spy()  # type: ignore[assignment]
+    try:
+        host._bind(
+            {
+                "replica_id": "rpl-1",
+                "incarnation": 2,
+                "listener_generation": 3,
+                "serve_task_id": "tsk-serve",
+                "binding_generation": 5,
+                "engine": {
+                    "base_url": "http://engine/v1",
+                    "model": "m",
+                    "api_key": None,
+                    "interface": "chat",
+                },
+            }
+        )
+        # The adopted serve task's fence must reach the gate: without it the gate binds
+        # serve_task_id=None and refuses every real serve bootstrap as wrong_serve_task.
+        assert captured["serve_task_id"] == "tsk-serve"
+        assert captured["binding_generation"] == 5
+    finally:
+        host._loop.close()

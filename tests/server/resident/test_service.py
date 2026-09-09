@@ -16,7 +16,9 @@ from server.network.state import (
     ReachabilityClass,
     ReplicaListenerAdvertisement,
     ResolvedRoute,
+    RouteCandidate,
     RouteOrigin,
+    Transport,
 )
 from server.orchestration.tool_dispatch import ToolInvocationEnvelope
 from server.resident import (
@@ -78,7 +80,7 @@ class _FakeNetwork:
             target_node_id=listener.node_id,
             listener_generation=listener.listener_generation,
             route_epoch=1,
-            candidates=(),
+            candidates=(RouteCandidate(transport=Transport.CONTROL_RELAY, hops=()),),
         )
         return origin, route
 

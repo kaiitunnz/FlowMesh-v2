@@ -1,11 +1,12 @@
-"""One resident invocation's windowed relay session, owned by a worker.
+"""One resident invocation's windowed relay session, owned by its endpoint.
 
-Each side of an invocation — the origin worker that drives it and the replica worker
-that serves it — runs one session. A session sends its role's data direction and reads
-the other, bounding its in-flight bytes with a sender-side window and granting the peer
-only as fast as it drains, so a slow consumer backpressures a fast producer end to end.
-The servers relay the frames opaquely: the session owns the cursor, window, and the
-protocol, and the supervisors never read them.
+Each side of an invocation runs one session: the origin — a caller worker's origin
+driver or the gated serve edge in the root — that drives it, and the replica worker that
+serves it. A session sends its role's data direction and reads the other, bounding its
+in-flight bytes with a sender-side window and granting the peer only as fast as it
+drains, so a slow consumer backpressures a fast producer end to end. The servers relay
+the frames opaquely: the session owns the cursor, window, and the protocol, and the
+supervisors never read them.
 """
 
 import asyncio
@@ -18,7 +19,12 @@ from shared.network.relay_frame import (
     RelayFrame,
     RelayFrameKind,
 )
-from shared.resident.wire import decode_msg, encode_msg
+from shared.resident.wire import (
+    decode_body_msg,
+    decode_msg,
+    encode_body_msg,
+    encode_msg,
+)
 
 from .transport import ResidentFrameSink
 
@@ -66,12 +72,22 @@ class ResidentRelaySession:
         self._recv_consumed = 0
 
     @property
+    def session_id(self) -> str:
+        return self._session_id
+
+    @property
     def cancelled(self) -> bool:
         return self._cancelled.is_set()
 
     async def send_wire(self, kind: str, **fields: Any) -> None:
         """Frame and send one wire message, blocking on a full send window."""
-        payload = encode_msg(kind, **fields)
+        await self._send_payload(encode_msg(kind, **fields))
+
+    async def send_body_wire(self, kind: str, body: bytes, **fields: Any) -> None:
+        """Send one wire message carrying raw body bytes after its header."""
+        await self._send_payload(encode_body_msg(kind, body, **fields))
+
+    async def _send_payload(self, payload: bytes) -> None:
         await self._window.reserve(len(payload))
         self._send_seq += 1
         await self._sink.send(
@@ -87,7 +103,19 @@ class ResidentRelaySession:
         )
 
     async def recv_wire(self, timeout: float) -> dict[str, Any] | None:
-        """Await and decode the next wire message, or ``None`` on cancel or timeout.
+        """Await and decode the next wire message, or ``None`` on cancel or timeout."""
+        payload = await self._recv_payload(timeout)
+        return None if payload is None else decode_msg(payload)
+
+    async def recv_body_wire(
+        self, timeout: float
+    ) -> tuple[dict[str, Any], bytes] | None:
+        """Await the next message and its raw body, empty when it carries none."""
+        payload = await self._recv_payload(timeout)
+        return None if payload is None else decode_body_msg(payload)
+
+    async def _recv_payload(self, timeout: float) -> bytes | None:
+        """Await the next frame's opaque payload.
 
         Draining a frame grants the peer its cumulative consumed bytes, so the peer's
         send window advances only as this side reads.
@@ -109,7 +137,7 @@ class ResidentRelaySession:
                     task.cancel()
         self._recv_consumed += len(payload)
         await self._grant()
-        return decode_msg(payload)
+        return payload
 
     async def on_frame(self, frame: RelayFrame) -> None:
         """Route one inbound frame: a grant, a cancel, or deduplicated data."""

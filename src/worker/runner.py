@@ -62,8 +62,8 @@ class Runner:
         self.logger = logger
         self.default_executor = default_executor
         self.network_bandwidth_bytes_per_sec = network_bandwidth_bytes_per_sec
-        # How long to keep an executor alive (seconds) after its last use
-        # before calling `cleanup_after_run()`. None or <=0 disables delayed cleanup.
+        # How long to keep an executor alive (seconds) after its last use before calling
+        # `cleanup_after_run()`. None or <=0 disables delayed cleanup.
         assert (
             executor_idle_cleanup_sec is None or executor_idle_cleanup_sec >= 0
         ), "executor_idle_cleanup_sec must be None or non-negative"
@@ -431,8 +431,7 @@ class Runner:
         """Background loop that periodically checks for idle executors.
 
         The loop waits on `stop_event` with a timeout equal to
-        `self._idle_check_interval` and calls `_maybe_expire_active_executor`
-        each tick.
+        `self._idle_check_interval` and calls `_maybe_expire_active_executor` each tick.
         """
         try:
             while not stop_event.wait(self._idle_check_interval):
@@ -454,8 +453,8 @@ class Runner:
         if self._idle_checker_thread and self._idle_checker_thread.is_alive():
             return
         self._idle_checker_stop_event = threading.Event()
-        # Use a small poll interval; ensure it's not larger than the cleanup
-        # timeout so expiration happens reasonably soon after timed out.
+        # Use a small poll interval; ensure it's not larger than the cleanup timeout so
+        # expiration happens reasonably soon after timed out.
         self._idle_check_interval = min(
             1.0, max(0.5, float(self.executor_idle_cleanup_sec) / 10.0)
         )

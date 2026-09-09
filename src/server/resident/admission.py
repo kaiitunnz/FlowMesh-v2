@@ -20,7 +20,7 @@ from .claim import (
     begin_stream,
     mark_uncertain,
     new_claim,
-    release_on_ds_terminal,
+    release_on_terminal,
     reserve,
     settle_terminal,
 )
@@ -32,6 +32,7 @@ from .state import (
     ClaimTerminalReason,
     DemandEntry,
     InvocationRequest,
+    InvocationSubject,
     ReplicaIncarnation,
     ServiceClaim,
 )
@@ -58,12 +59,17 @@ class AdmissionController:
         deadline_at: str | None,
         adapter_name: str | None = None,
         adapter_source: str | None = None,
+        serve_task_id: str | None = None,
+        binding_generation: int | None = None,
+        descriptor_digest: str | None = None,
     ) -> AdmissionHandoff:
         """A single-use fence handoff for a reserved claim's replica incarnation.
 
         It carries no route or origin: the network path resolves and attaches those. It
         never carries the raw engine endpoint. For an adapter-bound claim it names the
-        adapter the replica loads into a slot and the request selects.
+        adapter the replica loads into a slot and the request selects. A task-addressed
+        external claim also binds its authorized serve task, residency-binding
+        generation, and the bounded canonical request digest the gate recomputes.
         """
         return AdmissionHandoff(
             token=new_admission_handoff_token(),
@@ -78,6 +84,9 @@ class AdmissionController:
             expires_at=deadline_at,
             adapter_name=adapter_name,
             adapter_source=adapter_source,
+            serve_task_id=serve_task_id,
+            binding_generation=binding_generation,
+            descriptor_digest=descriptor_digest,
         )
 
     def _strategy_for(self, family: str) -> SelectionStrategy:
@@ -107,7 +116,7 @@ class AdmissionController:
         self,
         *,
         invocation_id: str,
-        workflow_id: str,
+        subject: InvocationSubject,
         family: str,
         profile: AdmissionProfile,
         replayable: bool = True,
@@ -117,12 +126,12 @@ class AdmissionController:
         Called only when no claim for the invocation is in flight. A permitted reissue
         is a successor: the admission epoch advances past every prior terminal claim,
         and no prior credit is released here — release happens only through the fenced
-        DS terminal.
+        terminal fact.
         """
         self._stores.invocations.put(
             InvocationRequest(
                 invocation_id=invocation_id,
-                workflow_id=workflow_id,
+                subject=subject,
                 family=family,
                 profile=profile,
                 replayable=replayable,
@@ -181,6 +190,13 @@ class AdmissionController:
             deadline_at=profile.deadline_at if profile is not None else None,
             adapter_name=profile.adapter_ref if profile is not None else None,
             adapter_source=profile.adapter_source if profile is not None else None,
+            serve_task_id=profile.serve_task_id if profile is not None else None,
+            binding_generation=(
+                profile.binding_generation if profile is not None else None
+            ),
+            descriptor_digest=(
+                profile.descriptor_digest if profile is not None else None
+            ),
         )
 
     def admit(
@@ -224,6 +240,9 @@ class AdmissionController:
             deadline_at=profile.deadline_at,
             adapter_name=profile.adapter_ref,
             adapter_source=profile.adapter_source,
+            serve_task_id=profile.serve_task_id,
+            binding_generation=profile.binding_generation,
+            descriptor_digest=profile.descriptor_digest,
         )
 
     def accept_and_authorize(
@@ -279,11 +298,12 @@ class AdmissionController:
         assert claim.replica_id is not None and claim.incarnation is not None
         replica = self._stores.directory.get(claim.replica_id)
         request = self._stores.invocations.get(claim.invocation_id)
+        profile = request.profile if request is not None else None
         return RouteAuthorization(
             claim_id=claim.claim_id,
             invocation_id=claim.invocation_id,
             idempotency_key=idempotency_key,
-            tenant=request.profile.tenant if request is not None else None,
+            tenant=profile.tenant if profile is not None else None,
             origin_id=origin_id,
             replica_id=claim.replica_id,
             incarnation=claim.incarnation,
@@ -291,6 +311,10 @@ class AdmissionController:
                 replica.listener_generation if replica is not None else 0
             ),
             expires_at=deadline_at,
+            serve_task_id=profile.serve_task_id if profile is not None else None,
+            binding_generation=(
+                profile.binding_generation if profile is not None else None
+            ),
         )
 
     def on_stream_started(self, claim: ServiceClaim) -> None:
@@ -333,17 +357,21 @@ class AdmissionController:
             mark_uncertain(claim)
             self._persist()
 
-    def on_ds_terminal(self, invocation_id: str, reason: ClaimTerminalReason) -> None:
-        """Settle every non-terminal claim of an invocation from a fenced DS outcome.
+    def settle_invocation_terminal(
+        self, invocation_id: str, reason: ClaimTerminalReason
+    ) -> None:
+        """Settle every non-terminal claim of an invocation from a fenced terminal fact.
 
-        This is the sole normal release path for an accepted credit: the orchestration
-        engine records the terminal outcome and the controller consumes it by
-        ``invocation_id``, tolerant of the claim's source state.
+        This is the sole normal release path for an accepted credit. A workflow
+        subject's fact is the orchestration engine's ``DS`` outcome; an external
+        subject's is a durable external status-terminal fact. The controller consumes
+        either by ``invocation_id``, tolerant of the claim's source state; it never
+        assumes a ``DS`` record exists.
         """
         released = False
         for claim in self._stores.claims.by_invocation(invocation_id):
             if claim.state is not ClaimState.TERMINAL:
-                release_on_ds_terminal(claim, reason)
+                release_on_terminal(claim, reason)
                 self._stores.demand.remove(claim.claim_id)
                 self._touch_replica(claim)
                 released = True

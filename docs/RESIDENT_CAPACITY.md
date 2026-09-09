@@ -125,9 +125,41 @@ cancelled invocation stops promptly rather than waiting out the stream deadline.
 stream emit claim-tagged load evidence, tagged latency-sensitive service traffic versus bulk
 transfer.
 
-The legacy serve proxy cannot reach a resident allocation: a resident replica's serve task
-is marked resident and the proxy refuses it by allocation identity, independent of its
-access mode. A resident allocation is reachable only through its claim-gated sidecar.
+## Task-ID-gated resident serve
+
+Every public user-declared `serve` task is a resident-gated standing allocation reached
+only by its task ID, over one FlowMesh-authenticated, claim-gated endpoint:
+`/api/v1/serve/tasks/{task_id}/{upstream_path}`. The request relays to the task's standing
+replica unchanged and the engine's own response comes back unchanged, so an
+OpenAI-compatible client can drive any endpoint the engine serves. The engine binds to
+loopback and is reached only through its claim-gated sidecar.
+
+At serve-task start the task is adopted as its own standing allocation: a per-task
+`ServiceFamily`, a `ServeTaskResidencyBinding` from the task ID to that allocation group,
+and a replica pinned for the task's lifetime. The model is validated under
+`RESIDENT_ALLOWED_MODELS`; a disallowed model is not adopted. A caller names only the task
+ID — the model, worker, endpoint, credential, and routing are fixed by the binding — and
+each request is admitted as its own claim. On task stop, cancellation, TTL, or failure the
+binding drains before it stops.
+
+A serve task pins one gated exposure mode. `proxy`, the default, terminates at the
+root-local ingress and is reached at `/api/v1/serve/tasks/{task_id}/{upstream_path}` on
+the server's own base url. `forward` terminates at a per-task public port on the root's
+public host, reached at `http://<public_host>:<forward_port>/<engine-native-path>` —
+the port is the whole address, so no task-qualified path prefix is used and the engine's
+own paths pass through unchanged. Forward serve reuses the SSH port-forward host config —
+`SERVER_PORT_FORWARD_BIND_HOST` for the listener and `SERVER_PORT_FORWARD_PUBLIC_HOST` for
+the url — with its own port range (`SERVER_SERVE_FORWARD_PORT_START`,
+`SERVER_SERVE_FORWARD_PORT_END`); each forward binding owns a `ForwardPortExposure` that
+control reserves, the root binds a plain-HTTP listener on, and control commits live only
+from that bound listener's evidence, publishing the port url on the task. `forwardPort`
+may request a specific port within the range, else one is
+auto-allocated. On root restart each persisted live exposure rebinds its same port under a
+fresh listener generation before it serves; a failed rebind stays unavailable rather than
+publishing a new port. A forward binding with no live exposure fails closed. Access is the
+task's ordinary `TASK` read permission. Both modes carry traffic over `control_relay`;
+trusted `worker_direct`/`node_relay` target legs resolve behind the shared claim-gated
+carriage seam.
 
 ## Replica lifecycle and policy
 

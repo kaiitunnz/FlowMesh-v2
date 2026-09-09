@@ -1,23 +1,32 @@
 """The replica worker's call to its co-located engine.
 
-The replica sidecar reaches the serve task running on the same worker over loopback. The
-call is non-streaming — it fits a stock vLLM replica and the GPU-free ``dev_model``
-stand-in alike — but the content is emitted in bounded pieces so the windowed relay
-session flow-controls a large completion rather than framing it whole. A chat replica
-returns the assistant message text; an embedding replica returns the ``data`` array of
-vectors serialized as JSON — both ride the content path as opaque bytes. An
-adapter-bound invocation loads its adapter into a replica slot and selects it as the
-request model before the call.
+The replica sidecar reaches the serve task running on the same worker over loopback. A
+workflow consumer receives the extracted completion content in bounded pieces so the
+windowed relay session flow-controls a large completion rather than framing it whole: a
+chat replica returns the assistant message text and an embedding replica the ``data``
+array of vectors serialized as JSON, both riding the content path as opaque bytes.
+
+A task-addressed serve request is instead reverse-proxied verbatim in both directions:
+the client's method, path, query, end-to-end headers, and raw body reach the engine
+unchanged, and its own status, headers, and body bytes come back unchanged, so an
+OpenAI-compatible client drives any endpoint the engine serves and a ``stream: true``
+body passes through unbuffered. FlowMesh supplies only the upstream host, which no
+client header can redirect, and the engine credential. An adapter-bound workflow
+invocation loads its adapter into a replica slot and selects it as the request model
+before the call.
 """
 
+import contextlib
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 import httpx
 
 from shared.resident.contracts import ReplicaEndpoint
 from shared.resident.engine_request import chat_body, embeddings_body
+from shared.resident.envelope import ServeRequestEnvelope, filter_response_headers
 
 # The already-loaded shapes an engine reports for an idempotent adapter re-load; matched
 # narrowly so a precise load error is not swallowed.
@@ -41,6 +50,30 @@ class EngineResponse:
 # adapter-bound invocation carries the adapter name and its loadable source.
 EngineOpen = Callable[
     [ReplicaEndpoint, str | None, str | None, str | None], Awaitable[EngineResponse]
+]
+
+
+@dataclass
+class RawEngineResponse:
+    """An opened engine request whose raw response is reverse-proxied verbatim.
+
+    ``status`` and ``headers`` are the engine response's own non-hop-by-hop metadata,
+    relayed ahead of the body so the client sees the engine's envelope; ``chunks``
+    streams the body bytes as they arrive, unbuffered, so a ``stream: true`` response
+    passes straight through.
+    """
+
+    status: int
+    headers: tuple[tuple[str, str], ...]
+    chunks: AsyncIterator[bytes]
+    aclose: Callable[[], Awaitable[None]]
+
+
+# Opens the engine request for a task-addressed serve invocation and returns its raw
+# streaming response, whose sidecar replays the frozen client envelope verbatim rather
+# than constructing a request and extracting completion content.
+RawEngineOpen = Callable[
+    [ReplicaEndpoint, ServeRequestEnvelope], Awaitable[RawEngineResponse]
 ]
 
 # Unloads a LoRA adapter from a replica slot when its last credit-bearing claim
@@ -152,3 +185,85 @@ class HttpEngineDelivery:
         if any(phrase in body for phrase in _ADAPTER_ALREADY_LOADED):
             return
         response.raise_for_status()
+
+
+class RawHttpEngineDelivery:
+    """Reverse-proxies the co-located engine for a task-addressed serve request.
+
+    The frozen client envelope is replayed against the engine unchanged — method, path,
+    query, end-to-end headers, and raw body — and the engine's status, headers, and body
+    bytes relay back unchanged. The response is never parsed, any status is carried
+    through, and a ``stream: true`` body passes unbuffered. FlowMesh supplies only the
+    upstream host, which no client header can redirect, and the engine credential.
+    """
+
+    def __init__(self, *, timeout_sec: float = 300.0) -> None:
+        self._timeout = timeout_sec
+
+    async def __call__(
+        self, endpoint: ReplicaEndpoint, envelope: ServeRequestEnvelope
+    ) -> RawEngineResponse:
+        headers = list(envelope.headers)
+        if endpoint.api_key:
+            headers.append(("Authorization", f"Bearer {endpoint.api_key}"))
+        client = httpx.AsyncClient(timeout=self._timeout)
+        try:
+            request = client.build_request(
+                envelope.method,
+                _engine_origin(endpoint.base_url) + envelope.target,
+                content=envelope.body,
+                headers=headers,
+            )
+            _strip_injected_headers(request, envelope)
+            response = await client.send(request, stream=True)
+        except BaseException:
+            await client.aclose()
+            raise
+
+        async def chunks() -> AsyncIterator[bytes]:
+            # The raw stream is not content-decoded, so the body bytes stay consistent
+            # with the Content-Encoding and Content-Length the engine reported.
+            async for data in response.aiter_raw():
+                if data:
+                    yield data
+
+        async def aclose() -> None:
+            with contextlib.suppress(Exception):
+                await response.aclose()
+            await client.aclose()
+
+        return RawEngineResponse(
+            status=response.status_code,
+            headers=filter_response_headers(
+                (name.decode("latin-1"), value.decode("latin-1"))
+                for name, value in response.headers.raw
+            ),
+            chunks=chunks(),
+            aclose=aclose,
+        )
+
+
+def _strip_injected_headers(
+    request: httpx.Request, envelope: ServeRequestEnvelope
+) -> None:
+    """Drop the conveniences the HTTP client adds that the caller never sent.
+
+    Only ``Host`` and the body framing are FlowMesh's to supply; a header the client did
+    not send must not appear upstream just because a client library defaults it.
+    """
+    sent = {name.lower() for name, _ in envelope.headers}
+    for name in ("accept", "accept-encoding", "user-agent", "connection"):
+        if name not in sent and name in request.headers:
+            del request.headers[name]
+
+
+def _engine_origin(base_url: str) -> str:
+    """The engine's scheme and authority, without the interface path a client carries.
+
+    A serve client addresses the engine's own path (``/v1/models``,
+    ``/v1/chat/completions``), so the upstream target is the endpoint's origin joined
+    with that path rather than the interface-suffixed base URL a workflow consumer posts
+    to.
+    """
+    split = urlsplit(base_url)
+    return f"{split.scheme}://{split.netloc}"

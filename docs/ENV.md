@@ -60,7 +60,6 @@ listed here is in `.env.example`.
 | `CONTENT_STORE_ROOT` | – | Content-store root; under the data dir if empty |
 | `RESIDENT_CAPACITY_ENABLED` | `false` | Serve resident model bindings via admission |
 | `RESIDENT_INFERENCE_SUBSTRATE` | `serve` | Resident replica substrate (`serve` or `dev_model`) |
-| `RESIDENT_SERVE_ACCESS_MODE` | `forward` | Materialized replica endpoint access mode |
 | `RESIDENT_ADMISSION_SLOTS` | `8` | Conservative safe admission slots per replica |
 | `RESIDENT_ADAPTER_SLOTS` | `4` | Distinct adapters a replica may hold concurrently |
 | `RESIDENT_MAX_REPLICAS_PER_FAMILY` | `1` | Replica quota per service family |
@@ -99,7 +98,11 @@ listed here is in `.env.example`.
 | `FLOWMESH_API_KEY` | – | Forwarded to spawned workers as their server-callback bearer |
 | `ENABLE_PERSISTENT_PORT_FORWARD` | `true` | Keep port-forward listeners bound between task sessions; disable to bind listeners only for active sessions |
 | `ENABLE_SERVER_SSH_PROXY` | `true` | Enable the WebSocket proxy for interactive SSH tasks |
-| `ENABLE_SERVER_SERVE_PROXY` | `true` | Enable the HTTP reverse proxy for `serve` tasks |
+| `ENABLE_SERVER_SERVE_PROXY` | `true` | Enable the root-local gated serve ingress |
+| `ENABLE_SERVER_SERVE_FORWARD` | `false` | Host the root per-task-port forward serve ingress. Reuses `SERVER_PORT_FORWARD_BIND_HOST` and `SERVER_PORT_FORWARD_PUBLIC_HOST` for the listener |
+| `SERVER_SERVE_FORWARD_PORT_START` | `34000` | Lowest forward serve exposure port |
+| `SERVER_SERVE_FORWARD_PORT_END` | `34099` | Highest forward serve exposure port |
+| `SERVER_SERVE_FORWARD_BODY_BUDGET_BYTES` | `536870912` | Cap on total in-flight forward request body bytes |
 | `LOG_LEVEL` | `INFO` | Server log level |
 
 **Notes:**

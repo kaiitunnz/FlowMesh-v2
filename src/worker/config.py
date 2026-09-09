@@ -1,8 +1,8 @@
 # worker/config.py
 """Configuration loader for the Worker process.
 
-This module encapsulates all environment-derived configuration so the rest of
-the worker code can depend on a structured config object.
+This module encapsulates all environment-derived configuration so the rest of the worker
+code can depend on a structured config object.
 """
 
 import json

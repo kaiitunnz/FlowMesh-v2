@@ -428,12 +428,6 @@ STACK_ENV_SCHEMA = EnvSchema(
                     choices=["serve", "dev_model"],
                 ),
                 EnvVar(
-                    "RESIDENT_SERVE_ACCESS_MODE",
-                    "forward",
-                    description="Materialized replica endpoint access mode.",
-                    choices=["forward", "proxy", "direct"],
-                ),
-                EnvVar(
                     "RESIDENT_ADMISSION_SLOTS",
                     "8",
                     description="Conservative safe admission slots per replica.",
@@ -706,6 +700,39 @@ STACK_ENV_SCHEMA = EnvSchema(
             ],
         ),
         EnvSection(
+            title="Serve Task Support",
+            vars=[
+                EnvVar("ENABLE_SERVER_SERVE_PROXY", "true", var_type=EnvVarType.BOOL),
+                EnvVar(
+                    "ENABLE_SERVER_SERVE_FORWARD",
+                    "false",
+                    var_type=EnvVarType.BOOL,
+                    description="Host the root per-task-port forward serve ingress.",
+                ),
+                EnvVar(
+                    "SERVER_SERVE_FORWARD_PORT_START",
+                    "34000",
+                    var_type=EnvVarType.INT,
+                    min_value=1,
+                    description="Lowest forward serve exposure port.",
+                ),
+                EnvVar(
+                    "SERVER_SERVE_FORWARD_PORT_END",
+                    "34099",
+                    var_type=EnvVarType.INT,
+                    min_value=1,
+                    description="Highest forward serve exposure port.",
+                ),
+                EnvVar(
+                    "SERVER_SERVE_FORWARD_BODY_BUDGET_BYTES",
+                    "536870912",
+                    var_type=EnvVarType.INT,
+                    min_value=1,
+                    description="Cap on total in-flight forward request body bytes.",
+                ),
+            ],
+        ),
+        EnvSection(
             title="SSH Task Support",
             vars=[
                 EnvVar("ENABLE_SERVER_SSH_PROXY", "true", var_type=EnvVarType.BOOL),
@@ -714,12 +741,6 @@ STACK_ENV_SCHEMA = EnvSchema(
                     "true",
                     var_type=EnvVarType.BOOL,
                 ),
-            ],
-        ),
-        EnvSection(
-            title="Serve Task Support",
-            vars=[
-                EnvVar("ENABLE_SERVER_SERVE_PROXY", "true", var_type=EnvVarType.BOOL),
             ],
         ),
         EnvSection(
@@ -1097,8 +1118,8 @@ STACK_ENV_SCHEMA = EnvSchema(
 )
 
 
-# Schema-default overrides applied when rendering a worker-role .env.
-# Unused vars are blanked out to avoid confusion and misconfiguration.
+# Schema-default overrides applied when rendering a worker-role .env. Unused vars are
+# blanked out to avoid confusion and misconfiguration.
 WORKER_ROLE_OVERRIDES = {
     "NODE_ROLE": NodeRole.WORKER.value,
     "REDIS_TLS_CERT_FILE": "",

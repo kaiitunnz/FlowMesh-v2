@@ -8,23 +8,27 @@ derived credit ledger recomputes the outstanding credit from the rehydrated clai
 from server.resident import (
     AdmissionController,
     ClaimState,
+    InvocationSubject,
+    InvocationSubjectKind,
     ResidentSnapshot,
     ResidentStores,
 )
 from tests.server.resident._helpers import PROFILE, warm_stores
+
+_SUBJECT = InvocationSubject(kind=InvocationSubjectKind.WORKFLOW, id="wfl-1")
 
 
 def _seed():
     stores = warm_stores(slots=2)
     ctl = AdmissionController(stores)
     reserved = ctl.raise_claim(
-        invocation_id="inv-1", workflow_id="wfl-1", family="fam", profile=PROFILE
+        invocation_id="inv-1", subject=_SUBJECT, family="fam", profile=PROFILE
     )
     ctl.admit(reserved, PROFILE, idempotency_key="idm-x")
     ctl.accept_and_authorize(reserved, idempotency_key="idm-x", origin_id="rog-1")
     ctl.on_stream_started(reserved)
     pending = ctl.raise_claim(
-        invocation_id="inv-2", workflow_id="wfl-1", family="fam", profile=PROFILE
+        invocation_id="inv-2", subject=_SUBJECT, family="fam", profile=PROFILE
     )
     return stores, reserved, pending
 

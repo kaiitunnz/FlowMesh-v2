@@ -10,9 +10,9 @@ class ServeSpecStrict(ModelSpecStrict):
     taskType: Literal[TaskType.SERVE]
     ttlSeconds: Annotated[float, Field(gt=0)] | None = None
     readinessTimeoutSeconds: Annotated[float, Field(gt=0)] | None = None
-    accessMode: Literal["direct", "forward", "proxy"] | None = None
+    accessMode: Literal["proxy", "forward"] | None = None
     port: Annotated[int, Field(ge=1, le=65535)] | None = None
-    apiKey: str | None = Field(default=None, min_length=1)
+    forwardPort: Annotated[int, Field(ge=1, le=65535)] | None = None
 
     def validate_dispatchable(self) -> None:
         _validate_serve_dispatchable(self)
@@ -22,9 +22,9 @@ class ServeSpecTemplate(ModelSpecTemplate):
     taskType: Literal[TaskType.SERVE]
     ttlSeconds: Annotated[float, Field(gt=0)] | None = None
     readinessTimeoutSeconds: Annotated[float, Field(gt=0)] | None = None
-    accessMode: Literal["direct", "forward", "proxy"] | None = None
+    accessMode: Literal["proxy", "forward"] | None = None
     port: Annotated[int, Field(ge=1, le=65535)] | None = None
-    apiKey: str | None = Field(default=None, min_length=1)
+    forwardPort: Annotated[int, Field(ge=1, le=65535)] | None = None
 
     def validate_dispatchable(self) -> None:
         _validate_serve_dispatchable(self)

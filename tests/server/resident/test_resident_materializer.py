@@ -106,7 +106,7 @@ def _materialize(config: ResidentCapacityConfig, runtime: Any, *registrars: Any)
 def test_serve_task_is_owned_and_registered_under_the_system_principal() -> None:
     runtime = _FakeRuntime()
     registrar = _RecordingRegistrar()
-    config = ResidentCapacityConfig(substrate="dev_model", access_mode="direct")
+    config = ResidentCapacityConfig(substrate="dev_model")
 
     task_id = _materialize(config, runtime, registrar)
     assert task_id == "tsk-resident"

@@ -58,9 +58,7 @@ class TestServeSpecStrict:
         assert spec.model_name is None
         assert spec.ttlSeconds is None
         assert spec.readinessTimeoutSeconds is None
-        assert spec.accessMode is None
         assert spec.port is None
-        assert spec.apiKey is None
 
     def test_spec_with_all_fields(self) -> None:
         spec = ServeSpecStrict(
@@ -71,18 +69,14 @@ class TestServeSpecStrict:
             ),
             ttlSeconds=7200.0,
             readinessTimeoutSeconds=300.0,
-            accessMode="forward",
             port=8001,
-            apiKey="sk-user-supplied",
         )
         assert spec.model_name == "meta-llama/Llama-3-8B"
         assert spec.model is not None
         assert spec.model.vllm == {"tensor_parallel_size": 2}
         assert spec.ttlSeconds == 7200.0
         assert spec.readinessTimeoutSeconds == 300.0
-        assert spec.accessMode == "forward"
         assert spec.port == 8001
-        assert spec.apiKey == "sk-user-supplied"
 
     def test_parses_inference_style_model_block(self) -> None:
         """ServeSpecStrict accepts the same model block as InferenceSpecStrict."""
@@ -120,9 +114,21 @@ class TestServeSpecStrict:
         spec = ServeSpecStrict(taskType=TaskType.SERVE)
         assert spec.taskType == TaskType.SERVE
 
-    def test_invalid_access_mode(self) -> None:
+    def test_accepts_both_gated_access_modes(self) -> None:
+        for mode in ("proxy", "forward"):
+            assert (
+                ServeSpecStrict(taskType=TaskType.SERVE, accessMode=mode).accessMode
+                == mode
+            )
+
+    def test_rejects_the_removed_direct_access_mode(self) -> None:
+        # ``direct`` named a raw ungated listener, which is no longer a mode at all.
         with pytest.raises(Exception):
-            ServeSpecStrict(taskType=TaskType.SERVE, accessMode="invalid")  # type: ignore[arg-type]
+            ServeSpecStrict(taskType=TaskType.SERVE, accessMode="direct")  # type: ignore[arg-type]
+
+    def test_rejects_removed_api_key_field(self) -> None:
+        with pytest.raises(Exception):
+            ServeSpecStrict(taskType=TaskType.SERVE, apiKey="sk-x")  # type: ignore[call-arg]
 
     def test_ttl_must_be_positive(self) -> None:
         with pytest.raises(Exception):
@@ -240,9 +246,13 @@ class TestServeExecutorCmdBuilding:
             ex.run(task, tmp_path)
 
 
-class TestServeApiKey:
-    """User-supplied apiKey is used verbatim; otherwise one is generated. Either
-    way the secret is surfaced only via the task update, never in the result."""
+class TestServeLoopbackEndpoint:
+    """The engine binds loopback only and emits worker-private endpoint facts.
+
+    The api key is generated internally and surfaced only as a "_"-prefixed field in the
+    task update (stripped from public task metadata), never in the result; the emit
+    exposes no raw routable host or public listener.
+    """
 
     def _make_executor(self) -> VLLMServeExecutor:
         return VLLMServeExecutor(make_worker_config(), make_worker_hardware())
@@ -276,7 +286,7 @@ class TestServeApiKey:
         serve = emit.call_args.args[1]["serve"]
         return captured[0], serve, result
 
-    def test_generates_api_key_when_not_provided(self, tmp_path: Path) -> None:
+    def test_generates_api_key_internally(self, tmp_path: Path) -> None:
         spec = ServeSpecStrict(
             taskType=TaskType.SERVE,
             model=ModelConfig(source=ModelSource(identifier="m")),
@@ -284,107 +294,38 @@ class TestServeApiKey:
         cmd, serve, _ = self._run(spec, tmp_path)
         generated = cmd[cmd.index("--api-key") + 1]
         assert len(generated) == 64
-        assert serve["api_key"] == generated
+        assert serve["_api_key"] == generated
 
-    def test_uses_user_supplied_api_key(self, tmp_path: Path) -> None:
+    def test_binds_loopback_and_emits_private_facts(self, tmp_path: Path) -> None:
         spec = ServeSpecStrict(
             taskType=TaskType.SERVE,
-            apiKey="sk-user-supplied",
             model=ModelConfig(source=ModelSource(identifier="m")),
         )
         cmd, serve, _ = self._run(spec, tmp_path)
-        assert cmd[cmd.index("--api-key") + 1] == "sk-user-supplied"
-        assert serve["api_key"] == "sk-user-supplied"
+        assert cmd[cmd.index("--host") + 1] == "127.0.0.1"
+        assert serve["_host"] == "127.0.0.1"
+        assert serve["model"] == "m"
+        # No raw routable host, listener, or credential is ever publicly exposed.
+        assert set(serve) == {"model", "interface", "_host", "_port", "_api_key"}
+        assert serve["interface"] == "chat"
 
     def test_result_never_carries_api_key(self, tmp_path: Path) -> None:
         spec = ServeSpecStrict(
             taskType=TaskType.SERVE,
-            apiKey="sk-user-supplied",
             model=ModelConfig(source=ModelSource(identifier="m")),
         )
         _, _, result = self._run(spec, tmp_path)
         assert "api_key" not in result.model_dump()
-
-
-class TestServeAccessModeHostBinding:
-    """Direct mode binds all interfaces and advertises a resolvable host; forward
-    mode binds loopback and advertises the relay target."""
-
-    def _make_executor(self) -> VLLMServeExecutor:
-        return VLLMServeExecutor(make_worker_config(), make_worker_hardware())
-
-    def _run(
-        self, spec: ServeSpecStrict, tmp_path: Path
-    ) -> tuple[list[str], dict[str, object]]:
-        task = make_worker_task_message(spec=spec, task_type=TaskType.SERVE)
-        ex = self._make_executor()
-        captured: list[list[str]] = []
-
-        def fake_popen(cmd: list[str], **_: object) -> MagicMock:
-            captured.append(list(cmd))
-            m = MagicMock()
-            m.stdout = io.StringIO("")
-            m.poll.return_value = 0
-            m.returncode = 0
-            m.pid = 12345
-            return m
-
-        emit = MagicMock()
-        with (
-            patch("subprocess.Popen", side_effect=fake_popen),
-            patch("socket.getfqdn", return_value="worker-1.cluster.local"),
-            patch.object(ex, "_poll_health"),
-            patch.object(ex, "_wait_for_serve"),
-            patch.object(ex, "emit_update", emit),
-            patch.object(ex, "_terminate_process_group"),
-        ):
-            ex.run(task, tmp_path)
-
-        serve = emit.call_args.args[1]["serve"]
-        return captured[0], serve
-
-    def test_direct_mode_binds_all_interfaces(self, tmp_path: Path) -> None:
-        spec = ServeSpecStrict(
-            taskType=TaskType.SERVE,
-            accessMode="direct",
-            model=ModelConfig(source=ModelSource(identifier="m")),
-        )
-        cmd, serve = self._run(spec, tmp_path)
-        assert cmd[cmd.index("--host") + 1] == "0.0.0.0"
-        assert serve["mode"] == "direct"
-        assert serve["host"] == "worker-1.cluster.local"
-        assert serve["_relay_target"] == {"host": "127.0.0.1", "port": serve["port"]}
-
-    def test_forward_mode_binds_loopback(self, tmp_path: Path) -> None:
-        spec = ServeSpecStrict(
-            taskType=TaskType.SERVE,
-            accessMode="forward",
-            model=ModelConfig(source=ModelSource(identifier="m")),
-        )
-        cmd, serve = self._run(spec, tmp_path)
-        assert cmd[cmd.index("--host") + 1] == "127.0.0.1"
-        assert serve["mode"] == "forward"
-        assert serve["host"] == "127.0.0.1"
-
-    def test_default_mode_is_forward_loopback(self, tmp_path: Path) -> None:
-        spec = ServeSpecStrict(
-            taskType=TaskType.SERVE,
-            model=ModelConfig(source=ModelSource(identifier="m")),
-        )
-        cmd, serve = self._run(spec, tmp_path)
-        assert cmd[cmd.index("--host") + 1] == "127.0.0.1"
-        assert serve["host"] == "127.0.0.1"
 
     def test_unset_port_auto_selects_free_port(self, tmp_path: Path) -> None:
         spec = ServeSpecStrict(
             taskType=TaskType.SERVE,
             model=ModelConfig(source=ModelSource(identifier="m")),
         )
-        cmd, serve = self._run(spec, tmp_path)
+        cmd, serve, _ = self._run(spec, tmp_path)
         port = int(cmd[cmd.index("--port") + 1])
         assert 1 <= port <= 65535
-        assert serve["port"] == port
-        assert serve["_relay_target"] == {"host": "127.0.0.1", "port": port}
+        assert serve["_port"] == port
 
     def test_explicit_free_port_is_used(self, tmp_path: Path) -> None:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
@@ -395,9 +336,9 @@ class TestServeAccessModeHostBinding:
             port=free_port,
             model=ModelConfig(source=ModelSource(identifier="m")),
         )
-        cmd, serve = self._run(spec, tmp_path)
+        cmd, serve, _ = self._run(spec, tmp_path)
         assert cmd[cmd.index("--port") + 1] == str(free_port)
-        assert serve["port"] == free_port
+        assert serve["_port"] == free_port
 
     def test_explicit_occupied_port_fails_with_clear_error(
         self, tmp_path: Path
