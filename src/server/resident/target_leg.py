@@ -185,6 +185,11 @@ class _TargetLegSink(ResidentFrameSink):
 
         Releasing the leg ends its read with the same errors a genuine loss raises, so a
         session torn down on its terminal would otherwise demote a healthy transport.
+
+        The demotion steers the next drive, so it reaches a loss the leg surfaces at
+        once. A loss the origin only notices at its own stream deadline can outlive the
+        demotion's negative TTL, and that attempt re-drives the way it would over the
+        relay.
         """
         if self._closing:
             return
