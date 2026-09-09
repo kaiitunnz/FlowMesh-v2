@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
+from shared.schemas.network import TARGET_LEG_PROTOCOL
 from shared.tasks.specs import ModelBindingMode
 from shared.utils.parsing import parse_bool_env, parse_float_env, parse_int_env
 
@@ -521,13 +522,73 @@ class ContentStoreConfig:
 
 
 @dataclass
+class TargetLegOffloadConfig:
+    """Trusted root-opened target-leg offload knobs.
+
+    A resident invocation's target leg leaves the reverse-rendezvous relay for a
+    direct socket only where the deployment has declared the pair trusted: the target
+    must sit in ``trust_domain`` and one of ``classes``, and the root and target
+    authenticate each other with mutual TLS over the ``ca_b64``/``cert_b64``/``key_b64``
+    material. ``root_identity`` is the certificate identity a target listener pins, so
+    a CA-signed certificate that is not the root's is refused. ``node_listener_url`` is
+    this node's purpose-scoped target-leg listener, which hands a session to its local
+    sidecar uplink.
+    """
+
+    enabled: bool = False
+    trust_domain: str = ""
+    classes: tuple[str, ...] = ("same_node", "same_cluster")
+    protocol: str = TARGET_LEG_PROTOCOL
+    ca_b64: str = ""
+    cert_b64: str = ""
+    key_b64: str = ""
+    root_identity: str = ""
+    node_listener_url: str = ""
+
+    @classmethod
+    def from_env(cls) -> "TargetLegOffloadConfig":
+        prefix = "NETWORK_PLANE_TARGET_LEG_"
+        raw_classes = _env_or_none(f"{prefix}CLASSES")
+        classes = (
+            tuple(c.strip() for c in raw_classes.split(",") if c.strip())
+            if raw_classes
+            else ("same_node", "same_cluster")
+        )
+        config = cls(
+            enabled=parse_bool_env(f"{prefix}ENABLED", False),
+            trust_domain=_env_or_none(f"{prefix}TRUST_DOMAIN") or "",
+            classes=classes,
+            ca_b64=_env_or_none(f"{prefix}CA_B64") or "",
+            cert_b64=_env_or_none(f"{prefix}CERT_B64") or "",
+            key_b64=_env_or_none(f"{prefix}KEY_B64") or "",
+            root_identity=_env_or_none(f"{prefix}ROOT_IDENTITY") or "",
+            node_listener_url=_env_or_none(f"{prefix}NODE_LISTENER_URL") or "",
+        )
+        if config.enabled and not config.mutual_tls_ready:
+            raise ValueError(
+                f"{prefix}ENABLED requires {prefix}CA_B64, {prefix}CERT_B64, "
+                f"{prefix}KEY_B64, and {prefix}ROOT_IDENTITY: a target-leg offload is "
+                "carried only over mutual TLS with a pinned root identity"
+            )
+        return config
+
+    @property
+    def mutual_tls_ready(self) -> bool:
+        """Whether the mutual-TLS material and the pinned root identity are present."""
+        return bool(
+            self.ca_b64 and self.cert_b64 and self.key_b64 and self.root_identity
+        )
+
+
+@dataclass
 class NetworkPlaneConfig:
     """Feature-gated network-plane route substrate knobs.
 
     ``endpoint_url`` is the operator-configured node-relay endpoint advertised on
     registration; ``sidecar_url`` is the node-local echo listener the relay uplinks to.
     TTL/backoff bounds drive the reachability state machine. ``relay_buffer_bytes`` is
-    the echo relay session's bounded in-flight buffer.
+    the echo relay session's bounded in-flight buffer. ``target_leg`` holds the trusted
+    offload policy and its mutual-TLS material.
     """
 
     enabled: bool = False
@@ -543,6 +604,7 @@ class NetworkPlaneConfig:
     connect_budget_sec: float = 5.0
     route_ttl_sec: float = 30.0
     relay_buffer_bytes: int = 65536
+    target_leg: TargetLegOffloadConfig = field(default_factory=TargetLegOffloadConfig)
 
     @classmethod
     def from_env(cls) -> "NetworkPlaneConfig":
@@ -570,6 +632,7 @@ class NetworkPlaneConfig:
             relay_buffer_bytes=max(
                 1024, parse_int_env(f"{prefix}RELAY_BUFFER_BYTES") or 65536
             ),
+            target_leg=TargetLegOffloadConfig.from_env(),
         )
 
 

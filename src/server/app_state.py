@@ -8,6 +8,7 @@ from .dispatcher import Dispatcher
 from .hooks import PrincipalContext
 from .network.service import NetworkPlane
 from .registries import NodeRegistry, WorkerRegistry, WorkflowRegistry
+from .resident.leg_metrics import ResidentLegMetrics
 from .resident.service import ResidentCapacityControl
 from .serve import GatedServe, ServeBindingStore
 from .services.content_store import ServerContentStore
@@ -110,6 +111,10 @@ def get_serve_bindings(conn: HTTPConnection) -> ServeBindingStore | None:
 
 def get_network_plane(conn: HTTPConnection) -> NetworkPlane | None:
     return conn.app.state.network_plane
+
+
+def get_resident_leg_metrics(conn: HTTPConnection) -> ResidentLegMetrics:
+    return conn.app.state.resident_leg_metrics
 
 
 def get_content_store(conn: HTTPConnection) -> ServerContentStore | None:

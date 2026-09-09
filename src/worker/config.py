@@ -59,6 +59,10 @@ class WorkerConfig:
     network_mode: str | None = None
     container_name: str | None = None
     ssh_network_name: str | None = None
+    target_leg_ca_b64: str = ""
+    target_leg_cert_b64: str = ""
+    target_leg_key_b64: str = ""
+    target_leg_root_identity: str = ""
 
     @staticmethod
     def from_env() -> "WorkerConfig":
@@ -209,4 +213,16 @@ class WorkerConfig:
             network_mode=network_mode,
             container_name=container_name,
             ssh_network_name=ssh_network_name,
+            target_leg_ca_b64=(
+                os.getenv("NETWORK_PLANE_TARGET_LEG_CA_B64") or ""
+            ).strip(),
+            target_leg_cert_b64=(
+                os.getenv("NETWORK_PLANE_TARGET_LEG_CERT_B64") or ""
+            ).strip(),
+            target_leg_key_b64=(
+                os.getenv("NETWORK_PLANE_TARGET_LEG_KEY_B64") or ""
+            ).strip(),
+            target_leg_root_identity=(
+                os.getenv("NETWORK_PLANE_TARGET_LEG_ROOT_IDENTITY") or ""
+            ).strip(),
         )

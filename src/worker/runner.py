@@ -2,6 +2,7 @@
 
 import json
 import logging
+import socket
 import threading
 import time
 from collections.abc import Iterable
@@ -10,6 +11,7 @@ from typing import Any
 
 import requests
 
+from shared.network.mtls import MutualTlsMaterial
 from shared.outcome import FabricContentStore
 from shared.schemas.result import BaseExecutorResult
 from shared.tasks import MergedChildTaskStrict
@@ -53,6 +55,8 @@ class Runner:
         model_api_key: str | None = None,
         model_egress_timeout_sec: float = 120.0,
         content_store: FabricContentStore | None = None,
+        target_leg_listener_sock: socket.socket | None = None,
+        target_leg_material: MutualTlsMaterial | None = None,
     ):
         self.lifecycle = lifecycle
         self.task_stream = task_stream
@@ -61,6 +65,8 @@ class Runner:
         self.executors = executors
         self.logger = logger
         self.default_executor = default_executor
+        self._target_leg_listener_sock = target_leg_listener_sock
+        self._target_leg_material = target_leg_material
         self.network_bandwidth_bytes_per_sec = network_bandwidth_bytes_per_sec
         # How long to keep an executor alive (seconds) after its last use before calling
         # `cleanup_after_run()`. None or <=0 disables delayed cleanup.
@@ -225,6 +231,8 @@ class Runner:
             content_store=self._content_store,
             peek_request=self.lifecycle.resident_requests.peek,
             delete_request=self.lifecycle.resident_requests.delete,
+            target_leg_listener_sock=self._target_leg_listener_sock,
+            target_leg_material=self._target_leg_material,
             logger=self.logger,
         )
         host.start()

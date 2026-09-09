@@ -56,6 +56,15 @@ class NetworkEndpointInfo(BaseModel):
     protocols: list[str] = Field(default_factory=list)
 
 
+class ResidentLegTrafficInfo(BaseModel):
+    """Resident payload carried on one leg over one transport."""
+
+    leg: str
+    transport: str
+    frames: int
+    payload_bytes: int
+
+
 class NetworkReachabilityEntryInfo(BaseModel):
     origin_id: str
     target_node_id: str

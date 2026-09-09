@@ -11,11 +11,13 @@ FAILED path, so the credit never strands and no ``DS`` state is fabricated.
 import asyncio
 from typing import Any
 
+from server.network.service import RouteResolution
 from server.network.state import (
     ReachabilityClass,
     ReplicaListenerAdvertisement,
     ResolvedRoute,
     RouteCandidate,
+    RouteObservationOutcome,
     RouteOrigin,
     Transport,
 )
@@ -61,10 +63,15 @@ def _held(stores: ResidentStores, replica_id: str | None) -> int:
 class _FakeNetwork:
     def __init__(self, base_candidate: bool = True) -> None:
         self._base_candidate = base_candidate
+        self.observations: list[tuple[Transport, RouteObservationOutcome]] = []
 
     async def resolve(
-        self, origin_node_id: str, listener: ReplicaListenerAdvertisement
-    ) -> tuple[RouteOrigin, ResolvedRoute]:
+        self,
+        origin_node_id: str,
+        listener: ReplicaListenerAdvertisement,
+        *,
+        target_leg_node_id: str | None,
+    ) -> RouteResolution:
         origin = RouteOrigin(
             origin_id="rog-1",
             endpoint_id="ep-root",
@@ -83,7 +90,18 @@ class _FakeNetwork:
             route_epoch=1,
             candidates=candidates,
         )
-        return origin, route
+        return RouteResolution(origin, origin, route)
+
+    def record_observations(
+        self,
+        resolution: RouteResolution,
+        listener: ReplicaListenerAdvertisement,
+        observations: list[tuple[Transport, RouteObservationOutcome]],
+    ) -> None:
+        self.observations.extend(observations)
+
+    async def endpoint_for(self, node_id: str) -> None:
+        return None
 
 
 class _FakeSessions:

@@ -1,15 +1,22 @@
 """The pure network route resolver.
 
-``resolve_route`` is a pure control-plane function: given a trusted ``RouteOrigin``, the
-target replica listener, the target node's endpoint advertisement, and a snapshot of the
-derived reachability view, it returns an ordered, expiry-bounded ``ResolvedRoute``
-candidate ladder. It is pure — it mutates nothing and permits no peer discovery; the
-deputy executes only the candidates it returns.
+``resolve_route`` is a pure control-plane function: given the logical ``RouteOrigin``,
+the root origin that opens any forward-dialed target leg, the target replica listener,
+the target node's endpoint advertisement, and a snapshot of the derived reachability
+view, it returns an ordered, expiry-bounded ``ResolvedRoute`` candidate ladder. It is
+pure — it mutates nothing and permits no peer discovery; a deputy executes only the
+candidates it returns.
+
+The two origins are distinct sources. ``control_relay`` runs from the logical origin's
+own outbound attachment, and the resolved route keeps that origin as its identity. The
+forward-dial offloads are opened by the root, so they are graded and their reachability
+keyed against the root's origin — the root is the physical target-leg bridge while the
+logical origin remains the source.
 
 Ladder rules:
 - ``worker_direct`` is legal only when the listener is explicitly directly routable and
-  the origin's network class can reach the target endpoint's class. Shared-node
-  placement alone is not sufficient.
+  the root's network class can reach the target endpoint's class. Shared-node placement
+  alone is not sufficient.
 - ``node_relay`` goes through the target node's announced endpoint and its node-local
   uplink; it is the initial same-node path as well as the normal cross-node path.
 - ``control_relay`` is the universal reverse-rendezvous base: the root bridges between
@@ -17,6 +24,10 @@ Ladder rules:
   delivery. Its feasibility is that both ends have a registered outbound attachment, not
   that either is inbound-reachable, so it is the guaranteed base whenever both
   attachments are present — including for an outbound-only node with no inbound URL.
+
+Each forward-dial candidate carries whether the deployment's trust policy admits it as
+an offload for claim-gated resident traffic; the reachability diagnostic still measures
+one the policy does not admit.
 
 Candidates a demotion has removed drop out; among those left, verified paths precede
 untried ones, and within a rank the base preference is direct, then node relay, then
@@ -33,6 +44,7 @@ from .state import (
     RouteHop,
     RouteOrigin,
     RouteTarget,
+    TargetLegTrustPolicy,
     Transport,
 )
 
@@ -60,12 +72,40 @@ def _base_index(transport: Transport) -> int:
     }[transport]
 
 
+def _admits(
+    trust: TargetLegTrustPolicy,
+    node_endpoint: NetworkEndpointAdvertisement,
+    listener: RouteTarget,
+    transport: Transport,
+) -> bool:
+    """Whether the trust policy admits this forward-dial candidate as an offload.
+
+    The target must sit in the required trust domain and a trusted reachability class,
+    and advertise the mutually authenticated transport — the node for both offloads, the
+    listener itself for a direct dial, which also needs the node's purpose-scoped
+    target-leg listener for a node relay.
+    """
+    if not trust.enabled:
+        return False
+    if node_endpoint.trust_domain != trust.trust_domain:
+        return False
+    if node_endpoint.reachability_class not in trust.classes:
+        return False
+    if trust.protocol not in node_endpoint.protocols:
+        return False
+    if transport is Transport.NODE_RELAY:
+        return bool(node_endpoint.target_leg_url)
+    return trust.protocol in listener.protocols
+
+
 def resolve_route(
     origin: RouteOrigin,
     listener: RouteTarget,
     node_endpoint: NetworkEndpointAdvertisement | None,
     reachability: NetworkReachabilityView,
     *,
+    target_leg_origin: RouteOrigin,
+    trust: TargetLegTrustPolicy,
     now: float,
     route_epoch: int,
     expires_at: float | None = None,
@@ -78,10 +118,15 @@ def resolve_route(
     """
     graded: list[tuple[int, int, RouteCandidate]] = []
 
-    def consider(transport: Transport, hops: tuple[RouteHop, ...]) -> None:
+    def consider(
+        transport: Transport,
+        hops: tuple[RouteHop, ...],
+        grading_origin: RouteOrigin,
+        trusted: bool = False,
+    ) -> None:
         state = reachability.state_for(
-            origin.origin_id,
-            origin.policy_class,
+            grading_origin.origin_id,
+            grading_origin.policy_class,
             listener.node_id,
             listener.incarnation,
             listener.listener_generation,
@@ -100,7 +145,7 @@ def resolve_route(
             (
                 rank,
                 _base_index(transport),
-                RouteCandidate(transport=transport, hops=hops),
+                RouteCandidate(transport=transport, hops=hops, trusted=trusted),
             )
         )
 
@@ -110,7 +155,7 @@ def resolve_route(
         and direct_route is not None
         and node_endpoint is not None
         and _class_reachable(
-            origin.reachability_class, node_endpoint.reachability_class
+            target_leg_origin.reachability_class, node_endpoint.reachability_class
         )
     ):
         consider(
@@ -122,24 +167,37 @@ def resolve_route(
                     node_id=listener.node_id,
                 ),
             ),
+            target_leg_origin,
+            _admits(trust, node_endpoint, listener, Transport.WORKER_DIRECT),
         )
 
-    if node_endpoint is not None and node_endpoint.url and direct_route is not None:
-        consider(
-            Transport.NODE_RELAY,
-            (
-                RouteHop(
-                    transport=Transport.NODE_RELAY,
-                    endpoint=node_endpoint.url,
-                    node_id=node_endpoint.node_id,
-                ),
-                RouteHop(
-                    transport=Transport.NODE_RELAY,
-                    endpoint=direct_route,
-                    node_id=listener.node_id,
-                ),
-            ),
+    if node_endpoint is not None and direct_route is not None:
+        trusted_node_relay = _admits(
+            trust, node_endpoint, listener, Transport.NODE_RELAY
         )
+        # A trusted offload enters the node's purpose-scoped target-leg listener; the
+        # diagnostic path enters its announced endpoint.
+        node_entry = (
+            node_endpoint.target_leg_url if trusted_node_relay else node_endpoint.url
+        )
+        if node_entry:
+            consider(
+                Transport.NODE_RELAY,
+                (
+                    RouteHop(
+                        transport=Transport.NODE_RELAY,
+                        endpoint=node_entry,
+                        node_id=node_endpoint.node_id,
+                    ),
+                    RouteHop(
+                        transport=Transport.NODE_RELAY,
+                        endpoint=direct_route,
+                        node_id=listener.node_id,
+                    ),
+                ),
+                target_leg_origin,
+                trusted_node_relay,
+            )
 
     # control_relay is the universal reverse-rendezvous base: the root bridges between
     # the origin and target reverse-relay attachments to the target's node-local sidecar
@@ -168,6 +226,7 @@ def resolve_route(
                     node_id=listener.node_id,
                 ),
             ),
+            origin,
         )
 
     graded.sort(key=lambda item: (item[0], item[1]))

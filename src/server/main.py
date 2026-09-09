@@ -29,7 +29,12 @@ from .clients.redis import resident_relay_client
 from .config import NodeRole, ServerConfig
 from .dispatcher.factory import create_dispatcher
 from .hooks import register
-from .network.rendezvous import RootCursorStore, RootRendezvousBridge
+from .network.rendezvous import (
+    RelayOriginSink,
+    RelayTargetSink,
+    RootCursorStore,
+    RootRendezvousBridge,
+)
 from .network.reverse_relay import (
     BinaryRedis,
     RelaySessionStore,
@@ -39,6 +44,8 @@ from .network.service import NetworkPlane
 from .registries import WorkerRegistry, WorkflowRegistry
 from .registries.node import NodeRegistry
 from .registries.resident import ResidentRegistry
+from .resident.leg_metrics import ResidentLegMetrics
+from .resident.target_leg import bridge_offload_selector, build_target_leg_support
 from .resident.wiring import build_resident_capacity, wire_worker_delivery
 from .routers import docs, health, v1
 from .serve import SERVE_EDGE_STREAM_ID
@@ -156,6 +163,18 @@ SERVE_BINDINGS = None
 NETWORK_PLANE = None
 RESIDENT_BRIDGE = None
 RESIDENT_BRIDGE_TASK = None
+RESIDENT_LEG_METRICS = ResidentLegMetrics()
+BRIDGE_TARGET_LEGS = None
+
+
+def _close_target_leg(session_id: str) -> None:
+    """Release the root's offloaded target leg when its invocation is reaped."""
+    if RESIDENT_BRIDGE is not None:
+        RESIDENT_BRIDGE.release(session_id)
+    if BRIDGE_TARGET_LEGS is not None:
+        BRIDGE_TARGET_LEGS.close(session_id)
+
+
 # The root node id, resolved after the supervisor handshake; the gated serve edge reads
 # it lazily to fence its transport-only route origin.
 ROOT_NODE_ID: str | None = None
@@ -236,10 +255,31 @@ if IS_ROOT_NODE:
                 tls_ca_file=config.redis.tls_ca_file,
             ),
         )
+        _relay_streams = RelayStreamStore(_relay_redis)
+        _relay_sessions = RelaySessionStore(_relay_redis)
+        _target_leg_support = build_target_leg_support(
+            config.orchestration.network,
+            observe=lambda session_id, transport, outcome: (
+                RESIDENT_CONTROL.record_target_leg_observation(
+                    session_id, transport, outcome
+                )
+                if RESIDENT_CONTROL is not None
+                else None
+            ),
+            meter=RESIDENT_LEG_METRICS.record,
+            logger=logger,
+        )
+        BRIDGE_TARGET_LEGS = _target_leg_support.carriage(
+            RelayTargetSink(_relay_streams, _relay_sessions),
+            RelayOriginSink(_relay_streams, _relay_sessions).send,
+            logger,
+        )
         RESIDENT_BRIDGE = RootRendezvousBridge(
-            RelayStreamStore(_relay_redis),
-            RelaySessionStore(_relay_redis),
+            _relay_streams,
+            _relay_sessions,
             RootCursorStore(_relay_redis),
+            offload_for=bridge_offload_selector(BRIDGE_TARGET_LEGS),
+            meter=RESIDENT_LEG_METRICS.record,
             logger=logger,
         )
 
@@ -265,6 +305,7 @@ if IS_ROOT_NODE:
             sessions=RelaySessionStore(_relay_redis),
             resident_cfg=config.orchestration.resident,
             root_node_id=lambda: ROOT_NODE_ID,
+            close_target_leg=_close_target_leg,
             edge_id=SERVE_EDGE_STREAM_ID,
         )
 
@@ -278,6 +319,7 @@ if IS_ROOT_NODE:
             registry=RESIDENT_REGISTRY,
             relay_redis=_relay_redis,
             port_forward=config.port_forward,
+            target_leg=_target_leg_support,
             logger=logger,
         )
         GATED_SERVE = _serve_wiring.gated_serve
@@ -633,6 +675,7 @@ app.state.resident_control = RESIDENT_CONTROL
 app.state.gated_serve = GATED_SERVE
 app.state.serve_bindings = SERVE_BINDINGS
 app.state.network_plane = NETWORK_PLANE
+app.state.resident_leg_metrics = RESIDENT_LEG_METRICS
 app.state.content_store = CONTENT_STORE
 # Started in lifespan on the root node when the resident relay bridge is enabled.
 app.state.resident_bridge_task = None

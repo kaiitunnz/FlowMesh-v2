@@ -7,10 +7,10 @@ takes a ``ResidentCarriagePlan`` naming the selected transport and returns the s
 that carries the attempt's frames. Selecting the transport stays control's decision;
 the carriage only realizes it, and never reinterprets one transport as another.
 
-The sole realization here is ``ControlRelayCarriage``, the universal reverse-rendezvous
-relay every deployment can reach. A trusted direct or node-relay carriage is a later
-addition behind the same factory; declaring the seam now lets one slot in without
-changing any drive that already takes its sink from a carriage.
+``ControlRelayCarriage`` realizes the universal reverse-rendezvous relay every
+deployment can reach. A root that opens a trusted forward-dialed target leg realizes it
+behind the same seam, so a drive takes its sink from a carriage without knowing which
+transport carries it.
 """
 
 from typing import Protocol
@@ -19,8 +19,7 @@ from pydantic import BaseModel, ConfigDict
 
 from .transport import ResidentFrameSink
 
-# The base transport candidate every healthy attachment resolves, and the only one a
-# carriage realizes here.
+# The base transport candidate every healthy attachment resolves.
 CONTROL_RELAY = "control_relay"
 
 
@@ -35,12 +34,20 @@ class ResidentCarriagePlan(BaseModel):
     the resolved route, plus the route's epoch and listener generation for diagnostics.
     It is not authority: it mints no claim and chooses no capacity, and rides beside the
     handoff rather than inside it, so a carriage realizes only what control decided.
+
+    ``selected_transport`` is the transport the plan's holder carries its own leg over.
+    ``target_leg_transport`` and ``target_leg_endpoint`` are the root's separate
+    selection for the leg into the target, realized only by the root; they coincide with
+    ``selected_transport`` when the root is itself the origin. A worker origin carries
+    ``control_relay`` to the root whatever the root then does with the target leg.
     """
 
     model_config = ConfigDict(frozen=True)
 
     session_id: str
     selected_transport: str = CONTROL_RELAY
+    target_leg_transport: str = CONTROL_RELAY
+    target_leg_endpoint: str = ""
     route_epoch: int = 0
     listener_generation: int = 0
 

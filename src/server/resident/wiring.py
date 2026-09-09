@@ -134,6 +134,7 @@ def wire_worker_delivery(
     sessions: RelaySessionStore,
     resident_cfg: ResidentCapacityConfig,
     root_node_id: Callable[[], str | None] | None = None,
+    close_target_leg: Callable[[str], None] | None = None,
     edge_id: str = "",
 ) -> None:
     """Wire the worker-owned resident data path into resident-capacity control.
@@ -162,6 +163,10 @@ def wire_worker_delivery(
         worker = worker_registry.get_worker(worker_id)
         return worker.node_id if worker is not None else None
 
+    def _resident_listener_port_of(worker_id: str) -> int:
+        worker = worker_registry.get_worker(worker_id)
+        return worker.capabilities.resident_listener_port if worker is not None else 0
+
     def _origin_worker_of_task(task_id: str) -> str | None:
         record = runtime.get_record(task_id)
         return record.assigned_worker if record else None
@@ -178,6 +183,8 @@ def wire_worker_delivery(
             origin_worker_of_task=_origin_worker_of_task,
             serve_worker_of=_serve_worker_of,
             node_of_worker=_node_of_worker,
+            resident_listener_port_of=_resident_listener_port_of,
+            close_target_leg=close_target_leg,
             network=network,
             sessions=sessions,
             directly_routable=resident_cfg.sidecar_directly_routable,

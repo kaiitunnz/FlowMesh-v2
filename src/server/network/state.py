@@ -116,6 +116,7 @@ class RouteTarget(Protocol):
     incarnation: int
     listener_generation: int
     routes: tuple[str, ...]
+    protocols: tuple[str, ...]
     directly_routable: bool
 
 
@@ -244,12 +245,38 @@ class RouteHop(BaseModel):
 
 
 class RouteCandidate(BaseModel):
-    """One transport alternative in the ordered candidate ladder."""
+    """One transport alternative in the ordered candidate ladder.
+
+    ``trusted`` marks a forward-dial candidate the deployment's target-leg trust policy
+    admits as an offload for claim-gated resident traffic. A resident target leg is
+    carried over a candidate only while it is marked; an untrusted candidate stays
+    available to the reachability diagnostic, which measures paths rather than using
+    them for admitted traffic. ``control_relay`` needs no such mark.
+    """
 
     model_config = ConfigDict(frozen=True)
 
     transport: Transport
     hops: tuple[RouteHop, ...]
+    trusted: bool = False
+
+
+class TargetLegTrustPolicy(BaseModel):
+    """The deployment's admission conditions for a root-opened target-leg offload.
+
+    A forward-dial candidate is trusted only when the policy is enabled and the target
+    node advertises the required trust domain, one of the trusted reachability classes,
+    and the mutually authenticated transport ``protocol``. These are transport-admission
+    conditions: the policy mints no authority, and a target it does not admit is carried
+    over ``control_relay``.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    enabled: bool = False
+    trust_domain: str = ""
+    classes: frozenset[ReachabilityClass] = frozenset()
+    protocol: str = ""
 
 
 class ResolvedRoute(BaseModel):

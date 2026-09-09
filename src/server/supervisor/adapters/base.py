@@ -179,6 +179,12 @@ class WorkerAdapter(ABC):
             "PREDOWNLOAD_MODEL_LIST": config.predownload_model_list,
             "NEBULA_API_TOKEN": to_env_str(config.nebula_api_token),
             "NEBULA_API_BASE_URL": env.NEBULA_API_BASE_URL,
+            "NETWORK_PLANE_TARGET_LEG_CA_B64": env.NETWORK_PLANE_TARGET_LEG_CA_B64,
+            "NETWORK_PLANE_TARGET_LEG_CERT_B64": env.NETWORK_PLANE_TARGET_LEG_CERT_B64,
+            "NETWORK_PLANE_TARGET_LEG_KEY_B64": env.NETWORK_PLANE_TARGET_LEG_KEY_B64,
+            "NETWORK_PLANE_TARGET_LEG_ROOT_IDENTITY": (
+                env.NETWORK_PLANE_TARGET_LEG_ROOT_IDENTITY
+            ),
         }
 
 

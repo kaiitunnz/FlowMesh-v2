@@ -250,6 +250,17 @@ def _endpoint_advertisement_provider(
         return lambda: None
 
     url = network_cfg.endpoint_url or ""
+    target_leg = network_cfg.target_leg
+    # The node advertises its target-leg listener, and the transport it serves it over,
+    # only where the deployment admits trusted offloads and it actually hosts one.
+    target_leg_url = (
+        target_leg.node_listener_url
+        if target_leg.enabled and target_leg.node_listener_url
+        else ""
+    )
+    protocols = network_cfg.protocols + (
+        (target_leg.protocol,) if target_leg_url else ()
+    )
     try:
         reachability_class = ReachabilityClass(network_cfg.reachability_class)
     except ValueError:
@@ -265,10 +276,11 @@ def _endpoint_advertisement_provider(
         return NetworkEndpointAdvertisement(
             endpoint_id=url,
             url=url,
+            target_leg_url=target_leg_url,
             generation=current,
             trust_domain=network_cfg.trust_domain,
             reachability_class=reachability_class,
-            protocols=network_cfg.protocols,
+            protocols=protocols,
         )
 
     return provider
@@ -290,6 +302,7 @@ def _run_supervisor(
     from typing import cast
 
     from shared._version import FLOWMESH_RELEASE_VERSION
+    from shared.network.mtls import MutualTlsMaterial
     from shared.schemas.node import NodeInfo
     from shared.utils.time import now_iso
 
@@ -309,6 +322,7 @@ def _run_supervisor(
     from .services.relay_service import RelayService
     from .services.relay_uplink import RelayUplinkService
     from .services.reverse_relay_attachment import ReverseRelayAttachment
+    from .services.target_leg_listener import NodeTargetLegListener
     from .services.task_listener import TaskListener
 
     # --- logging (child has its own logger) ---
@@ -444,6 +458,24 @@ def _run_supervisor(
         resident_bridge=resident_bridge,
     )
 
+    target_leg_listener: NodeTargetLegListener | None = None
+    if (
+        resident_bridge is not None
+        and network_cfg.target_leg.enabled
+        and network_cfg.target_leg.node_listener_url
+    ):
+        target_leg_listener = NodeTargetLegListener(
+            endpoint=network_cfg.target_leg.node_listener_url,
+            material=MutualTlsMaterial.from_b64(
+                ca_b64=network_cfg.target_leg.ca_b64,
+                cert_b64=network_cfg.target_leg.cert_b64,
+                key_b64=network_cfg.target_leg.key_b64,
+                root_identity=network_cfg.target_leg.root_identity,
+            ),
+            bridge=resident_bridge,
+            logger=logger,
+        )
+
     network_listeners: NetworkPlaneListeners | None = None
     if network_cfg.enabled and network_cfg.sidecar_url and network_cfg.endpoint_url:
         network_listeners = NetworkPlaneListeners(
@@ -500,6 +532,8 @@ def _run_supervisor(
         await grpc_server.start()
         if network_listeners is not None:
             await network_listeners.start()
+        if target_leg_listener is not None:
+            await target_leg_listener.start()
         if resident_attachment is not None:
             resident_attachment.start(loop)
         # Wire the re-register callback only once the reader threads are up
@@ -516,6 +550,8 @@ def _run_supervisor(
         lifecycle.publish_unregister()
         if resident_attachment is not None:
             await resident_attachment.stop()
+        if target_leg_listener is not None:
+            await target_leg_listener.stop()
         if network_listeners is not None:
             await network_listeners.stop()
         await grpc_server.stop()

@@ -33,11 +33,18 @@ class SSHLimits(BaseModel):
 
 
 class WorkerCapabilities(BaseModel):
-    """Task capabilities a worker advertises to the dispatcher."""
+    """Capabilities a worker advertises to the control plane."""
 
     supported_task_types: frozenset[TaskType] = Field(
         default_factory=frozenset,
         description="Types of tasks this worker can service.",
+    )
+    resident_listener_port: int = Field(
+        default=0,
+        description=(
+            "Port of the worker's claim-gated resident target-leg listener; 0 when it "
+            "hosts none."
+        ),
     )
 
 

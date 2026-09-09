@@ -11,10 +11,12 @@ import asyncio
 import concurrent.futures
 import contextlib
 import logging
+import socket
 import threading
 from collections.abc import Callable, Coroutine
 from typing import Any
 
+from shared.network.mtls import MutualTlsMaterial, server_context
 from shared.network.relay_frame import RelayDirection, RelayFrame
 from shared.outcome import FabricContentStore
 from shared.resident.carriage import ControlRelayCarriage, ResidentCarriagePlan
@@ -27,6 +29,7 @@ from shared.resident.gate import LoadEvidence
 from shared.resident.reports import ResidentBootstrapAck, ResidentOpOutcome
 from shared.resident.transport import ResidentFrameSink
 
+from .direct_listener import ResidentDirectListener
 from .engine import EngineOpen, HttpEngineDelivery, RawEngineOpen, RawHttpEngineDelivery
 from .origin_driver import ResidentOriginDriver, ResidentOriginRequest
 from .replica_sidecar import ResidentReplicaSidecar
@@ -64,6 +67,8 @@ class ResidentLaneHost:
         engine_open: EngineOpen | None = None,
         engine_open_raw: RawEngineOpen | None = None,
         engine_timeout_sec: float = 300.0,
+        target_leg_listener_sock: socket.socket | None = None,
+        target_leg_material: MutualTlsMaterial | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self._push_frame = push_frame
@@ -78,6 +83,9 @@ class ResidentLaneHost:
         self._engine_open_raw = engine_open_raw or RawHttpEngineDelivery(
             timeout_sec=engine_timeout_sec
         )
+        self._target_leg_listener_sock = target_leg_listener_sock
+        self._target_leg_material = target_leg_material
+        self._direct_listener: ResidentDirectListener | None = None
         self._logger = logger or logging.getLogger("resident-lane-host")
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(
@@ -93,9 +101,9 @@ class ResidentLaneHost:
 
     async def _build(self) -> None:
         sink: ResidentFrameSink = _EventFrameSink(self._push_frame)
-        # Every origin attempt on this worker rides control_relay over the one
-        # authenticated attachment; a later PR adds direct/node carriages behind the
-        # same factory without changing the drives that take their sink from it.
+        # This worker's origin attempts ride control_relay over its one authenticated
+        # attachment. A trusted target-leg offload is opened by the root into the
+        # replica lane's listener, not dialed from here.
         carriage = ControlRelayCarriage(sink)
         self._origin = ResidentOriginDriver(
             carriage=carriage,
@@ -111,6 +119,22 @@ class ResidentLaneHost:
             on_load=self._on_load,
             logger=self._logger,
         )
+        await self._start_direct_listener()
+
+    async def _start_direct_listener(self) -> None:
+        """Serve the worker's claim-gated target-leg listener, where one is set."""
+        sock, material = self._target_leg_listener_sock, self._target_leg_material
+        if sock is None or material is None or self._replica is None:
+            return
+        listener = ResidentDirectListener(
+            sock=sock,
+            ssl_context=server_context(material),
+            root_identity=material.root_identity,
+            deliver=self._replica.on_frame,
+            logger=self._logger,
+        )
+        await listener.start()
+        self._direct_listener = listener
 
     def _on_load(self, evidence: LoadEvidence) -> None:
         """Emit one admitted operation's claim-tagged load evidence for accounting."""
@@ -231,6 +255,9 @@ class ResidentLaneHost:
 
     def stop(self) -> None:
         """Reap the lanes and stop the loop thread."""
+        if self._direct_listener is not None:
+            with contextlib.suppress(Exception):
+                self._call(self._direct_listener.stop).result(timeout=5)
         if self._replica is not None:
             with contextlib.suppress(Exception):
                 self._call(self._replica.aclose).result(timeout=5)

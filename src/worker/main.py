@@ -1,8 +1,10 @@
 import argparse
 import logging
 import signal
+import socket
 from collections.abc import Mapping
 
+from shared.network.mtls import MutualTlsMaterial, MutualTlsMaterialError
 from shared.schemas.worker import WorkerCapabilities
 from shared.tasks.task_type import TaskType
 from shared.tasks.worker_message import WorkerHardware
@@ -183,6 +185,42 @@ def build_capabilities(
     return WorkerCapabilities(supported_task_types=supported_task_types)
 
 
+def _target_leg_material(
+    cfg: WorkerConfig, logger: logging.Logger
+) -> MutualTlsMaterial | None:
+    """The mutual-TLS material the worker serves its target-leg listener over."""
+    if not cfg.target_leg_ca_b64:
+        return None
+    try:
+        return MutualTlsMaterial.from_b64(
+            ca_b64=cfg.target_leg_ca_b64,
+            cert_b64=cfg.target_leg_cert_b64,
+            key_b64=cfg.target_leg_key_b64,
+            root_identity=cfg.target_leg_root_identity,
+        )
+    except MutualTlsMaterialError as exc:
+        logger.warning("Resident target-leg listener disabled: %s", exc)
+        return None
+
+
+def _bind_target_leg_listener(
+    material: MutualTlsMaterial | None,
+) -> socket.socket | None:
+    """Bind the target-leg listener so its port is advertised at registration.
+
+    The port is bound before the worker registers and served once the resident lane
+    loop comes up, so the address control advertises is the one the root reaches.
+    """
+    if material is None or not material.root_identity:
+        return None
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("0.0.0.0", 0))  # nosec B104 - the root dials it from off-host
+    sock.listen(16)
+    sock.setblocking(False)
+    return sock
+
+
 def main() -> None:
     args = _parse_args()
     if args.collect_hw:
@@ -228,7 +266,15 @@ def main() -> None:
         enable_mp_executors=cfg.enable_mp_executors,
     )
 
-    capabilities = build_capabilities(executors)
+    target_leg_material = _target_leg_material(cfg, logger)
+    target_leg_sock = _bind_target_leg_listener(target_leg_material)
+    capabilities = build_capabilities(executors).model_copy(
+        update={
+            "resident_listener_port": (
+                target_leg_sock.getsockname()[1] if target_leg_sock is not None else 0
+            )
+        }
+    )
     ssh_limits = cfg.ssh_limits
     if TaskType.SSH in capabilities.supported_task_types:
         if ssh_limits is None:
@@ -262,6 +308,8 @@ def main() -> None:
         model_api_key=cfg.model_api_key,
         model_egress_timeout_sec=cfg.model_egress_timeout_sec,
         content_store=build_content_store(cfg.server_base_url),
+        target_leg_listener_sock=target_leg_sock,
+        target_leg_material=target_leg_material,
     )
 
     # Install signal handlers to allow graceful shutdown

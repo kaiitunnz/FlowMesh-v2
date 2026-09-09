@@ -25,6 +25,31 @@ def _require_network_plane_for_resident(
         )
 
 
+def _require_target_leg_mutual_tls(
+    env: dict[str, str], errors: list[str], warnings: list[str]
+) -> None:
+    """A trusted target leg is carried only over mutual TLS with a pinned root."""
+    if not parse_bool(env.get("NETWORK_PLANE_TARGET_LEG_ENABLED", "")):
+        return
+    missing = [
+        name
+        for name in (
+            "NETWORK_PLANE_TARGET_LEG_CA_B64",
+            "NETWORK_PLANE_TARGET_LEG_CERT_B64",
+            "NETWORK_PLANE_TARGET_LEG_KEY_B64",
+            "NETWORK_PLANE_TARGET_LEG_ROOT_IDENTITY",
+        )
+        if not env.get(name, "").strip()
+    ]
+    if missing:
+        errors.append(
+            "NETWORK_PLANE_TARGET_LEG_ENABLED requires "
+            + ", ".join(missing)
+            + ": a target-leg offload is carried only over mutual TLS with a pinned "
+            "root identity"
+        )
+
+
 STACK_ENV_SCHEMA = EnvSchema(
     name="stack",
     header=[
@@ -636,6 +661,50 @@ STACK_ENV_SCHEMA = EnvSchema(
                     var_type=EnvVarType.INT,
                     min_value=1024,
                 ),
+                EnvVar(
+                    "NETWORK_PLANE_TARGET_LEG_ENABLED",
+                    "false",
+                    description="Enable trusted root-opened target-leg offloads.",
+                    var_type=EnvVarType.BOOL,
+                ),
+                EnvVar(
+                    "NETWORK_PLANE_TARGET_LEG_CLASSES",
+                    "same_node,same_cluster",
+                    description="Reachability classes eligible for an offload.",
+                    var_type=EnvVarType.CSV,
+                ),
+                EnvVar(
+                    "NETWORK_PLANE_TARGET_LEG_TRUST_DOMAIN",
+                    "",
+                    description=(
+                        "Trust domain an offload requires; the endpoint's if empty."
+                    ),
+                ),
+                EnvVar(
+                    "NETWORK_PLANE_TARGET_LEG_NODE_LISTENER_URL",
+                    "",
+                    description="Node target-leg listener (host:port).",
+                ),
+                EnvVar(
+                    "NETWORK_PLANE_TARGET_LEG_CA_B64",
+                    "",
+                    description="Base64 PEM CA bundle for target-leg mutual TLS.",
+                ),
+                EnvVar(
+                    "NETWORK_PLANE_TARGET_LEG_CERT_B64",
+                    "",
+                    description="Base64 PEM certificate for target-leg mutual TLS.",
+                ),
+                EnvVar(
+                    "NETWORK_PLANE_TARGET_LEG_KEY_B64",
+                    "",
+                    description="Base64 PEM private key for target-leg mutual TLS.",
+                ),
+                EnvVar(
+                    "NETWORK_PLANE_TARGET_LEG_ROOT_IDENTITY",
+                    "",
+                    description="Root certificate identity a target listener pins.",
+                ),
             ],
         ),
         EnvSection(
@@ -1114,6 +1183,7 @@ STACK_ENV_SCHEMA = EnvSchema(
             errors,
         ),
         _require_network_plane_for_resident,
+        _require_target_leg_mutual_tls,
     ],
 )
 

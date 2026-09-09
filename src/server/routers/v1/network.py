@@ -12,7 +12,12 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from shared.schemas.command import CommandMessage, CommandType
 
-from ...app_state import get_logger, get_network_plane, get_node_registry
+from ...app_state import (
+    get_logger,
+    get_network_plane,
+    get_node_registry,
+    get_resident_leg_metrics,
+)
 from ...auth.security import (
     PrincipalContext,
     authenticate_connection,
@@ -27,11 +32,13 @@ from ...network.state import (
 )
 from ...network.wire import APP_ERROR_SENTINEL
 from ...registries.node import NodeRegistry
+from ...resident.leg_metrics import ResidentLegMetrics
 from ...schemas.network import (
     NetworkEchoRequest,
     NetworkEchoResponse,
     NetworkEndpointInfo,
     NetworkReachabilityEntryInfo,
+    ResidentLegTrafficInfo,
 )
 
 router = APIRouter(prefix="/network", tags=["Network"])
@@ -78,13 +85,17 @@ async def network_echo(
         routes=tuple(body.listener.routes),
         directly_routable=body.listener.directly_routable,
     )
-    resolved = await network.resolve(body.origin_node_id, listener)
-    if resolved is None:
+    # The probe dials from the origin node on its own behalf, so it opens no
+    # root target leg and resolves no offload candidate.
+    resolution = await network.resolve(
+        body.origin_node_id, listener, target_leg_node_id=None
+    )
+    if resolution is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="origin node has no network endpoint advertisement",
         )
-    origin, route = resolved
+    route = resolution.route
 
     echo_payload = APP_ERROR_SENTINEL if body.app_error else body.payload.encode()
     cmd = CommandMessage(
@@ -115,7 +126,7 @@ async def network_echo(
         (Transport(item["transport"]), RouteObservationOutcome(item["outcome"]))
         for item in resp.data.get("observations", [])
     ]
-    network.record_observations(origin, listener, observations)
+    network.record_observations(resolution, listener, observations)
 
     echoed_b64 = resp.data.get("echoed_b64")
     echoed = base64.b64decode(echoed_b64).decode() if echoed_b64 else None
@@ -124,7 +135,7 @@ async def network_echo(
         echoed=echoed,
         route_epoch=route.route_epoch,
         candidates=[candidate.transport.value for candidate in route.candidates],
-        reachability=network.reachability_states(origin, listener),
+        reachability=network.reachability_states(resolution, listener),
     )
 
 
@@ -151,6 +162,31 @@ async def list_network_endpoints(
             protocols=list(adv.protocols),
         )
         for adv in await network.endpoints()
+    ]
+
+
+@router.get(
+    "/legs",
+    summary="List resident per-leg traffic",
+    description=(
+        "List resident payload frames and bytes carried per leg and transport, so an "
+        "offloaded target leg is readable separately from the source-to-root leg."
+    ),
+)
+async def list_resident_legs(
+    principal: PrincipalContext = Depends(authenticate_connection),
+    metrics: ResidentLegMetrics = Depends(get_resident_leg_metrics),
+    logger: logging.Logger = Depends(get_logger),
+) -> list[ResidentLegTrafficInfo]:
+    await _require_admin(principal, logger)
+    return [
+        ResidentLegTrafficInfo(
+            leg=str(entry["leg"]),
+            transport=str(entry["transport"]),
+            frames=int(entry["frames"]),
+            payload_bytes=int(entry["payload_bytes"]),
+        )
+        for entry in metrics.snapshot()
     ]
 
 

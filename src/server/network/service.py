@@ -8,6 +8,7 @@ reachability for diagnostics.
 
 import logging
 import time
+from dataclasses import dataclass
 
 from shared.utils.ids import new_route_origin_id
 
@@ -18,13 +19,40 @@ from .resolver import resolve_route
 from .state import (
     NetworkEndpointAdvertisement,
     PolicyClass,
+    ReachabilityClass,
     ReplicaListenerAdvertisement,
     ResolvedRoute,
     RouteObservation,
     RouteObservationOutcome,
     RouteOrigin,
+    TargetLegTrustPolicy,
     Transport,
 )
+
+# A resolution that opens no forward-dial target leg admits no offload candidate.
+_NO_OFFLOAD = TargetLegTrustPolicy()
+
+
+@dataclass(frozen=True)
+class RouteResolution:
+    """One resolved route and the two origins that graded it.
+
+    ``origin`` is the logical source and grades ``control_relay``; ``target_leg_origin``
+    is the party that opens a forward-dialed target leg and grades the two offloads.
+    They are the same origin when the logical source opens its own target leg.
+    """
+
+    origin: RouteOrigin
+    target_leg_origin: RouteOrigin
+    route: ResolvedRoute
+
+    def grading_origin(self, transport: Transport) -> RouteOrigin:
+        """The origin whose reachability key this transport's evidence belongs to."""
+        return (
+            self.origin
+            if transport is Transport.CONTROL_RELAY
+            else self.target_leg_origin
+        )
 
 
 def stamp_endpoint(
@@ -59,6 +87,14 @@ class NetworkPlane:
         logger: logging.Logger,
     ) -> None:
         self._config = config
+        self._trust = TargetLegTrustPolicy(
+            enabled=config.target_leg.enabled,
+            trust_domain=config.target_leg.trust_domain or config.trust_domain,
+            classes=frozenset(
+                ReachabilityClass(value) for value in config.target_leg.classes
+            ),
+            protocol=config.target_leg.protocol,
+        )
         self._nodes = node_registry
         self._logger = logger
         self._reachability = NetworkReachabilityView(
@@ -85,19 +121,39 @@ class NetworkPlane:
         return stamp_endpoint(node.network_endpoint, node.id)
 
     async def resolve(
-        self, origin_node_id: str, listener: ReplicaListenerAdvertisement
-    ) -> tuple[RouteOrigin, ResolvedRoute] | None:
+        self,
+        origin_node_id: str,
+        listener: ReplicaListenerAdvertisement,
+        *,
+        target_leg_node_id: str | None,
+    ) -> RouteResolution | None:
         """Resolve an ordered candidate ladder from origin to the target listener.
 
-        Returns ``None`` when the origin advertises no network endpoint.
+        ``target_leg_node_id`` names the node that opens a forward-dialed target leg —
+        the root, for a claim-gated resident invocation. Pass ``None`` to probe the
+        forward-dial legs from the logical origin itself: the candidates resolve for
+        reachability evidence and none of them is admitted as an offload.
+
+        Returns ``None`` when either origin advertises no network endpoint.
         """
         origin_endpoint = await self.endpoint_for(origin_node_id)
         if origin_endpoint is None:
             return None
+        if target_leg_node_id is None or target_leg_node_id == origin_node_id:
+            target_leg_endpoint = origin_endpoint
+            target_leg_node = origin_node_id
+        else:
+            resolved_endpoint = await self.endpoint_for(target_leg_node_id)
+            if resolved_endpoint is None:
+                return None
+            target_leg_endpoint = resolved_endpoint
+            target_leg_node = target_leg_node_id
         target_endpoint = await self.endpoint_for(listener.node_id)
         self._invalidate_on_rotation(target_endpoint)
 
         origin = self._route_origin(origin_endpoint, origin_node_id)
+        target_leg_origin = self._route_origin(target_leg_endpoint, target_leg_node)
+        trust = self._trust if target_leg_node_id is not None else _NO_OFFLOAD
         now = time.monotonic()
         self._route_epoch += 1
         route = resolve_route(
@@ -105,35 +161,45 @@ class NetworkPlane:
             listener,
             target_endpoint,
             self._reachability,
+            target_leg_origin=target_leg_origin,
+            trust=trust,
             now=now,
             route_epoch=self._route_epoch,
             expires_at=now + self._config.route_ttl_sec,
         )
+        resolution = RouteResolution(origin, target_leg_origin, route)
         for candidate in route.candidates:
+            grading = resolution.grading_origin(candidate.transport)
             self._reachability.mark_optimistic(
-                origin.origin_id,
-                origin.policy_class,
+                grading.origin_id,
+                grading.policy_class,
                 listener.node_id,
                 listener.incarnation,
                 listener.listener_generation,
                 candidate.transport,
                 now=now,
             )
-        return origin, route
+        return resolution
 
     def record_observations(
         self,
-        origin: RouteOrigin,
+        resolution: RouteResolution,
         listener: ReplicaListenerAdvertisement,
         observations: list[tuple[Transport, RouteObservationOutcome]],
     ) -> None:
-        """Fold the deputy's classified observations into the reachability view."""
+        """Fold classified route observations into the reachability view.
+
+        Each observation lands on the key of the origin that grades its transport, so
+        evidence about a root-opened target leg accumulates once for the root rather
+        than separately under every logical caller.
+        """
         now = time.monotonic()
         for transport, outcome in observations:
+            grading = resolution.grading_origin(transport)
             self._reachability.observe(
                 RouteObservation(
-                    origin_id=origin.origin_id,
-                    policy_class=origin.policy_class,
+                    origin_id=grading.origin_id,
+                    policy_class=grading.policy_class,
                     target_node_id=listener.node_id,
                     incarnation=listener.incarnation,
                     listener_generation=listener.listener_generation,
@@ -144,22 +210,23 @@ class NetworkPlane:
             )
 
     def reachability_states(
-        self, origin: RouteOrigin, listener: ReplicaListenerAdvertisement
+        self, resolution: RouteResolution, listener: ReplicaListenerAdvertisement
     ) -> dict[str, str]:
         """The current directional state per transport, for the echo response."""
         now = time.monotonic()
-        return {
-            transport.value: self._reachability.state_for(
-                origin.origin_id,
-                origin.policy_class,
+        states: dict[str, str] = {}
+        for transport in Transport:
+            grading = resolution.grading_origin(transport)
+            states[transport.value] = self._reachability.state_for(
+                grading.origin_id,
+                grading.policy_class,
                 listener.node_id,
                 listener.incarnation,
                 listener.listener_generation,
                 transport,
                 now=now,
             ).value
-            for transport in Transport
-        }
+        return states
 
     def reachability_snapshot(self) -> list[dict[str, str | int]]:
         now = time.monotonic()

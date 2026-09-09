@@ -88,6 +88,14 @@ listed here is in `.env.example`.
 | `NETWORK_PLANE_CONNECT_BUDGET_SEC` | `5` | Per-candidate optimistic connect budget (seconds) |
 | `NETWORK_PLANE_ROUTE_TTL_SEC` | `30` | Resolved-route snapshot TTL (seconds) |
 | `NETWORK_PLANE_RELAY_BUFFER_BYTES` | `65536` | Bounded relay-session in-flight buffer (bytes) |
+| `NETWORK_PLANE_TARGET_LEG_ENABLED` | `false` | Enable trusted root-opened target-leg offloads |
+| `NETWORK_PLANE_TARGET_LEG_CLASSES` | `same_node,same_cluster` | Reachability classes eligible for an offload |
+| `NETWORK_PLANE_TARGET_LEG_TRUST_DOMAIN` | – | Trust domain an offload requires; the endpoint's if empty |
+| `NETWORK_PLANE_TARGET_LEG_NODE_LISTENER_URL` | – | Node target-leg listener (`host:port`) |
+| `NETWORK_PLANE_TARGET_LEG_CA_B64` | – | Base64 PEM CA bundle for target-leg mutual TLS |
+| `NETWORK_PLANE_TARGET_LEG_CERT_B64` | – | Base64 PEM certificate for target-leg mutual TLS |
+| `NETWORK_PLANE_TARGET_LEG_KEY_B64` | – | Base64 PEM private key for target-leg mutual TLS |
+| `NETWORK_PLANE_TARGET_LEG_ROOT_IDENTITY` | – | Root certificate identity a target listener pins |
 | `ENABLE_WORKER_WATCHDOG` | `true` | Worker death detection |
 | `WORKER_DEATH_GRACE_SEC` | `60` | Grace period before marking dead |
 | `WORKER_REHYDRATION_GRACE_SEC` | `120` | Extra grace for a worker's rehydrated in-flight tasks after the root restarts, before the watchdog may reclaim them |

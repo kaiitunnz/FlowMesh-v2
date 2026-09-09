@@ -22,6 +22,7 @@ from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from shared.network.frame_stream import split_host_port
 from shared.resident.carriage import CONTROL_RELAY, ResidentCarriagePlan
 from shared.resident.contracts import (
     AdmissionHandoff,
@@ -37,12 +38,15 @@ from shared.resident.reports import (
     ResidentStreamHead,
     ResidentStreamStatus,
 )
+from shared.schemas.network import TARGET_LEG_PROTOCOL
 from shared.utils.ids import new_relay_session_id
 
+from ..network.service import RouteResolution
 from ..network.state import (
+    NetworkEndpointAdvertisement,
     ReplicaListenerAdvertisement,
     ResolvedRoute,
-    RouteOrigin,
+    RouteObservationOutcome,
     Transport,
 )
 from ..orchestration.tool_dispatch import ToolInvocationEnvelope
@@ -86,9 +90,24 @@ class RouteResolver(Protocol):
     re-deriving endpoints, reachability, or the resolver.
     """
 
+    async def endpoint_for(
+        self, node_id: str
+    ) -> NetworkEndpointAdvertisement | None: ...
+
     async def resolve(
-        self, origin_node_id: str, listener: ReplicaListenerAdvertisement
-    ) -> tuple[RouteOrigin, ResolvedRoute] | None: ...
+        self,
+        origin_node_id: str,
+        listener: ReplicaListenerAdvertisement,
+        *,
+        target_leg_node_id: str | None,
+    ) -> RouteResolution | None: ...
+
+    def record_observations(
+        self,
+        resolution: RouteResolution,
+        listener: ReplicaListenerAdvertisement,
+        observations: list[tuple[Transport, RouteObservationOutcome]],
+    ) -> None: ...
 
 
 class ResidentSessionWriter(Protocol):
@@ -108,6 +127,25 @@ OriginWorkerOfTask = Callable[[str], str | None]
 # Resolves the worker serving a replica incarnation, or None when it is gone.
 ServeWorkerOf = Callable[[ReplicaIncarnation], str | None]
 
+# The port of the claim-gated resident target-leg listener a worker hosts, or 0.
+ResidentListenerPortOf = Callable[[str], int]
+
+# Releases the root's forward-dialed target leg for one session.
+CloseTargetLeg = Callable[[str], None]
+
+
+def _select_target_leg(route: ResolvedRoute) -> tuple[Transport, str]:
+    """The trusted forward-dial candidate the root opens, and the address it dials.
+
+    Candidates arrive in resolved preference order, so the first the deployment's trust
+    policy admits is the offload; a route with none carries its target leg over the
+    relay base.
+    """
+    for candidate in route.candidates:
+        if candidate.trusted and candidate.hops:
+            return candidate.transport, candidate.hops[0].endpoint
+    return Transport.CONTROL_RELAY, ""
+
 
 @dataclass
 class ResidentWorkerDelivery:
@@ -126,6 +164,8 @@ class ResidentWorkerDelivery:
     node_of_worker: NodeOfWorker
     network: RouteResolver
     sessions: ResidentSessionWriter
+    resident_listener_port_of: ResidentListenerPortOf | None = None
+    close_target_leg: CloseTargetLeg | None = None
     directly_routable: bool = False
     forward_api_key: str | None = None
     # The gated serve edge is the transport-only origin: it resolves its fence from the
@@ -301,6 +341,11 @@ class ResidentCapacityControl:
         self._max_transient_redrives = max_transient_redrives
         self._transient_failures: dict[str, int] = {}
         self._attempts: dict[str, _Attempt] = {}
+        # The route each live session resolved, so target-leg path evidence lands on the
+        # reachability key of the origin that graded that transport.
+        self._resolutions: dict[
+            str, tuple[RouteResolution, ReplicaListenerAdvertisement]
+        ] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
         self._admit_lock = asyncio.Lock()
         self._sweep_task: asyncio.Task[None] | None = None
@@ -410,6 +455,22 @@ class ResidentCapacityControl:
         self._transient_failures.pop(invocation_id, None)
         self._reap_attempt(invocation_id)
 
+    def record_target_leg_observation(
+        self, session_id: str, transport: Transport, outcome: RouteObservationOutcome
+    ) -> None:
+        """Fold one session's target-leg path evidence into the reachability view.
+
+        Route evidence is network evidence: it moves only the transport's reachability
+        state and never touches the invocation's claim or its held credit.
+        """
+        resolved = self._resolutions.get(session_id)
+        if resolved is None or self._delivery is None:
+            return
+        resolution, listener = resolved
+        self._delivery.network.record_observations(
+            resolution, listener, [(transport, outcome)]
+        )
+
     def _reap_attempt(self, invocation_id: str) -> None:
         """Reap both ends of a resident invocation on its fenced terminal.
 
@@ -439,6 +500,9 @@ class ResidentCapacityControl:
             "resident_sidecar_reap",
             {"invocation_id": attempt.invocation_id},
         )
+        self._resolutions.pop(attempt.session_id, None)
+        if self._delivery.close_target_leg is not None:
+            self._delivery.close_target_leg(attempt.session_id)
         self._reclaim_adapter_slot(attempt)
         # A standing serve replica drained by its task's stop is left DRAINING while an
         # in-flight claim held credit; its last release settles here, so stop it now
@@ -858,15 +922,15 @@ class ResidentCapacityControl:
         assert deps is not None
         serve = orig.serve
         # The route fence resolves from the origin's registered endpoint. A gated serve
-        # origination has no origin worker, so it resolves from the root node over the
-        # edge stream — the root cannot dial a worker, so it always rides control_relay.
-        # A worker-originated workflow boundary resolves from the origin worker's own
-        # node, so a reachable pair offloads.
+        # origination has no origin worker and resolves from the root node over the edge
+        # stream; a worker-originated workflow boundary resolves from the origin
+        # worker's own node and carries its source leg to the root over control_relay.
+        # Either way the root opens the target leg, so it is the root that any trusted
+        # offload is resolved for.
+        root_node = deps.root_node_id() if deps.root_node_id is not None else None
         if serve is not None and orig.origin_worker is None:
             origin_worker = None
-            resolve_node: str | None = (
-                deps.root_node_id() if deps.root_node_id is not None else None
-            )
+            resolve_node: str | None = root_node
             routing_node = deps.edge_id or None
             if resolve_node is None or routing_node is None:
                 await self._hold_and_redrive(orig, claim, "no serve edge origin")
@@ -889,23 +953,25 @@ class ResidentCapacityControl:
         if listener is None:
             await self._hold_and_redrive(orig, claim, "resident sidecar is unavailable")
             return
-        resolved = await deps.network.resolve(resolve_node, listener)
-        if resolved is None:
+        resolution = await deps.network.resolve(
+            resolve_node, listener, target_leg_node_id=root_node
+        )
+        if resolution is None:
             await self._hold_and_redrive(
                 orig, claim, "no origin route for the boundary"
             )
             return
-        origin, route = resolved
-        # Control selects the transport candidate for the attempt from the resolved
-        # route; this PR realizes only control_relay, so without it as a base candidate
-        # the attempt cannot be carried — hold the credit and re-drive rather than
-        # reinterpret a direct/node candidate as a relay.
+        origin, route = resolution.origin, resolution.route
+        # control_relay is the base every attempt falls back to, so an attempt without
+        # it cannot be carried — hold the credit and re-drive rather than reinterpret a
+        # direct or node candidate as a relay.
         if not any(
             candidate.transport is Transport.CONTROL_RELAY
             for candidate in route.candidates
         ):
             await self._hold_and_redrive(orig, claim, "no control_relay carriage")
             return
+        target_leg, target_leg_endpoint = _select_target_leg(route)
         handoff = handoff.model_copy(
             update={
                 "origin_id": origin.origin_id,
@@ -915,9 +981,14 @@ class ResidentCapacityControl:
         # A fresh relay session per delivery attempt: a re-drive gets its own session,
         # so its bridge and per-direction sequence never collide with an old one.
         session_id = new_relay_session_id()
+        # The origin carries its own leg over control_relay; when the root is itself the
+        # origin its leg is the target leg, so the two selections coincide.
+        root_sourced = serve is not None and origin_worker is None
         plan = ResidentCarriagePlan(
             session_id=session_id,
-            selected_transport=CONTROL_RELAY,
+            selected_transport=target_leg.value if root_sourced else CONTROL_RELAY,
+            target_leg_transport=target_leg.value,
+            target_leg_endpoint=target_leg_endpoint,
             route_epoch=route.route_epoch,
             listener_generation=listener.listener_generation,
         )
@@ -929,9 +1000,12 @@ class ResidentCapacityControl:
             target_worker=target_worker,
             invocation_id=orig.invocation_id,
             idm=orig.idempotency_key or "",
-            selected_transport=CONTROL_RELAY,
+            selected_transport=plan.selected_transport,
+            target_leg_transport=target_leg.value,
+            target_leg_endpoint=target_leg_endpoint,
             route_epoch=route.route_epoch,
         )
+        self._resolutions[session_id] = (resolution, listener)
         self._attempts[orig.invocation_id] = _Attempt(
             task_id=orig.task_id,
             call_correlation=orig.call_correlation,
@@ -1309,6 +1383,7 @@ class ResidentCapacityControl:
         if not delivered:
             return None
         replica.listener_generation = generation
+        direct_listener = await self._direct_listener_of(worker_id, node_id)
         replica.listener = ReplicaListenerAdvertisement(
             replica_id=replica.replica_id,
             family=replica.family,
@@ -1316,12 +1391,32 @@ class ResidentCapacityControl:
             listener_generation=generation,
             node_id=node_id,
             worker_id=worker_id,
-            routes=(f"resident://{worker_id}",),
-            protocols=("resident",),
-            directly_routable=deps.directly_routable,
+            routes=(direct_listener or f"resident://{worker_id}",),
+            protocols=(
+                ("resident", TARGET_LEG_PROTOCOL) if direct_listener else ("resident",)
+            ),
+            directly_routable=deps.directly_routable and direct_listener is not None,
         )
         self._persist()
         return replica.listener
+
+    async def _direct_listener_of(self, worker_id: str, node_id: str) -> str | None:
+        """The address the root dials for this worker's claim-gated target-leg listener.
+
+        The worker reports the port it bound; the node's advertised endpoint supplies
+        the host the root reaches it at. A worker that hosts no listener, or a node
+        with no inbound endpoint, has no direct address and is reached over the relay.
+        """
+        deps = self._delivery
+        if deps is None or deps.resident_listener_port_of is None:
+            return None
+        port = deps.resident_listener_port_of(worker_id)
+        if port <= 0:
+            return None
+        endpoint = await deps.network.endpoint_for(node_id)
+        if endpoint is None or not endpoint.url:
+            return None
+        return f"{split_host_port(endpoint.url)[0]}:{port}"
 
     def _ensure_family(self, dependency: ServiceDependency) -> bool:
         family = dependency.service_family

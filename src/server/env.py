@@ -139,3 +139,16 @@ VAST_SEARCH_LIMIT: int = int(os.getenv("VAST_SEARCH_LIMIT") or "10")
 VAST_MAX_RETRIES: int = int(os.getenv("VAST_MAX_RETRIES") or "1")
 
 NEBULA_API_BASE_URL: str = os.getenv("NEBULA_API_BASE_URL", "")
+
+# Mutual-TLS material for the trusted resident target-leg transports, propagated to
+# every worker so a replica sidecar can serve its claim-gated listener.
+NETWORK_PLANE_TARGET_LEG_CA_B64: str = os.getenv("NETWORK_PLANE_TARGET_LEG_CA_B64", "")
+NETWORK_PLANE_TARGET_LEG_CERT_B64: str = os.getenv(
+    "NETWORK_PLANE_TARGET_LEG_CERT_B64", ""
+)
+NETWORK_PLANE_TARGET_LEG_KEY_B64: str = os.getenv(
+    "NETWORK_PLANE_TARGET_LEG_KEY_B64", ""
+)
+NETWORK_PLANE_TARGET_LEG_ROOT_IDENTITY: str = os.getenv(
+    "NETWORK_PLANE_TARGET_LEG_ROOT_IDENTITY", ""
+)

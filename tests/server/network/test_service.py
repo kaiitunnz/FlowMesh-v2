@@ -89,9 +89,11 @@ def test_resolve_returns_ladder() -> None:
     registry.set(_node("nde-1", generation=1))
     registry.set(_node("nde-2", generation=1))
     plane = _plane(registry)
-    result = asyncio.run(plane.resolve("nde-1", _listener()))
+    result = asyncio.run(
+        plane.resolve("nde-1", _listener(), target_leg_node_id="nde-1")
+    )
     assert result is not None
-    _origin, route = result
+    route = result.route
     transports = [c.transport.value for c in route.candidates]
     assert transports[0] == "worker_direct"
     assert "node_relay" in transports and "control_relay" in transports
@@ -104,7 +106,10 @@ def test_resolve_none_without_origin_endpoint() -> None:
     )  # no advertisement
     registry.set(_node("nde-2", generation=1))
     plane = _plane(registry)
-    assert asyncio.run(plane.resolve("nde-1", _listener())) is None
+    assert (
+        asyncio.run(plane.resolve("nde-1", _listener(), target_leg_node_id="nde-1"))
+        is None
+    )
 
 
 def test_outbound_only_nodes_resolve_only_the_control_relay() -> None:
@@ -124,9 +129,9 @@ def test_outbound_only_nodes_resolve_only_the_control_relay() -> None:
         routes=("127.0.0.1:9500",),
         directly_routable=False,
     )
-    result = asyncio.run(plane.resolve("nde-1", listener))
+    result = asyncio.run(plane.resolve("nde-1", listener, target_leg_node_id="nde-1"))
     assert result is not None
-    _origin, route = result
+    route = result.route
     transports = [c.transport.value for c in route.candidates]
     assert transports == ["control_relay"]
 
@@ -138,17 +143,16 @@ def test_observation_demotes_and_next_resolve_drops_direct() -> None:
     plane = _plane(registry)
 
     async def scenario() -> list[str]:
-        first = await plane.resolve("nde-1", _listener())
+        first = await plane.resolve("nde-1", _listener(), target_leg_node_id="nde-1")
         assert first is not None
-        origin, _route = first
         plane.record_observations(
-            origin,
+            first,
             _listener(),
             [(Transport.WORKER_DIRECT, RouteObservationOutcome.CONNECT_FAILURE)],
         )
-        second = await plane.resolve("nde-1", _listener())
+        second = await plane.resolve("nde-1", _listener(), target_leg_node_id="nde-1")
         assert second is not None
-        return [c.transport.value for c in second[1].candidates]
+        return [c.transport.value for c in second.route.candidates]
 
     transports = asyncio.run(scenario())
     assert "worker_direct" not in transports
@@ -161,19 +165,18 @@ def test_rotation_invalidates_reachability() -> None:
     plane = _plane(registry)
 
     async def scenario() -> dict[str, str]:
-        first = await plane.resolve("nde-1", _listener())
+        first = await plane.resolve("nde-1", _listener(), target_leg_node_id="nde-1")
         assert first is not None
-        origin, _route = first
         plane.record_observations(
-            origin,
+            first,
             _listener(),
             [(Transport.WORKER_DIRECT, RouteObservationOutcome.VERIFIED)],
         )
         # Target re-registers with a higher endpoint generation.
         registry.set(_node("nde-2", generation=2))
-        second = await plane.resolve("nde-1", _listener())
+        second = await plane.resolve("nde-1", _listener(), target_leg_node_id="nde-1")
         assert second is not None
-        return plane.reachability_states(second[0], _listener())
+        return plane.reachability_states(second, _listener())
 
     states = asyncio.run(scenario())
     # The prior VERIFIED entry was invalidated; the fresh attempt is only optimistic.

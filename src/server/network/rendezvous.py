@@ -22,11 +22,15 @@ cursor, bounding the per-node stream.
 
 import logging
 from collections import OrderedDict, deque
+from collections.abc import Callable
+
+from shared.network.frame_stream import FrameSink
 
 from .reverse_relay import (
     RESIDENT_RELAY_KEYSPACE,
     BinaryRedis,
     RelayDirection,
+    RelayFrame,
     RelayKeyspace,
     RelaySessionStore,
     RelayStreamStore,
@@ -52,8 +56,55 @@ class RootCursorStore:
         await self._redis.hset(self._key, mapping={node_id: entry_id})
 
 
+# Selects the offloaded sink for one session from its routing record, or ``None`` when
+# the session's frames toward the target belong on the target node's down stream.
+OffloadSelector = Callable[[str, dict[str, str]], FrameSink | None]
+
+# Counts one bridged frame and its payload bytes on a named leg and transport.
+LegMeter = Callable[[str, str, int], None]
+
+# The legs the bridge itself carries: an origin's frames up to the root, and a target's
+# frames back to it over the relay.
+SOURCE_TO_ROOT_LEG = "source_to_root"
+TARGET_LEG = "target"
+_RELAY = "control_relay"
+
+
+class RelayTargetSink:
+    """Publishes a frame down to the target node its session's record names."""
+
+    def __init__(self, streams: RelayStreamStore, sessions: RelaySessionStore) -> None:
+        self._streams = streams
+        self._sessions = sessions
+
+    async def send(self, frame: RelayFrame) -> None:
+        record = await self._sessions.load(frame.session_id)
+        if destination := record.get("target_node"):
+            await self._streams.publish_down(destination, frame)
+
+
+class RelayOriginSink:
+    """Publishes a frame down to the origin node its session's record names."""
+
+    def __init__(self, streams: RelayStreamStore, sessions: RelaySessionStore) -> None:
+        self._streams = streams
+        self._sessions = sessions
+
+    async def send(self, frame: RelayFrame) -> None:
+        record = await self._sessions.load(frame.session_id)
+        if destination := record.get("origin_node"):
+            await self._streams.publish_down(destination, frame)
+
+
 class RootRendezvousBridge:
-    """Bridges opaque relay frames between attached nodes by their session routing."""
+    """Bridges opaque relay frames between attached nodes by their session routing.
+
+    A session the wiring selects an offloaded sink for has its frames toward the target
+    carried over that sink instead of the target node's down stream; the target's frames
+    come back through the same sink's own delivery and publish down to the origin node,
+    so the origin's leg is untouched. The bridge selects and forwards; it reads no more
+    of a frame than it already does.
+    """
 
     def __init__(
         self,
@@ -61,12 +112,17 @@ class RootRendezvousBridge:
         sessions: RelaySessionStore,
         cursors: RootCursorStore,
         *,
+        offload_for: OffloadSelector | None = None,
+        meter: LegMeter | None = None,
         batch: int = 64,
         logger: logging.Logger | None = None,
     ) -> None:
         self._streams = streams
         self._sessions = sessions
         self._cursors = cursors
+        self._offload_for = offload_for
+        self._meter = meter
+        self._sinks: dict[str, FrameSink] = {}
         self._batch = batch
         self._logger = logger or logging.getLogger("network-rendezvous")
 
@@ -115,12 +171,55 @@ class RootRendezvousBridge:
         if not record:
             self._logger.warning("relay frame for unknown session %s", frame.session_id)
             return
-        if frame.direction is RelayDirection.ORIGIN_TO_TARGET:
-            destination = record.get("target_node")
-        else:
-            destination = record.get("origin_node")
-        if destination:
-            await self._streams.publish_down(destination, frame)
+        if frame.direction is RelayDirection.TARGET_TO_ORIGIN:
+            # A target's frame that reached the root over the relay: this session's
+            # target leg was not offloaded.
+            self._meter_leg(TARGET_LEG, len(frame.payload))
+            if destination := record.get("origin_node"):
+                await self._streams.publish_down(destination, frame)
+            return
+        self._meter_leg(SOURCE_TO_ROOT_LEG, len(frame.payload))
+        sink = self._target_sink(frame.session_id, record)
+        if sink is None:
+            self._meter_leg(TARGET_LEG, len(frame.payload))
+            if destination := record.get("target_node"):
+                await self._streams.publish_down(destination, frame)
+            return
+        try:
+            await sink.send(frame)
+        except OSError as exc:
+            # The offloaded sink ended mid-session, so this delivery is ambiguous: drop
+            # the sink and leave the outcome to the endpoints that own it.
+            self._logger.warning(
+                "offloaded target leg lost for session %s: %s", frame.session_id, exc
+            )
+            self.release(frame.session_id)
+
+    def _meter_leg(self, leg: str, payload_bytes: int) -> None:
+        if self._meter is not None:
+            self._meter(leg, _RELAY, payload_bytes)
+
+    def _target_sink(self, session_id: str, record: dict[str, str]) -> FrameSink | None:
+        """The offloaded sink for this session, or ``None`` for the down stream."""
+        if self._offload_for is None:
+            return None
+        if (sink := self._sinks.get(session_id)) is not None:
+            return sink
+        sink = self._offload_for(session_id, record)
+        if sink is not None:
+            self._sinks[session_id] = sink
+        return sink
+
+    def release(self, session_id: str) -> None:
+        """Drop one session's offloaded sink, on its terminal or its reap."""
+        self._sinks.pop(session_id, None)
 
 
-__all__ = ["RootCursorStore", "RootRendezvousBridge"]
+__all__ = [
+    "SOURCE_TO_ROOT_LEG",
+    "TARGET_LEG",
+    "RelayOriginSink",
+    "RelayTargetSink",
+    "RootCursorStore",
+    "RootRendezvousBridge",
+]

@@ -12,11 +12,13 @@ denies with no allocation; and a restart reconciles an in-flight claim to uncert
 import asyncio
 from typing import Any
 
+from server.network.service import RouteResolution
 from server.network.state import (
     ReachabilityClass,
     ReplicaListenerAdvertisement,
     ResolvedRoute,
     RouteCandidate,
+    RouteObservationOutcome,
     RouteOrigin,
     Transport,
 )
@@ -66,9 +68,16 @@ def _env(invocation_id: str = "inv-1") -> ToolInvocationEnvelope:
 
 
 class _FakeNetwork:
+    def __init__(self) -> None:
+        self.observations: list[tuple[Transport, RouteObservationOutcome]] = []
+
     async def resolve(
-        self, origin_node_id: str, listener: ReplicaListenerAdvertisement
-    ) -> tuple[RouteOrigin, ResolvedRoute]:
+        self,
+        origin_node_id: str,
+        listener: ReplicaListenerAdvertisement,
+        *,
+        target_leg_node_id: str | None,
+    ) -> RouteResolution:
         origin = RouteOrigin(
             origin_id="rog-1",
             endpoint_id="ep-1",
@@ -82,7 +91,18 @@ class _FakeNetwork:
             route_epoch=1,
             candidates=(RouteCandidate(transport=Transport.CONTROL_RELAY, hops=()),),
         )
-        return origin, route
+        return RouteResolution(origin, origin, route)
+
+    def record_observations(
+        self,
+        resolution: RouteResolution,
+        listener: ReplicaListenerAdvertisement,
+        observations: list[tuple[Transport, RouteObservationOutcome]],
+    ) -> None:
+        self.observations.extend(observations)
+
+    async def endpoint_for(self, node_id: str) -> None:
+        return None
 
 
 class _FakeSessions:

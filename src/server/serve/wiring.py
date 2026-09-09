@@ -14,6 +14,7 @@ from ..config import PortForwardConfig
 from ..network.reverse_relay import BinaryRedis
 from ..registries.resident import ResidentRegistry
 from ..resident.service import ResidentCapacityControl
+from ..resident.target_leg import TargetLegSupport
 from .binding import ServeBindingStore, ServeSnapshot
 from .forward_exposure import ForwardIngressDirectory
 from .forward_listener import RootForwardIngress
@@ -63,6 +64,7 @@ def build_gated_serve(
     registry: ResidentRegistry,
     relay_redis: BinaryRedis,
     port_forward: PortForwardConfig,
+    target_leg: TargetLegSupport | None = None,
     logger: logging.Logger,
 ) -> GatedServeWiring:
     """Wire and return the gated serve subsystem.
@@ -99,6 +101,7 @@ def build_gated_serve(
         relay_redis=relay_redis,
         edge_id=SERVE_EDGE_STREAM_ID,
         control=control,
+        target_leg=target_leg,
         logger=logger,
     )
     gated_serve = GatedServe(

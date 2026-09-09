@@ -9,8 +9,25 @@ from server.network.state import (
     RouteObservation,
     RouteObservationOutcome,
     RouteOrigin,
+    TargetLegTrustPolicy,
     Transport,
 )
+
+# The trusted-offload policy every deployment starts from: no target leg is admitted.
+_NO_OFFLOAD = TargetLegTrustPolicy()
+
+
+def _resolve(origin, listener, endpoint, view, *, trust=_NO_OFFLOAD, **kwargs):
+    """Resolve with the origin opening its own target leg, as a probe does."""
+    return resolve_route(
+        origin,
+        listener,
+        endpoint,
+        view,
+        target_leg_origin=origin,
+        trust=trust,
+        **kwargs,
+    )
 
 
 def _origin(
@@ -61,7 +78,7 @@ def _transports(route) -> list[str]:
 
 def test_colocated_not_directly_routable_uses_node_relay() -> None:
     view = NetworkReachabilityView()
-    route = resolve_route(
+    route = _resolve(
         _origin(),
         _listener(directly_routable=False),
         _endpoint(ReachabilityClass.SAME_NODE),
@@ -78,7 +95,7 @@ def test_colocated_not_directly_routable_uses_node_relay() -> None:
 
 def test_directly_routable_and_usable_class_adds_worker_direct() -> None:
     view = NetworkReachabilityView()
-    route = resolve_route(
+    route = _resolve(
         _origin(),
         _listener(directly_routable=True),
         _endpoint(ReachabilityClass.ROUTABLE),
@@ -92,7 +109,7 @@ def test_directly_routable_and_usable_class_adds_worker_direct() -> None:
 
 def test_routable_origin_cannot_reach_same_node_endpoint() -> None:
     view = NetworkReachabilityView()
-    route = resolve_route(
+    route = _resolve(
         _origin(ReachabilityClass.ROUTABLE),
         _listener(directly_routable=True),
         _endpoint(ReachabilityClass.SAME_NODE),
@@ -106,7 +123,7 @@ def test_routable_origin_cannot_reach_same_node_endpoint() -> None:
 def test_no_control_relay_without_both_attachments() -> None:
     view = NetworkReachabilityView()
     # No target endpoint means no target attachment: the reverse relay is infeasible.
-    no_target = resolve_route(
+    no_target = _resolve(
         _origin(),
         _listener(directly_routable=True),
         None,
@@ -116,7 +133,7 @@ def test_no_control_relay_without_both_attachments() -> None:
     )
     assert "control_relay" not in _transports(no_target)
     # An unattached origin is equally infeasible even with a fully attached target.
-    no_origin = resolve_route(
+    no_origin = _resolve(
         _origin(attached=False),
         _listener(directly_routable=False),
         _endpoint(ReachabilityClass.SAME_NODE),
@@ -141,7 +158,7 @@ def test_demoted_direct_falls_out_of_ladder() -> None:
         ),
         now=0.0,
     )
-    route = resolve_route(
+    route = _resolve(
         _origin(),
         _listener(directly_routable=True),
         _endpoint(ReachabilityClass.ROUTABLE),
@@ -167,7 +184,7 @@ def test_verified_candidate_is_preferred() -> None:
         ),
         now=0.0,
     )
-    route = resolve_route(
+    route = _resolve(
         _origin(),
         _listener(directly_routable=True),
         _endpoint(ReachabilityClass.ROUTABLE),
@@ -181,7 +198,7 @@ def test_verified_candidate_is_preferred() -> None:
 
 def test_control_relay_names_origin_and_target_attachments() -> None:
     view = NetworkReachabilityView()
-    route = resolve_route(
+    route = _resolve(
         _origin(),
         _listener(directly_routable=False),
         _endpoint(ReachabilityClass.SAME_NODE),
@@ -204,10 +221,10 @@ def test_resolver_is_pure() -> None:
     origin = _origin()
     listener = _listener(directly_routable=True)
     endpoint = _endpoint()
-    resolve_route(origin, listener, endpoint, view, now=0.0, route_epoch=1)
+    _resolve(origin, listener, endpoint, view, now=0.0, route_epoch=1)
     # Reading the view during resolution allocates no reachability entry.
     assert view.entries() == []
     # A resolve emits only candidates for the given pair, never a peer scan.
-    route = resolve_route(origin, listener, endpoint, view, now=0.0, route_epoch=2)
+    route = _resolve(origin, listener, endpoint, view, now=0.0, route_epoch=2)
     assert all(c.hops for c in route.candidates)
     assert route.route_epoch == 2

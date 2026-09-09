@@ -156,8 +156,15 @@ class ResidentReplicaSidecar:
         if task is not None and task is not asyncio.current_task() and not task.done():
             task.cancel()
 
-    async def on_frame(self, frame: RelayFrame) -> None:
-        """Route one inbound relay frame to its session, opening one on a bootstrap."""
+    async def on_frame(
+        self, frame: RelayFrame, sink: ResidentFrameSink | None = None
+    ) -> None:
+        """Route one inbound relay frame to its session, opening one on a bootstrap.
+
+        A frame delivered over a forward-dialed target leg passes that connection's
+        ``sink``, so the session it opens answers back over the same connection rather
+        than the worker's attachment.
+        """
         session = self._sessions.get(frame.session_id)
         if session is None:
             if frame.kind is not RelayFrameKind.DATA or frame.seq != 1:
@@ -165,21 +172,21 @@ class ResidentReplicaSidecar:
                 # or window for a reaped session): nothing to route it to.
                 return
             session = self._open_session(
-                frame.session_id, frame.invocation_id, frame.idm
+                frame.session_id, frame.invocation_id, frame.idm, sink or self._sink
             )
         await session.on_frame(frame)
         if frame.kind is RelayFrameKind.CANCEL:
             self._reap(frame.session_id)
 
     def _open_session(
-        self, session_id: str, invocation_id: str, idm: str
+        self, session_id: str, invocation_id: str, idm: str, sink: ResidentFrameSink
     ) -> ResidentRelaySession:
         session = ResidentRelaySession(
             session_id=session_id,
             invocation_id=invocation_id,
             idm=idm,
             role=ResidentSessionRole.REPLICA,
-            sink=self._sink,
+            sink=sink,
             window_bytes=self._window_bytes,
         )
         self._sessions[session_id] = session
