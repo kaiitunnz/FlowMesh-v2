@@ -158,6 +158,7 @@ async def list_network_endpoints(
             url=adv.url,
             generation=adv.generation,
             trust_domain=adv.trust_domain,
+            target_leg_url=adv.target_leg_url,
             reachability_class=adv.reachability_class.value,
             protocols=list(adv.protocols),
         )

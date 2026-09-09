@@ -50,6 +50,7 @@ class NetworkEndpointInfo(BaseModel):
     endpoint_id: str
     node_id: str | None = None
     url: str
+    target_leg_url: str = ""
     generation: int
     trust_domain: str
     reachability_class: str
