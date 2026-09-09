@@ -164,8 +164,8 @@ def freeze_request_envelope(
 
     The request target must be an unambiguous origin-form path: an absolute-form URL or
     a leading ``//`` authority would let the target name a host, and ambiguous framing
-    (duplicate or conflicting ``Content-Length``/``Transfer-Encoding``) or a protocol
-    upgrade is refused before admission rather than resolved by guessing.
+    (duplicate ``Content-Length``, any ``Transfer-Encoding``, ``Expect: 100-continue``)
+    or a protocol upgrade is refused before admission rather than resolved by guessing.
     """
     items = list(headers)
     lowered = [(name.lower(), value) for name, value in items]
@@ -181,13 +181,19 @@ def freeze_request_envelope(
         raise EnvelopeRejected("request target must not carry an authority")
 
     content_lengths = _values(lowered, "content-length")
-    transfer_encodings = _values(lowered, "transfer-encoding")
-    if len(content_lengths) > 1 or len(transfer_encodings) > 1:
+    if len(content_lengths) > 1:
         raise EnvelopeRejected("ambiguous request framing")
-    if content_lengths and transfer_encodings:
-        raise EnvelopeRejected("conflicting request framing")
+    # A transfer-coded body is not decoded on this slice, so accepting one would forward
+    # the request with a silently dropped body: every Transfer-Encoding fails closed
+    # until a bounded decoder is introduced and covered by the descriptor.
+    if _values(lowered, "transfer-encoding"):
+        raise EnvelopeRejected("transfer-encoded request bodies are not accepted")
     if content_lengths and not content_lengths[0].strip().isdigit():
         raise EnvelopeRejected("invalid content-length")
+    # 100-continue would leave the client waiting for an interim response this relay
+    # does not speak, so it is refused rather than silently ignored.
+    if any("100-continue" in value.lower() for value in _values(lowered, "expect")):
+        raise EnvelopeRejected("Expect: 100-continue is not supported")
 
     nominated = connection_nominated_headers(_values(lowered, "connection"))
     if any(name == "upgrade" for name, _ in lowered) or "upgrade" in nominated:

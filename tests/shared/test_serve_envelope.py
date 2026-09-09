@@ -104,6 +104,18 @@ def test_ambiguous_or_conflicting_framing_is_refused() -> None:
         _freeze(headers=[("Content-Length", "not-a-number")])
 
 
+def test_a_lone_transfer_encoding_fails_closed() -> None:
+    # A chunked body is not decoded here; accepting the request would drop the body and
+    # forward it empty, so a lone Transfer-Encoding is refused rather than lost.
+    with pytest.raises(EnvelopeRejected):
+        _freeze(headers=[("Transfer-Encoding", "chunked")])
+
+
+def test_expect_100_continue_is_refused() -> None:
+    with pytest.raises(EnvelopeRejected):
+        _freeze(headers=[("Expect", "100-continue")])
+
+
 def test_a_protocol_upgrade_is_refused() -> None:
     with pytest.raises(EnvelopeRejected):
         _freeze(headers=[("Upgrade", "websocket")])
