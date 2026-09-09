@@ -23,6 +23,11 @@ class FakeBinaryRedis:
             []
         )  # the block arg of each xread, for assertions
 
+    @property
+    def streams(self) -> dict[str, list[tuple[str, dict[bytes, bytes]]]]:
+        """The appended streams, for asserting which legs carried a frame."""
+        return self._streams
+
     async def xadd(self, name: str, fields: dict[bytes, bytes]) -> bytes:
         self._seq += 1
         entry_id = f"{self._seq}-0"

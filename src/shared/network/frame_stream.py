@@ -24,6 +24,14 @@ class FrameStreamError(Exception):
     """The stream's framing is unusable and its connection must be closed."""
 
 
+class FrameWriter(Protocol):
+    """The stream surface a frame is written to."""
+
+    def write(self, data: bytes) -> None: ...
+
+    async def drain(self) -> None: ...
+
+
 class FrameSink(Protocol):
     """Carries one relay frame onward, whatever transport is behind it."""
 
@@ -51,7 +59,7 @@ def _meta(frame: RelayFrame) -> bytes:
     ).encode()
 
 
-async def write_relay_frame(writer: asyncio.StreamWriter, frame: RelayFrame) -> None:
+async def write_relay_frame(writer: FrameWriter, frame: RelayFrame) -> None:
     """Write one frame's header and payload, then flush."""
     meta = _meta(frame)
     if len(meta) > MAX_META_BYTES or len(frame.payload) > MAX_PAYLOAD_BYTES:
@@ -96,6 +104,7 @@ __all__ = [
     "MAX_PAYLOAD_BYTES",
     "FrameSink",
     "FrameStreamError",
+    "FrameWriter",
     "read_relay_frame",
     "split_host_port",
     "write_relay_frame",

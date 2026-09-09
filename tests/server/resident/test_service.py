@@ -18,6 +18,7 @@ from server.network.state import (
     ReplicaListenerAdvertisement,
     ResolvedRoute,
     RouteCandidate,
+    RouteHop,
     RouteObservationOutcome,
     RouteOrigin,
     Transport,
@@ -67,8 +68,23 @@ def _env(invocation_id: str = "inv-1") -> ToolInvocationEnvelope:
     )
 
 
+def _candidates(offload: Transport | None) -> tuple[RouteCandidate, ...]:
+    relay = RouteCandidate(transport=Transport.CONTROL_RELAY, hops=())
+    if offload is None:
+        return (relay,)
+    return (
+        RouteCandidate(
+            transport=offload,
+            hops=(RouteHop(transport=offload, endpoint="10.0.0.4:41000"),),
+            trusted=True,
+        ),
+        relay,
+    )
+
+
 class _FakeNetwork:
-    def __init__(self) -> None:
+    def __init__(self, trusted_offload: Transport | None = None) -> None:
+        self._trusted_offload = trusted_offload
         self.observations: list[tuple[Transport, RouteObservationOutcome]] = []
 
     async def resolve(
@@ -89,7 +105,7 @@ class _FakeNetwork:
             target_node_id=listener.node_id,
             listener_generation=listener.listener_generation,
             route_epoch=1,
-            candidates=(RouteCandidate(transport=Transport.CONTROL_RELAY, hops=()),),
+            candidates=_candidates(self._trusted_offload),
         )
         return RouteResolution(origin, origin, route)
 
@@ -122,10 +138,13 @@ class _FakeSessions:
 class _Delivery:
     """A recording worker delivery: captures relays and the session records."""
 
-    def __init__(self, deliver: bool = True) -> None:
+    def __init__(
+        self, deliver: bool = True, trusted_offload: Transport | None = None
+    ) -> None:
         self.relays: list[tuple[str, str, dict[str, Any]]] = []
         self.deliver = deliver
         self.sessions = _FakeSessions()
+        self.network = _FakeNetwork(trusted_offload)
 
     def build(self) -> ResidentWorkerDelivery:
         return ResidentWorkerDelivery(
@@ -135,7 +154,7 @@ class _Delivery:
                 "wkr-replica" if replica.serve_task_id is not None else None
             ),
             node_of_worker=lambda worker_id: "node-1" if worker_id else None,
-            network=_FakeNetwork(),
+            network=self.network,
             sessions=self.sessions,
         )
 
@@ -156,6 +175,7 @@ def _build(
     materialize_fn: Any = None,
     deliver: bool = True,
     dependency: ServiceDependency | None = None,
+    trusted_offload: Transport | None = None,
 ) -> tuple[ResidentCapacityControl, ResidentStores, list[Any], _Delivery]:
     stores = ResidentStores()
     limits = limits or ResidentPolicyLimits()
@@ -186,7 +206,7 @@ def _build(
     lifecycle = LifecycleScaleManager(
         stores, limits=limits, admission_slots=2, materialize_fn=materialize_fn
     )
-    delivery = _Delivery(deliver=deliver)
+    delivery = _Delivery(deliver=deliver, trusted_offload=trusted_offload)
     svc = ResidentCapacityControl(
         stores=stores,
         admission=admission,
@@ -553,3 +573,47 @@ def test_rehydrate_preempts_a_warm_replica_whose_serve_task_is_gone():
     states = {r.state for r in fresh_stores.directory.all()}
     assert ReplicaState.WARM not in states
     assert ReplicaState.PREEMPTED in states
+
+
+def test_a_workflow_origin_keeps_its_relay_leg_while_the_target_leg_offloads():
+    svc, _stores, _settled, delivery = _build(trusted_offload=Transport.WORKER_DIRECT)
+    asyncio.run(svc._originate(_env()))
+
+    plan = delivery.frame("resident_handoff")["carriage_plan"]
+    # The origin worker carries its own leg to the root over the relay whatever the
+    # root then does with the target leg.
+    assert plan["selected_transport"] == "control_relay"
+    assert plan["target_leg_transport"] == "worker_direct"
+    assert plan["target_leg_endpoint"] == "10.0.0.4:41000"
+
+    record = delivery.sessions.records[svc._attempts["inv-1"].session_id]
+    assert record["target_leg_transport"] == "worker_direct"
+    assert record["target_leg_endpoint"] == "10.0.0.4:41000"
+
+
+def test_a_route_admitting_no_offload_carries_the_target_leg_over_the_relay():
+    svc, _stores, _settled, delivery = _build()
+    asyncio.run(svc._originate(_env()))
+
+    plan = delivery.frame("resident_handoff")["carriage_plan"]
+    assert plan["target_leg_transport"] == "control_relay"
+    assert plan["target_leg_endpoint"] == ""
+
+
+def test_target_leg_path_evidence_never_touches_the_claim_credit():
+    svc, stores, _settled, delivery = _build(trusted_offload=Transport.WORKER_DIRECT)
+    asyncio.run(svc._originate(_env()))
+    claim = stores.claims.by_invocation("inv-1")[0]
+    held = stores.credit_ledger.held(claim.replica_id)
+
+    svc.record_target_leg_observation(
+        svc._attempts["inv-1"].session_id,
+        Transport.WORKER_DIRECT,
+        RouteObservationOutcome.CONNECT_FAILURE,
+    )
+
+    assert delivery.network.observations == [
+        (Transport.WORKER_DIRECT, RouteObservationOutcome.CONNECT_FAILURE)
+    ]
+    assert stores.claims.by_invocation("inv-1")[0].state is claim.state
+    assert stores.credit_ledger.held(claim.replica_id) == held

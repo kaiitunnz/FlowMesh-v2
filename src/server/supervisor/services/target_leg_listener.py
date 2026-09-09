@@ -60,6 +60,15 @@ class NodeTargetLegListener:
         self._logger = logger or logging.getLogger("node-target-leg-listener")
         self._server: asyncio.Server | None = None
 
+    @property
+    def port(self) -> int:
+        """The bound port, resolved after ``start`` (a configured 0 binds any port)."""
+        return (
+            self._server.sockets[0].getsockname()[1]
+            if self._server is not None
+            else self._port
+        )
+
     async def start(self) -> None:
         self._server = await asyncio.start_server(
             self._serve,
