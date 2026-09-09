@@ -62,13 +62,6 @@ class WorkerConfig(BaseModel):
     executor_idle_cleanup_sec: float = env.WORKER_EXECUTOR_IDLE_CLEANUP_SEC
     """Seconds an executor may sit idle before the worker unloads it"""
     enable_dev_model: bool = env.WORKER_ENABLE_DEV_MODEL
-    serve_ingress_enabled: bool = env.WORKER_SERVE_INGRESS_ENABLED
-    serve_ingress_bind_host: str = env.WORKER_SERVE_INGRESS_BIND_HOST
-    serve_ingress_authority: str = env.WORKER_SERVE_INGRESS_AUTHORITY
-    serve_ingress_port_low: int = env.WORKER_SERVE_INGRESS_PORT_LOW
-    serve_ingress_port_high: int = env.WORKER_SERVE_INGRESS_PORT_HIGH
-    serve_ingress_tls_cert: str = env.WORKER_SERVE_INGRESS_TLS_CERT
-    serve_ingress_tls_key: str = env.WORKER_SERVE_INGRESS_TLS_KEY
     """Whether the worker advertises the GPU-free dev_model serving executor"""
     dev_model_forward_url: str = env.DEV_MODEL_FORWARD_URL
     """Upstream OpenAI-compatible base URL dev_model forwards to (empty = canned)"""
@@ -167,15 +160,6 @@ class WorkerAdapter(ABC):
                 config.executor_idle_cleanup_sec
             ),
             "WORKER_ENABLE_DEV_MODEL": to_env_str(config.enable_dev_model),
-            "WORKER_SERVE_INGRESS_ENABLED": to_env_str(config.serve_ingress_enabled),
-            "WORKER_SERVE_INGRESS_BIND_HOST": config.serve_ingress_bind_host,
-            "WORKER_SERVE_INGRESS_AUTHORITY": config.serve_ingress_authority,
-            "WORKER_SERVE_INGRESS_PORT_LOW": to_env_str(config.serve_ingress_port_low),
-            "WORKER_SERVE_INGRESS_PORT_HIGH": to_env_str(
-                config.serve_ingress_port_high
-            ),
-            "WORKER_SERVE_INGRESS_TLS_CERT": config.serve_ingress_tls_cert,
-            "WORKER_SERVE_INGRESS_TLS_KEY": config.serve_ingress_tls_key,
             "DEV_MODEL_FORWARD_URL": config.dev_model_forward_url,
             "DEV_MODEL_RESPONSE_DELAY_SEC": to_env_str(
                 config.dev_model_response_delay_sec

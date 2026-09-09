@@ -45,8 +45,8 @@ from .serve import (
     SERVE_EDGE_STREAM_ID,
     ForwardIngressDirectory,
     GatedServe,
+    RootForwardIngress,
     ServeBindingStore,
-    ServeForwardTransport,
     ServeIngressRegistry,
     ServeRelayExecutor,
     ServeSnapshot,
@@ -160,6 +160,7 @@ FABRIC_TOOL_BROKER = None
 RESIDENT_CONTROL = None
 RESIDENT_REGISTRY = None
 GATED_SERVE = None
+SERVE_FORWARD_INGRESS = None
 SERVE_BINDINGS = None
 NETWORK_PLANE = None
 RESIDENT_BRIDGE = None
@@ -317,20 +318,30 @@ if IS_ROOT_NODE:
                 if config.port_forward.serve_proxy_enabled
                 else None
             ),
-            # Each forward binding owns a per-task public port on a registered ingress
-            # host; a deployment that requires TLS refuses to expose one on a plaintext
-            # host, so a forward task without a TLS-capable host fails closed.
-            exposures=ForwardIngressDirectory(),
-            require_forward_tls=config.port_forward.serve_forward_require_tls,
-            # A forward-pinned request is admitted by control and relayed to its ingress
-            # worker over that worker's attachment; the worker tees the response to its
-            # own client data-direct.
-            forward_transport=ServeForwardTransport(
-                RESIDENT_CONTROL.relay_to_worker, logger=logger
+            # Each forward binding owns a per-task public port on the root's own
+            # authority; the root binds a plain-HTTP listener on it behind the
+            # deployment's TLS terminator, and a task without a configured forward
+            # authority/range fails closed.
+            exposures=ForwardIngressDirectory(
+                config.port_forward.serve_forward_authority,
+                config.port_forward.serve_forward_port_low,
+                config.port_forward.serve_forward_port_high,
             ),
             persist=_persist_serve,
             logger=logger,
         )
+        if config.port_forward.serve_forward_enabled:
+            # The root binds one plain-HTTP listener per forward task port and admits a
+            # request over the same gate as proxy, then relays it over the shared root
+            # rendezvous attachment; the exposure commits live only on a bound listener.
+            SERVE_FORWARD_INGRESS = RootForwardIngress(
+                bind_host=config.port_forward.serve_forward_bind_host,
+                authority=config.port_forward.serve_forward_authority,
+                admit=GATED_SERVE.admit_forward_request,
+                on_bound=GATED_SERVE.commit_forward,
+                logger=logger,
+            )
+            GATED_SERVE.set_forward_listener(SERVE_FORWARD_INGRESS)
 
     DISPATCHER = create_dispatcher(
         config.dispatch,
@@ -390,6 +401,11 @@ if IS_ROOT_NODE:
             NETWORK_PLANE.forget_node if NETWORK_PLANE is not None else None
         ),
     )
+    if GATED_SERVE is not None:
+        # A forward exposure goes live off the request path (its listener binds after
+        # the adopting endpoint update), so republish the task's url through the monitor
+        # when it commits, surfacing the port without waiting for another report.
+        GATED_SERVE.set_advertise_route(EVENT_MONITOR._advertise_serve_route_for)
 
     LOG_ARCHIVER = TaskLogArchiver(
         redis=REDIS_CLIENT.sync,
@@ -575,6 +591,12 @@ async def _lifespan(_: FastAPI):
                 )
             if GATED_SERVE is not None:
                 GATED_SERVE.relay.start(asyncio.get_running_loop())
+            if SERVE_FORWARD_INGRESS is not None and GATED_SERVE is not None:
+                # Bind the forward listeners on the server loop, then rebind every
+                # persisted exposure to its same port under a fresh listener generation
+                # before it serves.
+                SERVE_FORWARD_INGRESS.start(asyncio.get_running_loop())
+                GATED_SERVE.rebind_forward_exposures()
             if PORT_FORWARD_SERVICE is not None:
                 await PORT_FORWARD_SERVICE.start()
             _start_root_threads()
@@ -624,6 +646,8 @@ async def _lifespan(_: FastAPI):
                     await _bridge_task
                 except (asyncio.CancelledError, Exception):
                     pass
+            if SERVE_FORWARD_INGRESS is not None:
+                await SERVE_FORWARD_INGRESS.stop()
             if GATED_SERVE is not None:
                 await GATED_SERVE.relay.stop()
             if RESIDENT_CONTROL is not None:

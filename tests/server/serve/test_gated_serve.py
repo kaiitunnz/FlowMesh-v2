@@ -25,17 +25,13 @@ from server.serve import (
 from server.serve.ingress import ServeAccessMode, ServeIngressRegistry
 from server.serve.service import (
     BindingNotFound,
+    IngressUnavailable,
     MethodNotAllowed,
     WrongIngress,
 )
 from server.task.v2.representations.operators import ServiceInterface
 from shared.resident.contracts import ReplicaEndpoint
 from shared.resident.envelope import ServeRequestEnvelope, freeze_request_envelope
-from shared.resident.serve_ingress import (
-    ServeIngressAdvertisement,
-    ServeIngressBound,
-    ServeIngressRequest,
-)
 
 
 class _FakeControl:
@@ -110,20 +106,27 @@ class _FakeRelay:
     def close(self, *args, **kwargs) -> None:
         pass
 
-    def track(self, *args, **kwargs) -> None:
-        pass
 
-    def deny(self, *args, **kwargs) -> None:
-        pass
+class _FakeForwardListener:
+    """Records the port binds and releases the edge asks the root listener for."""
 
-    def forget(self, *args, **kwargs) -> None:
-        pass
+    def __init__(self) -> None:
+        self.bound: list[tuple[str, int, int]] = []
+        self.released: list[int] = []
+
+    def schedule_bind(
+        self, serve_task_id: str, exposure_generation: int, port: int
+    ) -> None:
+        self.bound.append((serve_task_id, exposure_generation, port))
+
+    def schedule_release(self, port: int) -> None:
+        self.released.append(port)
 
 
 def _edge(
     control: _FakeControl,
     ingresses: ServeIngressRegistry | None = None,
-    forward_transport: object | None = None,
+    forward_listener: object | None = None,
     exposures: ForwardIngressDirectory | None = None,
 ) -> GatedServe:
     bindings = ServeBindingStore()
@@ -133,21 +136,8 @@ def _edge(
         control=control,  # type: ignore[arg-type]
         relay=_FakeRelay(),  # type: ignore[arg-type]
         ingresses=ingresses or ServeIngressRegistry("serve-edge"),
-        exposures=exposures or ForwardIngressDirectory(),
-        forward_transport=forward_transport,  # type: ignore[arg-type]
-        require_forward_tls=False,
-    )
-
-
-def _register_host(edge: GatedServe, worker_id: str = "wrk-a") -> None:
-    edge.register_host(
-        worker_id,
-        ServeIngressAdvertisement(
-            authority="ingress.example",
-            port_low=34000,
-            port_high=34009,
-            generation=1,
-        ),
+        exposures=exposures or ForwardIngressDirectory("serve.example", 34000, 34009),
+        forward_listener=forward_listener,  # type: ignore[arg-type]
     )
 
 
@@ -256,38 +246,52 @@ def test_forward_adoption_reserves_a_port_and_commits_on_bound_evidence() -> Non
     control = _FakeControl(
         endpoint=ReplicaEndpoint(base_url="http://engine/v1", model="m")
     )
-    edge = _edge(control, forward_transport=_FakeRelay())
-    _register_host(edge)
+    listener = _FakeForwardListener()
+    edge = _edge(control, forward_listener=listener)
     edge.adopt("tsk-1", ServeAccessMode.FORWARD)
 
-    reserves = [p for _w, k, p in control.relayed if k == "serve_ingress_reserve"]
-    assert len(reserves) == 1 and reserves[0]["serve_task_id"] == "tsk-1"
+    # Adoption reserves a port on the root authority and asks the listener to bind it.
+    assert len(listener.bound) == 1 and listener.bound[0][0] == "tsk-1"
     exposure = edge.exposures.current("tsk-1")
     assert exposure is not None and 34000 <= exposure.public_port <= 34009
-    # The exposure is not live until the ingress worker's bound evidence commits it.
+    # The exposure is not live until the root listener's bound evidence commits it.
     assert edge.exposures.live("tsk-1") is None
 
-    assert edge.commit_forward(
-        ServeIngressBound(
-            serve_task_id="tsk-1",
-            binding_generation=exposure.binding_generation,
-            exposure_generation=exposure.exposure_generation,
-            listener_generation=1,
-            attachment_generation=1,
-        )
-    )
-    assert edge.exposures.live("tsk-1") is not None
+    edge.commit_forward("tsk-1", exposure.exposure_generation, 1)
+    live = edge.exposures.live("tsk-1")
+    assert live is not None and live.listener_generation == 1
 
 
-def test_forward_adoption_without_a_registered_host_fails_closed() -> None:
-    # With no forward ingress host registered, adoption reserves no port and publishes
-    # no exposure, so the task fails closed rather than serving over the proxy.
+def test_forward_adoption_without_a_configured_authority_fails_closed() -> None:
+    # With no root forward authority/range configured, adoption reserves no port and
+    # publishes no exposure, so the task fails closed rather than serving on proxy.
     control = _FakeControl(
         endpoint=ReplicaEndpoint(base_url="http://engine/v1", model="m")
     )
-    edge = _edge(control, forward_transport=_FakeRelay())
+    listener = _FakeForwardListener()
+    edge = _edge(
+        control,
+        forward_listener=listener,
+        exposures=ForwardIngressDirectory("", 0, 0),
+    )
     edge.adopt("tsk-1", ServeAccessMode.FORWARD)
-    assert [k for _w, k, _p in control.relayed if k == "serve_ingress_reserve"] == []
+    assert listener.bound == []
+    assert edge.exposures.current("tsk-1") is None
+
+
+def test_drain_retires_the_exposure_and_releases_the_root_listener() -> None:
+    control = _FakeControl(
+        endpoint=ReplicaEndpoint(base_url="http://engine/v1", model="m")
+    )
+    listener = _FakeForwardListener()
+    edge = _edge(control, forward_listener=listener)
+    edge.adopt("tsk-1", ServeAccessMode.FORWARD)
+    exposure = edge.exposures.current("tsk-1")
+    assert exposure is not None
+    edge.commit_forward("tsk-1", exposure.exposure_generation, 1)
+
+    edge.drain("tsk-1")
+    assert listener.released == [exposure.public_port]
     assert edge.exposures.current("tsk-1") is None
 
 
@@ -534,77 +538,53 @@ def test_a_binding_is_refused_on_an_ingress_it_does_not_pin() -> None:
     assert control.originations == []
 
 
-def _forward_edge() -> tuple[_FakeControl, GatedServe]:
-    """A gated edge with a live forward exposure and one originated forward request.
+def _forward_live_edge() -> tuple[_FakeControl, GatedServe]:
+    """A gated edge with one live forward exposure for ``tsk-1``.
 
-    The request is originated through ``_submit_forward`` (control's admission runs
-    after authentication elsewhere), so the origination's delivery is a forward-mode
-    stream on which the redrive, commit, and tee semantics are exercised.
+    The root binds the exposure's port and reports it bound, committing it live, so a
+    forward request resolves and admits over the same shared root relay as proxy.
     """
     control = _FakeControl(
         endpoint=ReplicaEndpoint(base_url="http://engine/v1", model="m")
     )
-    edge = _edge(control, forward_transport=_FakeRelay())
-    _register_host(edge)
+    edge = _edge(control, forward_listener=_FakeForwardListener())
     edge.adopt("tsk-1", ServeAccessMode.FORWARD)
     exposure = edge.exposures.current("tsk-1")
     assert exposure is not None
-    edge.commit_forward(
-        ServeIngressBound(
-            serve_task_id="tsk-1",
-            binding_generation=exposure.binding_generation,
-            exposure_generation=exposure.exposure_generation,
-            listener_generation=1,
-            attachment_generation=1,
-        )
-    )
-    edge._submit_forward(
-        ServeIngressRequest(
-            request_id="srq-1",
-            serve_task_id="tsk-1",
-            binding_generation=exposure.binding_generation,
-            exposure_generation=exposure.exposure_generation,
-            method="POST",
-            path="/v1/chat/completions",
-            descriptor_digest="d1",
-        ),
-        "wrk-a",
-        "p1",
-    )
+    edge.commit_forward("tsk-1", exposure.exposure_generation, 1)
     return control, edge
 
 
-def test_a_forward_loss_before_any_delivery_re_drives_transparently() -> None:
-    control, _edge_ = _forward_edge()
-    delivery = control.originations[0].delivery
-    delivery.redrive()
-    # Nothing reached the client yet, so the request re-runs and the caller still sees
-    # exactly one clean response.
-    assert len(control.redrives) == 1
-    assert control.failed_serve == []
+def test_a_forward_request_admits_and_delivers_over_the_shared_root_relay() -> None:
+    # A forward request over a live exposure originates the same local-delivery stream
+    # as a proxy request; the engine's frames tee to the client here, not to a worker.
+    control, edge = _forward_live_edge()
+
+    async def run() -> None:
+        result = edge.submit(
+            "p1", "acme", "tsk-1", _envelope(), ServeAccessMode.FORWARD
+        )
+        delivery = control.originations[0].delivery
+        delivery.head(200, (("content-type", "application/json"),))
+        delivery.tee(b"body")
+        delivery.complete()
+        events = await _events(result)
+        assert events[0].kind == "head"
+        assert [e.payload for e in events if e.kind == "chunk"] == [b"body"]
+        assert events[-1].kind == "done"
+
+    asyncio.run(run())
 
 
-def test_a_forward_loss_after_the_response_is_committed_never_re_drives() -> None:
-    # The ingress delivers frames to its own client, so control never sees them. Without
-    # the commit signal this loss would re-run the engine over a response the client
-    # already holds — duplicate bytes under a status it cannot take back.
-    control, edge = _forward_edge()
-    invocation_id = control.originations[0].invocation_id
-    delivery = control.originations[0].delivery
-
-    edge.committed(invocation_id, 200, (("content-type", "application/json"),))
-    delivery.redrive()
-
-    assert control.redrives == []
-    assert len(control.failed_serve) == 1
-
-
-def test_a_committed_forward_response_enqueues_nothing_for_the_root() -> None:
-    # A forward ingress already wrote its head to its own client; control must not also
-    # queue it, or the root would hold frames no one drains.
-    control, edge = _forward_edge()
-    invocation_id = control.originations[0].invocation_id
-    stream = control.originations[0].delivery
-    edge.committed(invocation_id, 200, (("content-type", "application/json"),))
-    stream.tee(b"body")
-    assert stream.queue.qsize() == 0
+def test_a_forward_request_fails_closed_without_a_live_exposure() -> None:
+    # A forward binding with no live root exposure is unavailable: submit fails closed
+    # before any credit rather than serving over the proxy.
+    control = _FakeControl()
+    edge = _edge(control, forward_listener=_FakeForwardListener())
+    _bind(edge, access_mode=ServeAccessMode.FORWARD)
+    try:
+        edge.submit("p1", "acme", "tsk-1", _envelope(), ServeAccessMode.FORWARD)
+        raise AssertionError("expected IngressUnavailable")
+    except IngressUnavailable:
+        pass
+    assert control.originations == []

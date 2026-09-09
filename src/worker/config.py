@@ -54,13 +54,6 @@ class WorkerConfig:
     docker_gpu_runtime: str | None
     ssh_limits: SSHLimits | None
     enable_ssh_gpu_limit: bool
-    serve_ingress_enabled: bool = False
-    serve_ingress_bind_host: str = "0.0.0.0"
-    serve_ingress_authority: str = ""
-    serve_ingress_port_low: int = 34000
-    serve_ingress_port_high: int = 34099
-    serve_ingress_tls_cert: str | None = None
-    serve_ingress_tls_key: str | None = None
     grpc_keepalive_time_ms: int | None = None
     grpc_keepalive_timeout_ms: int | None = None
     network_mode: str | None = None
@@ -121,25 +114,6 @@ class WorkerConfig:
             and network_bandwidth_bytes_per_sec <= 0
         ):
             raise SystemExit("WORKER_NETWORK_BANDWIDTH_BYTES_PER_SEC must be positive")
-
-        serve_ingress_enabled = parse_bool_env("WORKER_SERVE_INGRESS_ENABLED", False)
-        serve_ingress_authority = os.getenv(
-            "WORKER_SERVE_INGRESS_AUTHORITY", ""
-        ).strip()
-        if serve_ingress_enabled and not serve_ingress_authority:
-            # The host publishes this authority for clients to reach its per-task ports
-            # by; without one a forward task has no address, so refuse to come up
-            # half-wired.
-            raise SystemExit(
-                "WORKER_SERVE_INGRESS_AUTHORITY is required when "
-                "WORKER_SERVE_INGRESS_ENABLED is true"
-            )
-        serve_ingress_tls_cert = (
-            os.getenv("WORKER_SERVE_INGRESS_TLS_CERT", "").strip() or None
-        )
-        serve_ingress_tls_key = (
-            os.getenv("WORKER_SERVE_INGRESS_TLS_KEY", "").strip() or None
-        )
 
         enable_mp_executors = parse_bool_env("WORKER_ENABLE_MP_EXECUTORS", True)
         enable_dev_model = parse_bool_env("WORKER_ENABLE_DEV_MODEL", False)
@@ -219,19 +193,6 @@ class WorkerConfig:
             cost_per_hour=cost_per_hour,
             network_bandwidth_bytes_per_sec=network_bandwidth_bytes_per_sec,
             executor_idle_cleanup_sec=executor_idle_cleanup_sec,
-            serve_ingress_enabled=serve_ingress_enabled,
-            serve_ingress_bind_host=os.getenv(
-                "WORKER_SERVE_INGRESS_BIND_HOST", "0.0.0.0"
-            ).strip(),
-            serve_ingress_authority=serve_ingress_authority,
-            serve_ingress_port_low=parse_int_env("WORKER_SERVE_INGRESS_PORT_LOW", 34000)
-            or 34000,
-            serve_ingress_port_high=parse_int_env(
-                "WORKER_SERVE_INGRESS_PORT_HIGH", 34099
-            )
-            or 34099,
-            serve_ingress_tls_cert=serve_ingress_tls_cert,
-            serve_ingress_tls_key=serve_ingress_tls_key,
             enable_mp_executors=enable_mp_executors,
             enable_dev_model=enable_dev_model,
             dev_model_forward_url=dev_model_forward_url,

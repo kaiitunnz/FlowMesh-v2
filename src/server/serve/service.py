@@ -23,12 +23,6 @@ from fastapi import HTTPException
 from shared.resident.carriage import ResidentCarriagePlan
 from shared.resident.contracts import AdmissionHandoff, RouteAuthorization
 from shared.resident.envelope import ServeRequestEnvelope
-from shared.resident.serve_ingress import (
-    ServeIngressAdvertisement,
-    ServeIngressBound,
-    ServeIngressRequest,
-    ServeIngressReserve,
-)
 from shared.utils.ids import new_idempotency_key, new_invocation_id
 
 from ..auth.security import authenticate_api_key, require_permission
@@ -41,8 +35,8 @@ from ..resident.state import (
 )
 from ..task.v2.representations.operators import ServiceInterface
 from .binding import ServeBindingStore, ServeTaskResidencyBinding
-from .forward import ServeForwardTransport
-from .forward_exposure import ForwardIngressDirectory, ForwardIngressHost
+from .forward_exposure import ForwardIngressDirectory
+from .forward_listener import RootForwardIngress, ServeForwardDenied
 from .ingress import ServeAccessMode, ServeIngressRegistry
 from .relay import ServeRelayExecutor
 from .state import ServeStatusTerminal, ServeTerminalStatus, ServeTerminalStore
@@ -91,11 +85,10 @@ class WrongIngress(Exception):
 
 
 class ServeTransport(Protocol):
-    """How one gated ingress's origin relay is opened, authorized, and reaped.
+    """How the root serve ingress's origin relay is opened, authorized, and reaped.
 
-    The root-local proxy drives its relay in this process; a forward ingress drives it
-    on its own worker and is reached over that worker's authenticated attachment. Both
-    carry the same frozen envelope under the same fence.
+    Both gated modes drive one shared root-internal rendezvous attachment in this
+    process, carrying the same frozen envelope under one fence over ``control_relay``.
     """
 
     def open(
@@ -161,15 +154,6 @@ class _RequestContext:
     envelope: ServeRequestEnvelope
     transport: ServeTransport
     descriptor_digest: str
-    # A root-local proxy delivers response frames to a client attached to this process;
-    # a forward ingress delivers them to its own client and reports only that the
-    # response is committed, so nothing is enqueued here.
-    local_delivery: bool
-    # A worker-hosted forward request carries its ingress worker (the route resolves
-    # from its node) and the worker-minted request id its ingress rendezvous keys on; a
-    # proxy request leaves both unset.
-    origin_worker: str | None = None
-    request_id: str | None = None
 
 
 class _ServeStream:
@@ -208,8 +192,6 @@ class _ServeStream:
             profile=binding.profile(descriptor_digest=self._context.descriptor_digest),
             envelope=self._context.envelope,
             delivery=self,
-            origin_worker=self._context.origin_worker,
-            request_id=self._context.request_id,
         )
 
     def open(
@@ -246,11 +228,9 @@ class _ServeStream:
         if self._closed:
             return
         # Marking the response flushed is what stops a later loss from re-driving over
-        # bytes a client already holds, so it happens for both ingresses — a forward
-        # ingress reports its own commit here even though its frames are already gone.
+        # bytes the client already holds.
         self._flushed = True
-        if self._context.local_delivery:
-            self._offer(ServeEvent(kind="head", status=status, headers=headers))
+        self._offer(ServeEvent(kind="head", status=status, headers=headers))
 
     def tee(self, payload: bytes) -> None:
         # Once the client response is closed (a post-flush loss failed it, or it already
@@ -258,8 +238,7 @@ class _ServeStream:
         if self._closed:
             return
         self._flushed = True
-        if self._context.local_delivery:
-            self._offer(ServeEvent(kind="chunk", payload=payload))
+        self._offer(ServeEvent(kind="chunk", payload=payload))
 
     def _offer(self, event: ServeEvent) -> None:
         # A frame past the backlog bound is dropped rather than buffered without limit,
@@ -324,8 +303,8 @@ class GatedServe:
         relay: ServeRelayExecutor,
         ingresses: ServeIngressRegistry,
         exposures: ForwardIngressDirectory,
-        forward_transport: ServeForwardTransport | None = None,
-        require_forward_tls: bool = True,
+        forward_listener: RootForwardIngress | None = None,
+        advertise_route: Callable[[str], None] | None = None,
         persist: Callable[[], None] | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
@@ -333,27 +312,21 @@ class GatedServe:
         self._terminals = terminals
         self.ingresses = ingresses
         self.exposures = exposures
-        self._forward_transport = forward_transport
-        self._require_forward_tls = require_forward_tls
+        self._forward_listener = forward_listener
+        self._advertise_route = advertise_route or (lambda _task_id: None)
         self.control = control
         self.relay = relay
         self._persist = persist or (lambda: None)
         self._logger = logger or logging.getLogger("gated-serve")
         self._streams: dict[str, _ServeStream] = {}
 
-    def committed(
-        self, invocation_id: str, status: int, headers: tuple[tuple[str, str], ...]
-    ) -> None:
-        """Mark a forward ingress's response committed to its own client.
+    def set_forward_listener(self, listener: RootForwardIngress) -> None:
+        """Attach the root forward listener the edge binds and releases ports on."""
+        self._forward_listener = listener
 
-        The ingress delivers response frames itself, so control never sees them. Without
-        this signal a loss after the ingress had already written a status, headers, and
-        part of a body would look like a loss before anything was delivered and re-drive
-        the engine over a response the client already holds.
-        """
-        stream = self._streams.get(invocation_id)
-        if stream is not None:
-            stream.head(status, headers)
+    def set_advertise_route(self, advertise: Callable[[str], None]) -> None:
+        """Attach the callback that republishes a serve task's url when it goes live."""
+        self._advertise_route = advertise
 
     def submit(
         self,
@@ -365,11 +338,13 @@ class GatedServe:
     ) -> ServeResult:
         """Resolve the live binding, admit the request, and begin streaming.
 
-        The caller has already authenticated and passed task-read authorization at the
-        router, and its request is frozen into the transparent envelope relayed to the
-        engine. A missing live binding or a method the binding does not permit raises
-        before any credit. The binding's ``interface`` selects the family it was adopted
-        under; it constrains neither the path nor the body, which the engine resolves.
+        The caller has already authenticated and passed task-read authorization — the
+        proxy at the router, a forward request at the root listener — and its request is
+        frozen into the transparent envelope relayed to the engine. A missing live
+        binding or a method the binding does not permit raises before any credit. The
+        binding's ``interface`` selects the family it was adopted under; it constrains
+        neither the path nor the body, which the engine resolves. Both modes carry the
+        response over the one shared root rendezvous attachment.
         """
         binding = self._bindings.live(serve_task_id)
         if binding is None:
@@ -378,20 +353,18 @@ class GatedServe:
             raise MethodNotAllowed(envelope.method)
         # A binding pins one exposure mode, so serving it on another ingress would make
         # the mode a hint rather than policy: an operator who pinned forward to keep
-        # serve traffic off the root would still carry it there whenever a client used
-        # the root URL.
+        # serve traffic off the task-path route would still carry it there whenever a
+        # client used the root URL.
         if arrived_on is not binding.access_mode:
             raise WrongIngress(binding.access_mode)
-        # A binding pinned to an ingress this deployment has not registered is
-        # unavailable: fail closed rather than serve it over the other mode.
-        if self.ingresses.live(binding.access_mode) is None:
-            raise IngressUnavailable(binding.access_mode)
-        local = arrived_on is ServeAccessMode.PROXY
-        transport: ServeTransport | None = (
-            self.relay if local else self._forward_transport
-        )
-        if transport is None:
-            raise IngressUnavailable(binding.access_mode)
+        # A binding pinned to an ingress that is not live is unavailable: fail closed
+        # rather than serve it over the other mode. Proxy resolves its root-local
+        # ingress; forward resolves its own live root port exposure.
+        if arrived_on is ServeAccessMode.PROXY:
+            if self.ingresses.live(ServeAccessMode.PROXY) is None:
+                raise IngressUnavailable(ServeAccessMode.PROXY)
+        elif self.exposures.live(serve_task_id) is None:
+            raise IngressUnavailable(ServeAccessMode.FORWARD)
         context = _RequestContext(
             invocation_id=new_invocation_id(),
             idempotency_key=new_idempotency_key(),
@@ -400,189 +373,74 @@ class GatedServe:
             ),
             binding=binding,
             envelope=envelope,
-            transport=transport,
+            transport=self.relay,
             descriptor_digest=envelope.digest(),
-            local_delivery=local,
         )
         stream = _ServeStream(self, context)
         self._streams[context.invocation_id] = stream
         self.control.originate_serve(stream.origination())
         return ServeResult(stream)
 
-    def admit_forward(self, request: ServeIngressRequest, worker_id: str) -> None:
-        """Authenticate, authorize, and admit one worker-hosted forward request.
+    async def admit_forward_request(
+        self, credential: str | None, serve_task_id: str, envelope: ServeRequestEnvelope
+    ) -> ServeResult:
+        """Authenticate, authorize, and admit one root forward request.
 
-        The ingress relayed the presented credential and the frozen request's descriptor
-        up; control authenticates the principal, checks task-read access, resolves the
-        live binding, and admits — the same gate the root-local proxy runs at the
-        router, moved to control because a forward ingress authenticates nothing itself.
-        Its response frames are teed to the ingress's own client, never through control.
+        The root listener resolved the serve task from the arrival port and froze the
+        request; this runs the same gate the proxy runs at the router — authenticate the
+        FlowMesh principal, check task-read access, then admit — but off the listener
+        rather than a FastAPI dependency. A denial raises ``ServeForwardDenied`` with
+        the status the listener returns, and no ``ServiceClaim`` is raised.
         """
-        self.control.schedule(self._admit_forward(request, worker_id))
-
-    async def _admit_forward(
-        self, request: ServeIngressRequest, worker_id: str
-    ) -> None:
         try:
-            raw = request.credential or ""
+            raw = credential or ""
             if raw.startswith(_BEARER_PREFIX):
                 raw = raw[len(_BEARER_PREFIX) :]
             principal = await authenticate_api_key(raw, self._logger)
             await require_permission(
                 principal,
                 ResourceKind.TASK,
-                request.serve_task_id,
+                serve_task_id,
                 ResourceAction.READ,
                 self._logger,
             )
-            self._submit_forward(request, worker_id, principal.principal_id)
+            return self.submit(
+                principal.principal_id,
+                principal.org_id,
+                serve_task_id,
+                envelope,
+                ServeAccessMode.FORWARD,
+            )
         except HTTPException as exc:
-            self._deny_forward(request, worker_id, exc.status_code, str(exc.detail))
-        except (BindingNotFound, WrongIngress):
-            self._deny_forward(request, worker_id, 404, "serve task not found")
-        except MethodNotAllowed:
-            self._deny_forward(request, worker_id, 405, "method not allowed")
-        except IngressUnavailable:
-            self._deny_forward(
-                request, worker_id, 503, "serve task ingress is not available"
-            )
-        except Exception:
-            self._logger.exception(
-                "forward serve admission failed for task %s", request.serve_task_id
-            )
-            self._deny_forward(request, worker_id, 502, "serve admission error")
+            raise ServeForwardDenied(exc.status_code, str(exc.detail)) from exc
+        except (BindingNotFound, WrongIngress) as exc:
+            raise ServeForwardDenied(404, "serve task not found") from exc
+        except MethodNotAllowed as exc:
+            raise ServeForwardDenied(405, "method not allowed") from exc
+        except IngressUnavailable as exc:
+            raise ServeForwardDenied(
+                503, "serve task ingress is not available"
+            ) from exc
 
-    def _submit_forward(
-        self, request: ServeIngressRequest, worker_id: str, principal_id: str
-    ) -> None:
-        """Resolve the live binding and admit a forward request against its group.
-
-        The server holds the request's bounded descriptor, never its body: the ingress
-        worker relays the frozen request to the sidecar itself, so the profile binds the
-        worker-computed descriptor digest and the transport relays only the fence down.
-        """
-        transport = self._forward_transport
-        if transport is None:
-            raise IngressUnavailable(ServeAccessMode.FORWARD)
-        binding = self._bindings.live(request.serve_task_id)
-        if binding is None:
-            raise BindingNotFound(request.serve_task_id)
-        if request.method.upper() not in {m.upper() for m in binding.allowed_methods}:
-            raise MethodNotAllowed(request.method)
-        if binding.access_mode is not ServeAccessMode.FORWARD:
-            raise WrongIngress(binding.access_mode)
-        # Control resolves the task from its own live exposure, and the request must
-        # name that exposure's generations — the port the worker holds, never a client
-        # path. A request against a stale or superseded exposure is refused before any
-        # credit.
-        exposure = self.exposures.live(request.serve_task_id)
-        if exposure is None:
-            raise IngressUnavailable(ServeAccessMode.FORWARD)
-        if (
-            request.binding_generation != binding.binding_generation
-            or request.exposure_generation != exposure.exposure_generation
-        ):
-            raise IngressUnavailable(ServeAccessMode.FORWARD)
-        context = _RequestContext(
-            invocation_id=new_invocation_id(),
-            idempotency_key=new_idempotency_key(),
-            subject=InvocationSubject(
-                kind=InvocationSubjectKind.EXTERNAL, id=principal_id, tenant=None
-            ),
-            binding=binding,
-            # The forward ingress holds the real request; the server carries only the
-            # descriptor, so its envelope names the request line and the worker-computed
-            # digest travels explicitly rather than being recomputed from a body the
-            # server never sees.
-            envelope=ServeRequestEnvelope(
-                method=request.method.upper(),
-                path=request.path,
-                query=request.query,
-            ),
-            transport=transport,
-            descriptor_digest=request.descriptor_digest,
-            local_delivery=False,
-            origin_worker=worker_id,
-            request_id=request.request_id,
-        )
-        transport.track(
-            invocation_id=context.invocation_id,
-            worker_id=worker_id,
-            request_id=request.request_id,
-        )
-        stream = _ServeStream(self, context)
-        self._streams[context.invocation_id] = stream
-        self.control.originate_serve(stream.origination())
-
-    def _deny_forward(
-        self, request: ServeIngressRequest, worker_id: str, status: int, detail: str
-    ) -> None:
-        # A synchronous rejection is refused before the request was tracked, so the
-        # denial is relayed to the waiting ingress directly by its worker and request id
-        # rather than through the transport's per-invocation tracking.
-        self.control.relay_to_worker(
-            worker_id,
-            "serve_ingress_denied",
-            {"request_id": request.request_id, "status": status, "detail": detail},
-        )
-
-    def withdraw_host(self, worker_id: str) -> None:
-        """Drop a forward ingress host and its exposures when its worker unregisters."""
-        self.exposures.withdraw_host(worker_id)
-
-    def register_host(
-        self, worker_id: str, advertisement: ServeIngressAdvertisement
-    ) -> bool:
-        """Register a worker's forward ingress host from its advertisement.
-
-        Control derives the host's route origin from the reporting worker's own node, so
-        a request that arrives on it resolves an offload-capable origin. Once the host
-        is registered, any live forward binding still waiting for an ingress is reserved
-        a port and told to bind, so a task adopted before its host started still
-        exposes.
-        """
-        origin_id = self.control.node_of_worker(worker_id)
-        if origin_id is None:
-            return False
-        registered = self.exposures.register_host(
-            ForwardIngressHost(
-                authority=advertisement.authority,
-                worker_id=worker_id,
-                origin_id=origin_id,
-                port_low=advertisement.port_low,
-                port_high=advertisement.port_high,
-                tls_profile_generation=advertisement.tls_profile_generation,
-                generation=advertisement.generation,
-            )
-        )
-        if registered:
-            self._reserve_pending_forward_bindings()
-        return registered
-
-    def _reserve_pending_forward_bindings(self) -> None:
-        """Reserve a port for every live forward binding without a current exposure."""
-        for binding in self._bindings.all():
-            if (
-                binding.live
-                and binding.access_mode is ServeAccessMode.FORWARD
-                and self.exposures.current(binding.serve_task_id) is None
-            ):
-                self._reserve_and_relay(binding, None)
-
-    def _reserve_and_relay(
+    def _reserve_and_bind(
         self, binding: ServeTaskResidencyBinding, requested_port: int | None
     ) -> None:
-        """Reserve a forward port for a binding and tell its host worker to bind it.
+        """Reserve a forward port for a binding and bind the root listener on it.
 
-        A reservation that cannot be placed — no host registered, TLS required on a
-        plaintext host, or the range exhausted — leaves the binding with no exposure, so
-        its url is never published and requests fail closed until one can be placed.
+        A reservation that cannot be placed — the root has no configured forward
+        authority/range, or the range is exhausted — leaves the binding with no
+        exposure, so its url is never published and requests fail closed until one can
+        be placed.
+        The listener binds on its own loop and reports the bind back, which commits the
+        exposure live; a port that cannot bind reports nothing and stays unavailable.
         """
+        listener = self._forward_listener
+        if listener is None:
+            return
         exposure = self.exposures.reserve(
             serve_task_id=binding.serve_task_id,
             binding_generation=binding.binding_generation,
             requested_port=requested_port,
-            require_tls=self._require_forward_tls,
         )
         if exposure is None:
             self._logger.info(
@@ -591,34 +449,56 @@ class GatedServe:
             )
             return
         self.exposures.mark_binding(binding.serve_task_id, exposure.exposure_generation)
-        self.control.relay_to_worker(
-            exposure.worker_id,
-            "serve_ingress_reserve",
-            ServeIngressReserve(
-                serve_task_id=binding.serve_task_id,
-                binding_generation=binding.binding_generation,
-                exposure_generation=exposure.exposure_generation,
-                public_port=exposure.public_port,
-                tls=exposure.tls,
-            ).model_dump(mode="json"),
+        listener.schedule_bind(
+            binding.serve_task_id, exposure.exposure_generation, exposure.public_port
         )
 
-    def commit_forward(self, bound: ServeIngressBound) -> bool:
-        """Commit a bound forward exposure LIVE from its worker's ready evidence.
+    def commit_forward(
+        self, serve_task_id: str, exposure_generation: int, listener_generation: int
+    ) -> None:
+        """Commit a bound forward exposure LIVE from the root listener's evidence.
 
-        Returns whether the exposure went live, so the caller republishes the serve
-        task's url from the now-live exposure.
+        Runs on the control loop from the listener's bind report; on success it persists
+        the now-live exposure and republishes the serve task's url from it.
         """
-        exposure = self.exposures.commit(
-            serve_task_id=bound.serve_task_id,
-            exposure_generation=bound.exposure_generation,
-            listener_generation=bound.listener_generation,
-            attachment_generation=bound.attachment_generation,
-        )
-        if exposure is None:
-            return False
-        self._persist()
-        return True
+
+        def _commit() -> None:
+            exposure = self.exposures.commit(
+                serve_task_id=serve_task_id,
+                exposure_generation=exposure_generation,
+                listener_generation=listener_generation,
+            )
+            if exposure is None:
+                return
+            self._persist()
+            self._advertise_route(serve_task_id)
+
+        self.control.call_on_loop(_commit)
+
+    def rebind_forward_exposures(self) -> None:
+        """Rebind every persisted forward exposure on restart before it serves.
+
+        A persisted exposure comes back holding its port but no bound listener; treat it
+        as binding, ask the listener to rebind its same port, and recommit it with a
+        fresh listener generation. A port that cannot rebind stays unavailable rather
+        than the task silently publishing a new port.
+        """
+        listener = self._forward_listener
+        if listener is None:
+            return
+
+        def _rebind() -> None:
+            for exposure in self.exposures.all():
+                self.exposures.mark_binding(
+                    exposure.serve_task_id, exposure.exposure_generation
+                )
+                listener.schedule_bind(
+                    exposure.serve_task_id,
+                    exposure.exposure_generation,
+                    exposure.public_port,
+                )
+
+        self.control.call_on_loop(_rebind)
 
     def adopt(
         self,
@@ -673,10 +553,9 @@ class GatedServe:
                 binding_generation=binding.binding_generation,
             )
             if binding.access_mode is ServeAccessMode.FORWARD:
-                # Reserve a public port on a registered ingress host and tell its worker
-                # to bind it; the exposure goes live only on the worker's bound
-                # evidence.
-                self._reserve_and_relay(binding, forward_port)
+                # Reserve a public port on the root authority and bind its listener; the
+                # exposure goes live only on the listener's bound evidence.
+                self._reserve_and_bind(binding, forward_port)
             self._persist()
 
         self.control.call_on_loop(_adopt)
@@ -694,19 +573,12 @@ class GatedServe:
                 return
             self._bindings.drain(serve_task_id)
             self.control.drain_serve_replica(serve_task_id)
-            # Retire the forward exposure and tell its worker to close the listener; the
+            # Retire the forward exposure and close the root listener on its port; the
             # port is quarantined until a later exposure reserves it under a fresh
             # generation, so a reused number never carries a stale generation's traffic.
             exposure = self.exposures.retire(serve_task_id)
-            if exposure is not None:
-                self.control.relay_to_worker(
-                    exposure.worker_id,
-                    "serve_ingress_release",
-                    {
-                        "serve_task_id": serve_task_id,
-                        "public_port": exposure.public_port,
-                    },
-                )
+            if exposure is not None and self._forward_listener is not None:
+                self._forward_listener.schedule_release(exposure.public_port)
             self._bindings.remove(serve_task_id)
             self._persist()
 
@@ -715,12 +587,6 @@ class GatedServe:
     def forget(self, invocation_id: str) -> None:
         """Drop a settled request's stream once its claim has reached a terminal."""
         self._streams.pop(invocation_id, None)
-        if self._forward_transport is not None:
-            # A forward request that settled before its drive opened (a synchronous
-            # rejection or an admission that gave up) still has a waiting ingress
-            # rendezvous; forget denies it. One whose session opened was already reaped
-            # through close_session, so this is a no-op for it.
-            self._forward_transport.forget(invocation_id)
 
     def record_terminal(
         self, invocation_id: str, reason: ClaimTerminalReason, detail: str | None

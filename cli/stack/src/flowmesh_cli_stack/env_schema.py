@@ -705,6 +705,34 @@ STACK_ENV_SCHEMA = EnvSchema(
                 EnvVar("ENABLE_SERVER_SSH_PROXY", "true", var_type=EnvVarType.BOOL),
                 EnvVar("ENABLE_SERVER_SERVE_PROXY", "true", var_type=EnvVarType.BOOL),
                 EnvVar(
+                    "ENABLE_SERVER_SERVE_FORWARD",
+                    "false",
+                    var_type=EnvVarType.BOOL,
+                    description="Host the root per-task-port forward serve ingress.",
+                ),
+                EnvVar(
+                    "SERVE_FORWARD_AUTHORITY",
+                    "",
+                    description="Public authority clients dial forward serve ports at.",
+                ),
+                EnvVar(
+                    "SERVE_FORWARD_BIND_HOST",
+                    "0.0.0.0",
+                    description="Interface the root forward serve listeners bind.",
+                ),
+                EnvVar(
+                    "SERVE_FORWARD_PORT_LOW",
+                    "34000",
+                    var_type=EnvVarType.INT,
+                    description="Lowest forward serve exposure port.",
+                ),
+                EnvVar(
+                    "SERVE_FORWARD_PORT_HIGH",
+                    "34099",
+                    var_type=EnvVarType.INT,
+                    description="Highest forward serve exposure port.",
+                ),
+                EnvVar(
                     "ENABLE_SERVER_SSH_CONNECTION_AUDIT",
                     "true",
                     var_type=EnvVarType.BOOL,
@@ -960,44 +988,6 @@ STACK_ENV_SCHEMA = EnvSchema(
                     "false",
                     var_type=EnvVarType.BOOL,
                     description="Advertise the GPU-free dev_model executor.",
-                ),
-                EnvVar(
-                    "WORKER_SERVE_INGRESS_ENABLED",
-                    "false",
-                    var_type=EnvVarType.BOOL,
-                    description="Host the gated forward serve ingress on this worker.",
-                ),
-                EnvVar(
-                    "WORKER_SERVE_INGRESS_BIND_HOST",
-                    "0.0.0.0",
-                    description="Interface the gated forward serve ingress binds.",
-                ),
-                EnvVar(
-                    "WORKER_SERVE_INGRESS_AUTHORITY",
-                    "",
-                    description="Public authority for forward serve ports.",
-                ),
-                EnvVar(
-                    "WORKER_SERVE_INGRESS_PORT_LOW",
-                    "34000",
-                    var_type=EnvVarType.INT,
-                    description="Lowest forward serve exposure port.",
-                ),
-                EnvVar(
-                    "WORKER_SERVE_INGRESS_PORT_HIGH",
-                    "34099",
-                    var_type=EnvVarType.INT,
-                    description="Highest forward serve exposure port.",
-                ),
-                EnvVar(
-                    "WORKER_SERVE_INGRESS_TLS_CERT",
-                    "",
-                    description="Path to the forward serve ingress TLS certificate.",
-                ),
-                EnvVar(
-                    "WORKER_SERVE_INGRESS_TLS_KEY",
-                    "",
-                    description="Path to the forward serve ingress TLS private key.",
                 ),
                 EnvVar(
                     "DEV_MODEL_FORWARD_URL",

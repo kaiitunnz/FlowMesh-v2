@@ -13,14 +13,13 @@ from .binding import (
     ServeTaskResidencyBinding,
     serve_family_key,
 )
-from .forward import ServeForwardTransport
 from .forward_exposure import (
     ForwardExposureSnapshot,
     ForwardExposureStatus,
     ForwardIngressDirectory,
-    ForwardIngressHost,
     ForwardPortExposure,
 )
+from .forward_listener import RootForwardIngress
 from .ingress import (
     ServeAccessMode,
     ServeIngress,
@@ -49,12 +48,11 @@ __all__ = [
     "IngressUnavailable",
     "WrongIngress",
     "ServeAccessMode",
-    "ServeForwardTransport",
     "ForwardExposureSnapshot",
     "ForwardExposureStatus",
     "ForwardIngressDirectory",
-    "ForwardIngressHost",
     "ForwardPortExposure",
+    "RootForwardIngress",
     "ServeIngress",
     "ServeIngressRegistry",
     "is_public_base_url",

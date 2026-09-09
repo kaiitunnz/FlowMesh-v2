@@ -11,13 +11,6 @@ from typing import Any
 import requests
 
 from shared.outcome import FabricContentStore
-from shared.resident.carriage import ResidentCarriagePlan
-from shared.resident.contracts import AdmissionHandoff, RouteAuthorization
-from shared.resident.serve_ingress import (
-    ServeIngressAdvertisement,
-    ServeIngressBound,
-    ServeIngressReserve,
-)
 from shared.schemas.result import BaseExecutorResult
 from shared.tasks import MergedChildTaskStrict
 from shared.tasks.specs import (
@@ -30,7 +23,6 @@ from shared.tasks.worker_message import HardwareUsage, WorkerHardware, WorkerTas
 from shared.tools.contract import MediatedOperationPermit
 from shared.tools.model.schema import MODEL_INTERFACE
 from shared.tools.search.schema import DEFAULT_SEARCH_PROVIDER
-from shared.utils.ids import new_serve_request_id
 from shared.utils.manifest import prepare_output_dir, sync_manifest
 from shared.utils.time import now_iso
 
@@ -41,8 +33,6 @@ from .executors.utils.checkpoints import get_http_destination, write_executor_re
 from .lifecycle import Lifecycle
 from .model_turn import HeldModelEgress, ModelTurnRendezvous, ResponsesFacade
 from .resident.lane_host import ResidentLaneHost
-from .serve_ingress.listener import ForwardIngressHost
-from .serve_ingress.rendezvous import ServeIngressAdmission, ServeIngressDenied
 from .utils.logging import TaskLogEmitter
 
 
@@ -63,13 +53,6 @@ class Runner:
         model_api_key: str | None = None,
         model_egress_timeout_sec: float = 120.0,
         content_store: FabricContentStore | None = None,
-        serve_ingress_enabled: bool = False,
-        serve_ingress_bind_host: str = "0.0.0.0",
-        serve_ingress_authority: str = "",
-        serve_ingress_port_low: int = 34000,
-        serve_ingress_port_high: int = 34099,
-        serve_ingress_tls_cert: str | None = None,
-        serve_ingress_tls_key: str | None = None,
     ):
         self.lifecycle = lifecycle
         self.task_stream = task_stream
@@ -127,17 +110,6 @@ class Runner:
         # asyncio loop, built on the first resident control frame relayed over the
         # attachment (once the worker id is known).
         self._resident_host: ResidentLaneHost | None = None
-        # The optional worker-hosted forward serve ingress: a public listener that gates
-        # every request through control before relaying it, started at worker startup
-        # when the deployment configures one.
-        self._serve_ingress_enabled = serve_ingress_enabled
-        self._serve_ingress_bind_host = serve_ingress_bind_host
-        self._serve_ingress_authority = serve_ingress_authority
-        self._serve_ingress_port_low = serve_ingress_port_low
-        self._serve_ingress_port_high = serve_ingress_port_high
-        self._serve_ingress_tls_cert = serve_ingress_tls_cert
-        self._serve_ingress_tls_key = serve_ingress_tls_key
-        self._serve_ingress: ForwardIngressHost | None = None
 
     def _cancel_active_executor(self) -> None:
         with self._active_executor_lock:
@@ -178,8 +150,6 @@ class Runner:
             self._mediated_sidecar.stop()
         if self._responses_facade is not None:
             self._responses_facade.stop()
-        if self._serve_ingress is not None:
-            self._serve_ingress.stop()
         if self._resident_host is not None:
             self._resident_host.stop()
 
@@ -255,150 +225,16 @@ class Runner:
             content_store=self._content_store,
             peek_request=self.lifecycle.resident_requests.peek,
             delete_request=self.lifecycle.resident_requests.delete,
-            serve_ingress=self._serve_ingress_enabled,
-            report_committed=self._push_serve_committed,
             logger=self.logger,
         )
         host.start()
         self._resident_host = host
         return host
 
-    def _push_serve_committed(
-        self, invocation_id: str, status: int, headers: tuple[tuple[str, str], ...]
-    ) -> None:
-        self.lifecycle.client.push_serve_committed(
-            invocation_id, status, [[name, value] for name, value in headers]
-        )
-
-    def _start_serve_ingress(self) -> None:
-        """Host the forward-serve ingress and register it with control.
-
-        The host binds no port up front; control reserves a public port per forward task
-        and this host binds one listener each, so registration only advertises the
-        host's authority and port range. Registration runs in the background so waiting
-        for the event stream never blocks the task loop.
-        """
-        if not self._serve_ingress_enabled or self._serve_ingress is not None:
-            return
-        if not self._serve_ingress_authority:
-            self.logger.warning(
-                "serve ingress enabled without an authority; not hosting it"
-            )
-            return
-        self._serve_ingress = ForwardIngressHost(
-            bind_host=self._serve_ingress_bind_host,
-            authority=self._serve_ingress_authority,
-            propose=self._propose_serve_ingress,
-            begin=self._begin_serve_ingress,
-            new_request_id=new_serve_request_id,
-            report_bound=self._report_serve_ingress_bound,
-            tls_cert=self._serve_ingress_tls_cert,
-            tls_key=self._serve_ingress_tls_key,
-            logger=self.logger,
-        )
-        # Build the resident lane host up front so the serve lane is ready before the
-        # first admitted request.
-        self._ensure_resident_host()
-        threading.Thread(
-            target=self._register_serve_ingress,
-            daemon=True,
-            name="flowmesh-serve-ingress-register",
-        ).start()
-
-    def _register_serve_ingress(self) -> None:
-        tls_generation = (
-            1 if self._serve_ingress_tls_cert and self._serve_ingress_tls_key else 0
-        )
-        try:
-            self.lifecycle.client.push_serve_ingress_register(
-                ServeIngressAdvertisement(
-                    authority=self._serve_ingress_authority,
-                    port_low=self._serve_ingress_port_low,
-                    port_high=self._serve_ingress_port_high,
-                    tls_profile_generation=tls_generation,
-                    generation=int(time.time()),
-                ).model_dump(mode="json")
-            )
-        except Exception as exc:
-            self.logger.warning("serve ingress registration failed: %s", exc)
-
-    def _report_serve_ingress_bound(self, bound: ServeIngressBound) -> None:
-        try:
-            self.lifecycle.client.push_serve_ingress_bound(
-                bound.model_dump(mode="json")
-            )
-        except Exception as exc:
-            self.logger.warning("serve ingress bound report failed: %s", exc)
-
-    def _propose_serve_ingress(self, request: Any) -> None:
-        self.lifecycle.client.push_serve_ingress_request(
-            request.model_dump(mode="json")
-        )
-
-    def _begin_serve_ingress(
-        self, decision: ServeIngressAdmission, envelope: Any, channel: Any
-    ) -> None:
-        host = self._ensure_resident_host()
-        if host is None:
-            channel.fail("resident lane host unavailable")
-            return
-        host.begin_serve(decision, envelope, channel)
-
-    def _route_serve_ingress(self, frame_kind: str, frame: dict[str, Any]) -> None:
-        ingress = self._serve_ingress
-        if ingress is None:
-            return
-        if frame_kind == "serve_ingress_reserve":
-            # Control reserved a public port for a forward task: bind a listener on it
-            # and report it bound so control commits the exposure live.
-            ingress.reserve(ServeIngressReserve.model_validate(frame))
-        elif frame_kind == "serve_ingress_release":
-            ingress.release(int(frame["public_port"]))
-        elif frame_kind == "serve_ingress_admitted":
-            ingress.rendezvous.deliver(
-                str(frame["request_id"]),
-                ServeIngressAdmission(
-                    session_id=str(frame["session_id"]),
-                    task_id=str(frame["task_id"]),
-                    call_correlation=str(frame["call_correlation"]),
-                    handoff=AdmissionHandoff.model_validate(frame["handoff"]),
-                    carriage_plan=ResidentCarriagePlan.model_validate(
-                        frame["carriage_plan"]
-                    ),
-                ),
-            )
-        elif frame_kind == "serve_ingress_denied":
-            ingress.rendezvous.deliver(
-                str(frame["request_id"]),
-                ServeIngressDenied(
-                    int(frame["status"]), str(frame.get("detail") or "")
-                ),
-            )
-        elif frame_kind == "serve_ingress_authorized":
-            if (host := self._resident_host) is not None:
-                host.authorize_serve(
-                    str(frame["session_id"]),
-                    RouteAuthorization.model_validate(frame["auth"]),
-                )
-        elif frame_kind == "serve_ingress_reaped":
-            # A reaped invocation wakes a still-waiting request with a denial and closes
-            # a live drive and its client channel; whichever applies, the other no-ops.
-            ingress.rendezvous.deliver(
-                str(frame["request_id"]),
-                ServeIngressDenied(504, "serve request reaped"),
-            )
-            if (host := self._resident_host) is not None:
-                host.close_serve(str(frame["session_id"]), str(frame["invocation_id"]))
-        else:
-            self.logger.warning("Unknown serve ingress frame kind: %s", frame_kind)
-
     def _route_mediated_op(self, frame_kind: str, frame: dict[str, Any]) -> None:
         if frame_kind.startswith("resident_"):
             if (host := self._ensure_resident_host()) is not None:
                 host.route(frame_kind, frame)
-            return
-        if frame_kind.startswith("serve_ingress_"):
-            self._route_serve_ingress(frame_kind, frame)
             return
         if frame_kind == "deny":
             # A held model turn's denial: only a facade waiter consumes it.
@@ -716,7 +552,6 @@ class Runner:
     def start(self) -> None:
         self._start_idle_checker()
         self._start_interrupt_monitor()
-        self._start_serve_ingress()
         try:
             for msg in self.task_stream:
                 if self._shutdown_requested.is_set():

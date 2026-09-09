@@ -1,16 +1,14 @@
-"""The worker-hosted forward serve ingress's control-side admission and transport.
+"""The root-hosted forward serve ingress admits over the same gate as proxy.
 
-A forward request arrives on a worker's public ingress, which relays it to control for
-admission over the worker's attachment. Control authenticates it, resolves the live
-FORWARD binding, admits it against that binding's own allocation group, and relays the
-fence back down to the ingress worker — which tees the response to its own client. These
-cover that control side: the admission threads the ingress worker as the request's
-origin, a fail-closed leg refuses a request whose ingress is unregistered, and the
-transport relays the two-phase fence down and reaps the ingress rendezvous on teardown.
+A forward request enters at the root's per-task port; the listener resolves the serve
+task from that port, freezes the request, and hands it to ``admit_forward_request``,
+which authenticates the FlowMesh principal, checks task-read access, and admits it over
+the shared root relay. A bad credential or a denied read is refused with the engine's
+own status and raises no claim. These cover that admission gate; the port bind/commit
+and end-to-end streaming are covered by the gated-serve edge tests and the e2e.
 """
 
 import asyncio
-from collections.abc import Callable
 
 import pytest
 from fastapi import HTTPException
@@ -19,113 +17,64 @@ from server.serve import (
     ForwardIngressDirectory,
     GatedServe,
     ServeBindingStore,
-    ServeForwardTransport,
     ServeTerminalStore,
 )
+from server.serve.forward_listener import ServeForwardDenied
 from server.serve.ingress import ServeAccessMode, ServeIngressRegistry
 from server.task.v2.representations.operators import ServiceInterface
-from shared.resident.carriage import ResidentCarriagePlan
-from shared.resident.contracts import AdmissionHandoff, RouteAuthorization
-from shared.resident.envelope import ServeRequestEnvelope
-from shared.resident.serve_ingress import (
-    ServeIngressAdvertisement,
-    ServeIngressBound,
-    ServeIngressRequest,
-)
-
-_RelayLog = list[tuple[str, str, dict]]
+from shared.resident.envelope import ServeRequestEnvelope, freeze_request_envelope
 
 
-def _recorder(log: "_RelayLog") -> Callable[[str, str, dict], bool]:
-    def relay(worker_id: str, frame_kind: str, payload: dict) -> bool:
-        log.append((worker_id, frame_kind, payload))
-        return True
-
-    return relay
+class _Principal:
+    def __init__(self) -> None:
+        self.principal_id = "usr-1"
+        self.org_id = "org-1"
 
 
-def _handoff(invocation_id: str = "inv-1") -> AdmissionHandoff:
-    return AdmissionHandoff(
-        token="hnd-1",
-        claim_id="scl-1",
-        invocation_id=invocation_id,
-        family="serve/tsk-1",
-        replica_id="rpl-1",
-        incarnation=1,
-        serve_task_id="tsk-1",
-        binding_generation=0,
-        descriptor_digest="d1",
-    )
-
-
-def _auth(invocation_id: str = "inv-1") -> RouteAuthorization:
-    return RouteAuthorization(
-        claim_id="scl-1",
-        invocation_id=invocation_id,
-        replica_id="rpl-1",
-        incarnation=1,
-    )
-
-
-def _request(
-    request_id: str = "srq-1",
-    method: str = "POST",
-    digest: str = "d1",
-) -> ServeIngressRequest:
-    return ServeIngressRequest(
-        request_id=request_id,
-        serve_task_id="tsk-1",
-        binding_generation=0,
-        exposure_generation=0,
-        credential=None,
-        method=method,
-        path="/v1/chat/completions",
-        query="",
-        descriptor_digest=digest,
-        body_bytes=8,
-    )
-
-
-class _ForwardControl:
-    """A control double that records originations and the frames relayed to workers."""
+class _FakeControl:
+    """A control double that records originations; runs loop work inline."""
 
     def __init__(self) -> None:
         self.originations: list = []
-        self.relayed: _RelayLog = []
+        self.redrives: list = []
 
-    def schedule(self, coro) -> None:
-        asyncio.run(coro)
+    def call_on_loop(self, fn) -> None:
+        fn()
 
     def originate_serve(self, origination) -> None:
         self.originations.append(origination)
 
-    def relay_to_worker(self, worker_id: str, frame_kind: str, payload: dict) -> bool:
-        self.relayed.append((worker_id, frame_kind, payload))
-        return True
-
-    def node_of_worker(self, worker_id: str | None) -> str | None:
-        return f"node-{worker_id}" if worker_id else None
-
-    # Unused by the forward path but part of the control surface the edge may touch.
-    def call_on_loop(self, fn: Callable[[], None]) -> None:
-        fn()
+    def redrive_serve(self, origination) -> None:
+        self.redrives.append(origination)
 
 
-def _edge(
-    control: _ForwardControl,
-    transport: ServeForwardTransport,
-    *,
-    register: bool,
-) -> GatedServe:
+class _FakeRelay:
+    def open(self, *args, **kwargs) -> None: ...
+    def authorize(self, *args, **kwargs) -> None: ...
+    def close(self, *args, **kwargs) -> None: ...
+
+
+class _FakeForwardListener:
+    def __init__(self) -> None:
+        self.bound: list[tuple[str, int, int]] = []
+        self.released: list[int] = []
+
+    def schedule_bind(self, task_id: str, exposure_generation: int, port: int) -> None:
+        self.bound.append((task_id, exposure_generation, port))
+
+    def schedule_release(self, port: int) -> None:
+        self.released.append(port)
+
+
+def _edge() -> GatedServe:
     edge = GatedServe(
         bindings=ServeBindingStore(),
         terminals=ServeTerminalStore(),
-        control=control,  # type: ignore[arg-type]
-        relay=None,  # type: ignore[arg-type]
+        control=_FakeControl(),  # type: ignore[arg-type]
+        relay=_FakeRelay(),  # type: ignore[arg-type]
         ingresses=ServeIngressRegistry("serve-edge"),
-        exposures=ForwardIngressDirectory(),
-        forward_transport=transport,
-        require_forward_tls=False,
+        exposures=ForwardIngressDirectory("serve.example", 34000, 34009),
+        forward_listener=_FakeForwardListener(),  # type: ignore[arg-type]
     )
     edge._bindings.adopt(
         "tsk-1",
@@ -138,165 +87,65 @@ def _edge(
         max_output_tokens=None,
         access_mode=ServeAccessMode.FORWARD,
     )
-    if register:
-        # Register a forward ingress host, reserve the task's port, and commit the
-        # exposure live from the worker's bound evidence, so admission resolves it.
-        edge.register_host(
-            "wrk-a",
-            ServeIngressAdvertisement(
-                authority="ingress.example",
-                port_low=34000,
-                port_high=34009,
-                generation=1,
-            ),
-        )
-        exposure = edge.exposures.current("tsk-1")
-        assert exposure is not None
-        edge.commit_forward(
-            ServeIngressBound(
-                serve_task_id="tsk-1",
-                binding_generation=exposure.binding_generation,
-                exposure_generation=exposure.exposure_generation,
-                listener_generation=1,
-                attachment_generation=1,
-            )
-        )
+    # Reserve and commit a live exposure for the task, as adoption + a bound report do.
+    exposure = edge.exposures.reserve(
+        serve_task_id="tsk-1", binding_generation=0, requested_port=None
+    )
+    assert exposure is not None
+    edge.exposures.mark_binding("tsk-1", exposure.exposure_generation)
+    edge.exposures.commit(
+        serve_task_id="tsk-1",
+        exposure_generation=exposure.exposure_generation,
+        listener_generation=1,
+    )
     return edge
 
 
-def _kinds(log: _RelayLog) -> list[tuple[str, str]]:
-    return [(worker, kind) for worker, kind, _payload in log]
-
-
-def test_admit_forward_threads_the_ingress_worker_as_the_request_origin() -> None:
-    control = _ForwardControl()
-    transport = ServeForwardTransport(control.relay_to_worker)
-    edge = _edge(control, transport, register=True)
-
-    edge.admit_forward(_request(), "wrk-a")
-
-    assert len(control.originations) == 1
-    orig = control.originations[0]
-    # The forward serve resolves its route from the ingress worker's own node, so it
-    # carries that worker as its origin; a proxy origination leaves it unset.
-    assert orig.origin_worker == "wrk-a"
-    assert orig.request_id == "srq-1"
-    # The server holds only the worker-computed descriptor digest, never the body.
-    assert orig.profile.descriptor_digest == "d1"
-
-    # When admission mints the handoff, the transport relays the decision down to the
-    # ingress worker, keyed by the request id its rendezvous is waiting on.
-    orig.delivery.open(
-        "rly-1", _handoff(orig.invocation_id), ResidentCarriagePlan(session_id="rly-1")
-    )
-    admitted = [p for w, k, p in control.relayed if k == "serve_ingress_admitted"]
-    assert len(admitted) == 1
-    assert admitted[0]["request_id"] == "srq-1"
-    assert admitted[0]["session_id"] == "rly-1"
-
-
-def test_admit_forward_fails_closed_when_no_ingress_is_registered() -> None:
-    control = _ForwardControl()
-    transport = ServeForwardTransport(control.relay_to_worker)
-    edge = _edge(control, transport, register=False)
-
-    edge.admit_forward(_request("srq-9"), "wrk-a")
-
-    # Fail closed: no admission, and the ingress is refused promptly rather than at its
-    # own admission timeout.
-    assert control.originations == []
-    denied = [p for w, k, p in control.relayed if k == "serve_ingress_denied"]
-    assert len(denied) == 1
-    assert denied[0]["request_id"] == "srq-9"
-    assert denied[0]["status"] == 503
-
-
-def test_admit_forward_refuses_a_method_the_binding_forbids() -> None:
-    control = _ForwardControl()
-    transport = ServeForwardTransport(control.relay_to_worker)
-    edge = _edge(control, transport, register=True)
-    # Narrow the binding to GET; a POST is refused before any credit.
-    binding = edge._bindings.get("tsk-1")
-    assert binding is not None
-    edge._bindings._bindings["tsk-1"] = binding.model_copy(
-        update={"allowed_methods": ("GET",)}
+def _envelope(method: str = "POST") -> ServeRequestEnvelope:
+    return freeze_request_envelope(
+        method=method,
+        upstream_path="v1/chat/completions",
+        query="",
+        headers=[("content-type", "application/json")],
+        body=b"{}",
     )
 
-    edge.admit_forward(_request("srq-3", method="POST"), "wrk-a")
 
-    assert control.originations == []
-    denied = [p for w, k, p in control.relayed if k == "serve_ingress_denied"]
-    assert denied and denied[0]["status"] == 405
-
-
-def test_forward_transport_relays_the_two_phase_and_reaps_the_rendezvous() -> None:
-    log: _RelayLog = []
-    transport = ServeForwardTransport(_recorder(log))
-    transport.track(invocation_id="inv-1", worker_id="wrk-a", request_id="srq-1")
-    transport.open(
-        session_id="rly-1",
-        invocation_id="inv-1",
-        idm="idm-1",
-        task_id="inv-1",
-        call_correlation="serve/inv-1",
-        handoff=_handoff(),
-        envelope=ServeRequestEnvelope(method="POST", path="/v1/chat/completions"),
-        plan=ResidentCarriagePlan(session_id="rly-1"),
-    )
-    transport.authorize("rly-1", _auth())
-    transport.close("rly-1")
-
-    assert _kinds(log) == [
-        ("wrk-a", "serve_ingress_admitted"),
-        ("wrk-a", "serve_ingress_authorized"),
-        ("wrk-a", "serve_ingress_reaped"),
-    ]
-    # The reap names the request and invocation so the ingress drops the rendezvous
-    # entry and closes a live drive — no leaked entry or pinned client connection.
-    reaped = log[-1][2]
-    assert reaped["request_id"] == "srq-1"
-    assert reaped["invocation_id"] == "inv-1"
-    # The tracking is gone: a late authorize or reap for the same session is a no-op.
-    transport.authorize("rly-1", _auth())
-    transport.close("rly-1")
-    assert len(log) == 3
-
-
-class _Principal:
-    def __init__(self) -> None:
-        self.principal_id = "usr-1"
-        self.org_id = "org-1"
+def test_admit_forward_request_admits_a_live_forward_exposure() -> None:
+    edge = _edge()
+    result = asyncio.run(edge.admit_forward_request("Bearer k", "tsk-1", _envelope()))
+    assert result is not None
+    control = edge.control
+    assert len(control.originations) == 1  # type: ignore[attr-defined]
+    orig = control.originations[0]  # type: ignore[attr-defined]
+    # With no identity plugin installed the credential resolves the default admin
+    # principal — the documented unrestricted-admin default — and it admits.
+    assert orig.subject.id == "admin" and orig.subject.tenant == "local"
+    assert orig.family == "serve/tsk-1"
 
 
 def test_admit_forward_denies_a_bad_credential_without_raising_a_claim(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    control = _ForwardControl()
-    transport = ServeForwardTransport(control.relay_to_worker)
-    edge = _edge(control, transport, register=True)
+    edge = _edge()
 
     async def _reject(_credential: str, _logger: object) -> _Principal:
         raise HTTPException(status_code=401, detail="bad key")
 
     monkeypatch.setattr("server.serve.service.authenticate_api_key", _reject)
 
-    edge.admit_forward(_request(), "wrk-a")
-
     # Authentication is control's alone; a bad credential is refused with the engine's
     # own status and no ServiceClaim is ever raised, so no credit is spent.
-    assert control.originations == []
-    denied = [p for w, k, p in control.relayed if k == "serve_ingress_denied"]
-    assert len(denied) == 1
-    assert denied[0]["status"] == 401
-    assert denied[0]["request_id"] == "srq-1"
+    with pytest.raises(ServeForwardDenied) as caught:
+        asyncio.run(edge.admit_forward_request("Bearer bad", "tsk-1", _envelope()))
+    assert caught.value.status == 401
+    assert edge.control.originations == []  # type: ignore[attr-defined]
 
 
 def test_admit_forward_denies_a_forbidden_task_read_without_raising_a_claim(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    control = _ForwardControl()
-    transport = ServeForwardTransport(control.relay_to_worker)
-    edge = _edge(control, transport, register=True)
+    edge = _edge()
 
     async def _principal(_credential: str, _logger: object) -> _Principal:
         return _Principal()
@@ -307,28 +156,41 @@ def test_admit_forward_denies_a_forbidden_task_read_without_raising_a_claim(
     monkeypatch.setattr("server.serve.service.authenticate_api_key", _principal)
     monkeypatch.setattr("server.serve.service.require_permission", _forbid)
 
-    edge.admit_forward(_request(), "wrk-a")
-
-    # An authenticated principal without task-read access is refused with a 403 before
-    # admission, so again no origination and no credit.
-    assert control.originations == []
-    denied = [p for w, k, p in control.relayed if k == "serve_ingress_denied"]
-    assert len(denied) == 1
-    assert denied[0]["status"] == 403
-    assert denied[0]["request_id"] == "srq-1"
+    with pytest.raises(ServeForwardDenied) as caught:
+        asyncio.run(edge.admit_forward_request("Bearer k", "tsk-1", _envelope()))
+    assert caught.value.status == 403
+    assert edge.control.originations == []  # type: ignore[attr-defined]
 
 
-def test_forward_transport_denies_a_request_that_settled_before_it_opened() -> None:
-    log: _RelayLog = []
-    transport = ServeForwardTransport(_recorder(log))
-    transport.track(invocation_id="inv-2", worker_id="wrk-a", request_id="srq-2")
+def test_admit_forward_fails_closed_without_a_live_exposure() -> None:
+    # A forward task whose exposure is not live is unavailable: refused before any
+    # credit rather than served over the proxy.
+    edge = _edge()
+    edge.exposures.drain("tsk-1")
+    with pytest.raises(ServeForwardDenied) as caught:
+        asyncio.run(edge.admit_forward_request("Bearer k", "tsk-1", _envelope()))
+    assert caught.value.status == 503
+    assert edge.control.originations == []  # type: ignore[attr-defined]
 
-    # An admission that gave up before opening a session leaves the ingress rendezvous
-    # waiting; forgetting the settled request denies it so the client is not pinned.
-    transport.forget("inv-2")
 
-    assert _kinds(log) == [("wrk-a", "serve_ingress_denied")]
-    assert log[0][2]["request_id"] == "srq-2"
-    # Forgetting again is a no-op; the entry is already gone.
-    transport.forget("inv-2")
-    assert len(log) == 1
+def test_admit_forward_refuses_a_method_the_binding_forbids() -> None:
+    edge = _edge()
+    binding = edge._bindings.get("tsk-1")
+    assert binding is not None
+    edge._bindings._bindings["tsk-1"] = binding.model_copy(
+        update={"allowed_methods": ("GET",)}
+    )
+    with pytest.raises(ServeForwardDenied) as caught:
+        asyncio.run(
+            edge.admit_forward_request("Bearer k", "tsk-1", _envelope(method="POST"))
+        )
+    assert caught.value.status == 405
+    assert edge.control.originations == []  # type: ignore[attr-defined]
+
+
+def test_admit_forward_refuses_an_unknown_task() -> None:
+    edge = _edge()
+    with pytest.raises(ServeForwardDenied) as caught:
+        asyncio.run(edge.admit_forward_request("Bearer k", "tsk-missing", _envelope()))
+    assert caught.value.status == 404
+    assert edge.control.originations == []  # type: ignore[attr-defined]

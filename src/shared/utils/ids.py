@@ -29,7 +29,6 @@ PREFIX_ADMISSION_HANDOFF = "hnd"  # nosec B105 - object-id prefix, not a credent
 PREFIX_ROUTE_ORIGIN = "rog"  # nosec B105 - object-id prefix, not a credential
 PREFIX_RELAY_SESSION = "rly"
 PREFIX_MEDIATED_PERMIT = "mop"  # nosec B105 - object-id prefix, not a credential
-PREFIX_SERVE_REQUEST = "srq"
 
 
 def _uuid_str() -> str:
@@ -128,10 +127,6 @@ def new_mediated_permit_id() -> str:
     return f"{PREFIX_MEDIATED_PERMIT}-{secrets.token_hex(16)}"
 
 
-def new_serve_request_id() -> str:
-    return f"{PREFIX_SERVE_REQUEST}-{_uuid_hex()}"
-
-
 __all__ = [
     "PREFIX_ACTIVATION",
     "PREFIX_ADMISSION_HANDOFF",
@@ -147,7 +142,6 @@ __all__ = [
     "PREFIX_REPLICA",
     "PREFIX_ROUTE_ORIGIN",
     "PREFIX_SCOPE",
-    "PREFIX_SERVE_REQUEST",
     "PREFIX_SERVICE_CLAIM",
     "PREFIX_SSH_CONNECTION",
     "PREFIX_SSH_SESSION",
@@ -170,7 +164,6 @@ __all__ = [
     "new_replica_id",
     "new_route_origin_id",
     "new_scope_id",
-    "new_serve_request_id",
     "new_service_claim_id",
     "new_ssh_connection_id",
     "new_ssh_session_id",

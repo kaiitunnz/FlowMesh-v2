@@ -1,69 +1,47 @@
-"""The forward ingress directory allocates per-task ports and fences two-phase commit.
+"""The root forward ingress directory allocates per-task ports and fences commit.
 
-A deployment registers ingress hosts with a public authority and port range; each
-forward binding reserves a port, its worker binds and returns evidence, and only then
-does the exposure go LIVE and its url resolve. A drained exposure retires and
-quarantines its port so a reused number never carries a stale generation's traffic.
+The root exposes one public authority and port range; each forward binding reserves a
+port, the root binds a listener and returns evidence, and only then does the exposure go
+LIVE and its url resolve. A drained exposure retires and quarantines its port so a
+reused number never carries a stale generation's traffic.
 """
 
 from server.serve.forward_exposure import (
     ForwardExposureStatus,
     ForwardIngressDirectory,
-    ForwardIngressHost,
 )
 
 
-def _host(**over: object) -> ForwardIngressHost:
-    base: dict[str, object] = dict(
-        authority="serve.example",
-        worker_id="wrk-a",
-        origin_id="rog-a",
-        port_low=34000,
-        port_high=34001,
-        tls_profile_generation=0,
-        generation=1,
-    )
-    base.update(over)
-    return ForwardIngressHost(**base)  # type: ignore[arg-type]
+def _dir(authority="serve.example", low=34000, high=34001) -> ForwardIngressDirectory:
+    return ForwardIngressDirectory(authority, low, high)
 
 
-def _reserve(d: ForwardIngressDirectory, task="tsk-1", require_tls=False):
+def _reserve(d: ForwardIngressDirectory, task="tsk-1"):
     return d.reserve(
         serve_task_id=task,
         binding_generation=0,
         requested_port=None,
-        require_tls=require_tls,
     )
 
 
-def test_reserve_fails_closed_without_a_registered_host() -> None:
-    d = ForwardIngressDirectory()
+def test_reserve_fails_closed_without_a_configured_authority() -> None:
+    d = ForwardIngressDirectory("", 0, 0)
+    assert not d.configured
     assert _reserve(d) is None
 
 
-def test_reserve_allocates_from_the_host_range_and_publishes_a_port_url() -> None:
-    d = ForwardIngressDirectory()
-    d.register_host(_host())
+def test_reserve_allocates_from_the_range_and_publishes_a_port_url() -> None:
+    d = _dir()
     exposure = _reserve(d)
     assert exposure is not None
     assert 34000 <= exposure.public_port <= 34001
     assert exposure.status is ForwardExposureStatus.RESERVED
+    # The deployment terminates TLS ahead of the root, so the root url is plain http.
     assert exposure.public_url == f"http://serve.example:{exposure.public_port}"
 
 
-def test_a_tls_requirement_refuses_a_plaintext_host() -> None:
-    d = ForwardIngressDirectory()
-    d.register_host(_host(tls_profile_generation=0))
-    assert _reserve(d, require_tls=True) is None
-    d.register_host(_host(tls_profile_generation=5, generation=2))
-    exposure = _reserve(d, require_tls=True)
-    assert exposure is not None and exposure.tls
-    assert exposure.public_url.startswith("https://")
-
-
 def test_commit_goes_live_only_from_the_matching_reservation() -> None:
-    d = ForwardIngressDirectory()
-    d.register_host(_host())
+    d = _dir()
     exposure = _reserve(d)
     assert exposure is not None
     d.mark_binding("tsk-1", exposure.exposure_generation)
@@ -73,7 +51,6 @@ def test_commit_goes_live_only_from_the_matching_reservation() -> None:
             serve_task_id="tsk-1",
             exposure_generation=exposure.exposure_generation + 1,
             listener_generation=1,
-            attachment_generation=1,
         )
         is None
     )
@@ -81,22 +58,20 @@ def test_commit_goes_live_only_from_the_matching_reservation() -> None:
         serve_task_id="tsk-1",
         exposure_generation=exposure.exposure_generation,
         listener_generation=1,
-        attachment_generation=1,
     )
     assert live is not None and live.status is ForwardExposureStatus.LIVE
+    assert live.listener_generation == 1
     assert d.live("tsk-1") is not None
 
 
 def test_drain_stops_live_resolution_and_retire_quarantines_the_port() -> None:
-    d = ForwardIngressDirectory()
-    d.register_host(_host())
+    d = _dir()
     first = _reserve(d)
     assert first is not None
     d.commit(
         serve_task_id="tsk-1",
         exposure_generation=first.exposure_generation,
         listener_generation=1,
-        attachment_generation=1,
     )
     d.drain("tsk-1")
     assert d.live("tsk-1") is None
@@ -104,14 +79,12 @@ def test_drain_stops_live_resolution_and_retire_quarantines_the_port() -> None:
     assert retired is not None and retired.status is ForwardExposureStatus.RETIRED
 
     # The retired port is quarantined: a fresh reservation takes the other range port.
-    d.register_host(_host())
     second = _reserve(d, task="tsk-2")
     assert second is not None and second.public_port != first.public_port
 
 
 def test_the_range_can_be_exhausted() -> None:
-    d = ForwardIngressDirectory()
-    d.register_host(_host())
+    d = _dir()
     assert _reserve(d, task="tsk-1") is not None
     assert _reserve(d, task="tsk-2") is not None
     # Both ports in the two-wide range are in use.
