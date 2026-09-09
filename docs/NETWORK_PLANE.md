@@ -112,7 +112,7 @@ An offloaded leg carries the same frames as the relay: the claim-bound handoff b
 acceptance, the route authorization after it, the invocation and request identities,
 descriptor and generation fences, byte windows, cursors, and cancellation. The root writes
 frames through and reads no payload, engine token, cursor, or window, and the target
-sidecar's claim gate remains the only authority over what reaches an engine.
+sidecar's claim gate is the only authority over what reaches an engine.
 
 A dial that fails before any frame is delivered records a classified path observation and
 carries the attempt over `control_relay` under the same claim, request identity, and held
@@ -121,9 +121,9 @@ leaves the outcome ambiguous, which the origin reports as uncertain with its cre
 Fence, tenant, descriptor, application, and engine rejections are authorization failures, so
 they neither demote a path nor select a fallback.
 
-Only the target leg moves. A workflow origin keeps carrying its source-to-root leg over its
-own outbound attachment; a root-sourced gated serve call is its own origin, so both of its
-legs leave the rendezvous. `GET /api/v1/network/legs` counts resident frames and payload
+Only the target leg moves. A workflow origin carries its source-to-root leg over its own
+outbound attachment; a root-sourced gated serve call is its own origin, so both of its legs
+leave the rendezvous. `GET /api/v1/network/legs` counts resident frames and payload
 bytes per leg and transport, so the two read apart.
 
 ## Reverse-rendezvous relay

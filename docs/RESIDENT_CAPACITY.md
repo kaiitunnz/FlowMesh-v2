@@ -119,8 +119,9 @@ offload for the attempt and the root carries the leg into the target over a mutu
 authenticated direct socket instead of the target node's relay stream — reaching either the
 replica worker's own claim-gated listener or the target node's purpose-scoped listener and
 its local sidecar uplink. The handoff, route authorization, fences, windows, and
-cancellation are the frames they always were, and the replica sidecar's claim gate still
-gates the engine; the origin worker's own leg to the root is untouched. A dial that fails
+cancellation are the same frames, and the replica sidecar's claim gate is the only
+authority over the engine; only the target leg moves, so the origin worker carries its own
+leg to the root over its attachment. A dial that fails
 before delivery carries the attempt over `control_relay` under the same claim, `idm-*`, and
 held credit, and a loss after delivery is `UNCERTAIN` rather than a transport switch. See
 [`NETWORK_PLANE.md`](NETWORK_PLANE.md).

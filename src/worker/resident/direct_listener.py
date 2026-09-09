@@ -6,7 +6,7 @@ connection whose certificate carries the pinned root identity, then feeds each f
 reads to the replica sidecar and returns the sidecar's frames over the same connection.
 
 The listener is transport only: it never inspects a frame's payload, and the sidecar's
-claim gate remains the sole authority over which traffic reaches the engine. It fronts
+claim gate is the sole authority over which traffic reaches the engine. It fronts
 the sidecar, never the resident engine listener.
 """
 
@@ -27,6 +27,12 @@ from shared.resident.transport import ResidentFrameSink
 
 # Routes one frame into the replica sidecar, answering over the connection's own sink.
 FrameDelivery = Callable[[RelayFrame, ResidentFrameSink], Awaitable[None]]
+
+# A dialer that opens a socket but never finishes the handshake holds one slot, so the
+# handshake is deadlined and the accepted set is bounded. A legitimate leg then idles
+# between frames for as long as its invocation runs, so reads carry no deadline.
+_HANDSHAKE_TIMEOUT_SEC = 10.0
+_MAX_CONNECTIONS = 64
 
 
 class _ConnectionSink(ResidentFrameSink):
@@ -51,18 +57,24 @@ class ResidentDirectListener:
         ssl_context: ssl.SSLContext,
         root_identity: str,
         deliver: FrameDelivery,
+        max_connections: int = _MAX_CONNECTIONS,
         logger: logging.Logger | None = None,
     ) -> None:
         self._sock = sock
         self._ssl_context = ssl_context
         self._root_identity = root_identity
         self._deliver = deliver
+        self._max_connections = max_connections
+        self._open = 0
         self._logger = logger or logging.getLogger("resident-direct-listener")
         self._server: asyncio.Server | None = None
 
     async def start(self) -> None:
         self._server = await asyncio.start_server(
-            self._serve, sock=self._sock, ssl=self._ssl_context
+            self._serve,
+            sock=self._sock,
+            ssl=self._ssl_context,
+            ssl_handshake_timeout=_HANDSHAKE_TIMEOUT_SEC,
         )
 
     async def stop(self) -> None:
@@ -78,10 +90,15 @@ class ResidentDirectListener:
     async def _serve(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
+        if self._open >= self._max_connections:
+            self._logger.warning("refusing a target-leg connection over the cap")
+            await _close(writer)
+            return
         if not self._is_root(writer):
             self._logger.warning("refusing a target-leg dialer that is not the root")
             await _close(writer)
             return
+        self._open += 1
         sink = _ConnectionSink(writer, asyncio.Lock())
         try:
             while True:
@@ -92,6 +109,7 @@ class ResidentDirectListener:
         except FrameStreamError as exc:
             self._logger.warning("closing a target-leg connection: %s", exc)
         finally:
+            self._open -= 1
             await _close(writer)
 
     def _is_root(self, writer: asyncio.StreamWriter) -> bool:

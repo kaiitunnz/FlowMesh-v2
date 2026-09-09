@@ -248,10 +248,10 @@ class RouteCandidate(BaseModel):
     """One transport alternative in the ordered candidate ladder.
 
     ``trusted`` marks a forward-dial candidate the deployment's target-leg trust policy
-    admits as an offload for claim-gated resident traffic. A resident target leg is
-    carried over a candidate only while it is marked; an untrusted candidate stays
-    available to the reachability diagnostic, which measures paths rather than using
-    them for admitted traffic. ``control_relay`` needs no such mark.
+    admits as an offload for claim-gated resident traffic; only a marked candidate
+    carries a resident target leg. The reachability diagnostic measures every feasible
+    candidate, since it probes paths rather than carrying admitted traffic over them.
+    ``control_relay`` needs no such mark.
     """
 
     model_config = ConfigDict(frozen=True)

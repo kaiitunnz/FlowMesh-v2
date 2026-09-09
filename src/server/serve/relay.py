@@ -5,7 +5,7 @@ task-addressed external invocation. This executor is its transport: it holds the
 root-internal rendezvous attachment that consumes the edge stream's down leg, publishes
 origin-produced frames onto its up leg, and runs the shared serve origin drive over that
 sink. The root is itself the origin here, so a trusted target-leg offload carries the
-whole invocation over a direct socket and the rendezvous carries the rest.
+whole invocation over a direct socket.
 
 The drive itself — the two-phase bootstrap, the opaque response relay, and the fenced
 terminal reported to control — is shared with the root forward ingress, so one

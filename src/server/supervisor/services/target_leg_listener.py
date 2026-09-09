@@ -30,6 +30,12 @@ from shared.resident.transport import ResidentFrameSink
 
 from ...resident.worker_bridge import ResidentWorkerBridge
 
+# A dialer that opens a socket but never finishes the handshake holds one slot, so the
+# handshake is deadlined and the accepted set is bounded. A legitimate leg then idles
+# between frames for as long as its invocation runs, so reads carry no deadline.
+_HANDSHAKE_TIMEOUT_SEC = 10.0
+_MAX_CONNECTIONS = 64
+
 
 class _ConnectionSink(ResidentFrameSink):
     """Returns a session's worker frames over the connection the root opened."""
@@ -52,11 +58,14 @@ class NodeTargetLegListener:
         endpoint: str,
         material: MutualTlsMaterial,
         bridge: ResidentWorkerBridge,
+        max_connections: int = _MAX_CONNECTIONS,
         logger: logging.Logger | None = None,
     ) -> None:
         self._host, self._port = split_host_port(endpoint)
         self._material = material
         self._bridge = bridge
+        self._max_connections = max_connections
+        self._open = 0
         self._logger = logger or logging.getLogger("node-target-leg-listener")
         self._server: asyncio.Server | None = None
 
@@ -75,6 +84,7 @@ class NodeTargetLegListener:
             self._host,
             self._port,
             ssl=server_context(self._material),
+            ssl_handshake_timeout=_HANDSHAKE_TIMEOUT_SEC,
             family=socket.AF_INET,
         )
 
@@ -91,6 +101,10 @@ class NodeTargetLegListener:
     async def _serve(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
+        if self._open >= self._max_connections:
+            self._logger.warning("refusing a target-leg connection over the cap")
+            await _close(writer)
+            return
         ssl_object = writer.get_extra_info("ssl_object")
         if not isinstance(ssl_object, ssl.SSLObject) or not is_pinned_root(
             ssl_object.getpeercert(), self._material.root_identity
@@ -98,6 +112,7 @@ class NodeTargetLegListener:
             self._logger.warning("refusing a target-leg dialer that is not the root")
             await _close(writer)
             return
+        self._open += 1
         sink = _ConnectionSink(writer, asyncio.Lock())
         sessions: set[str] = set()
         try:
@@ -112,6 +127,7 @@ class NodeTargetLegListener:
         except FrameStreamError as exc:
             self._logger.warning("closing a target-leg connection: %s", exc)
         finally:
+            self._open -= 1
             for session_id in sessions:
                 self._bridge.release_target_leg(session_id)
             await _close(writer)

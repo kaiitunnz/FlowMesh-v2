@@ -6,10 +6,11 @@ the selected worker's claim-gated replica-sidecar listener, ``node_relay`` opens
 target node's purpose-scoped listener, which hands the session to its local sidecar
 uplink. Both legs carry the same frames as the relay, so the handoff, route
 authorization, fences, windows, and cancellation are unchanged and the target-side claim
-gate remains the only authority over the traffic.
+gate is the only authority over the traffic.
 
-The root bridges opaque frames: it reads a frame's routing identity and writes it
-through, and never parses a payload, engine token, cursor, or window.
+The root bridges opaque frames: it reads a frame's routing identity and writes the
+frame through, leaving payload, engine protocol, cursors, and windows to the endpoints
+that own them.
 
 A dial that fails before any frame reaches the target records a classified path
 observation and falls through to the relay base under the same claim, request identity,

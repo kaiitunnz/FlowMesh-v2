@@ -122,3 +122,44 @@ def test_a_dialer_presenting_no_certificate_carries_nothing() -> None:
 
     asyncio.run(scenario())
     assert delivered == []
+
+
+def test_connections_over_the_cap_are_refused_rather_than_accumulated() -> None:
+    delivered: list[RelayFrame] = []
+
+    async def scenario() -> None:
+        async def deliver(frame: RelayFrame, sink: ResidentFrameSink) -> None:
+            delivered.append(frame)
+
+        sock = _bound()
+        port = sock.getsockname()[1]
+        listener = ResidentDirectListener(
+            sock=sock,
+            ssl_context=server_context(_material("worker.flowmesh")),
+            root_identity=_ROOT,
+            deliver=deliver,
+            max_connections=1,
+        )
+        await listener.start()
+        context = client_context(_material(_ROOT))
+        held_reader, held_writer = await asyncio.open_connection(
+            "127.0.0.1", port, ssl=context
+        )
+        await write_relay_frame(held_writer, _frame())
+        for _ in range(100):
+            if delivered:
+                break
+            await asyncio.sleep(0.01)
+
+        reader, writer = await asyncio.open_connection("127.0.0.1", port, ssl=context)
+        await write_relay_frame(writer, _frame(b"over-cap"))
+        with pytest.raises(
+            (asyncio.IncompleteReadError, ConnectionError, ssl.SSLError, OSError)
+        ):
+            await asyncio.wait_for(read_relay_frame(reader), timeout=5)
+        writer.close()
+        held_writer.close()
+        await listener.stop()
+
+    asyncio.run(scenario())
+    assert [f.payload for f in delivered] == [b"bootstrap"]

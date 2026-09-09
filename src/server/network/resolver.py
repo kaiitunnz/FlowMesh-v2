@@ -11,7 +11,7 @@ The two origins are distinct sources. ``control_relay`` runs from the logical or
 own outbound attachment, and the resolved route keeps that origin as its identity. The
 forward-dial offloads are opened by the root, so they are graded and their reachability
 keyed against the root's origin — the root is the physical target-leg bridge while the
-logical origin remains the source.
+logical origin is the source.
 
 Ladder rules:
 - ``worker_direct`` is legal only when the listener is explicitly directly routable and
@@ -26,8 +26,8 @@ Ladder rules:
   attachments are present — including for an outbound-only node with no inbound URL.
 
 Each forward-dial candidate carries whether the deployment's trust policy admits it as
-an offload for claim-gated resident traffic; the reachability diagnostic still measures
-one the policy does not admit.
+an offload for claim-gated resident traffic. The reachability diagnostic measures every
+feasible candidate, admitted or not.
 
 Candidates a demotion has removed drop out; among those left, verified paths precede
 untried ones, and within a rank the base preference is direct, then node relay, then

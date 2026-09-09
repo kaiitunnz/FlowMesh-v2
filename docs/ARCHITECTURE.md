@@ -258,9 +258,9 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   claim-gated replica-sidecar listener, `node_relay` reaches the target node's
   purpose-scoped listener, which hands the session to its local sidecar uplink. Both carry
   the same frames, fences, windows, and cancellation as the relay, and the target sidecar's
-  claim gate stays the only authority over the traffic. A logical origin's own leg is
-  unchanged — a workflow origin keeps carrying its source-to-root leg over its attachment,
-  while a root-sourced gated serve call moves both legs — and per-leg counters at
+  claim gate is the only authority over the traffic. Only the target leg moves: a workflow
+  origin carries its source-to-root leg over its own attachment, while a root-sourced gated
+  serve call is its own origin and moves both legs. Per-leg counters at
   `GET /api/v1/network/legs` read the two apart. Eligibility requires the configured
   trusted class and trust domain, the target's current endpoint and listener generation,
   mutual TLS with the pinned root identity, and root-to-target reachability evidence; a
