@@ -233,11 +233,15 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   (`/api/v1/serve/tasks/{task_id}/{upstream_path}`). The request relays to the task's
   standing replica unchanged and the engine's own response comes back unchanged, so an
   OpenAI-compatible client can drive any endpoint the engine serves. A serve task pins one
-  gated exposure mode — `proxy`, the default root-local ingress, or `forward`, an
-  externally reachable ingress a deployment registers — and a mode with no registered
-  ingress fails closed. At start the task is adopted as its own standing replica, validated
-  under `RESIDENT_ALLOWED_MODELS`. Available when `RESIDENT_CAPACITY_ENABLED=true` (which
-  requires `NETWORK_PLANE_ENABLED=true`). See [`RESIDENT_CAPACITY.md`](RESIDENT_CAPACITY.md).
+  gated exposure mode — `proxy`, the default root-local ingress reached at the task-qualified
+  route above, or `forward`, a per-task public port on an externally reachable ingress host a
+  deployment registers, reached at `https://<authority>:<forward_port>/` with the engine's own
+  paths — and a mode with no registered ingress, or a forward exposure that cannot bind or
+  lacks required TLS, fails closed. At start the task is adopted as its own standing replica,
+  validated under `RESIDENT_ALLOWED_MODELS`. Both modes carry traffic over `control_relay`;
+  trusted direct target legs are a later addition behind the shared carriage seam. Available
+  when `RESIDENT_CAPACITY_ENABLED=true` (which requires `NETWORK_PLANE_ENABLED=true`). See
+  [`RESIDENT_CAPACITY.md`](RESIDENT_CAPACITY.md).
 - **Network-plane route substrate.** A topology-aware, control-resolved routing substrate
   turns trusted node endpoint advertisements and directional reachability evidence into an
   ordered route resolved by a pure resolver, carried by an origin-side deputy that never

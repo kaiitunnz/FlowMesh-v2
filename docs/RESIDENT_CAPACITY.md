@@ -142,10 +142,22 @@ ID — the model, worker, endpoint, credential, and routing are fixed by the bin
 each request is admitted as its own claim. On task stop, cancellation, TTL, or failure the
 binding drains before it stops.
 
-A serve task pins one gated exposure mode: `proxy`, the default, terminating at the
-root-local ingress, or `forward`, terminating at an externally reachable ingress a
-deployment registers. A mode whose ingress is not registered fails closed. Access is the
-task's ordinary `TASK` read permission.
+A serve task pins one gated exposure mode. `proxy`, the default, terminates at the
+root-local ingress and is reached at `/api/v1/serve/tasks/{task_id}/{upstream_path}` on
+the server's own base url. `forward` terminates at a per-task public port on an
+externally reachable ingress host a deployment registers, reached at
+`https://<authority>:<forward_port>/<engine-native-path>` — the port is the whole
+address, so no task-qualified path prefix is used and the engine's own paths pass
+through unchanged. A deployment registers a `ForwardIngressDirectory` of ingress hosts
+(a public authority, an allowed port range, and a TLS profile); each forward binding
+owns a `ForwardPortExposure` that control reserves, the ingress worker binds, and
+control commits live only from the worker's bound evidence, publishing the port url on
+the task. `forwardPort` may request a specific port within the host's range, else one is
+auto-allocated. A mode whose ingress is not registered — or a forward exposure that
+cannot bind or lacks required TLS — fails closed. Access is the task's ordinary `TASK`
+read permission. In this release both modes carry traffic over `control_relay`; trusted
+`worker_direct`/`node_relay` target legs are a later addition behind the shared
+claim-gated carriage seam.
 
 ## Replica lifecycle and policy
 
