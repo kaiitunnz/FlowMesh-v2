@@ -64,7 +64,7 @@ control adds `scl-` service claims, `rpl-` replica incarnations, and `lse-` allo
 leases. `msk-` is an unguessable ref for a workflow's vaulted model credential and `hnd-`
 an unguessable claim-bound admission handoff token. The network plane adds `rog-` route
 origins and `rly-` relay sessions. Worker-originated mediated boundaries add `mop-`
-one-use mediated-operation permits and `srq-` forward serve ingress requests.
+one-use mediated-operation permits.
 Always use `new_*_id()`
 helpers in `src/shared/utils/ids.py`. Never use `uuid4()` or `secrets.token_hex`
 for IDs.
@@ -234,10 +234,11 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   standing replica unchanged and the engine's own response comes back unchanged, so an
   OpenAI-compatible client can drive any endpoint the engine serves. A serve task pins one
   gated exposure mode — `proxy`, the default root-local ingress reached at the task-qualified
-  route above, or `forward`, a per-task public port on an externally reachable ingress host a
-  deployment registers, reached at `https://<authority>:<forward_port>/` with the engine's own
-  paths — and a mode with no registered ingress, or a forward exposure that cannot bind or
-  lacks required TLS, fails closed. At start the task is adopted as its own standing replica,
+  route above, or `forward`, a per-task public port on the root's own authority reached at
+  `http://<root_authority>:<forward_port>/` with the engine's own paths. The root binds the
+  port behind the deployment's TLS terminator, authenticates and admits the request over the
+  same gate as `proxy`, and relays it to the task's standing replica; a mode with no live
+  exposure fails closed. At start the task is adopted as its own standing replica,
   validated under `RESIDENT_ALLOWED_MODELS`. Both modes carry traffic over `control_relay`;
   trusted direct target legs are a later addition behind the shared carriage seam. Available
   when `RESIDENT_CAPACITY_ENABLED=true` (which requires `NETWORK_PLANE_ENABLED=true`). See

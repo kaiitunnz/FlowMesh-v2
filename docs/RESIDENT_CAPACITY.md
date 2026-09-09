@@ -144,20 +144,22 @@ binding drains before it stops.
 
 A serve task pins one gated exposure mode. `proxy`, the default, terminates at the
 root-local ingress and is reached at `/api/v1/serve/tasks/{task_id}/{upstream_path}` on
-the server's own base url. `forward` terminates at a per-task public port on an
-externally reachable ingress host a deployment registers, reached at
-`https://<authority>:<forward_port>/<engine-native-path>` — the port is the whole
-address, so no task-qualified path prefix is used and the engine's own paths pass
-through unchanged. A deployment registers a `ForwardIngressDirectory` of ingress hosts
-(a public authority, an allowed port range, and a TLS profile); each forward binding
-owns a `ForwardPortExposure` that control reserves, the ingress worker binds, and
-control commits live only from the worker's bound evidence, publishing the port url on
-the task. `forwardPort` may request a specific port within the host's range, else one is
-auto-allocated. A mode whose ingress is not registered — or a forward exposure that
-cannot bind or lacks required TLS — fails closed. Access is the task's ordinary `TASK`
-read permission. In this release both modes carry traffic over `control_relay`; trusted
-`worker_direct`/`node_relay` target legs are a later addition behind the shared
-claim-gated carriage seam.
+the server's own base url. `forward` terminates at a per-task public port on the root's
+own authority, reached at `http://<root_authority>:<forward_port>/<engine-native-path>` —
+the port is the whole address, so no task-qualified path prefix is used and the engine's
+own paths pass through unchanged. The root's `ForwardIngressDirectory` holds the public
+authority and an allowed port range (`SERVE_FORWARD_AUTHORITY`, `SERVE_FORWARD_PORT_LOW`,
+`SERVE_FORWARD_PORT_HIGH`); each forward binding owns a `ForwardPortExposure` that control
+reserves, the root binds a plain-HTTP listener on, and control commits live only from that
+bound listener's evidence, publishing the port url on the task. The deployment's own front
+proxy terminates TLS and forwards plain HTTP to the root, so FlowMesh holds no certificate
+of its own. `forwardPort` may request a specific port within the range, else one is
+auto-allocated. On root restart each persisted live exposure rebinds its same port under a
+fresh listener generation before it serves; a failed rebind stays unavailable rather than
+publishing a new port. A forward binding with no live exposure fails closed. Access is the
+task's ordinary `TASK` read permission. In this release both modes carry traffic over
+`control_relay`; trusted `worker_direct`/`node_relay` target legs are a later addition
+behind the shared claim-gated carriage seam.
 
 ## Replica lifecycle and policy
 
