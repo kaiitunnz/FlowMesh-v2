@@ -285,17 +285,25 @@ if IS_ROOT_NODE:
         serve_registry = RESIDENT_REGISTRY
         SERVE_BINDINGS = ServeBindingStore()
         serve_terminals = ServeTerminalStore()
+        SERVE_EXPOSURES = ForwardIngressDirectory(
+            config.port_forward.serve_forward_authority,
+            config.port_forward.serve_forward_port_low,
+            config.port_forward.serve_forward_port_high,
+        )
         if (stored := serve_registry.load_serve_snapshot()) is not None:
             SERVE_BINDINGS.load_snapshot(stored.bindings)
             serve_terminals.load_snapshot(stored.terminals)
+            SERVE_EXPOSURES.load_snapshot(stored.exposures)
 
         _serve_bindings = SERVE_BINDINGS
+        _serve_exposures = SERVE_EXPOSURES
 
         def _persist_serve() -> None:
             serve_registry.save_serve_snapshot(
                 ServeSnapshot(
                     bindings=_serve_bindings.to_snapshot(),
                     terminals=serve_terminals.to_snapshot(),
+                    exposures=_serve_exposures.to_snapshot(),
                 )
             )
 
@@ -321,12 +329,9 @@ if IS_ROOT_NODE:
             # Each forward binding owns a per-task public port on the root's own
             # authority; the root binds a plain-HTTP listener on it behind the
             # deployment's TLS terminator, and a task without a configured forward
-            # authority/range fails closed.
-            exposures=ForwardIngressDirectory(
-                config.port_forward.serve_forward_authority,
-                config.port_forward.serve_forward_port_low,
-                config.port_forward.serve_forward_port_high,
-            ),
+            # authority/range fails closed. The directory persists so a restart rebinds
+            # each live exposure to its same port.
+            exposures=SERVE_EXPOSURES,
             persist=_persist_serve,
             logger=logger,
         )

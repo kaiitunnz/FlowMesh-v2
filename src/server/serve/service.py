@@ -489,9 +489,7 @@ class GatedServe:
 
         def _rebind() -> None:
             for exposure in self.exposures.all():
-                self.exposures.mark_binding(
-                    exposure.serve_task_id, exposure.exposure_generation
-                )
+                self.exposures.mark_rebinding(exposure.serve_task_id)
                 listener.schedule_bind(
                     exposure.serve_task_id,
                     exposure.exposure_generation,

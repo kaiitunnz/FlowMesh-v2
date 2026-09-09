@@ -17,6 +17,7 @@ from shared.resident.envelope import TRANSPARENT_METHODS
 from ..resident.state import AdmissionProfile
 from ..task.v2.representations.operators import ServiceDependency, ServiceInterface
 from ..utils.time import now_iso
+from .forward_exposure import ForwardExposureSnapshot
 from .ingress import ServeAccessMode
 from .state import ServeTerminalSnapshot
 
@@ -105,10 +106,15 @@ class ServeBindingSnapshot(BaseModel):
 
 
 class ServeSnapshot(BaseModel):
-    """The persisted gated-serve control facts: the bindings and status terminals."""
+    """The persisted gated-serve facts: bindings, status terminals, forward exposures.
+
+    The forward exposures persist so a restart rebinds each live one to its same public
+    port under a fresh listener generation rather than publishing a new port.
+    """
 
     bindings: ServeBindingSnapshot = Field(default_factory=ServeBindingSnapshot)
     terminals: ServeTerminalSnapshot = Field(default_factory=ServeTerminalSnapshot)
+    exposures: ForwardExposureSnapshot = Field(default_factory=ForwardExposureSnapshot)
 
 
 class ServeBindingStore:

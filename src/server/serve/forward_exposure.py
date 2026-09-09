@@ -133,6 +133,21 @@ class ForwardIngressDirectory:
                 update={"status": ForwardExposureStatus.BINDING}
             )
 
+    def mark_rebinding(self, serve_task_id: str) -> None:
+        """Demote a persisted exposure to BINDING on restart until its listener rebinds.
+
+        A loaded exposure comes back LIVE but holds no bound listener yet; treating it
+        as BINDING keeps it out of ``live`` resolution until a fresh bind recommits it.
+        """
+        exposure = self._exposures.get(serve_task_id)
+        if (
+            exposure is not None
+            and exposure.status is not ForwardExposureStatus.RETIRED
+        ):
+            self._exposures[serve_task_id] = exposure.model_copy(
+                update={"status": ForwardExposureStatus.BINDING}
+            )
+
     def commit(
         self,
         *,

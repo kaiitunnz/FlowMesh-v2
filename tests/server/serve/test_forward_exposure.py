@@ -83,6 +83,34 @@ def test_drain_stops_live_resolution_and_retire_quarantines_the_port() -> None:
     assert second is not None and second.public_port != first.public_port
 
 
+def test_a_persisted_live_exposure_rebinds_its_same_port_on_restart() -> None:
+    d = _dir()
+    exposure = _reserve(d)
+    assert exposure is not None
+    d.commit(
+        serve_task_id="tsk-1",
+        exposure_generation=exposure.exposure_generation,
+        listener_generation=1,
+    )
+    # A fresh directory loads the persisted snapshot, as a restart does.
+    restored = _dir()
+    restored.load_snapshot(d.to_snapshot())
+    loaded = restored.current("tsk-1")
+    assert loaded is not None and loaded.public_port == exposure.public_port
+
+    # Until the listener rebinds, the exposure is treated as binding, not live.
+    restored.mark_rebinding("tsk-1")
+    assert restored.live("tsk-1") is None
+    # A rebind recommits the same port under a fresh listener generation.
+    live = restored.commit(
+        serve_task_id="tsk-1",
+        exposure_generation=loaded.exposure_generation,
+        listener_generation=2,
+    )
+    assert live is not None and live.public_port == exposure.public_port
+    assert live.listener_generation == 2
+
+
 def test_the_range_can_be_exhausted() -> None:
     d = _dir()
     assert _reserve(d, task="tsk-1") is not None
