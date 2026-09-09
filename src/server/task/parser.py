@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from shared.tasks import TaskEnvelopeTemplate, TaskType
 from shared.tasks.components import TaskAnnotations
+from shared.tasks.specs import DevModelSpecTemplate, ServeSpecTemplate
 from shared.utils import new_task_id, parse_bool_env
 from shared.utils.json import safe_get
 
@@ -717,9 +718,9 @@ def _validate_serve_access_mode(task: TaskEnvelopeTemplate, context: str) -> Non
     A forward task is not gated here: its ingress registers and withdraws at runtime, so
     availability is resolved per request rather than fixed at submission.
     """
-    if task.spec.taskType not in (TaskType.SERVE, TaskType.DEV_MODEL):
+    if not isinstance(task.spec, (ServeSpecTemplate, DevModelSpecTemplate)):
         return
-    access_mode = getattr(task.spec, "accessMode", None)
+    access_mode = task.spec.accessMode
     if access_mode == "proxy" and not _ENABLE_SERVER_SERVE_PROXY:
         raise ValueError(
             f"Invalid task payload{context}: serve accessMode 'proxy' "
