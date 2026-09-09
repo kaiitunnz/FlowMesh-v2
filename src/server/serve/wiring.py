@@ -30,6 +30,7 @@ def build_forward_serve_ingress(
         public_host=config.public_host,
         admit=gated_serve.admit_forward_request,
         on_bound=gated_serve.commit_forward,
+        body_budget_bytes=config.serve_forward_body_budget_bytes,
         logger=logger,
     )
     gated_serve.set_forward_listener(listener)

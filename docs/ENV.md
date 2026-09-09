@@ -102,6 +102,7 @@ listed here is in `.env.example`.
 | `ENABLE_SERVER_SERVE_FORWARD` | `false` | Host the root per-task-port forward serve ingress. Reuses `SERVER_PORT_FORWARD_BIND_HOST` and `SERVER_PORT_FORWARD_PUBLIC_HOST` for the listener |
 | `SERVER_SERVE_FORWARD_PORT_START` | `34000` | Lowest forward serve exposure port |
 | `SERVER_SERVE_FORWARD_PORT_END` | `34099` | Highest forward serve exposure port |
+| `SERVER_SERVE_FORWARD_BODY_BUDGET_BYTES` | `536870912` | Cap on total in-flight forward request body bytes |
 | `LOG_LEVEL` | `INFO` | Server log level |
 
 **Notes:**

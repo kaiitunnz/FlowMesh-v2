@@ -36,7 +36,13 @@ from shared.resident.envelope import (
 if TYPE_CHECKING:
     from .service import ServeEvent, ServeResult
 
-_MAX_REQUEST_BYTES = 4 * 1024 * 1024
+# The per-request body cap. A single request over it is refused, so a large-context
+# inference body is accepted while one oversized request cannot exhaust memory alone.
+_MAX_REQUEST_BYTES = 100 * 1024 * 1024
+# The default ceiling on total buffered forward request-body bytes across all in-flight
+# connections. Concurrent large bodies are refused past it, so the per-request cap times
+# the connection cap is not the memory ceiling.
+_MAX_INFLIGHT_BODY_BYTES = 512 * 1024 * 1024
 _MAX_HEADER_BYTES = 64 * 1024
 _STREAM_IDLE_TIMEOUT_SEC = 300.0
 # The request read (head and body) must complete within this bound: a client that opens
@@ -76,6 +82,7 @@ class RootForwardIngress:
         stream_idle_timeout_sec: float = _STREAM_IDLE_TIMEOUT_SEC,
         request_read_timeout_sec: float = _REQUEST_READ_TIMEOUT_SEC,
         max_connections: int = _MAX_CONCURRENT_CONNECTIONS,
+        body_budget_bytes: int = _MAX_INFLIGHT_BODY_BYTES,
         logger: logging.Logger | None = None,
     ) -> None:
         self._bind_host = bind_host
@@ -85,6 +92,8 @@ class RootForwardIngress:
         self._idle_timeout = stream_idle_timeout_sec
         self._read_timeout = request_read_timeout_sec
         self._max_connections = max_connections
+        self._body_budget = body_budget_bytes
+        self._inflight_body = 0
         self._active = 0
         self._log = logger or logging.getLogger("serve-forward-ingress")
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -204,11 +213,15 @@ class RootForwardIngress:
     async def _serve_client(
         self, port: int, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
+        reserved = 0
         try:
             parsed = await self._read_request(reader)
             if parsed is None:
                 return
             envelope, credential = parsed
+            # The read reserved the body against the global budget; release it once the
+            # request is served so the buffered bytes free the budget for the next one.
+            reserved = len(envelope.body)
             serve_task_id = self._port_to_task.get(port)
             if serve_task_id is None:
                 await self._refuse(writer, 404, "serve task not found")
@@ -227,6 +240,8 @@ class RootForwardIngress:
         except Exception:
             self._log.exception("forward serve request failed on port %d", port)
             await self._refuse(writer, 502, "serve request error")
+        finally:
+            self._inflight_body -= reserved
 
     async def _read_request(
         self, reader: asyncio.StreamReader
@@ -287,13 +302,23 @@ class RootForwardIngress:
         if content_length > _MAX_REQUEST_BYTES:
             raise EnvelopeRejected("request body too large")
         if content_length:
+            if self._inflight_body + content_length > self._body_budget:
+                # Concurrent large bodies past the global budget are refused fast rather
+                # than all buffered, so total in-flight body memory stays bounded.
+                raise ServeForwardDenied(
+                    503, "forward serve ingress in-flight body budget exhausted"
+                )
+            # Reserve against the budget before reading; ``_serve_client`` releases it.
+            self._inflight_body += content_length
             try:
                 body = await asyncio.wait_for(
                     reader.readexactly(content_length), self._read_timeout
                 )
             except TimeoutError as exc:
+                self._inflight_body -= content_length
                 raise ServeForwardDenied(408, "request body read timed out") from exc
             except (asyncio.IncompleteReadError, ConnectionError):
+                self._inflight_body -= content_length
                 return None
             envelope = envelope.model_copy(update={"body": body})
         return envelope, credential

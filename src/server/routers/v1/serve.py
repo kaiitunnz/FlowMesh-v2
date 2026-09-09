@@ -47,7 +47,7 @@ from ...serve.service import (
 
 router = APIRouter(prefix="/serve", tags=["Serve"])
 
-_MAX_REQUEST_BYTES = 4 * 1024 * 1024
+_MAX_REQUEST_BYTES = 100 * 1024 * 1024
 
 
 class _ServeStreamTruncated(Exception):

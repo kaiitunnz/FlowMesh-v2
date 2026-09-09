@@ -116,6 +116,7 @@ class PortForwardConfig:
     serve_forward_enabled: bool = False
     serve_forward_port_start: int = 34000
     serve_forward_port_end: int = 34099
+    serve_forward_body_budget_bytes: int = 512 * 1024 * 1024
     bind_host: str = "0.0.0.0"
     public_host: str = "localhost"
     port_start: int = 32000
@@ -137,6 +138,9 @@ class PortForwardConfig:
             ),
             serve_forward_port_end=parse_int_env(
                 "SERVER_SERVE_FORWARD_PORT_END", 34099
+            ),
+            serve_forward_body_budget_bytes=parse_int_env(
+                "SERVER_SERVE_FORWARD_BODY_BUDGET_BYTES", 512 * 1024 * 1024
             ),
             bind_host=os.getenv("SERVER_PORT_FORWARD_BIND_HOST", "0.0.0.0").strip(),
             public_host=os.getenv(

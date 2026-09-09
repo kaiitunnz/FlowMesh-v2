@@ -254,5 +254,53 @@ def test_listener_rejects_expect_100_continue_before_reading_the_body() -> None:
     asyncio.run(run())
 
 
+def test_listener_refuses_bodies_past_the_in_flight_budget() -> None:
+    async def run() -> None:
+        release = asyncio.Event()
+
+        async def _admit(cred, task_id, envelope):
+            await release.wait()  # hold the first request's body reserved
+            return _FakeResult([_Event("head", status=200), _Event("done")])
+
+        # A budget of 16 bytes admits one 10-byte body; a second concurrent 10-byte body
+        # would total 20 > 16, so it is refused rather than buffered alongside.
+        listener = RootForwardIngress(
+            bind_host="127.0.0.1",
+            public_host="local",
+            admit=_admit,
+            on_bound=_noop,
+            body_budget_bytes=16,
+        )
+        listener.start(asyncio.get_running_loop())
+        port = _free_port()
+        await listener._bind_and_report("tsk-1", 0, port)
+
+        head = (
+            b"POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\n"
+            b"Authorization: Bearer k\r\nContent-Length: 10\r\n\r\n0123456789"
+        )
+        r1, w1 = await asyncio.open_connection("127.0.0.1", port)
+        w1.write(head)
+        await w1.drain()
+        while listener._inflight_body < 10:
+            await asyncio.sleep(0)
+        # The second body would exceed the budget and is refused fast.
+        r2, w2 = await asyncio.open_connection("127.0.0.1", port)
+        w2.write(head)
+        await w2.drain()
+        raw2 = await asyncio.wait_for(r2.read(), timeout=5)
+        assert b"503" in raw2.split(b"\r\n")[0]
+        w2.close()
+
+        release.set()
+        await asyncio.wait_for(r1.read(), timeout=5)
+        w1.close()
+        # The first request's body is released once it is served.
+        assert listener._inflight_body == 0
+        await listener.stop()
+
+    asyncio.run(run())
+
+
 def _noop(_task_id: str, _exposure_generation: int, _listener_generation: int) -> None:
     pass

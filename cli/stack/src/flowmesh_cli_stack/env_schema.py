@@ -722,6 +722,13 @@ STACK_ENV_SCHEMA = EnvSchema(
                     min_value=1,
                     description="Highest forward serve exposure port.",
                 ),
+                EnvVar(
+                    "SERVER_SERVE_FORWARD_BODY_BUDGET_BYTES",
+                    "536870912",
+                    var_type=EnvVarType.INT,
+                    min_value=1,
+                    description="Cap on total in-flight forward request body bytes.",
+                ),
             ],
         ),
         EnvSection(
