@@ -113,6 +113,7 @@ class PortForwardConfig:
     ssh_proxy_enabled: bool = True
     ssh_audit_enabled: bool = True
     serve_proxy_enabled: bool = True
+    serve_forward_require_tls: bool = True
     bind_host: str = "0.0.0.0"
     public_host: str = "localhost"
     port_start: int = 32000
@@ -128,6 +129,7 @@ class PortForwardConfig:
                 "ENABLE_SERVER_SSH_CONNECTION_AUDIT", True
             ),
             serve_proxy_enabled=parse_bool_env("ENABLE_SERVER_SERVE_PROXY", True),
+            serve_forward_require_tls=parse_bool_env("SERVE_FORWARD_REQUIRE_TLS", True),
             bind_host=os.getenv("SERVER_PORT_FORWARD_BIND_HOST", "0.0.0.0").strip(),
             public_host=os.getenv(
                 "SERVER_PORT_FORWARD_PUBLIC_HOST", "localhost"

@@ -14,6 +14,7 @@ sidecar's fenced terminal releases its credit.
 """
 
 import queue
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 # The bound on one client's undrained frame backlog.
@@ -44,11 +45,27 @@ class ServeIngressChannel:
     )
     _closed: bool = False
     _lost: bool = False
+    _committed: bool = False
+    _committed_cb: Callable[[int, tuple[tuple[str, str], ...]], None] | None = None
 
     @property
     def lost(self) -> bool:
         """Whether a body frame was dropped, so a clean completion would lie."""
         return self._lost
+
+    def on_committed(
+        self, cb: Callable[[int, tuple[tuple[str, str], ...]], None]
+    ) -> None:
+        """Register the hook fired once the client head is written to the socket."""
+        self._committed_cb = cb
+
+    def commit_head(self, status: int, headers: tuple[tuple[str, str], ...]) -> None:
+        """Signal that the client head is written, exactly once per request."""
+        if self._committed:
+            return
+        self._committed = True
+        if self._committed_cb is not None:
+            self._committed_cb(status, headers)
 
     def head(self, status: int, headers: tuple[tuple[str, str], ...]) -> None:
         self._offer(ServeIngressFrame(kind="head", status=status, headers=headers))

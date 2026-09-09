@@ -17,6 +17,7 @@ from shared.resident.reports import (
 )
 from shared.resident.serve_ingress import (
     ServeIngressAdvertisement,
+    ServeIngressBound,
     ServeIngressRequest,
 )
 from shared.schemas.event import (
@@ -95,6 +96,12 @@ def _serve_access_mode(record: TaskRecord) -> ServeAccessMode:
     return ServeAccessMode(declared) if declared else ServeAccessMode.PROXY
 
 
+def _serve_forward_port(record: TaskRecord) -> int | None:
+    """The public forward port a serve task requested, or None to auto-allocate."""
+    requested = getattr(record.task.spec, "forwardPort", None)
+    return int(requested) if requested is not None else None
+
+
 def failed_task_can_retry(record: TaskRecord | None, retryable: bool | None) -> bool:
     """Whether a failed task may be requeued: retryable and within the attempt
     budget."""
@@ -157,8 +164,8 @@ class EventMonitor:
         self._pending_coros: set[Future[Any]] = set()
         self._pending_coros_lock = threading.Lock()
 
-        # Own-node tracking to coordinate with `stop()` during lifespan teardown.
-        # Set by `set_own_node()` once the supervisor handshake produces a node_id.
+        # Own-node tracking to coordinate with `stop()` during lifespan teardown. Set by
+        # `set_own_node()` once the supervisor handshake produces a node_id.
         self._own_node_id: str | None = None
         self._own_node_deregistered: asyncio.Event = asyncio.Event()
 
@@ -176,8 +183,7 @@ class EventMonitor:
         )
         return fallback
 
-    # ------------------------------------------------------------------ #
-    # Public API
+    # ------------------------------------------------------------------ # Public API
     # ------------------------------------------------------------------ #
 
     def start(self) -> None:
@@ -305,9 +311,8 @@ class EventMonitor:
         with self._pending_lock:
             return self._pending_result_clones.pop(task_id, [])
 
-    # ------------------------------------------------------------------ #
-    # Task event handling
-    # ------------------------------------------------------------------ #
+    # ------------------------------------------------------------------ # Task event
+    # handling ------------------------------------------------------------------ #
 
     def _tasks_events_loop(self) -> None:
         """Consume task events from a durable Redis stream.
@@ -320,16 +325,16 @@ class EventMonitor:
         dispatch/start/update events and repeated completions), so replay never
         double-applies.
 
-        Resuming from the persisted cursor is what lets events emitted while
-        the server was down (e.g. during a rolling restart) be replayed rather
-        than lost. The cursor is kept on the control Redis while the stream
-        lives on the telemetry Redis, so durable resume relies on both volumes
-        surviving — which the rolling-restart flow already requires.
+        Resuming from the persisted cursor is what lets events emitted while the server
+        was down (e.g. during a rolling restart) be replayed rather than lost. The
+        cursor is kept on the control Redis while the stream lives on the telemetry
+        Redis, so durable resume relies on both volumes surviving — which the
+        rolling-restart flow already requires.
 
-        The stream is length-bounded (``TASK_EVENT_STREAM_MAXLEN``), so a
-        consumer that stays down long enough for its cursor to fall behind the
-        trim horizon loses the events in between. That is detected and logged on
-        resume rather than passing silently.
+        The stream is length-bounded (``TASK_EVENT_STREAM_MAXLEN``), so a consumer that
+        stays down long enough for its cursor to fall behind the trim horizon loses the
+        events in between. That is detected and logged on resume rather than passing
+        silently.
         """
         cursor = self._redis_client.get(TASK_EVENT_CURSOR_KEY) or "0-0"
         self._warn_if_cursor_trimmed(cursor)
@@ -381,9 +386,9 @@ class EventMonitor:
                     # Propagate so the loop backs off and replays from this cursor.
                     raise
                 except Exception as exc:
-                    # Don't advance past a handler failure: it may be transient,
-                    # and the watchdog only reclaims dead workers (not a task stuck
-                    # under a live one), so advancing would lose the transition.
+                    # Don't advance past a handler failure: it may be transient, and the
+                    # watchdog only reclaims dead workers (not a task stuck under a live
+                    # one), so advancing would lose the transition.
                     attempts = self._event_handler_attempts.get(entry_id, 0) + 1
                     if attempts < TASK_EVENT_HANDLER_MAX_ATTEMPTS:
                         self._event_handler_attempts[entry_id] = attempts
@@ -416,9 +421,9 @@ class EventMonitor:
     def _warn_if_cursor_trimmed(self, cursor: str) -> None:
         """Log if the persisted cursor has fallen behind the stream's trim horizon.
 
-        Trimming removes entries from the front of the stream, so the oldest
-        surviving entry being newer than the cursor means every entry between
-        them was discarded before this consumer read it.
+        Trimming removes entries from the front of the stream, so the oldest surviving
+        entry being newer than the cursor means every entry between them was discarded
+        before this consumer read it.
         """
         if cursor in ("$", "0", "0-0"):
             return
@@ -640,9 +645,8 @@ class EventMonitor:
                     "Ignoring task event type=%s payload=%s", event_type, payload
                 )
 
-    # ------------------------------------------------------------------ #
-    # Node event handling
-    # ------------------------------------------------------------------ #
+    # ------------------------------------------------------------------ # Node event
+    # handling ------------------------------------------------------------------ #
 
     def _node_events_loop(self) -> None:
         event_key = NODE_EVENT_CHANNEL
@@ -664,8 +668,8 @@ class EventMonitor:
         event_type = event.type
         match event_type:
             case "SV_REGISTER":
-                # Registry is already populated by the supervisor's lifecycle
-                # Fire the register hook with the actor stamped on the event.
+                # Registry is already populated by the supervisor's lifecycle Fire the
+                # register hook with the actor stamped on the event.
                 self._schedule_register(
                     ResourceKind.NODE,
                     event.node_id,
@@ -701,9 +705,8 @@ class EventMonitor:
                     event.payload,
                 )
 
-    # ------------------------------------------------------------------ #
-    # Worker event handling
-    # ------------------------------------------------------------------ #
+    # ------------------------------------------------------------------ # Worker event
+    # handling ------------------------------------------------------------------ #
 
     def _workers_events_loop(self) -> None:
         event_key = WORKER_EVENT_CHANNEL
@@ -762,14 +765,19 @@ class EventMonitor:
                 )
             case "SERVE_INGRESS_REGISTER":
                 if self._gated_serve is not None:
-                    advertisement = ServeIngressAdvertisement.model_validate(
-                        event.payload["advertisement"]
-                    )
-                    self._gated_serve.register_forward(
+                    self._gated_serve.register_host(
                         (event.worker_id or "").strip(),
-                        advertisement.public_url,
-                        advertisement.generation,
+                        ServeIngressAdvertisement.model_validate(
+                            event.payload["advertisement"]
+                        ),
                     )
+            case "SERVE_INGRESS_BOUND":
+                if self._gated_serve is not None:
+                    bound = ServeIngressBound.model_validate(event.payload["bound"])
+                    if self._gated_serve.commit_forward(bound):
+                        # The exposure is live: republish the serve task's url so it
+                        # resolves to the now-bound public port.
+                        self._advertise_serve_route_for(bound.serve_task_id)
             case "SERVE_INGRESS_REQUEST":
                 if self._gated_serve is not None:
                     self._gated_serve.admit_forward(
@@ -792,7 +800,7 @@ class EventMonitor:
                 worker_id = (event.worker_id or "").strip()
                 self._worker_registry.unregister_workers(worker_id)
                 if self._gated_serve is not None and worker_id:
-                    self._gated_serve.withdraw_forward(worker_id)
+                    self._gated_serve.withdraw_host(worker_id)
                 if worker_id:
                     self._schedule_deregister(
                         ResourceKind.WORKER, worker_id, self._actor_from_event(event)
@@ -839,8 +847,8 @@ class EventMonitor:
                     "Ignoring task event type=%s payload=%s", event_type, event.payload
                 )
 
-    # ------------------------------------------------------------------ #
-    # SSH / serve forward task handling
+    # ------------------------------------------------------------------ # SSH / serve
+    # forward task handling
     # ------------------------------------------------------------------ #
 
     def _handle_ssh_task_update(
@@ -907,30 +915,51 @@ class EventMonitor:
             return payload
         payload = payload.copy()
         inner = inner.copy()
-        base = self._serve_base_url(task_id)
-        if base is None:
+        url = self._serve_url(task_id)
+        if url is None:
             inner.pop("url", None)
         else:
-            inner["url"] = f"{base}/api/v1/serve/tasks/{task_id}"
+            inner["url"] = url
         payload["serve"] = inner
         return payload
 
-    def _serve_base_url(self, task_id: str) -> str | None:
-        """The base url the task's pinned ingress is reached at, or None when it has no
-        registered ingress.
+    def _advertise_serve_route_for(self, task_id: str) -> None:
+        """Republish a serve task's url from its now-current pinned ingress.
 
-        A forward ingress supplies the base it registered, never a value read from a
-        request; the root-local proxy is reached at the server's own base url.
+        A forward task's url resolves only once its port exposure goes live, which the
+        two-phase bind completes after the endpoint update that adopted it. Re-stamping
+        the task's last update from the live exposure surfaces the url without waiting
+        for another endpoint report.
+        """
+        record = self._runtime.get_record(task_id)
+        payload = getattr(record, "latest_update", None) if record is not None else None
+        if not isinstance(payload, dict):
+            return
+        self._runtime.mark_updated(
+            task_id, self._handle_serve_task_update(task_id, None, payload)
+        )
+
+    def _serve_url(self, task_id: str) -> str | None:
+        """The public url a client reaches the serve task at, by its pinned mode.
+
+        A forward task's url is its live per-task port exposure, engine-native: the
+        client dials the authority and port directly with the engine's own paths. A
+        proxy task is reached at the server's own base url under the task-qualified
+        serve route. Either is None when the task's pinned ingress is not registered, so
+        no url is advertised.
         """
         if self._gated_serve is None:
             return None
         record = self._runtime.get_record(task_id)
         if record is None:
             return None
-        ingress = self._gated_serve.ingresses.live(_serve_access_mode(record))
-        if ingress is None:
+        mode = _serve_access_mode(record)
+        if mode is ServeAccessMode.FORWARD:
+            exposure = self._gated_serve.exposures.live(task_id)
+            return exposure.public_url if exposure is not None else None
+        if self._gated_serve.ingresses.live(mode) is None:
             return None
-        return (ingress.public_url or self._server_base_url).rstrip("/")
+        return f"{self._server_base_url.rstrip('/')}/api/v1/serve/tasks/{task_id}"
 
     def _maybe_adopt_serve(self, task_id: str) -> None:
         """Adopt a serve task as a standing resident allocation once its endpoint is up.
@@ -950,7 +979,11 @@ class EventMonitor:
             return
         serve = record.latest_update.get("serve") if record.latest_update else None
         if isinstance(serve, dict) and serve.get("_port"):
-            self._gated_serve.adopt(task_id, _serve_access_mode(record))
+            self._gated_serve.adopt(
+                task_id,
+                _serve_access_mode(record),
+                _serve_forward_port(record),
+            )
 
     def _maybe_drain_serve(self, task_id: str) -> None:
         """Drain a stopped serve task's binding and standing replica on its terminal."""
@@ -1138,9 +1171,8 @@ class EventMonitor:
             return "direct"
         return "direct"
 
-    # ------------------------------------------------------------------ #
-    # Helper methods
-    # ------------------------------------------------------------------ #
+    # ------------------------------------------------------------------ # Helper
+    # methods ------------------------------------------------------------------ #
 
     def _get_event_stream(self, topic: str) -> Iterable[Event]:
         pubsub = self._redis_client.subscribe_telemetry(topic)
@@ -1157,9 +1189,9 @@ class EventMonitor:
                 continue
             yield event
             # Stop AFTER yielding so a message that arrives concurrently with
-            # `stop_event.set()` (e.g. SV_UNREGISTER published while the
-            # supervisor subprocess is shutting down) still reaches the
-            # handler and gets a chance to schedule its hook coroutine.
+            # `stop_event.set()` (e.g. SV_UNREGISTER published while the supervisor
+            # subprocess is shutting down) still reaches the handler and gets a chance
+            # to schedule its hook coroutine.
             if self._stop_event.is_set():
                 break
         try:

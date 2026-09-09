@@ -973,15 +973,31 @@ STACK_ENV_SCHEMA = EnvSchema(
                     description="Interface the gated forward serve ingress binds.",
                 ),
                 EnvVar(
-                    "WORKER_SERVE_INGRESS_PORT",
-                    "8100",
-                    var_type=EnvVarType.INT,
-                    description="Port the gated forward serve ingress listens on.",
+                    "WORKER_SERVE_INGRESS_AUTHORITY",
+                    "",
+                    description="Public authority for forward serve ports.",
                 ),
                 EnvVar(
-                    "WORKER_SERVE_INGRESS_PUBLIC_URL",
+                    "WORKER_SERVE_INGRESS_PORT_LOW",
+                    "34000",
+                    var_type=EnvVarType.INT,
+                    description="Lowest forward serve exposure port.",
+                ),
+                EnvVar(
+                    "WORKER_SERVE_INGRESS_PORT_HIGH",
+                    "34099",
+                    var_type=EnvVarType.INT,
+                    description="Highest forward serve exposure port.",
+                ),
+                EnvVar(
+                    "WORKER_SERVE_INGRESS_TLS_CERT",
                     "",
-                    description="Public base url clients reach the forward ingress at.",
+                    description="Path to the forward serve ingress TLS certificate.",
+                ),
+                EnvVar(
+                    "WORKER_SERVE_INGRESS_TLS_KEY",
+                    "",
+                    description="Path to the forward serve ingress TLS private key.",
                 ),
                 EnvVar(
                     "DEV_MODEL_FORWARD_URL",
@@ -1108,8 +1124,8 @@ STACK_ENV_SCHEMA = EnvSchema(
 )
 
 
-# Schema-default overrides applied when rendering a worker-role .env.
-# Unused vars are blanked out to avoid confusion and misconfiguration.
+# Schema-default overrides applied when rendering a worker-role .env. Unused vars are
+# blanked out to avoid confusion and misconfiguration.
 WORKER_ROLE_OVERRIDES = {
     "NODE_ROLE": NodeRole.WORKER.value,
     "REDIS_TLS_CERT_FILE": "",

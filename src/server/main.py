@@ -43,6 +43,7 @@ from .resident.wiring import build_resident_capacity, wire_worker_delivery
 from .routers import docs, health, v1
 from .serve import (
     SERVE_EDGE_STREAM_ID,
+    ForwardIngressDirectory,
     GatedServe,
     ServeBindingStore,
     ServeForwardTransport,
@@ -84,8 +85,8 @@ IS_ROOT_NODE = NODE_ROLE is NodeRole.ROOT
 if NODE_ROLE is NodeRole.WORKER and not config.worker_management.enabled:
     raise SystemExit("Worker node role requires ENABLE_SUPERVISOR=true")
 
-# --------------------------------------------------------------------------- #
-# Shared services (all node roles)
+# --------------------------------------------------------------------------- # Shared
+# services (all node roles)
 # --------------------------------------------------------------------------- #
 
 logger = get_logger(
@@ -141,8 +142,8 @@ if config.worker_management.enabled:
         network=config.orchestration.network,
     )
 
-# --------------------------------------------------------------------------- #
-# Root node services (orchestrator)
+# --------------------------------------------------------------------------- # Root
+# node services (orchestrator)
 # --------------------------------------------------------------------------- #
 
 WORKFLOW_REGISTRY = None
@@ -316,6 +317,11 @@ if IS_ROOT_NODE:
                 if config.port_forward.serve_proxy_enabled
                 else None
             ),
+            # Each forward binding owns a per-task public port on a registered ingress
+            # host; a deployment that requires TLS refuses to expose one on a plaintext
+            # host, so a forward task without a TLS-capable host fails closed.
+            exposures=ForwardIngressDirectory(),
+            require_forward_tls=config.port_forward.serve_forward_require_tls,
             # A forward-pinned request is admitted by control and relayed to its ingress
             # worker over that worker's attachment; the worker tees the response to its
             # own client data-direct.
@@ -394,8 +400,8 @@ if IS_ROOT_NODE:
         flush_max_entries=config.log_stream.archive_flush_max_entries,
     )
 
-# --------------------------------------------------------------------------- #
-# Metrics export hook
+# --------------------------------------------------------------------------- # Metrics
+# export hook
 # --------------------------------------------------------------------------- #
 
 
@@ -463,8 +469,8 @@ def _stop_background() -> None:
     BACKGROUND_THREADS.clear()
 
 
-# --------------------------------------------------------------------------- #
-# FastAPI application
+# --------------------------------------------------------------------------- # FastAPI
+# application
 # --------------------------------------------------------------------------- #
 
 openapi_tags = [
@@ -497,8 +503,8 @@ async def _load_plugins(stack: AsyncExitStack) -> None:
     A plugin's `install()` is either:
       - a sync function returning a `HookBindings`, or
       - an `@asynccontextmanager async def` yielding a `HookBindings` (the
-        ctx manager registers on enter, cleans up on exit; e.g. closes a
-        SQLAlchemy engine).
+        ctx manager registers on enter, cleans up on exit; e.g. closes a SQLAlchemy
+        engine).
     """
     for plugin_name in config.plugins:
         mod = importlib.import_module(plugin_name)
@@ -519,8 +525,8 @@ async def _load_plugins(stack: AsyncExitStack) -> None:
 
 async def _reconcile_resources() -> None:
     """Refresh registrar-tracked records for every live resource, then purge
-    anything the sweep didn't touch. Runs once at startup after plugins load
-    so registrars don't drop grants on resources that outlived their TTL.
+    anything the sweep didn't touch. Runs once at startup after plugins load so
+    registrars don't drop grants on resources that outlived their TTL.
     """
     refs: list[ResourceRef] = []
 
@@ -593,9 +599,8 @@ async def _lifespan(_: FastAPI):
             _on_node_id_change(SUPERVISOR.node_id)
             SUPERVISOR.add_node_id_listener(_on_node_id_change)
 
-        # --- Startup reconcile ---
-        # Runs after the supervisor handshake so this node is in NODE_REGISTRY
-        # and is included in the live batch.
+        # --- Startup reconcile --- Runs after the supervisor handshake so this node is
+        # in NODE_REGISTRY and is included in the live batch.
         await _reconcile_resources()
 
         try:
@@ -633,8 +638,8 @@ async def _lifespan(_: FastAPI):
 
 app.router.lifespan_context = _lifespan
 
-# --------------------------------------------------------------------------- #
-# App state & routers
+# --------------------------------------------------------------------------- # App
+# state & routers
 # --------------------------------------------------------------------------- #
 
 # Shared state (all nodes)
@@ -693,9 +698,8 @@ if config.worker_management.enabled:
     app.include_router(v1.stack.router, prefix=v1_prefix)
 
 
-# --------------------------------------------------------------------------- #
-# Entry point
-# --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- # Entry
+# point --------------------------------------------------------------------------- #
 
 
 def main(argv: list[str] | None = None) -> None:

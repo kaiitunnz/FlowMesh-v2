@@ -13,6 +13,7 @@ import asyncio
 from collections.abc import Callable
 
 from server.serve import (
+    ForwardIngressDirectory,
     GatedServe,
     ServeBindingStore,
     ServeForwardTransport,
@@ -23,7 +24,11 @@ from server.task.v2.representations.operators import ServiceInterface
 from shared.resident.carriage import ResidentCarriagePlan
 from shared.resident.contracts import AdmissionHandoff, RouteAuthorization
 from shared.resident.envelope import ServeRequestEnvelope
-from shared.resident.serve_ingress import ServeIngressRequest
+from shared.resident.serve_ingress import (
+    ServeIngressAdvertisement,
+    ServeIngressBound,
+    ServeIngressRequest,
+)
 
 _RelayLog = list[tuple[str, str, dict]]
 
@@ -67,6 +72,8 @@ def _request(
     return ServeIngressRequest(
         request_id=request_id,
         serve_task_id="tsk-1",
+        binding_generation=0,
+        exposure_generation=0,
         credential=None,
         method=method,
         path="/v1/chat/completions",
@@ -107,21 +114,15 @@ def _edge(
     *,
     register: bool,
 ) -> GatedServe:
-    registry = ServeIngressRegistry("serve-edge")
-    if register:
-        registry.register_forward(
-            origin_id="node-wrk-a",
-            worker_id="wrk-a",
-            public_url="http://ingress.example:8100",
-            generation=1,
-        )
     edge = GatedServe(
         bindings=ServeBindingStore(),
         terminals=ServeTerminalStore(),
         control=control,  # type: ignore[arg-type]
         relay=None,  # type: ignore[arg-type]
-        ingresses=registry,
+        ingresses=ServeIngressRegistry("serve-edge"),
+        exposures=ForwardIngressDirectory(),
         forward_transport=transport,
+        require_forward_tls=False,
     )
     edge._bindings.adopt(
         "tsk-1",
@@ -134,6 +135,29 @@ def _edge(
         max_output_tokens=None,
         access_mode=ServeAccessMode.FORWARD,
     )
+    if register:
+        # Register a forward ingress host, reserve the task's port, and commit the
+        # exposure live from the worker's bound evidence, so admission resolves it.
+        edge.register_host(
+            "wrk-a",
+            ServeIngressAdvertisement(
+                authority="ingress.example",
+                port_low=34000,
+                port_high=34009,
+                generation=1,
+            ),
+        )
+        exposure = edge.exposures.current("tsk-1")
+        assert exposure is not None
+        edge.commit_forward(
+            ServeIngressBound(
+                serve_task_id="tsk-1",
+                binding_generation=exposure.binding_generation,
+                exposure_generation=exposure.exposure_generation,
+                listener_generation=1,
+                attachment_generation=1,
+            )
+        )
     return edge
 
 

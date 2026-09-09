@@ -264,8 +264,11 @@ def main() -> None:
         content_store=build_content_store(cfg.server_base_url),
         serve_ingress_enabled=cfg.serve_ingress_enabled,
         serve_ingress_bind_host=cfg.serve_ingress_bind_host,
-        serve_ingress_port=cfg.serve_ingress_port,
-        serve_ingress_public_url=cfg.serve_ingress_public_url,
+        serve_ingress_authority=cfg.serve_ingress_authority,
+        serve_ingress_port_low=cfg.serve_ingress_port_low,
+        serve_ingress_port_high=cfg.serve_ingress_port_high,
+        serve_ingress_tls_cert=cfg.serve_ingress_tls_cert,
+        serve_ingress_tls_key=cfg.serve_ingress_tls_key,
     )
 
     # Install signal handlers to allow graceful shutdown

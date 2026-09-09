@@ -1,20 +1,25 @@
-"""The forward ingress's public HTTP listener.
+"""The worker's forward serve ingress: one gated HTTP(S) listener per task port.
 
-An external client reaches a public serve task here by its task ID, at the same
-task-qualified route shape the root-local proxy serves. The listener authenticates
-nothing: it freezes the client's transparent request envelope, hands the presented
-credential and the frozen request's descriptor to control over the worker's
-authenticated attachment, and serves the request only on control's admission — which
-performs authentication, task-read authorization, binding lookup, and admission.
+A deployment registers this worker as a forward ingress host — a public authority and a
+port range. Control reserves a public port for each forward serve task and tells this
+host to bind it; the host binds one listener on that port, mapped to the task's port
+exposure, and reports it bound so control can commit the exposure live. A client then
+reaches the task at ``https://<authority>:<port>/<engine-native-path>`` — the port is
+the whole address, so the listener resolves the serve task from its own exposure, never
+from a client-supplied path, and forwards the engine-native path verbatim.
 
-The credential never leaves that control message: it is not logged, not relayed on the
-data path, and not forwarded to the engine, which the replica's sidecar reaches with its
-own. The listener relays opaque frames and applies no engine semantics of its own.
+The listener authenticates nothing: it freezes the client's transparent request
+envelope, hands the presented credential and the frozen request's descriptor to control
+over the worker's authenticated attachment, and serves the request only on control's
+admission. The credential never leaves that control message. TLS terminates here from
+the operator's profile; a plaintext listener is an explicit local-test mode only.
 """
 
 import logging
+import ssl
 import threading
 from collections.abc import Callable
+from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import urlsplit
@@ -24,7 +29,11 @@ from shared.resident.envelope import (
     ServeRequestEnvelope,
     freeze_request_envelope,
 )
-from shared.resident.serve_ingress import ServeIngressRequest
+from shared.resident.serve_ingress import (
+    ServeIngressBound,
+    ServeIngressRequest,
+    ServeIngressReserve,
+)
 
 from .channel import ServeIngressChannel
 from .rendezvous import (
@@ -32,9 +41,6 @@ from .rendezvous import (
     ServeIngressDenied,
     ServeIngressRendezvous,
 )
-
-# The task-qualified route shape, matching the root-local proxy's.
-_ROUTE_PREFIX = "/api/v1/serve/tasks/"
 
 _MAX_REQUEST_BYTES = 4 * 1024 * 1024
 
@@ -45,88 +51,172 @@ ProposeFn = Callable[[ServeIngressRequest], None]
 BeginFn = Callable[
     [ServeIngressAdmission, ServeRequestEnvelope, ServeIngressChannel], None
 ]
+# Reports a reserved port bound and serving so control commits the exposure live.
+BoundFn = Callable[[ServeIngressBound], None]
 
 
-class ServeForwardIngress:
-    """Serves external task-addressed requests from a worker, gated by control."""
+@dataclass(frozen=True)
+class _Exposure:
+    """The port exposure a listener resolves its requests to, assigned by control."""
+
+    serve_task_id: str
+    binding_generation: int
+    exposure_generation: int
+
+
+class ForwardIngressHost:
+    """Binds one gated HTTP(S) listener per reserved forward port on this worker."""
 
     def __init__(
         self,
         *,
         bind_host: str,
-        port: int,
-        public_url: str,
+        authority: str,
         propose: ProposeFn,
         begin: BeginFn,
         new_request_id: Callable[[], str],
+        report_bound: BoundFn,
+        tls_cert: str | None = None,
+        tls_key: str | None = None,
         admission_timeout_sec: float = 30.0,
         stream_idle_timeout_sec: float = 300.0,
         logger: logging.Logger | None = None,
     ) -> None:
         self._bind_host = bind_host
-        self._port = port
-        self._public_url = public_url.rstrip("/")
+        self._authority = authority
         self._propose = propose
         self._begin = begin
         self._new_request_id = new_request_id
+        self._report_bound = report_bound
+        self._tls_cert = tls_cert
+        self._tls_key = tls_key
         self._admission_timeout = admission_timeout_sec
         self._stream_idle_timeout = stream_idle_timeout_sec
         self._log = logger or logging.getLogger("serve-forward-ingress")
         self.rendezvous = ServeIngressRendezvous()
-        self._server: _IngressHTTPServer | None = None
-        self._thread: threading.Thread | None = None
+        self._servers: dict[int, _IngressHTTPServer] = {}
+        self._listener_generation = 0
+        self._lock = threading.Lock()
 
     @property
-    def public_url(self) -> str:
-        """The base url clients reach this ingress at, as registered with control."""
-        return self._public_url
+    def stream_idle_timeout(self) -> float:
+        return self._stream_idle_timeout
 
-    def start(self) -> int:
-        """Bind the public listener and begin serving; returns the bound port."""
-        server = _IngressHTTPServer(
-            (self._bind_host, self._port), _IngressHandler, self
-        )
-        self._server = server
-        self._thread = threading.Thread(target=server.serve_forever, daemon=True)
-        self._thread.start()
-        self._log.info(
-            "gated forward serve ingress listening on %s:%d as %s",
-            self._bind_host,
-            server.server_address[1],
-            self._public_url,
-        )
-        return int(server.server_address[1])
+    def reserve(self, reserve: ServeIngressReserve) -> None:
+        """Bind a listener on the reserved port and report it bound, or fail closed.
+
+        A TLS exposure without a configured operator profile, or a port that cannot
+        bind, reports nothing — the exposure never commits live, so the task fails
+        closed rather than serving on an unintended transport.
+        """
+        with self._lock:
+            existing = self._servers.get(reserve.public_port)
+            if existing is not None:
+                if (
+                    existing.exposure.serve_task_id == reserve.serve_task_id
+                    and existing.exposure.exposure_generation
+                    == reserve.exposure_generation
+                ):
+                    # A duplicate reserve for the same round: re-report the live
+                    # binding.
+                    self._report_bound(self._bound(reserve, existing.listener_gen))
+                    return
+                self._shutdown(reserve.public_port)
+            if reserve.tls and not (self._tls_cert and self._tls_key):
+                self._log.error(
+                    "forward ingress cannot serve %s over TLS without a cert profile",
+                    reserve.serve_task_id,
+                )
+                return
+            exposure = _Exposure(
+                serve_task_id=reserve.serve_task_id,
+                binding_generation=reserve.binding_generation,
+                exposure_generation=reserve.exposure_generation,
+            )
+            server = self._bind(reserve.public_port, exposure, reserve.tls)
+            if server is None:
+                return
+            self._listener_generation += 1
+            server.listener_gen = self._listener_generation
+            self._servers[reserve.public_port] = server
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            self._log.info(
+                "forward serve ingress bound %s on %s:%d",
+                reserve.serve_task_id,
+                self._authority,
+                reserve.public_port,
+            )
+            listener_gen = server.listener_gen
+        self._report_bound(self._bound(reserve, listener_gen))
+
+    def release(self, public_port: int) -> None:
+        """Close a drained exposure's listener and dispose its connections."""
+        with self._lock:
+            self._shutdown(public_port)
 
     def stop(self) -> None:
-        if (server := self._server) is not None:
+        with self._lock:
+            for port in list(self._servers):
+                self._shutdown(port)
+
+    def _bind(
+        self, port: int, exposure: _Exposure, tls: bool
+    ) -> "_IngressHTTPServer | None":
+        try:
+            server = _IngressHTTPServer(
+                (self._bind_host, port), _IngressHandler, self, exposure
+            )
+        except OSError as exc:
+            self._log.error(
+                "forward ingress could not bind port %d for %s: %s",
+                port,
+                exposure.serve_task_id,
+                exc,
+            )
+            return None
+        if tls and self._tls_cert and self._tls_key:
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(self._tls_cert, self._tls_key)
+            server.socket = context.wrap_socket(server.socket, server_side=True)
+        return server
+
+    def _shutdown(self, port: int) -> None:
+        server = self._servers.pop(port, None)
+        if server is not None:
             server.shutdown()
             server.server_close()
-        if (thread := self._thread) is not None:
-            thread.join(timeout=5.0)
-        self._server = None
-        self._thread = None
+
+    @staticmethod
+    def _bound(
+        reserve: ServeIngressReserve, listener_generation: int
+    ) -> ServeIngressBound:
+        return ServeIngressBound(
+            serve_task_id=reserve.serve_task_id,
+            binding_generation=reserve.binding_generation,
+            exposure_generation=reserve.exposure_generation,
+            listener_generation=listener_generation,
+            attachment_generation=1,
+        )
 
     def handle(
         self,
+        exposure: _Exposure,
         method: str,
         target: str,
         headers: list[tuple[str, str]],
         body: bytes,
     ) -> ServeIngressChannel | ServeIngressDenied:
-        """Admit one request through control and begin relaying it, or refuse it."""
-        split = urlsplit(target)
-        if not split.path.startswith(_ROUTE_PREFIX):
-            return ServeIngressDenied(404, "not found")
-        remainder = split.path[len(_ROUTE_PREFIX) :]
-        serve_task_id, _, upstream_path = remainder.partition("/")
-        if not serve_task_id or not upstream_path:
-            return ServeIngressDenied(404, "not found")
+        """Admit one request for this port's exposure through control, or refuse it.
 
+        The request target is the engine-native origin-form path, forwarded verbatim;
+        the serve task is this listener's own exposure, never a client-supplied path.
+        """
+        split = urlsplit(target)
         credential = _bearer(headers)
         try:
             envelope = freeze_request_envelope(
                 method=method,
-                upstream_path=upstream_path,
+                upstream_path=split.path.lstrip("/"),
                 query=split.query,
                 headers=headers,
                 body=body,
@@ -139,7 +229,9 @@ class ServeForwardIngress:
             self._propose(
                 ServeIngressRequest(
                     request_id=request_id,
-                    serve_task_id=serve_task_id,
+                    serve_task_id=exposure.serve_task_id,
+                    binding_generation=exposure.binding_generation,
+                    exposure_generation=exposure.exposure_generation,
                     credential=credential,
                     method=envelope.method,
                     path=envelope.path,
@@ -158,10 +250,6 @@ class ServeForwardIngress:
         self._begin(decision, envelope, channel)
         return channel
 
-    @property
-    def stream_idle_timeout(self) -> float:
-        return self._stream_idle_timeout
-
 
 def _bearer(headers: list[tuple[str, str]]) -> str | None:
     for name, value in headers:
@@ -178,9 +266,12 @@ class _IngressHTTPServer(ThreadingHTTPServer):
         self,
         address: tuple[str, int],
         handler: type[BaseHTTPRequestHandler],
-        ingress: ServeForwardIngress,
+        host: ForwardIngressHost,
+        exposure: _Exposure,
     ) -> None:
-        self.ingress = ingress
+        self.host = host
+        self.exposure = exposure
+        self.listener_gen = 0
         super().__init__(address, handler)
 
 
@@ -192,7 +283,7 @@ class _IngressHandler(BaseHTTPRequestHandler):
         return None
 
     def _serve(self) -> None:
-        ingress = self.server.ingress
+        host = self.server.host
         declared = self.headers.get("content-length")
         if declared is not None and declared.isdigit():
             if int(declared) > _MAX_REQUEST_BYTES:
@@ -201,13 +292,17 @@ class _IngressHandler(BaseHTTPRequestHandler):
             body = self.rfile.read(int(declared))
         else:
             body = b""
-        outcome = ingress.handle(
-            self.command, self.path, list(self.headers.items()), body
+        outcome = host.handle(
+            self.server.exposure,
+            self.command,
+            self.path,
+            list(self.headers.items()),
+            body,
         )
         if isinstance(outcome, ServeIngressDenied):
             self._refuse(outcome.status, outcome.detail)
             return
-        self._relay(outcome, ingress.stream_idle_timeout)
+        self._relay(outcome, host.stream_idle_timeout)
 
     do_GET = _serve
     do_POST = _serve
@@ -227,15 +322,11 @@ class _IngressHandler(BaseHTTPRequestHandler):
     def _relay(self, channel: ServeIngressChannel, idle_timeout: float) -> None:
         """Write the engine's own head, then its body frames, as they arrive."""
         started = False
-        # A HEAD response carries the headers its GET would produce and no body, and a
-        # no-body status carries neither a body nor the framing for one.
         write_body = self.command != "HEAD"
         try:
             while True:
                 frame = channel.drain(idle_timeout)
                 if frame is None:
-                    # No frame before the idle deadline: refuse a request that never
-                    # produced a head, and abort one whose stream stalled mid-delivery.
                     if started:
                         self._abort()
                     else:
@@ -246,9 +337,12 @@ class _IngressHandler(BaseHTTPRequestHandler):
                     write_body = write_body and framed
                     self._send_head(frame.status, frame.headers, framed=framed)
                     started = True
+                    # The client now holds the head: mark it committed only now, so a
+                    # loss before this point may legally re-drive while a loss after it
+                    # closes the client rather than re-driving over bytes it already
+                    # has.
+                    channel.commit_head(frame.status, frame.headers)
                 elif frame.kind == "chunk":
-                    # A body frame before the engine's own head is a protocol error; the
-                    # head is never synthesized, so an unheaded stream fails closed.
                     if not started:
                         self._refuse(502, "resident serve sent a body before a head")
                         return
@@ -260,9 +354,6 @@ class _IngressHandler(BaseHTTPRequestHandler):
                             502, frame.detail or "resident serve produced no response"
                         )
                         return
-                    # A dropped body frame or an engine error leaves an incomplete
-                    # response: abort the connection rather than close it cleanly and
-                    # imply a completion that kept every byte.
                     if channel.lost or frame.kind == "error":
                         self._abort()
                     elif write_body:
@@ -287,13 +378,9 @@ class _IngressHandler(BaseHTTPRequestHandler):
     ) -> None:
         self.send_response(status)
         for name, value in headers:
-            # The body is re-framed for this hop, so the engine's own framing headers
-            # are not carried onto it.
             if name.lower() not in ("content-length", "transfer-encoding"):
                 self.send_header(name, value)
         if framed:
-            # A HEAD response still advertises the framing its GET would use; it just
-            # carries no body.
             self.send_header("Transfer-Encoding", "chunked")
         self.end_headers()
 

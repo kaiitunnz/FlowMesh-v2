@@ -14,6 +14,13 @@ from .binding import (
     serve_family_key,
 )
 from .forward import ServeForwardTransport
+from .forward_exposure import (
+    ForwardExposureSnapshot,
+    ForwardExposureStatus,
+    ForwardIngressDirectory,
+    ForwardIngressHost,
+    ForwardPortExposure,
+)
 from .ingress import (
     ServeAccessMode,
     ServeIngress,
@@ -43,6 +50,11 @@ __all__ = [
     "WrongIngress",
     "ServeAccessMode",
     "ServeForwardTransport",
+    "ForwardExposureSnapshot",
+    "ForwardExposureStatus",
+    "ForwardIngressDirectory",
+    "ForwardIngressHost",
+    "ForwardPortExposure",
     "ServeIngress",
     "ServeIngressRegistry",
     "is_public_base_url",

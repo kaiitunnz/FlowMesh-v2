@@ -14,6 +14,7 @@ from collections.abc import Callable
 from server.resident.state import ClaimTerminalReason, InvocationSubjectKind
 from server.routers.v1.serve import _stream
 from server.serve import (
+    ForwardIngressDirectory,
     GatedServe,
     ServeBindingStore,
     ServeResult,
@@ -24,13 +25,17 @@ from server.serve import (
 from server.serve.ingress import ServeAccessMode, ServeIngressRegistry
 from server.serve.service import (
     BindingNotFound,
-    IngressUnavailable,
     MethodNotAllowed,
     WrongIngress,
 )
 from server.task.v2.representations.operators import ServiceInterface
 from shared.resident.contracts import ReplicaEndpoint
 from shared.resident.envelope import ServeRequestEnvelope, freeze_request_envelope
+from shared.resident.serve_ingress import (
+    ServeIngressAdvertisement,
+    ServeIngressBound,
+    ServeIngressRequest,
+)
 
 
 class _FakeControl:
@@ -48,6 +53,7 @@ class _FakeControl:
         self.adopt_calls: list[dict] = []
         self.drained: list[str] = []
         self.reconciled: list[tuple[str, ClaimTerminalReason]] = []
+        self.relayed: list[tuple[str, str, dict]] = []
         self._endpoint = endpoint
         self._model_allowed = model_allowed
 
@@ -81,6 +87,16 @@ class _FakeControl:
     ) -> None:
         self.reconciled.append((invocation_id, reason))
 
+    def node_of_worker(self, worker_id: str) -> str | None:
+        return f"node-{worker_id}" if worker_id else None
+
+    def relay_to_worker(self, worker_id: str, kind: str, payload: dict) -> bool:
+        self.relayed.append((worker_id, kind, payload))
+        return True
+
+    def schedule(self, coro) -> None:
+        asyncio.get_event_loop().run_until_complete(coro)
+
 
 class _FakeRelay:
     """A no-op edge relay; the origin transport is exercised in the resident tests."""
@@ -108,6 +124,7 @@ def _edge(
     control: _FakeControl,
     ingresses: ServeIngressRegistry | None = None,
     forward_transport: object | None = None,
+    exposures: ForwardIngressDirectory | None = None,
 ) -> GatedServe:
     bindings = ServeBindingStore()
     return GatedServe(
@@ -116,7 +133,21 @@ def _edge(
         control=control,  # type: ignore[arg-type]
         relay=_FakeRelay(),  # type: ignore[arg-type]
         ingresses=ingresses or ServeIngressRegistry("serve-edge"),
+        exposures=exposures or ForwardIngressDirectory(),
         forward_transport=forward_transport,  # type: ignore[arg-type]
+        require_forward_tls=False,
+    )
+
+
+def _register_host(edge: GatedServe, worker_id: str = "wrk-a") -> None:
+    edge.register_host(
+        worker_id,
+        ServeIngressAdvertisement(
+            authority="ingress.example",
+            port_low=34000,
+            port_high=34009,
+            generation=1,
+        ),
     )
 
 
@@ -221,33 +252,43 @@ def test_submit_forwards_any_engine_path_rather_than_an_allowlist() -> None:
     ]
 
 
-def test_forward_fails_closed_without_a_registered_ingress() -> None:
-    # A task pinned to forward must never be quietly served over the root-local proxy:
-    # with no forward ingress registered the request is refused before any credit.
-    control = _FakeControl()
-    edge = _edge(control)
-    _bind(edge, access_mode=ServeAccessMode.FORWARD)
-    try:
-        edge.submit("p1", "acme", "tsk-1", _envelope(), ServeAccessMode.FORWARD)
-        raise AssertionError("expected IngressUnavailable")
-    except IngressUnavailable:
-        pass
-    assert control.originations == []
-
-
-def test_forward_is_admitted_once_its_ingress_is_registered() -> None:
-    control = _FakeControl()
-    registry = ServeIngressRegistry("serve-edge")
-    edge = _edge(control, registry, forward_transport=_FakeRelay())
-    _bind(edge, access_mode=ServeAccessMode.FORWARD)
-    registry.register_forward(
-        origin_id="node-a",
-        worker_id="wrk-a",
-        public_url="http://ingress.example:8100",
-        generation=1,
+def test_forward_adoption_reserves_a_port_and_commits_on_bound_evidence() -> None:
+    control = _FakeControl(
+        endpoint=ReplicaEndpoint(base_url="http://engine/v1", model="m")
     )
-    edge.submit("p1", "acme", "tsk-1", _envelope(), ServeAccessMode.FORWARD)
-    assert len(control.originations) == 1
+    edge = _edge(control, forward_transport=_FakeRelay())
+    _register_host(edge)
+    edge.adopt("tsk-1", ServeAccessMode.FORWARD)
+
+    reserves = [p for _w, k, p in control.relayed if k == "serve_ingress_reserve"]
+    assert len(reserves) == 1 and reserves[0]["serve_task_id"] == "tsk-1"
+    exposure = edge.exposures.current("tsk-1")
+    assert exposure is not None and 34000 <= exposure.public_port <= 34009
+    # The exposure is not live until the ingress worker's bound evidence commits it.
+    assert edge.exposures.live("tsk-1") is None
+
+    assert edge.commit_forward(
+        ServeIngressBound(
+            serve_task_id="tsk-1",
+            binding_generation=exposure.binding_generation,
+            exposure_generation=exposure.exposure_generation,
+            listener_generation=1,
+            attachment_generation=1,
+        )
+    )
+    assert edge.exposures.live("tsk-1") is not None
+
+
+def test_forward_adoption_without_a_registered_host_fails_closed() -> None:
+    # With no forward ingress host registered, adoption reserves no port and publishes
+    # no exposure, so the task fails closed rather than serving over the proxy.
+    control = _FakeControl(
+        endpoint=ReplicaEndpoint(base_url="http://engine/v1", model="m")
+    )
+    edge = _edge(control, forward_transport=_FakeRelay())
+    edge.adopt("tsk-1", ServeAccessMode.FORWARD)
+    assert [k for _w, k, _p in control.relayed if k == "serve_ingress_reserve"] == []
+    assert edge.exposures.current("tsk-1") is None
 
 
 def test_a_proxy_binding_is_admitted_without_any_forward_ingress() -> None:
@@ -474,18 +515,10 @@ def test_reconcile_replays_recorded_terminals() -> None:
 
 def test_a_binding_is_refused_on_an_ingress_it_does_not_pin() -> None:
     # accessMode is policy, not a hint: a task pinned to one ingress must not be
-    # servable through the other, or an operator who chose forward to keep serve
-    # traffic off the root still carries it there whenever a client uses the root URL.
+    # servable through the other, or an operator who chose forward to keep serve traffic
+    # off the root still carries it there whenever a client uses the root URL.
     control = _FakeControl()
-    registry = ServeIngressRegistry("serve-edge")
-    registry.register_forward(
-        origin_id="node-a",
-        worker_id="wrk-a",
-        public_url="http://ingress.example:8100",
-        generation=1,
-    )
-
-    edge = _edge(control, registry)
+    edge = _edge(control)
     _bind(edge, task_id="tsk-fwd", access_mode=ServeAccessMode.FORWARD)
     _bind(edge, task_id="tsk-pxy", access_mode=ServeAccessMode.PROXY)
 
@@ -502,22 +535,47 @@ def test_a_binding_is_refused_on_an_ingress_it_does_not_pin() -> None:
 
 
 def _forward_edge() -> tuple[_FakeControl, GatedServe]:
-    control = _FakeControl()
-    registry = ServeIngressRegistry("serve-edge")
-    edge = _edge(control, registry, forward_transport=_FakeRelay())
-    _bind(edge, access_mode=ServeAccessMode.FORWARD)
-    registry.register_forward(
-        origin_id="node-a",
-        worker_id="wrk-a",
-        public_url="http://ingress.example:8100",
-        generation=1,
+    """A gated edge with a live forward exposure and one originated forward request.
+
+    The request is originated through ``_submit_forward`` (control's admission runs
+    after authentication elsewhere), so the origination's delivery is a forward-mode
+    stream on which the redrive, commit, and tee semantics are exercised.
+    """
+    control = _FakeControl(
+        endpoint=ReplicaEndpoint(base_url="http://engine/v1", model="m")
+    )
+    edge = _edge(control, forward_transport=_FakeRelay())
+    _register_host(edge)
+    edge.adopt("tsk-1", ServeAccessMode.FORWARD)
+    exposure = edge.exposures.current("tsk-1")
+    assert exposure is not None
+    edge.commit_forward(
+        ServeIngressBound(
+            serve_task_id="tsk-1",
+            binding_generation=exposure.binding_generation,
+            exposure_generation=exposure.exposure_generation,
+            listener_generation=1,
+            attachment_generation=1,
+        )
+    )
+    edge._submit_forward(
+        ServeIngressRequest(
+            request_id="srq-1",
+            serve_task_id="tsk-1",
+            binding_generation=exposure.binding_generation,
+            exposure_generation=exposure.exposure_generation,
+            method="POST",
+            path="/v1/chat/completions",
+            descriptor_digest="d1",
+        ),
+        "wrk-a",
+        "p1",
     )
     return control, edge
 
 
 def test_a_forward_loss_before_any_delivery_re_drives_transparently() -> None:
-    control, edge = _forward_edge()
-    edge.submit("p1", "acme", "tsk-1", _envelope(), ServeAccessMode.FORWARD)
+    control, _edge_ = _forward_edge()
     delivery = control.originations[0].delivery
     delivery.redrive()
     # Nothing reached the client yet, so the request re-runs and the caller still sees
@@ -531,7 +589,6 @@ def test_a_forward_loss_after_the_response_is_committed_never_re_drives() -> Non
     # the commit signal this loss would re-run the engine over a response the client
     # already holds — duplicate bytes under a status it cannot take back.
     control, edge = _forward_edge()
-    edge.submit("p1", "acme", "tsk-1", _envelope(), ServeAccessMode.FORWARD)
     invocation_id = control.originations[0].invocation_id
     delivery = control.originations[0].delivery
 
@@ -546,8 +603,8 @@ def test_a_committed_forward_response_enqueues_nothing_for_the_root() -> None:
     # A forward ingress already wrote its head to its own client; control must not also
     # queue it, or the root would hold frames no one drains.
     control, edge = _forward_edge()
-    result = edge.submit("p1", "acme", "tsk-1", _envelope(), ServeAccessMode.FORWARD)
     invocation_id = control.originations[0].invocation_id
+    stream = control.originations[0].delivery
     edge.committed(invocation_id, 200, (("content-type", "application/json"),))
-    control.originations[0].delivery.tee(b"body")
-    assert result._stream.queue.qsize() == 0
+    stream.tee(b"body")
+    assert stream.queue.qsize() == 0

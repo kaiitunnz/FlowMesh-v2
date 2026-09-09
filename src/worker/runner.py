@@ -13,7 +13,11 @@ import requests
 from shared.outcome import FabricContentStore
 from shared.resident.carriage import ResidentCarriagePlan
 from shared.resident.contracts import AdmissionHandoff, RouteAuthorization
-from shared.resident.serve_ingress import ServeIngressAdvertisement
+from shared.resident.serve_ingress import (
+    ServeIngressAdvertisement,
+    ServeIngressBound,
+    ServeIngressReserve,
+)
 from shared.schemas.result import BaseExecutorResult
 from shared.tasks import MergedChildTaskStrict
 from shared.tasks.specs import (
@@ -37,7 +41,7 @@ from .executors.utils.checkpoints import get_http_destination, write_executor_re
 from .lifecycle import Lifecycle
 from .model_turn import HeldModelEgress, ModelTurnRendezvous, ResponsesFacade
 from .resident.lane_host import ResidentLaneHost
-from .serve_ingress.listener import ServeForwardIngress
+from .serve_ingress.listener import ForwardIngressHost
 from .serve_ingress.rendezvous import ServeIngressAdmission, ServeIngressDenied
 from .utils.logging import TaskLogEmitter
 
@@ -61,8 +65,11 @@ class Runner:
         content_store: FabricContentStore | None = None,
         serve_ingress_enabled: bool = False,
         serve_ingress_bind_host: str = "0.0.0.0",
-        serve_ingress_port: int = 8100,
-        serve_ingress_public_url: str | None = None,
+        serve_ingress_authority: str = "",
+        serve_ingress_port_low: int = 34000,
+        serve_ingress_port_high: int = 34099,
+        serve_ingress_tls_cert: str | None = None,
+        serve_ingress_tls_key: str | None = None,
     ):
         self.lifecycle = lifecycle
         self.task_stream = task_stream
@@ -72,8 +79,8 @@ class Runner:
         self.logger = logger
         self.default_executor = default_executor
         self.network_bandwidth_bytes_per_sec = network_bandwidth_bytes_per_sec
-        # How long to keep an executor alive (seconds) after its last use
-        # before calling `cleanup_after_run()`. None or <=0 disables delayed cleanup.
+        # How long to keep an executor alive (seconds) after its last use before calling
+        # `cleanup_after_run()`. None or <=0 disables delayed cleanup.
         assert (
             executor_idle_cleanup_sec is None or executor_idle_cleanup_sec >= 0
         ), "executor_idle_cleanup_sec must be None or non-negative"
@@ -125,9 +132,12 @@ class Runner:
         # when the deployment configures one.
         self._serve_ingress_enabled = serve_ingress_enabled
         self._serve_ingress_bind_host = serve_ingress_bind_host
-        self._serve_ingress_port = serve_ingress_port
-        self._serve_ingress_public_url = serve_ingress_public_url
-        self._serve_ingress: ServeForwardIngress | None = None
+        self._serve_ingress_authority = serve_ingress_authority
+        self._serve_ingress_port_low = serve_ingress_port_low
+        self._serve_ingress_port_high = serve_ingress_port_high
+        self._serve_ingress_tls_cert = serve_ingress_tls_cert
+        self._serve_ingress_tls_key = serve_ingress_tls_key
+        self._serve_ingress: ForwardIngressHost | None = None
 
     def _cancel_active_executor(self) -> None:
         with self._active_executor_lock:
@@ -261,58 +271,64 @@ class Runner:
         )
 
     def _start_serve_ingress(self) -> None:
-        """Bind the public forward-serve listener and register it with control."""
+        """Host the forward-serve ingress and register it with control.
+
+        The host binds no port up front; control reserves a public port per forward task
+        and this host binds one listener each, so registration only advertises the
+        host's authority and port range. Registration runs in the background so waiting
+        for the event stream never blocks the task loop.
+        """
         if not self._serve_ingress_enabled or self._serve_ingress is not None:
             return
-        public_url = self._serve_ingress_public_url
-        if not public_url:
+        if not self._serve_ingress_authority:
             self.logger.warning(
-                "serve ingress enabled without a public url; not starting"
+                "serve ingress enabled without an authority; not hosting it"
             )
             return
-        ingress = ServeForwardIngress(
+        self._serve_ingress = ForwardIngressHost(
             bind_host=self._serve_ingress_bind_host,
-            port=self._serve_ingress_port,
-            public_url=public_url,
+            authority=self._serve_ingress_authority,
             propose=self._propose_serve_ingress,
             begin=self._begin_serve_ingress,
             new_request_id=new_serve_request_id,
+            report_bound=self._report_serve_ingress_bound,
+            tls_cert=self._serve_ingress_tls_cert,
+            tls_key=self._serve_ingress_tls_key,
             logger=self.logger,
         )
-        try:
-            ingress.start()
-        except OSError as exc:
-            # The ingress is an optional transport role; a worker that cannot bind its
-            # configured port (e.g. another local worker already holds it) keeps serving
-            # tasks rather than failing, and simply registers no ingress with control.
-            self.logger.warning(
-                "forward serve ingress could not bind %s:%d (%s); not hosting it",
-                self._serve_ingress_bind_host,
-                self._serve_ingress_port,
-                exc,
-            )
-            return
-        self._serve_ingress = ingress
         # Build the resident lane host up front so the serve lane is ready before the
-        # first admitted request; register the listener with control in the background
-        # so waiting for the event stream never blocks the task loop.
+        # first admitted request.
         self._ensure_resident_host()
         threading.Thread(
             target=self._register_serve_ingress,
-            args=(public_url,),
             daemon=True,
             name="flowmesh-serve-ingress-register",
         ).start()
 
-    def _register_serve_ingress(self, public_url: str) -> None:
+    def _register_serve_ingress(self) -> None:
+        tls_generation = (
+            1 if self._serve_ingress_tls_cert and self._serve_ingress_tls_key else 0
+        )
         try:
             self.lifecycle.client.push_serve_ingress_register(
                 ServeIngressAdvertisement(
-                    public_url=public_url, generation=int(time.time())
+                    authority=self._serve_ingress_authority,
+                    port_low=self._serve_ingress_port_low,
+                    port_high=self._serve_ingress_port_high,
+                    tls_profile_generation=tls_generation,
+                    generation=int(time.time()),
                 ).model_dump(mode="json")
             )
         except Exception as exc:
             self.logger.warning("serve ingress registration failed: %s", exc)
+
+    def _report_serve_ingress_bound(self, bound: ServeIngressBound) -> None:
+        try:
+            self.lifecycle.client.push_serve_ingress_bound(
+                bound.model_dump(mode="json")
+            )
+        except Exception as exc:
+            self.logger.warning("serve ingress bound report failed: %s", exc)
 
     def _propose_serve_ingress(self, request: Any) -> None:
         self.lifecycle.client.push_serve_ingress_request(
@@ -332,7 +348,13 @@ class Runner:
         ingress = self._serve_ingress
         if ingress is None:
             return
-        if frame_kind == "serve_ingress_admitted":
+        if frame_kind == "serve_ingress_reserve":
+            # Control reserved a public port for a forward task: bind a listener on it
+            # and report it bound so control commits the exposure live.
+            ingress.reserve(ServeIngressReserve.model_validate(frame))
+        elif frame_kind == "serve_ingress_release":
+            ingress.release(int(frame["public_port"]))
+        elif frame_kind == "serve_ingress_admitted":
             ingress.rendezvous.deliver(
                 str(frame["request_id"]),
                 ServeIngressAdmission(
@@ -573,8 +595,7 @@ class Runner:
         """Background loop that periodically checks for idle executors.
 
         The loop waits on `stop_event` with a timeout equal to
-        `self._idle_check_interval` and calls `_maybe_expire_active_executor`
-        each tick.
+        `self._idle_check_interval` and calls `_maybe_expire_active_executor` each tick.
         """
         try:
             while not stop_event.wait(self._idle_check_interval):
@@ -596,8 +617,8 @@ class Runner:
         if self._idle_checker_thread and self._idle_checker_thread.is_alive():
             return
         self._idle_checker_stop_event = threading.Event()
-        # Use a small poll interval; ensure it's not larger than the cleanup
-        # timeout so expiration happens reasonably soon after timed out.
+        # Use a small poll interval; ensure it's not larger than the cleanup timeout so
+        # expiration happens reasonably soon after timed out.
         self._idle_check_interval = min(
             1.0, max(0.5, float(self.executor_idle_cleanup_sec) / 10.0)
         )

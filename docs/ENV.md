@@ -135,8 +135,11 @@ Spark), set `DOCKER_GPU_RUNTIME=` in the stack env.
 | `WORKER_ENABLE_DEV_MODEL` | `false` | Advertise the GPU-free `dev_model` executor |
 | `WORKER_SERVE_INGRESS_ENABLED` | `false` | Host the gated forward serve ingress on this worker |
 | `WORKER_SERVE_INGRESS_BIND_HOST` | `0.0.0.0` | Interface the gated forward serve ingress binds |
-| `WORKER_SERVE_INGRESS_PORT` | `8100` | Port the gated forward serve ingress listens on |
-| `WORKER_SERVE_INGRESS_PUBLIC_URL` | | Public base url clients reach the forward ingress at |
+| `WORKER_SERVE_INGRESS_AUTHORITY` | | Public authority for forward serve ports |
+| `WORKER_SERVE_INGRESS_PORT_LOW` | `34000` | Lowest forward serve exposure port |
+| `WORKER_SERVE_INGRESS_PORT_HIGH` | `34099` | Highest forward serve exposure port |
+| `WORKER_SERVE_INGRESS_TLS_CERT` | | Path to the forward serve ingress TLS certificate |
+| `WORKER_SERVE_INGRESS_TLS_KEY` | | Path to the forward serve ingress TLS private key |
 | `DEV_MODEL_FORWARD_URL` | – | Upstream URL `dev_model` forwards to; canned if unset |
 | `DEV_MODEL_RESPONSE_DELAY_SEC` | `0` | Per-response delay the `dev_model` stand-in applies |
 

@@ -19,7 +19,12 @@ class _GatedServe:
         self.adopted: list[tuple[str, ServeAccessMode]] = []
         self.drained: list[str] = []
 
-    def adopt(self, task_id: str, access_mode: ServeAccessMode) -> None:
+    def adopt(
+        self,
+        task_id: str,
+        access_mode: ServeAccessMode,
+        forward_port: int | None = None,
+    ) -> None:
         self.adopted.append((task_id, access_mode))
 
     def drain(self, task_id: str) -> None:
@@ -123,24 +128,38 @@ def test_the_tasks_pinned_access_mode_reaches_adoption() -> None:
     assert gated.adopted == [("tsk-1", ServeAccessMode.FORWARD)]
 
 
-class _Ingresses:
-    def __init__(self, ingress: object | None) -> None:
-        self._ingress = ingress
+class _Registry:
+    def __init__(self, proxy: object | None) -> None:
+        self._proxy = proxy
 
     def live(self, _mode: ServeAccessMode) -> object | None:
-        return self._ingress
+        return self._proxy
 
 
-class _GatedWithIngresses(_GatedServe):
-    def __init__(self, ingress: object | None) -> None:
+class _Exposures:
+    def __init__(self, exposure: object | None) -> None:
+        self._exposure = exposure
+
+    def live(self, _task_id: str) -> object | None:
+        return self._exposure
+
+
+class _GatedForAdvertise(_GatedServe):
+    def __init__(self, proxy: object | None, exposure: object | None) -> None:
         super().__init__()
-        self.ingresses = _Ingresses(ingress)
+        self.ingresses = _Registry(proxy)
+        self.exposures = _Exposures(exposure)
 
 
-def _advertise(access_mode: str | None, ingress: object | None) -> dict:
+def _advertise(
+    access_mode: str | None,
+    *,
+    proxy: object | None = None,
+    exposure: object | None = None,
+) -> dict:
     runtime = MagicMock()
     runtime.get_record.return_value = _record(TaskType.SERVE, access_mode=access_mode)
-    monitor = _monitor(runtime, _GatedWithIngresses(ingress))
+    monitor = _monitor(runtime, _GatedForAdvertise(proxy, exposure))
     monitor._server_base_url = "http://root.example:8000"
     return monitor._handle_serve_task_update(
         "tsk-1", "wrk-1", {"serve": {"model": "m", "_host": "h", "_port": 8123}}
@@ -148,23 +167,22 @@ def _advertise(access_mode: str | None, ingress: object | None) -> dict:
 
 
 def test_a_proxy_task_is_advertised_at_the_server_base_url() -> None:
-    ingress = SimpleNamespace(public_url="")
+    proxy = SimpleNamespace(origin_id="serve-edge")
     assert (
-        _advertise("proxy", ingress)["url"]
+        _advertise("proxy", proxy=proxy)["url"]
         == "http://root.example:8000/api/v1/serve/tasks/tsk-1"
     )
 
 
-def test_a_forward_task_is_advertised_at_its_registered_ingress() -> None:
-    # The base comes from what the ingress registered, never the root's own url.
-    ingress = SimpleNamespace(public_url="http://ingress.example:8100")
-    assert (
-        _advertise("forward", ingress)["url"]
-        == "http://ingress.example:8100/api/v1/serve/tasks/tsk-1"
+def test_a_forward_task_is_advertised_at_its_live_exposure_engine_native() -> None:
+    # A forward task's url is its per-task port exposure — engine-native, no task path.
+    exposure = SimpleNamespace(public_url="https://ingress.example:34000")
+    assert _advertise("forward", exposure=exposure)["url"] == (
+        "https://ingress.example:34000"
     )
 
 
 def test_a_task_whose_ingress_is_unregistered_is_advertised_with_no_url() -> None:
-    # Publishing the root url for a forward-pinned task would hand out an address that
-    # can only fail closed, so none is published at all.
-    assert "url" not in _advertise("forward", None)
+    # A forward-pinned task with no live exposure publishes no url; an address that
+    # could only fail closed is worse than none.
+    assert "url" not in _advertise("forward", exposure=None)

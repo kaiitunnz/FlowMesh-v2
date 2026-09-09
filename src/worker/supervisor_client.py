@@ -92,8 +92,7 @@ class SupervisorClient:
     def incarnation(self) -> int:
         return self._incarnation
 
-    # ------------------------------------------------------------------ #
-    # Lifecycle
+    # ------------------------------------------------------------------ # Lifecycle
     # ------------------------------------------------------------------ #
 
     def register(
@@ -204,8 +203,8 @@ class SupervisorClient:
         self._worker_id = None
         self._drain.clear()
 
-    # ------------------------------------------------------------------ #
-    # Worker lifecycle helpers
+    # ------------------------------------------------------------------ # Worker
+    # lifecycle helpers
     # ------------------------------------------------------------------ #
 
     def heartbeat(
@@ -352,9 +351,8 @@ class SupervisorClient:
             log_paths=log_paths,
         )
 
-    # ------------------------------------------------------------------ #
-    # Task consumption
-    # ------------------------------------------------------------------ #
+    # ------------------------------------------------------------------ # Task
+    # consumption ------------------------------------------------------------------ #
 
     def iter_tasks(self) -> Iterable[WorkerTaskMessage]:
         """Yield tasks relayed by the supervisor until shutdown."""
@@ -390,9 +388,8 @@ class SupervisorClient:
             except queue.Empty:
                 break
 
-    # ------------------------------------------------------------------ #
-    # Internal helpers
-    # ------------------------------------------------------------------ #
+    # ------------------------------------------------------------------ # Internal
+    # helpers ------------------------------------------------------------------ #
 
     def _send_register_event(self) -> None:
         event = self._worker_register_event
@@ -674,6 +671,19 @@ class SupervisorClient:
             type="SERVE_INGRESS_REGISTER",
             worker_id=self.worker_id,
             payload={"advertisement": advertisement},
+        )
+        self._event_queue.put(serialize_event(event))
+
+    def push_serve_ingress_bound(self, bound: dict[str, Any]) -> None:
+        """Report a reserved forward port bound so control commits it live."""
+        if self._stub is None:
+            raise RuntimeError("Supervisor gRPC client not started")
+        if not self._event_ready.wait():
+            raise RuntimeError("Supervisor event stream not ready")
+        event = WorkerEvent(
+            type="SERVE_INGRESS_BOUND",
+            worker_id=self.worker_id,
+            payload={"bound": bound},
         )
         self._event_queue.put(serialize_event(event))
 

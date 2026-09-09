@@ -131,7 +131,6 @@ class ResidentLaneHost:
                 carriage=carriage,
                 report_ack=self._report_ack,
                 report_outcome=self._report_outcome,
-                report_committed=self._report_committed,
                 logger=self._logger,
             )
 
@@ -193,9 +192,22 @@ class ResidentLaneHost:
             channel.fail("serve ingress lane is not running")
             return
         handoff = decision.handoff
+        invocation_id = handoff.invocation_id
+
+        # The listener fires this from its own thread once it has written the head to
+        # the client; scheduling the committed report on the resident loop keeps it
+        # ordered before any later uncertain outcome the drive emits there, so a
+        # post-commit loss fails the response rather than re-driving over bytes the
+        # client already holds.
+        def _commit(status: int, headers: tuple[tuple[str, str], ...]) -> None:
+            self._loop.call_soon_threadsafe(
+                self._report_committed, invocation_id, status, headers
+            )
+
+        channel.on_committed(_commit)
         self._serve_lane.begin(
             session_id=decision.session_id,
-            invocation_id=handoff.invocation_id,
+            invocation_id=invocation_id,
             idm=handoff.idempotency_key or "",
             task_id=decision.task_id,
             call_correlation=decision.call_correlation,
