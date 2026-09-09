@@ -41,17 +41,8 @@ from .registries.node import NodeRegistry
 from .registries.resident import ResidentRegistry
 from .resident.wiring import build_resident_capacity, wire_worker_delivery
 from .routers import docs, health, v1
-from .serve import (
-    SERVE_EDGE_STREAM_ID,
-    ForwardIngressDirectory,
-    GatedServe,
-    ServeBindingStore,
-    ServeIngressRegistry,
-    ServeRelayExecutor,
-    ServeSnapshot,
-    ServeTerminalStore,
-)
-from .serve.wiring import build_forward_serve_ingress
+from .serve import SERVE_EDGE_STREAM_ID
+from .serve.wiring import build_gated_serve
 from .services.agent_model_gateway import (
     AgentModelGateway,
     ResolvedGatewayBinding,
@@ -282,66 +273,16 @@ if IS_ROOT_NODE:
         and RESIDENT_REGISTRY is not None
         and _relay_redis is not None
     ):
-        serve_registry = RESIDENT_REGISTRY
-        SERVE_BINDINGS = ServeBindingStore()
-        serve_terminals = ServeTerminalStore()
-        SERVE_EXPOSURES = ForwardIngressDirectory(
-            config.port_forward.public_host,
-            config.port_forward.serve_forward_port_start,
-            config.port_forward.serve_forward_port_end,
-        )
-        if (stored := serve_registry.load_serve_snapshot()) is not None:
-            SERVE_BINDINGS.load_snapshot(stored.bindings)
-            serve_terminals.load_snapshot(stored.terminals)
-            SERVE_EXPOSURES.load_snapshot(stored.exposures)
-            if not config.port_forward.serve_forward_enabled:
-                # Forward is off this run, so no listener will bind the persisted ports:
-                # retire the loaded exposures rather than leave the directory holding a
-                # live entry no listener backs.
-                SERVE_EXPOSURES.retire_all()
-
-        _serve_bindings = SERVE_BINDINGS
-        _serve_exposures = SERVE_EXPOSURES
-
-        def _persist_serve() -> None:
-            serve_registry.save_serve_snapshot(
-                ServeSnapshot(
-                    bindings=_serve_bindings.to_snapshot(),
-                    terminals=serve_terminals.to_snapshot(),
-                    exposures=_serve_exposures.to_snapshot(),
-                )
-            )
-
-        SERVE_RELAY = ServeRelayExecutor(
+        _serve_wiring = build_gated_serve(
+            control=RESIDENT_CONTROL,
+            registry=RESIDENT_REGISTRY,
             relay_redis=_relay_redis,
-            edge_id=SERVE_EDGE_STREAM_ID,
-            control=RESIDENT_CONTROL,
+            port_forward=config.port_forward,
             logger=logger,
         )
-        GATED_SERVE = GatedServe(
-            bindings=SERVE_BINDINGS,
-            terminals=serve_terminals,
-            control=RESIDENT_CONTROL,
-            relay=SERVE_RELAY,
-            # An operator that refuses public serve exposure registers no root-local
-            # proxy ingress, so every proxy-pinned request fails closed; a forward
-            # ingress is registered only where a deployment hosts one.
-            ingresses=ServeIngressRegistry(
-                SERVE_EDGE_STREAM_ID
-                if config.port_forward.serve_proxy_enabled
-                else None
-            ),
-            # Each forward binding owns a per-task public port on the root's public
-            # host; the root binds a plain-HTTP listener on it, and a task without a
-            # configured forward public host/range fails closed. The directory persists
-            # so a restart rebinds each live exposure to its same port.
-            exposures=SERVE_EXPOSURES,
-            persist=_persist_serve,
-            logger=logger,
-        )
-        SERVE_FORWARD_INGRESS = build_forward_serve_ingress(
-            config.port_forward, GATED_SERVE, logger
-        )
+        GATED_SERVE = _serve_wiring.gated_serve
+        SERVE_FORWARD_INGRESS = _serve_wiring.forward_ingress
+        SERVE_BINDINGS = _serve_wiring.bindings
 
     DISPATCHER = create_dispatcher(
         config.dispatch,
