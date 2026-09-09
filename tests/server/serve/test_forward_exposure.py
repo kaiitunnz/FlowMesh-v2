@@ -111,6 +111,35 @@ def test_a_persisted_live_exposure_rebinds_its_same_port_on_restart() -> None:
     assert live.listener_generation == 2
 
 
+def test_generations_advance_monotonically_across_a_retire() -> None:
+    d = _dir()
+    first = _reserve(d)
+    assert first is not None
+    d.retire("tsk-1")
+    # A fresh reservation for the same task never reuses the retired generation number,
+    # so a late bind or commit for the superseded reservation cannot match it.
+    second = _reserve(d)
+    assert second is not None
+    assert second.exposure_generation > first.exposure_generation
+
+
+def test_retire_all_drops_every_exposure_out_of_live_resolution() -> None:
+    d = ForwardIngressDirectory("serve.example", 34000, 34009)
+    for task in ("tsk-1", "tsk-2"):
+        exposure = d.reserve(
+            serve_task_id=task, binding_generation=0, requested_port=None
+        )
+        assert exposure is not None
+        d.commit(
+            serve_task_id=task,
+            exposure_generation=exposure.exposure_generation,
+            listener_generation=1,
+        )
+    d.retire_all()
+    assert d.live("tsk-1") is None and d.live("tsk-2") is None
+    assert d.all() == []
+
+
 def test_the_range_can_be_exhausted() -> None:
     d = _dir()
     assert _reserve(d, task="tsk-1") is not None

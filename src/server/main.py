@@ -294,6 +294,11 @@ if IS_ROOT_NODE:
             SERVE_BINDINGS.load_snapshot(stored.bindings)
             serve_terminals.load_snapshot(stored.terminals)
             SERVE_EXPOSURES.load_snapshot(stored.exposures)
+            if not config.port_forward.serve_forward_enabled:
+                # Forward is off this run, so no listener will bind the persisted ports:
+                # retire the loaded exposures rather than leave the directory holding a
+                # live entry no listener backs.
+                SERVE_EXPOSURES.retire_all()
 
         _serve_bindings = SERVE_BINDINGS
         _serve_exposures = SERVE_EXPOSURES

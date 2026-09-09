@@ -8,11 +8,11 @@ port on that authority to the binding.
 The exposure is pure address-state: it mints no claim, reserves no capacity, and is
 never a replica endpoint. Its identity is ``(serve_task_id, binding_generation)`` and
 its locator is ``http://<authority>:<public_port>/`` — the deployment's own front proxy
-terminates TLS and forwards plain HTTP to the root, so FlowMesh holds no certificate or
-TLS-profile state of its own. A request arriving on that port resolves its serve task
-from the live exposure, never from a client-supplied path: the port is the whole
-address. Publication is two-phase — the root reserves a port, binds a local listener on
-it, and only then does the exposure go ``LIVE`` and its url reach the task. A drained
+terminates TLS and forwards plain HTTP to the root. A request arriving on that port
+resolves its serve task from the live exposure, never from a client-supplied path: the
+port is the whole address. Publication is two-phase — the root reserves a port, binds a
+local listener on it, and only then does the exposure go ``LIVE`` and its url reach the
+task. A drained
 exposure rejects new requests, retires, and quarantines its port before a later exposure
 reuses the number.
 """
@@ -85,10 +85,7 @@ class ForwardIngressDirectory:
         self._port_high = port_high
         self._exposures: dict[str, ForwardPortExposure] = {}
         self._quarantined: set[int] = set()
-
-    @property
-    def authority(self) -> str:
-        return self._authority
+        self._generation_high: dict[str, int] = {}
 
     @property
     def configured(self) -> bool:
@@ -112,8 +109,11 @@ class ForwardIngressDirectory:
         port = self._allocate(requested_port)
         if port is None:
             return None
-        prior = self._exposures.get(serve_task_id)
-        generation = (prior.exposure_generation + 1) if prior is not None else 0
+        # Generations advance monotonically per task and never reset, even after a
+        # retire drops the exposure, so a late bind or commit for a superseded
+        # reservation can never match a reused generation number.
+        generation = self._generation_high.get(serve_task_id, -1) + 1
+        self._generation_high[serve_task_id] = generation
         exposure = ForwardPortExposure(
             serve_task_id=serve_task_id,
             binding_generation=binding_generation,
@@ -189,6 +189,16 @@ class ForwardIngressDirectory:
         self._quarantined.add(exposure.public_port)
         return exposure.model_copy(update={"status": ForwardExposureStatus.RETIRED})
 
+    def retire_all(self) -> None:
+        """Retire every exposure, as when forward is disabled at startup.
+
+        A persisted exposure holds no bound listener until forward binds one; when
+        forward is off no listener ever will, so drop them all out of live resolution
+        rather than resolve a task to a port nothing serves.
+        """
+        for serve_task_id in list(self._exposures):
+            self.retire(serve_task_id)
+
     def live(self, serve_task_id: str) -> ForwardPortExposure | None:
         """The LIVE exposure for a serve task, or None when none is live."""
         exposure = self._exposures.get(serve_task_id)
@@ -206,6 +216,9 @@ class ForwardIngressDirectory:
 
     def load_snapshot(self, snapshot: ForwardExposureSnapshot) -> None:
         self._exposures = {e.serve_task_id: e for e in snapshot.exposures}
+        self._generation_high = {
+            e.serve_task_id: e.exposure_generation for e in snapshot.exposures
+        }
 
     def _match(
         self, serve_task_id: str, exposure_generation: int
