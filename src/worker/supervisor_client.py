@@ -92,7 +92,8 @@ class SupervisorClient:
     def incarnation(self) -> int:
         return self._incarnation
 
-    # ------------------------------------------------------------------ # Lifecycle
+    # ------------------------------------------------------------------ #
+    # Lifecycle
     # ------------------------------------------------------------------ #
 
     def register(
@@ -203,8 +204,8 @@ class SupervisorClient:
         self._worker_id = None
         self._drain.clear()
 
-    # ------------------------------------------------------------------ # Worker
-    # lifecycle helpers
+    # ------------------------------------------------------------------ #
+    # Worker lifecycle helpers
     # ------------------------------------------------------------------ #
 
     def heartbeat(
@@ -351,8 +352,9 @@ class SupervisorClient:
             log_paths=log_paths,
         )
 
-    # ------------------------------------------------------------------ # Task
-    # consumption ------------------------------------------------------------------ #
+    # ------------------------------------------------------------------ #
+    # Task consumption
+    # ------------------------------------------------------------------ #
 
     def iter_tasks(self) -> Iterable[WorkerTaskMessage]:
         """Yield tasks relayed by the supervisor until shutdown."""
@@ -388,8 +390,9 @@ class SupervisorClient:
             except queue.Empty:
                 break
 
-    # ------------------------------------------------------------------ # Internal
-    # helpers ------------------------------------------------------------------ #
+    # ------------------------------------------------------------------ #
+    # Internal helpers
+    # ------------------------------------------------------------------ #
 
     def _send_register_event(self) -> None:
         event = self._worker_register_event
