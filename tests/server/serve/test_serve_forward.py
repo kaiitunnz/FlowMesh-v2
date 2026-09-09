@@ -12,6 +12,9 @@ transport relays the two-phase fence down and reaps the ingress rendezvous on te
 import asyncio
 from collections.abc import Callable
 
+import pytest
+from fastapi import HTTPException
+
 from server.serve import (
     ForwardIngressDirectory,
     GatedServe,
@@ -257,6 +260,62 @@ def test_forward_transport_relays_the_two_phase_and_reaps_the_rendezvous() -> No
     transport.authorize("rly-1", _auth())
     transport.close("rly-1")
     assert len(log) == 3
+
+
+class _Principal:
+    def __init__(self) -> None:
+        self.principal_id = "usr-1"
+        self.org_id = "org-1"
+
+
+def test_admit_forward_denies_a_bad_credential_without_raising_a_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    control = _ForwardControl()
+    transport = ServeForwardTransport(control.relay_to_worker)
+    edge = _edge(control, transport, register=True)
+
+    async def _reject(_credential: str, _logger: object) -> _Principal:
+        raise HTTPException(status_code=401, detail="bad key")
+
+    monkeypatch.setattr("server.serve.service.authenticate_api_key", _reject)
+
+    edge.admit_forward(_request(), "wrk-a")
+
+    # Authentication is control's alone; a bad credential is refused with the engine's
+    # own status and no ServiceClaim is ever raised, so no credit is spent.
+    assert control.originations == []
+    denied = [p for w, k, p in control.relayed if k == "serve_ingress_denied"]
+    assert len(denied) == 1
+    assert denied[0]["status"] == 401
+    assert denied[0]["request_id"] == "srq-1"
+
+
+def test_admit_forward_denies_a_forbidden_task_read_without_raising_a_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    control = _ForwardControl()
+    transport = ServeForwardTransport(control.relay_to_worker)
+    edge = _edge(control, transport, register=True)
+
+    async def _principal(_credential: str, _logger: object) -> _Principal:
+        return _Principal()
+
+    async def _forbid(*_args: object, **_kwargs: object) -> None:
+        raise HTTPException(status_code=403, detail="denied")
+
+    monkeypatch.setattr("server.serve.service.authenticate_api_key", _principal)
+    monkeypatch.setattr("server.serve.service.require_permission", _forbid)
+
+    edge.admit_forward(_request(), "wrk-a")
+
+    # An authenticated principal without task-read access is refused with a 403 before
+    # admission, so again no origination and no credit.
+    assert control.originations == []
+    denied = [p for w, k, p in control.relayed if k == "serve_ingress_denied"]
+    assert len(denied) == 1
+    assert denied[0]["status"] == 403
+    assert denied[0]["request_id"] == "srq-1"
 
 
 def test_forward_transport_denies_a_request_that_settled_before_it_opened() -> None:
