@@ -14,6 +14,7 @@ completion, or holds a credential, so hosting it does not make the ingress an ex
 import logging
 from collections.abc import Callable
 
+from shared.resident.carriage import ClaimGatedServiceCarriage, ResidentCarriagePlan
 from shared.resident.contracts import AdmissionHandoff, RouteAuthorization
 from shared.resident.envelope import ServeRequestEnvelope
 from shared.resident.reports import (
@@ -24,7 +25,6 @@ from shared.resident.reports import (
     ResidentStreamStatus,
 )
 from shared.resident.serve_drive import ServeOriginDrive
-from shared.resident.transport import ResidentFrameSink
 
 from .channel import ServeIngressChannel
 
@@ -41,7 +41,7 @@ class ServeIngressLane:
     def __init__(
         self,
         *,
-        sink: ResidentFrameSink,
+        carriage: ClaimGatedServiceCarriage,
         report_ack: AckSink,
         report_outcome: OutcomeSink,
         report_committed: CommittedSink,
@@ -56,7 +56,7 @@ class ServeIngressLane:
         self._channels: dict[str, ServeIngressChannel] = {}
         self._committed: set[str] = set()
         self._drive = ServeOriginDrive(
-            sink=sink,
+            carriage=carriage,
             control=self,
             window_bytes=window_bytes,
             stream_deadline_sec=stream_deadline_sec,
@@ -79,6 +79,7 @@ class ServeIngressLane:
         handoff: AdmissionHandoff,
         envelope: ServeRequestEnvelope,
         channel: ServeIngressChannel,
+        plan: ResidentCarriagePlan,
     ) -> None:
         """Start one admitted request's drive, delivering its frames to ``channel``."""
         self._channels[invocation_id] = channel
@@ -90,6 +91,7 @@ class ServeIngressLane:
             call_correlation=call_correlation,
             handoff=handoff,
             envelope=envelope,
+            plan=plan,
         )
 
     def authorize(self, session_id: str, auth: RouteAuthorization) -> None:

@@ -15,7 +15,9 @@ from server.network.state import (
     ReachabilityClass,
     ReplicaListenerAdvertisement,
     ResolvedRoute,
+    RouteCandidate,
     RouteOrigin,
+    Transport,
 )
 from server.resident import (
     AdmissionController,
@@ -35,6 +37,7 @@ from server.resident.state import (
     InvocationSubjectKind,
 )
 from server.task.v2.representations.operators import ServiceDependency
+from shared.resident.carriage import CONTROL_RELAY, ResidentCarriagePlan
 from shared.resident.contracts import AdmissionHandoff, RouteAuthorization
 from shared.resident.envelope import freeze_request_envelope
 from shared.resident.reports import (
@@ -56,6 +59,9 @@ def _held(stores: ResidentStores, replica_id: str | None) -> int:
 
 
 class _FakeNetwork:
+    def __init__(self, base_candidate: bool = True) -> None:
+        self._base_candidate = base_candidate
+
     async def resolve(
         self, origin_node_id: str, listener: ReplicaListenerAdvertisement
     ) -> tuple[RouteOrigin, ResolvedRoute]:
@@ -65,12 +71,17 @@ class _FakeNetwork:
             reachability_class=ReachabilityClass.ROUTABLE,
             trust_domain="td",
         )
+        candidates = (
+            (RouteCandidate(transport=Transport.CONTROL_RELAY, hops=()),)
+            if self._base_candidate
+            else ()
+        )
         route = ResolvedRoute(
             origin_id="rog-1",
             target_node_id=listener.node_id,
             listener_generation=listener.listener_generation,
             route_epoch=1,
-            candidates=(),
+            candidates=candidates,
         )
         return origin, route
 
@@ -94,6 +105,7 @@ class _ServeDelivery:
 
     def __init__(self) -> None:
         self.opened: list[tuple[str, AdmissionHandoff]] = []
+        self.plans: list[ResidentCarriagePlan] = []
         self.authorized: list[tuple[str, RouteAuthorization]] = []
         self.closed: list[str] = []
         self.heads: list[tuple[int, tuple[tuple[str, str], ...]]] = []
@@ -103,8 +115,11 @@ class _ServeDelivery:
         self.failed: str | None = None
         self.redrives = 0
 
-    def open(self, session_id: str, handoff: AdmissionHandoff) -> None:
+    def open(
+        self, session_id: str, handoff: AdmissionHandoff, plan: ResidentCarriagePlan
+    ) -> None:
         self.opened.append((session_id, handoff))
+        self.plans.append(plan)
 
     def authorize(self, session_id: str, auth: RouteAuthorization) -> None:
         self.authorized.append((session_id, auth))
@@ -132,9 +147,10 @@ class _ServeDelivery:
 
 
 class _Deps:
-    def __init__(self) -> None:
+    def __init__(self, base_candidate: bool = True) -> None:
         self.relays: list[tuple[str, str, dict[str, Any]]] = []
         self.sessions = _FakeSessions()
+        self._base_candidate = base_candidate
 
     def build(self) -> ResidentWorkerDelivery:
         return ResidentWorkerDelivery(
@@ -144,7 +160,7 @@ class _Deps:
                 "wkr-replica" if replica.serve_task_id is not None else None
             ),
             node_of_worker=lambda worker_id: "node-1" if worker_id else None,
-            network=_FakeNetwork(),
+            network=_FakeNetwork(self._base_candidate),
             sessions=self.sessions,
             root_node_id=lambda: "node-root",
             edge_id="serve-edge",
@@ -158,7 +174,9 @@ class _Deps:
         return [k for _w, k, _p in self.relays]
 
 
-def _build() -> tuple[ResidentCapacityControl, ResidentStores, list[Any], _Deps]:
+def _build(
+    base_candidate: bool = True,
+) -> tuple[ResidentCapacityControl, ResidentStores, list[Any], _Deps]:
     stores = ResidentStores()
     limits = ResidentPolicyLimits()
     settled: list[Any] = []
@@ -178,7 +196,7 @@ def _build() -> tuple[ResidentCapacityControl, ResidentStores, list[Any], _Deps]
     lifecycle = LifecycleScaleManager(
         stores, limits=limits, admission_slots=2, materialize_fn=materialize_fn
     )
-    deps = _Deps()
+    deps = _Deps(base_candidate=base_candidate)
     svc = ResidentCapacityControl(
         stores=stores,
         admission=admission,
@@ -296,6 +314,26 @@ def test_originate_admits_against_the_family_and_opens_the_edge_relay() -> None:
     record = deps.sessions.records[svc._attempts["inv-1"].session_id]
     assert record["origin_node"] == "serve-edge"
     assert record["origin_worker"] == ""
+    # The carriage plan control selected rides beside the handoff and names the base
+    # transport; the session record keeps the selection as diagnostics.
+    assert delivery.plans[0].selected_transport == CONTROL_RELAY
+    assert record["selected_transport"] == CONTROL_RELAY
+
+
+def test_no_control_relay_candidate_holds_the_credit_without_opening() -> None:
+    # control_relay is the only carriage this PR realizes; a resolved route without it
+    # as a base candidate holds the credit rather than opening on no transport.
+    svc, stores, _settled, deps = _build(base_candidate=False)
+    _adopt(svc)
+    delivery = _ServeDelivery()
+    asyncio.run(svc._originate_serve(_origination(delivery)))
+
+    assert delivery.opened == []
+    # The hold moves the claim UNCERTAIN, which still holds the credit — the base
+    # transport being unavailable never releases it.
+    claim = stores.claims.by_invocation("inv-1")[0]
+    assert claim.state is ClaimState.UNCERTAIN
+    assert _held(stores, claim.replica_id) == 1
 
 
 def test_ack_authorizes_through_the_edge_then_terminal_releases_credit() -> None:

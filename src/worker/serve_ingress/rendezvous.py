@@ -16,6 +16,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 
+from shared.resident.carriage import ResidentCarriagePlan
 from shared.resident.contracts import AdmissionHandoff
 
 
@@ -26,12 +27,14 @@ class ServeIngressAdmission:
     ``task_id`` and ``call_correlation`` are the invocation's worker-lane correlation
     that control assigned; the ingress lane echoes them on the ack and outcome it sends
     back so control matches every report to the same in-flight attempt.
+    ``carriage_plan`` names the transport control selected for the attempt.
     """
 
     session_id: str
     task_id: str
     call_correlation: str
     handoff: AdmissionHandoff
+    carriage_plan: ResidentCarriagePlan
 
 
 @dataclass(frozen=True)

@@ -7,6 +7,12 @@ origin and replica workers execute the protocol against these contracts; the ser
 relay the frames opaquely.
 """
 
+from .carriage import (
+    CarriageUnavailable,
+    ClaimGatedServiceCarriage,
+    ControlRelayCarriage,
+    ResidentCarriagePlan,
+)
 from .contracts import AdmissionHandoff, ReplicaEndpoint, RouteAuthorization
 from .engine_request import chat_body
 from .gate import (
@@ -38,10 +44,14 @@ __all__ = [
     "KIND_REJECT",
     "KIND_STREAM",
     "AdmissionHandoff",
+    "CarriageUnavailable",
+    "ClaimGatedServiceCarriage",
+    "ControlRelayCarriage",
     "GateDecision",
     "GateRejection",
     "LoadEvidence",
     "ReplicaEndpoint",
+    "ResidentCarriagePlan",
     "RouteAuthorization",
     "SidecarClaimGate",
     "SidecarSession",

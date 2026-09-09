@@ -14,6 +14,7 @@ from typing import Any
 from shared.network.relay_frame import RelayDirection, RelayFrame, RelayFrameKind
 from shared.outcome import FabricContentStore, OutcomeManifest
 from shared.outcome.manifest import content_digest
+from shared.resident.carriage import ResidentCarriagePlan
 from shared.resident.contracts import (
     AdmissionHandoff,
     ReplicaEndpoint,
@@ -194,6 +195,9 @@ def test_two_hosts_complete_a_resident_invocation() -> None:
                 "call_correlation": "call-1",
                 "session_id": "rly-1",
                 "handoff": _handoff(),
+                "carriage_plan": ResidentCarriagePlan(session_id="rly-1").model_dump(
+                    mode="json"
+                ),
             },
         )
         assert done.wait(timeout=10.0)

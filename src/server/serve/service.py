@@ -21,6 +21,7 @@ from typing import Protocol
 
 from fastapi import HTTPException
 
+from shared.resident.carriage import ResidentCarriagePlan
 from shared.resident.contracts import AdmissionHandoff, RouteAuthorization
 from shared.resident.envelope import ServeRequestEnvelope
 from shared.resident.serve_ingress import ServeIngressRequest
@@ -102,6 +103,7 @@ class ServeTransport(Protocol):
         call_correlation: str,
         handoff: AdmissionHandoff,
         envelope: ServeRequestEnvelope,
+        plan: ResidentCarriagePlan,
     ) -> None: ...
 
     def authorize(self, session_id: str, auth: RouteAuthorization) -> None: ...
@@ -205,7 +207,9 @@ class _ServeStream:
             request_id=self._context.request_id,
         )
 
-    def open(self, session_id: str, handoff: AdmissionHandoff) -> None:
+    def open(
+        self, session_id: str, handoff: AdmissionHandoff, plan: ResidentCarriagePlan
+    ) -> None:
         self._context.transport.open(
             session_id=session_id,
             invocation_id=self._context.invocation_id,
@@ -214,6 +218,7 @@ class _ServeStream:
             call_correlation=_call_correlation(self._context.invocation_id),
             handoff=handoff,
             envelope=self._context.envelope,
+            plan=plan,
         )
 
     def authorize(self, session_id: str, auth: RouteAuthorization) -> None:

@@ -17,6 +17,7 @@ import logging
 import os
 
 from shared.network.relay_frame import RelayFrame
+from shared.resident.carriage import ControlRelayCarriage, ResidentCarriagePlan
 from shared.resident.contracts import AdmissionHandoff, RouteAuthorization
 from shared.resident.envelope import ServeRequestEnvelope
 from shared.resident.serve_drive import ServeControl, ServeOriginDrive
@@ -64,8 +65,10 @@ class ServeRelayExecutor:
         self._attachment = ReverseRelayAttachment(
             relay_redis, edge_id, self, owner=f"serve-edge:{os.getpid()}"
         )
+        # The root cannot dial a worker, so its frames always ride control_relay over
+        # the internal rendezvous attachment; the carriage realizes that one transport.
         self._drive = ServeOriginDrive(
-            sink=_EdgeSink(self._streams, edge_id),
+            carriage=ControlRelayCarriage(_EdgeSink(self._streams, edge_id)),
             control=control,
             window_bytes=window_bytes,
             stream_deadline_sec=stream_deadline_sec,
@@ -98,6 +101,7 @@ class ServeRelayExecutor:
         call_correlation: str,
         handoff: AdmissionHandoff,
         envelope: ServeRequestEnvelope,
+        plan: ResidentCarriagePlan,
     ) -> None:
         """Start one origin drive: send the bootstrap and stream the response."""
         self._drive.open(
@@ -108,6 +112,7 @@ class ServeRelayExecutor:
             call_correlation=call_correlation,
             handoff=handoff,
             envelope=envelope,
+            plan=plan,
         )
 
     def authorize(self, session_id: str, auth: RouteAuthorization) -> None:

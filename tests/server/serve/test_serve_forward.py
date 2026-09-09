@@ -20,6 +20,7 @@ from server.serve import (
 )
 from server.serve.ingress import ServeAccessMode, ServeIngressRegistry
 from server.task.v2.representations.operators import ServiceInterface
+from shared.resident.carriage import ResidentCarriagePlan
 from shared.resident.contracts import AdmissionHandoff, RouteAuthorization
 from shared.resident.envelope import ServeRequestEnvelope
 from shared.resident.serve_ingress import ServeIngressRequest
@@ -158,7 +159,9 @@ def test_admit_forward_threads_the_ingress_worker_as_the_request_origin() -> Non
 
     # When admission mints the handoff, the transport relays the decision down to the
     # ingress worker, keyed by the request id its rendezvous is waiting on.
-    orig.delivery.open("rly-1", _handoff(orig.invocation_id))
+    orig.delivery.open(
+        "rly-1", _handoff(orig.invocation_id), ResidentCarriagePlan(session_id="rly-1")
+    )
     admitted = [p for w, k, p in control.relayed if k == "serve_ingress_admitted"]
     assert len(admitted) == 1
     assert admitted[0]["request_id"] == "srq-1"
@@ -211,6 +214,7 @@ def test_forward_transport_relays_the_two_phase_and_reaps_the_rendezvous() -> No
         call_correlation="serve/inv-1",
         handoff=_handoff(),
         envelope=ServeRequestEnvelope(method="POST", path="/v1/chat/completions"),
+        plan=ResidentCarriagePlan(session_id="rly-1"),
     )
     transport.authorize("rly-1", _auth())
     transport.close("rly-1")

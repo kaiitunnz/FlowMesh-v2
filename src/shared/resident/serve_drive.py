@@ -20,6 +20,11 @@ from typing import Protocol
 
 from shared.network.relay_frame import RelayFrame
 
+from .carriage import (
+    CarriageUnavailable,
+    ClaimGatedServiceCarriage,
+    ResidentCarriagePlan,
+)
 from .contracts import AdmissionHandoff, RouteAuthorization
 from .envelope import ServeRequestEnvelope
 from .reports import (
@@ -31,7 +36,6 @@ from .reports import (
     ResidentStreamStatus,
 )
 from .session import ResidentRelaySession, ResidentSessionRole
-from .transport import ResidentFrameSink
 from .wire import (
     KIND_ACK,
     KIND_BOOTSTRAP,
@@ -79,22 +83,22 @@ class ServeOriginDrive:
 
     Per invocation, an origin session sends the frozen bootstrap and authorized-stream
     frames and reads the sidecar's response, reporting the acknowledgement and terminal
-    to control while teeing each response frame to the client. The caller owns the frame
-    sink and whatever consumes the return leg, and routes inbound frames in through
-    ``on_frame``.
+    to control while teeing each response frame to the client. The attempt's frame sink
+    comes from the carriage control's plan selects, and the caller routes inbound frames
+    in through ``on_frame``.
     """
 
     def __init__(
         self,
         *,
-        sink: ResidentFrameSink,
+        carriage: ClaimGatedServiceCarriage,
         control: ServeControl,
         window_bytes: int = 65536,
         stream_deadline_sec: float = 300.0,
         auth_deadline_sec: float = 60.0,
         logger: logging.Logger | None = None,
     ) -> None:
-        self._sink = sink
+        self._carriage = carriage
         self._control = control
         self._window_bytes = window_bytes
         self._stream_deadline = stream_deadline_sec
@@ -118,14 +122,32 @@ class ServeOriginDrive:
         call_correlation: str,
         handoff: AdmissionHandoff,
         envelope: ServeRequestEnvelope,
+        plan: ResidentCarriagePlan,
     ) -> None:
         """Start one origin drive: send the bootstrap and stream the response."""
+        try:
+            sink = self._carriage.select(plan)
+        except CarriageUnavailable as exc:
+            # Control selected a transport this ingress has no carriage for; hold the
+            # credit uncertain rather than open a session on the wrong sink.
+            self._control.on_outcome(
+                ResidentOpOutcome(
+                    task_id=task_id,
+                    call_correlation=call_correlation,
+                    invocation_id=invocation_id,
+                    session_id=session_id,
+                    status=ResidentStreamStatus.UNCERTAIN,
+                    manifest=None,
+                    error=f"no carriage for transport {exc}",
+                )
+            )
+            return
         session = ResidentRelaySession(
             session_id=session_id,
             invocation_id=invocation_id,
             idm=idm,
             role=ResidentSessionRole.ORIGIN,
-            sink=self._sink,
+            sink=sink,
             window_bytes=self._window_bytes,
         )
         drive = _Drive(session, task_id, call_correlation, invocation_id)

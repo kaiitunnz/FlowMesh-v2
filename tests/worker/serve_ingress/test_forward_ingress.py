@@ -13,6 +13,7 @@ from contextlib import contextmanager
 import httpx
 import pytest
 
+from shared.resident.carriage import ResidentCarriagePlan
 from shared.resident.contracts import AdmissionHandoff
 from shared.resident.envelope import ServeRequestEnvelope
 from worker.serve_ingress.channel import ServeIngressChannel
@@ -51,6 +52,7 @@ class _Control:
                 task_id="inv-1",
                 call_correlation="serve/inv-1",
                 handoff=_handoff(),
+                carriage_plan=ResidentCarriagePlan(session_id="rly-1"),
             )
         assert self.ingress is not None
         # Control answers on its own thread, as it would over the attachment.

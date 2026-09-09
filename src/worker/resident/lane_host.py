@@ -17,6 +17,7 @@ from typing import Any
 
 from shared.network.relay_frame import RelayDirection, RelayFrame
 from shared.outcome import FabricContentStore
+from shared.resident.carriage import ControlRelayCarriage, ResidentCarriagePlan
 from shared.resident.contracts import (
     AdmissionHandoff,
     ReplicaEndpoint,
@@ -104,8 +105,12 @@ class ResidentLaneHost:
 
     async def _build(self) -> None:
         sink: ResidentFrameSink = _EventFrameSink(self._push_frame)
+        # Every origin attempt on this worker rides control_relay over the one
+        # authenticated attachment; a later PR adds direct/node carriages behind the
+        # same factory without changing the drives that take their sink from it.
+        carriage = ControlRelayCarriage(sink)
         self._origin = ResidentOriginDriver(
-            sink=sink,
+            carriage=carriage,
             content_store=self._content_store,
             report_ack=self._report_ack,
             report_outcome=self._report_outcome,
@@ -123,7 +128,7 @@ class ResidentLaneHost:
             # proxy over this worker's frame sink; its head and body frames tee to the
             # client connected here while its ack and terminal report up to control.
             self._serve_lane = ServeIngressLane(
-                sink=sink,
+                carriage=carriage,
                 report_ack=self._report_ack,
                 report_outcome=self._report_outcome,
                 report_committed=self._report_committed,
@@ -197,6 +202,7 @@ class ResidentLaneHost:
             handoff=handoff,
             envelope=envelope,
             channel=channel,
+            plan=decision.carriage_plan,
         )
 
     def authorize_serve(self, session_id: str, auth: RouteAuthorization) -> None:
@@ -228,6 +234,9 @@ class ResidentLaneHost:
                 session_id=str(frame["session_id"]),
                 handoff=handoff,
                 request_payload=request,
+                carriage_plan=ResidentCarriagePlan.model_validate(
+                    frame["carriage_plan"]
+                ),
             )
         )
 

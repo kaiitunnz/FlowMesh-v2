@@ -6,6 +6,7 @@ that up exactly once, ahead of the outcome on the same ordered stream, so a post
 loss fails the response rather than re-driving the engine over bytes the client holds.
 """
 
+from shared.resident.carriage import ControlRelayCarriage
 from shared.resident.reports import ResidentStreamHead
 from shared.resident.transport import ResidentFrameSink
 from worker.serve_ingress.lane import ServeIngressLane
@@ -18,7 +19,7 @@ class _NullSink(ResidentFrameSink):
 
 def _lane(committed: list) -> ServeIngressLane:
     return ServeIngressLane(
-        sink=_NullSink(),
+        carriage=ControlRelayCarriage(_NullSink()),
         report_ack=lambda _ack: None,
         report_outcome=lambda _outcome: None,
         report_committed=lambda inv, status, headers: committed.append(

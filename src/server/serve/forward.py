@@ -16,6 +16,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from shared.resident.carriage import ResidentCarriagePlan
 from shared.resident.contracts import AdmissionHandoff, RouteAuthorization
 from shared.resident.envelope import ServeRequestEnvelope
 
@@ -64,11 +65,13 @@ class ServeForwardTransport:
         call_correlation: str,
         handoff: AdmissionHandoff,
         envelope: ServeRequestEnvelope,
+        plan: ResidentCarriagePlan,
     ) -> None:
         """Relay the admission decision down so the ingress begins its own drive.
 
         The envelope is not relayed: the ingress already holds the frozen request and
-        drives the sidecar data-direct.
+        drives the sidecar data-direct. The carriage plan names the transport control
+        selected, which the ingress realizes as its own frame sink.
         """
         entry = self._by_invocation.get(invocation_id)
         if entry is None:
@@ -84,6 +87,7 @@ class ServeForwardTransport:
                 "task_id": task_id,
                 "call_correlation": call_correlation,
                 "handoff": handoff.model_dump(mode="json"),
+                "carriage_plan": plan.model_dump(mode="json"),
             },
         )
 

@@ -22,6 +22,7 @@ from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from shared.resident.carriage import CONTROL_RELAY, ResidentCarriagePlan
 from shared.resident.contracts import (
     AdmissionHandoff,
     ReplicaEndpoint,
@@ -42,6 +43,7 @@ from ..network.state import (
     ReplicaListenerAdvertisement,
     ResolvedRoute,
     RouteOrigin,
+    Transport,
 )
 from ..orchestration.tool_dispatch import ToolInvocationEnvelope
 from ..task.v2.representations.operators import ServiceDependency
@@ -146,7 +148,9 @@ class ServeDelivery(Protocol):
     opaque frames.
     """
 
-    def open(self, session_id: str, handoff: AdmissionHandoff) -> None:
+    def open(
+        self, session_id: str, handoff: AdmissionHandoff, plan: ResidentCarriagePlan
+    ) -> None:
         """Open the origin relay to the sidecar and send the bootstrap."""
         ...
 
@@ -891,7 +895,17 @@ class ResidentCapacityControl:
                 orig, claim, "no origin route for the boundary"
             )
             return
-        origin, _route = resolved
+        origin, route = resolved
+        # Control selects the transport candidate for the attempt from the resolved
+        # route; this PR realizes only control_relay, so without it as a base candidate
+        # the attempt cannot be carried — hold the credit and re-drive rather than
+        # reinterpret a direct/node candidate as a relay.
+        if not any(
+            candidate.transport is Transport.CONTROL_RELAY
+            for candidate in route.candidates
+        ):
+            await self._hold_and_redrive(orig, claim, "no control_relay carriage")
+            return
         handoff = handoff.model_copy(
             update={
                 "origin_id": origin.origin_id,
@@ -901,6 +915,12 @@ class ResidentCapacityControl:
         # A fresh relay session per delivery attempt: a re-drive gets its own session,
         # so its bridge and per-direction sequence never collide with an old one.
         session_id = new_relay_session_id()
+        plan = ResidentCarriagePlan(
+            session_id=session_id,
+            selected_transport=CONTROL_RELAY,
+            route_epoch=route.route_epoch,
+            listener_generation=listener.listener_generation,
+        )
         await deps.sessions.update(
             session_id,
             origin_node=routing_node or "",
@@ -909,6 +929,8 @@ class ResidentCapacityControl:
             target_worker=target_worker,
             invocation_id=orig.invocation_id,
             idm=orig.idempotency_key or "",
+            selected_transport=CONTROL_RELAY,
+            route_epoch=route.route_epoch,
         )
         self._attempts[orig.invocation_id] = _Attempt(
             task_id=orig.task_id,
@@ -927,7 +949,7 @@ class ResidentCapacityControl:
             request_id=orig.request_id,
         )
         if serve is not None:
-            serve.open(session_id, handoff)
+            serve.open(session_id, handoff, plan)
             return
         assert origin_worker is not None
         delivered = deps.relay(
@@ -938,6 +960,7 @@ class ResidentCapacityControl:
                 "call_correlation": orig.call_correlation,
                 "session_id": session_id,
                 "handoff": handoff.model_dump(mode="json"),
+                "carriage_plan": plan.model_dump(mode="json"),
             },
         )
         if not delivered:

@@ -11,6 +11,7 @@ from typing import Any
 import requests
 
 from shared.outcome import FabricContentStore
+from shared.resident.carriage import ResidentCarriagePlan
 from shared.resident.contracts import AdmissionHandoff, RouteAuthorization
 from shared.resident.serve_ingress import ServeIngressAdvertisement
 from shared.schemas.result import BaseExecutorResult
@@ -339,6 +340,9 @@ class Runner:
                     task_id=str(frame["task_id"]),
                     call_correlation=str(frame["call_correlation"]),
                     handoff=AdmissionHandoff.model_validate(frame["handoff"]),
+                    carriage_plan=ResidentCarriagePlan.model_validate(
+                        frame["carriage_plan"]
+                    ),
                 ),
             )
         elif frame_kind == "serve_ingress_denied":
