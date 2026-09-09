@@ -50,6 +50,10 @@ router = APIRouter(prefix="/serve", tags=["Serve"])
 _MAX_REQUEST_BYTES = 4 * 1024 * 1024
 
 
+class _ServeStreamTruncated(Exception):
+    """A serve response failed after its head was sent, so the body is aborted."""
+
+
 async def _read_capped_body(request: Request) -> bytes:
     """Read the raw request body, refusing one past the bound before it is buffered."""
     declared = request.headers.get("content-length")
@@ -173,6 +177,13 @@ async def _stream(result: ServeResult) -> StreamingResponse:
                     yield event.payload
                 elif event.terminal:
                     terminated = True
+                    if event.kind == "error":
+                        # The stream lost frames or the drive failed after the head was
+                        # committed: abort the response so the client sees a truncated
+                        # body rather than a well-formed one silently missing bytes.
+                        raise _ServeStreamTruncated(
+                            event.detail or "resident serve stream lost"
+                        )
         finally:
             # A client that disconnects mid-stream stops the body generator before its
             # terminal: close the client stream so a still-running drive stops teeing.

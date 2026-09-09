@@ -172,6 +172,7 @@ class _ServeStream:
         self.queue: asyncio.Queue[ServeEvent] = asyncio.Queue(maxsize=_TEE_QUEUE_MAX)
         self._closed = False
         self._flushed = False
+        self._dropped = False
 
     @property
     def invocation_id(self) -> str:
@@ -242,12 +243,13 @@ class _ServeStream:
 
     def _offer(self, event: ServeEvent) -> None:
         # A frame past the backlog bound is dropped rather than buffered without limit,
-        # so a client that stops draining cannot pin unbounded memory. The terminal
-        # never takes this path, so a dropped frame still yields a closing stream.
+        # so a client that stops draining cannot pin unbounded memory. The drop poisons
+        # the stream: its terminal then lands as an error, never a clean done, so a
+        # response missing bytes is never reported complete.
         try:
             self.queue.put_nowait(event)
         except asyncio.QueueFull:
-            pass
+            self._dropped = True
 
     def record_terminal(self, reason: ClaimTerminalReason, detail: str | None) -> None:
         self._edge.record_terminal(self.invocation_id, reason, detail)
@@ -263,6 +265,13 @@ class _ServeStream:
             return
         self._closed = True
         self._edge.forget(self.invocation_id)
+        if self._dropped and event.kind == "done":
+            # Frames were dropped past the backlog bound, so the response the client
+            # received is missing bytes: land an error terminal, never a clean done, so
+            # the consumer aborts the truncated stream rather than closing it complete.
+            event = ServeEvent(
+                kind="error", detail="resident serve response dropped frames under load"
+            )
         # The terminal must reach the consumer so its stream closes; if the bounded
         # backlog is full, evict the oldest frame to make room for it.
         while True:

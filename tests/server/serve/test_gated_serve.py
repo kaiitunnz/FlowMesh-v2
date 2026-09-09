@@ -11,8 +11,10 @@ policy; a stop drains.
 import asyncio
 from collections.abc import Callable
 
+import pytest
+
 from server.resident.state import ClaimTerminalReason, InvocationSubjectKind
-from server.routers.v1.serve import _stream
+from server.routers.v1.serve import _ServeStreamTruncated, _stream
 from server.serve import (
     ForwardIngressDirectory,
     GatedServe,
@@ -399,7 +401,7 @@ def test_router_sets_the_client_status_and_headers_from_the_head() -> None:
     asyncio.run(run())
 
 
-def test_a_non_draining_client_cannot_pin_unbounded_memory() -> None:
+def test_a_non_draining_client_that_overflows_is_failed_not_reported_complete() -> None:
     control = _FakeControl()
     edge = _edge(control)
     _bind(edge)
@@ -407,15 +409,52 @@ def test_a_non_draining_client_cannot_pin_unbounded_memory() -> None:
     async def run() -> None:
         result = edge.submit("p1", "acme", "tsk-1", _envelope(), ServeAccessMode.PROXY)
         stream = control.originations[0].delivery
+        stream.head(200, ())
         for i in range(
             stream.queue.maxsize * 3
         ):  # flood past the bound, never draining
             stream.tee(f"f{i}".encode())
+        # Memory stays bounded: frames past the backlog bound are dropped, not buffered.
         assert stream.queue.qsize() <= stream.queue.maxsize
         stream.complete()
         events = await _events(result)
-        # The terminal still lands despite the overflow, so the client stream closes.
-        assert events[-1].kind == "done"
+        # A response that dropped frames is never reported complete: the drop poisons
+        # the stream so its terminal lands as an error the consumer aborts on, never a
+        # clean done over the gaps.
+        assert events[-1].kind == "error"
+        assert not any(e.kind == "done" for e in events)
+
+    asyncio.run(run())
+
+
+def test_the_router_aborts_the_response_on_a_poisoned_terminal() -> None:
+    control = _FakeControl()
+    edge = _edge(control)
+    _bind(edge)
+
+    async def run() -> None:
+        result = edge.submit(
+            "p1",
+            "acme",
+            "tsk-1",
+            _envelope(body=b'{"stream": true}'),
+            ServeAccessMode.PROXY,
+        )
+        delivery = control.originations[0].delivery
+        delivery.head(200, (("content-type", "text/event-stream"),))
+        delivery.tee(b"data: 1\n\n")
+        delivery.fail("resident stream lost")  # a mid-stream error terminal
+        response = await _stream(result)
+        assert response.status_code == 200
+        # The head was already committed, so the router cannot change the status; it
+        # aborts the body instead of ending it cleanly over the lost frames.
+        received: list[bytes] = []
+        with pytest.raises(_ServeStreamTruncated):
+            async for chunk in response.body_iterator:
+                received.append(
+                    chunk.encode() if isinstance(chunk, str) else bytes(chunk)
+                )
+        assert b"".join(received) == b"data: 1\n\n"
 
     asyncio.run(run())
 
