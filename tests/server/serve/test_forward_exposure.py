@@ -1,6 +1,6 @@
 """The root forward ingress directory allocates per-task ports and fences commit.
 
-The root exposes one public authority and port range; each forward binding reserves a
+The root exposes one public host and port range; each forward binding reserves a
 port, the root binds a listener and returns evidence, and only then does the exposure go
 LIVE and its url resolve. A drained exposure retires and quarantines its port so a
 reused number never carries a stale generation's traffic.
@@ -12,8 +12,8 @@ from server.serve.forward_exposure import (
 )
 
 
-def _dir(authority="serve.example", low=34000, high=34001) -> ForwardIngressDirectory:
-    return ForwardIngressDirectory(authority, low, high)
+def _dir(public_host="serve.example", low=34000, high=34001) -> ForwardIngressDirectory:
+    return ForwardIngressDirectory(public_host, low, high)
 
 
 def _reserve(d: ForwardIngressDirectory, task="tsk-1"):
@@ -24,7 +24,7 @@ def _reserve(d: ForwardIngressDirectory, task="tsk-1"):
     )
 
 
-def test_reserve_fails_closed_without_a_configured_authority() -> None:
+def test_reserve_fails_closed_without_a_configured_public_host() -> None:
     d = ForwardIngressDirectory("", 0, 0)
     assert not d.configured
     assert _reserve(d) is None

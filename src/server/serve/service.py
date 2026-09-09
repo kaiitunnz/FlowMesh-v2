@@ -437,7 +437,7 @@ class GatedServe:
         """Reserve a forward port for a binding and bind the root listener on it.
 
         A reservation that cannot be placed — the root has no configured forward
-        authority/range, or the range is exhausted — leaves the binding with no
+        public host/range, or the range is exhausted — leaves the binding with no
         exposure, so its url is never published and requests fail closed until one can
         be placed.
         The listener binds on its own loop and reports the bind back, which commits the
@@ -560,7 +560,7 @@ class GatedServe:
                 binding_generation=binding.binding_generation,
             )
             if binding.access_mode is ServeAccessMode.FORWARD:
-                # Reserve a public port on the root authority and bind its listener; the
+                # Reserve a public port on the public host and bind its listener; the
                 # exposure goes live only on the listener's bound evidence.
                 self._reserve_and_bind(binding, forward_port)
             self._persist()

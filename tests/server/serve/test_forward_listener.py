@@ -77,7 +77,7 @@ def test_listener_admits_and_streams_the_engine_head_and_body() -> None:
             return result
 
         listener = RootForwardIngress(
-            bind_host="127.0.0.1", authority="local", admit=_admit, on_bound=_noop
+            bind_host="127.0.0.1", public_host="local", admit=_admit, on_bound=_noop
         )
         listener.start(asyncio.get_running_loop())
         port = _free_port()
@@ -100,7 +100,7 @@ def test_listener_maps_a_denial_to_its_http_status() -> None:
             raise ServeForwardDenied(403, "denied")
 
         listener = RootForwardIngress(
-            bind_host="127.0.0.1", authority="local", admit=_admit, on_bound=_noop
+            bind_host="127.0.0.1", public_host="local", admit=_admit, on_bound=_noop
         )
         listener.start(asyncio.get_running_loop())
         port = _free_port()
@@ -123,7 +123,7 @@ def test_listener_refuses_a_body_before_a_head_without_synthesizing_200() -> Non
             return result
 
         listener = RootForwardIngress(
-            bind_host="127.0.0.1", authority="local", admit=_admit, on_bound=_noop
+            bind_host="127.0.0.1", public_host="local", admit=_admit, on_bound=_noop
         )
         listener.start(asyncio.get_running_loop())
         port = _free_port()
@@ -142,7 +142,7 @@ def test_listener_refuses_a_request_on_a_released_port() -> None:
             raise AssertionError("admit must not run for a released port")
 
         listener = RootForwardIngress(
-            bind_host="127.0.0.1", authority="local", admit=_admit, on_bound=_noop
+            bind_host="127.0.0.1", public_host="local", admit=_admit, on_bound=_noop
         )
         listener.start(asyncio.get_running_loop())
         port = _free_port()
@@ -165,7 +165,7 @@ def test_listener_times_out_a_stalled_request_read() -> None:
 
         listener = RootForwardIngress(
             bind_host="127.0.0.1",
-            authority="local",
+            public_host="local",
             admit=_admit,
             on_bound=_noop,
             request_read_timeout_sec=0.2,
@@ -197,7 +197,7 @@ def test_listener_refuses_a_connection_past_the_concurrency_cap() -> None:
 
         listener = RootForwardIngress(
             bind_host="127.0.0.1",
-            authority="local",
+            public_host="local",
             admit=_admit,
             on_bound=_noop,
             max_connections=1,
@@ -230,7 +230,7 @@ def test_listener_rejects_expect_100_continue_before_reading_the_body() -> None:
             raise AssertionError("admit must not run for a rejected request")
 
         listener = RootForwardIngress(
-            bind_host="127.0.0.1", authority="local", admit=_admit, on_bound=_noop
+            bind_host="127.0.0.1", public_host="local", admit=_admit, on_bound=_noop
         )
         listener.start(asyncio.get_running_loop())
         port = _free_port()

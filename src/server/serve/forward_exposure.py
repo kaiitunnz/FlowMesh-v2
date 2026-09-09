@@ -1,20 +1,18 @@
 """Per-task public port exposure for the root-hosted gated forward serve ingress.
 
 ``forward`` addressing is a separate exposure contract, not a route or capacity
-contract. The root exposes one public authority with an allowed port range; every live
-serve binding pinned to ``forward`` owns one ``ForwardPortExposure`` mapping a public
-port on that authority to the binding.
+contract. The root exposes one public host with an allowed port range; every live serve
+binding pinned to ``forward`` owns one ``ForwardPortExposure`` mapping a public port on
+that host to the binding.
 
 The exposure is pure address-state: it mints no claim, reserves no capacity, and is
 never a replica endpoint. Its identity is ``(serve_task_id, binding_generation)`` and
-its locator is ``http://<authority>:<public_port>/`` — the deployment's own front proxy
-terminates TLS and forwards plain HTTP to the root. A request arriving on that port
+its locator is ``http://<public_host>:<public_port>/``. A request arriving on that port
 resolves its serve task from the live exposure, never from a client-supplied path: the
 port is the whole address. Publication is two-phase — the root reserves a port, binds a
 local listener on it, and only then does the exposure go ``LIVE`` and its url reach the
-task. A drained
-exposure rejects new requests, retires, and quarantines its port before a later exposure
-reuses the number.
+task. A drained exposure rejects new requests, retires, and quarantines its port before
+a later exposure reuses the number.
 """
 
 from enum import StrEnum
@@ -47,7 +45,7 @@ class ForwardPortExposure(BaseModel):
 
     serve_task_id: str
     binding_generation: int
-    authority: str
+    public_host: str
     public_port: int
     exposure_generation: int
     listener_generation: int = 0
@@ -56,8 +54,8 @@ class ForwardPortExposure(BaseModel):
 
     @property
     def public_url(self) -> str:
-        """The base a client reaches this exposure at, host authority and port only."""
-        return f"http://{self.authority}:{self.public_port}"
+        """The base a client reaches this exposure at, public host and port only."""
+        return f"http://{self.public_host}:{self.public_port}"
 
     @property
     def live(self) -> bool:
@@ -71,16 +69,16 @@ class ForwardExposureSnapshot(BaseModel):
 
 
 class ForwardIngressDirectory:
-    """The root's public forward authority, port range, and live per-task exposures.
+    """The root's public forward host, port range, and live per-task exposures.
 
-    Each forward binding owns a port on the root's authority, and control resolves the
-    serve task from that authoritative exposure rather than from a task-qualified path.
-    A retired exposure's port is quarantined until a later exposure reserves it afresh,
-    so a reused number never carries a stale generation's traffic.
+    Each forward binding owns a port on the root's public host, and control resolves the
+    serve task from that exposure rather than from a task-qualified path. A retired
+    exposure's port is quarantined until a later exposure reserves it afresh, so a
+    reused number never carries a stale generation's traffic.
     """
 
-    def __init__(self, authority: str, port_low: int, port_high: int) -> None:
-        self._authority = authority
+    def __init__(self, public_host: str, port_low: int, port_high: int) -> None:
+        self._public_host = public_host
         self._port_low = port_low
         self._port_high = port_high
         self._exposures: dict[str, ForwardPortExposure] = {}
@@ -89,8 +87,10 @@ class ForwardIngressDirectory:
 
     @property
     def configured(self) -> bool:
-        """Whether the root has a usable forward authority and port range."""
-        return bool(self._authority) and 1 <= self._port_low <= self._port_high <= 65535
+        """Whether the root has a usable forward public host and port range."""
+        return bool(self._public_host) and (
+            1 <= self._port_low <= self._port_high <= 65535
+        )
 
     def reserve(
         self,
@@ -99,9 +99,9 @@ class ForwardIngressDirectory:
         binding_generation: int,
         requested_port: int | None,
     ) -> ForwardPortExposure | None:
-        """Reserve a port for one binding on the root authority, or None when it cannot.
+        """Reserve a port for one binding on the public host, or None when it cannot.
 
-        Fails closed when the root has no configured authority/range, a requested port
+        Fails closed when the root has no configured public host/range, a requested port
         is outside the range or already in use, or the range has no free port left.
         """
         if not self.configured:
@@ -117,7 +117,7 @@ class ForwardIngressDirectory:
         exposure = ForwardPortExposure(
             serve_task_id=serve_task_id,
             binding_generation=binding_generation,
-            authority=self._authority,
+            public_host=self._public_host,
             public_port=port,
             exposure_generation=generation,
             status=ForwardExposureStatus.RESERVED,

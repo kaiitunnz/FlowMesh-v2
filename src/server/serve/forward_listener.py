@@ -1,9 +1,9 @@
 """The root-hosted forward serve ingress: one gated HTTP listener per task port.
 
-A forward serve task owns a public port on the root's authority. The root binds a
-plain-HTTP listener on that port behind the deployment's own TLS terminator; a client
-reaches the task at ``http://<authority>:<port>/<engine-native-path>`` — the port is the
-whole address, so the listener resolves the serve task from the port it arrived on,
+A forward serve task owns a public port on the root's public host. The root binds a
+plain-HTTP listener on that port; a client reaches the task at
+``http://<public_host>:<port>/<engine-native-path>`` — the port is the whole address, so
+the listener resolves the serve task from the port it arrived on,
 never from a client-supplied path, and forwards the engine-native path verbatim.
 
 The listener authenticates nothing itself beyond reading the presented credential: it
@@ -70,7 +70,7 @@ class RootForwardIngress:
         self,
         *,
         bind_host: str,
-        authority: str,
+        public_host: str,
         admit: AdmitFn,
         on_bound: BoundFn,
         stream_idle_timeout_sec: float = _STREAM_IDLE_TIMEOUT_SEC,
@@ -79,7 +79,7 @@ class RootForwardIngress:
         logger: logging.Logger | None = None,
     ) -> None:
         self._bind_host = bind_host
-        self._authority = authority
+        self._public_host = public_host
         self._admit = admit
         self._on_bound = on_bound
         self._idle_timeout = stream_idle_timeout_sec
@@ -150,7 +150,7 @@ class RootForwardIngress:
         self._log.info(
             "forward serve ingress bound %s on %s:%d",
             serve_task_id,
-            self._authority,
+            self._public_host,
             port,
         )
         self._on_bound(serve_task_id, exposure_generation, listener_generation)

@@ -114,10 +114,8 @@ class PortForwardConfig:
     ssh_audit_enabled: bool = True
     serve_proxy_enabled: bool = True
     serve_forward_enabled: bool = False
-    serve_forward_authority: str = ""
-    serve_forward_bind_host: str = "0.0.0.0"
-    serve_forward_port_low: int = 34000
-    serve_forward_port_high: int = 34099
+    serve_forward_port_start: int = 34000
+    serve_forward_port_end: int = 34099
     bind_host: str = "0.0.0.0"
     public_host: str = "localhost"
     port_start: int = 32000
@@ -134,12 +132,12 @@ class PortForwardConfig:
             ),
             serve_proxy_enabled=parse_bool_env("ENABLE_SERVER_SERVE_PROXY", True),
             serve_forward_enabled=parse_bool_env("ENABLE_SERVER_SERVE_FORWARD", False),
-            serve_forward_authority=os.getenv("SERVE_FORWARD_AUTHORITY", "").strip(),
-            serve_forward_bind_host=os.getenv(
-                "SERVE_FORWARD_BIND_HOST", "0.0.0.0"
-            ).strip(),
-            serve_forward_port_low=parse_int_env("SERVE_FORWARD_PORT_LOW", 34000),
-            serve_forward_port_high=parse_int_env("SERVE_FORWARD_PORT_HIGH", 34099),
+            serve_forward_port_start=parse_int_env(
+                "SERVER_SERVE_FORWARD_PORT_START", 34000
+            ),
+            serve_forward_port_end=parse_int_env(
+                "SERVER_SERVE_FORWARD_PORT_END", 34099
+            ),
             bind_host=os.getenv("SERVER_PORT_FORWARD_BIND_HOST", "0.0.0.0").strip(),
             public_host=os.getenv(
                 "SERVER_PORT_FORWARD_PUBLIC_HOST", "localhost"

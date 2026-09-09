@@ -99,11 +99,9 @@ listed here is in `.env.example`.
 | `ENABLE_PERSISTENT_PORT_FORWARD` | `true` | Keep port-forward listeners bound between task sessions; disable to bind listeners only for active sessions |
 | `ENABLE_SERVER_SSH_PROXY` | `true` | Enable the WebSocket proxy for interactive SSH tasks |
 | `ENABLE_SERVER_SERVE_PROXY` | `true` | Enable the root-local gated serve ingress |
-| `ENABLE_SERVER_SERVE_FORWARD` | `false` | Host the root per-task-port forward serve ingress |
-| `SERVE_FORWARD_AUTHORITY` | | Public authority clients dial forward serve ports at |
-| `SERVE_FORWARD_BIND_HOST` | `0.0.0.0` | Interface the root forward serve listeners bind |
-| `SERVE_FORWARD_PORT_LOW` | `34000` | Lowest forward serve exposure port |
-| `SERVE_FORWARD_PORT_HIGH` | `34099` | Highest forward serve exposure port |
+| `ENABLE_SERVER_SERVE_FORWARD` | `false` | Host the root per-task-port forward serve ingress. Reuses `SERVER_PORT_FORWARD_BIND_HOST` and `SERVER_PORT_FORWARD_PUBLIC_HOST` for the listener |
+| `SERVER_SERVE_FORWARD_PORT_START` | `34000` | Lowest forward serve exposure port |
+| `SERVER_SERVE_FORWARD_PORT_END` | `34099` | Highest forward serve exposure port |
 | `LOG_LEVEL` | `INFO` | Server log level |
 
 **Notes:**

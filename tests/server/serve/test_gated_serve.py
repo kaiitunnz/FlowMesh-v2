@@ -252,7 +252,7 @@ def test_forward_adoption_reserves_a_port_and_commits_on_bound_evidence() -> Non
     edge = _edge(control, forward_listener=listener)
     edge.adopt("tsk-1", ServeAccessMode.FORWARD)
 
-    # Adoption reserves a port on the root authority and asks the listener to bind it.
+    # Adoption reserves a port on the root public host and asks the listener to bind it.
     assert len(listener.bound) == 1 and listener.bound[0][0] == "tsk-1"
     exposure = edge.exposures.current("tsk-1")
     assert exposure is not None and 34000 <= exposure.public_port <= 34009
@@ -264,8 +264,8 @@ def test_forward_adoption_reserves_a_port_and_commits_on_bound_evidence() -> Non
     assert live is not None and live.listener_generation == 1
 
 
-def test_forward_adoption_without_a_configured_authority_fails_closed() -> None:
-    # With no root forward authority/range configured, adoption reserves no port and
+def test_forward_adoption_without_a_configured_public_host_fails_closed() -> None:
+    # With no root forward public host/range configured, adoption reserves no port and
     # publishes no exposure, so the task fails closed rather than serving on proxy.
     control = _FakeControl(
         endpoint=ReplicaEndpoint(base_url="http://engine/v1", model="m")

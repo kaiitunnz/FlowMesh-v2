@@ -145,15 +145,15 @@ binding drains before it stops.
 A serve task pins one gated exposure mode. `proxy`, the default, terminates at the
 root-local ingress and is reached at `/api/v1/serve/tasks/{task_id}/{upstream_path}` on
 the server's own base url. `forward` terminates at a per-task public port on the root's
-own authority, reached at `http://<root_authority>:<forward_port>/<engine-native-path>` —
+public host, reached at `http://<public_host>:<forward_port>/<engine-native-path>` —
 the port is the whole address, so no task-qualified path prefix is used and the engine's
-own paths pass through unchanged. The root's `ForwardIngressDirectory` holds the public
-authority and an allowed port range (`SERVE_FORWARD_AUTHORITY`, `SERVE_FORWARD_PORT_LOW`,
-`SERVE_FORWARD_PORT_HIGH`); each forward binding owns a `ForwardPortExposure` that control
-reserves, the root binds a plain-HTTP listener on, and control commits live only from that
-bound listener's evidence, publishing the port url on the task. The deployment's own front
-proxy terminates TLS and forwards plain HTTP to the root. `forwardPort` may request a
-specific port within the range, else one is
+own paths pass through unchanged. Forward serve reuses the SSH port-forward host config —
+`SERVER_PORT_FORWARD_BIND_HOST` for the listener and `SERVER_PORT_FORWARD_PUBLIC_HOST` for
+the url — with its own port range (`SERVER_SERVE_FORWARD_PORT_START`,
+`SERVER_SERVE_FORWARD_PORT_END`); each forward binding owns a `ForwardPortExposure` that
+control reserves, the root binds a plain-HTTP listener on, and control commits live only
+from that bound listener's evidence, publishing the port url on the task. `forwardPort`
+may request a specific port within the range, else one is
 auto-allocated. On root restart each persisted live exposure rebinds its same port under a
 fresh listener generation before it serves; a failed rebind stays unavailable rather than
 publishing a new port. A forward binding with no live exposure fails closed. Access is the

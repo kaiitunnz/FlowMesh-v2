@@ -45,13 +45,13 @@ from .serve import (
     SERVE_EDGE_STREAM_ID,
     ForwardIngressDirectory,
     GatedServe,
-    RootForwardIngress,
     ServeBindingStore,
     ServeIngressRegistry,
     ServeRelayExecutor,
     ServeSnapshot,
     ServeTerminalStore,
 )
+from .serve.wiring import build_forward_serve_ingress
 from .services.agent_model_gateway import (
     AgentModelGateway,
     ResolvedGatewayBinding,
@@ -286,9 +286,9 @@ if IS_ROOT_NODE:
         SERVE_BINDINGS = ServeBindingStore()
         serve_terminals = ServeTerminalStore()
         SERVE_EXPOSURES = ForwardIngressDirectory(
-            config.port_forward.serve_forward_authority,
-            config.port_forward.serve_forward_port_low,
-            config.port_forward.serve_forward_port_high,
+            config.port_forward.public_host,
+            config.port_forward.serve_forward_port_start,
+            config.port_forward.serve_forward_port_end,
         )
         if (stored := serve_registry.load_serve_snapshot()) is not None:
             SERVE_BINDINGS.load_snapshot(stored.bindings)
@@ -331,27 +331,17 @@ if IS_ROOT_NODE:
                 if config.port_forward.serve_proxy_enabled
                 else None
             ),
-            # Each forward binding owns a per-task public port on the root's own
-            # authority; the root binds a plain-HTTP listener on it behind the
-            # deployment's TLS terminator, and a task without a configured forward
-            # authority/range fails closed. The directory persists so a restart rebinds
-            # each live exposure to its same port.
+            # Each forward binding owns a per-task public port on the root's public
+            # host; the root binds a plain-HTTP listener on it, and a task without a
+            # configured forward public host/range fails closed. The directory persists
+            # so a restart rebinds each live exposure to its same port.
             exposures=SERVE_EXPOSURES,
             persist=_persist_serve,
             logger=logger,
         )
-        if config.port_forward.serve_forward_enabled:
-            # The root binds one plain-HTTP listener per forward task port and admits a
-            # request over the same gate as proxy, then relays it over the shared root
-            # rendezvous attachment; the exposure commits live only on a bound listener.
-            SERVE_FORWARD_INGRESS = RootForwardIngress(
-                bind_host=config.port_forward.serve_forward_bind_host,
-                authority=config.port_forward.serve_forward_authority,
-                admit=GATED_SERVE.admit_forward_request,
-                on_bound=GATED_SERVE.commit_forward,
-                logger=logger,
-            )
-            GATED_SERVE.set_forward_listener(SERVE_FORWARD_INGRESS)
+        SERVE_FORWARD_INGRESS = build_forward_serve_ingress(
+            config.port_forward, GATED_SERVE, logger
+        )
 
     DISPATCHER = create_dispatcher(
         config.dispatch,

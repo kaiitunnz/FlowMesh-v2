@@ -234,9 +234,9 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   standing replica unchanged and the engine's own response comes back unchanged, so an
   OpenAI-compatible client can drive any endpoint the engine serves. A serve task pins one
   gated exposure mode — `proxy`, the default root-local ingress reached at the task-qualified
-  route above, or `forward`, a per-task public port on the root's own authority reached at
-  `http://<root_authority>:<forward_port>/` with the engine's own paths. The root binds the
-  port behind the deployment's TLS terminator, authenticates and admits the request over the
+  route above, or `forward`, a per-task public port on the root's public host reached at
+  `http://<public_host>:<forward_port>/` with the engine's own paths. The root binds the
+  port, authenticates and admits the request over the
   same gate as `proxy`, and relays it to the task's standing replica; a mode with no live
   exposure fails closed. At start the task is adopted as its own standing replica,
   validated under `RESIDENT_ALLOWED_MODELS`. Both modes carry traffic over `control_relay`;

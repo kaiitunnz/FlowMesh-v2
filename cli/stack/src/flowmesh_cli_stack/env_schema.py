@@ -700,10 +700,8 @@ STACK_ENV_SCHEMA = EnvSchema(
             ],
         ),
         EnvSection(
-            title="SSH Task Support",
+            title="Serve Forward Ingress",
             vars=[
-                EnvVar("ENABLE_SERVER_SSH_PROXY", "true", var_type=EnvVarType.BOOL),
-                EnvVar("ENABLE_SERVER_SERVE_PROXY", "true", var_type=EnvVarType.BOOL),
                 EnvVar(
                     "ENABLE_SERVER_SERVE_FORWARD",
                     "false",
@@ -711,27 +709,26 @@ STACK_ENV_SCHEMA = EnvSchema(
                     description="Host the root per-task-port forward serve ingress.",
                 ),
                 EnvVar(
-                    "SERVE_FORWARD_AUTHORITY",
-                    "",
-                    description="Public authority clients dial forward serve ports at.",
-                ),
-                EnvVar(
-                    "SERVE_FORWARD_BIND_HOST",
-                    "0.0.0.0",
-                    description="Interface the root forward serve listeners bind.",
-                ),
-                EnvVar(
-                    "SERVE_FORWARD_PORT_LOW",
+                    "SERVER_SERVE_FORWARD_PORT_START",
                     "34000",
                     var_type=EnvVarType.INT,
+                    min_value=1,
                     description="Lowest forward serve exposure port.",
                 ),
                 EnvVar(
-                    "SERVE_FORWARD_PORT_HIGH",
+                    "SERVER_SERVE_FORWARD_PORT_END",
                     "34099",
                     var_type=EnvVarType.INT,
+                    min_value=1,
                     description="Highest forward serve exposure port.",
                 ),
+            ],
+        ),
+        EnvSection(
+            title="SSH Task Support",
+            vars=[
+                EnvVar("ENABLE_SERVER_SSH_PROXY", "true", var_type=EnvVarType.BOOL),
+                EnvVar("ENABLE_SERVER_SERVE_PROXY", "true", var_type=EnvVarType.BOOL),
                 EnvVar(
                     "ENABLE_SERVER_SSH_CONNECTION_AUDIT",
                     "true",
