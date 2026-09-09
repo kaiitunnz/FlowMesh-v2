@@ -468,8 +468,8 @@ def _run_supervisor(
             endpoint=network_cfg.target_leg.node_listener_url,
             material=MutualTlsMaterial.from_b64(
                 ca_b64=network_cfg.target_leg.ca_b64,
-                cert_b64=network_cfg.target_leg.cert_b64,
-                key_b64=network_cfg.target_leg.key_b64,
+                cert_b64=network_cfg.target_leg.server_cert_b64,
+                key_b64=network_cfg.target_leg.server_key_b64,
                 root_identity=network_cfg.target_leg.root_identity,
             ),
             bridge=resident_bridge,

@@ -194,8 +194,8 @@ def _target_leg_material(
     try:
         return MutualTlsMaterial.from_b64(
             ca_b64=cfg.target_leg_ca_b64,
-            cert_b64=cfg.target_leg_cert_b64,
-            key_b64=cfg.target_leg_key_b64,
+            cert_b64=cfg.target_leg_server_cert_b64,
+            key_b64=cfg.target_leg_server_key_b64,
             root_identity=cfg.target_leg_root_identity,
         )
     except MutualTlsMaterialError as exc:

@@ -6,6 +6,9 @@ deployment's configured CA. The target additionally pins the root's certificate
 identity, so a certificate the CA signed for some other party is refused — a CA bundle
 alone does not prove to a target that its dialer is the root.
 
+The two ends therefore hold separate identities: the root's dialing identity carries the
+pinned name and stays on the root, while a target serves with an identity of its own.
+
 Material is carried as base64 PEM so it travels the same way as the rest of a node's
 configured credentials, and is written to a private temporary file only because
 ``ssl`` loads a chain from a path.

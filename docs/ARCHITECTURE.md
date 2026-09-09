@@ -261,12 +261,7 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   claim gate is the only authority over the traffic. Only the target leg moves: a workflow
   origin carries its source-to-root leg over its own attachment, while a root-sourced gated
   serve call is its own origin and moves both legs. Per-leg counters at
-  `GET /api/v1/network/legs` read the two apart. Eligibility requires the configured
-  trusted class and trust domain, the target's current endpoint and listener generation,
-  mutual TLS with the pinned root identity, and root-to-target reachability evidence; a
-  target missing any of them is carried over `control_relay`. A dial that fails before
-  delivery falls back to the relay under the same claim, request identity, and held credit;
-  a loss after delivery is ambiguous and holds the credit. Enable with
+  `GET /api/v1/network/legs` read the two apart. Enable with
   `NETWORK_PLANE_TARGET_LEG_ENABLED=true`. See [`NETWORK_PLANE.md`](NETWORK_PLANE.md).
 - **Worker-originated mediated boundaries.** A fabric-served external tool (`search/v1`)
   or a managed external model turn egresses only in the Agent's assigned worker, never in

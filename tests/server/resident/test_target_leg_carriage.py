@@ -183,3 +183,38 @@ def test_a_leg_lost_after_delivery_is_ambiguous_rather_than_a_fallback() -> None
     asyncio.run(scenario())
     # A loss after delivery never re-carries the session over the relay base.
     assert not recorder.base
+    # It is still path evidence, so the re-drive resolves the transport as demoted and
+    # carries the relay base rather than re-selecting a transport that keeps failing.
+    assert [outcome for _s, _t, outcome in recorder.observations][-1] in {
+        RouteObservationOutcome.CONNECT_FAILURE,
+        RouteObservationOutcome.ROUTE_FAILURE,
+        RouteObservationOutcome.TIMEOUT,
+    }
+
+
+def test_releasing_a_leg_on_its_terminal_never_demotes_the_transport() -> None:
+    recorder = _Recorder()
+
+    async def scenario() -> None:
+        async def serve(reader: asyncio.StreamReader, writer) -> None:
+            await read_relay_frame(reader)
+            await asyncio.sleep(5)
+
+        server = await asyncio.start_server(
+            serve, "127.0.0.1", 0, ssl=server_context(_material("worker.flowmesh"))
+        )
+        port = server.sockets[0].getsockname()[1]
+        carriage = _carriage(recorder, ssl_context=client_context(_material(_ROOT)))
+        sink = carriage.select(_plan(f"127.0.0.1:{port}"))
+        await sink.send(_frame())
+        # The invocation settled, so control releases the leg: ending its read is not a
+        # transport failure.
+        carriage.close("rly-1")
+        await asyncio.sleep(0.1)
+        server.close()
+        await server.wait_closed()
+
+    asyncio.run(scenario())
+    assert [outcome for _s, _t, outcome in recorder.observations] == [
+        RouteObservationOutcome.VERIFIED
+    ]

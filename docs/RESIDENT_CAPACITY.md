@@ -115,16 +115,11 @@ inbound connection and the resident wire messages ride as opaque relay payloads 
 supervisors relay them without decoding a body, cursor, or window.
 
 Where the deployment declares the root-to-target pair trusted, control selects a target-leg
-offload for the attempt and the root carries the leg into the target over a mutually
-authenticated direct socket instead of the target node's relay stream — reaching either the
-replica worker's own claim-gated listener or the target node's purpose-scoped listener and
-its local sidecar uplink. The handoff, route authorization, fences, windows, and
-cancellation are the same frames, and the replica sidecar's claim gate is the only
-authority over the engine; only the target leg moves, so the origin worker carries its own
-leg to the root over its attachment. A dial that fails
-before delivery carries the attempt over `control_relay` under the same claim, `idm-*`, and
-held credit, and a loss after delivery is `UNCERTAIN` rather than a transport switch. See
-[`NETWORK_PLANE.md`](NETWORK_PLANE.md).
+offload for the attempt and the root carries that leg over a mutually authenticated direct
+socket into the replica worker's claim-gated listener or the target node's purpose-scoped
+one. Only the target leg moves, so the origin worker carries its own leg to the root over
+its attachment, and the replica sidecar's claim gate stays the authority over the engine.
+See [`NETWORK_PLANE.md`](NETWORK_PLANE.md).
 
 Every transition is safe under loss. Control records `ACCEPTED` and mints the fence only on
 the origin worker's acknowledgement, and the credit releases only from the fenced `DS`

@@ -16,7 +16,7 @@ import threading
 from collections.abc import Callable, Coroutine
 from typing import Any
 
-from shared.network.mtls import MutualTlsMaterial, server_context
+from shared.network.mtls import MutualTlsMaterial
 from shared.network.relay_frame import RelayDirection, RelayFrame
 from shared.outcome import FabricContentStore
 from shared.resident.carriage import ControlRelayCarriage, ResidentCarriagePlan
@@ -128,8 +128,7 @@ class ResidentLaneHost:
             return
         listener = ResidentDirectListener(
             sock=sock,
-            ssl_context=server_context(material),
-            root_identity=material.root_identity,
+            material=material,
             deliver=self._replica.on_frame,
             logger=self._logger,
         )

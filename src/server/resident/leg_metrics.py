@@ -2,9 +2,7 @@
 
 A resident invocation's payload crosses two legs: the source-to-root leg an origin
 worker carries over its outbound attachment, and the target leg into the selected
-replica. Counting them separately, per transport, is what makes an offload's effect
-readable — a workflow origin keeps its source leg on the reverse-rendezvous relay while
-its target leg moves to a direct socket, and a root-sourced serve call moves both.
+replica. They are counted separately, per transport.
 """
 
 from dataclasses import dataclass, field

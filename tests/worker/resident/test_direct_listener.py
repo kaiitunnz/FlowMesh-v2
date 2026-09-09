@@ -7,7 +7,7 @@ import ssl
 import pytest
 
 from shared.network.frame_stream import read_relay_frame, write_relay_frame
-from shared.network.mtls import MutualTlsMaterial, client_context, server_context
+from shared.network.mtls import MutualTlsMaterial, client_context
 from shared.network.relay_frame import RelayDirection, RelayFrame, RelayFrameKind
 from shared.resident.transport import ResidentFrameSink
 from tests.support.certs import new_ca
@@ -55,10 +55,7 @@ async def _listener(delivered: list[RelayFrame]) -> tuple[ResidentDirectListener
     sock = _bound()
     port = sock.getsockname()[1]
     listener = ResidentDirectListener(
-        sock=sock,
-        ssl_context=server_context(_material("worker.flowmesh")),
-        root_identity=_ROOT,
-        deliver=deliver,
+        sock=sock, material=_material("worker.flowmesh"), deliver=deliver
     )
     await listener.start()
     return listener, port
@@ -135,8 +132,7 @@ def test_connections_over_the_cap_are_refused_rather_than_accumulated() -> None:
         port = sock.getsockname()[1]
         listener = ResidentDirectListener(
             sock=sock,
-            ssl_context=server_context(_material("worker.flowmesh")),
-            root_identity=_ROOT,
+            material=_material("worker.flowmesh"),
             deliver=deliver,
             max_connections=1,
         )

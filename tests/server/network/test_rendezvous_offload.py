@@ -128,3 +128,38 @@ def test_a_lost_offloaded_leg_drops_the_sink_without_re_carrying_the_frame() -> 
 
     # The frame is neither re-sent over the relay nor silently duplicated.
     assert "rr:node:nde-target:down" not in asyncio.run(scenario())
+
+
+def test_a_released_session_takes_the_down_stream_rather_than_re_opening() -> None:
+    async def scenario() -> tuple[int, dict]:
+        redis = FakeBinaryRedis()
+        opened = 0
+
+        def offload_for(session_id: str, record: dict[str, str]) -> _Failing:
+            nonlocal opened
+            opened += 1
+            return _Failing()
+
+        await RelaySessionStore(redis).update(
+            "rly-1",
+            origin_node="nde-origin",
+            target_node="nde-target",
+            target_leg_transport="worker_direct",
+        )
+        bridge = RootRendezvousBridge(
+            RelayStreamStore(redis),
+            RelaySessionStore(redis),
+            RootCursorStore(redis),
+            offload_for=offload_for,
+        )
+        streams = RelayStreamStore(redis)
+        # The first frame loses the leg and releases it; the next must not re-open it.
+        await streams.publish_up("nde-origin", _frame(RelayDirection.ORIGIN_TO_TARGET))
+        await bridge.pump_node("nde-origin")
+        await streams.publish_up("nde-origin", _frame(RelayDirection.ORIGIN_TO_TARGET))
+        await bridge.pump_node("nde-origin")
+        return opened, redis.streams
+
+    opened, streams = asyncio.run(scenario())
+    assert opened == 1
+    assert "rr:node:nde-target:down" in streams

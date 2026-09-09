@@ -267,6 +267,25 @@ class TestDockerWorkerRuntimeSelection:
 
         assert environment["DOCKER_GPU_RUNTIME"] == "nvidia"
 
+    def test_worker_environment_withholds_the_root_target_leg_identity(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A worker serves a target-leg listener and pins the root that dials it. Handing
+        # it the root's own dialing identity would let it satisfy another target's pin,
+        # so only the listener half of the material is propagated.
+        monkeypatch.setattr(env, "NETWORK_PLANE_TARGET_LEG_CA_B64", "ca")
+        monkeypatch.setattr(env, "NETWORK_PLANE_TARGET_LEG_SERVER_CERT_B64", "srv-cert")
+        monkeypatch.setattr(env, "NETWORK_PLANE_TARGET_LEG_SERVER_KEY_B64", "srv-key")
+        monkeypatch.setattr(env, "NETWORK_PLANE_TARGET_LEG_ROOT_IDENTITY", "the-root")
+
+        environment = self._worker()._base_environment()
+
+        assert environment["NETWORK_PLANE_TARGET_LEG_CA_B64"] == "ca"
+        assert environment["NETWORK_PLANE_TARGET_LEG_SERVER_CERT_B64"] == "srv-cert"
+        assert environment["NETWORK_PLANE_TARGET_LEG_SERVER_KEY_B64"] == "srv-key"
+        assert environment["NETWORK_PLANE_TARGET_LEG_ROOT_IDENTITY"] == "the-root"
+        assert not [key for key in environment if "TARGET_LEG_CLIENT" in key]
+
 
 class TestCapacityChangeReporting:
     def _run(self, coro: object) -> object:  # type: ignore[return]

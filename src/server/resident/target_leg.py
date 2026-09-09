@@ -1,12 +1,12 @@
 """The root's forward-dialed target-leg carriage.
 
 A trusted deployment lets the root carry an admitted resident invocation's target leg
-over a direct socket instead of the reverse-rendezvous relay: ``worker_direct`` opens
-the selected worker's claim-gated replica-sidecar listener, ``node_relay`` opens the
-target node's purpose-scoped listener, which hands the session to its local sidecar
-uplink. Both legs carry the same frames as the relay, so the handoff, route
-authorization, fences, windows, and cancellation are unchanged and the target-side claim
-gate is the only authority over the traffic.
+over a direct socket: ``worker_direct`` opens the selected worker's claim-gated
+replica-sidecar listener, ``node_relay`` opens the target node's purpose-scoped
+listener, which hands the session to its local sidecar uplink. Both legs carry the same
+frames as the relay, so the handoff, route authorization, fences, windows, and
+cancellation are the same, and the target-side claim gate is the only authority over the
+traffic.
 
 The root bridges opaque frames: it reads a frame's routing identity and writes the
 frame through, leaving payload, engine protocol, cursors, and windows to the endpoints
@@ -16,7 +16,11 @@ A dial that fails before any frame reaches the target records a classified path
 observation and falls through to the relay base under the same claim, request identity,
 and held credit. Once a frame has been written the leg never switches transport: a loss
 from there on leaves the invocation's outcome ambiguous, which the origin reports as
-uncertain with its credit held.
+uncertain with its credit held. Such a loss records the same classified observation, so
+the re-drive resolves the transport as demoted and carries the relay base: an attempt is
+never replayed across transports, and a path that keeps failing stops being selected.
+Only a transport loss observes — a fence, tenant, descriptor, application, or engine
+rejection arrives as a frame and settles the boundary without touching the path.
 """
 
 import asyncio
@@ -120,6 +124,7 @@ class _TargetLegSink(ResidentFrameSink):
         self._writer: asyncio.StreamWriter | None = None
         self._reader_task: asyncio.Task[None] | None = None
         self._on_base = False
+        self._closing = False
 
     async def send(self, frame: RelayFrame) -> None:
         if self._on_base:
@@ -132,6 +137,7 @@ class _TargetLegSink(ResidentFrameSink):
         try:
             await write_relay_frame(self._writer, frame)
         except (OSError, FrameStreamError) as exc:
+            self._observe_loss(exc)
             self.close()
             raise TargetLegLost(f"target leg lost for {self._session_id}") from exc
         self._carriage.meter(self._transport.value, len(frame.payload))
@@ -169,12 +175,23 @@ class _TargetLegSink(ResidentFrameSink):
                 frame = await read_relay_frame(reader)
                 self._carriage.meter(self._transport.value, len(frame.payload))
                 await self._carriage.deliver(frame)
-        except (asyncio.IncompleteReadError, OSError, FrameStreamError):
-            pass
+        except (asyncio.IncompleteReadError, OSError, FrameStreamError) as exc:
+            self._observe_loss(exc)
         except asyncio.CancelledError:
             raise
 
+    def _observe_loss(self, exc: BaseException) -> None:
+        """Record a transport loss, unless this leg is already being released.
+
+        Releasing the leg ends its read with the same errors a genuine loss raises, so a
+        session torn down on its terminal would otherwise demote a healthy transport.
+        """
+        if self._closing:
+            return
+        self._carriage.observe(self._session_id, self._transport, _classify(exc))
+
     def close(self) -> None:
+        self._closing = True
         if self._reader_task is not None:
             self._reader_task.cancel()
             self._reader_task = None
@@ -263,7 +280,6 @@ def bridge_offload_selector(
                 session_id=session_id,
                 target_leg_transport=transport,
                 target_leg_endpoint=record.get("target_leg_endpoint") or "",
-                route_epoch=int(record.get("route_epoch") or 0),
             )
         )
 
@@ -287,8 +303,8 @@ def build_target_leg_support(
         context = client_context(
             MutualTlsMaterial.from_b64(
                 ca_b64=config.target_leg.ca_b64,
-                cert_b64=config.target_leg.cert_b64,
-                key_b64=config.target_leg.key_b64,
+                cert_b64=config.target_leg.client_cert_b64,
+                key_b64=config.target_leg.client_key_b64,
                 root_identity=config.target_leg.root_identity,
             )
         )

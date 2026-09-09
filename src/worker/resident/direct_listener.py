@@ -1,50 +1,41 @@
 """The replica worker's claim-gated resident target-leg listener.
 
-A trusted deployment lets the root open this listener directly instead of carrying the
-target leg over the reverse-rendezvous relay. It accepts only a mutually authenticated
-connection whose certificate carries the pinned root identity, then feeds each frame it
-reads to the replica sidecar and returns the sidecar's frames over the same connection.
-
-The listener is transport only: it never inspects a frame's payload, and the sidecar's
-claim gate is the sole authority over which traffic reaches the engine. It fronts
-the sidecar, never the resident engine listener.
+A trusted deployment lets the root carry a resident invocation's target leg straight
+into this listener. Each frame it reads goes to the replica
+sidecar, which answers over the same connection, so the sidecar's claim gate is the sole
+authority over which traffic reaches the engine. It fronts the sidecar; the resident
+engine listener stays loopback-only behind it.
 """
 
-import asyncio
 import logging
 import socket
-import ssl
 from collections.abc import Awaitable, Callable
 
-from shared.network.frame_stream import (
-    FrameStreamError,
-    read_relay_frame,
-    write_relay_frame,
+from shared.network.mtls import MutualTlsMaterial
+from shared.network.mtls_listener import (
+    MAX_CONNECTIONS,
+    ConnectionHandler,
+    MutualTlsFrameListener,
 )
-from shared.network.mtls import is_pinned_root
 from shared.network.relay_frame import RelayFrame
 from shared.resident.transport import ResidentFrameSink
 
 # Routes one frame into the replica sidecar, answering over the connection's own sink.
 FrameDelivery = Callable[[RelayFrame, ResidentFrameSink], Awaitable[None]]
 
-# A dialer that opens a socket but never finishes the handshake holds one slot, so the
-# handshake is deadlined and the accepted set is bounded. A legitimate leg then idles
-# between frames for as long as its invocation runs, so reads carry no deadline.
-_HANDSHAKE_TIMEOUT_SEC = 10.0
-_MAX_CONNECTIONS = 64
 
+class _SidecarConnection(ConnectionHandler):
+    """Hands one connection's frames to the replica sidecar."""
 
-class _ConnectionSink(ResidentFrameSink):
-    """Returns the sidecar's frames over the connection that delivered the request."""
+    def __init__(self, deliver: FrameDelivery, sink: ResidentFrameSink) -> None:
+        self._deliver = deliver
+        self._sink = sink
 
-    def __init__(self, writer: asyncio.StreamWriter, lock: asyncio.Lock) -> None:
-        self._writer = writer
-        self._lock = lock
+    async def on_frame(self, frame: RelayFrame) -> None:
+        await self._deliver(frame, self._sink)
 
-    async def send(self, frame: RelayFrame) -> None:
-        async with self._lock:
-            await write_relay_frame(self._writer, frame)
+    def close(self) -> None:
+        return None
 
 
 class ResidentDirectListener:
@@ -54,83 +45,28 @@ class ResidentDirectListener:
         self,
         *,
         sock: socket.socket,
-        ssl_context: ssl.SSLContext,
-        root_identity: str,
+        material: MutualTlsMaterial,
         deliver: FrameDelivery,
-        max_connections: int = _MAX_CONNECTIONS,
+        max_connections: int = MAX_CONNECTIONS,
         logger: logging.Logger | None = None,
     ) -> None:
         self._sock = sock
-        self._ssl_context = ssl_context
-        self._root_identity = root_identity
-        self._deliver = deliver
-        self._max_connections = max_connections
-        self._open = 0
-        self._logger = logger or logging.getLogger("resident-direct-listener")
-        self._server: asyncio.Server | None = None
-
-    async def start(self) -> None:
-        self._server = await asyncio.start_server(
-            self._serve,
-            sock=self._sock,
-            ssl=self._ssl_context,
-            ssl_handshake_timeout=_HANDSHAKE_TIMEOUT_SEC,
+        self._listener = MutualTlsFrameListener(
+            material=material,
+            handler=lambda sink: _SidecarConnection(deliver, sink),
+            max_connections=max_connections,
+            logger=logger or logging.getLogger("resident-direct-listener"),
         )
 
+    @property
+    def port(self) -> int:
+        return self._listener.port
+
+    async def start(self) -> None:
+        await self._listener.start_on_socket(self._sock)
+
     async def stop(self) -> None:
-        server, self._server = self._server, None
-        if server is None:
-            return
-        server.close()
-        try:
-            await server.wait_closed()
-        except (OSError, asyncio.CancelledError):
-            pass
-
-    async def _serve(
-        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-    ) -> None:
-        if self._open >= self._max_connections:
-            self._logger.warning("refusing a target-leg connection over the cap")
-            await _close(writer)
-            return
-        if not self._is_root(writer):
-            self._logger.warning("refusing a target-leg dialer that is not the root")
-            await _close(writer)
-            return
-        self._open += 1
-        sink = _ConnectionSink(writer, asyncio.Lock())
-        try:
-            while True:
-                frame = await read_relay_frame(reader)
-                await self._deliver(frame, sink)
-        except (asyncio.IncompleteReadError, ConnectionError, OSError):
-            pass
-        except FrameStreamError as exc:
-            self._logger.warning("closing a target-leg connection: %s", exc)
-        finally:
-            self._open -= 1
-            await _close(writer)
-
-    def _is_root(self, writer: asyncio.StreamWriter) -> bool:
-        """Whether the verified peer certificate carries the pinned root identity.
-
-        Mutual TLS has already proved the certificate chains to the configured CA; the
-        pin is what proves the dialer is the root rather than another holder of a
-        CA-signed certificate.
-        """
-        ssl_object = writer.get_extra_info("ssl_object")
-        if not isinstance(ssl_object, ssl.SSLObject):
-            return False
-        return is_pinned_root(ssl_object.getpeercert(), self._root_identity)
-
-
-async def _close(writer: asyncio.StreamWriter) -> None:
-    try:
-        writer.close()
-        await writer.wait_closed()
-    except (OSError, asyncio.CancelledError, ssl.SSLError):
-        pass
+        await self._listener.stop()
 
 
 __all__ = ["ResidentDirectListener"]

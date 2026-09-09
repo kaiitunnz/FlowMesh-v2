@@ -93,8 +93,10 @@ listed here is in `.env.example`.
 | `NETWORK_PLANE_TARGET_LEG_TRUST_DOMAIN` | – | Trust domain an offload requires; the endpoint's if empty |
 | `NETWORK_PLANE_TARGET_LEG_NODE_LISTENER_URL` | – | Node target-leg listener (`host:port`) |
 | `NETWORK_PLANE_TARGET_LEG_CA_B64` | – | Base64 PEM CA bundle for target-leg mutual TLS |
-| `NETWORK_PLANE_TARGET_LEG_CERT_B64` | – | Base64 PEM certificate for target-leg mutual TLS |
-| `NETWORK_PLANE_TARGET_LEG_KEY_B64` | – | Base64 PEM private key for target-leg mutual TLS |
+| `NETWORK_PLANE_TARGET_LEG_CLIENT_CERT_B64` | – | Base64 PEM certificate the root dials with |
+| `NETWORK_PLANE_TARGET_LEG_CLIENT_KEY_B64` | – | Base64 PEM private key the root dials with |
+| `NETWORK_PLANE_TARGET_LEG_SERVER_CERT_B64` | – | Base64 PEM certificate a target listener serves with |
+| `NETWORK_PLANE_TARGET_LEG_SERVER_KEY_B64` | – | Base64 PEM private key a target listener serves with |
 | `NETWORK_PLANE_TARGET_LEG_ROOT_IDENTITY` | – | Root certificate identity a target listener pins |
 | `ENABLE_WORKER_WATCHDOG` | `true` | Worker death detection |
 | `WORKER_DEATH_GRACE_SEC` | `60` | Grace period before marking dead |

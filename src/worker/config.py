@@ -60,8 +60,8 @@ class WorkerConfig:
     container_name: str | None = None
     ssh_network_name: str | None = None
     target_leg_ca_b64: str = ""
-    target_leg_cert_b64: str = ""
-    target_leg_key_b64: str = ""
+    target_leg_server_cert_b64: str = ""
+    target_leg_server_key_b64: str = ""
     target_leg_root_identity: str = ""
 
     @staticmethod
@@ -216,11 +216,11 @@ class WorkerConfig:
             target_leg_ca_b64=(
                 os.getenv("NETWORK_PLANE_TARGET_LEG_CA_B64") or ""
             ).strip(),
-            target_leg_cert_b64=(
-                os.getenv("NETWORK_PLANE_TARGET_LEG_CERT_B64") or ""
+            target_leg_server_cert_b64=(
+                os.getenv("NETWORK_PLANE_TARGET_LEG_SERVER_CERT_B64") or ""
             ).strip(),
-            target_leg_key_b64=(
-                os.getenv("NETWORK_PLANE_TARGET_LEG_KEY_B64") or ""
+            target_leg_server_key_b64=(
+                os.getenv("NETWORK_PLANE_TARGET_LEG_SERVER_KEY_B64") or ""
             ).strip(),
             target_leg_root_identity=(
                 os.getenv("NETWORK_PLANE_TARGET_LEG_ROOT_IDENTITY") or ""

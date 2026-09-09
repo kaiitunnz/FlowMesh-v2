@@ -102,7 +102,10 @@ target-leg listener. Anything else is carried over `control_relay`. Enable the p
 
 Both ends authenticate with mutual TLS from the configured CA bundle, and the target pins
 the configured root identity, so a certificate the CA signed for another party is refused
-before any frame is read. The `worker_direct` target is the replica worker's own claim-gated
+before any frame is read. The two ends hold separate identities: the root dials with the
+identity the pin names and keeps it, while a target listener serves with an identity of
+its own — the only half a worker is given — so holding a listener identity never
+satisfies another target's pin. The `worker_direct` target is the replica worker's own claim-gated
 listener, whose port the worker reports at registration and control composes with the node's
 advertised host. The `node_relay` target is a node listener that resolves each frame's
 control-minted relay session to that node's local sidecar uplink — the dialer supplies no

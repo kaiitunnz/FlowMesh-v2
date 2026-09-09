@@ -35,8 +35,10 @@ def _require_target_leg_mutual_tls(
         name
         for name in (
             "NETWORK_PLANE_TARGET_LEG_CA_B64",
-            "NETWORK_PLANE_TARGET_LEG_CERT_B64",
-            "NETWORK_PLANE_TARGET_LEG_KEY_B64",
+            "NETWORK_PLANE_TARGET_LEG_CLIENT_CERT_B64",
+            "NETWORK_PLANE_TARGET_LEG_CLIENT_KEY_B64",
+            "NETWORK_PLANE_TARGET_LEG_SERVER_CERT_B64",
+            "NETWORK_PLANE_TARGET_LEG_SERVER_KEY_B64",
             "NETWORK_PLANE_TARGET_LEG_ROOT_IDENTITY",
         )
         if not env.get(name, "").strip()
@@ -691,14 +693,24 @@ STACK_ENV_SCHEMA = EnvSchema(
                     description="Base64 PEM CA bundle for target-leg mutual TLS.",
                 ),
                 EnvVar(
-                    "NETWORK_PLANE_TARGET_LEG_CERT_B64",
+                    "NETWORK_PLANE_TARGET_LEG_CLIENT_CERT_B64",
                     "",
-                    description="Base64 PEM certificate for target-leg mutual TLS.",
+                    description="Base64 PEM certificate the root dials with.",
                 ),
                 EnvVar(
-                    "NETWORK_PLANE_TARGET_LEG_KEY_B64",
+                    "NETWORK_PLANE_TARGET_LEG_CLIENT_KEY_B64",
                     "",
-                    description="Base64 PEM private key for target-leg mutual TLS.",
+                    description="Base64 PEM private key the root dials with.",
+                ),
+                EnvVar(
+                    "NETWORK_PLANE_TARGET_LEG_SERVER_CERT_B64",
+                    "",
+                    description="Base64 PEM certificate a target listener serves with.",
+                ),
+                EnvVar(
+                    "NETWORK_PLANE_TARGET_LEG_SERVER_KEY_B64",
+                    "",
+                    description="Base64 PEM private key a target listener serves with.",
                 ),
                 EnvVar(
                     "NETWORK_PLANE_TARGET_LEG_ROOT_IDENTITY",

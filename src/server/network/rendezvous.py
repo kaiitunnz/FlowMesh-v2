@@ -69,6 +69,10 @@ SOURCE_TO_ROOT_LEG = "source_to_root"
 TARGET_LEG = "target"
 _RELAY = "control_relay"
 
+# How many released sessions to remember. A lost session re-drives under a fresh session
+# id, so this only has to outlive the frames already in flight for the old one.
+_RELEASED_MEMORY = 1024
+
 
 class RelayTargetSink:
     """Publishes a frame down to the target node its session's record names."""
@@ -100,10 +104,10 @@ class RootRendezvousBridge:
     """Bridges opaque relay frames between attached nodes by their session routing.
 
     A session the wiring selects an offloaded sink for has its frames toward the target
-    carried over that sink instead of the target node's down stream; the target's frames
-    come back through the same sink's own delivery and publish down to the origin node,
-    so the origin's leg is untouched. The bridge selects and forwards; it reads no more
-    of a frame than it already does.
+    carried over that sink; the target's frames come back through the same sink's own
+    delivery and publish down to the origin node, so only the target leg moves. The
+    bridge selects and forwards, reading a frame's routing and flow-control fields as it
+    always does.
     """
 
     def __init__(
@@ -123,6 +127,7 @@ class RootRendezvousBridge:
         self._offload_for = offload_for
         self._meter = meter
         self._sinks: dict[str, FrameSink] = {}
+        self._released: OrderedDict[str, None] = OrderedDict()
         self._batch = batch
         self._logger = logger or logging.getLogger("network-rendezvous")
 
@@ -201,7 +206,7 @@ class RootRendezvousBridge:
 
     def _target_sink(self, session_id: str, record: dict[str, str]) -> FrameSink | None:
         """The offloaded sink for this session, or ``None`` for the down stream."""
-        if self._offload_for is None:
+        if self._offload_for is None or session_id in self._released:
             return None
         if (sink := self._sinks.get(session_id)) is not None:
             return sink
@@ -211,8 +216,15 @@ class RootRendezvousBridge:
         return sink
 
     def release(self, session_id: str) -> None:
-        """Drop one session's offloaded sink, on its terminal or its reap."""
+        """Drop one session's offloaded sink, on its terminal or its reap.
+
+        A released session is remembered briefly so a late frame for it takes the target
+        node's down stream rather than re-opening the leg it just lost.
+        """
         self._sinks.pop(session_id, None)
+        self._released[session_id] = None
+        while len(self._released) > _RELEASED_MEMORY:
+            self._released.popitem(last=False)
 
 
 __all__ = [

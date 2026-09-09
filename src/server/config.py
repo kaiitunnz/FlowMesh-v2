@@ -528,11 +528,15 @@ class TargetLegOffloadConfig:
     A resident invocation's target leg leaves the reverse-rendezvous relay for a
     direct socket only where the deployment has declared the pair trusted: the target
     must sit in ``trust_domain`` and one of ``classes``, and the root and target
-    authenticate each other with mutual TLS over the ``ca_b64``/``cert_b64``/``key_b64``
-    material. ``root_identity`` is the certificate identity a target listener pins, so
-    a CA-signed certificate that is not the root's is refused. ``node_listener_url`` is
-    this node's purpose-scoped target-leg listener, which hands a session to its local
-    sidecar uplink.
+    authenticate each other with mutual TLS against the ``ca_b64`` bundle.
+
+    The two ends hold separate identities. ``client_cert_b64``/``client_key_b64`` is the
+    root's dialing identity, whose ``root_identity`` every target pins; it stays on the
+    root. ``server_cert_b64``/``server_key_b64`` is the identity a target listener
+    serves with, and is the only one a worker is given — so holding a listener identity
+    never satisfies a target's root pin. ``node_listener_url`` is this node's
+    purpose-scoped target-leg listener, which hands a session to its local sidecar
+    uplink.
     """
 
     enabled: bool = False
@@ -540,8 +544,10 @@ class TargetLegOffloadConfig:
     classes: tuple[str, ...] = ("same_node", "same_cluster")
     protocol: str = TARGET_LEG_PROTOCOL
     ca_b64: str = ""
-    cert_b64: str = ""
-    key_b64: str = ""
+    client_cert_b64: str = ""
+    client_key_b64: str = ""
+    server_cert_b64: str = ""
+    server_key_b64: str = ""
     root_identity: str = ""
     node_listener_url: str = ""
 
@@ -559,24 +565,32 @@ class TargetLegOffloadConfig:
             trust_domain=_env_or_none(f"{prefix}TRUST_DOMAIN") or "",
             classes=classes,
             ca_b64=_env_or_none(f"{prefix}CA_B64") or "",
-            cert_b64=_env_or_none(f"{prefix}CERT_B64") or "",
-            key_b64=_env_or_none(f"{prefix}KEY_B64") or "",
+            client_cert_b64=_env_or_none(f"{prefix}CLIENT_CERT_B64") or "",
+            client_key_b64=_env_or_none(f"{prefix}CLIENT_KEY_B64") or "",
+            server_cert_b64=_env_or_none(f"{prefix}SERVER_CERT_B64") or "",
+            server_key_b64=_env_or_none(f"{prefix}SERVER_KEY_B64") or "",
             root_identity=_env_or_none(f"{prefix}ROOT_IDENTITY") or "",
             node_listener_url=_env_or_none(f"{prefix}NODE_LISTENER_URL") or "",
         )
         if config.enabled and not config.mutual_tls_ready:
             raise ValueError(
-                f"{prefix}ENABLED requires {prefix}CA_B64, {prefix}CERT_B64, "
-                f"{prefix}KEY_B64, and {prefix}ROOT_IDENTITY: a target-leg offload is "
-                "carried only over mutual TLS with a pinned root identity"
+                f"{prefix}ENABLED requires {prefix}CA_B64, {prefix}CLIENT_CERT_B64, "
+                f"{prefix}CLIENT_KEY_B64, {prefix}SERVER_CERT_B64, "
+                f"{prefix}SERVER_KEY_B64, and {prefix}ROOT_IDENTITY: a target-leg "
+                "offload is carried only over mutual TLS with a pinned root identity"
             )
         return config
 
     @property
     def mutual_tls_ready(self) -> bool:
-        """Whether the mutual-TLS material and the pinned root identity are present."""
+        """Whether both identities and the pinned root identity are present."""
         return bool(
-            self.ca_b64 and self.cert_b64 and self.key_b64 and self.root_identity
+            self.ca_b64
+            and self.client_cert_b64
+            and self.client_key_b64
+            and self.server_cert_b64
+            and self.server_key_b64
+            and self.root_identity
         )
 
 
