@@ -230,12 +230,15 @@ class _IngressHandler(BaseHTTPRequestHandler):
         # A HEAD response carries the headers its GET would produce and no body, and a
         # no-body status carries neither a body nor the framing for one.
         write_body = self.command != "HEAD"
-        framed = False
         try:
             while True:
                 frame = channel.drain(idle_timeout)
                 if frame is None:
-                    if not started:
+                    # No frame before the idle deadline: refuse a request that never
+                    # produced a head, and abort one whose stream stalled mid-delivery.
+                    if started:
+                        self._abort()
+                    else:
                         self._refuse(504, "resident serve timed out")
                     return
                 if frame.kind == "head":
@@ -244,26 +247,40 @@ class _IngressHandler(BaseHTTPRequestHandler):
                     self._send_head(frame.status, frame.headers, framed=framed)
                     started = True
                 elif frame.kind == "chunk":
+                    # A body frame before the engine's own head is a protocol error; the
+                    # head is never synthesized, so an unheaded stream fails closed.
                     if not started:
-                        framed = True
-                        self._send_head(200, (), framed=True)
-                        started = True
+                        self._refuse(502, "resident serve sent a body before a head")
+                        return
                     if write_body and frame.payload:
                         self._write_chunk(frame.payload)
                 elif frame.terminal:
                     if not started:
-                        if frame.kind == "error":
-                            self._refuse(502, frame.detail or "resident serve error")
-                            return
-                        framed = True
-                        self._send_head(200, (), framed=True)
-                    if write_body:
+                        self._refuse(
+                            502, frame.detail or "resident serve produced no response"
+                        )
+                        return
+                    # A dropped body frame or an engine error leaves an incomplete
+                    # response: abort the connection rather than close it cleanly and
+                    # imply a completion that kept every byte.
+                    if channel.lost or frame.kind == "error":
+                        self._abort()
+                    elif write_body:
                         self._end_chunks()
                     return
         except (BrokenPipeError, ConnectionResetError):
             # The client is gone. Stop delivering; the claim settles on the sidecar's
             # own fenced terminal, never on this connection ending.
             channel.close()
+
+    def _abort(self) -> None:
+        """Drop a partially delivered response so the client sees a broken transfer.
+
+        A chunked body that never receives its terminating zero-length chunk is an
+        incomplete message: closing the connection without it signals the failure rather
+        than implying a clean completion for a response that lost bytes.
+        """
+        self.close_connection = True
 
     def _send_head(
         self, status: int, headers: tuple[tuple[str, str], ...], *, framed: bool

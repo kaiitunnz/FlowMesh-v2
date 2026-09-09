@@ -5,10 +5,12 @@ is served on a listener thread, so relayed response frames cross between them he
 drive offers the engine's head, its opaque body frames, and the terminal; the connection
 drains them in order and writes them out.
 
-The backlog is bounded: a client that stops draining cannot pin unbounded memory, so
-frames past the bound are dropped while the terminal always lands — evicting the oldest
-frame if it must — so the connection always closes. Dropping a frame never touches the
-claim: only the sidecar's fenced terminal releases its credit.
+The backlog is bounded: a client that stops draining cannot pin unbounded memory. A
+frame that would overflow the bound is not silently dropped into a clean completion —
+the channel records the loss so the connection is aborted at the terminal rather than
+closed as if it kept every byte. The terminal itself always lands, evicting the oldest
+frame if it must. Neither a dropped frame nor a gone client touches the claim: only the
+sidecar's fenced terminal releases its credit.
 """
 
 import queue
@@ -41,6 +43,12 @@ class ServeIngressChannel:
         default_factory=lambda: queue.Queue(maxsize=_QUEUE_MAX)
     )
     _closed: bool = False
+    _lost: bool = False
+
+    @property
+    def lost(self) -> bool:
+        """Whether a body frame was dropped, so a clean completion would lie."""
+        return self._lost
 
     def head(self, status: int, headers: tuple[tuple[str, str], ...]) -> None:
         self._offer(ServeIngressFrame(kind="head", status=status, headers=headers))
@@ -64,14 +72,18 @@ class ServeIngressChannel:
         try:
             self.frames.put_nowait(frame)
         except queue.Full:
-            pass
+            # The client is not draining fast enough. Record the gap rather than drop
+            # the frame silently, so the terminal aborts the connection instead of
+            # implying a response that kept every byte.
+            self._lost = True
 
     def _finish(self, frame: ServeIngressFrame) -> None:
         if self._closed:
             return
         self._closed = True
         # The terminal must reach the connection so its response closes; if the bounded
-        # backlog is full, evict the oldest frame to make room for it.
+        # backlog is full, evict the oldest frame to make room — an evicted frame is a
+        # gap the connection turns into an aborted delivery.
         while True:
             try:
                 self.frames.put_nowait(frame)
@@ -79,6 +91,7 @@ class ServeIngressChannel:
             except queue.Full:
                 try:
                     self.frames.get_nowait()
+                    self._lost = True
                 except queue.Empty:
                     return
 
