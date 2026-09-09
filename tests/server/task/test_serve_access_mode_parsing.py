@@ -48,7 +48,12 @@ def _parsed_mode(access_mode: str | None) -> str | None:
 
 
 @pytest.mark.parametrize("access_mode", ["proxy", "forward"])
-def test_both_gated_modes_parse(access_mode: str) -> None:
+def test_both_gated_modes_parse(
+    access_mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Both gated modes are enabled here; each mode's deployment switch is exercised
+    # separately below.
+    monkeypatch.setattr("server.task.parser._ENABLE_SERVER_SERVE_FORWARD", True)
     assert _parsed_mode(access_mode) == access_mode
 
 
@@ -73,7 +78,22 @@ def test_proxy_is_rejected_when_the_deployment_disables_the_proxy_ingress(
 def test_forward_is_not_gated_by_the_proxy_switch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The forward ingress has its own registration knob; its availability is resolved
-    # per request, so the proxy switch must not reject it at submission.
+    # Each gated mode has its own deployment switch: disabling proxy must not reject a
+    # forward task when forward is enabled.
     monkeypatch.setattr("server.task.parser._ENABLE_SERVER_SERVE_PROXY", False)
+    monkeypatch.setattr("server.task.parser._ENABLE_SERVER_SERVE_FORWARD", True)
+    assert _parsed_mode("forward") == "forward"
+
+
+def test_forward_is_rejected_when_the_deployment_disables_forward(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # ENABLE_SERVER_SERVE_FORWARD is a static deployment config known at submission, so
+    # a forward task on a forward-disabled server fails fast rather than being adopted
+    # and failing every request.
+    monkeypatch.setattr("server.task.parser._ENABLE_SERVER_SERVE_FORWARD", False)
+    with pytest.raises(ValueError, match="serve accessMode 'forward' is disabled"):
+        parse_workflow(_serve_workflow("forward"), format="native")
+    # With forward enabled the same task parses.
+    monkeypatch.setattr("server.task.parser._ENABLE_SERVER_SERVE_FORWARD", True)
     assert _parsed_mode("forward") == "forward"

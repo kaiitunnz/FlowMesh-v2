@@ -17,6 +17,7 @@ from .n8n_parser import translate_n8n_workflow
 _ALLOWED_TASK_TYPES = ", ".join(member.value for member in TaskType)
 _ENABLE_SERVER_SSH_PROXY = parse_bool_env("ENABLE_SERVER_SSH_PROXY", True)
 _ENABLE_SERVER_SERVE_PROXY = parse_bool_env("ENABLE_SERVER_SERVE_PROXY", True)
+_ENABLE_SERVER_SERVE_FORWARD = parse_bool_env("ENABLE_SERVER_SERVE_FORWARD", False)
 _ENABLE_SERVER_PORT_FORWARD = parse_bool_env("ENABLE_SERVER_PORT_FORWARD", True)
 
 
@@ -713,10 +714,12 @@ def _validate_ssh_access_mode(task: TaskEnvelopeTemplate, context: str) -> None:
 
 
 def _validate_serve_access_mode(task: TaskEnvelopeTemplate, context: str) -> None:
-    """Refuse a serve task pinned to proxy where the deployment disabled that ingress.
+    """Refuse a serve task whose pinned exposure mode is disabled on this server.
 
-    A forward task is not gated here: its ingress registers and withdraws at runtime, so
-    availability is resolved per request rather than fixed at submission.
+    The static deployment enable for each mode is gated here at submission — proxy and
+    forward alike — so a task pinned to a mode the server does not host fails fast
+    rather than being adopted and failing every request. The dynamic per-request
+    exposure availability stays resolved at runtime.
     """
     if not isinstance(task.spec, (ServeSpecTemplate, DevModelSpecTemplate)):
         return
@@ -724,6 +727,11 @@ def _validate_serve_access_mode(task: TaskEnvelopeTemplate, context: str) -> Non
     if access_mode == "proxy" and not _ENABLE_SERVER_SERVE_PROXY:
         raise ValueError(
             f"Invalid task payload{context}: serve accessMode 'proxy' "
+            "is disabled on this server"
+        )
+    if access_mode == "forward" and not _ENABLE_SERVER_SERVE_FORWARD:
+        raise ValueError(
+            f"Invalid task payload{context}: serve accessMode 'forward' "
             "is disabled on this server"
         )
 
