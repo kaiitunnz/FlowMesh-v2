@@ -190,22 +190,26 @@ def _offload_material(
 ) -> MutualTlsMaterial | None:
     """This worker's transient copy of the node's offload TLS material, if configured.
 
-    A deployment that admits offloads without mutual TLS is an operator attesting a
-    trusted network, so the absence of material is reported rather than silently
-    treated as a disabled feature. Material this worker was handed and cannot read is
-    fatal: dialing and serving in plaintext instead would carry resident payloads over a
-    wire the operator asked to protect.
+    Mutual TLS is on unless the operator attests a trusted network, so material that is
+    absent or unusable is fatal: dialing and serving in plaintext instead would carry
+    resident payloads over a wire the deployment asked to protect. Absent material is a
+    node misconfiguration rather than a posture, since the supervisor reads the files
+    and fails on its own side before it hands this worker their bytes.
     """
     if not cfg.offload_enabled:
+        return None
+    if cfg.offload_disable_mtls:
+        logger.warning(
+            "resident offloads are enabled without mutual TLS: this worker dials a "
+            "target on an operator-attested trusted network, proving no identity to it"
+        )
         return None
     if not (
         cfg.offload_tls_ca_b64 and cfg.offload_tls_cert_b64 and cfg.offload_tls_key_b64
     ):
-        logger.warning(
-            "resident offloads are enabled without mutual TLS material: this worker "
-            "dials a target on a trusted network, proving no identity to it"
+        raise MutualTlsMaterialError(
+            "resident offloads require mutual TLS material this worker was not given"
         )
-        return None
     try:
         return MutualTlsMaterial.from_b64(
             ca_b64=cfg.offload_tls_ca_b64,

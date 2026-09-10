@@ -30,8 +30,8 @@ def _require_offload_trust(
 ) -> None:
     """A trusted offload needs the network plane, a trust domain, and its material.
 
-    Mutual TLS is the default; an operator who turns it off has attested a trusted
-    network, which is warned about rather than silently accepted.
+    Mutual TLS is on unless the operator sets the disable flag, which attests a trusted
+    network and is warned about rather than silently accepted.
     """
     if not parse_bool(env.get("NETWORK_PLANE_OFFLOAD_ENABLED", "")):
         return
@@ -51,18 +51,18 @@ def _require_offload_trust(
         "NETWORK_PLANE_OFFLOAD_TLS_CERT_FILE",
         "NETWORK_PLANE_OFFLOAD_TLS_KEY_FILE",
     ]
-    if parse_bool(env.get("NETWORK_PLANE_OFFLOAD_REQUIRE_MTLS", "true")):
-        missing = [name for name in material if not (env.get(name, "") or "").strip()]
-        if missing:
-            errors.append(
-                "NETWORK_PLANE_OFFLOAD_ENABLED requires "
-                f"{', '.join(missing)}: an offload is carried over mutual TLS unless "
-                "NETWORK_PLANE_OFFLOAD_REQUIRE_MTLS is explicitly disabled"
-            )
-    else:
+    if parse_bool(env.get("NETWORK_PLANE_OFFLOAD_DISABLE_MTLS", "")):
         warnings.append(
-            "NETWORK_PLANE_OFFLOAD_REQUIRE_MTLS is disabled: offload traffic runs on "
-            "an operator-attested trusted network and its dialer proves no identity"
+            "NETWORK_PLANE_OFFLOAD_DISABLE_MTLS is set: offload traffic runs on an "
+            "operator-attested trusted network and its dialer proves no identity"
+        )
+        return
+    missing = [name for name in material if not (env.get(name, "") or "").strip()]
+    if missing:
+        errors.append(
+            "NETWORK_PLANE_OFFLOAD_ENABLED requires "
+            f"{', '.join(missing)}: an offload is carried over mutual TLS unless "
+            "NETWORK_PLANE_OFFLOAD_DISABLE_MTLS is set"
         )
 
 
@@ -695,9 +695,9 @@ STACK_ENV_SCHEMA = EnvSchema(
                     var_type=EnvVarType.CSV,
                 ),
                 EnvVar(
-                    "NETWORK_PLANE_OFFLOAD_REQUIRE_MTLS",
-                    "true",
-                    description="Require mutual TLS on an offload.",
+                    "NETWORK_PLANE_OFFLOAD_DISABLE_MTLS",
+                    "false",
+                    description="Run offloads on an attested trusted network.",
                     var_type=EnvVarType.BOOL,
                 ),
                 EnvVar(

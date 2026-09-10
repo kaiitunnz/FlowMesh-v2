@@ -131,9 +131,7 @@ class TrustedOffloadPolicy(BaseModel):
 
     Disabled by default: a deployment that has not declared a trusted class carries
     every resident invocation over ``control_relay``. ``protocol`` is the transport
-    capability both the origin and the target must advertise, and ``require_mtls``
-    is the default posture — an operator who clears it has explicitly attested a
-    trusted network, which never silently downgrades a candidate that needs mutual TLS.
+    capability both the origin and the target must advertise.
 
     ``probe`` marks the rule a reachability diagnostic resolves under. A probe dials a
     node's own diagnostic listener and carries no invocation payload, so it is offered
@@ -147,7 +145,6 @@ class TrustedOffloadPolicy(BaseModel):
     trust_domain: str = ""
     classes: frozenset[ReachabilityClass] = frozenset()
     protocol: str = ""
-    require_mtls: bool = True
     probe: bool = False
 
 

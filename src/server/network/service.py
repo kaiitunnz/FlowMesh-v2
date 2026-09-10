@@ -75,7 +75,6 @@ def _offload_policy(config: NetworkPlaneConfig) -> TrustedOffloadPolicy:
             if value in _REACHABILITY_CLASSES
         ),
         protocol=OFFLOAD_PROTOCOL,
-        require_mtls=offload.require_mtls,
     )
 
 

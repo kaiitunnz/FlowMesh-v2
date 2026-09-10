@@ -223,13 +223,12 @@ def _offload_material(
 ) -> MutualTlsMaterial | None:
     """This node's offload TLS material, read from the operator's configured files.
 
-    A deployment that admits offloads without mutual TLS is an operator attesting a
-    trusted network, so missing material is reported rather than silently disabling the
-    listener the node already advertises. Material this node was configured to present
-    and cannot read is fatal: serving the advertised listener in plaintext instead would
-    carry resident payloads over a wire the operator asked to protect.
+    Mutual TLS is on unless the operator attests a trusted network, so material this
+    node cannot read is fatal whether it is missing or unusable: serving the advertised
+    listener in plaintext instead would carry resident payloads over a wire the
+    deployment asked to protect.
     """
-    if not offload.require_mtls and not offload.mtls_ready:
+    if offload.disable_mtls:
         logger.warning(
             "serving the node offload listener without mutual TLS: the deployment is "
             "configured for a trusted network, so a dialer proves no identity"

@@ -102,7 +102,7 @@ transport capability, and directional evidence has not demoted the path. An untr
 public, NATed, outbound-only, stale, or policy-ineligible target is offered
 `control_relay` alone, even when it advertises a dialable address.
 
-Mutual TLS is the default. The deployment CA issues each node an identity carrying both
+Mutual TLS is on by default. The deployment CA issues each node an identity carrying both
 client and server authentication, so a target admits only a dialer the CA vouched for,
 and an origin admits only a target whose certificate covers the host it dialed — the
 node's advertised offload address must therefore appear among its certificate's
@@ -110,8 +110,9 @@ subject-alternative names, or the handshake fails and the attempt falls back to 
 relay. The replica's claim gate then fences the session to the invocation control
 admitted. TLS material is configured as files under the offload TLS directory, which the
 stack mounts read-only at `/etc/ssl/offload` where the configured paths resolve, and is
-base64-encoded only when a worker attachment is handed its transient copy. An operator may instead attest a trusted network and run without mutual
-TLS, which warns on every listener and still requires the same trusted-pair policy.
+base64-encoded only when a worker attachment is handed its transient copy. Material a node cannot read is fatal at start-up rather than a fallback to plaintext. An
+operator may instead set `NETWORK_PLANE_OFFLOAD_DISABLE_MTLS` to attest a trusted
+network, which warns on every listener and still requires the same trusted-pair policy.
 
 A dial that fails before any frame reaches the target records classified path evidence
 and falls through to the relay under the same claim, request identity, and held credit.

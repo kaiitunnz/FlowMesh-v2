@@ -60,6 +60,7 @@ class WorkerConfig:
     container_name: str | None = None
     ssh_network_name: str | None = None
     offload_enabled: bool = False
+    offload_disable_mtls: bool = False
     offload_tls_ca_b64: str | None = None
     offload_tls_cert_b64: str | None = None
     offload_tls_key_b64: str | None = None
@@ -94,6 +95,7 @@ class WorkerConfig:
         # configures it as files on the node it came from.
         offload_prefix = "NETWORK_PLANE_OFFLOAD_"
         offload_enabled = parse_bool_env(f"{offload_prefix}ENABLED", False)
+        offload_disable_mtls = parse_bool_env(f"{offload_prefix}DISABLE_MTLS", False)
         offload_tls_ca_b64 = (
             os.getenv(f"{offload_prefix}TLS_CA_B64") or ""
         ).strip() or None
@@ -199,6 +201,7 @@ class WorkerConfig:
             supervisor_grpc_target=supervisor_grpc_target,
             supervisor_grpc_tls_ca_b64=supervisor_grpc_tls_ca_b64,
             offload_enabled=offload_enabled,
+            offload_disable_mtls=offload_disable_mtls,
             offload_tls_ca_b64=offload_tls_ca_b64,
             offload_tls_cert_b64=offload_tls_cert_b64,
             offload_tls_key_b64=offload_tls_key_b64,

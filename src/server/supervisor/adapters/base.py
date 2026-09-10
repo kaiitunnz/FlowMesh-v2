@@ -140,6 +140,9 @@ class WorkerAdapter(ABC):
             "NETWORK_PLANE_OFFLOAD_ENABLED": to_env_str(
                 env.NETWORK_PLANE_OFFLOAD_ENABLED
             ),
+            "NETWORK_PLANE_OFFLOAD_DISABLE_MTLS": to_env_str(
+                env.NETWORK_PLANE_OFFLOAD_DISABLE_MTLS
+            ),
             "NETWORK_PLANE_OFFLOAD_TLS_CA_B64": env.NETWORK_PLANE_OFFLOAD_TLS_CA_B64,
             "NETWORK_PLANE_OFFLOAD_TLS_CERT_B64": (
                 env.NETWORK_PLANE_OFFLOAD_TLS_CERT_B64

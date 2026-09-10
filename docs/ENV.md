@@ -91,7 +91,7 @@ listed here is in `.env.example`.
 | `NETWORK_PLANE_OFFLOAD_ENABLED` | `false` | Enable trusted direct origin-to-target offloads |
 | `NETWORK_PLANE_OFFLOAD_TRUST_DOMAIN` | – | Trust domain both ends must share |
 | `NETWORK_PLANE_OFFLOAD_CLASSES` | `same_node,same_cluster` | Target reachability classes an offload admits |
-| `NETWORK_PLANE_OFFLOAD_REQUIRE_MTLS` | `true` | Require mutual TLS on an offload |
+| `NETWORK_PLANE_OFFLOAD_DISABLE_MTLS` | `false` | Run offloads on an attested trusted network |
 | `NETWORK_PLANE_OFFLOAD_TLS_DIR` | `./secrets/tls/offload` | Host directory mounted at `/etc/ssl/offload` |
 | `NETWORK_PLANE_OFFLOAD_TLS_CA_FILE` | `/etc/ssl/offload/offload-ca.pem` | Offload CA bundle path |
 | `NETWORK_PLANE_OFFLOAD_TLS_CERT_FILE` | `/etc/ssl/offload/offload.pem` | Offload certificate path (must cover the advertised listener host) |

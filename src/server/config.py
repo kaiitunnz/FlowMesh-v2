@@ -525,18 +525,19 @@ class TrustedOffloadConfig:
     """The deployment's trusted direct origin-to-target offload posture.
 
     Disabled by default, so a deployment that declares no trusted class carries every
-    resident invocation over the through-root relay. Mutual TLS is the default when the
-    feature is on; ``require_mtls=False`` is an operator attesting a trusted network,
-    which warns and still requires the same trusted-pair policy.
+    resident invocation over the through-root relay. Mutual TLS is on unless
+    ``disable_mtls`` is set, which is an operator attesting a trusted network; it warns
+    and still requires the same trusted-pair policy.
 
-    TLS material is configured as files, following the cluster's gRPC TLS pattern; it is
-    base64-encoded only when a worker attachment is handed a transient copy.
+    TLS material is configured as files under the mounted offload TLS directory,
+    following the cluster's gRPC TLS pattern; it is base64-encoded only when a worker
+    attachment is handed a transient copy.
     """
 
     enabled: bool = False
     trust_domain: str = ""
     classes: tuple[str, ...] = ()
-    require_mtls: bool = True
+    disable_mtls: bool = False
     tls_ca_file: str = ""
     tls_cert_file: str = ""
     tls_key_file: str = ""
@@ -555,18 +556,17 @@ class TrustedOffloadConfig:
             enabled=parse_bool_env(f"{prefix}ENABLED", False),
             trust_domain=_env_or_none(f"{prefix}TRUST_DOMAIN") or default_trust_domain,
             classes=classes,
-            require_mtls=parse_bool_env(f"{prefix}REQUIRE_MTLS", True),
+            disable_mtls=parse_bool_env(f"{prefix}DISABLE_MTLS", False),
             tls_ca_file=(os.getenv(f"{prefix}TLS_CA_FILE") or "").strip(),
             tls_cert_file=(os.getenv(f"{prefix}TLS_CERT_FILE") or "").strip(),
             tls_key_file=(os.getenv(f"{prefix}TLS_KEY_FILE") or "").strip(),
             node_listener_url=_env_or_none(f"{prefix}NODE_LISTENER_URL") or "",
         )
-        if config.enabled and config.require_mtls and not config.mtls_ready:
+        if config.enabled and not config.disable_mtls and not config.mtls_ready:
             raise ValueError(
                 f"{prefix}ENABLED requires {prefix}TLS_CA_FILE, "
                 f"{prefix}TLS_CERT_FILE, and {prefix}TLS_KEY_FILE: a direct offload "
-                f"is carried over mutual TLS unless {prefix}REQUIRE_MTLS is "
-                f"explicitly disabled"
+                f"is carried over mutual TLS unless {prefix}DISABLE_MTLS is set"
             )
         return config
 

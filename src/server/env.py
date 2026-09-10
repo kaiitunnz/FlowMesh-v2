@@ -144,6 +144,9 @@ NEBULA_API_BASE_URL: str = os.getenv("NEBULA_API_BASE_URL", "")
 NETWORK_PLANE_OFFLOAD_ENABLED: bool = parse_bool_env(
     "NETWORK_PLANE_OFFLOAD_ENABLED", False
 )
+NETWORK_PLANE_OFFLOAD_DISABLE_MTLS: bool = parse_bool_env(
+    "NETWORK_PLANE_OFFLOAD_DISABLE_MTLS", False
+)
 
 
 def _offload_material_b64(var: str) -> str:
@@ -151,12 +154,14 @@ def _offload_material_b64(var: str) -> str:
 
     The operator configures the material as files on the node; a worker runs in its own
     container, so the supervisor hands it the bytes rather than a path it cannot read.
+    Material the node cannot read is fatal here rather than handed over absent, so a
+    worker never dials in plaintext on a deployment that asked for mutual TLS.
     """
-    if not NETWORK_PLANE_OFFLOAD_ENABLED:
+    if not NETWORK_PLANE_OFFLOAD_ENABLED or NETWORK_PLANE_OFFLOAD_DISABLE_MTLS:
         return ""
     path = (os.getenv(var) or "").strip()
     if not path:
-        return ""
+        raise RuntimeError(f"{var} is required unless offload mutual TLS is disabled")
     try:
         return base64.b64encode(Path(path).read_bytes()).decode("ascii")
     except OSError as exc:
