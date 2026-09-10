@@ -139,3 +139,36 @@ VAST_SEARCH_LIMIT: int = int(os.getenv("VAST_SEARCH_LIMIT") or "10")
 VAST_MAX_RETRIES: int = int(os.getenv("VAST_MAX_RETRIES") or "1")
 
 NEBULA_API_BASE_URL: str = os.getenv("NEBULA_API_BASE_URL", "")
+
+
+NETWORK_PLANE_OFFLOAD_ENABLED: bool = parse_bool_env(
+    "NETWORK_PLANE_OFFLOAD_ENABLED", False
+)
+
+
+def _offload_material_b64(var: str) -> str:
+    """A worker's transient copy of one offload TLS file, base64-encoded.
+
+    The operator configures the material as files on the node; a worker runs in its own
+    container, so the supervisor hands it the bytes rather than a path it cannot read.
+    """
+    if not NETWORK_PLANE_OFFLOAD_ENABLED:
+        return ""
+    path = (os.getenv(var) or "").strip()
+    if not path:
+        return ""
+    try:
+        return base64.b64encode(Path(path).read_bytes()).decode("ascii")
+    except OSError as exc:
+        raise RuntimeError(f"Failed to read {var}: {exc}") from exc
+
+
+NETWORK_PLANE_OFFLOAD_TLS_CA_B64: str = _offload_material_b64(
+    "NETWORK_PLANE_OFFLOAD_TLS_CA_FILE"
+)
+NETWORK_PLANE_OFFLOAD_TLS_CERT_B64: str = _offload_material_b64(
+    "NETWORK_PLANE_OFFLOAD_TLS_CERT_FILE"
+)
+NETWORK_PLANE_OFFLOAD_TLS_KEY_B64: str = _offload_material_b64(
+    "NETWORK_PLANE_OFFLOAD_TLS_KEY_FILE"
+)

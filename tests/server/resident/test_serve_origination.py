@@ -88,6 +88,9 @@ class _FakeNetwork:
     def record_observations(self, origin, listener, observations) -> None:
         self.observations = list(observations)
 
+    async def endpoint_for(self, node_id: str):
+        return None
+
 
 class _FakeSessions:
     def __init__(self) -> None:

@@ -22,6 +22,7 @@ from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from shared.network.frame_stream import split_host_port
 from shared.resident.carriage import CONTROL_RELAY, ResidentCarriagePlan
 from shared.resident.contracts import (
     AdmissionHandoff,
@@ -38,9 +39,11 @@ from shared.resident.reports import (
     ResidentStreamHead,
     ResidentStreamStatus,
 )
+from shared.schemas.network import OFFLOAD_PROTOCOL
 from shared.utils.ids import new_relay_session_id
 
 from ..network.state import (
+    NetworkEndpointAdvertisement,
     ReplicaListenerAdvertisement,
     ResolvedRoute,
     RouteObservationOutcome,
@@ -67,6 +70,9 @@ from .state import (
     ServiceFamily,
 )
 from .stores import ResidentStores
+
+# The port of the claim-gated resident offload listener a worker hosts, or 0.
+ResidentListenerPortOf = Callable[[str], int]
 
 # Resolves a task's normalized resident dependency: (workflow_id, dependency) or None.
 DependencyResolver = Callable[[str], tuple[str, ServiceDependency] | None]
@@ -109,6 +115,10 @@ class RouteResolver(Protocol):
     async def resolve(
         self, origin_node_id: str, listener: ReplicaListenerAdvertisement
     ) -> tuple[RouteOrigin, ResolvedRoute] | None: ...
+
+    async def endpoint_for(
+        self, node_id: str
+    ) -> NetworkEndpointAdvertisement | None: ...
 
     def record_observations(
         self,
@@ -154,6 +164,7 @@ class ResidentWorkerDelivery:
     network: RouteResolver
     sessions: ResidentSessionWriter
     directly_routable: bool = False
+    resident_listener_port_of: ResidentListenerPortOf | None = None
     forward_api_key: str | None = None
     # The gated serve edge is the transport-only origin: it resolves its fence from the
     # root node's registered endpoint (read lazily — the node id is known only after the
@@ -1379,6 +1390,7 @@ class ResidentCapacityControl:
         if not delivered:
             return None
         replica.listener_generation = generation
+        offload_listener = await self._offload_listener_of(worker_id, node_id)
         replica.listener = ReplicaListenerAdvertisement(
             replica_id=replica.replica_id,
             family=replica.family,
@@ -1386,12 +1398,32 @@ class ResidentCapacityControl:
             listener_generation=generation,
             node_id=node_id,
             worker_id=worker_id,
-            routes=(f"resident://{worker_id}",),
-            protocols=("resident",),
-            directly_routable=deps.directly_routable,
+            routes=(offload_listener or f"resident://{worker_id}",),
+            protocols=(
+                ("resident", OFFLOAD_PROTOCOL) if offload_listener else ("resident",)
+            ),
+            directly_routable=deps.directly_routable and offload_listener is not None,
         )
         self._persist()
         return replica.listener
+
+    async def _offload_listener_of(self, worker_id: str, node_id: str) -> str | None:
+        """The address an origin dials for this worker's claim-gated offload listener.
+
+        The worker reports the port it bound; the node's advertised endpoint supplies
+        the host an origin reaches it at. A worker that hosts no listener, or a node
+        with no inbound endpoint, has no dialable address and is reached over the relay.
+        """
+        deps = self._delivery
+        if deps is None or deps.resident_listener_port_of is None:
+            return None
+        port = deps.resident_listener_port_of(worker_id)
+        if port <= 0:
+            return None
+        endpoint = await deps.network.endpoint_for(node_id)
+        if endpoint is None or not endpoint.url:
+            return None
+        return f"{split_host_port(endpoint.url)[0]}:{port}"
 
     def _ensure_family(self, dependency: ServiceDependency) -> bool:
         family = dependency.service_family
