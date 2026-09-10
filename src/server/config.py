@@ -521,6 +521,61 @@ class ContentStoreConfig:
 
 
 @dataclass
+class TrustedOffloadConfig:
+    """The deployment's trusted direct origin-to-target offload posture.
+
+    Disabled by default, so a deployment that declares no trusted class carries every
+    resident invocation over the through-root relay. Mutual TLS is the default when the
+    feature is on; ``require_mtls=False`` is an operator attesting a trusted network,
+    which warns and still requires the same trusted-pair policy.
+
+    TLS material is configured as files, following the cluster's gRPC TLS pattern; it is
+    base64-encoded only when a worker attachment is handed a transient copy.
+    """
+
+    enabled: bool = False
+    trust_domain: str = ""
+    classes: tuple[str, ...] = ()
+    require_mtls: bool = True
+    tls_ca_file: str = ""
+    tls_cert_file: str = ""
+    tls_key_file: str = ""
+    node_listener_url: str = ""
+
+    @classmethod
+    def from_env(cls, *, default_trust_domain: str) -> "TrustedOffloadConfig":
+        prefix = "NETWORK_PLANE_OFFLOAD_"
+        raw_classes = _env_or_none(f"{prefix}CLASSES")
+        classes = (
+            tuple(c.strip() for c in raw_classes.split(",") if c.strip())
+            if raw_classes
+            else ("same_node", "same_cluster")
+        )
+        config = cls(
+            enabled=parse_bool_env(f"{prefix}ENABLED", False),
+            trust_domain=_env_or_none(f"{prefix}TRUST_DOMAIN") or default_trust_domain,
+            classes=classes,
+            require_mtls=parse_bool_env(f"{prefix}REQUIRE_MTLS", True),
+            tls_ca_file=(os.getenv(f"{prefix}TLS_CA_FILE") or "").strip(),
+            tls_cert_file=(os.getenv(f"{prefix}TLS_CERT_FILE") or "").strip(),
+            tls_key_file=(os.getenv(f"{prefix}TLS_KEY_FILE") or "").strip(),
+            node_listener_url=_env_or_none(f"{prefix}NODE_LISTENER_URL") or "",
+        )
+        if config.enabled and config.require_mtls and not config.mtls_ready:
+            raise ValueError(
+                f"{prefix}ENABLED requires {prefix}TLS_CA_FILE, "
+                f"{prefix}TLS_CERT_FILE, and {prefix}TLS_KEY_FILE: a direct offload "
+                f"is carried over mutual TLS unless {prefix}REQUIRE_MTLS is "
+                f"explicitly disabled"
+            )
+        return config
+
+    @property
+    def mtls_ready(self) -> bool:
+        return bool(self.tls_ca_file and self.tls_cert_file and self.tls_key_file)
+
+
+@dataclass
 class NetworkPlaneConfig:
     """Feature-gated network-plane route substrate knobs.
 
@@ -543,6 +598,7 @@ class NetworkPlaneConfig:
     connect_budget_sec: float = 5.0
     route_ttl_sec: float = 30.0
     relay_buffer_bytes: int = 65536
+    offload: TrustedOffloadConfig = field(default_factory=TrustedOffloadConfig)
 
     @classmethod
     def from_env(cls) -> "NetworkPlaneConfig":
@@ -569,6 +625,9 @@ class NetworkPlaneConfig:
             route_ttl_sec=parse_float_env(f"{prefix}ROUTE_TTL_SEC") or 30.0,
             relay_buffer_bytes=max(
                 1024, parse_int_env(f"{prefix}RELAY_BUFFER_BYTES") or 65536
+            ),
+            offload=TrustedOffloadConfig.from_env(
+                default_trust_domain=_env_or_none(f"{prefix}TRUST_DOMAIN") or "flowmesh"
             ),
         )
 

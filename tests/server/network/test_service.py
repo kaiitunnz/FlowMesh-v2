@@ -4,7 +4,7 @@ import asyncio
 import logging
 
 from server.config import NetworkPlaneConfig
-from server.network.service import NetworkPlane
+from server.network.service import PROBE_TRUST, NetworkPlane
 from server.network.state import (
     NetworkEndpointAdvertisement,
     ReachabilityClass,
@@ -84,12 +84,28 @@ def _plane(registry: _FakeNodeRegistry) -> NetworkPlane:
     )
 
 
-def test_resolve_returns_ladder() -> None:
+def test_resolve_offers_only_the_relay_without_a_trusted_offload_posture() -> None:
+    # The offload posture is off by default, so a deployment that declared no trusted
+    # class carries resident traffic over the relay even though the target advertises a
+    # dialable address.
     registry = _FakeNodeRegistry()
     registry.set(_node("nde-1", generation=1))
     registry.set(_node("nde-2", generation=1))
     plane = _plane(registry)
     result = asyncio.run(plane.resolve("nde-1", _listener()))
+    assert result is not None
+    _origin, route = result
+    assert [c.transport.value for c in route.candidates] == ["control_relay"]
+
+
+def test_a_probe_resolves_the_full_ladder() -> None:
+    # A diagnostic probe is not gated on the offload posture: it exists to learn whether
+    # a path works before a deployment declares it trusted.
+    registry = _FakeNodeRegistry()
+    registry.set(_node("nde-1", generation=1))
+    registry.set(_node("nde-2", generation=1))
+    plane = _plane(registry)
+    result = asyncio.run(plane.resolve("nde-1", _listener(), trust=PROBE_TRUST))
     assert result is not None
     _origin, route = result
     transports = [c.transport.value for c in route.candidates]

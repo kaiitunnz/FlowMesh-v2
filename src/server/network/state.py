@@ -34,6 +34,7 @@ __all__ = [
     "RouteOrigin",
     "RouteTarget",
     "Transport",
+    "TrustedOffloadPolicy",
     "is_demoting",
 ]
 
@@ -116,6 +117,7 @@ class RouteTarget(Protocol):
     incarnation: int
     listener_generation: int
     routes: tuple[str, ...]
+    protocols: tuple[str, ...]
     directly_routable: bool
 
 
@@ -167,6 +169,31 @@ class NonresidentSidecarTarget(BaseModel):
     directly_routable: bool = False
 
 
+class TrustedOffloadPolicy(BaseModel):
+    """The deployment's eligibility rule for the direct origin-to-target transports.
+
+    Disabled by default: a deployment that has not declared a trusted class carries
+    every resident invocation over ``control_relay``. ``protocol`` is the transport
+    capability both the origin and the target must advertise, and ``require_mtls``
+    is the default posture — an operator who clears it has explicitly attested a
+    trusted network, which never silently downgrades a candidate that needs mutual TLS.
+
+    ``probe`` marks the rule a reachability diagnostic resolves under. A probe dials a
+    node's own diagnostic listener and carries no invocation payload, so it is offered
+    every reachable path regardless of the deployment's posture; it is never the rule a
+    route carrying resident traffic resolves under.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    enabled: bool = False
+    trust_domain: str = ""
+    classes: frozenset[ReachabilityClass] = frozenset()
+    protocol: str = ""
+    require_mtls: bool = True
+    probe: bool = False
+
+
 class RouteOrigin(BaseModel):
     """A trusted caller origin, bound by control to a registered source endpoint.
 
@@ -183,6 +210,7 @@ class RouteOrigin(BaseModel):
     reachability_class: ReachabilityClass
     policy_class: PolicyClass = PolicyClass.DEFAULT
     trust_domain: str
+    protocols: tuple[str, ...] = ()
     relay_attachment_id: str | None = None
 
 

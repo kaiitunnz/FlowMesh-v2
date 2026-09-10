@@ -23,6 +23,10 @@ class ReachabilityClass(StrEnum):
     ROUTABLE = "routable"
 
 
+OFFLOAD_PROTOCOL = "resident-offload"
+"""The transport capability a direct origin-to-target offload is carried over."""
+
+
 class NetworkEndpointAdvertisement(BaseModel):
     """A node's (or registered ingress edge's) purpose-scoped network-plane endpoint.
 
@@ -51,4 +55,4 @@ class NetworkEndpointAdvertisement(BaseModel):
     relay_attachment_id: str | None = None
 
 
-__all__ = ["NetworkEndpointAdvertisement", "ReachabilityClass"]
+__all__ = ["OFFLOAD_PROTOCOL", "NetworkEndpointAdvertisement", "ReachabilityClass"]
