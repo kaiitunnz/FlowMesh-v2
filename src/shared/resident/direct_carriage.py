@@ -181,10 +181,12 @@ class _DirectSink(ResidentFrameSink):
 class DirectOffloadCarriage:
     """Realizes a plan's transport: a trusted dialed socket, or the relay base.
 
-    ``expects`` names the target identity control selected for one session, so a peer
-    that verifies against the deployment CA but is not that target is refused. Without
-    mutual TLS there is no identity to check and the trusted-pair policy that selected
-    the route is the only gate.
+    A plan naming the target's identity refuses a peer that verifies against the
+    deployment CA but is some other party. A plan naming none falls back to what
+    mutual TLS already proved — the CA issues an identity only to a registered worker
+    or node — with the target's claim gate fencing the session to the admitted
+    invocation. Without mutual TLS there is no identity at all, and the trusted-pair
+    policy that selected the route is the only gate.
     """
 
     def __init__(
@@ -193,7 +195,6 @@ class DirectOffloadCarriage:
         base: ResidentFrameSink,
         deliver: InboundSink,
         observe: ObservationSink,
-        expects: Callable[[str], frozenset[str]],
         ssl_context: ssl.SSLContext | None,
         connect_budget_sec: float,
         logger: logging.Logger | None = None,
@@ -201,7 +202,6 @@ class DirectOffloadCarriage:
         self._base = base
         self.deliver = deliver
         self.observe = observe
-        self._expects = expects
         self.ssl_context = ssl_context
         self.connect_budget_sec = connect_budget_sec
         self.log = logger or logging.getLogger("direct-offload-carriage")
@@ -223,7 +223,11 @@ class DirectOffloadCarriage:
             session_id=plan.session_id,
             endpoint=plan.selected_endpoint,
             transport=Transport(plan.selected_transport),
-            expects=self._expects(plan.session_id),
+            expects=(
+                frozenset({plan.selected_identity})
+                if plan.selected_identity
+                else frozenset()
+            ),
         )
         self._sinks[plan.session_id] = sink
         return sink
@@ -237,6 +241,8 @@ class DirectOffloadCarriage:
         ssl_object = writer.get_extra_info("ssl_object")
         if not isinstance(ssl_object, ssl.SSLObject):
             return False
+        if not expects:
+            return True
         return peer_matches(ssl_object.getpeercert(), expects)
 
     async def send_on_base(self, frame: RelayFrame) -> None:

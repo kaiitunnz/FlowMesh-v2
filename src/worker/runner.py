@@ -10,6 +10,7 @@ from typing import Any
 
 import requests
 
+from shared.network.mtls import MutualTlsMaterial
 from shared.outcome import FabricContentStore
 from shared.schemas.result import BaseExecutorResult
 from shared.tasks import MergedChildTaskStrict
@@ -53,6 +54,8 @@ class Runner:
         model_api_key: str | None = None,
         model_egress_timeout_sec: float = 120.0,
         content_store: FabricContentStore | None = None,
+        offload_enabled: bool = False,
+        offload_material: MutualTlsMaterial | None = None,
     ):
         self.lifecycle = lifecycle
         self.task_stream = task_stream
@@ -62,6 +65,8 @@ class Runner:
         self.logger = logger
         self.default_executor = default_executor
         self.network_bandwidth_bytes_per_sec = network_bandwidth_bytes_per_sec
+        self._offload_enabled = offload_enabled
+        self._offload_material = offload_material
         # How long to keep an executor alive (seconds) after its last use before calling
         # `cleanup_after_run()`. None or <=0 disables delayed cleanup.
         assert (
@@ -222,9 +227,12 @@ class Runner:
             push_frame=client.push_resident_frame,
             report_ack=client.push_resident_ack,
             report_outcome=client.push_resident_outcome,
+            report_observation=client.push_resident_route_observation,
             content_store=self._content_store,
             peek_request=self.lifecycle.resident_requests.peek,
             delete_request=self.lifecycle.resident_requests.delete,
+            offload_enabled=self._offload_enabled,
+            offload_material=self._offload_material,
             logger=self.logger,
         )
         host.start()

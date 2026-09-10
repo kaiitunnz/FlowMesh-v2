@@ -59,6 +59,10 @@ class WorkerConfig:
     network_mode: str | None = None
     container_name: str | None = None
     ssh_network_name: str | None = None
+    offload_enabled: bool = False
+    offload_tls_ca_b64: str | None = None
+    offload_tls_cert_b64: str | None = None
+    offload_tls_key_b64: str | None = None
 
     @staticmethod
     def from_env() -> "WorkerConfig":
@@ -84,6 +88,22 @@ class WorkerConfig:
 
         supervisor_grpc_tls_ca_b64: str | None = (
             os.getenv("SUPERVISOR_GRPC_TLS_CA_B64") or ""
+        ).strip() or None
+
+        # The node's offload material reaches a worker base64-encoded; the operator
+        # configures it as files on the node it came from.
+        offload_prefix = "NETWORK_PLANE_OFFLOAD_"
+        offload_enabled = (
+            os.getenv(f"{offload_prefix}ENABLED", "").strip().lower() == "true"
+        )
+        offload_tls_ca_b64 = (
+            os.getenv(f"{offload_prefix}TLS_CA_B64") or ""
+        ).strip() or None
+        offload_tls_cert_b64 = (
+            os.getenv(f"{offload_prefix}TLS_CERT_B64") or ""
+        ).strip() or None
+        offload_tls_key_b64 = (
+            os.getenv(f"{offload_prefix}TLS_KEY_B64") or ""
         ).strip() or None
 
         results_dir = Path(
@@ -180,6 +200,10 @@ class WorkerConfig:
             server_base_url=server_base_url,
             supervisor_grpc_target=supervisor_grpc_target,
             supervisor_grpc_tls_ca_b64=supervisor_grpc_tls_ca_b64,
+            offload_enabled=offload_enabled,
+            offload_tls_ca_b64=offload_tls_ca_b64,
+            offload_tls_cert_b64=offload_tls_cert_b64,
+            offload_tls_key_b64=offload_tls_key_b64,
             results_dir=results_dir,
             results_mount_source=results_mount_source,
             hb_interval_sec=hb_interval,

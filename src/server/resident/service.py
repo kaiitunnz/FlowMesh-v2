@@ -33,6 +33,7 @@ from shared.resident.reports import (
     ResidentBootstrapAck,
     ResidentBootstrapOutcome,
     ResidentOpOutcome,
+    ResidentRouteObservation,
     ResidentStreamChunk,
     ResidentStreamHead,
     ResidentStreamStatus,
@@ -42,6 +43,7 @@ from shared.utils.ids import new_relay_session_id
 from ..network.state import (
     ReplicaListenerAdvertisement,
     ResolvedRoute,
+    RouteObservationOutcome,
     RouteOrigin,
     Transport,
 )
@@ -78,6 +80,24 @@ EndpointProbe = Callable[[str], ReplicaEndpoint | None]
 PersistCallback = Callable[[], None]
 
 
+def _selected_carriage(route: ResolvedRoute) -> tuple[str, str, str]:
+    """The transport the attempt takes, the address to dial, and the target's identity.
+
+    The resolver has already dropped every offload the deployment does not admit, so
+    the ladder's head is the best transport this pair is allowed; ``control_relay``
+    names no address because its origin reaches the root over its own attachment. The
+    identity is the node the selected hop terminates at, which the dialing origin
+    requires its verified peer to present.
+    """
+    for candidate in route.candidates:
+        if candidate.transport is Transport.CONTROL_RELAY:
+            return CONTROL_RELAY, "", ""
+        if candidate.hops:
+            hop = candidate.hops[0]
+            return candidate.transport.value, hop.endpoint, hop.node_id or ""
+    return CONTROL_RELAY, "", ""
+
+
 class RouteResolver(Protocol):
     """The control-plane route resolution the origin fence binds.
 
@@ -89,6 +109,13 @@ class RouteResolver(Protocol):
     async def resolve(
         self, origin_node_id: str, listener: ReplicaListenerAdvertisement
     ) -> tuple[RouteOrigin, ResolvedRoute] | None: ...
+
+    def record_observations(
+        self,
+        origin: RouteOrigin,
+        listener: ReplicaListenerAdvertisement,
+        observations: list[tuple[Transport, RouteObservationOutcome]],
+    ) -> None: ...
 
 
 class ResidentSessionWriter(Protocol):
@@ -254,6 +281,8 @@ class _Attempt:
     origin_worker: str | None
     serve_worker: str
     origin_id: str
+    origin: RouteOrigin | None
+    listener: ReplicaListenerAdvertisement | None
     deadline_at: str | None
     replica_id: str
     adapter_ref: str | None
@@ -387,6 +416,36 @@ class ResidentCapacityControl:
         """Consume an origin worker's fenced terminal report off the calling lane."""
         if self._loop is not None:
             asyncio.run_coroutine_threadsafe(self._on_outcome(outcome), self._loop)
+
+    def on_route_observation(self, observation: ResidentRouteObservation) -> None:
+        """Fold an origin's classified path evidence into the reachability view.
+
+        Network evidence only: a demoted transport stops being selected on the next
+        drive, and no observation touches a claim, its credit, or its fence.
+        """
+        deps = self._delivery
+        if deps is None:
+            return
+        attempt = next(
+            (
+                candidate
+                for candidate in self._attempts.values()
+                if candidate.session_id == observation.session_id
+            ),
+            None,
+        )
+        if attempt is None or attempt.origin is None or attempt.listener is None:
+            return
+        deps.network.record_observations(
+            attempt.origin,
+            attempt.listener,
+            [
+                (
+                    Transport(observation.transport),
+                    RouteObservationOutcome(observation.outcome),
+                )
+            ],
+        )
 
     def on_invocation_terminal(self, invocation_id: str, failed: bool = False) -> None:
         """Release the admission credit from a fenced DS terminal outcome.
@@ -857,11 +916,11 @@ class ResidentCapacityControl:
         deps = self._delivery
         assert deps is not None
         serve = orig.serve
-        # The route fence resolves from the origin's registered endpoint. A gated serve
-        # origination has no origin worker, so it resolves from the root node over the
-        # edge stream — the root cannot dial a worker, so it always rides control_relay.
-        # A worker-originated workflow boundary resolves from the origin worker's own
-        # node, so a reachable pair offloads.
+        # The route fence resolves from the origin's registered endpoint, which is also
+        # what dials an admitted offload. A gated serve origination has no origin
+        # worker, so the root is itself the origin and resolves from the root node over
+        # the edge stream. A worker-originated workflow boundary resolves from the
+        # origin worker's own node, so its payload never reaches the root at all.
         if serve is not None and orig.origin_worker is None:
             origin_worker = None
             resolve_node: str | None = (
@@ -921,9 +980,12 @@ class ResidentCapacityControl:
         # A fresh relay session per delivery attempt: a re-drive gets its own session,
         # so its bridge and per-direction sequence never collide with an old one.
         session_id = new_relay_session_id()
+        transport, endpoint, identity = _selected_carriage(route)
         plan = ResidentCarriagePlan(
             session_id=session_id,
-            selected_transport=CONTROL_RELAY,
+            selected_transport=transport,
+            selected_endpoint=endpoint,
+            selected_identity=identity,
             route_epoch=route.route_epoch,
             listener_generation=listener.listener_generation,
         )
@@ -935,7 +997,7 @@ class ResidentCapacityControl:
             target_worker=target_worker,
             invocation_id=orig.invocation_id,
             idm=orig.idempotency_key or "",
-            selected_transport=CONTROL_RELAY,
+            selected_transport=transport,
             route_epoch=route.route_epoch,
         )
         self._attempts[orig.invocation_id] = _Attempt(
@@ -947,6 +1009,8 @@ class ResidentCapacityControl:
             origin_worker=origin_worker,
             serve_worker=target_worker,
             origin_id=origin.origin_id,
+            origin=origin,
+            listener=listener,
             deadline_at=profile.deadline_at,
             replica_id=replica.replica_id,
             adapter_ref=profile.adapter_ref,

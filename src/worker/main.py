@@ -3,6 +3,7 @@ import logging
 import signal
 from collections.abc import Mapping
 
+from shared.network.mtls import MutualTlsMaterial, MutualTlsMaterialError
 from shared.schemas.worker import WorkerCapabilities
 from shared.tasks.task_type import TaskType
 from shared.tasks.worker_message import WorkerHardware
@@ -183,6 +184,36 @@ def build_capabilities(
     return WorkerCapabilities(supported_task_types=supported_task_types)
 
 
+def _offload_material(
+    cfg: WorkerConfig, logger: logging.Logger
+) -> MutualTlsMaterial | None:
+    """This worker's transient copy of the node's offload TLS material, if configured.
+
+    A deployment that admits offloads without mutual TLS is an operator attesting a
+    trusted network, so the absence of material is reported rather than silently
+    treated as a disabled feature.
+    """
+    if not cfg.offload_enabled:
+        return None
+    if not (
+        cfg.offload_tls_ca_b64 and cfg.offload_tls_cert_b64 and cfg.offload_tls_key_b64
+    ):
+        logger.warning(
+            "resident offloads are enabled without mutual TLS material: this worker "
+            "dials a target on a trusted network, proving no identity to it"
+        )
+        return None
+    try:
+        return MutualTlsMaterial.from_b64(
+            ca_b64=cfg.offload_tls_ca_b64,
+            cert_b64=cfg.offload_tls_cert_b64,
+            key_b64=cfg.offload_tls_key_b64,
+        )
+    except MutualTlsMaterialError as exc:
+        logger.error("resident offload TLS material is unusable: %s", exc)
+        return None
+
+
 def main() -> None:
     args = _parse_args()
     if args.collect_hw:
@@ -262,6 +293,8 @@ def main() -> None:
         model_api_key=cfg.model_api_key,
         model_egress_timeout_sec=cfg.model_egress_timeout_sec,
         content_store=build_content_store(cfg.server_base_url),
+        offload_enabled=cfg.offload_enabled,
+        offload_material=_offload_material(cfg, logger),
     )
 
     # Install signal handlers to allow graceful shutdown

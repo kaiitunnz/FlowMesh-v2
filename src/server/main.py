@@ -219,6 +219,7 @@ if IS_ROOT_NODE:
             originate=RESIDENT_CONTROL.originate,
             on_ack=RESIDENT_CONTROL.on_bootstrap_ack,
             on_outcome=RESIDENT_CONTROL.on_outcome,
+            on_route_observation=RESIDENT_CONTROL.on_route_observation,
         )
 
     _relay_redis: BinaryRedis | None = None

@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 from shared.resident.reports import (
     ResidentBootstrapAck,
     ResidentOpOutcome,
+    ResidentRouteObservation,
 )
 from shared.schemas.event import (
     Event,
@@ -757,6 +758,12 @@ class EventMonitor:
             case "RESIDENT_OP_OUTCOME":
                 self._runtime.on_resident_outcome(
                     ResidentOpOutcome.model_validate(event.payload["outcome"])
+                )
+            case "RESIDENT_ROUTE_OBSERVATION":
+                self._runtime.on_resident_route_observation(
+                    ResidentRouteObservation.model_validate(
+                        event.payload["observation"]
+                    )
                 )
             case "UNREGISTER":
                 worker_id = (event.worker_id or "").strip()

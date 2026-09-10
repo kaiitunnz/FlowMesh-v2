@@ -15,16 +15,26 @@ import threading
 from collections.abc import Callable, Coroutine
 from typing import Any
 
+from shared.network.mtls import MutualTlsMaterial, client_context
 from shared.network.relay_frame import RelayDirection, RelayFrame
 from shared.outcome import FabricContentStore
-from shared.resident.carriage import ControlRelayCarriage, ResidentCarriagePlan
+from shared.resident.carriage import (
+    ClaimGatedServiceCarriage,
+    ControlRelayCarriage,
+    ResidentCarriagePlan,
+)
 from shared.resident.contracts import (
     AdmissionHandoff,
     ReplicaEndpoint,
     RouteAuthorization,
 )
+from shared.resident.direct_carriage import DirectOffloadCarriage
 from shared.resident.gate import LoadEvidence
-from shared.resident.reports import ResidentBootstrapAck, ResidentOpOutcome
+from shared.resident.reports import (
+    ResidentBootstrapAck,
+    ResidentOpOutcome,
+    ResidentRouteObservation,
+)
 from shared.resident.transport import ResidentFrameSink
 
 from .engine import EngineOpen, HttpEngineDelivery, RawEngineOpen, RawHttpEngineDelivery
@@ -37,6 +47,7 @@ RequestLookup = Callable[[str, str], str | None]
 RequestDelete = Callable[[str, str], None]
 AckSink = Callable[[ResidentBootstrapAck], None]
 OutcomeSink = Callable[[ResidentOpOutcome], None]
+ObservationReport = Callable[[ResidentRouteObservation], None]
 
 
 class _EventFrameSink:
@@ -64,6 +75,10 @@ class ResidentLaneHost:
         engine_open: EngineOpen | None = None,
         engine_open_raw: RawEngineOpen | None = None,
         engine_timeout_sec: float = 300.0,
+        report_observation: ObservationReport | None = None,
+        offload_material: MutualTlsMaterial | None = None,
+        offload_enabled: bool = False,
+        connect_budget_sec: float = 5.0,
         logger: logging.Logger | None = None,
     ) -> None:
         self._push_frame = push_frame
@@ -78,6 +93,10 @@ class ResidentLaneHost:
         self._engine_open_raw = engine_open_raw or RawHttpEngineDelivery(
             timeout_sec=engine_timeout_sec
         )
+        self._report_observation = report_observation
+        self._offload_material = offload_material
+        self._offload_enabled = offload_enabled
+        self._connect_budget_sec = connect_budget_sec
         self._logger = logger or logging.getLogger("resident-lane-host")
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(
@@ -93,10 +112,7 @@ class ResidentLaneHost:
 
     async def _build(self) -> None:
         sink: ResidentFrameSink = _EventFrameSink(self._push_frame)
-        # Every origin attempt on this worker rides control_relay over the one
-        # authenticated attachment; a later PR adds direct/node carriages behind the
-        # same factory without changing the drives that take their sink from it.
-        carriage = ControlRelayCarriage(sink)
+        carriage = self._carriage(sink)
         self._origin = ResidentOriginDriver(
             carriage=carriage,
             content_store=self._content_store,
@@ -110,6 +126,46 @@ class ResidentLaneHost:
             engine_open_raw=self._engine_open_raw,
             on_load=self._on_load,
             logger=self._logger,
+        )
+
+    def _carriage(self, sink: ResidentFrameSink) -> ClaimGatedServiceCarriage:
+        """The carriage this worker's origin attempts take their frame sink from.
+
+        A deployment that admits no offload carries every attempt over the one
+        authenticated attachment. Where it does, control selects the transport per
+        attempt and this worker dials the target itself, so the payload of a workflow
+        boundary never reaches the root.
+        """
+        if not self._offload_enabled:
+            return ControlRelayCarriage(sink)
+        return DirectOffloadCarriage(
+            base=sink,
+            deliver=self._deliver_inbound,
+            observe=self._observe,
+            ssl_context=(
+                client_context(self._offload_material)
+                if self._offload_material is not None
+                else None
+            ),
+            connect_budget_sec=self._connect_budget_sec,
+            logger=self._logger,
+        )
+
+    async def _deliver_inbound(self, frame: RelayFrame) -> None:
+        """Deliver a frame the dialed target returned into this worker's origin lane."""
+        if self._origin is not None:
+            await self._origin.on_frame(frame)
+
+    def _observe(self, session_id: str, transport: Any, outcome: Any) -> None:
+        """Report one attempt's classified path evidence for the reachability view."""
+        if self._report_observation is None:
+            return
+        self._report_observation(
+            ResidentRouteObservation(
+                session_id=session_id,
+                transport=transport.value,
+                outcome=outcome.value,
+            )
         )
 
     def _on_load(self, evidence: LoadEvidence) -> None:

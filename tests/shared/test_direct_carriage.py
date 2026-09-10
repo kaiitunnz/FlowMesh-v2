@@ -32,14 +32,13 @@ class _BaseSink:
         self.frames.append(frame)
 
 
-def _carriage(base, delivered, observed, *, expects=frozenset()):
+def _carriage(base, delivered, observed):
     return DirectOffloadCarriage(
         base=base,
         deliver=lambda frame: delivered.append(frame) or asyncio.sleep(0),
         observe=lambda session, transport, outcome: observed.append(
             (session, transport, outcome)
         ),
-        expects=lambda _session: expects,
         ssl_context=None,
         connect_budget_sec=0.5,
     )
