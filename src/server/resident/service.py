@@ -1593,6 +1593,7 @@ class ResidentCapacityControl:
         deadline = loop.time() + self._limits.cold_start_deadline_sec
         while True:
             async with self._admit_lock:
+                self._reap_lost_reservations(definition)
                 self._promote_ready_replicas(definition)
                 self._lifecycle.refresh_family_reports(family)
                 handoff = self._admission.admit(
@@ -1631,6 +1632,25 @@ class ResidentCapacityControl:
             r.state is ReplicaState.MATERIALIZING
             for r in self._stores.directory.by_family(family)
         )
+
+    def _reap_lost_reservations(self, definition: ServiceFamily) -> None:
+        """Invalidate a sandbox host whose reserved worker is gone.
+
+        A reservation holds no task to fail, so nothing else reports its loss; without
+        this the family stays at its replica quota against a worker no session can be
+        placed on. Invalidating it lets the next demand reserve a live worker.
+        """
+        if definition.kind is not ServiceFamilyKind.SANDBOX_HOST:
+            return
+        for replica in self._stores.directory.by_family(definition.family):
+            if replica.state not in SERVABLE_REPLICA_STATES:
+                continue
+            if not self._probe_sandbox_worker(replica.worker_id or ""):
+                self._logger.info(
+                    "sandbox host %s lost its reserved worker; invalidating it",
+                    replica.replica_id,
+                )
+                self._lifecycle.on_preempt(replica.replica_id)
 
     def _promote_ready_replicas(self, definition: ServiceFamily) -> None:
         """Warm every materializing replica whose engine endpoint now answers.
