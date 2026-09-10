@@ -1,4 +1,4 @@
-"""The offload transports' material loading and peer identity checks."""
+"""The offload transports' material loading and peer identity reading."""
 
 import base64
 
@@ -8,7 +8,6 @@ from shared.network.mtls import (
     MutualTlsMaterial,
     MutualTlsMaterialError,
     peer_identities,
-    peer_matches,
 )
 from tests.support.certs import new_ca
 
@@ -70,20 +69,3 @@ def test_peer_identities_reads_the_common_name_and_alternatives():
     assert peer_identities(_cert("wkr-1", "node-a", "wkr-1.fabric")) == frozenset(
         {"wkr-1", "node-a", "wkr-1.fabric"}
     )
-
-
-def test_a_peer_control_named_is_admitted():
-    assert peer_matches(_cert("wkr-1"), ["wkr-1"])
-    assert peer_matches(_cert("wkr-1", "node-a"), ["node-a"])
-
-
-def test_a_ca_signed_peer_control_did_not_name_is_refused():
-    # The whole point of the identity check: a certificate the deployment CA signed for
-    # some other party verifies, so the CA alone must not admit it.
-    assert not peer_matches(_cert("wkr-9"), ["wkr-1"])
-
-
-def test_an_unnamed_expectation_never_matches():
-    assert not peer_matches(_cert("wkr-1"), [])
-    assert not peer_matches(_cert("wkr-1"), [""])
-    assert not peer_matches(None, ["wkr-1"])

@@ -6,6 +6,11 @@
 # server-only identities, which authenticate a listener but never prove which node is
 # dialing it.
 #
+# A dialing origin verifies that its target's certificate covers the host it dialed, so
+# pass the node's advertised offload address (NETWORK_PLANE_OFFLOAD_NODE_LISTENER_URL's
+# host, and the worker listener host) as extra SANs — a certificate that omits it fails
+# the handshake and the offload falls back to the relay.
+#
 # Usage: generate_offload_tls_certs.sh <node-name> [extra-san ...]
 set -euo pipefail
 

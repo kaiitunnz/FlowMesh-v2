@@ -86,22 +86,21 @@ EndpointProbe = Callable[[str], ReplicaEndpoint | None]
 PersistCallback = Callable[[], None]
 
 
-def _selected_carriage(route: ResolvedRoute) -> tuple[str, str, str]:
-    """The transport the attempt takes, the address to dial, and the target's identity.
+def _selected_carriage(route: ResolvedRoute) -> tuple[str, str]:
+    """The transport the attempt takes and the address to dial.
 
     The resolver has already dropped every offload the deployment does not admit, so
     the ladder's head is the best transport this pair is allowed; ``control_relay``
     names no address because its origin reaches the root over its own attachment. The
-    identity is the node the selected hop terminates at, which the dialing origin
-    requires its verified peer to present.
+    dialed address is itself the target's identity: mutual TLS admits only a peer whose
+    certificate covers that host.
     """
     for candidate in route.candidates:
         if candidate.transport is Transport.CONTROL_RELAY:
-            return CONTROL_RELAY, "", ""
+            return CONTROL_RELAY, ""
         if candidate.hops:
-            hop = candidate.hops[0]
-            return candidate.transport.value, hop.endpoint, hop.node_id or ""
-    return CONTROL_RELAY, "", ""
+            return candidate.transport.value, candidate.hops[0].endpoint
+    return CONTROL_RELAY, ""
 
 
 class RouteResolver(Protocol):
@@ -991,12 +990,11 @@ class ResidentCapacityControl:
         # A fresh relay session per delivery attempt: a re-drive gets its own session,
         # so its bridge and per-direction sequence never collide with an old one.
         session_id = new_relay_session_id()
-        transport, endpoint, identity = _selected_carriage(route)
+        transport, endpoint = _selected_carriage(route)
         plan = ResidentCarriagePlan(
             session_id=session_id,
             selected_transport=transport,
             selected_endpoint=endpoint,
-            selected_identity=identity,
             route_epoch=route.route_epoch,
             listener_generation=listener.listener_generation,
         )

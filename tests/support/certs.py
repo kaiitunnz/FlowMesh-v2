@@ -2,6 +2,7 @@
 
 import base64
 import datetime
+import ipaddress
 from dataclasses import dataclass
 
 from cryptography import x509
@@ -28,7 +29,7 @@ class TestCa:
     signer: ed25519.Ed25519PrivateKey
     issuer_cert: x509.Certificate
 
-    def issue(self, identity: str) -> Issued:
+    def issue(self, identity: str, *sans: str) -> Issued:
         key = ed25519.Ed25519PrivateKey.generate()
         now = datetime.datetime.now(datetime.UTC)
         cert = (
@@ -42,7 +43,8 @@ class TestCa:
             .not_valid_before(now - _DAY)
             .not_valid_after(now + _DAY)
             .add_extension(
-                x509.SubjectAlternativeName([x509.DNSName(identity)]), critical=False
+                x509.SubjectAlternativeName([_san(name) for name in (identity, *sans)]),
+                critical=False,
             )
             .sign(self.signer, None)
         )
@@ -64,6 +66,13 @@ def new_ca(name: str = "flowmesh-test-ca") -> TestCa:
         .sign(key, None)
     )
     return TestCa(_b64(_pem(cert)), key, cert)
+
+
+def _san(name: str) -> x509.GeneralName:
+    try:
+        return x509.IPAddress(ipaddress.ip_address(name))
+    except ValueError:
+        return x509.DNSName(name)
 
 
 def _pem(cert: x509.Certificate) -> bytes:

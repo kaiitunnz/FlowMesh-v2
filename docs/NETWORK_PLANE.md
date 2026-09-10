@@ -103,9 +103,12 @@ public, NATed, outbound-only, stale, or policy-ineligible target is offered
 `control_relay` alone, even when it advertises a dialable address.
 
 Mutual TLS is the default. The deployment CA issues each node an identity carrying both
-client and server authentication, so a target admits only a dialer the CA vouched for
-and an origin refuses a target that is not the listener control selected; the replica's
-claim gate then fences the session to the invocation control admitted. TLS material is
+client and server authentication, so a target admits only a dialer the CA vouched for,
+and an origin admits only a target whose certificate covers the host it dialed — the
+node's advertised offload address must therefore appear among its certificate's
+subject-alternative names, or the handshake fails and the attempt falls back to the
+relay. The replica's claim gate then fences the session to the invocation control
+admitted. TLS material is
 configured as files and base64-encoded only when a worker attachment is handed its
 transient copy. An operator may instead attest a trusted network and run without mutual
 TLS, which warns on every listener and still requires the same trusted-pair policy.

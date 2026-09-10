@@ -32,9 +32,8 @@ class ResidentCarriagePlan(BaseModel):
     """The transport selection control carries alongside an ``AdmissionHandoff``.
 
     It names the attempt's session and the transport candidate control selected from
-    the resolved route, the address to dial when that candidate is an offload and the
-    identity that target must present, plus the route's epoch and listener generation
-    for diagnostics.
+    the resolved route, the address to dial when that candidate is an offload, plus the
+    route's epoch and listener generation for diagnostics.
     It is not authority: it mints no claim and chooses no capacity, and rides beside the
     handoff rather than inside it, so a carriage realizes only what control decided.
     """
@@ -44,7 +43,6 @@ class ResidentCarriagePlan(BaseModel):
     session_id: str
     selected_transport: str = CONTROL_RELAY
     selected_endpoint: str = ""
-    selected_identity: str = ""
     route_epoch: int = 0
     listener_generation: int = 0
 

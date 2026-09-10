@@ -93,7 +93,7 @@ listed here is in `.env.example`.
 | `NETWORK_PLANE_OFFLOAD_CLASSES` | `same_node,same_cluster` | Target reachability classes an offload admits |
 | `NETWORK_PLANE_OFFLOAD_REQUIRE_MTLS` | `true` | Require mutual TLS on an offload |
 | `NETWORK_PLANE_OFFLOAD_TLS_CA_FILE` | – | Offload CA bundle path |
-| `NETWORK_PLANE_OFFLOAD_TLS_CERT_FILE` | – | Offload certificate path |
+| `NETWORK_PLANE_OFFLOAD_TLS_CERT_FILE` | – | Offload certificate path (must cover the advertised listener host) |
 | `NETWORK_PLANE_OFFLOAD_TLS_KEY_FILE` | – | Offload private key path |
 | `NETWORK_PLANE_OFFLOAD_NODE_LISTENER_URL` | – | Node offload listener (`host:port`) |
 | `ENABLE_WORKER_WATCHDOG` | `true` | Worker death detection |

@@ -17,7 +17,7 @@ import base64
 import binascii
 import ssl
 import tempfile
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -96,12 +96,13 @@ def _chain_files(material: MutualTlsMaterial) -> Iterator[tuple[Path, Path, Path
 def client_context(material: MutualTlsMaterial) -> ssl.SSLContext:
     """A dialing origin's context: present its certificate, verify the target's.
 
-    Hostname verification is off because a target is named by its control-plane
-    advertisement rather than by DNS, and its address moves with the replica; the CA and
-    the identity the target presents are what the origin validates instead.
+    A route names its target as the endpoint host the origin dials, so the origin
+    validates that the peer's certificate covers that host: the operator lists a node's
+    reachable address among its certificate's subject-alternative names, and issuing
+    only to registered nodes is what makes holding such a certificate meaningful.
     """
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    context.check_hostname = False
+    context.check_hostname = True
     context.verify_mode = ssl.CERT_REQUIRED
     with _chain_files(material) as (ca, cert, key):
         context.load_verify_locations(cafile=ca.as_posix())
@@ -134,21 +135,10 @@ def peer_identities(peer_cert: dict[str, Any] | None) -> frozenset[str]:
     return frozenset(names)
 
 
-def peer_matches(peer_cert: dict[str, Any] | None, expected: Iterable[str]) -> bool:
-    """Whether the verified peer presented one of the identities control named.
-
-    An empty expectation never matches: a route whose source or target identity control
-    did not name is not admitted on the strength of the CA alone.
-    """
-    wanted = {name for name in expected if name}
-    return bool(wanted) and bool(wanted & peer_identities(peer_cert))
-
-
 __all__ = [
     "MutualTlsMaterial",
     "MutualTlsMaterialError",
     "client_context",
     "peer_identities",
-    "peer_matches",
     "server_context",
 ]

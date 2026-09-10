@@ -37,7 +37,6 @@ from shared.network.frame_stream import (
     split_host_port,
     write_relay_frame,
 )
-from shared.network.mtls import peer_matches
 from shared.network.relay_frame import RelayFrame
 from shared.schemas.network import RouteObservationOutcome, Transport
 
@@ -76,13 +75,11 @@ class _DirectSink(ResidentFrameSink):
         session_id: str,
         endpoint: str,
         transport: Transport,
-        expects: frozenset[str],
     ) -> None:
         self._carriage = carriage
         self._session_id = session_id
         self._endpoint = endpoint
         self._transport = transport
-        self._expects = expects
         self._writer: asyncio.StreamWriter | None = None
         self._reader_task: asyncio.Task[None] | None = None
         self._on_base = False
@@ -105,10 +102,14 @@ class _DirectSink(ResidentFrameSink):
 
     async def _dial(self) -> bool:
         """Open the socket, or fall back to the relay and record the path evidence."""
+        host, port = split_host_port(self._endpoint)
         try:
             reader, writer = await asyncio.wait_for(
                 asyncio.open_connection(
-                    *split_host_port(self._endpoint), ssl=self._carriage.ssl_context
+                    host,
+                    port,
+                    ssl=self._carriage.ssl_context,
+                    server_hostname=host if self._carriage.ssl_context else None,
                 ),
                 timeout=self._carriage.connect_budget_sec,
             )
@@ -120,19 +121,6 @@ class _DirectSink(ResidentFrameSink):
                 self._session_id,
                 exc,
             )
-            self._on_base = True
-            return False
-        if not self._carriage.peer_admitted(writer, self._expects):
-            self._carriage.observe(
-                self._session_id, self._transport, RouteObservationOutcome.TLS_FAILURE
-            )
-            self._carriage.log.warning(
-                "%s for %s presented an identity control did not select",
-                self._transport.value,
-                self._session_id,
-            )
-            with contextlib.suppress(OSError):
-                writer.close()
             self._on_base = True
             return False
         self._writer = writer
@@ -181,12 +169,12 @@ class _DirectSink(ResidentFrameSink):
 class DirectOffloadCarriage:
     """Realizes a plan's transport: a trusted dialed socket, or the relay base.
 
-    A plan naming the target's identity refuses a peer that verifies against the
-    deployment CA but is some other party. A plan naming none falls back to what
-    mutual TLS already proved — the CA issues an identity only to a registered worker
-    or node — with the target's claim gate fencing the session to the admitted
-    invocation. Without mutual TLS there is no identity at all, and the trusted-pair
-    policy that selected the route is the only gate.
+    The plan names its target as an endpoint to dial, and mutual TLS proves the peer is
+    that endpoint: the handshake fails unless the certificate covers the dialed host,
+    and the deployment CA issues one only to a registered worker or node. The target's
+    claim gate then fences the session to the admitted invocation. Without mutual TLS
+    there is nothing to verify, and the trusted-pair policy that selected the route is
+    the only gate.
     """
 
     def __init__(
@@ -223,27 +211,9 @@ class DirectOffloadCarriage:
             session_id=plan.session_id,
             endpoint=plan.selected_endpoint,
             transport=Transport(plan.selected_transport),
-            expects=(
-                frozenset({plan.selected_identity})
-                if plan.selected_identity
-                else frozenset()
-            ),
         )
         self._sinks[plan.session_id] = sink
         return sink
-
-    def peer_admitted(
-        self, writer: asyncio.StreamWriter, expects: frozenset[str]
-    ) -> bool:
-        """Whether the dialed peer is the target control selected for this session."""
-        if self.ssl_context is None:
-            return True
-        ssl_object = writer.get_extra_info("ssl_object")
-        if not isinstance(ssl_object, ssl.SSLObject):
-            return False
-        if not expects:
-            return True
-        return peer_matches(ssl_object.getpeercert(), expects)
 
     async def send_on_base(self, frame: RelayFrame) -> None:
         await self._base.send(frame)
