@@ -164,7 +164,7 @@ def _peer_material_b64(var: str) -> str:
     """
     if not NETWORK_PLANE_PEER_ENABLED or NETWORK_PLANE_PEER_DISABLE_MTLS:
         return ""
-    path = (os.getenv(var) or "").strip()
+    path = os.getenv(var, "").strip()
     if not path:
         raise RuntimeError(f"{var} is required unless peer mutual TLS is disabled")
     return _read_file_b64(path, var)

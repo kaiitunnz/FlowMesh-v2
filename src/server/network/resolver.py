@@ -7,16 +7,17 @@ candidate ladder. It is pure — it mutates nothing and permits no peer discover
 deputy executes only the candidates it returns.
 
 Ladder rules:
-- ``worker_direct`` and ``node_relay`` are the origin-to-target peer transports: the
-  ``RouteOrigin`` itself dials, so a workflow origin's payload never enters the root.
-  They are offered only to a deployment-declared trusted pair — the trust policy, both
-  ends' trust domain, the target's reachability class, the transport capability both
-  advertise, and directional evidence must all admit them.
-- ``worker_direct`` additionally needs the listener explicitly directly routable and the
-  origin's network class able to reach the target endpoint's class. Shared-node
-  placement alone is not sufficient.
-- ``node_relay`` goes through the target node's announced endpoint and its node-local
-  uplink; it is the initial same-node path as well as the normal cross-node path.
+- ``worker_direct`` is the ``RouteOrigin``'s own dial to the target listener, so a
+  workflow origin's payload never enters the root. It is offered only to a
+  deployment-declared trusted pair — the trust policy, both ends' trust domain, the
+  target's reachability class, the transport capability both advertise, and directional
+  evidence must all admit it — and additionally needs the listener explicitly directly
+  routable and the origin's network class able to reach the target endpoint's class.
+  Shared-node placement alone is not sufficient.
+- ``node_relay`` is the same origin-dialed bypass through the target node's announced
+  endpoint and its node-local uplink, under the same trusted-pair conditions as
+  ``worker_direct``. It is the initial same-node path as well as the normal cross-node
+  path.
 - ``control_relay`` is the universal reverse-rendezvous base: the root bridges between
   the origin and target reverse-relay attachments to the target's node-local sidecar
   delivery. Its feasibility is that both ends have a registered outbound attachment, not
