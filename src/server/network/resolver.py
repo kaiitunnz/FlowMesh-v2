@@ -233,4 +233,5 @@ def resolve_route(
         route_epoch=route_epoch,
         candidates=tuple(candidate for _, _, candidate in graded),
         expires_at=expires_at,
+        probe=trust.probe,
     )

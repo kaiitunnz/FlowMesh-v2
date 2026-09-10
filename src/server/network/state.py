@@ -286,6 +286,11 @@ class ResolvedRoute(BaseModel):
     It is non-authoritative: it issues no authority, chooses no capacity, and mutates no
     ``ServiceClaim``. The deputy executes only these candidates in order and never scans
     for a peer.
+
+    ``probe`` marks a route resolved for a reachability diagnostic, whose candidates
+    were graded without the deployment's trust policy. Such a route carries no
+    invocation: a caller delivering resident traffic refuses it rather than treating
+    its candidates as admitted.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -296,3 +301,4 @@ class ResolvedRoute(BaseModel):
     route_epoch: int
     candidates: tuple[RouteCandidate, ...]
     expires_at: float | None = None
+    probe: bool = False

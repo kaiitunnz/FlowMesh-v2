@@ -896,9 +896,15 @@ class ResidentCapacityControl:
             )
             return
         origin, route = resolved
-        # Control selects the transport candidate for the attempt from the resolved
-        # route; this PR realizes only control_relay, so without it as a base candidate
-        # the attempt cannot be carried — hold the credit and re-drive rather than
+        # A diagnostic route grades its candidates without the deployment's trust
+        # policy, so it can never carry an invocation.
+        if route.probe:
+            await self._hold_and_redrive(
+                orig, claim, "no admitted route for the boundary"
+            )
+            return
+        # control_relay is the base every attempt falls back to, so without it the
+        # attempt cannot be carried — hold the credit and re-drive rather than
         # reinterpret a direct/node candidate as a relay.
         if not any(
             candidate.transport is Transport.CONTROL_RELAY

@@ -302,3 +302,18 @@ def test_a_node_without_the_transport_capability_gets_no_node_relay() -> None:
 def test_a_trusted_pair_is_offered_both_offloads_ahead_of_the_relay() -> None:
     route = _resolve(TRUSTED)
     assert _transports(route) == ["worker_direct", "node_relay", "control_relay"]
+
+
+def test_the_relay_survives_when_both_offloads_are_inadmissible() -> None:
+    # Dropping inadmissible offloads must never leave a registered pair with nothing to
+    # carry the attempt: the through-root fallback is the terminal candidate.
+    route = _resolve(TrustedOffloadPolicy())
+    assert route.candidates
+    assert route.candidates[-1].transport is Transport.CONTROL_RELAY
+
+
+def test_a_diagnostic_route_is_marked_as_a_probe() -> None:
+    # The mark is what keeps a probe's candidates — graded without the deployment's
+    # trust policy — from being treated as admitted by a caller carrying an invocation.
+    assert _resolve(TrustedOffloadPolicy(enabled=True, probe=True)).probe
+    assert not _resolve(TRUSTED).probe
