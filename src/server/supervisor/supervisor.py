@@ -225,7 +225,9 @@ def _offload_material(
 
     A deployment that admits offloads without mutual TLS is an operator attesting a
     trusted network, so missing material is reported rather than silently disabling the
-    listener the node already advertises.
+    listener the node already advertises. Material this node was configured to present
+    and cannot read is fatal: serving the advertised listener in plaintext instead would
+    carry resident payloads over a wire the operator asked to protect.
     """
     if not offload.require_mtls and not offload.mtls_ready:
         logger.warning(
@@ -239,9 +241,9 @@ def _offload_material(
             cert_file=offload.tls_cert_file,
             key_file=offload.tls_key_file,
         )
-    except MutualTlsMaterialError as exc:
-        logger.error("node offload TLS material is unusable: %s", exc)
-        return None
+    except MutualTlsMaterialError:
+        logger.error("node offload TLS material is unusable")
+        raise
 
 
 def _enqueue_latest_node_id(

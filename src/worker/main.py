@@ -192,7 +192,9 @@ def _offload_material(
 
     A deployment that admits offloads without mutual TLS is an operator attesting a
     trusted network, so the absence of material is reported rather than silently
-    treated as a disabled feature.
+    treated as a disabled feature. Material this worker was handed and cannot read is
+    fatal: dialing and serving in plaintext instead would carry resident payloads over a
+    wire the operator asked to protect.
     """
     if not cfg.offload_enabled:
         return None
@@ -210,9 +212,9 @@ def _offload_material(
             cert_b64=cfg.offload_tls_cert_b64,
             key_b64=cfg.offload_tls_key_b64,
         )
-    except MutualTlsMaterialError as exc:
-        logger.error("resident offload TLS material is unusable: %s", exc)
-        return None
+    except MutualTlsMaterialError:
+        logger.error("resident offload TLS material is unusable")
+        raise
 
 
 def _bind_offload_listener(cfg: WorkerConfig) -> socket.socket | None:
