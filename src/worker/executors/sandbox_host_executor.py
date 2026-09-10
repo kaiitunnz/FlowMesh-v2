@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 from typing import ClassVar
 
-from shared.schemas.result import SandboxHostResult
+from shared.schemas.result import BaseExecutorResult
 from shared.tasks.specs import SandboxHostSpecStrict
 from shared.tasks.task_type import TaskType
 from shared.utils.parsing import parse_float_env
@@ -39,7 +39,7 @@ class SandboxHostExecutor(Executor):
         self._cancel_event = threading.Event()
         self._stop_event = threading.Event()
 
-    def run(self, task: ExecutorTask, out_dir: Path) -> SandboxHostResult:
+    def run(self, task: ExecutorTask, out_dir: Path) -> BaseExecutorResult:
         spec = self.require_spec(task, SandboxHostSpecStrict)
         ttl_sec = spec.ttlSeconds or parse_float_env(
             "SERVE_DEFAULT_TTL_SEC", _DEFAULT_TTL_SEC
@@ -55,7 +55,7 @@ class SandboxHostExecutor(Executor):
         finally:
             self._cancel_event.clear()
             self._stop_event.clear()
-        return SandboxHostResult(profile=spec.profile)
+        return BaseExecutorResult()
 
     def _hold(self, ttl_sec: float) -> None:
         deadline = time.time() + ttl_sec

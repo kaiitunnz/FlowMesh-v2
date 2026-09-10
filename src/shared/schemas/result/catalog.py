@@ -83,13 +83,6 @@ class DevModelResult(StrictExecutorResult):
     port: int
 
 
-class SandboxHostResult(StrictExecutorResult):
-    """A sandbox host allocation's descriptor."""
-
-    task_type: Literal[TaskType.SANDBOX_HOST] = TaskType.SANDBOX_HOST
-    profile: str
-
-
 class SandboxResult(StrictExecutorResult):
     """A sandbox session's commands and their bounded results."""
 
@@ -368,7 +361,6 @@ AnyExecutorResult = Annotated[
         | Annotated[APIResult, Tag(TaskType.API.value)]
         | Annotated[SSHResult, Tag(TaskType.SSH.value)]
         | Annotated[SandboxResult, Tag(TaskType.SANDBOX.value)]
-        | Annotated[SandboxHostResult, Tag(TaskType.SANDBOX_HOST.value)]
         | Annotated[BaseExecutorResult, Tag(_BASE_TAG)]
     ),
     Discriminator(_result_discriminator),
