@@ -7,10 +7,10 @@ takes a ``ResidentCarriagePlan`` naming the selected transport and returns the s
 that carries the attempt's frames. Selecting the transport stays control's decision;
 the carriage only realizes it, and never reinterprets one transport as another.
 
-The sole realization here is ``ControlRelayCarriage``, the universal reverse-rendezvous
-relay every deployment can reach. A trusted direct or node-relay carriage is a later
-addition behind the same factory; declaring the seam now lets one slot in without
-changing any drive that already takes its sink from a carriage.
+``ControlRelayCarriage`` realizes the universal reverse-rendezvous relay every
+deployment can reach. ``DirectOffloadCarriage`` realizes the trusted direct and
+node-relay transports the origin dials itself; both sit behind the same factory, so a
+drive takes its sink from a carriage without knowing which transport carried it.
 """
 
 from typing import Protocol
@@ -32,7 +32,8 @@ class ResidentCarriagePlan(BaseModel):
     """The transport selection control carries alongside an ``AdmissionHandoff``.
 
     It names the attempt's session and the transport candidate control selected from
-    the resolved route, plus the route's epoch and listener generation for diagnostics.
+    the resolved route, the address to dial when that candidate is an offload, plus the
+    route's epoch and listener generation for diagnostics.
     It is not authority: it mints no claim and chooses no capacity, and rides beside the
     handoff rather than inside it, so a carriage realizes only what control decided.
     """
@@ -41,6 +42,7 @@ class ResidentCarriagePlan(BaseModel):
 
     session_id: str
     selected_transport: str = CONTROL_RELAY
+    selected_endpoint: str = ""
     route_epoch: int = 0
     listener_generation: int = 0
 
