@@ -21,6 +21,7 @@ route policy that selected the pair remains the only thing admitting the traffic
 """
 
 import asyncio
+import contextlib
 import logging
 import socket
 import ssl
@@ -39,6 +40,9 @@ from .relay_frame import RelayFrame
 
 HANDSHAKE_TIMEOUT_SEC = 10.0
 MAX_CONNECTIONS = 64
+# A closed connection whose peer never reads ends at its own transport close, so the
+# shutdown waits only briefly for the reads to notice before it stops caring.
+SHUTDOWN_TIMEOUT_SEC = 5.0
 
 
 class ConnectionHandler(Protocol):
@@ -96,6 +100,7 @@ class MutualTlsFrameListener:
         self._open = 0
         self._logger = logger or logging.getLogger("offload-frame-listener")
         self._server: asyncio.Server | None = None
+        self._connections: set[asyncio.StreamWriter] = set()
 
     @property
     def port(self) -> int:
@@ -134,13 +139,23 @@ class MutualTlsFrameListener:
         return server_context(self._material)
 
     async def stop(self) -> None:
+        """Close the listener and every connection it is still serving.
+
+        A legitimate connection idles between frames for as long as its invocation runs,
+        so waiting for the reads to end on their own would hold a node's shutdown open
+        for as long as a peer keeps its socket. Closing them ends those reads.
+        """
         server, self._server = self._server, None
         if server is None:
             return
         server.close()
+        connections, self._connections = self._connections, set()
+        for writer in connections:
+            with contextlib.suppress(OSError, ssl.SSLError):
+                writer.close()
         try:
-            await server.wait_closed()
-        except (OSError, asyncio.CancelledError):
+            await asyncio.wait_for(server.wait_closed(), timeout=SHUTDOWN_TIMEOUT_SEC)
+        except (OSError, asyncio.CancelledError, TimeoutError):
             pass
 
     async def _serve(
@@ -161,6 +176,7 @@ class MutualTlsFrameListener:
             await close_writer(writer)
             return
         self._open += 1
+        self._connections.add(writer)
         handler = self._handler(ConnectionFrameSink(writer))
         try:
             while True:
@@ -171,6 +187,7 @@ class MutualTlsFrameListener:
             self._logger.warning("closing an offload connection: %s", exc)
         finally:
             self._open -= 1
+            self._connections.discard(writer)
             handler.close()
             await close_writer(writer)
 
