@@ -8,6 +8,7 @@ from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
+from shared.private_state import OwnerFence, PrivateStateUnavailableReason
 from shared.schemas.artifact import ArtifactRef
 from shared.schemas.event import TaskEvent
 from shared.schemas.result import (
@@ -184,6 +185,48 @@ class Dispatcher:
             extra_payload={"failed_workers": sorted(failed_ids)},
         )
 
+    def _private_state_owner_live(self, owner: OwnerFence) -> bool:
+        """Whether a bound generation's holder is still the same live incarnation."""
+        worker = self._worker_registry.get_worker(owner.worker_id)
+        return (
+            worker is not None
+            and worker.incarnation == owner.incarnation
+            and not self._worker_registry.is_worker_stale(owner.worker_id)
+        )
+
+    def _fail_private_state_unavailable(
+        self, task_id: str, record: TaskRecord, owner: OwnerFence
+    ) -> bool:
+        """Fail an episode whose private state no live holder can supply.
+
+        A brief grace absorbs a heartbeat flap; past it the episode fails closed rather
+        than resuming against an empty home on another worker.
+        """
+        now = time.time()
+        if record.no_eligible_since is None:
+            record.no_eligible_since = now
+        if now - record.no_eligible_since < self._no_worker_grace_sec:
+            self.requeue_task(
+                task_id, reason="private_state_owner_lost", count_retry=False
+            )
+            return False
+        reason = PrivateStateUnavailableReason.OWNER_LOST
+        self._logger.warning(
+            "Private state for %s is held by %s, which is gone; failing closed",
+            task_id,
+            owner.worker_id,
+        )
+        self.fail_task(
+            task_id,
+            f"PrivateStateUnavailable: {reason.value}",
+            payload={
+                "reason": reason.value,
+                "private_state_owner": owner.worker_id,
+                "private_state_incarnation": str(owner.incarnation),
+            },
+        )
+        return False
+
     def dispatch_once(self, task_id: str) -> bool:
         """Dispatch a single task if possible; requeue when no worker."""
         record = self._runtime.get_record(task_id)
@@ -216,6 +259,24 @@ class Dispatcher:
         # 2. Filter by selected_worker hint if present
         if record.selected_worker:
             pool = [c for c in pool if c.id in record.selected_worker]
+
+        # 2b. Owner-affine private state: a bound generation is sealed on the holder
+        # that produced it, so the episode waits for that incarnation instead of
+        # resuming against a fresh or foreign one. Waiting holds no worker.
+        if (owner := self._runtime.private_state_owner(task_id)) is not None:
+            if not self._private_state_owner_live(owner):
+                return self._fail_private_state_unavailable(task_id, record, owner)
+            pool = [
+                c
+                for c in pool
+                if c.id == owner.worker_id and c.incarnation == owner.incarnation
+            ]
+            if not pool:
+                record.no_eligible_since = None
+                self.requeue_task(
+                    task_id, reason="private_state_owner_busy", count_retry=False
+                )
+                return False
 
         failed_ids = set(record.failed_workers)
 
@@ -490,7 +551,10 @@ class Dispatcher:
             upstream_task_ids=self._resolve_upstream_task_ids(
                 record, rendered_task.spec
             ),
-            agent_episode=self._runtime.agent_episode_dispatch(task_id),
+            agent_episode=self._runtime.agent_episode_dispatch(
+                task_id,
+                OwnerFence(worker_id=worker.id, incarnation=worker.incarnation),
+            ),
             service_episode=self._runtime.service_episode_dispatch(task_id),
         )
 

@@ -18,6 +18,7 @@ from enum import StrEnum
 from pydantic import BaseModel, ConfigDict
 
 from ..outcome import OutcomeManifest
+from ..private_state import PrivateStateAttachment, PrivateStateBinding
 from ..tasks.specs.misc import ModelBindingMode
 from ..tools.facade import FacadeDescriptor
 from .boundary import BoundaryRequest, DenialKind
@@ -178,6 +179,9 @@ class AgentEpisodeDispatch(BaseModel):
     re-applies the initial context. ``model_binding`` is the credential-free binding the
     worker captures an external model boundary against. ``facade_descriptors`` are the
     agent's compile-pinned fabric facades the worker injects into a held model turn.
+    ``private_state`` names the generation the episode resumes on and
+    ``private_state_attachment`` is this worker incarnation's exclusive authority to
+    materialize and write it.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -188,6 +192,8 @@ class AgentEpisodeDispatch(BaseModel):
     input_bindings: tuple[InputBinding, ...] = ()
     model_binding: EpisodeModelBinding | None = None
     facade_descriptors: tuple[FacadeDescriptor, ...] = ()
+    private_state: PrivateStateBinding | None = None
+    private_state_attachment: PrivateStateAttachment | None = None
 
 
 class ServiceLeafEpisodeDispatch(BaseModel):

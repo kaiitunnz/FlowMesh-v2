@@ -9,6 +9,7 @@ holder exclusive authority to materialize and write it.
 
 from .attachment import (
     PrivateStateAttachment,
+    PrivateStateSealReport,
     PrivateStateUnavailable,
     PrivateStateUnavailableReason,
 )
@@ -40,6 +41,7 @@ __all__ = [
     "PrivateStateBinding",
     "PrivateStateIsolation",
     "PrivateStateRecoveryMode",
+    "PrivateStateSealReport",
     "PrivateStateUnavailable",
     "PrivateStateUnavailableReason",
     "SealedComponent",

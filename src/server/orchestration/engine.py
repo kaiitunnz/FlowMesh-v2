@@ -20,6 +20,12 @@ from typing import Self
 
 from shared.harness import DeliveredOutcome, OutcomeKind
 from shared.outcome import OutcomeManifest
+from shared.private_state import (
+    OwnerFence,
+    PrivateStateAttachment,
+    PrivateStateBinding,
+    StateBundleManifest,
+)
 from shared.tools.contract import MediatedOperationPermit
 from shared.utils import (
     new_activation_id,
@@ -65,6 +71,7 @@ from .outcomes import (
     next_on_terminal,
     next_on_uncertain,
 )
+from .private_state import PrivateStateLedger
 from .state import (
     AcceptedInput,
     AcceptedInputMember,
@@ -229,6 +236,7 @@ class OrchestrationEngine:
         self._slots = {s.slot_key: s for s in snapshot.result_slots}
         self._publications = {p.slot_key: p for p in snapshot.result_publications}
         self._trace = list(snapshot.trace)
+        self._private_state = PrivateStateLedger(snapshot.private_state)
 
         self._operators: dict[str, LogicalOperator] = {
             op.operator_id: op for op in bundle.template.operators
@@ -613,6 +621,7 @@ class OrchestrationEngine:
             )
         wi.status = WorkItemStatus.SETTLED
         wi.outcome = outcome
+        self._private_state.release(wi.activation_id)
         self._publish(wi.operator_id, outcome, value_ref)
         return self._deliver_record(wi.operator_id, wi.activation_id, value_ref).extend(
             released
@@ -2099,6 +2108,7 @@ class OrchestrationEngine:
         wi.status = WorkItemStatus.SETTLED
         wi.outcome = outcome
         wi.value_ref = value_ref
+        self._private_state.release(wi.activation_id)
         cap = self._capability(activation.scope_id, ProgressAxis.CHILD_INIT)
         cap.outstanding = max(0, cap.outstanding - 1)
         spawn_op = self._scopes[activation.scope_id].owner_operator_id or ""
@@ -2332,6 +2342,7 @@ class OrchestrationEngine:
         if wi.status in _TERMINAL_WI:
             return
         wi.status = WorkItemStatus.CANCELLED
+        self._private_state.release(wi.activation_id)
         self._publish(
             wi.operator_id, PublicationOutcome.EXPLICIT_EMPTY, ValueRef(kind="empty")
         )
@@ -2935,6 +2946,7 @@ class OrchestrationEngine:
                 return
             wi.status = WorkItemStatus.SETTLED
             wi.outcome = PublicationOutcome.EXPLICIT_EMPTY
+            self._private_state.release(wi.activation_id)
             self._publish(
                 operator_id, PublicationOutcome.EXPLICIT_EMPTY, ValueRef(kind="empty")
             )
@@ -2947,6 +2959,7 @@ class OrchestrationEngine:
             return []
         wi.status = WorkItemStatus.SETTLED
         wi.outcome = PublicationOutcome.DECLARED_FAILURE
+        self._private_state.release(wi.activation_id)
         self._publish(wi.operator_id, PublicationOutcome.DECLARED_FAILURE, None)
         cascade = [wi.legacy_task_id]
         for successor in sorted(self._forward.get(wi.operator_id, ())):
@@ -3184,6 +3197,69 @@ class OrchestrationEngine:
         op = self._operators.get(operator_id)
         return op if isinstance(op, AgentOperator) else None
 
+    def private_state_binding(self, task_id: str) -> PrivateStateBinding | None:
+        """An agent task's binding, minting an unseeded lineage on first use."""
+        wi = self._work_item_for_task(task_id)
+        if wi is None or self.agent_operator(task_id) is None:
+            return None
+        return self._private_state.ensure(wi.activation_id, self._instance.instance_id)
+
+    def private_state_owner(self, task_id: str) -> OwnerFence | None:
+        """The single holder that can supply an agent task's bound generation."""
+        wi = self._work_item_for_task(task_id)
+        if wi is None or self.agent_operator(task_id) is None:
+            return None
+        return self._private_state.owner(wi.activation_id)
+
+    def grant_private_state(
+        self, task_id: str, worker_id: str, incarnation: int
+    ) -> tuple[PrivateStateBinding, PrivateStateAttachment] | None:
+        """Bind a holder to an agent task's private state for one dispatch."""
+        wi = self._work_item_for_task(task_id)
+        if wi is None or self.agent_operator(task_id) is None:
+            return None
+        binding = self._private_state.ensure(
+            wi.activation_id, self._instance.instance_id
+        )
+        attachment = self._private_state.attach(
+            wi.activation_id, worker_id, incarnation
+        )
+        self._emit(
+            "private_state_attached",
+            work_item_id=wi.work_item_id,
+            operator_id=wi.operator_id,
+            detail={
+                "reference": binding.reference.reference_id,
+                "generation": str(binding.generation),
+                "write_epoch": str(attachment.write_epoch),
+            },
+        )
+        return binding, attachment
+
+    def seal_private_state(
+        self, task_id: str, manifest: StateBundleManifest, write_epoch: int
+    ) -> None:
+        """Record the generation a holder sealed at its quiescence fence."""
+        wi = self._work_item_for_task(task_id)
+        if wi is None:
+            return
+        self._private_state.seal(wi.activation_id, manifest, write_epoch)
+        self._emit(
+            "private_state_sealed",
+            work_item_id=wi.work_item_id,
+            operator_id=wi.operator_id,
+            detail={
+                "reference": manifest.reference_id,
+                "generation": str(manifest.generation),
+            },
+        )
+
+    def release_private_state(self, task_id: str) -> None:
+        """Drop an agent task's write authority once it can no longer resume."""
+        wi = self._work_item_for_task(task_id)
+        if wi is not None:
+            self._private_state.release(wi.activation_id)
+
     def service_dependency(self, task_id: str) -> ServiceDependency | None:
         """The normalized resident dependency a dispatched task consumes, or None."""
         wi = self._work_item_for_task(task_id)
@@ -3226,6 +3302,7 @@ class OrchestrationEngine:
             result_slots=list(self._slots.values()),
             result_publications=list(self._publications.values()),
             trace=list(self._trace),
+            private_state=self._private_state.lineages(),
             released_scopes=sorted(self._released_scopes),
             next_seq=self._next_seq,
         )

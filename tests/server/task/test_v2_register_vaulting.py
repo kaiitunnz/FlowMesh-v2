@@ -11,8 +11,11 @@ from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime
 from server.task.v2 import PersistedV2Workflow
 from shared.harness import HarnessCapsule
+from shared.private_state import OwnerFence
 from tests.server.task.test_v2_orchestration import FakeRegistry, _WorkerRegistryStub
 from worker.executors.harness.scripted import ScriptedHarnessAdapter, ScriptedStep
+
+_HOLDER = OwnerFence(worker_id="wkr-1", incarnation=1)
 
 _RAW_KEY = "sk-super-secret-USER-KEY"
 
@@ -117,7 +120,7 @@ async def test_cancel_purges_the_workflow_vault():
 
 def _drive_agent_to_done(runtime: TaskRuntime, task_id: str) -> None:
     engine = runtime.orchestration_engine(runtime._tasks[task_id].workflow_id)
-    dispatch = runtime.agent_episode_dispatch(task_id)
+    dispatch = runtime.agent_episode_dispatch(task_id, _HOLDER)
     assert engine is not None and dispatch is not None
     adapter = ScriptedHarnessAdapter([ScriptedStep(op="complete", value="done")], "v1")
     capsule = (

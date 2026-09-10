@@ -22,6 +22,11 @@ from shared.harness import (
     ServiceLeafEpisodeDispatch,
 )
 from shared.outcome import OutcomeManifest
+from shared.private_state import (
+    OwnerFence,
+    PrivateStateSealReport,
+    PrivateStateUnavailable,
+)
 from shared.resident.reports import (
     ResidentBootstrapAck,
     ResidentOpOutcome,
@@ -1736,11 +1741,42 @@ class TaskRuntime:
             dependency = engine.service_dependency(task_id)
             return (record.workflow_id, dependency) if dependency is not None else None
 
-    def agent_episode_dispatch(self, task_id: str) -> AgentEpisodeDispatch | None:
+    def _apply_private_state_seal_locked(self, task_id: str, sealed: Any) -> None:
+        """Record the generation a holder sealed, ignoring a fenced-out report."""
+        record = self._tasks.get(task_id)
+        engine = self._engines.get(record.workflow_id) if record else None
+        if engine is None:
+            return
+        report = PrivateStateSealReport.model_validate(sealed)
+        try:
+            engine.seal_private_state(task_id, report.manifest, report.write_epoch)
+        except PrivateStateUnavailable as exc:
+            # A superseded holder cannot advance the lineage; its step is already
+            # fenced out of the write, so the binding keeps the generation it had.
+            self._logger.warning(
+                "refused a private-state seal for %s: %s", task_id, exc
+            )
+
+    def private_state_owner(self, task_id: str) -> OwnerFence | None:
+        """The holder that must supply a task's bound private state, or None.
+
+        None covers a task with no private state and an agent whose lineage has no
+        sealed generation yet, both of which any eligible worker may run.
+        """
+        with self._lock:
+            record = self._tasks.get(task_id)
+            engine = self._engines.get(record.workflow_id) if record else None
+            return engine.private_state_owner(task_id) if engine else None
+
+    def agent_episode_dispatch(
+        self, task_id: str, holder: OwnerFence
+    ) -> AgentEpisodeDispatch | None:
         """The agent-episode context to ship with a dispatch, or None for a non-agent.
 
         The backend key comes from the operator's pinned harness binding, so a later
-        deployment-default change cannot move a live activation.
+        deployment-default change cannot move a live activation. ``holder`` is the
+        selected worker incarnation the dispatch grants private-state authority to; the
+        grant supersedes any prior epoch, fencing a stale holder out of the write.
         """
         with self._lock:
             record = self._tasks.get(task_id)
@@ -1756,6 +1792,9 @@ class TaskRuntime:
                 EpisodeModelBinding(mode=model.mode, url=model.url, model=model.model)
                 if model is not None
                 else None
+            )
+            granted = engine.grant_private_state(
+                task_id, holder.worker_id, holder.incarnation
             )
             capsule_blob, outcomes = engine.episode_context(task_id)
             # First-turn dataflow inputs are delivered only on the first dispatch; a
@@ -1774,6 +1813,8 @@ class TaskRuntime:
                 input_bindings=input_bindings,
                 model_binding=model_binding,
                 facade_descriptors=tuple(op.facades) if op is not None else (),
+                private_state=granted[0] if granted else None,
+                private_state_attachment=granted[1] if granted else None,
             )
 
     def service_episode_dispatch(
@@ -2630,6 +2671,11 @@ class TaskRuntime:
             episode_step = payload.get("agent_episode")
             if episode_step is not None and record is not None:
                 harness_result = HarnessResult.model_validate(episode_step)
+                # The holder seals its private state at the step's quiescence fence, so
+                # the generation the next resume binds is recorded before the step is
+                # routed and the episode can be re-dispatched.
+                if (sealed := payload.get("agent_episode_private_state")) is not None:
+                    self._apply_private_state_seal_locked(task_id, sealed)
                 # A facade group the worker captured on this turn rides the completion's
                 # own metadata on the durable task stream, so it is ingested here rather
                 # than on a separate channel that could deliver it after the completion

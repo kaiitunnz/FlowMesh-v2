@@ -4,6 +4,8 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict
 
+from .manifest import StateBundleManifest
+
 
 class PrivateStateAttachment(BaseModel):
     """Materialization and write authority for one holder over one bound generation.
@@ -21,6 +23,19 @@ class PrivateStateAttachment(BaseModel):
     generation: int
     worker_id: str
     incarnation: int
+    write_epoch: int
+
+
+class PrivateStateSealReport(BaseModel):
+    """A holder's report of the generation it sealed under its attachment.
+
+    ``write_epoch`` is the fence the seal is accepted under: a holder whose epoch has
+    been superseded cannot advance the lineage.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    manifest: StateBundleManifest
     write_epoch: int
 
 

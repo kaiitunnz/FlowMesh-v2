@@ -13,8 +13,11 @@ from server.config import AgentModelGatewayConfig, GatewayMode
 from server.orchestration import WorkItemStatus
 from server.services.agent_model_gateway import AgentModelGateway
 from shared.harness import BoundaryEventKind, HarnessCapsule
+from shared.private_state import OwnerFence
 from tests.server.task.test_v2_orchestration import FakeRegistry, _register, _runtime
 from worker.executors.harness.scripted import ScriptedHarnessAdapter, ScriptedStep
+
+_HOLDER = OwnerFence(worker_id="wkr-1", incarnation=1)
 
 _TS = "2026-08-29T00:00:00Z"
 
@@ -87,7 +90,7 @@ def test_model_boundary_settles_and_resumes_with_the_result() -> None:
         assert wi is not None and wi.status is WorkItemStatus.READY
 
         # Step 2: the re-dispatch carries the injected model result; it completes.
-        dispatch = runtime.agent_episode_dispatch(solver)
+        dispatch = runtime.agent_episode_dispatch(solver, _HOLDER)
         assert dispatch is not None and len(dispatch.delivered_outcomes) == 1
         capsule = HarnessCapsule(
             backend=dispatch.backend, blob=dispatch.capsule_blob or ""
