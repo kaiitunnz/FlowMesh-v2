@@ -625,7 +625,11 @@ class Runner:
                             f"Task {task_id} was cancelled before execution"
                         )
                     self._current_task_id = task_id
-                    if msg.service_episode is not None:
+                    if msg.sandbox_session is not None:
+                        # A sandbox session runs its own episode against its private
+                        # filesystem; it consumes host capacity, not a model request.
+                        desired_key = "sandbox_session"
+                    elif msg.service_episode is not None:
                         # A resident service-backed leaf runs the service-episode path
                         # (capture the model request, yield a resident boundary, resume
                         # on the settled completion) rather than loading a local model.
@@ -640,8 +644,6 @@ class Runner:
                         desired_key = self._select_embedding_executor_key(spec)
                     elif task_type == "serve":
                         desired_key = "vllm_serve"
-                    elif task_type == "sandbox":
-                        desired_key = "sandbox_session"
                     elif task_type == "agent":
                         if msg.agent_episode is None:
                             raise ExecutionError(

@@ -1946,6 +1946,10 @@ class TaskRuntime:
             dependency = engine.service_dependency(task_id)
             if dependency is None or engine.agent_operator(task_id) is not None:
                 return None
+            if engine.sandbox_session_operator(task_id) is not None:
+                # A sandbox session consumes its host through the session episode, not
+                # the model-request path a service leaf yields.
+                return None
             _capsule, outcomes = engine.episode_context(task_id)
             return ServiceLeafEpisodeDispatch(
                 interface=dependency.interface.value, delivered_outcomes=outcomes

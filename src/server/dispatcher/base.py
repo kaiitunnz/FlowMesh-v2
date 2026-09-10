@@ -266,27 +266,6 @@ class Dispatcher:
         if record.selected_worker:
             pool = [c for c in pool if c.id in record.selected_worker]
 
-        # 2a. Sandbox sessions place on their admitted host: the session's commands run
-        # in that host's own worker, so admission — not the worker pool — decides where
-        # it goes. Waiting for the admission holds no worker.
-        if self._runtime.is_sandbox_session(task_id):
-            host_worker = self._runtime.sandbox_session_worker(task_id)
-            if host_worker is None:
-                # Requeue before originating: admission may settle the session
-                # terminally, and a requeue after that would find no pending task.
-                self.requeue_task(
-                    task_id, reason="awaiting_sandbox_admission", count_retry=False
-                )
-                self._runtime.open_sandbox_session(task_id)
-                return False
-            pool = [c for c in pool if c.id == host_worker]
-            if not pool:
-                record.no_eligible_since = None
-                self.requeue_task(
-                    task_id, reason="sandbox_host_busy", count_retry=False
-                )
-                return False
-
         # 2b. Owner-affine private state: a bound generation is sealed on the holder
         # that produced it, so the episode waits for that incarnation instead of
         # resuming against a fresh or foreign one. Waiting holds no worker. This
@@ -316,6 +295,29 @@ class Dispatcher:
             # untried worker would wait on workers 2b has already excluded, which never
             # become selectable — an unbounded requeue that reaches no terminal.
             failed_ids = set()
+
+        # A sandbox session places on its admitted host: its commands run in that host's
+        # own worker, so admission — not the worker pool — decides where it goes.
+        # Waiting for the admission holds no worker. This follows the owner-affine check
+        # so a session whose holder is gone fails closed there rather than waiting here
+        # for a host it can no longer use.
+        if self._runtime.is_sandbox_session(task_id):
+            host_worker = self._runtime.sandbox_session_worker(task_id)
+            if host_worker is None:
+                # Requeue before originating: admission may settle the session
+                # terminally, and a requeue after that would find no pending task.
+                self.requeue_task(
+                    task_id, reason="awaiting_sandbox_admission", count_retry=False
+                )
+                self._runtime.open_sandbox_session(task_id)
+                return False
+            pool = [c for c in pool if c.id == host_worker]
+            if not pool:
+                record.no_eligible_since = None
+                self.requeue_task(
+                    task_id, reason="sandbox_host_busy", count_retry=False
+                )
+                return False
 
         # 3. No idle worker: wait for a busy one, or grace-then-fail when no worker can
         # take the task, or every eligible worker has already failed it.
