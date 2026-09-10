@@ -5,6 +5,8 @@ rebuilt from pending claims on load while an admitted claim is not re-enqueued, 
 derived credit ledger recomputes the outstanding credit from the rehydrated claims.
 """
 
+import json
+
 from server.resident import (
     AdmissionController,
     ClaimState,
@@ -83,3 +85,17 @@ def test_derived_credit_and_demand_rebuild_on_load():
     assert restored.demand.get(pending.claim_id) is not None
     assert restored.demand.get(reserved.claim_id) is None
     assert restored.claims.get(reserved.claim_id).state is ClaimState.STREAMING
+
+
+def test_an_unreadable_family_is_dropped_without_stranding_the_claims():
+    stores, reserved, _pending = _seed()
+    blob = json.loads(stores.to_snapshot().model_dump_json())
+    blob["families"] = [
+        {"family": "legacy", "engine_batch_key": "k"},
+        *blob["families"],
+    ]
+
+    restored = ResidentSnapshot.model_validate(blob)
+
+    assert "legacy" not in {family.family for family in restored.families}
+    assert reserved.claim_id in {claim.claim_id for claim in restored.claims}
