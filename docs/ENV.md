@@ -137,6 +137,7 @@ Spark), set `DOCKER_GPU_RUNTIME=` in the stack env.
 | `WORKER_TOKEN` | – | Auth token for supervisor gRPC |
 | `SUPERVISOR_GRPC_TARGET` | – | Supervisor gRPC endpoint |
 | `RESULTS_DIR` | `./results` | Task output directory |
+| `WORKER_PRIVATE_STATE_DIR` | – | Root for activation-private harness state; defaults to a private subdirectory of `RESULTS_DIR` |
 | `WORKER_TAGS` | `` | Scheduler hints |
 | `WORKER_COST_PER_HOUR` | `1.0` | Cost metadata |
 | `WORKER_UPLOAD_RESULTS` | `false` | Upload results when no destination set |

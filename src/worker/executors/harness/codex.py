@@ -36,6 +36,7 @@ from shared.tasks.specs import AgentSpecStrict
 from shared.tasks.worker_message import WorkerTaskMessage
 from worker.config import WorkerConfig
 from worker.model_turn import ResponsesFacade
+from worker.private_state import MaterializedState
 
 _BACKEND = "codex"
 _CODEX_ADAPTER_VERSION = "v1"
@@ -163,6 +164,7 @@ def build_codex_adapter(
     task: WorkerTaskMessage,
     config: WorkerConfig,
     facade: ResponsesFacade | None = None,
+    state: MaterializedState | None = None,
 ) -> CodexAppServerHarnessAdapter:
     spec = task.spec
     if not isinstance(spec, AgentSpecStrict) or spec.harness is None:
@@ -177,9 +179,8 @@ def build_codex_adapter(
         raise ValueError(
             "the codex backend requires a managed model binding with a url and model"
         )
-    codex_home = _isolated_codex_home(
-        config.results_dir, task.workflow_id, task.task_id
-    )
+    if state is None:
+        raise ValueError("the codex backend requires materialized private state")
     # Bind Codex to the facade's loopback surface with a per-episode token so one
     # episode can't drive another's egress.
     token = facade.register_episode(
@@ -194,7 +195,8 @@ def build_codex_adapter(
         CodexTransportConfig(
             base_url=facade.base_url(),
             model=binding.model,
-            codex_home=codex_home,
+            codex_home=state.harness_home,
+            cwd=state.workspace,
             initial_input=render_input_envelope(_agent_task(spec), bindings),
             task_id=task.task_id,
             env_key_value=token,
@@ -213,12 +215,11 @@ def _agent_task(spec: AgentSpecStrict) -> str:
     raise ValueError("the codex backend requires 'spec.task' or 'spec.data.task'")
 
 
-def _isolated_codex_home(results_dir: Path, workflow_id: str, task_id: str) -> Path:
-    """The rollout home for one agent activation: isolated per workflow and task.
+def legacy_codex_home(results_dir: Path, workflow_id: str, task_id: str) -> Path:
+    """The rollout home a Codex activation used before private-state references.
 
-    ``workflow_id`` and ``task_id`` are stable across an agent's run-to-yield steps and
-    restart, so the rollout resumes; distinct activations never co-mingle rollouts, so a
-    leaked thread id cannot reattach another activation's thread under a shared home.
+    A reachable tree here is drained into the activation's first sealed generation, so
+    an activation already mid-run keeps its rollout.
     """
     safe = (re.sub(r"[^A-Za-z0-9._-]", "_", part) for part in (workflow_id, task_id))
     return results_dir.joinpath("codex_home", *safe)

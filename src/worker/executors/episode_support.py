@@ -2,6 +2,7 @@
 
 from shared.harness import DeliveredOutcome, HarnessResult
 from shared.outcome import ContentStoreError, FabricContentStore
+from shared.private_state import PrivateStateSealReport
 from shared.schemas.result import BaseExecutorResult
 from shared.tools.facade import FacadeTurnGroup
 
@@ -15,12 +16,14 @@ class EpisodeStepResult(BaseExecutorResult):
     ``harness_result`` carries the step back to the server through the success metadata;
     ``value`` is the episode's declared output on a completion step, readable over REST.
     ``facade_group`` is a turn group a worker facade captured on this step, carried with
-    the completion so control routes it ordered-with the turn.
+    the completion so control routes it ordered-with the turn. ``private_state`` reports
+    the generation this holder sealed at the step's quiescence fence.
     """
 
     harness_result: HarnessResult
     value: str | None = None
     facade_group: FacadeTurnGroup | None = None
+    private_state: PrivateStateSealReport | None = None
 
 
 def hydrate_delivered_outcomes(

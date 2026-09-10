@@ -732,6 +732,10 @@ class Runner:
                             metadata["agent_episode_facade_group"] = (
                                 out.facade_group.model_dump(mode="json")
                             )
+                        if out.private_state is not None:
+                            metadata["agent_episode_private_state"] = (
+                                out.private_state.model_dump(mode="json")
+                            )
                     self.lifecycle.set_succeeded(task_id, metadata=metadata)
                     self.logger.info("Task %s completed successfully", task_id)
                 except TaskCancelledError as e:

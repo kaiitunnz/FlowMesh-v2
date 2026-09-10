@@ -1018,6 +1018,14 @@ STACK_ENV_SCHEMA = EnvSchema(
                         "Defaults to the stack-scoped results volume when empty."
                     ],
                 ),
+                EnvVar(
+                    "WORKER_PRIVATE_STATE_DIR",
+                    var_type=EnvVarType.DIR_PATH,
+                    description=[
+                        "Defaults to a private subdirectory of the results volume "
+                        "when empty."
+                    ],
+                ),
                 EnvVar("HF_CACHE_DIR", var_type=EnvVarType.DIR_PATH),
                 EnvVar(
                     "WORKER_NETWORK_BANDWIDTH_BYTES_PER_SEC",

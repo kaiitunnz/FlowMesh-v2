@@ -27,7 +27,7 @@ from worker.executors.harness.codex import (
     CodexEvent,
     CodexInjectItem,
     _agent_task,
-    _isolated_codex_home,
+    legacy_codex_home,
 )
 
 
@@ -172,18 +172,17 @@ def test_crash_after_injection_before_terminal_does_not_reexecute() -> None:
     assert fake.execution_count["a:0"] == 1
 
 
-def test_codex_home_isolates_activations_but_is_stable() -> None:
+def test_the_legacy_drain_source_is_per_activation() -> None:
     root = Path("/results")
-    home = _isolated_codex_home(root, "wfl-1", "act-1")
-    # Stable across steps of the same activation, so its rollout resumes.
-    assert home == _isolated_codex_home(root, "wfl-1", "act-1")
-    # Distinct per workflow and per task, so rollouts never co-mingle on disk.
-    assert home != _isolated_codex_home(root, "wfl-2", "act-1")
-    assert home != _isolated_codex_home(root, "wfl-1", "act-2")
+    home = legacy_codex_home(root, "wfl-1", "act-1")
+    assert home == legacy_codex_home(root, "wfl-1", "act-1")
+    # Distinct per workflow and per task, so a drain adopts one activation's rollout.
+    assert home != legacy_codex_home(root, "wfl-2", "act-1")
+    assert home != legacy_codex_home(root, "wfl-1", "act-2")
 
 
-def test_codex_home_sanitizes_path_separators() -> None:
-    home = _isolated_codex_home(Path("/results"), "wfl-1", "op/../escape")
+def test_the_legacy_drain_source_sanitizes_path_separators() -> None:
+    home = legacy_codex_home(Path("/results"), "wfl-1", "op/../escape")
     assert home == Path("/results/codex_home/wfl-1/op_.._escape")
     assert Path("/results/codex_home") in home.parents
 
