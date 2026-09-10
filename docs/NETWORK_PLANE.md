@@ -99,18 +99,17 @@ substitutes a peer.
 Eligibility is a property of the pair, not of topology. The resolver offers a peer
 transport only when the deployment enables it, both ends sit in the configured trust
 domain, the target is exposed at an admitted reachability class, both advertise the peer
-transport capability, and directional evidence has not demoted the path. An untrusted,
-public, NATed, outbound-only, stale, or policy-ineligible target is offered
-`control_relay` alone, even when it advertises a dialable address.
+transport capability, and directional evidence has not demoted the path.
 
-Mutual TLS is on by default. The deployment CA issues each node an identity carrying both
-client and server authentication, so a target admits only a dialer the CA vouched for,
-and an origin admits only a target whose certificate covers the host it dialed — the
-node's advertised peer address must therefore appear among its certificate's
-subject-alternative names, or the handshake fails and the attempt falls back to the
-relay. The replica's claim gate then fences the session to the invocation control
-admitted. TLS material is configured as files under the peer TLS directory, which the
-stack mounts read-only at `/etc/ssl/peer` where the configured paths resolve, and is
+Mutual TLS is on by default, enabled with `NETWORK_PLANE_PEER_ENABLED=true` over the
+identities `scripts/dev/generate_peer_tls_certs.sh` issues. The deployment CA issues each
+node an identity carrying both client and server authentication, so a target admits only
+a dialer the CA vouched for, and an origin admits only a target whose certificate covers
+the host it dialed — the node's advertised peer address must therefore appear among its
+certificate's subject-alternative names, or the handshake fails and the attempt falls
+back to the relay. The replica's claim gate then fences the session to the invocation
+control admitted. TLS material is configured as files under the peer TLS directory, which
+the stack mounts read-only at `/etc/ssl/peer` where the configured paths resolve, and is
 base64-encoded only when a worker attachment is handed its transient copy. Material a
 node cannot read is fatal at start-up rather than a fallback to plaintext. An operator
 may instead set `NETWORK_PLANE_PEER_DISABLE_MTLS` to attest a trusted network, which
@@ -123,9 +122,6 @@ ambiguous, so it settles as uncertain with its credit held and the demoted path 
 the next drive. Only transport failures demote — a fence, tenant, descriptor,
 application, or engine rejection arrives as a frame and settles the boundary without
 touching the path.
-
-Enable with `NETWORK_PLANE_PEER_ENABLED=true`; `scripts/dev/generate_peer_tls_certs.sh`
-issues the CA and per-node identities.
 
 ## Reverse-rendezvous relay
 

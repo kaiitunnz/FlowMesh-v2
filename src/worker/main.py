@@ -177,12 +177,16 @@ def initialize_executors(
 def build_capabilities(
     executors: dict[str, Executor],
     registry: Mapping[str, type[Executor] | None] | None = None,
+    resident_listener_port: int = 0,
 ) -> WorkerCapabilities:
     registry = registry or EXECUTOR_REGISTRY
     supported_task_types = frozenset[TaskType]().union(
         *(cls.supported_task_types for key in executors if (cls := registry.get(key)))
     )
-    return WorkerCapabilities(supported_task_types=supported_task_types)
+    return WorkerCapabilities(
+        supported_task_types=supported_task_types,
+        resident_listener_port=resident_listener_port,
+    )
 
 
 def _peer_material(
@@ -283,12 +287,11 @@ def main() -> None:
     )
 
     peer_sock = _bind_peer_listener(cfg)
-    capabilities = build_capabilities(executors).model_copy(
-        update={
-            "resident_listener_port": (
-                peer_sock.getsockname()[1] if peer_sock is not None else 0
-            )
-        }
+    capabilities = build_capabilities(
+        executors,
+        resident_listener_port=(
+            peer_sock.getsockname()[1] if peer_sock is not None else 0
+        ),
     )
     ssh_limits = cfg.ssh_limits
     if TaskType.SSH in capabilities.supported_task_types:

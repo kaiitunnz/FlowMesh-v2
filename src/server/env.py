@@ -6,6 +6,15 @@ from pathlib import Path
 from shared.tools.search.schema import DEFAULT_SEARCH_PROVIDER
 from shared.utils import parse_bool_env, parse_float_env, parse_int_env
 
+
+def _read_file_b64(path: str, what: str) -> str:
+    """One operator-configured TLS file, base64-encoded for a transient copy."""
+    try:
+        return base64.b64encode(Path(path).read_bytes()).decode("ascii")
+    except OSError as exc:
+        raise RuntimeError(f"Failed to read {what}: {exc}") from exc
+
+
 NODE_NAMESPACE: str = os.getenv("NODE_NAMESPACE") or "flowmesh"
 NODE_CLUSTER: str = os.getenv("NODE_CLUSTER") or "cluster"
 NODE_ALIAS: str = os.getenv("NODE_ALIAS") or "node"
@@ -47,11 +56,9 @@ if SERVER_GRPC_TLS_CERT_FILE or SERVER_GRPC_TLS_KEY_FILE:
         )
     if not SERVER_GRPC_TLS_CA_FILE:
         raise RuntimeError("SERVER_GRPC_TLS_CA_FILE is required for server TLS")
-    ca_path = Path(SERVER_GRPC_TLS_CA_FILE)
-    try:
-        SERVER_GRPC_TLS_CA_B64 = base64.b64encode(ca_path.read_bytes()).decode("ascii")
-    except OSError as exc:
-        raise RuntimeError(f"Failed to read server TLS CA file: {exc}") from exc
+    SERVER_GRPC_TLS_CA_B64 = _read_file_b64(
+        SERVER_GRPC_TLS_CA_FILE, "server TLS CA file"
+    )
 else:
     SERVER_GRPC_TLS_CA_B64 = ""
 
@@ -160,10 +167,7 @@ def _peer_material_b64(var: str) -> str:
     path = (os.getenv(var) or "").strip()
     if not path:
         raise RuntimeError(f"{var} is required unless peer mutual TLS is disabled")
-    try:
-        return base64.b64encode(Path(path).read_bytes()).decode("ascii")
-    except OSError as exc:
-        raise RuntimeError(f"Failed to read {var}: {exc}") from exc
+    return _read_file_b64(path, var)
 
 
 NETWORK_PLANE_PEER_TLS_CA_B64: str = _peer_material_b64(

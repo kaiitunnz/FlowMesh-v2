@@ -598,12 +598,12 @@ STACK_ENV_SCHEMA = EnvSchema(
                 EnvVar(
                     "NETWORK_PLANE_ENDPOINT_URL",
                     "",
-                    description="Advertised node-relay endpoint (host:port).",
+                    description="Advertised node-relay substrate endpoint (host:port).",
                 ),
                 EnvVar(
                     "NETWORK_PLANE_SIDECAR_URL",
                     "",
-                    description="Node-local echo listener (host:port).",
+                    description="Node-local reachability echo listener (host:port).",
                 ),
                 EnvVar(
                     "NETWORK_PLANE_TRUST_DOMAIN",
@@ -728,7 +728,7 @@ STACK_ENV_SCHEMA = EnvSchema(
                 EnvVar(
                     "NETWORK_PLANE_PEER_NODE_LISTENER_URL",
                     "",
-                    description="Node peer listener (host:port).",
+                    description="mTLS peer listener for node_relay (host:port).",
                 ),
             ],
         ),
@@ -1195,7 +1195,6 @@ STACK_ENV_SCHEMA = EnvSchema(
         ),
     ],
     validators=[
-        _require_peer_trust,
         lambda env, errors, warnings: require_if_true(
             env, "REDIS_ACL_ENABLED", ["REDIS_USERNAME", "REDIS_PASSWORD"], errors
         ),
@@ -1208,6 +1207,7 @@ STACK_ENV_SCHEMA = EnvSchema(
             ],
             errors,
         ),
+        _require_peer_trust,
         _require_network_plane_for_resident,
     ],
 )

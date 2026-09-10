@@ -11,9 +11,7 @@ Ladder rules:
   ``RouteOrigin`` itself dials, so a workflow origin's payload never enters the root.
   They are offered only to a deployment-declared trusted pair — the trust policy, both
   ends' trust domain, the target's reachability class, the transport capability both
-  advertise, and directional evidence must all admit them. A target that is untrusted,
-  public, NATed, outbound-only, stale, or policy-ineligible is offered ``control_relay``
-  alone, even when it advertises a dialable address.
+  advertise, and directional evidence must all admit them.
 - ``worker_direct`` additionally needs the listener explicitly directly routable and the
   origin's network class able to reach the target endpoint's class. Shared-node
   placement alone is not sufficient.

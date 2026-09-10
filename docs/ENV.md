@@ -76,8 +76,8 @@ listed here is in `.env.example`.
 | `RESIDENT_IDLE_SWEEP_INTERVAL_SEC` | `30` | Idle-teardown sweep interval (seconds) |
 | `RESIDENT_SIDECAR_DIRECTLY_ROUTABLE` | `false` | Advertise the resident sidecar as directly routable |
 | `NETWORK_PLANE_ENABLED` | `false` | Enable the route-discovery and relay substrate |
-| `NETWORK_PLANE_ENDPOINT_URL` | – | Advertised node-relay endpoint (`host:port`) |
-| `NETWORK_PLANE_SIDECAR_URL` | – | Node-local echo listener (`host:port`) |
+| `NETWORK_PLANE_ENDPOINT_URL` | – | Advertised node-relay substrate endpoint (`host:port`) |
+| `NETWORK_PLANE_SIDECAR_URL` | – | Node-local reachability echo listener (`host:port`) |
 | `NETWORK_PLANE_TRUST_DOMAIN` | `flowmesh` | Endpoint trust domain |
 | `NETWORK_PLANE_REACHABILITY_CLASS` | `routable` | Endpoint reachability class |
 | `NETWORK_PLANE_PROTOCOLS` | `echo` | Advertised transport protocols |
@@ -96,7 +96,7 @@ listed here is in `.env.example`.
 | `NETWORK_PLANE_PEER_TLS_CA_FILE` | `/etc/ssl/peer/peer-ca.pem` | Peer CA bundle path |
 | `NETWORK_PLANE_PEER_TLS_CERT_FILE` | `/etc/ssl/peer/peer.pem` | Peer certificate path (must cover the advertised listener host) |
 | `NETWORK_PLANE_PEER_TLS_KEY_FILE` | `/etc/ssl/peer/peer.key` | Peer private key path |
-| `NETWORK_PLANE_PEER_NODE_LISTENER_URL` | – | Node peer listener (`host:port`) |
+| `NETWORK_PLANE_PEER_NODE_LISTENER_URL` | – | mTLS peer listener for `node_relay` (`host:port`) |
 | `ENABLE_WORKER_WATCHDOG` | `true` | Worker death detection |
 | `WORKER_DEATH_GRACE_SEC` | `60` | Grace period before marking dead |
 | `WORKER_REHYDRATION_GRACE_SEC` | `120` | Extra grace for a worker's rehydrated in-flight tasks after the root restarts, before the watchdog may reclaim them |

@@ -135,8 +135,6 @@ class WorkerAdapter(ABC):
             "WORKER_TOKEN": self.token,  # type: ignore
             "SUPERVISOR_GRPC_TARGET": config.supervisor_grpc_target,
             "SUPERVISOR_GRPC_TLS_CA_B64": env.SERVER_GRPC_TLS_CA_B64,
-            # A worker dials a peer target and serves one of its own, so it holds
-            # the node's identity for both directions.
             "NETWORK_PLANE_PEER_ENABLED": to_env_str(env.NETWORK_PLANE_PEER_ENABLED),
             "NETWORK_PLANE_PEER_DISABLE_MTLS": to_env_str(
                 env.NETWORK_PLANE_PEER_DISABLE_MTLS

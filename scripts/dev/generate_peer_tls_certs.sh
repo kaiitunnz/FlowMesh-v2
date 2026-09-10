@@ -2,9 +2,7 @@
 # Issue the CA and node identities a trusted peer transport is carried over.
 #
 # Each node both dials a peer target and serves one, so its identity carries
-# clientAuth and serverAuth. The cluster gRPC CA cannot be reused as-is: it issues
-# server-only identities, which authenticate a listener but never prove which node is
-# dialing it.
+# clientAuth and serverAuth.
 #
 # A dialing origin verifies that its target's certificate covers the host it dialed, so
 # pass the node's advertised peer address (NETWORK_PLANE_PEER_NODE_LISTENER_URL's
@@ -100,6 +98,8 @@ chmod 644 "${TLS_DIR}/peer.pem"
 
 echo "Generated CA: ${CA_CERT}"
 echo "Generated node cert/key: ${NODE_CERT} ${NODE_KEY}"
-echo "Installed as ${NODE_NAME}'s identity: ${TLS_DIR}/peer.pem ${TLS_DIR}/peer.key"
-echo "Run this on ${NODE_NAME} with NETWORK_PLANE_PEER_TLS_DIR=${TLS_DIR}; the"
-echo "container reads the mounted /etc/ssl/peer paths the env defaults already name."
+echo "Export these for ${NODE_NAME}:"
+echo "NETWORK_PLANE_PEER_TLS_DIR=${TLS_DIR}"
+echo "NETWORK_PLANE_PEER_TLS_CA_FILE=${CA_CERT}"
+echo "NETWORK_PLANE_PEER_TLS_CERT_FILE=${NODE_CERT}"
+echo "NETWORK_PLANE_PEER_TLS_KEY_FILE=${NODE_KEY}"
