@@ -6,6 +6,15 @@ from pathlib import Path
 from shared.tools.search.schema import DEFAULT_SEARCH_PROVIDER
 from shared.utils import parse_bool_env, parse_float_env, parse_int_env
 
+
+def _read_file_b64(path: str, what: str) -> str:
+    """One operator-configured TLS file, base64-encoded for a transient copy."""
+    try:
+        return base64.b64encode(Path(path).read_bytes()).decode("ascii")
+    except OSError as exc:
+        raise RuntimeError(f"Failed to read {what}: {exc}") from exc
+
+
 NODE_NAMESPACE: str = os.getenv("NODE_NAMESPACE") or "flowmesh"
 NODE_CLUSTER: str = os.getenv("NODE_CLUSTER") or "cluster"
 NODE_ALIAS: str = os.getenv("NODE_ALIAS") or "node"
@@ -47,11 +56,9 @@ if SERVER_GRPC_TLS_CERT_FILE or SERVER_GRPC_TLS_KEY_FILE:
         )
     if not SERVER_GRPC_TLS_CA_FILE:
         raise RuntimeError("SERVER_GRPC_TLS_CA_FILE is required for server TLS")
-    ca_path = Path(SERVER_GRPC_TLS_CA_FILE)
-    try:
-        SERVER_GRPC_TLS_CA_B64 = base64.b64encode(ca_path.read_bytes()).decode("ascii")
-    except OSError as exc:
-        raise RuntimeError(f"Failed to read server TLS CA file: {exc}") from exc
+    SERVER_GRPC_TLS_CA_B64 = _read_file_b64(
+        SERVER_GRPC_TLS_CA_FILE, "server TLS CA file"
+    )
 else:
     SERVER_GRPC_TLS_CA_B64 = ""
 
@@ -139,3 +146,36 @@ VAST_SEARCH_LIMIT: int = int(os.getenv("VAST_SEARCH_LIMIT") or "10")
 VAST_MAX_RETRIES: int = int(os.getenv("VAST_MAX_RETRIES") or "1")
 
 NEBULA_API_BASE_URL: str = os.getenv("NEBULA_API_BASE_URL", "")
+
+
+NETWORK_PLANE_PEER_ENABLED: bool = parse_bool_env("NETWORK_PLANE_PEER_ENABLED", False)
+NETWORK_PLANE_PEER_DISABLE_MTLS: bool = parse_bool_env(
+    "NETWORK_PLANE_PEER_DISABLE_MTLS", False
+)
+
+
+def _peer_material_b64(var: str) -> str:
+    """A worker's transient copy of one peer TLS file, base64-encoded.
+
+    The operator configures the material as files on the node; a worker runs in its own
+    container, so the supervisor hands it the bytes rather than a path it cannot read.
+    Material the node cannot read is fatal here rather than handed over absent, so a
+    worker never dials in plaintext on a deployment that asked for mutual TLS.
+    """
+    if not NETWORK_PLANE_PEER_ENABLED or NETWORK_PLANE_PEER_DISABLE_MTLS:
+        return ""
+    path = os.getenv(var, "").strip()
+    if not path:
+        raise RuntimeError(f"{var} is required unless peer mutual TLS is disabled")
+    return _read_file_b64(path, var)
+
+
+NETWORK_PLANE_PEER_TLS_CA_B64: str = _peer_material_b64(
+    "NETWORK_PLANE_PEER_TLS_CA_FILE"
+)
+NETWORK_PLANE_PEER_TLS_CERT_B64: str = _peer_material_b64(
+    "NETWORK_PLANE_PEER_TLS_CERT_FILE"
+)
+NETWORK_PLANE_PEER_TLS_KEY_B64: str = _peer_material_b64(
+    "NETWORK_PLANE_PEER_TLS_KEY_FILE"
+)

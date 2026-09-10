@@ -11,24 +11,37 @@ import asyncio
 import concurrent.futures
 import contextlib
 import logging
+import socket
 import threading
 from collections.abc import Callable, Coroutine
 from typing import Any
 
+from shared.network.mtls import MutualTlsMaterial, client_context
 from shared.network.relay_frame import RelayDirection, RelayFrame
 from shared.outcome import FabricContentStore
-from shared.resident.carriage import ControlRelayCarriage, ResidentCarriagePlan
+from shared.resident.carriage import (
+    ClaimGatedServiceCarriage,
+    ControlRelayCarriage,
+    ResidentCarriagePlan,
+)
 from shared.resident.contracts import (
     AdmissionHandoff,
     ReplicaEndpoint,
     RouteAuthorization,
 )
 from shared.resident.gate import LoadEvidence
-from shared.resident.reports import ResidentBootstrapAck, ResidentOpOutcome
+from shared.resident.peer_carriage import PeerCarriage
+from shared.resident.reports import (
+    ResidentBootstrapAck,
+    ResidentOpOutcome,
+    ResidentRouteObservation,
+)
 from shared.resident.transport import ResidentFrameSink
+from shared.schemas.network import RouteObservationOutcome, Transport
 
 from .engine import EngineOpen, HttpEngineDelivery, RawEngineOpen, RawHttpEngineDelivery
 from .origin_driver import ResidentOriginDriver, ResidentOriginRequest
+from .peer_listener import ResidentPeerListener
 from .replica_sidecar import ResidentReplicaSidecar
 
 # Peeks the worker-private raw request for a captured resident boundary, or None.
@@ -37,6 +50,7 @@ RequestLookup = Callable[[str, str], str | None]
 RequestDelete = Callable[[str, str], None]
 AckSink = Callable[[ResidentBootstrapAck], None]
 OutcomeSink = Callable[[ResidentOpOutcome], None]
+ObservationReport = Callable[[ResidentRouteObservation], None]
 
 
 class _EventFrameSink:
@@ -64,6 +78,11 @@ class ResidentLaneHost:
         engine_open: EngineOpen | None = None,
         engine_open_raw: RawEngineOpen | None = None,
         engine_timeout_sec: float = 300.0,
+        report_observation: ObservationReport | None = None,
+        peer_material: MutualTlsMaterial | None = None,
+        peer_enabled: bool = False,
+        peer_listener_sock: socket.socket | None = None,
+        connect_budget_sec: float = 5.0,
         logger: logging.Logger | None = None,
     ) -> None:
         self._push_frame = push_frame
@@ -78,6 +97,12 @@ class ResidentLaneHost:
         self._engine_open_raw = engine_open_raw or RawHttpEngineDelivery(
             timeout_sec=engine_timeout_sec
         )
+        self._report_observation = report_observation
+        self._peer_material = peer_material
+        self._peer_enabled = peer_enabled
+        self._peer_listener_sock = peer_listener_sock
+        self._peer_listener: ResidentPeerListener | None = None
+        self._connect_budget_sec = connect_budget_sec
         self._logger = logger or logging.getLogger("resident-lane-host")
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(
@@ -93,10 +118,7 @@ class ResidentLaneHost:
 
     async def _build(self) -> None:
         sink: ResidentFrameSink = _EventFrameSink(self._push_frame)
-        # Every origin attempt on this worker rides control_relay over the one
-        # authenticated attachment; a later PR adds direct/node carriages behind the
-        # same factory without changing the drives that take their sink from it.
-        carriage = ControlRelayCarriage(sink)
+        carriage = self._carriage(sink)
         self._origin = ResidentOriginDriver(
             carriage=carriage,
             content_store=self._content_store,
@@ -110,6 +132,66 @@ class ResidentLaneHost:
             engine_open_raw=self._engine_open_raw,
             on_load=self._on_load,
             logger=self._logger,
+        )
+        await self._start_peer_listener()
+
+    async def _start_peer_listener(self) -> None:
+        """Serve this worker's claim-gated peer listener, where one is bound."""
+        sock = self._peer_listener_sock
+        if sock is None or self._replica is None:
+            return
+        listener = ResidentPeerListener(
+            sock=sock,
+            material=self._peer_material,
+            deliver=self._replica.on_frame,
+            logger=self._logger,
+        )
+        await listener.start()
+        self._peer_listener = listener
+
+    def _carriage(self, sink: ResidentFrameSink) -> ClaimGatedServiceCarriage:
+        """The carriage this worker's origin attempts take their frame sink from.
+
+        A deployment that admits no peer transport carries every attempt over the one
+        authenticated attachment. Where it does, control selects the transport per
+        attempt and this worker dials the target itself, so the payload of a workflow
+        boundary never reaches the root.
+        """
+        if not self._peer_enabled:
+            return ControlRelayCarriage(sink)
+        return PeerCarriage(
+            base=sink,
+            deliver=self._deliver_inbound,
+            observe=self._observe,
+            ssl_context=(
+                client_context(self._peer_material)
+                if self._peer_material is not None
+                else None
+            ),
+            connect_budget_sec=self._connect_budget_sec,
+            logger=self._logger,
+        )
+
+    async def _deliver_inbound(self, frame: RelayFrame) -> None:
+        """Deliver a frame the dialed target returned into this worker's origin lane."""
+        if self._origin is not None:
+            await self._origin.on_frame(frame)
+
+    def _observe(
+        self,
+        session_id: str,
+        transport: Transport,
+        outcome: RouteObservationOutcome,
+    ) -> None:
+        """Report one attempt's classified path evidence for the reachability view."""
+        if self._report_observation is None:
+            return
+        self._report_observation(
+            ResidentRouteObservation(
+                session_id=session_id,
+                transport=transport.value,
+                outcome=outcome.value,
+            )
         )
 
     def _on_load(self, evidence: LoadEvidence) -> None:

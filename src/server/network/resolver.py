@@ -7,11 +7,17 @@ candidate ladder. It is pure — it mutates nothing and permits no peer discover
 deputy executes only the candidates it returns.
 
 Ladder rules:
-- ``worker_direct`` is legal only when the listener is explicitly directly routable and
-  the origin's network class can reach the target endpoint's class. Shared-node
-  placement alone is not sufficient.
-- ``node_relay`` goes through the target node's announced endpoint and its node-local
-  uplink; it is the initial same-node path as well as the normal cross-node path.
+- ``worker_direct`` is the ``RouteOrigin``'s own dial to the target listener, so a
+  workflow origin's payload never enters the root. It is offered only to a
+  deployment-declared trusted pair — the trust policy, both ends' trust domain, the
+  target's reachability class, the transport capability both advertise, and directional
+  evidence must all admit it — and additionally needs the listener explicitly directly
+  routable and the origin's network class able to reach the target endpoint's class.
+  Shared-node placement alone is not sufficient.
+- ``node_relay`` is the same origin-dialed bypass through the target node's announced
+  endpoint and its node-local uplink, under the same trusted-pair conditions as
+  ``worker_direct``. It is the initial same-node path as well as the normal cross-node
+  path.
 - ``control_relay`` is the universal reverse-rendezvous base: the root bridges between
   the origin and target reverse-relay attachments to the target's node-local sidecar
   delivery. Its feasibility is that both ends have a registered outbound attachment, not
@@ -34,6 +40,7 @@ from .state import (
     RouteOrigin,
     RouteTarget,
     Transport,
+    TrustedPeerPolicy,
 )
 
 _CLASS_LOCALITY: dict[ReachabilityClass, int] = {
@@ -60,21 +67,58 @@ def _base_index(transport: Transport) -> int:
     }[transport]
 
 
+def _peer_admitted(
+    trust: TrustedPeerPolicy,
+    origin: RouteOrigin,
+    node_endpoint: NetworkEndpointAdvertisement,
+    listener: RouteTarget,
+    transport: Transport,
+) -> bool:
+    """Whether the deployment admits this origin-to-target pair for a peer transport.
+
+    Trust is a property of the pair, never of topology: sharing a node or advertising an
+    address proves nothing. Both ends must sit in the configured trust domain, the
+    target must be exposed at an admitted class, and both must advertise the transport
+    capability the peer transport is carried over.
+    """
+    if not trust.enabled:
+        return False
+    if trust.probe:
+        return True
+    if not trust.trust_domain:
+        return False
+    if origin.trust_domain != trust.trust_domain:
+        return False
+    if node_endpoint.trust_domain != trust.trust_domain:
+        return False
+    if node_endpoint.reachability_class not in trust.classes:
+        return False
+    if trust.protocol not in origin.protocols:
+        return False
+    if transport is Transport.NODE_RELAY:
+        return trust.protocol in node_endpoint.protocols
+    return trust.protocol in listener.protocols
+
+
 def resolve_route(
     origin: RouteOrigin,
     listener: RouteTarget,
     node_endpoint: NetworkEndpointAdvertisement | None,
     reachability: NetworkReachabilityView,
     *,
+    trust: TrustedPeerPolicy,
     now: float,
     route_epoch: int,
     expires_at: float | None = None,
 ) -> ResolvedRoute:
     """Resolve the ordered candidate ladder for one origin/target pair.
 
-    The ``control_relay`` base is carried whenever the origin and the target node both
-    advertise an outbound reverse-relay attachment; it names those attachments and the
-    target's node-local sidecar delivery, and the root bridges between them.
+    Every candidate is graded against the one ``RouteOrigin`` that will execute it: the
+    origin worker or node for a workflow boundary, the root for its own gated serve
+    ingress. The ``control_relay`` base is carried whenever the origin and the target
+    node both advertise an outbound reverse-relay attachment; it names those
+    attachments and the target's node-local sidecar delivery, and the root bridges
+    between them.
     """
     graded: list[tuple[int, int, RouteCandidate]] = []
 
@@ -112,6 +156,9 @@ def resolve_route(
         and _class_reachable(
             origin.reachability_class, node_endpoint.reachability_class
         )
+        and _peer_admitted(
+            trust, origin, node_endpoint, listener, Transport.WORKER_DIRECT
+        )
     ):
         consider(
             Transport.WORKER_DIRECT,
@@ -124,13 +171,19 @@ def resolve_route(
             ),
         )
 
-    if node_endpoint is not None and node_endpoint.url and direct_route is not None:
+    node_peer_url = node_endpoint.peer_url if node_endpoint is not None else ""
+    if (
+        node_endpoint is not None
+        and node_peer_url
+        and direct_route is not None
+        and _peer_admitted(trust, origin, node_endpoint, listener, Transport.NODE_RELAY)
+    ):
         consider(
             Transport.NODE_RELAY,
             (
                 RouteHop(
                     transport=Transport.NODE_RELAY,
-                    endpoint=node_endpoint.url,
+                    endpoint=node_peer_url,
                     node_id=node_endpoint.node_id,
                 ),
                 RouteHop(
@@ -178,4 +231,5 @@ def resolve_route(
         route_epoch=route_epoch,
         candidates=tuple(candidate for _, _, candidate in graded),
         expires_at=expires_at,
+        probe=trust.probe,
     )

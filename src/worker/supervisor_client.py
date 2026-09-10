@@ -16,7 +16,11 @@ from google.protobuf.struct_pb2 import Struct
 
 from shared._version import FLOWMESH_RELEASE_VERSION
 from shared.grpc.supervisor.v1 import supervisor_pb2, supervisor_pb2_grpc
-from shared.resident.reports import ResidentBootstrapAck, ResidentOpOutcome
+from shared.resident.reports import (
+    ResidentBootstrapAck,
+    ResidentOpOutcome,
+    ResidentRouteObservation,
+)
 from shared.schemas.event import Event, TaskEvent, WorkerEvent, serialize_event
 from shared.schemas.worker import SSHLimits, WorkerCapabilities
 from shared.tasks.worker_message import (
@@ -648,6 +652,21 @@ class SupervisorClient:
             type="RESIDENT_BOOTSTRAP_ACK",
             worker_id=self.worker_id,
             payload={"ack": ack.model_dump(mode="json")},
+        )
+        self._event_queue.put(serialize_event(event))
+
+    def push_resident_route_observation(
+        self, observation: ResidentRouteObservation
+    ) -> None:
+        """Report one dialed attempt's classified path evidence to control."""
+        if self._stub is None:
+            raise RuntimeError("Supervisor gRPC client not started")
+        if not self._event_ready.wait():
+            raise RuntimeError("Supervisor event stream not ready")
+        event = WorkerEvent(
+            type="RESIDENT_ROUTE_OBSERVATION",
+            worker_id=self.worker_id,
+            payload={"observation": observation.model_dump(mode="json")},
         )
         self._event_queue.put(serialize_event(event))
 

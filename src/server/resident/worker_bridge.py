@@ -12,6 +12,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from shared.network.frame_stream import FrameSink
 from shared.network.relay_frame import RelayDirection, RelayFrame
 
 from ..network.reverse_relay import BinaryRedis, RelaySessionStore, RelayStreamStore
@@ -35,6 +36,7 @@ class ResidentWorkerBridge:
         self._sessions = RelaySessionStore(redis)
         self._node_id = node_id
         self._enqueue_local = enqueue_local
+        self._peers: dict[str, FrameSink] = {}
         self._logger = logger or logging.getLogger("resident-worker-bridge")
 
     async def on_frame(self, frame: RelayFrame) -> None:
@@ -57,6 +59,27 @@ class ResidentWorkerBridge:
             },
         )
 
+    def bind_peer(self, session_id: str, sink: FrameSink) -> None:
+        """Answer one session's worker frames over the connection its origin dialed.
+
+        The binding is taken from whichever admitted dialer names the session first: the
+        forward direction is claim-gated at the replica, while this reverse direction
+        rests on the session id being unguessable and the dialer holding a deployment
+        identity. Naming the expected origin to a target would need control to carry it.
+        """
+        self._peers[session_id] = sink
+
+    def release_peer(self, session_id: str) -> None:
+        self._peers.pop(session_id, None)
+
     async def publish_up(self, frame: RelayFrame) -> None:
-        """Publish a worker's produced frame to this node's up stream for bridging."""
+        """Return a worker's produced frame to the origin that is waiting for it.
+
+        A session an origin dialed answers over that same connection, so its frames
+        never enter the rendezvous; every other session publishes to this node's up
+        stream for the root to bridge onward.
+        """
+        if (sink := self._peers.get(frame.session_id)) is not None:
+            await sink.send(frame)
+            return
         await self._streams.publish_up(self._node_id, frame)

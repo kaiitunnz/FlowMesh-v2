@@ -11,8 +11,13 @@ from queue import Empty as QueueEmpty
 from queue import Full as QueueFull
 from threading import Lock, Thread
 
+from shared.network.mtls import MutualTlsMaterial, MutualTlsMaterialError
 from shared.schemas.command import CommandMessage, CommandResponse
-from shared.schemas.network import NetworkEndpointAdvertisement, ReachabilityClass
+from shared.schemas.network import (
+    PEER_PROTOCOL,
+    NetworkEndpointAdvertisement,
+    ReachabilityClass,
+)
 
 from ..config import (
     GrpcConfig,
@@ -20,6 +25,7 @@ from ..config import (
     LoggingConfig,
     NetworkPlaneConfig,
     RedisConfig,
+    TrustedPeerConfig,
     WorkerManagementConfig,
 )
 from ..hooks import PrincipalContext
@@ -212,6 +218,33 @@ class WorkerSupervisor:
 # ------------------------------------------------------------------ #
 
 
+def _peer_material(
+    peer: TrustedPeerConfig, logger: logging.Logger
+) -> MutualTlsMaterial | None:
+    """This node's peer TLS material, read from the operator's configured files.
+
+    Mutual TLS is on unless the operator attests a trusted network, so material this
+    node cannot read is fatal whether it is missing or unusable: serving the advertised
+    listener in plaintext instead would carry resident payloads over a wire the
+    deployment asked to protect.
+    """
+    if peer.disable_mtls:
+        logger.warning(
+            "serving the node peer listener without mutual TLS: the deployment is "
+            "configured for a trusted network, so a dialer proves no identity"
+        )
+        return None
+    try:
+        return MutualTlsMaterial.from_files(
+            ca_file=peer.tls_ca_file,
+            cert_file=peer.tls_cert_file,
+            key_file=peer.tls_key_file,
+        )
+    except MutualTlsMaterialError:
+        logger.error("node peer TLS material is unusable")
+        raise
+
+
 def _enqueue_latest_node_id(
     queue: MPQueue[str], node_id: str, logger: logging.Logger
 ) -> None:
@@ -250,6 +283,12 @@ def _endpoint_advertisement_provider(
         return lambda: None
 
     url = network_cfg.endpoint_url or ""
+    peer = network_cfg.peer
+    # A node advertises its peer listener only when it actually serves one, so an
+    # unconfigured node stays reachable over the relay alone rather than over an
+    # address no listener answers.
+    peer_url = peer.node_listener_url if peer.enabled else ""
+    protocols = network_cfg.protocols + ((PEER_PROTOCOL,) if peer_url else ())
     try:
         reachability_class = ReachabilityClass(network_cfg.reachability_class)
     except ValueError:
@@ -265,10 +304,11 @@ def _endpoint_advertisement_provider(
         return NetworkEndpointAdvertisement(
             endpoint_id=url,
             url=url,
+            peer_url=peer_url,
             generation=current,
             trust_domain=network_cfg.trust_domain,
             reachability_class=reachability_class,
-            protocols=network_cfg.protocols,
+            protocols=protocols,
         )
 
     return provider
@@ -306,6 +346,7 @@ def _run_supervisor(
     from .services.command_listener import CommandListener
     from .services.grpc_server import GrpcServer
     from .services.lifecycle import Lifecycle
+    from .services.peer_listener import NodePeerListener
     from .services.relay_service import RelayService
     from .services.relay_uplink import RelayUplinkService
     from .services.reverse_relay_attachment import ReverseRelayAttachment
@@ -444,6 +485,19 @@ def _run_supervisor(
         resident_bridge=resident_bridge,
     )
 
+    peer_listener: NodePeerListener | None = None
+    if (
+        resident_bridge is not None
+        and network_cfg.peer.enabled
+        and network_cfg.peer.node_listener_url
+    ):
+        peer_listener = NodePeerListener(
+            endpoint=network_cfg.peer.node_listener_url,
+            material=_peer_material(network_cfg.peer, logger),
+            bridge=resident_bridge,
+            logger=logger,
+        )
+
     network_listeners: NetworkPlaneListeners | None = None
     if network_cfg.enabled and network_cfg.sidecar_url and network_cfg.endpoint_url:
         network_listeners = NetworkPlaneListeners(
@@ -502,6 +556,8 @@ def _run_supervisor(
             await network_listeners.start()
         if resident_attachment is not None:
             resident_attachment.start(loop)
+        if peer_listener is not None:
+            await peer_listener.start()
         # Wire the re-register callback only once the reader threads are up
         lifecycle.set_reregister_callback(_on_reregister)
         logger.info("Supervisor ready for node %s", node_id)
@@ -514,6 +570,8 @@ def _run_supervisor(
         # Publish unregister event early to allow the server to handle before being
         # timed out
         lifecycle.publish_unregister()
+        if peer_listener is not None:
+            await peer_listener.stop()
         if resident_attachment is not None:
             await resident_attachment.stop()
         if network_listeners is not None:

@@ -4,7 +4,7 @@ import asyncio
 import logging
 
 from server.config import NetworkPlaneConfig
-from server.network.service import NetworkPlane
+from server.network.service import PROBE_TRUST, NetworkPlane
 from server.network.state import (
     NetworkEndpointAdvertisement,
     ReachabilityClass,
@@ -38,6 +38,7 @@ def _node(node_id: str, *, generation: int, cls=ReachabilityClass.ROUTABLE) -> N
         network_endpoint=NetworkEndpointAdvertisement(
             endpoint_id=f"ep-{node_id}",
             url=f"127.0.0.1:900{node_id[-1]}",
+            peer_url=f"127.0.0.1:910{node_id[-1]}",
             generation=generation,
             trust_domain="fm",
             reachability_class=cls,
@@ -84,12 +85,28 @@ def _plane(registry: _FakeNodeRegistry) -> NetworkPlane:
     )
 
 
-def test_resolve_returns_ladder() -> None:
+def test_resolve_offers_only_the_relay_without_a_trusted_peer_posture() -> None:
+    # The peer posture is off by default, so a deployment that declared no trusted
+    # class carries resident traffic over the relay even though the target advertises a
+    # dialable address.
     registry = _FakeNodeRegistry()
     registry.set(_node("nde-1", generation=1))
     registry.set(_node("nde-2", generation=1))
     plane = _plane(registry)
     result = asyncio.run(plane.resolve("nde-1", _listener()))
+    assert result is not None
+    _origin, route = result
+    assert [c.transport.value for c in route.candidates] == ["control_relay"]
+
+
+def test_a_probe_resolves_the_full_ladder() -> None:
+    # A diagnostic probe is not gated on the peer posture: it exists to learn whether
+    # a path works before a deployment declares it trusted.
+    registry = _FakeNodeRegistry()
+    registry.set(_node("nde-1", generation=1))
+    registry.set(_node("nde-2", generation=1))
+    plane = _plane(registry)
+    result = asyncio.run(plane.resolve("nde-1", _listener(), trust=PROBE_TRUST))
     assert result is not None
     _origin, route = result
     transports = [c.transport.value for c in route.candidates]

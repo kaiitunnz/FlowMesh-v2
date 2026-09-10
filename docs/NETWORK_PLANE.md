@@ -64,26 +64,64 @@ gets fresh `UNKNOWN` entries, and node re-registration invalidates a target's en
 
 The resolver orders three transport candidates. `control_relay` is the universal base,
 carried whenever the origin and target both advertise an outbound relay attachment;
-policy may rank a verified `worker_direct` or `node_relay` offload ahead of it, and a
-demoted offload drops out until its backoff cools.
+policy may rank a verified `worker_direct` or `node_relay` peer transport ahead of it,
+and a demoted one drops out until its backoff cools.
 
-- **`worker_direct`** — caller to the listener. A forward-dial offload legal only for an
-  explicitly directly routable listener whose endpoint class the origin's network class can
-  reach, under a bounded optimistic connect budget. Shared-node placement alone does not
-  make it legal.
+- **`worker_direct`** — caller to the listener. A forward-dial peer transport legal only
+  for an explicitly directly routable listener whose endpoint class the origin's network
+  class can reach, under a bounded optimistic connect budget. Shared-node placement alone
+  does not make it legal.
 - **`node_relay`** — caller to the target node's announced endpoint, which uplinks over an
   authenticated node-local relay session to the target listener the route names. A
-  forward-dial offload; the initial same-node path as well as the normal cross-node path.
+  forward-dial peer transport; the initial same-node path as well as the normal
+  cross-node path.
 - **`control_relay`** — the universal reverse-rendezvous base. Its descriptor names the
   origin and target reverse attachments by node (the delivery routes by node id) and the
   target's node-local sidecar delivery, not a chain of dialable addresses. It is feasible
   whenever both ends hold a live outbound attachment, so it resolves for an outbound-only
-  node where the forward-dial offloads do not.
+  node where the forward-dial peer transports do not.
 
 A `worker_direct` or `node_relay` hop is target-addressed and forward-dialed: the deputy
 reads one leading frame naming its next hop, dials it, and byte-relays the rest, chaining a
 multi-hop ladder through the relays; a `RelaySession` bridges the two stream pairs with a
 bounded in-flight buffer so a slow consumer backpressures a fast producer.
+
+## Trusted peer transports
+
+Where a deployment declares an origin-to-target pair trusted, an admitted resident
+invocation leaves the relay for a socket the origin opens itself. The `RouteOrigin` is
+both the route's source identity and its dialer: for a workflow boundary that is the
+invocation's own worker, so the request and response bypass the root and the rendezvous
+entirely; for a gated serve request the root is itself the origin and dials on its own
+behalf. Only the pair the resolver admitted is reachable — an origin never scans for or
+substitutes a peer.
+
+Eligibility is a property of the pair, not of topology. The resolver offers a peer
+transport only when the deployment enables it, both ends sit in the configured trust
+domain, the target is exposed at an admitted reachability class, both advertise the peer
+transport capability, and directional evidence has not demoted the path.
+
+Mutual TLS is on by default, enabled with `NETWORK_PLANE_PEER_ENABLED=true` over the
+identities `scripts/dev/generate_peer_tls_certs.sh` issues. The deployment CA issues each
+node an identity carrying both client and server authentication, so a target admits only
+a dialer the CA vouched for, and an origin admits only a target whose certificate covers
+the host it dialed — the node's advertised peer address must therefore appear among its
+certificate's subject-alternative names, or the handshake fails and the attempt falls
+back to the relay. The replica's claim gate then fences the session to the invocation
+control admitted. TLS material is configured as files under the peer TLS directory, which
+the stack mounts read-only at `/etc/ssl/peer` where the configured paths resolve, and is
+base64-encoded only when a worker attachment is handed its transient copy. Material a
+node cannot read is fatal at start-up rather than a fallback to plaintext. An operator
+may instead set `NETWORK_PLANE_PEER_DISABLE_MTLS` to attest a trusted network, which
+warns on every listener and still requires the same trusted-pair policy.
+
+A dial that fails before any frame reaches the target records classified path evidence
+and falls through to the relay under the same claim, request identity, and held credit.
+Once a frame has been written the attempt never switches transport: the outcome is
+ambiguous, so it settles as uncertain with its credit held and the demoted path steers
+the next drive. Only transport failures demote — a fence, tenant, descriptor,
+application, or engine rejection arrives as a frame and settles the boundary without
+touching the path.
 
 ## Reverse-rendezvous relay
 

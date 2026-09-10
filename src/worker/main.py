@@ -1,8 +1,10 @@
 import argparse
 import logging
 import signal
+import socket
 from collections.abc import Mapping
 
+from shared.network.mtls import MutualTlsMaterial, MutualTlsMaterialError
 from shared.schemas.worker import WorkerCapabilities
 from shared.tasks.task_type import TaskType
 from shared.tasks.worker_message import WorkerHardware
@@ -175,12 +177,68 @@ def initialize_executors(
 def build_capabilities(
     executors: dict[str, Executor],
     registry: Mapping[str, type[Executor] | None] | None = None,
+    resident_listener_port: int = 0,
 ) -> WorkerCapabilities:
     registry = registry or EXECUTOR_REGISTRY
     supported_task_types = frozenset[TaskType]().union(
         *(cls.supported_task_types for key in executors if (cls := registry.get(key)))
     )
-    return WorkerCapabilities(supported_task_types=supported_task_types)
+    return WorkerCapabilities(
+        supported_task_types=supported_task_types,
+        resident_listener_port=resident_listener_port,
+    )
+
+
+def _peer_material(
+    cfg: WorkerConfig, logger: logging.Logger
+) -> MutualTlsMaterial | None:
+    """This worker's transient copy of the node's peer TLS material, if configured.
+
+    Mutual TLS is on unless the operator attests a trusted network, so material that is
+    absent or unusable is fatal: dialing and serving in plaintext instead would carry
+    resident payloads over a wire the deployment asked to protect. Absent material is a
+    node misconfiguration rather than a posture, since the supervisor reads the files
+    and fails on its own side before it hands this worker their bytes.
+    """
+    if not cfg.peer_enabled:
+        return None
+    if cfg.peer_disable_mtls:
+        logger.warning(
+            "resident peer transports are enabled without mutual TLS: this worker "
+            "dials a target on an operator-attested trusted network, proving no "
+            "identity to it"
+        )
+        return None
+    if not (cfg.peer_tls_ca_b64 and cfg.peer_tls_cert_b64 and cfg.peer_tls_key_b64):
+        raise MutualTlsMaterialError(
+            "resident peer transports require mutual TLS material this worker was "
+            "not given"
+        )
+    try:
+        return MutualTlsMaterial.from_b64(
+            ca_b64=cfg.peer_tls_ca_b64,
+            cert_b64=cfg.peer_tls_cert_b64,
+            key_b64=cfg.peer_tls_key_b64,
+        )
+    except MutualTlsMaterialError:
+        logger.error("resident peer TLS material is unusable")
+        raise
+
+
+def _bind_peer_listener(cfg: WorkerConfig) -> socket.socket | None:
+    """Bind the peer listener so its port is advertised at registration.
+
+    The port is bound before the worker registers and served once the resident lane
+    loop comes up, so the address control advertises is the one an origin reaches.
+    """
+    if not cfg.peer_enabled:
+        return None
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("0.0.0.0", 0))  # nosec B104 - an origin dials it from off-host
+    sock.listen(16)
+    sock.setblocking(False)
+    return sock
 
 
 def main() -> None:
@@ -228,7 +286,13 @@ def main() -> None:
         enable_mp_executors=cfg.enable_mp_executors,
     )
 
-    capabilities = build_capabilities(executors)
+    peer_sock = _bind_peer_listener(cfg)
+    capabilities = build_capabilities(
+        executors,
+        resident_listener_port=(
+            peer_sock.getsockname()[1] if peer_sock is not None else 0
+        ),
+    )
     ssh_limits = cfg.ssh_limits
     if TaskType.SSH in capabilities.supported_task_types:
         if ssh_limits is None:
@@ -262,6 +326,9 @@ def main() -> None:
         model_api_key=cfg.model_api_key,
         model_egress_timeout_sec=cfg.model_egress_timeout_sec,
         content_store=build_content_store(cfg.server_base_url),
+        peer_enabled=cfg.peer_enabled,
+        peer_material=_peer_material(cfg, logger),
+        peer_listener_sock=peer_sock,
     )
 
     # Install signal handlers to allow graceful shutdown

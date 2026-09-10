@@ -162,6 +162,12 @@ def wire_worker_delivery(
         worker = worker_registry.get_worker(worker_id)
         return worker.node_id if worker is not None else None
 
+    def _resident_listener_port_of(worker_id: str) -> int:
+        worker = worker_registry.get_worker(worker_id)
+        if worker is None or worker.capabilities is None:
+            return 0
+        return worker.capabilities.resident_listener_port
+
     def _origin_worker_of_task(task_id: str) -> str | None:
         record = runtime.get_record(task_id)
         return record.assigned_worker if record else None
@@ -181,6 +187,7 @@ def wire_worker_delivery(
             network=network,
             sessions=sessions,
             directly_routable=resident_cfg.sidecar_directly_routable,
+            resident_listener_port_of=_resident_listener_port_of,
             forward_api_key=resident_cfg.forward_api_key,
             root_node_id=root_node_id,
             edge_id=edge_id,

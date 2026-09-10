@@ -102,3 +102,20 @@ class ResidentStreamChunk(BaseModel):
     invocation_id: str
     session_id: str
     payload: bytes
+
+
+class ResidentRouteObservation(BaseModel):
+    """One attempt's classified path evidence, reported by the origin that dialed.
+
+    It is network evidence only: it updates the derived reachability view so a failing
+    transport stops being selected, and can never promote, release, or overwrite a
+    ``ServiceClaim`` credit. Only a transport outcome is reported — a fence, tenant,
+    descriptor, application, or engine rejection arrives as a frame and settles the
+    boundary without touching the path.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    session_id: str
+    transport: str
+    outcome: str

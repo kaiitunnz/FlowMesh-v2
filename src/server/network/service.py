@@ -9,6 +9,7 @@ reachability for diagnostics.
 import logging
 import time
 
+from shared.schemas.network import PEER_PROTOCOL
 from shared.utils.ids import new_route_origin_id
 
 from ..config import NetworkPlaneConfig
@@ -18,12 +19,14 @@ from .resolver import resolve_route
 from .state import (
     NetworkEndpointAdvertisement,
     PolicyClass,
+    ReachabilityClass,
     ReplicaListenerAdvertisement,
     ResolvedRoute,
     RouteObservation,
     RouteObservationOutcome,
     RouteOrigin,
     Transport,
+    TrustedPeerPolicy,
 )
 
 
@@ -49,6 +52,32 @@ def stamp_endpoint(
     return endpoint.model_copy(update=updates)
 
 
+PROBE_TRUST = TrustedPeerPolicy(enabled=True, probe=True)
+
+_REACHABILITY_CLASSES = frozenset(ReachabilityClass)
+"""The trust rule a reachability probe resolves under.
+
+A probe carries no invocation payload — it dials a node's own diagnostic listener to
+learn whether the path works at all — so it is not gated on the deployment's peer
+posture. It is never used to resolve a route that carries resident traffic.
+"""
+
+
+def _peer_policy(config: NetworkPlaneConfig) -> TrustedPeerPolicy:
+    """The pure resolver's trust rule, derived from the deployment's peer posture."""
+    peer = config.peer
+    return TrustedPeerPolicy(
+        enabled=peer.enabled,
+        trust_domain=peer.trust_domain,
+        classes=frozenset(
+            ReachabilityClass(value)
+            for value in peer.classes
+            if value in _REACHABILITY_CLASSES
+        ),
+        protocol=PEER_PROTOCOL,
+    )
+
+
 class NetworkPlane:
     """Control-plane route discovery over trusted endpoint advertisements."""
 
@@ -72,6 +101,7 @@ class NetworkPlane:
         self._route_epoch = 0
         self._origin_ids: dict[tuple[str, PolicyClass, int], str] = {}
         self._seen_generation: dict[str, int] = {}
+        self._trust = _peer_policy(config)
 
     @property
     def connect_budget_sec(self) -> float:
@@ -85,9 +115,18 @@ class NetworkPlane:
         return stamp_endpoint(node.network_endpoint, node.id)
 
     async def resolve(
-        self, origin_node_id: str, listener: ReplicaListenerAdvertisement
+        self,
+        origin_node_id: str,
+        listener: ReplicaListenerAdvertisement,
+        *,
+        trust: TrustedPeerPolicy | None = None,
     ) -> tuple[RouteOrigin, ResolvedRoute] | None:
         """Resolve an ordered candidate ladder from origin to the target listener.
+
+        The origin node is the one whose deputy will execute the route, so it is what
+        every candidate — the peer transports included — is graded against. ``trust``
+        overrides the deployment policy for a caller that probes reachability rather
+        than carrying an invocation.
 
         Returns ``None`` when the origin advertises no network endpoint.
         """
@@ -105,6 +144,7 @@ class NetworkPlane:
             listener,
             target_endpoint,
             self._reachability,
+            trust=self._trust if trust is None else trust,
             now=now,
             route_epoch=self._route_epoch,
             expires_at=now + self._config.route_ttl_sec,
@@ -220,6 +260,7 @@ class NetworkPlane:
             reachability_class=endpoint.reachability_class,
             policy_class=PolicyClass.DEFAULT,
             trust_domain=endpoint.trust_domain,
+            protocols=endpoint.protocols,
             relay_attachment_id=endpoint.relay_attachment_id,
         )
 

@@ -10,6 +10,8 @@ denies with no allocation; and a restart reconciles an in-flight claim to uncert
 """
 
 import asyncio
+import threading
+import time
 from typing import Any
 
 from server.network.state import (
@@ -17,6 +19,7 @@ from server.network.state import (
     ReplicaListenerAdvertisement,
     ResolvedRoute,
     RouteCandidate,
+    RouteObservationOutcome,
     RouteOrigin,
     Transport,
 )
@@ -44,6 +47,7 @@ from shared.resident.reports import (
     ResidentBootstrapAck,
     ResidentBootstrapOutcome,
     ResidentOpOutcome,
+    ResidentRouteObservation,
     ResidentStreamStatus,
 )
 
@@ -84,6 +88,15 @@ class _FakeNetwork:
         )
         return origin, route
 
+    def __init__(self) -> None:
+        self.observations: list[tuple[Transport, RouteObservationOutcome]] = []
+
+    def record_observations(self, origin, listener, observations) -> None:
+        self.observations.extend(observations)
+
+    async def endpoint_for(self, node_id: str):
+        return None
+
 
 class _FakeSessions:
     def __init__(self) -> None:
@@ -108,6 +121,7 @@ class _Delivery:
         self.sessions = _FakeSessions()
 
     def build(self) -> ResidentWorkerDelivery:
+        self.network = _FakeNetwork()
         return ResidentWorkerDelivery(
             relay=self._relay,
             origin_worker_of_task=lambda task_id: "wkr-origin",
@@ -115,7 +129,7 @@ class _Delivery:
                 "wkr-replica" if replica.serve_task_id is not None else None
             ),
             node_of_worker=lambda worker_id: "node-1" if worker_id else None,
-            network=_FakeNetwork(),
+            network=self.network,
             sessions=self.sessions,
         )
 
@@ -533,3 +547,88 @@ def test_rehydrate_preempts_a_warm_replica_whose_serve_task_is_gone():
     states = {r.state for r in fresh_stores.directory.all()}
     assert ReplicaState.WARM not in states
     assert ReplicaState.PREEMPTED in states
+
+
+def _observation(session_id: str, outcome: RouteObservationOutcome):
+    return ResidentRouteObservation(
+        session_id=session_id,
+        transport=Transport.WORKER_DIRECT.value,
+        outcome=outcome.value,
+    )
+
+
+def test_an_origins_path_evidence_reaches_the_reachability_view():
+    svc, _stores, _settled, delivery = _build()
+    asyncio.run(svc._originate(_env()))
+
+    session_id = svc._attempts["inv-1"].session_id
+    asyncio.run(
+        svc._on_route_observation(
+            _observation(session_id, RouteObservationOutcome.CONNECT_FAILURE)
+        )
+    )
+
+    assert delivery.network.observations == [
+        (Transport.WORKER_DIRECT, RouteObservationOutcome.CONNECT_FAILURE)
+    ]
+
+
+def test_path_evidence_for_an_unknown_session_records_nothing():
+    svc, _stores, _settled, delivery = _build()
+    asyncio.run(svc._originate(_env()))
+
+    asyncio.run(
+        svc._on_route_observation(
+            _observation("rly-not-ours", RouteObservationOutcome.VERIFIED)
+        )
+    )
+
+    assert delivery.network.observations == []
+
+
+def test_a_route_observation_naming_an_unknown_transport_is_ignored():
+    # The report crosses from a worker, so a value this control plane cannot parse must
+    # not raise on the lane that carries every other worker report.
+    svc, _stores, _settled, delivery = _build()
+    asyncio.run(svc._originate(_env()))
+
+    session_id = svc._attempts["inv-1"].session_id
+    asyncio.run(
+        svc._on_route_observation(
+            ResidentRouteObservation(
+                session_id=session_id, transport="teleport", outcome="verified"
+            )
+        )
+    )
+
+    assert delivery.network.observations == []
+
+
+def test_path_evidence_from_the_worker_lane_runs_on_the_origination_loop():
+    # The report arrives on the worker-events thread while the origination loop mutates
+    # the attempts and the reachability entries, so it must be marshaled like its
+    # sibling reports rather than folded in place.
+    svc, _stores, _settled, delivery = _build()
+    asyncio.run(svc._originate(_env()))
+    session_id = svc._attempts["inv-1"].session_id
+
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    try:
+        svc.bind_loop(loop)
+        svc.on_route_observation(
+            _observation(session_id, RouteObservationOutcome.VERIFIED)
+        )
+        for _ in range(100):
+            if delivery.network.observations:
+                break
+            time.sleep(0.02)
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=5)
+        loop.close()
+
+    assert delivery.network.observations == [
+        (Transport.WORKER_DIRECT, RouteObservationOutcome.VERIFIED)
+    ]

@@ -19,7 +19,7 @@ from ...auth.security import (
     require_permission,
 )
 from ...hooks import ResourceAction, ResourceKind
-from ...network.service import NetworkPlane
+from ...network.service import PROBE_TRUST, NetworkPlane
 from ...network.state import (
     ReplicaListenerAdvertisement,
     RouteObservationOutcome,
@@ -78,7 +78,9 @@ async def network_echo(
         routes=tuple(body.listener.routes),
         directly_routable=body.listener.directly_routable,
     )
-    resolved = await network.resolve(body.origin_node_id, listener)
+    # A diagnostic probe resolves the full ladder so an operator can test a path the
+    # deployment has not (yet) declared trusted for resident traffic.
+    resolved = await network.resolve(body.origin_node_id, listener, trust=PROBE_TRUST)
     if resolved is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

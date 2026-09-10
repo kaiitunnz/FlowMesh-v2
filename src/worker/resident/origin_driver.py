@@ -150,6 +150,7 @@ class ResidentOriginDriver:
         if origin is None:
             return
         self._by_session.pop(origin.request.session_id, None)
+        self._carriage.close(origin.request.session_id)
         task = origin.task
         if task is not None and task is not asyncio.current_task() and not task.done():
             task.cancel()
@@ -199,6 +200,10 @@ class ResidentOriginDriver:
             self._logger.exception("resident origin drive failed")
             self._report_outcome(self._uncertain(req, f"origin drive error: {exc}"))
         finally:
+            # A dialed peer session holds a socket and its reader for this session
+            # alone, so the attempt's end is what releases both ends: the target's
+            # connection cannot end until the origin closes.
+            self._carriage.close(req.session_id)
             self._by_session.pop(req.session_id, None)
             if self._by_call.get(req.call_correlation) is origin:
                 self._by_call.pop(req.call_correlation, None)
