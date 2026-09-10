@@ -39,7 +39,7 @@ from shared.resident.reports import (
     ResidentStreamHead,
     ResidentStreamStatus,
 )
-from shared.schemas.network import OFFLOAD_PROTOCOL
+from shared.schemas.network import PEER_PROTOCOL
 from shared.utils.ids import new_relay_session_id
 
 from ..network.state import (
@@ -71,7 +71,7 @@ from .state import (
 )
 from .stores import ResidentStores
 
-# The port of the claim-gated resident offload listener a worker hosts, or 0.
+# The port of the claim-gated resident peer listener a worker hosts, or 0.
 ResidentListenerPortOf = Callable[[str], int]
 
 # Resolves a task's normalized resident dependency: (workflow_id, dependency) or None.
@@ -89,11 +89,11 @@ PersistCallback = Callable[[], None]
 def _selected_carriage(route: ResolvedRoute) -> tuple[str, str]:
     """The transport the attempt takes and the address to dial.
 
-    The resolver has already dropped every offload the deployment does not admit, so
-    the ladder's head is the best transport this pair is allowed; ``control_relay``
-    names no address because its origin reaches the root over its own attachment. The
-    dialed address is itself the target's identity: mutual TLS admits only a peer whose
-    certificate covers that host.
+    The resolver has already dropped every peer transport the deployment does not
+    admit, so the ladder's head is the best transport this pair is allowed;
+    ``control_relay`` names no address because its origin reaches the root over its
+    own attachment. The dialed address is itself the target's identity: mutual TLS
+    admits only a peer whose certificate covers that host.
     """
     for candidate in route.candidates:
         if candidate.transport is Transport.CONTROL_RELAY:
@@ -247,7 +247,7 @@ class ServeOrigination:
     delivery: ServeDelivery
     # Both gated serve modes (proxy and the root forward ingress) originate on the root
     # and leave these unset. A worker-originated workflow boundary sets its own worker
-    # as the origin (so the route resolves offload-capable from that worker's node) and
+    # as the origin (so the route resolves peer-capable from that worker's node) and
     # the worker-minted request id its rendezvous keys the admission decision by.
     origin_worker: str | None = None
     request_id: str | None = None
@@ -937,7 +937,7 @@ class ResidentCapacityControl:
         assert deps is not None
         serve = orig.serve
         # The route fence resolves from the origin's registered endpoint, which is also
-        # what dials an admitted offload. A gated serve origination has no origin
+        # what dials an admitted peer session. A gated serve origination has no origin
         # worker, so the root is itself the origin and resolves from the root node over
         # the edge stream. A worker-originated workflow boundary resolves from the
         # origin worker's own node, so its payload never reaches the root at all.
@@ -1398,7 +1398,7 @@ class ResidentCapacityControl:
         if not delivered:
             return None
         replica.listener_generation = generation
-        offload_listener = await self._offload_listener_of(worker_id, node_id)
+        peer_listener = await self._peer_listener_of(worker_id, node_id)
         replica.listener = ReplicaListenerAdvertisement(
             replica_id=replica.replica_id,
             family=replica.family,
@@ -1406,17 +1406,15 @@ class ResidentCapacityControl:
             listener_generation=generation,
             node_id=node_id,
             worker_id=worker_id,
-            routes=(offload_listener or f"resident://{worker_id}",),
-            protocols=(
-                ("resident", OFFLOAD_PROTOCOL) if offload_listener else ("resident",)
-            ),
-            directly_routable=deps.directly_routable and offload_listener is not None,
+            routes=(peer_listener or f"resident://{worker_id}",),
+            protocols=(("resident", PEER_PROTOCOL) if peer_listener else ("resident",)),
+            directly_routable=deps.directly_routable and peer_listener is not None,
         )
         self._persist()
         return replica.listener
 
-    async def _offload_listener_of(self, worker_id: str, node_id: str) -> str | None:
-        """The address an origin dials for this worker's claim-gated offload listener.
+    async def _peer_listener_of(self, worker_id: str, node_id: str) -> str | None:
+        """The address an origin dials for this worker's claim-gated peer listener.
 
         The worker reports the port it bound; the node's advertised endpoint supplies
         the host an origin reaches it at. A worker that hosts no listener, or a node

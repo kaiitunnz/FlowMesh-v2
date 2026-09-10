@@ -185,10 +185,10 @@ def build_capabilities(
     return WorkerCapabilities(supported_task_types=supported_task_types)
 
 
-def _offload_material(
+def _peer_material(
     cfg: WorkerConfig, logger: logging.Logger
 ) -> MutualTlsMaterial | None:
-    """This worker's transient copy of the node's offload TLS material, if configured.
+    """This worker's transient copy of the node's peer TLS material, if configured.
 
     Mutual TLS is on unless the operator attests a trusted network, so material that is
     absent or unusable is fatal: dialing and serving in plaintext instead would carry
@@ -196,38 +196,38 @@ def _offload_material(
     node misconfiguration rather than a posture, since the supervisor reads the files
     and fails on its own side before it hands this worker their bytes.
     """
-    if not cfg.offload_enabled:
+    if not cfg.peer_enabled:
         return None
-    if cfg.offload_disable_mtls:
+    if cfg.peer_disable_mtls:
         logger.warning(
-            "resident offloads are enabled without mutual TLS: this worker dials a "
-            "target on an operator-attested trusted network, proving no identity to it"
+            "resident peer transports are enabled without mutual TLS: this worker "
+            "dials a target on an operator-attested trusted network, proving no "
+            "identity to it"
         )
         return None
-    if not (
-        cfg.offload_tls_ca_b64 and cfg.offload_tls_cert_b64 and cfg.offload_tls_key_b64
-    ):
+    if not (cfg.peer_tls_ca_b64 and cfg.peer_tls_cert_b64 and cfg.peer_tls_key_b64):
         raise MutualTlsMaterialError(
-            "resident offloads require mutual TLS material this worker was not given"
+            "resident peer transports require mutual TLS material this worker was "
+            "not given"
         )
     try:
         return MutualTlsMaterial.from_b64(
-            ca_b64=cfg.offload_tls_ca_b64,
-            cert_b64=cfg.offload_tls_cert_b64,
-            key_b64=cfg.offload_tls_key_b64,
+            ca_b64=cfg.peer_tls_ca_b64,
+            cert_b64=cfg.peer_tls_cert_b64,
+            key_b64=cfg.peer_tls_key_b64,
         )
     except MutualTlsMaterialError:
-        logger.error("resident offload TLS material is unusable")
+        logger.error("resident peer TLS material is unusable")
         raise
 
 
-def _bind_offload_listener(cfg: WorkerConfig) -> socket.socket | None:
-    """Bind the offload listener so its port is advertised at registration.
+def _bind_peer_listener(cfg: WorkerConfig) -> socket.socket | None:
+    """Bind the peer listener so its port is advertised at registration.
 
     The port is bound before the worker registers and served once the resident lane
     loop comes up, so the address control advertises is the one an origin reaches.
     """
-    if not cfg.offload_enabled:
+    if not cfg.peer_enabled:
         return None
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -282,11 +282,11 @@ def main() -> None:
         enable_mp_executors=cfg.enable_mp_executors,
     )
 
-    offload_sock = _bind_offload_listener(cfg)
+    peer_sock = _bind_peer_listener(cfg)
     capabilities = build_capabilities(executors).model_copy(
         update={
             "resident_listener_port": (
-                offload_sock.getsockname()[1] if offload_sock is not None else 0
+                peer_sock.getsockname()[1] if peer_sock is not None else 0
             )
         }
     )
@@ -323,9 +323,9 @@ def main() -> None:
         model_api_key=cfg.model_api_key,
         model_egress_timeout_sec=cfg.model_egress_timeout_sec,
         content_store=build_content_store(cfg.server_base_url),
-        offload_enabled=cfg.offload_enabled,
-        offload_material=_offload_material(cfg, logger),
-        offload_listener_sock=offload_sock,
+        peer_enabled=cfg.peer_enabled,
+        peer_material=_peer_material(cfg, logger),
+        peer_listener_sock=peer_sock,
     )
 
     # Install signal handlers to allow graceful shutdown

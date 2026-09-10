@@ -1,4 +1,4 @@
-"""The node's purpose-scoped listener for a directly dialed offload.
+"""The node's purpose-scoped listener for a directly dialed peer session.
 
 A trusted deployment lets an admitted invocation's origin open a connection straight to
 the node hosting the selected replica. Each frame it reads goes to the node's local
@@ -32,12 +32,12 @@ class _UplinkConnection(ConnectionHandler):
     async def on_frame(self, frame: RelayFrame) -> None:
         if frame.session_id not in self._sessions:
             self._sessions.add(frame.session_id)
-            self._bridge.bind_offload(frame.session_id, self._sink)
+            self._bridge.bind_peer(frame.session_id, self._sink)
         await self._bridge.on_frame(frame)
 
     def close(self) -> None:
         for session_id in self._sessions:
-            self._bridge.release_offload(session_id)
+            self._bridge.peer_release(session_id)
 
 
 def _is_registered_origin(identities: frozenset[str]) -> bool:
@@ -45,8 +45,8 @@ def _is_registered_origin(identities: frozenset[str]) -> bool:
     return bool(identities)
 
 
-class NodeOffloadListener:
-    """Serves the node's dialed offload connections into its local sidecar uplink."""
+class NodePeerListener:
+    """Serves the node's dialed peer connections into its local sidecar uplink."""
 
     def __init__(
         self,
@@ -61,7 +61,7 @@ class NodeOffloadListener:
             material=material,
             handler=lambda sink: _UplinkConnection(bridge, sink),
             admits=_is_registered_origin,
-            logger=logger or logging.getLogger("node-offload-listener"),
+            logger=logger or logging.getLogger("node-peer-listener"),
         )
 
     @property
@@ -75,4 +75,4 @@ class NodeOffloadListener:
         await self._listener.stop()
 
 
-__all__ = ["NodeOffloadListener"]
+__all__ = ["NodePeerListener"]

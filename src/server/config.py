@@ -521,15 +521,15 @@ class ContentStoreConfig:
 
 
 @dataclass
-class TrustedOffloadConfig:
-    """The deployment's trusted direct origin-to-target offload posture.
+class TrustedPeerConfig:
+    """The deployment's trusted origin-to-target peer posture.
 
     Disabled by default, so a deployment that declares no trusted class carries every
     resident invocation over the through-root relay. Mutual TLS is on unless
     ``disable_mtls`` is set, which is an operator attesting a trusted network; it warns
     and still requires the same trusted-pair policy.
 
-    TLS material is configured as files under the mounted offload TLS directory,
+    TLS material is configured as files under the mounted peer TLS directory,
     following the cluster's gRPC TLS pattern; it is base64-encoded only when a worker
     attachment is handed a transient copy.
     """
@@ -544,8 +544,8 @@ class TrustedOffloadConfig:
     node_listener_url: str = ""
 
     @classmethod
-    def from_env(cls, *, default_trust_domain: str) -> "TrustedOffloadConfig":
-        prefix = "NETWORK_PLANE_OFFLOAD_"
+    def from_env(cls, *, default_trust_domain: str) -> "TrustedPeerConfig":
+        prefix = "NETWORK_PLANE_PEER_"
         raw_classes = _env_or_none(f"{prefix}CLASSES")
         classes = (
             tuple(c.strip() for c in raw_classes.split(",") if c.strip())
@@ -565,7 +565,7 @@ class TrustedOffloadConfig:
         if config.enabled and not config.disable_mtls and not config.mtls_ready:
             raise ValueError(
                 f"{prefix}ENABLED requires {prefix}TLS_CA_FILE, "
-                f"{prefix}TLS_CERT_FILE, and {prefix}TLS_KEY_FILE: a direct offload "
+                f"{prefix}TLS_CERT_FILE, and {prefix}TLS_KEY_FILE: a peer transport "
                 f"is carried over mutual TLS unless {prefix}DISABLE_MTLS is set"
             )
         return config
@@ -598,7 +598,7 @@ class NetworkPlaneConfig:
     connect_budget_sec: float = 5.0
     route_ttl_sec: float = 30.0
     relay_buffer_bytes: int = 65536
-    offload: TrustedOffloadConfig = field(default_factory=TrustedOffloadConfig)
+    peer: TrustedPeerConfig = field(default_factory=TrustedPeerConfig)
 
     @classmethod
     def from_env(cls) -> "NetworkPlaneConfig":
@@ -626,7 +626,7 @@ class NetworkPlaneConfig:
             relay_buffer_bytes=max(
                 1024, parse_int_env(f"{prefix}RELAY_BUFFER_BYTES") or 65536
             ),
-            offload=TrustedOffloadConfig.from_env(
+            peer=TrustedPeerConfig.from_env(
                 default_trust_domain=_env_or_none(f"{prefix}TRUST_DOMAIN") or "flowmesh"
             ),
         )

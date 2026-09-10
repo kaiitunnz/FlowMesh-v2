@@ -1,4 +1,4 @@
-"""The offload transports' material loading and peer identity reading."""
+"""The peer transports' material loading and peer identity reading."""
 
 import base64
 

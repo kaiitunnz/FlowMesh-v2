@@ -200,9 +200,9 @@ class ResidentOriginDriver:
             self._logger.exception("resident origin drive failed")
             self._report_outcome(self._uncertain(req, f"origin drive error: {exc}"))
         finally:
-            # A dialed offload holds a socket and its reader for this session alone, so
-            # the attempt's end is what releases both ends: the target's connection
-            # cannot end until the origin closes.
+            # A dialed peer session holds a socket and its reader for this session
+            # alone, so the attempt's end is what releases both ends: the target's
+            # connection cannot end until the origin closes.
             self._carriage.close(req.session_id)
             self._by_session.pop(req.session_id, None)
             if self._by_call.get(req.call_correlation) is origin:

@@ -1,4 +1,4 @@
-"""A mutually authenticated relay-frame listener for a directly dialed offload.
+"""A mutually authenticated relay-frame listener for a directly dialed peer session.
 
 A target endpoint accepts only a connection whose certificate chains to the deployment
 CA, then reads relay frames from it and answers over the same connection. Membership of
@@ -98,7 +98,7 @@ class MutualTlsFrameListener:
         self._admits = admits
         self._max_connections = max_connections
         self._open = 0
-        self._logger = logger or logging.getLogger("offload-frame-listener")
+        self._logger = logger or logging.getLogger("peer-frame-listener")
         self._server: asyncio.Server | None = None
         self._connections: set[asyncio.StreamWriter] = set()
 
@@ -132,7 +132,7 @@ class MutualTlsFrameListener:
     def _tls_context(self) -> ssl.SSLContext | None:
         if self._material is None:
             self._logger.warning(
-                "serving offload frames without mutual TLS: the deployment is "
+                "serving peer frames without mutual TLS: the deployment is "
                 "configured for a trusted network, so a dialer proves no identity"
             )
             return None
@@ -162,7 +162,7 @@ class MutualTlsFrameListener:
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
         if self._open >= self._max_connections:
-            self._logger.warning("refusing an offload connection over the cap")
+            self._logger.warning("refusing an peer connection over the cap")
             await close_writer(writer)
             return
         identities = self._peer_identities(writer)
@@ -170,9 +170,7 @@ class MutualTlsFrameListener:
         # policy that selected the route is the only gate; the start-up warning is where
         # that posture is surfaced. With mutual TLS the identity must be a known origin.
         if self._material is not None and not self._admits(identities):
-            self._logger.warning(
-                "refusing an offload dialer that is not a known origin"
-            )
+            self._logger.warning("refusing an peer dialer that is not a known origin")
             await close_writer(writer)
             return
         self._open += 1
@@ -184,7 +182,7 @@ class MutualTlsFrameListener:
         except (asyncio.IncompleteReadError, ConnectionError, OSError):
             pass
         except FrameStreamError as exc:
-            self._logger.warning("closing an offload connection: %s", exc)
+            self._logger.warning("closing an peer connection: %s", exc)
         finally:
             self._open -= 1
             self._connections.discard(writer)

@@ -1,6 +1,6 @@
-"""The offload listener's teardown does not wait on a peer that never closes.
+"""The peer listener's teardown does not wait on a peer that never closes.
 
-A legitimate offload connection idles between frames for as long as its invocation runs,
+A legitimate peer connection idles between frames for as long as its invocation runs,
 so a listener that waited for its reads to end on their own would hold a node's shutdown
 open for as long as a dialer keeps its socket.
 """

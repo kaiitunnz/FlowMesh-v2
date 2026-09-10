@@ -1,4 +1,4 @@
-"""The replica worker's claim-gated listener for a directly dialed offload.
+"""The replica worker's claim-gated listener for a directly dialed peer session.
 
 A trusted deployment lets an admitted invocation's origin dial this listener instead of
 carrying its frames through the root. Each frame it reads goes to the replica sidecar,
@@ -49,8 +49,8 @@ class _SidecarConnection(ConnectionHandler):
         return None
 
 
-class ResidentDirectListener:
-    """Serves the worker's offload connections on the resident lane loop."""
+class ResidentPeerListener:
+    """Serves the worker's peer connections on the resident lane loop."""
 
     def __init__(
         self,
@@ -81,4 +81,4 @@ class ResidentDirectListener:
         await self._listener.stop()
 
 
-__all__ = ["ResidentDirectListener"]
+__all__ = ["ResidentPeerListener"]

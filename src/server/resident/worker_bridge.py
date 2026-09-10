@@ -36,7 +36,7 @@ class ResidentWorkerBridge:
         self._sessions = RelaySessionStore(redis)
         self._node_id = node_id
         self._enqueue_local = enqueue_local
-        self._offloads: dict[str, FrameSink] = {}
+        self._peers: dict[str, FrameSink] = {}
         self._logger = logger or logging.getLogger("resident-worker-bridge")
 
     async def on_frame(self, frame: RelayFrame) -> None:
@@ -59,7 +59,7 @@ class ResidentWorkerBridge:
             },
         )
 
-    def bind_offload(self, session_id: str, sink: FrameSink) -> None:
+    def bind_peer(self, session_id: str, sink: FrameSink) -> None:
         """Answer one session's worker frames over the connection its origin dialed.
 
         The binding is taken from whichever admitted dialer names the session first: the
@@ -67,10 +67,10 @@ class ResidentWorkerBridge:
         rests on the session id being unguessable and the dialer holding a deployment
         identity. Naming the expected origin to a target would need control to carry it.
         """
-        self._offloads[session_id] = sink
+        self._peers[session_id] = sink
 
-    def release_offload(self, session_id: str) -> None:
-        self._offloads.pop(session_id, None)
+    def peer_release(self, session_id: str) -> None:
+        self._peers.pop(session_id, None)
 
     async def publish_up(self, frame: RelayFrame) -> None:
         """Return a worker's produced frame to the origin that is waiting for it.
@@ -79,7 +79,7 @@ class ResidentWorkerBridge:
         never enter the rendezvous; every other session publishes to this node's up
         stream for the root to bridge onward.
         """
-        if (sink := self._offloads.get(frame.session_id)) is not None:
+        if (sink := self._peers.get(frame.session_id)) is not None:
             await sink.send(frame)
             return
         await self._streams.publish_up(self._node_id, frame)

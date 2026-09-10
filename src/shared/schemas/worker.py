@@ -42,7 +42,7 @@ class WorkerCapabilities(BaseModel):
     resident_listener_port: int = Field(
         default=0,
         description=(
-            "Port of the worker's claim-gated resident offload listener; 0 when it "
+            "Port of the worker's claim-gated resident peer listener; 0 when it "
             "serves none, which leaves its replicas reachable over the relay alone."
         ),
     )

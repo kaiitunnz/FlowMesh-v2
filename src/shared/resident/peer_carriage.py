@@ -49,7 +49,7 @@ InboundSink = Callable[[RelayFrame], Awaitable[None]]
 ObservationSink = Callable[[str, Transport, RouteObservationOutcome], None]
 
 
-class DirectCarriageLost(OSError):
+class PeerCarriageLost(OSError):
     """A dialed carriage failed after delivery, leaving the outcome ambiguous."""
 
 
@@ -65,13 +65,13 @@ def _classify(exc: BaseException) -> RouteObservationOutcome:
     return RouteObservationOutcome.ROUTE_FAILURE
 
 
-class _DirectSink(ResidentFrameSink):
+class _PeerSink(ResidentFrameSink):
     """One attempt's dialed socket, falling back to the relay base before delivery."""
 
     def __init__(
         self,
         *,
-        carriage: "DirectOffloadCarriage",
+        carriage: "PeerCarriage",
         session_id: str,
         endpoint: str,
         transport: Transport,
@@ -98,7 +98,7 @@ class _DirectSink(ResidentFrameSink):
         except (OSError, FrameStreamError) as exc:
             self._observe_loss(exc)
             self.close()
-            raise DirectCarriageLost(f"carriage lost for {self._session_id}") from exc
+            raise PeerCarriageLost(f"carriage lost for {self._session_id}") from exc
 
     async def _dial(self) -> bool:
         """Open the socket, or fall back to the relay and record the path evidence."""
@@ -166,7 +166,7 @@ class _DirectSink(ResidentFrameSink):
                 writer.close()
 
 
-class DirectOffloadCarriage:
+class PeerCarriage:
     """Realizes a plan's transport: a trusted dialed socket, or the relay base.
 
     The plan names its target as an endpoint to dial, and mutual TLS proves the peer is
@@ -192,21 +192,21 @@ class DirectOffloadCarriage:
         self.observe = observe
         self.ssl_context = ssl_context
         self.connect_budget_sec = connect_budget_sec
-        self.log = logger or logging.getLogger("direct-offload-carriage")
-        self._sinks: dict[str, _DirectSink] = {}
+        self.log = logger or logging.getLogger("peer-carriage")
+        self._sinks: dict[str, _PeerSink] = {}
 
     def select(self, plan: ResidentCarriagePlan) -> ResidentFrameSink:
         """The sink for this attempt.
 
-        A plan naming the relay carries the base sink. A plan naming an offload this
-        origin cannot open is refused rather than relayed silently, so a selection never
-        rides a transport other than the one control chose.
+        A plan naming the relay carries the base sink. A plan naming a peer this
+        origin cannot open is refused rather than relayed silently, so a selection
+        never rides a transport other than the one control chose.
         """
         if plan.selected_transport == CONTROL_RELAY:
             return self._base
         if not plan.selected_endpoint:
             raise CarriageUnavailable(plan.selected_transport)
-        sink = _DirectSink(
+        sink = _PeerSink(
             carriage=self,
             session_id=plan.session_id,
             endpoint=plan.selected_endpoint,
@@ -230,8 +230,8 @@ class DirectOffloadCarriage:
 
 
 __all__ = [
-    "DirectCarriageLost",
-    "DirectOffloadCarriage",
+    "PeerCarriageLost",
+    "PeerCarriage",
     "InboundSink",
     "ObservationSink",
 ]

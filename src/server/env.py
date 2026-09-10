@@ -141,39 +141,37 @@ VAST_MAX_RETRIES: int = int(os.getenv("VAST_MAX_RETRIES") or "1")
 NEBULA_API_BASE_URL: str = os.getenv("NEBULA_API_BASE_URL", "")
 
 
-NETWORK_PLANE_OFFLOAD_ENABLED: bool = parse_bool_env(
-    "NETWORK_PLANE_OFFLOAD_ENABLED", False
-)
-NETWORK_PLANE_OFFLOAD_DISABLE_MTLS: bool = parse_bool_env(
-    "NETWORK_PLANE_OFFLOAD_DISABLE_MTLS", False
+NETWORK_PLANE_PEER_ENABLED: bool = parse_bool_env("NETWORK_PLANE_PEER_ENABLED", False)
+NETWORK_PLANE_PEER_DISABLE_MTLS: bool = parse_bool_env(
+    "NETWORK_PLANE_PEER_DISABLE_MTLS", False
 )
 
 
-def _offload_material_b64(var: str) -> str:
-    """A worker's transient copy of one offload TLS file, base64-encoded.
+def _peer_material_b64(var: str) -> str:
+    """A worker's transient copy of one peer TLS file, base64-encoded.
 
     The operator configures the material as files on the node; a worker runs in its own
     container, so the supervisor hands it the bytes rather than a path it cannot read.
     Material the node cannot read is fatal here rather than handed over absent, so a
     worker never dials in plaintext on a deployment that asked for mutual TLS.
     """
-    if not NETWORK_PLANE_OFFLOAD_ENABLED or NETWORK_PLANE_OFFLOAD_DISABLE_MTLS:
+    if not NETWORK_PLANE_PEER_ENABLED or NETWORK_PLANE_PEER_DISABLE_MTLS:
         return ""
     path = (os.getenv(var) or "").strip()
     if not path:
-        raise RuntimeError(f"{var} is required unless offload mutual TLS is disabled")
+        raise RuntimeError(f"{var} is required unless peer mutual TLS is disabled")
     try:
         return base64.b64encode(Path(path).read_bytes()).decode("ascii")
     except OSError as exc:
         raise RuntimeError(f"Failed to read {var}: {exc}") from exc
 
 
-NETWORK_PLANE_OFFLOAD_TLS_CA_B64: str = _offload_material_b64(
-    "NETWORK_PLANE_OFFLOAD_TLS_CA_FILE"
+NETWORK_PLANE_PEER_TLS_CA_B64: str = _peer_material_b64(
+    "NETWORK_PLANE_PEER_TLS_CA_FILE"
 )
-NETWORK_PLANE_OFFLOAD_TLS_CERT_B64: str = _offload_material_b64(
-    "NETWORK_PLANE_OFFLOAD_TLS_CERT_FILE"
+NETWORK_PLANE_PEER_TLS_CERT_B64: str = _peer_material_b64(
+    "NETWORK_PLANE_PEER_TLS_CERT_FILE"
 )
-NETWORK_PLANE_OFFLOAD_TLS_KEY_B64: str = _offload_material_b64(
-    "NETWORK_PLANE_OFFLOAD_TLS_KEY_FILE"
+NETWORK_PLANE_PEER_TLS_KEY_B64: str = _peer_material_b64(
+    "NETWORK_PLANE_PEER_TLS_KEY_FILE"
 )

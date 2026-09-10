@@ -20,7 +20,7 @@ from shared.resident.contracts import (
     ReplicaEndpoint,
     RouteAuthorization,
 )
-from shared.resident.direct_carriage import DirectOffloadCarriage
+from shared.resident.peer_carriage import PeerCarriage
 from shared.resident.reports import (
     ResidentBootstrapAck,
     ResidentBootstrapOutcome,
@@ -28,9 +28,9 @@ from shared.resident.reports import (
     ResidentStreamStatus,
 )
 from shared.resident.session import ResidentRelaySession  # noqa: F401 - re-export check
-from worker.resident.direct_listener import ResidentDirectListener
 from worker.resident.engine import EngineResponse
 from worker.resident.origin_driver import ResidentOriginDriver, ResidentOriginRequest
+from worker.resident.peer_listener import ResidentPeerListener
 from worker.resident.replica_sidecar import ResidentReplicaSidecar
 
 _COMPLETION = "the resident model reply, streamed in pieces"
@@ -237,7 +237,7 @@ def test_post_manifest_redrive_reuses_the_reference() -> None:
 
 
 class _DialedHarness:
-    """The two lanes over a real dialed socket, as a trusted offload carries them."""
+    """The two lanes over a real dialed socket, as a trusted peer carries them."""
 
     def __init__(self, sock, port: int) -> None:
         self.store = _MemStore()
@@ -254,10 +254,10 @@ class _DialedHarness:
             listener_generation=1,
             endpoint=ReplicaEndpoint(base_url="http://engine/v1", model="m"),
         )
-        self.listener = ResidentDirectListener(
+        self.listener = ResidentPeerListener(
             sock=sock, material=None, deliver=self.sidecar.on_frame
         )
-        self.carriage = DirectOffloadCarriage(
+        self.carriage = PeerCarriage(
             base=_ToPeer(),
             deliver=lambda frame: self.origin.on_frame(frame),
             observe=lambda session, transport, outcome: None,
@@ -299,11 +299,11 @@ class _DialedHarness:
         await asyncio.wait_for(self.done.wait(), timeout=10.0)
 
 
-def test_repeated_offloads_release_both_ends_of_the_dialed_socket() -> None:
+def test_repeated_peers_release_both_ends_of_the_dialed_socket() -> None:
     # The target's connection cannot end until the origin closes, so an attempt that
     # leaks its sink also pins a connection against the listener's cap: after enough
-    # invocations the listener refuses every further offload and the feature silently
-    # falls back to the relay.
+    # invocations the listener refuses every further peer session and the feature
+    # silently falls back to the relay.
     async def run() -> None:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

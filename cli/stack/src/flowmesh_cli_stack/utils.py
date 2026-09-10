@@ -17,7 +17,7 @@ DEFAULT_ENV_FILE = Path(".env")
 STACK_PATH_KEYS = {
     "REDIS_TLS_DIR",
     "SERVER_TLS_DIR",
-    "NETWORK_PLANE_OFFLOAD_TLS_DIR",
+    "NETWORK_PLANE_PEER_TLS_DIR",
     "SERVER_WORKER_CONFIG",
     "FLOWMESH_PLUGIN_DIR",
 }
@@ -123,8 +123,8 @@ def ensure_deploy_paths(base_dir: Path) -> None:
     )
     ensure_dir(
         resolve_path(
-            os.getenv("NETWORK_PLANE_OFFLOAD_TLS_DIR", ""),
-            default="./secrets/tls/offload",
+            os.getenv("NETWORK_PLANE_PEER_TLS_DIR", ""),
+            default="./secrets/tls/peer",
             base_dir=base_dir,
         )
     )

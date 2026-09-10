@@ -1,6 +1,6 @@
-"""Mutual-TLS material for the direct offload transports.
+"""Mutual-TLS material for the peer transports.
 
-Both ends of a directly dialed offload authenticate each other against the deployment's
+Both ends of a dialed peer session authenticate each other against the deployment's
 configured CA. The two ends check different things with that proof: an origin requires
 the certificate to cover the endpoint host it dialed, so the peer is the target its
 route selected, while a target admits any peer the CA vouched for and leaves the
@@ -60,27 +60,25 @@ class MutualTlsMaterial:
 
 def _read(path: str, what: str) -> bytes:
     if not path.strip():
-        raise MutualTlsMaterialError(f"offload {what} file is not configured")
+        raise MutualTlsMaterialError(f"peer {what} file is not configured")
     try:
         return Path(path).read_bytes()
     except OSError as exc:
-        raise MutualTlsMaterialError(
-            f"offload {what} file is unreadable: {exc}"
-        ) from exc
+        raise MutualTlsMaterialError(f"peer {what} file is unreadable: {exc}") from exc
 
 
 def _decode(value: str, what: str) -> bytes:
     if not value.strip():
-        raise MutualTlsMaterialError(f"offload {what} is not configured")
+        raise MutualTlsMaterialError(f"peer {what} is not configured")
     try:
         return base64.b64decode(value, validate=True)
     except (binascii.Error, ValueError) as exc:
-        raise MutualTlsMaterialError(f"offload {what} is not valid base64") from exc
+        raise MutualTlsMaterialError(f"peer {what} is not valid base64") from exc
 
 
 @contextmanager
 def _chain_files(material: MutualTlsMaterial) -> Iterator[tuple[Path, Path, Path]]:
-    with tempfile.TemporaryDirectory(prefix="flowmesh-offload-tls-") as directory:
+    with tempfile.TemporaryDirectory(prefix="flowmesh-peer-tls-") as directory:
         root = Path(directory)
         ca, cert, key = root / "ca.pem", root / "cert.pem", root / "key.pem"
         for path, content in ((ca, material.ca_pem), (cert, material.cert_pem)):

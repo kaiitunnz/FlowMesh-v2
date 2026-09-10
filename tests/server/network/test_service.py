@@ -38,7 +38,7 @@ def _node(node_id: str, *, generation: int, cls=ReachabilityClass.ROUTABLE) -> N
         network_endpoint=NetworkEndpointAdvertisement(
             endpoint_id=f"ep-{node_id}",
             url=f"127.0.0.1:900{node_id[-1]}",
-            offload_url=f"127.0.0.1:910{node_id[-1]}",
+            peer_url=f"127.0.0.1:910{node_id[-1]}",
             generation=generation,
             trust_domain="fm",
             reachability_class=cls,
@@ -85,8 +85,8 @@ def _plane(registry: _FakeNodeRegistry) -> NetworkPlane:
     )
 
 
-def test_resolve_offers_only_the_relay_without_a_trusted_offload_posture() -> None:
-    # The offload posture is off by default, so a deployment that declared no trusted
+def test_resolve_offers_only_the_relay_without_a_trusted_peer_posture() -> None:
+    # The peer posture is off by default, so a deployment that declared no trusted
     # class carries resident traffic over the relay even though the target advertises a
     # dialable address.
     registry = _FakeNodeRegistry()
@@ -100,7 +100,7 @@ def test_resolve_offers_only_the_relay_without_a_trusted_offload_posture() -> No
 
 
 def test_a_probe_resolves_the_full_ladder() -> None:
-    # A diagnostic probe is not gated on the offload posture: it exists to learn whether
+    # A diagnostic probe is not gated on the peer posture: it exists to learn whether
     # a path works before a deployment declares it trusted.
     registry = _FakeNodeRegistry()
     registry.set(_node("nde-1", generation=1))

@@ -7,7 +7,7 @@ candidate ladder. It is pure — it mutates nothing and permits no peer discover
 deputy executes only the candidates it returns.
 
 Ladder rules:
-- ``worker_direct`` and ``node_relay`` are the direct origin-to-target offloads: the
+- ``worker_direct`` and ``node_relay`` are the origin-to-target peer transports: the
   ``RouteOrigin`` itself dials, so a workflow origin's payload never enters the root.
   They are offered only to a deployment-declared trusted pair — the trust policy, both
   ends' trust domain, the target's reachability class, the transport capability both
@@ -41,7 +41,7 @@ from .state import (
     RouteOrigin,
     RouteTarget,
     Transport,
-    TrustedOffloadPolicy,
+    TrustedPeerPolicy,
 )
 
 _CLASS_LOCALITY: dict[ReachabilityClass, int] = {
@@ -68,19 +68,19 @@ def _base_index(transport: Transport) -> int:
     }[transport]
 
 
-def _offload_admitted(
-    trust: TrustedOffloadPolicy,
+def _peer_admitted(
+    trust: TrustedPeerPolicy,
     origin: RouteOrigin,
     node_endpoint: NetworkEndpointAdvertisement,
     listener: RouteTarget,
     transport: Transport,
 ) -> bool:
-    """Whether the deployment admits this origin-to-target pair for a direct offload.
+    """Whether the deployment admits this origin-to-target pair for a peer transport.
 
     Trust is a property of the pair, never of topology: sharing a node or advertising an
     address proves nothing. Both ends must sit in the configured trust domain, the
     target must be exposed at an admitted class, and both must advertise the transport
-    capability the offload is carried over.
+    capability the peer transport is carried over.
     """
     if not trust.enabled:
         return False
@@ -107,7 +107,7 @@ def resolve_route(
     node_endpoint: NetworkEndpointAdvertisement | None,
     reachability: NetworkReachabilityView,
     *,
-    trust: TrustedOffloadPolicy,
+    trust: TrustedPeerPolicy,
     now: float,
     route_epoch: int,
     expires_at: float | None = None,
@@ -157,7 +157,7 @@ def resolve_route(
         and _class_reachable(
             origin.reachability_class, node_endpoint.reachability_class
         )
-        and _offload_admitted(
+        and _peer_admitted(
             trust, origin, node_endpoint, listener, Transport.WORKER_DIRECT
         )
     ):
@@ -172,21 +172,19 @@ def resolve_route(
             ),
         )
 
-    node_offload_url = node_endpoint.offload_url if node_endpoint is not None else ""
+    node_peer_url = node_endpoint.peer_url if node_endpoint is not None else ""
     if (
         node_endpoint is not None
-        and node_offload_url
+        and node_peer_url
         and direct_route is not None
-        and _offload_admitted(
-            trust, origin, node_endpoint, listener, Transport.NODE_RELAY
-        )
+        and _peer_admitted(trust, origin, node_endpoint, listener, Transport.NODE_RELAY)
     ):
         consider(
             Transport.NODE_RELAY,
             (
                 RouteHop(
                     transport=Transport.NODE_RELAY,
-                    endpoint=node_offload_url,
+                    endpoint=node_peer_url,
                     node_id=node_endpoint.node_id,
                 ),
                 RouteHop(

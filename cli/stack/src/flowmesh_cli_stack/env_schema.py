@@ -25,44 +25,44 @@ def _require_network_plane_for_resident(
         )
 
 
-def _require_offload_trust(
+def _require_peer_trust(
     env: dict[str, str], errors: list[str], warnings: list[str]
 ) -> None:
-    """A trusted offload needs the network plane, a trust domain, and its material.
+    """A peer transport needs the network plane, a trust domain, and its material.
 
     Mutual TLS is on unless the operator sets the disable flag, which attests a trusted
     network and is warned about rather than silently accepted.
     """
-    if not parse_bool(env.get("NETWORK_PLANE_OFFLOAD_ENABLED", "")):
+    if not parse_bool(env.get("NETWORK_PLANE_PEER_ENABLED", "")):
         return
     if not parse_bool(env.get("NETWORK_PLANE_ENABLED", "")):
         errors.append(
-            "NETWORK_PLANE_OFFLOAD_ENABLED requires NETWORK_PLANE_ENABLED: an offload "
-            "substitutes for a network-plane transport"
+            "NETWORK_PLANE_PEER_ENABLED requires NETWORK_PLANE_ENABLED: a peer "
+            "transport substitutes for a network-plane transport"
         )
-    if not (env.get("NETWORK_PLANE_OFFLOAD_TRUST_DOMAIN", "") or "").strip():
+    if not (env.get("NETWORK_PLANE_PEER_TRUST_DOMAIN", "") or "").strip():
         errors.append(
-            "NETWORK_PLANE_OFFLOAD_ENABLED requires "
-            "NETWORK_PLANE_OFFLOAD_TRUST_DOMAIN: an offload is admitted only between "
-            "a declared trusted pair"
+            "NETWORK_PLANE_PEER_ENABLED requires "
+            "NETWORK_PLANE_PEER_TRUST_DOMAIN: a peer transport is admitted only "
+            "between a declared trusted pair"
         )
     material = [
-        "NETWORK_PLANE_OFFLOAD_TLS_CA_FILE",
-        "NETWORK_PLANE_OFFLOAD_TLS_CERT_FILE",
-        "NETWORK_PLANE_OFFLOAD_TLS_KEY_FILE",
+        "NETWORK_PLANE_PEER_TLS_CA_FILE",
+        "NETWORK_PLANE_PEER_TLS_CERT_FILE",
+        "NETWORK_PLANE_PEER_TLS_KEY_FILE",
     ]
-    if parse_bool(env.get("NETWORK_PLANE_OFFLOAD_DISABLE_MTLS", "")):
+    if parse_bool(env.get("NETWORK_PLANE_PEER_DISABLE_MTLS", "")):
         warnings.append(
-            "NETWORK_PLANE_OFFLOAD_DISABLE_MTLS is set: offload traffic runs on an "
+            "NETWORK_PLANE_PEER_DISABLE_MTLS is set: peer traffic runs on an "
             "operator-attested trusted network and its dialer proves no identity"
         )
         return
     missing = [name for name in material if not (env.get(name, "") or "").strip()]
     if missing:
         errors.append(
-            "NETWORK_PLANE_OFFLOAD_ENABLED requires "
-            f"{', '.join(missing)}: an offload is carried over mutual TLS unless "
-            "NETWORK_PLANE_OFFLOAD_DISABLE_MTLS is set"
+            "NETWORK_PLANE_PEER_ENABLED requires "
+            f"{', '.join(missing)}: a peer transport is carried over mutual TLS unless "
+            "NETWORK_PLANE_PEER_DISABLE_MTLS is set"
         )
 
 
@@ -678,57 +678,57 @@ STACK_ENV_SCHEMA = EnvSchema(
                     min_value=1024,
                 ),
                 EnvVar(
-                    "NETWORK_PLANE_OFFLOAD_ENABLED",
+                    "NETWORK_PLANE_PEER_ENABLED",
                     "false",
-                    description="Enable trusted direct origin-to-target offloads.",
+                    description="Enable trusted origin-to-target peer transports.",
                     var_type=EnvVarType.BOOL,
                 ),
                 EnvVar(
-                    "NETWORK_PLANE_OFFLOAD_TRUST_DOMAIN",
+                    "NETWORK_PLANE_PEER_TRUST_DOMAIN",
                     "",
                     description="Trust domain both ends must share.",
                 ),
                 EnvVar(
-                    "NETWORK_PLANE_OFFLOAD_CLASSES",
+                    "NETWORK_PLANE_PEER_CLASSES",
                     "same_node,same_cluster",
-                    description="Target reachability classes an offload admits.",
+                    description="Target reachability classes a peer transport admits.",
                     var_type=EnvVarType.CSV,
                 ),
                 EnvVar(
-                    "NETWORK_PLANE_OFFLOAD_DISABLE_MTLS",
+                    "NETWORK_PLANE_PEER_DISABLE_MTLS",
                     "false",
-                    description="Run offloads on an attested trusted network.",
+                    description="Run peer transports on an attested trusted network.",
                     var_type=EnvVarType.BOOL,
                 ),
                 EnvVar(
-                    "NETWORK_PLANE_OFFLOAD_TLS_DIR",
-                    "./secrets/tls/offload",
+                    "NETWORK_PLANE_PEER_TLS_DIR",
+                    "./secrets/tls/peer",
                     var_type=EnvVarType.DIR_PATH,
                     use_default=True,
                     ensure_path="create",
                 ),
                 EnvVar(
-                    "NETWORK_PLANE_OFFLOAD_TLS_CA_FILE",
-                    "/etc/ssl/offload/offload-ca.pem",
-                    description="Offload CA bundle path.",
+                    "NETWORK_PLANE_PEER_TLS_CA_FILE",
+                    "/etc/ssl/peer/peer-ca.pem",
+                    description="Peer CA bundle path.",
                     var_type=EnvVarType.FILE_PATH,
                 ),
                 EnvVar(
-                    "NETWORK_PLANE_OFFLOAD_TLS_CERT_FILE",
-                    "/etc/ssl/offload/offload.pem",
-                    description="Offload certificate path.",
+                    "NETWORK_PLANE_PEER_TLS_CERT_FILE",
+                    "/etc/ssl/peer/peer.pem",
+                    description="Peer certificate path.",
                     var_type=EnvVarType.FILE_PATH,
                 ),
                 EnvVar(
-                    "NETWORK_PLANE_OFFLOAD_TLS_KEY_FILE",
-                    "/etc/ssl/offload/offload.key",
-                    description="Offload private key path.",
+                    "NETWORK_PLANE_PEER_TLS_KEY_FILE",
+                    "/etc/ssl/peer/peer.key",
+                    description="Peer private key path.",
                     var_type=EnvVarType.FILE_PATH,
                 ),
                 EnvVar(
-                    "NETWORK_PLANE_OFFLOAD_NODE_LISTENER_URL",
+                    "NETWORK_PLANE_PEER_NODE_LISTENER_URL",
                     "",
-                    description="Node offload listener (host:port).",
+                    description="Node peer listener (host:port).",
                 ),
             ],
         ),
@@ -1195,7 +1195,7 @@ STACK_ENV_SCHEMA = EnvSchema(
         ),
     ],
     validators=[
-        _require_offload_trust,
+        _require_peer_trust,
         lambda env, errors, warnings: require_if_true(
             env, "REDIS_ACL_ENABLED", ["REDIS_USERNAME", "REDIS_PASSWORD"], errors
         ),

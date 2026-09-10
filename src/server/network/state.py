@@ -40,7 +40,7 @@ __all__ = [
     "RouteOrigin",
     "RouteTarget",
     "Transport",
-    "TrustedOffloadPolicy",
+    "TrustedPeerPolicy",
     "is_demoting",
 ]
 
@@ -126,7 +126,7 @@ class NonresidentSidecarTarget(BaseModel):
     directly_routable: bool = False
 
 
-class TrustedOffloadPolicy(BaseModel):
+class TrustedPeerPolicy(BaseModel):
     """The deployment's eligibility rule for the direct origin-to-target transports.
 
     Disabled by default: a deployment that has not declared a trusted class carries

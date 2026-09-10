@@ -9,7 +9,7 @@ from shared.network.frame_stream import read_relay_frame, write_relay_frame
 from shared.network.mtls import MutualTlsMaterial, client_context, server_context
 from shared.network.relay_frame import RelayDirection, RelayFrame, RelayFrameKind
 from shared.resident.carriage import CarriageUnavailable, ResidentCarriagePlan
-from shared.resident.direct_carriage import DirectCarriageLost, DirectOffloadCarriage
+from shared.resident.peer_carriage import PeerCarriage, PeerCarriageLost
 from shared.schemas.network import RouteObservationOutcome, Transport
 from tests.support.certs import new_ca
 
@@ -35,7 +35,7 @@ class _BaseSink:
 
 
 def _carriage(base, delivered, observed):
-    return DirectOffloadCarriage(
+    return PeerCarriage(
         base=base,
         deliver=lambda frame: delivered.append(frame) or asyncio.sleep(0),
         observe=lambda session, transport, outcome: observed.append(
@@ -63,7 +63,7 @@ def _dial_over_mtls(target: MutualTlsMaterial, origin: MutualTlsMaterial):
     """Dial a live mutual-TLS target on loopback: (received, relayed, observed)."""
     base = _BaseSink()
     observed: list[tuple] = []
-    carriage = DirectOffloadCarriage(
+    carriage = PeerCarriage(
         base=base,
         deliver=lambda frame: asyncio.sleep(0),
         observe=lambda session, transport, outcome: observed.append(
@@ -99,7 +99,7 @@ def test_a_relay_plan_carries_the_base_sink() -> None:
     assert carriage.select(_plan("control_relay", "")) is base
 
 
-def test_an_offload_without_an_address_is_refused_not_relayed() -> None:
+def test_a_peer_transport_without_an_address_is_refused_not_relayed() -> None:
     # Silently relaying a selection control made would carry the attempt over a
     # transport other than the one it chose.
     carriage = _carriage(_BaseSink(), [], [])
@@ -177,7 +177,7 @@ def test_a_loss_after_delivery_is_ambiguous_rather_than_relayed() -> None:
         async with server:
             sink = carriage.select(_plan("worker_direct", f"127.0.0.1:{port}"))
             await sink.send(_frame(b"first"))
-            with pytest.raises(DirectCarriageLost):
+            with pytest.raises(PeerCarriageLost):
                 for _ in range(100):
                     await asyncio.sleep(0.02)
                     await sink.send(_frame(b"again"))

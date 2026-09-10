@@ -9,7 +9,7 @@ reachability for diagnostics.
 import logging
 import time
 
-from shared.schemas.network import OFFLOAD_PROTOCOL
+from shared.schemas.network import PEER_PROTOCOL
 from shared.utils.ids import new_route_origin_id
 
 from ..config import NetworkPlaneConfig
@@ -26,7 +26,7 @@ from .state import (
     RouteObservationOutcome,
     RouteOrigin,
     Transport,
-    TrustedOffloadPolicy,
+    TrustedPeerPolicy,
 )
 
 
@@ -52,29 +52,29 @@ def stamp_endpoint(
     return endpoint.model_copy(update=updates)
 
 
-PROBE_TRUST = TrustedOffloadPolicy(enabled=True, probe=True)
+PROBE_TRUST = TrustedPeerPolicy(enabled=True, probe=True)
 
 _REACHABILITY_CLASSES = frozenset(ReachabilityClass)
 """The trust rule a reachability probe resolves under.
 
 A probe carries no invocation payload — it dials a node's own diagnostic listener to
-learn whether the path works at all — so it is not gated on the deployment's offload
+learn whether the path works at all — so it is not gated on the deployment's peer
 posture. It is never used to resolve a route that carries resident traffic.
 """
 
 
-def _offload_policy(config: NetworkPlaneConfig) -> TrustedOffloadPolicy:
-    """The pure resolver's trust rule, derived from the deployment's offload posture."""
-    offload = config.offload
-    return TrustedOffloadPolicy(
-        enabled=offload.enabled,
-        trust_domain=offload.trust_domain,
+def _peer_policy(config: NetworkPlaneConfig) -> TrustedPeerPolicy:
+    """The pure resolver's trust rule, derived from the deployment's peer posture."""
+    peer = config.peer
+    return TrustedPeerPolicy(
+        enabled=peer.enabled,
+        trust_domain=peer.trust_domain,
         classes=frozenset(
             ReachabilityClass(value)
-            for value in offload.classes
+            for value in peer.classes
             if value in _REACHABILITY_CLASSES
         ),
-        protocol=OFFLOAD_PROTOCOL,
+        protocol=PEER_PROTOCOL,
     )
 
 
@@ -101,7 +101,7 @@ class NetworkPlane:
         self._route_epoch = 0
         self._origin_ids: dict[tuple[str, PolicyClass, int], str] = {}
         self._seen_generation: dict[str, int] = {}
-        self._trust = _offload_policy(config)
+        self._trust = _peer_policy(config)
 
     @property
     def connect_budget_sec(self) -> float:
@@ -119,12 +119,12 @@ class NetworkPlane:
         origin_node_id: str,
         listener: ReplicaListenerAdvertisement,
         *,
-        trust: TrustedOffloadPolicy | None = None,
+        trust: TrustedPeerPolicy | None = None,
     ) -> tuple[RouteOrigin, ResolvedRoute] | None:
         """Resolve an ordered candidate ladder from origin to the target listener.
 
         The origin node is the one whose deputy will execute the route, so it is what
-        every candidate — the direct offloads included — is graded against. ``trust``
+        every candidate — the peer transports included — is graded against. ``trust``
         overrides the deployment policy for a caller that probes reachability rather
         than carrying an invocation.
 

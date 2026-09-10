@@ -248,12 +248,12 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   ordered route resolved by a pure resolver, carried by an origin-side deputy that never
   peer-discovers over the universal reverse-rendezvous `control_relay` — both ends attach
   outward to a root bridge, so neither needs an inbound connection — or a verified
-  forward-dial `worker_direct` / `node_relay` offload for a reachable pair. The
+  forward-dial `worker_direct` / `node_relay` peer transport for a reachable pair. The
   substrate holds no admission authority — it mints no `ServiceClaim` or `RouteAuthorization`
   and its transports carry only what a caller frames over them; resident-capacity control
   binds it to carry claim-gated resident invocation traffic. Enable with
   `NETWORK_PLANE_ENABLED=true`. See [`NETWORK_PLANE.md`](NETWORK_PLANE.md).
-- **Trusted direct offloads.** Where a deployment declares the origin-to-target pair
+- **Trusted peer transports.** Where a deployment declares the origin-to-target pair
   trusted, an admitted resident invocation leaves the reverse-rendezvous relay for a
   direct socket the route's own origin opens: `worker_direct` reaches the selected
   worker's claim-gated replica-sidecar listener, `node_relay` reaches the target node's
@@ -265,7 +265,7 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   claim gate is the only authority over the traffic. Mutual TLS between the pair is the
   default. An untrusted, unreachable, or policy-ineligible pair is carried over
   `control_relay`, and a dial that fails before delivery falls back to it under the same
-  held credit. Enable with `NETWORK_PLANE_OFFLOAD_ENABLED=true`. See
+  held credit. Enable with `NETWORK_PLANE_PEER_ENABLED=true`. See
   [`NETWORK_PLANE.md`](NETWORK_PLANE.md).
 - **Worker-originated mediated boundaries.** A fabric-served external tool (`search/v1`)
   or a managed external model turn egresses only in the Agent's assigned worker, never in

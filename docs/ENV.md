@@ -88,15 +88,15 @@ listed here is in `.env.example`.
 | `NETWORK_PLANE_CONNECT_BUDGET_SEC` | `5` | Per-candidate optimistic connect budget (seconds) |
 | `NETWORK_PLANE_ROUTE_TTL_SEC` | `30` | Resolved-route snapshot TTL (seconds) |
 | `NETWORK_PLANE_RELAY_BUFFER_BYTES` | `65536` | Bounded relay-session in-flight buffer (bytes) |
-| `NETWORK_PLANE_OFFLOAD_ENABLED` | `false` | Enable trusted direct origin-to-target offloads |
-| `NETWORK_PLANE_OFFLOAD_TRUST_DOMAIN` | – | Trust domain both ends must share |
-| `NETWORK_PLANE_OFFLOAD_CLASSES` | `same_node,same_cluster` | Target reachability classes an offload admits |
-| `NETWORK_PLANE_OFFLOAD_DISABLE_MTLS` | `false` | Run offloads on an attested trusted network |
-| `NETWORK_PLANE_OFFLOAD_TLS_DIR` | `./secrets/tls/offload` | Host directory mounted at `/etc/ssl/offload` |
-| `NETWORK_PLANE_OFFLOAD_TLS_CA_FILE` | `/etc/ssl/offload/offload-ca.pem` | Offload CA bundle path |
-| `NETWORK_PLANE_OFFLOAD_TLS_CERT_FILE` | `/etc/ssl/offload/offload.pem` | Offload certificate path (must cover the advertised listener host) |
-| `NETWORK_PLANE_OFFLOAD_TLS_KEY_FILE` | `/etc/ssl/offload/offload.key` | Offload private key path |
-| `NETWORK_PLANE_OFFLOAD_NODE_LISTENER_URL` | – | Node offload listener (`host:port`) |
+| `NETWORK_PLANE_PEER_ENABLED` | `false` | Enable trusted direct origin-to-target peer transports |
+| `NETWORK_PLANE_PEER_TRUST_DOMAIN` | – | Trust domain both ends must share |
+| `NETWORK_PLANE_PEER_CLASSES` | `same_node,same_cluster` | Target reachability classes a peer transport admits |
+| `NETWORK_PLANE_PEER_DISABLE_MTLS` | `false` | Run peer transports on an attested trusted network |
+| `NETWORK_PLANE_PEER_TLS_DIR` | `./secrets/tls/peer` | Host directory mounted at `/etc/ssl/peer` |
+| `NETWORK_PLANE_PEER_TLS_CA_FILE` | `/etc/ssl/peer/peer-ca.pem` | Peer CA bundle path |
+| `NETWORK_PLANE_PEER_TLS_CERT_FILE` | `/etc/ssl/peer/peer.pem` | Peer certificate path (must cover the advertised listener host) |
+| `NETWORK_PLANE_PEER_TLS_KEY_FILE` | `/etc/ssl/peer/peer.key` | Peer private key path |
+| `NETWORK_PLANE_PEER_NODE_LISTENER_URL` | – | Node peer listener (`host:port`) |
 | `ENABLE_WORKER_WATCHDOG` | `true` | Worker death detection |
 | `WORKER_DEATH_GRACE_SEC` | `60` | Grace period before marking dead |
 | `WORKER_REHYDRATION_GRACE_SEC` | `120` | Extra grace for a worker's rehydrated in-flight tasks after the root restarts, before the watchdog may reclaim them |
