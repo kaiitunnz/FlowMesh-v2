@@ -14,7 +14,7 @@ from server.resident import (
 
 def test_allows_within_limits():
     decision = decide_materialization(
-        model_ref="m",
+        service_ref="m",
         limits=ResidentPolicyLimits(),
         active_replicas=0,
         materializing_replicas=0,
@@ -24,7 +24,7 @@ def test_allows_within_limits():
 
 def test_empty_allowlist_permits_any_model():
     decision = decide_materialization(
-        model_ref="anything",
+        service_ref="anything",
         limits=ResidentPolicyLimits(allowed_models=frozenset()),
         active_replicas=0,
         materializing_replicas=0,
@@ -34,7 +34,7 @@ def test_empty_allowlist_permits_any_model():
 
 def test_denies_unlisted_model():
     decision = decide_materialization(
-        model_ref="secret-model",
+        service_ref="secret-model",
         limits=ResidentPolicyLimits(allowed_models=frozenset({"allowed-model"})),
         active_replicas=0,
         materializing_replicas=0,
@@ -45,7 +45,7 @@ def test_denies_unlisted_model():
 
 def test_denies_over_family_quota():
     decision = decide_materialization(
-        model_ref="m",
+        service_ref="m",
         limits=ResidentPolicyLimits(max_replicas_per_family=1),
         active_replicas=1,
         materializing_replicas=0,
@@ -56,7 +56,7 @@ def test_denies_over_family_quota():
 
 def test_denies_over_cold_start_limit():
     decision = decide_materialization(
-        model_ref="m",
+        service_ref="m",
         limits=ResidentPolicyLimits(
             max_replicas_per_family=4, max_concurrent_cold_starts=1
         ),

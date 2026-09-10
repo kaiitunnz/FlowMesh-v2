@@ -86,7 +86,7 @@ class LifecycleScaleManager:
         ]
 
     def plan_capacity(
-        self, family: str, model_ref: str, profile: AdmissionProfile | None = None
+        self, family: str, service_ref: str, profile: AdmissionProfile | None = None
     ) -> CapacityPlan:
         """Decide, from the directory and policy, how to satisfy a family's demand.
 
@@ -104,7 +104,7 @@ class LifecycleScaleManager:
         if any(r.state is ReplicaState.MATERIALIZING for r in active):
             return CapacityPlan(action="materialize")
         decision = decide_materialization(
-            model_ref=model_ref,
+            service_ref=service_ref,
             limits=self._limits,
             active_replicas=len(active),
             materializing_replicas=sum(

@@ -37,7 +37,7 @@ _FOREIGN = PrincipalContext(
     principal_type="user",
     scopes=["user"],
 )
-_FAMILY = ServiceFamily(family="m", engine_batch_key="m", model_ref="m")
+_FAMILY = ServiceFamily(family="m", engine_batch_key="m", service_ref="m")
 _REPLICA = ReplicaIncarnation(replica_id="rpl-1", family="m", incarnation=1)
 
 
@@ -151,7 +151,7 @@ def test_embedding_serve_substrate_requests_a_pooling_replica() -> None:
     family = ServiceFamily(
         family="m|embedding",
         engine_batch_key="m|embedding",
-        model_ref="m",
+        service_ref="m",
         interface="embedding",
     )
 
@@ -195,7 +195,7 @@ def test_embedding_dev_model_substrate_needs_no_serving_flag() -> None:
     family = ServiceFamily(
         family="m|embedding",
         engine_batch_key="m|embedding",
-        model_ref="m",
+        service_ref="m",
         interface="embedding",
     )
 

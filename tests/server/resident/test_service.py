@@ -52,8 +52,8 @@ from shared.resident.reports import (
 )
 
 
-def _dependency(model_ref: str = "m") -> ServiceDependency:
-    return ServiceDependency(service_ref=model_ref)
+def _dependency(service_ref: str = "m") -> ServiceDependency:
+    return ServiceDependency(service_ref=service_ref)
 
 
 def _env(invocation_id: str = "inv-1") -> ToolInvocationEnvelope:

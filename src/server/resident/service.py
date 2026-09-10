@@ -625,7 +625,7 @@ class ResidentCapacityControl:
                 ServiceFamily(
                     family=family,
                     engine_batch_key=dependency.engine_batch_key,
-                    model_ref=dependency.service_ref,
+                    service_ref=dependency.service_ref,
                     interface=dependency.interface.value,
                     isolation=dependency.isolation,
                     selection_strategy=self._limits.selection_strategy,
@@ -787,7 +787,7 @@ class ResidentCapacityControl:
                 orig, "resident-capacity control requires the network plane"
             )
             return
-        model_ref = dependency.service_ref
+        service_ref = dependency.service_ref
         family = orig.family or dependency.service_family
         existing = self._admission.active_claim(orig.invocation_id)
         if existing is not None and existing.holds_credit:
@@ -817,7 +817,7 @@ class ResidentCapacityControl:
                 self._fail(
                     orig,
                     ProvisioningDenialReason.MODEL_NOT_ALLOWED,
-                    f"model {model_ref!r} is not in the allowed catalog",
+                    f"model {service_ref!r} is not in the allowed catalog",
                 )
                 return
             else:
@@ -828,7 +828,7 @@ class ResidentCapacityControl:
                     profile=profile,
                 )
             handoff = await self._acquire_capacity(
-                orig, family, model_ref, claim, profile
+                orig, family, service_ref, claim, profile
             )
             if handoff is None:
                 return
@@ -1435,14 +1435,17 @@ class ResidentCapacityControl:
         family = dependency.service_family
         if family in self._stores.families:
             return True
-        model_ref = dependency.service_ref
-        if self._limits.allowed_models and model_ref not in self._limits.allowed_models:
+        service_ref = dependency.service_ref
+        if (
+            self._limits.allowed_models
+            and service_ref not in self._limits.allowed_models
+        ):
             return False
         self._stores.families.register(
             ServiceFamily(
                 family=family,
                 engine_batch_key=dependency.engine_batch_key,
-                model_ref=model_ref,
+                service_ref=service_ref,
                 interface=dependency.interface.value,
                 isolation=dependency.isolation,
                 selection_strategy=self._limits.selection_strategy,
@@ -1454,7 +1457,7 @@ class ResidentCapacityControl:
         self,
         orig: _Origination,
         family: str,
-        model_ref: str,
+        service_ref: str,
         claim: ServiceClaim,
         profile: AdmissionProfile,
     ) -> AdmissionHandoff | None:
@@ -1469,7 +1472,7 @@ class ResidentCapacityControl:
                 )
                 if handoff is not None:
                     return handoff
-                plan = self._lifecycle.plan_capacity(family, model_ref, profile)
+                plan = self._lifecycle.plan_capacity(family, service_ref, profile)
                 if plan.action == "deny" and plan.denial is not None:
                     self._admission.on_denied(claim)
                     self._fail(orig, plan.denial.reason, plan.denial.detail or "")

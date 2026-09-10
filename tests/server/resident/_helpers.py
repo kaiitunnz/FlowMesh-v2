@@ -18,7 +18,7 @@ def warm_stores(*, slots: int = 2, replica_id: str = "rpl-1") -> ResidentStores:
     """Stores with one warm, endpoint-bound replica reporting ``slots`` safe slots."""
     stores = ResidentStores()
     stores.families.register(
-        ServiceFamily(family="fam", engine_batch_key="fam", model_ref="m")
+        ServiceFamily(family="fam", engine_batch_key="fam", service_ref="m")
     )
     stores.directory.add(
         ReplicaIncarnation(

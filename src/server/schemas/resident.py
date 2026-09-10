@@ -14,7 +14,7 @@ class ResidentFamilyInfo(BaseModel):
     engine_batch_key: str = Field(
         description="Engine and batch key a compatible replica is admitted against."
     )
-    model_ref: str = Field(description="Model reference served by the family.")
+    service_ref: str = Field(description="Service reference the family serves.")
     isolation: str | None = Field(
         default=None, description="Isolation requirement, if any."
     )
@@ -29,7 +29,7 @@ class ResidentFamilyInfo(BaseModel):
         return cls(
             family=family.family,
             engine_batch_key=family.engine_batch_key,
-            model_ref=family.model_ref,
+            service_ref=family.service_ref,
             isolation=family.isolation,
             selection_strategy=family.selection_strategy,
             warmth=family.warmth,

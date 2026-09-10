@@ -29,7 +29,7 @@ _CREDIT = ClaimCredit(slots=1)
 def _stores(*, slots=2, incarnation=1):
     stores = ResidentStores()
     stores.families.register(
-        ServiceFamily(family="fam", engine_batch_key="k", model_ref="m")
+        ServiceFamily(family="fam", engine_batch_key="k", service_ref="m")
     )
     stores.directory.add(
         ReplicaIncarnation(

@@ -42,7 +42,7 @@ async def materialize_resident_replica(
         "model": {
             "source": {
                 "type": "huggingface",
-                "identifier": family.model_ref,
+                "identifier": family.service_ref,
                 "revision": "main",
             }
         },

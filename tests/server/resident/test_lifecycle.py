@@ -30,7 +30,7 @@ _SUBJECT = InvocationSubject(kind=InvocationSubjectKind.WORKFLOW, id="w")
 _PAST = "2000-01-01T00:00:00Z"
 _FUTURE = "2999-01-01T00:00:00Z"
 
-_FAMILY = ServiceFamily(family="fam", engine_batch_key="fam", model_ref="m")
+_FAMILY = ServiceFamily(family="fam", engine_batch_key="fam", service_ref="m")
 _ENDPOINT = ReplicaEndpoint(base_url="http://replica", model="m")
 
 

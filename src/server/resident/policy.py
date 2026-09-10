@@ -51,7 +51,7 @@ class ProvisioningDecision:
 
 def decide_materialization(
     *,
-    model_ref: str,
+    service_ref: str,
     limits: ResidentPolicyLimits,
     active_replicas: int,
     materializing_replicas: int,
@@ -61,10 +61,10 @@ def decide_materialization(
     ``active_replicas`` counts live incarnations (warm, busy, materializing, draining);
     ``materializing_replicas`` counts in-flight cold starts against the concurrency cap.
     """
-    if limits.allowed_models and model_ref not in limits.allowed_models:
+    if limits.allowed_models and service_ref not in limits.allowed_models:
         return ProvisioningDecision.deny(
             ProvisioningDenialReason.MODEL_NOT_ALLOWED,
-            f"model {model_ref!r} is not in the allowed catalog",
+            f"model {service_ref!r} is not in the allowed catalog",
         )
     if active_replicas >= limits.max_replicas_per_family:
         return ProvisioningDecision.deny(

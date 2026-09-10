@@ -44,7 +44,7 @@ def anyio_backend() -> str:
 def _seeded_stores() -> ResidentStores:
     stores = ResidentStores()
     stores.families.register(
-        ServiceFamily(family="fam", engine_batch_key="fam", model_ref="m")
+        ServiceFamily(family="fam", engine_batch_key="fam", service_ref="m")
     )
     stores.directory.add(
         ReplicaIncarnation(
@@ -141,7 +141,7 @@ async def test_families_endpoint_lists_registered_family() -> None:
     assert resp.status_code == status.HTTP_200_OK
     body = resp.json()
     assert body[0]["family"] == "fam"
-    assert body[0]["model_ref"] == "m"
+    assert body[0]["service_ref"] == "m"
 
 
 @pytest.mark.anyio
