@@ -27,6 +27,7 @@ from shared.harness import (
     HarnessResult,
     HarnessResultKind,
 )
+from shared.private_state import OwnerFence
 from shared.schemas.event import parse_event
 from shared.tools.contract import (
     AgentModelTurnProposal,
@@ -49,6 +50,8 @@ from worker.egress import PendingEgressRequestStore
 from worker.executors.agent_episode_executor import AgentEpisodeExecutor
 from worker.executors.harness.scripted import ScriptedHarnessAdapter, ScriptedStep
 from worker.supervisor_client import SupervisorClient
+
+_HOLDER = OwnerFence(worker_id="wkr-1", incarnation=1)
 
 _TS = "2026-04-28T00:00:00Z"
 _QUERY_TOKEN = "supernova-remnants"
@@ -162,7 +165,7 @@ def _dispatch_agent(
     """Mimic a dispatch: pin the worker and run one scripted step, worker-side strip
     included, then report the step to the runtime."""
     engine = runtime.orchestration_engine(runtime._tasks[task_id].workflow_id)
-    dispatch = runtime.agent_episode_dispatch(task_id)
+    dispatch = runtime.agent_episode_dispatch(task_id, _HOLDER)
     assert engine is not None and dispatch is not None
     capsule = (
         HarnessCapsule(backend=dispatch.backend, blob=dispatch.capsule_blob)

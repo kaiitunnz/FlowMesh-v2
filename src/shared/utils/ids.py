@@ -29,6 +29,9 @@ PREFIX_ADMISSION_HANDOFF = "hnd"  # nosec B105 - object-id prefix, not a credent
 PREFIX_ROUTE_ORIGIN = "rog"  # nosec B105 - object-id prefix, not a credential
 PREFIX_RELAY_SESSION = "rly"
 PREFIX_MEDIATED_PERMIT = "mop"  # nosec B105 - object-id prefix, not a credential
+PREFIX_PRIVATE_STATE = "aps"
+PREFIX_STATE_BUNDLE_MANIFEST = "sbm"
+PREFIX_STATE_ATTACHMENT = "psa"
 
 
 def _uuid_str() -> str:
@@ -127,6 +130,18 @@ def new_mediated_permit_id() -> str:
     return f"{PREFIX_MEDIATED_PERMIT}-{secrets.token_hex(16)}"
 
 
+def new_private_state_reference_id() -> str:
+    return f"{PREFIX_PRIVATE_STATE}-{_uuid_hex()}"
+
+
+def new_state_bundle_manifest_id() -> str:
+    return f"{PREFIX_STATE_BUNDLE_MANIFEST}-{_uuid_hex()}"
+
+
+def new_state_attachment_id() -> str:
+    return f"{PREFIX_STATE_ATTACHMENT}-{_uuid_hex()}"
+
+
 __all__ = [
     "PREFIX_ACTIVATION",
     "PREFIX_ADMISSION_HANDOFF",
@@ -138,6 +153,7 @@ __all__ = [
     "PREFIX_MEDIATED_PERMIT",
     "PREFIX_MODEL_SECRET",
     "PREFIX_NODE",
+    "PREFIX_PRIVATE_STATE",
     "PREFIX_RELAY_SESSION",
     "PREFIX_REPLICA",
     "PREFIX_ROUTE_ORIGIN",
@@ -145,6 +161,8 @@ __all__ = [
     "PREFIX_SERVICE_CLAIM",
     "PREFIX_SSH_CONNECTION",
     "PREFIX_SSH_SESSION",
+    "PREFIX_STATE_ATTACHMENT",
+    "PREFIX_STATE_BUNDLE_MANIFEST",
     "PREFIX_SUPERVISOR_COMMAND",
     "PREFIX_TASK",
     "PREFIX_WORK_ITEM",
@@ -160,6 +178,7 @@ __all__ = [
     "new_mediated_permit_id",
     "new_model_secret_ref",
     "new_node_id",
+    "new_private_state_reference_id",
     "new_relay_session_id",
     "new_replica_id",
     "new_route_origin_id",
@@ -167,6 +186,8 @@ __all__ = [
     "new_service_claim_id",
     "new_ssh_connection_id",
     "new_ssh_session_id",
+    "new_state_attachment_id",
+    "new_state_bundle_manifest_id",
     "new_supervisor_command_id",
     "new_task_id",
     "new_work_item_id",

@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from shared.harness.boundary import DenialKind
 from shared.outcome import OutcomeManifest
+from shared.private_state import PrivateStateAttachment, PrivateStateBinding
 
 from ..task.v2.representations.operators import (
     BoundaryEventKind,
@@ -484,6 +485,18 @@ class ResultPublication(BaseModel):
     at: str = Field(default_factory=now_iso)
 
 
+class PrivateStateLineage(BaseModel):
+    """One activation's private-state lineage: its binding and live write authority.
+
+    ``write_epoch`` is monotonic per lineage; each grant supersedes the previous one, so
+    the ``attachment`` is the only holder that may write the bound generation.
+    """
+
+    binding: PrivateStateBinding
+    attachment: PrivateStateAttachment | None = None
+    write_epoch: int = 0
+
+
 class OrchestrationEvent(BaseModel):
     """One entry of the compact contract-relevant trace."""
 
@@ -523,5 +536,6 @@ class LedgerSnapshot(BaseModel):
     result_slots: list[ResultSlot] = Field(default_factory=list)
     result_publications: list[ResultPublication] = Field(default_factory=list)
     trace: list[OrchestrationEvent] = Field(default_factory=list)
+    private_state: list[PrivateStateLineage] = Field(default_factory=list)
     released_scopes: list[str] = Field(default_factory=list)
     next_seq: int = 0

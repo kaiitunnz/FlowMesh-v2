@@ -28,6 +28,7 @@ DEFAULT_WORKER_CONFIG: Final[WorkerConfig] = WorkerConfig(
         scopes=["*"],
     ).model_dump(),
     worker_token="test",
+    private_state_dir=Path("/tmp/test-private-state"),
     server_base_url=None,
     supervisor_grpc_target="localhost:50051",
     supervisor_grpc_tls_ca_b64=None,

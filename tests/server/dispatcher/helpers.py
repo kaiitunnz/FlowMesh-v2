@@ -65,10 +65,10 @@ def make_capturing_dispatcher(
     """Build a CapturingDispatcher whose registry returns the given worker ids."""
     registry = mock.Mock()
     registry.idle_satisfying_pool.return_value = [
-        SimpleNamespace(id=wid) for wid in (idle_ids or [])
+        SimpleNamespace(id=wid, incarnation=1) for wid in (idle_ids or [])
     ]
     registry.satisfying_workers.return_value = [
-        SimpleNamespace(id=wid) for wid in (satisfying_ids or [])
+        SimpleNamespace(id=wid, incarnation=1) for wid in (satisfying_ids or [])
     ]
     return CapturingDispatcher(
         runtime=runtime if runtime is not None else mock.Mock(),

@@ -8,6 +8,7 @@ from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
+from shared.private_state import OwnerFence, PrivateStateUnavailableReason
 from shared.schemas.artifact import ArtifactRef
 from shared.schemas.event import TaskEvent
 from shared.schemas.result import (
@@ -184,6 +185,54 @@ class Dispatcher:
             extra_payload={"failed_workers": sorted(failed_ids)},
         )
 
+    def _private_state_owner_loss(
+        self, owner: OwnerFence
+    ) -> PrivateStateUnavailableReason | None:
+        """Why a bound generation's holder cannot supply it, or None when it can."""
+        worker = self._worker_registry.get_worker(owner.worker_id)
+        if worker is None or self._worker_registry.is_worker_stale(owner.worker_id):
+            return PrivateStateUnavailableReason.OWNER_LOST
+        if worker.incarnation != owner.incarnation:
+            return PrivateStateUnavailableReason.INCARNATION_MISMATCH
+        return None
+
+    def _fail_private_state_unavailable(
+        self,
+        task_id: str,
+        record: TaskRecord,
+        owner: OwnerFence,
+        reason: PrivateStateUnavailableReason,
+    ) -> bool:
+        """Fail an episode whose private state no live holder can supply.
+
+        A brief grace absorbs a heartbeat flap; past it the episode fails closed rather
+        than resuming against an empty home on another worker.
+        """
+        now = time.time()
+        if record.no_eligible_since is None:
+            record.no_eligible_since = now
+        if now - record.no_eligible_since < self._no_worker_grace_sec:
+            self.requeue_task(
+                task_id, reason="private_state_owner_lost", count_retry=False
+            )
+            return False
+        self._logger.warning(
+            "Private state for %s cannot be supplied by %s (%s); failing closed",
+            task_id,
+            owner.worker_id,
+            reason.value,
+        )
+        self.fail_task(
+            task_id,
+            f"PrivateStateUnavailable: {reason.value}",
+            payload={
+                "reason": reason.value,
+                "private_state_owner": owner.worker_id,
+                "private_state_incarnation": str(owner.incarnation),
+            },
+        )
+        return False
+
     def dispatch_once(self, task_id: str) -> bool:
         """Dispatch a single task if possible; requeue when no worker."""
         record = self._runtime.get_record(task_id)
@@ -217,7 +266,35 @@ class Dispatcher:
         if record.selected_worker:
             pool = [c for c in pool if c.id in record.selected_worker]
 
+        # 2b. Owner-affine private state: a bound generation is sealed on the holder
+        # that produced it, so the episode waits for that incarnation instead of
+        # resuming against a fresh or foreign one. Waiting holds no worker. This
+        # governs a holder lost with no external effect in flight; an ambiguous
+        # in-flight effect settles terminally in the ledger before placement is asked.
+        if (owner := self._runtime.private_state_owner(task_id)) is not None:
+            if (loss := self._private_state_owner_loss(owner)) is not None:
+                return self._fail_private_state_unavailable(
+                    task_id, record, owner, loss
+                )
+            pool = [
+                c
+                for c in pool
+                if c.id == owner.worker_id and c.incarnation == owner.incarnation
+            ]
+            if not pool:
+                record.no_eligible_since = None
+                self.requeue_task(
+                    task_id, reason="private_state_owner_busy", count_retry=False
+                )
+                return False
+
         failed_ids = set(record.failed_workers)
+        if owner is not None:
+            # The owner is the only holder that can supply the bound generation, so a
+            # failure there is retried on it under the attempt budget. Diverting to an
+            # untried worker would wait on workers 2b has already excluded, which never
+            # become selectable — an unbounded requeue that reaches no terminal.
+            failed_ids = set()
 
         # 3. No idle worker: wait for a busy one, or grace-then-fail when no worker can
         # take the task, or every eligible worker has already failed it.
@@ -490,7 +567,10 @@ class Dispatcher:
             upstream_task_ids=self._resolve_upstream_task_ids(
                 record, rendered_task.spec
             ),
-            agent_episode=self._runtime.agent_episode_dispatch(task_id),
+            agent_episode=self._runtime.agent_episode_dispatch(
+                task_id,
+                OwnerFence(worker_id=worker.id, incarnation=worker.incarnation),
+            ),
             service_episode=self._runtime.service_episode_dispatch(task_id),
         )
 

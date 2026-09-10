@@ -62,7 +62,9 @@ attempts, `inv-` invocations, `agr-` authority grants, and `idm-` idempotency
 keys (the fabric-assigned dedupe authority for a mediated boundary). Resident-capacity
 control adds `scl-` service claims, `rpl-` replica incarnations, and `lse-` allocation
 leases. `msk-` is an unguessable ref for a workflow's vaulted model credential and `hnd-`
-an unguessable claim-bound admission handoff token. The network plane adds `rog-` route
+an unguessable claim-bound admission handoff token. Activation-private state adds
+`aps-` state references, `sbm-` sealed-generation manifests, and `psa-` attachments.
+The network plane adds `rog-` route
 origins and `rly-` relay sessions. Worker-originated mediated boundaries add `mop-`
 one-use mediated-operation permits.
 Always use `new_*_id()`
@@ -179,6 +181,29 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   pinned on its compiled operator; the backend comes from `spec.harness.backend` or the
   `AGENT_HARNESS_DEFAULT_BACKEND` default, and an agent with neither fails template
   validation. `agent` is a v2-only task type: a legacy v1 agent submission is rejected.
+- **Activation-private state.** An agent activation owns its mutable harness state
+  under an opaque `ActivationPrivateStateReference`, whose lifecycle and recovery the
+  orchestration ledger owns. A `PrivateStateBinding` names the generation and recovery
+  mode a continuation resumes on, an immutable `StateBundleManifest` describes one
+  sealed generation over registered typed components (`harness_home_fs`,
+  `workspace_fs`), and a `PrivateStateAttachment` grants one worker incarnation the
+  exclusive, epoch-fenced authority to materialize and write it. An attachment is
+  physical execution authority over one activation's state, distinct from the capacity
+  admission a `ServiceClaim` carries.
+  Each dispatch mints a fresh write epoch, so a superseded holder can neither write nor
+  seal. Components seal together at one quiescence fence, so a harness home never
+  resumes beside a workspace from another generation. While a generation is sealed
+  local to the holder that produced it, that holder is a hard scheduler feasibility
+  constraint resolved at dispatch: the episode lane yields as any other does, and an
+  episode waits while its holder is busy. Owner loss, an incarnation change, or a
+  component that does not match its seal fails closed as a typed
+  `PrivateStateUnavailable` rather than resuming against a fresh or partial home. One
+  activation reaches another's state only by holding a valid binding and attachment for
+  it, which the ledger's owner and epoch fences decide; the `0700` private root, keyed
+  by the opaque reference, separates a holder's lineages from other users on its node,
+  and a harness works inside its own components under its sandbox. Only opaque
+  references cross into the ledger, control state, operation frames, logs, results, or
+  artifacts. `WORKER_PRIVATE_STATE_DIR` sets the root.
 - **Agent-model gateway.** A model boundary an agent defers with a `canned` or `echo`
   binding settles on the control plane off the agent's lane, injecting the result back at
   the originating call. The gateway resolves the activation's pinned binding and its

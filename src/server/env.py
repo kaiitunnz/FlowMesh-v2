@@ -126,6 +126,7 @@ RESULTS_DIR: str = os.getenv("RESULTS_DIR", "").strip() or "./results"
 WORKER_RESULTS_DIR: str = (
     os.getenv("WORKER_RESULTS_DIR", "").strip() or "flowmesh_results"
 )
+WORKER_PRIVATE_STATE_DIR: str = os.getenv("WORKER_PRIVATE_STATE_DIR", "").strip()
 HF_CACHE_DIR: str | None = os.getenv("HF_CACHE_DIR") or None
 PREDOWNLOAD_MODEL_LIST: str = os.getenv("PREDOWNLOAD_MODEL_LIST", "")
 WORKER_TAGS: str = os.getenv("WORKER_TAGS", "")

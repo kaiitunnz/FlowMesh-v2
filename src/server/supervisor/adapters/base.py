@@ -143,6 +143,7 @@ class WorkerAdapter(ABC):
             "NETWORK_PLANE_PEER_TLS_CERT_B64": env.NETWORK_PLANE_PEER_TLS_CERT_B64,
             "NETWORK_PLANE_PEER_TLS_KEY_B64": env.NETWORK_PLANE_PEER_TLS_KEY_B64,
             "RESULTS_DIR": config.results_dir,
+            "WORKER_PRIVATE_STATE_DIR": env.WORKER_PRIVATE_STATE_DIR,
             "HEARTBEAT_INTERVAL_SEC": to_env_str(config.hb_interval),
             "WORKER_HB_FILE": hb_file,
             "WORKER_NAMESPACE": env.NODE_NAMESPACE,

@@ -31,6 +31,7 @@ class WorkerConfig:
     supervisor_grpc_target: str
     supervisor_grpc_tls_ca_b64: str | None
     results_dir: Path
+    private_state_dir: Path
     results_mount_source: str | None
     hb_interval_sec: int
     hb_ttl_sec: int
@@ -108,6 +109,11 @@ class WorkerConfig:
             os.getenv("RESULTS_DIR", "").strip() or "./results"
         ).absolute()
         results_dir.mkdir(parents=True, exist_ok=True)
+
+        private_state_dir = Path(
+            os.getenv("WORKER_PRIVATE_STATE_DIR", "").strip()
+            or (results_dir / "private_state")
+        ).absolute()
 
         hb_interval, hb_ttl, hb_file = get_hb_config()
 
@@ -204,6 +210,7 @@ class WorkerConfig:
             peer_tls_cert_b64=peer_tls_cert_b64,
             peer_tls_key_b64=peer_tls_key_b64,
             results_dir=results_dir,
+            private_state_dir=private_state_dir,
             results_mount_source=results_mount_source,
             hb_interval_sec=hb_interval,
             hb_ttl_sec=hb_ttl,

@@ -13,6 +13,7 @@ from typing import Any, ClassVar
 
 from shared.harness import (
     REQUIRED_MEDIATED_FACADES,
+    AgentEpisodeDispatch,
     BoundaryEventKind,
     EgressHandoffMode,
     EpisodeModelBinding,
@@ -21,6 +22,7 @@ from shared.harness import (
     HarnessResult,
     HarnessResultKind,
 )
+from shared.private_state import PrivateStateAttachment, PrivateStateUnavailable
 from shared.tasks.specs.misc import ModelBindingMode
 from shared.tasks.task_type import TaskType
 from shared.tools.model.schema import (
@@ -35,6 +37,7 @@ from shared.tools.search.schema import (
 )
 
 from ..egress import PendingEgressRequestStore
+from ..private_state import MaterializedState, PrivateStateHolder
 from ..resident import capture_resident_request
 from .base_executor import ExecutionError, Executor, ExecutorTask
 from .episode_support import EpisodeStepResult, hydrate_delivered_outcomes
@@ -61,13 +64,14 @@ class AgentEpisodeExecutor(Executor):
                 f"{task.task_id} routed to the agent-episode executor without an "
                 "agent-episode dispatch context"
             )
+        state, holder = self._open_private_state(dispatch)
         facade = self._lifecycle.responses_facade if self._lifecycle else None
         prior = self._episode_task_id
         if facade is not None and prior is not None and prior != task.task_id:
             # A different task means the prior episode finished; drop its facade context
             # so a worker running episodes back-to-back does not accumulate them.
             facade.unregister_episode(prior)
-        adapter = build_adapter(dispatch.backend, task, self._config, facade)
+        adapter = build_adapter(dispatch.backend, task, self._config, facade, state)
         self._episode_task_id = task.task_id
         missing = REQUIRED_MEDIATED_FACADES - adapter.mediated_facades()
         if missing:
@@ -118,7 +122,31 @@ class AgentEpisodeExecutor(Executor):
             )
         value = result.value if result.kind is HarnessResultKind.COMPLETION else None
         group = facade.take_captured_group(task.task_id) if facade is not None else None
-        return EpisodeStepResult(harness_result=result, value=value, facade_group=group)
+        sealed = None
+        if state is not None and holder is not None:
+            # The step has run to its yield, so the components are quiescent and seal as
+            # one generation the next resume binds.
+            sealed = holder.seal(state, _attachment(dispatch))
+        return EpisodeStepResult(
+            harness_result=result,
+            value=value,
+            facade_group=group,
+            private_state=sealed,
+        )
+
+    def _open_private_state(
+        self, dispatch: AgentEpisodeDispatch
+    ) -> tuple[MaterializedState | None, PrivateStateHolder | None]:
+        """Materialize the activation's bound generation for this dispatch."""
+        binding = dispatch.private_state
+        if binding is None:
+            return None, None
+        holder = PrivateStateHolder(self._config.private_state_dir)
+        try:
+            state = holder.open(binding, _attachment(dispatch))
+        except PrivateStateUnavailable as exc:
+            raise ExecutionError(f"PrivateStateUnavailable: {exc}") from exc
+        return state, holder
 
     @staticmethod
     def _is_capturable_boundary(
@@ -221,3 +249,10 @@ class AgentEpisodeExecutor(Executor):
             facade.unregister_episode(self._episode_task_id)
         self._episode_task_id = None
         self._adapter = None
+
+
+def _attachment(dispatch: AgentEpisodeDispatch) -> PrivateStateAttachment:
+    """The write authority a holder needs before it may materialize private state."""
+    if dispatch.private_state_attachment is None:
+        raise ExecutionError("an agent private-state binding ships with its attachment")
+    return dispatch.private_state_attachment

@@ -7,12 +7,15 @@ import pytest
 
 from server.config import AgentBindingConfig, OrchestrationConfig
 from server.task.runtime import TaskRuntime
+from shared.private_state import OwnerFence
 from shared.tasks.specs import ModelBindingMode
 from tests.server.task.test_v2_orchestration import (
     FakeRegistry,
     _NoopSecretVault,
     _WorkerRegistryStub,
 )
+
+_HOLDER = OwnerFence(worker_id="wkr-1", incarnation=1)
 
 _WF = """
 apiVersion: flowmesh/v2
@@ -77,7 +80,7 @@ async def test_dispatch_and_model_binding_read_the_source_pin_not_the_default():
     # Source model binding wins over the deployment openai default (pin is inert).
     assert binding.mode is ModelBindingMode.CANNED
 
-    dispatch = runtime.agent_episode_dispatch(task_id)
+    dispatch = runtime.agent_episode_dispatch(task_id, _HOLDER)
     assert dispatch is not None
     assert dispatch.backend.backend == "scripted"
     assert dispatch.backend.version == "v9"
@@ -93,6 +96,6 @@ async def test_default_backend_agent_dispatches_through_the_episode_path():
     )
     task_id = next(r.task_id for r in results if r.graph_node_name == "solver")
 
-    dispatch = runtime.agent_episode_dispatch(task_id)
+    dispatch = runtime.agent_episode_dispatch(task_id, _HOLDER)
     assert dispatch is not None
     assert dispatch.backend.backend == "codex"

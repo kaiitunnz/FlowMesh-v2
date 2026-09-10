@@ -29,8 +29,11 @@ from shared.harness import (
     HarnessResultKind,
     OutcomeKind,
 )
+from shared.private_state import OwnerFence
 from tests.server.task.test_v2_orchestration import FakeRegistry, _register, _runtime
 from worker.executors.harness.scripted import ScriptedHarnessAdapter, ScriptedStep
+
+_HOLDER = OwnerFence(worker_id="wkr-1", incarnation=1)
 
 _TS = "2026-08-29T00:00:00Z"
 
@@ -71,7 +74,7 @@ def _adapter() -> ScriptedHarnessAdapter:
 def _step(runtime, adapter, task_id: str, worker: str = "wkr-1") -> None:
     """Simulate one dispatch: give the episode its context, run and report it."""
     engine = runtime.orchestration_engine(runtime._tasks[task_id].workflow_id)
-    dispatch = runtime.agent_episode_dispatch(task_id)
+    dispatch = runtime.agent_episode_dispatch(task_id, _HOLDER)
     assert engine is not None and dispatch is not None
     capsule = (
         HarnessCapsule(backend=dispatch.backend, blob=dispatch.capsule_blob)
@@ -286,11 +289,11 @@ def test_a_consumed_outcome_is_not_reinjected_across_a_query_step() -> None:
         assert engine is not None
 
         _step(runtime, adapter, writer)  # model boundary → suspend → canned settle
-        after_model = runtime.agent_episode_dispatch(writer)
+        after_model = runtime.agent_episode_dispatch(writer, _HOLDER)
         assert after_model is not None and len(after_model.delivered_outcomes) == 1
         _step(runtime, adapter, writer)  # injects m0 → state-access (inline)
         # The model outcome was consumed by the previous dispatch; it must not re-ship.
-        after_query = runtime.agent_episode_dispatch(writer)
+        after_query = runtime.agent_episode_dispatch(writer, _HOLDER)
         assert after_query is not None and after_query.delivered_outcomes == ()
         _step(runtime, adapter, writer)  # completion still reads the injected m0 value
         wi = engine.work_item(writer)
@@ -323,7 +326,7 @@ def test_a_denied_boundary_re_readies_with_a_denied_outcome() -> None:
 
         _step(runtime, adapter, writer)  # denied boundary → re-ready with a denial
         assert runtime._tasks[writer].status is TaskStatus.PENDING
-        dispatch = runtime.agent_episode_dispatch(writer)
+        dispatch = runtime.agent_episode_dispatch(writer, _HOLDER)
         assert dispatch is not None and len(dispatch.delivered_outcomes) == 1
         assert dispatch.delivered_outcomes[0].kind is OutcomeKind.DENIED
         _step(runtime, adapter, writer)  # the agent handles the denial and completes
@@ -369,7 +372,7 @@ def _complete(
 ) -> None:
     """Drive one clean-completing turn, optionally originating a facade group first."""
     engine = runtime.orchestration_engine(runtime._tasks[task_id].workflow_id)
-    dispatch = runtime.agent_episode_dispatch(task_id)
+    dispatch = runtime.agent_episode_dispatch(task_id, _HOLDER)
     capsule = (
         HarnessCapsule(backend=dispatch.backend, blob=dispatch.capsule_blob)
         if dispatch.capsule_blob is not None
@@ -459,7 +462,7 @@ def test_gateway_origination_survives_a_restart_replay() -> None:
         engine = runtime.orchestration_engine(workflow_id)
         assert engine is not None
 
-        dispatch = runtime.agent_episode_dispatch(writer)
+        dispatch = runtime.agent_episode_dispatch(writer, _HOLDER)
         assert dispatch is not None
         engine.on_dispatched(writer, "wkr-1")
         result = adapter.start(
@@ -504,7 +507,7 @@ def test_a_post_reroute_completion_replay_is_a_noop() -> None:
         assert engine is not None
 
         # Turn 1: dispatch, run, originate, and reroute into the spawn.
-        dispatch = runtime.agent_episode_dispatch(writer)
+        dispatch = runtime.agent_episode_dispatch(writer, _HOLDER)
         assert dispatch is not None
         engine.on_dispatched(writer, "wkr-1")
         result = adapter.start(
@@ -548,7 +551,7 @@ def test_a_post_done_agent_completion_replay_reaches_the_done_heal() -> None:
         engine = runtime.orchestration_engine(workflow_id)
         assert engine is not None
 
-        dispatch = runtime.agent_episode_dispatch(writer)
+        dispatch = runtime.agent_episode_dispatch(writer, _HOLDER)
         assert dispatch is not None
         engine.on_dispatched(writer, "wkr-1")
         result = adapter.start(
@@ -607,11 +610,11 @@ def test_agent_episode_dispatch_ships_the_capsule_and_outcome() -> None:
 
         # First dispatch carries no capsule; after the spawn the next carries the
         # advanced capsule and the spawn's ack outcome.
-        first = runtime.agent_episode_dispatch(writer)
+        first = runtime.agent_episode_dispatch(writer, _HOLDER)
         assert first is not None and first.capsule_blob is None
         assert first.delivered_outcomes == ()
         _step(runtime, adapter, writer)
-        second = runtime.agent_episode_dispatch(writer)
+        second = runtime.agent_episode_dispatch(writer, _HOLDER)
         assert second is not None and second.capsule_blob is not None
         assert len(second.delivered_outcomes) == 1
         assert second.delivered_outcomes[0].call_correlation == "c0"
@@ -769,3 +772,20 @@ def test_normal_and_group_settles_are_unchanged_by_the_guard() -> None:
     assert not first.ready and eng.work_item("A").status is WorkItemStatus.BLOCKED
     last = eng.settle_boundary_outcome("A", "A:0:1", value="r1")
     assert last.ready == ["A"]
+
+
+def test_a_dispatch_after_cancel_takes_back_no_private_state_write() -> None:
+    async def run() -> None:
+        runtime = _runtime(FakeRegistry())
+        workflow_id, writer, engine, _env = await _held_boundary(runtime)
+        assert engine.grant_private_state(writer, "wkr-1", 1) is not None
+
+        runtime.cancel_workflow(workflow_id)
+
+        # Cancellation released the write authority, and a dispatch still in flight
+        # cannot take it back for an activation that has ended.
+        assert engine.grant_private_state(writer, "wkr-1", 1) is None
+        dispatch = runtime.agent_episode_dispatch(writer, _HOLDER)
+        assert dispatch is not None and dispatch.private_state_attachment is None
+
+    asyncio.run(run())

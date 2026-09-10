@@ -12,8 +12,11 @@ from server.orchestration import WorkItemStatus
 from server.orchestration.state import LedgerSnapshot
 from shared.harness import BoundaryEventKind
 from shared.outcome import OutcomeManifest, content_digest
+from shared.private_state import OwnerFence
 from tests.server.task.test_v2_orchestration import FakeRegistry, _register, _runtime
 from worker.executors.harness.scripted import ScriptedHarnessAdapter, ScriptedStep
+
+_HOLDER = OwnerFence(worker_id="wkr-1", incarnation=1)
 
 _AGENT_WF = """
 apiVersion: flowmesh/v2
@@ -94,7 +97,7 @@ def test_reference_settle_keeps_payload_out_of_ledger() -> None:
 
 def _one_step(runtime, adapter, task_id: str, worker: str = "wkr-1") -> None:
     engine = runtime.orchestration_engine(runtime._tasks[task_id].workflow_id)
-    dispatch = runtime.agent_episode_dispatch(task_id)
+    dispatch = runtime.agent_episode_dispatch(task_id, _HOLDER)
     assert engine is not None and dispatch is not None
     engine.on_dispatched(task_id, worker)
     result = adapter.start(task_id, capsule=None, outcomes=dispatch.delivered_outcomes)

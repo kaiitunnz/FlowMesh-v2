@@ -32,6 +32,7 @@ from shared.tasks.specs import AgentSpecStrict
 from shared.tasks.worker_message import WorkerTaskMessage
 from worker.config import WorkerConfig
 from worker.model_turn import ResponsesFacade
+from worker.private_state import MaterializedState
 
 _BACKEND = "scripted"
 
@@ -130,6 +131,7 @@ def build_scripted_adapter(
     task: WorkerTaskMessage,
     config: WorkerConfig,
     facade: ResponsesFacade | None = None,
+    state: MaterializedState | None = None,
 ) -> ScriptedHarnessAdapter:
     # The scripted backend yields its lane per boundary, so it never binds the facade.
     spec = task.spec
