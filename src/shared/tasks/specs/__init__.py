@@ -36,6 +36,13 @@ from .omni import (
     OmniText2SpeechSpecTemplate,
 )
 from .rag import RagSpecStrict, RagSpecTemplate
+from .sandbox import (
+    SandboxCommandSpec,
+    SandboxCommandSpecTemplate,
+    SandboxHostSpec,
+    SandboxSpecStrict,
+    SandboxSpecTemplate,
+)
 from .serve import ServeSpecStrict, ServeSpecTemplate
 from .ssh import SSHSpecStrict, SSHSpecTemplate
 from .training import (
@@ -77,6 +84,11 @@ __all__ = [
     "PPOSpecTemplate",
     "RagSpecStrict",
     "RagSpecTemplate",
+    "SandboxCommandSpec",
+    "SandboxCommandSpecTemplate",
+    "SandboxHostSpec",
+    "SandboxSpecStrict",
+    "SandboxSpecTemplate",
     "SFTSpecStrict",
     "SFTSpecTemplate",
     "AgentSpecStrict",

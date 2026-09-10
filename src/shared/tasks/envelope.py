@@ -42,6 +42,8 @@ from .specs import (
     PPOSpecTemplate,
     RagSpecStrict,
     RagSpecTemplate,
+    SandboxSpecStrict,
+    SandboxSpecTemplate,
     ServeSpecStrict,
     ServeSpecTemplate,
     SFTSpecStrict,
@@ -71,7 +73,8 @@ type TaskSpecStrict = Annotated[
     | OmniText2ImageSpecStrict
     | OmniText2SpeechSpecStrict
     | OmniText2AudioSpecStrict
-    | OmniText2GeneralSpecStrict,
+    | OmniText2GeneralSpecStrict
+    | SandboxSpecStrict,
     Field(discriminator="taskType"),
 ]
 
@@ -96,7 +99,8 @@ type TaskSpecTemplate = Annotated[
     | OmniText2ImageSpecTemplate
     | OmniText2SpeechSpecTemplate
     | OmniText2AudioSpecTemplate
-    | OmniText2GeneralSpecTemplate,
+    | OmniText2GeneralSpecTemplate
+    | SandboxSpecTemplate,
     Field(discriminator="taskType"),
 ]
 
