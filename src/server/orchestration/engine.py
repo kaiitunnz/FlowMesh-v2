@@ -3214,9 +3214,16 @@ class OrchestrationEngine:
     def grant_private_state(
         self, task_id: str, worker_id: str, incarnation: int
     ) -> tuple[PrivateStateBinding, PrivateStateAttachment] | None:
-        """Bind a holder to an agent task's private state for one dispatch."""
+        """Bind a holder to an agent task's private state for one dispatch.
+
+        A settled or cancelled work item is granted nothing: a dispatch still in flight
+        when its activation ended cannot take back the write authority the terminal
+        released.
+        """
         wi = self._work_item_for_task(task_id)
-        if wi is None or self.agent_operator(task_id) is None:
+        if wi is None or wi.status in _TERMINAL_WI:
+            return None
+        if self.agent_operator(task_id) is None:
             return None
         binding = self._private_state.ensure(
             wi.activation_id, self._instance.instance_id

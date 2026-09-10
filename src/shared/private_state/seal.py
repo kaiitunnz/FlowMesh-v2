@@ -26,22 +26,15 @@ def seal_component(
 
     The digest covers every regular file's relative path and contents in canonical
     order, so the same tree seals identically on any holder and any edit after the seal
-    is detectable. A symlink pointing outside the tree fails closed rather than sealing
-    state the reference does not own.
+    is detectable. A symlink is never followed, so a link planted in the tree cannot
+    draw state the reference does not own into the seal; replacing a sealed file with
+    one still changes the digest.
     """
     tree = hashlib.sha256()
     total = 0
     entries = 0
-    resolved_root = root.resolve()
     for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).parts):
-        target = path.resolve()
-        if not target.is_relative_to(resolved_root):
-            raise PrivateStateUnavailable(
-                PrivateStateUnavailableReason.CONTAINMENT_VIOLATION,
-                f"{kind.value} links outside its private root",
-                reference_id=reference_id,
-            )
-        if not path.is_file() or path.is_symlink():
+        if path.is_symlink() or not path.is_file():
             continue
         digest, size = _file_digest(path)
         tree.update(f"{path.relative_to(root).as_posix()}\0{size}\0{digest}\n".encode())

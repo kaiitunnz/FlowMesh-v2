@@ -772,3 +772,20 @@ def test_normal_and_group_settles_are_unchanged_by_the_guard() -> None:
     assert not first.ready and eng.work_item("A").status is WorkItemStatus.BLOCKED
     last = eng.settle_boundary_outcome("A", "A:0:1", value="r1")
     assert last.ready == ["A"]
+
+
+def test_a_dispatch_after_cancel_takes_back_no_private_state_write() -> None:
+    async def run() -> None:
+        runtime = _runtime(FakeRegistry())
+        workflow_id, writer, engine, _env = await _held_boundary(runtime)
+        assert engine.grant_private_state(writer, "wkr-1", 1) is not None
+
+        runtime.cancel_workflow(workflow_id)
+
+        # Cancellation released the write authority, and a dispatch still in flight
+        # cannot take it back for an activation that has ended.
+        assert engine.grant_private_state(writer, "wkr-1", 1) is None
+        assert runtime.agent_episode_dispatch(writer, _HOLDER) is not None
+        assert engine.private_state_binding(writer) is not None
+
+    asyncio.run(run())

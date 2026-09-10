@@ -201,3 +201,28 @@ def test_agent_task_reads_spec_task_then_data_task() -> None:
 def test_agent_task_requires_a_task() -> None:
     with pytest.raises(ValueError, match="spec.task"):
         _agent_task(_agent_spec())
+
+
+def test_the_backend_binds_the_materialized_components_as_its_home_and_cwd(
+    tmp_path: Path,
+) -> None:
+    """Codex reaches a home and a working directory only through private state."""
+    pytest.importorskip("openai_codex")
+    from worker.executors.harness.codex_transport import CodexTransportConfig
+
+    home = tmp_path / "harness_home_fs"
+    workspace = tmp_path / "workspace_fs"
+    home.mkdir()
+    workspace.mkdir()
+
+    config = CodexTransportConfig(
+        base_url="http://gw",
+        model="m",
+        codex_home=home,
+        cwd=workspace,
+        initial_input="t",
+        task_id="tsk-1",
+    ).to_codex_config()
+
+    assert config.env is not None and config.env["CODEX_HOME"] == home.as_posix()
+    assert config.cwd == workspace.as_posix()

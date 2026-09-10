@@ -184,12 +184,41 @@ def test_verification_rejects_an_unmaterialized_component(tmp_path: Path) -> Non
     assert raised.value.reason is PrivateStateUnavailableReason.COMPONENT_MISSING
 
 
-def test_sealing_refuses_a_link_out_of_the_private_root(tmp_path: Path) -> None:
+def test_sealing_never_follows_a_link_out_of_the_private_root(tmp_path: Path) -> None:
+    """A harness may keep links to its own tooling; their targets are not its state."""
     outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "secret.txt").write_text("not ours")
+    (outside / "other.txt").write_text("also not ours")
     home = _tree(tmp_path, "home", "rollout")
+    plain = seal_component(_HOME, home, reference_id="aps-one")
+
     (home / "escape").symlink_to(outside / "secret.txt")
+    linked = seal_component(_HOME, home, reference_id="aps-one")
+
+    # The link contributes nothing, so nothing outside the root reaches the seal.
+    assert linked.content_digest == plain.content_digest
+    assert linked.size_bytes == plain.size_bytes
+
+    # Retargeting it cannot change the component either.
+    (home / "escape").unlink()
+    (home / "escape").symlink_to(outside / "other.txt")
+    assert (
+        seal_component(_HOME, home, reference_id="aps-one").content_digest
+        == plain.content_digest
+    )
+
+
+def test_replacing_a_sealed_file_with_a_link_is_detected(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "swap.txt").write_text("rollout")
+    home = _tree(tmp_path, "home", "rollout")
+    sealed = seal_component(_HOME, home, reference_id="aps-one")
+
+    (home / "file.txt").unlink()
+    (home / "file.txt").symlink_to(outside / "swap.txt")
+
     with pytest.raises(PrivateStateUnavailable) as raised:
-        seal_component(_HOME, home, reference_id="aps-one")
-    assert raised.value.reason is PrivateStateUnavailableReason.CONTAINMENT_VIOLATION
+        verify_component(sealed, home, reference_id="aps-one")
+    assert raised.value.reason is PrivateStateUnavailableReason.COMPONENT_MISMATCH

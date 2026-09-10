@@ -148,3 +148,12 @@ def test_a_lineage_survives_a_snapshot_round_trip(tmp_path: Path) -> None:
     assert binding.reference.reference_id == reference_id
     assert binding.generation == 1
     assert restored.owner("act-1") == ledger.owner("act-1")
+
+
+def test_a_cancelled_activation_is_granted_no_new_write_authority() -> None:
+    """A dispatch still in flight at cancellation cannot re-take the released write."""
+    ledger = PrivateStateLedger()
+    ledger.ensure("act-1", "wfl-1")
+    ledger.attach("act-1", "wkr-1", 3)
+    ledger.release("act-1")
+    assert ledger.lineages()[0].attachment is None
