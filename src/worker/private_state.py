@@ -102,15 +102,19 @@ class PrivateStateHolder:
             )
         lineage = self._lineage_root(binding)
         _claim_epoch(lineage, attachment)
-        components = {}
-        for kind in sorted(required_components(binding.reference.profile)):
-            components[kind] = _private_dir(lineage / kind.value)
+        kinds = sorted(required_components(binding.reference.profile))
         if binding.manifest is None:
+            components = {kind: _private_dir(lineage / kind.value) for kind in kinds}
             self._adopt_legacy_home(
                 components[StateComponentKind.HARNESS_HOME_FS], legacy_home
             )
         else:
+            # A bound generation is verified as it stands: creating a component first
+            # would repair away a removed one instead of refusing the resume.
+            components = {kind: lineage / kind.value for kind in kinds}
             self._restore(binding.manifest, components, reference_id)
+            for path in components.values():
+                path.chmod(_PRIVATE_MODE)
         return MaterializedState(
             reference_id, binding.generation, binding.reference.profile, components
         )

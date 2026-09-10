@@ -1,5 +1,6 @@
 """Materializing, fencing, and sealing an activation's private state on a holder."""
 
+import shutil
 import stat
 from pathlib import Path
 
@@ -229,3 +230,17 @@ def test_a_non_opaque_reference_never_reaches_the_filesystem(tmp_path: Path) -> 
         holder.open(binding, _attachment(binding))
 
     assert raised.value.reason is PrivateStateUnavailableReason.CONTAINMENT_VIOLATION
+
+
+def test_a_resume_refuses_a_component_removed_from_under_the_holder(
+    tmp_path: Path,
+) -> None:
+    """A missing component is refused, not repaired into an empty one."""
+    holder = PrivateStateHolder(tmp_path)
+    bound, state = _advance(holder, _binding(), 1)
+    shutil.rmtree(state.workspace)
+
+    with pytest.raises(PrivateStateUnavailable) as raised:
+        holder.open(bound, _attachment(bound, write_epoch=2))
+
+    assert raised.value.reason is PrivateStateUnavailableReason.COMPONENT_MISSING
