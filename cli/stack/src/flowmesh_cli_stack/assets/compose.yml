@@ -169,6 +169,7 @@ services:
       - ${FLOWMESH_PLUGIN_DATA_DIR:-./plugin-data}:/app/plugin-data
       - ${REDIS_TLS_DIR:-./secrets/tls/redis}:/etc/ssl/redis:ro
       - ${SERVER_TLS_DIR:-./secrets/tls/server}:/etc/ssl/server:ro
+      - ${NETWORK_PLANE_OFFLOAD_TLS_DIR:-./secrets/tls/offload}:/etc/ssl/offload:ro
     restart: unless-stopped
     network_mode: host
     healthcheck:

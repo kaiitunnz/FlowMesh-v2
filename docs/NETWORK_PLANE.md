@@ -108,9 +108,9 @@ and an origin admits only a target whose certificate covers the host it dialed â
 node's advertised offload address must therefore appear among its certificate's
 subject-alternative names, or the handshake fails and the attempt falls back to the
 relay. The replica's claim gate then fences the session to the invocation control
-admitted. TLS material is
-configured as files and base64-encoded only when a worker attachment is handed its
-transient copy. An operator may instead attest a trusted network and run without mutual
+admitted. TLS material is configured as files under the offload TLS directory, which the
+stack mounts read-only at `/etc/ssl/offload` where the configured paths resolve, and is
+base64-encoded only when a worker attachment is handed its transient copy. An operator may instead attest a trusted network and run without mutual
 TLS, which warns on every listener and still requires the same trusted-pair policy.
 
 A dial that fails before any frame reaches the target records classified path evidence

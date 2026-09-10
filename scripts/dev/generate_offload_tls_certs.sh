@@ -91,9 +91,15 @@ openssl x509 -req \
 chmod 600 "${NODE_KEY}"
 chmod 644 "${NODE_CERT}"
 
+# The stack mounts this directory at /etc/ssl/offload and the env defaults name the
+# identity there, so a node also gets its certificate under those names.
+cp "${NODE_CERT}" "${TLS_DIR}/offload.pem"
+cp "${NODE_KEY}" "${TLS_DIR}/offload.key"
+chmod 600 "${TLS_DIR}/offload.key"
+chmod 644 "${TLS_DIR}/offload.pem"
+
 echo "Generated CA: ${CA_CERT}"
 echo "Generated node cert/key: ${NODE_CERT} ${NODE_KEY}"
-echo "Export these on ${NODE_NAME}:"
-echo "NETWORK_PLANE_OFFLOAD_TLS_CA_FILE=${CA_CERT}"
-echo "NETWORK_PLANE_OFFLOAD_TLS_CERT_FILE=${NODE_CERT}"
-echo "NETWORK_PLANE_OFFLOAD_TLS_KEY_FILE=${NODE_KEY}"
+echo "Installed as ${NODE_NAME}'s identity: ${TLS_DIR}/offload.pem ${TLS_DIR}/offload.key"
+echo "Run this on ${NODE_NAME} with NETWORK_PLANE_OFFLOAD_TLS_DIR=${TLS_DIR}; the"
+echo "container reads the mounted /etc/ssl/offload paths the env defaults already name."

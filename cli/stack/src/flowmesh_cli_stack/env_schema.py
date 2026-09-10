@@ -701,19 +701,29 @@ STACK_ENV_SCHEMA = EnvSchema(
                     var_type=EnvVarType.BOOL,
                 ),
                 EnvVar(
+                    "NETWORK_PLANE_OFFLOAD_TLS_DIR",
+                    "./secrets/tls/offload",
+                    var_type=EnvVarType.DIR_PATH,
+                    use_default=True,
+                    ensure_path="create",
+                ),
+                EnvVar(
                     "NETWORK_PLANE_OFFLOAD_TLS_CA_FILE",
-                    "",
+                    "/etc/ssl/offload/offload-ca.pem",
                     description="Offload CA bundle path.",
+                    var_type=EnvVarType.FILE_PATH,
                 ),
                 EnvVar(
                     "NETWORK_PLANE_OFFLOAD_TLS_CERT_FILE",
-                    "",
+                    "/etc/ssl/offload/offload.pem",
                     description="Offload certificate path.",
+                    var_type=EnvVarType.FILE_PATH,
                 ),
                 EnvVar(
                     "NETWORK_PLANE_OFFLOAD_TLS_KEY_FILE",
-                    "",
+                    "/etc/ssl/offload/offload.key",
                     description="Offload private key path.",
+                    var_type=EnvVarType.FILE_PATH,
                 ),
                 EnvVar(
                     "NETWORK_PLANE_OFFLOAD_NODE_LISTENER_URL",

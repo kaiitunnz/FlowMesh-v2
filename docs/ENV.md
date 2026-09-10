@@ -92,9 +92,10 @@ listed here is in `.env.example`.
 | `NETWORK_PLANE_OFFLOAD_TRUST_DOMAIN` | – | Trust domain both ends must share |
 | `NETWORK_PLANE_OFFLOAD_CLASSES` | `same_node,same_cluster` | Target reachability classes an offload admits |
 | `NETWORK_PLANE_OFFLOAD_REQUIRE_MTLS` | `true` | Require mutual TLS on an offload |
-| `NETWORK_PLANE_OFFLOAD_TLS_CA_FILE` | – | Offload CA bundle path |
-| `NETWORK_PLANE_OFFLOAD_TLS_CERT_FILE` | – | Offload certificate path (must cover the advertised listener host) |
-| `NETWORK_PLANE_OFFLOAD_TLS_KEY_FILE` | – | Offload private key path |
+| `NETWORK_PLANE_OFFLOAD_TLS_DIR` | `./secrets/tls/offload` | Host directory mounted at `/etc/ssl/offload` |
+| `NETWORK_PLANE_OFFLOAD_TLS_CA_FILE` | `/etc/ssl/offload/offload-ca.pem` | Offload CA bundle path |
+| `NETWORK_PLANE_OFFLOAD_TLS_CERT_FILE` | `/etc/ssl/offload/offload.pem` | Offload certificate path (must cover the advertised listener host) |
+| `NETWORK_PLANE_OFFLOAD_TLS_KEY_FILE` | `/etc/ssl/offload/offload.key` | Offload private key path |
 | `NETWORK_PLANE_OFFLOAD_NODE_LISTENER_URL` | – | Node offload listener (`host:port`) |
 | `ENABLE_WORKER_WATCHDOG` | `true` | Worker death detection |
 | `WORKER_DEATH_GRACE_SEC` | `60` | Grace period before marking dead |
