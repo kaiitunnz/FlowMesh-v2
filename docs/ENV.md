@@ -88,7 +88,7 @@ listed here is in `.env.example`.
 | `NETWORK_PLANE_CONNECT_BUDGET_SEC` | `5` | Per-candidate optimistic connect budget (seconds) |
 | `NETWORK_PLANE_ROUTE_TTL_SEC` | `30` | Resolved-route snapshot TTL (seconds) |
 | `NETWORK_PLANE_RELAY_BUFFER_BYTES` | `65536` | Bounded relay-session in-flight buffer (bytes) |
-| `NETWORK_PLANE_PEER_ENABLED` | `false` | Enable trusted direct origin-to-target peer transports |
+| `NETWORK_PLANE_PEER_ENABLED` | `false` | Enable trusted origin-to-target peer transports |
 | `NETWORK_PLANE_PEER_TRUST_DOMAIN` | – | Trust domain both ends must share |
 | `NETWORK_PLANE_PEER_CLASSES` | `same_node,same_cluster` | Target reachability classes a peer transport admits |
 | `NETWORK_PLANE_PEER_DISABLE_MTLS` | `false` | Run peer transports on an attested trusted network |

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Issue the CA and node identities a trusted peer transport is carried over.
 #
-# Each node both dials an peer target and serves one, so its identity carries
+# Each node both dials a peer target and serves one, so its identity carries
 # clientAuth and serverAuth. The cluster gRPC CA cannot be reused as-is: it issues
 # server-only identities, which authenticate a listener but never prove which node is
 # dialing it.

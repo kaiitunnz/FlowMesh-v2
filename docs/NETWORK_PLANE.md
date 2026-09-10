@@ -64,16 +64,17 @@ gets fresh `UNKNOWN` entries, and node re-registration invalidates a target's en
 
 The resolver orders three transport candidates. `control_relay` is the universal base,
 carried whenever the origin and target both advertise an outbound relay attachment;
-policy may rank a verified `worker_direct` or `node_relay` peer transport ahead of it, and a
-demoted one drops out until its backoff cools.
+policy may rank a verified `worker_direct` or `node_relay` peer transport ahead of it,
+and a demoted one drops out until its backoff cools.
 
-- **`worker_direct`** — caller to the listener. A forward-dial peer transport legal only for an
-  explicitly directly routable listener whose endpoint class the origin's network class can
-  reach, under a bounded optimistic connect budget. Shared-node placement alone does not
-  make it legal.
+- **`worker_direct`** — caller to the listener. A forward-dial peer transport legal only
+  for an explicitly directly routable listener whose endpoint class the origin's network
+  class can reach, under a bounded optimistic connect budget. Shared-node placement alone
+  does not make it legal.
 - **`node_relay`** — caller to the target node's announced endpoint, which uplinks over an
   authenticated node-local relay session to the target listener the route names. A
-  forward-dial peer transport; the initial same-node path as well as the normal cross-node path.
+  forward-dial peer transport; the initial same-node path as well as the normal
+  cross-node path.
 - **`control_relay`** — the universal reverse-rendezvous base. Its descriptor names the
   origin and target reverse attachments by node (the delivery routes by node id) and the
   target's node-local sidecar delivery, not a chain of dialable addresses. It is feasible

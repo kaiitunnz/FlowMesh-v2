@@ -37,7 +37,7 @@ class _UplinkConnection(ConnectionHandler):
 
     def close(self) -> None:
         for session_id in self._sessions:
-            self._bridge.peer_release(session_id)
+            self._bridge.release_peer(session_id)
 
 
 def _is_registered_origin(identities: frozenset[str]) -> bool:

@@ -69,7 +69,7 @@ class ResidentWorkerBridge:
         """
         self._peers[session_id] = sink
 
-    def peer_release(self, session_id: str) -> None:
+    def release_peer(self, session_id: str) -> None:
         self._peers.pop(session_id, None)
 
     async def publish_up(self, frame: RelayFrame) -> None:
