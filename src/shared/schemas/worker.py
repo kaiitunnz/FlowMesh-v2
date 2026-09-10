@@ -39,6 +39,13 @@ class WorkerCapabilities(BaseModel):
         default_factory=frozenset,
         description="Types of tasks this worker can service.",
     )
+    resident_listener_port: int = Field(
+        default=0,
+        description=(
+            "Port of the worker's claim-gated resident offload listener; 0 when it "
+            "serves none, which leaves its replicas reachable over the relay alone."
+        ),
+    )
 
 
 __all__ = ["SSHLimits", "WorkerCapabilities", "WorkerStatus"]

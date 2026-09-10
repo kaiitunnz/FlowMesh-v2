@@ -11,6 +11,7 @@ import asyncio
 import concurrent.futures
 import contextlib
 import logging
+import socket
 import threading
 from collections.abc import Callable, Coroutine
 from typing import Any
@@ -37,6 +38,7 @@ from shared.resident.reports import (
 )
 from shared.resident.transport import ResidentFrameSink
 
+from .direct_listener import ResidentDirectListener
 from .engine import EngineOpen, HttpEngineDelivery, RawEngineOpen, RawHttpEngineDelivery
 from .origin_driver import ResidentOriginDriver, ResidentOriginRequest
 from .replica_sidecar import ResidentReplicaSidecar
@@ -78,6 +80,7 @@ class ResidentLaneHost:
         report_observation: ObservationReport | None = None,
         offload_material: MutualTlsMaterial | None = None,
         offload_enabled: bool = False,
+        offload_listener_sock: socket.socket | None = None,
         connect_budget_sec: float = 5.0,
         logger: logging.Logger | None = None,
     ) -> None:
@@ -96,6 +99,8 @@ class ResidentLaneHost:
         self._report_observation = report_observation
         self._offload_material = offload_material
         self._offload_enabled = offload_enabled
+        self._offload_listener_sock = offload_listener_sock
+        self._offload_listener: ResidentDirectListener | None = None
         self._connect_budget_sec = connect_budget_sec
         self._logger = logger or logging.getLogger("resident-lane-host")
         self._loop = asyncio.new_event_loop()
@@ -127,6 +132,21 @@ class ResidentLaneHost:
             on_load=self._on_load,
             logger=self._logger,
         )
+        await self._start_offload_listener()
+
+    async def _start_offload_listener(self) -> None:
+        """Serve this worker's claim-gated offload listener, where one is bound."""
+        sock = self._offload_listener_sock
+        if sock is None or self._replica is None:
+            return
+        listener = ResidentDirectListener(
+            sock=sock,
+            material=self._offload_material,
+            deliver=self._replica.on_frame,
+            logger=self._logger,
+        )
+        await listener.start()
+        self._offload_listener = listener
 
     def _carriage(self, sink: ResidentFrameSink) -> ClaimGatedServiceCarriage:
         """The carriage this worker's origin attempts take their frame sink from.

@@ -1,6 +1,7 @@
 import argparse
 import logging
 import signal
+import socket
 from collections.abc import Mapping
 
 from shared.network.mtls import MutualTlsMaterial, MutualTlsMaterialError
@@ -214,6 +215,22 @@ def _offload_material(
         return None
 
 
+def _bind_offload_listener(cfg: WorkerConfig) -> socket.socket | None:
+    """Bind the offload listener so its port is advertised at registration.
+
+    The port is bound before the worker registers and served once the resident lane
+    loop comes up, so the address control advertises is the one an origin reaches.
+    """
+    if not cfg.offload_enabled:
+        return None
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("0.0.0.0", 0))  # nosec B104 - an origin dials it from off-host
+    sock.listen(16)
+    sock.setblocking(False)
+    return sock
+
+
 def main() -> None:
     args = _parse_args()
     if args.collect_hw:
@@ -259,7 +276,14 @@ def main() -> None:
         enable_mp_executors=cfg.enable_mp_executors,
     )
 
-    capabilities = build_capabilities(executors)
+    offload_sock = _bind_offload_listener(cfg)
+    capabilities = build_capabilities(executors).model_copy(
+        update={
+            "resident_listener_port": (
+                offload_sock.getsockname()[1] if offload_sock is not None else 0
+            )
+        }
+    )
     ssh_limits = cfg.ssh_limits
     if TaskType.SSH in capabilities.supported_task_types:
         if ssh_limits is None:
@@ -295,6 +319,7 @@ def main() -> None:
         content_store=build_content_store(cfg.server_base_url),
         offload_enabled=cfg.offload_enabled,
         offload_material=_offload_material(cfg, logger),
+        offload_listener_sock=offload_sock,
     )
 
     # Install signal handlers to allow graceful shutdown

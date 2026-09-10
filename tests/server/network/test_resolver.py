@@ -61,6 +61,7 @@ def _endpoint(
         endpoint_id="e-target",
         node_id="nde-1",
         url="127.0.0.1:9101",
+        offload_url="127.0.0.1:9102",
         generation=1,
         trust_domain="fm",
         reachability_class=reachability_class,

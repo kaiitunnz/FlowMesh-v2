@@ -2,6 +2,7 @@
 
 import json
 import logging
+import socket
 import threading
 import time
 from collections.abc import Iterable
@@ -56,6 +57,7 @@ class Runner:
         content_store: FabricContentStore | None = None,
         offload_enabled: bool = False,
         offload_material: MutualTlsMaterial | None = None,
+        offload_listener_sock: socket.socket | None = None,
     ):
         self.lifecycle = lifecycle
         self.task_stream = task_stream
@@ -67,6 +69,7 @@ class Runner:
         self.network_bandwidth_bytes_per_sec = network_bandwidth_bytes_per_sec
         self._offload_enabled = offload_enabled
         self._offload_material = offload_material
+        self._offload_listener_sock = offload_listener_sock
         # How long to keep an executor alive (seconds) after its last use before calling
         # `cleanup_after_run()`. None or <=0 disables delayed cleanup.
         assert (
@@ -233,6 +236,7 @@ class Runner:
             delete_request=self.lifecycle.resident_requests.delete,
             offload_enabled=self._offload_enabled,
             offload_material=self._offload_material,
+            offload_listener_sock=self._offload_listener_sock,
             logger=self.logger,
         )
         host.start()

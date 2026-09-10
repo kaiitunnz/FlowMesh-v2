@@ -38,6 +38,7 @@ def _node(node_id: str, *, generation: int, cls=ReachabilityClass.ROUTABLE) -> N
         network_endpoint=NetworkEndpointAdvertisement(
             endpoint_id=f"ep-{node_id}",
             url=f"127.0.0.1:900{node_id[-1]}",
+            offload_url=f"127.0.0.1:910{node_id[-1]}",
             generation=generation,
             trust_domain="fm",
             reachability_class=cls,

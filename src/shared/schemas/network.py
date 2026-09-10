@@ -36,6 +36,11 @@ class NetworkEndpointAdvertisement(BaseModel):
     and route evidence keyed to an older one are never used, which is also the fence
     that invalidates the node's relay evidence.
 
+    ``offload_url`` is the node's purpose-scoped listener for a directly dialed
+    offload, which hands a session to the node's current local sidecar uplink; it is
+    separate from the diagnostic ``url`` and is empty on a node that hosts no such
+    listener.
+
     ``relay_attachment_id`` is the non-secret identity of this node's (or ingress
     edge's) outbound relay attachment to the root rendezvous. It proves the node can
     attach outward for the universal reverse relay; it is not an inbound URL a peer may
@@ -48,6 +53,7 @@ class NetworkEndpointAdvertisement(BaseModel):
     endpoint_id: str
     node_id: str | None = None
     url: str
+    offload_url: str = ""
     generation: int
     trust_domain: str
     reachability_class: ReachabilityClass

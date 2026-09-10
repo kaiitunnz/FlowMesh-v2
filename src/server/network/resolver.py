@@ -172,9 +172,10 @@ def resolve_route(
             ),
         )
 
+    node_offload_url = node_endpoint.offload_url if node_endpoint is not None else ""
     if (
         node_endpoint is not None
-        and node_endpoint.url
+        and node_offload_url
         and direct_route is not None
         and _offload_admitted(
             trust, origin, node_endpoint, listener, Transport.NODE_RELAY
@@ -185,7 +186,7 @@ def resolve_route(
             (
                 RouteHop(
                     transport=Transport.NODE_RELAY,
-                    endpoint=node_endpoint.url,
+                    endpoint=node_offload_url,
                     node_id=node_endpoint.node_id,
                 ),
                 RouteHop(
