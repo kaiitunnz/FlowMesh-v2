@@ -428,6 +428,15 @@ class ResidentCapacityControl:
             asyncio.run_coroutine_threadsafe(self._on_outcome(outcome), self._loop)
 
     def on_route_observation(self, observation: ResidentRouteObservation) -> None:
+        """Consume an origin's classified path evidence off the calling lane."""
+        if self._loop is not None:
+            asyncio.run_coroutine_threadsafe(
+                self._on_route_observation(observation), self._loop
+            )
+
+    async def _on_route_observation(
+        self, observation: ResidentRouteObservation
+    ) -> None:
         """Fold an origin's classified path evidence into the reachability view.
 
         Network evidence only: a demoted transport stops being selected on the next
@@ -435,6 +444,14 @@ class ResidentCapacityControl:
         """
         deps = self._delivery
         if deps is None:
+            return
+        try:
+            transport = Transport(observation.transport)
+            outcome = RouteObservationOutcome(observation.outcome)
+        except ValueError:
+            self._logger.warning(
+                "ignoring a route observation naming an unknown transport or outcome"
+            )
             return
         attempt = next(
             (
@@ -447,14 +464,7 @@ class ResidentCapacityControl:
         if attempt is None or attempt.origin is None or attempt.listener is None:
             return
         deps.network.record_observations(
-            attempt.origin,
-            attempt.listener,
-            [
-                (
-                    Transport(observation.transport),
-                    RouteObservationOutcome(observation.outcome),
-                )
-            ],
+            attempt.origin, attempt.listener, [(transport, outcome)]
         )
 
     def on_invocation_terminal(self, invocation_id: str, failed: bool = False) -> None:

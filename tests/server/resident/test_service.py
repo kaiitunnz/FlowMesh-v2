@@ -10,6 +10,8 @@ denies with no allocation; and a restart reconciles an in-flight claim to uncert
 """
 
 import asyncio
+import threading
+import time
 from typing import Any
 
 from server.network.state import (
@@ -560,8 +562,10 @@ def test_an_origins_path_evidence_reaches_the_reachability_view():
     asyncio.run(svc._originate(_env()))
 
     session_id = svc._attempts["inv-1"].session_id
-    svc.on_route_observation(
-        _observation(session_id, RouteObservationOutcome.CONNECT_FAILURE)
+    asyncio.run(
+        svc._on_route_observation(
+            _observation(session_id, RouteObservationOutcome.CONNECT_FAILURE)
+        )
     )
 
     assert delivery.network.observations == [
@@ -573,8 +577,58 @@ def test_path_evidence_for_an_unknown_session_records_nothing():
     svc, _stores, _settled, delivery = _build()
     asyncio.run(svc._originate(_env()))
 
-    svc.on_route_observation(
-        _observation("rly-not-ours", RouteObservationOutcome.VERIFIED)
+    asyncio.run(
+        svc._on_route_observation(
+            _observation("rly-not-ours", RouteObservationOutcome.VERIFIED)
+        )
     )
 
     assert delivery.network.observations == []
+
+
+def test_a_route_observation_naming_an_unknown_transport_is_ignored():
+    # The report crosses from a worker, so a value this control plane cannot parse must
+    # not raise on the lane that carries every other worker report.
+    svc, _stores, _settled, delivery = _build()
+    asyncio.run(svc._originate(_env()))
+
+    session_id = svc._attempts["inv-1"].session_id
+    asyncio.run(
+        svc._on_route_observation(
+            ResidentRouteObservation(
+                session_id=session_id, transport="teleport", outcome="verified"
+            )
+        )
+    )
+
+    assert delivery.network.observations == []
+
+
+def test_path_evidence_from_the_worker_lane_runs_on_the_origination_loop():
+    # The report arrives on the worker-events thread while the origination loop mutates
+    # the attempts and the reachability entries, so it must be marshaled like its
+    # sibling reports rather than folded in place.
+    svc, _stores, _settled, delivery = _build()
+    asyncio.run(svc._originate(_env()))
+    session_id = svc._attempts["inv-1"].session_id
+
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    try:
+        svc.bind_loop(loop)
+        svc.on_route_observation(
+            _observation(session_id, RouteObservationOutcome.VERIFIED)
+        )
+        for _ in range(100):
+            if delivery.network.observations:
+                break
+            time.sleep(0.02)
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=5)
+        loop.close()
+
+    assert delivery.network.observations == [
+        (Transport.WORKER_DIRECT, RouteObservationOutcome.VERIFIED)
+    ]
