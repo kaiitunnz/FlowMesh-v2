@@ -86,9 +86,9 @@ def test_plan_capacity_is_adapter_aware_at_exhaustion():
     same = AdmissionProfile(engine_batch_key="fam", adapter_ref="lora-a")
     distinct = AdmissionProfile(engine_batch_key="fam", adapter_ref="lora-b")
 
-    assert mgr.plan_capacity("fam", "m", base).action == "join"
-    assert mgr.plan_capacity("fam", "m", same).action == "join"
-    denied = mgr.plan_capacity("fam", "m", distinct)
+    assert mgr.plan_capacity(_FAMILY, base).action == "join"
+    assert mgr.plan_capacity(_FAMILY, same).action == "join"
+    denied = mgr.plan_capacity(_FAMILY, distinct)
     assert denied.action == "deny"
     assert denied.denial is not None
     assert denied.denial.reason is ProvisioningDenialReason.ADAPTER_SLOT_CAP
@@ -123,7 +123,7 @@ def test_adapter_slot_cap_denial_surfaces_the_co_occurring_quota_reason():
     # new distinct adapter can neither fit nor add a replica: the denial names both.
     _hold_adapter(stores, "inv-1", "lora-a")
     denied = mgr.plan_capacity(
-        "fam", "m", AdmissionProfile(engine_batch_key="fam", adapter_ref="lora-b")
+        _FAMILY, AdmissionProfile(engine_batch_key="fam", adapter_ref="lora-b")
     )
     assert denied.action == "deny" and denied.denial is not None
     assert denied.denial.reason is ProvisioningDenialReason.ADAPTER_SLOT_CAP
@@ -138,27 +138,27 @@ def test_scale_from_zero_then_warm():
         return "tsk-serve-1"
 
     mgr = _manager(stores, materialize_fn=materialize_fn)
-    assert mgr.plan_capacity("fam", "m").action == "materialize"
+    assert mgr.plan_capacity(_FAMILY).action == "materialize"
 
     replica = asyncio.run(mgr.materialize(_FAMILY))
     assert replica.state is ReplicaState.MATERIALIZING
     assert replica.serve_task_id == "tsk-serve-1"
     assert stores.leases.by_family("fam")[0].replica_id == replica.replica_id
     # A cold start in progress is not a fresh materialize decision.
-    assert mgr.plan_capacity("fam", "m").action == "materialize"
+    assert mgr.plan_capacity(_FAMILY).action == "materialize"
 
     mgr.on_replica_ready(replica.replica_id, _ENDPOINT)
     assert stores.directory.get(replica.replica_id).state is ReplicaState.WARM
     assert stores.pools.feasible_candidates("fam", PROFILE)
-    assert mgr.plan_capacity("fam", "m") == mgr.plan_capacity("fam", "m")
-    assert mgr.plan_capacity("fam", "m").action == "join"
+    assert mgr.plan_capacity(_FAMILY) == mgr.plan_capacity(_FAMILY)
+    assert mgr.plan_capacity(_FAMILY).action == "join"
 
 
 def test_policy_denies_over_quota_and_unlisted_model():
     stores = warm_stores()  # one active replica, draining so it is not joinable
     mgr = _manager(stores, limits=ResidentPolicyLimits(max_replicas_per_family=1))
     mgr.drain("rpl-1")
-    denied = mgr.plan_capacity("fam", "m")
+    denied = mgr.plan_capacity(_FAMILY)
     assert denied.action == "deny"
     assert denied.denial.reason is ProvisioningDenialReason.QUOTA_EXCEEDED
 
@@ -166,7 +166,7 @@ def test_policy_denies_over_quota_and_unlisted_model():
         ResidentStores(),
         limits=ResidentPolicyLimits(allowed_models=frozenset({"allowed"})),
     )
-    decision = gated.plan_capacity("fam", "m")
+    decision = gated.plan_capacity(_FAMILY)
     assert decision.action == "deny"
     assert decision.denial.reason is ProvisioningDenialReason.MODEL_NOT_ALLOWED
 

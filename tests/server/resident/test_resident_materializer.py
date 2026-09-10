@@ -19,7 +19,7 @@ from lumid_hooks import PrincipalContext, ResourceRef
 from server.auth import require_permission
 from server.config import ResidentCapacityConfig
 from server.hooks import PERMISSION_CHECKERS, RESOURCE_REGISTRARS
-from server.resident import ReplicaIncarnation, ServiceFamily
+from server.resident import ReplicaIncarnation, ServiceFamily, ServiceFamilyKind
 from server.resident.materializer import materialize_resident_replica
 
 _LOGGER = logging.getLogger("test.resident_materializer")
@@ -342,3 +342,32 @@ def test_foreign_tenant_is_denied_the_resident_task_logs() -> None:
     with pytest.raises(HTTPException) as excinfo:
         _read_logs(_FOREIGN, task_id)
     assert excinfo.value.status_code == 403
+
+
+def test_sandbox_host_substrate_needs_no_model_source() -> None:
+    runtime: Any = _FakeRuntime()
+    config = ResidentCapacityConfig(substrate="serve", serve_ttl_sec=600)
+    family = ServiceFamily(
+        family="posix-default|sandbox",
+        engine_batch_key="posix-default|sandbox",
+        service_ref="posix-default",
+        kind=ServiceFamilyKind.SANDBOX_HOST,
+        interface="sandbox",
+    )
+
+    RESOURCE_REGISTRARS.clear()
+    try:
+        asyncio.run(
+            materialize_resident_replica(
+                runtime, _SYSTEM, config, family, _REPLICA, _LOGGER
+            )
+        )
+    finally:
+        RESOURCE_REGISTRARS.clear()
+
+    assert runtime.register_call is not None
+    spec = json.loads(runtime.register_call[2])["spec"]
+    assert spec["taskType"] == "sandbox_host"
+    assert spec["resources"]["hardware"]["gpu"]["count"] == 0
+    assert spec["ttlSeconds"] == 600
+    assert "model" not in spec

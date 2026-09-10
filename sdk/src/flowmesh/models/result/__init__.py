@@ -31,6 +31,8 @@ from .catalog import (
     PPOResult,
     RAGResult,
     ResultEnvelope,
+    SandboxHostResult,
+    SandboxResult,
     ServeResult,
     SFTResult,
     SSHResult,
@@ -57,6 +59,7 @@ from .payloads import (
     RagQuery,
     RagSearch,
     RagUsage,
+    SandboxCommandItem,
 )
 
 # Resolve the recursive ``children`` union on the base and every concrete
@@ -68,6 +71,8 @@ _RESULT_MODELS: tuple[type[BaseModel], ...] = (
     DiffusionResult,
     ServeResult,
     DevModelResult,
+    SandboxHostResult,
+    SandboxResult,
     SFTResult,
     LoRAResult,
     PPOResult,
@@ -104,6 +109,8 @@ __all__ = [
     "DataRetrievalItem",
     "DataRetrievalResult",
     "DevModelResult",
+    "SandboxHostResult",
+    "SandboxResult",
     "DiffusionResult",
     "EchoItem",
     "EchoResult",
@@ -132,6 +139,7 @@ __all__ = [
     "RagQuery",
     "RagSearch",
     "RagUsage",
+    "SandboxCommandItem",
     "ResultEnvelope",
     "SFTResult",
     "SSHResult",

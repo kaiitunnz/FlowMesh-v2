@@ -201,6 +201,16 @@ class RagQuery(StrictModel):
     items: list[RagHit] = Field(default_factory=list)
 
 
+class SandboxCommandItem(StrictModel):
+    """One sandbox command's terminal result."""
+
+    argv: list[str]
+    exit_code: int
+    stdout: str = ""
+    stderr: str = ""
+    timed_out: bool = False
+
+
 class EchoItem(StrictModel):
     """One echoed value."""
 

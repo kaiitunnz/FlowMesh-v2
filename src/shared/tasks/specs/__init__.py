@@ -40,6 +40,8 @@ from .sandbox import (
     SandboxCommandSpec,
     SandboxCommandSpecTemplate,
     SandboxHostSpec,
+    SandboxHostSpecStrict,
+    SandboxHostSpecTemplate,
     SandboxSpecStrict,
     SandboxSpecTemplate,
 )
@@ -87,6 +89,8 @@ __all__ = [
     "SandboxCommandSpec",
     "SandboxCommandSpecTemplate",
     "SandboxHostSpec",
+    "SandboxHostSpecStrict",
+    "SandboxHostSpecTemplate",
     "SandboxSpecStrict",
     "SandboxSpecTemplate",
     "SFTSpecStrict",

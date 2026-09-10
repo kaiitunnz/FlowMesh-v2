@@ -640,6 +640,8 @@ class Runner:
                         desired_key = self._select_embedding_executor_key(spec)
                     elif task_type == "serve":
                         desired_key = "vllm_serve"
+                    elif task_type == "sandbox_host":
+                        desired_key = "sandbox_host"
                     elif task_type == "agent":
                         if msg.agent_episode is None:
                             raise ExecutionError(

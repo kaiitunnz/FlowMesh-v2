@@ -10,7 +10,7 @@ arbitrary provider. Thresholds here are the conservative baseline.
 from dataclasses import dataclass, field
 
 from .selection import DEFAULT_SELECTION_STRATEGY
-from .state import ProvisioningDenialReason
+from .state import ProvisioningDenialReason, ServiceFamilyKind
 
 
 @dataclass(frozen=True)
@@ -18,8 +18,9 @@ class ResidentPolicyLimits:
     """Deployment-resolved caps for resident auto-provisioning.
 
     ``allowed_models`` empty means the deployment allows any plan-derived model; a non-
-    empty set enforces an explicit catalog. ``selection_strategy`` is the replica-
-    selection strategy each auto-registered family adopts. The manager receives resolved
+    empty set enforces an explicit catalog over model-serving families.
+    ``selection_strategy`` is the replica-selection strategy each auto-registered family
+    adopts. The manager receives resolved
     values from the config edge rather than reading the environment.
     """
 
@@ -52,6 +53,7 @@ class ProvisioningDecision:
 def decide_materialization(
     *,
     service_ref: str,
+    kind: ServiceFamilyKind = ServiceFamilyKind.MODEL_SERVING,
     limits: ResidentPolicyLimits,
     active_replicas: int,
     materializing_replicas: int,
@@ -60,8 +62,14 @@ def decide_materialization(
 
     ``active_replicas`` counts live incarnations (warm, busy, materializing, draining);
     ``materializing_replicas`` counts in-flight cold starts against the concurrency cap.
+    The model catalog gates a model-serving family's reference; every kind is bounded by
+    the same replica quota and cold-start caps.
     """
-    if limits.allowed_models and service_ref not in limits.allowed_models:
+    if (
+        kind is ServiceFamilyKind.MODEL_SERVING
+        and limits.allowed_models
+        and service_ref not in limits.allowed_models
+    ):
         return ProvisioningDecision.deny(
             ProvisioningDenialReason.MODEL_NOT_ALLOWED,
             f"model {service_ref!r} is not in the allowed catalog",

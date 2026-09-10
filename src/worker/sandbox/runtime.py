@@ -9,6 +9,7 @@ rather than an external effect.
 import os
 import shutil
 import subprocess
+import sys
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
@@ -49,14 +50,16 @@ class SandboxRuntime(ABC):
     def run(self, root: Path, command: SandboxCommand) -> SandboxCommandResult: ...
 
 
-def _isolate() -> None:
-    """Detach the child into its own user and network namespaces before exec.
-
-    An unprivileged user namespace carries a network namespace holding only a down
-    loopback, so the command cannot reach a network at all rather than being trusted
-    not to.
-    """
-    os.unshare(os.CLONE_NEWUSER | os.CLONE_NEWNET)
+# Detaches into its own user and network namespaces, then becomes the command. An
+# unprivileged user namespace carries a network namespace holding only a down loopback,
+# so the command cannot reach a network at all rather than being trusted not to. The
+# unshare runs in this freshly started interpreter rather than between fork and exec,
+# where a threaded worker could deadlock.
+_ISOLATING_LAUNCHER = (
+    "import os, sys; "
+    "os.unshare(os.CLONE_NEWUSER | os.CLONE_NEWNET); "
+    "os.execv(sys.argv[1], sys.argv[1:])"
+)
 
 
 def _sandbox_env(root: Path) -> dict[str, str]:
@@ -88,7 +91,13 @@ class PosixProcessSandbox(SandboxRuntime):
             raise SandboxUnavailable("a sandbox command names no program")
         if (program := shutil.which(command.argv[0])) is None:
             raise SandboxUnavailable(f"{command.argv[0]!r} is not available")
-        argv = [program, *command.argv[1:]]
+        argv = [
+            sys.executable,
+            "-c",
+            _ISOLATING_LAUNCHER,
+            program,
+            *command.argv[1:],
+        ]
         try:
             completed = subprocess.run(  # nosec B603 - argv list, no shell, absolute program via shutil.which()
                 argv,
@@ -98,7 +107,6 @@ class PosixProcessSandbox(SandboxRuntime):
                 capture_output=True,
                 text=True,
                 timeout=command.timeout_sec,
-                preexec_fn=_isolate,
                 check=False,
             )
         except subprocess.TimeoutExpired as expired:

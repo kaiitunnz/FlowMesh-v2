@@ -51,7 +51,7 @@ from ..network.state import (
     Transport,
 )
 from ..orchestration.tool_dispatch import ToolInvocationEnvelope
-from ..task.v2.representations.operators import ServiceDependency
+from ..task.v2.representations.operators import ServiceDependency, ServiceInterface
 from .admission import AdmissionController
 from .lifecycle import LifecycleScaleManager
 from .policy import ResidentPolicyLimits
@@ -68,6 +68,7 @@ from .state import (
     ResidentSnapshot,
     ServiceClaim,
     ServiceFamily,
+    ServiceFamilyKind,
 )
 from .stores import ResidentStores
 
@@ -82,8 +83,17 @@ SettleCallback = Callable[..., bool]
 RedispatchCallback = Callable[[str, str], bool]
 # Reads a serve substrate's reported endpoint once ready, else None.
 EndpointProbe = Callable[[str], ReplicaEndpoint | None]
+# Whether a sandbox host allocation is running on a worker a session can be placed on.
+SandboxHostProbe = Callable[[str], bool]
 # Persists the authoritative CS snapshot.
 PersistCallback = Callable[[], None]
+
+
+def _family_kind(interface: ServiceInterface) -> ServiceFamilyKind:
+    """The substrate a dependency's interface is materialized as."""
+    if interface is ServiceInterface.SANDBOX:
+        return ServiceFamilyKind.SANDBOX_HOST
+    return ServiceFamilyKind.MODEL_SERVING
 
 
 def _selected_carriage(route: ResolvedRoute) -> tuple[str, str]:
@@ -315,6 +325,7 @@ class ResidentCapacityControl:
         settle_cb: SettleCallback,
         redispatch_cb: RedispatchCallback,
         endpoint_probe: EndpointProbe,
+        sandbox_host_probe: SandboxHostProbe | None = None,
         delivery: ResidentWorkerDelivery | None = None,
         persist: PersistCallback | None = None,
         logger: logging.Logger | None = None,
@@ -331,6 +342,7 @@ class ResidentCapacityControl:
         self._settle = settle_cb
         self._redispatch = redispatch_cb
         self._probe_endpoint = endpoint_probe
+        self._probe_sandbox_host = sandbox_host_probe or (lambda _task_id: False)
         self._delivery = delivery
         self._persist = persist or (lambda: None)
         self._logger = logger or logging.getLogger("resident-capacity")
@@ -692,18 +704,27 @@ class ResidentCapacityControl:
         self._stores.load_snapshot(snapshot)
         # Reports are not snapshotted and endpoint credentials are not persisted:
         # re-probe each servable replica to re-attach its endpoint and re-report
-        # capacity so a warm replica is admittable again. A serve task that no longer
-        # reports an endpoint is gone, so invalidate the incarnation to re-materialize.
+        # capacity so a warm replica is admittable again. An allocation whose substrate
+        # no longer reports itself live is gone, so invalidate the incarnation to
+        # re-materialize.
         for replica in self._stores.directory.all():
             if (
                 replica.state not in SERVABLE_REPLICA_STATES
                 or replica.serve_task_id is None
             ):
                 continue
-            if (fresh := self._probe_endpoint(replica.serve_task_id)) is None:
+            definition = self._stores.families.get(replica.family)
+            if definition is not None and definition.kind is (
+                ServiceFamilyKind.SANDBOX_HOST
+            ):
+                if not self._probe_sandbox_host(replica.serve_task_id):
+                    self._lifecycle.on_preempt(replica.replica_id)
+                    continue
+            elif (fresh := self._probe_endpoint(replica.serve_task_id)) is None:
                 self._lifecycle.on_preempt(replica.replica_id)
                 continue
-            replica.endpoint = fresh
+            else:
+                replica.endpoint = fresh
             self._lifecycle.refresh_report(replica.replica_id)
         for claim in self._stores.claims.all():
             if claim.state in (
@@ -827,9 +848,13 @@ class ResidentCapacityControl:
                     family=family,
                     profile=profile,
                 )
-            handoff = await self._acquire_capacity(
-                orig, family, service_ref, claim, profile
-            )
+            definition = self._stores.families.get(family)
+            if definition is None:
+                self._settle_origination_error(
+                    orig, "resident service family is unregistered"
+                )
+                return
+            handoff = await self._acquire_capacity(orig, definition, claim, profile)
             if handoff is None:
                 return
         replica = self._stores.directory.get(handoff.replica_id)
@@ -1456,40 +1481,38 @@ class ResidentCapacityControl:
     async def _acquire_capacity(
         self,
         orig: _Origination,
-        family: str,
-        service_ref: str,
+        definition: ServiceFamily,
         claim: ServiceClaim,
         profile: AdmissionProfile,
     ) -> AdmissionHandoff | None:
+        family = definition.family
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self._limits.cold_start_deadline_sec
         while True:
             async with self._admit_lock:
-                self._promote_ready_replicas(family)
+                self._promote_ready_replicas(definition)
                 self._lifecycle.refresh_family_reports(family)
                 handoff = self._admission.admit(
                     claim, profile, idempotency_key=orig.idempotency_key
                 )
                 if handoff is not None:
                     return handoff
-                plan = self._lifecycle.plan_capacity(family, service_ref, profile)
+                plan = self._lifecycle.plan_capacity(definition, profile)
                 if plan.action == "deny" and plan.denial is not None:
                     self._admission.on_denied(claim)
                     self._fail(orig, plan.denial.reason, plan.denial.detail or "")
                     return None
                 if plan.action == "materialize" and not self._has_materializing(family):
-                    definition = self._stores.families.get(family)
-                    if definition is not None:
-                        try:
-                            await self._lifecycle.materialize(definition)
-                        except Exception as exc:  # cold start could not be started
-                            self._admission.on_denied(claim)
-                            self._fail(
-                                orig,
-                                ProvisioningDenialReason.RESOURCE_CAP,
-                                f"resident materialization failed: {exc}",
-                            )
-                            return None
+                    try:
+                        await self._lifecycle.materialize(definition)
+                    except Exception as exc:  # cold start could not be started
+                        self._admission.on_denied(claim)
+                        self._fail(
+                            orig,
+                            ProvisioningDenialReason.RESOURCE_CAP,
+                            f"resident materialization failed: {exc}",
+                        )
+                        return None
             if loop.time() >= deadline:
                 self._admission.on_expired(claim)
                 self._fail(
@@ -1506,14 +1529,23 @@ class ResidentCapacityControl:
             for r in self._stores.directory.by_family(family)
         )
 
-    def _promote_ready_replicas(self, family: str) -> None:
-        for replica in self._stores.directory.by_family(family):
+    def _promote_ready_replicas(self, definition: ServiceFamily) -> None:
+        """Warm every materializing replica whose substrate now reports itself live.
+
+        A model-serving replica becomes admittable once its engine endpoint answers; a
+        sandbox host once its allocation runs on a worker, which is all a co-located
+        session needs to reach it.
+        """
+        for replica in self._stores.directory.by_family(definition.family):
             if (
-                replica.state is ReplicaState.MATERIALIZING
-                and replica.serve_task_id is not None
-                and (endpoint := self._probe_endpoint(replica.serve_task_id))
-                is not None
+                replica.state is not ReplicaState.MATERIALIZING
+                or replica.serve_task_id is None
             ):
+                continue
+            if definition.kind is ServiceFamilyKind.SANDBOX_HOST:
+                if self._probe_sandbox_host(replica.serve_task_id):
+                    self._lifecycle.on_replica_ready(replica.replica_id, None)
+            elif (endpoint := self._probe_endpoint(replica.serve_task_id)) is not None:
                 self._lifecycle.on_replica_ready(replica.replica_id, endpoint)
 
     def _fail(

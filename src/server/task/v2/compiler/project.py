@@ -9,6 +9,8 @@ from shared.tasks.specs import (
     EmbeddingSpecTemplate,
     InferenceSpecStrict,
     InferenceSpecTemplate,
+    SandboxSpecStrict,
+    SandboxSpecTemplate,
 )
 from shared.tasks.specs.common import ModelSpecTemplate
 
@@ -156,13 +158,23 @@ def _leaf_operator(
 def _leaf_service_dependency(
     task: ParsedTask, task_type: TaskType
 ) -> ServiceDependency | None:
-    """Normalize an inference/embedding leaf's resident binding into a dependency.
+    """Normalize a leaf's resident binding into a dependency.
 
-    The service reference defaults to the task's own model source; a declared adapter
-    rides ``adapter`` so it constrains a compatible base replica's slot. The interface
-    is the leaf's own — an embedding leaf never shares a chat batch for the same model.
+    A sandbox session depends on the sandbox-host family its profile names; an
+    inference or embedding leaf on the model-serving family its binding names.
+
+    The model service reference defaults to the task's own model source; a declared
+    adapter rides ``adapter`` so it constrains a compatible base replica's slot. The
+    interface is the leaf's own — an embedding leaf never shares a chat batch for the
+    same model.
     """
     spec = task.task.spec
+    if isinstance(spec, (SandboxSpecStrict, SandboxSpecTemplate)):
+        return ServiceDependency(
+            service_ref=spec.sandbox.profile.strip(),
+            interface=ServiceInterface.SANDBOX,
+            isolation=spec.sandbox.isolation,
+        )
     if not isinstance(
         spec,
         (

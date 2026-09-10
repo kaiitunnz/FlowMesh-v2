@@ -161,6 +161,13 @@ class ReplicaCapacityReport(BaseModel):
     at: str = Field(default_factory=now_iso)
 
 
+class ServiceFamilyKind(StrEnum):
+    """The substrate a family's replicas are materialized as."""
+
+    MODEL_SERVING = "model_serving"
+    SANDBOX_HOST = "sandbox_host"
+
+
 class ServiceFamily(BaseModel):
     """A policy-approved, plan-derived service-family definition.
 
@@ -174,6 +181,7 @@ class ServiceFamily(BaseModel):
     family: str
     engine_batch_key: str
     service_ref: str
+    kind: ServiceFamilyKind = ServiceFamilyKind.MODEL_SERVING
     interface: str = "chat"
     isolation: str | None = None
     selection_strategy: str = "batch-aware-best-fit"

@@ -24,3 +24,4 @@ class TaskType(StrEnum):
     SERVE = "serve"
     DEV_MODEL = "dev_model"
     SANDBOX = "sandbox"
+    SANDBOX_HOST = "sandbox_host"

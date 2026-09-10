@@ -127,10 +127,13 @@ class ServiceInterface(StrEnum):
 
     Distinct interfaces never share an engine batch or replica pool: a chat/completion
     runner and an embedding runner are different services even for the same model name.
+    ``SANDBOX`` names a sandbox host, whose capacity is concurrent sessions rather than
+    an engine batch.
     """
 
     CHAT = "chat"
     EMBEDDING = "embedding"
+    SANDBOX = "sandbox"
 
 
 class ServiceDependency(BaseModel):

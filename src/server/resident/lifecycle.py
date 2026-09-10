@@ -86,7 +86,7 @@ class LifecycleScaleManager:
         ]
 
     def plan_capacity(
-        self, family: str, service_ref: str, profile: AdmissionProfile | None = None
+        self, definition: ServiceFamily, profile: AdmissionProfile | None = None
     ) -> CapacityPlan:
         """Decide, from the directory and policy, how to satisfy a family's demand.
 
@@ -96,7 +96,7 @@ class LifecycleScaleManager:
         adapter and policy cannot materialize another, the demand is denied promptly and
         correctly rather than waiting out the cold-start deadline.
         """
-        active = self._active_replicas(family)
+        active = self._active_replicas(definition.family)
         servable = [r for r in active if r.state in SERVABLE_REPLICA_STATES]
         joinable = next((r for r in servable if self._adapter_fits(r, profile)), None)
         if joinable is not None:
@@ -104,7 +104,8 @@ class LifecycleScaleManager:
         if any(r.state is ReplicaState.MATERIALIZING for r in active):
             return CapacityPlan(action="materialize")
         decision = decide_materialization(
-            service_ref=service_ref,
+            service_ref=definition.service_ref,
+            kind=definition.kind,
             limits=self._limits,
             active_replicas=len(active),
             materializing_replicas=sum(
@@ -206,8 +207,14 @@ class LifecycleScaleManager:
         self._persist()
         return replica
 
-    def on_replica_ready(self, replica_id: str, endpoint: ReplicaEndpoint) -> None:
-        """Transition a materializing replica to warm with its reachable endpoint."""
+    def on_replica_ready(
+        self, replica_id: str, endpoint: ReplicaEndpoint | None
+    ) -> None:
+        """Transition a materializing replica to warm.
+
+        An endpoint accompanies a replica a consumer reaches over the network; a
+        co-located allocation is reached on its own worker and carries none.
+        """
         replica = self._stores.directory.get(replica_id)
         if replica is None or replica.state is not ReplicaState.MATERIALIZING:
             return

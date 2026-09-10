@@ -155,5 +155,13 @@ class RagQuery(StrictModel):
     items: list[RagHit] = Field(default_factory=list)
 
 
+class SandboxCommandItem(StrictModel):
+    argv: list[str]
+    exit_code: int
+    stdout: str = ""
+    stderr: str = ""
+    timed_out: bool = False
+
+
 class EchoItem(StrictModel):
     output: JsonValue = None

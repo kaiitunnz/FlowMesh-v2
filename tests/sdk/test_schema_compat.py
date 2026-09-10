@@ -117,6 +117,8 @@ _RESULT_MODEL_NAMES = [
     "DiffusionResult",
     "ServeResult",
     "DevModelResult",
+    "SandboxHostResult",
+    "SandboxResult",
     "SFTResult",
     "LoRAResult",
     "PPOResult",

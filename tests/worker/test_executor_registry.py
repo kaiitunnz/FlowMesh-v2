@@ -32,6 +32,7 @@ class TestExecutorRegistry:
             "rag",
             "agent_episode",
             "service_leaf",
+            "sandbox_host",
             "echo",
             "data_profiling",
             "data_retrieval",

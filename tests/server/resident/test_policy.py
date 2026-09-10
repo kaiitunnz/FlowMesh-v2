@@ -8,6 +8,7 @@ admitted — none of which itself creates a replica or a credit.
 from server.resident import (
     ProvisioningDenialReason,
     ResidentPolicyLimits,
+    ServiceFamilyKind,
     decide_materialization,
 )
 
@@ -65,3 +66,26 @@ def test_denies_over_cold_start_limit():
     )
     assert not decision.allowed
     assert decision.reason is ProvisioningDenialReason.COLD_START_LIMIT
+
+
+def test_the_model_catalog_does_not_gate_a_sandbox_host_family():
+    decision = decide_materialization(
+        service_ref="posix-default",
+        kind=ServiceFamilyKind.SANDBOX_HOST,
+        limits=ResidentPolicyLimits(allowed_models=frozenset({"allowed-model"})),
+        active_replicas=0,
+        materializing_replicas=0,
+    )
+    assert decision.allowed
+
+
+def test_a_sandbox_host_family_is_still_bounded_by_the_replica_quota():
+    decision = decide_materialization(
+        service_ref="posix-default",
+        kind=ServiceFamilyKind.SANDBOX_HOST,
+        limits=ResidentPolicyLimits(max_replicas_per_family=1),
+        active_replicas=1,
+        materializing_replicas=0,
+    )
+    assert not decision.allowed
+    assert decision.reason is ProvisioningDenialReason.QUOTA_EXCEEDED

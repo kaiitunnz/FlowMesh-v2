@@ -55,6 +55,7 @@ from .state import (
     SafeCapacityVector,
     ServiceClaim,
     ServiceFamily,
+    ServiceFamilyKind,
 )
 from .stores import (
     AdmissionCreditLedger,
@@ -116,6 +117,7 @@ __all__ = [
     "SelectionStrategy",
     "ServiceClaim",
     "ServiceFamily",
+    "ServiceFamilyKind",
     "ServiceFamilyRegistry",
     "accept",
     "begin_stream",

@@ -35,6 +35,7 @@ from .payloads import (
     RagQuery,
     RagSearch,
     RagUsage,
+    SandboxCommandItem,
 )
 
 
@@ -80,6 +81,20 @@ class DevModelResult(StrictExecutorResult):
     task_type: Literal[TaskType.DEV_MODEL] = TaskType.DEV_MODEL
     model: str
     port: int
+
+
+class SandboxHostResult(StrictExecutorResult):
+    """A sandbox host allocation's descriptor."""
+
+    task_type: Literal[TaskType.SANDBOX_HOST] = TaskType.SANDBOX_HOST
+    profile: str
+
+
+class SandboxResult(StrictExecutorResult):
+    """A sandbox session's commands and their bounded results."""
+
+    task_type: Literal[TaskType.SANDBOX] = TaskType.SANDBOX
+    commands: list[SandboxCommandItem] = Field(default_factory=list)
 
 
 class _TrainingResult(StrictExecutorResult):
@@ -352,6 +367,8 @@ AnyExecutorResult = Annotated[
         | Annotated[EchoResult, Tag(TaskType.ECHO.value)]
         | Annotated[APIResult, Tag(TaskType.API.value)]
         | Annotated[SSHResult, Tag(TaskType.SSH.value)]
+        | Annotated[SandboxResult, Tag(TaskType.SANDBOX.value)]
+        | Annotated[SandboxHostResult, Tag(TaskType.SANDBOX_HOST.value)]
         | Annotated[BaseExecutorResult, Tag(_BASE_TAG)]
     ),
     Discriminator(_result_discriminator),

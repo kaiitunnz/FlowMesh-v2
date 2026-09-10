@@ -107,6 +107,18 @@ def build_resident_capacity(
             interface=str(serve.get("interface") or "chat"),
         )
 
+    def sandbox_host_live(host_task_id: str) -> bool:
+        record = runtime.get_record(host_task_id)
+        # A host is placeable once its allocation runs on a worker and has reported
+        # itself open; a terminal or unassigned one is not.
+        return bool(
+            record is not None
+            and record.status not in TERMINAL_TASK_STATUSES
+            and record.assigned_worker
+            and record.latest_update
+            and isinstance(record.latest_update.get("sandbox_host"), dict)
+        )
+
     sweep_interval = cfg.idle_sweep_interval_sec if cfg.idle_retain_sec > 0 else 0.0
     return ResidentCapacityControl(
         stores=stores,
@@ -117,6 +129,7 @@ def build_resident_capacity(
         settle_cb=runtime.settle_episode_invocation,
         redispatch_cb=runtime.redispatch_episode_invocation,
         endpoint_probe=endpoint,
+        sandbox_host_probe=sandbox_host_live,
         logger=logger,
         poll_interval_sec=cfg.poll_interval_sec,
         idle_sweep_interval_sec=sweep_interval,
