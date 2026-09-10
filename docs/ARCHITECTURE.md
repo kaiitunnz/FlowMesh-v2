@@ -197,10 +197,13 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   constraint resolved at dispatch: the episode lane yields as any other does, and an
   episode waits while its holder is busy. Owner loss, an incarnation change, or a
   component that does not match its seal fails closed as a typed
-  `PrivateStateUnavailable` rather than resuming against a fresh or partial home. The private root is scoped by the opaque
-  reference at `0700`, and only opaque references cross into the ledger, control state,
-  operation frames, logs, results, or artifacts. `WORKER_PRIVATE_STATE_DIR` sets the
-  root.
+  `PrivateStateUnavailable` rather than resuming against a fresh or partial home. One
+  activation reaches another's state only by holding a valid binding and attachment for
+  it, which the ledger's owner and epoch fences decide; the `0700` private root, keyed
+  by the opaque reference, separates a holder's lineages from other users on its node,
+  and a harness works inside its own components under its sandbox. Only opaque
+  references cross into the ledger, control state, operation frames, logs, results, or
+  artifacts. `WORKER_PRIVATE_STATE_DIR` sets the root.
 - **Agent-model gateway.** A model boundary an agent defers with a `canned` or `echo`
   binding settles on the control plane off the agent's lane, injecting the result back at
   the originating call. The gateway resolves the activation's pinned binding and its

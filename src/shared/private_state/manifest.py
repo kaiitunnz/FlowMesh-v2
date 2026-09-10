@@ -126,9 +126,9 @@ class StateBundleManifest(BaseModel):
     @model_validator(mode="after")
     def _seal_is_coherent(self) -> Self:
         kinds = [component.kind for component in self.components]
-        if len(set(kinds)) != len(kinds):
+        if len(present := set(kinds)) != len(kinds):
             raise ValueError("a sealed generation carries each component kind once")
-        if missing := required_components(self.profile) - set(kinds):
+        if missing := required_components(self.profile) - present:
             raise ValueError(
                 "a sealed generation is incomplete without "
                 + ", ".join(sorted(kind.value for kind in missing))

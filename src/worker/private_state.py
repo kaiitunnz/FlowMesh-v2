@@ -4,6 +4,16 @@ The holder keeps each lineage in its own opaque root, restores only the generati
 binding names, and seals the required components together at the step's quiescence
 fence. A generation that cannot be supplied in full fails closed rather than resuming
 against a fresh or partial home.
+
+A step that ends without sealing — a failure part way through a turn — leaves the tree
+ahead of the generation the binding still names, so the next attempt fails closed at
+verification rather than resuming from a point no fence covers.
+
+A lineage root outlives the activation that owned it: the holder reaps nothing on its
+own, because a completed step is not always the episode's terminal one and the root is
+shared with the workers co-located on its node. Its contents are private to the holder
+at 0700 and unreachable once the holder's incarnation ends, since no later incarnation
+satisfies an owner fence.
 """
 
 import re
@@ -63,12 +73,8 @@ class PrivateStateHolder:
                 "a state reference is an opaque identifier",
                 reference_id=reference_id,
             )
-        self._root.mkdir(parents=True, exist_ok=True)
-        self._root.chmod(_PRIVATE_MODE)
-        lineage = self._root / reference_id
-        lineage.mkdir(exist_ok=True)
-        lineage.chmod(_PRIVATE_MODE)
-        return lineage
+        _private_dir(self._root, parents=True)
+        return _private_dir(self._root / reference_id)
 
     def open(
         self,
@@ -98,10 +104,7 @@ class PrivateStateHolder:
         _claim_epoch(lineage, attachment)
         components = {}
         for kind in sorted(required_components(binding.reference.profile)):
-            path = lineage / kind.value
-            path.mkdir(exist_ok=True)
-            path.chmod(_PRIVATE_MODE)
-            components[kind] = path
+            components[kind] = _private_dir(lineage / kind.value)
         if binding.manifest is None:
             self._adopt_legacy_home(
                 components[StateComponentKind.HARNESS_HOME_FS], legacy_home
@@ -158,6 +161,13 @@ class PrivateStateHolder:
         if any(home.iterdir()):
             return
         shutil.copytree(legacy_home, home, dirs_exist_ok=True, symlinks=False)
+
+
+def _private_dir(path: Path, *, parents: bool = False) -> Path:
+    """Create or adopt a directory readable only by the holder's own user."""
+    path.mkdir(parents=parents, exist_ok=True)
+    path.chmod(_PRIVATE_MODE)
+    return path
 
 
 def _held_epoch(lineage: Path) -> int | None:

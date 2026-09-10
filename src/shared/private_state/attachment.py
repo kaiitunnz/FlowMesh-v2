@@ -51,9 +51,10 @@ class PrivateStateUnavailableReason(StrEnum):
 
 
 class PrivateStateUnavailable(Exception):
-    """A bound generation cannot be supplied, so the continuation fails closed.
+    """Raised when a bound generation cannot be supplied in full.
 
-    Raised instead of resuming against a fresh, partial, or foreign generation.
+    The continuation fails closed rather than resuming against a fresh, partial, or
+    foreign generation.
     """
 
     def __init__(

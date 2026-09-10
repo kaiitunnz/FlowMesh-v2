@@ -74,7 +74,7 @@ def test_a_seal_binds_the_generation_to_the_holder_that_produced_it(
     tmp_path: Path,
 ) -> None:
     ledger, _ = _seeded(tmp_path)
-    binding = ledger.binding("act-1")
+    binding = ledger.lineages()[0].binding
     assert binding is not None and binding.generation == 1
     assert binding.owner is not None
     assert (binding.owner.worker_id, binding.owner.incarnation) == ("wkr-1", 3)
@@ -143,7 +143,7 @@ def test_a_lineage_survives_a_snapshot_round_trip(tmp_path: Path) -> None:
             for lineage in ledger.lineages()
         ]
     )
-    binding = restored.binding("act-1")
+    binding = restored.lineages()[0].binding
     assert binding is not None
     assert binding.reference.reference_id == reference_id
     assert binding.generation == 1

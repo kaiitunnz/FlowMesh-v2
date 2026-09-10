@@ -1,8 +1,8 @@
 """The engine's authority over activation-private state lineages.
 
 The orchestration ledger owns a lineage's identity, its bound generation, and which
-holder may write it. Admission credit is a separate concern: an attachment reserves no
-capacity, holds no claim, and releases none.
+holder may write it. That authority is over state access alone; capacity admission is
+the separate concern a service claim carries.
 """
 
 from shared.private_state import (
@@ -31,10 +31,6 @@ class PrivateStateLedger:
 
     def lineages(self) -> list[PrivateStateLineage]:
         return list(self._lineages.values())
-
-    def binding(self, activation_id: str) -> PrivateStateBinding | None:
-        lineage = self._lineages.get(activation_id)
-        return lineage.binding if lineage else None
 
     def owner(self, activation_id: str) -> OwnerFence | None:
         lineage = self._lineages.get(activation_id)

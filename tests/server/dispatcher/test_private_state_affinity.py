@@ -31,7 +31,11 @@ spec:
 
 
 def _dispatcher(
-    *, idle_ids: list[str], registered: Worker | None, stale: bool = False
+    *,
+    idle_ids: list[str],
+    registered: Worker | None,
+    stale: bool = False,
+    failed: list[str] | None = None,
 ) -> tuple[CapturingDispatcher, str]:
     runtime = TaskRuntime(
         cast(Any, WorkflowRegistryStub()),
@@ -45,6 +49,9 @@ def _dispatcher(
         runtime.register("owner", "org", _ECHO_WORKFLOW, format="native")
     )
     task_id = results[0].task_id
+    record = runtime.get_record(task_id)
+    assert record is not None
+    record.failed_workers = list(failed or [])
     runtime.private_state_owner = mock.Mock(return_value=_OWNER)  # type: ignore[method-assign]
     registry = mock.Mock()
     registry.idle_satisfying_pool.return_value = [_worker(wid) for wid in idle_ids]
@@ -119,7 +126,38 @@ def test_a_restarted_owner_incarnation_does_not_satisfy_the_binding() -> None:
 
     assert dispatcher.dispatch_once(task_id) is False
 
-    assert PrivateStateUnavailableReason.OWNER_LOST.value in dispatcher.failed[0][1]
+    # The reason names the restart, not a generic loss: the worker id is still live.
+    reason = PrivateStateUnavailableReason.INCARNATION_MISMATCH
+    assert reason.value in dispatcher.failed[0][1]
+    assert dispatcher.failed[0][2]["payload"]["reason"] == reason.value
+
+
+def test_a_failure_on_the_owner_retries_there_rather_than_waiting_forever() -> None:
+    """The owner is the only holder that can supply the generation.
+
+    Diverting to an "untried" worker waits on candidates owner-affinity has already
+    excluded, so the episode would requeue without counting a retry and never reach a
+    terminal.
+    """
+    dispatcher, task_id = _dispatcher(
+        idle_ids=["wkr-other", _OWNER.worker_id],
+        registered=_live_owner(),
+        failed=[_OWNER.worker_id],
+    )
+    seen: list[list[str]] = []
+
+    def _capture(pool: list[Worker], *args: Any, **kwargs: Any) -> tuple[None, dict]:
+        seen.append([worker.id for worker in pool])
+        return None, {}
+
+    with mock.patch("server.dispatcher.base.select_worker", _capture):
+        dispatcher.dispatch_once(task_id)
+
+    # It reached selection with the owner as the candidate rather than deferring to a
+    # worker owner-affinity has already excluded. (Selection is stubbed out, so the
+    # trailing no_selection requeue is the stub's, not the divert's.)
+    assert seen == [[_OWNER.worker_id]]
+    assert [kwargs["reason"] for _, kwargs in dispatcher.requeued] == ["no_selection"]
 
 
 def test_a_stale_owner_heartbeat_fails_closed() -> None:

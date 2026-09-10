@@ -259,7 +259,7 @@ class AgentEpisodeExecutor(Executor):
 
 
 def _attachment(dispatch: AgentEpisodeDispatch) -> PrivateStateAttachment:
-    """The dispatch's write authority, without which no holder may materialize state."""
+    """The write authority a holder needs before it may materialize private state."""
     if dispatch.private_state_attachment is None:
         raise ExecutionError("an agent private-state binding ships with its attachment")
     return dispatch.private_state_attachment

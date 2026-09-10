@@ -185,17 +185,23 @@ class Dispatcher:
             extra_payload={"failed_workers": sorted(failed_ids)},
         )
 
-    def _private_state_owner_live(self, owner: OwnerFence) -> bool:
-        """Whether a bound generation's holder is the same live incarnation."""
+    def _private_state_owner_loss(
+        self, owner: OwnerFence
+    ) -> PrivateStateUnavailableReason | None:
+        """Why a bound generation's holder cannot supply it, or None when it can."""
         worker = self._worker_registry.get_worker(owner.worker_id)
-        return (
-            worker is not None
-            and worker.incarnation == owner.incarnation
-            and not self._worker_registry.is_worker_stale(owner.worker_id)
-        )
+        if worker is None or self._worker_registry.is_worker_stale(owner.worker_id):
+            return PrivateStateUnavailableReason.OWNER_LOST
+        if worker.incarnation != owner.incarnation:
+            return PrivateStateUnavailableReason.INCARNATION_MISMATCH
+        return None
 
     def _fail_private_state_unavailable(
-        self, task_id: str, record: TaskRecord, owner: OwnerFence
+        self,
+        task_id: str,
+        record: TaskRecord,
+        owner: OwnerFence,
+        reason: PrivateStateUnavailableReason,
     ) -> bool:
         """Fail an episode whose private state no live holder can supply.
 
@@ -210,11 +216,11 @@ class Dispatcher:
                 task_id, reason="private_state_owner_lost", count_retry=False
             )
             return False
-        reason = PrivateStateUnavailableReason.OWNER_LOST
         self._logger.warning(
-            "Private state for %s is held by %s, which is gone; failing closed",
+            "Private state for %s cannot be supplied by %s (%s); failing closed",
             task_id,
             owner.worker_id,
+            reason.value,
         )
         self.fail_task(
             task_id,
@@ -262,10 +268,14 @@ class Dispatcher:
 
         # 2b. Owner-affine private state: a bound generation is sealed on the holder
         # that produced it, so the episode waits for that incarnation instead of
-        # resuming against a fresh or foreign one. Waiting holds no worker.
+        # resuming against a fresh or foreign one. Waiting holds no worker. This
+        # governs a holder lost with no external effect in flight; an ambiguous
+        # in-flight effect settles terminally in the ledger before placement is asked.
         if (owner := self._runtime.private_state_owner(task_id)) is not None:
-            if not self._private_state_owner_live(owner):
-                return self._fail_private_state_unavailable(task_id, record, owner)
+            if (loss := self._private_state_owner_loss(owner)) is not None:
+                return self._fail_private_state_unavailable(
+                    task_id, record, owner, loss
+                )
             pool = [
                 c
                 for c in pool
@@ -279,6 +289,12 @@ class Dispatcher:
                 return False
 
         failed_ids = set(record.failed_workers)
+        if owner is not None:
+            # The owner is the only holder that can supply the bound generation, so a
+            # failure there is retried on it under the attempt budget. Diverting to an
+            # untried worker would wait on workers 2b has already excluded, which never
+            # become selectable — an unbounded requeue that reaches no terminal.
+            failed_ids = set()
 
         # 3. No idle worker: wait for a busy one, or grace-then-fail when no worker can
         # take the task, or every eligible worker has already failed it.

@@ -82,11 +82,16 @@ and seals the components together when the step yields.
 
 The holder verifies every required component against its seal before the harness starts,
 refuses an attachment whose write epoch a later dispatch superseded, and keeps each
-lineage under its own `0700` root keyed by the opaque state reference, so activations
-sharing a worker cannot reach each other's state. A generation that cannot be supplied in
-full raises `PrivateStateUnavailable` instead of starting the harness against an empty or
-partial home. A reachable harness home from an earlier run drains into the activation's
-first sealed generation.
+lineage under its own `0700` root keyed by the opaque state reference. Attaching to a
+lineage takes a binding and an attachment the ledger issued for it, so an activation
+sharing a worker with another gets no authority over its state. A generation that cannot
+be supplied in full raises `PrivateStateUnavailable` instead of starting the harness
+against an empty or partial home, which is also how a step that failed part way through
+a turn settles: the tree is ahead of the generation the binding names, and the next
+attempt fails closed rather than resuming from a point no fence covers. A reachable
+harness home from an earlier run drains into the activation's first sealed generation,
+and a lineage root outlives its activation, private to the holder until its incarnation
+ends.
 
 ## Per-workflow harness and model binding
 

@@ -1,4 +1,13 @@
-"""Sealing a component tree into the content identity a manifest records."""
+"""Sealing a component tree into the content identity a manifest records.
+
+A component's identity covers the relative path and contents of every regular file it
+holds. Symlinks, empty directories, and file modes are outside that scope: a link is
+skipped rather than followed, so a tree the harness fills with links to its own tooling
+seals to the same identity on any holder and nothing outside the root is drawn in.
+
+Sealing and verifying each read the whole tree, so both cost one pass over the
+component per dispatch.
+"""
 
 import hashlib
 from pathlib import Path
@@ -28,7 +37,7 @@ def seal_component(
     order, so the same tree seals identically on any holder and any edit after the seal
     is detectable. A symlink is never followed, so a link planted in the tree cannot
     draw state the reference does not own into the seal; replacing a sealed file with
-    one still changes the digest.
+    one still changes the digest. Directory recursion likewise does not follow links.
     """
     tree = hashlib.sha256()
     total = 0

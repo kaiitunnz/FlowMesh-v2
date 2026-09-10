@@ -785,7 +785,7 @@ def test_a_dispatch_after_cancel_takes_back_no_private_state_write() -> None:
         # Cancellation released the write authority, and a dispatch still in flight
         # cannot take it back for an activation that has ended.
         assert engine.grant_private_state(writer, "wkr-1", 1) is None
-        assert runtime.agent_episode_dispatch(writer, _HOLDER) is not None
-        assert engine.private_state_binding(writer) is not None
+        dispatch = runtime.agent_episode_dispatch(writer, _HOLDER)
+        assert dispatch is not None and dispatch.private_state_attachment is None
 
     asyncio.run(run())

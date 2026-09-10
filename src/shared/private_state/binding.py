@@ -10,14 +10,15 @@ from .reference import ActivationPrivateStateReference
 
 
 class PrivateStateRecoveryMode(StrEnum):
-    """What a continuation declares should happen when its generation is unavailable."""
+    """What a continuation declares should happen when its generation is unavailable.
+
+    A mode is listed once the fabric honors it, so a binding never declares recovery
+    behavior that recovery does not apply.
+    """
 
     # The bound generation is irreplaceable: recovery fails closed rather than
     # substituting a fresh or partial one.
     OWNER_LOCAL = "owner_local"
-    # Losing the generation is declared safe: recovery starts a fresh lineage
-    # generation instead of failing.
-    REINITIALIZE = "reinitialize"
 
 
 class OwnerFence(BaseModel):

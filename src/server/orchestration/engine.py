@@ -3197,13 +3197,6 @@ class OrchestrationEngine:
         op = self._operators.get(operator_id)
         return op if isinstance(op, AgentOperator) else None
 
-    def private_state_binding(self, task_id: str) -> PrivateStateBinding | None:
-        """An agent task's binding, minting an unseeded lineage on first use."""
-        wi = self._work_item_for_task(task_id)
-        if wi is None or self.agent_operator(task_id) is None:
-            return None
-        return self._private_state.ensure(wi.activation_id, self._instance.instance_id)
-
     def private_state_owner(self, task_id: str) -> OwnerFence | None:
         """The single holder that can supply an agent task's bound generation."""
         wi = self._work_item_for_task(task_id)
@@ -3260,12 +3253,6 @@ class OrchestrationEngine:
                 "generation": str(manifest.generation),
             },
         )
-
-    def release_private_state(self, task_id: str) -> None:
-        """Drop an agent task's write authority when it settles."""
-        wi = self._work_item_for_task(task_id)
-        if wi is not None:
-            self._private_state.release(wi.activation_id)
 
     def service_dependency(self, task_id: str) -> ServiceDependency | None:
         """The normalized resident dependency a dispatched task consumes, or None."""

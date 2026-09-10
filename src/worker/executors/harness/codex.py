@@ -216,10 +216,10 @@ def _agent_task(spec: AgentSpecStrict) -> str:
 
 
 def legacy_codex_home(results_dir: Path, workflow_id: str, task_id: str) -> Path:
-    """The rollout home a Codex activation used before private-state references.
+    """The worker-local rollout home an activation's first generation drains from.
 
-    A reachable tree here is drained into the activation's first sealed generation, so
-    an activation already mid-run keeps its rollout.
+    A reachable tree here is adopted into that first sealed generation, so an
+    activation already mid-run keeps its rollout.
     """
     safe = (re.sub(r"[^A-Za-z0-9._-]", "_", part) for part in (workflow_id, task_id))
     return results_dir.joinpath("codex_home", *safe)
