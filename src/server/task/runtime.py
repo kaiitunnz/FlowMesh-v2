@@ -1896,6 +1896,10 @@ class TaskRuntime:
             if record is None or engine is None:
                 return
             advance = engine.on_failed(task_id, detail, retryable=False)
+            # The session was denied before any attempt existed to carry the error, so
+            # record the typed reason on the task itself rather than leaving the
+            # generic obligation the advance would fall back to.
+            self._fail_v2_records_locked([task_id], detail, persist=True)
             self._apply_advance_locked(record.workflow_id, advance)
             self._save_ledger_locked(record.workflow_id)
             self._cv.notify_all()

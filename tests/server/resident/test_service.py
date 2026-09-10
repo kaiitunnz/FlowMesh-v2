@@ -29,6 +29,7 @@ from server.resident import (
     AdmissionProfile,
     ClaimState,
     LifecycleScaleManager,
+    MaterializedAllocation,
     ReplicaEndpoint,
     ReplicaState,
     ResidentCapacityControl,
@@ -173,8 +174,10 @@ def _build(
 
     if materialize_fn is None:
 
-        async def materialize_fn(family: str, replica: ReplicaIncarnation) -> str:
-            return "tsk-serve-1"
+        async def materialize_fn(
+            family: Any, replica: ReplicaIncarnation
+        ) -> MaterializedAllocation:
+            return MaterializedAllocation(serve_task_id="tsk-serve-1")
 
     admission = AdmissionController(stores)
     lifecycle = LifecycleScaleManager(

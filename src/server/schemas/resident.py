@@ -6,6 +6,7 @@ from ..resident.state import (
     ReplicaIncarnation,
     ServiceClaim,
     ServiceFamily,
+    ServiceFamilyKind,
 )
 
 
@@ -15,6 +16,7 @@ class ResidentFamilyInfo(BaseModel):
         description="Engine and batch key a compatible replica is admitted against."
     )
     service_ref: str = Field(description="Service reference the family serves.")
+    kind: ServiceFamilyKind = Field(description="Substrate the replicas run as.")
     isolation: str | None = Field(
         default=None, description="Isolation requirement, if any."
     )
@@ -30,6 +32,7 @@ class ResidentFamilyInfo(BaseModel):
             family=family.family,
             engine_batch_key=family.engine_batch_key,
             service_ref=family.service_ref,
+            kind=family.kind,
             isolation=family.isolation,
             selection_strategy=family.selection_strategy,
             warmth=family.warmth,

@@ -19,7 +19,12 @@ from lumid_hooks import PrincipalContext, ResourceRef
 from server.auth import require_permission
 from server.config import ResidentCapacityConfig
 from server.hooks import PERMISSION_CHECKERS, RESOURCE_REGISTRARS
-from server.resident import ReplicaIncarnation, ServiceFamily, ServiceFamilyKind
+from server.resident import (
+    NoSandboxCapacity,
+    ReplicaIncarnation,
+    ServiceFamily,
+    ServiceFamilyKind,
+)
 from server.resident.materializer import materialize_resident_replica
 
 _LOGGER = logging.getLogger("test.resident_materializer")
@@ -94,13 +99,15 @@ def _materialize(config: ResidentCapacityConfig, runtime: Any, *registrars: Any)
     RESOURCE_REGISTRARS.clear()
     RESOURCE_REGISTRARS.extend(registrars)
     try:
-        return asyncio.run(
+        allocation = asyncio.run(
             materialize_resident_replica(
                 runtime, _SYSTEM, config, _FAMILY, _REPLICA, _LOGGER
             )
         )
     finally:
         RESOURCE_REGISTRARS.clear()
+    assert allocation.serve_task_id is not None
+    return allocation.serve_task_id
 
 
 def test_serve_task_is_owned_and_registered_under_the_system_principal() -> None:
@@ -312,10 +319,11 @@ def _materialize_owned(owner: PrincipalContext) -> tuple[str, _OwnershipRegistra
     PERMISSION_CHECKERS.append(_OwnerOnlyChecker(registrar.owner_of))
     config = ResidentCapacityConfig(substrate="dev_model")
     runtime: Any = _FakeRuntime()
-    task_id = asyncio.run(
+    allocation = asyncio.run(
         materialize_resident_replica(runtime, owner, config, _FAMILY, _REPLICA, _LOGGER)
     )
-    return task_id, registrar
+    assert allocation.serve_task_id is not None
+    return allocation.serve_task_id, registrar
 
 
 def _read_logs(principal: PrincipalContext, task_id: str) -> None:
@@ -344,7 +352,7 @@ def test_foreign_tenant_is_denied_the_resident_task_logs() -> None:
     assert excinfo.value.status_code == 403
 
 
-def test_sandbox_host_substrate_needs_no_model_source() -> None:
+def test_a_sandbox_host_reserves_a_worker_and_starts_no_task() -> None:
     runtime: Any = _FakeRuntime()
     config = ResidentCapacityConfig(substrate="serve", serve_ttl_sec=600)
     family = ServiceFamily(
@@ -355,19 +363,37 @@ def test_sandbox_host_substrate_needs_no_model_source() -> None:
         interface="sandbox",
     )
 
-    RESOURCE_REGISTRARS.clear()
-    try:
+    allocation = asyncio.run(
+        materialize_resident_replica(
+            runtime, _SYSTEM, config, family, _REPLICA, _LOGGER, lambda: "wkr-7"
+        )
+    )
+
+    assert allocation.worker_id == "wkr-7"
+    assert allocation.serve_task_id is None
+    # A reservation starts nothing, so no task is submitted for it.
+    assert runtime.register_call is None
+
+
+def test_a_sandbox_host_without_a_capable_worker_refuses_to_materialize() -> None:
+    runtime: Any = _FakeRuntime()
+    family = ServiceFamily(
+        family="posix-default|sandbox",
+        engine_batch_key="posix-default|sandbox",
+        service_ref="posix-default",
+        kind=ServiceFamilyKind.SANDBOX_HOST,
+        interface="sandbox",
+    )
+
+    with pytest.raises(NoSandboxCapacity):
         asyncio.run(
             materialize_resident_replica(
-                runtime, _SYSTEM, config, family, _REPLICA, _LOGGER
+                runtime,
+                _SYSTEM,
+                ResidentCapacityConfig(),
+                family,
+                _REPLICA,
+                _LOGGER,
+                lambda: None,
             )
         )
-    finally:
-        RESOURCE_REGISTRARS.clear()
-
-    assert runtime.register_call is not None
-    spec = json.loads(runtime.register_call[2])["spec"]
-    assert spec["taskType"] == "sandbox_host"
-    assert spec["resources"]["hardware"]["gpu"]["count"] == 0
-    assert spec["ttlSeconds"] == 600
-    assert "model" not in spec

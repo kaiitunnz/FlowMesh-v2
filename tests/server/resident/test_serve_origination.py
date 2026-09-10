@@ -195,7 +195,7 @@ def _build(
         settled.append(("redispatch", task_id, call_correlation))
         return True
 
-    async def materialize_fn(family: Any, replica: Any) -> str:
+    async def materialize_fn(family: Any, replica: Any) -> Any:
         raise AssertionError("a standing serve replica is adopted, never materialized")
 
     admission = AdmissionController(stores)

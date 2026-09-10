@@ -1,15 +1,16 @@
-"""Materialize a resident replica as an owned task.
+"""Materialize a resident replica's substrate.
 
-Resident-capacity control provisions a replica by submitting its family's substrate
-through the runtime under the resolved system principal — a serve (or the GPU-free
-`dev_model` stand-in) task for a model-serving family, a sandbox-host allocation for a
-sandbox family — and records that ownership with the resource registrars. An operator
-then reads a resident replica's logs through the same owner-scoped path as any other
-task, rather than through a synthetic owner no principal can authenticate as.
+A model-serving family provisions a replica by submitting a serve (or the GPU-free
+`dev_model` stand-in) task through the runtime under the resolved system principal, and
+records that ownership with the resource registrars, so an operator reads the replica's
+logs through the same owner-scoped path as any other task. A sandbox-host family instead
+reserves sandbox capacity on a worker: nothing is started, so the allocation is the
+reservation itself and its sessions run their commands on that worker.
 """
 
 import json
 import logging
+from collections.abc import Callable
 from typing import Any
 
 from flowmesh_hook import ResourceKind
@@ -18,7 +19,13 @@ from lumid_hooks import PrincipalContext
 from ..auth import register_resource
 from ..config import ResidentCapacityConfig
 from ..task.runtime import TaskRuntime
-from .state import ReplicaIncarnation, ServiceFamily, ServiceFamilyKind
+from .state import (
+    MaterializedAllocation,
+    NoSandboxCapacity,
+    ReplicaIncarnation,
+    ServiceFamily,
+    ServiceFamilyKind,
+)
 
 
 async def materialize_resident_replica(
@@ -28,13 +35,17 @@ async def materialize_resident_replica(
     family: ServiceFamily,
     replica: ReplicaIncarnation,
     logger: logging.Logger,
-) -> str:
-    """Submit the family's substrate as a task owned by `owner`; return its id."""
-    spec = (
-        _sandbox_host_spec()
-        if family.kind is ServiceFamilyKind.SANDBOX_HOST
-        else _model_serving_spec(config, family)
-    )
+    reserve_sandbox_worker: Callable[[], str | None] | None = None,
+) -> MaterializedAllocation:
+    """Provision the family's substrate for `replica`."""
+    if family.kind is ServiceFamilyKind.SANDBOX_HOST:
+        worker_id = reserve_sandbox_worker() if reserve_sandbox_worker else None
+        if worker_id is None:
+            raise NoSandboxCapacity(
+                f"no sandbox-capable worker can hold {family.family!r}"
+            )
+        return MaterializedAllocation(worker_id=worker_id)
+    spec = _model_serving_spec(config, family)
     if config.serve_ttl_sec:
         spec["ttlSeconds"] = config.serve_ttl_sec
     payload = {
@@ -65,17 +76,7 @@ async def materialize_resident_replica(
             {"workflow_id": workflow_id},
             logger,
         )
-    return entries[0].task_id
-
-
-def _sandbox_host_spec() -> dict[str, Any]:
-    """A sandbox host holds a worker's reusable runtime state and session capacity."""
-    return {
-        "taskType": "sandbox_host",
-        "resources": {
-            "hardware": {"cpu": 2, "memory": "4Gi", "gpu": {"type": "any", "count": 0}}
-        },
-    }
+    return MaterializedAllocation(serve_task_id=entries[0].task_id)
 
 
 def _model_serving_spec(

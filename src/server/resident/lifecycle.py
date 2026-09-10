@@ -20,6 +20,7 @@ from .state import (
     SERVABLE_REPLICA_STATES,
     AdmissionProfile,
     AllocationLease,
+    MaterializedAllocation,
     ProvisioningDenialReason,
     ReplicaCapacityReport,
     ReplicaEndpoint,
@@ -30,8 +31,10 @@ from .state import (
 )
 from .stores import ResidentStores
 
-# Submits the family's serve substrate and returns the backing serve task id.
-MaterializeFn = Callable[[ServiceFamily, ReplicaIncarnation], Awaitable[str]]
+# Provisions the family's substrate and returns what it allocated.
+MaterializeFn = Callable[
+    [ServiceFamily, ReplicaIncarnation], Awaitable[MaterializedAllocation]
+]
 # Tears down a replica's backing serve task.
 StopFn = Callable[[str], None]
 
@@ -151,15 +154,20 @@ class LifecycleScaleManager:
         self._stores.directory.add(replica)
         self._persist()
         try:
-            serve_task_id = await self._materialize_fn(family, replica)
+            allocation = await self._materialize_fn(family, replica)
         except Exception:
             # A failed cold start must not wedge the family: invalidate the replica so a
             # later demand can materialize again, and let the caller settle the claim.
             self.on_preempt(replica.replica_id)
             raise
-        replica.serve_task_id = serve_task_id
+        replica.serve_task_id = allocation.serve_task_id
+        replica.worker_id = allocation.worker_id
         replica.updated_at = now_iso()
         self._persist()
+        if allocation.serve_task_id is None:
+            # A reservation starts nothing, so it is admittable the moment it is
+            # recorded; there is no endpoint to wait for.
+            self.on_replica_ready(replica.replica_id, None)
         return replica
 
     def adopt_standing_replica(

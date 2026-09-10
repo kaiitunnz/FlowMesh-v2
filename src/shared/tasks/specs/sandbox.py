@@ -1,4 +1,4 @@
-from typing import Annotated, Literal, Self
+from typing import Literal, Self
 
 from pydantic import Field, model_validator
 
@@ -51,15 +51,3 @@ class SandboxSpecTemplate(TaskSpecTemplateBase):
     taskType: Literal[TaskType.SANDBOX]
     sandbox: SandboxHostSpec = Field(default_factory=SandboxHostSpec)
     commands: list[SandboxCommandSpecTemplate] = Field(min_length=1)
-
-
-class SandboxHostSpecStrict(TaskSpecStrictBase):
-    taskType: Literal[TaskType.SANDBOX_HOST]
-    profile: str = "posix-default"
-    ttlSeconds: Annotated[float, Field(gt=0)] | None = None
-
-
-class SandboxHostSpecTemplate(TaskSpecTemplateBase):
-    taskType: Literal[TaskType.SANDBOX_HOST]
-    profile: str = "posix-default"
-    ttlSeconds: Annotated[float, Field(gt=0)] | None = None

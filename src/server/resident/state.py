@@ -129,7 +129,9 @@ class SafeCapacityVector(BaseModel):
 
     ``admission_slots`` is the calibrated conservative slot count the stock adapter
     reports — a per-family, per-hardware slot budget rather than a scalar running-set
-    threshold.
+    threshold. It bounds how many invocations may hold the replica at once, which is
+    admission, not execution: a sandbox host's sessions each hold a slot while open and
+    their commands still run one at a time on its worker.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -216,6 +218,23 @@ class ReplicaIncarnation(BaseModel):
     created_at: str = Field(default_factory=now_iso)
     updated_at: str = Field(default_factory=now_iso)
     last_active_at: str = Field(default_factory=now_iso)
+
+
+class MaterializedAllocation(BaseModel):
+    """What one materialization produced for a replica.
+
+    A model-serving replica names the serve task backing it; a sandbox host names the
+    worker whose sandbox capacity it reserves.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    serve_task_id: str | None = None
+    worker_id: str | None = None
+
+
+class NoSandboxCapacity(Exception):
+    """No worker can hold a sandbox-host reservation."""
 
 
 class AllocationLease(BaseModel):

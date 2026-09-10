@@ -83,8 +83,8 @@ SettleCallback = Callable[..., bool]
 RedispatchCallback = Callable[[str, str], bool]
 # Reads a serve substrate's reported endpoint once ready, else None.
 EndpointProbe = Callable[[str], ReplicaEndpoint | None]
-# Whether a sandbox host allocation is running on a worker a session can be placed on.
-SandboxHostProbe = Callable[[str], bool]
+# Whether a worker holding a sandbox-host reservation is still live and non-stale.
+SandboxWorkerProbe = Callable[[str], bool]
 # Persists the authoritative CS snapshot.
 PersistCallback = Callable[[], None]
 
@@ -345,7 +345,7 @@ class ResidentCapacityControl:
         settle_cb: SettleCallback,
         redispatch_cb: RedispatchCallback,
         endpoint_probe: EndpointProbe,
-        sandbox_host_probe: SandboxHostProbe | None = None,
+        sandbox_worker_probe: SandboxWorkerProbe | None = None,
         delivery: ResidentWorkerDelivery | None = None,
         persist: PersistCallback | None = None,
         logger: logging.Logger | None = None,
@@ -362,7 +362,7 @@ class ResidentCapacityControl:
         self._settle = settle_cb
         self._redispatch = redispatch_cb
         self._probe_endpoint = endpoint_probe
-        self._probe_sandbox_host = sandbox_host_probe or (lambda _task_id: False)
+        self._probe_sandbox_worker = sandbox_worker_probe or (lambda _worker: False)
         self._delivery = delivery
         self._persist = persist or (lambda: None)
         self._logger = logger or logging.getLogger("resident-capacity")
@@ -372,6 +372,7 @@ class ResidentCapacityControl:
         self._max_transient_redrives = max_transient_redrives
         self._transient_failures: dict[str, int] = {}
         self._attempts: dict[str, _Attempt] = {}
+        self._sandbox_opens: set[str] = set()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._admit_lock = asyncio.Lock()
         self._sweep_task: asyncio.Task[None] | None = None
@@ -443,9 +444,14 @@ class ResidentCapacityControl:
         """
         if self._loop is None:
             return
-        if (held := self._admission.active_claim(request.invocation_id)) is not None:
-            if held.holds_credit:
-                return
+        # Admit once: any non-terminal claim — pending or credit-bearing — is this
+        # session's admission, and an open already in flight has not raised its claim
+        # yet, so neither may raise a second one.
+        if self._admission.active_claim(request.invocation_id) is not None:
+            return
+        if request.invocation_id in self._sandbox_opens:
+            return
+        self._sandbox_opens.add(request.invocation_id)
         asyncio.run_coroutine_threadsafe(
             self._open_sandbox_session(request), self._loop
         )
@@ -496,6 +502,8 @@ class ResidentCapacityControl:
             self._logger.exception(
                 "sandbox session admission failed for %s", request.invocation_id
             )
+        finally:
+            self._sandbox_opens.discard(request.invocation_id)
 
     def sandbox_session_worker(self, invocation_id: str) -> str | None:
         """The worker holding the host an admitted session must run on, or None."""
@@ -507,7 +515,7 @@ class ResidentCapacityControl:
         replica = self._stores.directory.get(claim.replica_id)
         if replica is None or replica.state not in SERVABLE_REPLICA_STATES:
             return None
-        return self._delivery.serve_worker_of(replica) if self._delivery else None
+        return replica.worker_id
 
     def redrive_serve(self, request: ServeOrigination) -> None:
         """Re-drive a serve origination onto a fresh session under its held claim."""
@@ -803,16 +811,11 @@ class ResidentCapacityControl:
         # no longer reports itself live is gone, so invalidate the incarnation to
         # re-materialize.
         for replica in self._stores.directory.all():
-            if (
-                replica.state not in SERVABLE_REPLICA_STATES
-                or replica.serve_task_id is None
-            ):
+            if replica.state not in SERVABLE_REPLICA_STATES:
                 continue
-            definition = self._stores.families.get(replica.family)
-            if definition is not None and definition.kind is (
-                ServiceFamilyKind.SANDBOX_HOST
-            ):
-                if not self._probe_sandbox_host(replica.serve_task_id):
+            if replica.serve_task_id is None:
+                # A sandbox-host reservation survives only while its worker does.
+                if not self._probe_sandbox_worker(replica.worker_id or ""):
                     self._lifecycle.on_preempt(replica.replica_id)
                     continue
             elif (fresh := self._probe_endpoint(replica.serve_task_id)) is None:
@@ -1558,8 +1561,10 @@ class ResidentCapacityControl:
         if family in self._stores.families:
             return True
         service_ref = dependency.service_ref
+        kind = _family_kind(dependency.interface)
         if (
-            self._limits.allowed_models
+            kind is ServiceFamilyKind.MODEL_SERVING
+            and self._limits.allowed_models
             and service_ref not in self._limits.allowed_models
         ):
             return False
@@ -1568,6 +1573,7 @@ class ResidentCapacityControl:
                 family=family,
                 engine_batch_key=dependency.engine_batch_key,
                 service_ref=service_ref,
+                kind=kind,
                 interface=dependency.interface.value,
                 isolation=dependency.isolation,
                 selection_strategy=self._limits.selection_strategy,
@@ -1627,11 +1633,10 @@ class ResidentCapacityControl:
         )
 
     def _promote_ready_replicas(self, definition: ServiceFamily) -> None:
-        """Warm every materializing replica whose substrate now reports itself live.
+        """Warm every materializing replica whose engine endpoint now answers.
 
-        A model-serving replica becomes admittable once its engine endpoint answers; a
-        sandbox host once its allocation runs on a worker, which is all a co-located
-        session needs to reach it.
+        A sandbox host reserves capacity rather than starting anything, so it is warm
+        from the moment its reservation is recorded and never waits here.
         """
         for replica in self._stores.directory.by_family(definition.family):
             if (
@@ -1639,10 +1644,7 @@ class ResidentCapacityControl:
                 or replica.serve_task_id is None
             ):
                 continue
-            if definition.kind is ServiceFamilyKind.SANDBOX_HOST:
-                if self._probe_sandbox_host(replica.serve_task_id):
-                    self._lifecycle.on_replica_ready(replica.replica_id, None)
-            elif (endpoint := self._probe_endpoint(replica.serve_task_id)) is not None:
+            if (endpoint := self._probe_endpoint(replica.serve_task_id)) is not None:
                 self._lifecycle.on_replica_ready(replica.replica_id, endpoint)
 
     def _fail(

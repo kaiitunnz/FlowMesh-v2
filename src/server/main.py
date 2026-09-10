@@ -212,6 +212,7 @@ if IS_ROOT_NODE:
             orchestration=config.orchestration,
             system_principal=_resident_owner,
             registry=RESIDENT_REGISTRY,
+            worker_registry=WORKER_REGISTRY,
             logger=logger,
         )
         RUNTIME.set_resident_terminal_hook(RESIDENT_CONTROL.on_invocation_terminal)

@@ -15,6 +15,7 @@ from lumid_hooks import PrincipalContext
 
 from shared.resident.contracts import ReplicaEndpoint
 from shared.schemas.command import MediatedOpMessage
+from shared.tasks.task_type import TaskType
 
 from ..config import OrchestrationConfig, ResidentCapacityConfig
 from ..network.reverse_relay import RelaySessionStore
@@ -28,7 +29,7 @@ from .lifecycle import LifecycleScaleManager
 from .materializer import materialize_resident_replica
 from .policy import ResidentPolicyLimits
 from .service import ResidentCapacityControl, ResidentWorkerDelivery
-from .state import ReplicaIncarnation, ServiceFamily
+from .state import MaterializedAllocation, ReplicaIncarnation, ServiceFamily
 from .stores import ResidentStores
 
 # Yields the resolved system principal, read lazily so materialization uses the
@@ -42,6 +43,7 @@ def build_resident_capacity(
     orchestration: OrchestrationConfig,
     system_principal: SystemPrincipalProvider,
     registry: ResidentRegistry,
+    worker_registry: WorkerRegistry,
     logger: logging.Logger,
 ) -> ResidentCapacityControl:
     """Wire and return resident-capacity control for the enabled resident config."""
@@ -58,9 +60,31 @@ def build_resident_capacity(
     def persist() -> None:
         registry.save_snapshot(stores.to_snapshot())
 
-    async def materialize(family: ServiceFamily, replica: ReplicaIncarnation) -> str:
+    def sandbox_worker_live(worker_id: str) -> bool:
+        worker = worker_registry.get_worker(worker_id) if worker_id else None
+        return worker is not None and not worker_registry.is_worker_stale(worker_id)
+
+    def reserve_sandbox_worker() -> str | None:
+        """A live worker that can run sandbox sessions, or None when none can."""
+        for worker_id in worker_registry.get_worker_ids():
+            worker = worker_registry.get_worker(worker_id)
+            if worker is None or worker_registry.is_worker_stale(worker_id):
+                continue
+            if TaskType.SANDBOX in worker.capabilities.supported_task_types:
+                return worker.id
+        return None
+
+    async def materialize(
+        family: ServiceFamily, replica: ReplicaIncarnation
+    ) -> MaterializedAllocation:
         return await materialize_resident_replica(
-            runtime, system_principal(), cfg, family, replica, logger
+            runtime,
+            system_principal(),
+            cfg,
+            family,
+            replica,
+            logger,
+            reserve_sandbox_worker,
         )
 
     def stop(serve_task_id: str) -> None:
@@ -107,18 +131,6 @@ def build_resident_capacity(
             interface=str(serve.get("interface") or "chat"),
         )
 
-    def sandbox_host_live(host_task_id: str) -> bool:
-        record = runtime.get_record(host_task_id)
-        # A host is placeable once its allocation runs on a worker and has reported
-        # itself open; a terminal or unassigned one is not.
-        return bool(
-            record is not None
-            and record.status not in TERMINAL_TASK_STATUSES
-            and record.assigned_worker
-            and record.latest_update
-            and isinstance(record.latest_update.get("sandbox_host"), dict)
-        )
-
     sweep_interval = cfg.idle_sweep_interval_sec if cfg.idle_retain_sec > 0 else 0.0
     return ResidentCapacityControl(
         stores=stores,
@@ -129,7 +141,7 @@ def build_resident_capacity(
         settle_cb=runtime.settle_episode_invocation,
         redispatch_cb=runtime.redispatch_episode_invocation,
         endpoint_probe=endpoint,
-        sandbox_host_probe=sandbox_host_live,
+        sandbox_worker_probe=sandbox_worker_live,
         logger=logger,
         poll_interval_sec=cfg.poll_interval_sec,
         idle_sweep_interval_sec=sweep_interval,

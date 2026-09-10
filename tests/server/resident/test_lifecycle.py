@@ -15,6 +15,7 @@ from server.resident import (
     InvocationSubject,
     InvocationSubjectKind,
     LifecycleScaleManager,
+    MaterializedAllocation,
     ProvisioningDenialReason,
     ReplicaEndpoint,
     ReplicaState,
@@ -135,7 +136,7 @@ def test_scale_from_zero_then_warm():
     stores.families.register(_FAMILY)
 
     async def materialize_fn(family, replica):
-        return "tsk-serve-1"
+        return MaterializedAllocation(serve_task_id="tsk-serve-1")
 
     mgr = _manager(stores, materialize_fn=materialize_fn)
     assert mgr.plan_capacity(_FAMILY).action == "materialize"

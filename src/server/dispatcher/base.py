@@ -272,10 +272,12 @@ class Dispatcher:
         if self._runtime.is_sandbox_session(task_id):
             host_worker = self._runtime.sandbox_session_worker(task_id)
             if host_worker is None:
-                self._runtime.open_sandbox_session(task_id)
+                # Requeue before originating: admission may settle the session
+                # terminally, and a requeue after that would find no pending task.
                 self.requeue_task(
                     task_id, reason="awaiting_sandbox_admission", count_retry=False
                 )
+                self._runtime.open_sandbox_session(task_id)
                 return False
             pool = [c for c in pool if c.id == host_worker]
             if not pool:

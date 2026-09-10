@@ -35,6 +35,7 @@ from .state import (
     InvocationSubject,
     ReplicaIncarnation,
     ServiceClaim,
+    ServiceFamilyKind,
 )
 from .stores import ResidentStores
 
@@ -221,7 +222,7 @@ class AdmissionController:
         if chosen is None:
             return None
         replica = self._stores.directory.get(chosen.replica_id)
-        if replica is None or replica.endpoint is None:
+        if replica is None or not self._reachable(replica):
             return None
         reserve(
             claim,
@@ -266,6 +267,17 @@ class AdmissionController:
             origin_id=origin_id,
             deadline_at=deadline_at,
         )
+
+    def _reachable(self, replica: ReplicaIncarnation) -> bool:
+        """Whether an admitted claim can reach the replica's substrate.
+
+        A model-serving replica is reached at the engine endpoint it advertises; a
+        sandbox host is reached in its own worker, so it advertises none.
+        """
+        family = self._stores.families.get(replica.family)
+        if family is not None and family.kind is ServiceFamilyKind.SANDBOX_HOST:
+            return True
+        return replica.endpoint is not None
 
     def accept_session(self, claim: ServiceClaim) -> None:
         """Record ``ACCEPTED`` for a session its admitted host now holds open.

@@ -171,10 +171,15 @@ WARM / BUSY → PREEMPTED / FAILED → reconcile and recreate
 
 A family declares the substrate its replicas are materialized as. A `model_serving` family
 starts a serve (or `dev_model`) task and becomes admittable once its engine endpoint
-answers; a `sandbox_host` family starts a sandbox-host allocation and becomes admittable
-once that allocation runs on a worker, which is all a co-located session needs to reach it.
-Every other part of the lifecycle — leases, states, drain, teardown, preemption, capacity
-reports, selection, and credit — is shared.
+answers. A `sandbox_host` family instead reserves sandbox capacity on a worker: it starts
+nothing, so it is admittable the moment the reservation is recorded, and the sessions
+admitted to it run their commands on that worker. Its reservation lives while that worker
+does. Every other part of the lifecycle — leases, states, drain, teardown, preemption,
+capacity reports, selection, and credit — is shared.
+
+A replica's admission slots bound how many invocations may hold it at once. For a sandbox
+host that is how many sessions may be open concurrently; their commands still execute one
+at a time on the reserved worker, each command waiting for the worker as any task does.
 
 The first eligible `PENDING` claim for an approved family with no capacity triggers a
 bounded zero-to-one materialization. Before creating an allocation, policy checks the
@@ -213,7 +218,7 @@ is disabled.
 
 | Method | Path | Returns |
 | --- | --- | --- |
-| GET | `/api/v1/resident/families` | Registered service families (family, engine/batch key, service ref, isolation, selection strategy, warmth). |
+| GET | `/api/v1/resident/families` | Registered service families (family, engine/batch key, service ref, kind, isolation, selection strategy, warmth). |
 | GET | `/api/v1/resident/replicas` | Replica incarnations — live and inert — with state, health, backing `serve_task_id`, worker, lease, and endpoint host and port. Filterable by `family`. |
 | GET | `/api/v1/resident/claims` | Credit-bearing admission claims and per-replica held credit, recomputed on read from the authoritative claims. |
 

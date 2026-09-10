@@ -124,6 +124,7 @@ def initialize_executors(
         "rag",
         "agent_episode",
         "service_leaf",
+        "sandbox_session",
         "dev_model",
         "sft",
         "lora_sft",

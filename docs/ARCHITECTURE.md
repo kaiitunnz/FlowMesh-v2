@@ -182,19 +182,21 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   `AGENT_HARNESS_DEFAULT_BACKEND` default, and an agent with neither fails template
   validation. `agent` is a v2-only task type: a legacy v1 agent submission is rejected.
 - **Sandbox sessions.** A sandbox host is a resident allocation of the `sandbox_host`
-  family kind, materialized, warmed, drained, stopped, and recreated through the same
-  lifecycle as a model-serving family; only the materializer's substrate differs. A
-  `sandbox` task is one private session: it owns its own activation and therefore its
-  own private-state lineage under the `sandbox_session` profile, and its commands run in
-  the worker holding its admitted host. One `ServiceClaim` admits the session's host
-  capacity for its whole life — every command reuses it — and its `PrivateStateAttachment`
-  grants state access without consuming or releasing that credit. Admission supplies the
-  session's placement, so a session waits, holding no worker, until its host is admitted.
-  Each command is one bounded episode step that opens the generation its binding names,
-  runs in the worker-local `SandboxRuntime`, and seals the next generation, so the sealed
-  generation is also the session's progress. A private sandbox mutation is stateful and
-  recovery-bearing but is not an external effect: the declared-safe path reaches no
-  network and nothing outside the session's own tree.
+  family kind, admitted, drained, stopped, and recreated through the same lifecycle as a
+  model-serving family; only the materializer differs, and for a sandbox host it reserves
+  sandbox capacity on a worker rather than starting anything. A `sandbox` task is one
+  private session: it owns its own activation and therefore its own private-state lineage
+  under the `sandbox_session` profile, and its commands run on the worker its admitted
+  host reserves. One `ServiceClaim` admits the session's host capacity for its whole life
+  — every command reuses it — and its `PrivateStateAttachment` grants state access without
+  consuming or releasing that credit. Admission supplies the session's placement, so a
+  session waits, holding no worker, until its host is admitted. A replica's admission
+  slots bound how many sessions may hold a host open at once; their commands run one at a
+  time on the reserved worker. Each command is one bounded episode step that opens the
+  generation its binding names, runs in the worker-local `SandboxRuntime`, and seals the
+  next generation, so the sealed generation is also the session's progress. A private
+  sandbox mutation is stateful and recovery-bearing but is not an external effect: the
+  declared-safe path reaches no network and nothing outside the session's own tree.
 - **Activation-private state.** An agent activation owns its mutable harness state
   under an opaque `ActivationPrivateStateReference`, whose lifecycle and recovery the
   orchestration ledger owns. A `PrivateStateBinding` names the generation and recovery
