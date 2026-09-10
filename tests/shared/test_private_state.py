@@ -20,6 +20,7 @@ from shared.private_state import (
 
 _HOME = StateComponentKind.HARNESS_HOME_FS
 _WORKSPACE = StateComponentKind.WORKSPACE_FS
+_SANDBOX = StateComponentKind.SANDBOX_FS
 
 
 def _reference(reference_id: str = "aps-one") -> ActivationPrivateStateReference:
@@ -222,3 +223,32 @@ def test_replacing_a_sealed_file_with_a_link_is_detected(tmp_path: Path) -> None
     with pytest.raises(PrivateStateUnavailable) as raised:
         verify_component(sealed, home, reference_id="aps-one")
     assert raised.value.reason is PrivateStateUnavailableReason.COMPONENT_MISMATCH
+
+
+def test_a_sandbox_generation_seals_its_own_component(tmp_path: Path) -> None:
+    sandbox = seal_component(
+        _SANDBOX, _tree(tmp_path, "box", "output"), reference_id="aps-one"
+    )
+    manifest = StateBundleManifest(
+        manifest_id="sbm-1",
+        reference_id="aps-one",
+        generation=1,
+        profile=BundleProfile.SANDBOX_SESSION,
+        quiescence_fence="fence-1",
+        components=(sandbox,),
+    )
+    assert manifest.component(_SANDBOX) == sandbox
+    assert manifest.component(_WORKSPACE) is None
+
+
+def test_a_sandbox_generation_rejects_a_harness_component_set(tmp_path: Path) -> None:
+    home, workspace = _components(tmp_path)
+    with pytest.raises(ValueError, match="sandbox_fs"):
+        StateBundleManifest(
+            manifest_id="sbm-1",
+            reference_id="aps-one",
+            generation=1,
+            profile=BundleProfile.SANDBOX_SESSION,
+            quiescence_fence="fence-1",
+            components=(home, workspace),
+        )

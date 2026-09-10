@@ -17,6 +17,7 @@ class BundleProfile(StrEnum):
     """The component set a lineage's sealed generations carry."""
 
     AGENT_HARNESS = "agent_harness"
+    SANDBOX_SESSION = "sandbox_session"
 
 
 class ActivationPrivateStateReference(BaseModel):

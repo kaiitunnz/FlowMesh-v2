@@ -20,6 +20,7 @@ class StateComponentKind(StrEnum):
 
     HARNESS_HOME_FS = "harness_home_fs"
     WORKSPACE_FS = "workspace_fs"
+    SANDBOX_FS = "sandbox_fs"
 
 
 class Confidentiality(StrEnum):
@@ -68,6 +69,14 @@ _SPECS: Mapping[StateComponentKind, StateComponentSpec] = MappingProxyType(
                 confidentiality=Confidentiality.SECRET_BEARING,
                 exportability=Exportability.LOCAL_ONLY,
             ),
+            # A sandbox tree holds whatever the session's commands write, including
+            # secret-bearing files, so it is handled as secret-bearing throughout.
+            StateComponentSpec(
+                kind=StateComponentKind.SANDBOX_FS,
+                schema_version=1,
+                confidentiality=Confidentiality.SECRET_BEARING,
+                exportability=Exportability.LOCAL_ONLY,
+            ),
         )
     }
 )
@@ -77,7 +86,8 @@ _PROFILE_COMPONENTS: Mapping[BundleProfile, frozenset[StateComponentKind]] = (
         {
             BundleProfile.AGENT_HARNESS: frozenset(
                 {StateComponentKind.HARNESS_HOME_FS, StateComponentKind.WORKSPACE_FS}
-            )
+            ),
+            BundleProfile.SANDBOX_SESSION: frozenset({StateComponentKind.SANDBOX_FS}),
         }
     )
 )

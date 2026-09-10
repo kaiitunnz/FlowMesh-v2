@@ -57,6 +57,10 @@ class MaterializedState:
     def workspace(self) -> Path:
         return self.components[StateComponentKind.WORKSPACE_FS]
 
+    @property
+    def sandbox(self) -> Path:
+        return self.components[StateComponentKind.SANDBOX_FS]
+
 
 class PrivateStateHolder:
     """A worker's private-state root and the attachments it honors."""
