@@ -88,10 +88,8 @@ sharing a worker with another gets no authority over its state. A generation tha
 be supplied in full raises `PrivateStateUnavailable` instead of starting the harness
 against an empty or partial home, which is also how a step that failed part way through
 a turn settles: the tree is ahead of the generation the binding names, and the next
-attempt fails closed rather than resuming from a point no fence covers. A reachable
-harness home from an earlier run drains into the activation's first sealed generation,
-and a lineage root outlives its activation, private to the holder until its incarnation
-ends.
+attempt fails closed rather than resuming from a point no fence covers. A lineage root
+outlives its activation, private to the holder until its incarnation ends.
 
 ## Per-workflow harness and model binding
 

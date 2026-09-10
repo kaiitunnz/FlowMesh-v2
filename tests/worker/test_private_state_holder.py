@@ -196,32 +196,6 @@ def test_an_attachment_for_another_lineage_is_refused(tmp_path: Path) -> None:
     assert raised.value.reason is PrivateStateUnavailableReason.STALE_EPOCH
 
 
-def test_a_legacy_harness_home_drains_into_the_first_generation(
-    tmp_path: Path,
-) -> None:
-    legacy = tmp_path / "legacy"
-    legacy.mkdir()
-    (legacy / "rollout.jsonl").write_text("pre-existing")
-    holder = PrivateStateHolder(tmp_path / "private")
-    binding = _binding()
-
-    state = holder.open(binding, _attachment(binding), legacy_home=legacy)
-
-    assert (state.harness_home / "rollout.jsonl").read_text() == "pre-existing"
-
-
-def test_a_legacy_home_never_overwrites_a_restored_generation(tmp_path: Path) -> None:
-    legacy = tmp_path / "legacy"
-    legacy.mkdir()
-    (legacy / "rollout.jsonl").write_text("pre-existing")
-    holder = PrivateStateHolder(tmp_path / "private")
-    bound, _ = _advance(holder, _binding(), 1)
-
-    resumed = holder.open(bound, _attachment(bound, write_epoch=2), legacy_home=legacy)
-
-    assert (resumed.harness_home / "rollout.jsonl").read_text() == "turn-1"
-
-
 def test_a_non_opaque_reference_never_reaches_the_filesystem(tmp_path: Path) -> None:
     holder = PrivateStateHolder(tmp_path)
     binding = _binding("../escape")

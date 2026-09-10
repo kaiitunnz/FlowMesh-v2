@@ -15,9 +15,7 @@ maps to its ``idempotency_key`` and injects at most once, so a settled effect ne
 double-applies on a resume.
 """
 
-import re
 from collections.abc import Sequence
-from pathlib import Path
 from typing import Protocol
 
 from pydantic import BaseModel
@@ -213,13 +211,3 @@ def _agent_task(spec: AgentSpecStrict) -> str:
     if isinstance(task := data.get("task"), str) and task:
         return task
     raise ValueError("the codex backend requires 'spec.task' or 'spec.data.task'")
-
-
-def legacy_codex_home(results_dir: Path, workflow_id: str, task_id: str) -> Path:
-    """The worker-local rollout home an activation's first generation drains from.
-
-    A reachable tree here is adopted into that first sealed generation, so an
-    activation already mid-run keeps its rollout.
-    """
-    safe = (re.sub(r"[^A-Za-z0-9._-]", "_", part) for part in (workflow_id, task_id))
-    return results_dir.joinpath("codex_home", *safe)

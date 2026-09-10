@@ -17,7 +17,6 @@ satisfies an owner fence.
 """
 
 import re
-import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -77,18 +76,13 @@ class PrivateStateHolder:
         return _private_dir(self._root / reference_id)
 
     def open(
-        self,
-        binding: PrivateStateBinding,
-        attachment: PrivateStateAttachment,
-        *,
-        legacy_home: Path | None = None,
+        self, binding: PrivateStateBinding, attachment: PrivateStateAttachment
     ) -> MaterializedState:
         """Materialize the bound generation for the attachment's holder.
 
         Restoring verifies every required component against the sealed generation, so a
         component that was edited, lost, or never sealed refuses the resume. An unseeded
-        lineage starts empty, adopting a reachable legacy harness home into its first
-        generation.
+        lineage starts empty.
         """
         reference_id = binding.reference.reference_id
         if (
@@ -105,9 +99,6 @@ class PrivateStateHolder:
         kinds = sorted(required_components(binding.reference.profile))
         if binding.manifest is None:
             components = {kind: _private_dir(lineage / kind.value) for kind in kinds}
-            self._adopt_legacy_home(
-                components[StateComponentKind.HARNESS_HOME_FS], legacy_home
-            )
         else:
             # A bound generation is verified as it stands: creating a component first
             # would repair away a removed one instead of refusing the resume.
@@ -157,14 +148,6 @@ class PrivateStateHolder:
                     reference_id=reference_id,
                 )
             verify_component(sealed, path, reference_id=reference_id)
-
-    @staticmethod
-    def _adopt_legacy_home(home: Path, legacy_home: Path | None) -> None:
-        if legacy_home is None or not legacy_home.is_dir():
-            return
-        if any(home.iterdir()):
-            return
-        shutil.copytree(legacy_home, home, dirs_exist_ok=True, symlinks=False)
 
 
 def _private_dir(path: Path, *, parents: bool = False) -> Path:

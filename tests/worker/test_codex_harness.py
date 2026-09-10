@@ -27,7 +27,6 @@ from worker.executors.harness.codex import (
     CodexEvent,
     CodexInjectItem,
     _agent_task,
-    legacy_codex_home,
 )
 
 
@@ -170,21 +169,6 @@ def test_crash_after_injection_before_terminal_does_not_reexecute() -> None:
     # effect ran exactly once and the episode still completes.
     assert done.kind is HarnessResultKind.COMPLETION and done.value == "final"
     assert fake.execution_count["a:0"] == 1
-
-
-def test_the_legacy_drain_source_is_per_activation() -> None:
-    root = Path("/results")
-    home = legacy_codex_home(root, "wfl-1", "act-1")
-    assert home == legacy_codex_home(root, "wfl-1", "act-1")
-    # Distinct per workflow and per task, so a drain adopts one activation's rollout.
-    assert home != legacy_codex_home(root, "wfl-2", "act-1")
-    assert home != legacy_codex_home(root, "wfl-1", "act-2")
-
-
-def test_the_legacy_drain_source_sanitizes_path_separators() -> None:
-    home = legacy_codex_home(Path("/results"), "wfl-1", "op/../escape")
-    assert home == Path("/results/codex_home/wfl-1/op_.._escape")
-    assert Path("/results/codex_home") in home.parents
 
 
 def _agent_spec(**fields: object) -> AgentSpecStrict:

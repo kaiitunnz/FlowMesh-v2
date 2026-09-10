@@ -42,7 +42,6 @@ from ..resident import capture_resident_request
 from .base_executor import ExecutionError, Executor, ExecutorTask
 from .episode_support import EpisodeStepResult, hydrate_delivered_outcomes
 from .harness import build_adapter
-from .harness.codex import legacy_codex_home
 
 _LOG = logging.getLogger("agent-episode-executor")
 
@@ -65,7 +64,7 @@ class AgentEpisodeExecutor(Executor):
                 f"{task.task_id} routed to the agent-episode executor without an "
                 "agent-episode dispatch context"
             )
-        state, holder = self._open_private_state(task, dispatch)
+        state, holder = self._open_private_state(dispatch)
         facade = self._lifecycle.responses_facade if self._lifecycle else None
         prior = self._episode_task_id
         if facade is not None and prior is not None and prior != task.task_id:
@@ -136,7 +135,7 @@ class AgentEpisodeExecutor(Executor):
         )
 
     def _open_private_state(
-        self, task: ExecutorTask, dispatch: AgentEpisodeDispatch
+        self, dispatch: AgentEpisodeDispatch
     ) -> tuple[MaterializedState | None, PrivateStateHolder | None]:
         """Materialize the activation's bound generation for this dispatch."""
         binding = dispatch.private_state
@@ -144,13 +143,7 @@ class AgentEpisodeExecutor(Executor):
             return None, None
         holder = PrivateStateHolder(self._config.private_state_dir)
         try:
-            state = holder.open(
-                binding,
-                _attachment(dispatch),
-                legacy_home=legacy_codex_home(
-                    self._config.results_dir, task.workflow_id, task.task_id
-                ),
-            )
+            state = holder.open(binding, _attachment(dispatch))
         except PrivateStateUnavailable as exc:
             raise ExecutionError(f"PrivateStateUnavailable: {exc}") from exc
         return state, holder
