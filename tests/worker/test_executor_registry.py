@@ -33,6 +33,7 @@ class TestExecutorRegistry:
             "agent_episode",
             "service_leaf",
             "sandbox_host",
+            "sandbox_session",
             "echo",
             "data_profiling",
             "data_retrieval",

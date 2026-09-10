@@ -9,7 +9,11 @@ from pydantic import (
     model_validator,
 )
 
-from shared.harness import AgentEpisodeDispatch, ServiceLeafEpisodeDispatch
+from shared.harness import (
+    AgentEpisodeDispatch,
+    SandboxSessionDispatch,
+    ServiceLeafEpisodeDispatch,
+)
 from shared.schemas.worker import WorkerStatus
 from shared.tasks import (
     TaskEnvelopeStrict,
@@ -49,6 +53,10 @@ class WorkerTaskMessage(BaseModel):
     service_episode: ServiceLeafEpisodeDispatch | None = Field(
         default=None,
         description="Resident service-leaf episode context for a run-to-yield step.",
+    )
+    sandbox_session: SandboxSessionDispatch | None = Field(
+        default=None,
+        description="Sandbox-session episode context for one command step.",
     )
 
     @property

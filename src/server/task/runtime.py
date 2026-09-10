@@ -19,6 +19,7 @@ from shared.harness import (
     HarnessResultKind,
     InputBinding,
     InputBindingMember,
+    SandboxSessionDispatch,
     ServiceLeafEpisodeDispatch,
 )
 from shared.outcome import OutcomeManifest
@@ -38,7 +39,7 @@ from shared.tasks import TaskEnvelopeTemplate
 from shared.tasks.specs import ModelBindingMode
 from shared.tools.contract import AgentModelTurnProposal, MediatedOperationOutcome
 from shared.utils import new_workflow_id
-from shared.utils.ids import new_model_secret_ref
+from shared.utils.ids import new_idempotency_key, new_model_secret_ref
 
 from ..config import AgentBindingConfig, OrchestrationConfig
 from ..hooks import SUPPLIER_RESOLVERS
@@ -68,6 +69,12 @@ from ..orchestration.tool_dispatch import (
 )
 from ..registries.worker import Worker, WorkerRegistry
 from ..registries.workflow import PersistedTask, WorkflowRegistry, WorkflowSched
+from ..resident.service import SandboxSessionOpen
+from ..resident.state import (
+    AdmissionProfile,
+    InvocationSubject,
+    InvocationSubjectKind,
+)
 from ..services.model_secret_vault import ModelSecretVault
 from ..utils.time import parse_iso_ts
 from .models import (
@@ -205,6 +212,10 @@ class TaskRuntime:
         # to the origin worker; the ack and outcome handlers consume the worker's fenced
         # transition reports. Set when resident-capacity control is enabled.
         self._resident_originate: Callable[[ToolInvocationEnvelope], None] | None = None
+        # Sandbox sessions: admission supplies placement, so the dispatcher asks for the
+        # admitted host's worker before it places one.
+        self._sandbox_open: Callable[[SandboxSessionOpen], None] | None = None
+        self._sandbox_session_worker: Callable[[str], str | None] | None = None
         self._resident_ack: Callable[[ResidentBootstrapAck], None] | None = None
         self._resident_outcome: Callable[[ResidentOpOutcome], None] | None = None
         self._resident_route_observation: (
@@ -1625,6 +1636,15 @@ class TaskRuntime:
         self._resident_outcome = on_outcome
         self._resident_route_observation = on_route_observation
 
+    def set_sandbox_session_hooks(
+        self,
+        open_session: Callable[[SandboxSessionOpen], None],
+        session_worker: Callable[[str], str | None],
+    ) -> None:
+        """Install the sandbox-host admission and placement lookups."""
+        self._sandbox_open = open_session
+        self._sandbox_session_worker = session_worker
+
     def set_resident_terminal_hook(self, hook: Callable[[str, bool], None]) -> None:
         """Install the consumer that releases a resident admission credit on DS
         terminal.
@@ -1634,6 +1654,20 @@ class TaskRuntime:
         terminal on any fenced outcome — the sole normal credit release.
         """
         self._resident_terminal_hook = hook
+
+    def _release_session_credit_locked(
+        self, engine: OrchestrationEngine, task_id: str, *, failed: bool
+    ) -> None:
+        """Release a sandbox session's host credit from its own fenced terminal.
+
+        A session holds one admission for its whole life, so its credit releases when
+        the session settles rather than at any single command.
+        """
+        if engine.sandbox_session_operator(task_id) is None:
+            return
+        wi = engine.work_item(task_id)
+        if wi is not None:
+            self._release_resident_credit(wi.invocation_id, failed=failed)
 
     def _release_resident_credit(
         self, invocation_id: str | None, *, failed: bool
@@ -1817,6 +1851,80 @@ class TaskRuntime:
                 private_state_attachment=granted[1] if granted else None,
             )
 
+    def open_sandbox_session(self, task_id: str) -> None:
+        """Admit the host capacity a ready sandbox session needs before it is placed.
+
+        The session's commands run on the admitted host's own worker, so admission is
+        what supplies its placement. Admitting is idempotent on the work item's
+        invocation identity: a session already holding its credit re-drives nothing.
+        """
+        with self._lock:
+            record = self._tasks.get(task_id)
+            engine = self._engines.get(record.workflow_id) if record else None
+            if record is None or engine is None or self._sandbox_open is None:
+                return
+            op = engine.sandbox_session_operator(task_id)
+            if op is None or op.service_dependency is None:
+                return
+            invocation_id = engine.ensure_invocation(task_id)
+            if invocation_id is None:
+                return
+            dependency = op.service_dependency
+            request = SandboxSessionOpen(
+                invocation_id=invocation_id,
+                idempotency_key=new_idempotency_key(),
+                task_id=task_id,
+                subject=InvocationSubject(
+                    kind=InvocationSubjectKind.WORKFLOW, id=record.workflow_id
+                ),
+                dependency=dependency,
+                profile=AdmissionProfile(engine_batch_key=dependency.engine_batch_key),
+                deny=lambda detail: self.fail_sandbox_session(task_id, detail),
+            )
+            self._save_ledger_locked(record.workflow_id)
+        self._sandbox_open(request)
+
+    def fail_sandbox_session(self, task_id: str, detail: str) -> None:
+        """Fail a session whose host capacity was denied or did not arrive in time.
+
+        A denied session settles terminally instead of waiting on a host it will never
+        be admitted to.
+        """
+        with self._lock:
+            record = self._tasks.get(task_id)
+            engine = self._engines.get(record.workflow_id) if record else None
+            if record is None or engine is None:
+                return
+            advance = engine.on_failed(task_id, detail, retryable=False)
+            self._apply_advance_locked(record.workflow_id, advance)
+            self._save_ledger_locked(record.workflow_id)
+            self._cv.notify_all()
+
+    def sandbox_session_worker(self, task_id: str) -> str | None:
+        """The worker holding the host an admitted sandbox session runs on, or None.
+
+        None covers both a task that is not a sandbox session and one whose host is not
+        admitted yet; the caller distinguishes them through ``is_sandbox_session``.
+        """
+        with self._lock:
+            record = self._tasks.get(task_id)
+            engine = self._engines.get(record.workflow_id) if record else None
+            if engine is None or self._sandbox_session_worker is None:
+                return None
+            wi = engine.work_item(task_id)
+            if wi is None or wi.invocation_id is None:
+                return None
+        return self._sandbox_session_worker(wi.invocation_id)
+
+    def is_sandbox_session(self, task_id: str) -> bool:
+        """Whether a task is a sandbox session, whose placement follows its host."""
+        with self._lock:
+            record = self._tasks.get(task_id)
+            engine = self._engines.get(record.workflow_id) if record else None
+            if engine is None:
+                return False
+            return engine.sandbox_session_operator(task_id) is not None
+
     def service_episode_dispatch(
         self, task_id: str
     ) -> ServiceLeafEpisodeDispatch | None:
@@ -1837,6 +1945,35 @@ class TaskRuntime:
             _capsule, outcomes = engine.episode_context(task_id)
             return ServiceLeafEpisodeDispatch(
                 interface=dependency.interface.value, delivered_outcomes=outcomes
+            )
+
+    def sandbox_session_dispatch(
+        self, task_id: str, holder: OwnerFence
+    ) -> SandboxSessionDispatch | None:
+        """The session-episode context to ship with a dispatch, or None.
+
+        The bound generation is also the session's progress: a generation of ``n`` means
+        ``n`` commands have sealed, so the step runs the command at that index.
+        ``holder`` is the selected worker incarnation the dispatch grants private-state
+        authority to; the grant supersedes any prior epoch.
+        """
+        with self._lock:
+            record = self._tasks.get(task_id)
+            engine = self._engines.get(record.workflow_id) if record else None
+            if engine is None or engine.sandbox_session_operator(task_id) is None:
+                return None
+            granted = engine.grant_private_state(
+                task_id, holder.worker_id, holder.incarnation
+            )
+            if granted is None:
+                return None
+            binding, attachment = granted
+            capsule_blob, _outcomes = engine.episode_context(task_id)
+            return SandboxSessionDispatch(
+                command_index=binding.generation,
+                capsule_blob=capsule_blob,
+                private_state=binding,
+                private_state_attachment=attachment,
             )
 
     def _synthesize_ready_children_locked(
@@ -2791,6 +2928,7 @@ class TaskRuntime:
 
             notify = bool(ready_children)
             if record is not None and (engine := self._engines.get(record.workflow_id)):
+                self._release_session_credit_locked(engine, task_id, failed=False)
                 advance = engine.on_succeeded(task_id, empty=empty)
                 advance.extend(
                     self._fan_out_children_locked(record.workflow_id, engine, task_id)
@@ -2889,6 +3027,7 @@ class TaskRuntime:
                 impacted.append((child, reason))
 
             if record is not None and (engine := self._engines.get(record.workflow_id)):
+                self._release_session_credit_locked(engine, task_id, failed=True)
                 advance = engine.on_failed(task_id, message, retryable=False)
                 impacted.extend(self._fail_v2_cascade_locked(task_id, advance.failed))
 

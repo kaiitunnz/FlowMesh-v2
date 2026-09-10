@@ -93,8 +93,9 @@ def check_admissible(
 
     The path runs effect-free operations and external effects under any declared replay
     contract (replayable-with-dedup, compensable, or ambiguity-terminal), handling each
-    uncertainty without inferring success. Private-state operations (sandbox recovery)
-    and residency administration are not admitted.
+    uncertainty without inferring success. Operations declaring a durable-checkpoint
+    private-state effect (the training leaves) and residency administration are not
+    admitted.
     """
     if residency_only:
         raise AdmissionError(
@@ -103,8 +104,8 @@ def check_admissible(
         )
     if effect is EffectClass.PRIVATE_STATE:
         raise AdmissionError(
-            f"operator {operator_id!r} declares private-state effect, whose sandbox "
-            "recovery boundary the orchestration path does not run"
+            f"operator {operator_id!r} declares a private-state effect, whose "
+            "durable-checkpoint boundary the orchestration path does not run"
         )
 
 
@@ -148,7 +149,11 @@ def next_on_uncertain(
 
 
 def next_on_reissue(state: InvocationState) -> InvocationState:
-    """Reissue a replayable invocation through its stable identity after uncertainty."""
-    if state is InvocationState.UNCERTAIN:
+    """Issue an invocation through its stable identity.
+
+    An identity minted before its first dispatch — one whose admission had to precede
+    placement — issues here, as does a replayable one reissued after uncertainty.
+    """
+    if state in (InvocationState.UNISSUED, InvocationState.UNCERTAIN):
         return InvocationState.ISSUED
     return state

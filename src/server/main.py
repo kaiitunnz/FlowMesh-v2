@@ -215,6 +215,10 @@ if IS_ROOT_NODE:
             logger=logger,
         )
         RUNTIME.set_resident_terminal_hook(RESIDENT_CONTROL.on_invocation_terminal)
+        RUNTIME.set_sandbox_session_hooks(
+            RESIDENT_CONTROL.open_sandbox_session,
+            RESIDENT_CONTROL.sandbox_session_worker,
+        )
         RUNTIME.set_resident_handlers(
             originate=RESIDENT_CONTROL.originate,
             on_ack=RESIDENT_CONTROL.on_bootstrap_ack,

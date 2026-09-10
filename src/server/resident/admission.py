@@ -267,6 +267,15 @@ class AdmissionController:
             deadline_at=deadline_at,
         )
 
+    def accept_session(self, claim: ServiceClaim) -> None:
+        """Record ``ACCEPTED`` for a session its admitted host now holds open.
+
+        A co-located session carries no stream off its worker, so there is no route to
+        authorize; acceptance is what commits the capacity for the session's life.
+        """
+        accept(claim)
+        self._persist()
+
     def reauthorize(
         self,
         claim: ServiceClaim,

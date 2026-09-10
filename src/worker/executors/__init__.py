@@ -38,6 +38,7 @@ EXECUTOR_MODULES: dict[str, tuple[str, str]] = {
     "agent_episode": ("AgentEpisodeExecutor", ".agent_episode_executor"),
     "service_leaf": ("ServiceLeafExecutor", ".service_leaf_executor"),
     "sandbox_host": ("SandboxHostExecutor", ".sandbox_host_executor"),
+    "sandbox_session": ("SandboxSessionExecutor", ".sandbox_session_executor"),
     "echo": ("EchoExecutor", ".echo_executor"),
     "data_profiling": ("DataProfilingExecutor", ".data_profiling_executor"),
     "data_retrieval": ("DataRetrievalExecutor", ".data_retrieval_executor"),

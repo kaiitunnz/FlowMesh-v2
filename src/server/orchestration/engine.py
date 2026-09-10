@@ -21,6 +21,7 @@ from typing import Self
 from shared.harness import DeliveredOutcome, OutcomeKind
 from shared.outcome import OutcomeManifest
 from shared.private_state import (
+    BundleProfile,
     OwnerFence,
     PrivateStateAttachment,
     PrivateStateBinding,
@@ -53,6 +54,7 @@ from ..task.v2.representations.operators import (
     RecoveryClass,
     ResidualPolicy,
     ServiceDependency,
+    ServiceInterface,
     SpawnRegion,
     operator_service_dependency,
 )
@@ -3197,17 +3199,60 @@ class OrchestrationEngine:
         op = self._operators.get(operator_id)
         return op if isinstance(op, AgentOperator) else None
 
-    def private_state_owner(self, task_id: str) -> OwnerFence | None:
-        """The single holder that can supply an agent task's bound generation."""
+    def sandbox_session_operator(self, task_id: str) -> LeafOperator | None:
+        """The sandbox-session leaf a dispatched task realizes, or None."""
         wi = self._work_item_for_task(task_id)
-        if wi is None or self.agent_operator(task_id) is None:
+        operator_id = wi.operator_id if wi is not None else task_id
+        op = self._operators.get(operator_id)
+        if not isinstance(op, LeafOperator) or op.service_dependency is None:
+            return None
+        interface = op.service_dependency.interface
+        return op if interface is ServiceInterface.SANDBOX else None
+
+    def private_state_profile(self, task_id: str) -> BundleProfile | None:
+        """The private-state profile a task owns a lineage under, or None.
+
+        The one answer to which operators own activation-private state: an agent owns
+        its harness home and workspace, a sandbox session its own filesystem.
+        """
+        if self.agent_operator(task_id) is not None:
+            return BundleProfile.AGENT_HARNESS
+        if self.sandbox_session_operator(task_id) is not None:
+            return BundleProfile.SANDBOX_SESSION
+        return None
+
+    def ensure_invocation(self, task_id: str) -> str | None:
+        """The work item's request identity, minted unissued if it has none yet.
+
+        A session whose capacity must be admitted before it can be placed needs the
+        identity its claim links to before any attempt exists.
+        """
+        wi = self._work_item_for_task(task_id)
+        if wi is None or wi.status in _TERMINAL_WI:
+            return None
+        if wi.invocation_id is None:
+            invocation = Invocation(
+                work_item_id=wi.work_item_id,
+                invocation_id=new_invocation_id(),
+                state=InvocationState.UNISSUED,
+                replayable=is_replayable(wi.effect_class, wi.replay_contract),
+                compensable=is_compensable(wi.effect_class, wi.replay_contract),
+            )
+            wi.invocation_id = invocation.invocation_id
+            self._invocations[invocation.invocation_id] = invocation
+        return wi.invocation_id
+
+    def private_state_owner(self, task_id: str) -> OwnerFence | None:
+        """The single holder that can supply a task's bound generation."""
+        wi = self._work_item_for_task(task_id)
+        if wi is None or self.private_state_profile(task_id) is None:
             return None
         return self._private_state.owner(wi.activation_id)
 
     def grant_private_state(
         self, task_id: str, worker_id: str, incarnation: int
     ) -> tuple[PrivateStateBinding, PrivateStateAttachment] | None:
-        """Bind a holder to an agent task's private state for one dispatch.
+        """Bind a holder to a task's private state for one dispatch.
 
         A settled or cancelled work item is granted nothing: a dispatch still in flight
         when its activation ended cannot take back the write authority the terminal
@@ -3216,10 +3261,11 @@ class OrchestrationEngine:
         wi = self._work_item_for_task(task_id)
         if wi is None or wi.status in _TERMINAL_WI:
             return None
-        if self.agent_operator(task_id) is None:
+        profile = self.private_state_profile(task_id)
+        if profile is None:
             return None
         binding = self._private_state.ensure(
-            wi.activation_id, self._instance.instance_id
+            wi.activation_id, self._instance.instance_id, profile=profile
         )
         attachment = self._private_state.attach(
             wi.activation_id, worker_id, incarnation

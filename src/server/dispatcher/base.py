@@ -266,6 +266,25 @@ class Dispatcher:
         if record.selected_worker:
             pool = [c for c in pool if c.id in record.selected_worker]
 
+        # 2a. Sandbox sessions place on their admitted host: the session's commands run
+        # in that host's own worker, so admission — not the worker pool — decides where
+        # it goes. Waiting for the admission holds no worker.
+        if self._runtime.is_sandbox_session(task_id):
+            host_worker = self._runtime.sandbox_session_worker(task_id)
+            if host_worker is None:
+                self._runtime.open_sandbox_session(task_id)
+                self.requeue_task(
+                    task_id, reason="awaiting_sandbox_admission", count_retry=False
+                )
+                return False
+            pool = [c for c in pool if c.id == host_worker]
+            if not pool:
+                record.no_eligible_since = None
+                self.requeue_task(
+                    task_id, reason="sandbox_host_busy", count_retry=False
+                )
+                return False
+
         # 2b. Owner-affine private state: a bound generation is sealed on the holder
         # that produced it, so the episode waits for that incarnation instead of
         # resuming against a fresh or foreign one. Waiting holds no worker. This
@@ -572,6 +591,10 @@ class Dispatcher:
                 OwnerFence(worker_id=worker.id, incarnation=worker.incarnation),
             ),
             service_episode=self._runtime.service_episode_dispatch(task_id),
+            sandbox_session=self._runtime.sandbox_session_dispatch(
+                task_id,
+                OwnerFence(worker_id=worker.id, incarnation=worker.incarnation),
+            ),
         )
 
         # 8. Publish task

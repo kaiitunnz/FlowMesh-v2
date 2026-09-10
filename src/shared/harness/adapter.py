@@ -77,7 +77,11 @@ class HarnessBackendKey(BaseModel):
 
 
 class HarnessCapsule(BaseModel):
-    """An opaque, durable continuation of a harness session."""
+    """An opaque, durable continuation of a yielded episode.
+
+    ``backend`` names the binding that produced it, so a capsule resumes only against
+    the substrate that can read it.
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -209,6 +213,26 @@ class ServiceLeafEpisodeDispatch(BaseModel):
 
     interface: str
     delivered_outcomes: tuple[DeliveredOutcome, ...] = ()
+
+
+class SandboxSessionDispatch(BaseModel):
+    """The sandbox-session episode context the fabric ships for one step.
+
+    One step runs one command against the session's own filesystem: ``command_index``
+    names it within the task's declared sequence, ``capsule_blob`` carries the results
+    of the commands already run, ``private_state`` the generation the session resumes
+    on, and ``private_state_attachment`` this worker incarnation's exclusive authority
+    to materialize and write it. ``runtime`` selects the sandbox substrate the host
+    provides.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    command_index: int
+    capsule_blob: str | None = None
+    runtime: str | None = None
+    private_state: PrivateStateBinding | None = None
+    private_state_attachment: PrivateStateAttachment | None = None
 
 
 class HarnessResultKind(StrEnum):

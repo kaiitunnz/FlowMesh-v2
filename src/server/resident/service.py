@@ -234,6 +234,24 @@ class ServeDelivery(Protocol):
         ...
 
 
+@dataclass(frozen=True)
+class SandboxSessionOpen:
+    """One private sandbox session's request for host capacity.
+
+    The session's own work item supplies the invocation identity its claim links to, so
+    a re-drive resumes the same admission rather than raising a second one.
+    """
+
+    invocation_id: str
+    idempotency_key: str
+    task_id: str
+    subject: InvocationSubject
+    dependency: ServiceDependency
+    profile: AdmissionProfile
+    # Fails the session's task when its host capacity is denied or times out.
+    deny: Callable[[str], None]
+
+
 @dataclass
 class ServeOrigination:
     """One authenticated task-addressed serve request driven through resident admission.
@@ -276,6 +294,8 @@ class _Origination:
     family: str | None = None
     serve: ServeDelivery | None = None
     request_id: str | None = None
+    # Where an origination-phase denial goes for a subject that settles no boundary.
+    deny_sink: Callable[[str], None] | None = None
 
 
 @dataclass
@@ -413,6 +433,81 @@ class ResidentCapacityControl:
             request.delivery.fail("resident-capacity control is not running")
             return
         asyncio.run_coroutine_threadsafe(self._originate_serve(request), self._loop)
+
+    def open_sandbox_session(self, request: SandboxSessionOpen) -> None:
+        """Admit one private sandbox session's host capacity.
+
+        A session is admitted once and reuses that claim for every command it runs, so
+        this is idempotent on the invocation: a re-drive while the claim already holds
+        its credit does nothing.
+        """
+        if self._loop is None:
+            return
+        if (held := self._admission.active_claim(request.invocation_id)) is not None:
+            if held.holds_credit:
+                return
+        asyncio.run_coroutine_threadsafe(
+            self._open_sandbox_session(request), self._loop
+        )
+
+    async def _open_sandbox_session(self, request: SandboxSessionOpen) -> None:
+        """Admit the session's claim to a sandbox host and accept it.
+
+        Admission alone places the session: its commands run on the admitted host's own
+        worker, so nothing is relayed and no route is authorized. The claim is accepted
+        once the host holds the session open, and holds its credit until the session
+        reaches a fenced terminal.
+        """
+        orig = _Origination(
+            task_id=request.task_id,
+            call_correlation=request.invocation_id,
+            invocation_id=request.invocation_id,
+            idempotency_key=request.idempotency_key,
+            subject=request.subject,
+            origin_worker=None,
+            deny_sink=request.deny,
+        )
+        dependency = request.dependency
+        family = dependency.service_family
+        try:
+            if not self._ensure_family(dependency):
+                self._fail(
+                    orig,
+                    ProvisioningDenialReason.ISOLATION_DENIED,
+                    f"sandbox profile {dependency.service_ref!r} is not admissible",
+                )
+                return
+            definition = self._stores.families.get(family)
+            if definition is None:
+                return
+            claim = self._admission.raise_claim(
+                invocation_id=request.invocation_id,
+                subject=request.subject,
+                family=family,
+                profile=request.profile,
+            )
+            handoff = await self._acquire_capacity(
+                orig, definition, claim, request.profile
+            )
+            if handoff is None:
+                return
+            self._admission.accept_session(claim)
+        except Exception:
+            self._logger.exception(
+                "sandbox session admission failed for %s", request.invocation_id
+            )
+
+    def sandbox_session_worker(self, invocation_id: str) -> str | None:
+        """The worker holding the host an admitted session must run on, or None."""
+        claim = self._admission.active_claim(invocation_id)
+        if claim is None or claim.state is not ClaimState.ACCEPTED:
+            return None
+        if claim.replica_id is None:
+            return None
+        replica = self._stores.directory.get(claim.replica_id)
+        if replica is None or replica.state not in SERVABLE_REPLICA_STATES:
+            return None
+        return self._delivery.serve_worker_of(replica) if self._delivery else None
 
     def redrive_serve(self, request: ServeOrigination) -> None:
         """Re-drive a serve origination onto a fresh session under its held claim."""
@@ -882,7 +977,9 @@ class ResidentCapacityControl:
 
     def _settle_origination_error(self, orig: _Origination, detail: str) -> None:
         """Route an origination-phase error to its subject's settle path."""
-        if orig.serve is not None:
+        if orig.deny_sink is not None:
+            orig.deny_sink(detail)
+        elif orig.serve is not None:
             self._finalize_serve(
                 orig.invocation_id,
                 orig.serve,
