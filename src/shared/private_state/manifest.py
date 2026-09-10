@@ -25,8 +25,10 @@ class StateComponentKind(StrEnum):
 class Confidentiality(StrEnum):
     """Whether a component's bytes may carry secrets."""
 
-    SECRET_BEARING = "secret_bearing"
-    NON_SECRET = "non_secret"
+    SECRET_BEARING = (
+        "secret_bearing"  # nosec B105 - a component class, not a credential
+    )
+    NON_SECRET = "non_secret"  # nosec B105 - a component class, not a credential
 
 
 class Exportability(StrEnum):
