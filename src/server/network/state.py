@@ -14,7 +14,13 @@ from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from shared.schemas.network import NetworkEndpointAdvertisement, ReachabilityClass
+from shared.schemas.network import (
+    NetworkEndpointAdvertisement,
+    ReachabilityClass,
+    RouteObservationOutcome,
+    Transport,
+    is_demoting,
+)
 
 from ..utils.time import now_iso
 
@@ -45,19 +51,6 @@ class PolicyClass(StrEnum):
     DEFAULT = "default"
 
 
-class Transport(StrEnum):
-    """A generic route transport candidate.
-
-    ``worker_direct`` is caller-to-listener; ``node_relay`` goes through the
-    replica-node endpoint and its node-local uplink; ``control_relay`` is the bounded
-    controlled fallback. They are ordered into a candidate ladder by the resolver.
-    """
-
-    WORKER_DIRECT = "worker_direct"
-    NODE_RELAY = "node_relay"
-    CONTROL_RELAY = "control_relay"
-
-
 class ReachabilityState(StrEnum):
     """The derived directional reachability of one (origin, target, transport) key."""
 
@@ -65,42 +58,6 @@ class ReachabilityState(StrEnum):
     OPTIMISTIC = "optimistic"
     VERIFIED = "verified"
     DEMOTED = "demoted"
-
-
-class RouteObservationOutcome(StrEnum):
-    """The classified outcome of one attempted route.
-
-    Only network-path failures demote reachability. Authority, tenant, fence,
-    application, and engine failures are not evidence about the path and do not demote.
-    """
-
-    VERIFIED = "verified"
-    DNS_FAILURE = "dns_failure"
-    CONNECT_FAILURE = "connect_failure"
-    TLS_FAILURE = "tls_failure"
-    ROUTE_FAILURE = "route_failure"
-    TIMEOUT = "timeout"
-    AUTHORITY_DENIED = "authority_denied"
-    TENANT_DENIED = "tenant_denied"
-    FENCE_INVALID = "fence_invalid"
-    APPLICATION_ERROR = "application_error"
-    ENGINE_ERROR = "engine_error"
-
-
-_DEMOTING_OUTCOMES: frozenset[RouteObservationOutcome] = frozenset(
-    {
-        RouteObservationOutcome.DNS_FAILURE,
-        RouteObservationOutcome.CONNECT_FAILURE,
-        RouteObservationOutcome.TLS_FAILURE,
-        RouteObservationOutcome.ROUTE_FAILURE,
-        RouteObservationOutcome.TIMEOUT,
-    }
-)
-
-
-def is_demoting(outcome: RouteObservationOutcome) -> bool:
-    """Whether the outcome is a network-path failure that may demote reachability."""
-    return outcome in _DEMOTING_OUTCOMES
 
 
 class RouteTarget(Protocol):
