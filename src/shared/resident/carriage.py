@@ -52,6 +52,9 @@ class ClaimGatedServiceCarriage(Protocol):
 
     def select(self, plan: ResidentCarriagePlan) -> ResidentFrameSink: ...
 
+    def close(self, session_id: str) -> None:
+        """Release whatever the attempt held, on its terminal or its reap."""
+
 
 class ControlRelayCarriage:
     """The universal reverse-rendezvous relay carriage, over one base frame sink.
@@ -69,3 +72,6 @@ class ControlRelayCarriage:
         if plan.selected_transport != CONTROL_RELAY:
             raise CarriageUnavailable(plan.selected_transport)
         return self._base_sink
+
+    def close(self, session_id: str) -> None:
+        """Nothing per attempt: every session shares the one long-lived base sink."""

@@ -7,6 +7,8 @@ re-reports the recorded reference without re-running the engine.
 """
 
 import asyncio
+import contextlib
+import socket
 from collections.abc import AsyncIterator, Awaitable, Callable
 
 from shared.network.relay_frame import RelayFrame
@@ -18,6 +20,7 @@ from shared.resident.contracts import (
     ReplicaEndpoint,
     RouteAuthorization,
 )
+from shared.resident.direct_carriage import DirectOffloadCarriage
 from shared.resident.reports import (
     ResidentBootstrapAck,
     ResidentBootstrapOutcome,
@@ -25,6 +28,7 @@ from shared.resident.reports import (
     ResidentStreamStatus,
 )
 from shared.resident.session import ResidentRelaySession  # noqa: F401 - re-export check
+from worker.resident.direct_listener import ResidentDirectListener
 from worker.resident.engine import EngineResponse
 from worker.resident.origin_driver import ResidentOriginDriver, ResidentOriginRequest
 from worker.resident.replica_sidecar import ResidentReplicaSidecar
@@ -228,5 +232,100 @@ def test_post_manifest_redrive_reuses_the_reference() -> None:
         assert second.manifest.content_digest == first.manifest.content_digest
         assert h.engine_calls == [1]  # the engine ran once, not twice
         await h.sidecar.aclose()
+
+    asyncio.run(run())
+
+
+class _DialedHarness:
+    """The two lanes over a real dialed socket, as a trusted offload carries them."""
+
+    def __init__(self, sock, port: int) -> None:
+        self.store = _MemStore()
+        self.engine_calls: list[int] = []
+        self.outcomes: list[ResidentOpOutcome] = []
+        self.done = asyncio.Event()
+
+        self.sidecar = ResidentReplicaSidecar(
+            sink=_ToPeer(), engine_open=_engine(self.engine_calls)
+        )
+        self.sidecar.bind(
+            replica_id="rpl-1",
+            incarnation=1,
+            listener_generation=1,
+            endpoint=ReplicaEndpoint(base_url="http://engine/v1", model="m"),
+        )
+        self.listener = ResidentDirectListener(
+            sock=sock, material=None, deliver=self.sidecar.on_frame
+        )
+        self.carriage = DirectOffloadCarriage(
+            base=_ToPeer(),
+            deliver=lambda frame: self.origin.on_frame(frame),
+            observe=lambda session, transport, outcome: None,
+            ssl_context=None,
+            connect_budget_sec=2.0,
+        )
+        self.origin = ResidentOriginDriver(
+            carriage=self.carriage,
+            content_store=self.store,
+            report_ack=self._on_ack,
+            report_outcome=self._on_outcome,
+        )
+        self._endpoint = f"127.0.0.1:{port}"
+
+    def _on_ack(self, ack: ResidentBootstrapAck) -> None:
+        if ack.outcome is ResidentBootstrapOutcome.ACKED:
+            self.origin.authorize(ack.call_correlation, _auth())
+
+    def _on_outcome(self, outcome: ResidentOpOutcome) -> None:
+        self.outcomes.append(outcome)
+        self.done.set()
+
+    async def invoke(self, session_no: int) -> None:
+        self.done.clear()
+        self.origin.begin(
+            ResidentOriginRequest(
+                task_id="tsk-1",
+                call_correlation=f"call-{session_no}",
+                session_id=f"rly-{session_no}",
+                handoff=_handoff(session_no),
+                request_payload='{"prompt": "hi"}',
+                carriage_plan=ResidentCarriagePlan(
+                    session_id=f"rly-{session_no}",
+                    selected_transport="worker_direct",
+                    selected_endpoint=self._endpoint,
+                ),
+            )
+        )
+        await asyncio.wait_for(self.done.wait(), timeout=10.0)
+
+
+def test_repeated_offloads_release_both_ends_of_the_dialed_socket() -> None:
+    # The target's connection cannot end until the origin closes, so an attempt that
+    # leaks its sink also pins a connection against the listener's cap: after enough
+    # invocations the listener refuses every further offload and the feature silently
+    # falls back to the relay.
+    async def run() -> None:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        h = _DialedHarness(sock, port)
+        await h.listener.start()
+        try:
+            for session_no in range(1, 4):
+                await h.invoke(session_no)
+                assert h.outcomes[-1].status is ResidentStreamStatus.SUCCESS
+                assert h.carriage._sinks == {}
+                for _ in range(50):
+                    if h.listener._listener._open == 0:
+                        break
+                    await asyncio.sleep(0.02)
+                assert h.listener._listener._open == 0
+        finally:
+            # A connection the origin never released would keep the listener's close
+            # waiting, so bound it rather than hanging the failure.
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(h.listener.stop(), timeout=5.0)
+            await h.sidecar.aclose()
 
     asyncio.run(run())
