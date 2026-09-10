@@ -25,6 +25,47 @@ def _require_network_plane_for_resident(
         )
 
 
+def _require_offload_trust(
+    env: dict[str, str], errors: list[str], warnings: list[str]
+) -> None:
+    """A trusted offload needs the network plane, a trust domain, and its material.
+
+    Mutual TLS is the default; an operator who turns it off has attested a trusted
+    network, which is warned about rather than silently accepted.
+    """
+    if not parse_bool(env.get("NETWORK_PLANE_OFFLOAD_ENABLED", "")):
+        return
+    if not parse_bool(env.get("NETWORK_PLANE_ENABLED", "")):
+        errors.append(
+            "NETWORK_PLANE_OFFLOAD_ENABLED requires NETWORK_PLANE_ENABLED: an offload "
+            "substitutes for a network-plane transport"
+        )
+    if not (env.get("NETWORK_PLANE_OFFLOAD_TRUST_DOMAIN", "") or "").strip():
+        errors.append(
+            "NETWORK_PLANE_OFFLOAD_ENABLED requires "
+            "NETWORK_PLANE_OFFLOAD_TRUST_DOMAIN: an offload is admitted only between "
+            "a declared trusted pair"
+        )
+    material = [
+        "NETWORK_PLANE_OFFLOAD_TLS_CA_FILE",
+        "NETWORK_PLANE_OFFLOAD_TLS_CERT_FILE",
+        "NETWORK_PLANE_OFFLOAD_TLS_KEY_FILE",
+    ]
+    if parse_bool(env.get("NETWORK_PLANE_OFFLOAD_REQUIRE_MTLS", "true")):
+        missing = [name for name in material if not (env.get(name, "") or "").strip()]
+        if missing:
+            errors.append(
+                "NETWORK_PLANE_OFFLOAD_ENABLED requires "
+                f"{', '.join(missing)}: an offload is carried over mutual TLS unless "
+                "NETWORK_PLANE_OFFLOAD_REQUIRE_MTLS is explicitly disabled"
+            )
+    else:
+        warnings.append(
+            "NETWORK_PLANE_OFFLOAD_REQUIRE_MTLS is disabled: offload traffic runs on "
+            "an operator-attested trusted network and its dialer proves no identity"
+        )
+
+
 STACK_ENV_SCHEMA = EnvSchema(
     name="stack",
     header=[
@@ -636,6 +677,49 @@ STACK_ENV_SCHEMA = EnvSchema(
                     var_type=EnvVarType.INT,
                     min_value=1024,
                 ),
+                EnvVar(
+                    "NETWORK_PLANE_OFFLOAD_ENABLED",
+                    "false",
+                    description="Enable trusted direct origin-to-target offloads.",
+                    var_type=EnvVarType.BOOL,
+                ),
+                EnvVar(
+                    "NETWORK_PLANE_OFFLOAD_TRUST_DOMAIN",
+                    "",
+                    description="Trust domain both ends must share.",
+                ),
+                EnvVar(
+                    "NETWORK_PLANE_OFFLOAD_CLASSES",
+                    "same_node,same_cluster",
+                    description="Target reachability classes an offload admits.",
+                    var_type=EnvVarType.CSV,
+                ),
+                EnvVar(
+                    "NETWORK_PLANE_OFFLOAD_REQUIRE_MTLS",
+                    "true",
+                    description="Require mutual TLS on an offload.",
+                    var_type=EnvVarType.BOOL,
+                ),
+                EnvVar(
+                    "NETWORK_PLANE_OFFLOAD_TLS_CA_FILE",
+                    "",
+                    description="Offload CA bundle path.",
+                ),
+                EnvVar(
+                    "NETWORK_PLANE_OFFLOAD_TLS_CERT_FILE",
+                    "",
+                    description="Offload certificate path.",
+                ),
+                EnvVar(
+                    "NETWORK_PLANE_OFFLOAD_TLS_KEY_FILE",
+                    "",
+                    description="Offload private key path.",
+                ),
+                EnvVar(
+                    "NETWORK_PLANE_OFFLOAD_NODE_LISTENER_URL",
+                    "",
+                    description="Node offload listener (host:port).",
+                ),
             ],
         ),
         EnvSection(
@@ -1101,6 +1185,7 @@ STACK_ENV_SCHEMA = EnvSchema(
         ),
     ],
     validators=[
+        _require_offload_trust,
         lambda env, errors, warnings: require_if_true(
             env, "REDIS_ACL_ENABLED", ["REDIS_USERNAME", "REDIS_PASSWORD"], errors
         ),

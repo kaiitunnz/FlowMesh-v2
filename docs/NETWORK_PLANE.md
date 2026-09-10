@@ -85,6 +85,42 @@ reads one leading frame naming its next hop, dials it, and byte-relays the rest,
 multi-hop ladder through the relays; a `RelaySession` bridges the two stream pairs with a
 bounded in-flight buffer so a slow consumer backpressures a fast producer.
 
+## Trusted direct offloads
+
+Where a deployment declares an origin-to-target pair trusted, an admitted resident
+invocation leaves the relay for a socket the origin opens itself. The `RouteOrigin` is
+both the route's source identity and its dialer: for a workflow boundary that is the
+invocation's own worker, so the request and response bypass the root and the rendezvous
+entirely; for a gated serve request the root is itself the origin and dials on its own
+behalf. Only the pair the resolver admitted is reachable — an origin never scans for or
+substitutes a peer.
+
+Eligibility is a property of the pair, not of topology. The resolver offers an offload
+only when the deployment enables it, both ends sit in the configured trust domain, the
+target is exposed at an admitted reachability class, both advertise the offload
+transport capability, and directional evidence has not demoted the path. An untrusted,
+public, NATed, outbound-only, stale, or policy-ineligible target is offered
+`control_relay` alone, even when it advertises a dialable address.
+
+Mutual TLS is the default. The deployment CA issues each node an identity carrying both
+client and server authentication, so a target admits only a dialer the CA vouched for
+and an origin refuses a target that is not the listener control selected; the replica's
+claim gate then fences the session to the invocation control admitted. TLS material is
+configured as files and base64-encoded only when a worker attachment is handed its
+transient copy. An operator may instead attest a trusted network and run without mutual
+TLS, which warns on every listener and still requires the same trusted-pair policy.
+
+A dial that fails before any frame reaches the target records classified path evidence
+and falls through to the relay under the same claim, request identity, and held credit.
+Once a frame has been written the attempt never switches transport: the outcome is
+ambiguous, so it settles as uncertain with its credit held and the demoted path steers
+the next drive. Only transport failures demote — a fence, tenant, descriptor,
+application, or engine rejection arrives as a frame and settles the boundary without
+touching the path.
+
+Enable with `NETWORK_PLANE_OFFLOAD_ENABLED=true`; `scripts/dev/generate_offload_tls_certs.sh`
+issues the CA and per-node identities.
+
 ## Reverse-rendezvous relay
 
 `control_relay` carries a resident invocation without either end accepting an inbound

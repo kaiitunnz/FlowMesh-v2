@@ -253,6 +253,20 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   and its transports carry only what a caller frames over them; resident-capacity control
   binds it to carry claim-gated resident invocation traffic. Enable with
   `NETWORK_PLANE_ENABLED=true`. See [`NETWORK_PLANE.md`](NETWORK_PLANE.md).
+- **Trusted direct offloads.** Where a deployment declares the origin-to-target pair
+  trusted, an admitted resident invocation leaves the reverse-rendezvous relay for a
+  direct socket the route's own origin opens: `worker_direct` reaches the selected
+  worker's claim-gated replica-sidecar listener, `node_relay` reaches the target node's
+  purpose-scoped listener, which hands the session to its local sidecar uplink. The
+  `RouteOrigin` is both the source identity and the dialer, so a workflow boundary's
+  payload bypasses the root and the rendezvous for the whole request and response, while
+  a root-sourced gated serve call has the root as its legitimate origin. Both carry the
+  same frames, fences, windows, and cancellation as the relay, and the target sidecar's
+  claim gate is the only authority over the traffic. Mutual TLS between the pair is the
+  default. An untrusted, unreachable, or policy-ineligible pair is carried over
+  `control_relay`, and a dial that fails before delivery falls back to it under the same
+  held credit. Enable with `NETWORK_PLANE_OFFLOAD_ENABLED=true`. See
+  [`NETWORK_PLANE.md`](NETWORK_PLANE.md).
 - **Worker-originated mediated boundaries.** A fabric-served external tool (`search/v1`)
   or a managed external model turn egresses only in the Agent's assigned worker, never in
   the root or a supervisor. The worker captures the boundary, keeps the raw request in
