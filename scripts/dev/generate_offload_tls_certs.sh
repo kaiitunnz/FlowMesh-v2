@@ -38,7 +38,7 @@ add_san_entry() {
   fi
 }
 
-# The node name is the identity a peer matches, so it is always a SAN.
+# A node is reachable under its own name as well as its address, so it is always a SAN.
 add_san_entry "${NODE_NAME}"
 for entry in "$@"; do
   add_san_entry "${entry}"

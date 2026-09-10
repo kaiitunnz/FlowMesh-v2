@@ -9,8 +9,8 @@ engine listener stays loopback-only behind it.
 The origin that dials is whichever participant control resolved as the route source: the
 invocation's own worker for a workflow boundary, the root for its own gated serve
 request. Mutual TLS proves the dialer holds an identity the deployment CA issued to a
-registered worker or node, and the claim gate then fences the session to the invocation
-control admitted.
+registered worker or node; which invocation it may carry is the claim gate's decision,
+on the fenced handoff the first frame delivers.
 """
 
 import logging
@@ -31,24 +31,16 @@ FrameDelivery = Callable[[RelayFrame, ResidentFrameSink], Awaitable[None]]
 
 
 def _is_registered_origin(identities: frozenset[str]) -> bool:
-    """Whether the verified dialer carries an identity from the deployment's CA.
-
-    The CA issues one only to a registered worker or node, so holding a verified
-    identity is what admits the connection here; which invocation it may carry is the
-    claim gate's decision, on the fenced handoff the first frame delivers.
-    """
+    """Whether the dialer holds an identity the deployment CA issued."""
     return bool(identities)
 
 
 class _SidecarConnection(ConnectionHandler):
     """Hands one connection's frames to the replica sidecar."""
 
-    def __init__(
-        self, deliver: FrameDelivery, sink: ResidentFrameSink, origin: frozenset[str]
-    ) -> None:
+    def __init__(self, deliver: FrameDelivery, sink: ResidentFrameSink) -> None:
         self._deliver = deliver
         self._sink = sink
-        self._origin = origin
 
     async def on_frame(self, frame: RelayFrame) -> None:
         await self._deliver(frame, self._sink)
@@ -72,7 +64,7 @@ class ResidentDirectListener:
         self._sock = sock
         self._listener = MutualTlsFrameListener(
             material=material,
-            handler=lambda sink, origin: _SidecarConnection(deliver, sink, origin),
+            handler=lambda sink: _SidecarConnection(deliver, sink),
             admits=_is_registered_origin,
             max_connections=max_connections,
             logger=logger or logging.getLogger("resident-direct-listener"),

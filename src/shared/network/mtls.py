@@ -1,16 +1,13 @@
-"""Mutual-TLS material and peer identity checks for the direct offload transports.
+"""Mutual-TLS material for the direct offload transports.
 
 Both ends of a directly dialed offload authenticate each other against the deployment's
-configured CA, and each then checks that the verified peer is the specific party the
-control plane named: a target admits the registered origin worker or node that control
-resolved as the route's source, and an origin admits the selected target listener. A CA
-bundle alone proves only that some party in the deployment presented a signed
-certificate, which is why every caller matches an expected identity as well.
+configured CA. The two ends check different things with that proof: an origin requires
+the certificate to cover the endpoint host it dialed, so the peer is the target its
+route selected, while a target admits any peer the CA vouched for and leaves the
+question of which invocation may be carried to the replica's claim gate.
 
 Material is configured as operator files and is base64-encoded only when it is loaded
-into a transient worker attachment, following the pattern the cluster's gRPC TLS
-material already uses. A chain is written to a private temporary file when a context is
-built, because ``ssl`` loads a chain from a path.
+into a transient worker attachment.
 """
 
 import base64

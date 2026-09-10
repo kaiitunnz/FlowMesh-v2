@@ -8,9 +8,7 @@ connection, so neither direction enters the rendezvous.
 Routing is by the frame's control-minted relay session, which the node resolves against
 its own durable routing record: the dialer names only that session, never a host, port,
 or engine endpoint. The frames stay opaque here — the replica worker's claim gate is the
-only authority over what reaches an engine. The verified origin identity is bound to
-each session the connection carries, so the node hands its local sidecar the same
-origin control resolved.
+only authority over what reaches an engine.
 """
 
 import logging
@@ -26,12 +24,9 @@ from ...resident.worker_bridge import ResidentWorkerBridge
 class _UplinkConnection(ConnectionHandler):
     """Binds each session this connection carries to the node's local sidecar uplink."""
 
-    def __init__(
-        self, bridge: ResidentWorkerBridge, sink: FrameSink, origin: frozenset[str]
-    ) -> None:
+    def __init__(self, bridge: ResidentWorkerBridge, sink: FrameSink) -> None:
         self._bridge = bridge
         self._sink = sink
-        self._origin = origin
         self._sessions: set[str] = set()
 
     async def on_frame(self, frame: RelayFrame) -> None:
@@ -46,12 +41,7 @@ class _UplinkConnection(ConnectionHandler):
 
 
 def _is_registered_origin(identities: frozenset[str]) -> bool:
-    """Whether the verified dialer carries an identity from the deployment's CA.
-
-    The CA issues one only to a registered worker or node, so holding a verified
-    identity is what admits the connection here; which invocation it may carry is the
-    replica claim gate's decision, on the fenced handoff the frames deliver.
-    """
+    """Whether the dialer holds an identity the deployment CA issued."""
     return bool(identities)
 
 
@@ -69,7 +59,7 @@ class NodeOffloadListener:
         self._endpoint = endpoint
         self._listener = MutualTlsFrameListener(
             material=material,
-            handler=lambda sink, origin: _UplinkConnection(bridge, sink, origin),
+            handler=lambda sink: _UplinkConnection(bridge, sink),
             admits=_is_registered_origin,
             logger=logger or logging.getLogger("node-offload-listener"),
         )

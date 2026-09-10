@@ -1,13 +1,12 @@
 """A mutually authenticated relay-frame listener for a directly dialed offload.
 
 A target endpoint accepts only a connection whose certificate chains to the deployment
-CA and whose verified identity its host admits as a control-registered origin, then
-reads relay frames from it and answers over the same connection. Both target endpoints —
-the replica worker's claim-gated listener and the node's purpose-scoped listener — serve
-that shape and differ only in where a frame goes, which each supplies as a
-per-connection handler. The verified identities are handed to that handler so a session
-can be bound to the origin that opened it, and a node can propagate that binding to its
-local sidecar.
+CA, then reads relay frames from it and answers over the same connection. Membership of
+the CA is the whole of the peer check here: it proves a registered worker or node is
+dialing, and the replica's claim gate fences the session to the invocation control
+admitted. Both target endpoints — the replica worker's claim-gated listener and the
+node's purpose-scoped listener — serve that shape and differ only in where a frame goes,
+which each supplies as a per-connection handler.
 
 The listener is transport only: it reads a frame's framing and hands the frame on whole.
 
@@ -52,7 +51,7 @@ class ConnectionHandler(Protocol):
 
 # Builds the handler for one accepted connection, given the sink that answers over it
 # and the verified identities its dialer presented (empty without mutual TLS).
-ConnectionHandlerFactory = Callable[[FrameSink, frozenset[str]], ConnectionHandler]
+ConnectionHandlerFactory = Callable[[FrameSink], ConnectionHandler]
 
 # Whether the verified identities belong to an origin this endpoint admits.
 PeerAdmission = Callable[[frozenset[str]], bool]
@@ -162,7 +161,7 @@ class MutualTlsFrameListener:
             await close_writer(writer)
             return
         self._open += 1
-        handler = self._handler(ConnectionFrameSink(writer), identities)
+        handler = self._handler(ConnectionFrameSink(writer))
         try:
             while True:
                 await handler.on_frame(await read_relay_frame(reader))
