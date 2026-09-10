@@ -57,7 +57,7 @@ def seal_component(
 
 
 def verify_component(sealed: SealedComponent, root: Path, *, reference_id: str) -> None:
-    """Fail closed unless a tree still carries exactly the sealed component."""
+    """Fail closed unless a tree carries exactly the sealed component."""
     if not root.is_dir():
         raise PrivateStateUnavailable(
             PrivateStateUnavailableReason.COMPONENT_MISSING,

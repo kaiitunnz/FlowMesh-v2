@@ -95,7 +95,7 @@ class PrivateStateHolder:
                 reference_id=reference_id,
             )
         lineage = self._lineage_root(binding)
-        self._claim_epoch(lineage, attachment)
+        _claim_epoch(lineage, attachment)
         components = {}
         for kind in sorted(required_components(binding.reference.profile)):
             path = lineage / kind.value
@@ -117,7 +117,7 @@ class PrivateStateHolder:
     ) -> PrivateStateSealReport:
         """Seal every component of the lineage as the next coherent generation."""
         lineage = self._root / state.reference_id
-        self._verify_epoch(lineage, attachment)
+        _verify_epoch(lineage, attachment)
         generation = state.generation + 1
         components = tuple(
             seal_component(kind, path, reference_id=state.reference_id)
@@ -159,32 +159,34 @@ class PrivateStateHolder:
             return
         shutil.copytree(legacy_home, home, dirs_exist_ok=True, symlinks=False)
 
-    @staticmethod
-    def _claim_epoch(lineage: Path, attachment: PrivateStateAttachment) -> None:
-        marker = lineage / _EPOCH_FILE
-        held = PrivateStateHolder._held_epoch(marker)
-        if held is not None and held > attachment.write_epoch:
-            raise PrivateStateUnavailable(
-                PrivateStateUnavailableReason.STALE_EPOCH,
-                f"write epoch {attachment.write_epoch} is superseded by {held}",
-                reference_id=attachment.reference_id,
-            )
-        marker.write_text(str(attachment.write_epoch))
-        marker.chmod(0o600)
 
-    @staticmethod
-    def _verify_epoch(lineage: Path, attachment: PrivateStateAttachment) -> None:
-        held = PrivateStateHolder._held_epoch(lineage / _EPOCH_FILE)
-        if held != attachment.write_epoch:
-            raise PrivateStateUnavailable(
-                PrivateStateUnavailableReason.STALE_EPOCH,
-                f"write epoch {attachment.write_epoch} no longer holds the lineage",
-                reference_id=attachment.reference_id,
-            )
+def _held_epoch(lineage: Path) -> int | None:
+    marker = lineage / _EPOCH_FILE
+    if not marker.is_file():
+        return None
+    raw = marker.read_text().strip()
+    return int(raw) if raw.isdigit() else None
 
-    @staticmethod
-    def _held_epoch(marker: Path) -> int | None:
-        if not marker.is_file():
-            return None
-        raw = marker.read_text().strip()
-        return int(raw) if raw.isdigit() else None
+
+def _claim_epoch(lineage: Path, attachment: PrivateStateAttachment) -> None:
+    """Take the lineage's write epoch, refusing one a later grant superseded."""
+    held = _held_epoch(lineage)
+    if held is not None and held > attachment.write_epoch:
+        raise PrivateStateUnavailable(
+            PrivateStateUnavailableReason.STALE_EPOCH,
+            f"write epoch {attachment.write_epoch} is superseded by {held}",
+            reference_id=attachment.reference_id,
+        )
+    marker = lineage / _EPOCH_FILE
+    marker.write_text(str(attachment.write_epoch))
+    marker.chmod(0o600)
+
+
+def _verify_epoch(lineage: Path, attachment: PrivateStateAttachment) -> None:
+    """Confirm the holder still owns the write before its seal counts."""
+    if _held_epoch(lineage) != attachment.write_epoch:
+        raise PrivateStateUnavailable(
+            PrivateStateUnavailableReason.STALE_EPOCH,
+            f"write epoch {attachment.write_epoch} does not hold the lineage",
+            reference_id=attachment.reference_id,
+        )

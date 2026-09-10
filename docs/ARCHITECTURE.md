@@ -188,15 +188,16 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   sealed generation over registered typed components (`harness_home_fs`,
   `workspace_fs`), and a `PrivateStateAttachment` grants one worker incarnation the
   exclusive, epoch-fenced authority to materialize and write it. An attachment is
-  physical execution authority: it admits no capacity and releases no claim credit.
+  physical execution authority over one activation's state, distinct from the capacity
+  admission a `ServiceClaim` carries.
   Each dispatch mints a fresh write epoch, so a superseded holder can neither write nor
   seal. Components seal together at one quiescence fence, so a harness home never
   resumes beside a workspace from another generation. While a generation is sealed
   local to the holder that produced it, that holder is a hard scheduler feasibility
-  constraint: the episode lane still yields and reserves no worker, an episode waits
-  while its holder is busy, and owner loss, an incarnation change, or a component that
-  does not match its seal fails closed as a typed `PrivateStateUnavailable` rather than
-  resuming against a fresh or partial home. The private root is scoped by the opaque
+  constraint resolved at dispatch: the episode lane yields as any other does, and an
+  episode waits while its holder is busy. Owner loss, an incarnation change, or a
+  component that does not match its seal fails closed as a typed
+  `PrivateStateUnavailable` rather than resuming against a fresh or partial home. The private root is scoped by the opaque
   reference at `0700`, and only opaque references cross into the ledger, control state,
   operation frames, logs, results, or artifacts. `WORKER_PRIVATE_STATE_DIR` sets the
   root.

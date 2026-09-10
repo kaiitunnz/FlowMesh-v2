@@ -186,7 +186,7 @@ class Dispatcher:
         )
 
     def _private_state_owner_live(self, owner: OwnerFence) -> bool:
-        """Whether a bound generation's holder is still the same live incarnation."""
+        """Whether a bound generation's holder is the same live incarnation."""
         worker = self._worker_registry.get_worker(owner.worker_id)
         return (
             worker is not None

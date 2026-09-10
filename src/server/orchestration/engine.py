@@ -3255,7 +3255,7 @@ class OrchestrationEngine:
         )
 
     def release_private_state(self, task_id: str) -> None:
-        """Drop an agent task's write authority once it can no longer resume."""
+        """Drop an agent task's write authority when it settles."""
         wi = self._work_item_for_task(task_id)
         if wi is not None:
             self._private_state.release(wi.activation_id)

@@ -10,10 +10,10 @@ from .manifest import StateBundleManifest
 class PrivateStateAttachment(BaseModel):
     """Materialization and write authority for one holder over one bound generation.
 
-    An attachment is physical execution authority: it admits no capacity, holds no
-    credit, and reserves nothing. Its ``write_epoch`` is the exclusive-writer fence —
-    one writable attachment exists per bound generation, and a holder whose epoch has
-    been superseded can neither write nor resume.
+    An attachment is physical execution authority over one activation's state, distinct
+    from the capacity admission a service claim carries. Its ``write_epoch`` is the
+    exclusive-writer fence: one writable attachment exists per bound generation, and a
+    holder whose epoch has been superseded can neither write nor resume.
     """
 
     model_config = ConfigDict(frozen=True)

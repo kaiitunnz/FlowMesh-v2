@@ -102,8 +102,8 @@ class PrivateStateLedger:
     ) -> None:
         """Advance the lineage to the generation its live attachment sealed.
 
-        A superseded epoch's seal is refused: the holder reporting it no longer owns the
-        write, so accepting it would bind a generation another holder has moved past.
+        A superseded epoch's seal is refused: its holder lost the write, so accepting it
+        would bind a generation another holder has already moved past.
         """
         lineage = self._lineages[activation_id]
         attachment = lineage.attachment

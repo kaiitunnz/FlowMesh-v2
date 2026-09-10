@@ -22,9 +22,8 @@ class BundleProfile(StrEnum):
 class ActivationPrivateStateReference(BaseModel):
     """A durable, opaque identity for the private state one activation owns.
 
-    The reference names a state lineage, not its backing: it carries no bytes, path,
-    storage URL, secret, or bearer access, and a physical copy of that state neither
-    defines nor certifies it. Materializing or writing the state requires a
+    The reference names a state lineage, not its backing, so a physical copy of that
+    state neither defines nor certifies it. Materializing or writing the state takes a
     :class:`PrivateStateBinding` selecting a generation plus an attachment authorizing
     a holder.
     """
