@@ -93,9 +93,7 @@ class WorkerConfig:
         # The node's offload material reaches a worker base64-encoded; the operator
         # configures it as files on the node it came from.
         offload_prefix = "NETWORK_PLANE_OFFLOAD_"
-        offload_enabled = (
-            os.getenv(f"{offload_prefix}ENABLED", "").strip().lower() == "true"
-        )
+        offload_enabled = parse_bool_env(f"{offload_prefix}ENABLED", False)
         offload_tls_ca_b64 = (
             os.getenv(f"{offload_prefix}TLS_CA_B64") or ""
         ).strip() or None
