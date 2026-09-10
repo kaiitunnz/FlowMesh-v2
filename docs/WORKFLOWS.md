@@ -107,6 +107,28 @@ declare `provenance` (`pinned` | `live`) and `determinism` / `effect` /
 `recovery` overrides, and a `result: { visibility: published }` to publish its
 induced output.
 
+### Sandbox sessions
+
+A `sandbox` task is one private session. `sandbox.profile` names the sandbox-host family
+its capacity is admitted against and `commands` are the commands it runs, one per episode
+step, against its own filesystem:
+
+```yaml
+- name: build
+  spec:
+    taskType: sandbox
+    sandbox: { profile: posix-default }
+    commands:
+      - argv: ["sh", "-c", "echo hello > note.txt"]
+      - argv: ["cat", "note.txt"]
+        timeoutSeconds: 10
+```
+
+Each command sees what the previous one wrote and nothing from any other session. The
+declared-safe path reaches no network, so a session's mutations are private state rather
+than an external effect. The result carries every command's `argv`, `exit_code`, `stdout`,
+`stderr`, and whether it timed out.
+
 ### Structured regions
 
 In the graph form, a node carries a `region` instead of a `spec`. Regions wire

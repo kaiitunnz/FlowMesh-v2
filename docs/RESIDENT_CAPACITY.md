@@ -169,9 +169,17 @@ WARM / BUSY → DRAINING → STOPPED
 WARM / BUSY → PREEMPTED / FAILED → reconcile and recreate
 ```
 
+A family declares the substrate its replicas are materialized as. A `model_serving` family
+starts a serve (or `dev_model`) task and becomes admittable once its engine endpoint
+answers; a `sandbox_host` family starts a sandbox-host allocation and becomes admittable
+once that allocation runs on a worker, which is all a co-located session needs to reach it.
+Every other part of the lifecycle — leases, states, drain, teardown, preemption, capacity
+reports, selection, and credit — is shared.
+
 The first eligible `PENDING` claim for an approved family with no capacity triggers a
-bounded zero-to-one materialization. Before creating an allocation, policy checks the allowed
-model catalog, the per-family replica quota, and the concurrent cold-start limit; a refusal
+bounded zero-to-one materialization. Before creating an allocation, policy checks the
+per-family replica quota and the concurrent cold-start limit, and for a model-serving
+family the allowed model catalog; a refusal
 is a typed durable outcome that creates no allocation, handoff, or credit and never
 substitutes an external provider. A drain rejects new claims while admitted work reaches a
 safe outcome. Idle teardown is off by default; when a retain window is configured, a

@@ -19,6 +19,8 @@ The worker resolves `spec.taskType` against an executor registry in
 | `ssh` | `SSHExecutor` | Interactive SSH session or non-interactive container job |
 | `serve` | `VLLMServeExecutor` | Persistent vLLM API server for a single model |
 | `dev_model` | `DevModelExecutor` | GPU-free OpenAI-compatible endpoint; forwards to an upstream or returns canned responses |
+| `sandbox` | `SandboxSessionExecutor` | One private sandbox session, running its declared commands one per episode step against its own filesystem |
+| `sandbox_host` | `SandboxHostExecutor` | A worker's sandbox host allocation, holding its reusable runtime state and session capacity |
 
 Helper utilities live in `src/worker/executors/utils/` (`artifacts`,
 `checkpoints`, `data_utils`, `distributed`, `graph_templates`,
