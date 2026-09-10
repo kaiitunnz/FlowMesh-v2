@@ -37,6 +37,7 @@ from shared.resident.reports import (
     ResidentRouteObservation,
 )
 from shared.resident.transport import ResidentFrameSink
+from shared.schemas.network import RouteObservationOutcome, Transport
 
 from .direct_listener import ResidentDirectListener
 from .engine import EngineOpen, HttpEngineDelivery, RawEngineOpen, RawHttpEngineDelivery
@@ -176,7 +177,12 @@ class ResidentLaneHost:
         if self._origin is not None:
             await self._origin.on_frame(frame)
 
-    def _observe(self, session_id: str, transport: Any, outcome: Any) -> None:
+    def _observe(
+        self,
+        session_id: str,
+        transport: Transport,
+        outcome: RouteObservationOutcome,
+    ) -> None:
         """Report one attempt's classified path evidence for the reachability view."""
         if self._report_observation is None:
             return

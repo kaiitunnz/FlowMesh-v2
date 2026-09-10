@@ -60,7 +60,13 @@ class ResidentWorkerBridge:
         )
 
     def bind_offload(self, session_id: str, sink: FrameSink) -> None:
-        """Answer one session's worker frames over the connection its origin dialed."""
+        """Answer one session's worker frames over the connection its origin dialed.
+
+        The binding is taken from whichever admitted dialer names the session first: the
+        forward direction is claim-gated at the replica, while this reverse direction
+        rests on the session id being unguessable and the dialer holding a deployment
+        identity. Naming the expected origin to a target would need control to carry it.
+        """
         self._offloads[session_id] = sink
 
     def release_offload(self, session_id: str) -> None:

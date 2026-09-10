@@ -53,6 +53,8 @@ def stamp_endpoint(
 
 
 PROBE_TRUST = TrustedOffloadPolicy(enabled=True, probe=True)
+
+_REACHABILITY_CLASSES = frozenset(ReachabilityClass)
 """The trust rule a reachability probe resolves under.
 
 A probe carries no invocation payload — it dials a node's own diagnostic listener to
@@ -70,7 +72,7 @@ def _offload_policy(config: NetworkPlaneConfig) -> TrustedOffloadPolicy:
         classes=frozenset(
             ReachabilityClass(value)
             for value in offload.classes
-            if value in set(ReachabilityClass)
+            if value in _REACHABILITY_CLASSES
         ),
         protocol=OFFLOAD_PROTOCOL,
         require_mtls=offload.require_mtls,
