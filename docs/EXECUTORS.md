@@ -109,6 +109,12 @@ records a turn-group member, or produces a control-plane round trip per command.
 backend that does not mediate the sandbox is refused an agent that declares one, rather
 than running its code outside the fence.
 
+`run_command` is the only way code reaches a model. The facade forwards a harness's own
+tools only when they are on its allowlist, so a native shell, a native subagent, and any
+tool the allowlist does not name are dropped before the model sees them — a harness that
+renames or adds one fails closed. This holds whether or not the agent declares a sandbox,
+so an agent without one is offered no executable tool at all.
+
 Commands mutate `workspace_fs` and become durable at the episode's ordinary seal, so a
 worker loss before that seal leaves the last sealed generation intact. Egress is denied
 in the runtime: a command cannot open an IP connection, and reaching a model, tool, or

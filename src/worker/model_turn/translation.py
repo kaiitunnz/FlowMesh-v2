@@ -85,17 +85,35 @@ def _text_of(content: Any) -> str:
     return str(content)
 
 
+# The harness-native tools the fabric forwards to the model. Everything else a harness
+# advertises is dropped, including anything this set does not name: a tool that runs a
+# command, delegates to a child, or blocks on a person must reach the model only as the
+# fabric's own mediated facade, and a harness version that renames or adds one fails
+# closed here rather than reaching the model unmediated. These forward because their
+# effects stay inside the model's reasoning or the harness's own sealed session state.
+HARNESS_TOOL_ALLOWLIST = frozenset(
+    {"update_plan", "view_image", "get_goal", "create_goal", "update_goal"}
+)
+
+
 def chat_tools(responses_tools: Any, facade_schemas: list[str]) -> list[dict[str, Any]]:
-    """The chat ``tools`` for a turn: the request's own function tools plus the facades.
+    """The chat ``tools`` for a turn: the allowed harness tools plus the fabric facades.
 
     A Responses-flat function tool nests under a ``function`` key for chat; a
     non-function tool a harness advertises is dropped, a chat provider not accepting it.
+    A harness tool outside :data:`HARNESS_TOOL_ALLOWLIST` is dropped too, so native code
+    execution and native delegation never reach the model — the fabric's own facades are
+    the only path to either. This holds for every agent, whether or not it declares a
+    sandbox: an agent with no sandbox gets no executable tool at all.
     """
     tools: list[dict[str, Any]] = []
     if isinstance(responses_tools, list):
         for tool in responses_tools:
-            if (nested := _nest_function_tool(tool)) is not None:
-                tools.append(nested)
+            if (nested := _nest_function_tool(tool)) is None:
+                continue
+            if nested["function"].get("name") not in HARNESS_TOOL_ALLOWLIST:
+                continue
+            tools.append(nested)
     for schema in facade_schemas:
         try:
             parsed = json.loads(schema)

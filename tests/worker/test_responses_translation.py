@@ -56,17 +56,47 @@ def test_conversation_items_replay_faithfully() -> None:
 
 
 def test_chat_tools_nest_and_inject() -> None:
-    request_tool = {
+    allowed = {
         "type": "function",
-        "name": "native",
+        "name": "update_plan",
         "parameters": {"type": "object"},
     }
     other = {"type": "web_search"}  # a non-function harness tool chat providers reject
-    tools = chat_tools([request_tool, other], [_SEARCH_TOOL])
-    assert len(tools) == 2  # the native function and the injected facade; other dropped
+    tools = chat_tools([allowed, other], [_SEARCH_TOOL])
+    assert len(tools) == 2  # the allowed harness tool and the injected facade
     assert all(t["type"] == "function" and "function" in t for t in tools)
     names = {t["function"]["name"] for t in tools}
-    assert names == {"native", "web_search"}
+    assert names == {"update_plan", "web_search"}
+
+
+def test_a_native_code_execution_tool_never_reaches_the_model() -> None:
+    """Code runs through the fabric's fenced runtime or not at all."""
+    native_exec = [
+        {"type": "function", "name": name, "parameters": {"type": "object"}}
+        for name in ("exec_command", "write_stdin", "shell_command")
+    ]
+
+    tools = chat_tools(native_exec, [_SEARCH_TOOL])
+
+    assert {t["function"]["name"] for t in tools} == {"web_search"}
+
+
+def test_a_native_delegation_tool_never_reaches_the_model() -> None:
+    """Child agents come from the fabric's spawn facade, never a native subagent."""
+    tools = chat_tools(
+        [{"type": "function", "name": "multi_agent_v1", "parameters": {}}], []
+    )
+
+    assert tools == []
+
+
+def test_an_unrecognized_harness_tool_fails_closed() -> None:
+    """A renamed or new harness tool drops rather than reaching the model unmediated."""
+    tools = chat_tools(
+        [{"type": "function", "name": "exec_command_v2", "parameters": {}}], []
+    )
+
+    assert tools == []
 
 
 def test_completion_maps_to_message_and_function_calls() -> None:
