@@ -8,8 +8,9 @@ capacity pools and the credit ledger are derived, rebuildable views.
 """
 
 from enum import StrEnum
+from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from shared.resident.contracts import ReplicaEndpoint
 
@@ -318,3 +319,26 @@ class ResidentSnapshot(BaseModel):
     leases: list[AllocationLease] = Field(default_factory=list)
     invocations: list[InvocationRequest] = Field(default_factory=list)
     claims: list[ServiceClaim] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_unreadable_families(cls, data: Any) -> Any:
+        """Load the snapshot without any family definition it cannot read.
+
+        A family definition is re-derived from the next eligible demand, so dropping one
+        an older snapshot wrote costs a cold start; refusing the whole snapshot would
+        instead fail the root's rehydrate and strand the credit-bearing claims it
+        carries.
+        """
+        if not isinstance(data, dict):
+            return data
+        if not isinstance(families := data.get("families"), list):
+            return data
+        readable = []
+        for entry in families:
+            try:
+                ServiceFamily.model_validate(entry)
+            except ValidationError:
+                continue
+            readable.append(entry)
+        return {**data, "families": readable}
