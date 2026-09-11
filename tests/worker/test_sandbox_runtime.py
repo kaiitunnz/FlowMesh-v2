@@ -87,5 +87,21 @@ def test_unavailable_program_is_refused(tmp_path: Path) -> None:
         )
 
 
-def test_unknown_runtime_name_falls_back_to_the_default() -> None:
-    assert isinstance(build_sandbox_runtime("containerd"), PosixProcessSandbox)
+def test_sessions_run_their_commands_in_the_posix_runtime() -> None:
+    assert isinstance(build_sandbox_runtime(), PosixProcessSandbox)
+
+
+def test_command_cannot_open_an_io_uring(tmp_path: Path) -> None:
+    probe = (
+        "import ctypes, os\n"
+        "libc = ctypes.CDLL('libc.so.6', use_errno=True)\n"
+        "params = ctypes.create_string_buffer(120)\n"
+        "rc = libc.syscall(425, 8, ctypes.byref(params))\n"
+        "print('ring', rc, ctypes.get_errno())\n"
+    )
+    result = PosixProcessSandbox().run(
+        tmp_path, SandboxCommand(argv=("python3", "-c", probe))
+    )
+    assert result.exit_code == 0, result.stderr
+    # A ring would submit socket work in kernel context, unchecked by the filter.
+    assert result.stdout.split()[1] == "-1"

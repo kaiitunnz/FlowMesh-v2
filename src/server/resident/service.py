@@ -85,6 +85,12 @@ RedispatchCallback = Callable[[str, str], bool]
 EndpointProbe = Callable[[str], ReplicaEndpoint | None]
 # Whether a worker holding a sandbox-host reservation is still live and non-stale.
 SandboxWorkerProbe = Callable[[str], bool]
+
+# Claim states from which a sandbox session still reaches a dispatch: it is waiting for
+# its admission, or holding one. Any other state no longer places it.
+_PLACEABLE_CLAIM_STATES: frozenset[ClaimState] = frozenset(
+    {ClaimState.PENDING, ClaimState.RESERVED, ClaimState.ACCEPTED}
+)
 # Persists the authoritative CS snapshot.
 PersistCallback = Callable[[], None]
 
@@ -446,15 +452,43 @@ class ResidentCapacityControl:
             return
         # Admit once: any non-terminal claim — pending or credit-bearing — is this
         # session's admission, and an open already in flight has not raised its claim
-        # yet, so neither may raise a second one.
-        if self._admission.active_claim(request.invocation_id) is not None:
-            return
+        # yet, so neither may raise a second one. An admission whose host is gone, or
+        # which no longer places the session, is settled first so a successor can admit
+        # on live capacity instead of waiting on a host that will never take it.
+        held = self._admission.active_claim(request.invocation_id)
+        if held is not None:
+            if held.state in _PLACEABLE_CLAIM_STATES and (
+                held.state is not ClaimState.ACCEPTED
+                or self._live_session_host(held) is not None
+            ):
+                return
+            self._reconcile_lost_session(held)
         if request.invocation_id in self._sandbox_opens:
             return
         self._sandbox_opens.add(request.invocation_id)
         asyncio.run_coroutine_threadsafe(
             self._open_sandbox_session(request), self._loop
         )
+
+    def _reconcile_lost_session(self, claim: ServiceClaim) -> None:
+        """Release an admission whose sandbox host can no longer take its session.
+
+        The credit is freed and the stale reservation invalidated, so the next demand
+        reserves live capacity rather than queueing against a worker that is gone.
+        """
+        self._logger.info(
+            "sandbox session claim %s can no longer be placed; settling it",
+            claim.claim_id,
+        )
+        self._admission.settle_invocation_terminal(
+            claim.invocation_id, ClaimTerminalReason.FAILED
+        )
+        if claim.replica_id is not None:
+            replica = self._stores.directory.get(claim.replica_id)
+            if replica is not None and not self._probe_sandbox_worker(
+                replica.worker_id or ""
+            ):
+                self._lifecycle.on_preempt(claim.replica_id)
 
     async def _open_sandbox_session(self, request: SandboxSessionOpen) -> None:
         """Admit the session's claim to a sandbox host and accept it.
@@ -505,17 +539,26 @@ class ResidentCapacityControl:
         finally:
             self._sandbox_opens.discard(request.invocation_id)
 
-    def sandbox_session_worker(self, invocation_id: str) -> str | None:
-        """The worker holding the host an admitted session must run on, or None."""
-        claim = self._admission.active_claim(invocation_id)
-        if claim is None or claim.state is not ClaimState.ACCEPTED:
-            return None
+    def _live_session_host(self, claim: ServiceClaim) -> str | None:
+        """The worker a claim's sandbox host still reserves, or None if it is gone.
+
+        A co-located session has no route of its own: reaching its host is exactly the
+        reserved worker being alive, so that is what the claim is reconciled against.
+        """
         if claim.replica_id is None:
             return None
         replica = self._stores.directory.get(claim.replica_id)
         if replica is None or replica.state not in SERVABLE_REPLICA_STATES:
             return None
-        return replica.worker_id
+        worker_id = replica.worker_id or ""
+        return worker_id if self._probe_sandbox_worker(worker_id) else None
+
+    def sandbox_session_worker(self, invocation_id: str) -> str | None:
+        """The worker holding the host an admitted session must run on, or None."""
+        claim = self._admission.active_claim(invocation_id)
+        if claim is None or claim.state is not ClaimState.ACCEPTED:
+            return None
+        return self._live_session_host(claim)
 
     def redrive_serve(self, request: ServeOrigination) -> None:
         """Re-drive a serve origination onto a fresh session under its held claim."""
@@ -825,12 +868,23 @@ class ResidentCapacityControl:
                 replica.endpoint = fresh
             self._lifecycle.refresh_report(replica.replica_id)
         for claim in self._stores.claims.all():
-            if claim.state in (
+            if claim.state not in (
                 ClaimState.RESERVED,
                 ClaimState.ACCEPTED,
                 ClaimState.STREAMING,
             ):
-                self._admission.on_route_loss(claim)
+                continue
+            definition = self._stores.families.get(claim.family)
+            if definition is not None and definition.kind is (
+                ServiceFamilyKind.SANDBOX_HOST
+            ):
+                # A co-located session lost no route to its host: the host either
+                # survived the restart, in which case the session resumes on it, or it
+                # is gone and the claim settles so a successor can admit fresh.
+                if self._live_session_host(claim) is None:
+                    self._reconcile_lost_session(claim)
+                continue
+            self._admission.on_route_loss(claim)
 
     async def _originate(self, env: ToolInvocationEnvelope) -> None:
         """Originate one resident boundary, settling an error at its call on any escape.
@@ -1594,7 +1648,7 @@ class ResidentCapacityControl:
         while True:
             async with self._admit_lock:
                 self._reap_lost_reservations(definition)
-                self._promote_ready_replicas(definition)
+                self._promote_ready_replicas(family)
                 self._lifecycle.refresh_family_reports(family)
                 handoff = self._admission.admit(
                     claim, profile, idempotency_key=orig.idempotency_key
@@ -1652,13 +1706,13 @@ class ResidentCapacityControl:
                 )
                 self._lifecycle.on_preempt(replica.replica_id)
 
-    def _promote_ready_replicas(self, definition: ServiceFamily) -> None:
+    def _promote_ready_replicas(self, family: str) -> None:
         """Warm every materializing replica whose engine endpoint now answers.
 
         A sandbox host reserves capacity rather than starting anything, so it is warm
         from the moment its reservation is recorded and never waits here.
         """
-        for replica in self._stores.directory.by_family(definition.family):
+        for replica in self._stores.directory.by_family(family):
             if (
                 replica.state is not ReplicaState.MATERIALIZING
                 or replica.serve_task_id is None

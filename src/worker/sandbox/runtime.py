@@ -1,9 +1,14 @@
 """Running one session command inside its private sandbox tree.
 
 A runtime executes a command against the session's own filesystem root and returns its
-bounded result. The declared-safe path is filesystem-only: the command reaches nothing
-outside its root and cannot open a network connection, so its mutation is private-state
-backing rather than an external effect.
+bounded result. Network egress is enforced: the command cannot open an IP connection, so
+its mutation is private-state backing rather than an external effect.
+
+Filesystem and process confinement is the runtime's own to provide, and the POSIX
+process runtime provides none: it scopes a command to its root by working directory and
+environment, which holds while a worker runs one tenant's sessions. Confining sessions
+that do not trust each other on a shared worker takes a runtime that isolates the
+filesystem and process namespace, bound at this seam.
 """
 
 import os
@@ -50,18 +55,22 @@ class SandboxRuntime(ABC):
     def run(self, root: Path, command: SandboxCommand) -> SandboxCommandResult: ...
 
 
-# Installs a seccomp filter denying IP socket creation, then becomes the command, so it
-# cannot open a network connection rather than being trusted not to. A filter needs no
-# privilege, which a namespace does: a worker container is normally denied one. Unix
-# sockets and the filesystem are untouched. An architecture whose syscall numbers this
-# does not know refuses the command instead of running it unfiltered, and the filter is
-# installed in this freshly started interpreter rather than between fork and exec, where
-# a threaded worker could deadlock.
+# Installs a seccomp filter denying IP socket creation and io_uring, then becomes the
+# command, so it cannot open a network connection rather than being trusted not to. A
+# ring is denied because its operations run in kernel context and are not re-checked
+# against this filter. A filter needs no privilege, which a namespace does: a worker
+# container is normally denied one. Unix sockets and the filesystem are untouched. An
+# architecture whose syscall numbers this does not know refuses the command instead of
+# running it unfiltered, and the filter is installed in this freshly started interpreter
+# rather than between fork and exec, where a threaded worker could deadlock.
 _ISOLATING_LAUNCHER = """
 import ctypes, os, struct, sys
 
-_ARCH = {"x86_64": (0xC000003E, 41, 317), "aarch64": (0xC00000B7, 198, 277)}
-audit, nr_socket, nr_seccomp = _ARCH[os.uname().machine]
+_ARCH = {
+    "x86_64": (0xC000003E, 41, 317, 425),
+    "aarch64": (0xC00000B7, 198, 277, 425),
+}
+audit, nr_socket, nr_seccomp, nr_io_uring_setup = _ARCH[os.uname().machine]
 _LD, _JEQ, _RET, _DENY, _ALLOW = 0x20, 0x15, 0x06, 0x00050000 | 13, 0x7FFF0000
 
 
@@ -75,13 +84,14 @@ def _jeq(k, jt, jf):
 
 prog = b"".join(
     [
-        _stmt(_LD, 4),                 # seccomp_data.arch
-        _jeq(audit, 0, 5),             # a foreign arch denies everything
-        _stmt(_LD, 0),                 # seccomp_data.nr
-        _jeq(nr_socket, 0, 4),         # anything but socket() runs
-        _stmt(_LD, 16),                # socket() domain
-        _jeq(2, 1, 0),                 # AF_INET
-        _jeq(10, 0, 1),                # AF_INET6
+        _stmt(_LD, 4),                      # seccomp_data.arch
+        _jeq(audit, 0, 6),                  # a foreign arch denies everything
+        _stmt(_LD, 0),                      # seccomp_data.nr
+        _jeq(nr_io_uring_setup, 4, 0),      # a ring would submit sockets unchecked
+        _jeq(nr_socket, 0, 4),              # anything but socket() runs
+        _stmt(_LD, 16),                     # socket() domain
+        _jeq(2, 1, 0),                      # AF_INET
+        _jeq(10, 0, 1),                     # AF_INET6
         _stmt(_RET, _DENY),
         _stmt(_RET, _ALLOW),
     ]
@@ -123,7 +133,9 @@ class PosixProcessSandbox(SandboxRuntime):
     """Runs each command as a filtered process rooted in the session tree.
 
     The command's working directory, home, and temporary directory are the session's
-    own root, and its environment carries nothing the worker holds.
+    own root, and its environment carries nothing the worker holds. It runs as the
+    worker's own user with the worker's view of the filesystem, so the root scopes it by
+    construction rather than by enforcement.
     """
 
     name = "posix_process"
@@ -176,13 +188,6 @@ def _as_text(stream: str | bytes | None) -> str:
     return stream or ""
 
 
-_RUNTIMES: dict[str, type[SandboxRuntime]] = {
-    PosixProcessSandbox.name: PosixProcessSandbox
-}
-
-DEFAULT_SANDBOX_RUNTIME = PosixProcessSandbox.name
-
-
-def build_sandbox_runtime(name: str | None) -> SandboxRuntime:
-    """Instantiate a named sandbox runtime, falling back to the default."""
-    return _RUNTIMES.get(name or DEFAULT_SANDBOX_RUNTIME, PosixProcessSandbox)()
+def build_sandbox_runtime() -> SandboxRuntime:
+    """Instantiate the sandbox runtime sessions run their commands in."""
+    return PosixProcessSandbox()

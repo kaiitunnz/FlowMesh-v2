@@ -1090,6 +1090,13 @@ class TaskRuntime:
         engine = self._engines.get(record.workflow_id) if record else None
         if record is None or engine is None:
             return
+        wi = engine.work_item(task_id)
+        if wi is not None and wi.status is WorkItemStatus.CANCELLED:
+            # The activation was cancelled while this step ran. The ledger has closed
+            # the work item, so routing the step re-readies nothing; settle the record
+            # instead of leaving it pending against a lane that will never run again.
+            self._settle_cancelled_record_locked(task_id)
+            return
         if hr.kind in (HarnessResultKind.FAILURE, HarnessResultKind.CANCELLATION):
             self._pending_facade_groups.pop(task_id, None)
             record.pending_facade_group = None
@@ -2478,6 +2485,18 @@ class TaskRuntime:
             },
         )
 
+    def _settle_cancelled_record_locked(self, task_id: str) -> None:
+        """Bring a task record to CANCELLED once its work item is cancelled."""
+        record = self._tasks.get(task_id)
+        if record is None or record.status in TERMINAL_TASK_STATUSES:
+            return
+        record.status = TaskStatus.CANCELLED
+        record.assigned_worker = None
+        record.finished_ts = time.time()
+        self._remove_from_ready_locked(task_id)
+        self._persist_terminal_locked(task_id)
+        self._cv.notify_all()
+
     def _fail_v2_records_locked(
         self, task_ids: list[str], reason: str, *, persist: bool
     ) -> list[str]:
@@ -3083,6 +3102,7 @@ class TaskRuntime:
         touched: list[str] = []
         interrupts: list[InterruptMessage] = []
         resident_invocation_ids: list[str] = []
+        session_invocation_ids: list[str] = []
         with self._cv:
             workflow_tasks = [
                 item
@@ -3153,11 +3173,22 @@ class TaskRuntime:
                 resident_invocation_ids = (
                     engine.cancel_outstanding_boundary_invocations()
                 )
+                session_invocation_ids = [
+                    invocation_id
+                    for task_id, _record in workflow_tasks
+                    if engine.sandbox_session_operator(task_id) is not None
+                    and (wi := engine.work_item(task_id)) is not None
+                    and (invocation_id := wi.invocation_id) is not None
+                ]
                 self._save_ledger_locked(workflow_id)
 
         # A cancelled in-flight resident invocation releases its credit from this fenced
-        # cancellation terminal, so a lost or draining replica is not held forever.
+        # cancellation terminal, so a lost or draining replica is not held forever. A
+        # sandbox session holds its host claim on its own work item rather than a
+        # mediated boundary, so its credit releases from the same terminal here.
         for invocation_id in resident_invocation_ids:
+            self._release_resident_credit(invocation_id, failed=True)
+        for invocation_id in session_invocation_ids:
             self._release_resident_credit(invocation_id, failed=True)
 
         for interrupt in interrupts:
@@ -3194,6 +3225,8 @@ class TaskRuntime:
                 # after its in-memory commit.
                 self._repersist_terminal_workflow_locked(record.workflow_id)
                 return usages
+            if engine := self._engines.get(record.workflow_id):
+                self._release_session_credit_locked(engine, task_id, failed=True)
             if record.status in (TaskStatus.DONE, TaskStatus.FAILED):
                 self._logger.warning(
                     "Ignoring cancellation for task %s in terminal status %s",

@@ -222,15 +222,13 @@ class SandboxSessionDispatch(BaseModel):
     names it within the task's declared sequence, ``capsule_blob`` carries the results
     of the commands already run, ``private_state`` the generation the session resumes
     on, and ``private_state_attachment`` this worker incarnation's exclusive authority
-    to materialize and write it. ``runtime`` selects the sandbox substrate the host
-    provides.
+    to materialize and write it.
     """
 
     model_config = ConfigDict(frozen=True)
 
     command_index: int
     capsule_blob: str | None = None
-    runtime: str | None = None
     private_state: PrivateStateBinding | None = None
     private_state_attachment: PrivateStateAttachment | None = None
 

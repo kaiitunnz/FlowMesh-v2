@@ -195,8 +195,11 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   time on the reserved worker. Each command is one bounded episode step that opens the
   generation its binding names, runs in the worker-local `SandboxRuntime`, and seals the
   next generation, so the sealed generation is also the session's progress. A private
-  sandbox mutation is stateful and recovery-bearing but is not an external effect: the
-  declared-safe path reaches no network and nothing outside the session's own tree.
+  sandbox mutation is stateful and recovery-bearing but is not an external effect: a
+  command cannot open a network connection. Filesystem and process confinement is the
+  sandbox runtime's to provide, and the worker-local POSIX runtime provides none — it
+  scopes a command to its own root by working directory and environment, which holds
+  while a worker runs one tenant's sessions.
 - **Activation-private state.** An agent activation owns its mutable harness state
   under an opaque `ActivationPrivateStateReference`, whose lifecycle and recovery the
   orchestration ledger owns. A `PrivateStateBinding` names the generation and recovery

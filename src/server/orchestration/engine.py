@@ -3212,8 +3212,8 @@ class OrchestrationEngine:
     def private_state_profile(self, task_id: str) -> BundleProfile | None:
         """The private-state profile a task owns a lineage under, or None.
 
-        The one answer to which operators own activation-private state: an agent owns
-        its harness home and workspace, a sandbox session its own filesystem.
+        An agent owns a harness home and workspace; a sandbox session its own
+        filesystem.
         """
         if self.agent_operator(task_id) is not None:
             return BundleProfile.AGENT_HARNESS

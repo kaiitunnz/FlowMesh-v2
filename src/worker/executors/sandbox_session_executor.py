@@ -72,7 +72,7 @@ class SandboxSessionExecutor(Executor):
             raise ExecutionError(f"PrivateStateUnavailable: {exc}") from exc
 
         declared = spec.commands[index]
-        runtime = build_sandbox_runtime(dispatch.runtime)
+        runtime = build_sandbox_runtime()
         try:
             outcome = runtime.run(
                 state.sandbox,

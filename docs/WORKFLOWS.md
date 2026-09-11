@@ -124,9 +124,11 @@ step, against its own filesystem:
         timeoutSeconds: 10
 ```
 
-Each command sees what the previous one wrote and nothing from any other session. The
-declared-safe path reaches no network, so a session's mutations are private state rather
-than an external effect. The result carries every command's `argv`, `exit_code`, `stdout`,
+Each command sees what the previous one wrote, and each session starts in its own tree. A
+command cannot open a network connection, so a session's mutations are private state
+rather than an external effect; the worker-local runtime scopes a command to its root by
+working directory rather than enforcing a filesystem boundary, so a worker runs one
+tenant's sessions. The result carries every command's `argv`, `exit_code`, `stdout`,
 `stderr`, and whether it timed out.
 
 ### Structured regions
