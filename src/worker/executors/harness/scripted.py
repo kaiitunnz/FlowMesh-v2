@@ -17,7 +17,6 @@ from typing import Literal
 from pydantic import BaseModel
 
 from shared.harness import (
-    REQUIRED_MEDIATED_FACADES,
     BoundaryEventKind,
     BoundaryRequest,
     DeliveredOutcome,
@@ -29,6 +28,7 @@ from shared.harness import (
     HarnessResultKind,
     MediatedFacade,
     OutcomeKind,
+    sandbox_mediated,
 )
 from shared.sandbox import (
     LocalSandboxExecutor,
@@ -94,9 +94,7 @@ class ScriptedHarnessAdapter(HarnessAdapter):
         return EgressHandoffMode.DURABLE_PRE_EGRESS_YIELD
 
     def mediated_facades(self) -> frozenset[MediatedFacade]:
-        if self._sandbox is None:
-            return REQUIRED_MEDIATED_FACADES
-        return REQUIRED_MEDIATED_FACADES | {MediatedFacade.SANDBOX}
+        return sandbox_mediated(self._sandbox is not None)
 
     def start(
         self,

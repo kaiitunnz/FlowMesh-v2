@@ -21,7 +21,6 @@ from typing import Protocol
 from pydantic import BaseModel
 
 from shared.harness import (
-    REQUIRED_MEDIATED_FACADES,
     DeliveredOutcome,
     HarnessAdapter,
     HarnessBackendKey,
@@ -31,6 +30,7 @@ from shared.harness import (
     MediatedFacade,
     OutcomeKind,
     render_input_envelope,
+    sandbox_mediated,
 )
 from shared.sandbox import LocalSandboxExecutor
 from shared.tasks.specs import AgentSpecStrict
@@ -104,9 +104,7 @@ class CodexAppServerHarnessAdapter(HarnessAdapter):
     def mediated_facades(self) -> frozenset[MediatedFacade]:
         # The model reaches code execution only through the fabric's run_command facade,
         # which the worker resolves in its own fenced runtime inside the held turn.
-        if self._sandbox is None:
-            return REQUIRED_MEDIATED_FACADES
-        return REQUIRED_MEDIATED_FACADES | {MediatedFacade.SANDBOX}
+        return sandbox_mediated(self._sandbox is not None)
 
     def start(
         self,

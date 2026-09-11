@@ -40,7 +40,6 @@ _NR = {
 }
 
 _PR_SET_NO_NEW_PRIVS = 38
-_LANDLOCK_CREATE_RULESET_VERSION = 1
 _LANDLOCK_RULE_PATH_BENEATH = 1
 # Read, list, and execute; a read-only root grants exactly these.
 _FS_READ = 0x1 | 0x4 | 0x8
@@ -158,13 +157,13 @@ def _limits(spec: dict) -> None:
     # No RLIMIT_NPROC: it bounds the whole uid rather than this command, and every
     # activation on a worker shares one uid, so a per-command process cap needs the
     # cgroup delegation an unprivileged container does not have.
-    for name, value in (
-        ("RLIMIT_AS", spec["memory_bytes"]),
-        ("RLIMIT_CPU", spec["cpu_seconds"]),
-        ("RLIMIT_FSIZE", spec["file_size_bytes"]),
-        ("RLIMIT_NOFILE", spec["open_files"]),
+    for limit, value in (
+        (resource.RLIMIT_AS, spec["memory_bytes"]),
+        (resource.RLIMIT_CPU, spec["cpu_seconds"]),
+        (resource.RLIMIT_FSIZE, spec["file_size_bytes"]),
+        (resource.RLIMIT_NOFILE, spec["open_files"]),
     ):
-        resource.setrlimit(getattr(resource, name), (value, value))
+        resource.setrlimit(limit, (value, value))
 
 
 def main() -> None:

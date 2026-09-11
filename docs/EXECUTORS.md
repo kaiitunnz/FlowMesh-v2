@@ -112,7 +112,16 @@ than running its code outside the fence.
 Commands mutate `workspace_fs` and become durable at the episode's ordinary seal, so a
 worker loss before that seal leaves the last sealed generation intact. Egress is denied
 in the runtime: a command cannot open an IP connection, and reaching a model, tool, or
-external effect takes the existing mediated boundary.
+external effect takes the mediated boundary.
+
+`ORCHESTRATOR_AGENT_SANDBOX_ENABLED` gates the feature for the whole deployment and is
+off by default; an agent that declares `sandbox.execute` where it is off fails template
+validation rather than running without a sandbox. Filesystem confinement between
+activations on one worker needs a Landlock-capable kernel (5.13+, and 6.7+ for the
+network rules): where Landlock is absent the worker logs the posture it achieved and
+falls back to the seccomp and resource layers, which still deny egress but no longer
+confine the filesystem. Enable the feature only on workers running a single trusted
+tenant's agents.
 
 ## Per-workflow harness and model binding
 

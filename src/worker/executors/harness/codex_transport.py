@@ -167,8 +167,8 @@ class CodexTransportConfig:
             # native codex web_search (provider-executed, unavailable on a self-hosted
             # model) stays off; the model sees only the fabric facade.
             "tools.web_search=false",
-            # Whatever the native shell can still start gets no network, so it cannot
-            # egress around the mediated facades.
+            # Whatever the native shell starts gets no network, so it cannot egress
+            # around the mediated facades.
             "sandbox_workspace_write.network_access=false",
         )
         env = {"CODEX_HOME": self.codex_home.as_posix(), _KEY_ENV: self.env_key_value}

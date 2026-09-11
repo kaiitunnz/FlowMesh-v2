@@ -61,6 +61,18 @@ REQUIRED_MEDIATED_FACADES = frozenset(
 )
 
 
+def sandbox_mediated(has_sandbox: bool) -> frozenset[MediatedFacade]:
+    """The facades a backend mediates, given whether it was handed a local sandbox.
+
+    A backend that can run code declares it, which is what binds its commands to the
+    fenced runtime; the executor refuses an agent whose sandbox a backend would not
+    mediate, so this is the one place that mapping lives.
+    """
+    if not has_sandbox:
+        return REQUIRED_MEDIATED_FACADES
+    return REQUIRED_MEDIATED_FACADES | {MediatedFacade.SANDBOX}
+
+
 class EgressHandoffMode(StrEnum):
     """How a backend hands a mediated egress boundary to the worker egress lane.
 
