@@ -51,6 +51,7 @@ from ..representations.template import (
 from .agent_binding import (
     AgentBindingDefaults,
     resolve_agent_bindings,
+    resolve_agent_sandbox_binding,
 )
 from .bindings import (
     BindingClass,
@@ -270,6 +271,9 @@ def _agent_operator(
     harness_binding, gateway_binding = resolve_agent_bindings(
         harness, model_binding, defaults, secret_ref
     )
+    sandbox = (
+        spec.sandbox if isinstance(spec, (AgentSpecStrict, AgentSpecTemplate)) else None
+    )
     return AgentOperator(
         operator_id=task.task_id,
         source_ref=task.task_id,
@@ -278,6 +282,7 @@ def _agent_operator(
         binding=BindingKey(task_type=TaskType.AGENT),
         harness_binding=harness_binding,
         model_binding=gateway_binding,
+        sandbox_binding=resolve_agent_sandbox_binding(sandbox),
         authority=default_agent_authority(),
         boundary=default_agent_boundary(),
         guard=_condition_guard(task, name_to_op, operator_ids),

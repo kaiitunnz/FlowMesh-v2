@@ -21,6 +21,7 @@ from shared.harness import (
     HarnessCapsule,
     HarnessResult,
     HarnessResultKind,
+    MediatedFacade,
 )
 from shared.private_state import PrivateStateAttachment, PrivateStateUnavailable
 from shared.tasks.specs.misc import ModelBindingMode
@@ -39,6 +40,7 @@ from shared.tools.search.schema import (
 from ..egress import PendingEgressRequestStore
 from ..private_state import MaterializedState, PrivateStateHolder
 from ..resident import capture_resident_request
+from ..sandbox import AgentSandboxRuntime, SandboxRuntime, build_sandbox_runtime
 from .base_executor import ExecutionError, Executor, ExecutorTask
 from .episode_support import EpisodeStepResult, hydrate_delivered_outcomes
 from .harness import build_adapter
@@ -56,6 +58,7 @@ class AgentEpisodeExecutor(Executor):
         super().__init__(*args, **kwargs)
         self._adapter: HarnessAdapter | None = None
         self._episode_task_id: str | None = None
+        self._sandbox_runtime: SandboxRuntime | None = None
 
     def run(self, task: ExecutorTask, out_dir: Path) -> EpisodeStepResult:
         dispatch = task.agent_episode
@@ -71,13 +74,26 @@ class AgentEpisodeExecutor(Executor):
             # A different task means the prior episode finished; drop its facade context
             # so a worker running episodes back-to-back does not accumulate them.
             facade.unregister_episode(prior)
-        adapter = build_adapter(dispatch.backend, task, self._config, facade, state)
+        sandbox = self._sandbox(dispatch, state)
+        adapter = build_adapter(
+            dispatch.backend, task, self._config, facade, state, sandbox
+        )
         self._episode_task_id = task.task_id
         missing = REQUIRED_MEDIATED_FACADES - adapter.mediated_facades()
         if missing:
             raise ExecutionError(
                 f"harness backend {dispatch.backend.backend!r} does not mediate "
                 + ", ".join(sorted(missing))
+            )
+        if (
+            sandbox is not None
+            and MediatedFacade.SANDBOX not in adapter.mediated_facades()
+        ):
+            # The agent may run code but this backend would run it natively, outside the
+            # fence: refuse rather than execute unconfined.
+            raise ExecutionError(
+                f"harness backend {dispatch.backend.backend!r} does not mediate the "
+                "sandbox its agent declares"
             )
         self._adapter = adapter
         capsule = (
@@ -132,6 +148,20 @@ class AgentEpisodeExecutor(Executor):
             value=value,
             facade_group=group,
             private_state=sealed,
+        )
+
+    def _sandbox(
+        self, dispatch: AgentEpisodeDispatch, state: MaterializedState | None
+    ) -> AgentSandboxRuntime | None:
+        """The fenced runtime this dispatch's commands run in, or None for an agent
+        that declares no sandbox."""
+        capability = dispatch.sandbox
+        if capability is None or state is None:
+            return None
+        if self._sandbox_runtime is None:
+            self._sandbox_runtime = build_sandbox_runtime()
+        return AgentSandboxRuntime(
+            capability, _attachment(dispatch), state, self._sandbox_runtime
         )
 
     def _open_private_state(

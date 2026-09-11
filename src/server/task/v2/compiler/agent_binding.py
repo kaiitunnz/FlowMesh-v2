@@ -1,10 +1,17 @@
 from dataclasses import dataclass
 
-from shared.tasks.specs import AgentHarnessSpec, AgentModelBindingSpec, ModelBindingMode
+from shared.sandbox import SandboxRuntimeProfile
+from shared.tasks.specs import (
+    AgentHarnessSpec,
+    AgentModelBindingSpec,
+    AgentSandboxSpec,
+    ModelBindingMode,
+)
 
 from ..representations.operators import (
     AgentHarnessBinding,
     AgentModelGatewayBinding,
+    AgentSandboxBinding,
     BindingProvenance,
     HarnessBindingProvenance,
     ModelBindingProvenance,
@@ -170,4 +177,23 @@ def resolve_agent_bindings(
     return (
         _resolve_harness(harness, defaults),
         _resolve_model(_source_model(harness, model_binding), defaults, secret_ref),
+    )
+
+
+def resolve_agent_sandbox_binding(
+    sandbox: AgentSandboxSpec | None,
+) -> AgentSandboxBinding | None:
+    """Pin the declared local sandbox envelope, or none when the agent declares one."""
+    if sandbox is None:
+        return None
+    return AgentSandboxBinding(
+        profile=SandboxRuntimeProfile(
+            runtime=sandbox.runtime,
+            command_timeout_sec=sandbox.command_timeout_sec,
+            cpu_seconds=sandbox.cpu_seconds,
+            memory_bytes=sandbox.memory_bytes,
+            file_size_bytes=sandbox.file_size_bytes,
+            open_files=sandbox.open_files,
+        ),
+        provenance=BindingProvenance.SOURCE,
     )

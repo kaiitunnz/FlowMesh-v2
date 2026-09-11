@@ -11,6 +11,8 @@ import json
 from typing import Any
 
 from shared.harness.boundary import BoundaryEventKind
+from shared.sandbox import SANDBOX_EXECUTE_INTERFACE
+from shared.tools.facade import FacadeResolution
 
 from ....orchestration.tool_dispatch import FABRIC_TOOL_INTERFACES
 from ..representations.operators import AgentOperator, FacadeDescriptor
@@ -18,6 +20,7 @@ from .project import LoweringAccumulator
 
 _SPAWN_AGENT_NAME = "spawn_agent"
 _DEFAULT_SEARCH_NAME = "web_search"
+_RUN_COMMAND_NAME = "run_command"
 
 
 def _spawn_agent_schema() -> dict[str, Any]:
@@ -41,6 +44,33 @@ def _spawn_agent_schema() -> dict[str, Any]:
                 },
             },
             "required": ["region"],
+        },
+    }
+
+
+def _run_command_schema() -> dict[str, Any]:
+    return {
+        "type": "function",
+        "name": _RUN_COMMAND_NAME,
+        "description": (
+            "Run a command in your own workspace and return its exit code, stdout, "
+            "and stderr. The workspace is the only writable path and the command has "
+            "no network access."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "the program and its arguments",
+                },
+                "timeout_sec": {
+                    "type": "number",
+                    "description": "how long to allow the command to run",
+                },
+            },
+            "required": ["command"],
         },
     }
 
@@ -96,6 +126,18 @@ def pin_agent_facades(acc: LoweringAccumulator) -> None:
                     kind=BoundaryEventKind.INVOCATION,
                     interface=interface,
                     tool_schema=json.dumps(_search_schema(name)),
+                )
+            )
+        if op.sandbox_binding is not None:
+            # The worker resolves this one in the held turn: it is the agent's own
+            # fenced state transition, not a call the fabric settles.
+            facades.append(
+                FacadeDescriptor(
+                    name=_RUN_COMMAND_NAME,
+                    kind=BoundaryEventKind.STATE_ACCESS,
+                    interface=SANDBOX_EXECUTE_INTERFACE,
+                    tool_schema=json.dumps(_run_command_schema()),
+                    resolution=FacadeResolution.LOCAL_INLINE,
                 )
             )
         if facades:

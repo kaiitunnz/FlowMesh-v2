@@ -24,6 +24,7 @@ from shared.harness import (
 from shared.outcome import OutcomeManifest
 from shared.private_state import (
     OwnerFence,
+    PrivateStateAttachment,
     PrivateStateSealReport,
     PrivateStateUnavailable,
 )
@@ -32,6 +33,7 @@ from shared.resident.reports import (
     ResidentOpOutcome,
     ResidentRouteObservation,
 )
+from shared.sandbox import LocalSandboxCapability
 from shared.schemas.command import InterruptMessage, MediatedOpMessage
 from shared.schemas.result import ResultEnvelope, result_file_path
 from shared.tasks import TaskEnvelopeTemplate
@@ -91,12 +93,38 @@ from .v2 import (
 )
 from .v2.compiler.agent_binding import AgentBindingDefaults
 from .v2.credentials import pop_inline_model_secrets, redact_source_text
-from .v2.representations.operators import AgentModelGatewayBinding, ServiceDependency
+from .v2.representations.operators import (
+    AgentModelGatewayBinding,
+    AgentOperator,
+    ServiceDependency,
+)
 from .v2.representations.plan import EpisodeSpec
 
 # A live-feasibility check: whether a lowered episode's declared alternative can be
 # placed now.
 EpisodeFeasibility = Callable[[EpisodeSpec], bool]
+
+
+def _sandbox_capability(
+    op: AgentOperator | None, attachment: PrivateStateAttachment | None
+) -> LocalSandboxCapability | None:
+    """The local execution authority for one dispatch of a sandbox-declaring agent.
+
+    It is minted from the agent's pinned envelope and the attachment that already fences
+    this dispatch's writes, so a command runs only under the holder and write epoch that
+    owns the workspace it mutates. An agent with no attachment has no workspace to run
+    in and gets none.
+    """
+    if op is None or op.sandbox_binding is None or attachment is None:
+        return None
+    return LocalSandboxCapability(
+        attachment_id=attachment.attachment_id,
+        reference_id=attachment.reference_id,
+        worker_id=attachment.worker_id,
+        incarnation=attachment.incarnation,
+        write_epoch=attachment.write_epoch,
+        profile=op.sandbox_binding.profile,
+    )
 
 
 def _stringify(value: Any) -> str:
@@ -1815,6 +1843,7 @@ class TaskRuntime:
                 facade_descriptors=tuple(op.facades) if op is not None else (),
                 private_state=granted[0] if granted else None,
                 private_state_attachment=granted[1] if granted else None,
+                sandbox=_sandbox_capability(op, granted[1] if granted else None),
             )
 
     def service_episode_dispatch(

@@ -4,6 +4,7 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from shared.harness.boundary import BoundaryEventKind
+from shared.sandbox import SandboxRuntimeProfile
 from shared.tasks import TaskType
 from shared.tasks.specs import ModelBindingMode
 from shared.tools.facade import FacadeDescriptor as FacadeDescriptor
@@ -238,6 +239,21 @@ class AgentHarnessBinding(BaseModel):
     provenance: HarnessBindingProvenance
 
 
+class AgentSandboxBinding(BaseModel):
+    """The resolved, submission-pinned local sandbox binding for an agent.
+
+    It lowers to bounded local runtime actions inside the agent's own episode, on the
+    holder its private state already selected. It names no host, worker, image cache,
+    mount, endpoint, service dependency, residency intent, claim, or route: an agent's
+    commands are a fenced private-state transition, not a service it invokes.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    profile: SandboxRuntimeProfile
+    provenance: BindingProvenance
+
+
 class ModelBindingProvenance(BaseModel):
     """Per-field provenance of the resolved model-gateway binding."""
 
@@ -410,6 +426,8 @@ class AgentOperator(_OperatorBase):
     # operator is constructed outside compilation.
     harness_binding: AgentHarnessBinding | None = None
     model_binding: AgentModelGatewayBinding | None = None
+    # Set only for an agent whose authority declares ``sandbox.execute``.
+    sandbox_binding: AgentSandboxBinding | None = None
     authority: AuthorityCeiling = AuthorityCeiling()
     boundary: BoundarySignature = BoundarySignature()
     guard: ConditionGuard | None = None

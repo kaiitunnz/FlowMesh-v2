@@ -11,6 +11,7 @@ from .inference import InferenceBackend, InferenceSpecStrict, InferenceSpecTempl
 from .misc import (
     AgentHarnessSpec,
     AgentModelBindingSpec,
+    AgentSandboxSpec,
     AgentSpecStrict,
     AgentSpecTemplate,
     ApiSpecStrict,
@@ -53,6 +54,7 @@ from .training import (
 
 __all__ = [
     "AgentHarnessSpec",
+    "AgentSandboxSpec",
     "AgentModelBindingSpec",
     "ModelBindingMode",
     "ConditionSpec",

@@ -1,5 +1,6 @@
 from collections import defaultdict
 
+from shared.sandbox import SANDBOX_EXECUTE_INTERFACE
 from shared.tasks.specs import ModelBindingMode
 
 from ..representations.operators import (
@@ -683,9 +684,11 @@ def validate_compilation(
     loc = _location_index(template)
     # An invoke face names an interface, so a tool is referenced by its declared
     # interface (a tool without one is referenced by its bare name).
+    # The local sandbox is an interface the fabric itself provides, not an author-wired
+    # tool, so declaring it needs no tool entry.
     declared_tools = {
         tool.interface or tool.name for tool in template.tool_declarations
-    }
+    } | {SANDBOX_EXECUTE_INTERFACE}
     diags: list[Diagnostic] = []
 
     diags.extend(_check_source_map(template, plan, loc))
