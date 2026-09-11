@@ -128,8 +128,10 @@ class CodexTransportConfig:
     env_key_value: str = "placeholder"
     provider_id: str = "flowmesh"
     approval_policy: str = "never"
-    # Permit native shell in a workspace-write sandbox but deny it network egress, so
-    # the fabric search facade is the only web path (a native curl cannot bypass it).
+    # Codex confines its own native shell with a bundled bubblewrap, which needs the
+    # user namespace an ordinary worker container is denied, so that shell fails closed
+    # here. Agent code execution runs through the fabric's own fenced runtime instead,
+    # reached by the run_command facade.
     sandbox_mode: str = "workspace-write"
     turn_input: str = "continue"
     turn_timeout_sec: float = 120.0
@@ -165,8 +167,8 @@ class CodexTransportConfig:
             # native codex web_search (provider-executed, unavailable on a self-hosted
             # model) stays off; the model sees only the fabric facade.
             "tools.web_search=false",
-            # Native shell is permitted but has no network, so it cannot egress around
-            # the mediated search facade.
+            # Whatever the native shell can still start gets no network, so it cannot
+            # egress around the mediated facades.
             "sandbox_workspace_write.network_access=false",
         )
         env = {"CODEX_HOME": self.codex_home.as_posix(), _KEY_ENV: self.env_key_value}
