@@ -182,7 +182,7 @@ def main() -> None:
     _landlock(libc, nr, spec)
     _seccomp(libc, nr)
     _limits(spec)
-    os.execv(program, argv)
+    os.execv(program, argv)  # nosec B606 - argv list, no shell, absolute program
 
 
 if __name__ == "__main__":
