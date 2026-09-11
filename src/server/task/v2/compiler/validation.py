@@ -637,6 +637,19 @@ def _check_agent_binding(
     """
     diags: list[Diagnostic] = []
     location = loc.get(op.operator_id)
+    if SANDBOX_EXECUTE_INTERFACE in op.authority.invoke and op.sandbox_binding is None:
+        # The pin pass binds an envelope to every agent that declares the interface, so
+        # a declared interface with no binding means the deployment permits none.
+        diags.append(
+            Diagnostic(
+                code="agent.sandbox.disabled",
+                message=(
+                    "agent declares sandbox.execute but agent-local code execution is "
+                    "disabled on this deployment (ORCHESTRATOR_AGENT_SANDBOX_ENABLED)"
+                ),
+                location=location,
+            )
+        )
     if op.harness_binding is None:
         diags.append(
             Diagnostic(

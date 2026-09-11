@@ -214,12 +214,13 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   become durable together at the agent's ordinary boundary seal, not per command; a loss
   before that seal fails closed as `PrivateStateUnavailable` rather than resuming on a
   fresh workspace. A command is a private-state transition, not an external effect:
-  network egress is denied in the runtime, and a model, tool, or effect still takes its
-  existing mediated boundary. The fence is Landlock filesystem confinement to the
-  workspace, a seccomp filter denying IP sockets and io_uring, the envelope's resource
-  limits, and a process group killed and reaped before the action completes; it provides
-  no mount, PID, or IPC namespace and no cgroup limits, so the feature is a
-  single-trusted-tenant development posture rather than multi-tenant isolation.
+  network egress is denied in the runtime, and a model, tool, or effect takes its
+  mediated boundary. The fence is Landlock filesystem confinement to the workspace, a
+  seccomp filter denying IP sockets and io_uring, the envelope's resource limits, and a
+  process group killed and reaped before the action completes; it provides no mount,
+  PID, or IPC namespace and no cgroup limits, so the feature is a single-trusted-tenant
+  development posture rather than multi-tenant isolation, and an operator enables it for
+  the fleet with `ORCHESTRATOR_AGENT_SANDBOX_ENABLED`.
 - **Agent-model gateway.** A model boundary an agent defers with a `canned` or `echo`
   binding settles on the control plane off the agent's lane, injecting the result back at
   the originating call. The gateway resolves the activation's pinned binding and its

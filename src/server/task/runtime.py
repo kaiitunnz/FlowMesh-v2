@@ -132,7 +132,9 @@ def _stringify(value: Any) -> str:
     return value if isinstance(value, str) else json.dumps(value, sort_keys=True)
 
 
-def _binding_defaults(cfg: AgentBindingConfig) -> AgentBindingDefaults:
+def _binding_defaults(
+    cfg: AgentBindingConfig, sandbox_enabled: bool = False
+) -> AgentBindingDefaults:
     """Convert the deployment binding config into the compiler's injected defaults."""
     return AgentBindingDefaults(
         default_backend=cfg.default_backend,
@@ -140,6 +142,7 @@ def _binding_defaults(cfg: AgentBindingConfig) -> AgentBindingDefaults:
         default_mode=cfg.default_mode,
         default_url=cfg.default_url,
         default_model=cfg.default_model,
+        sandbox_enabled=sandbox_enabled,
     )
 
 
@@ -195,7 +198,9 @@ class TaskRuntime:
         self._web_search = orchestration.web_search
         self._model_egress_timeout_sec = orchestration.gateway.timeout_sec
         self._input_budget_bytes = orchestration.agent_input_budget_bytes
-        self._agent_binding_defaults = _binding_defaults(orchestration.agent_binding)
+        self._agent_binding_defaults = _binding_defaults(
+            orchestration.agent_binding, orchestration.agent_sandbox_enabled
+        )
         self._lowering_strategy = (
             LoweringStrategy.EPISODE_CUT
             if orchestration.episode_lowering

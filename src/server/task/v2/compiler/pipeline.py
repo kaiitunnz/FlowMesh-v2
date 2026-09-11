@@ -101,7 +101,7 @@ def compile_workflow(
     lower_tasks(parsed, name_to_op, acc, defaults, secret_refs or {})
     lower_frontend_v2(parsed, acc)
     induce_effect_boundaries(acc)
-    pin_agent_sandbox(acc)
+    pin_agent_sandbox(acc, defaults.sandbox_enabled)
     pin_agent_facades(acc)
     template = _assemble_template(workflow_id, source, acc)
     nodes = tuple(acc.nodes)
