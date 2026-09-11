@@ -87,7 +87,7 @@ def _readonly_roots() -> list[str]:
     ``/proc`` is deliberately absent: it is the one path that would expose another
     activation's command line and environment on a shared worker.
     """
-    roots = {"/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc"}
+    roots = {"/usr", "/usr/local", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/opt"}
     roots.add(Path(sys.executable).parent.as_posix())
     roots.add(sys.base_prefix)
     roots.add(sys.prefix)
@@ -130,9 +130,10 @@ class PosixProcessSandbox(SandboxRuntime):
         spec = {
             "landlock_abi": self._abi,
             "rw": [root.as_posix()],
-            "ro": _readonly_roots(),
+            # The program's own directory too: an interpreter installed outside the
+            # standard roots must still be readable to exec.
+            "ro": [*_readonly_roots(), Path(program).resolve().parent.as_posix()],
             "devices": list(_DEVICES),
-            "max_processes": profile.max_processes,
             "memory_bytes": profile.memory_bytes,
             "cpu_seconds": profile.cpu_seconds,
             "file_size_bytes": profile.file_size_bytes,

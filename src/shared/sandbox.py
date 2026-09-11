@@ -22,9 +22,10 @@ MAX_STREAM_CHARS = 64 * 1024
 class SandboxRuntimeProfile(BaseModel):
     """A policy-approved local runtime and the envelope its commands run under.
 
-    The envelope is the bounded CPU, memory, PID, disk, and wallclock cost one command
-    may take. It is ordinary worker resource isolation held for the dispatch, not an
-    admission credit.
+    The envelope is the bounded CPU, memory, disk, descriptor, and wallclock cost one
+    command may take. It is ordinary worker resource isolation held for the dispatch,
+    not an admission credit. It carries no process-count bound: that needs the cgroup
+    delegation an unprivileged container does not have.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -33,7 +34,6 @@ class SandboxRuntimeProfile(BaseModel):
     command_timeout_sec: float = 60.0
     cpu_seconds: int = 60
     memory_bytes: int = 2 * 1024**3
-    max_processes: int = 64
     file_size_bytes: int = 512 * 1024**2
     open_files: int = 1024
 
