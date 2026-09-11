@@ -107,6 +107,27 @@ declare `provenance` (`pinned` | `live`) and `determinism` / `effect` /
 `recovery` overrides, and a `result: { visibility: published }` to publish its
 induced output.
 
+An agent that runs code declares `sandbox.execute` in its invoke face, which
+needs no `tools` entry — the fabric provides the interface. `spec.sandbox`
+bounds one command and may be omitted for the defaults:
+
+```yaml
+- name: coder
+  spec:
+    taskType: agent
+    task: build and test the project
+    harness: { backend: codex, version: v1 }
+    sandbox: { command_timeout_sec: 120, memory_bytes: 4294967296 }
+    v2:
+      authority: { invoke: ["sandbox.execute"], delegate: [] }
+```
+
+Commands run in the agent's own workspace on the worker that already holds its
+private state, and the runtime denies network egress: reaching a model, tool, or
+external effect takes the agent's mediated boundaries instead. The confinement
+is a development posture for single-tenant workers, not multi-tenant isolation
+(see [`EXECUTORS.md`](EXECUTORS.md)).
+
 ### Structured regions
 
 In the graph form, a node carries a `region` instead of a `spec`. Regions wire

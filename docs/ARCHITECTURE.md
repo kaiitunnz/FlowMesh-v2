@@ -204,6 +204,22 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   and a harness works inside its own components under its sandbox. Only opaque
   references cross into the ledger, control state, operation frames, logs, results, or
   artifacts. `WORKER_PRIVATE_STATE_DIR` sets the root.
+- **Agent-local sandbox execution.** An agent that declares the `sandbox.execute`
+  interface in its authority ceiling pins a bounded local envelope and runs commands in
+  its own `workspace_fs`, on the worker its private-state attachment already selected.
+  Each dispatch mints a capability fenced to that attachment's holder and write epoch,
+  and the worker-local runtime validates every command against it, so an ordinary
+  command raises no `Invocation`, `ServiceClaim`, `RouteAuthorization`, admission
+  transaction, or cross-worker hop. Several commands run inside one bounded turn and
+  become durable together at the agent's ordinary boundary seal, not per command; a loss
+  before that seal fails closed as `PrivateStateUnavailable` rather than resuming on a
+  fresh workspace. A command is a private-state transition, not an external effect:
+  network egress is denied in the runtime, and a model, tool, or effect still takes its
+  existing mediated boundary. The fence is Landlock filesystem confinement to the
+  workspace, a seccomp filter denying IP sockets and io_uring, the envelope's resource
+  limits, and a process group killed and reaped before the action completes; it provides
+  no mount, PID, or IPC namespace and no cgroup limits, so the feature is a
+  single-trusted-tenant development posture rather than multi-tenant isolation.
 - **Agent-model gateway.** A model boundary an agent defers with a `canned` or `echo`
   binding settles on the control plane off the agent's lane, injecting the result back at
   the originating call. The gateway resolves the activation's pinned binding and its

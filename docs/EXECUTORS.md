@@ -91,6 +91,29 @@ a turn settles: the tree is ahead of the generation the binding names, and the n
 attempt fails closed rather than resuming from a point no fence covers. A lineage root
 outlives its activation, private to the holder until its incarnation ends.
 
+### Agent-local sandbox
+
+An agent whose `spec.v2.authority.invoke` names `sandbox.execute` may run commands in its
+own workspace. `spec.sandbox` bounds one command — `runtime`, `command_timeout_sec`,
+`cpu_seconds`, `memory_bytes`, `file_size_bytes`, `open_files` — and defaults apply when
+it is omitted. It names no host, image, mount, or path: where a command runs is the
+runtime's choice, and the writable root is always the activation's own `workspace_fs`.
+
+The dispatch carries a capability fenced to the same holder and write epoch as the
+private-state attachment, and the worker validates each command against it, so a
+superseded holder cannot run one. A backend reaches the runtime only through the
+executor: the `scripted` backend runs an `exec` step, and the `codex` backend's model
+sees a `run_command` tool the worker-local Responses facade resolves inside the held
+turn, feeding the result back into the same turn. Neither path yields the episode lane,
+records a turn-group member, or produces a control-plane round trip per command. A
+backend that does not mediate the sandbox is refused an agent that declares one, rather
+than running its code outside the fence.
+
+Commands mutate `workspace_fs` and become durable at the episode's ordinary seal, so a
+worker loss before that seal leaves the last sealed generation intact. Egress is denied
+in the runtime: a command cannot open an IP connection, and reaching a model, tool, or
+external effect takes the existing mediated boundary.
+
 ## Per-workflow harness and model binding
 
 An agent declares its harness and model binding in the workflow; both are pinned at
