@@ -25,6 +25,7 @@ from shared.sandbox import (
     LocalSandboxExecutor,
     SandboxCommand,
     SandboxDenied,
+    SandboxUnavailable,
 )
 from shared.tools.facade import FacadeDescriptor, FacadeTurnGroup
 from shared.tools.model.schema import (
@@ -53,7 +54,7 @@ from .translation import (
 
 _MAX_BODY_BYTES = 20 * 1024 * 1024
 # Bounds how many local commands one held turn may run before it must report back, so a
-# turn cannot loop on the model indefinitely.
+# turn neither loops on the model forever nor runs an unbounded batch in one round.
 _MAX_TURN_COMMANDS = 32
 
 
@@ -194,35 +195,27 @@ class ResponsesFacade:
         A local command is run here and its result appended to this turn's own message
         list, so the model continues from it without the episode yielding its lane.
         Nothing about the command reaches control: no invocation, claim, route, or
-        permit — only the model calls between them are mediated, as they already were.
+        permit. Only the model calls between them are mediated.
         """
+        descriptors = list(ctx.descriptors)
         ran = 0
         for round_index in range(_MAX_TURN_COMMANDS + 1):
             completion = self._egress_turn(
                 task_id, ctx, messages, tools, base, round_index
             )
-            local, _ = partition_local_calls(
-                completion.tool_calls, list(ctx.descriptors)
-            )
+            local, _ = partition_local_calls(completion.tool_calls, descriptors)
             if not local or ran >= _MAX_TURN_COMMANDS:
                 return completion
-            mediated, _ = partition_facade_calls(
-                completion.tool_calls, list(ctx.descriptors)
-            )
             messages.append(_assistant_tool_calls(completion))
+            # Every call the model emitted needs a result, or the next request carries
+            # a dangling tool call the backend rejects: a call this turn will not run is
+            # answered as not-run rather than left unanswered.
             for call in completion.tool_calls:
-                if call in local:
+                if call in local and ran < _MAX_TURN_COMMANDS:
                     ran += 1
                     messages.append(_tool_result(call, self._run_command(ctx, call)))
-                elif call in mediated:
-                    # A mediated call co-emitted with a command is not silently dropped:
-                    # it is answered as not-run so the model asks for it on its own.
-                    messages.append(
-                        _tool_result(
-                            call,
-                            "not run: ask for this again once your commands are done",
-                        )
-                    )
+                else:
+                    messages.append(_tool_result(call, _DEFERRED))
         return completion
 
     def _run_command(self, ctx: EpisodeContext, call: ModelToolCall) -> str:
@@ -245,7 +238,9 @@ class ResponsesFacade:
             )
         except (ValueError, TypeError) as exc:
             return f"denied: {exc}"
-        except SandboxDenied as exc:
+        except (SandboxDenied, SandboxUnavailable) as exc:
+            # A command the runtime will not run is a declared terminal outcome of the
+            # action: the model is told, and the turn carries on.
             return f"denied: {exc}"
         return json.dumps(
             {
@@ -301,6 +296,9 @@ class ResponsesFacade:
         output.extend(function_call_item(call) for call in other)
         output.append(message_output_item(_dispatch_summary(capture.group)))
         return output
+
+
+_DEFERRED = "not run: ask for this again once your commands are done"
 
 
 def _assistant_tool_calls(completion: ModelCompletion) -> dict[str, Any]:

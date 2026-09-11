@@ -16,12 +16,14 @@ from shared.sandbox import (
     SandboxCommand,
     SandboxCommandResult,
     SandboxDenied,
+    SandboxUnavailable,
 )
 from shared.tools.facade import FacadeDescriptor, FacadeResolution
 from shared.tools.model.schema import ModelCompletion, ModelToolCall
 from shared.tools.search.schema import SEARCH_INTERFACE
 from worker.egress import PendingEgressRequestStore
 from worker.model_turn import ResponsesFacade
+from worker.model_turn.facade import _MAX_TURN_COMMANDS
 
 _TASK = "tsk-agent"
 _RUN_COMMAND = FacadeDescriptor(
@@ -57,11 +59,14 @@ class _ScriptedEgress:
 
 
 class _RecordingSandbox(LocalSandboxExecutor):
-    def __init__(self, denied: bool = False) -> None:
+    def __init__(self, denied: bool = False, unavailable: bool = False) -> None:
         self.commands: list[tuple[str, ...]] = []
         self._denied = denied
+        self._unavailable = unavailable
 
     def execute(self, command: SandboxCommand) -> SandboxCommandResult:
+        if self._unavailable:
+            raise SandboxUnavailable("the sandbox could not start a command")
         if self._denied:
             raise SandboxDenied("the capability is not this dispatch's authority")
         self.commands.append(command.argv)
@@ -219,3 +224,66 @@ def test_a_malformed_command_is_denied_without_running() -> None:
 
     assert sandbox.commands == []
     assert "denied" in egress.seen[1][2].body["messages"][-1]["content"]
+
+
+def test_an_unavailable_runtime_denies_rather_than_failing_the_turn() -> None:
+    """A runtime that cannot start a command settles the action, not the request."""
+    sandbox = _RecordingSandbox(unavailable=True)
+    facade, egress, _, token = _facade(
+        [
+            ModelCompletion(
+                content="", tool_calls=(_call("run_command", {"command": ["echo"]}),)
+            ),
+            ModelCompletion(content="understood"),
+        ],
+        sandbox,
+    )
+
+    output = facade.handle_turn(_TASK, token, {"input": "go"})
+
+    assert output[0]["content"][0]["text"] == "understood"
+    assert egress.seen[1][2].body["messages"][-1]["content"].startswith("denied:")
+
+
+def test_a_turn_runs_no_more_than_the_command_cap() -> None:
+    """The cap bounds commands, not rounds: one completion runs no unbounded batch."""
+    sandbox = _RecordingSandbox()
+    over_cap = tuple(
+        _call("run_command", {"command": ["echo", str(i)]}, f"c{i}")
+        for i in range(_MAX_TURN_COMMANDS + 5)
+    )
+    facade, _, _, token = _facade(
+        [
+            ModelCompletion(content="", tool_calls=over_cap),
+            ModelCompletion(content="stopped"),
+        ],
+        sandbox,
+    )
+
+    facade.handle_turn(_TASK, token, {"input": "go"})
+
+    assert len(sandbox.commands) == _MAX_TURN_COMMANDS
+
+
+def test_a_native_tool_co_emitted_with_a_command_still_gets_a_result() -> None:
+    """Every call the model emitted is answered, so the next request is well-formed."""
+    sandbox = _RecordingSandbox()
+    facade, egress, _, token = _facade(
+        [
+            ModelCompletion(
+                content="",
+                tool_calls=(
+                    _call("run_command", {"command": ["ls"]}, "c1"),
+                    _call("apply_patch", {"patch": "..."}, "c2"),
+                ),
+            ),
+            ModelCompletion(content="done"),
+        ],
+        sandbox,
+    )
+
+    facade.handle_turn(_TASK, token, {"input": "go"})
+
+    messages = egress.seen[1][2].body["messages"]
+    answered = {m["tool_call_id"] for m in messages if m["role"] == "tool"}
+    assert answered == {"c1", "c2"}

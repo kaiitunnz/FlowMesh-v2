@@ -12,6 +12,7 @@ from pydantic import (
     model_validator,
 )
 
+from ...sandbox import SANDBOX_RUNTIMES
 from ..task_type import TaskType
 from .common import (
     ModelSpecStrict,
@@ -223,6 +224,16 @@ class AgentSandboxSpec(BaseModel):
     memory_bytes: int = Field(default=2 * 1024**3, gt=0)
     file_size_bytes: int = Field(default=512 * 1024**2, gt=0)
     open_files: int = Field(default=1024, gt=0)
+
+    @field_validator("runtime")
+    @classmethod
+    def _known_runtime(cls, runtime: str) -> str:
+        if runtime not in SANDBOX_RUNTIMES:
+            raise ValueError(
+                f"unknown sandbox runtime {runtime!r}; this deployment provides "
+                + ", ".join(sorted(SANDBOX_RUNTIMES))
+            )
+        return runtime
 
 
 class AgentSpecStrict(TaskSpecStrictBase):

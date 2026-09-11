@@ -38,16 +38,9 @@ class AgentSandboxRuntime(LocalSandboxExecutor):
         self._attachment = attachment
         self._state = state
         self._runtime = runtime
-        self._executed = 0
-
-    @property
-    def executed(self) -> int:
-        """How many commands this dispatch has run, for the episode's own accounting."""
-        return self._executed
 
     def execute(self, command: SandboxCommand) -> SandboxCommandResult:
         self._check_fence()
-        self._executed += 1
         _LOG.info("[sandbox] %s", " ".join(command.argv)[:200])
         result = self._runtime.run(
             self._state.workspace, command, self._capability.profile
@@ -60,7 +53,12 @@ class AgentSandboxRuntime(LocalSandboxExecutor):
         return result
 
     def _check_fence(self) -> None:
-        """Refuse a command whose capability is not this dispatch's write authority."""
+        """Refuse a command whose capability is not this dispatch's write authority.
+
+        Both sides are minted for one dispatch, so this is a consistency check rather
+        than the security boundary: the load-bearing owner and epoch fences are the
+        holder's, applied when it opens and seals the generation.
+        """
         capability, attachment = self._capability, self._attachment
         if (
             capability.attachment_id != attachment.attachment_id

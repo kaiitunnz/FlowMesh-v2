@@ -7,11 +7,17 @@ from pathlib import Path
 import pytest
 
 from shared.sandbox import (
+    MAX_STREAM_CHARS,
     SandboxCommand,
     SandboxDenied,
     SandboxRuntimeProfile,
 )
-from worker.sandbox.runtime import PosixProcessSandbox, landlock_abi
+from worker.sandbox.runtime import (
+    _DRAIN_CHUNK_CHARS,
+    PosixProcessSandbox,
+    _Streams,
+    landlock_abi,
+)
 
 pytestmark = pytest.mark.skipif(
     not sys.platform.startswith("linux"), reason="the fence is Linux-only"
@@ -162,3 +168,58 @@ def test_the_fence_still_denies_egress_without_landlock(profile, tmp_path):
     assert result.exit_code != 0
     assert "EGRESS" not in result.stdout
     assert run(runtime, profile, tmp_path, "sh", "-c", "echo ok").stdout.strip() == "ok"
+
+
+def test_a_newline_free_flood_does_not_buffer_unbounded_in_the_worker(
+    runtime, profile, tmp_path
+):
+    """The kept prefix is bounded, and so is what the worker holds to produce it."""
+    flood = MAX_STREAM_CHARS * 4
+    result = run(
+        runtime,
+        profile,
+        tmp_path,
+        sys.executable,
+        "-c",
+        f"import sys; sys.stdout.write('x' * {flood})",
+    )
+
+    assert result.exit_code == 0
+    assert len(result.stdout) == MAX_STREAM_CHARS
+
+
+class _FloodPipe:
+    """A pipe with no line breaks, recording the largest read it was asked for."""
+
+    def __init__(self, total: int) -> None:
+        self._left = total
+        self.largest_read = 0
+        self.readline_calls = 0
+
+    def read(self, size: int = -1) -> str:
+        # A reader asking for everything is what buffers a flood in worker memory.
+        want = self._left if size is None or size < 0 else min(size, self._left)
+        self.largest_read = max(self.largest_read, want)
+        self._left -= want
+        return "x" * want
+
+    def readline(self) -> str:
+        self.readline_calls += 1
+        self.largest_read = max(self.largest_read, self._left)
+        text, self._left = "x" * self._left, 0
+        return text
+
+    def close(self) -> None:
+        return None
+
+
+def test_the_drain_reads_in_bounded_chunks():
+    """A stream that never breaks a line must not be pulled into memory whole."""
+    pipe = _FloodPipe(MAX_STREAM_CHARS * 4)
+    kept: list[str] = []
+
+    _Streams._drain(pipe, kept)  # type: ignore[arg-type]
+
+    assert pipe.readline_calls == 0
+    assert pipe.largest_read <= _DRAIN_CHUNK_CHARS
+    assert len("".join(kept)) == MAX_STREAM_CHARS

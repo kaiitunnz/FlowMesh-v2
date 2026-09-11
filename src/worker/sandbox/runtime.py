@@ -35,17 +35,16 @@ from shared.sandbox import (
     SandboxCommandResult,
     SandboxDenied,
     SandboxRuntimeProfile,
+    SandboxUnavailable,
 )
 
 _LOG = logging.getLogger("sandbox-runtime")
 # A drain that outlives its reaped process group is a lost thread, not a lost result.
 _DRAIN_JOIN_SEC = 5.0
+_DRAIN_CHUNK_CHARS = 8192
+_REAP_WAIT_SEC = 5.0
 _LAUNCHER = Path(__file__).with_name("_launcher.py")
 _LANDLOCK_CREATE_RULESET = {"x86_64": 444, "aarch64": 444}
-
-
-class SandboxUnavailable(Exception):
-    """The runtime cannot give a command the fence the sandbox declares."""
 
 
 class SandboxRuntime(ABC):
@@ -162,7 +161,7 @@ class PosixProcessSandbox(SandboxRuntime):
             )
         except OSError as exc:
             raise SandboxUnavailable(f"the sandbox could not start a command: {exc}")
-        streams = _Streams(proc, command.stdin)
+        streams = _Streams(proc)
         try:
             proc.wait(timeout=deadline)
             timed_out = False
@@ -172,7 +171,10 @@ class PosixProcessSandbox(SandboxRuntime):
             # The command itself has finished, so anything still holding its pipes is a
             # process it left behind: kill the group, which also ends the drain.
             _reap(proc)
-            proc.wait()
+            # A killed group normally reaps at once; a child stuck in the kernel would
+            # otherwise hold this lane, and the result is already decided either way.
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                proc.wait(_REAP_WAIT_SEC)
         stdout, stderr = streams.collect()
         return SandboxCommandResult(
             exit_code=-1 if timed_out else proc.returncode,
@@ -190,13 +192,13 @@ class _Streams:
     keeps a chatty command from blocking on a full pipe before it can exit.
     """
 
-    def __init__(self, proc: subprocess.Popen[str], stdin: str | None) -> None:
+    def __init__(self, proc: subprocess.Popen[str]) -> None:
         self._out: list[str] = []
         self._err: list[str] = []
         self._threads = [
             threading.Thread(target=self._drain, args=(proc.stdout, self._out)),
             threading.Thread(target=self._drain, args=(proc.stderr, self._err)),
-            threading.Thread(target=self._write, args=(proc.stdin, stdin)),
+            threading.Thread(target=self._close, args=(proc.stdin,)),
         ]
         for thread in self._threads:
             thread.daemon = True
@@ -209,22 +211,28 @@ class _Streams:
 
     @staticmethod
     def _drain(pipe: IO[str] | None, into: list[str]) -> None:
+        """Keep a bounded prefix, then keep reading without keeping.
+
+        Reading in fixed chunks rather than by line is what bounds the worker's own
+        memory: a command emitting one newline-free stream would otherwise buffer the
+        whole thing here while the reader waited for a terminator that never comes.
+        """
         if pipe is None:
             return
         kept = 0
         with contextlib.closing(pipe):
-            for line in iter(pipe.readline, ""):
+            while chunk := pipe.read(_DRAIN_CHUNK_CHARS):
                 if kept < MAX_STREAM_CHARS:
-                    into.append(line[: MAX_STREAM_CHARS - kept])
-                    kept += len(line)
+                    into.append(chunk[: MAX_STREAM_CHARS - kept])
+                    kept += len(chunk)
 
     @staticmethod
-    def _write(pipe: IO[str] | None, text: str | None) -> None:
+    def _close(pipe: IO[str] | None) -> None:
+        """Close the command's stdin so one that reads it sees end-of-input at once."""
         if pipe is None:
             return
-        with contextlib.suppress(OSError), contextlib.closing(pipe):
-            if text:
-                pipe.write(text)
+        with contextlib.suppress(OSError):
+            pipe.close()
 
 
 def _reap(proc: subprocess.Popen[str]) -> None:

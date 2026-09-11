@@ -141,7 +141,6 @@ def test_many_commands_run_inside_one_dispatch(state) -> None:
     assert result.kind is HarnessResultKind.COMPLETION
     assert result.value == "ran echo"
     assert len(runtime.commands) == 3
-    assert sandbox.executed == 3
 
 
 def test_an_agent_without_a_sandbox_cannot_run_a_command() -> None:

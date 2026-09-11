@@ -15,6 +15,10 @@ from pydantic import BaseModel, ConfigDict
 
 SANDBOX_EXECUTE_INTERFACE = "sandbox.execute"
 
+# The local runtimes a deployment may name. A confining runtime joins this set when it
+# exists; until then naming one is refused rather than silently run as the weaker fence.
+SANDBOX_RUNTIMES = frozenset({"posix_process"})
+
 # Bounds one command's captured streams so a runaway writer cannot unbound a result.
 MAX_STREAM_CHARS = 64 * 1024
 
@@ -24,8 +28,7 @@ class SandboxRuntimeProfile(BaseModel):
 
     The envelope is the bounded CPU, memory, disk, descriptor, and wallclock cost one
     command may take. It is ordinary worker resource isolation held for the dispatch,
-    not an admission credit. It carries no process-count bound: that needs the cgroup
-    delegation an unprivileged container does not have.
+    not an admission credit.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -63,7 +66,6 @@ class SandboxCommand(BaseModel):
 
     argv: tuple[str, ...]
     timeout_sec: float | None = None  # None takes the capability's envelope deadline
-    stdin: str | None = None
 
 
 class SandboxCommandResult(BaseModel):
@@ -82,6 +84,14 @@ class SandboxDenied(Exception):
 
     A denial is a declared terminal outcome of the action, never a retryable failure and
     never an escalation into a mediated boundary.
+    """
+
+
+class SandboxUnavailable(Exception):
+    """The runtime cannot give a command the fence the sandbox declares.
+
+    Like a denial this settles the action rather than escalating it: a command the
+    runtime could not start under its fence never runs unfenced instead.
     """
 
 
