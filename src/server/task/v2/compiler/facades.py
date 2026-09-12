@@ -2,9 +2,12 @@
 
 An agent's facades are derived from its declared authority and child regions: a
 fabric-served tool interface it may invoke (``search/v1``) becomes an injected
-function-tool facade, and a spawnable agent gets the ``spawn_agent`` facade. The model
-gateway injects only the facades pinned here, so an agent can never call a fabric tool
-it did not declare.
+function-tool facade, and a spawnable agent gets the ``spawn_agent`` facade. An agent
+can never call a fabric tool it did not declare.
+
+What is pinned here is the declared upper bound, not the set one dispatch offers: an
+activation's effective grant may be narrower than its operator's ceiling, and the
+dispatch projects the locally resolved facades onto it.
 """
 
 import json
@@ -52,8 +55,9 @@ def _spawn_agent_schema() -> dict[str, Any]:
 def run_command_schema(egress: bool) -> str:
     """The injected ``run_command`` tool schema for the fence a dispatch grants.
 
-    The compiler renders it for the pinned binding; a dispatch re-renders it when the
-    activation's effective grant is narrower than what the binding asked for.
+    The compiler renders it for the pinned binding, which is the upper bound; a dispatch
+    re-renders it when the activation's effective grant is narrower than what the
+    binding asked for, so the model is told the fence it actually has.
     """
     return json.dumps(_run_command_body(egress))
 
@@ -115,7 +119,7 @@ def _search_schema(name: str) -> dict[str, Any]:
 
 
 def pin_agent_facades(acc: LoweringAccumulator) -> None:
-    """Derive and pin each agent operator's facade set on the accumulator in place."""
+    """Derive and pin each agent operator's facade ceiling, on the accumulator."""
     tool_name_for = {
         tool.interface: tool.name
         for tool in acc.tool_declarations
