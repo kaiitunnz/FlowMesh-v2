@@ -255,8 +255,8 @@ class Dispatcher:
         """The advisory placement preference, kept inside the surviving pool.
 
         The preference is intersected with the candidates the dispatch has already
-        narrowed, so a policy reaches only the workers owner affinity, a selected-worker
-        hint, and prior failures have left in the pool.
+        narrowed, so a policy reaches only what owner affinity, a selected-worker hint,
+        and prior failures have left in the pool.
         """
         preference = self._runtime.placement_preference(
             task_id, [candidate.id for candidate in pool]

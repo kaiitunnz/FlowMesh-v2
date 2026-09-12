@@ -3,8 +3,8 @@
 Every hook refines a choice the fabric has already found legal. Capacity admission,
 claim and attachment minting, and fence relaxation belong to the fabric; a policy
 chooses among the alternatives it already allows, and each answer is screened at its
-call site. So an enabled policy changes which legal alternative runs, never what a
-workflow declares, the effects it has, or how it recovers.
+call site. An enabled policy changes which legal alternative runs, never what a workflow
+declares, the effects it has, or how it recovers.
 """
 
 from .lowering import (
