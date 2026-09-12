@@ -205,32 +205,22 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   references cross into the ledger, control state, operation frames, logs, results, or
   artifacts. `WORKER_PRIVATE_STATE_DIR` sets the root.
 - **Agent-local sandbox execution.** An agent that declares the `sandbox.execute`
-  interface in its authority ceiling pins a bounded local envelope and runs commands in
-  its own `workspace_fs`, on the worker its private-state attachment already selected.
-  Each dispatch mints a capability fenced to that attachment's holder and write epoch,
-  and the worker-local runtime validates every command against it, so an ordinary
-  command raises no `Invocation`, `ServiceClaim`, `RouteAuthorization`, admission
-  transaction, or cross-worker hop. The mint resolves `sandbox.execute` against the
-  activation's effective grant, so a child whose parent withheld the interface is given
-  no capability at all rather than the one its own ceiling declares. Several commands run inside one bounded turn and
-  become durable together at the agent's ordinary boundary seal, not per command; a loss
-  before that seal fails closed as `PrivateStateUnavailable` rather than resuming on a
-  fresh workspace. A command is a private-state transition, not an external effect: the
-  runtime confines it to its workspace, denies network egress, bounds its resources, and
-  reaps its process group, and a model, tool, or effect takes its mediated boundary. The
-  fence is unprivileged and grants no mount, PID, or IPC namespace, so the feature is a
-  single-trusted-tenant development posture rather than multi-tenant isolation; an
-  operator enables it for the fleet with `AGENT_SANDBOX_ENABLED`.
+  interface runs commands worker-locally in its own `workspace_fs`, on the worker its
+  private-state attachment selected; an ordinary command makes no control-plane round
+  trip or cross-worker hop. The runtime confines a command to its workspace, denies
+  network egress, and bounds its resources; commands become durable together at the
+  agent's ordinary boundary seal, and a loss before the seal fails closed as
+  `PrivateStateUnavailable`. A child runs commands only where its parent delegated the
+  interface. The feature is a single-trusted-tenant development posture, not
+  multi-tenant isolation; an operator enables it for the fleet with
+  `AGENT_SANDBOX_ENABLED`.
 - **Author-owned sandbox egress.** An agent that declares the distinct `sandbox.egress`
-  authority runs its commands with the network fence relaxed, on a deployment that sets
-  `AGENT_SANDBOX_EGRESS_ENABLED`; `sandbox.network_egress: deny` opts back out, for a
-  ceiling that carries the interface only to delegate it. The engine resolves the
-  effective grant at dispatch and fences the decision into the immutable capability, so
-  a child never inherits an egress its parent withheld. Such a command is the one case
-  where a command is an external effect, classified once for the binding as
-  `external_effect` with an `author_owned_at_least_once` replay contract: recovery keeps
-  the ordinary seal cadence, so a failure before the next seal may repeat a command that
-  already egressed, and the author owns idempotency and reconciliation.
+  authority runs its commands with the network fence relaxed, where the deployment sets
+  `AGENT_SANDBOX_EGRESS_ENABLED`; a ceiling that carries the interface only to delegate
+  it opts its own commands back out with `sandbox.network_egress: deny`, and a child
+  never inherits an egress its parent withheld. An egress command is an external effect:
+  a failure before the next seal may repeat a command that already egressed, so the
+  author owns idempotency and reconciliation.
 - **Agent-model gateway.** A model boundary an agent defers with a `canned` or `echo`
   binding settles on the control plane off the agent's lane, injecting the result back at
   the originating call. The gateway resolves the activation's pinned binding and its

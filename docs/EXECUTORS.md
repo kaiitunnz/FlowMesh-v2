@@ -93,65 +93,38 @@ outlives its activation, private to the holder until its incarnation ends.
 
 ### Agent-local sandbox
 
-An agent whose `spec.v2.authority.invoke` names `sandbox.execute` may run commands in its
-own workspace. `spec.sandbox` bounds one command — `runtime`, `command_timeout_sec`,
-`cpu_seconds`, `memory_bytes`, `file_size_bytes`, `open_files` — and defaults apply when
-it is omitted. It names no host, image, mount, or path: where a command runs is the
-runtime's choice, and the writable root is always the activation's own `workspace_fs`.
+An agent whose `spec.v2.authority.invoke` names `sandbox.execute` may run commands in
+its own `workspace_fs`. `spec.sandbox` bounds one command — `runtime`,
+`command_timeout_sec`, `cpu_seconds`, `memory_bytes`, `file_size_bytes`, `open_files` —
+with defaults when omitted; it names no host, image, mount, or path.
 
-The dispatch carries a capability fenced to the same holder and write epoch as the
-private-state attachment, and the worker validates each command against it, so a
-superseded holder cannot run one. A backend reaches the runtime only through the
-executor: the `scripted` backend runs an `exec` step, and the `codex` backend's model
-sees a `run_command` tool the worker-local Responses facade resolves inside the held
-turn, feeding the result back into the same turn. Neither path yields the episode lane,
-records a turn-group member, or produces a control-plane round trip per command. A
-backend that does not mediate the sandbox is refused an agent that declares one, rather
-than running its code outside the fence.
-
-`run_command` is the only way code reaches a model. The facade forwards a harness's own
-tools only when they are on its allowlist, so a native shell, a native subagent, and any
-tool the allowlist does not name are dropped before the model sees them — a harness that
-renames or adds one fails closed. This holds whether or not the agent declares a sandbox,
-so an agent without one is offered no executable tool at all.
+The `scripted` backend runs an `exec` step; the `codex` backend's model calls a
+`run_command` tool the worker-local Responses facade resolves inside the held turn.
+Neither path yields the episode lane or makes a control-plane round trip per command,
+and a backend that does not mediate the sandbox is refused an agent that declares one.
+`run_command` is the only way code reaches a model: the facade forwards a harness's own
+tools only from its allowlist, so a native shell or any tool it does not name is
+dropped, and an agent without a sandbox is offered no executable tool.
 
 Commands mutate `workspace_fs` and become durable at the episode's ordinary seal, so a
-worker loss before that seal leaves the last sealed generation intact. Egress is denied
-in the runtime by default: a command cannot open an IP connection, and reaching a model,
-tool, or external effect takes the mediated boundary.
+worker loss before it leaves the last sealed generation intact. Egress is denied by
+default — reaching a model, tool, or external effect takes the mediated boundary.
 
-Declaring the separate `sandbox.egress` interface in the agent's authority ceiling opts
-its commands out of that fence, on a deployment that sets `AGENT_SANDBOX_EGRESS_ENABLED`;
-a ceiling that holds the interface only to delegate it to children sets
-`spec.sandbox.network_egress: deny` to keep its own commands fenced. An explicit
-`author_owned_at_least_once` without the interface or the deployment gate fails template
-validation, and a child whose parent withheld the interface runs fenced. Access is
-all-or-nothing IP networking — the fence enforces no destination, domain, port, or
-protocol policy.
+Declaring the separate `sandbox.egress` interface, on a deployment that sets
+`AGENT_SANDBOX_EGRESS_ENABLED`, relaxes the network fence for the agent's own commands;
+`spec.sandbox.network_egress: deny` opts a delegate-only ceiling back out, and a child
+whose parent withheld the interface runs fenced. An egress command is an external
+effect: a failure before the next seal may re-run a command that already egressed, so
+the author owns idempotency and reconciliation, and the fabric offers no deduplication
+or compensation.
 
-Such a command is the one case where a command is an external effect: the compiler
-records one `external_effect` boundary with an `author_owned_at_least_once` replay
-contract for the whole binding, never per command. Because commands become durable only
-at the ordinary seal, a failure before it may re-run a command that already egressed —
-the author owns idempotency and reconciliation, and the fabric promises no delivery,
-deduplication, or compensation.
-
-`AGENT_SANDBOX_ENABLED` gates the feature for the whole deployment and is
-off by default; an agent that declares `sandbox.execute` where it is off fails template
-validation rather than running without a sandbox. Authority is resolved again at
-dispatch against the activation's effective grant, so a spawned child runs commands only
-where its parent delegated `sandbox.execute` — a declared ceiling alone authorizes
-nothing, and an activation without the effective interface is given no capability, is
-not offered `run_command` at all, and refuses every command. The offered tool also
-describes the fence that activation actually gets, so a child whose parent withheld
-`sandbox.egress` is told it has no network even where the binding asked for it. Filesystem confinement between
-activations on one worker needs a Landlock-capable kernel (5.13+, and 6.7+ for the
-network rules): where Landlock is absent the worker logs the posture it achieved and
-falls back to the seccomp and resource layers, which still deny egress but no longer
-confine the filesystem. Egress denial is proven independently of Landlock: the seccomp
-layer alone denies it, and the egress opt-in relaxes both network layers and nothing
-else. Enable the feature only on workers running a single trusted
-tenant's agents.
+`AGENT_SANDBOX_ENABLED` gates the feature for the deployment and is off by default; an
+agent that declares `sandbox.execute` where it is off fails validation. Authority is
+resolved again at dispatch, so a spawned child runs commands only where its parent
+delegated the interface. The feature is a single-trusted-tenant development posture:
+filesystem confinement between activations on one worker needs a Landlock-capable
+kernel, and without one the runtime still denies egress but does not confine the
+filesystem. Enable it only on workers running a single trusted tenant's agents.
 
 ## Per-workflow harness and model binding
 
