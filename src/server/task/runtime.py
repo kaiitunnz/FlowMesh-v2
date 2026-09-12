@@ -44,6 +44,7 @@ from shared.schemas.result import ResultEnvelope, result_file_path
 from shared.tasks import TaskEnvelopeTemplate
 from shared.tasks.specs import ModelBindingMode
 from shared.tools.contract import AgentModelTurnProposal, MediatedOperationOutcome
+from shared.tools.facade import FacadeDescriptor, FacadeResolution
 from shared.utils import new_workflow_id
 from shared.utils.ids import new_model_secret_ref
 
@@ -97,6 +98,7 @@ from .v2 import (
     compile_bundle,
 )
 from .v2.compiler.agent_binding import AgentBindingDefaults
+from .v2.compiler.facades import run_command_schema
 from .v2.credentials import pop_inline_model_secrets, redact_source_text
 from .v2.representations.operators import (
     AgentModelGatewayBinding,
@@ -147,6 +149,39 @@ def _sandbox_capability(
         profile=op.sandbox_binding.profile,
         network_egress=egress,
     )
+
+
+def _effective_facades(
+    op: AgentOperator | None,
+    invoke_face: tuple[str, ...],
+    sandbox: LocalSandboxCapability | None,
+) -> tuple[FacadeDescriptor, ...]:
+    """The facades this dispatch offers the model, narrowed to what it may use.
+
+    The compiler pins the ceiling from the operator's declared authority; an
+    activation's effective grant can be narrower, so a locally-resolved facade is
+    reconciled here against it. Only ``LOCAL_INLINE`` facades are narrowed: a mediated
+    call the activation may not invoke settles as a durable authority denial, which is a
+    record worth keeping, while a local one is refused inside the worker and would leave
+    no trace of the offer at all.
+    """
+    if op is None:
+        return ()
+    facades: list[FacadeDescriptor] = []
+    for facade in op.facades:
+        if facade.resolution is not FacadeResolution.LOCAL_INLINE:
+            facades.append(facade)
+            continue
+        if facade.interface == SANDBOX_EXECUTE_INTERFACE:
+            if sandbox is None:
+                continue  # no effective execute: the tool is never offered
+            facade = facade.model_copy(
+                update={"tool_schema": run_command_schema(sandbox.egress_allowed)}
+            )
+        elif facade.interface is not None and facade.interface not in invoke_face:
+            continue
+        facades.append(facade)
+    return tuple(facades)
 
 
 def _stringify(value: Any) -> str:
@@ -1858,6 +1893,9 @@ class TaskRuntime:
             )
             capsule_blob, outcomes = engine.episode_context(task_id)
             invoke_face = engine.effective_invoke_face(task_id)
+            sandbox = _sandbox_capability(
+                op, granted[1] if granted else None, invoke_face
+            )
             # First-turn dataflow inputs are delivered only on the first dispatch; a
             # resume injects only the harness's own delivered outcomes.
             input_bindings = (
@@ -1873,12 +1911,10 @@ class TaskRuntime:
                 delivered_outcomes=outcomes,
                 input_bindings=input_bindings,
                 model_binding=model_binding,
-                facade_descriptors=tuple(op.facades) if op is not None else (),
+                facade_descriptors=_effective_facades(op, invoke_face, sandbox),
                 private_state=granted[0] if granted else None,
                 private_state_attachment=granted[1] if granted else None,
-                sandbox=_sandbox_capability(
-                    op, granted[1] if granted else None, invoke_face
-                ),
+                sandbox=sandbox,
             )
 
     def service_episode_dispatch(

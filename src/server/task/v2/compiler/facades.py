@@ -49,7 +49,16 @@ def _spawn_agent_schema() -> dict[str, Any]:
     }
 
 
-def _run_command_schema(egress: bool) -> dict[str, Any]:
+def run_command_schema(egress: bool) -> str:
+    """The injected ``run_command`` tool schema for the fence a dispatch grants.
+
+    The compiler renders it for the pinned binding; a dispatch re-renders it when the
+    activation's effective grant is narrower than what the binding asked for.
+    """
+    return json.dumps(_run_command_body(egress))
+
+
+def _run_command_body(egress: bool) -> dict[str, Any]:
     # Truthful in both modes: a model told it has no network will not try, and one told
     # it has network will use the egress its workflow paid to authorize.
     network = (
@@ -144,7 +153,7 @@ def pin_agent_facades(acc: LoweringAccumulator) -> None:
                     name=_RUN_COMMAND_NAME,
                     kind=BoundaryEventKind.STATE_ACCESS,
                     interface=SANDBOX_EXECUTE_INTERFACE,
-                    tool_schema=json.dumps(_run_command_schema(egress_requested(op))),
+                    tool_schema=run_command_schema(egress_requested(op)),
                     resolution=FacadeResolution.LOCAL_INLINE,
                 )
             )

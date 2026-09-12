@@ -139,8 +139,10 @@ off by default; an agent that declares `sandbox.execute` where it is off fails t
 validation rather than running without a sandbox. Authority is resolved again at
 dispatch against the activation's effective grant, so a spawned child runs commands only
 where its parent delegated `sandbox.execute` — a declared ceiling alone authorizes
-nothing, and an activation without the effective interface is given no capability and
-refuses every command. Filesystem confinement between
+nothing, and an activation without the effective interface is given no capability, is
+not offered `run_command` at all, and refuses every command. The offered tool also
+describes the fence that activation actually gets, so a child whose parent withheld
+`sandbox.egress` is told it has no network even where the binding asked for it. Filesystem confinement between
 activations on one worker needs a Landlock-capable kernel (5.13+, and 6.7+ for the
 network rules): where Landlock is absent the worker logs the posture it achieved and
 falls back to the seccomp and resource layers, which still deny egress but no longer

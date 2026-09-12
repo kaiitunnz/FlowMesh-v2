@@ -31,7 +31,10 @@ class FacadeDescriptor(BaseModel):
     ``name`` is the model-facing tool name whose call the facade captures;
     ``tool_schema`` is the function-tool JSON injected into the model turn; ``kind`` and
     ``interface`` are the boundary the captured call originates. The compiler pins the
-    exact set an agent may use, so the facade injects only its declared facades.
+    ceiling from the agent's declared authority, and a dispatch narrows the
+    ``LOCAL_INLINE`` facades to the activation's effective grant, so the facade injects
+    only what this activation may actually use. A mediated facade stays offered even
+    where the grant forbids it, because calling it records a durable authority denial.
     """
 
     model_config = ConfigDict(frozen=True)

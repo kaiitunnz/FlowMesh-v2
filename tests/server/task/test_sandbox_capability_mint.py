@@ -5,7 +5,8 @@ says what its ancestors left it. The mint takes the intersection for both interf
 a child never inherits code execution or egress its parent withheld.
 """
 
-from server.task.runtime import _sandbox_capability
+from server.task.runtime import _effective_facades, _sandbox_capability
+from server.task.v2.compiler.facades import run_command_schema
 from server.task.v2.representations.operators import (
     AgentOperator,
     AgentSandboxBinding,
@@ -13,6 +14,7 @@ from server.task.v2.representations.operators import (
     BindingKey,
     BindingProvenance,
 )
+from shared.harness.boundary import BoundaryEventKind
 from shared.private_state import PrivateStateAttachment
 from shared.sandbox import (
     SANDBOX_EGRESS_INTERFACE,
@@ -21,6 +23,7 @@ from shared.sandbox import (
     SandboxRuntimeProfile,
 )
 from shared.tasks.task_type import TaskType
+from shared.tools.facade import FacadeDescriptor, FacadeResolution
 
 _ATTACHMENT = PrivateStateAttachment(
     attachment_id="psa-1",
@@ -124,3 +127,74 @@ def test_a_delegated_execute_face_still_mints() -> None:
 
     assert capability is not None
     assert not capability.egress_allowed
+
+
+def _facades(op: AgentOperator) -> tuple[str, ...]:
+    return tuple(f.name for f in op.facades)
+
+
+def _with_facades(mode: SandboxEgressMode) -> AgentOperator:
+    op = _agent(mode)
+    return op.model_copy(
+        update={
+            "facades": (
+                FacadeDescriptor(
+                    name="web_search",
+                    kind=BoundaryEventKind.INVOCATION,
+                    interface="search/v1",
+                    tool_schema="{}",
+                ),
+                FacadeDescriptor(
+                    name="run_command",
+                    kind=BoundaryEventKind.STATE_ACCESS,
+                    interface=SANDBOX_EXECUTE_INTERFACE,
+                    tool_schema=run_command_schema(mode.allows_egress),
+                    resolution=FacadeResolution.LOCAL_INLINE,
+                ),
+            )
+        }
+    )
+
+
+def test_a_child_without_effective_execute_is_not_offered_run_command() -> None:
+    op = _with_facades(SandboxEgressMode.DENY)
+
+    offered = _effective_facades(op, ("search/v1",), None)
+
+    assert [f.name for f in offered] == ["web_search"]
+
+
+def test_a_child_without_effective_egress_is_offered_a_no_network_description() -> None:
+    """The binding asks for egress; this activation's grant does not carry it."""
+    op = _with_facades(SandboxEgressMode.AUTHOR_OWNED_AT_LEAST_ONCE)
+    fenced = _sandbox_capability(op, _ATTACHMENT, (SANDBOX_EXECUTE_INTERFACE,))
+
+    offered = _effective_facades(op, (SANDBOX_EXECUTE_INTERFACE,), fenced)
+
+    schema = next(f for f in offered if f.name == "run_command").tool_schema
+    assert "no network access" in schema
+    assert "can reach the network" not in schema
+
+
+def test_an_authorized_activation_keeps_its_facades_and_description() -> None:
+    """A filter that refuses everything would fail here."""
+    op = _with_facades(SandboxEgressMode.AUTHOR_OWNED_AT_LEAST_ONCE)
+    face = (SANDBOX_EXECUTE_INTERFACE, SANDBOX_EGRESS_INTERFACE, "search/v1")
+    capability = _sandbox_capability(op, _ATTACHMENT, face)
+
+    offered = _effective_facades(op, face, capability)
+
+    assert [f.name for f in offered] == ["web_search", "run_command"]
+    schema = next(f for f in offered if f.name == "run_command").tool_schema
+    assert "can reach the network" in schema
+
+
+def test_a_mediated_facade_stays_offered_so_its_denial_is_recorded() -> None:
+    """A mediated call the grant forbids settles as a durable authority denial; not
+    offering it would erase that record."""
+    op = _with_facades(SandboxEgressMode.DENY)
+    capability = _sandbox_capability(op, _ATTACHMENT, (SANDBOX_EXECUTE_INTERFACE,))
+
+    offered = _effective_facades(op, (SANDBOX_EXECUTE_INTERFACE,), capability)
+
+    assert "web_search" in [f.name for f in offered]
