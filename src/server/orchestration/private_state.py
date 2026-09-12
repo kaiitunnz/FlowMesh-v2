@@ -32,6 +32,19 @@ class PrivateStateLedger:
     def lineages(self) -> list[PrivateStateLineage]:
         return list(self._lineages.values())
 
+    def holders(self) -> frozenset[str]:
+        """The workers that hold a sealed generation of any lineage."""
+        return frozenset(
+            lineage.binding.owner.worker_id
+            for lineage in self._lineages.values()
+            if lineage.binding.owner is not None
+        )
+
+    def generation(self, activation_id: str) -> int | None:
+        """The generation a lineage is bound to, or None for an unknown lineage."""
+        lineage = self._lineages.get(activation_id)
+        return lineage.binding.generation if lineage else None
+
     def owner(self, activation_id: str) -> OwnerFence | None:
         lineage = self._lineages.get(activation_id)
         return lineage.binding.owner if lineage else None
