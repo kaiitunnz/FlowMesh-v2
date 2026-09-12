@@ -10,6 +10,7 @@ import importlib
 from collections.abc import Callable
 
 from shared.harness import HarnessAdapter, HarnessBackendKey
+from shared.sandbox import LocalSandboxExecutor
 from shared.tasks.worker_message import WorkerTaskMessage
 from worker.config import WorkerConfig
 from worker.model_turn import ResponsesFacade
@@ -22,6 +23,7 @@ type AdapterFactory = Callable[
         WorkerConfig,
         ResponsesFacade | None,
         MaterializedState | None,
+        LocalSandboxExecutor | None,
     ],
     HarnessAdapter,
 ]
@@ -49,6 +51,7 @@ def build_adapter(
     config: WorkerConfig,
     facade: ResponsesFacade | None = None,
     state: MaterializedState | None = None,
+    sandbox: LocalSandboxExecutor | None = None,
 ) -> HarnessAdapter:
     """Instantiate the adapter for a backend key, importing its module on first use.
 
@@ -56,13 +59,15 @@ def build_adapter(
     through; a backend that holds its own lane (Codex) binds to it, and one that yields
     the lane per boundary (scripted) ignores it. ``state`` is the activation's
     materialized private state, whose components back the backend's home and workspace.
+    ``sandbox`` is the fenced local runtime an agent that declares ``sandbox.execute``
+    hands a code action to; a backend given none can run no commands.
     """
     if (factory := _REGISTERED.get(backend.backend)) is not None:
-        return factory(backend, task, config, facade, state)
+        return factory(backend, task, config, facade, state, sandbox)
     if (entry := _ADAPTER_MODULES.get(backend.backend)) is None:
         raise UnknownHarnessBackendError(
             f"no harness binding for backend {backend.backend!r}"
         )
     module, factory_name = entry
     factory = getattr(importlib.import_module(module, __package__), factory_name)
-    return factory(backend, task, config, facade, state)
+    return factory(backend, task, config, facade, state, sandbox)

@@ -2831,6 +2831,24 @@ class OrchestrationEngine:
         )
         return grant
 
+    def effective_invoke_face(self, task_id: str) -> tuple[str, ...]:
+        """The interfaces this agent activation may invoke.
+
+        The same effective face the engine authorizes ordinary boundaries against: the
+        activation's scope grant under its operator ceiling and the policy envelope. A
+        spawned activation reads its own delegated grant, which its parent already
+        attenuated, so an interface an ancestor withheld is absent here even where the
+        operator's own declared ceiling names it. A task that is not an agent invokes
+        nothing through this face.
+        """
+        wi = self._work_item_for_task(task_id)
+        act = self._activations.get(wi.activation_id) if wi is not None else None
+        op = self._operators.get(wi.operator_id) if wi is not None else None
+        if act is None or not isinstance(op, AgentOperator):
+            return ()
+        invoke, _delegate = self._agent_face_tuples(op, act.scope_id)
+        return invoke
+
     def _grant_for_scope(
         self, scope_id: str
     ) -> AuthorityGrant | DelegatedAuthorityGrant:

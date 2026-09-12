@@ -3,8 +3,16 @@ from enum import StrEnum
 from typing import Any, Literal, Self
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, SecretStr, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    field_validator,
+    model_validator,
+)
 
+from ...sandbox import SANDBOX_RUNTIMES, SandboxEgressMode
 from ..task_type import TaskType
 from .common import (
     ModelSpecStrict,
@@ -202,6 +210,43 @@ class EchoSpecTemplate(TaskSpecTemplateBase):
     data: dict[str, Any] | None = None
 
 
+class AgentSandboxSpec(BaseModel):
+    """Bounds the local commands an agent that declares ``sandbox.execute`` may run.
+
+    The runtime names a policy-approved local profile; the remaining fields bound one
+    command's wallclock, CPU, memory, output size, and descriptors. It names no host,
+    image, mount, or path: where a command runs is the runtime's to choose.
+
+    ``network_egress`` opts the whole binding out of the network fence, and is
+    all-or-nothing: it names no destination, domain, port, protocol, or provider,
+    because the fence cannot enforce one. Left unset it derives from the declared
+    authority — an agent that declares ``sandbox.egress`` may reach the network, one
+    that does not may not — so a ceiling that carries the interface only to delegate it
+    to children opts its own commands back out with an explicit ``deny``. An explicit
+    request still needs the ``sandbox.egress`` authority and a deployment that enables
+    egress; asking for it without either is refused at submission rather than quietly
+    run fenced.
+    """
+
+    runtime: str = "posix_process"
+    network_egress: SandboxEgressMode | None = None
+    command_timeout_sec: float = Field(default=60.0, gt=0)
+    cpu_seconds: int = Field(default=60, gt=0)
+    memory_bytes: int = Field(default=2 * 1024**3, gt=0)
+    file_size_bytes: int = Field(default=512 * 1024**2, gt=0)
+    open_files: int = Field(default=1024, gt=0)
+
+    @field_validator("runtime")
+    @classmethod
+    def _known_runtime(cls, runtime: str) -> str:
+        if runtime not in SANDBOX_RUNTIMES:
+            raise ValueError(
+                f"unknown sandbox runtime {runtime!r}; this deployment provides "
+                + ", ".join(sorted(SANDBOX_RUNTIMES))
+            )
+        return runtime
+
+
 class AgentSpecStrict(TaskSpecStrictBase):
     taskType: Literal[TaskType.AGENT]
 
@@ -209,6 +254,7 @@ class AgentSpecStrict(TaskSpecStrictBase):
     data: dict[str, Any] | None = None
     harness: AgentHarnessSpec | None = None
     model_binding: AgentModelBindingSpec | None = None
+    sandbox: AgentSandboxSpec | None = None
 
 
 class AgentSpecTemplate(TaskSpecTemplateBase):
@@ -218,6 +264,7 @@ class AgentSpecTemplate(TaskSpecTemplateBase):
     data: dict[str, Any] | None = None
     harness: AgentHarnessSpec | None = None
     model_binding: AgentModelBindingSpec | None = None
+    sandbox: AgentSandboxSpec | None = None
 
 
 class DataProfilingSpecStrict(TaskSpecStrictBase):

@@ -21,6 +21,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 from shared.harness import BoundaryEventKind
+from shared.sandbox import (
+    LocalSandboxExecutor,
+    SandboxCommand,
+    SandboxDenied,
+    SandboxUnavailable,
+)
 from shared.tools.facade import FacadeDescriptor, FacadeTurnGroup
 from shared.tools.model.schema import (
     MODEL_INTERFACE,
@@ -30,7 +36,12 @@ from shared.tools.model.schema import (
 )
 
 from ..egress import HeldEgressReject, PendingEgressRequestStore
-from .capture import build_facade_capture, partition_facade_calls, turn_base
+from .capture import (
+    build_facade_capture,
+    partition_facade_calls,
+    partition_local_calls,
+    turn_base,
+)
 from .held_egress import HeldModelEgress
 from .translation import (
     chat_tools,
@@ -42,6 +53,9 @@ from .translation import (
 )
 
 _MAX_BODY_BYTES = 20 * 1024 * 1024
+# Bounds how many local commands one held turn may run before it must report back, so a
+# turn neither loops on the model forever nor runs an unbounded batch in one round.
+_MAX_TURN_COMMANDS = 32
 
 
 class FacadeTurnError(RuntimeError):
@@ -50,12 +64,13 @@ class FacadeTurnError(RuntimeError):
 
 @dataclass(frozen=True)
 class EpisodeContext:
-    """One held episode's model binding, injectable facades, and auth token."""
+    """One held episode's model binding, injectable facades, auth token, and sandbox."""
 
     url: str
     model: str
     descriptors: tuple[FacadeDescriptor, ...]
     token: str
+    sandbox: LocalSandboxExecutor | None = None
 
 
 class ResponsesFacade:
@@ -82,13 +97,22 @@ class ResponsesFacade:
         self._port: int | None = None
 
     def register_episode(
-        self, task_id: str, url: str, model: str, descriptors: list[FacadeDescriptor]
+        self,
+        task_id: str,
+        url: str,
+        model: str,
+        descriptors: list[FacadeDescriptor],
+        sandbox: LocalSandboxExecutor | None = None,
     ) -> str:
         """Register one episode's binding and facades; return its per-episode token."""
         token = secrets.token_urlsafe(24)
         with self._lock:
             self._episodes[task_id] = EpisodeContext(
-                url=url, model=model, descriptors=tuple(descriptors), token=token
+                url=url,
+                model=model,
+                descriptors=tuple(descriptors),
+                token=token,
+                sandbox=sandbox,
             )
         return token
 
@@ -137,7 +161,9 @@ class ResponsesFacade:
         """
         ctx = self._episode_for(task_id, token)
         base = turn_base(body.get("input"))
-        completion = self._egress_turn(task_id, ctx, body, base)
+        messages = responses_input_to_messages(body.get("input"))
+        tools = chat_tools(body.get("tools"), [d.tool_schema for d in ctx.descriptors])
+        completion = self._run_turn(task_id, ctx, messages, tools, base)
         facade_calls, other = partition_facade_calls(
             completion.tool_calls, list(ctx.descriptors)
         )
@@ -156,16 +182,94 @@ class ResponsesFacade:
             raise FacadeTurnError("episode token mismatch")
         return ctx
 
-    def _egress_turn(
-        self, task_id: str, ctx: EpisodeContext, body: dict[str, Any], base: int
+    def _run_turn(
+        self,
+        task_id: str,
+        ctx: EpisodeContext,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        base: int,
     ) -> ModelCompletion:
-        messages = responses_input_to_messages(body.get("input"))
-        tools = chat_tools(body.get("tools"), [d.tool_schema for d in ctx.descriptors])
+        """Drive one held turn, answering the model's local commands as it makes them.
+
+        A local command is run here and its result appended to this turn's own message
+        list, so the model continues from it without the episode yielding its lane.
+        Nothing about the command reaches control: no invocation, claim, route, or
+        permit. Only the model calls between them are mediated.
+        """
+        descriptors = list(ctx.descriptors)
+        ran = 0
+        for round_index in range(_MAX_TURN_COMMANDS + 1):
+            completion = self._egress_turn(
+                task_id, ctx, messages, tools, base, round_index
+            )
+            local, _ = partition_local_calls(completion.tool_calls, descriptors)
+            if not local or ran >= _MAX_TURN_COMMANDS:
+                return completion
+            messages.append(_assistant_tool_calls(completion))
+            # Every call the model emitted needs a result, or the next request carries
+            # a dangling tool call the backend rejects: a call this turn will not run is
+            # answered as not-run rather than left unanswered.
+            for call in completion.tool_calls:
+                if call in local and ran < _MAX_TURN_COMMANDS:
+                    ran += 1
+                    messages.append(_tool_result(call, self._run_command(ctx, call)))
+                else:
+                    messages.append(_tool_result(call, _DEFERRED))
+        # Unreachable: a round that does not return runs at least one command, so the
+        # command bound trips before the round bound does.
+        raise FacadeTurnError("held turn exhausted its command rounds")
+
+    def _run_command(self, ctx: EpisodeContext, call: ModelToolCall) -> str:
+        """Run one local command and render its result for the model."""
+        if ctx.sandbox is None:
+            return "denied: this agent declares no sandbox to run commands in"
+        try:
+            arguments = json.loads(call.arguments or "{}")
+            argv = arguments.get("command")
+            if isinstance(argv, str):
+                argv = [argv]
+            if not isinstance(argv, list) or not argv:
+                return "denied: 'command' must be a non-empty list of strings"
+            timeout = arguments.get("timeout_sec")
+            result = ctx.sandbox.execute(
+                SandboxCommand(
+                    argv=tuple(str(item) for item in argv),
+                    timeout_sec=float(timeout) if timeout is not None else None,
+                )
+            )
+        except (ValueError, TypeError) as exc:
+            return f"denied: {exc}"
+        except (SandboxDenied, SandboxUnavailable) as exc:
+            # A command the runtime will not run is a declared terminal outcome of the
+            # action: the model is told, and the turn carries on.
+            return f"denied: {exc}"
+        return json.dumps(
+            {
+                "exit_code": result.exit_code,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "timed_out": result.timed_out,
+            }
+        )
+
+    def _egress_turn(
+        self,
+        task_id: str,
+        ctx: EpisodeContext,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        base: int,
+        round_index: int = 0,
+    ) -> ModelCompletion:
         chat_body: dict[str, Any] = {"model": ctx.model, "messages": messages}
         if tools:
             chat_body["tools"] = tools
         request = ModelRequest(interface=MODEL_INTERFACE, url=ctx.url, body=chat_body)
-        result = self._held_egress.run(task_id, f"model:{base}", request)
+        correlation = (
+            f"model:{base}" if not round_index else f"model:{base}:{round_index}"
+        )
+        result = self._held_egress.run(task_id, correlation, request)
         if isinstance(result, HeldEgressReject):
             raise FacadeTurnError(f"held model egress rejected: {result.reason}")
         return result
@@ -194,6 +298,29 @@ class ResponsesFacade:
         output.extend(function_call_item(call) for call in other)
         output.append(message_output_item(_dispatch_summary(capture.group)))
         return output
+
+
+_DEFERRED = "not run: ask for this again once your commands are done"
+
+
+def _assistant_tool_calls(completion: ModelCompletion) -> dict[str, Any]:
+    """The model's own message, replayed so its tool results attach to their calls."""
+    return {
+        "role": "assistant",
+        "content": completion.content or None,
+        "tool_calls": [
+            {
+                "id": call.call_id,
+                "type": "function",
+                "function": {"name": call.name, "arguments": call.arguments},
+            }
+            for call in completion.tool_calls
+        ],
+    }
+
+
+def _tool_result(call: ModelToolCall, content: str) -> dict[str, Any]:
+    return {"role": "tool", "tool_call_id": call.call_id, "content": content}
 
 
 def _dispatch_summary(group: FacadeTurnGroup) -> str:
@@ -264,8 +391,9 @@ class _FacadeHandler(BaseHTTPRequestHandler):
         try:
             output = facade.handle_turn(task_id, token, body)
         except FacadeTurnError as exc:
-            # Redact: the reason never carries the request, credential, or permit.
-            facade._log.info("facade turn failed for %s", task_id)
+            # Every reason is a bounded diagnostic built here or by the egress lane; the
+            # request, the credential, and the permit never reach one.
+            facade._log.info("facade turn failed for %s: %s", task_id, exc)
             self._write_json(502, {"error": str(exc)})
             return
         sse = responses_sse(output)

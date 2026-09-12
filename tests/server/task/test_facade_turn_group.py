@@ -470,10 +470,11 @@ def test_a_crash_after_route_does_not_resurrect_a_stale_group() -> None:
     asyncio.run(run())
 
 
-def test_native_shell_is_permitted_without_network_egress() -> None:
-    # The codex sandbox permits native shell but denies it network, so a native curl
-    # cannot bypass the mediated search/v1 facade — the only egress. Guarded so the test
-    # does not couple to the optional runtime-harness-codex dependency.
+def test_the_codex_sandbox_backs_the_facade_tool_filter() -> None:
+    # What keeps native code and native search from the model is the facade's tool
+    # filter; this config is the second line behind it, so anything that starts anyway
+    # runs confined and without network. Guarded so the test does not couple to the
+    # optional runtime-harness-codex dependency.
     import pytest
 
     pytest.importorskip("openai_codex")
@@ -487,6 +488,6 @@ def test_native_shell_is_permitted_without_network_egress() -> None:
         task_id="tsk-1",
     )
     overrides = cfg.to_codex_config().config_overrides
-    assert 'sandbox_mode="workspace-write"' in overrides  # shell permitted
+    assert 'sandbox_mode="workspace-write"' in overrides  # confined if it runs
     assert "sandbox_workspace_write.network_access=false" in overrides  # no egress
-    assert "tools.web_search=false" in overrides  # native web search hidden
+    assert "tools.web_search=false" in overrides  # honored by a version that reads it

@@ -12,13 +12,29 @@ from pydantic import BaseModel, ConfigDict
 from shared.harness.boundary import BoundaryEventKind
 
 
+class FacadeResolution(StrEnum):
+    """Where a facade call the model emits is resolved.
+
+    ``MEDIATED`` is the fabric path: the call is captured, recorded as a turn-group
+    member, and settled through the control plane. ``LOCAL_INLINE`` is resolved by the
+    worker inside the held turn — it never becomes a group member, an invocation, or a
+    control-plane round trip.
+    """
+
+    MEDIATED = "mediated"
+    LOCAL_INLINE = "local_inline"
+
+
 class FacadeDescriptor(BaseModel):
     """A fabric-owned facade tool the facade injects for one agent.
 
     ``name`` is the model-facing tool name whose call the facade captures;
     ``tool_schema`` is the function-tool JSON injected into the model turn; ``kind`` and
     ``interface`` are the boundary the captured call originates. The compiler pins the
-    exact set an agent may use, so the facade injects only its declared facades.
+    ceiling from the agent's declared authority, and a dispatch narrows the
+    ``LOCAL_INLINE`` facades to the activation's effective grant, so the facade injects
+    only what this activation may actually use. A mediated facade stays offered even
+    where the grant forbids it, because calling it records a durable authority denial.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -27,6 +43,7 @@ class FacadeDescriptor(BaseModel):
     kind: BoundaryEventKind
     interface: str | None = None
     tool_schema: str  # the injected function-tool schema, serialized
+    resolution: FacadeResolution = FacadeResolution.MEDIATED
 
 
 class FacadeCompletionMode(StrEnum):

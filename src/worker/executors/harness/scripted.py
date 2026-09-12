@@ -26,7 +26,14 @@ from shared.harness import (
     HarnessCapsule,
     HarnessResult,
     HarnessResultKind,
+    MediatedFacade,
     OutcomeKind,
+    sandbox_mediated,
+)
+from shared.sandbox import (
+    LocalSandboxExecutor,
+    SandboxCommand,
+    SandboxDenied,
 )
 from shared.tasks.specs import AgentSpecStrict
 from shared.tasks.worker_message import WorkerTaskMessage
@@ -38,9 +45,16 @@ _BACKEND = "scripted"
 
 
 class ScriptedStep(BaseModel):
-    """One declared move of a scripted agent."""
+    """One declared move of a scripted agent.
 
-    op: Literal["boundary", "complete", "fail"]
+    An ``exec`` step runs a command in the agent's own workspace and records its stdout
+    under ``call``, so a later step can complete from it. It is not a boundary: it
+    neither ends the dispatch nor produces a request the fabric settles.
+    """
+
+    op: Literal["boundary", "complete", "fail", "exec"]
+    argv: list[str] | None = None
+    timeout_sec: float | None = None
     kind: BoundaryEventKind | None = None
     call: str | None = None
     interface: str | None = None
@@ -62,9 +76,15 @@ class _ScriptedState(BaseModel):
 class ScriptedHarnessAdapter(HarnessAdapter):
     """Replay a declared script, deferring each boundary and resuming from a capsule."""
 
-    def __init__(self, script: Sequence[ScriptedStep], version: str) -> None:
+    def __init__(
+        self,
+        script: Sequence[ScriptedStep],
+        version: str,
+        sandbox: LocalSandboxExecutor | None = None,
+    ) -> None:
         self._script = list(script)
         self._version = version
+        self._sandbox = sandbox
 
     def backend_key(self) -> HarnessBackendKey:
         return HarnessBackendKey(backend=_BACKEND, version=self._version)
@@ -72,6 +92,9 @@ class ScriptedHarnessAdapter(HarnessAdapter):
     def egress_handoff_mode(self) -> EgressHandoffMode:
         # Every boundary defers to a capsule and resumes from the committed outcome.
         return EgressHandoffMode.DURABLE_PRE_EGRESS_YIELD
+
+    def mediated_facades(self) -> frozenset[MediatedFacade]:
+        return sandbox_mediated(self._sandbox is not None)
 
     def start(
         self,
@@ -90,14 +113,29 @@ class ScriptedHarnessAdapter(HarnessAdapter):
                 state.denied.append(outcome.call_correlation)
             elif outcome.value is not None:
                 state.injected[outcome.call_correlation] = outcome.value
-        if state.cursor >= len(self._script):
-            return HarnessResult(kind=HarnessResultKind.COMPLETION, value=None)
-        step = self._script[state.cursor]
-        state.cursor += 1
-        return self._emit(step, state)
+        while state.cursor < len(self._script):
+            step = self._script[state.cursor]
+            state.cursor += 1
+            if step.op != "exec":
+                return self._emit(step, state)
+            # Several commands run in one dispatch: a local action is not a boundary, so
+            # the episode neither yields its lane nor tells the fabric between them.
+            self._run(step, state)
+        return HarnessResult(kind=HarnessResultKind.COMPLETION, value=None)
 
     def cancel(self, activation_id: str) -> None:
         return None
+
+    def _run(self, step: ScriptedStep, state: "_ScriptedState") -> None:
+        if self._sandbox is None:
+            raise SandboxDenied("this agent declares no sandbox to run a command in")
+        if not step.argv:
+            raise ValueError("a scripted exec step needs an argv")
+        result = self._sandbox.execute(
+            SandboxCommand(argv=tuple(step.argv), timeout_sec=step.timeout_sec)
+        )
+        if step.call is not None:
+            state.injected[step.call] = result.stdout.strip()
 
     def _emit(self, step: ScriptedStep, state: _ScriptedState) -> HarnessResult:
         capsule = HarnessCapsule(
@@ -132,6 +170,7 @@ def build_scripted_adapter(
     config: WorkerConfig,
     facade: ResponsesFacade | None = None,
     state: MaterializedState | None = None,
+    sandbox: LocalSandboxExecutor | None = None,
 ) -> ScriptedHarnessAdapter:
     # The scripted backend yields its lane per boundary, so it never binds the facade.
     spec = task.spec
@@ -141,4 +180,4 @@ def build_scripted_adapter(
     if not isinstance(raw, list):
         raise ValueError("the scripted backend requires a 'script' list in its params")
     script = [ScriptedStep.model_validate(item) for item in raw]
-    return ScriptedHarnessAdapter(script, backend.version)
+    return ScriptedHarnessAdapter(script, backend.version, sandbox)

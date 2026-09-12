@@ -64,7 +64,9 @@ def test_reference_outcome_is_hydrated_before_injection(
     manifest = store.materialize("idm-1", b"the-result", media_type="application/json")
     monkeypatch.setattr(es, "build_content_store", lambda base_url: store)
     adapter = _RecordingAdapter()
-    register_adapter("fake", lambda backend, task, config, facade, state: adapter)
+    register_adapter(
+        "fake", lambda backend, task, config, facade, state, sandbox: adapter
+    )
 
     ex = AgentEpisodeExecutor(make_worker_config())
     ex.run(_dispatch_with_ref(manifest), tmp_path)
@@ -85,7 +87,8 @@ def test_hydration_failure_fails_the_step(
     )
     monkeypatch.setattr(es, "build_content_store", lambda base_url: store)
     register_adapter(
-        "fake", lambda backend, task, config, facade, state: _RecordingAdapter()
+        "fake",
+        lambda backend, task, config, facade, state, sandbox: _RecordingAdapter(),
     )
 
     ex = AgentEpisodeExecutor(make_worker_config())

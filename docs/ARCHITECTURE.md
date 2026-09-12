@@ -204,6 +204,23 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   and a harness works inside its own components under its sandbox. Only opaque
   references cross into the ledger, control state, operation frames, logs, results, or
   artifacts. `WORKER_PRIVATE_STATE_DIR` sets the root.
+- **Agent-local sandbox execution.** An agent that declares the `sandbox.execute`
+  interface runs commands worker-locally in its own `workspace_fs`, on the worker its
+  private-state attachment selected; an ordinary command makes no control-plane round
+  trip or cross-worker hop. The runtime confines a command to its workspace, denies
+  network egress, and bounds its resources; commands become durable together at the
+  agent's ordinary boundary seal, and a loss before the seal fails closed as
+  `PrivateStateUnavailable`. A child runs commands only where its parent delegated the
+  interface. The feature is a single-trusted-tenant development posture, not
+  multi-tenant isolation; an operator enables it for the fleet with
+  `AGENT_SANDBOX_ENABLED`.
+- **Author-owned sandbox egress.** An agent that declares the distinct `sandbox.egress`
+  authority runs its commands with the network fence relaxed, where the deployment sets
+  `AGENT_SANDBOX_EGRESS_ENABLED`; a ceiling that carries the interface only to delegate
+  it opts its own commands back out with `sandbox.network_egress: deny`, and a child
+  never inherits an egress its parent withheld. An egress command is an external effect:
+  a failure before the next seal may repeat a command that already egressed, so the
+  author owns idempotency and reconciliation.
 - **Agent-model gateway.** A model boundary an agent defers with a `canned` or `echo`
   binding settles on the control plane off the agent's lane, injecting the result back at
   the originating call. The gateway resolves the activation's pinned binding and its

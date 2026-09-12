@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict
 
 from ..outcome import OutcomeManifest
 from ..private_state import PrivateStateAttachment, PrivateStateBinding
+from ..sandbox import LocalSandboxCapability
 from ..tasks.specs.misc import ModelBindingMode
 from ..tools.facade import FacadeDescriptor
 from .boundary import BoundaryRequest, DenialKind
@@ -45,13 +46,31 @@ class MediatedFacade(StrEnum):
     MODEL = "model"
     SPAWN_AGENT = "spawn_agent"
     SEARCH = "search"
+    # Code execution the fabric intercepts and validates, then runs WORKER-LOCALLY in
+    # the agent's own fenced workspace. Unlike the others it never reaches control: a
+    # command raises no invocation, claim, route, or permit.
+    SANDBOX = "sandbox"
 
 
 # The set the fabric requires a supported agent backend to mediate: the model boundary,
 # child delegation, and web search all cross the fabric's validation, not a native path.
+# ``SANDBOX`` is deliberately outside it: a backend that runs no code needs no sandbox,
+# and one that does declares it, which is what binds its commands to the fenced runtime.
 REQUIRED_MEDIATED_FACADES = frozenset(
     {MediatedFacade.MODEL, MediatedFacade.SPAWN_AGENT, MediatedFacade.SEARCH}
 )
+
+
+def sandbox_mediated(has_sandbox: bool) -> frozenset[MediatedFacade]:
+    """The facades a backend mediates, given whether it was handed a local sandbox.
+
+    A backend that can run code declares it, which is what binds its commands to the
+    fenced runtime; the executor refuses an agent whose sandbox a backend would not
+    mediate, so this is the one place that mapping lives.
+    """
+    if not has_sandbox:
+        return REQUIRED_MEDIATED_FACADES
+    return REQUIRED_MEDIATED_FACADES | {MediatedFacade.SANDBOX}
 
 
 class EgressHandoffMode(StrEnum):
@@ -181,7 +200,10 @@ class AgentEpisodeDispatch(BaseModel):
     agent's compile-pinned fabric facades the worker injects into a held model turn.
     ``private_state`` names the generation the episode resumes on and
     ``private_state_attachment`` is this worker incarnation's exclusive authority to
-    materialize and write it.
+    materialize and write it. ``sandbox`` is the local execution authority for an agent
+    that declares ``sandbox.execute``: it is scoped to this dispatch and fenced to the
+    same holder and write epoch, so the runtime validates every command against it
+    without a per-command control-plane round trip.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -194,6 +216,7 @@ class AgentEpisodeDispatch(BaseModel):
     facade_descriptors: tuple[FacadeDescriptor, ...] = ()
     private_state: PrivateStateBinding | None = None
     private_state_attachment: PrivateStateAttachment | None = None
+    sandbox: LocalSandboxCapability | None = None
 
 
 class ServiceLeafEpisodeDispatch(BaseModel):

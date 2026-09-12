@@ -91,6 +91,41 @@ a turn settles: the tree is ahead of the generation the binding names, and the n
 attempt fails closed rather than resuming from a point no fence covers. A lineage root
 outlives its activation, private to the holder until its incarnation ends.
 
+### Agent-local sandbox
+
+An agent whose `spec.v2.authority.invoke` names `sandbox.execute` may run commands in
+its own `workspace_fs`. `spec.sandbox` bounds one command — `runtime`,
+`command_timeout_sec`, `cpu_seconds`, `memory_bytes`, `file_size_bytes`, `open_files` —
+with defaults when omitted; it names no host, image, mount, or path.
+
+The `scripted` backend runs an `exec` step; the `codex` backend's model calls a
+`run_command` tool the worker-local Responses facade resolves inside the held turn.
+Neither path yields the episode lane or makes a control-plane round trip per command,
+and a backend that does not mediate the sandbox is refused an agent that declares one.
+`run_command` is the only way code reaches a model: the facade forwards a harness's own
+tools only from its allowlist, so a native shell or any tool it does not name is
+dropped, and an agent without a sandbox is offered no executable tool.
+
+Commands mutate `workspace_fs` and become durable at the episode's ordinary seal, so a
+worker loss before it leaves the last sealed generation intact. Egress is denied by
+default — reaching a model, tool, or external effect takes the mediated boundary.
+
+Declaring the separate `sandbox.egress` interface, on a deployment that sets
+`AGENT_SANDBOX_EGRESS_ENABLED`, relaxes the network fence for the agent's own commands;
+`spec.sandbox.network_egress: deny` opts a delegate-only ceiling back out, and a child
+whose parent withheld the interface runs fenced. An egress command is an external
+effect: a failure before the next seal may re-run a command that already egressed, so
+the author owns idempotency and reconciliation, and the fabric offers no deduplication
+or compensation.
+
+`AGENT_SANDBOX_ENABLED` gates the feature for the deployment and is off by default; an
+agent that declares `sandbox.execute` where it is off fails validation. Authority is
+resolved again at dispatch, so a spawned child runs commands only where its parent
+delegated the interface. The feature is a single-trusted-tenant development posture:
+filesystem confinement between activations on one worker needs a Landlock-capable
+kernel, and without one the runtime still denies egress but does not confine the
+filesystem. Enable it only on workers running a single trusted tenant's agents.
+
 ## Per-workflow harness and model binding
 
 An agent declares its harness and model binding in the workflow; both are pinned at

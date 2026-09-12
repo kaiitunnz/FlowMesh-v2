@@ -19,6 +19,7 @@ from shared.tools.facade import (
     FacadeCallMember,
     FacadeCompletionMode,
     FacadeDescriptor,
+    FacadeResolution,
     FacadeTurnGroup,
 )
 from shared.tools.model.schema import ModelToolCall
@@ -40,11 +41,27 @@ class FacadeCapture:
 def partition_facade_calls(
     tool_calls: tuple[ModelToolCall, ...], descriptors: list[FacadeDescriptor]
 ) -> tuple[list[ModelToolCall], list[ModelToolCall]]:
-    """Split a turn's tool calls into the fabric-facade calls and the rest."""
-    names = {d.name for d in descriptors}
+    """Split a turn's tool calls into the mediated fabric-facade calls and the rest."""
+    names = {d.name for d in descriptors if d.resolution is FacadeResolution.MEDIATED}
     facade = [call for call in tool_calls if call.name in names]
     other = [call for call in tool_calls if call.name not in names]
     return facade, other
+
+
+def partition_local_calls(
+    tool_calls: tuple[ModelToolCall, ...], descriptors: list[FacadeDescriptor]
+) -> tuple[list[ModelToolCall], list[ModelToolCall]]:
+    """Split a turn's tool calls into the locally-resolved ones and the rest.
+
+    A locally-resolved call never becomes a group member or an invocation: the worker
+    runs it inside the held turn and answers it there.
+    """
+    names = {
+        d.name for d in descriptors if d.resolution is FacadeResolution.LOCAL_INLINE
+    }
+    local = [call for call in tool_calls if call.name in names]
+    other = [call for call in tool_calls if call.name not in names]
+    return local, other
 
 
 def build_facade_capture(

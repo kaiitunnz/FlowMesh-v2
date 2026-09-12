@@ -128,8 +128,10 @@ class CodexTransportConfig:
     env_key_value: str = "placeholder"
     provider_id: str = "flowmesh"
     approval_policy: str = "never"
-    # Permit native shell in a workspace-write sandbox but deny it network egress, so
-    # the fabric search facade is the only web path (a native curl cannot bypass it).
+    # A second line only: the facade drops codex's native exec tools before the model
+    # sees them, so the model cannot call one. Should one ever start anyway, it runs
+    # under codex's own bundled-bubblewrap sandbox, which needs a user namespace an
+    # ordinary worker container denies and therefore fails closed there.
     sandbox_mode: str = "workspace-write"
     turn_input: str = "continue"
     turn_timeout_sec: float = 120.0
@@ -161,12 +163,13 @@ class CodexTransportConfig:
             f'model="{self.model}"',
             f'approval_policy="{self.approval_policy}"',
             f'sandbox_mode="{self.sandbox_mode}"',
-            # The fabric mediates web search through a gateway-injected facade, so the
-            # native codex web_search (provider-executed, unavailable on a self-hosted
-            # model) stays off; the model sees only the fabric facade.
+            # Codex still advertises its native web search whatever this says; what
+            # keeps it from the model is the facade, which forwards only the harness
+            # tools it allows and drops a builtin outright. Set because a codex version
+            # that honors it should not offer a search the fabric does not mediate.
             "tools.web_search=false",
-            # Native shell is permitted but has no network, so it cannot egress around
-            # the mediated search facade.
+            # Whatever a native tool starts gets no network, so it cannot egress around
+            # the mediated facades.
             "sandbox_workspace_write.network_access=false",
         )
         env = {"CODEX_HOME": self.codex_home.as_posix(), _KEY_ENV: self.env_key_value}

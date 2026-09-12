@@ -107,6 +107,48 @@ declare `provenance` (`pinned` | `live`) and `determinism` / `effect` /
 `recovery` overrides, and a `result: { visibility: published }` to publish its
 induced output.
 
+An agent that runs code declares `sandbox.execute` in its invoke face, which
+needs no `tools` entry — the fabric provides the interface. `spec.sandbox`
+bounds one command and may be omitted for the defaults:
+
+```yaml
+- name: coder
+  spec:
+    taskType: agent
+    task: build and test the project
+    harness: { backend: codex, version: v1 }
+    sandbox: { command_timeout_sec: 120, memory_bytes: 4294967296 }
+    v2:
+      authority: { invoke: ["sandbox.execute"], delegate: [] }
+```
+
+Commands run in the agent's own workspace on the worker that already holds its
+private state, and the runtime denies network egress: reaching a model, tool, or
+external effect takes the agent's mediated boundaries instead. The confinement
+is a development posture for single-tenant workers, not multi-tenant isolation
+(see [`EXECUTORS.md`](EXECUTORS.md)).
+
+A workflow that needs its commands on the network declares the separate
+`sandbox.egress` interface, which opts the agent's own commands in:
+
+```yaml
+- name: fetcher
+  spec:
+    taskType: agent
+    task: fetch and summarize the release notes
+    harness: { backend: codex, version: v1 }
+    v2:
+      authority: { invoke: ["sandbox.execute", "sandbox.egress"], delegate: [] }
+```
+
+An agent that declares the interface only to delegate it keeps its own commands
+fenced with `sandbox: { network_egress: deny }`. The deployment must also enable
+`AGENT_SANDBOX_EGRESS_ENABLED`, and a spawned child gets the opt-in only if its
+parent delegates `sandbox.egress`. Access is all-or-nothing IP networking — no
+destination or port policy — and an egress-enabled command is an external effect
+the author owns: a failure before the episode's next seal may run it again, and
+the fabric neither deduplicates nor compensates it.
+
 ### Structured regions
 
 In the graph form, a node carries a `region` instead of a `spec`. Regions wire

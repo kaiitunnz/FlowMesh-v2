@@ -16,11 +16,13 @@ from .adapter import (
     MediatedFacade,
     OutcomeKind,
     ServiceLeafEpisodeDispatch,
+    sandbox_mediated,
 )
 from .boundary import BoundaryEventKind, BoundaryRequest, DenialKind
 from .input_render import render_input_envelope
 
 __all__ = [
+    "sandbox_mediated",
     "FACADE_TOOLS",
     "REQUIRED_MEDIATED_FACADES",
     "AgentEpisodeDispatch",

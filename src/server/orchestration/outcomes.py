@@ -93,8 +93,8 @@ def check_admissible(
 
     The path runs effect-free operations and external effects under any declared replay
     contract (replayable-with-dedup, compensable, or ambiguity-terminal), handling each
-    uncertainty without inferring success. Private-state operations (sandbox recovery)
-    and residency administration are not admitted.
+    uncertainty without inferring success. Private-state operations (a training leaf's
+    checkpoint recovery) and residency administration are not admitted.
     """
     if residency_only:
         raise AdmissionError(
@@ -103,8 +103,8 @@ def check_admissible(
         )
     if effect is EffectClass.PRIVATE_STATE:
         raise AdmissionError(
-            f"operator {operator_id!r} declares private-state effect, whose sandbox "
-            "recovery boundary the orchestration path does not run"
+            f"operator {operator_id!r} declares private-state effect, whose recovery "
+            "boundary the orchestration path does not run"
         )
 
 

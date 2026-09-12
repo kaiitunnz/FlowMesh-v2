@@ -27,9 +27,12 @@ from shared.harness import (
     HarnessCapsule,
     HarnessResult,
     HarnessResultKind,
+    MediatedFacade,
     OutcomeKind,
     render_input_envelope,
+    sandbox_mediated,
 )
+from shared.sandbox import LocalSandboxExecutor
 from shared.tasks.specs import AgentSpecStrict
 from shared.tasks.worker_message import WorkerTaskMessage
 from worker.config import WorkerConfig
@@ -89,12 +92,19 @@ class CodexAppServerHarnessAdapter(HarnessAdapter):
         self,
         transport: CodexAppServerTransport,
         version: str = _CODEX_ADAPTER_VERSION,
+        sandbox: LocalSandboxExecutor | None = None,
     ) -> None:
         self._transport = transport
         self._version = version
+        self._sandbox = sandbox
 
     def backend_key(self) -> HarnessBackendKey:
         return HarnessBackendKey(backend=_BACKEND, version=self._version)
+
+    def mediated_facades(self) -> frozenset[MediatedFacade]:
+        # The model reaches code execution only through the fabric's run_command facade,
+        # which the worker resolves in its own fenced runtime inside the held turn.
+        return sandbox_mediated(self._sandbox is not None)
 
     def start(
         self,
@@ -163,6 +173,7 @@ def build_codex_adapter(
     config: WorkerConfig,
     facade: ResponsesFacade | None = None,
     state: MaterializedState | None = None,
+    sandbox: LocalSandboxExecutor | None = None,
 ) -> CodexAppServerHarnessAdapter:
     spec = task.spec
     if not isinstance(spec, AgentSpecStrict) or spec.harness is None:
@@ -182,7 +193,11 @@ def build_codex_adapter(
     # Bind Codex to the facade's loopback surface with a per-episode token so one
     # episode can't drive another's egress.
     token = facade.register_episode(
-        task.task_id, binding.url, binding.model, list(dispatch.facade_descriptors)
+        task.task_id,
+        binding.url,
+        binding.model,
+        list(dispatch.facade_descriptors),
+        sandbox,
     )
     # The live binding pulls in the openai-codex SDK and its bundled app-server binary;
     # keep both off the import path of a worker that never selects the codex backend.
@@ -200,7 +215,7 @@ def build_codex_adapter(
             env_key_value=token,
         )
     )
-    return CodexAppServerHarnessAdapter(transport, backend.version)
+    return CodexAppServerHarnessAdapter(transport, backend.version, sandbox)
 
 
 def _agent_task(spec: AgentSpecStrict) -> str:

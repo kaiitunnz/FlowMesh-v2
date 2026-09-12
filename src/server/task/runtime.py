@@ -24,6 +24,7 @@ from shared.harness import (
 from shared.outcome import OutcomeManifest
 from shared.private_state import (
     OwnerFence,
+    PrivateStateAttachment,
     PrivateStateSealReport,
     PrivateStateUnavailable,
 )
@@ -32,11 +33,18 @@ from shared.resident.reports import (
     ResidentOpOutcome,
     ResidentRouteObservation,
 )
+from shared.sandbox import (
+    SANDBOX_EGRESS_INTERFACE,
+    SANDBOX_EXECUTE_INTERFACE,
+    LocalSandboxCapability,
+    SandboxEgressMode,
+)
 from shared.schemas.command import InterruptMessage, MediatedOpMessage
 from shared.schemas.result import ResultEnvelope, result_file_path
 from shared.tasks import TaskEnvelopeTemplate
 from shared.tasks.specs import ModelBindingMode
 from shared.tools.contract import AgentModelTurnProposal, MediatedOperationOutcome
+from shared.tools.facade import FacadeDescriptor, FacadeResolution
 from shared.utils import new_workflow_id
 from shared.utils.ids import new_model_secret_ref
 
@@ -90,8 +98,13 @@ from .v2 import (
     compile_bundle,
 )
 from .v2.compiler.agent_binding import AgentBindingDefaults
+from .v2.compiler.facades import run_command_schema
 from .v2.credentials import pop_inline_model_secrets, redact_source_text
-from .v2.representations.operators import AgentModelGatewayBinding, ServiceDependency
+from .v2.representations.operators import (
+    AgentModelGatewayBinding,
+    AgentOperator,
+    ServiceDependency,
+)
 from .v2.representations.plan import EpisodeSpec
 
 # A live-feasibility check: whether a lowered episode's declared alternative can be
@@ -99,12 +112,88 @@ from .v2.representations.plan import EpisodeSpec
 EpisodeFeasibility = Callable[[EpisodeSpec], bool]
 
 
+def _sandbox_capability(
+    op: AgentOperator | None,
+    attachment: PrivateStateAttachment | None,
+    invoke_face: tuple[str, ...],
+) -> LocalSandboxCapability | None:
+    """The local execution authority for one dispatch of a sandbox-declaring agent.
+
+    It is minted from the agent's pinned envelope and the attachment that already fences
+    this dispatch's writes, so a command runs only under the holder and write epoch that
+    owns the workspace it mutates. An agent with no attachment has no workspace to run
+    in and gets none.
+
+    Both interfaces are resolved against ``invoke_face`` — what this activation may
+    actually invoke once its ancestors have attenuated it — rather than against the
+    pinned binding, which only records what the author asked for. A child whose parent
+    withheld ``sandbox.execute`` gets no capability at all and cannot run a command; one
+    whose parent withheld only ``sandbox.egress`` runs fenced under a binding that names
+    the opt-in. Neither a binding nor a command argument can widen what is minted here.
+    """
+    if op is None or op.sandbox_binding is None or attachment is None:
+        return None
+    if SANDBOX_EXECUTE_INTERFACE not in invoke_face:
+        return None
+    egress = (
+        op.sandbox_binding.network_egress
+        if SANDBOX_EGRESS_INTERFACE in invoke_face
+        else SandboxEgressMode.DENY
+    )
+    return LocalSandboxCapability(
+        attachment_id=attachment.attachment_id,
+        reference_id=attachment.reference_id,
+        worker_id=attachment.worker_id,
+        incarnation=attachment.incarnation,
+        write_epoch=attachment.write_epoch,
+        profile=op.sandbox_binding.profile,
+        network_egress=egress,
+    )
+
+
+def _effective_facades(
+    op: AgentOperator | None,
+    invoke_face: tuple[str, ...],
+    sandbox: LocalSandboxCapability | None,
+) -> tuple[FacadeDescriptor, ...]:
+    """The facades this dispatch offers the model, narrowed to what it may use.
+
+    The compiler pins the ceiling from the operator's declared authority; an
+    activation's effective grant can be narrower, so a locally-resolved facade is
+    reconciled here against it. Only ``LOCAL_INLINE`` facades are narrowed: a mediated
+    call the activation may not invoke settles as a durable authority denial, which is a
+    record worth keeping, while a local one is refused inside the worker and would leave
+    no trace of the offer at all.
+    """
+    if op is None:
+        return ()
+    facades: list[FacadeDescriptor] = []
+    for facade in op.facades:
+        if facade.resolution is not FacadeResolution.LOCAL_INLINE:
+            facades.append(facade)
+            continue
+        if facade.interface == SANDBOX_EXECUTE_INTERFACE:
+            if sandbox is None:
+                continue  # no effective execute: the tool is never offered
+            facade = facade.model_copy(
+                update={"tool_schema": run_command_schema(sandbox.egress_allowed)}
+            )
+        elif facade.interface is not None and facade.interface not in invoke_face:
+            continue
+        facades.append(facade)
+    return tuple(facades)
+
+
 def _stringify(value: Any) -> str:
     """A stable string rendering of a resolved input value, for delivery."""
     return value if isinstance(value, str) else json.dumps(value, sort_keys=True)
 
 
-def _binding_defaults(cfg: AgentBindingConfig) -> AgentBindingDefaults:
+def _binding_defaults(
+    cfg: AgentBindingConfig,
+    sandbox_enabled: bool = False,
+    sandbox_egress_enabled: bool = False,
+) -> AgentBindingDefaults:
     """Convert the deployment binding config into the compiler's injected defaults."""
     return AgentBindingDefaults(
         default_backend=cfg.default_backend,
@@ -112,6 +201,8 @@ def _binding_defaults(cfg: AgentBindingConfig) -> AgentBindingDefaults:
         default_mode=cfg.default_mode,
         default_url=cfg.default_url,
         default_model=cfg.default_model,
+        sandbox_enabled=sandbox_enabled,
+        sandbox_egress_enabled=sandbox_enabled and sandbox_egress_enabled,
     )
 
 
@@ -167,7 +258,11 @@ class TaskRuntime:
         self._web_search = orchestration.web_search
         self._model_egress_timeout_sec = orchestration.gateway.timeout_sec
         self._input_budget_bytes = orchestration.agent_input_budget_bytes
-        self._agent_binding_defaults = _binding_defaults(orchestration.agent_binding)
+        self._agent_binding_defaults = _binding_defaults(
+            orchestration.agent_binding,
+            orchestration.agent_sandbox_enabled,
+            orchestration.agent_sandbox_egress_enabled,
+        )
         self._lowering_strategy = (
             LoweringStrategy.EPISODE_CUT
             if orchestration.episode_lowering
@@ -1797,6 +1892,10 @@ class TaskRuntime:
                 task_id, holder.worker_id, holder.incarnation
             )
             capsule_blob, outcomes = engine.episode_context(task_id)
+            invoke_face = engine.effective_invoke_face(task_id)
+            sandbox = _sandbox_capability(
+                op, granted[1] if granted else None, invoke_face
+            )
             # First-turn dataflow inputs are delivered only on the first dispatch; a
             # resume injects only the harness's own delivered outcomes.
             input_bindings = (
@@ -1812,9 +1911,10 @@ class TaskRuntime:
                 delivered_outcomes=outcomes,
                 input_bindings=input_bindings,
                 model_binding=model_binding,
-                facade_descriptors=tuple(op.facades) if op is not None else (),
+                facade_descriptors=_effective_facades(op, invoke_face, sandbox),
                 private_state=granted[0] if granted else None,
                 private_state_attachment=granted[1] if granted else None,
+                sandbox=sandbox,
             )
 
     def service_episode_dispatch(

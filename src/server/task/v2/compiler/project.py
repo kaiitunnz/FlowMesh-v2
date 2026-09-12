@@ -1,6 +1,7 @@
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
+from shared.sandbox import SandboxEgressMode
 from shared.tasks import TaskType
 from shared.tasks.specs import (
     AgentSpecStrict,
@@ -51,6 +52,7 @@ from ..representations.template import (
 from .agent_binding import (
     AgentBindingDefaults,
     resolve_agent_bindings,
+    resolve_agent_sandbox_binding,
 )
 from .bindings import (
     BindingClass,
@@ -256,6 +258,7 @@ def _agent_operator(
     operator_ids: set[str],
     defaults: AgentBindingDefaults,
     secret_ref: str | None,
+    egress_requests: dict[str, SandboxEgressMode],
 ) -> AgentOperator:
     inputs, outputs = _ports(task, TaskType.AGENT)
     spec = task.task.spec
@@ -270,6 +273,11 @@ def _agent_operator(
     harness_binding, gateway_binding = resolve_agent_bindings(
         harness, model_binding, defaults, secret_ref
     )
+    sandbox = (
+        spec.sandbox if isinstance(spec, (AgentSpecStrict, AgentSpecTemplate)) else None
+    )
+    if sandbox is not None and sandbox.network_egress is not None:
+        egress_requests[task.task_id] = sandbox.network_egress
     return AgentOperator(
         operator_id=task.task_id,
         source_ref=task.task_id,
@@ -278,6 +286,7 @@ def _agent_operator(
         binding=BindingKey(task_type=TaskType.AGENT),
         harness_binding=harness_binding,
         model_binding=gateway_binding,
+        sandbox_binding=resolve_agent_sandbox_binding(sandbox),
         authority=default_agent_authority(),
         boundary=default_agent_boundary(),
         guard=_condition_guard(task, name_to_op, operator_ids),
@@ -297,6 +306,7 @@ class LoweringAccumulator:
     resource_declarations: list[ResourceDeclaration] = field(default_factory=list)
     source_map: list[SourceMapEntry] = field(default_factory=list)
     nodes: list[PhysicalNode] = field(default_factory=list)
+    sandbox_egress_requests: dict[str, SandboxEgressMode] = field(default_factory=dict)
 
     @property
     def operator_ids(self) -> set[str]:
@@ -339,7 +349,12 @@ def lower_tasks(
         if binding_class(task_type) is BindingClass.AGENT:
             acc.operators.append(
                 _agent_operator(
-                    task, name_to_op, task_ids, defaults, secret_refs.get(task.task_id)
+                    task,
+                    name_to_op,
+                    task_ids,
+                    defaults,
+                    secret_refs.get(task.task_id),
+                    acc.sandbox_egress_requests,
                 )
             )
         else:

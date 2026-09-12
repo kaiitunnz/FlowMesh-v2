@@ -1,10 +1,17 @@
 from dataclasses import dataclass
 
-from shared.tasks.specs import AgentHarnessSpec, AgentModelBindingSpec, ModelBindingMode
+from shared.sandbox import SandboxRuntimeProfile
+from shared.tasks.specs import (
+    AgentHarnessSpec,
+    AgentModelBindingSpec,
+    AgentSandboxSpec,
+    ModelBindingMode,
+)
 
 from ..representations.operators import (
     AgentHarnessBinding,
     AgentModelGatewayBinding,
+    AgentSandboxBinding,
     BindingProvenance,
     HarnessBindingProvenance,
     ModelBindingProvenance,
@@ -28,6 +35,14 @@ class AgentBindingDefaults:
     default_mode: ModelBindingMode | None = None
     default_url: str | None = None
     default_model: str | None = None
+    # Whether this deployment permits agent-local code execution at all. Off by default:
+    # the local fence is a single-trusted-tenant posture, so allowing it on a shared
+    # cluster is the operator's decision, not an author's.
+    sandbox_enabled: bool = False
+    # And whether those commands may reach the network. A separate decision from the
+    # one above: code execution is contained to a workspace the fabric owns, while
+    # egress reaches a perimeter the operator owns.
+    sandbox_egress_enabled: bool = False
 
 
 def neutral_defaults() -> AgentBindingDefaults:
@@ -170,4 +185,22 @@ def resolve_agent_bindings(
     return (
         _resolve_harness(harness, defaults),
         _resolve_model(_source_model(harness, model_binding), defaults, secret_ref),
+    )
+
+
+def resolve_agent_sandbox_binding(
+    sandbox: AgentSandboxSpec | None,
+) -> AgentSandboxBinding | None:
+    """Pin the declared local sandbox envelope, or none when the agent declares none.
+
+    The egress mode is carried on the binding rather than the envelope: the envelope is
+    the resource cost of one command, and whether commands may leave the worker is a
+    separately authorized property of the whole binding. It is resolved by the pin pass,
+    which reads the authority an unset mode derives from; the envelope is pinned here.
+    """
+    if sandbox is None:
+        return None
+    return AgentSandboxBinding(
+        profile=SandboxRuntimeProfile(**sandbox.model_dump(exclude={"network_egress"})),
+        provenance=BindingProvenance.SOURCE,
     )

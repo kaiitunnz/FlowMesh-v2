@@ -640,6 +640,8 @@ class OrchestrationConfig:
     max_spawns_per_turn: int | None = None
     max_spawns_per_region: int | None = None
     episode_lowering: bool = False
+    agent_sandbox_enabled: bool = False
+    agent_sandbox_egress_enabled: bool = False
     agent_input_budget_bytes: int = 262_144
     gateway: AgentModelGatewayConfig = field(default_factory=AgentModelGatewayConfig)
     agent_binding: AgentBindingConfig = field(default_factory=AgentBindingConfig)
@@ -666,9 +668,11 @@ class OrchestrationConfig:
             max_spawns_per_turn=parse_int_env("ORCHESTRATOR_MAX_SPAWNS_PER_TURN"),
             max_spawns_per_region=parse_int_env("ORCHESTRATOR_MAX_SPAWNS_PER_REGION"),
             episode_lowering=parse_bool_env("ORCHESTRATOR_EPISODE_LOWERING", False),
-            agent_input_budget_bytes=parse_int_env(
-                "ORCHESTRATOR_AGENT_INPUT_BUDGET_BYTES"
-            )
+            agent_sandbox_enabled=parse_bool_env("AGENT_SANDBOX_ENABLED", False),
+            agent_sandbox_egress_enabled=parse_bool_env(
+                "AGENT_SANDBOX_EGRESS_ENABLED", False
+            ),
+            agent_input_budget_bytes=parse_int_env("AGENT_INPUT_BUDGET_BYTES")
             or 262_144,
             gateway=AgentModelGatewayConfig.from_env(),
             agent_binding=AgentBindingConfig.from_env(),
