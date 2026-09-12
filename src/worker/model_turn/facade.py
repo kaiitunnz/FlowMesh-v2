@@ -389,8 +389,9 @@ class _FacadeHandler(BaseHTTPRequestHandler):
         try:
             output = facade.handle_turn(task_id, token, body)
         except FacadeTurnError as exc:
-            # Redact: the reason never carries the request, credential, or permit.
-            facade._log.info("facade turn failed for %s", task_id)
+            # Every reason is a bounded diagnostic built here or by the egress lane; the
+            # request, the credential, and the permit never reach one.
+            facade._log.info("facade turn failed for %s: %s", task_id, exc)
             self._write_json(502, {"error": str(exc)})
             return
         sse = responses_sse(output)
