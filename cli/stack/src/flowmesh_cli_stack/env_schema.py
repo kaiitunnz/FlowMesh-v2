@@ -336,6 +336,34 @@ STACK_ENV_SCHEMA = EnvSchema(
                     description="Lower v2 templates into run-to-yield episodes.",
                     var_type=EnvVarType.BOOL,
                 ),
+                EnvVar(
+                    "ORCHESTRATOR_POLICY_SURFACE_ENABLED",
+                    "0",
+                    description="Enable the advisory policy surface.",
+                    var_type=EnvVarType.BOOL,
+                ),
+                EnvVar(
+                    "ORCHESTRATOR_LOWERING_POLICY",
+                    "conservative",
+                    description="Advisory lowering policy.",
+                ),
+                EnvVar(
+                    "ORCHESTRATOR_PLACEMENT_POLICY",
+                    "instance_state_locality",
+                    description="Advisory placement policy.",
+                ),
+                EnvVar(
+                    "ORCHESTRATOR_STATE_CONTROL_POLICY",
+                    "recency_warmth",
+                    description="Advisory sealed-state control policy.",
+                ),
+                EnvVar(
+                    "ORCHESTRATOR_STATE_WARM_GENERATIONS",
+                    "8",
+                    description="Sealed generations kept warm by recency.",
+                    var_type=EnvVarType.INT,
+                    min_value=0,
+                ),
             ],
         ),
         EnvSection(
