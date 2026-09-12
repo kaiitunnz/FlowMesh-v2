@@ -140,14 +140,12 @@ class RecencyWarmth(StateControlPolicy):
         )
         decisions: dict[str, StateControlDecision] = {}
         for position, evidence in enumerate(ranked):
-            if position < self._warm:
-                decisions[evidence.reference_id] = StateControlDecision(
-                    verb=StateControlVerb.RETAIN,
-                    reason=f"within the warmest {self._warm} sealed generations",
-                )
-            else:
-                decisions[evidence.reference_id] = StateControlDecision(
-                    verb=StateControlVerb.EVICT,
-                    reason=f"colder than the warmest {self._warm} sealed generations",
-                )
+            warm = position < self._warm
+            decisions[evidence.reference_id] = StateControlDecision(
+                verb=StateControlVerb.RETAIN if warm else StateControlVerb.EVICT,
+                reason=(
+                    f"{'within' if warm else 'colder than'} the warmest "
+                    f"{self._warm} sealed generations"
+                ),
+            )
         return decisions
