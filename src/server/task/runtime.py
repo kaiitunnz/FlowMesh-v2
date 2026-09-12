@@ -74,7 +74,7 @@ from ..orchestration.tool_dispatch import (
     ToolOutcome,
     ToolOutcomeStatus,
 )
-from ..policy import PolicySurface
+from ..policy import PlacementContext, PolicySurface
 from ..registries.worker import Worker, WorkerRegistry
 from ..registries.workflow import PersistedTask, WorkflowRegistry, WorkflowSched
 from ..services.model_secret_vault import ModelSecretVault
@@ -255,6 +255,7 @@ class TaskRuntime:
         self._logger = logger
         self._results_dir = results_dir
         self._feasibility_check = feasibility_check
+        self._policy = policy
         self._lowering_policy = policy.lowering if policy else None
         self._secret_vault = secret_vault
         self._scope_budget = ScopeBudget.from_config(orchestration)
@@ -2023,6 +2024,36 @@ class TaskRuntime:
             engine = self._engines.get(record.workflow_id) if record else None
             spec = engine.episode_spec(task_id) if engine else None
         return True if spec is None else self._feasibility_check(spec)
+
+    def placement_preference(
+        self, task_id: str, candidates: Sequence[str]
+    ) -> frozenset[str]:
+        """The workers the placement policy prefers for a ready task.
+
+        Advisory: the dispatcher intersects the preference with the pool it has already
+        narrowed, so a preference only ever removes a candidate. Absent a configured
+        policy, or for a task no engine owns, no worker is preferred.
+        """
+        if self._policy is None:
+            return frozenset()
+        with self._lock:
+            record = self._tasks.get(task_id)
+            engine = self._engines.get(record.workflow_id) if record else None
+            if engine is None:
+                return frozenset()
+            context = PlacementContext(
+                task_id=task_id,
+                candidates=tuple(candidates),
+                episode=engine.episode_spec(task_id),
+                state_generation=engine.private_state_generation(task_id),
+                state_owner=(
+                    owner.worker_id
+                    if (owner := engine.private_state_owner(task_id))
+                    else None
+                ),
+                instance_state_holders=engine.private_state_holders(),
+            )
+        return frozenset(self._policy.placement.prefer(context))
 
     def retry_deferred_fanout(self, producer_task_id: str) -> None:
         """Re-drive a producer's deferred fan-out once its result lands out-of-band.

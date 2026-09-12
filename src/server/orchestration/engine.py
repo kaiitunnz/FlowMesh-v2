@@ -3215,6 +3215,15 @@ class OrchestrationEngine:
         op = self._operators.get(operator_id)
         return op if isinstance(op, AgentOperator) else None
 
+    def private_state_holders(self) -> frozenset[str]:
+        """The workers holding a sealed generation of this instance's private state."""
+        return self._private_state.holders()
+
+    def private_state_generation(self, task_id: str) -> int | None:
+        """The generation a task's activation is bound to, if it owns a lineage."""
+        wi = self._work_item_for_task(task_id)
+        return None if wi is None else self._private_state.generation(wi.activation_id)
+
     def private_state_owner(self, task_id: str) -> OwnerFence | None:
         """The single holder that can supply an agent task's bound generation."""
         wi = self._work_item_for_task(task_id)
