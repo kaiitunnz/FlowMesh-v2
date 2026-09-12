@@ -2053,7 +2053,6 @@ class TaskRuntime:
             context = PlacementContext(
                 task_id=task_id,
                 candidates=tuple(candidates),
-                episode=engine.episode_spec(task_id),
                 state_generation=engine.private_state_generation(task_id),
                 state_owner=(
                     owner.worker_id

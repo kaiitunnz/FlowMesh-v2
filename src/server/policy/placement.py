@@ -8,17 +8,13 @@ preference leaves the pool as it was.
 """
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from ..task.v2.representations.plan import EpisodeSpec
 
 
 @dataclass(frozen=True)
 class PlacementContext:
     """What a placement policy reads about one dispatch.
 
-    ``candidates`` are the workers still eligible after the dispatch's hard filters.
+    ``candidates`` are the workers eligible after the dispatch's hard filters.
     ``state_generation`` and ``state_owner`` describe the task's own private-state
     binding — an owner-bound generation leaves one candidate, so locality is a choice
     only while a lineage has yet to seal. ``instance_state_holders`` are the workers
@@ -27,7 +23,6 @@ class PlacementContext:
 
     task_id: str
     candidates: tuple[str, ...]
-    episode: "EpisodeSpec | None" = None
     state_generation: int | None = None
     state_owner: str | None = None
     instance_state_holders: frozenset[str] = field(default_factory=frozenset)
