@@ -5,6 +5,10 @@ asks the state-control policy what should happen to the eligible ones. Reading d
 nothing physical: no state is materialized, copied, or deleted, no attachment or claim
 is minted, and no binding changes. A generation a holder is writing is reported as
 evidence and left to the ledger.
+
+The eligibility screen a decision passes is what bounds acting on it: eviction covers
+only a generation no holder writes and no continuation can resume on, and a copy verb
+only components every one of which is exportable.
 """
 
 from dataclasses import dataclass
