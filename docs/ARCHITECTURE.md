@@ -344,16 +344,16 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   Every answer is screened at its call site, so a preference only ever removes a
   candidate and never softens owner affinity, a selected-worker hint, or the
   `PrivateStateUnavailable` fail-closed path, and a lowering refinement only ever cuts
-  more often. A policy holds no authority: it admits no capacity, mints no claim or
-  attachment, and relaxes no fence. Policies are deployment-global — a workflow
-  submission selects none — and a workflow's declared outputs, effects, and recovery are
-  identical whether or not one runs. Sealed activation-private-state generations have a
-  SYSTEM/ADMIN-gated read inventory (holder fence, component digests, authorization
-  scope) over which a state-control policy decides retention, eviction, replication,
-  placement, or prefetch. It reads and decides only: nothing materializes, copies, or
-  deletes state, a generation a holder writes or a continuation can resume on is
-  retained, and a verb its components' exportability forbids settles as retention.
-  Enable with `ORCHESTRATOR_POLICY_SURFACE_ENABLED=true`.
+  more often. Capacity admission, claim and attachment minting, and fence relaxation
+  belong to the fabric; a policy chooses among the alternatives it already allows.
+  Policies are deployment-global — a workflow submission selects none — and a workflow's
+  declared outputs, effects, and recovery are identical whether or not one runs. Sealed
+  activation-private-state generations have a SYSTEM/ADMIN-gated read inventory (holder
+  fence, component digests, authorization scope) over which a state-control policy
+  decides retention, eviction, replication, placement, or prefetch. It reads and decides
+  only: nothing materializes, copies, or deletes state, an attached or resumable
+  generation is retained, and a verb its components' exportability forbids settles as
+  retention. Enable with `ORCHESTRATOR_POLICY_SURFACE_ENABLED=true`.
 - **Task merging.** Compatible adjacent tasks in a DAG (same `taskType`,
   model, hardware shape, and merge key) coalesce into a single dispatch.
   Merged children ride on `WorkerTaskMessage.merged_children`; the worker

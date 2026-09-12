@@ -495,7 +495,7 @@ class PrivateStateLineage(BaseModel):
     binding: PrivateStateBinding
     attachment: PrivateStateAttachment | None = None
     write_epoch: int = 0
-    sealed_at: str | None = None  # when the bound generation was sealed
+    sealed_at: str | None = None
 
 
 class OrchestrationEvent(BaseModel):

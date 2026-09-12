@@ -3,9 +3,9 @@
 A lowering policy refines choices the compiler has already found legal: it may veto a
 fusion, ask for an extra durable checkpoint, annotate an episode, steer a service
 dependency to a compatible family, and express residency preference. The compiler
-screens every answer, so a policy widens nothing: fusion stays within the pure,
-deterministic, local set, a boundary only ever cuts more often, and a family
-refinement holds the dependency's engine-batch key and isolation.
+screens every answer, so a policy only narrows: fusion is bounded to the pure,
+deterministic, local set, a boundary only ever cuts more often, and a family refinement
+holds the dependency's engine-batch key and isolation.
 """
 
 from dataclasses import dataclass

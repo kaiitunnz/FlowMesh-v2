@@ -131,7 +131,7 @@ Empty when the advisory policy surface is disabled.
 
 The projection describes a generation — identity, holder, component digests and sizes —
 and carries no state bytes and no credential. A decision is advisory: nothing
-materializes, copies, or deletes state, and no attachment or claim is minted.
+materializes, copies, or deletes state.
 
 ## Network
 

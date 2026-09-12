@@ -3258,7 +3258,7 @@ class OrchestrationEngine:
         return evidence
 
     def _activation_resumable(self, activation_id: str) -> bool:
-        """Whether an activation still has work that could resume on its state."""
+        """Whether an activation has work that could resume on its state."""
         return any(
             wi.activation_id == activation_id and wi.status not in _TERMINAL_WI
             for wi in self._work_items.values()

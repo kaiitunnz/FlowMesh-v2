@@ -2,13 +2,11 @@
 
 The inventory reads the sealed generations the live orchestration engines record and
 asks the state-control policy what should happen to the eligible ones. Reading decides
-nothing physical: no state is materialized, copied, or deleted, no attachment or claim
-is minted, and no binding changes. A generation a holder is writing is reported as
-evidence and left to the ledger.
+nothing physical: no state is materialized, copied, or deleted, and no binding changes.
 
-The eligibility screen a decision passes is what bounds acting on it: eviction covers
-only a generation no holder writes and no continuation can resume on, and a copy verb
-only components every one of which is exportable.
+The eligibility screen a decision passes is what bounds acting on it: eviction takes a
+generation neither attached nor resumable, and a copy verb takes components every one
+of which is exportable.
 """
 
 from dataclasses import dataclass
@@ -35,8 +33,8 @@ def sealed_state_inventory(
 ) -> list[SealedGenerationEntry]:
     """Sealed generations across the live engines, newest seal first.
 
-    A policy decides over the generations no holder is currently writing, and every
-    answer is screened against the generation's own evidence before it is reported.
+    A policy decides over the unattached generations, and every answer is screened
+    against the generation's own evidence before it is reported.
     """
     generations = sorted(
         runtime.sealed_private_state(),

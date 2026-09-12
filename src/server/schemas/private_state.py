@@ -29,7 +29,7 @@ class SealedGenerationInfo(BaseModel):
     owner_incarnation: int = Field(description="Holder incarnation fence.")
     sealed_at: str | None = Field(default=None, description="Seal timestamp.")
     attached: bool = Field(description="Whether a holder currently writes the lineage.")
-    resumable: bool = Field(description="Whether work could still resume on it.")
+    resumable: bool = Field(description="Whether work could resume on it.")
     exportable: bool = Field(
         description="Whether every component may materialize off its holder."
     )
