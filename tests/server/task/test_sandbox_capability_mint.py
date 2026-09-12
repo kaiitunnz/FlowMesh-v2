@@ -1,8 +1,8 @@
-"""Resolving an agent's egress at capability mint, against its effective grant.
+"""Resolving an agent's sandbox authority at capability mint, against its grant.
 
 The pinned binding says what the workflow asked for; the activation's own invoke face
-says what its ancestors left it. The mint takes the intersection, so a child never
-inherits an egress its parent withheld.
+says what its ancestors left it. The mint takes the intersection for both interfaces, so
+a child never inherits code execution or egress its parent withheld.
 """
 
 from server.task.runtime import _sandbox_capability
@@ -97,3 +97,36 @@ def test_an_agent_without_an_attachment_gets_no_capability() -> None:
         )
         is None
     )
+
+
+def test_an_activation_without_effective_execute_gets_no_capability() -> None:
+    """A declared ceiling is not authority: without the delegated interface the
+    activation cannot run a command at all."""
+    assert (
+        _sandbox_capability(
+            _agent(SandboxEgressMode.DENY), _ATTACHMENT, ("web_search",), 2
+        )
+        is None
+    )
+
+
+def test_a_withheld_execute_denies_the_capability_even_with_egress_delegated() -> None:
+    assert (
+        _sandbox_capability(
+            _agent(SandboxEgressMode.AUTHOR_OWNED_AT_LEAST_ONCE),
+            _ATTACHMENT,
+            (SANDBOX_EGRESS_INTERFACE,),
+            3,
+        )
+        is None
+    )
+
+
+def test_a_delegated_execute_face_still_mints() -> None:
+    """The refusal is specific: the ordinary authorized child keeps working."""
+    capability = _sandbox_capability(
+        _agent(SandboxEgressMode.DENY), _ATTACHMENT, (SANDBOX_EXECUTE_INTERFACE,), 5
+    )
+
+    assert capability is not None
+    assert not capability.egress_allowed

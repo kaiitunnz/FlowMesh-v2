@@ -210,7 +210,9 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   Each dispatch mints a capability fenced to that attachment's holder and write epoch,
   and the worker-local runtime validates every command against it, so an ordinary
   command raises no `Invocation`, `ServiceClaim`, `RouteAuthorization`, admission
-  transaction, or cross-worker hop. Several commands run inside one bounded turn and
+  transaction, or cross-worker hop. The mint resolves `sandbox.execute` against the
+  activation's effective grant, so a child whose parent withheld the interface is given
+  no capability at all rather than the one its own ceiling declares. Several commands run inside one bounded turn and
   become durable together at the agent's ordinary boundary seal, not per command; a loss
   before that seal fails closed as `PrivateStateUnavailable` rather than resuming on a
   fresh workspace. A command is a private-state transition, not an external effect: the

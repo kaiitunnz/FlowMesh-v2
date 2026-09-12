@@ -35,6 +35,7 @@ from shared.resident.reports import (
 )
 from shared.sandbox import (
     SANDBOX_EGRESS_INTERFACE,
+    SANDBOX_EXECUTE_INTERFACE,
     LocalSandboxCapability,
     SandboxEgressMode,
 )
@@ -122,13 +123,16 @@ def _sandbox_capability(
     owns the workspace it mutates. An agent with no attachment has no workspace to run
     in and gets none.
 
-    Egress is resolved here rather than copied from the binding: the pinned mode only
-    says what the author asked for, while ``invoke_face`` is what this activation may
-    actually invoke after its ancestors attenuated it. A child whose parent withheld
-    ``sandbox.egress`` therefore runs fenced under a binding that names the opt-in, and
-    no command argument can widen the capability it is handed.
+    Both interfaces are resolved against ``invoke_face`` — what this activation may
+    actually invoke once its ancestors have attenuated it — rather than against the
+    pinned binding, which only records what the author asked for. A child whose parent
+    withheld ``sandbox.execute`` gets no capability at all and cannot run a command; one
+    whose parent withheld only ``sandbox.egress`` runs fenced under a binding that names
+    the opt-in. Neither a binding nor a command argument can widen what is minted here.
     """
     if op is None or op.sandbox_binding is None or attachment is None:
+        return None
+    if SANDBOX_EXECUTE_INTERFACE not in invoke_face:
         return None
     egress = (
         op.sandbox_binding.network_egress

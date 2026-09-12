@@ -136,7 +136,11 @@ delivery, deduplication, or compensation.
 
 `AGENT_SANDBOX_ENABLED` gates the feature for the whole deployment and is
 off by default; an agent that declares `sandbox.execute` where it is off fails template
-validation rather than running without a sandbox. Filesystem confinement between
+validation rather than running without a sandbox. Authority is resolved again at
+dispatch against the activation's effective grant, so a spawned child runs commands only
+where its parent delegated `sandbox.execute` — a declared ceiling alone authorizes
+nothing, and an activation without the effective interface is given no capability and
+refuses every command. Filesystem confinement between
 activations on one worker needs a Landlock-capable kernel (5.13+, and 6.7+ for the
 network rules): where Landlock is absent the worker logs the posture it achieved and
 falls back to the seccomp and resource layers, which still deny egress but no longer
