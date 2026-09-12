@@ -1,6 +1,6 @@
 from collections import defaultdict
 
-from shared.sandbox import SANDBOX_EXECUTE_INTERFACE
+from shared.sandbox import SANDBOX_EGRESS_INTERFACE, SANDBOX_EXECUTE_INTERFACE
 from shared.tasks.specs import ModelBindingMode
 
 from ..representations.operators import (
@@ -24,6 +24,7 @@ from ..representations.plan import PhysicalExecutionPlan
 from ..representations.results import CardinalityKind, ReleaseConditionKind
 from ..representations.template import LogicalWorkflowTemplate
 from .diagnostics import Diagnostic, Severity, SourceLocation
+from .sandbox import egress_authorized, egress_requested
 
 _DETERMINISTIC = (
     DeterminismClass.DETERMINISTIC_BITWISE,
@@ -627,7 +628,9 @@ def _check_cycles(
 
 
 def _check_agent_binding(
-    op: AgentOperator, loc: dict[str, SourceLocation]
+    op: AgentOperator,
+    loc: dict[str, SourceLocation],
+    sandbox_egress_enabled: bool,
 ) -> list[Diagnostic]:
     """Diagnose an agent whose resolved harness/model binding is unresolvable.
 
@@ -645,7 +648,21 @@ def _check_agent_binding(
                 code="agent.sandbox.disabled",
                 message=(
                     "agent declares sandbox.execute but agent-local code execution is "
-                    "disabled on this deployment (ORCHESTRATOR_AGENT_SANDBOX_ENABLED)"
+                    "disabled on this deployment (AGENT_SANDBOX_ENABLED)"
+                ),
+                location=location,
+            )
+        )
+    if egress_requested(op) and not egress_authorized(op, sandbox_egress_enabled):
+        # Refused rather than downgraded: a workflow that asked to reach the network
+        # must not run under a fence that silently denies it.
+        diags.append(
+            Diagnostic(
+                code="agent.sandbox.egress.disabled",
+                message=(
+                    "agent requests sandbox network_egress but it is not authorized: "
+                    "declare the sandbox.egress interface in the agent's authority and "
+                    "enable it on this deployment (AGENT_SANDBOX_EGRESS_ENABLED)"
                 ),
                 location=location,
             )
@@ -687,6 +704,7 @@ def _check_agent_binding(
 def validate_compilation(
     template: LogicalWorkflowTemplate,
     plan: PhysicalExecutionPlan,
+    sandbox_egress_enabled: bool = False,
 ) -> list[Diagnostic]:
     """Run every validation pass over a compiled template and physical plan.
 
@@ -701,7 +719,7 @@ def validate_compilation(
     # tool, so declaring it needs no tool entry.
     declared_tools = {
         tool.interface or tool.name for tool in template.tool_declarations
-    } | {SANDBOX_EXECUTE_INTERFACE}
+    } | {SANDBOX_EXECUTE_INTERFACE, SANDBOX_EGRESS_INTERFACE}
     diags: list[Diagnostic] = []
 
     diags.extend(_check_source_map(template, plan, loc))
@@ -720,7 +738,7 @@ def validate_compilation(
             diags.extend(_check_effect_boundary(template, op, loc))
         elif isinstance(op, AgentOperator):
             diags.extend(_check_authority(op, op.authority, declared_tools, loc))
-            diags.extend(_check_agent_binding(op, loc))
+            diags.extend(_check_agent_binding(op, loc, sandbox_egress_enabled))
         elif isinstance(op, SpawnRegion):
             diags.extend(_check_authority(op, op.authority, declared_tools, loc))
 

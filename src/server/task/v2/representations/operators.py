@@ -4,7 +4,7 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from shared.harness.boundary import BoundaryEventKind
-from shared.sandbox import SandboxRuntimeProfile
+from shared.sandbox import SandboxEgressMode, SandboxRuntimeProfile
 from shared.tasks import TaskType
 from shared.tasks.specs import ModelBindingMode
 from shared.tools.facade import FacadeDescriptor as FacadeDescriptor
@@ -48,6 +48,10 @@ class EffectReplayContract(StrEnum):
     REPLAYABLE_DEDUP = "replayable_dedup"
     COMPENSABLE = "compensable"
     AMBIGUITY_TERMINAL = "ambiguity_terminal"
+    # A re-drive may repeat an effect the author already caused, because the surface
+    # deliberately carries no per-operation receipt to deduplicate against. It describes
+    # what recovery may do, not a delivery the fabric promises.
+    AUTHOR_OWNED_AT_LEAST_ONCE = "author_owned_at_least_once"
 
 
 class PortKind(StrEnum):
@@ -246,12 +250,18 @@ class AgentSandboxBinding(BaseModel):
     holder its private state already selected. It names no host, worker, image cache,
     mount, endpoint, service dependency, residency intent, claim, or route: an agent's
     commands are a fenced private-state transition, not a service it invokes.
+
+    ``network_egress`` is the one exception to that framing: a binding pinned to
+    ``author_owned_at_least_once`` is an author-owned external-effect surface, declared
+    here at binding granularity rather than per command, so no command acquires a
+    receipt or an idempotency key of its own.
     """
 
     model_config = ConfigDict(frozen=True)
 
     profile: SandboxRuntimeProfile
     provenance: BindingProvenance
+    network_egress: SandboxEgressMode = SandboxEgressMode.DENY
 
 
 class ModelBindingProvenance(BaseModel):

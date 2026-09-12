@@ -84,7 +84,7 @@ def build_inspection(
     template, plan = compile_workflow(
         workflow_id, parsed, source, validate=False, bindings=defaults
     )
-    diagnostics = validate_compilation(template, plan)
+    diagnostics = validate_compilation(template, plan, defaults.sandbox_egress_enabled)
     return InspectionReport(
         workflow_id=workflow_id,
         template=template,

@@ -109,7 +109,9 @@ def compile_workflow(
         nodes = lower_to_episodes(template, nodes)
     plan = _finalize_plan(workflow_id, template.version, nodes)
     if validate:
-        diagnostics = validate_compilation(template, plan)
+        diagnostics = validate_compilation(
+            template, plan, defaults.sandbox_egress_enabled
+        )
         if has_errors(diagnostics):
             raise CompileError(tuple(diagnostics))
     return template, plan

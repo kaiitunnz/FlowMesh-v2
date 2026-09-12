@@ -12,7 +12,7 @@ from pydantic import (
     model_validator,
 )
 
-from ...sandbox import SANDBOX_RUNTIMES
+from ...sandbox import SANDBOX_RUNTIMES, SandboxEgressMode
 from ..task_type import TaskType
 from .common import (
     ModelSpecStrict,
@@ -216,9 +216,19 @@ class AgentSandboxSpec(BaseModel):
     The runtime names a policy-approved local profile; the remaining fields bound one
     command's wallclock, CPU, memory, output size, and descriptors. It names no host,
     image, mount, or path: where a command runs is the runtime's to choose.
+
+    ``network_egress`` opts the whole binding out of the network fence, and is
+    all-or-nothing: it names no destination, domain, port, protocol, or provider,
+    because the fence cannot enforce one. It also needs the separate ``sandbox.egress``
+    authority and a deployment that enables egress; asking for it without either is
+    refused at submission rather than quietly run fenced.
     """
 
     runtime: str = "posix_process"
+    # Opting a workflow's commands out of the network fence. The fabric mints no
+    # per-command receipt for what they do out there, and a re-drive after a failure may
+    # repeat a command that already egressed, so the author owns idempotency.
+    network_egress: SandboxEgressMode = SandboxEgressMode.DENY
     command_timeout_sec: float = Field(default=60.0, gt=0)
     cpu_seconds: int = Field(default=60, gt=0)
     memory_bytes: int = Field(default=2 * 1024**3, gt=0)

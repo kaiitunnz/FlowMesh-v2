@@ -39,6 +39,10 @@ class AgentBindingDefaults:
     # the local fence is a single-trusted-tenant posture, so allowing it on a shared
     # cluster is the operator's decision, not an author's.
     sandbox_enabled: bool = False
+    # And whether those commands may reach the network. A separate decision from the
+    # one above: code execution stays inside a workspace the fabric owns, while egress
+    # reaches a perimeter the operator owns.
+    sandbox_egress_enabled: bool = False
 
 
 def neutral_defaults() -> AgentBindingDefaults:
@@ -187,10 +191,16 @@ def resolve_agent_bindings(
 def resolve_agent_sandbox_binding(
     sandbox: AgentSandboxSpec | None,
 ) -> AgentSandboxBinding | None:
-    """Pin the declared local sandbox envelope, or none when the agent declares none."""
+    """Pin the declared local sandbox envelope, or none when the agent declares none.
+
+    The egress mode is carried on the binding rather than the envelope: the envelope is
+    the resource cost of one command, and whether commands may leave the worker is a
+    separately authorized property of the whole binding.
+    """
     if sandbox is None:
         return None
     return AgentSandboxBinding(
-        profile=SandboxRuntimeProfile(**sandbox.model_dump()),
+        profile=SandboxRuntimeProfile(**sandbox.model_dump(exclude={"network_egress"})),
+        network_egress=sandbox.network_egress,
         provenance=BindingProvenance.SOURCE,
     )

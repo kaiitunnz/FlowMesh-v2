@@ -18,13 +18,23 @@ from server.task.v2 import (
     compile_workflow,
 )
 from server.task.v2.compiler.agent_binding import AgentBindingDefaults
-from server.task.v2.representations.operators import AgentOperator
-from shared.sandbox import SANDBOX_EXECUTE_INTERFACE
+from server.task.v2.representations.operators import (
+    AgentOperator,
+    EffectClass,
+    EffectReplayContract,
+)
+from shared.sandbox import (
+    SANDBOX_EXECUTE_INTERFACE,
+    SandboxEgressMode,
+)
 from shared.tasks.specs import AgentSandboxSpec
 from shared.tools.facade import FacadeResolution
 
 _BINDINGS = AgentBindingDefaults(default_backend="scripted", sandbox_enabled=True)
 _DISABLED = AgentBindingDefaults(default_backend="scripted")
+_EGRESS = AgentBindingDefaults(
+    default_backend="scripted", sandbox_enabled=True, sandbox_egress_enabled=True
+)
 
 _DECLARED = """
 apiVersion: flowmesh/v2
@@ -74,12 +84,38 @@ spec:
 """
 
 
-def _agent(text: str, bindings: AgentBindingDefaults = _BINDINGS) -> AgentOperator:
+def _compile(text: str, bindings: AgentBindingDefaults = _BINDINGS):
     parsed = parse_workflow(text, "native")
     source = FrontendWorkflowSource.capture(text, "native", name="wf")
-    template, _ = compile_workflow("wfl-t", parsed, source, bindings=bindings)
+    return compile_workflow("wfl-t", parsed, source, bindings=bindings)
+
+
+def _agent(text: str, bindings: AgentBindingDefaults = _BINDINGS) -> AgentOperator:
+    template, _ = _compile(text, bindings)
     agents: list[Any] = [o for o in template.operators if isinstance(o, AgentOperator)]
     return agents[0]
+
+
+def _egress_source(interfaces: str, mode: str = "author_owned_at_least_once") -> str:
+    return f"""
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {{name: coder-egress}}
+spec:
+  graph:
+    nodes:
+      - name: coder
+        spec:
+          taskType: agent
+          v2:
+            authority: {{invoke: [{interfaces}], delegate: []}}
+          sandbox: {{network_egress: {mode}}}
+          harness: {{backend: scripted, version: v1, params: {{script: []}}}}
+"""
+
+
+_EGRESS_DECLARED = _egress_source('"sandbox.execute", "sandbox.egress"')
+_EGRESS_UNAUTHORIZED = _egress_source('"sandbox.execute"')
 
 
 def test_declaring_the_interface_pins_a_default_envelope() -> None:
@@ -129,3 +165,74 @@ def test_an_unknown_runtime_is_refused_rather_than_silently_substituted() -> Non
     """Naming a runtime the deployment does not provide must not run the weaker one."""
     with pytest.raises(ValidationError):
         AgentSandboxSpec(runtime="docker")
+
+
+def test_the_egress_opt_in_pins_when_authority_and_deployment_agree() -> None:
+    agent = _agent(_EGRESS_DECLARED, _EGRESS)
+
+    assert agent.sandbox_binding is not None
+    assert (
+        agent.sandbox_binding.network_egress
+        is SandboxEgressMode.AUTHOR_OWNED_AT_LEAST_ONCE
+    )
+
+
+def test_the_default_binding_denies_egress() -> None:
+    agent = _agent(_DECLARED)
+
+    assert agent.sandbox_binding is not None
+    assert agent.sandbox_binding.network_egress is SandboxEgressMode.DENY
+
+
+def test_egress_without_the_distinct_authority_is_refused_not_downgraded() -> None:
+    """sandbox.execute does not imply sandbox.egress, and the request is not silently
+    run under the fence it asked to leave."""
+    with pytest.raises(CompileError) as raised:
+        _agent(_EGRESS_UNAUTHORIZED, _EGRESS)
+
+    assert "agent.sandbox.egress.disabled" in str(raised.value)
+
+
+def test_egress_without_the_deployment_gate_is_refused() -> None:
+    with pytest.raises(CompileError) as raised:
+        _agent(_EGRESS_DECLARED, _BINDINGS)
+
+    assert "agent.sandbox.egress.disabled" in str(raised.value)
+
+
+def test_an_egress_binding_declares_one_effect_boundary_for_the_whole_binding() -> None:
+    """The waiver is source-mapped once, so no command earns a receipt of its own."""
+    template, _ = _compile(_EGRESS_DECLARED, _EGRESS)
+    agent = next(o for o in template.operators if isinstance(o, AgentOperator))
+
+    boundaries = [
+        b for b in template.effect_boundaries if b.source_ref == agent.operator_id
+    ]
+    assert len(boundaries) == 1
+    assert boundaries[0].effect_class is EffectClass.EXTERNAL_EFFECT
+    assert (
+        boundaries[0].replay_contract is EffectReplayContract.AUTHOR_OWNED_AT_LEAST_ONCE
+    )
+
+
+def test_a_fenced_binding_declares_no_effect_boundary() -> None:
+    template, _ = _compile(_DECLARED)
+    agent = next(o for o in template.operators if isinstance(o, AgentOperator))
+
+    assert not [
+        b for b in template.effect_boundaries if b.source_ref == agent.operator_id
+    ]
+
+
+def test_the_tool_description_tells_the_model_which_fence_it_has() -> None:
+    fenced = _agent(_DECLARED).facades
+    opened = _agent(_EGRESS_DECLARED, _EGRESS).facades
+
+    fenced_schema = json.loads(
+        next(f for f in fenced if f.name == "run_command").tool_schema
+    )
+    open_schema = json.loads(
+        next(f for f in opened if f.name == "run_command").tool_schema
+    )
+    assert "no network access" in fenced_schema["description"]
+    assert "can reach the network" in open_schema["description"]

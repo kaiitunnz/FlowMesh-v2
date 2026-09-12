@@ -1,11 +1,19 @@
 """Pin each agent's local sandbox binding from its declared authority."""
 
-from shared.sandbox import SANDBOX_EXECUTE_INTERFACE, SandboxRuntimeProfile
+from shared.sandbox import (
+    SANDBOX_EGRESS_INTERFACE,
+    SANDBOX_EXECUTE_INTERFACE,
+    SandboxEgressMode,
+    SandboxRuntimeProfile,
+)
 
 from ..representations.operators import (
     AgentOperator,
     AgentSandboxBinding,
     BindingProvenance,
+    EffectBoundary,
+    EffectClass,
+    EffectReplayContract,
 )
 from .project import LoweringAccumulator
 
@@ -20,6 +28,11 @@ def pin_agent_sandbox(acc: LoweringAccumulator, enabled: bool = False) -> None:
     declared without the authority binds nothing. A pinned binding therefore always
     means the agent may actually run commands, and an agent that asks for one where the
     deployment disables it is refused by validation rather than running on without it.
+
+    A requested egress mode is pinned as the author wrote it, never downgraded here: an
+    unauthorized or ungated request has to reach validation to be refused, because
+    silently pinning it back to ``deny`` would run the workflow under a fence its author
+    did not ask for.
     """
     for index, op in enumerate(acc.operators):
         if not isinstance(op, AgentOperator):
@@ -32,3 +45,32 @@ def pin_agent_sandbox(acc: LoweringAccumulator, enabled: bool = False) -> None:
             )
         if binding is not op.sandbox_binding:
             acc.operators[index] = op.model_copy(update={"sandbox_binding": binding})
+        if binding is not None and _egress(binding.network_egress):
+            # Declared once for the binding, never per command: the waiver is what the
+            # source map records, and no individual command earns a receipt from it.
+            acc.effect_boundaries.append(
+                EffectBoundary(
+                    effect_class=EffectClass.EXTERNAL_EFFECT,
+                    replay_contract=EffectReplayContract.AUTHOR_OWNED_AT_LEAST_ONCE,
+                    source_ref=op.operator_id,
+                )
+            )
+
+
+def _egress(mode: SandboxEgressMode) -> bool:
+    return mode is SandboxEgressMode.AUTHOR_OWNED_AT_LEAST_ONCE
+
+
+def egress_requested(op: AgentOperator) -> bool:
+    """Whether the agent's pinned binding asks for the network-egress opt-in."""
+    return op.sandbox_binding is not None and _egress(op.sandbox_binding.network_egress)
+
+
+def egress_authorized(op: AgentOperator, enabled: bool) -> bool:
+    """Whether the deployment and the agent's declared ceiling both permit egress.
+
+    This is the static half of the decision. The effective half — whether the
+    activation's own attenuated grant still carries the interface — is resolved when the
+    dispatch mints its capability, because a child's grant does not exist until then.
+    """
+    return enabled and SANDBOX_EGRESS_INTERFACE in op.authority.invoke

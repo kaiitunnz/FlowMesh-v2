@@ -17,6 +17,7 @@ from shared.tools.facade import FacadeResolution
 from ....orchestration.tool_dispatch import FABRIC_TOOL_INTERFACES
 from ..representations.operators import AgentOperator, FacadeDescriptor
 from .project import LoweringAccumulator
+from .sandbox import egress_requested
 
 _SPAWN_AGENT_NAME = "spawn_agent"
 _DEFAULT_SEARCH_NAME = "web_search"
@@ -48,14 +49,21 @@ def _spawn_agent_schema() -> dict[str, Any]:
     }
 
 
-def _run_command_schema() -> dict[str, Any]:
+def _run_command_schema(egress: bool) -> dict[str, Any]:
+    # Truthful in both modes: a model told it has no network will not try, and one told
+    # it has network will use the egress its workflow paid to authorize.
+    network = (
+        "the command can reach the network, and anything it does out there is not "
+        "retried or deduplicated for you"
+        if egress
+        else "the command has no network access"
+    )
     return {
         "type": "function",
         "name": _RUN_COMMAND_NAME,
         "description": (
             "Run a command in your own workspace and return its exit code, stdout, "
-            "and stderr. The workspace is the only writable path and the command has "
-            "no network access."
+            f"and stderr. The workspace is the only writable path and {network}."
         ),
         "parameters": {
             "type": "object",
@@ -136,7 +144,7 @@ def pin_agent_facades(acc: LoweringAccumulator) -> None:
                     name=_RUN_COMMAND_NAME,
                     kind=BoundaryEventKind.STATE_ACCESS,
                     interface=SANDBOX_EXECUTE_INTERFACE,
-                    tool_schema=json.dumps(_run_command_schema()),
+                    tool_schema=json.dumps(_run_command_schema(egress_requested(op))),
                     resolution=FacadeResolution.LOCAL_INLINE,
                 )
             )

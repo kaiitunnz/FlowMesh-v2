@@ -10,10 +10,14 @@ becomes durable at the agent's ordinary boundary seal.
 """
 
 from abc import ABC, abstractmethod
+from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict
 
 SANDBOX_EXECUTE_INTERFACE = "sandbox.execute"
+# Egress is a separate interface, never implied by the authority to run code: an
+# activation reaches the network only where its own effective grant still carries this.
+SANDBOX_EGRESS_INTERFACE = "sandbox.egress"
 
 # The local runtimes a deployment may name. A confining runtime joins this set when it
 # exists; until then naming one is refused rather than silently run as the weaker fence.
@@ -21,6 +25,20 @@ SANDBOX_RUNTIMES = frozenset({"posix_process"})
 
 # Bounds one command's captured streams so a runaway writer cannot unbound a result.
 MAX_STREAM_CHARS = 64 * 1024
+
+
+class SandboxEgressMode(StrEnum):
+    """Whether a binding's commands may reach the network, and under what contract.
+
+    ``DENY`` is the default and keeps a command an activation-private transition. The
+    opt-in is named for what recovery does rather than for what it permits: a command
+    that egressed before the episode's seal may run again on a re-drive, so the author
+    owns idempotency and reconciliation. The fabric mints no per-command receipt to
+    make it once, and the name is not a delivery guarantee.
+    """
+
+    DENY = "deny"
+    AUTHOR_OWNED_AT_LEAST_ONCE = "author_owned_at_least_once"
 
 
 class SandboxRuntimeProfile(BaseModel):
@@ -46,7 +64,10 @@ class LocalSandboxCapability(BaseModel):
 
     It carries the fences of the episode's private-state attachment, so a command runs
     only under the holder and write epoch that currently owns the workspace it mutates.
-    A superseded holder fails the same fence its seal would fail.
+    A superseded holder fails the same fence its seal would fail. It is immutable and
+    minted per dispatch, so a grant revoked or attenuated between dispatches takes
+    effect at the next one, and the capability the superseded dispatch holds can no
+    longer run a command at all.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -57,6 +78,15 @@ class LocalSandboxCapability(BaseModel):
     incarnation: int
     write_epoch: int
     profile: SandboxRuntimeProfile
+    # The effective mode, resolved against the activation's own attenuated grant rather
+    # than copied from the pinned binding, so a child never inherits an egress its
+    # parent withheld. The epoch is the grant it was resolved under.
+    network_egress: SandboxEgressMode = SandboxEgressMode.DENY
+    authority_epoch: int = 0
+
+    @property
+    def egress_allowed(self) -> bool:
+        return self.network_egress is SandboxEgressMode.AUTHOR_OWNED_AT_LEAST_ONCE
 
 
 class SandboxCommand(BaseModel):
