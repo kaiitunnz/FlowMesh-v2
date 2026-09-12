@@ -120,6 +120,15 @@ def test_a_live_generation_is_never_evicted(live: str) -> None:
     assert decision.verb is StateControlVerb.RETAIN
 
 
+def test_a_generation_of_unknown_seal_time_is_never_evicted() -> None:
+    evidence = _evidence(sealed_at=None)
+    assert StateControlVerb.EVICT not in eligible_verbs(evidence)
+    decision = screen(
+        evidence, StateControlDecision(verb=StateControlVerb.EVICT, reason="cold")
+    )
+    assert decision.verb is StateControlVerb.RETAIN
+
+
 def test_screen_keeps_an_admissible_decision() -> None:
     decision = StateControlDecision(verb=StateControlVerb.EVICT, reason="cold")
     assert screen(_evidence(), decision) is decision

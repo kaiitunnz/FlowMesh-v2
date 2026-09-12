@@ -67,13 +67,14 @@ class StateControlDecision:
 def eligible_verbs(evidence: SealedGenerationEvidence) -> frozenset[StateControlVerb]:
     """The verbs a sealed generation's own evidence admits.
 
-    Retention is always legal. Eviction takes a generation no holder is writing and no
-    continuation can resume on. Replication, placement, and prefetch move a generation
-    away from the holder that sealed it, which takes components every one of which is
-    exportable.
+    Retention is always legal. Eviction takes a generation neither attached nor
+    resumable, whose seal time is known: a generation of unknown age ranks coldest under
+    any recency order, so it is retained rather than ranked out on a fact it lacks.
+    Replication, placement, and prefetch move a generation away from the holder that
+    sealed it, which takes components every one of which is exportable.
     """
     verbs = {StateControlVerb.RETAIN}
-    if not evidence.attached and not evidence.resumable:
+    if not evidence.attached and not evidence.resumable and evidence.sealed_at:
         verbs.add(StateControlVerb.EVICT)
     if evidence.exportable:
         verbs.update(
