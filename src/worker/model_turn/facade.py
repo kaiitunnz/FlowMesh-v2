@@ -216,7 +216,9 @@ class ResponsesFacade:
                     messages.append(_tool_result(call, self._run_command(ctx, call)))
                 else:
                     messages.append(_tool_result(call, _DEFERRED))
-        return completion
+        # Unreachable: a round that does not return runs at least one command, so the
+        # command bound trips before the round bound does.
+        raise FacadeTurnError("held turn exhausted its command rounds")
 
     def _run_command(self, ctx: EpisodeContext, call: ModelToolCall) -> str:
         """Run one local command and render its result for the model."""
