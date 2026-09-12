@@ -336,6 +336,12 @@ STACK_ENV_SCHEMA = EnvSchema(
                     description="Lower v2 templates into run-to-yield episodes.",
                     var_type=EnvVarType.BOOL,
                 ),
+            ],
+        ),
+        EnvSection(
+            title="Agent Harness & Model Binding",
+            description=["Deployment defaults for agent harnesses and their models."],
+            vars=[
                 EnvVar(
                     "ORCHESTRATOR_AGENT_SANDBOX_ENABLED",
                     "0",
@@ -349,12 +355,6 @@ STACK_ENV_SCHEMA = EnvSchema(
                     var_type=EnvVarType.INT,
                     min_value=1,
                 ),
-            ],
-        ),
-        EnvSection(
-            title="Agent Harness & Model Binding",
-            description=["Deployment defaults for agent harnesses and their models."],
-            vars=[
                 EnvVar(
                     "AGENT_HARNESS_DEFAULT_BACKEND",
                     "",
