@@ -65,6 +65,13 @@ def test_surface_builds_the_configured_facets() -> None:
     assert surface.lowering.name == LoweringPolicy.name
 
 
+def test_zero_warmth_is_configurable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ORCHESTRATOR_STATE_WARM_GENERATIONS", "0")
+    assert PolicySurfaceConfig.from_env().warm_generations == 0
+    monkeypatch.delenv("ORCHESTRATOR_STATE_WARM_GENERATIONS")
+    assert PolicySurfaceConfig.from_env().warm_generations == 8
+
+
 def test_unknown_policy_name_is_rejected() -> None:
     with pytest.raises(ValueError, match="ORCHESTRATOR_PLACEMENT_POLICY"):
         build_policy_surface(PolicySurfaceConfig(enabled=True, placement="nope"))

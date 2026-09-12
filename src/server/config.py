@@ -649,6 +649,9 @@ class PolicySurfaceConfig:
     @classmethod
     def from_env(cls) -> "PolicySurfaceConfig":
         defaults = cls()
+        # Zero warmth is a policy a deployment can hold, so it is read as a value
+        # rather than folded into the default.
+        warm = parse_int_env("ORCHESTRATOR_STATE_WARM_GENERATIONS")
         return cls(
             enabled=parse_bool_env("ORCHESTRATOR_POLICY_SURFACE_ENABLED", False),
             lowering=_env_or_none("ORCHESTRATOR_LOWERING_POLICY") or defaults.lowering,
@@ -656,8 +659,9 @@ class PolicySurfaceConfig:
             or defaults.placement,
             state_control=_env_or_none("ORCHESTRATOR_STATE_CONTROL_POLICY")
             or defaults.state_control,
-            warm_generations=parse_int_env("ORCHESTRATOR_STATE_WARM_GENERATIONS")
-            or defaults.warm_generations,
+            warm_generations=(
+                defaults.warm_generations if warm is None else max(0, warm)
+            ),
         )
 
 
