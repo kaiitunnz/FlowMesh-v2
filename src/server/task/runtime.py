@@ -74,7 +74,7 @@ from ..orchestration.tool_dispatch import (
     ToolOutcome,
     ToolOutcomeStatus,
 )
-from ..policy import PlacementContext, PolicySurface
+from ..policy import PlacementContext, PolicySurface, SealedGenerationEvidence
 from ..registries.worker import Worker, WorkerRegistry
 from ..registries.workflow import PersistedTask, WorkflowRegistry, WorkflowSched
 from ..services.model_secret_vault import ModelSecretVault
@@ -2024,6 +2024,15 @@ class TaskRuntime:
             engine = self._engines.get(record.workflow_id) if record else None
             spec = engine.episode_spec(task_id) if engine else None
         return True if spec is None else self._feasibility_check(spec)
+
+    def sealed_private_state(self) -> list[SealedGenerationEvidence]:
+        """Every sealed private-state generation the live engines record."""
+        with self._lock:
+            return [
+                evidence
+                for engine in self._engines.values()
+                for evidence in engine.sealed_generations()
+            ]
 
     def placement_preference(
         self, task_id: str, candidates: Sequence[str]
