@@ -51,6 +51,22 @@ class StageReferenceNotReady(Exception):
     """Raised when a task references a stage whose artifacts are not yet available."""
 
 
+def _preference_ladder(
+    pool: list[Worker], cached: list[Worker], policy: list[Worker]
+) -> list[Worker]:
+    """The narrowest preference that leaves a candidate standing.
+
+    Both preferences are subsets of the surviving pool, so each rung only ever removes a
+    worker and the full pool is always the last one: a task is never stranded by a
+    preference, and no preference can reach a worker the pool excluded.
+    """
+    if cached and policy:
+        policy_ids = {candidate.id for candidate in policy}
+        if both := [candidate for candidate in cached if candidate.id in policy_ids]:
+            return both
+    return cached or policy or pool
+
+
 class Dispatcher:
     """Handles FCFS task dispatching via Redis pub/sub."""
 
@@ -233,6 +249,22 @@ class Dispatcher:
         )
         return False
 
+    def _policy_preferred_candidates(
+        self, task_id: str, pool: list[Worker]
+    ) -> list[Worker]:
+        """The advisory placement preference, kept inside the surviving pool.
+
+        The preference is intersected with the candidates the dispatch has already
+        narrowed, so a policy reaches only what owner affinity, a selected-worker hint,
+        and prior failures have left in the pool.
+        """
+        preference = self._runtime.placement_preference(
+            task_id, [candidate.id for candidate in pool]
+        )
+        if not preference:
+            return []
+        return [candidate for candidate in pool if candidate.id in preference]
+
     def dispatch_once(self, task_id: str) -> bool:
         """Dispatch a single task if possible; requeue when no worker."""
         record = self._runtime.get_record(task_id)
@@ -392,7 +424,8 @@ class Dispatcher:
                 pool, model_names, dataset_names
             )
         if worker is None:
-            candidate_pool = preferred_pool or pool
+            policy_pool = self._policy_preferred_candidates(task_id, pool)
+            candidate_pool = _preference_ladder(pool, preferred_pool, policy_pool)
             if preferred_pool:
                 self._logger.debug(
                     "Preferring cached worker candidates for %s "
@@ -412,7 +445,7 @@ class Dispatcher:
                 jitter_epsilon=self._selection_jitter,
                 task_age=task_age,
             )
-            if not worker and preferred_pool:
+            if not worker and candidate_pool is not pool:
                 worker, selection_info = select_worker(
                     pool,
                     self._worker_selection_strategy,

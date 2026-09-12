@@ -120,6 +120,19 @@ capacity is disabled.
 Endpoint responses carry host and port only — never an `api_key`. Read a replica's serving
 logs via its `serve_task_id` through `GET /api/v1/tasks/{id}/logs`.
 
+## Private state
+
+SYSTEM/ADMIN-gated read-only inventory of sealed activation-private-state generations.
+Empty when the advisory policy surface is disabled.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/v1/private-state/generations` | List sealed generations with holder fence, component digests, and the advisory state-control decision. Filter by any projected field, e.g. `instance_id`. |
+
+The projection describes a generation — identity, holder, component digests and sizes —
+and carries no state bytes and no credential. A decision is advisory: nothing
+materializes, copies, or deletes state.
+
 ## Network
 
 SYSTEM/ADMIN-gated route-discovery diagnostics and a test echo. Present only when

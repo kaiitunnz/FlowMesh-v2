@@ -21,10 +21,12 @@ from typing import Self
 from shared.harness import DeliveredOutcome, OutcomeKind
 from shared.outcome import OutcomeManifest
 from shared.private_state import (
+    Exportability,
     OwnerFence,
     PrivateStateAttachment,
     PrivateStateBinding,
     StateBundleManifest,
+    component_spec,
 )
 from shared.tools.contract import MediatedOperationPermit
 from shared.utils import (
@@ -38,6 +40,7 @@ from shared.utils import (
     new_work_item_id,
 )
 
+from ..policy.state_control import SealedGenerationEvidence
 from ..task.v2.representations.bundle import PersistedV2Workflow
 from ..task.v2.representations.operators import (
     AgentOperator,
@@ -3214,6 +3217,61 @@ class OrchestrationEngine:
         operator_id = wi.operator_id if wi is not None else task_id
         op = self._operators.get(operator_id)
         return op if isinstance(op, AgentOperator) else None
+
+    def sealed_generations(self) -> list[SealedGenerationEvidence]:
+        """Evidence for every sealed generation this instance's ledger records.
+
+        Only what an operator or a policy may see: identity, the holder fence, component
+        digests, and the live facts that bound what may legally happen to a generation.
+        No state bytes and no credential leave the ledger through it.
+        """
+        evidence: list[SealedGenerationEvidence] = []
+        for lineage in self._private_state.lineages():
+            binding = lineage.binding
+            manifest, owner = binding.manifest, binding.owner
+            if binding.generation == 0 or manifest is None or owner is None:
+                continue
+            reference = binding.reference
+            evidence.append(
+                SealedGenerationEvidence(
+                    reference_id=reference.reference_id,
+                    instance_id=self._instance.instance_id,
+                    activation_id=reference.activation_id,
+                    owner_id=self._instance.owner_id,
+                    org_id=self._instance.org_id,
+                    tenant=reference.tenant,
+                    profile=reference.profile,
+                    generation=binding.generation,
+                    owner_worker_id=owner.worker_id,
+                    owner_incarnation=owner.incarnation,
+                    components=manifest.components,
+                    attached=lineage.attachment is not None,
+                    resumable=self._activation_resumable(reference.activation_id),
+                    exportable=all(
+                        component_spec(component.kind).exportability
+                        is Exportability.EXPORTABLE
+                        for component in manifest.components
+                    ),
+                    sealed_at=lineage.sealed_at,
+                )
+            )
+        return evidence
+
+    def _activation_resumable(self, activation_id: str) -> bool:
+        """Whether an activation has work that could resume on its state."""
+        return any(
+            wi.activation_id == activation_id and wi.status not in _TERMINAL_WI
+            for wi in self._work_items.values()
+        )
+
+    def private_state_holders(self) -> frozenset[str]:
+        """The workers holding a sealed generation of this instance's private state."""
+        return self._private_state.holders()
+
+    def private_state_generation(self, task_id: str) -> int | None:
+        """The generation a task's activation is bound to, if it owns a lineage."""
+        wi = self._work_item_for_task(task_id)
+        return None if wi is None else self._private_state.generation(wi.activation_id)
 
     def private_state_owner(self, task_id: str) -> OwnerFence | None:
         """The single holder that can supply an agent task's bound generation."""

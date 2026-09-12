@@ -633,6 +633,39 @@ class NetworkPlaneConfig:
 
 
 @dataclass
+class PolicySurfaceConfig:
+    """The deployment's advisory policy selection.
+
+    Policies are deployment-global: a workflow submission selects none of them. While
+    ``enabled`` is false the whole surface is inert.
+    """
+
+    enabled: bool = False
+    lowering: str = "conservative"
+    placement: str = "instance_state_locality"
+    state_control: str = "recency_warmth"
+    warm_generations: int = 8
+
+    @classmethod
+    def from_env(cls) -> "PolicySurfaceConfig":
+        defaults = cls()
+        # Zero warmth is a policy a deployment can hold, so it is read as a value
+        # rather than folded into the default.
+        warm = parse_int_env("ORCHESTRATOR_STATE_WARM_GENERATIONS")
+        return cls(
+            enabled=parse_bool_env("ORCHESTRATOR_POLICY_SURFACE_ENABLED", False),
+            lowering=_env_or_none("ORCHESTRATOR_LOWERING_POLICY") or defaults.lowering,
+            placement=_env_or_none("ORCHESTRATOR_PLACEMENT_POLICY")
+            or defaults.placement,
+            state_control=_env_or_none("ORCHESTRATOR_STATE_CONTROL_POLICY")
+            or defaults.state_control,
+            warm_generations=(
+                defaults.warm_generations if warm is None else max(0, warm)
+            ),
+        )
+
+
+@dataclass
 class OrchestrationConfig:
     max_scope_depth: int | None = None
     max_loop_iterations: int | None = None
@@ -651,6 +684,7 @@ class OrchestrationConfig:
     web_search: WebSearchConfig = field(default_factory=WebSearchConfig)
     resident: ResidentCapacityConfig = field(default_factory=ResidentCapacityConfig)
     network: NetworkPlaneConfig = field(default_factory=NetworkPlaneConfig)
+    policy: PolicySurfaceConfig = field(default_factory=PolicySurfaceConfig)
 
     @classmethod
     def from_env(cls) -> "OrchestrationConfig":
@@ -680,6 +714,7 @@ class OrchestrationConfig:
             web_search=WebSearchConfig.from_env(),
             resident=resident,
             network=network,
+            policy=PolicySurfaceConfig.from_env(),
         )
 
 

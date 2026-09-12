@@ -74,6 +74,7 @@ from ..orchestration.tool_dispatch import (
     ToolOutcome,
     ToolOutcomeStatus,
 )
+from ..policy import PlacementContext, PolicySurface, SealedGenerationEvidence
 from ..registries.worker import Worker, WorkerRegistry
 from ..registries.workflow import PersistedTask, WorkflowRegistry, WorkflowSched
 from ..services.model_secret_vault import ModelSecretVault
@@ -247,12 +248,15 @@ class TaskRuntime:
         logger: logging.Logger,
         secret_vault: ModelSecretVault,
         feasibility_check: EpisodeFeasibility | None = None,
+        policy: PolicySurface | None = None,
     ) -> None:
         self._workflow_registry = workflow_registry
         self._worker_registry = worker_registry
         self._logger = logger
         self._results_dir = results_dir
         self._feasibility_check = feasibility_check
+        self._policy = policy
+        self._lowering_policy = policy.lowering if policy else None
         self._secret_vault = secret_vault
         self._scope_budget = ScopeBudget.from_config(orchestration)
         self._web_search = orchestration.web_search
@@ -411,6 +415,7 @@ class TaskRuntime:
                 strategy=self._lowering_strategy,
                 bindings=self._agent_binding_defaults,
                 secret_refs=secret_refs,
+                policy=self._lowering_policy,
             )
             v2_engine = OrchestrationEngine.build(
                 workflow_id, owner_id, org_id, v2_bundle, budget=self._scope_budget
@@ -2019,6 +2024,44 @@ class TaskRuntime:
             engine = self._engines.get(record.workflow_id) if record else None
             spec = engine.episode_spec(task_id) if engine else None
         return True if spec is None else self._feasibility_check(spec)
+
+    def sealed_private_state(self) -> list[SealedGenerationEvidence]:
+        """Every sealed private-state generation the live engines record."""
+        with self._lock:
+            return [
+                evidence
+                for engine in self._engines.values()
+                for evidence in engine.sealed_generations()
+            ]
+
+    def placement_preference(
+        self, task_id: str, candidates: Sequence[str]
+    ) -> frozenset[str]:
+        """The workers the placement policy prefers for a ready task.
+
+        Advisory: the dispatcher intersects the preference with the pool it has already
+        narrowed, so a preference only ever removes a candidate. Absent a configured
+        policy, or for a task no engine owns, no worker is preferred.
+        """
+        if self._policy is None:
+            return frozenset()
+        with self._lock:
+            record = self._tasks.get(task_id)
+            engine = self._engines.get(record.workflow_id) if record else None
+            if engine is None:
+                return frozenset()
+            context = PlacementContext(
+                task_id=task_id,
+                candidates=tuple(candidates),
+                state_generation=engine.private_state_generation(task_id),
+                state_owner=(
+                    owner.worker_id
+                    if (owner := engine.private_state_owner(task_id))
+                    else None
+                ),
+                instance_state_holders=engine.private_state_holders(),
+            )
+        return frozenset(self._policy.placement.prefer(context))
 
     def retry_deferred_fanout(self, producer_task_id: str) -> None:
         """Re-drive a producer's deferred fan-out once its result lands out-of-band.

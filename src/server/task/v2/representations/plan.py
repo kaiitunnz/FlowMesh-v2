@@ -28,9 +28,10 @@ class EpisodeSpec(BaseModel):
     ``boundary`` is the cut that closes the episode. ``fused_refs`` lists the
     additional logical operators executed in the same episode beyond the node's
     ``logical_ref`` anchor. ``resource_class`` names the episode's executor-binding
-    family and ``liveness_key`` is a reserved liveness annotation; a scheduler
-    feasibility check may read them, and neither names a worker, replica, or capacity
-    object.
+    family, ``liveness_key`` groups episodes whose liveness a scheduler reads together,
+    and ``speculative_eligible`` marks an episode a speculative attempt may run. A
+    scheduler feasibility check may read them, and none of them names a worker, replica,
+    or capacity object.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -39,6 +40,7 @@ class EpisodeSpec(BaseModel):
     fused_refs: tuple[str, ...] = ()
     resource_class: str | None = None
     liveness_key: str | None = None
+    speculative_eligible: bool = False
 
 
 class ServiceFamilyRequirement(BaseModel):
