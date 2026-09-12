@@ -1,6 +1,9 @@
 """The worker-local sandbox fence: what a command may touch, and what it may not."""
 
+import socket
+import struct
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -12,6 +15,7 @@ from shared.sandbox import (
     SandboxDenied,
     SandboxRuntimeProfile,
 )
+from worker.sandbox._launcher import _NR, _filter_program
 from worker.sandbox.runtime import (
     _DRAIN_CHUNK_CHARS,
     PosixProcessSandbox,
@@ -39,8 +43,37 @@ def profile() -> SandboxRuntimeProfile:
     return SandboxRuntimeProfile()
 
 
-def run(runtime, profile, root: Path, *argv: str, **kwargs):
-    return runtime.run(root, SandboxCommand(argv=argv, **kwargs), profile)
+def run(runtime, profile, root: Path, *argv: str, egress: bool = False, **kwargs):
+    return runtime.run(root, SandboxCommand(argv=argv, **kwargs), profile, egress)
+
+
+@pytest.fixture
+def listener():
+    """A loopback endpoint an egress-enabled command can actually reach."""
+    server = socket.socket()
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("127.0.0.1", 0))
+    server.listen(4)
+
+    def serve() -> None:
+        while True:
+            try:
+                conn, _ = server.accept()
+            except OSError:
+                return
+            conn.sendall(b"REACHED")
+            conn.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    yield server.getsockname()[1]
+    server.close()
+
+
+def _connect(port: int) -> str:
+    return (
+        "import socket; s = socket.socket(); s.settimeout(5); "
+        f"s.connect(('127.0.0.1', {port})); print(s.recv(16).decode())"
+    )
 
 
 def test_a_command_reads_and_writes_its_own_workspace(runtime, profile, tmp_path):
@@ -223,3 +256,111 @@ def test_the_drain_reads_in_bounded_chunks():
     assert pipe.readline_calls == 0
     assert pipe.largest_read <= _DRAIN_CHUNK_CHARS
     assert len("".join(kept)) == MAX_STREAM_CHARS
+
+
+def test_an_egress_authorized_command_reaches_the_network(
+    runtime, profile, tmp_path, listener
+):
+    result = run(
+        runtime,
+        profile,
+        tmp_path,
+        sys.executable,
+        "-c",
+        _connect(listener),
+        egress=True,
+    )
+
+    assert result.exit_code == 0
+    assert result.stdout.strip() == "REACHED"
+
+
+def test_the_same_command_without_the_opt_in_is_denied(
+    runtime, profile, tmp_path, listener
+):
+    result = run(runtime, profile, tmp_path, sys.executable, "-c", _connect(listener))
+
+    assert result.exit_code != 0
+    assert "REACHED" not in result.stdout
+
+
+def test_egress_is_authorized_without_landlock_too(profile, tmp_path, listener):
+    """Relaxing the fence relaxes the seccomp layer, not only the Landlock one."""
+    runtime = PosixProcessSandbox(abi=0)
+
+    result = run(
+        runtime,
+        profile,
+        tmp_path,
+        sys.executable,
+        "-c",
+        _connect(listener),
+        egress=True,
+    )
+
+    assert result.exit_code == 0
+    assert result.stdout.strip() == "REACHED"
+
+
+def test_an_egress_authorized_command_keeps_every_other_fence(
+    runtime, profile, tmp_path
+):
+    """Only the network layers move: the workspace confinement is unchanged."""
+    outside = tmp_path.parent / "outside.txt"
+    outside.write_text("secret")
+
+    result = run(
+        runtime,
+        profile,
+        tmp_path,
+        "sh",
+        "-c",
+        f"cat {outside.as_posix()}",
+        egress=True,
+    )
+
+    assert result.exit_code != 0
+    assert "secret" not in result.stdout
+
+
+def test_an_egress_authorized_command_still_runs_ordinary_commands(
+    runtime, profile, tmp_path
+):
+    """A filter whose jumps land wrong would deny every syscall, not just sockets."""
+    result = run(
+        runtime, profile, tmp_path, "sh", "-c", "echo ok > f && cat f", egress=True
+    )
+
+    assert result.exit_code == 0
+    assert result.stdout.strip() == "ok"
+
+
+def test_the_denying_filter_is_unchanged_byte_for_byte():
+    """The denied program is the fence of record; an offset slip must fail here."""
+    ld, jeq, ret = 0x20, 0x15, 0x06
+    deny, allow = 0x00050000 | 13, 0x7FFF0000
+    nr = _NR["x86_64"]
+
+    def stmt(code: int, k: int) -> bytes:
+        return struct.pack("HBBI", code, 0, 0, k)
+
+    def jump(k: int, jt: int, jf: int) -> bytes:
+        return struct.pack("HBBI", jeq, jt, jf, k)
+
+    expected = b"".join(
+        [
+            stmt(ld, 4),
+            jump(nr["audit"], 0, 6),
+            stmt(ld, 0),
+            jump(nr["io_uring_setup"], 4, 0),
+            jump(nr["socket"], 0, 4),
+            stmt(ld, 16),
+            jump(2, 1, 0),
+            jump(10, 0, 1),
+            stmt(ret, deny),
+            stmt(ret, allow),
+        ]
+    )
+
+    assert _filter_program(nr, False) == expected
+    assert _filter_program(nr, True) != expected

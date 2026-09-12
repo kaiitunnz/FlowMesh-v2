@@ -5,7 +5,9 @@ bounded result. The fence is kernel-enforced and unprivileged, so it holds in an
 ordinary worker container: Landlock denies every path outside the workspace and the
 read-only runtime, a seccomp filter denies IP sockets and io_uring, the envelope's
 resource limits bound the command, and its process group is killed and reaped before
-the action completes.
+the action completes. A dispatch whose capability carries the egress opt-in relaxes the
+two network layers and nothing else; a command still cannot leave its workspace, keep a
+process, or read another activation's state.
 
 What the fence does not provide, because an unprivileged container cannot: no mount
 namespace or private root view, no PID or IPC isolation (processes on one worker remain
@@ -54,7 +56,11 @@ class SandboxRuntime(ABC):
 
     @abstractmethod
     def run(
-        self, root: Path, command: SandboxCommand, profile: SandboxRuntimeProfile
+        self,
+        root: Path,
+        command: SandboxCommand,
+        profile: SandboxRuntimeProfile,
+        egress: bool = False,
     ) -> SandboxCommandResult: ...
 
 
@@ -120,7 +126,11 @@ class PosixProcessSandbox(SandboxRuntime):
         )
 
     def run(
-        self, root: Path, command: SandboxCommand, profile: SandboxRuntimeProfile
+        self,
+        root: Path,
+        command: SandboxCommand,
+        profile: SandboxRuntimeProfile,
+        egress: bool = False,
     ) -> SandboxCommandResult:
         if not command.argv:
             raise SandboxDenied("a sandbox command names no program")
@@ -133,6 +143,9 @@ class PosixProcessSandbox(SandboxRuntime):
             # standard roots must still be readable to exec.
             "ro": [*_readonly_roots(), Path(program).resolve().parent.as_posix()],
             "devices": list(_DEVICES),
+            # Only an authorized dispatch relaxes the network layers; every other fence
+            # is identical either way.
+            "egress": egress,
             "memory_bytes": profile.memory_bytes,
             "cpu_seconds": profile.cpu_seconds,
             "file_size_bytes": profile.file_size_bytes,

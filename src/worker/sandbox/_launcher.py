@@ -8,7 +8,9 @@ filter between fork and exec can deadlock a threaded worker.
 The fence is: a Landlock ruleset that denies every path outside the activation's own
 workspace and the read-only runtime, a seccomp filter that denies IP sockets and
 io_uring, and the resource limits the episode's envelope declares. Each layer fails
-closed — an error installing one aborts before the command runs.
+closed — an error installing one aborts before the command runs. A spec whose ``egress``
+is set relaxes the two network layers, and only those: it is installed for a command
+whose capability was minted with the opt-in, never chosen here.
 """
 
 import ctypes
@@ -61,12 +63,17 @@ def _fail(message: str) -> None:
 
 
 def _landlock(libc: ctypes.CDLL, nr: dict[str, int], spec: dict) -> None:
-    """Restrict the filesystem to the workspace plus a read-only runtime."""
+    """Restrict the filesystem to the workspace plus a read-only runtime.
+
+    Networking is handled by omission: declaring the TCP rights without granting a rule
+    denies them. An egress-authorized command declares no network rights at all, which
+    leaves the filesystem confinement untouched.
+    """
     abi = int(spec["landlock_abi"])
     if abi < 1:
         return
     handled_fs = _FS_HANDLED[min(abi, max(_FS_HANDLED))]
-    if abi >= 4:
+    if abi >= 4 and not spec["egress"]:
         attr = struct.pack("QQ", handled_fs, _NET_HANDLED)
     else:
         attr = struct.pack("Q", handled_fs)
@@ -107,11 +114,16 @@ def _landlock(libc: ctypes.CDLL, nr: dict[str, int], spec: dict) -> None:
         os.close(fd)
 
 
-def _seccomp(libc: ctypes.CDLL, nr: dict[str, int]) -> None:
-    """Deny IP sockets and io_uring, so the command cannot reach the network.
+def _filter_program(nr: dict[str, int], egress: bool) -> bytes:
+    """The classic-BPF seccomp program: deny io_uring, and IP sockets unless authorized.
 
-    A ring is denied because its operations run in kernel context and are not re-checked
-    against this filter. Unix sockets and the filesystem are untouched.
+    A ring is denied in both modes because its operations run in kernel context and are
+    not re-checked against this filter. Unix sockets and the filesystem are untouched.
+
+    Denying by socket domain is the whole of the network fence, so lifting it lifts
+    every destination at once: seccomp cannot dereference a ``sockaddr``, and no later
+    syscall carries the address in a register. An egress-authorized command therefore
+    reaches whatever the worker and kernel reach.
     """
     ld, jeq, ret = 0x20, 0x15, 0x06
     deny, allow = 0x00050000 | 13, 0x7FFF0000
@@ -122,20 +134,39 @@ def _seccomp(libc: ctypes.CDLL, nr: dict[str, int]) -> None:
     def jump(k: int, jt: int, jf: int) -> bytes:
         return struct.pack("HBBI", jeq, jt, jf, k)
 
-    prog = b"".join(
-        [
-            stmt(ld, 4),  # seccomp_data.arch
-            jump(nr["audit"], 0, 6),  # a foreign arch denies everything
-            stmt(ld, 0),  # seccomp_data.nr
-            jump(nr["io_uring_setup"], 4, 0),
+    socket_filter = (
+        []
+        if egress
+        else [
             jump(nr["socket"], 0, 4),  # anything but socket() runs
             stmt(ld, 16),  # socket() domain
             jump(2, 1, 0),  # AF_INET
             jump(10, 0, 1),  # AF_INET6
-            stmt(ret, deny),
-            stmt(ret, allow),
         ]
     )
+    # Every jump below targets the deny that ends the body, so the distances move with
+    # the socket filter. Its false branch falls through to that filter when there is one
+    # and must otherwise step over the deny, or an egress-authorized command would be
+    # denied every syscall it makes.
+    body = [
+        stmt(ld, 0),  # seccomp_data.nr
+        jump(nr["io_uring_setup"], len(socket_filter), 0 if socket_filter else 1),
+        *socket_filter,
+        stmt(ret, deny),
+        stmt(ret, allow),
+    ]
+    return b"".join(
+        [
+            stmt(ld, 4),  # seccomp_data.arch
+            jump(nr["audit"], 0, len(body) - 2),  # a foreign arch denies everything
+            *body,
+        ]
+    )
+
+
+def _seccomp(libc: ctypes.CDLL, nr: dict[str, int], egress: bool) -> None:
+    """Install the syscall filter this command runs under."""
+    prog = _filter_program(nr, egress)
 
     class _Prog(ctypes.Structure):
         _fields_ = [("len", ctypes.c_ushort), ("filter", ctypes.c_void_p)]
@@ -179,7 +210,7 @@ def main() -> None:
     if libc.prctl(_PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0):
         _fail("cannot drop privilege escalation")
     _landlock(libc, nr, spec)
-    _seccomp(libc, nr)
+    _seccomp(libc, nr, bool(spec["egress"]))
     _limits(spec)
     os.execv(program, argv)  # nosec B606 - argv list, no shell, absolute program
 

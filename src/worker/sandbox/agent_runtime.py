@@ -43,7 +43,10 @@ class AgentSandboxRuntime(LocalSandboxExecutor):
         self._check_fence()
         _LOG.info("[sandbox] %s", " ".join(command.argv)[:200])
         result = self._runtime.run(
-            self._state.workspace, command, self._capability.profile
+            self._state.workspace,
+            command,
+            self._capability.profile,
+            self._capability.egress_allowed,
         )
         _LOG.info(
             "[sandbox] exit=%s%s",

@@ -18,6 +18,7 @@ from shared.sandbox import (
     SandboxCommand,
     SandboxCommandResult,
     SandboxDenied,
+    SandboxEgressMode,
     SandboxRuntimeProfile,
 )
 from worker.executors.harness.scripted import ScriptedHarnessAdapter, ScriptedStep
@@ -53,11 +54,17 @@ class _RecordingRuntime(SandboxRuntime):
 
     def __init__(self) -> None:
         self.commands: list[tuple[Path, tuple[str, ...]]] = []
+        self.egress: list[bool] = []
 
     def run(
-        self, root: Path, command: SandboxCommand, profile: SandboxRuntimeProfile
+        self,
+        root: Path,
+        command: SandboxCommand,
+        profile: SandboxRuntimeProfile,
+        egress: bool = False,
     ) -> SandboxCommandResult:
         self.commands.append((root, command.argv))
+        self.egress.append(egress)
         return SandboxCommandResult(
             exit_code=0, stdout=f"ran {command.argv[0]}", stderr=""
         )
@@ -156,3 +163,27 @@ def test_the_backend_key_is_unchanged_by_the_sandbox() -> None:
     adapter = ScriptedHarnessAdapter([], "v1")
 
     assert adapter.backend_key() == HarnessBackendKey(backend="scripted", version="v1")
+
+
+def test_the_runtime_takes_its_fence_from_the_capability_not_the_command(state) -> None:
+    """A command argument can never widen the fence the dispatch minted."""
+    runtime = _RecordingRuntime()
+    sandbox = AgentSandboxRuntime(_capability(), _ATTACHMENT, state, runtime)
+
+    sandbox.execute(SandboxCommand(argv=("curl", "https://example.com")))
+
+    assert runtime.egress == [False]
+
+
+def test_an_egress_minted_capability_relaxes_the_fence(state) -> None:
+    runtime = _RecordingRuntime()
+    sandbox = AgentSandboxRuntime(
+        _capability(network_egress=SandboxEgressMode.AUTHOR_OWNED_AT_LEAST_ONCE),
+        _ATTACHMENT,
+        state,
+        runtime,
+    )
+
+    sandbox.execute(SandboxCommand(argv=("curl", "https://example.com")))
+
+    assert runtime.egress == [True]
