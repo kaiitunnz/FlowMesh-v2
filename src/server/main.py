@@ -626,6 +626,7 @@ app.state.system_principal = None
 
 # Root-only state (None on worker nodes)
 app.state.runtime = RUNTIME
+app.state.policy_surface = POLICY_SURFACE
 app.state.dispatcher = DISPATCHER
 app.state.workflow_registry = WORKFLOW_REGISTRY
 app.state.worker_registry = WORKER_REGISTRY
@@ -659,6 +660,7 @@ if IS_ROOT_NODE:
     app.include_router(v1.ssh.router, prefix=v1_prefix)
     app.include_router(v1.serve.router, prefix=v1_prefix)
     app.include_router(v1.resident.router, prefix=v1_prefix)
+    app.include_router(v1.private_state.router, prefix=v1_prefix)
     app.include_router(v1.network.router, prefix=v1_prefix)
     app.include_router(v1.system.router, prefix=v1_prefix)
     app.include_router(v1.traces.router, prefix=v1_prefix)

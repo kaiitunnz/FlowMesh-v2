@@ -7,6 +7,7 @@ from .clients import RedisClient
 from .dispatcher import Dispatcher
 from .hooks import PrincipalContext
 from .network.service import NetworkPlane
+from .policy import PolicySurface
 from .registries import NodeRegistry, WorkerRegistry, WorkflowRegistry
 from .resident.service import ResidentCapacityControl
 from .serve import GatedServe, ServeBindingStore
@@ -106,6 +107,10 @@ def get_gated_serve(conn: HTTPConnection) -> GatedServe | None:
 
 def get_serve_bindings(conn: HTTPConnection) -> ServeBindingStore | None:
     return conn.app.state.serve_bindings
+
+
+def get_policy_surface(conn: HTTPConnection) -> PolicySurface | None:
+    return conn.app.state.policy_surface
 
 
 def get_network_plane(conn: HTTPConnection) -> NetworkPlane | None:

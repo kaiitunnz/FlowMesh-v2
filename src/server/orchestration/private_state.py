@@ -17,6 +17,7 @@ from shared.private_state import (
 )
 from shared.utils.ids import new_private_state_reference_id, new_state_attachment_id
 
+from ..utils.time import now_iso
 from .state import PrivateStateLineage
 
 
@@ -138,6 +139,7 @@ class PrivateStateLedger:
                 worker_id=attachment.worker_id, incarnation=attachment.incarnation
             ),
         )
+        lineage.sealed_at = now_iso()
 
     def release(self, activation_id: str) -> None:
         """Drop the live attachment, so no holder retains write authority."""

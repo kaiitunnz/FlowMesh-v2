@@ -29,7 +29,13 @@ from shared.harness import (
     HarnessResultKind,
     OutcomeKind,
 )
-from shared.private_state import OwnerFence
+from shared.private_state import (
+    OwnerFence,
+    SealedComponent,
+    StateBundleManifest,
+    required_components,
+)
+from shared.utils.ids import new_state_bundle_manifest_id
 from tests.server.task.test_v2_orchestration import FakeRegistry, _register, _runtime
 from worker.executors.harness.scripted import ScriptedHarnessAdapter, ScriptedStep
 
@@ -787,5 +793,49 @@ def test_a_dispatch_after_cancel_takes_back_no_private_state_write() -> None:
         assert engine.grant_private_state(writer, "wkr-1", 1) is None
         dispatch = runtime.agent_episode_dispatch(writer, _HOLDER)
         assert dispatch is not None and dispatch.private_state_attachment is None
+
+    asyncio.run(run())
+
+
+def test_a_sealed_generation_reaches_the_inventory_with_its_holder_evidence() -> None:
+    async def run() -> None:
+        runtime = _runtime(FakeRegistry())
+        _, writer, engine, _env = await _held_boundary(runtime)
+        granted = engine.grant_private_state(writer, "wkr-1", 1)
+        assert granted is not None
+        binding, attachment = granted
+
+        assert engine.sealed_generations() == []  # generation 0 binds nothing sealed
+
+        manifest = StateBundleManifest(
+            manifest_id=new_state_bundle_manifest_id(),
+            reference_id=binding.reference.reference_id,
+            generation=1,
+            profile=binding.reference.profile,
+            quiescence_fence=f"{attachment.attachment_id}:1",
+            components=tuple(
+                SealedComponent(
+                    kind=kind,
+                    schema_version=1,
+                    content_digest=f"digest-{kind.value}",
+                    size_bytes=4,
+                    entry_count=1,
+                )
+                for kind in required_components(binding.reference.profile)
+            ),
+        )
+        engine.seal_private_state(writer, manifest, attachment.write_epoch)
+
+        evidence = engine.sealed_generations()[0]
+        assert evidence.generation == 1
+        assert (evidence.owner_worker_id, evidence.owner_incarnation) == ("wkr-1", 1)
+        assert evidence.attached is True
+        assert evidence.resumable is True  # the writer's work item has yet to settle
+        assert evidence.exportable is False  # both agent components seal local-only
+        assert {c.kind for c in evidence.components} == required_components(
+            binding.reference.profile
+        )
+        assert evidence.sealed_at is not None
+        assert engine.private_state_holders() == {"wkr-1"}
 
     asyncio.run(run())
