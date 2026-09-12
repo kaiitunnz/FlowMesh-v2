@@ -53,12 +53,10 @@ def test_an_egress_binding_mints_egress_when_the_grant_still_carries_it() -> Non
         _agent(SandboxEgressMode.AUTHOR_OWNED_AT_LEAST_ONCE),
         _ATTACHMENT,
         (SANDBOX_EXECUTE_INTERFACE, SANDBOX_EGRESS_INTERFACE),
-        4,
     )
 
     assert capability is not None
     assert capability.egress_allowed
-    assert capability.authority_epoch == 4
 
 
 def test_a_child_whose_grant_lost_the_interface_is_minted_fenced() -> None:
@@ -67,7 +65,6 @@ def test_a_child_whose_grant_lost_the_interface_is_minted_fenced() -> None:
         _agent(SandboxEgressMode.AUTHOR_OWNED_AT_LEAST_ONCE),
         _ATTACHMENT,
         (SANDBOX_EXECUTE_INTERFACE,),
-        9,
     )
 
     assert capability is not None
@@ -80,7 +77,6 @@ def test_a_fenced_binding_stays_fenced_under_a_grant_that_would_allow_egress() -
         _agent(SandboxEgressMode.DENY),
         _ATTACHMENT,
         (SANDBOX_EXECUTE_INTERFACE, SANDBOX_EGRESS_INTERFACE),
-        1,
     )
 
     assert capability is not None
@@ -93,7 +89,6 @@ def test_an_agent_without_an_attachment_gets_no_capability() -> None:
             _agent(SandboxEgressMode.AUTHOR_OWNED_AT_LEAST_ONCE),
             None,
             (SANDBOX_EGRESS_INTERFACE,),
-            0,
         )
         is None
     )
@@ -104,7 +99,7 @@ def test_an_activation_without_effective_execute_gets_no_capability() -> None:
     activation cannot run a command at all."""
     assert (
         _sandbox_capability(
-            _agent(SandboxEgressMode.DENY), _ATTACHMENT, ("web_search",), 2
+            _agent(SandboxEgressMode.DENY), _ATTACHMENT, ("web_search",)
         )
         is None
     )
@@ -116,7 +111,6 @@ def test_a_withheld_execute_denies_the_capability_even_with_egress_delegated() -
             _agent(SandboxEgressMode.AUTHOR_OWNED_AT_LEAST_ONCE),
             _ATTACHMENT,
             (SANDBOX_EGRESS_INTERFACE,),
-            3,
         )
         is None
     )
@@ -125,7 +119,7 @@ def test_a_withheld_execute_denies_the_capability_even_with_egress_delegated() -
 def test_a_delegated_execute_face_still_mints() -> None:
     """The refusal is specific: the ordinary authorized child keeps working."""
     capability = _sandbox_capability(
-        _agent(SandboxEgressMode.DENY), _ATTACHMENT, (SANDBOX_EXECUTE_INTERFACE,), 5
+        _agent(SandboxEgressMode.DENY), _ATTACHMENT, (SANDBOX_EXECUTE_INTERFACE,)
     )
 
     assert capability is not None

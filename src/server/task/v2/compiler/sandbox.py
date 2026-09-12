@@ -3,7 +3,6 @@
 from shared.sandbox import (
     SANDBOX_EGRESS_INTERFACE,
     SANDBOX_EXECUTE_INTERFACE,
-    SandboxEgressMode,
     SandboxRuntimeProfile,
 )
 
@@ -45,7 +44,7 @@ def pin_agent_sandbox(acc: LoweringAccumulator, enabled: bool = False) -> None:
             )
         if binding is not op.sandbox_binding:
             acc.operators[index] = op.model_copy(update={"sandbox_binding": binding})
-        if binding is not None and _egress(binding.network_egress):
+        if binding is not None and binding.network_egress.allows_egress:
             # Declared once for the binding, never per command: the waiver is what the
             # source map records, and no individual command earns a receipt from it.
             acc.effect_boundaries.append(
@@ -57,20 +56,19 @@ def pin_agent_sandbox(acc: LoweringAccumulator, enabled: bool = False) -> None:
             )
 
 
-def _egress(mode: SandboxEgressMode) -> bool:
-    return mode is SandboxEgressMode.AUTHOR_OWNED_AT_LEAST_ONCE
-
-
 def egress_requested(op: AgentOperator) -> bool:
     """Whether the agent's pinned binding asks for the network-egress opt-in."""
-    return op.sandbox_binding is not None and _egress(op.sandbox_binding.network_egress)
+    return (
+        op.sandbox_binding is not None
+        and op.sandbox_binding.network_egress.allows_egress
+    )
 
 
 def egress_authorized(op: AgentOperator, enabled: bool) -> bool:
     """Whether the deployment and the agent's declared ceiling both permit egress.
 
     This is the static half of the decision. The effective half — whether the
-    activation's own attenuated grant still carries the interface — is resolved when the
+    activation's own attenuated grant carries the interface — is resolved when the
     dispatch mints its capability, because a child's grant does not exist until then.
     """
     return enabled and SANDBOX_EGRESS_INTERFACE in op.authority.invoke

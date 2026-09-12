@@ -225,9 +225,6 @@ class AgentSandboxSpec(BaseModel):
     """
 
     runtime: str = "posix_process"
-    # Opting a workflow's commands out of the network fence. The fabric mints no
-    # per-command receipt for what they do out there, and a re-drive after a failure may
-    # repeat a command that already egressed, so the author owns idempotency.
     network_egress: SandboxEgressMode = SandboxEgressMode.DENY
     command_timeout_sec: float = Field(default=60.0, gt=0)
     cpu_seconds: int = Field(default=60, gt=0)

@@ -227,7 +227,7 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   an ancestor that delegated it, and `AGENT_SANDBOX_EGRESS_ENABLED`; the engine resolves
   the effective grant at dispatch and fences the decision into the immutable capability,
   so a child never inherits an egress its parent withheld and no command argument widens
-  one. The opt-in stays local — it creates no `Invocation`, `idm-*`, receipt,
+  one. The opt-in is local — it creates no `Invocation`, `idm-*`, receipt,
   `ServiceClaim`, or route, and adds no per-command control-plane traffic — and is
   classified once for the binding as an `external_effect` boundary with an
   `author_owned_at_least_once` replay contract. Recovery keeps the ordinary seal cadence,

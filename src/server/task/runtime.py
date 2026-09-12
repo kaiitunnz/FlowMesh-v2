@@ -114,7 +114,6 @@ def _sandbox_capability(
     op: AgentOperator | None,
     attachment: PrivateStateAttachment | None,
     invoke_face: tuple[str, ...],
-    grant_epoch: int,
 ) -> LocalSandboxCapability | None:
     """The local execution authority for one dispatch of a sandbox-declaring agent.
 
@@ -147,7 +146,6 @@ def _sandbox_capability(
         write_epoch=attachment.write_epoch,
         profile=op.sandbox_binding.profile,
         network_egress=egress,
-        authority_epoch=grant_epoch,
     )
 
 
@@ -1859,7 +1857,7 @@ class TaskRuntime:
                 task_id, holder.worker_id, holder.incarnation
             )
             capsule_blob, outcomes = engine.episode_context(task_id)
-            invoke_face, grant_epoch = engine.effective_invoke_face(task_id)
+            invoke_face = engine.effective_invoke_face(task_id)
             # First-turn dataflow inputs are delivered only on the first dispatch; a
             # resume injects only the harness's own delivered outcomes.
             input_bindings = (
@@ -1879,10 +1877,7 @@ class TaskRuntime:
                 private_state=granted[0] if granted else None,
                 private_state_attachment=granted[1] if granted else None,
                 sandbox=_sandbox_capability(
-                    op,
-                    granted[1] if granted else None,
-                    invoke_face,
-                    grant_epoch,
+                    op, granted[1] if granted else None, invoke_face
                 ),
             )
 

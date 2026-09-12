@@ -302,6 +302,7 @@ def test_egress_is_authorized_without_landlock_too(profile, tmp_path, listener):
     assert result.stdout.strip() == "REACHED"
 
 
+@_needs_landlock
 def test_an_egress_authorized_command_keeps_every_other_fence(
     runtime, profile, tmp_path
 ):
@@ -364,3 +365,21 @@ def test_the_denying_filter_is_unchanged_byte_for_byte():
 
     assert _filter_program(nr, False) == expected
     assert _filter_program(nr, True) != expected
+
+
+_RING_PROBE = (
+    "import ctypes; libc = ctypes.CDLL('libc.so.6', use_errno=True); "
+    "libc.syscall(425, 8, 0); print('errno', ctypes.get_errno())"
+)
+
+
+@pytest.mark.parametrize("egress", [False, True])
+def test_io_uring_stays_denied_in_both_modes(runtime, profile, tmp_path, egress):
+    """A ring runs its operations in kernel context, where this filter no longer sees
+    them, so relaxing the network must not relax it."""
+    result = run(
+        runtime, profile, tmp_path, sys.executable, "-c", _RING_PROBE, egress=egress
+    )
+
+    # EACCES is the filter's own denial; a reachable io_uring_setup fails differently.
+    assert result.stdout.strip() == "errno 13"

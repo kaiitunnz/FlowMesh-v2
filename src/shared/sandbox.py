@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict
 
 SANDBOX_EXECUTE_INTERFACE = "sandbox.execute"
 # Egress is a separate interface, never implied by the authority to run code: an
-# activation reaches the network only where its own effective grant still carries this.
+# activation reaches the network only where its own effective grant carries this.
 SANDBOX_EGRESS_INTERFACE = "sandbox.egress"
 
 # The local runtimes a deployment may name. A confining runtime joins this set when it
@@ -39,6 +39,10 @@ class SandboxEgressMode(StrEnum):
 
     DENY = "deny"
     AUTHOR_OWNED_AT_LEAST_ONCE = "author_owned_at_least_once"
+
+    @property
+    def allows_egress(self) -> bool:
+        return self is SandboxEgressMode.AUTHOR_OWNED_AT_LEAST_ONCE
 
 
 class SandboxRuntimeProfile(BaseModel):
@@ -66,8 +70,7 @@ class LocalSandboxCapability(BaseModel):
     only under the holder and write epoch that currently owns the workspace it mutates.
     A superseded holder fails the same fence its seal would fail. It is immutable and
     minted per dispatch, so a grant revoked or attenuated between dispatches takes
-    effect at the next one, and the capability the superseded dispatch holds can no
-    longer run a command at all.
+    effect at the next one, under the fences of that dispatch's own attachment.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -80,13 +83,12 @@ class LocalSandboxCapability(BaseModel):
     profile: SandboxRuntimeProfile
     # The effective mode, resolved against the activation's own attenuated grant rather
     # than copied from the pinned binding, so a child never inherits an egress its
-    # parent withheld. The epoch is the grant it was resolved under.
+    # parent withheld.
     network_egress: SandboxEgressMode = SandboxEgressMode.DENY
-    authority_epoch: int = 0
 
     @property
     def egress_allowed(self) -> bool:
-        return self.network_egress is SandboxEgressMode.AUTHOR_OWNED_AT_LEAST_ONCE
+        return self.network_egress.allows_egress
 
 
 class SandboxCommand(BaseModel):

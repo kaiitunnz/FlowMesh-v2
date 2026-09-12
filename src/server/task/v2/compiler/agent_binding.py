@@ -40,8 +40,8 @@ class AgentBindingDefaults:
     # cluster is the operator's decision, not an author's.
     sandbox_enabled: bool = False
     # And whether those commands may reach the network. A separate decision from the
-    # one above: code execution stays inside a workspace the fabric owns, while egress
-    # reaches a perimeter the operator owns.
+    # one above: code execution is contained to a workspace the fabric owns, while
+    # egress reaches a perimeter the operator owns.
     sandbox_egress_enabled: bool = False
 
 

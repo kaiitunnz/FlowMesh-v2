@@ -210,7 +210,7 @@ def main() -> None:
     if libc.prctl(_PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0):
         _fail("cannot drop privilege escalation")
     _landlock(libc, nr, spec)
-    _seccomp(libc, nr, bool(spec["egress"]))
+    _seccomp(libc, nr, spec["egress"])
     _limits(spec)
     os.execv(program, argv)  # nosec B606 - argv list, no shell, absolute program
 
