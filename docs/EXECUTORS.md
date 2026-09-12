@@ -117,16 +117,32 @@ so an agent without one is offered no executable tool at all.
 
 Commands mutate `workspace_fs` and become durable at the episode's ordinary seal, so a
 worker loss before that seal leaves the last sealed generation intact. Egress is denied
-in the runtime: a command cannot open an IP connection, and reaching a model, tool, or
-external effect takes the mediated boundary.
+in the runtime by default: a command cannot open an IP connection, and reaching a model,
+tool, or external effect takes the mediated boundary.
 
-`ORCHESTRATOR_AGENT_SANDBOX_ENABLED` gates the feature for the whole deployment and is
+A workflow may opt one agent's commands out of that network fence with
+`spec.sandbox.network_egress: author_owned_at_least_once`. The opt-in additionally
+requires the `sandbox.egress` interface in the agent's authority ceiling, a parent that
+delegated it, and `AGENT_SANDBOX_EGRESS_ENABLED` on the deployment; a request missing
+the interface or the gate fails template validation, and a child whose parent withheld
+the interface runs fenced. It is all-or-nothing IP networking — the fence enforces no
+destination, domain, port, or protocol policy — and it is the one case where a command
+is an external effect. The compiler records that as one `external_effect` boundary with
+an `author_owned_at_least_once` replay contract for the whole binding, never per
+command, so no command carries a receipt or an idempotency key. Because commands become
+durable only at the ordinary seal, a failure before it may re-run commands that already
+egressed: the author owns idempotency and reconciliation, and the fabric promises no
+delivery, deduplication, or compensation.
+
+`AGENT_SANDBOX_ENABLED` gates the feature for the whole deployment and is
 off by default; an agent that declares `sandbox.execute` where it is off fails template
 validation rather than running without a sandbox. Filesystem confinement between
 activations on one worker needs a Landlock-capable kernel (5.13+, and 6.7+ for the
 network rules): where Landlock is absent the worker logs the posture it achieved and
 falls back to the seccomp and resource layers, which still deny egress but no longer
-confine the filesystem. Enable the feature only on workers running a single trusted
+confine the filesystem. Egress denial is proven independently of Landlock: the seccomp
+layer alone denies it, and the egress opt-in relaxes both network layers and nothing
+else. Enable the feature only on workers running a single trusted
 tenant's agents.
 
 ## Per-workflow harness and model binding

@@ -213,14 +213,26 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   transaction, or cross-worker hop. Several commands run inside one bounded turn and
   become durable together at the agent's ordinary boundary seal, not per command; a loss
   before that seal fails closed as `PrivateStateUnavailable` rather than resuming on a
-  fresh workspace. A command is a private-state transition, not an external effect:
-  network egress is denied in the runtime, and a model, tool, or effect takes its
-  mediated boundary. The fence is Landlock filesystem confinement to the workspace, a
-  seccomp filter denying IP sockets and io_uring, the envelope's resource limits, and a
-  process group killed and reaped before the action completes; it provides no mount,
-  PID, or IPC namespace and no cgroup limits, so the feature is a single-trusted-tenant
-  development posture rather than multi-tenant isolation, and an operator enables it for
-  the fleet with `ORCHESTRATOR_AGENT_SANDBOX_ENABLED`.
+  fresh workspace. A command is a private-state transition, not an external effect: the
+  runtime confines it to its workspace, denies network egress, bounds its resources, and
+  reaps its process group, and a model, tool, or effect takes its mediated boundary. The
+  fence is unprivileged and grants no mount, PID, or IPC namespace, so the feature is a
+  single-trusted-tenant development posture rather than multi-tenant isolation; an
+  operator enables it for the fleet with `AGENT_SANDBOX_ENABLED`.
+- **Author-owned sandbox egress.** A workflow may pin one agent's binding to
+  `network_egress: author_owned_at_least_once`, which relaxes the runtime's network
+  denial for that agent's commands. It requires the distinct `sandbox.egress` authority,
+  an ancestor that delegated it, and `AGENT_SANDBOX_EGRESS_ENABLED`; the engine resolves
+  the effective grant at dispatch and fences the decision into the immutable capability,
+  so a child never inherits an egress its parent withheld and no command argument widens
+  one. The opt-in stays local — it creates no `Invocation`, `idm-*`, receipt,
+  `ServiceClaim`, or route, and adds no per-command control-plane traffic — and is
+  classified once for the binding as an `external_effect` boundary with an
+  `author_owned_at_least_once` replay contract. Recovery keeps the ordinary seal cadence,
+  so a failure before the next seal may repeat commands that already egressed, or fail
+  closed on owner loss: the author owns idempotency and reconciliation. Access is
+  all-or-nothing IP networking to the degree the worker and kernel permit, not a
+  destination, domain, port, or protocol allowlist.
 - **Agent-model gateway.** A model boundary an agent defers with a `canned` or `echo`
   binding settles on the control plane off the agent's lane, injecting the result back at
   the originating call. The gateway resolves the activation's pinned binding and its
