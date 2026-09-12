@@ -1,10 +1,10 @@
 """The deployment's advisory policy surface over lowering, placement, and sealed state.
 
-Every hook refines a choice the fabric has already found legal. A policy holds no
-authority: it admits no capacity, mints no claim or attachment, relaxes no fence, and
-overrides no hard constraint. Each answer is screened at its call site, so an enabled
-policy changes which legal alternative runs, never what a workflow declares, the effects
-it has, or how it recovers.
+Every hook refines a choice the fabric has already found legal. Capacity admission,
+claim and attachment minting, and fence relaxation belong to the fabric; a policy
+chooses among the alternatives it already allows, and each answer is screened at its
+call site. So an enabled policy changes which legal alternative runs, never what a
+workflow declares, the effects it has, or how it recovers.
 """
 
 from .lowering import (

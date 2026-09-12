@@ -54,7 +54,7 @@ class StageReferenceNotReady(Exception):
 def _preference_ladder(
     pool: list[Worker], cached: list[Worker], policy: list[Worker]
 ) -> list[Worker]:
-    """The narrowest preference that still leaves a candidate standing.
+    """The narrowest preference that leaves a candidate standing.
 
     Both preferences are subsets of the surviving pool, so each rung only ever removes a
     worker and the full pool is always the last one: a task is never stranded by a
@@ -255,8 +255,8 @@ class Dispatcher:
         """The advisory placement preference, kept inside the surviving pool.
 
         The preference is intersected with the candidates the dispatch has already
-        narrowed, so a worker owner affinity, a selected-worker hint, or a prior failure
-        excluded stays excluded whatever a policy names.
+        narrowed, so a policy reaches only the workers owner affinity, a selected-worker
+        hint, and prior failures have left in the pool.
         """
         preference = self._runtime.placement_preference(
             task_id, [candidate.id for candidate in pool]

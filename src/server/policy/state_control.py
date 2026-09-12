@@ -1,10 +1,8 @@
 """Advisory control over sealed generations of activation-private state.
 
 A state-control policy reads the sealed generations the orchestration ledger records
-and says what should happen to each one. It decides; it never acts. Nothing here
-materializes, copies, or deletes state bytes, and no decision creates a holder, an
-attachment, or a capacity claim: a sealed generation's identity, its owner fence, and
-who may write it stay the ledger's.
+and says what should happen to each one. It decides; it never acts: a generation's
+bytes, its identity, its owner fence, and who may write it are the ledger's.
 
 Every verb beyond retention is screened against the generation's own evidence before a
 policy's answer is honored, so a decision that a component's exportability or a live
@@ -35,8 +33,8 @@ class SealedGenerationEvidence:
     Carries the generation's identity, the holder fence that can supply it, its
     component contents by digest, and the live facts that bound what may legally happen
     to it: ``attached`` while a holder writes the lineage, ``resumable`` while a
-    continuation could still resume on the generation, and ``exportable`` when every
-    component may be materialized away from its holder.
+    continuation could resume on the generation, and ``exportable`` when every component
+    may be materialized away from its holder.
     """
 
     reference_id: str
