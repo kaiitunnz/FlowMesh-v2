@@ -662,7 +662,8 @@ def _check_agent_binding(
                 message=(
                     "agent requests sandbox network_egress but it is not authorized: "
                     "declare the sandbox.egress interface in the agent's authority and "
-                    "enable it on this deployment (AGENT_SANDBOX_EGRESS_ENABLED)"
+                    "enable it on this deployment (AGENT_SANDBOX_EGRESS_ENABLED), or "
+                    "set sandbox.network_egress to deny to run its commands fenced"
                 ),
                 location=location,
             )

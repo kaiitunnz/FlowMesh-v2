@@ -219,13 +219,17 @@ class AgentSandboxSpec(BaseModel):
 
     ``network_egress`` opts the whole binding out of the network fence, and is
     all-or-nothing: it names no destination, domain, port, protocol, or provider,
-    because the fence cannot enforce one. It also needs the separate ``sandbox.egress``
-    authority and a deployment that enables egress; asking for it without either is
-    refused at submission rather than quietly run fenced.
+    because the fence cannot enforce one. Left unset it derives from the declared
+    authority — an agent that declares ``sandbox.egress`` may reach the network, one
+    that does not may not — so a ceiling that carries the interface only to delegate it
+    to children opts its own commands back out with an explicit ``deny``. An explicit
+    request still needs the ``sandbox.egress`` authority and a deployment that enables
+    egress; asking for it without either is refused at submission rather than quietly
+    run fenced.
     """
 
     runtime: str = "posix_process"
-    network_egress: SandboxEgressMode = SandboxEgressMode.DENY
+    network_egress: SandboxEgressMode | None = None
     command_timeout_sec: float = Field(default=60.0, gt=0)
     cpu_seconds: int = Field(default=60, gt=0)
     memory_bytes: int = Field(default=2 * 1024**3, gt=0)

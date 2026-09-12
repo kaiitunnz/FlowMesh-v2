@@ -195,12 +195,12 @@ def resolve_agent_sandbox_binding(
 
     The egress mode is carried on the binding rather than the envelope: the envelope is
     the resource cost of one command, and whether commands may leave the worker is a
-    separately authorized property of the whole binding.
+    separately authorized property of the whole binding. It is resolved by the pin pass,
+    which reads the authority an unset mode derives from; the envelope is pinned here.
     """
     if sandbox is None:
         return None
     return AgentSandboxBinding(
         profile=SandboxRuntimeProfile(**sandbox.model_dump(exclude={"network_egress"})),
-        network_egress=sandbox.network_egress,
         provenance=BindingProvenance.SOURCE,
     )

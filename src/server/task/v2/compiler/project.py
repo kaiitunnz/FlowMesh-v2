@@ -1,6 +1,7 @@
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
+from shared.sandbox import SandboxEgressMode
 from shared.tasks import TaskType
 from shared.tasks.specs import (
     AgentSpecStrict,
@@ -257,6 +258,7 @@ def _agent_operator(
     operator_ids: set[str],
     defaults: AgentBindingDefaults,
     secret_ref: str | None,
+    egress_requests: dict[str, SandboxEgressMode],
 ) -> AgentOperator:
     inputs, outputs = _ports(task, TaskType.AGENT)
     spec = task.task.spec
@@ -274,6 +276,8 @@ def _agent_operator(
     sandbox = (
         spec.sandbox if isinstance(spec, (AgentSpecStrict, AgentSpecTemplate)) else None
     )
+    if sandbox is not None and sandbox.network_egress is not None:
+        egress_requests[task.task_id] = sandbox.network_egress
     return AgentOperator(
         operator_id=task.task_id,
         source_ref=task.task_id,
@@ -302,6 +306,7 @@ class LoweringAccumulator:
     resource_declarations: list[ResourceDeclaration] = field(default_factory=list)
     source_map: list[SourceMapEntry] = field(default_factory=list)
     nodes: list[PhysicalNode] = field(default_factory=list)
+    sandbox_egress_requests: dict[str, SandboxEgressMode] = field(default_factory=dict)
 
     @property
     def operator_ids(self) -> set[str]:
@@ -344,7 +349,12 @@ def lower_tasks(
         if binding_class(task_type) is BindingClass.AGENT:
             acc.operators.append(
                 _agent_operator(
-                    task, name_to_op, task_ids, defaults, secret_refs.get(task.task_id)
+                    task,
+                    name_to_op,
+                    task_ids,
+                    defaults,
+                    secret_refs.get(task.task_id),
+                    acc.sandbox_egress_requests,
                 )
             )
         else:

@@ -221,20 +221,16 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   fence is unprivileged and grants no mount, PID, or IPC namespace, so the feature is a
   single-trusted-tenant development posture rather than multi-tenant isolation; an
   operator enables it for the fleet with `AGENT_SANDBOX_ENABLED`.
-- **Author-owned sandbox egress.** A workflow may pin one agent's binding to
-  `network_egress: author_owned_at_least_once`, which relaxes the runtime's network
-  denial for that agent's commands. It requires the distinct `sandbox.egress` authority,
-  an ancestor that delegated it, and `AGENT_SANDBOX_EGRESS_ENABLED`; the engine resolves
-  the effective grant at dispatch and fences the decision into the immutable capability,
-  so a child never inherits an egress its parent withheld and no command argument widens
-  one. The opt-in is local — it creates no `Invocation`, `idm-*`, receipt,
-  `ServiceClaim`, or route, and adds no per-command control-plane traffic — and is
-  classified once for the binding as an `external_effect` boundary with an
-  `author_owned_at_least_once` replay contract. Recovery keeps the ordinary seal cadence,
-  so a failure before the next seal may repeat commands that already egressed, or fail
-  closed on owner loss: the author owns idempotency and reconciliation. Access is
-  all-or-nothing IP networking to the degree the worker and kernel permit, not a
-  destination, domain, port, or protocol allowlist.
+- **Author-owned sandbox egress.** An agent that declares the distinct `sandbox.egress`
+  authority runs its commands with the network fence relaxed, on a deployment that sets
+  `AGENT_SANDBOX_EGRESS_ENABLED`; `sandbox.network_egress: deny` opts back out, for a
+  ceiling that carries the interface only to delegate it. The engine resolves the
+  effective grant at dispatch and fences the decision into the immutable capability, so
+  a child never inherits an egress its parent withheld. Such a command is the one case
+  where a command is an external effect, classified once for the binding as
+  `external_effect` with an `author_owned_at_least_once` replay contract: recovery keeps
+  the ordinary seal cadence, so a failure before the next seal may repeat a command that
+  already egressed, and the author owns idempotency and reconciliation.
 - **Agent-model gateway.** A model boundary an agent defers with a `canned` or `echo`
   binding settles on the control plane off the agent's lane, injecting the result back at
   the originating call. The gateway resolves the activation's pinned binding and its

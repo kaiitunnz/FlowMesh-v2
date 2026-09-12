@@ -120,19 +120,21 @@ worker loss before that seal leaves the last sealed generation intact. Egress is
 in the runtime by default: a command cannot open an IP connection, and reaching a model,
 tool, or external effect takes the mediated boundary.
 
-A workflow may opt one agent's commands out of that network fence with
-`spec.sandbox.network_egress: author_owned_at_least_once`. The opt-in additionally
-requires the `sandbox.egress` interface in the agent's authority ceiling, a parent that
-delegated it, and `AGENT_SANDBOX_EGRESS_ENABLED` on the deployment; a request missing
-the interface or the gate fails template validation, and a child whose parent withheld
-the interface runs fenced. It is all-or-nothing IP networking — the fence enforces no
-destination, domain, port, or protocol policy — and it is the one case where a command
-is an external effect. The compiler records that as one `external_effect` boundary with
-an `author_owned_at_least_once` replay contract for the whole binding, never per
-command, so no command carries a receipt or an idempotency key. Because commands become
-durable only at the ordinary seal, a failure before it may re-run commands that already
-egressed: the author owns idempotency and reconciliation, and the fabric promises no
-delivery, deduplication, or compensation.
+Declaring the separate `sandbox.egress` interface in the agent's authority ceiling opts
+its commands out of that fence, on a deployment that sets `AGENT_SANDBOX_EGRESS_ENABLED`;
+a ceiling that holds the interface only to delegate it to children sets
+`spec.sandbox.network_egress: deny` to keep its own commands fenced. An explicit
+`author_owned_at_least_once` without the interface or the deployment gate fails template
+validation, and a child whose parent withheld the interface runs fenced. Access is
+all-or-nothing IP networking — the fence enforces no destination, domain, port, or
+protocol policy.
+
+Such a command is the one case where a command is an external effect: the compiler
+records one `external_effect` boundary with an `author_owned_at_least_once` replay
+contract for the whole binding, never per command. Because commands become durable only
+at the ordinary seal, a failure before it may re-run a command that already egressed —
+the author owns idempotency and reconciliation, and the fabric promises no delivery,
+deduplication, or compensation.
 
 `AGENT_SANDBOX_ENABLED` gates the feature for the whole deployment and is
 off by default; an agent that declares `sandbox.execute` where it is off fails template

@@ -129,7 +129,7 @@ is a development posture for single-tenant workers, not multi-tenant isolation
 (see [`EXECUTORS.md`](EXECUTORS.md)).
 
 A workflow that needs its commands on the network declares the separate
-`sandbox.egress` interface and opts the binding in:
+`sandbox.egress` interface, which opts the agent's own commands in:
 
 ```yaml
 - name: fetcher
@@ -137,17 +137,17 @@ A workflow that needs its commands on the network declares the separate
     taskType: agent
     task: fetch and summarize the release notes
     harness: { backend: codex, version: v1 }
-    sandbox: { network_egress: author_owned_at_least_once }
     v2:
       authority: { invoke: ["sandbox.execute", "sandbox.egress"], delegate: [] }
 ```
 
-The deployment must also enable `AGENT_SANDBOX_EGRESS_ENABLED`, and a spawned
-child gets the opt-in only if its parent delegates `sandbox.egress`. Access is
-all-or-nothing IP networking — no destination or port policy — and an
-egress-enabled command is an external effect the author owns: a failure before
-the episode's next seal may run it again, and the fabric neither deduplicates
-nor compensates it.
+An agent that declares the interface only to delegate it keeps its own commands
+fenced with `sandbox: { network_egress: deny }`. The deployment must also enable
+`AGENT_SANDBOX_EGRESS_ENABLED`, and a spawned child gets the opt-in only if its
+parent delegates `sandbox.egress`. Access is all-or-nothing IP networking — no
+destination or port policy — and an egress-enabled command is an external effect
+the author owns: a failure before the episode's next seal may run it again, and
+the fabric neither deduplicates nor compensates it.
 
 ### Structured regions
 

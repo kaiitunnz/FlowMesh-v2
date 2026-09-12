@@ -12,6 +12,7 @@ import pytest
 from pydantic import ValidationError
 
 from server.task.parser import parse_workflow
+from server.task.runtime import _sandbox_capability
 from server.task.v2 import (
     CompileError,
     FrontendWorkflowSource,
@@ -23,12 +24,22 @@ from server.task.v2.representations.operators import (
     EffectClass,
     EffectReplayContract,
 )
+from shared.private_state import PrivateStateAttachment
 from shared.sandbox import (
     SANDBOX_EXECUTE_INTERFACE,
     SandboxEgressMode,
 )
 from shared.tasks.specs import AgentSandboxSpec
 from shared.tools.facade import FacadeResolution
+
+_ATTACHMENT = PrivateStateAttachment(
+    attachment_id="psa-1",
+    reference_id="aps-1",
+    generation=1,
+    worker_id="wkr-1",
+    incarnation=2,
+    write_epoch=3,
+)
 
 _BINDINGS = AgentBindingDefaults(default_backend="scripted", sandbox_enabled=True)
 _DISABLED = AgentBindingDefaults(default_backend="scripted")
@@ -96,7 +107,10 @@ def _agent(text: str, bindings: AgentBindingDefaults = _BINDINGS) -> AgentOperat
     return agents[0]
 
 
-def _egress_source(interfaces: str, mode: str = "author_owned_at_least_once") -> str:
+def _egress_source(
+    interfaces: str, mode: str | None = "author_owned_at_least_once"
+) -> str:
+    sandbox = "" if mode is None else f"\n          sandbox: {{network_egress: {mode}}}"
     return f"""
 apiVersion: flowmesh/v2
 kind: Workflow
@@ -108,14 +122,16 @@ spec:
         spec:
           taskType: agent
           v2:
-            authority: {{invoke: [{interfaces}], delegate: []}}
-          sandbox: {{network_egress: {mode}}}
+            authority: {{invoke: [{interfaces}], delegate: []}}{sandbox}
           harness: {{backend: scripted, version: v1, params: {{script: []}}}}
 """
 
 
-_EGRESS_DECLARED = _egress_source('"sandbox.execute", "sandbox.egress"')
+_BOTH_INTERFACES = '"sandbox.execute", "sandbox.egress"'
+_EGRESS_DECLARED = _egress_source(_BOTH_INTERFACES)
 _EGRESS_UNAUTHORIZED = _egress_source('"sandbox.execute"')
+_EGRESS_DERIVED = _egress_source(_BOTH_INTERFACES, None)
+_EGRESS_DELEGATE_ONLY = _egress_source(_BOTH_INTERFACES, "deny")
 
 
 def test_declaring_the_interface_pins_a_default_envelope() -> None:
@@ -236,3 +252,61 @@ def test_the_tool_description_tells_the_model_which_fence_it_has() -> None:
     )
     assert "no network access" in fenced_schema["description"]
     assert "can reach the network" in open_schema["description"]
+
+
+def test_declaring_the_egress_authority_opts_the_agent_in_without_a_binding_line() -> (
+    None
+):
+    """The authority is the author-facing surface: an unset mode derives from it."""
+    agent = _agent(_EGRESS_DERIVED, _EGRESS)
+
+    assert agent.sandbox_binding is not None
+    assert (
+        agent.sandbox_binding.network_egress
+        is SandboxEgressMode.AUTHOR_OWNED_AT_LEAST_ONCE
+    )
+
+
+def test_a_derived_opt_in_declares_the_effect_boundary_the_written_one_declares() -> (
+    None
+):
+    template, _ = _compile(_EGRESS_DERIVED, _EGRESS)
+    agent = next(o for o in template.operators if isinstance(o, AgentOperator))
+
+    boundaries = [
+        b for b in template.effect_boundaries if b.source_ref == agent.operator_id
+    ]
+    assert len(boundaries) == 1
+    assert boundaries[0].effect_class is EffectClass.EXTERNAL_EFFECT
+    assert (
+        boundaries[0].replay_contract is EffectReplayContract.AUTHOR_OWNED_AT_LEAST_ONCE
+    )
+
+
+def test_a_delegate_only_ceiling_opts_its_own_commands_back_out() -> None:
+    """Holding sandbox.egress to hand to children is not running commands with it."""
+    template, _ = _compile(_EGRESS_DELEGATE_ONLY, _EGRESS)
+    agent = next(o for o in template.operators if isinstance(o, AgentOperator))
+
+    assert agent.sandbox_binding is not None
+    assert agent.sandbox_binding.network_egress is SandboxEgressMode.DENY
+    assert not [
+        b for b in template.effect_boundaries if b.source_ref == agent.operator_id
+    ]
+
+
+def test_a_derived_opt_in_is_still_decided_against_the_effective_grant() -> None:
+    """The derive reads the declared ceiling, the mint reads what the parent delegated.
+
+    A child whose ceiling names sandbox.egress derives an egress-on binding, and the
+    mint must still fence it when the delegated face withheld the interface.
+    """
+    agent = _agent(_EGRESS_DERIVED, _EGRESS)
+    assert agent.sandbox_binding is not None
+    assert agent.sandbox_binding.network_egress.allows_egress
+
+    capability = _sandbox_capability(agent, _ATTACHMENT, (SANDBOX_EXECUTE_INTERFACE,))
+
+    assert capability is not None
+    assert not capability.egress_allowed
+    assert capability.network_egress is SandboxEgressMode.DENY
