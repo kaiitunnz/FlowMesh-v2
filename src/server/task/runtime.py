@@ -33,7 +33,11 @@ from shared.resident.reports import (
     ResidentOpOutcome,
     ResidentRouteObservation,
 )
-from shared.sandbox import LocalSandboxCapability
+from shared.sandbox import (
+    SANDBOX_EGRESS_INTERFACE,
+    LocalSandboxCapability,
+    SandboxEgressMode,
+)
 from shared.schemas.command import InterruptMessage, MediatedOpMessage
 from shared.schemas.result import ResultEnvelope, result_file_path
 from shared.tasks import TaskEnvelopeTemplate
@@ -106,7 +110,10 @@ EpisodeFeasibility = Callable[[EpisodeSpec], bool]
 
 
 def _sandbox_capability(
-    op: AgentOperator | None, attachment: PrivateStateAttachment | None
+    op: AgentOperator | None,
+    attachment: PrivateStateAttachment | None,
+    invoke_face: tuple[str, ...],
+    grant_epoch: int,
 ) -> LocalSandboxCapability | None:
     """The local execution authority for one dispatch of a sandbox-declaring agent.
 
@@ -114,9 +121,20 @@ def _sandbox_capability(
     this dispatch's writes, so a command runs only under the holder and write epoch that
     owns the workspace it mutates. An agent with no attachment has no workspace to run
     in and gets none.
+
+    Egress is resolved here rather than copied from the binding: the pinned mode only
+    says what the author asked for, while ``invoke_face`` is what this activation may
+    actually invoke after its ancestors attenuated it. A child whose parent withheld
+    ``sandbox.egress`` therefore runs fenced under a binding that names the opt-in, and
+    no command argument can widen the capability it is handed.
     """
     if op is None or op.sandbox_binding is None or attachment is None:
         return None
+    egress = (
+        op.sandbox_binding.network_egress
+        if SANDBOX_EGRESS_INTERFACE in invoke_face
+        else SandboxEgressMode.DENY
+    )
     return LocalSandboxCapability(
         attachment_id=attachment.attachment_id,
         reference_id=attachment.reference_id,
@@ -124,6 +142,8 @@ def _sandbox_capability(
         incarnation=attachment.incarnation,
         write_epoch=attachment.write_epoch,
         profile=op.sandbox_binding.profile,
+        network_egress=egress,
+        authority_epoch=grant_epoch,
     )
 
 
@@ -133,7 +153,9 @@ def _stringify(value: Any) -> str:
 
 
 def _binding_defaults(
-    cfg: AgentBindingConfig, sandbox_enabled: bool = False
+    cfg: AgentBindingConfig,
+    sandbox_enabled: bool = False,
+    sandbox_egress_enabled: bool = False,
 ) -> AgentBindingDefaults:
     """Convert the deployment binding config into the compiler's injected defaults."""
     return AgentBindingDefaults(
@@ -143,6 +165,7 @@ def _binding_defaults(
         default_url=cfg.default_url,
         default_model=cfg.default_model,
         sandbox_enabled=sandbox_enabled,
+        sandbox_egress_enabled=sandbox_enabled and sandbox_egress_enabled,
     )
 
 
@@ -199,7 +222,9 @@ class TaskRuntime:
         self._model_egress_timeout_sec = orchestration.gateway.timeout_sec
         self._input_budget_bytes = orchestration.agent_input_budget_bytes
         self._agent_binding_defaults = _binding_defaults(
-            orchestration.agent_binding, orchestration.agent_sandbox_enabled
+            orchestration.agent_binding,
+            orchestration.agent_sandbox_enabled,
+            orchestration.agent_sandbox_egress_enabled,
         )
         self._lowering_strategy = (
             LoweringStrategy.EPISODE_CUT
@@ -1830,6 +1855,7 @@ class TaskRuntime:
                 task_id, holder.worker_id, holder.incarnation
             )
             capsule_blob, outcomes = engine.episode_context(task_id)
+            invoke_face, grant_epoch = engine.effective_invoke_face(task_id)
             # First-turn dataflow inputs are delivered only on the first dispatch; a
             # resume injects only the harness's own delivered outcomes.
             input_bindings = (
@@ -1848,7 +1874,12 @@ class TaskRuntime:
                 facade_descriptors=tuple(op.facades) if op is not None else (),
                 private_state=granted[0] if granted else None,
                 private_state_attachment=granted[1] if granted else None,
-                sandbox=_sandbox_capability(op, granted[1] if granted else None),
+                sandbox=_sandbox_capability(
+                    op,
+                    granted[1] if granted else None,
+                    invoke_face,
+                    grant_epoch,
+                ),
             )
 
     def service_episode_dispatch(

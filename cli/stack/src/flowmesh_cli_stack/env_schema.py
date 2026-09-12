@@ -343,13 +343,19 @@ STACK_ENV_SCHEMA = EnvSchema(
             description=["Deployment defaults for agent harnesses and their models."],
             vars=[
                 EnvVar(
-                    "ORCHESTRATOR_AGENT_SANDBOX_ENABLED",
+                    "AGENT_SANDBOX_ENABLED",
                     "0",
                     description="Allow agents to run code in a worker-local sandbox.",
                     var_type=EnvVarType.BOOL,
                 ),
                 EnvVar(
-                    "ORCHESTRATOR_AGENT_INPUT_BUDGET_BYTES",
+                    "AGENT_SANDBOX_EGRESS_ENABLED",
+                    "0",
+                    description="Allow sandbox commands to reach the network.",
+                    var_type=EnvVarType.BOOL,
+                ),
+                EnvVar(
+                    "AGENT_INPUT_BUDGET_BYTES",
                     "262144",
                     description="Max resolved first-turn input bytes per agent.",
                     var_type=EnvVarType.INT,
