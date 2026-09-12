@@ -9,13 +9,15 @@ refinement holds the dependency's engine-batch key and isolation.
 """
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-from ..task.v2.representations.operators import LogicalOperator
-from ..task.v2.representations.plan import (
-    EpisodeBoundaryKind,
-    ResidencyIntent,
-    ServiceFamilyRequirement,
-)
+if TYPE_CHECKING:
+    from ..task.v2.representations.operators import LogicalOperator
+    from ..task.v2.representations.plan import (
+        EpisodeBoundaryKind,
+        ResidencyIntent,
+        ServiceFamilyRequirement,
+    )
 
 
 @dataclass(frozen=True)
@@ -36,34 +38,36 @@ class LoweringPolicy:
 
     name = "conservative"
 
-    def fuse(self, head: LogicalOperator, candidate: LogicalOperator) -> bool:
-        """Whether a fusible successor joins the head operator's episode."""
+    def fuse(
+        self, predecessor: "LogicalOperator", candidate: "LogicalOperator"
+    ) -> bool:
+        """Whether a fusible operator joins its predecessor's episode."""
         return True
 
-    def checkpoint(self, op: LogicalOperator) -> bool:
+    def checkpoint(self, op: "LogicalOperator") -> bool:
         """Whether an operator that closes on its task boundary takes a durable one."""
         return False
 
     def annotate(
-        self, op: LogicalOperator, boundary: EpisodeBoundaryKind
+        self, op: "LogicalOperator", boundary: "EpisodeBoundaryKind"
     ) -> EpisodeAnnotation:
         """The liveness and speculative-eligibility annotations for an episode."""
         return EpisodeAnnotation()
 
     def service_family(
-        self, requirement: ServiceFamilyRequirement
-    ) -> ServiceFamilyRequirement:
+        self, requirement: "ServiceFamilyRequirement"
+    ) -> "ServiceFamilyRequirement":
         """The family a service dependency binds, among the compatible ones."""
         return requirement
 
-    def residency(self, intent: ResidencyIntent) -> ResidencyIntent:
+    def residency(self, intent: "ResidencyIntent") -> "ResidencyIntent":
         """The warmth, reuse, affinity, and preemption preference for a dependency."""
         return intent
 
 
 def screen_service_family(
-    derived: ServiceFamilyRequirement, refined: ServiceFamilyRequirement
-) -> ServiceFamilyRequirement:
+    derived: "ServiceFamilyRequirement", refined: "ServiceFamilyRequirement"
+) -> "ServiceFamilyRequirement":
     """The refined requirement when it is compatible with the derived one.
 
     Engine-batch key and isolation are the dependency's compatibility key: a refinement
@@ -79,8 +83,8 @@ def screen_service_family(
 
 
 def screen_residency(
-    derived: ResidencyIntent, refined: ResidencyIntent
-) -> ResidencyIntent:
+    derived: "ResidencyIntent", refined: "ResidencyIntent"
+) -> "ResidencyIntent":
     """The refined intent under the compiler's own family and requiredness.
 
     A required resident dependency is pinned by the template's binding; a policy carries

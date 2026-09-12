@@ -2,6 +2,7 @@ from collections.abc import Mapping
 
 from pydantic import ValidationError
 
+from ....policy.lowering import LoweringPolicy
 from ...parser import ParsedWorkflow
 from ..mode import LoweringStrategy
 from ..representations.bundle import PersistedV2Workflow
@@ -82,6 +83,7 @@ def compile_workflow(
     strategy: LoweringStrategy = LoweringStrategy.TRANSPARENT,
     bindings: AgentBindingDefaults | None = None,
     secret_refs: Mapping[str, str] | None = None,
+    policy: LoweringPolicy | None = None,
 ) -> tuple[LogicalWorkflowTemplate, PhysicalExecutionPlan]:
     """Compile a parsed workflow into symbolic v2 representations.
 
@@ -98,7 +100,7 @@ def compile_workflow(
     defaults = bindings if bindings is not None else neutral_defaults()
     acc = LoweringAccumulator()
     name_to_op = build_name_map(parsed)
-    lower_tasks(parsed, name_to_op, acc, defaults, secret_refs or {})
+    lower_tasks(parsed, name_to_op, acc, defaults, secret_refs or {}, policy)
     lower_frontend_v2(parsed, acc)
     induce_effect_boundaries(acc)
     pin_agent_sandbox(acc, defaults.sandbox_enabled)
@@ -106,7 +108,7 @@ def compile_workflow(
     template = _assemble_template(workflow_id, source, acc)
     nodes = tuple(acc.nodes)
     if strategy is LoweringStrategy.EPISODE_CUT:
-        nodes = lower_to_episodes(template, nodes)
+        nodes = lower_to_episodes(template, nodes, policy)
     plan = _finalize_plan(workflow_id, template.version, nodes)
     if validate:
         diagnostics = validate_compilation(
@@ -124,6 +126,7 @@ def compile_bundle(
     strategy: LoweringStrategy = LoweringStrategy.TRANSPARENT,
     bindings: AgentBindingDefaults | None = None,
     secret_refs: Mapping[str, str] | None = None,
+    policy: LoweringPolicy | None = None,
 ) -> PersistedV2Workflow:
     """Compile a parsed workflow into the durable plan-time bundle."""
     template, plan = compile_workflow(
@@ -133,5 +136,6 @@ def compile_bundle(
         strategy=strategy,
         bindings=bindings,
         secret_refs=secret_refs,
+        policy=policy,
     )
     return PersistedV2Workflow(source=source, template=template, plan=plan)
