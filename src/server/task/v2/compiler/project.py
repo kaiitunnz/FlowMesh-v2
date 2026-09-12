@@ -13,6 +13,11 @@ from shared.tasks.specs import (
 )
 from shared.tasks.specs.common import ModelSpecTemplate
 
+from ....policy.lowering import (
+    LoweringPolicy,
+    screen_residency,
+    screen_service_family,
+)
 from ...parser import ParsedTask, ParsedWorkflow
 from ..representations.operators import (
     AgentOperator,
@@ -330,6 +335,7 @@ def lower_tasks(
     acc: LoweringAccumulator,
     defaults: AgentBindingDefaults,
     secret_refs: Mapping[str, str],
+    policy: LoweringPolicy | None = None,
 ) -> None:
     """Lower each legacy task into a symbolic leaf/agent/residency operator.
 
@@ -407,7 +413,7 @@ def lower_tasks(
             )
         )
         dependency = operator_service_dependency(ops_by_id.get(operator_id))
-        requirement, intent = _service_family_annotations(dependency)
+        requirement, intent = _service_family_annotations(dependency, policy)
         acc.nodes.append(
             PhysicalNode(
                 node_id=f"phys:{operator_id}",
@@ -420,25 +426,32 @@ def lower_tasks(
 
 
 def _service_family_annotations(
-    dependency: ServiceDependency | None,
+    dependency: ServiceDependency | None, policy: LoweringPolicy | None = None
 ) -> tuple[ServiceFamilyRequirement | None, ResidencyIntent | None]:
     """Derive the plan-derived resident requirement from a service dependency.
 
     Detection only: it pins the finite dependency a resident invocation needs, with no
     allocation, claim, or replica. The family and engine-batch key fold interface, base
     model, and isolation so incompatible dependencies pin distinct families rather than
-    collapsing on a shared model name.
+    collapsing on a shared model name. A policy chooses among the families compatible
+    with that key and expresses residency preference; the refinement it returns is
+    screened, so the dependency stays pinned to what the template declared.
     """
     if dependency is None:
         return None, None
-    return (
-        ServiceFamilyRequirement(
-            family=dependency.service_family,
-            engine_batch_key=dependency.engine_batch_key,
-            isolation=dependency.isolation,
-        ),
-        ResidencyIntent(service_family=dependency.service_family, required=True),
+    requirement = ServiceFamilyRequirement(
+        family=dependency.service_family,
+        engine_batch_key=dependency.engine_batch_key,
+        isolation=dependency.isolation,
     )
+    if policy is not None:
+        requirement = screen_service_family(
+            requirement, policy.service_family(requirement)
+        )
+    intent = ResidencyIntent(service_family=requirement.family, required=True)
+    if policy is not None:
+        intent = screen_residency(intent, policy.residency(intent))
+    return requirement, intent
 
 
 def induce_effect_boundaries(acc: LoweringAccumulator) -> None:

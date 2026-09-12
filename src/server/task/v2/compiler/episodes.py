@@ -7,8 +7,14 @@ local leaves fuses into one episode node whose ``fused_refs`` records the folded
 operators. The logical template is untouched, so the lowering is contract-equivalent to
 the transparent one: it changes only where episodes cut, never a declared output, an
 effect boundary, or progress closure.
+
+A lowering policy refines the cut within that guarantee: it may keep a fusible operator
+out of its predecessor's episode, ask an operator that closes on its task boundary to
+take a durable checkpoint instead, and annotate an episode. Cutting more often and
+fusing less are both contract-equivalent to the cut the compiler reaches alone.
 """
 
+from ....policy.lowering import EpisodeAnnotation, LoweringPolicy
 from ..representations.operators import (
     AgentOperator,
     BoundaryEventKind,
@@ -73,9 +79,12 @@ def _resource_class_for(op: LogicalOperator | None) -> str | None:
 
 
 def lower_to_episodes(
-    template: LogicalWorkflowTemplate, nodes: tuple[PhysicalNode, ...]
+    template: LogicalWorkflowTemplate,
+    nodes: tuple[PhysicalNode, ...],
+    policy: LoweringPolicy | None = None,
 ) -> tuple[PhysicalNode, ...]:
     """Rewrite transparent nodes into episode nodes with boundaries and fusion."""
+    policy = policy or LoweringPolicy()
     ops = {op.operator_id: op for op in template.operators}
     child_templates = {
         op.child_template_ref
@@ -83,7 +92,7 @@ def lower_to_episodes(
         if isinstance(op, SpawnRegion) and op.child_template_ref
     }
     succ, pred = _linear_adjacency(template, child_templates)
-    fused_into = _fuse_chains(ops, child_templates, succ, pred)
+    fused_into = _fuse_chains(ops, child_templates, succ, pred, policy)
 
     rewritten: list[PhysicalNode] = []
     for node in nodes:
@@ -92,9 +101,12 @@ def lower_to_episodes(
         if ref in fused_into:  # folded into an earlier chain head's episode
             continue
         boundary = _boundary_for(op) if op is not None else None
-        if boundary is None:  # residency administration node, left as-is
+        if boundary is None or op is None:  # residency administration node, left as-is
             rewritten.append(node)
             continue
+        if boundary is EpisodeBoundaryKind.TASK and policy.checkpoint(op):
+            boundary = EpisodeBoundaryKind.DURABLE_CHECKPOINT
+        annotation: EpisodeAnnotation = policy.annotate(op, boundary)
         folded = tuple(k for k, head in fused_into.items() if head == ref)
         rewritten.append(
             node.model_copy(
@@ -103,6 +115,8 @@ def lower_to_episodes(
                         boundary=boundary,
                         fused_refs=folded,
                         resource_class=_resource_class_for(op),
+                        liveness_key=annotation.liveness_key,
+                        speculative_eligible=annotation.speculative_eligible,
                     )
                 }
             )
@@ -139,8 +153,13 @@ def _fuse_chains(
     child_templates: set[str],
     succ: dict[str, list[str]],
     pred: dict[str, list[str]],
+    policy: LoweringPolicy,
 ) -> dict[str, str]:
-    """Map each fused operator to its chain head, folding maximal pure-leaf runs."""
+    """Map each fused operator to its chain head, folding maximal pure-leaf runs.
+
+    Fusion is asked of the policy one predecessor-successor pair at a time, so a vetoed
+    operator opens a chain of its own instead of folding into the one before it.
+    """
     fused_into: dict[str, str] = {}
     for op_id, op in ops.items():
         if op_id in fused_into or op_id in child_templates or not _is_fusible(op):
@@ -149,17 +168,21 @@ def _fuse_chains(
         preds = pred.get(op_id, [])
         if (
             len(preds) == 1
-            and _is_fusible(ops.get(preds[0]))
+            and _is_fusible(predecessor := ops.get(preds[0]))
             and succ.get(preds[0]) == [op_id]
+            and predecessor is not None
+            and policy.fuse(predecessor, op)
         ):
             continue
         cursor = op_id
         while (nexts := succ.get(cursor, [])) and len(nexts) == 1:
             nxt_id = nexts[0]
             if (
-                not _is_fusible(ops.get(nxt_id))
+                not _is_fusible(nxt := ops.get(nxt_id))
                 or pred.get(nxt_id, []) != [cursor]
                 or nxt_id in fused_into
+                or nxt is None
+                or not policy.fuse(ops[cursor], nxt)
             ):
                 break
             fused_into[nxt_id] = op_id
