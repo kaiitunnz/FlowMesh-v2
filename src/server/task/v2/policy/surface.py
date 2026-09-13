@@ -8,7 +8,7 @@ the lowerer, while a template compiles.
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from ..config import PolicySurfaceConfig
+from ....config import PolicySurfaceConfig
 from .lowering import LoweringPolicy
 
 type _Factory[T] = Callable[[PolicySurfaceConfig], T]

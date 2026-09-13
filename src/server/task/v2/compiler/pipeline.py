@@ -2,9 +2,9 @@ from collections.abc import Mapping
 
 from pydantic import ValidationError
 
-from ....policy.lowering import LoweringPolicy
 from ...parser import ParsedWorkflow
 from ..mode import LoweringStrategy
+from ..policy.lowering import LoweringPolicy
 from ..representations.bundle import PersistedV2Workflow
 from ..representations.plan import PhysicalExecutionPlan, PhysicalNode
 from ..representations.source import FrontendWorkflowSource

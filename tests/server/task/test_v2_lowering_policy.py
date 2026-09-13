@@ -1,9 +1,9 @@
 """The advisory lowering policy and the screens that keep its answers legal."""
 
-from server.policy import LoweringPolicy
 from server.task.parser import parse_workflow
 from server.task.v2 import FrontendWorkflowSource, compile_workflow
 from server.task.v2.mode import LoweringStrategy
+from server.task.v2.policy import LoweringPolicy
 from server.task.v2.representations.operators import LogicalOperator
 from server.task.v2.representations.plan import (
     PhysicalExecutionPlan,

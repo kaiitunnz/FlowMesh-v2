@@ -3,7 +3,7 @@
 import pytest
 
 from server.config import PolicySurfaceConfig
-from server.policy import (
+from server.task.v2.policy import (
     LoweringPolicy,
     build_policy_surface,
     screen_residency,

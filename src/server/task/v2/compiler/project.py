@@ -13,12 +13,12 @@ from shared.tasks.specs import (
 )
 from shared.tasks.specs.common import ModelSpecTemplate
 
-from ....policy.lowering import (
+from ...parser import ParsedTask, ParsedWorkflow
+from ..policy.lowering import (
     LoweringPolicy,
     screen_residency,
     screen_service_family,
 )
-from ...parser import ParsedTask, ParsedWorkflow
 from ..representations.operators import (
     AgentOperator,
     BindingKey,

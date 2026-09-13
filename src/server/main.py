@@ -36,7 +36,6 @@ from .network.reverse_relay import (
     RelayStreamStore,
 )
 from .network.service import NetworkPlane
-from .policy import build_policy_surface
 from .registries import WorkerRegistry, WorkflowRegistry
 from .registries.node import NodeRegistry
 from .registries.resident import ResidentRegistry
@@ -63,6 +62,7 @@ from .startup import (
 )
 from .supervisor import WorkerSupervisor
 from .task.runtime import TaskRuntime
+from .task.v2.policy import build_policy_surface
 from .tools.fabric_tool_broker import FabricToolBroker
 from .utils.logging import get_logger
 

@@ -74,7 +74,6 @@ from ..orchestration.tool_dispatch import (
     ToolOutcome,
     ToolOutcomeStatus,
 )
-from ..policy import PolicySurface
 from ..registries.worker import Worker, WorkerRegistry
 from ..registries.workflow import PersistedTask, WorkflowRegistry, WorkflowSched
 from ..services.model_secret_vault import ModelSecretVault
@@ -101,6 +100,7 @@ from .v2 import (
 from .v2.compiler.agent_binding import AgentBindingDefaults
 from .v2.compiler.facades import run_command_schema
 from .v2.credentials import pop_inline_model_secrets, redact_source_text
+from .v2.policy import PolicySurface
 from .v2.representations.operators import (
     AgentModelGatewayBinding,
     AgentOperator,

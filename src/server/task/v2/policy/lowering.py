@@ -14,8 +14,8 @@ compiler already proved legal.
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from ..task.v2.representations.operators import LogicalOperator
-    from ..task.v2.representations.plan import (
+    from ..representations.operators import LogicalOperator
+    from ..representations.plan import (
         ResidencyIntent,
         ServiceFamilyRequirement,
     )

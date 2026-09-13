@@ -13,7 +13,7 @@ out of its predecessor's episode, which cuts more often than the compiler would 
 and is contract-equivalent to the cut it reaches.
 """
 
-from ....policy.lowering import LoweringPolicy
+from ..policy.lowering import LoweringPolicy
 from ..representations.operators import (
     AgentOperator,
     BoundaryEventKind,

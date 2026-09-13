@@ -7,7 +7,6 @@ from .clients import RedisClient
 from .dispatcher import Dispatcher
 from .hooks import PrincipalContext
 from .network.service import NetworkPlane
-from .policy import PolicySurface
 from .registries import NodeRegistry, WorkerRegistry, WorkflowRegistry
 from .resident.service import ResidentCapacityControl
 from .serve import GatedServe, ServeBindingStore
@@ -19,6 +18,7 @@ from .services.ssh_audit import SshAuditService
 from .services.watchdog import WorkerWatchdog
 from .supervisor.supervisor import WorkerSupervisor
 from .task.runtime import TaskRuntime
+from .task.v2.policy import PolicySurface
 
 
 def get_logger(conn: HTTPConnection) -> logging.Logger:
