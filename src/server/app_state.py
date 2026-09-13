@@ -18,7 +18,6 @@ from .services.ssh_audit import SshAuditService
 from .services.watchdog import WorkerWatchdog
 from .supervisor.supervisor import WorkerSupervisor
 from .task.runtime import TaskRuntime
-from .task.v2.policy import PolicySurface
 
 
 def get_logger(conn: HTTPConnection) -> logging.Logger:
@@ -107,10 +106,6 @@ def get_gated_serve(conn: HTTPConnection) -> GatedServe | None:
 
 def get_serve_bindings(conn: HTTPConnection) -> ServeBindingStore | None:
     return conn.app.state.serve_bindings
-
-
-def get_policy_surface(conn: HTTPConnection) -> PolicySurface | None:
-    return conn.app.state.policy_surface
 
 
 def get_network_plane(conn: HTTPConnection) -> NetworkPlane | None:

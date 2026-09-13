@@ -626,7 +626,6 @@ app.state.system_principal = None
 
 # Root-only state (None on worker nodes)
 app.state.runtime = RUNTIME
-app.state.policy_surface = POLICY_SURFACE
 app.state.dispatcher = DISPATCHER
 app.state.workflow_registry = WORKFLOW_REGISTRY
 app.state.worker_registry = WORKER_REGISTRY
