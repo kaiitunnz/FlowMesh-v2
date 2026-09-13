@@ -267,6 +267,31 @@ JSON — is injected on a resume and becomes the leaf's result. The resident-req
 and reference-backed outcome hydration are the same caller-neutral substrate the
 agent-episode executor uses.
 
+### Local-eligible inference leaves
+
+An inference leaf may instead declare `{mode: local_eligible, primary: ...}`, which says
+that one pinned model contract may be realized either by resident capacity or by a
+self-contained local executor, and names which of the two the fabric runs when both are
+placeable. The leaf then carries both sets of constraints: the resident binding fields
+above, and the local model, executor, and GPU requirement a `{mode: resident}` leaf drops.
+
+The compiler proves the two embodiments run one declared contract before emitting either,
+through a canonical request and result projection. The proof is narrow: it admits a chat
+inference leaf that pins the vLLM engine, declares exactly one literal prompt under
+`spec.data.items`, and declares no adapter, shard, parallel split, or postprocessing step.
+A leaf outside that set compiles with the single embodiment its binding names, and
+`local_eligible` on an embedding leaf is rejected. Token accounting is telemetry rather
+than declared output, so an embodiment that reports none leaves `usage` unset.
+
+At dispatch a scheduler-owned selector reads live feasibility and either binds one
+embodiment or defers, holding no worker and admitting no capacity object. The default
+selector runs the declared primary and defers when it cannot be placed rather than
+switching. The choice is recorded durably before the worker message is published, rides
+that message, and is recorded on the attempt; worker routing and the result projection
+read it rather than the leaf's service binding, which names every embodiment the leaf
+admits. A resident embodiment is pinned once its invocation exists, so a retry reconciles
+through that invocation instead of running the model locally.
+
 A service dependency's family folds the service interface, base model, and isolation
 domain. A shared base model and interface reuse a warm replica; a differing interface, base
 model, or isolation domain resolves to a distinct family and cannot share a batch or route

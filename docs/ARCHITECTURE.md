@@ -173,6 +173,25 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   recovery are the same whether or not one runs. The fusion refinement applies to the
   episode-cut lowering; family and residency refinement applies to both lowerings.
   Enable with `ORCHESTRATOR_POLICY_SURFACE_ENABLED=true`.
+- **Inference-embodiment menus.** An inference leaf that declares `local_eligible`
+  lowers to one physical node carrying the finite set of embodiments its pinned model
+  contract admits — a resident-served candidate and a self-contained one — each with its
+  own `EpisodeSpec` and either a local executor/resource envelope or a
+  `ServiceFamilyRequirement` and a *conditional* `ResidencyIntent`. The compiler proves
+  the candidates run one declared contract through a canonical request/result codec
+  before emitting either; an unproven leaf keeps the single embodiment its binding names,
+  and a legacy present or absent `service` binding is resident-required or
+  self-contained-required exactly as before. An unresolved menu registers no residency
+  demand, mints no claim, and is never read as one episode. At dispatch a scheduler-owned
+  `EmbodimentSelector` reads a read-only feasibility snapshot and returns a selection or a
+  defer; it ranks only compiler-proven candidates and holds no capacity authority — it
+  names no worker or replica, reserves nothing, and mints no claim or route. The default
+  selector runs the declared primary and defers rather than switching. The selection is
+  recorded in the ledger before the `WorkerTaskMessage` publishes, rides that message, and
+  lands on the attempt; routing and result projection consume it rather than re-deriving
+  residence from the leaf's binding. A resident embodiment is pinned once its invocation
+  exists and reconciles through that invocation instead of falling back to inline
+  execution. See [`EXECUTORS.md`](EXECUTORS.md).
 - **Live-feasibility handoff.** A ready episode carries the lowerer's declared
   alternative; a feasibility check lets the scheduler defer an infeasible alternative,
   holding no worker, rather than dispatching it. It resolves no resident capacity.
