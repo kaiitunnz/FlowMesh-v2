@@ -389,7 +389,7 @@ class ModelSecretVaultConfig:
 
     @classmethod
     def from_env(cls) -> "ModelSecretVaultConfig":
-        return cls(ttl_sec=parse_int_env("AGENT_MODEL_SECRET_TTL_SEC") or 86400)
+        return cls(ttl_sec=parse_int_env("AGENT_MODEL_SECRET_TTL_SEC", 86400))
 
 
 @dataclass
@@ -443,28 +443,29 @@ class ResidentCapacityConfig:
         return cls(
             enabled=parse_bool_env(f"{prefix}CAPACITY_ENABLED", False),
             substrate=substrate,
-            admission_slots=max(1, parse_int_env(f"{prefix}ADMISSION_SLOTS") or 8),
-            adapter_slots=max(1, parse_int_env(f"{prefix}ADAPTER_SLOTS") or 4),
+            admission_slots=max(1, parse_int_env(f"{prefix}ADMISSION_SLOTS", 8)),
+            adapter_slots=max(1, parse_int_env(f"{prefix}ADAPTER_SLOTS", 4)),
             max_replicas_per_family=max(
-                1, parse_int_env(f"{prefix}MAX_REPLICAS_PER_FAMILY") or 1
+                1, parse_int_env(f"{prefix}MAX_REPLICAS_PER_FAMILY", 1)
             ),
             max_concurrent_cold_starts=max(
-                1, parse_int_env(f"{prefix}MAX_COLD_STARTS") or 1
+                1, parse_int_env(f"{prefix}MAX_COLD_STARTS", 1)
             ),
             cold_start_deadline_sec=parse_float_env(f"{prefix}COLD_START_DEADLINE_SEC")
             or 300.0,
             poll_interval_sec=parse_float_env(f"{prefix}POLL_INTERVAL_SEC") or 1.0,
             redrive_backoff_sec=parse_float_env(f"{prefix}REDRIVE_BACKOFF_SEC", 0.5),
             max_transient_redrives=max(
-                1, parse_int_env(f"{prefix}MAX_TRANSIENT_REDRIVES") or 3
+                1, parse_int_env(f"{prefix}MAX_TRANSIENT_REDRIVES", 3)
             ),
             serve_ttl_sec=parse_float_env(f"{prefix}SERVE_TTL_SEC"),
             allowed_models=allowed,
             forward_api_key=_env_or_none(f"{prefix}FORWARD_API_KEY"),
             selection_strategy=strategy,
-            idle_retain_sec=parse_float_env(f"{prefix}IDLE_RETAIN_SEC") or 0.0,
-            idle_sweep_interval_sec=parse_float_env(f"{prefix}IDLE_SWEEP_INTERVAL_SEC")
-            or 30.0,
+            idle_retain_sec=parse_float_env(f"{prefix}IDLE_RETAIN_SEC", 0.0),
+            idle_sweep_interval_sec=parse_float_env(
+                f"{prefix}IDLE_SWEEP_INTERVAL_SEC", 30.0
+            ),
             sidecar_directly_routable=parse_bool_env(
                 f"{prefix}SIDECAR_DIRECTLY_ROUTABLE", False
             ),
@@ -490,10 +491,10 @@ class WebSearchConfig:
     def from_env(cls) -> "WebSearchConfig":
         prefix = "WEB_SEARCH_"
         return cls(
-            max_results=parse_int_env(f"{prefix}MAX_RESULTS") or 5,
+            max_results=parse_int_env(f"{prefix}MAX_RESULTS", 5),
             timeout_sec=parse_float_env(f"{prefix}TIMEOUT_SEC") or 20.0,
-            result_char_cap=parse_int_env(f"{prefix}RESULT_CHAR_CAP") or 6000,
-            max_parallel=parse_int_env(f"{prefix}MAX_PARALLEL_CALLS_PER_TURN") or 4,
+            result_char_cap=parse_int_env(f"{prefix}RESULT_CHAR_CAP", 6000),
+            max_parallel=parse_int_env(f"{prefix}MAX_PARALLEL_CALLS_PER_TURN", 4),
         )
 
 
@@ -617,14 +618,14 @@ class NetworkPlaneConfig:
             reachability_class=_env_or_none(f"{prefix}REACHABILITY_CLASS")
             or "routable",
             protocols=protocols,
-            positive_ttl_sec=parse_float_env(f"{prefix}POSITIVE_TTL_SEC") or 30.0,
-            negative_ttl_sec=parse_float_env(f"{prefix}NEGATIVE_TTL_SEC") or 15.0,
-            backoff_base_sec=parse_float_env(f"{prefix}BACKOFF_BASE_SEC") or 1.0,
-            backoff_max_sec=parse_float_env(f"{prefix}BACKOFF_MAX_SEC") or 30.0,
+            positive_ttl_sec=parse_float_env(f"{prefix}POSITIVE_TTL_SEC", 30.0),
+            negative_ttl_sec=parse_float_env(f"{prefix}NEGATIVE_TTL_SEC", 15.0),
+            backoff_base_sec=parse_float_env(f"{prefix}BACKOFF_BASE_SEC", 1.0),
+            backoff_max_sec=parse_float_env(f"{prefix}BACKOFF_MAX_SEC", 30.0),
             connect_budget_sec=parse_float_env(f"{prefix}CONNECT_BUDGET_SEC") or 5.0,
-            route_ttl_sec=parse_float_env(f"{prefix}ROUTE_TTL_SEC") or 30.0,
+            route_ttl_sec=parse_float_env(f"{prefix}ROUTE_TTL_SEC", 30.0),
             relay_buffer_bytes=max(
-                1024, parse_int_env(f"{prefix}RELAY_BUFFER_BYTES") or 65536
+                1024, parse_int_env(f"{prefix}RELAY_BUFFER_BYTES", 65536)
             ),
             peer=TrustedPeerConfig.from_env(
                 default_trust_domain=_env_or_none(f"{prefix}TRUST_DOMAIN") or "flowmesh"
@@ -672,8 +673,7 @@ class OrchestrationConfig:
             agent_sandbox_egress_enabled=parse_bool_env(
                 "AGENT_SANDBOX_EGRESS_ENABLED", False
             ),
-            agent_input_budget_bytes=parse_int_env("AGENT_INPUT_BUDGET_BYTES")
-            or 262_144,
+            agent_input_budget_bytes=parse_int_env("AGENT_INPUT_BUDGET_BYTES", 262_144),
             gateway=AgentModelGatewayConfig.from_env(),
             agent_binding=AgentBindingConfig.from_env(),
             model_secret_vault=ModelSecretVaultConfig.from_env(),
