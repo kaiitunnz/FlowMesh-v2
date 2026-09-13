@@ -8,7 +8,11 @@ from typing import Any, cast
 import pytest
 
 from server.config import OrchestrationConfig
-from server.dispatcher.embodiment import EmbodimentDecision, EmbodimentSnapshot
+from server.dispatcher.embodiment import (
+    EmbodimentDecision,
+    EmbodimentSnapshot,
+    relay_placement_task,
+)
 from server.task.runtime import TaskRuntime
 from server.task.v2.representations.plan import InferenceEmbodimentMenu
 from shared.tasks.specs import InferenceEmbodimentKind
@@ -173,3 +177,56 @@ async def test_a_task_without_a_menu_passes_straight_through() -> None:
     dispatcher = make_capturing_dispatcher(runtime=runtime)
     assert dispatcher._resolve_embodiment("tsk-absent", cast(Any, None)) is True
     assert dispatcher.requeued == []
+
+
+def _gpu_task(runtime: TaskRuntime, task_id: str) -> Any:
+    record = runtime.get_record(task_id)
+    assert record is not None
+    return record.task
+
+
+def _declared_gpu(task: Any) -> Any:
+    hardware = task.spec.resources.hardware if task.spec.resources else None
+    return hardware.gpu if hardware else None
+
+
+def _declared_cpu(task: Any) -> Any:
+    hardware = task.spec.resources.hardware if task.spec.resources else None
+    return hardware.cpu if hardware else None
+
+
+@pytest.mark.anyio
+async def test_a_relay_placement_view_drops_only_the_local_accelerator() -> None:
+    _dispatcher, runtime, task_id = await _setup()
+    task = _gpu_task(runtime, task_id)
+    assert _declared_gpu(task) is not None
+
+    relayed = relay_placement_task(task)
+    assert _declared_gpu(relayed) is None
+    # Every other declared resource still applies, and the original is untouched.
+    assert _declared_cpu(relayed) == _declared_cpu(task)
+    assert _declared_gpu(task) is not None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "kind, relaxed",
+    [
+        (InferenceEmbodimentKind.RESIDENT_SERVED, True),
+        (InferenceEmbodimentKind.SELF_CONTAINED, False),
+    ],
+)
+async def test_placement_relaxes_the_accelerator_only_for_a_relaying_embodiment(
+    kind: InferenceEmbodimentKind, relaxed: bool
+) -> None:
+    dispatcher, runtime, task_id = await _setup(
+        embodiment_selector=_ForcedSelector(kind)
+    )
+    assert _resolve(dispatcher, runtime, task_id) is True
+    assert dispatcher._relays_only(task_id) is relaxed
+
+
+@pytest.mark.anyio
+async def test_a_task_with_no_resolved_embodiment_places_as_declared() -> None:
+    dispatcher, runtime, task_id = await _setup()
+    assert dispatcher._relays_only(task_id) is False

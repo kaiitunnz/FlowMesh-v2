@@ -27,6 +27,7 @@ from shared.tasks import (
 from shared.tasks.placeholders import PLACEHOLDER_PATTERN
 from shared.tasks.specs import (
     ConditionSpec,
+    InferenceEmbodimentKind,
     SSHSpecStrict,
     SSHSpecTemplate,
 )
@@ -43,6 +44,7 @@ from .embodiment import (
     EmbodimentSelector,
     EmbodimentSnapshot,
     PrimaryEmbodimentSelector,
+    relay_placement_task,
 )
 from .worker_selector import DEFAULT_WORKER_SELECTION, select_worker
 
@@ -105,11 +107,11 @@ class Dispatcher:
             "artifact",
         )
 
-    def eligible_worker_ids(self, record: TaskRecord) -> set[str]:
+    def eligible_worker_ids(self, record: TaskRecord, relay: bool = False) -> set[str]:
         """Worker ids whose hardware satisfies the task, honoring selected_worker."""
+        task = relay_placement_task(record.task) if relay else record.task
         eligible = {
-            worker.id
-            for worker in self._worker_registry.satisfying_workers(record.task)
+            worker.id for worker in self._worker_registry.satisfying_workers(task)
         }
         if record.selected_worker:
             eligible &= set(record.selected_worker)
@@ -293,8 +295,22 @@ class Dispatcher:
     def _embodiment_snapshot(self, record: TaskRecord) -> EmbodimentSnapshot:
         """Read live feasibility for one menu node. It reserves nothing."""
         return EmbodimentSnapshot(
-            eligible_workers=len(self.eligible_worker_ids(record)),
+            local_capable_workers=len(self.eligible_worker_ids(record)),
+            relay_capable_workers=len(self.eligible_worker_ids(record, relay=True)),
             resident_capacity_enabled=self._resident_capacity_enabled,
+        )
+
+    def _relays_only(self, task_id: str) -> bool:
+        """Whether this dispatch carries an invocation rather than running a model.
+
+        A resident-served embodiment runs its model on a replica, so the local model
+        requirement its leaf declares for the other embodiment does not apply to the
+        worker that carries the invocation.
+        """
+        resolved = self._runtime.resolved_embodiment(task_id)
+        return (
+            resolved is not None
+            and resolved.kind is InferenceEmbodimentKind.RESIDENT_SERVED
         )
 
     def dispatch_once(self, task_id: str) -> bool:
@@ -318,6 +334,10 @@ class Dispatcher:
             return False
 
         task = record.task
+        # Placement reads the resolved embodiment, never the leaf's own binding: a
+        # resident-served dispatch carries the invocation and loads no model locally.
+        relays_only = self._relays_only(task_id)
+        placement_task = relay_placement_task(task) if relays_only else task
 
         model_names, dataset_names = extract_model_dataset_names(task)
         task_category = (
@@ -330,7 +350,7 @@ class Dispatcher:
             task_age = max(0.0, time.time() - record.last_queue_ts)
 
         # 1. Get idle worker pool
-        pool = self._worker_registry.idle_satisfying_pool(task)
+        pool = self._worker_registry.idle_satisfying_pool(placement_task)
 
         # 2. Filter by selected_worker hint if present
         if record.selected_worker:
@@ -369,7 +389,7 @@ class Dispatcher:
         # 3. No idle worker: wait for a busy one, or grace-then-fail when no worker can
         # take the task, or every eligible worker has already failed it.
         if not pool:
-            eligible = self.eligible_worker_ids(record)
+            eligible = self.eligible_worker_ids(record, relay=relays_only)
             if not eligible:
                 return self._grace_then_fail(
                     task_id,
@@ -393,7 +413,7 @@ class Dispatcher:
             filtered_pool = [c for c in pool if c.id not in failed_ids]
             if filtered_pool:
                 pool = filtered_pool
-            elif self.eligible_worker_ids(record) - failed_ids:
+            elif self.eligible_worker_ids(record, relay=relays_only) - failed_ids:
                 # Untried eligible workers exist but are busy; wait for them.
                 record.no_eligible_since = None
                 self._logger.debug(

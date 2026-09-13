@@ -49,9 +49,13 @@ def _menu(primary: str) -> InferenceEmbodimentMenu:
     )
 
 
-def _snapshot(workers: int = 2, resident: bool = True) -> EmbodimentSnapshot:
+def _snapshot(
+    workers: int = 2, resident: bool = True, relays: int | None = None
+) -> EmbodimentSnapshot:
     return EmbodimentSnapshot(
-        eligible_workers=workers, resident_capacity_enabled=resident
+        local_capable_workers=workers,
+        relay_capable_workers=workers if relays is None else relays,
+        resident_capacity_enabled=resident,
     )
 
 
@@ -108,3 +112,10 @@ class TestCandidateFeasibility:
     def test_a_resident_candidate_needs_resident_capacity(self) -> None:
         assert candidate_feasible(_resident(), _snapshot(resident=False)) is False
         assert candidate_feasible(_resident(), _snapshot()) is True
+
+    def test_a_resident_candidate_places_on_a_worker_that_only_relays(self) -> None:
+        # No worker can run the model locally, but one can carry the invocation: the
+        # resident embodiment is placeable and the local one is not.
+        relay_only = _snapshot(workers=0, relays=2)
+        assert candidate_feasible(_resident(), relay_only) is True
+        assert candidate_feasible(_local(), relay_only) is False

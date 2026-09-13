@@ -188,8 +188,9 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   names no worker or replica, reserves nothing, and mints no claim or route. The default
   selector runs the declared primary and defers rather than switching. The selection is
   recorded in the ledger before the `WorkerTaskMessage` publishes, rides that message, and
-  lands on the attempt; routing and result projection consume it rather than re-deriving
-  residence from the leaf's binding. A resident embodiment is pinned once its invocation
+  lands on the attempt; routing, placement, and the result projection consume it rather
+  than re-deriving residence from the leaf's binding — a resident-served dispatch is
+  placed without the accelerator its leaf declares for the other embodiment. A resident embodiment is pinned once its invocation
   exists and reconciles through that invocation instead of falling back to inline
   execution. See [`EXECUTORS.md`](EXECUTORS.md).
 - **Live-feasibility handoff.** A ready episode carries the lowerer's declared

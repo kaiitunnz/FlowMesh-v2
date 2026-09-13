@@ -10,6 +10,7 @@ ordinary claim path afterwards, and a local one is placed like any other local w
 from dataclasses import dataclass
 from typing import Protocol
 
+from shared.tasks import TaskEnvelope
 from shared.tasks.specs import InferenceEmbodimentKind
 
 from ..task.v2.representations.plan import (
@@ -18,22 +19,43 @@ from ..task.v2.representations.plan import (
 )
 
 
+def relay_placement_task(task: TaskEnvelope) -> TaskEnvelope:
+    """The task as a worker that only carries its invocation must satisfy it.
+
+    A resident-served embodiment runs its model on a replica, so the accelerator its
+    leaf declares for the self-contained embodiment is not a requirement on the worker
+    that relays. Every other declared resource still applies.
+    """
+    hardware = task.spec.resources.hardware if task.spec.resources else None
+    if hardware is None or hardware.gpu is None:
+        return task
+    relayed = task.model_copy(deep=True)
+    resources = relayed.spec.resources
+    if resources is not None and resources.hardware is not None:
+        resources.hardware.gpu = None
+    return relayed
+
+
 @dataclass(frozen=True)
 class EmbodimentSnapshot:
     """Live feasibility evidence for one ready menu node, read-only.
 
-    ``eligible_workers`` counts the workers that satisfy the task as declared, which
-    either embodiment needs: one runs the model, the other carries the invocation.
-    ``resident_capacity_enabled`` is whether the deployment serves resident capacity at
-    all. Both are evidence about feasibility, never a reservation of it.
+    ``local_capable_workers`` counts the workers that satisfy the task as declared,
+    which the embodiment that loads the model needs. ``relay_capable_workers`` counts
+    those that satisfy it without its local accelerator, which is what a worker carrying
+    an invocation to a replica needs. ``resident_capacity_enabled`` is whether the
+    deployment serves resident capacity at all. All three are evidence about
+    feasibility, never a reservation of it.
     """
 
-    eligible_workers: int
+    local_capable_workers: int
+    relay_capable_workers: int
     resident_capacity_enabled: bool
 
     def evidence(self) -> str:
         return (
-            f"eligible_workers={self.eligible_workers} "
+            f"local_capable_workers={self.local_capable_workers} "
+            f"relay_capable_workers={self.relay_capable_workers} "
             f"resident_capacity_enabled={self.resident_capacity_enabled}"
         )
 
@@ -68,11 +90,9 @@ def candidate_feasible(
     candidate: InferenceEmbodimentCandidate, snapshot: EmbodimentSnapshot
 ) -> bool:
     """Whether a candidate's own envelope can be satisfied right now."""
-    if snapshot.eligible_workers <= 0:
-        return False
     if candidate.kind is InferenceEmbodimentKind.RESIDENT_SERVED:
-        return snapshot.resident_capacity_enabled
-    return True
+        return snapshot.resident_capacity_enabled and snapshot.relay_capable_workers > 0
+    return snapshot.local_capable_workers > 0
 
 
 class PrimaryEmbodimentSelector:

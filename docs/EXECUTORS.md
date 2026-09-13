@@ -291,9 +291,11 @@ than carried by one; a leaf that needs them declares `self_contained_required`.
 Each candidate records its own envelope — a local executor and accelerator requirement,
 or a service family and a conditional residency intent — as the plan's description of what
 that embodiment needs. Runtime routing, placement, and admission read the task's own spec
-and service dependency, so the two never disagree. A local-eligible leaf declares the GPU
-its self-contained embodiment needs, and holds that requirement even when the resident
-embodiment is selected and the worker only carries the invocation.
+and service dependency, so the two never disagree. A local-eligible leaf declares the
+accelerator its self-contained embodiment needs; placement reads the resolved embodiment,
+so a resident-served dispatch — which runs its model on a replica and only carries the
+invocation — is placed without that requirement, while every other declared resource
+still applies.
 
 At dispatch a scheduler-owned selector reads live feasibility and either binds one
 embodiment or defers, holding no worker and admitting no capacity object. The default
