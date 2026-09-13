@@ -3221,17 +3221,18 @@ class OrchestrationEngine:
         return self._embodiment_selections.get(wi.work_item_id) if wi else None
 
     def embodiment_pinned(self, task_id: str) -> bool:
-        """Whether a resolved embodiment may no longer be re-resolved.
+        """Whether a resolved embodiment is committed to the run that carries it.
 
-        An embodiment changes only before its candidate-specific issue. Once the work
-        item carries an invocation the choice is committed: reconciliation reuses that
-        invocation and its idempotency and credit path rather than running the other
-        embodiment.
+        An embodiment changes only before its candidate-specific issue or delivery. A
+        resident candidate commits at its invocation, after which reconciliation reuses
+        that invocation and its idempotency and credit path rather than running the
+        other embodiment; a local candidate carries no invocation and commits when its
+        attempt is issued, which is where it was delivered to a worker.
         """
         wi = self._work_item_for_task(task_id)
         if wi is None or wi.work_item_id not in self._embodiment_selections:
             return False
-        return wi.invocation_id is not None
+        return wi.invocation_id is not None or bool(wi.attempt_ids)
 
     def record_embodiment_selection(
         self, task_id: str, alternative_id: str, selector: str, evidence: str

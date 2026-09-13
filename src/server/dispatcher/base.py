@@ -242,15 +242,22 @@ class Dispatcher:
         )
         return False
 
-    def _resolve_embodiment(self, task_id: str) -> bool:
+    def _resolve_embodiment(self, task_id: str, record: TaskRecord) -> bool:
         """Bind a menu node to one embodiment, or defer holding no worker.
 
-        A task whose node offers no menu, and one already bound, pass straight through.
+        A task whose node offers no menu passes straight through, as does one whose
+        embodiment is already committed: the choice is re-resolvable only while no
+        attempt has carried it to a worker and no invocation has issued.
+
+        A primary that can never be placed would otherwise defer forever, so a
+        continuously deferred menu reaches the same grace-then-fail a task no worker can
+        satisfy does. It fails rather than switching: an embodiment the author did not
+        declare stays unreachable.
         """
         menu = self._runtime.embodiment_menu(task_id)
-        if menu is None or self._runtime.resolved_embodiment(task_id) is not None:
+        if menu is None or self._runtime.embodiment_pinned(task_id):
             return True
-        snapshot = self._embodiment_snapshot(task_id)
+        snapshot = self._embodiment_snapshot(record)
         decision = self._embodiment_selector(menu, snapshot)
         if decision.alternative_id is None:
             self._logger.debug(
@@ -258,27 +265,36 @@ class Dispatcher:
                 task_id,
                 decision.defer_reason,
             )
-            self.requeue_task(
+            return self._grace_then_fail(
                 task_id,
+                record,
                 reason=f"embodiment_deferred:{decision.defer_reason}",
-                count_retry=False,
+                message=(
+                    "No embodiment of the task can be placed: its declared primary "
+                    f"is unavailable ({decision.defer_reason})"
+                ),
             )
-            return False
-        self._runtime.record_embodiment_selection(
+        bound = self._runtime.record_embodiment_selection(
             task_id,
             decision.alternative_id,
             self._embodiment_selector.name,
             snapshot.evidence(),
         )
+        if bound is None:
+            # The work item went away mid-dispatch; without a durable selection there is
+            # no fence, so the task waits rather than running an unrecorded embodiment.
+            self.requeue_task(
+                task_id, reason="embodiment_unrecorded", count_retry=False
+            )
+            return False
+        record.no_eligible_since = None
         return True
 
-    def _embodiment_snapshot(self, task_id: str) -> EmbodimentSnapshot:
+    def _embodiment_snapshot(self, record: TaskRecord) -> EmbodimentSnapshot:
         """Read live feasibility for one menu node. It reserves nothing."""
-        record = self._runtime.get_record(task_id)
-        eligible = len(self.eligible_worker_ids(record)) if record else 0
         return EmbodimentSnapshot(
-            eligible_workers=eligible,
-            resident_available=self._resident_capacity_enabled,
+            eligible_workers=len(self.eligible_worker_ids(record)),
+            resident_capacity_enabled=self._resident_capacity_enabled,
         )
 
     def dispatch_once(self, task_id: str) -> bool:
@@ -290,7 +306,7 @@ class Dispatcher:
         # Resolve and durably bind the embodiment before anything else this dispatch
         # does: publication precedes attempt bookkeeping, so a choice recorded after it
         # would not survive a loss between the two.
-        if not self._resolve_embodiment(task_id):
+        if not self._resolve_embodiment(task_id, record):
             return False
 
         # Live-feasibility handoff: defer an episode whose declared alternative is not

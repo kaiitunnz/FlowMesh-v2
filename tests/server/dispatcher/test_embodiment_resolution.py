@@ -8,11 +8,7 @@ from typing import Any, cast
 import pytest
 
 from server.config import OrchestrationConfig
-from server.dispatcher.embodiment import (
-    EmbodimentDecision,
-    EmbodimentSnapshot,
-    PrimaryEmbodimentSelector,
-)
+from server.dispatcher.embodiment import EmbodimentDecision, EmbodimentSnapshot
 from server.task.runtime import TaskRuntime
 from server.task.v2.representations.plan import InferenceEmbodimentMenu
 from shared.tasks.specs import InferenceEmbodimentKind
@@ -21,7 +17,7 @@ from tests.server.dispatcher.helpers import (
     make_capturing_dispatcher,
 )
 from tests.server.task.test_v2_embodiment_fence import LOCAL_ELIGIBLE, _runtime
-from tests.server.task.test_v2_orchestration import FakeRegistry, _register
+from tests.server.task.test_v2_orchestration import FakeRegistry, _register, _worker
 
 
 class _ForcedSelector:
@@ -50,10 +46,18 @@ async def _setup(
     return dispatcher, runtime, ids["gen"]
 
 
+def _resolve(
+    dispatcher: CapturingDispatcher, runtime: TaskRuntime, task_id: str
+) -> bool:
+    record = runtime.get_record(task_id)
+    assert record is not None
+    return dispatcher._resolve_embodiment(task_id, record)
+
+
 @pytest.mark.anyio
 async def test_the_primary_embodiment_is_bound_before_placement() -> None:
     dispatcher, runtime, task_id = await _setup(resident_capacity_enabled=True)
-    assert dispatcher._resolve_embodiment(task_id) is True
+    assert _resolve(dispatcher, runtime, task_id) is True
 
     resolved = runtime.resolved_embodiment(task_id)
     assert resolved is not None
@@ -65,7 +69,7 @@ async def test_the_primary_embodiment_is_bound_before_placement() -> None:
 async def test_an_unplaceable_primary_defers_without_binding_anything() -> None:
     # Resident capacity is off, so the declared resident primary cannot be placed.
     dispatcher, runtime, task_id = await _setup(resident_capacity_enabled=False)
-    assert dispatcher._resolve_embodiment(task_id) is False
+    assert _resolve(dispatcher, runtime, task_id) is False
 
     # It defers holding no worker: no embodiment bound, no local switch, no retry spent.
     assert runtime.resolved_embodiment(task_id) is None
@@ -87,7 +91,7 @@ async def test_an_injected_selector_can_force_either_legal_candidate(
     dispatcher, runtime, task_id = await _setup(
         embodiment_selector=_ForcedSelector(kind)
     )
-    assert dispatcher._resolve_embodiment(task_id) is True
+    assert _resolve(dispatcher, runtime, task_id) is True
 
     resolved = runtime.resolved_embodiment(task_id)
     assert resolved is not None and resolved.kind is kind
@@ -97,17 +101,63 @@ async def test_an_injected_selector_can_force_either_legal_candidate(
 
 
 @pytest.mark.anyio
-async def test_a_bound_embodiment_is_not_re_resolved_on_a_later_pass() -> None:
+async def test_an_uncommitted_embodiment_is_re_resolvable() -> None:
+    # Nothing has carried the choice to a worker yet, so a later pass may resolve it
+    # again: an embodiment is fixed by its issue, not by the act of recording it.
     dispatcher, runtime, task_id = await _setup(
         embodiment_selector=_ForcedSelector(InferenceEmbodimentKind.SELF_CONTAINED)
     )
-    assert dispatcher._resolve_embodiment(task_id) is True
-    dispatcher._embodiment_selector = PrimaryEmbodimentSelector()
+    assert _resolve(dispatcher, runtime, task_id) is True
+    dispatcher._embodiment_selector = _ForcedSelector(
+        InferenceEmbodimentKind.RESIDENT_SERVED
+    )
 
-    assert dispatcher._resolve_embodiment(task_id) is True
+    assert _resolve(dispatcher, runtime, task_id) is True
     resolved = runtime.resolved_embodiment(task_id)
     assert resolved is not None
-    assert resolved.kind is InferenceEmbodimentKind.SELF_CONTAINED
+    assert resolved.kind is InferenceEmbodimentKind.RESIDENT_SERVED
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "kind",
+    [InferenceEmbodimentKind.RESIDENT_SERVED, InferenceEmbodimentKind.SELF_CONTAINED],
+)
+async def test_a_delivered_embodiment_is_pinned(
+    kind: InferenceEmbodimentKind,
+) -> None:
+    # Once an attempt has carried the embodiment to a worker it is committed, for a
+    # local candidate as much as a resident one — the local candidate never acquires an
+    # invocation, so delivery is what fixes it.
+    dispatcher, runtime, task_id = await _setup(
+        embodiment_selector=_ForcedSelector(kind)
+    )
+    assert _resolve(dispatcher, runtime, task_id) is True
+    runtime.mark_dispatched(task_id, _worker())
+    assert runtime.embodiment_pinned(task_id) is True
+
+    other = next(k for k in InferenceEmbodimentKind if k is not kind)
+    dispatcher._embodiment_selector = _ForcedSelector(other)
+    assert _resolve(dispatcher, runtime, task_id) is True
+    resolved = runtime.resolved_embodiment(task_id)
+    assert resolved is not None and resolved.kind is kind
+
+
+@pytest.mark.anyio
+async def test_a_permanently_unplaceable_primary_fails_rather_than_hanging() -> None:
+    # A defer holds no worker, but it cannot hold forever: past the no-worker grace the
+    # task reaches a terminal instead of requeueing for the life of the deployment.
+    dispatcher, runtime, task_id = await _setup(
+        resident_capacity_enabled=False, grace_sec=0
+    )
+    assert _resolve(dispatcher, runtime, task_id) is False
+
+    [(failed, message, kwargs)] = dispatcher.failed
+    assert failed == task_id
+    assert "declared primary" in message
+    assert "resident_served_infeasible" in kwargs["payload"]["reason"]
+    # It fails rather than switching to the embodiment the author did not declare.
+    assert runtime.resolved_embodiment(task_id) is None
 
 
 @pytest.mark.anyio
@@ -121,5 +171,5 @@ async def test_a_task_without_a_menu_passes_straight_through() -> None:
         secret_vault=cast(Any, None),
     )
     dispatcher = make_capturing_dispatcher(runtime=runtime)
-    assert dispatcher._resolve_embodiment("tsk-absent") is True
+    assert dispatcher._resolve_embodiment("tsk-absent", cast(Any, None)) is True
     assert dispatcher.requeued == []

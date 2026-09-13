@@ -50,7 +50,9 @@ def _menu(primary: str) -> InferenceEmbodimentMenu:
 
 
 def _snapshot(workers: int = 2, resident: bool = True) -> EmbodimentSnapshot:
-    return EmbodimentSnapshot(eligible_workers=workers, resident_available=resident)
+    return EmbodimentSnapshot(
+        eligible_workers=workers, resident_capacity_enabled=resident
+    )
 
 
 class TestMenuShape:

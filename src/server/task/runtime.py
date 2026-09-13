@@ -1968,6 +1968,13 @@ class TaskRuntime:
             alternative_id=candidate.alternative_id, kind=candidate.kind
         )
 
+    def embodiment_pinned(self, task_id: str) -> bool:
+        """Whether a task's resolved embodiment is committed to the run carrying it."""
+        with self._lock:
+            record = self._tasks.get(task_id)
+            engine = self._engines.get(record.workflow_id) if record else None
+            return engine.embodiment_pinned(task_id) if engine else False
+
     def resolved_embodiment(self, task_id: str) -> ResolvedEmbodiment | None:
         """The embodiment a menu node's task is bound to, for its worker message."""
         with self._lock:

@@ -24,17 +24,17 @@ class EmbodimentSnapshot:
 
     ``eligible_workers`` counts the workers that satisfy the task as declared, which
     either embodiment needs: one runs the model, the other carries the invocation.
-    ``resident_available`` is whether resident capacity can serve the candidate's family
-    at all — evidence about feasibility, never a reservation of it.
+    ``resident_capacity_enabled`` is whether the deployment serves resident capacity at
+    all. Both are evidence about feasibility, never a reservation of it.
     """
 
     eligible_workers: int
-    resident_available: bool
+    resident_capacity_enabled: bool
 
     def evidence(self) -> str:
         return (
             f"eligible_workers={self.eligible_workers} "
-            f"resident_available={self.resident_available}"
+            f"resident_capacity_enabled={self.resident_capacity_enabled}"
         )
 
 
@@ -71,7 +71,7 @@ def candidate_feasible(
     if snapshot.eligible_workers <= 0:
         return False
     if candidate.kind is InferenceEmbodimentKind.RESIDENT_SERVED:
-        return snapshot.resident_available
+        return snapshot.resident_capacity_enabled
     return True
 
 
