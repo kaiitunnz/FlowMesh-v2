@@ -34,12 +34,6 @@ from ..representations.plan import (
 from ..representations.versioning import content_digest
 from .diagnostics import compile_error
 
-# Token accounting differs between a local generation and a relayed engine response and
-# is deliberately outside the equivalence proof: it is telemetry on an optional field
-# both embodiments leave unset by default, not part of what the leaf declares. Every
-# other attribute of the contract below is proven equal before a menu is emitted.
-_TELEMETRY_EXEMPT = ("usage",)
-
 
 def embodiment_menu(
     task: ParsedTask,
@@ -50,7 +44,12 @@ def embodiment_menu(
 ) -> InferenceEmbodimentMenu:
     """Prove a local-eligible leaf's two embodiments equivalent and emit its menu.
 
-    Raises a compile error naming the unproven attribute when they are not.
+    The attributes below are proven equal. The per-item fields a local generation
+    reports and a relayed engine response cannot — see ``PROJECTION_DROPS`` — are
+    outside the proof because the shared result projection drops them from both
+    embodiments rather than letting one carry them.
+
+    Raises a compile error naming the unproven attribute when they are not equal.
     """
     request = _canonical_request(task, spec)
     _reject_unproven(task, spec)
@@ -167,7 +166,6 @@ def _contract_fingerprint(
                 "effect": profile.effect.value,
                 "recovery": profile.recovery.value,
                 "input_provenance": profile.input_provenance.value,
-                "telemetry_exempt": _TELEMETRY_EXEMPT,
             },
             sort_keys=True,
             default=str,

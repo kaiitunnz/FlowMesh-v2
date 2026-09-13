@@ -7,8 +7,6 @@ The projection is deliberately narrow: it accepts only the spec shape both embod
 already read identically, and rejects anything whose equivalence is unproven.
 """
 
-from typing import Any
-
 from pydantic import BaseModel, ConfigDict
 
 from ..schemas.result.catalog import InferenceResult
@@ -16,6 +14,12 @@ from ..schemas.result.payloads import InferenceItem
 from ..tasks.specs import InferenceSpecStrict, InferenceSpecTemplate
 
 _LIST_DATA_TYPE = "list"
+
+# Fields a local generation reports and a relayed engine response cannot. The shared
+# projection drops them from both embodiments of a leaf: a field present under one and
+# absent under the other is what would make the choice observable to a consumer, or to a
+# guard branching on the result.
+PROJECTION_DROPS = ("finish_reason", "metadata", "usage")
 
 InferenceSpec = InferenceSpecStrict | InferenceSpecTemplate
 
@@ -74,25 +78,14 @@ def canonical_request(spec: InferenceSpec) -> CanonicalInferenceRequest:
 
 
 def canonical_result(
-    request: CanonicalInferenceRequest,
-    output: str,
-    finish_reason: str | None = None,
-    metadata: dict[str, Any] | None = None,
+    request: CanonicalInferenceRequest, output: str
 ) -> InferenceResult:
     """Report a completion in the declared result shape of an inference leaf.
 
-    Token accounting is telemetry rather than declared output, so an embodiment that
-    does not report it leaves ``usage`` unset without changing what the leaf declares.
+    It carries what the leaf declares — the pinned model, one item, its prompt, and its
+    output — and leaves the fields in ``PROJECTION_DROPS`` unset.
     """
     return InferenceResult(
         model=request.model,
-        items=[
-            InferenceItem(
-                index=0,
-                prompt=request.prompt,
-                output=output,
-                finish_reason=finish_reason,
-                metadata=metadata,
-            )
-        ],
+        items=[InferenceItem(index=0, prompt=request.prompt, output=output)],
     )

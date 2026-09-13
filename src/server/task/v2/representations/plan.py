@@ -199,9 +199,8 @@ class PhysicalExecutionPlan(BaseModel):
     It records physical nodes and their source maps to the logical template.
     A node may carry an :class:`EpisodeSpec` with its run-to-yield boundary and
     lightweight resource/liveness annotations, or an :class:`InferenceEmbodimentMenu`
-    of the contract-equivalent embodiments one inference node admits. State-placement
-    schemas remain a reserved extension point; no phase-by-phase allocation schema is
-    frozen here.
+    of the contract-equivalent embodiments one inference node admits. It holds no
+    phase-by-phase allocation schema.
     """
 
     model_config = ConfigDict(frozen=True)

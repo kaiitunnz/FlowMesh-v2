@@ -280,14 +280,27 @@ through a canonical request and result projection. The proof is narrow: it admit
 inference leaf that pins the vLLM engine, declares exactly one literal prompt under
 `spec.data.items`, and declares no adapter, shard, parallel split, or postprocessing step.
 A leaf outside that set compiles with the single embodiment its binding names, and
-`local_eligible` on an embedding leaf is rejected. Token accounting is telemetry rather
-than declared output, so an embodiment that reports none leaves `usage` unset.
+`local_eligible` on an embedding leaf is rejected.
+
+Both embodiments report through that same projection, so a consumer — or a guard
+branching on the result — sees one declared result whichever ran: the pinned model, one
+item, its prompt, and its output. Per-item fields only a local generation can report
+(`finish_reason`, `metadata`) and token accounting (`usage`) are dropped from both rather
+than carried by one; a leaf that needs them declares `self_contained_required`.
+
+Each candidate records its own envelope — a local executor and accelerator requirement,
+or a service family and a conditional residency intent — as the plan's description of what
+that embodiment needs. Runtime routing, placement, and admission read the task's own spec
+and service dependency, so the two never disagree. A local-eligible leaf declares the GPU
+its self-contained embodiment needs, and holds that requirement even when the resident
+embodiment is selected and the worker only carries the invocation.
 
 At dispatch a scheduler-owned selector reads live feasibility and either binds one
 embodiment or defers, holding no worker and admitting no capacity object. The default
 selector runs the declared primary and defers when it cannot be placed rather than
-switching. The choice is recorded durably before the worker message is published, rides
-that message, and is recorded on the attempt; worker routing and the result projection
+switching, and a primary that stays unplaceable past the no-worker grace fails the task
+rather than deferring indefinitely. The choice is recorded durably before the worker
+message is published, rides that message, and is recorded on the attempt; worker routing and the result projection
 read it rather than the leaf's service binding, which names every embodiment the leaf
 admits. A resident embodiment is pinned once its invocation exists, so a retry reconciles
 through that invocation instead of running the model locally.

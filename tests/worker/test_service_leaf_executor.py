@@ -68,7 +68,7 @@ def test_first_step_captures_the_request_and_yields_a_resident_boundary(
     tmp_path: Path,
 ) -> None:
     ex, store = _executor()
-    out = _step(ex.run(_msg({"prompt": "hello there"}), tmp_path))
+    out = ex.run(_msg({"prompt": "hello there"}), tmp_path)
 
     req = out.harness_result.request
     assert out.harness_result.kind is HarnessResultKind.BOUNDARY
@@ -140,7 +140,7 @@ def test_embedding_leaf_captures_the_input_list_and_yields_a_boundary(
     tmp_path: Path,
 ) -> None:
     ex, store = _executor()
-    out = _step(ex.run(_embedding_msg({"input": ["alpha", "beta"]}), tmp_path))
+    out = ex.run(_embedding_msg({"input": ["alpha", "beta"]}), tmp_path)
 
     req = out.harness_result.request
     assert out.harness_result.kind is HarnessResultKind.BOUNDARY

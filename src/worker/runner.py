@@ -28,6 +28,7 @@ from shared.tools.model.schema import MODEL_INTERFACE
 from shared.tools.search.schema import DEFAULT_SEARCH_PROVIDER
 from shared.utils.manifest import prepare_output_dir, sync_manifest
 from shared.utils.time import now_iso
+from worker.executors.menu_result import declared_result
 
 from .egress import MediatedEgressSidecar, ModelEgress, SearchEgress
 from .executors.base_executor import ExecutionError, Executor, TaskCancelledError
@@ -723,7 +724,13 @@ class Runner:
                         if stop_before_start:
                             executor_to_run.stop(task_id)
                     out = executor_to_run.run(msg, out_dir)
-                    self._write_results(task_id, spec, merged_children, out_dir, out)
+                    self._write_results(
+                        task_id,
+                        spec,
+                        merged_children,
+                        out_dir,
+                        declared_result(msg, out),
+                    )
                     metadata = self._build_task_metadata(
                         task_type,
                         dispatched_at,

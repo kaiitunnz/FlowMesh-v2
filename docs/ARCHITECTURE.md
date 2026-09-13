@@ -179,9 +179,9 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   own `EpisodeSpec` and either a local executor/resource envelope or a
   `ServiceFamilyRequirement` and a *conditional* `ResidencyIntent`. The compiler proves
   the candidates run one declared contract through a canonical request/result codec
-  before emitting either; an unproven leaf keeps the single embodiment its binding names,
-  and a legacy present or absent `service` binding is resident-required or
-  self-contained-required exactly as before. An unresolved menu registers no residency
+  before emitting either; an unproven leaf keeps the single embodiment its binding names.
+  A present `service` binding is resident-required and an absent one
+  self-contained-required, each a single-embodiment path. An unresolved menu registers no residency
   demand, mints no claim, and is never read as one episode. At dispatch a scheduler-owned
   `EmbodimentSelector` reads a read-only feasibility snapshot and returns a selection or a
   defer; it ranks only compiler-proven candidates and holds no capacity authority — it

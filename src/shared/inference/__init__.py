@@ -1,4 +1,5 @@
 from .codec import (
+    PROJECTION_DROPS,
     CanonicalInferenceRequest,
     CanonicalProjectionError,
     canonical_request,
@@ -6,6 +7,7 @@ from .codec import (
 )
 
 __all__ = [
+    "PROJECTION_DROPS",
     "CanonicalInferenceRequest",
     "CanonicalProjectionError",
     "canonical_request",
