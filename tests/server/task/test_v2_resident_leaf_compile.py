@@ -208,13 +208,120 @@ spec:
     assert embodiment.primary is None
 
 
+def _local_eligible(primary: str = "resident_served", **overrides: str) -> str:
+    body = {
+        "model": (
+            "{source: {identifier: Qwen/Qwen3-4B}, "
+            "vllm: {gpu_memory_utilization: 0.9}}"
+        ),
+        "data": '{type: list, items: ["hello"]}',
+        "resources": "{hardware: {gpu: {count: 1}}}",
+        **overrides,
+    }
+    fields = "\n".join(f"          {k}: {v}" for k, v in body.items())
+    return f"""
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {{name: t}}
+spec:
+  taskType: echo
+  graph:
+    nodes:
+      - name: a
+        spec:
+          taskType: inference
+{fields}
+          service: {{mode: local_eligible, primary: {primary}}}
+"""
+
+
 def test_a_local_eligible_binding_pins_both_embodiments_and_its_primary():
-    template, _plan = _compile(
-        _resident_inference("{mode: local_eligible, primary: self_contained}")
-    )
+    template, _plan = _compile(_local_eligible(primary="self_contained"))
     embodiment = _inference_leaf(template).embodiment
     assert embodiment.eligibility is InferenceEmbodimentEligibility.LOCAL_ELIGIBLE
     assert embodiment.primary is InferenceEmbodimentKind.SELF_CONTAINED
+
+
+def _menu_node(plan):
+    return next(n for n in plan.nodes if n.embodiment_menu is not None)
+
+
+def test_a_local_eligible_leaf_compiles_to_a_two_candidate_menu():
+    _template, plan = _compile(_local_eligible())
+    node = _menu_node(plan)
+    menu = node.embodiment_menu
+
+    kinds = {c.kind for c in menu.candidates}
+    assert kinds == {
+        InferenceEmbodimentKind.RESIDENT_SERVED,
+        InferenceEmbodimentKind.SELF_CONTAINED,
+    }
+    assert menu.contract_fingerprint
+    assert menu.candidate(menu.primary).kind is InferenceEmbodimentKind.RESIDENT_SERVED
+
+    # One logical leaf, one source map, one physical node.
+    assert node.logical_ref == node.source_ref
+    assert len([n for n in plan.nodes if n.logical_ref == node.logical_ref]) == 1
+
+
+def test_an_unresolved_menu_registers_no_residency_demand():
+    _template, plan = _compile(_local_eligible())
+    node = _menu_node(plan)
+    assert node.service_family_requirement is None
+    assert node.residency_intent is None
+    assert node.episode is None
+
+    resident = next(
+        c
+        for c in node.embodiment_menu.candidates
+        if c.kind is InferenceEmbodimentKind.RESIDENT_SERVED
+    )
+    assert resident.residency_intent.conditional is True
+    assert resident.residency_intent.required is False
+    assert resident.service_family_requirement.family == "Qwen/Qwen3-4B|chat"
+
+
+def test_each_candidate_carries_its_own_episode_and_envelope():
+    _template, plan = _compile(_local_eligible())
+    by_kind = {c.kind: c for c in _menu_node(plan).embodiment_menu.candidates}
+
+    resident = by_kind[InferenceEmbodimentKind.RESIDENT_SERVED]
+    assert resident.episode.boundary is EpisodeBoundaryKind.SERVICE_ISSUE
+    assert resident.local is None
+
+    local = by_kind[InferenceEmbodimentKind.SELF_CONTAINED]
+    assert local.episode.boundary is EpisodeBoundaryKind.TASK
+    assert local.local.executor_key == "vllm"
+    assert local.local.gpu_count == 1
+
+
+@pytest.mark.parametrize(
+    "overrides, reason",
+    [
+        ({"data": '{type: list, items: ["a", "b"]}'}, "exactly one prompt"),
+        ({"data": "{type: dataset, url: squad}"}, "not projectable"),
+        ({"data": "{type: list, expr: upstream.items}"}, "literal list"),
+        (
+            {"model": "{source: {identifier: Qwen/Qwen3-4B}}"},
+            "does not pin the vLLM engine",
+        ),
+        (
+            {"postprocess": "{jsonl_export: {path: out.jsonl, fields: {a: b}}}"},
+            "postprocessing",
+        ),
+    ],
+)
+def test_an_unproven_contract_compiles_to_no_menu(overrides, reason):
+    with pytest.raises(CompileError, match=reason):
+        _compile(_local_eligible(**overrides))
+
+
+def test_a_resident_required_leaf_compiles_to_a_single_embodiment():
+    _template, plan = _compile(_resident_inference("{mode: resident}"))
+    assert all(n.embodiment_menu is None for n in plan.nodes)
+    resident = [n for n in plan.nodes if n.service_family_requirement is not None]
+    assert resident[0].residency_intent.required is True
+    assert resident[0].residency_intent.conditional is False
 
 
 def test_a_local_eligible_embedding_leaf_is_rejected():

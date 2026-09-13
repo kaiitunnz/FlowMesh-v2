@@ -39,6 +39,7 @@ from ..representations.operators import (
     operator_service_dependency,
 )
 from ..representations.plan import (
+    InferenceEmbodimentMenu,
     PhysicalNode,
     ResidencyIntent,
     ServiceFamilyRequirement,
@@ -71,6 +72,7 @@ from .bindings import (
     leaf_profile,
 )
 from .diagnostics import compile_error
+from .embodiment import embodiment_menu
 
 _SERVICE_BACKED_SPECS = (
     InferenceSpecStrict,
@@ -440,17 +442,51 @@ def lower_tasks(
                 source_ref=operator_id,
             )
         )
-        dependency = operator_service_dependency(ops_by_id.get(operator_id))
+        op = ops_by_id.get(operator_id)
+        dependency = operator_service_dependency(op)
+        node_id = f"phys:{operator_id}"
+        if (menu := _embodiment_menu(task, op, dependency, node_id)) is not None:
+            # A menu holds its boundary and resident annotations per candidate, so an
+            # unresolved node registers no service family and no residency demand.
+            acc.nodes.append(
+                PhysicalNode(
+                    node_id=node_id,
+                    source_ref=operator_id,
+                    logical_ref=operator_id,
+                    embodiment_menu=menu,
+                )
+            )
+            continue
         requirement, intent = _service_family_annotations(dependency, policy)
         acc.nodes.append(
             PhysicalNode(
-                node_id=f"phys:{operator_id}",
+                node_id=node_id,
                 source_ref=operator_id,
                 logical_ref=operator_id,
                 service_family_requirement=requirement,
                 residency_intent=intent,
             )
         )
+
+
+def _embodiment_menu(
+    task: ParsedTask,
+    op: LogicalOperator | None,
+    dependency: ServiceDependency | None,
+    node_id: str,
+) -> InferenceEmbodimentMenu | None:
+    """The embodiment menu a local-eligible inference leaf lowers to, or None."""
+    spec = task.task.spec
+    if (
+        not isinstance(op, LeafOperator)
+        or op.embodiment is None
+        or op.embodiment.eligibility
+        is not InferenceEmbodimentEligibility.LOCAL_ELIGIBLE
+        or dependency is None
+        or not isinstance(spec, (InferenceSpecStrict, InferenceSpecTemplate))
+    ):
+        return None
+    return embodiment_menu(task, spec, dependency, op.profile, node_id)
 
 
 def _service_family_annotations(

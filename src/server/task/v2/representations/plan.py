@@ -2,6 +2,8 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from shared.tasks.specs import InferenceEmbodimentKind
+
 from .versioning import VersionId
 
 
@@ -73,6 +75,99 @@ class ResidencyIntent(BaseModel):
     reuse_domain: str | None = None
     affinity: str | None = None
     preemption: str | None = None
+    # Scoped to one embodiment candidate: it registers demand only once that candidate
+    # is durably selected, so lifecycle control passes over it while the menu is
+    # unresolved. An ordinary non-required warmth preference applies unresolved.
+    conditional: bool = False
+
+
+class LocalExecutionEnvelope(BaseModel):
+    """What a self-contained candidate needs on the worker that runs it.
+
+    A resident binding places no worker-local model requirement, so a candidate that
+    loads the model locally states its own executor and accelerator requirement rather
+    than inheriting the resident leaf's empty one.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    executor_key: str
+    gpu_count: int | None = None
+
+
+class InferenceEmbodimentCandidate(BaseModel):
+    """One physical embodiment of a leaf's pinned inference contract.
+
+    A ``resident_served`` candidate carries the service family it admits to and a
+    conditional residency intent; a ``self_contained`` candidate carries the local
+    envelope it needs. Both run the same declared contract, so the menu holds their
+    shared fingerprint and they share the node's single source map.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    alternative_id: str
+    kind: InferenceEmbodimentKind
+    episode: EpisodeSpec
+    local: LocalExecutionEnvelope | None = None
+    service_family_requirement: ServiceFamilyRequirement | None = None
+    residency_intent: ResidencyIntent | None = None
+
+    @model_validator(mode="after")
+    def _validate_kind_envelope(self) -> "InferenceEmbodimentCandidate":
+        resident = self.kind is InferenceEmbodimentKind.RESIDENT_SERVED
+        if resident and (self.service_family_requirement is None or self.local):
+            raise ValueError(
+                "a resident_served candidate carries a service family requirement "
+                "and no local envelope."
+            )
+        if not resident and (self.local is None or self.service_family_requirement):
+            raise ValueError(
+                "a self_contained candidate carries a local envelope and no service "
+                "family requirement."
+            )
+        if resident and not (
+            self.residency_intent and self.residency_intent.conditional
+        ):
+            raise ValueError(
+                "a resident_served candidate carries a conditional residency intent, "
+                "so an unselected menu registers no demand."
+            )
+        return self
+
+
+class InferenceEmbodimentMenu(BaseModel):
+    """The finite set of contract-equivalent embodiments one inference node admits.
+
+    The compiler proves the entries equivalent before emitting them and records the
+    proof as ``contract_fingerprint``, which every entry shares. ``primary`` is the
+    submission-pinned entry a conservative scheduler selects; another entry is reachable
+    only through a selection the runtime durably records.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    contract_fingerprint: str
+    primary: str
+    candidates: tuple[InferenceEmbodimentCandidate, ...]
+
+    @model_validator(mode="after")
+    def _validate_candidates(self) -> "InferenceEmbodimentMenu":
+        ids = [candidate.alternative_id for candidate in self.candidates]
+        if len(ids) < 2 or len(ids) != len(set(ids)):
+            raise ValueError(
+                "an embodiment menu holds at least two distinctly identified entries."
+            )
+        if self.primary not in ids:
+            raise ValueError(
+                f"primary embodiment {self.primary!r} is not a menu entry."
+            )
+        return self
+
+    def candidate(self, alternative_id: str) -> InferenceEmbodimentCandidate | None:
+        return next(
+            (c for c in self.candidates if c.alternative_id == alternative_id), None
+        )
 
 
 class PhysicalNode(BaseModel):
@@ -81,6 +176,10 @@ class PhysicalNode(BaseModel):
     Maps to a logical operator through ``logical_ref`` (``None`` for a residency
     administration node that owns no logical operator). It carries no per-attempt
     placement and no transient endpoint address.
+
+    A node carrying an ``embodiment_menu`` holds its boundary and resident annotations
+    per candidate instead of on the node, so nothing reads an unresolved menu as one
+    episode or as a registered service dependency.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -91,6 +190,7 @@ class PhysicalNode(BaseModel):
     episode: EpisodeSpec | None = None
     service_family_requirement: ServiceFamilyRequirement | None = None
     residency_intent: ResidencyIntent | None = None
+    embodiment_menu: InferenceEmbodimentMenu | None = None
 
 
 class PhysicalExecutionPlan(BaseModel):
@@ -98,9 +198,10 @@ class PhysicalExecutionPlan(BaseModel):
 
     It records physical nodes and their source maps to the logical template.
     A node may carry an :class:`EpisodeSpec` with its run-to-yield boundary and
-    lightweight resource/liveness annotations. Per-operator alternative-lowering
-    menus and state-placement schemas remain reserved extension points; no
-    phase-by-phase allocation schema is frozen here.
+    lightweight resource/liveness annotations, or an :class:`InferenceEmbodimentMenu`
+    of the contract-equivalent embodiments one inference node admits. State-placement
+    schemas remain a reserved extension point; no phase-by-phase allocation schema is
+    frozen here.
     """
 
     model_config = ConfigDict(frozen=True)

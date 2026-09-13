@@ -100,7 +100,9 @@ def lower_to_episodes(
         if ref in fused_into:  # folded into an earlier chain head's episode
             continue
         boundary = _boundary_for(op) if op is not None else None
-        if boundary is None:  # residency administration node, left as-is
+        # A residency administration node, and a node whose embodiments each carry their
+        # own episode, are left as they are: an unresolved menu is not one episode.
+        if boundary is None or node.embodiment_menu is not None:
             rewritten.append(node)
             continue
         folded = tuple(k for k, head in fused_into.items() if head == ref)
