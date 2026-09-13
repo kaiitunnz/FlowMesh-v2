@@ -18,6 +18,7 @@ from shared.tasks import MergedChildTaskStrict
 from shared.tasks.specs import (
     EmbeddingSpecStrict,
     InferenceBackend,
+    InferenceEmbodimentKind,
     InferenceSpecStrict,
     TaskSpecStrictBase,
 )
@@ -625,7 +626,18 @@ class Runner:
                             f"Task {task_id} was cancelled before execution"
                         )
                     self._current_task_id = task_id
-                    if msg.service_episode is not None:
+                    if (embodiment := msg.embodiment) is not None:
+                        # A leaf that admits more than one embodiment routes on the
+                        # embodiment the scheduler resolved, never on its own service
+                        # binding, which names every embodiment the leaf admits.
+                        assert isinstance(spec, InferenceSpecStrict)
+                        desired_key = (
+                            "service_leaf"
+                            if embodiment.kind
+                            is InferenceEmbodimentKind.RESIDENT_SERVED
+                            else self._select_inference_executor_key(spec)
+                        )
+                    elif msg.service_episode is not None:
                         # A resident service-backed leaf runs the service-episode path
                         # (capture the model request, yield a resident boundary, resume
                         # on the settled completion) rather than loading a local model.

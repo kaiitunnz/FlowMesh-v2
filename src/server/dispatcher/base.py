@@ -39,6 +39,11 @@ from ..task.metadata import extract_model_dataset_names
 from ..task.models import TaskRecord, TaskStatus
 from ..task.runtime import TaskRuntime
 from ..utils.time import now_iso
+from .embodiment import (
+    EmbodimentSelector,
+    EmbodimentSnapshot,
+    PrimaryEmbodimentSelector,
+)
 from .worker_selector import DEFAULT_WORKER_SELECTION, select_worker
 
 _SENTINEL: Any = object()
@@ -70,6 +75,8 @@ class Dispatcher:
         enable_stage_weight_stickiness: bool = False,
         no_worker_grace_sec: int = 60,
         metrics_recorder: MetricsRecorder | None = None,
+        resident_capacity_enabled: bool = False,
+        embodiment_selector: EmbodimentSelector | None = None,
     ) -> None:
         self._runtime = runtime
         self._worker_registry = worker_registry
@@ -85,6 +92,8 @@ class Dispatcher:
         self._stage_weight_stickiness_enabled = enable_stage_weight_stickiness
         self._no_worker_grace_sec = max(0, no_worker_grace_sec)
         self._metrics = metrics_recorder
+        self._resident_capacity_enabled = resident_capacity_enabled
+        self._embodiment_selector = embodiment_selector or PrimaryEmbodimentSelector()
         self._weight_reference_hints: tuple[str, ...] = (
             "checkpoint",
             "weight",
@@ -233,11 +242,56 @@ class Dispatcher:
         )
         return False
 
+    def _resolve_embodiment(self, task_id: str) -> bool:
+        """Bind a menu node to one embodiment, or defer holding no worker.
+
+        A task whose node offers no menu, and one already bound, pass straight through.
+        """
+        menu = self._runtime.embodiment_menu(task_id)
+        if menu is None or self._runtime.resolved_embodiment(task_id) is not None:
+            return True
+        snapshot = self._embodiment_snapshot(task_id)
+        decision = self._embodiment_selector(menu, snapshot)
+        if decision.alternative_id is None:
+            self._logger.debug(
+                "Deferring %s: no embodiment placeable (%s)",
+                task_id,
+                decision.defer_reason,
+            )
+            self.requeue_task(
+                task_id,
+                reason=f"embodiment_deferred:{decision.defer_reason}",
+                count_retry=False,
+            )
+            return False
+        self._runtime.record_embodiment_selection(
+            task_id,
+            decision.alternative_id,
+            self._embodiment_selector.name,
+            snapshot.evidence(),
+        )
+        return True
+
+    def _embodiment_snapshot(self, task_id: str) -> EmbodimentSnapshot:
+        """Read live feasibility for one menu node. It reserves nothing."""
+        record = self._runtime.get_record(task_id)
+        eligible = len(self.eligible_worker_ids(record)) if record else 0
+        return EmbodimentSnapshot(
+            eligible_workers=eligible,
+            resident_available=self._resident_capacity_enabled,
+        )
+
     def dispatch_once(self, task_id: str) -> bool:
         """Dispatch a single task if possible; requeue when no worker."""
         record = self._runtime.get_record(task_id)
         if not record:
             return True
+
+        # Resolve and durably bind the embodiment before anything else this dispatch
+        # does: publication precedes attempt bookkeeping, so a choice recorded after it
+        # would not survive a loss between the two.
+        if not self._resolve_embodiment(task_id):
+            return False
 
         # Live-feasibility handoff: defer an episode whose declared alternative is not
         # feasible to place now, holding no worker. It admits no capacity object.
@@ -572,6 +626,7 @@ class Dispatcher:
                 OwnerFence(worker_id=worker.id, incarnation=worker.incarnation),
             ),
             service_episode=self._runtime.service_episode_dispatch(task_id),
+            embodiment=self._runtime.resolved_embodiment(task_id),
         )
 
         # 8. Publish task

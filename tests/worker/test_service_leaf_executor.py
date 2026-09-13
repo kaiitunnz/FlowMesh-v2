@@ -12,16 +12,24 @@ from unittest.mock import MagicMock
 import pytest
 
 from shared.harness import BoundaryEventKind, HarnessResultKind
+from shared.schemas.result import BaseExecutorResult
 from shared.tasks.task_type import TaskType
 from shared.tools.model.schema import MODEL_INTERFACE
 from tests.worker.factories import make_worker_config, make_worker_task_message
 from worker.executors import EXECUTOR_REGISTRY
 from worker.executors.base_executor import ExecutionError
+from worker.executors.episode_support import EpisodeStepResult
 from worker.executors.service_leaf_executor import (
     ServiceLeafExecutor,
     _call_correlation,
 )
 from worker.resident import ResidentRequestStore
+
+
+def _step(result: BaseExecutorResult) -> EpisodeStepResult:
+    assert isinstance(result, EpisodeStepResult)
+    return result
+
 
 _CORR = _call_correlation("tsk-test")
 
@@ -60,7 +68,7 @@ def test_first_step_captures_the_request_and_yields_a_resident_boundary(
     tmp_path: Path,
 ) -> None:
     ex, store = _executor()
-    out = ex.run(_msg({"prompt": "hello there"}), tmp_path)
+    out = _step(ex.run(_msg({"prompt": "hello there"}), tmp_path))
 
     req = out.harness_result.request
     assert out.harness_result.kind is HarnessResultKind.BOUNDARY
@@ -83,18 +91,20 @@ def test_explicit_messages_pass_through_as_a_chat_request(tmp_path: Path) -> Non
 
 def test_resume_completes_with_the_settled_value(tmp_path: Path) -> None:
     ex, _store = _executor()
-    out = ex.run(
-        _msg(
-            {"prompt": "hello"},
-            delivered_outcomes=[
-                {
-                    "call_correlation": _CORR,
-                    "kind": "result",
-                    "value": "the answer",
-                }
-            ],
-        ),
-        tmp_path,
+    out = _step(
+        ex.run(
+            _msg(
+                {"prompt": "hello"},
+                delivered_outcomes=[
+                    {
+                        "call_correlation": _CORR,
+                        "kind": "result",
+                        "value": "the answer",
+                    }
+                ],
+            ),
+            tmp_path,
+        )
     )
     assert out.harness_result.kind is HarnessResultKind.COMPLETION
     assert out.value == "the answer"
@@ -102,18 +112,20 @@ def test_resume_completes_with_the_settled_value(tmp_path: Path) -> None:
 
 def test_resume_on_a_denied_outcome_fails_the_leaf(tmp_path: Path) -> None:
     ex, _store = _executor()
-    out = ex.run(
-        _msg(
-            {"prompt": "hello"},
-            delivered_outcomes=[
-                {
-                    "call_correlation": _CORR,
-                    "kind": "denied",
-                    "denial": "authority",
-                }
-            ],
-        ),
-        tmp_path,
+    out = _step(
+        ex.run(
+            _msg(
+                {"prompt": "hello"},
+                delivered_outcomes=[
+                    {
+                        "call_correlation": _CORR,
+                        "kind": "denied",
+                        "denial": "authority",
+                    }
+                ],
+            ),
+            tmp_path,
+        )
     )
     assert out.harness_result.kind is HarnessResultKind.FAILURE
 
@@ -128,7 +140,7 @@ def test_embedding_leaf_captures_the_input_list_and_yields_a_boundary(
     tmp_path: Path,
 ) -> None:
     ex, store = _executor()
-    out = ex.run(_embedding_msg({"input": ["alpha", "beta"]}), tmp_path)
+    out = _step(ex.run(_embedding_msg({"input": ["alpha", "beta"]}), tmp_path))
 
     req = out.harness_result.request
     assert out.harness_result.kind is HarnessResultKind.BOUNDARY
@@ -141,18 +153,20 @@ def test_embedding_leaf_captures_the_input_list_and_yields_a_boundary(
 def test_embedding_resume_completes_with_the_settled_vectors(tmp_path: Path) -> None:
     ex, _store = _executor()
     vectors = json.dumps([{"index": 0, "embedding": [0.1, 0.2]}])
-    out = ex.run(
-        _embedding_msg(
-            {"input": ["alpha"]},
-            delivered_outcomes=[
-                {
-                    "call_correlation": _CORR,
-                    "kind": "result",
-                    "value": vectors,
-                }
-            ],
-        ),
-        tmp_path,
+    out = _step(
+        ex.run(
+            _embedding_msg(
+                {"input": ["alpha"]},
+                delivered_outcomes=[
+                    {
+                        "call_correlation": _CORR,
+                        "kind": "result",
+                        "value": vectors,
+                    }
+                ],
+            ),
+            tmp_path,
+        )
     )
     assert out.harness_result.kind is HarnessResultKind.COMPLETION
     assert out.value is not None

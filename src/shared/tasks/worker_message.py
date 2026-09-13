@@ -17,7 +17,21 @@ from shared.tasks import (
 )
 from shared.tasks.components import TaskMetadata
 from shared.tasks.merged import MergedChildTaskStrict
+from shared.tasks.specs import InferenceEmbodimentKind
 from shared.utils.json import dedup_json, restore_json
+
+
+class ResolvedEmbodiment(BaseModel):
+    """The embodiment of a menu node this dispatch is bound to.
+
+    Worker routing and result projection read it rather than re-deriving residence from
+    the task's own service binding, which names every embodiment the leaf admits.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    alternative_id: str
+    kind: InferenceEmbodimentKind
 
 
 class WorkerTaskMessage(BaseModel):
@@ -49,6 +63,10 @@ class WorkerTaskMessage(BaseModel):
     service_episode: ServiceLeafEpisodeDispatch | None = Field(
         default=None,
         description="Resident service-leaf episode context for a run-to-yield step.",
+    )
+    embodiment: ResolvedEmbodiment | None = Field(
+        default=None,
+        description="The embodiment the scheduler resolved for a menu node.",
     )
 
     @property

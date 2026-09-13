@@ -21,7 +21,18 @@ from shared.harness import (
     HarnessResultKind,
     OutcomeKind,
 )
-from shared.tasks.specs import EmbeddingSpecStrict, InferenceSpecStrict
+from shared.inference import (
+    CanonicalInferenceRequest,
+    CanonicalProjectionError,
+    canonical_request,
+    canonical_result,
+)
+from shared.schemas.result import BaseExecutorResult
+from shared.tasks.specs import (
+    EmbeddingSpecStrict,
+    InferenceEmbodimentKind,
+    InferenceSpecStrict,
+)
 from shared.tasks.task_type import TaskType
 from shared.tools.model.schema import MODEL_INTERFACE
 
@@ -58,7 +69,7 @@ class ServiceLeafExecutor(Executor):
     # local inference/embedding capability of its own.
     supported_task_types: ClassVar[frozenset[TaskType]] = frozenset()
 
-    def run(self, task: ExecutorTask, out_dir: Path) -> EpisodeStepResult:
+    def run(self, task: ExecutorTask, out_dir: Path) -> BaseExecutorResult:
         dispatch = task.service_episode
         if dispatch is None:
             raise ExecutionError(
@@ -71,13 +82,17 @@ class ServiceLeafExecutor(Executor):
         correlation = _call_correlation(task.task_id)
         settled = next((o for o in outcomes if o.call_correlation == correlation), None)
         if settled is not None:
-            return self._complete(settled)
+            return self._complete(task, settled)
         return self._yield_boundary(task, dispatch.interface, correlation)
 
     def _yield_boundary(
         self, task: ExecutorTask, interface: str, correlation: str
     ) -> EpisodeStepResult:
-        payload = _resident_request_payload(task, interface)
+        payload = (
+            _canonical_projection(task).prompt
+            if _runs_one_of_several_embodiments(task)
+            else _resident_request_payload(task, interface)
+        )
         request = BoundaryRequest(
             kind=BoundaryEventKind.INVOCATION,
             interface=MODEL_INTERFACE,
@@ -95,7 +110,7 @@ class ServiceLeafExecutor(Executor):
         return EpisodeStepResult(harness_result=result)
 
     @staticmethod
-    def _complete(settled: DeliveredOutcome) -> EpisodeStepResult:
+    def _complete(task: ExecutorTask, settled: DeliveredOutcome) -> BaseExecutorResult:
         if settled.kind is OutcomeKind.DENIED:
             return EpisodeStepResult(
                 harness_result=HarnessResult(
@@ -108,6 +123,10 @@ class ServiceLeafExecutor(Executor):
                 harness_result=HarnessResult(kind=HarnessResultKind.CANCELLATION)
             )
         value = settled.value or ""
+        if _runs_one_of_several_embodiments(task):
+            # A leaf whose embodiments are interchangeable reports one declared result
+            # shape, so what a consumer reads does not depend on which one ran.
+            return canonical_result(_canonical_projection(task), value)
         return EpisodeStepResult(
             harness_result=HarnessResult(
                 kind=HarnessResultKind.COMPLETION, value=value
@@ -117,6 +136,28 @@ class ServiceLeafExecutor(Executor):
 
     def cancel(self, task_id: str) -> None:
         return None
+
+
+def _runs_one_of_several_embodiments(task: ExecutorTask) -> bool:
+    """Whether this dispatch is the resident embodiment of a leaf that admits both."""
+    embodiment = task.embodiment
+    return (
+        embodiment is not None
+        and embodiment.kind is InferenceEmbodimentKind.RESIDENT_SERVED
+    )
+
+
+def _canonical_projection(task: ExecutorTask) -> CanonicalInferenceRequest:
+    spec = task.spec
+    if not isinstance(spec, InferenceSpecStrict):
+        raise ExecutionError(
+            f"{task.task_id} carries a resolved inference embodiment but no "
+            "inference spec"
+        )
+    try:
+        return canonical_request(spec)
+    except CanonicalProjectionError as exc:
+        raise ExecutionError(f"{task.task_id}: {exc}") from exc
 
 
 def _resident_request_payload(task: ExecutorTask, interface: str) -> str:
