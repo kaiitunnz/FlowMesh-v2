@@ -4,7 +4,11 @@ from typing import Any
 
 import pytest
 
-from shared.tasks.specs import InferenceBackend, InferenceSpecStrict
+from shared.tasks.specs import (
+    EmbeddingSpecStrict,
+    InferenceBackend,
+    InferenceSpecStrict,
+)
 
 
 def _spec(**fields: Any) -> InferenceSpecStrict:
@@ -111,3 +115,57 @@ class TestValidateDispatchable:
             model={"adapters": [{"type": "lora", "name": "a", "path": "hf/a"}]},
             service={"mode": "resident"},
         ).validate_dispatchable()
+
+
+class TestLocalEligibleBinding:
+    def test_primary_is_required(self) -> None:
+        with pytest.raises(ValueError, match="must name the primary embodiment"):
+            _spec(service={"mode": "local_eligible"})
+
+    def test_primary_rejected_on_a_resident_binding(self) -> None:
+        with pytest.raises(ValueError, match="only to a local_eligible"):
+            _spec(service={"mode": "resident", "primary": "self_contained"})
+
+    def test_local_eligible_keeps_the_local_gpu_requirement(self) -> None:
+        # A resident binding admits to a replica and carries no worker-local GPU
+        # requirement; a local-eligible one must still place its self-contained
+        # embodiment, so the vLLM backend's GPU requirement survives.
+        _spec(
+            model={"vllm": {"gpu_memory_utilization": 0.9}},
+            service={"mode": "resident"},
+        ).validate_dispatchable()
+        with pytest.raises(ValueError, match="requests no GPU"):
+            _spec(
+                model={"vllm": {"gpu_memory_utilization": 0.9}},
+                service={"mode": "local_eligible", "primary": "resident_served"},
+            ).validate_dispatchable()
+
+    def test_local_eligible_with_a_declared_gpu_is_dispatchable(self) -> None:
+        _spec(
+            model={"vllm": {"gpu_memory_utilization": 0.9}},
+            resources={"hardware": {"gpu": {"count": 1}}},
+            service={"mode": "local_eligible", "primary": "resident_served"},
+        ).validate_dispatchable()
+
+    def test_local_eligible_keeps_the_resident_adapter_limit(self) -> None:
+        with pytest.raises(ValueError, match="single adapter"):
+            _spec(
+                model={
+                    "adapters": [
+                        {"type": "lora", "name": "a", "path": "hf/a"},
+                        {"type": "lora", "name": "b", "path": "hf/b"},
+                    ]
+                },
+                resources={"hardware": {"gpu": {"count": 1}}},
+                service={"mode": "local_eligible", "primary": "resident_served"},
+            ).validate_dispatchable()
+
+    def test_embedding_rejects_local_eligible(self) -> None:
+        spec = EmbeddingSpecStrict.model_validate(
+            {
+                "taskType": "embedding",
+                "service": {"mode": "local_eligible", "primary": "self_contained"},
+            }
+        )
+        with pytest.raises(ValueError, match="only a resident service binding"):
+            spec.validate_dispatchable()

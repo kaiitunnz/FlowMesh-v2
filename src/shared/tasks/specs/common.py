@@ -1,4 +1,5 @@
-from typing import Any, Literal
+from enum import StrEnum
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny, model_validator
 
@@ -45,6 +46,35 @@ def validate_adapters_loadable(
             )
 
 
+def validate_resident_only_binding(
+    binding: "ServiceBindingSpec | None", *, leaf: str
+) -> None:
+    """Reject a local-eligible binding on a leaf that admits only resident serving.
+
+    A contract-equivalent local embodiment is proven for pinned chat inference; another
+    leaf kind keeps the single embodiment its binding names.
+    """
+    if binding is not None and binding.mode is ServiceBindingMode.LOCAL_ELIGIBLE:
+        raise ValueError(
+            f"a {leaf} leaf supports only a resident service binding; local_eligible "
+            "is available for inference leaves."
+        )
+
+
+class InferenceEmbodimentKind(StrEnum):
+    """How one pinned inference contract is physically realized."""
+
+    RESIDENT_SERVED = "resident_served"
+    SELF_CONTAINED = "self_contained"
+
+
+class ServiceBindingMode(StrEnum):
+    """What the binding says about where the leaf's invocation may run."""
+
+    RESIDENT = "resident"
+    LOCAL_ELIGIBLE = "local_eligible"
+
+
 class ServiceBindingSpec(BaseModel):
     """Binds a service-backed leaf to resident-served capacity.
 
@@ -52,13 +82,35 @@ class ServiceBindingSpec(BaseModel):
     replica the fabric materializes and reuses. ``service_model_ref`` names the served
     model, defaulting to the task's own model source; ``isolation`` names a co-batch and
     cache isolation domain that is never shared across domains even for the same model.
+
+    A ``local_eligible`` binding declares that the same pinned model contract may also
+    be realized by a self-contained local executor, and names the ``primary`` embodiment
+    the fabric uses when both are placeable. The leaf then carries the resident
+    constraints below *and* the local model, executor, and resource constraints of an
+    unbound leaf.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    mode: Literal["resident"] = "resident"
+    mode: ServiceBindingMode = ServiceBindingMode.RESIDENT
     service_model_ref: str | None = None
     isolation: str | None = None
+    primary: InferenceEmbodimentKind | None = None
+
+    @model_validator(mode="after")
+    def _validate_primary(self) -> "ServiceBindingSpec":
+        if self.mode is ServiceBindingMode.LOCAL_ELIGIBLE:
+            if self.primary is None:
+                raise ValueError(
+                    "a local_eligible service binding must name the primary "
+                    "embodiment: resident_served or self_contained."
+                )
+        elif self.primary is not None:
+            raise ValueError(
+                "primary applies only to a local_eligible service binding; a "
+                f"{self.mode.value} binding admits one embodiment."
+            )
+        return self
 
 
 class ParallelSpec(StrictBaseModel):

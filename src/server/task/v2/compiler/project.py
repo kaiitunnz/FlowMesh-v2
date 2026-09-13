@@ -10,6 +10,7 @@ from shared.tasks.specs import (
     EmbeddingSpecTemplate,
     InferenceSpecStrict,
     InferenceSpecTemplate,
+    ServiceBindingMode,
 )
 from shared.tasks.specs.common import ModelSpecTemplate
 
@@ -26,6 +27,8 @@ from ..representations.operators import (
     EffectBoundary,
     EffectClass,
     EffectReplayContract,
+    InferenceEmbodimentBinding,
+    InferenceEmbodimentEligibility,
     LeafOperator,
     LogicalOperator,
     ModelRef,
@@ -68,6 +71,13 @@ from .bindings import (
     leaf_profile,
 )
 from .diagnostics import compile_error
+
+_SERVICE_BACKED_SPECS = (
+    InferenceSpecStrict,
+    InferenceSpecTemplate,
+    EmbeddingSpecStrict,
+    EmbeddingSpecTemplate,
+)
 
 
 def _model_ref(task: ParsedTask) -> ModelRef | None:
@@ -157,6 +167,32 @@ def _leaf_operator(
         guard=_condition_guard(task, name_to_op, operator_ids),
         residency_only=binding_class(task_type) is BindingClass.RESIDENCY,
         service_dependency=_leaf_service_dependency(task, task_type),
+        embodiment=_leaf_embodiment(task),
+    )
+
+
+def _leaf_embodiment(task: ParsedTask) -> InferenceEmbodimentBinding | None:
+    """Pin an inference/embedding leaf's embodiment disposition from its source.
+
+    A present resident binding is resident-required and an absent one self-contained
+    required, so a leaf naming neither embodiment keeps exactly one. Only an explicit
+    ``local_eligible`` binding admits both, and it names its primary.
+    """
+    spec = task.task.spec
+    if not isinstance(spec, _SERVICE_BACKED_SPECS):
+        return None
+    binding = spec.service
+    if binding is None:
+        return InferenceEmbodimentBinding(
+            eligibility=InferenceEmbodimentEligibility.SELF_CONTAINED_REQUIRED
+        )
+    if binding.mode is ServiceBindingMode.RESIDENT:
+        return InferenceEmbodimentBinding(
+            eligibility=InferenceEmbodimentEligibility.RESIDENT_REQUIRED
+        )
+    return InferenceEmbodimentBinding(
+        eligibility=InferenceEmbodimentEligibility.LOCAL_ELIGIBLE,
+        primary=binding.primary,
     )
 
 
@@ -170,15 +206,7 @@ def _leaf_service_dependency(
     is the leaf's own — an embedding leaf never shares a chat batch for the same model.
     """
     spec = task.task.spec
-    if not isinstance(
-        spec,
-        (
-            InferenceSpecStrict,
-            InferenceSpecTemplate,
-            EmbeddingSpecStrict,
-            EmbeddingSpecTemplate,
-        ),
-    ):
+    if not isinstance(spec, _SERVICE_BACKED_SPECS):
         return None
     binding = spec.service
     if binding is None:

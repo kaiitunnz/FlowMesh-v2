@@ -5,9 +5,14 @@ from server.task.v2.compiler.agent_binding import AgentBindingDefaults
 from server.task.v2.compiler.diagnostics import CompileError
 from server.task.v2.compiler.episodes import lower_to_episodes
 from server.task.v2.compiler.pipeline import compile_workflow
-from server.task.v2.representations.operators import LeafOperator, ServiceInterface
+from server.task.v2.representations.operators import (
+    InferenceEmbodimentEligibility,
+    LeafOperator,
+    ServiceInterface,
+)
 from server.task.v2.representations.plan import EpisodeBoundaryKind
 from server.task.v2.representations.source import FrontendWorkflowSource
+from shared.tasks.specs import InferenceEmbodimentKind
 
 
 def _compile(text):
@@ -168,3 +173,55 @@ spec:
 """
     with pytest.raises(CompileError, match="service.missing-ref"):
         _compile(text)
+
+
+def _inference_leaf(template) -> LeafOperator:
+    return next(op for op in template.operators if isinstance(op, LeafOperator))
+
+
+def test_a_resident_binding_pins_a_resident_required_embodiment():
+    template, _plan = _compile(_resident_inference("{mode: resident}"))
+    embodiment = _inference_leaf(template).embodiment
+    assert embodiment.eligibility is InferenceEmbodimentEligibility.RESIDENT_REQUIRED
+    assert embodiment.primary is None
+
+
+def test_no_service_binding_pins_a_self_contained_required_embodiment():
+    text = """
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {name: t}
+spec:
+  taskType: echo
+  graph:
+    nodes:
+      - name: a
+        spec:
+          taskType: inference
+          model: {source: {identifier: Qwen/Qwen3-4B}}
+"""
+    template, _plan = _compile(text)
+    embodiment = _inference_leaf(template).embodiment
+    assert (
+        embodiment.eligibility is InferenceEmbodimentEligibility.SELF_CONTAINED_REQUIRED
+    )
+    assert embodiment.primary is None
+
+
+def test_a_local_eligible_binding_pins_both_embodiments_and_its_primary():
+    template, _plan = _compile(
+        _resident_inference("{mode: local_eligible, primary: self_contained}")
+    )
+    embodiment = _inference_leaf(template).embodiment
+    assert embodiment.eligibility is InferenceEmbodimentEligibility.LOCAL_ELIGIBLE
+    assert embodiment.primary is InferenceEmbodimentKind.SELF_CONTAINED
+
+
+def test_a_local_eligible_embedding_leaf_is_rejected():
+    with pytest.raises(ValueError, match="local_eligible is available for inference"):
+        _compile(
+            _resident_inference(
+                "{mode: local_eligible, primary: self_contained}",
+                task_type="embedding",
+            )
+        )
