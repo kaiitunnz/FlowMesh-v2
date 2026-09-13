@@ -634,6 +634,26 @@ class NetworkPlaneConfig:
 
 
 @dataclass
+class PolicySurfaceConfig:
+    """The deployment's advisory policy selection.
+
+    A policy is deployment-global: a workflow submission selects none. While
+    ``enabled`` is false the surface is inert.
+    """
+
+    enabled: bool = False
+    lowering: str = "conservative"
+
+    @classmethod
+    def from_env(cls) -> "PolicySurfaceConfig":
+        defaults = cls()
+        return cls(
+            enabled=parse_bool_env("ORCHESTRATOR_POLICY_SURFACE_ENABLED", False),
+            lowering=_env_or_none("ORCHESTRATOR_LOWERING_POLICY") or defaults.lowering,
+        )
+
+
+@dataclass
 class OrchestrationConfig:
     max_scope_depth: int | None = None
     max_loop_iterations: int | None = None
@@ -652,6 +672,7 @@ class OrchestrationConfig:
     web_search: WebSearchConfig = field(default_factory=WebSearchConfig)
     resident: ResidentCapacityConfig = field(default_factory=ResidentCapacityConfig)
     network: NetworkPlaneConfig = field(default_factory=NetworkPlaneConfig)
+    policy: PolicySurfaceConfig = field(default_factory=PolicySurfaceConfig)
 
     @classmethod
     def from_env(cls) -> "OrchestrationConfig":
@@ -680,6 +701,7 @@ class OrchestrationConfig:
             web_search=WebSearchConfig.from_env(),
             resident=resident,
             network=network,
+            policy=PolicySurfaceConfig.from_env(),
         )
 
 

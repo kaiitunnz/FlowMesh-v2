@@ -100,6 +100,7 @@ from .v2 import (
 from .v2.compiler.agent_binding import AgentBindingDefaults
 from .v2.compiler.facades import run_command_schema
 from .v2.credentials import pop_inline_model_secrets, redact_source_text
+from .v2.policy import PolicySurface
 from .v2.representations.operators import (
     AgentModelGatewayBinding,
     AgentOperator,
@@ -247,12 +248,14 @@ class TaskRuntime:
         logger: logging.Logger,
         secret_vault: ModelSecretVault,
         feasibility_check: EpisodeFeasibility | None = None,
+        policy: PolicySurface | None = None,
     ) -> None:
         self._workflow_registry = workflow_registry
         self._worker_registry = worker_registry
         self._logger = logger
         self._results_dir = results_dir
         self._feasibility_check = feasibility_check
+        self._lowering_policy = policy.lowering if policy else None
         self._secret_vault = secret_vault
         self._scope_budget = ScopeBudget.from_config(orchestration)
         self._web_search = orchestration.web_search
@@ -411,6 +414,7 @@ class TaskRuntime:
                 strategy=self._lowering_strategy,
                 bindings=self._agent_binding_defaults,
                 secret_refs=secret_refs,
+                policy=self._lowering_policy,
             )
             v2_engine = OrchestrationEngine.build(
                 workflow_id, owner_id, org_id, v2_bundle, budget=self._scope_budget

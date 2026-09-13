@@ -62,6 +62,7 @@ from .startup import (
 )
 from .supervisor import WorkerSupervisor
 from .task.runtime import TaskRuntime
+from .task.v2.policy import build_policy_surface
 from .tools.fabric_tool_broker import FabricToolBroker
 from .utils.logging import get_logger
 
@@ -154,6 +155,7 @@ GATED_SERVE = None
 SERVE_FORWARD_INGRESS = None
 SERVE_BINDINGS = None
 NETWORK_PLANE = None
+POLICY_SURFACE = None
 RESIDENT_BRIDGE = None
 RESIDENT_BRIDGE_TASK = None
 # The root node id, resolved after the supervisor handshake; the gated serve edge reads
@@ -167,6 +169,7 @@ if IS_ROOT_NODE:
     MODEL_SECRET_VAULT = ModelSecretVault(
         REDIS_CLIENT, config.orchestration.model_secret_vault.ttl_sec, logger
     )
+    POLICY_SURFACE = build_policy_surface(config.orchestration.policy)
     RUNTIME = TaskRuntime(
         WORKFLOW_REGISTRY,
         WORKER_REGISTRY,
@@ -174,6 +177,7 @@ if IS_ROOT_NODE:
         RESULTS_DIR,
         logger,
         secret_vault=MODEL_SECRET_VAULT,
+        policy=POLICY_SURFACE,
     )
     AGENT_MODEL_GATEWAY = AgentModelGateway(
         RUNTIME, config.orchestration.gateway, logger

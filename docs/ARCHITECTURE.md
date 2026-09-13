@@ -159,6 +159,20 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   contract-equivalent — an episode cut changes only where work yields, never a declared
   output, effect visibility, or progress closure. `ORCHESTRATOR_EPISODE_LOWERING=true`
   selects the episode-cut lowering.
+- **Advisory lowering policy.** A deployment may enable a compile-time policy that
+  refines a lowering the compiler has already found legal: it can keep a fusible
+  operator out of its predecessor's episode, pick among the families compatible with a
+  dependency's engine-batch key, and express warmth, reuse, affinity, or preemption
+  preference. The compiler screens every answer, so fusion stays bounded to the pure,
+  deterministic, local set, an episode only ever cuts more often, and a refinement
+  holds the dependency's engine-batch key and isolation as well as its pinned family
+  and requiredness. Choosing a worker, reserving capacity, minting a claim or
+  attachment, and replacing a pinned resident binding belong to the fabric. The policy
+  is deployment-global — a workflow submission selects none — and the default lowers
+  identically to the compiler alone, so a workflow's declared outputs, effects, and
+  recovery are the same whether or not one runs. The fusion refinement applies to the
+  episode-cut lowering; family and residency refinement applies to both lowerings.
+  Enable with `ORCHESTRATOR_POLICY_SURFACE_ENABLED=true`.
 - **Live-feasibility handoff.** A ready episode carries the lowerer's declared
   alternative; a feasibility check lets the scheduler defer an infeasible alternative,
   holding no worker, rather than dispatching it. It resolves no resident capacity.

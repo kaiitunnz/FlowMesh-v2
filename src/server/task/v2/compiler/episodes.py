@@ -7,8 +7,13 @@ local leaves fuses into one episode node whose ``fused_refs`` records the folded
 operators. The logical template is untouched, so the lowering is contract-equivalent to
 the transparent one: it changes only where episodes cut, never a declared output, an
 effect boundary, or progress closure.
+
+A lowering policy refines the cut within that guarantee: it may keep a fusible operator
+out of its predecessor's episode, which cuts more often than the compiler would alone
+and is contract-equivalent to the cut it reaches.
 """
 
+from ..policy.lowering import LoweringPolicy
 from ..representations.operators import (
     AgentOperator,
     BoundaryEventKind,
@@ -73,9 +78,12 @@ def _resource_class_for(op: LogicalOperator | None) -> str | None:
 
 
 def lower_to_episodes(
-    template: LogicalWorkflowTemplate, nodes: tuple[PhysicalNode, ...]
+    template: LogicalWorkflowTemplate,
+    nodes: tuple[PhysicalNode, ...],
+    policy: LoweringPolicy | None = None,
 ) -> tuple[PhysicalNode, ...]:
     """Rewrite transparent nodes into episode nodes with boundaries and fusion."""
+    policy = policy or LoweringPolicy()
     ops = {op.operator_id: op for op in template.operators}
     child_templates = {
         op.child_template_ref
@@ -83,7 +91,7 @@ def lower_to_episodes(
         if isinstance(op, SpawnRegion) and op.child_template_ref
     }
     succ, pred = _linear_adjacency(template, child_templates)
-    fused_into = _fuse_chains(ops, child_templates, succ, pred)
+    fused_into = _fuse_chains(ops, child_templates, succ, pred, policy)
 
     rewritten: list[PhysicalNode] = []
     for node in nodes:
@@ -139,8 +147,13 @@ def _fuse_chains(
     child_templates: set[str],
     succ: dict[str, list[str]],
     pred: dict[str, list[str]],
+    policy: LoweringPolicy,
 ) -> dict[str, str]:
-    """Map each fused operator to its chain head, folding maximal pure-leaf runs."""
+    """Map each fused operator to its chain head, folding maximal pure-leaf runs.
+
+    Fusion is asked of the policy one predecessor-successor pair at a time, so a vetoed
+    operator opens a chain of its own instead of folding into the one before it.
+    """
     fused_into: dict[str, str] = {}
     for op_id, op in ops.items():
         if op_id in fused_into or op_id in child_templates or not _is_fusible(op):
@@ -149,17 +162,21 @@ def _fuse_chains(
         preds = pred.get(op_id, [])
         if (
             len(preds) == 1
-            and _is_fusible(ops.get(preds[0]))
+            and _is_fusible(predecessor := ops.get(preds[0]))
             and succ.get(preds[0]) == [op_id]
+            and predecessor is not None
+            and policy.fuse(predecessor, op)
         ):
             continue
         cursor = op_id
         while (nexts := succ.get(cursor, [])) and len(nexts) == 1:
             nxt_id = nexts[0]
             if (
-                not _is_fusible(ops.get(nxt_id))
+                not _is_fusible(nxt := ops.get(nxt_id))
                 or pred.get(nxt_id, []) != [cursor]
                 or nxt_id in fused_into
+                or nxt is None
+                or not policy.fuse(ops[cursor], nxt)
             ):
                 break
             fused_into[nxt_id] = op_id
