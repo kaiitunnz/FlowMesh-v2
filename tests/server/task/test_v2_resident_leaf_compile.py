@@ -257,6 +257,16 @@ def test_an_undeclared_binding_that_is_unprovable_keeps_one_embodiment():
     assert all(n.embodiment_menu is None for n in plan.nodes)
 
 
+def test_an_undeclared_mode_with_a_provable_contract_compiles_to_a_menu():
+    # A binding that names a served model but no mode still declares one contract, so
+    # it admits both embodiments; only an explicit mode pins a single one.
+    template, plan = _compile(_local_eligible(service="{isolation: tenant-a}"))
+    leaf = _inference_leaf(template)
+    assert leaf.embodiment.eligibility is InferenceEmbodimentEligibility.LOCAL_ELIGIBLE
+    menu = _menu_node(plan).embodiment_menu
+    assert menu.candidate(menu.primary).kind is InferenceEmbodimentKind.RESIDENT_SERVED
+
+
 def test_an_undeclared_mode_with_an_unprovable_contract_stays_resident():
     # An adapter is rejected by the proof and is exactly the resident serving case, so
     # the fallback keeps the resident embodiment the binding named rather than
