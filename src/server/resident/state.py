@@ -104,8 +104,8 @@ class AdmissionProfile(BaseModel):
     tenant: str | None = None
     deadline_at: str | None = None
     max_output_tokens: int | None = None
-    # One invocation that carries several conversations occupies one engine sequence per
-    # conversation, so its claim reserves that many admission slots rather than one.
+    # One invocation carrying several conversations occupies one engine sequence each,
+    # so its claim reserves an admission slot per conversation.
     batch_size: int = Field(default=1, ge=1)
     adapter_ref: str | None = None
     adapter_source: str | None = None

@@ -155,10 +155,10 @@ def reject_resident_batch(
 ) -> None:
     """Fail a leaf served from a replica without a menu that declares several prompts.
 
-    A replica serves one conversation per chat request, so several prompts are served
-    by the batch a menu compiles and not otherwise. Failing here reports what the leaf
-    declares rather than serving its first prompt and dropping the rest. An embedding
-    leaf embeds a list of inputs in one request and is unaffected.
+    A replica serves one conversation per chat request, so several prompts are served by
+    the batch a menu compiles and not otherwise. Failing names what the leaf declared,
+    where serving its first prompt alone would lose the rest silently. An embedding leaf
+    embeds a list of inputs in one request and is unaffected.
     """
     if eligibility is not InferenceEmbodimentEligibility.RESIDENT_REQUIRED:
         return
