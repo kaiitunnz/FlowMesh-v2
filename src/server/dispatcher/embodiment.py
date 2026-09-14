@@ -44,19 +44,34 @@ class EmbodimentSnapshot:
     which the embodiment that loads the model needs. ``relay_capable_workers`` counts
     those that satisfy it without its local accelerator, which is what a worker carrying
     an invocation to a replica needs. ``resident_capacity_enabled`` is whether the
-    deployment serves resident capacity at all. All three are evidence about
-    feasibility, never a reservation of it.
+    deployment serves resident capacity at all, and ``resident_admission_slots`` how
+    many concurrent sequences one replica admits, which bounds the batch a resident
+    embodiment can ever carry. All are evidence about feasibility, never a reservation
+    of it.
     """
 
     local_capable_workers: int
     relay_capable_workers: int
     resident_capacity_enabled: bool
+    resident_admission_slots: int = 0
+
+    def admits_batch(self, batch_size: int) -> bool:
+        """Whether a replica's admission bound can ever hold a batch this size.
+
+        A snapshot reporting no bound does not constrain one: admission enforces its own
+        capacity, and the scheduler rules a candidate out only on evidence it holds.
+        """
+        return (
+            self.resident_admission_slots <= 0
+            or batch_size <= self.resident_admission_slots
+        )
 
     def evidence(self) -> str:
         return (
             f"local_capable_workers={self.local_capable_workers} "
             f"relay_capable_workers={self.relay_capable_workers} "
-            f"resident_capacity_enabled={self.resident_capacity_enabled}"
+            f"resident_capacity_enabled={self.resident_capacity_enabled} "
+            f"resident_admission_slots={self.resident_admission_slots}"
         )
 
 
@@ -87,26 +102,37 @@ class EmbodimentSelector(Protocol):
 
 
 def candidate_feasible(
-    candidate: InferenceEmbodimentCandidate, snapshot: EmbodimentSnapshot
+    candidate: InferenceEmbodimentCandidate,
+    snapshot: EmbodimentSnapshot,
+    batch_size: int = 1,
 ) -> bool:
     """Whether a candidate's own envelope can be satisfied right now."""
     if candidate.kind is InferenceEmbodimentKind.RESIDENT_SERVED:
-        return snapshot.resident_capacity_enabled and snapshot.relay_capable_workers > 0
+        return (
+            snapshot.resident_capacity_enabled
+            and snapshot.relay_capable_workers > 0
+            and snapshot.admits_batch(batch_size)
+        )
     return snapshot.local_capable_workers > 0
 
 
 def candidate_unavailable(
-    candidate: InferenceEmbodimentCandidate, snapshot: EmbodimentSnapshot
+    candidate: InferenceEmbodimentCandidate,
+    snapshot: EmbodimentSnapshot,
+    batch_size: int = 1,
 ) -> bool:
     """Whether the deployment's own configuration rules a candidate out entirely.
 
     This is narrower than infeasibility: a fleet whose workers are momentarily busy
     still admits the candidate once one frees up, but a deployment that serves no
     resident capacity never admits a resident-served one, however long the task waits.
+    A batch carrying more conversations than a replica admits at once is the same case:
+    it occupies one sequence per conversation, so no amount of waiting frees enough.
     """
-    return (
-        candidate.kind is InferenceEmbodimentKind.RESIDENT_SERVED
-        and not snapshot.resident_capacity_enabled
+    if candidate.kind is not InferenceEmbodimentKind.RESIDENT_SERVED:
+        return False
+    return not snapshot.resident_capacity_enabled or not snapshot.admits_batch(
+        batch_size
     )
 
 
@@ -127,16 +153,34 @@ class PrimaryEmbodimentSelector:
         primary = menu.candidate(menu.primary)
         if primary is None:
             return EmbodimentDecision.defer("primary_embodiment_missing")
-        if candidate_feasible(primary, snapshot):
+        if candidate_feasible(primary, snapshot, menu.batch_size):
             return EmbodimentDecision.select(primary.alternative_id)
-        if not candidate_unavailable(primary, snapshot):
+        if not candidate_unavailable(primary, snapshot, menu.batch_size):
             return EmbodimentDecision.defer(f"{primary.kind.value}_infeasible")
         fallthrough = [
             candidate
             for candidate in menu.candidates
             if candidate.alternative_id != primary.alternative_id
-            and candidate_feasible(candidate, snapshot)
+            and candidate_feasible(candidate, snapshot, menu.batch_size)
         ]
         if len(fallthrough) != 1:
-            return EmbodimentDecision.defer(f"{primary.kind.value}_unavailable")
+            return EmbodimentDecision.defer(
+                _unavailable_reason(primary, snapshot, menu.batch_size)
+            )
         return EmbodimentDecision.select(fallthrough[0].alternative_id)
+
+
+def _unavailable_reason(
+    primary: InferenceEmbodimentCandidate,
+    snapshot: EmbodimentSnapshot,
+    batch_size: int,
+) -> str:
+    """Why no embodiment of a node can run, in terms an operator can act on."""
+    base = f"{primary.kind.value}_unavailable"
+    if snapshot.admits_batch(batch_size):
+        return base
+    return (
+        f"{base}: its {batch_size} conversations need one admission slot each and a "
+        f"replica admits {snapshot.resident_admission_slots} "
+        "(RESIDENT_ADMISSION_SLOTS), and no worker can run it self-contained"
+    )

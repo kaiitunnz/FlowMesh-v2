@@ -764,6 +764,7 @@ class ResidentCapacityControl:
             engine_batch_key=dependency.engine_batch_key,
             adapter_ref=dependency.adapter,
             adapter_source=dependency.adapter_source,
+            batch_size=dependency.batch_size,
         )
         await self._drive_claim(orig, dependency, profile)
 

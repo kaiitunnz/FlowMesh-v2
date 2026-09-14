@@ -20,8 +20,15 @@ from .state import (
 
 
 def default_credit(profile: AdmissionProfile) -> ClaimCredit:
-    """The conservative credit a claim reserves: one admission slot plus tokens."""
-    return ClaimCredit(slots=1, projected_tokens=profile.max_output_tokens)
+    """The conservative credit a claim reserves: one slot per conversation, plus tokens.
+
+    An invocation carrying a batch runs its conversations as that many concurrent engine
+    sequences, so crediting it one slot would let the derived capacity view report
+    headroom a replica does not have.
+    """
+    return ClaimCredit(
+        slots=profile.batch_size, projected_tokens=profile.max_output_tokens
+    )
 
 
 def outstanding_slots(claims: Iterable[ServiceClaim]) -> int:
@@ -43,8 +50,9 @@ def is_feasible(
     """Whether a replica can safely admit one more claim of this profile.
 
     A replica must be healthy and servable, satisfy an adapter-slot constraint, and have
-    safe headroom after every outstanding credit. The gate is conservative: it never
-    packs past the reported safe slots even to make a denser batch.
+    safe headroom for the whole credit this profile reserves after every outstanding
+    one. The gate is conservative: it never packs past the reported safe slots even to
+    make a denser batch.
     """
     if not report.healthy or report.state not in SERVABLE_REPLICA_STATES:
         return False
@@ -59,7 +67,7 @@ def is_feasible(
         reference = now_ts if now_ts is not None else parse_iso_ts(now_iso())
         if parse_iso_ts(profile.deadline_at) <= reference:
             return False
-    return (report.safe.admission_slots - held_slots) >= 1
+    return (report.safe.admission_slots - held_slots) >= profile.batch_size
 
 
 def residual_after(

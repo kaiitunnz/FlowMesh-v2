@@ -1,6 +1,7 @@
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
+from shared.inference import CanonicalProjectionError, canonical_request
 from shared.sandbox import SandboxEgressMode
 from shared.tasks import TaskType
 from shared.tasks.specs import (
@@ -11,6 +12,7 @@ from shared.tasks.specs import (
     InferenceSpecStrict,
     InferenceSpecTemplate,
     ServiceBindingMode,
+    TaskSpecBase,
 )
 from shared.tasks.specs.common import ModelSpecTemplate
 
@@ -266,7 +268,23 @@ def _leaf_service_dependency(
         adapter=adapter,
         adapter_source=_leaf_adapter_source(spec),
         isolation=binding.isolation if binding else None,
+        batch_size=_declared_batch_size(spec),
     )
+
+
+def _declared_batch_size(spec: TaskSpecBase) -> int:
+    """How many conversations one invocation of a chat leaf carries.
+
+    Only a leaf whose request projects into one contract runs several conversations on
+    one invocation; anything else carries one. An embedding leaf embeds its whole input
+    list in a single request, so it is one either way.
+    """
+    if not isinstance(spec, (InferenceSpecStrict, InferenceSpecTemplate)):
+        return 1
+    try:
+        return len(canonical_request(spec).prompts)
+    except CanonicalProjectionError:
+        return 1
 
 
 def _leaf_adapter_ref(

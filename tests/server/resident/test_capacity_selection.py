@@ -9,11 +9,15 @@ best-fit fills the tightest replica, least-load spreads, and round-robin rotates
 from server.resident import (
     AdmissionProfile,
     ClaimCredit,
+    ClaimState,
     ReplicaCapacityReport,
     ReplicaState,
     SafeCapacityVector,
+    ServiceClaim,
     build_selection_strategy,
+    default_credit,
     is_feasible,
+    outstanding_slots,
     residual_after,
 )
 from server.resident.selection import ReplicaCandidate
@@ -120,3 +124,44 @@ def test_unknown_strategy_falls_back_to_best_fit():
 
 def test_empty_candidates_select_none():
     assert build_selection_strategy(None).select([], _CREDIT) is None
+
+
+_BATCH_PROFILE = AdmissionProfile(engine_batch_key="k", batch_size=3)
+
+
+def test_a_batch_reserves_one_slot_per_conversation():
+    # Crediting a batch one slot would report headroom the replica does not have.
+    assert default_credit(_BATCH_PROFILE).slots == 3
+    assert default_credit(_PROFILE).slots == 1
+
+
+def test_a_batch_admits_only_where_its_whole_credit_fits():
+    report = _report(slots=4)
+    assert is_feasible(report, _BATCH_PROFILE, held_slots=0)
+    assert is_feasible(report, _BATCH_PROFILE, held_slots=1)
+    # Two free slots cannot serve three concurrent conversations.
+    assert not is_feasible(report, _BATCH_PROFILE, held_slots=2)
+
+
+def test_outstanding_credit_counts_a_batch_at_its_full_weight():
+    held = [
+        ServiceClaim(
+            claim_id="scl-1",
+            invocation_id="inv-1",
+            family="f",
+            admission_epoch=1,
+            state=ClaimState.ACCEPTED,
+            credit=ClaimCredit(slots=3),
+        )
+    ]
+    assert outstanding_slots(held) == 3
+
+
+def test_a_feasible_batch_candidate_never_scores_negative_headroom():
+    # Best-fit takes the minimum residual, so an over-committed replica would sort
+    # first if feasibility and scoring disagreed about the credit.
+    report = _report(slots=4)
+    credit = default_credit(_BATCH_PROFILE)
+    for held in range(0, 2):
+        assert is_feasible(report, _BATCH_PROFILE, held_slots=held)
+        assert residual_after(report, held, credit) >= 0
