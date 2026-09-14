@@ -272,8 +272,9 @@ agent-episode executor uses.
 An inference leaf declares one model contract. Where the compiler can prove that resident
 capacity and a self-contained local executor run that contract identically, the leaf
 admits both and the fabric picks one at dispatch. The proof is narrow: it admits a chat
-leaf that pins the vLLM engine, declares one literal prompt under `spec.data.items`, and
-declares no adapter, shard, parallel split, or postprocessing step. A leaf declaring an
+leaf that pins the vLLM engine, declares its prompts as literal strings under
+`spec.data.items`, and declares no adapter, shard, parallel split, or postprocessing
+step. A leaf declaring an
 inference setting a relayed request does not carry — guided decoding from a template,
 chat-template arguments — keeps one embodiment for the same reason. Any other leaf keeps
 the embodiment its source names — resident when it declares a `service` binding,
@@ -286,11 +287,24 @@ local embodiment.
 
 The leaf's declared sampling governs its generation wherever it runs, and values it
 leaves out take the same defaults on both sides, so both embodiments issue one engine
-request. Equivalence is over that request and the declared result, not over sampled
-tokens: a leaf that needs reproducible output declares greedy sampling. Both report one
-result — the pinned model, its prompt, and its output. Fields only a local generation can
-report (`finish_reason`, `metadata`) and token accounting (`usage`) are dropped from
-both.
+request. Each prompt is its own conversation, and the model's own chat template renders
+it on both sides: a resident invocation is rendered by the replica's engine and a local
+generation by the engine it loads. Equivalence is over that request and the declared
+result, not over sampled tokens: a leaf that needs reproducible output declares greedy
+sampling. Both report one result — the pinned model, and one item per declared prompt
+carrying its index, its prompt, and its output. Fields only a local generation can report
+(`finish_reason`, `metadata`) and token accounting (`usage`) are dropped from both.
+
+A leaf declaring several prompts is served as one batch. It yields one resident boundary
+carrying every conversation and is admitted under one `ServiceClaim` and one
+`invocation_id`, whose credit reserves one admission slot per conversation; the replica
+issues each conversation as its own concurrent engine request, so the engine's continuous
+batching combines them, and their completions settle as that one invocation's outcome.
+The self-contained embodiment generates the same conversations in one batched call. A
+batch larger than a replica's admission bound (`RESIDENT_ADMISSION_SLOTS`) can never be
+admitted, so the leaf runs self-contained instead. Resident serving without a menu runs
+one prompt: a leaf pinned to `{mode: resident}`, or one whose embodiments are not provably
+equivalent, is rejected at submission when it declares more than one.
 
 At dispatch a scheduler-owned selector reads live feasibility and either binds one
 embodiment or defers, holding no worker and admitting no capacity object. It runs the
