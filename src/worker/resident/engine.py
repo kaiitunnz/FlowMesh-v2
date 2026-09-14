@@ -4,7 +4,10 @@ The replica sidecar reaches the serve task running on the same worker over loopb
 workflow consumer receives the extracted completion content in bounded pieces so the
 windowed relay session flow-controls a large completion rather than framing it whole: a
 chat replica returns the assistant message text and an embedding replica the ``data``
-array of vectors serialized as JSON, both riding the content path as opaque bytes.
+array of vectors serialized as JSON, both riding the content path as opaque bytes. A
+consumer that carries several conversations on one boundary has each issued as its own
+concurrent engine request and receives their texts as a JSON array, so the whole batch
+settles as the one invocation that admitted it.
 
 A task-addressed serve request is instead reverse-proxied verbatim in both directions:
 the client's method, path, query, end-to-end headers, and raw body reach the engine
@@ -16,17 +19,29 @@ invocation loads its adapter into a replica slot and selects it as the request m
 before the call.
 """
 
+import asyncio
 import contextlib
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
+from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
 
 from shared.resident.contracts import ReplicaEndpoint
-from shared.resident.engine_request import chat_body, embeddings_body
+from shared.resident.engine_request import (
+    batch_chat_bodies,
+    chat_body,
+    embeddings_body,
+)
 from shared.resident.envelope import ServeRequestEnvelope, filter_response_headers
+
+
+def _completion(data: dict[str, Any]) -> str:
+    """The assistant message text of one chat response."""
+    return str(data["choices"][0]["message"]["content"])
+
 
 # The already-loaded shapes an engine reports for an idempotent adapter re-load; matched
 # narrowly so a precise load error is not swallowed.
@@ -124,11 +139,12 @@ class HttpEngineDelivery:
     ) -> EngineResponse:
         model = adapter_name or endpoint.model
         embedding = endpoint.interface == "embedding"
+        batch = None if embedding else batch_chat_bodies(request_payload, model)
         if embedding:
-            body = embeddings_body(request_payload, model)
+            bodies = [embeddings_body(request_payload, model)]
             path = "/embeddings"
         else:
-            body = chat_body(request_payload, model)
+            bodies = batch or [chat_body(request_payload, model)]
             path = "/chat/completions"
         headers = {"Content-Type": "application/json"}
         if endpoint.api_key:
@@ -139,13 +155,18 @@ class HttpEngineDelivery:
                 await self._ensure_adapter(
                     client, base, headers, adapter_name, adapter_source
                 )
-            response = await client.post(f"{base}{path}", json=body, headers=headers)
-            response.raise_for_status()
-            data = response.json()
+            # The conversations of a batch are issued together and concurrently: each is
+            # its own engine request, so the engine's continuous batching combines them
+            # as it does requests from any other source.
+            responses = await asyncio.gather(
+                *(self._post(client, f"{base}{path}", body, headers) for body in bodies)
+            )
         if embedding:
-            content = json.dumps(data["data"])
+            content = json.dumps(responses[0]["data"])
+        elif batch is not None:
+            content = json.dumps([_completion(data) for data in responses])
         else:
-            content = str(data["choices"][0]["message"]["content"])
+            content = _completion(responses[0])
         size = self._chunk_chars
 
         async def chunks() -> AsyncIterator[str]:
@@ -156,6 +177,18 @@ class HttpEngineDelivery:
             return None
 
         return EngineResponse(chunks=chunks(), aclose=aclose)
+
+    @staticmethod
+    async def _post(
+        client: httpx.AsyncClient,
+        url: str,
+        body: dict[str, Any],
+        headers: dict[str, str],
+    ) -> dict[str, Any]:
+        response = await client.post(url, json=body, headers=headers)
+        response.raise_for_status()
+        data: dict[str, Any] = response.json()
+        return data
 
     @staticmethod
     async def _ensure_adapter(

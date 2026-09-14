@@ -12,7 +12,7 @@ import json
 from collections.abc import Iterator
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from threading import Thread
+from threading import Barrier, Thread
 from typing import Any
 
 import httpx
@@ -112,8 +112,15 @@ class _Handler(BaseHTTPRequestHandler):
             if self.server.chat_override is not None:
                 self._reply(*self.server.chat_override)
                 return
+            if (barrier := self.server.chat_barrier) is not None:
+                # Times out unless every conversation of the batch is in flight at once,
+                # so a sequential fan-out fails here rather than passing quietly.
+                barrier.wait(timeout=5.0)
+            content = "hi there"
+            if self.server.echo_chat:
+                content = str(body["messages"][-1]["content"])
             payload = {
-                "choices": [{"message": {"role": "assistant", "content": "hi there"}}]
+                "choices": [{"message": {"role": "assistant", "content": content}}]
             }
         self._reply(200, "application/json", json.dumps(payload).encode())
 
@@ -130,6 +137,8 @@ class _Server(ThreadingHTTPServer):
         self.unloaded: list[str | None] = []
         self.unload_response: tuple[int, str] = (200, "success")
         self.chat_override: tuple[int, str, bytes] | None = None
+        self.chat_barrier: Barrier | None = None
+        self.echo_chat = False
         self.seen: list[dict[str, Any]] = []
         self.extra_response_headers: list[tuple[str, str]] = []
 
@@ -164,6 +173,53 @@ def test_chat_interface_posts_chat_completions_and_streams_text() -> None:
         base = f"http://127.0.0.1:{server.server_address[1]}/v1"
         endpoint = ReplicaEndpoint(base_url=base, model="m", interface="chat")
         content = asyncio.run(_drain(endpoint, "hello"))
+    assert server.paths == ["/v1/chat/completions"]
+    assert content == "hi there"
+
+
+def _batch_payload(*prompts: str) -> str:
+    return json.dumps(
+        [
+            {"max_tokens": 4, "messages": [{"role": "user", "content": prompt}]}
+            for prompt in prompts
+        ]
+    )
+
+
+def test_a_batch_boundary_issues_one_engine_request_per_conversation() -> None:
+    with _running() as server:
+        server.echo_chat = True
+        base = f"http://127.0.0.1:{server.server_address[1]}/v1"
+        endpoint = ReplicaEndpoint(base_url=base, model="m", interface="chat")
+        content = asyncio.run(_drain(endpoint, _batch_payload("a", "b", "c")))
+    assert server.paths == ["/v1/chat/completions"] * 3
+    # Each conversation is its own request carrying the replica's model and the
+    # boundary's own sampling, and the texts come back in declared order.
+    assert [b["model"] for b in server.bodies] == ["m", "m", "m"]
+    assert [b["max_tokens"] for b in server.bodies] == [4, 4, 4]
+    assert json.loads(content) == ["a", "b", "c"]
+
+
+def test_a_batch_is_issued_concurrently() -> None:
+    # The engine combines whole requests through its own continuous batching, which it
+    # can only do for conversations that are in flight together.
+    with _running() as server:
+        server.echo_chat = True
+        server.chat_barrier = Barrier(3)
+        base = f"http://127.0.0.1:{server.server_address[1]}/v1"
+        endpoint = ReplicaEndpoint(base_url=base, model="m", interface="chat")
+        content = asyncio.run(_drain(endpoint, _batch_payload("a", "b", "c")))
+    assert json.loads(content) == ["a", "b", "c"]
+
+
+def test_a_single_conversation_is_not_read_as_a_batch() -> None:
+    # The batch shape is a list of chat requests; anything else stays one request whose
+    # text is returned verbatim, so an agent boundary is unaffected.
+    with _running() as server:
+        base = f"http://127.0.0.1:{server.server_address[1]}/v1"
+        endpoint = ReplicaEndpoint(base_url=base, model="m", interface="chat")
+        single = json.dumps({"messages": [{"role": "user", "content": "a"}]})
+        content = asyncio.run(_drain(endpoint, single))
     assert server.paths == ["/v1/chat/completions"]
     assert content == "hi there"
 

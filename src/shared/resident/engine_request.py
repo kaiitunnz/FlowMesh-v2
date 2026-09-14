@@ -32,6 +32,31 @@ def chat_body(request_payload: str | None, model: str) -> dict[str, Any]:
     return {"model": model, "messages": [{"role": "user", "content": prompt}]}
 
 
+def batch_chat_bodies(
+    request_payload: str | None, model: str
+) -> list[dict[str, Any]] | None:
+    """The chat requests a batch boundary carries, or ``None`` if it carries one.
+
+    A leaf declaring several prompts sends its conversations as a list, because a chat
+    request serves exactly one conversation. Any other payload reads as a single request
+    so a single-prompt leaf and an agent boundary are unaffected.
+    """
+    if not request_payload:
+        return None
+    try:
+        parsed = json.loads(request_payload)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(parsed, list) or not parsed:
+        return None
+    if not all(
+        isinstance(body, dict) and isinstance(body.get("messages"), list)
+        for body in parsed
+    ):
+        return None
+    return [{**body, "model": model} for body in parsed]
+
+
 def embeddings_body(request_payload: str | None, model: str) -> dict[str, Any]:
     """Build the OpenAI embeddings request from a boundary payload.
 
