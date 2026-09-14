@@ -22,7 +22,11 @@ from shared.harness import (
     OutcomeKind,
     ServiceLeafEpisodeDispatch,
 )
-from shared.inference import CanonicalInferenceRequest, declared_sampling
+from shared.inference import (
+    LIST_PROMPT_FIELDS,
+    CanonicalInferenceRequest,
+    declared_sampling,
+)
 from shared.tasks.specs import EmbeddingSpecStrict, InferenceSpecStrict
 from shared.tasks.task_type import TaskType
 from shared.tools.model.schema import MODEL_INTERFACE
@@ -62,10 +66,6 @@ def _declared_request_payload(task: ExecutorTask) -> str | None:
 
 
 _PROMPT_FIELDS = ("prompt", "input", "content", "text")
-# A leaf declares its prompts either as a scalar field or as a literal list. Both are
-# read here, so a leaf whose inputs a local generation reads declares them once and a
-# replica serves the same request.
-_LIST_PROMPT_FIELDS = ("prompts", "items")
 
 _EMBEDDING_INTERFACE = "embedding"
 _EMBEDDING_INPUT_FIELDS = ("input", "items", "inputs", "texts", "prompts")
@@ -180,7 +180,7 @@ def _resident_request_payload(task: ExecutorTask, interface: str) -> str:
         for field in _PROMPT_FIELDS:
             if isinstance(value := source.get(field), str) and value:
                 return _chat_payload(params, value)
-        for field in _LIST_PROMPT_FIELDS:
+        for field in LIST_PROMPT_FIELDS:
             if isinstance(prompts := source.get(field), list) and prompts:
                 return _chat_payload(params, str(prompts[0]))
 

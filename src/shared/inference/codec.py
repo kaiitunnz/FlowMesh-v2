@@ -19,6 +19,11 @@ from ..tasks.specs import InferenceSpecStrict, InferenceSpecTemplate
 
 _LIST_DATA_TYPE = "list"
 
+# Everything a projectable leaf may declare about its inputs. An allowlist, so a leaf
+# naming inputs only one embodiment reads — an upstream expression, an object store, an
+# image group — fails toward no menu instead of toward a silently different request.
+_PROJECTABLE_DATA_KEYS = frozenset({"type", "items"})
+
 # What a local generation applies when the leaf declares nothing. A resident replica
 # would otherwise fall back to its engine's own defaults — generating until the context
 # ends where a local run stops at 512 tokens — so an embodiment menu carries these
@@ -86,9 +91,10 @@ class CanonicalInferenceRequest(BaseModel):
         )
 
 
-# The fields a chat leaf names a literal list of prompts under. A ``messages`` array is
-# one multi-turn conversation rather than several prompts, so it is not one of them.
-_LIST_PROMPT_FIELDS = ("prompts", "items")
+# The fields a chat leaf names a literal list of prompts under, in the order a request
+# builder reads them. A ``messages`` array is one multi-turn conversation, not several
+# prompts, so it is not one of them.
+LIST_PROMPT_FIELDS = ("prompts", "items")
 
 
 def declares_multiple_prompts(spec: InferenceSpec) -> bool:
@@ -104,7 +110,7 @@ def declares_multiple_prompts(spec: InferenceSpec) -> bool:
     for source in sources:
         if isinstance(source.get("messages"), list):
             return False
-        for field in _LIST_PROMPT_FIELDS:
+        for field in LIST_PROMPT_FIELDS:
             if isinstance(prompts := source.get(field), list):
                 return len(prompts) > 1
     return False
@@ -177,10 +183,10 @@ def canonical_request(spec: InferenceSpec) -> CanonicalInferenceRequest:
         raise CanonicalProjectionError(
             "spec.data.items must hold literal non-empty strings"
         )
-    if any(data.get(key) is not None for key in ("expr", "node", "path", "s3_cfg")):
+    if extra := tuple(sorted(key for key in data if key not in _PROJECTABLE_DATA_KEYS)):
         raise CanonicalProjectionError(
-            "a projectable leaf resolves its prompts from literal items, not from an "
-            "upstream expression or an object store"
+            f"spec.data declares {', '.join(extra)}; a projectable leaf resolves its "
+            "prompts from literal items alone"
         )
     return CanonicalInferenceRequest(
         model=model, prompts=tuple(items), params=canonical_sampling(spec)

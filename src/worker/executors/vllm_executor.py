@@ -1092,8 +1092,18 @@ Summary:"""
             },
         ):
             if conversations is not None:
+                if len(conversations) != len(self._batched_inputs):
+                    # The result items are assembled by position against the prompts the
+                    # spec prepared, so a contract that disagrees with them would report
+                    # each output under the wrong prompt.
+                    raise ExecutionError(
+                        f"task {task_id} declares {len(conversations)} conversations "
+                        f"but prepared {len(self._batched_inputs)} prompts"
+                    )
                 outputs = self._llm.chat(
-                    conversations, sampling_params=sampling_params
+                    conversations,
+                    sampling_params=sampling_params,
+                    **generate_kwargs,
                 )  # type: ignore[attr-defined]
             else:
                 outputs = self._llm.generate(

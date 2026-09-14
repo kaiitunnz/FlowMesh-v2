@@ -1,8 +1,8 @@
 """A self-contained run of a resolved contract generates from its conversations.
 
-Both embodiments of a leaf have to issue one request. A replica applies the model's chat
-template to the conversation it is sent, so a local generation that fed the raw prompt
-straight to the engine was running a different request from the same declaration.
+Both embodiments of a leaf issue one request. A replica has the engine apply the model's
+chat template to the conversation it is sent, so a local generation renders the same
+conversation the same way, exactly once.
 """
 
 from pathlib import Path

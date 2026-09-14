@@ -434,6 +434,33 @@ def test_a_leaf_declaring_several_prompts_compiles_to_a_menu():
         InferenceEmbodimentKind.SELF_CONTAINED,
     }
     assert menu.candidate(menu.primary) is not None
+    # The number the claim's credit is sized from. A menu that lost it would admit the
+    # whole batch on one slot.
+    assert menu.batch_size == 3
+
+
+def test_a_leafs_dependency_carries_the_batch_its_claim_reserves_for():
+    template, _plan = _compile(
+        _local_eligible(data='{type: list, items: ["a", "b", "c"]}')
+    )
+    assert _inference_leaf(template).service_dependency.batch_size == 3
+
+
+def test_a_single_prompt_leafs_dependency_reserves_one():
+    template, _plan = _compile(_local_eligible())
+    assert _inference_leaf(template).service_dependency.batch_size == 1
+
+
+def test_an_embedding_leafs_dependency_reserves_one():
+    # An embedding request carries its whole input list, so it is one engine sequence.
+    template, _plan = _compile(
+        _resident_inference(
+            "{mode: resident}",
+            task_type="embedding",
+            data='{type: list, items: ["a", "b"]}',
+        )
+    )
+    assert _resident_leaf(template).service_dependency.batch_size == 1
 
 
 def test_a_resident_required_leaf_compiles_to_a_single_embodiment():

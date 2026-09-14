@@ -160,8 +160,11 @@ def test_outstanding_credit_counts_a_batch_at_its_full_weight():
 def test_a_feasible_batch_candidate_never_scores_negative_headroom():
     # Best-fit takes the minimum residual, so an over-committed replica would sort
     # first if feasibility and scoring disagreed about the credit.
-    report = _report(slots=4)
+    report = _report(slots=8)
     credit = default_credit(_BATCH_PROFILE)
-    for held in range(0, 2):
-        assert is_feasible(report, _BATCH_PROFILE, held_slots=held)
+    feasible = [
+        h for h in range(9) if is_feasible(report, _BATCH_PROFILE, held_slots=h)
+    ]
+    assert feasible == [0, 1, 2, 3, 4, 5]
+    for held in feasible:
         assert residual_after(report, held, credit) >= 0

@@ -19,6 +19,11 @@ def chat_body(request_payload: str | None, model: str) -> dict[str, Any]:
             parsed = json.loads(request_payload)
         except (json.JSONDecodeError, TypeError):
             parsed = None
+    if isinstance(parsed, list):
+        raise ValueError(
+            "a list payload carries several conversations; build its requests with "
+            "batch_chat_bodies"
+        )
     if isinstance(parsed, dict) and isinstance(parsed.get("messages"), list):
         return {**parsed, "model": model}
     if isinstance(parsed, dict):

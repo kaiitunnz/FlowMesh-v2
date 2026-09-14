@@ -96,7 +96,7 @@ def embodiment_menu(
         contract_fingerprint=_contract_fingerprint(spec, dependency, profile, request),
         primary=primary.alternative_id,
         candidates=(resident, local),
-        batch_size=len(request.prompts),
+        batch_size=dependency.batch_size,
     )
 
 
