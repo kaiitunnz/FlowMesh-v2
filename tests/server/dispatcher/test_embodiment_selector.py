@@ -92,12 +92,29 @@ class TestPrimarySelector:
         assert decision.alternative_id == primary
         assert decision.defer_reason is None
 
-    def test_an_unavailable_primary_defers_rather_than_switching(self) -> None:
+    def test_a_primary_the_deployment_rules_out_falls_through(self) -> None:
+        # A deployment serving no resident capacity never admits the resident primary,
+        # so waiting for it would only fail the task.
         decision = PrimaryEmbodimentSelector()(
             _menu(RESIDENT_ID), _snapshot(resident=False)
         )
+        assert decision.alternative_id == LOCAL_ID
+        assert decision.defer_reason is None
+
+    def test_a_momentarily_unplaceable_primary_defers_rather_than_switching(
+        self,
+    ) -> None:
+        # Resident capacity is served; no worker can carry the invocation right now.
+        decision = PrimaryEmbodimentSelector()(_menu(RESIDENT_ID), _snapshot(relays=0))
         assert decision.alternative_id is None
         assert decision.defer_reason == "resident_served_infeasible"
+
+    def test_it_defers_when_neither_embodiment_can_be_placed(self) -> None:
+        decision = PrimaryEmbodimentSelector()(
+            _menu(RESIDENT_ID), _snapshot(workers=0, resident=False)
+        )
+        assert decision.alternative_id is None
+        assert decision.defer_reason == "resident_served_unavailable"
 
     def test_it_defers_when_no_worker_satisfies_the_task(self) -> None:
         decision = PrimaryEmbodimentSelector()(_menu(LOCAL_ID), _snapshot(workers=0))

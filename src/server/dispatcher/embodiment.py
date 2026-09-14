@@ -95,12 +95,28 @@ def candidate_feasible(
     return snapshot.local_capable_workers > 0
 
 
-class PrimaryEmbodimentSelector:
-    """Runs the embodiment the submission declared primary, or defers.
+def candidate_unavailable(
+    candidate: InferenceEmbodimentCandidate, snapshot: EmbodimentSnapshot
+) -> bool:
+    """Whether the deployment's own configuration rules a candidate out entirely.
 
-    Deferring rather than switching keeps the declared behavior of a workflow stable:
-    an embodiment the author did not name is reached only through a selector a
-    deployment installs deliberately.
+    This is narrower than infeasibility: a fleet whose workers are momentarily busy
+    still admits the candidate once one frees up, but a deployment that serves no
+    resident capacity never admits a resident-served one, however long the task waits.
+    """
+    return (
+        candidate.kind is InferenceEmbodimentKind.RESIDENT_SERVED
+        and not snapshot.resident_capacity_enabled
+    )
+
+
+class PrimaryEmbodimentSelector:
+    """Runs the primary embodiment, falling through only when it is ruled out.
+
+    A primary the fleet cannot place right now defers, so a momentary shortage never
+    silently changes how a workflow runs. A primary the deployment rules out entirely
+    is a different case: waiting for it would fail the task on a deployment that was
+    never going to serve it, so the one remaining feasible embodiment runs instead.
     """
 
     name = "primary"
@@ -111,6 +127,16 @@ class PrimaryEmbodimentSelector:
         primary = menu.candidate(menu.primary)
         if primary is None:
             return EmbodimentDecision.defer("primary_embodiment_missing")
-        if not candidate_feasible(primary, snapshot):
+        if candidate_feasible(primary, snapshot):
+            return EmbodimentDecision.select(primary.alternative_id)
+        if not candidate_unavailable(primary, snapshot):
             return EmbodimentDecision.defer(f"{primary.kind.value}_infeasible")
-        return EmbodimentDecision.select(primary.alternative_id)
+        fallthrough = [
+            candidate
+            for candidate in menu.candidates
+            if candidate.alternative_id != primary.alternative_id
+            and candidate_feasible(candidate, snapshot)
+        ]
+        if len(fallthrough) != 1:
+            return EmbodimentDecision.defer(f"{primary.kind.value}_unavailable")
+        return EmbodimentDecision.select(fallthrough[0].alternative_id)

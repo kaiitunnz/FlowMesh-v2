@@ -40,12 +40,16 @@ class _ForcedSelector:
 
 
 async def _setup(
-    primary: str = "resident_served", **kwargs: Any
+    primary: str = "resident_served",
+    satisfying_ids: list[str] | None = None,
+    **kwargs: Any,
 ) -> tuple[CapturingDispatcher, TaskRuntime, str]:
     runtime = _runtime(FakeRegistry())
     _wfl, ids = await _register(runtime, LOCAL_ELIGIBLE.replace("PRIMARY", primary))
     dispatcher = make_capturing_dispatcher(
-        runtime=runtime, satisfying_ids=["wkr-1"], **kwargs
+        runtime=runtime,
+        satisfying_ids=["wkr-1"] if satisfying_ids is None else satisfying_ids,
+        **kwargs,
     )
     return dispatcher, runtime, ids["gen"]
 
@@ -70,9 +74,27 @@ async def test_the_primary_embodiment_is_bound_before_placement() -> None:
 
 
 @pytest.mark.anyio
-async def test_an_unplaceable_primary_defers_without_binding_anything() -> None:
-    # Resident capacity is off, so the declared resident primary cannot be placed.
+async def test_a_deployment_without_resident_capacity_runs_the_other_embodiment() -> (
+    None
+):
+    # The derived primary is resident-served and is config-agnostic; a deployment that
+    # serves no resident capacity runs the leaf locally rather than failing it.
     dispatcher, runtime, task_id = await _setup(resident_capacity_enabled=False)
+    assert _resolve(dispatcher, runtime, task_id) is True
+
+    resolved = runtime.resolved_embodiment(task_id)
+    assert resolved is not None
+    assert resolved.kind is InferenceEmbodimentKind.SELF_CONTAINED
+    assert runtime.service_episode_dispatch(task_id) is None
+    assert dispatcher.requeued == []
+
+
+@pytest.mark.anyio
+async def test_an_unplaceable_primary_defers_without_binding_anything() -> None:
+    # Resident capacity is served, but no worker can carry the invocation right now.
+    dispatcher, runtime, task_id = await _setup(
+        resident_capacity_enabled=True, satisfying_ids=[]
+    )
     assert _resolve(dispatcher, runtime, task_id) is False
 
     # It defers holding no worker: no embodiment bound, no local switch, no retry spent.
@@ -152,7 +174,7 @@ async def test_a_permanently_unplaceable_primary_fails_rather_than_hanging() -> 
     # A defer holds no worker, but it cannot hold forever: past the no-worker grace the
     # task reaches a terminal instead of requeueing for the life of the deployment.
     dispatcher, runtime, task_id = await _setup(
-        resident_capacity_enabled=False, grace_sec=0
+        resident_capacity_enabled=True, satisfying_ids=[], grace_sec=0
     )
     assert _resolve(dispatcher, runtime, task_id) is False
 
