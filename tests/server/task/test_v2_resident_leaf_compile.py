@@ -257,6 +257,26 @@ def test_an_undeclared_binding_that_is_unprovable_keeps_one_embodiment():
     assert all(n.embodiment_menu is None for n in plan.nodes)
 
 
+def test_a_leaf_whose_inference_settings_do_not_relay_keeps_one_embodiment():
+    # Guided decoding from a declared template is applied by a local generation and is
+    # not carried to a replica, so the two would produce structurally different output.
+    template, plan = _compile(
+        _undeclared_binding(inference='{templates: {answer: "{a}"}}')
+    )
+    leaf = _inference_leaf(template)
+    assert (
+        leaf.embodiment.eligibility
+        is InferenceEmbodimentEligibility.SELF_CONTAINED_REQUIRED
+    )
+    assert all(n.embodiment_menu is None for n in plan.nodes)
+
+
+def test_declared_sampling_still_admits_a_menu():
+    # Sampling IS carried, so declaring it must not cost the leaf its menu.
+    _template, plan = _compile(_undeclared_binding(inference="{max_tokens: 10}"))
+    assert any(n.embodiment_menu is not None for n in plan.nodes)
+
+
 def test_an_undeclared_mode_with_a_provable_contract_compiles_to_a_menu():
     # A binding that names a served model but no mode still declares one contract, so
     # it admits both embodiments; only an explicit mode pins a single one.

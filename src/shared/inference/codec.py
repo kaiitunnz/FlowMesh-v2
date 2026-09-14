@@ -80,6 +80,18 @@ class CanonicalInferenceRequest(BaseModel):
         }
 
 
+def unforwarded_inference_keys(spec: InferenceSpec) -> tuple[str, ...]:
+    """Declared inference settings a relayed request does not carry.
+
+    A local generation reads ``spec.inference`` for more than sampling — guided decoding
+    from a declared template, chat-template arguments — and those do not cross to a
+    replica. A leaf declaring one is not running one contract on both embodiments.
+    """
+    declared = spec.inference if isinstance(spec.inference, dict) else {}
+    forwarded = set(SAMPLING_DEFAULTS) | set(_OPTIONAL_SAMPLING_FIELDS)
+    return tuple(sorted(key for key in declared if key not in forwarded))
+
+
 def declared_sampling(inference: dict[str, Any]) -> dict[str, Any]:
     """The sampling a leaf declared, restricted to what a generation honours.
 

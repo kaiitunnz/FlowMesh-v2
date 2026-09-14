@@ -12,6 +12,7 @@ from shared.inference import (
     CanonicalInferenceRequest,
     CanonicalProjectionError,
     canonical_request,
+    unforwarded_inference_keys,
 )
 from shared.tasks.specs import (
     InferenceBackend,
@@ -122,6 +123,11 @@ def unproven_reason(
         return "a sharded or parallel split applies to one embodiment"
     if spec.postprocess is not None:
         return "postprocessing applies to one embodiment"
+    if unforwarded := unforwarded_inference_keys(spec):
+        return (
+            f"spec.inference declares {', '.join(unforwarded)}, which a local "
+            "generation applies and a relayed request does not carry"
+        )
     try:
         canonical_request(spec)
     except CanonicalProjectionError as exc:
