@@ -24,7 +24,7 @@ import contextlib
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlsplit
 
 import httpx
@@ -158,9 +158,7 @@ class HttpEngineDelivery:
             # The conversations of a batch are issued together and concurrently: each is
             # its own engine request, so the engine's continuous batching combines them
             # as it does requests from any other source.
-            responses = await asyncio.gather(
-                *(self._post(client, f"{base}{path}", body, headers) for body in bodies)
-            )
+            responses = await self._post_all(client, f"{base}{path}", bodies, headers)
         if embedding:
             content = json.dumps(responses[0]["data"])
         elif batch is not None:
@@ -177,6 +175,29 @@ class HttpEngineDelivery:
             return None
 
         return EngineResponse(chunks=chunks(), aclose=aclose)
+
+    @classmethod
+    async def _post_all(
+        cls,
+        client: httpx.AsyncClient,
+        url: str,
+        bodies: list[dict[str, Any]],
+        headers: dict[str, str],
+    ) -> list[dict[str, Any]]:
+        """Issue every conversation concurrently and settle them together.
+
+        The invocation carrying them settles whole, so one refused conversation fails it
+        rather than leaving the rest to be abandoned mid-flight. Results keep the order
+        the conversations were declared in, whatever order the engine finishes them.
+        """
+        settled = await asyncio.gather(
+            *(cls._post(client, url, body, headers) for body in bodies),
+            return_exceptions=True,
+        )
+        for outcome in settled:
+            if isinstance(outcome, BaseException):
+                raise outcome
+        return cast(list[dict[str, Any]], settled)
 
     @staticmethod
     async def _post(

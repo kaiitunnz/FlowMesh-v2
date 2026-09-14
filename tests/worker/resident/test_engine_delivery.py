@@ -26,6 +26,10 @@ from worker.resident.engine import (
     unload_adapter,
 )
 
+# The conversation a stand-in engine refuses, so a test can fail one member of a batch
+# without depending on which request the engine happens to serve first.
+_REFUSED = "refuse-me"
+
 
 class _Handler(BaseHTTPRequestHandler):
     server: "_Server"
@@ -119,6 +123,9 @@ class _Handler(BaseHTTPRequestHandler):
             content = "hi there"
             if self.server.echo_chat:
                 content = str(body["messages"][-1]["content"])
+            if content == _REFUSED:
+                self._reply(500, "application/json", b'{"error":"refused"}')
+                return
             payload = {
                 "choices": [{"message": {"role": "assistant", "content": content}}]
             }
@@ -453,3 +460,14 @@ def test_embedding_interface_posts_embeddings_and_streams_vectors() -> None:
     vectors = json.loads(content)
     assert [v["index"] for v in vectors] == [0, 1]
     assert vectors[0]["embedding"] == [0.0]
+
+
+def test_one_refused_conversation_fails_the_whole_batch() -> None:
+    # The invocation carrying a batch settles whole, so a member the engine refuses
+    # fails it rather than settling a partial result under the same credit.
+    with _running() as server:
+        server.echo_chat = True
+        base = f"http://127.0.0.1:{server.server_address[1]}/v1"
+        endpoint = ReplicaEndpoint(base_url=base, model="m", interface="chat")
+        with pytest.raises(httpx.HTTPStatusError):
+            asyncio.run(_drain(endpoint, _batch_payload("a", _REFUSED, "c")))
