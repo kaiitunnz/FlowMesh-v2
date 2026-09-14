@@ -32,10 +32,8 @@ def chat_body(request_payload: str | None, model: str) -> dict[str, Any]:
     return {"model": model, "messages": [{"role": "user", "content": prompt}]}
 
 
-def batch_chat_bodies(
-    request_payload: str | None, model: str
-) -> list[dict[str, Any]] | None:
-    """The chat requests a batch boundary carries, or ``None`` if it carries one.
+def _batch_requests(request_payload: str | None) -> list[dict[str, Any]] | None:
+    """The conversations a batch boundary carries, or ``None`` if it carries one.
 
     A leaf declaring several prompts sends its conversations as a list, because a chat
     request serves exactly one conversation. Any other payload reads as a single request
@@ -54,7 +52,20 @@ def batch_chat_bodies(
         for body in parsed
     ):
         return None
-    return [{**body, "model": model} for body in parsed]
+    return parsed
+
+
+def is_batch_request(request_payload: str | None) -> bool:
+    """Whether a boundary payload carries several conversations."""
+    return _batch_requests(request_payload) is not None
+
+
+def batch_chat_bodies(
+    request_payload: str | None, model: str
+) -> list[dict[str, Any]] | None:
+    """The chat requests a batch boundary issues, with the replica's model pinned."""
+    requests = _batch_requests(request_payload)
+    return None if requests is None else [{**body, "model": model} for body in requests]
 
 
 def embeddings_body(request_payload: str | None, model: str) -> dict[str, Any]:
