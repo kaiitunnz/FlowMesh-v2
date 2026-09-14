@@ -84,6 +84,15 @@ def test_the_declared_sampling_is_carried_to_the_replica() -> None:
     assert body["messages"] == [{"role": "user", "content": "hello there"}]
 
 
+def test_a_leaf_declaring_a_literal_prompt_list_is_served(tmp_path: Path) -> None:
+    # The shape a local generation reads. A leaf that admits both embodiments declares
+    # its prompt once, so the replica has to read the same declaration.
+    ex, store = _executor()
+    ex.run(_msg({"type": "list", "items": ["hello there"]}), tmp_path)
+
+    assert _body(store) == {"messages": [{"role": "user", "content": "hello there"}]}
+
+
 def test_inputs_and_executor_settings_are_not_sent_as_engine_params() -> None:
     ex, store = _executor()
     ex.run(

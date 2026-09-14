@@ -44,6 +44,10 @@ def _call_correlation(task_id: str) -> str:
 
 
 _PROMPT_FIELDS = ("prompt", "input", "content", "text")
+# A leaf declares its prompts either as a scalar field or as a literal list. Both are
+# read here, so a leaf whose inputs a local generation reads declares them once and a
+# replica serves the same request.
+_LIST_PROMPT_FIELDS = ("prompts", "items")
 
 _EMBEDDING_INTERFACE = "embedding"
 _EMBEDDING_INPUT_FIELDS = ("input", "items", "inputs", "texts", "prompts")
@@ -153,8 +157,9 @@ def _resident_request_payload(task: ExecutorTask, interface: str) -> str:
         for field in _PROMPT_FIELDS:
             if isinstance(value := source.get(field), str) and value:
                 return _chat_payload(params, value)
-        if isinstance(prompts := source.get("prompts"), list) and prompts:
-            return _chat_payload(params, str(prompts[0]))
+        for field in _LIST_PROMPT_FIELDS:
+            if isinstance(prompts := source.get(field), list) and prompts:
+                return _chat_payload(params, str(prompts[0]))
 
     raise ExecutionError(
         f"resident {interface} leaf {task.task_id} declares no prompt or messages "
