@@ -173,26 +173,25 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   recovery are the same whether or not one runs. The fusion refinement applies to the
   episode-cut lowering; family and residency refinement applies to both lowerings.
   Enable with `ORCHESTRATOR_POLICY_SURFACE_ENABLED=true`.
-- **Inference-embodiment menus.** An inference leaf that declares `local_eligible`
-  lowers to one physical node carrying the finite set of embodiments its pinned model
-  contract admits — a resident-served candidate and a self-contained one — each with its
-  own `EpisodeSpec` and either a local executor/resource envelope or a
-  `ServiceFamilyRequirement` and a *conditional* `ResidencyIntent`. The compiler proves
-  the candidates run one declared contract through a canonical request/result codec
-  before emitting either; an unproven leaf keeps the single embodiment its binding names.
-  A present `service` binding is resident-required and an absent one
-  self-contained-required, each a single-embodiment path. An unresolved menu registers no residency
-  demand, mints no claim, and is never read as one episode. At dispatch a scheduler-owned
+- **Inference-embodiment menus.** An inference leaf declares one model contract; whether
+  resident capacity or a local executor serves it is the fabric's to decide. Such a leaf
+  lowers to one physical node carrying the embodiments that contract admits — a
+  resident-served candidate and a self-contained one — each with its own `EpisodeSpec`
+  and either a local executor and resource envelope or a `ServiceFamilyRequirement` and a
+  *conditional* `ResidencyIntent`. The compiler emits a menu only for leaves it proves run
+  one declared contract; any other leaf keeps the embodiment its source names, and
+  `mode: resident` pins resident serving. An unresolved menu registers no residency demand,
+  mints no claim, and is never read as one episode. At dispatch a scheduler-owned
   `EmbodimentSelector` reads a read-only feasibility snapshot and returns a selection or a
-  defer; it ranks only compiler-proven candidates and holds no capacity authority — it
-  names no worker or replica, reserves nothing, and mints no claim or route. The default
-  selector runs the declared primary and defers rather than switching. The selection is
-  recorded in the ledger before the `WorkerTaskMessage` publishes, rides that message, and
-  lands on the attempt; routing, placement, and the result projection consume it rather
-  than re-deriving residence from the leaf's binding — a resident-served dispatch is
-  placed without the accelerator its leaf declares for the other embodiment. A resident embodiment is pinned once its invocation
-  exists and reconciles through that invocation instead of falling back to inline
-  execution. See [`EXECUTORS.md`](EXECUTORS.md).
+  defer. It holds no capacity authority: it names no worker or replica, reserves nothing,
+  and mints no claim or route. The default selector runs the primary, defers while the
+  fleet cannot place it, and falls through to the other embodiment only where the
+  deployment rules the primary out entirely. The selection records to the ledger before
+  the task is published and lands on the attempt; the dispatcher materializes the task the
+  choice implies, so a resident-served dispatch is placed without the accelerator the
+  self-contained embodiment needs and the worker runs an ordinary typed task. A resident
+  embodiment is pinned once its invocation exists and reconciles through that invocation
+  rather than running the model locally. See [`EXECUTORS.md`](EXECUTORS.md).
 - **Live-feasibility handoff.** A ready episode carries the lowerer's declared
   alternative; a feasibility check lets the scheduler defer an infeasible alternative,
   holding no worker, rather than dispatching it. It resolves no resident capacity.
