@@ -29,7 +29,10 @@ def _resident_leaf(template) -> LeafOperator:
     )
 
 
-def _resident_inference(service_body: str, task_type: str = "inference") -> str:
+def _resident_inference(
+    service_body: str, task_type: str = "inference", data: str | None = None
+) -> str:
+    data_line = f"\n          data: {data}" if data else ""
     return f"""
 apiVersion: flowmesh/v2
 kind: Workflow
@@ -41,7 +44,7 @@ spec:
       - name: a
         spec:
           taskType: {task_type}
-          model: {{source: {{identifier: Qwen/Qwen3-4B}}}}
+          model: {{source: {{identifier: Qwen/Qwen3-4B}}}}{data_line}
           service: {service_body}
 """
 
@@ -439,6 +442,49 @@ def test_a_resident_required_leaf_compiles_to_a_single_embodiment():
     resident = [n for n in plan.nodes if n.service_family_requirement is not None]
     assert resident[0].residency_intent.required is True
     assert resident[0].residency_intent.conditional is False
+
+
+def test_a_pinned_resident_leaf_declaring_several_prompts_is_rejected():
+    # Without a menu a replica serves one conversation per request, so a batch that
+    # would silently lose every prompt but the first fails instead.
+    with pytest.raises(CompileError, match="runs one prompt"):
+        _compile(
+            _resident_inference(
+                "{mode: resident}", data='{type: list, items: ["a", "b"]}'
+            )
+        )
+
+
+def test_an_unprovable_resident_leaf_declaring_several_prompts_is_rejected():
+    # The same holds for a leaf that falls back to resident because its embodiments
+    # are not provably equivalent: batch serving is the menu's, not the fallback's.
+    with pytest.raises(CompileError, match="runs one prompt"):
+        _compile(
+            _resident_inference(
+                "{isolation: tenant-a}",
+                data='{type: list, items: ["a", "b"]}',
+            )
+        )
+
+
+def test_a_pinned_resident_leaf_declaring_one_prompt_still_compiles():
+    _template, plan = _compile(
+        _resident_inference("{mode: resident}", data='{type: list, items: ["a"]}')
+    )
+    assert all(n.embodiment_menu is None for n in plan.nodes)
+
+
+def test_a_resident_embedding_leaf_embeds_several_inputs():
+    # An embedding request carries its whole input list, so it is not a batch of
+    # conversations and the rejection does not apply to it.
+    _template, plan = _compile(
+        _resident_inference(
+            "{mode: resident}",
+            task_type="embedding",
+            data='{type: list, items: ["a", "b"]}',
+        )
+    )
+    assert any(n.service_family_requirement is not None for n in plan.nodes)
 
 
 def test_a_local_eligible_embedding_leaf_is_rejected():

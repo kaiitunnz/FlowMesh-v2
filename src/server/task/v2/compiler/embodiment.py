@@ -12,6 +12,7 @@ from shared.inference import (
     CanonicalInferenceRequest,
     CanonicalProjectionError,
     canonical_request,
+    declares_multiple_prompts,
     unforwarded_inference_keys,
 )
 from shared.tasks.specs import (
@@ -19,10 +20,15 @@ from shared.tasks.specs import (
     InferenceEmbodimentKind,
     InferenceSpecStrict,
     InferenceSpecTemplate,
+    TaskSpecBase,
 )
 
 from ...parser import ParsedTask
-from ..representations.operators import LeafProfile, ServiceDependency
+from ..representations.operators import (
+    InferenceEmbodimentEligibility,
+    LeafProfile,
+    ServiceDependency,
+)
 from ..representations.plan import (
     EpisodeBoundaryKind,
     EpisodeSpec,
@@ -143,19 +149,46 @@ def reject_unproven(
         raise _unproven(task, reason)
 
 
+def reject_resident_batch(
+    task: ParsedTask, spec: TaskSpecBase, eligibility: InferenceEmbodimentEligibility
+) -> None:
+    """Fail a leaf served from a replica without a menu that declares several prompts.
+
+    A replica serves one conversation per chat request, so several prompts are served
+    by the batch a menu compiles and not otherwise. Failing here reports what the leaf
+    declares rather than serving its first prompt and dropping the rest. An embedding
+    leaf embeds a list of inputs in one request and is unaffected.
+    """
+    if eligibility is not InferenceEmbodimentEligibility.RESIDENT_REQUIRED:
+        return
+    if not isinstance(spec, (InferenceSpecStrict, InferenceSpecTemplate)):
+        return
+    if not declares_multiple_prompts(spec):
+        return
+    raise _reject(
+        task,
+        "embodiment.resident-batch-unserved",
+        "a resident-served inference leaf runs one prompt; declare one prompt, or "
+        "leave the binding mode undeclared so the leaf admits both embodiments",
+    )
+
+
 def _unproven(task: ParsedTask, reason: str) -> Exception:
+    return _reject(
+        task,
+        "embodiment.not-contract-equivalent",
+        f"a local_eligible inference leaf admits both embodiments only when they run "
+        f"one proven contract; here {reason}",
+    )
+
+
+def _reject(task: ParsedTask, code: str, message: str) -> Exception:
     source_kind, source_id = (
         ("graph_node", task.graph_node_name)
         if task.graph_node_name
         else ("stage", task.local_name) if task.local_name else ("legacy", task.task_id)
     )
-    return compile_error(
-        "embodiment.not-contract-equivalent",
-        f"a local_eligible inference leaf admits both embodiments only when they run "
-        f"one proven contract; here {reason}",
-        source_id or task.task_id,
-        source_kind,
-    )
+    return compile_error(code, message, source_id or task.task_id, source_kind)
 
 
 def _declared_gpu_count(

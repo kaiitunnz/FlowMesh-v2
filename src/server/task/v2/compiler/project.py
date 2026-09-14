@@ -72,7 +72,12 @@ from .bindings import (
     leaf_profile,
 )
 from .diagnostics import compile_error
-from .embodiment import embodiment_menu, reject_unproven, unproven_reason
+from .embodiment import (
+    embodiment_menu,
+    reject_resident_batch,
+    reject_unproven,
+    unproven_reason,
+)
 
 _SERVICE_BACKED_SPECS = (
     InferenceSpecStrict,
@@ -193,12 +198,14 @@ def _leaf_embodiment(task: ParsedTask) -> InferenceEmbodimentBinding | None:
         else InferenceEmbodimentEligibility.SELF_CONTAINED_REQUIRED
     )
     if binding is not None and binding.mode is ServiceBindingMode.RESIDENT:
+        reject_resident_batch(task, spec, named)
         return InferenceEmbodimentBinding(eligibility=named)
     if not isinstance(spec, (InferenceSpecStrict, InferenceSpecTemplate)):
         return InferenceEmbodimentBinding(eligibility=named)
     if binding is not None and binding.mode is ServiceBindingMode.LOCAL_ELIGIBLE:
         reject_unproven(task, spec)
     elif unproven_reason(spec) is not None:
+        reject_resident_batch(task, spec, named)
         return InferenceEmbodimentBinding(eligibility=named)
     return InferenceEmbodimentBinding(
         eligibility=InferenceEmbodimentEligibility.LOCAL_ELIGIBLE,

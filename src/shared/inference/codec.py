@@ -86,6 +86,30 @@ class CanonicalInferenceRequest(BaseModel):
         )
 
 
+# The fields a chat leaf names a literal list of prompts under. A ``messages`` array is
+# one multi-turn conversation rather than several prompts, so it is not one of them.
+_LIST_PROMPT_FIELDS = ("prompts", "items")
+
+
+def declares_multiple_prompts(spec: InferenceSpec) -> bool:
+    """Whether a leaf declares more than one prompt.
+
+    A chat request serves exactly one conversation, so a leaf declaring several prompts
+    needs each of them issued as its own request.
+    """
+    sources = (
+        spec.data if isinstance(spec.data, dict) else {},
+        spec.inference if isinstance(spec.inference, dict) else {},
+    )
+    for source in sources:
+        if isinstance(source.get("messages"), list):
+            return False
+        for field in _LIST_PROMPT_FIELDS:
+            if isinstance(prompts := source.get(field), list):
+                return len(prompts) > 1
+    return False
+
+
 def unforwarded_inference_keys(spec: InferenceSpec) -> tuple[str, ...]:
     """Declared inference settings a relayed request does not carry.
 
