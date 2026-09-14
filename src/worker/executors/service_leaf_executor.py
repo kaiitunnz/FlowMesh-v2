@@ -22,7 +22,7 @@ from shared.harness import (
     OutcomeKind,
     ServiceLeafEpisodeDispatch,
 )
-from shared.inference import declared_sampling
+from shared.inference import CanonicalInferenceRequest, declared_sampling
 from shared.tasks.specs import EmbeddingSpecStrict, InferenceSpecStrict
 from shared.tasks.task_type import TaskType
 from shared.tools.model.schema import MODEL_INTERFACE
@@ -42,6 +42,19 @@ _CALL_CORRELATION_PREFIX = "resident-model/"
 
 def _call_correlation(task_id: str) -> str:
     return f"{_CALL_CORRELATION_PREFIX}{task_id}"
+
+
+def _declared_request_payload(task: ExecutorTask) -> str | None:
+    """The engine request a resolved contract names, or None to build one from the spec.
+
+    A leaf whose contract the fabric resolves is handed the request every embodiment of
+    it issues, including the sampling its author left undeclared. The executor reads a
+    request, never an embodiment.
+    """
+    if task.declared_contract is None:
+        return None
+    contract = CanonicalInferenceRequest.model_validate_json(task.declared_contract)
+    return json.dumps(contract.chat_body())
 
 
 _PROMPT_FIELDS = ("prompt", "input", "content", "text")
@@ -86,7 +99,7 @@ class ServiceLeafExecutor(Executor):
         dispatch: ServiceLeafEpisodeDispatch,
         correlation: str,
     ) -> EpisodeStepResult:
-        payload = dispatch.declared_request or _resident_request_payload(
+        payload = _declared_request_payload(task) or _resident_request_payload(
             task, dispatch.interface
         )
         request = BoundaryRequest(

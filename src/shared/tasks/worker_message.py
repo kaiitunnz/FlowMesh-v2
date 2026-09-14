@@ -50,6 +50,14 @@ class WorkerTaskMessage(BaseModel):
         default=None,
         description="Resident service-leaf episode context for a run-to-yield step.",
     )
+    declared_contract: str | None = Field(
+        default=None,
+        description=(
+            "Canonical inference request for a leaf whose contract the fabric resolves "
+            "rather than the executor: the request to issue and the result shape to "
+            "report."
+        ),
+    )
 
     @property
     def spec(self) -> TaskSpecStrict:

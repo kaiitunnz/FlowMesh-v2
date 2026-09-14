@@ -232,11 +232,6 @@ class ServiceLeafEpisodeDispatch(BaseModel):
 
     interface: str
     delivered_outcomes: tuple[DeliveredOutcome, ...] = ()
-    # The engine request to issue, for a leaf whose declared contract the fabric
-    # resolves rather than the executor: it is built once from the leaf's spec so that
-    # every embodiment of that leaf issues the same one. A leaf that admits a single
-    # embodiment carries none and builds its request from its own spec.
-    declared_request: str | None = None
 
 
 class HarnessResultKind(StrEnum):

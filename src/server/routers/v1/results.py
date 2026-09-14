@@ -102,7 +102,6 @@ async def ingest_result(
     if record:
         expected_artifacts = record.task.spec.get_artifacts()
     sync_manifest(path.parent, task_id, expected_artifacts)
-    runtime.project_menu_result(task_id)
     runtime.retry_deferred_fanout(task_id)
     pending_children = event_monitor.pop_pending_clones(task_id)
     if pending_children:

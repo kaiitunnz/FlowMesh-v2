@@ -12,6 +12,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from shared.harness import BoundaryEventKind, HarnessResultKind
+from shared.inference import CanonicalInferenceRequest
 from shared.schemas.result import BaseExecutorResult
 from shared.tasks.task_type import TaskType
 from shared.tools.model.schema import MODEL_INTERFACE
@@ -84,14 +85,20 @@ def test_the_declared_sampling_is_carried_to_the_replica() -> None:
     assert body["messages"] == [{"role": "user", "content": "hello there"}]
 
 
-def test_a_handed_request_is_issued_unchanged(tmp_path: Path) -> None:
-    # The fabric builds one request for a leaf whose embodiment it resolves, so the
+def test_a_handed_contract_is_issued_unchanged(tmp_path: Path) -> None:
+    # The fabric builds one request for a leaf whose contract it resolves, so the
     # executor issues that rather than deriving a second one from the spec.
     ex, store = _executor()
-    handed = '{"messages": [{"role": "user", "content": "hi"}], "max_tokens": 512}'
-    ex.run(_msg({"prompt": "ignored"}, declared_request=handed), tmp_path)
+    msg = _msg({"prompt": "ignored"})
+    msg.declared_contract = CanonicalInferenceRequest(
+        model="m", prompt="hi", params={"max_tokens": 512}
+    ).model_dump_json()
+    ex.run(msg, tmp_path)
 
-    assert _body(store) == json.loads(handed)
+    assert _body(store) == {
+        "max_tokens": 512,
+        "messages": [{"role": "user", "content": "hi"}],
+    }
 
 
 def test_a_leaf_declaring_a_literal_prompt_list_is_served(tmp_path: Path) -> None:

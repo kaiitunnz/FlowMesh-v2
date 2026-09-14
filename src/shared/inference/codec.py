@@ -161,6 +161,22 @@ def canonical_request(spec: InferenceSpec) -> CanonicalInferenceRequest:
     )
 
 
+def generated_output(payload: dict[str, Any]) -> str | None:
+    """The generated text, read the same way from either embodiment's own result.
+
+    A local generation reports items and a relayed invocation reports the episode's
+    terminal value. Reading the already declared shape first is what makes a second pass
+    over a projected result reproduce it.
+    """
+    items = payload.get("items")
+    if isinstance(items, list) and items:
+        first = items[0]
+        if isinstance(first, dict) and isinstance(output := first.get("output"), str):
+            return output
+    value = payload.get("value")
+    return value if isinstance(value, str) else None
+
+
 def canonical_result(
     request: CanonicalInferenceRequest, output: str
 ) -> InferenceResult:

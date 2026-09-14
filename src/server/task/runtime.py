@@ -21,6 +21,7 @@ from shared.harness import (
     InputBindingMember,
     ServiceLeafEpisodeDispatch,
 )
+from shared.inference import CanonicalProjectionError, canonical_request
 from shared.outcome import OutcomeManifest
 from shared.private_state import (
     OwnerFence,
@@ -42,7 +43,12 @@ from shared.sandbox import (
 from shared.schemas.command import InterruptMessage, MediatedOpMessage
 from shared.schemas.result import ResultEnvelope, result_file_path
 from shared.tasks import TaskEnvelopeTemplate
-from shared.tasks.specs import InferenceEmbodimentKind, ModelBindingMode
+from shared.tasks.specs import (
+    InferenceEmbodimentKind,
+    InferenceSpecStrict,
+    InferenceSpecTemplate,
+    ModelBindingMode,
+)
 from shared.tools.contract import AgentModelTurnProposal, MediatedOperationOutcome
 from shared.tools.facade import FacadeDescriptor, FacadeResolution
 from shared.utils import new_workflow_id
@@ -78,8 +84,6 @@ from ..registries.worker import Worker, WorkerRegistry
 from ..registries.workflow import PersistedTask, WorkflowRegistry, WorkflowSched
 from ..services.model_secret_vault import ModelSecretVault
 from ..utils.time import parse_iso_ts
-from .inference_projection import menu_request_payload
-from .inference_projection import project_menu_result as project_declared_result
 from .models import (
     TERMINAL_TASK_STATUSES,
     TaskInfo,
@@ -1945,7 +1949,6 @@ class TaskRuntime:
             dependency = engine.service_dependency(task_id)
             if dependency is None or engine.agent_operator(task_id) is not None:
                 return None
-            declared_request: str | None = None
             if engine.embodiment_menu(task_id) is not None:
                 resolved = self._resolved_embodiment_locked(engine, task_id)
                 if (
@@ -1953,15 +1956,10 @@ class TaskRuntime:
                     or resolved.kind is not InferenceEmbodimentKind.RESIDENT_SERVED
                 ):
                     return None
-                # Both embodiments of this leaf run one request, so it is built here
-                # from the leaf's own declaration rather than separately by each.
-                if record is not None:
-                    declared_request = menu_request_payload(record.task.spec)
             _capsule, outcomes = engine.episode_context(task_id)
             return ServiceLeafEpisodeDispatch(
                 interface=dependency.interface.value,
                 delivered_outcomes=outcomes,
-                declared_request=declared_request,
             )
 
     def _resolved_embodiment_locked(
@@ -2135,24 +2133,32 @@ class TaskRuntime:
             if self._apply_advance_locked(record.workflow_id, advance):
                 self._cv.notify_all()
 
-    def project_menu_result(self, task_id: str) -> bool:
-        """Store a menu leaf's result in the shape its contract declares.
+    def declared_contract(self, task_id: str) -> str | None:
+        """The canonical request a menu leaf runs, for the worker to issue and report.
 
-        A task's result reaches this node on its own channel, unordered against the
-        event that settles the task, so this runs from both and projects on whichever
-        arrives last. It reads no selection: both embodiments of a leaf project to the
-        same declared shape, so the result does not depend on which one ran.
+        A leaf that admits more than one embodiment resolves its contract here rather
+        than in the executor, so every embodiment issues one engine request and stores
+        one result shape. It names no embodiment: the worker reads a declared contract
+        and never learns which one it is running.
         """
         with self._lock:
             record = self._tasks.get(task_id)
             engine = self._engines.get(record.workflow_id) if record else None
             if record is None or engine is None:
-                return False
+                return None
             if engine.embodiment_menu(task_id) is None:
-                return False
-            # Held across the rewrite, as the settlement path holds it: two arrivals for
-            # one task then serialize instead of racing to write the same file.
-            return project_declared_result(self._results_dir, task_id, record.task.spec)
+                return None
+            spec = record.task.spec
+            if not isinstance(spec, (InferenceSpecStrict, InferenceSpecTemplate)):
+                return None
+            try:
+                return canonical_request(spec).model_dump_json()
+            except CanonicalProjectionError:
+                self._logger.warning(
+                    "[fabric] a menu leaf's request is no longer projectable: %s",
+                    task_id,
+                )
+                return None
 
     def resolve_v2_output(
         self, workflow_id: str, output_id: str
@@ -3004,12 +3010,6 @@ class TaskRuntime:
 
             notify = bool(ready_children)
             if record is not None and (engine := self._engines.get(record.workflow_id)):
-                # Before anything reads the result: a fan-out over a menu leaf spreads
-                # its declared items, not the shape one embodiment happened to produce.
-                if engine.embodiment_menu(task_id) is not None:
-                    project_declared_result(
-                        self._results_dir, task_id, record.task.spec
-                    )
                 advance = engine.on_succeeded(task_id, empty=empty)
                 advance.extend(
                     self._fan_out_children_locked(record.workflow_id, engine, task_id)
