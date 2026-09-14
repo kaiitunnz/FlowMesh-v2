@@ -20,11 +20,18 @@ from worker.executors.base_executor import Executor
 from worker.executors.episode_support import EpisodeStepResult
 from worker.runner import Runner
 
+_MODEL = "Qwen/Qwen3-4B-Instruct-2507"
+_PARAMS = {"max_tokens": 512, "temperature": 0.7}
+
 _CONTRACT = CanonicalInferenceRequest(
-    model="Qwen/Qwen3-4B-Instruct-2507",
-    prompt="name one planet",
-    params={"max_tokens": 512, "temperature": 0.7},
+    model=_MODEL, prompts=("name one planet",), params=_PARAMS
 )
+
+_BATCH_PROMPTS = ("name one planet", "name one ocean", "name one river")
+_BATCH_CONTRACT = CanonicalInferenceRequest(
+    model=_MODEL, prompts=_BATCH_PROMPTS, params=_PARAMS
+)
+_BATCH_OUTPUTS = ("Mars", "Pacific", "Nile")
 
 
 class _FixedExecutor(Executor):
@@ -69,35 +76,44 @@ def _stored(tmp_path: Path, result: BaseExecutorResult, contract: str | None) ->
     return json.loads(path.read_text(encoding="utf-8"))["result"]
 
 
-def _native_local() -> InferenceResult:
+def _native_local(
+    prompts: tuple[str, ...] = ("name one planet",),
+    outputs: tuple[str, ...] = ("Mars",),
+) -> InferenceResult:
     """What a local generation reports: its own items, plus what only it can report."""
     return InferenceResult(
-        model="Qwen/Qwen3-4B-Instruct-2507",
+        model=_MODEL,
         items=[
             InferenceItem(
-                index=0,
-                prompt="name one planet",
-                output="Mars",
+                index=index,
+                prompt=prompt,
+                output=output,
                 finish_reason="stop",
                 metadata={"engine": "vllm"},
             )
+            for index, (prompt, output) in enumerate(zip(prompts, outputs))
         ],
         usage=GenerationUsage(
             prompt_tokens=4,
             completion_tokens=1,
             total_tokens=5,
-            num_requests=1,
+            num_requests=len(prompts),
             latency_sec=0.2,
         ),
     )
 
 
-def _native_resident() -> EpisodeStepResult:
+def _native_resident(value: str = "Mars") -> EpisodeStepResult:
     """What a relayed invocation reports: the episode's terminal value."""
     return EpisodeStepResult(
-        harness_result=HarnessResult(kind=HarnessResultKind.COMPLETION, value="Mars"),
-        value="Mars",
+        harness_result=HarnessResult(kind=HarnessResultKind.COMPLETION, value=value),
+        value=value,
     )
+
+
+def _native_resident_batch() -> EpisodeStepResult:
+    """What a relayed batch invocation reports: one completion per declared prompt."""
+    return _native_resident(json.dumps(list(_BATCH_OUTPUTS)))
 
 
 def test_a_local_generation_stores_the_declared_shape(tmp_path: Path) -> None:
@@ -124,6 +140,40 @@ def test_a_relayed_invocation_stores_the_same_shape(tmp_path: Path) -> None:
     resident.pop("_artifacts", None)
 
     assert local == resident
+
+
+def test_a_batch_leaf_stores_one_item_per_declared_prompt(tmp_path: Path) -> None:
+    stored = _stored(
+        tmp_path,
+        _native_local(_BATCH_PROMPTS, _BATCH_OUTPUTS),
+        _BATCH_CONTRACT.model_dump_json(),
+    )
+
+    assert [(i["index"], i["prompt"], i["output"]) for i in stored["items"]] == [
+        (0, "name one planet", "Mars"),
+        (1, "name one ocean", "Pacific"),
+        (2, "name one river", "Nile"),
+    ]
+
+
+def test_a_relayed_batch_stores_the_same_shape(tmp_path: Path) -> None:
+    # One resident invocation carries the whole batch, so its terminal value holds every
+    # completion — and a reader still cannot tell which embodiment ran the leaf.
+    local = _stored(
+        tmp_path / "local",
+        _native_local(_BATCH_PROMPTS, _BATCH_OUTPUTS),
+        _BATCH_CONTRACT.model_dump_json(),
+    )
+    resident = _stored(
+        tmp_path / "resident",
+        _native_resident_batch(),
+        _BATCH_CONTRACT.model_dump_json(),
+    )
+    local.pop("_artifacts", None)
+    resident.pop("_artifacts", None)
+
+    assert local == resident
+    assert len(resident["items"]) == len(_BATCH_PROMPTS)
 
 
 def test_a_leaf_with_no_declared_contract_stores_its_own_result(

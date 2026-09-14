@@ -7,7 +7,9 @@ The projection is deliberately narrow: it accepts only the spec shape both embod
 already read identically, and rejects anything whose equivalence is unproven.
 """
 
-from typing import Any
+import json
+from collections.abc import Sequence
+from typing import Any, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -64,20 +66,24 @@ class CanonicalInferenceRequest(BaseModel):
     ``params`` is the effective sampling request, not only what the leaf declared: a
     value the author left out still has to be the same on both sides for the two runs
     to be one contract.
+
+    A contract carries the leaf's prompts in declared order. Each is its own
+    conversation: the contract never merges them, because a chat request serves one
+    conversation and the engine batches whole requests itself.
     """
 
     model_config = ConfigDict(frozen=True)
 
     model: str
-    prompt: str
+    prompts: tuple[str, ...]
     params: dict[str, Any] = Field(default_factory=dict)
 
-    def chat_body(self) -> dict[str, Any]:
-        """The engine request this contract issues, whichever embodiment runs it."""
-        return {
-            **self.params,
-            "messages": [{"role": "user", "content": self.prompt}],
-        }
+    def chat_bodies(self) -> tuple[dict[str, Any], ...]:
+        """The engine requests this contract issues, whichever embodiment runs it."""
+        return tuple(
+            {**self.params, "messages": [{"role": "user", "content": prompt}]}
+            for prompt in self.prompts
+        )
 
 
 def unforwarded_inference_keys(spec: InferenceSpec) -> tuple[str, ...]:
@@ -122,11 +128,10 @@ def canonical_sampling(spec: InferenceSpec) -> dict[str, Any]:
 def canonical_request(spec: InferenceSpec) -> CanonicalInferenceRequest:
     """Project a leaf's declared inputs into the request both embodiments run.
 
-    The accepted shape is a single literal prompt under ``spec.data.items``: a local
-    executor reads it as its one prompt and a resident invocation carries it as its one
-    user message. A dataset, an upstream expression, an image group, or more than one
-    prompt is rejected rather than projected, because the two embodiments do not read
-    those identically.
+    The accepted shape is literal prompts under ``spec.data.items``: a local executor
+    reads them as its prompts and a resident invocation carries one conversation per
+    prompt. A dataset, an upstream expression, or an image group is rejected rather
+    than projected, because the two embodiments do not read those identically.
     """
     model = (spec.model_name or "").strip()
     if not model:
@@ -144,48 +149,80 @@ def canonical_request(spec: InferenceSpec) -> CanonicalInferenceRequest:
         raise CanonicalProjectionError(
             "spec.data.items must be a non-empty literal list"
         )
-    if len(items) != 1:
+    if any(not isinstance(prompt, str) or not prompt.strip() for prompt in items):
         raise CanonicalProjectionError(
-            f"a projectable leaf declares exactly one prompt, not {len(items)}"
+            "spec.data.items must hold literal non-empty strings"
         )
-    prompt = items[0]
-    if not isinstance(prompt, str) or not prompt.strip():
-        raise CanonicalProjectionError("spec.data.items must hold one literal string")
     if any(data.get(key) is not None for key in ("expr", "node", "path", "s3_cfg")):
         raise CanonicalProjectionError(
-            "a projectable leaf resolves its prompt from literal items, not from an "
+            "a projectable leaf resolves its prompts from literal items, not from an "
             "upstream expression or an object store"
         )
     return CanonicalInferenceRequest(
-        model=model, prompt=prompt, params=canonical_sampling(spec)
+        model=model, prompts=tuple(items), params=canonical_sampling(spec)
     )
 
 
-def generated_output(payload: dict[str, Any]) -> str | None:
-    """The generated text, read the same way from either embodiment's own result.
+def generated_outputs(
+    payload: dict[str, Any], request: CanonicalInferenceRequest
+) -> list[str] | None:
+    """The generated texts, read the same way from either embodiment's own result.
 
     A local generation reports items and a relayed invocation reports the episode's
     terminal value. Reading the already declared shape first is what makes a second pass
     over a projected result reproduce it.
+
+    The contract's own prompt count decides how the terminal value reads, so a single
+    completion is always taken verbatim and never mistaken for a batch because the model
+    happened to generate a JSON array.
     """
     items = payload.get("items")
-    if isinstance(items, list) and items:
-        first = items[0]
-        if isinstance(first, dict) and isinstance(output := first.get("output"), str):
-            return output
+    if isinstance(items, list) and len(items) == len(request.prompts):
+        outputs = [
+            item.get("output") if isinstance(item, dict) else None for item in items
+        ]
+        if all(isinstance(output, str) for output in outputs):
+            return cast(list[str], outputs)
     value = payload.get("value")
-    return value if isinstance(value, str) else None
+    if not isinstance(value, str):
+        return None
+    if len(request.prompts) == 1:
+        return [value]
+    return _batch_value(value, len(request.prompts))
+
+
+def _batch_value(value: str, expected: int) -> list[str] | None:
+    """Read a batch invocation's terminal value: one completion per declared prompt."""
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(decoded, list) or len(decoded) != expected:
+        return None
+    return (
+        cast(list[str], decoded)
+        if all(isinstance(output, str) for output in decoded)
+        else None
+    )
 
 
 def canonical_result(
-    request: CanonicalInferenceRequest, output: str
+    request: CanonicalInferenceRequest, outputs: Sequence[str]
 ) -> InferenceResult:
-    """Report a completion in the declared result shape of an inference leaf.
+    """Report completions in the declared result shape of an inference leaf.
 
-    It carries what the leaf declares — the pinned model, one item, its prompt, and its
-    output — and leaves the fields in ``PROJECTION_DROPS`` unset.
+    It carries what the leaf declares — the pinned model, one item per declared prompt
+    in declared order — and leaves the fields in ``PROJECTION_DROPS`` unset.
     """
+    if len(outputs) != len(request.prompts):
+        raise CanonicalProjectionError(
+            f"the contract declares {len(request.prompts)} prompts and the run "
+            f"reported {len(outputs)} outputs"
+        )
     return InferenceResult(
         model=request.model,
-        items=[InferenceItem(index=0, prompt=request.prompt, output=output)],
+        items=[
+            InferenceItem(index=index, prompt=prompt, output=output)
+            for index, (prompt, output) in enumerate(zip(request.prompts, outputs))
+        ],
     )

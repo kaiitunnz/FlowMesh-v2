@@ -7,7 +7,7 @@ from .codec import (
     canonical_result,
     canonical_sampling,
     declared_sampling,
-    generated_output,
+    generated_outputs,
     unforwarded_inference_keys,
 )
 
@@ -20,6 +20,6 @@ __all__ = [
     "canonical_result",
     "canonical_sampling",
     "declared_sampling",
-    "generated_output",
+    "generated_outputs",
     "unforwarded_inference_keys",
 ]

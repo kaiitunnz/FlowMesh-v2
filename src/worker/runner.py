@@ -14,7 +14,7 @@ import requests
 from shared.inference import (
     CanonicalInferenceRequest,
     canonical_result,
-    generated_output,
+    generated_outputs,
 )
 from shared.network.mtls import MutualTlsMaterial
 from shared.outcome import FabricContentStore
@@ -56,8 +56,8 @@ def _declared_result(
     if declared_contract is None:
         return None
     request = CanonicalInferenceRequest.model_validate_json(declared_contract)
-    output = generated_output(result.model_dump())
-    return None if output is None else canonical_result(request, output)
+    outputs = generated_outputs(result.model_dump(), request)
+    return None if outputs is None else canonical_result(request, outputs)
 
 
 class Runner:

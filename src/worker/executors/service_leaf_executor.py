@@ -50,11 +50,15 @@ def _declared_request_payload(task: ExecutorTask) -> str | None:
     A leaf whose contract the fabric resolves is handed the request every embodiment of
     it issues, including the sampling its author left undeclared. The executor reads a
     request, never an embodiment.
+
+    A leaf declaring several prompts carries them on the one boundary as a list of chat
+    requests, so the whole batch is admitted and served as a single invocation.
     """
     if task.declared_contract is None:
         return None
     contract = CanonicalInferenceRequest.model_validate_json(task.declared_contract)
-    return json.dumps(contract.chat_body())
+    bodies = contract.chat_bodies()
+    return json.dumps(bodies[0] if len(bodies) == 1 else list(bodies))
 
 
 _PROMPT_FIELDS = ("prompt", "input", "content", "text")

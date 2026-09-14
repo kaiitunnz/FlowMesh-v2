@@ -401,7 +401,6 @@ def test_each_candidate_carries_its_own_episode_and_envelope():
 @pytest.mark.parametrize(
     "overrides, reason",
     [
-        ({"data": '{type: list, items: ["a", "b"]}'}, "exactly one prompt"),
         ({"data": "{type: dataset, url: squad}"}, "not projectable"),
         ({"data": "{type: list, expr: upstream.items}"}, "literal list"),
         (
@@ -417,6 +416,21 @@ def test_each_candidate_carries_its_own_episode_and_envelope():
 def test_an_unproven_contract_compiles_to_no_menu(overrides, reason):
     with pytest.raises(CompileError, match=reason):
         _compile(_local_eligible(**overrides))
+
+
+def test_a_leaf_declaring_several_prompts_compiles_to_a_menu():
+    # A batch declares one contract and is served as one invocation, so it admits the
+    # same two embodiments a single-prompt leaf does.
+    _template, plan = _compile(
+        _local_eligible(data='{type: list, items: ["a", "b", "c"]}')
+    )
+    menu = _menu_node(plan).embodiment_menu
+
+    assert {c.kind for c in menu.candidates} == {
+        InferenceEmbodimentKind.RESIDENT_SERVED,
+        InferenceEmbodimentKind.SELF_CONTAINED,
+    }
+    assert menu.candidate(menu.primary) is not None
 
 
 def test_a_resident_required_leaf_compiles_to_a_single_embodiment():
