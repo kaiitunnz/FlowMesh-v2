@@ -208,7 +208,8 @@ spec:
     assert embodiment.primary is None
 
 
-def _local_eligible(primary: str = "resident_served", **overrides: str) -> str:
+def _undeclared_binding(**overrides: str) -> str:
+    """A leaf that declares no service binding at all, so its default decides."""
     body = {
         "model": (
             "{source: {identifier: Qwen/Qwen3-4B}, "
@@ -231,7 +232,79 @@ spec:
         spec:
           taskType: inference
 {fields}
-          service: {{mode: local_eligible, primary: {primary}}}
+"""
+
+
+def test_an_undeclared_binding_compiles_to_a_menu_with_a_derived_primary():
+    template, plan = _compile(_undeclared_binding())
+    embodiment = _inference_leaf(template).embodiment
+    assert embodiment.eligibility is InferenceEmbodimentEligibility.LOCAL_ELIGIBLE
+    assert embodiment.primary is None
+    menu = _menu_node(plan).embodiment_menu
+    assert menu.candidate(menu.primary).kind is InferenceEmbodimentKind.RESIDENT_SERVED
+
+
+def test_an_undeclared_binding_that_is_unprovable_keeps_one_embodiment():
+    # The proof, not the default, bounds the menu: a leaf that pins no vLLM engine
+    # keeps exactly the embodiment it had before, and names no service.
+    template, plan = _compile(_undeclared_binding(model="{source: {identifier: q}}"))
+    leaf = _inference_leaf(template)
+    assert (
+        leaf.embodiment.eligibility
+        is InferenceEmbodimentEligibility.SELF_CONTAINED_REQUIRED
+    )
+    assert leaf.service_dependency is None
+    assert all(n.embodiment_menu is None for n in plan.nodes)
+
+
+def test_an_undeclared_mode_with_an_unprovable_contract_stays_resident():
+    # An adapter is rejected by the proof and is exactly the resident serving case, so
+    # the fallback keeps the resident embodiment the binding named rather than
+    # stripping it down to a self-contained one.
+    template, _plan = _compile(
+        _local_eligible(
+            service="{isolation: tenant-a}",
+            model=(
+                "{source: {identifier: Qwen/Qwen3-4B}, "
+                "vllm: {gpu_memory_utilization: 0.9}, "
+                "adapters: [{type: lora, name: a, path: hf/a}]}"
+            ),
+        )
+    )
+    leaf = _inference_leaf(template)
+    assert (
+        leaf.embodiment.eligibility is InferenceEmbodimentEligibility.RESIDENT_REQUIRED
+    )
+    assert leaf.service_dependency is not None
+
+
+def _local_eligible(
+    primary: str = "resident_served", service: str | None = None, **overrides: str
+) -> str:
+    body = {
+        "model": (
+            "{source: {identifier: Qwen/Qwen3-4B}, "
+            "vllm: {gpu_memory_utilization: 0.9}}"
+        ),
+        "data": '{type: list, items: ["hello"]}',
+        "resources": "{hardware: {gpu: {count: 1}}}",
+        **overrides,
+    }
+    binding = service or f"{{mode: local_eligible, primary: {primary}}}"
+    fields = "\n".join(f"          {k}: {v}" for k, v in body.items())
+    return f"""
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {{name: t}}
+spec:
+  taskType: echo
+  graph:
+    nodes:
+      - name: a
+        spec:
+          taskType: inference
+{fields}
+          service: {binding}
 """
 
 

@@ -72,7 +72,7 @@ from .bindings import (
     leaf_profile,
 )
 from .diagnostics import compile_error
-from .embodiment import embodiment_menu
+from .embodiment import embodiment_menu, reject_unproven, unproven_reason
 
 _SERVICE_BACKED_SPECS = (
     InferenceSpecStrict,
@@ -160,6 +160,7 @@ def _leaf_operator(
     operator_ids: set[str],
 ) -> LeafOperator:
     inputs, outputs = _ports(task, task_type)
+    embodiment = _leaf_embodiment(task)
     return LeafOperator(
         operator_id=task.task_id,
         source_ref=task.task_id,
@@ -168,52 +169,66 @@ def _leaf_operator(
         profile=leaf_profile(task_type),
         guard=_condition_guard(task, name_to_op, operator_ids),
         residency_only=binding_class(task_type) is BindingClass.RESIDENCY,
-        service_dependency=_leaf_service_dependency(task, task_type),
-        embodiment=_leaf_embodiment(task),
+        service_dependency=_leaf_service_dependency(task, task_type, embodiment),
+        embodiment=embodiment,
     )
 
 
 def _leaf_embodiment(task: ParsedTask) -> InferenceEmbodimentBinding | None:
     """Pin an inference/embedding leaf's embodiment disposition from its source.
 
-    A present resident binding is resident-required and an absent one self-contained
-    required, so a leaf naming neither embodiment keeps exactly one. Only an explicit
-    ``local_eligible`` binding admits both, and it names its primary.
+    An inference leaf admits both embodiments whenever they provably run one contract,
+    whether or not it declares a binding. A leaf the proof does not clear, and a leaf
+    kind for which only one embodiment is proven, keeps the embodiment its source names:
+    resident when it declares a binding, self-contained when it declares none. A leaf
+    that asks for both explicitly is failed rather than quietly narrowed.
     """
     spec = task.task.spec
     if not isinstance(spec, _SERVICE_BACKED_SPECS):
         return None
     binding = spec.service
-    if binding is None:
-        return InferenceEmbodimentBinding(
-            eligibility=InferenceEmbodimentEligibility.SELF_CONTAINED_REQUIRED
-        )
-    if binding.mode is ServiceBindingMode.RESIDENT:
-        return InferenceEmbodimentBinding(
-            eligibility=InferenceEmbodimentEligibility.RESIDENT_REQUIRED
-        )
+    named = (
+        InferenceEmbodimentEligibility.RESIDENT_REQUIRED
+        if binding is not None
+        else InferenceEmbodimentEligibility.SELF_CONTAINED_REQUIRED
+    )
+    if binding is not None and binding.mode is ServiceBindingMode.RESIDENT:
+        return InferenceEmbodimentBinding(eligibility=named)
+    if not isinstance(spec, (InferenceSpecStrict, InferenceSpecTemplate)):
+        return InferenceEmbodimentBinding(eligibility=named)
+    if binding is not None and binding.mode is ServiceBindingMode.LOCAL_ELIGIBLE:
+        reject_unproven(task, spec)
+    elif unproven_reason(spec) is not None:
+        return InferenceEmbodimentBinding(eligibility=named)
     return InferenceEmbodimentBinding(
         eligibility=InferenceEmbodimentEligibility.LOCAL_ELIGIBLE,
-        primary=binding.primary,
+        primary=binding.primary if binding else None,
     )
 
 
 def _leaf_service_dependency(
-    task: ParsedTask, task_type: TaskType
+    task: ParsedTask,
+    task_type: TaskType,
+    embodiment: InferenceEmbodimentBinding | None,
 ) -> ServiceDependency | None:
-    """Normalize an inference/embedding leaf's resident binding into a dependency.
+    """Normalize the resident embodiment of a leaf that admits one into a dependency.
 
     The service reference defaults to the task's own model source; a declared adapter
     rides ``adapter`` so it constrains a compatible base replica's slot. The interface
     is the leaf's own — an embedding leaf never shares a chat batch for the same model.
+    A leaf whose only embodiment is self-contained names no service.
     """
     spec = task.task.spec
     if not isinstance(spec, _SERVICE_BACKED_SPECS):
         return None
-    binding = spec.service
-    if binding is None:
+    if (
+        embodiment is None
+        or embodiment.eligibility
+        is InferenceEmbodimentEligibility.SELF_CONTAINED_REQUIRED
+    ):
         return None
-    service_ref = binding.service_model_ref or spec.model_name
+    binding = spec.service
+    service_ref = (binding.service_model_ref if binding else None) or spec.model_name
     if not service_ref:
         source_kind, source_id = _task_source(task)
         raise compile_error(
@@ -243,7 +258,7 @@ def _leaf_service_dependency(
         interface=interface,
         adapter=adapter,
         adapter_source=_leaf_adapter_source(spec),
-        isolation=binding.isolation,
+        isolation=binding.isolation if binding else None,
     )
 
 

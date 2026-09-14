@@ -118,12 +118,16 @@ class TestValidateDispatchable:
 
 
 class TestLocalEligibleBinding:
-    def test_primary_is_required(self) -> None:
-        with pytest.raises(ValueError, match="must name the primary embodiment"):
-            _spec(service={"mode": "local_eligible"})
+    def test_primary_is_optional(self) -> None:
+        binding = _spec(service={"mode": "local_eligible"}).service
+        assert binding is not None and binding.primary is None
+
+    def test_undeclared_mode_leaves_the_leaf_to_decide(self) -> None:
+        binding = _spec(service={"isolation": "tenant-a"}).service
+        assert binding is not None and binding.mode is None
 
     def test_primary_rejected_on_a_resident_binding(self) -> None:
-        with pytest.raises(ValueError, match="only to a local_eligible"):
+        with pytest.raises(ValueError, match="a resident binding admits one"):
             _spec(service={"mode": "resident", "primary": "self_contained"})
 
     def test_local_eligible_keeps_the_local_gpu_requirement(self) -> None:

@@ -52,7 +52,8 @@ def validate_resident_only_binding(
     """Reject a local-eligible binding on a leaf that admits only resident serving.
 
     A contract-equivalent local embodiment is proven for pinned chat inference; another
-    leaf kind keeps the single embodiment its binding names.
+    leaf kind keeps the single embodiment its binding names. Only an explicitly declared
+    mode is rejected: an undeclared one resolves to the leaf's own default.
     """
     if binding is not None and binding.mode is ServiceBindingMode.LOCAL_ELIGIBLE:
         raise ValueError(
@@ -84,31 +85,28 @@ class ServiceBindingSpec(BaseModel):
     cache isolation domain that is never shared across domains even for the same model.
 
     A ``local_eligible`` binding declares that the same pinned model contract may also
-    be realized by a self-contained local executor, and names the ``primary`` embodiment
-    the fabric uses when both are placeable. The leaf then carries the resident
+    be realized by a self-contained local executor. The leaf then carries the resident
     constraints below *and* the local model, executor, and resource constraints of an
-    unbound leaf.
+    unbound leaf, and ``primary`` optionally names the embodiment the fabric prefers
+    when both are placeable.
+
+    An undeclared ``mode`` resolves to the leaf's own default: an inference leaf admits
+    both embodiments, and a leaf kind with one proven embodiment keeps it.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    mode: ServiceBindingMode = ServiceBindingMode.RESIDENT
+    mode: ServiceBindingMode | None = None
     service_model_ref: str | None = None
     isolation: str | None = None
     primary: InferenceEmbodimentKind | None = None
 
     @model_validator(mode="after")
     def _validate_primary(self) -> "ServiceBindingSpec":
-        if self.mode is ServiceBindingMode.LOCAL_ELIGIBLE:
-            if self.primary is None:
-                raise ValueError(
-                    "a local_eligible service binding must name the primary "
-                    "embodiment: resident_served or self_contained."
-                )
-        elif self.primary is not None:
+        if self.mode is ServiceBindingMode.RESIDENT and self.primary is not None:
             raise ValueError(
-                "primary applies only to a local_eligible service binding; a "
-                f"{self.mode.value} binding admits one embodiment."
+                "primary names which of several embodiments to prefer; a resident "
+                "binding admits one."
             )
         return self
 

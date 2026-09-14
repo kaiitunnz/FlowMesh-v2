@@ -42,18 +42,18 @@ def embodiment_menu(
     profile: LeafProfile,
     node_id: str,
 ) -> InferenceEmbodimentMenu:
-    """Prove a local-eligible leaf's two embodiments equivalent and emit its menu.
+    """Emit the menu of a leaf ``unproven_reason`` has already cleared.
 
-    The attributes below are proven equal. The per-item fields a local generation
-    reports and a relayed engine response cannot — see ``PROJECTION_DROPS`` — are
-    outside the proof because the shared result projection drops them from both
-    embodiments rather than letting one carry them.
+    The attributes digested into the fingerprint are the ones proven equal. The per-item
+    fields a local generation reports and a relayed engine response cannot — see
+    ``PROJECTION_DROPS`` — are outside the proof because the shared result projection
+    drops them from both embodiments rather than letting one carry them.
 
-    Raises a compile error naming the unproven attribute when they are not equal.
+    The primary is the resident-served embodiment unless the binding names the other:
+    a leaf declares one model contract, and which capacity serves it is the fabric's to
+    decide from what a deployment actually runs.
     """
     request = _canonical_request(task, spec)
-    _reject_unproven(task, spec)
-
     resource_class = profile.binding.task_type.value
     resident = InferenceEmbodimentCandidate(
         alternative_id=f"{node_id}:{InferenceEmbodimentKind.RESIDENT_SERVED.value}",
@@ -83,10 +83,11 @@ def embodiment_menu(
         ),
     )
     by_kind = {resident.kind: resident, local.kind: local}
-    primary = spec.service.primary if spec.service else None
+    declared = spec.service.primary if spec.service else None
+    primary = by_kind[declared] if declared else resident
     return InferenceEmbodimentMenu(
         contract_fingerprint=_contract_fingerprint(spec, dependency, profile, request),
-        primary=by_kind[primary].alternative_id if primary else local.alternative_id,
+        primary=primary.alternative_id,
         candidates=(resident, local),
     )
 
@@ -100,27 +101,40 @@ def _canonical_request(
         raise _unproven(task, f"its request projection is not shared: {exc}") from exc
 
 
-def _reject_unproven(
-    task: ParsedTask, spec: InferenceSpecStrict | InferenceSpecTemplate
-) -> None:
-    """Reject a leaf whose embodiments this module cannot prove equivalent.
+def unproven_reason(
+    spec: InferenceSpecStrict | InferenceSpecTemplate,
+) -> str | None:
+    """Why this module cannot prove a leaf's embodiments equivalent, or ``None``.
 
     A resident replica serves a pinned vLLM engine, so a local embodiment is proven only
     for a leaf that pins the same engine. An adapter, a shard, a parallel split, or a
-    postprocessing step changes what one embodiment produces relative to the other.
+    postprocessing step changes what one embodiment produces relative to the other, and
+    a request the two do not read identically is unprojectable.
     """
     if spec.enforce_cpu is True or spec.backend() is not InferenceBackend.VLLM:
-        raise _unproven(
-            task,
+        return (
             "it does not pin the vLLM engine a resident replica serves; declare "
-            "model.vllm and no enforce_cpu",
+            "model.vllm and no enforce_cpu"
         )
     if spec.adapters:
-        raise _unproven(task, "adapter serving is proven for one embodiment only")
+        return "adapter serving is proven for one embodiment only"
     if spec.parallel is not None or spec.shard is not None:
-        raise _unproven(task, "a sharded or parallel split applies to one embodiment")
+        return "a sharded or parallel split applies to one embodiment"
     if spec.postprocess is not None:
-        raise _unproven(task, "postprocessing applies to one embodiment")
+        return "postprocessing applies to one embodiment"
+    try:
+        canonical_request(spec)
+    except CanonicalProjectionError as exc:
+        return f"its request projection is not shared: {exc}"
+    return None
+
+
+def reject_unproven(
+    task: ParsedTask, spec: InferenceSpecStrict | InferenceSpecTemplate
+) -> None:
+    """Fail a leaf that explicitly asked for a menu this module cannot prove."""
+    if (reason := unproven_reason(spec)) is not None:
+        raise _unproven(task, reason)
 
 
 def _unproven(task: ParsedTask, reason: str) -> Exception:
