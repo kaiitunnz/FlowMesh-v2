@@ -21,6 +21,7 @@ from shared.harness import (
     HarnessResultKind,
     OutcomeKind,
 )
+from shared.inference import declared_sampling
 from shared.tasks.specs import EmbeddingSpecStrict, InferenceSpecStrict
 from shared.tasks.task_type import TaskType
 from shared.tools.model.schema import MODEL_INTERFACE
@@ -28,7 +29,6 @@ from shared.tools.model.schema import MODEL_INTERFACE
 from ..resident import capture_resident_request
 from .base_executor import ExecutionError, Executor, ExecutorTask
 from .episode_support import EpisodeStepResult, hydrate_delivered_outcomes
-from .menu_result import canonical_projection
 
 _LOG = logging.getLogger("service-leaf-executor")
 
@@ -78,11 +78,7 @@ class ServiceLeafExecutor(Executor):
     def _yield_boundary(
         self, task: ExecutorTask, interface: str, correlation: str
     ) -> EpisodeStepResult:
-        payload = (
-            canonical_projection(task.spec, task.task_id).prompt
-            if task.embodiment is not None
-            else _resident_request_payload(task, interface)
-        )
+        payload = _resident_request_payload(task, interface)
         request = BoundaryRequest(
             kind=BoundaryEventKind.INVOCATION,
             interface=MODEL_INTERFACE,
@@ -148,21 +144,26 @@ def _resident_request_payload(task: ExecutorTask, interface: str) -> str:
     if interface == _EMBEDDING_INTERFACE:
         return _embedding_payload(task, data, inference)
 
+    params = declared_sampling(inference)
     for source in (inference, data):
         if isinstance(messages := source.get("messages"), list):
-            return json.dumps({"messages": messages})
+            return json.dumps({**params, "messages": messages})
 
     for source in (data, inference):
         for field in _PROMPT_FIELDS:
             if isinstance(value := source.get(field), str) and value:
-                return value
+                return _chat_payload(params, value)
         if isinstance(prompts := source.get("prompts"), list) and prompts:
-            return str(prompts[0])
+            return _chat_payload(params, str(prompts[0]))
 
     raise ExecutionError(
         f"resident {interface} leaf {task.task_id} declares no prompt or messages "
         "in spec.data or spec.inference"
     )
+
+
+def _chat_payload(params: dict[str, Any], prompt: str) -> str:
+    return json.dumps({**params, "messages": [{"role": "user", "content": prompt}]})
 
 
 def _embedding_payload(

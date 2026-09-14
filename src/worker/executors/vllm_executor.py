@@ -66,6 +66,7 @@ except Exception:
         _HAS_VLLM = False
         StructuredOutputsParams = None  # type: ignore
 
+from shared.inference import SAMPLING_DEFAULTS
 from shared.schemas.governance import SpanType
 from shared.schemas.result import (
     BaseExecutorResult,
@@ -691,18 +692,19 @@ Summary:"""
             optional_sampling_fields["bad_words"] = inference_cfg["bad_words"]
         if "n" in inference_cfg:
             optional_sampling_fields["n"] = int(inference_cfg["n"])
+        cfg = {**SAMPLING_DEFAULTS, **inference_cfg}
         return SamplingParams(  # type: ignore[call-arg]
-            temperature=float(inference_cfg.get("temperature", 0.7)),
-            top_p=float(inference_cfg.get("top_p", 0.95)),
-            top_k=int(inference_cfg.get("top_k", -1)),
-            min_p=float(inference_cfg.get("min_p", 0.0)),
-            max_tokens=int(inference_cfg.get("max_tokens", 512)),
-            min_tokens=int(inference_cfg.get("min_tokens", 0)),
-            presence_penalty=float(inference_cfg.get("presence_penalty", 0.0)),
-            frequency_penalty=float(inference_cfg.get("frequency_penalty", 0.0)),
-            repetition_penalty=float(inference_cfg.get("repetition_penalty", 1.0)),
-            stop=inference_cfg.get("stop"),
-            skip_special_tokens=bool(inference_cfg.get("skip_special_tokens", True)),
+            temperature=float(cfg["temperature"]),
+            top_p=float(cfg["top_p"]),
+            top_k=int(cfg["top_k"]),
+            min_p=float(cfg["min_p"]),
+            max_tokens=int(cfg["max_tokens"]),
+            min_tokens=int(cfg["min_tokens"]),
+            presence_penalty=float(cfg["presence_penalty"]),
+            frequency_penalty=float(cfg["frequency_penalty"]),
+            repetition_penalty=float(cfg["repetition_penalty"]),
+            stop=cfg.get("stop"),
+            skip_special_tokens=bool(cfg["skip_special_tokens"]),
             **optional_sampling_fields,
         )
 

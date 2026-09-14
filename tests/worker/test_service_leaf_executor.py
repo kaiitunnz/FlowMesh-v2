@@ -26,6 +26,13 @@ from worker.executors.service_leaf_executor import (
 from worker.resident import ResidentRequestStore
 
 
+def _body(store: ResidentRequestStore) -> dict:
+    """The engine request the executor kept in worker-private custody."""
+    payload = store.peek("tsk-test", _CORR)
+    assert payload is not None
+    return json.loads(payload)
+
+
 def _step(result: BaseExecutorResult) -> EpisodeStepResult:
     assert isinstance(result, EpisodeStepResult)
     return result
@@ -47,6 +54,46 @@ def _msg(spec_data: dict, **episode: object):
         task_type=TaskType.INFERENCE,
         service_episode={"interface": "chat", **episode},
     )
+
+
+def _inference_msg(spec_data: dict, inference: dict, **episode: object):
+    return make_worker_task_message(
+        {"taskType": "inference", "data": spec_data, "inference": inference},
+        task_type=TaskType.INFERENCE,
+        service_episode={"interface": "chat", **episode},
+    )
+
+
+def test_the_declared_sampling_is_carried_to_the_replica() -> None:
+    # A leaf's declared sampling governs its generation wherever it runs. Dropping it
+    # here made a resident run of the same leaf generate under the engine's defaults
+    # while a local run honoured the spec.
+    ex, store = _executor()
+    ex.run(
+        _inference_msg(
+            {"prompt": "hello there"},
+            {"max_tokens": 10, "temperature": 0.0, "stop": ["\n"]},
+        ),
+        Path("/tmp"),  # noqa: S108
+    )
+
+    body = _body(store)
+    assert body["max_tokens"] == 10
+    assert body["temperature"] == 0.0
+    assert body["stop"] == ["\n"]
+    assert body["messages"] == [{"role": "user", "content": "hello there"}]
+
+
+def test_inputs_and_executor_settings_are_not_sent_as_engine_params() -> None:
+    ex, store = _executor()
+    ex.run(
+        _inference_msg({"prompt": "hi"}, {"max_tokens": 4, "batch_size": 8}),
+        Path("/tmp"),  # noqa: S108
+    )
+
+    body = _body(store)
+    assert body["max_tokens"] == 4
+    assert "batch_size" not in body
 
 
 def _embedding_msg(spec_data: dict, **episode: object):
@@ -78,7 +125,7 @@ def test_first_step_captures_the_request_and_yields_a_resident_boundary(
     # The raw request is stripped to a digest and kept worker-private.
     assert req.request_payload is None
     assert req.request_digest is not None
-    assert store.peek("tsk-test", _CORR) == "hello there"
+    assert _body(store) == {"messages": [{"role": "user", "content": "hello there"}]}
 
 
 def test_explicit_messages_pass_through_as_a_chat_request(tmp_path: Path) -> None:
