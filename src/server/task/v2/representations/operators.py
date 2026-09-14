@@ -199,6 +199,21 @@ class InferenceEmbodimentBinding(BaseModel):
     primary: InferenceEmbodimentKind | None = None
 
 
+class ResolvedEmbodiment(BaseModel):
+    """The menu entry a task's dispatch is bound to.
+
+    Routing, placement, and the result projection read it rather than re-deriving
+    residence from the leaf's own service binding, which names every embodiment the leaf
+    admits. It stays on the control plane: the worker runs the concrete task the
+    dispatcher materializes from it, not the choice behind it.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    alternative_id: str
+    kind: InferenceEmbodimentKind
+
+
 class Port(BaseModel):
     """A typed input/output port on a logical operator or region."""
 

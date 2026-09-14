@@ -662,7 +662,6 @@ class Dispatcher:
                 OwnerFence(worker_id=worker.id, incarnation=worker.incarnation),
             ),
             service_episode=self._runtime.service_episode_dispatch(task_id),
-            embodiment=self._runtime.resolved_embodiment(task_id),
         )
 
         # 8. Publish task

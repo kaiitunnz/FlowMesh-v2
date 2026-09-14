@@ -43,7 +43,6 @@ from shared.schemas.command import InterruptMessage, MediatedOpMessage
 from shared.schemas.result import ResultEnvelope, result_file_path
 from shared.tasks import TaskEnvelopeTemplate
 from shared.tasks.specs import InferenceEmbodimentKind, ModelBindingMode
-from shared.tasks.worker_message import ResolvedEmbodiment
 from shared.tools.contract import AgentModelTurnProposal, MediatedOperationOutcome
 from shared.tools.facade import FacadeDescriptor, FacadeResolution
 from shared.utils import new_workflow_id
@@ -79,6 +78,7 @@ from ..registries.worker import Worker, WorkerRegistry
 from ..registries.workflow import PersistedTask, WorkflowRegistry, WorkflowSched
 from ..services.model_secret_vault import ModelSecretVault
 from ..utils.time import parse_iso_ts
+from .inference_projection import project_menu_result
 from .models import (
     TERMINAL_TASK_STATUSES,
     TaskInfo,
@@ -105,6 +105,7 @@ from .v2.policy import PolicySurface
 from .v2.representations.operators import (
     AgentModelGatewayBinding,
     AgentOperator,
+    ResolvedEmbodiment,
     ServiceDependency,
 )
 from .v2.representations.plan import EpisodeSpec, InferenceEmbodimentMenu
@@ -2126,6 +2127,24 @@ class TaskRuntime:
             if self._apply_advance_locked(record.workflow_id, advance):
                 self._cv.notify_all()
 
+    def project_menu_result(self, task_id: str) -> bool:
+        """Store a menu leaf's result in the shape its contract declares.
+
+        A task's result reaches this node on its own channel, unordered against the
+        event that settles the task, so this runs from both and projects on whichever
+        arrives last. It reads no selection: both embodiments of a leaf project to the
+        same declared shape, so the result does not depend on which one ran.
+        """
+        with self._lock:
+            record = self._tasks.get(task_id)
+            engine = self._engines.get(record.workflow_id) if record else None
+            if record is None or engine is None:
+                return False
+            if engine.embodiment_menu(task_id) is None:
+                return False
+            spec = record.task.spec
+        return project_menu_result(self._results_dir, task_id, spec)
+
     def resolve_v2_output(
         self, workflow_id: str, output_id: str
     ) -> ResultPublication | None:
@@ -2976,6 +2995,10 @@ class TaskRuntime:
 
             notify = bool(ready_children)
             if record is not None and (engine := self._engines.get(record.workflow_id)):
+                # Before anything reads the result: a fan-out over a menu leaf spreads
+                # its declared items, not the shape one embodiment happened to produce.
+                if engine.embodiment_menu(task_id) is not None:
+                    project_menu_result(self._results_dir, task_id, record.task.spec)
                 advance = engine.on_succeeded(task_id, empty=empty)
                 advance.extend(
                     self._fan_out_children_locked(record.workflow_id, engine, task_id)

@@ -18,7 +18,6 @@ from shared.tasks import MergedChildTaskStrict
 from shared.tasks.specs import (
     EmbeddingSpecStrict,
     InferenceBackend,
-    InferenceEmbodimentKind,
     InferenceSpecStrict,
     TaskSpecStrictBase,
 )
@@ -28,7 +27,6 @@ from shared.tools.model.schema import MODEL_INTERFACE
 from shared.tools.search.schema import DEFAULT_SEARCH_PROVIDER
 from shared.utils.manifest import prepare_output_dir, sync_manifest
 from shared.utils.time import now_iso
-from worker.executors.menu_result import declared_result
 
 from .egress import MediatedEgressSidecar, ModelEgress, SearchEgress
 from .executors.base_executor import ExecutionError, Executor, TaskCancelledError
@@ -627,18 +625,7 @@ class Runner:
                             f"Task {task_id} was cancelled before execution"
                         )
                     self._current_task_id = task_id
-                    if (embodiment := msg.embodiment) is not None:
-                        # A leaf that admits more than one embodiment routes on the
-                        # embodiment the scheduler resolved, never on its own service
-                        # binding, which names every embodiment the leaf admits.
-                        assert isinstance(spec, InferenceSpecStrict)
-                        desired_key = (
-                            "service_leaf"
-                            if embodiment.kind
-                            is InferenceEmbodimentKind.RESIDENT_SERVED
-                            else self._select_inference_executor_key(spec)
-                        )
-                    elif msg.service_episode is not None:
+                    if msg.service_episode is not None:
                         # A resident service-backed leaf runs the service-episode path
                         # (capture the model request, yield a resident boundary, resume
                         # on the settled completion) rather than loading a local model.
@@ -724,13 +711,7 @@ class Runner:
                         if stop_before_start:
                             executor_to_run.stop(task_id)
                     out = executor_to_run.run(msg, out_dir)
-                    self._write_results(
-                        task_id,
-                        spec,
-                        merged_children,
-                        out_dir,
-                        declared_result(msg, out),
-                    )
+                    self._write_results(task_id, spec, merged_children, out_dir, out)
                     metadata = self._build_task_metadata(
                         task_type,
                         dispatched_at,
