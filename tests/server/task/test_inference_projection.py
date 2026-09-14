@@ -9,7 +9,8 @@ import json
 from pathlib import Path
 from typing import Any
 
-from server.task.inference_projection import project_menu_result
+from server.task.inference_projection import menu_request_payload, project_menu_result
+from shared.inference import SAMPLING_DEFAULTS
 from shared.schemas.result.catalog import ResultEnvelope
 from shared.schemas.result.io import result_file_path, write_result
 from shared.tasks.specs import InferenceSpecStrict
@@ -21,6 +22,40 @@ _SPEC = InferenceSpecStrict.model_validate(
         "data": {"type": "list", "items": ["hello there"]},
     }
 )
+
+
+def test_the_request_carries_the_sampling_a_local_generation_would_apply() -> None:
+    # The leaf declares no sampling, so the two embodiments are one contract only if the
+    # relayed request states what a local generation would have applied by default.
+    # Built from the spec alone, this is the request BOTH embodiments issue.
+    body = json.loads(menu_request_payload(_SPEC) or "{}")
+
+    assert body["messages"] == [{"role": "user", "content": "hello there"}]
+    assert body["max_tokens"] == SAMPLING_DEFAULTS["max_tokens"] == 512
+    assert body["temperature"] == SAMPLING_DEFAULTS["temperature"] == 0.7
+    assert body["top_p"] == SAMPLING_DEFAULTS["top_p"] == 0.95
+
+
+def test_declared_sampling_overrides_the_default_in_the_request() -> None:
+    spec = InferenceSpecStrict.model_validate(
+        {
+            "taskType": "inference",
+            "model": {"source": {"identifier": "Qwen/Qwen3-4B"}},
+            "data": {"type": "list", "items": ["hello there"]},
+            "inference": {"max_tokens": 10},
+        }
+    )
+    body = json.loads(menu_request_payload(spec) or "{}")
+
+    assert body["max_tokens"] == 10
+    assert body["temperature"] == SAMPLING_DEFAULTS["temperature"]
+
+
+def test_an_unprojectable_spec_carries_no_request() -> None:
+    spec = InferenceSpecStrict.model_validate(
+        {"taskType": "inference", "model": {"source": {"identifier": "q"}}}
+    )
+    assert menu_request_payload(spec) is None
 
 
 def _store(tmp_path: Path, result: dict[str, Any]) -> None:

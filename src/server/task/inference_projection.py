@@ -11,6 +11,7 @@ It runs where the fabric already owns the stored result, so the worker executes 
 ordinary typed task and never learns which embodiment it is.
 """
 
+import json
 import logging
 from pathlib import Path
 from typing import Any
@@ -23,11 +24,29 @@ from shared.inference import (
 from shared.schemas.result.catalog import ResultEnvelope
 from shared.schemas.result.io import result_file_path, write_result
 from shared.tasks.specs import InferenceSpecStrict, InferenceSpecTemplate
+from shared.tasks.specs.common import TaskSpecBase
 
 _LOG = logging.getLogger("inference-projection")
 
 
-def project_menu_result(results_dir: Path, task_id: str, spec: Any) -> bool:
+def menu_request_payload(spec: TaskSpecBase) -> str | None:
+    """The one engine request every embodiment of a leaf issues.
+
+    A local generation applies the sampling defaults of its executor to whatever the
+    leaf left undeclared, so the request carries the effective values rather than only
+    the declared ones: the two embodiments are one contract only if a leaf that declares
+    no sampling still generates the same way on both.
+    """
+    if not isinstance(spec, (InferenceSpecStrict, InferenceSpecTemplate)):
+        return None
+    try:
+        return json.dumps(canonical_request(spec).chat_body())
+    except CanonicalProjectionError:
+        _LOG.warning("[fabric] a menu leaf's request is no longer projectable")
+        return None
+
+
+def project_menu_result(results_dir: Path, task_id: str, spec: TaskSpecBase) -> bool:
     """Rewrite a menu leaf's stored result into its declared shape.
 
     Idempotent in both senses a settlement path needs: re-running it over an already

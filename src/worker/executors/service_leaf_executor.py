@@ -20,6 +20,7 @@ from shared.harness import (
     HarnessResult,
     HarnessResultKind,
     OutcomeKind,
+    ServiceLeafEpisodeDispatch,
 )
 from shared.inference import declared_sampling
 from shared.tasks.specs import EmbeddingSpecStrict, InferenceSpecStrict
@@ -77,12 +78,17 @@ class ServiceLeafExecutor(Executor):
         settled = next((o for o in outcomes if o.call_correlation == correlation), None)
         if settled is not None:
             return self._complete(settled)
-        return self._yield_boundary(task, dispatch.interface, correlation)
+        return self._yield_boundary(task, dispatch, correlation)
 
     def _yield_boundary(
-        self, task: ExecutorTask, interface: str, correlation: str
+        self,
+        task: ExecutorTask,
+        dispatch: ServiceLeafEpisodeDispatch,
+        correlation: str,
     ) -> EpisodeStepResult:
-        payload = _resident_request_payload(task, interface)
+        payload = dispatch.declared_request or _resident_request_payload(
+            task, dispatch.interface
+        )
         request = BoundaryRequest(
             kind=BoundaryEventKind.INVOCATION,
             interface=MODEL_INTERFACE,

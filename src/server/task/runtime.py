@@ -78,7 +78,8 @@ from ..registries.worker import Worker, WorkerRegistry
 from ..registries.workflow import PersistedTask, WorkflowRegistry, WorkflowSched
 from ..services.model_secret_vault import ModelSecretVault
 from ..utils.time import parse_iso_ts
-from .inference_projection import project_menu_result
+from .inference_projection import menu_request_payload
+from .inference_projection import project_menu_result as project_declared_result
 from .models import (
     TERMINAL_TASK_STATUSES,
     TaskInfo,
@@ -1944,6 +1945,7 @@ class TaskRuntime:
             dependency = engine.service_dependency(task_id)
             if dependency is None or engine.agent_operator(task_id) is not None:
                 return None
+            declared_request: str | None = None
             if engine.embodiment_menu(task_id) is not None:
                 resolved = self._resolved_embodiment_locked(engine, task_id)
                 if (
@@ -1951,9 +1953,15 @@ class TaskRuntime:
                     or resolved.kind is not InferenceEmbodimentKind.RESIDENT_SERVED
                 ):
                     return None
+                # Both embodiments of this leaf run one request, so it is built here
+                # from the leaf's own declaration rather than separately by each.
+                if record is not None:
+                    declared_request = menu_request_payload(record.task.spec)
             _capsule, outcomes = engine.episode_context(task_id)
             return ServiceLeafEpisodeDispatch(
-                interface=dependency.interface.value, delivered_outcomes=outcomes
+                interface=dependency.interface.value,
+                delivered_outcomes=outcomes,
+                declared_request=declared_request,
             )
 
     def _resolved_embodiment_locked(
@@ -2142,8 +2150,9 @@ class TaskRuntime:
                 return False
             if engine.embodiment_menu(task_id) is None:
                 return False
-            spec = record.task.spec
-        return project_menu_result(self._results_dir, task_id, spec)
+            # Held across the rewrite, as the settlement path holds it: two arrivals for
+            # one task then serialize instead of racing to write the same file.
+            return project_declared_result(self._results_dir, task_id, record.task.spec)
 
     def resolve_v2_output(
         self, workflow_id: str, output_id: str
@@ -2998,7 +3007,9 @@ class TaskRuntime:
                 # Before anything reads the result: a fan-out over a menu leaf spreads
                 # its declared items, not the shape one embodiment happened to produce.
                 if engine.embodiment_menu(task_id) is not None:
-                    project_menu_result(self._results_dir, task_id, record.task.spec)
+                    project_declared_result(
+                        self._results_dir, task_id, record.task.spec
+                    )
                 advance = engine.on_succeeded(task_id, empty=empty)
                 advance.extend(
                     self._fan_out_children_locked(record.workflow_id, engine, task_id)
