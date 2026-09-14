@@ -6,7 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from shared.harness.boundary import BoundaryEventKind
 from shared.sandbox import SandboxEgressMode, SandboxRuntimeProfile
 from shared.tasks import TaskType
-from shared.tasks.specs import ModelBindingMode
+from shared.tasks.specs import InferenceEmbodimentKind, ModelBindingMode
 from shared.tools.facade import FacadeDescriptor as FacadeDescriptor
 
 
@@ -174,6 +174,44 @@ class ServiceDependency(BaseModel):
     def engine_batch_key(self) -> str:
         """The compatible model-runner and config key an admitted batch shares."""
         return "|".join([self.service_ref.strip(), self.interface.value])
+
+
+class InferenceEmbodimentEligibility(StrEnum):
+    """Which physical embodiments one pinned inference contract admits."""
+
+    RESIDENT_REQUIRED = "resident_required"
+    SELF_CONTAINED_REQUIRED = "self_contained_required"
+    LOCAL_ELIGIBLE = "local_eligible"
+
+
+class InferenceEmbodimentBinding(BaseModel):
+    """The submission-pinned embodiment disposition of an inference leaf.
+
+    Part of the leaf's binding and its input cone, not a scheduler hint: a scheduler
+    chooses among the embodiments a ``local_eligible`` disposition admits, and never
+    reinterprets a required disposition as optional. ``primary`` is set only for
+    ``local_eligible`` and names the embodiment the fabric uses when both are placeable.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    eligibility: InferenceEmbodimentEligibility
+    primary: InferenceEmbodimentKind | None = None
+
+
+class ResolvedEmbodiment(BaseModel):
+    """The menu entry a task's dispatch is bound to.
+
+    Routing, placement, and the result projection read it rather than re-deriving
+    residence from the leaf's own service binding, which names every embodiment the leaf
+    admits. It stays on the control plane: the worker runs the concrete task the
+    dispatcher materializes from it, not the choice behind it.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    alternative_id: str
+    kind: InferenceEmbodimentKind
 
 
 class Port(BaseModel):
@@ -417,9 +455,11 @@ class LeafOperator(_OperatorBase):
     profile: LeafProfile
     guard: ConditionGuard | None = None
     residency_only: bool = False
-    # A resident-required service dependency this leaf consumes (an inference/embedding
-    # leaf served by resident capacity). None for an ordinary in-process leaf.
+    # The service dependency this leaf consumes (an inference/embedding leaf its binding
+    # admits to resident capacity). None for an ordinary in-process leaf.
     service_dependency: ServiceDependency | None = None
+    # Set for every inference/embedding leaf; None for any other binding.
+    embodiment: InferenceEmbodimentBinding | None = None
 
 
 class AgentOperator(_OperatorBase):

@@ -11,6 +11,11 @@ from typing import Any
 
 import requests
 
+from shared.inference import (
+    CanonicalInferenceRequest,
+    canonical_result,
+    generated_output,
+)
 from shared.network.mtls import MutualTlsMaterial
 from shared.outcome import FabricContentStore
 from shared.schemas.result import BaseExecutorResult
@@ -36,6 +41,23 @@ from .lifecycle import Lifecycle
 from .model_turn import HeldModelEgress, ModelTurnRendezvous, ResponsesFacade
 from .resident.lane_host import ResidentLaneHost
 from .utils.logging import TaskLogEmitter
+
+
+def _declared_result(
+    result: BaseExecutorResult, declared_contract: str | None
+) -> BaseExecutorResult | None:
+    """Rewrite a result into the shape its contract declares, or None to store it as is.
+
+    A leaf whose contract the fabric resolves stores one result shape wherever it ran,
+    so a consumer reading its output cannot tell which embodiment produced it. It runs
+    before the result is stored, so the shape does not depend on the result reaching any
+    other node. A step that generated nothing yet has nothing to declare.
+    """
+    if declared_contract is None:
+        return None
+    request = CanonicalInferenceRequest.model_validate_json(declared_contract)
+    output = generated_output(result.model_dump())
+    return None if output is None else canonical_result(request, output)
 
 
 class Runner:
@@ -298,10 +320,16 @@ class Runner:
         merged_children: list[MergedChildTaskStrict],
         out_dir: Path,
         result: BaseExecutorResult | None,
+        declared_contract: str | None = None,
     ):
         if result is None:
             return
-        self._write_single_result(task_id, spec, out_dir, result)
+        self._write_single_result(
+            task_id,
+            spec,
+            out_dir,
+            _declared_result(result, declared_contract) or result,
+        )
 
         child_lookup = {entry.task_id: entry for entry in merged_children}
         for child_id, child_result in result.children.items():
@@ -711,7 +739,14 @@ class Runner:
                         if stop_before_start:
                             executor_to_run.stop(task_id)
                     out = executor_to_run.run(msg, out_dir)
-                    self._write_results(task_id, spec, merged_children, out_dir, out)
+                    self._write_results(
+                        task_id,
+                        spec,
+                        merged_children,
+                        out_dir,
+                        out,
+                        msg.declared_contract,
+                    )
                     metadata = self._build_task_metadata(
                         task_type,
                         dispatched_at,

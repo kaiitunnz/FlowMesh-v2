@@ -436,6 +436,28 @@ class Attempt(BaseModel):
     started_at: str | None = None
     finished_at: str | None = None
     error: str | None = None
+    # The embodiment this attempt ran, for a work item whose node offered a menu.
+    alternative_id: str | None = None
+
+
+class EmbodimentSelection(BaseModel):
+    """The embodiment a work item is bound to, resolved before it was published.
+
+    The selection is a physical fence rather than a dispatcher preference: it is
+    recorded before the worker message goes out, so what ran is known even when the
+    attempt that followed was never recorded. It binds no worker, replica, or capacity
+    object — the scheduler places the resolved embodiment afterwards as it places any
+    other work.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    work_item_id: str
+    alternative_id: str
+    plan_version: str
+    selector: str = Field(description="The selector that resolved this embodiment.")
+    evidence: str = Field(description="Bounded summary of the feasibility snapshot.")
+    selected_at: str = Field(default_factory=now_iso)
 
 
 class EffectReceipt(BaseModel):
@@ -528,6 +550,7 @@ class LedgerSnapshot(BaseModel):
     region_aggregates: list[RegionJoinAggregate] = Field(default_factory=list)
     invocations: list[Invocation] = Field(default_factory=list)
     attempts: list[Attempt] = Field(default_factory=list)
+    embodiment_selections: list[EmbodimentSelection] = Field(default_factory=list)
     boundary_events: list[BoundaryEvent] = Field(default_factory=list)
     effect_receipts: list[EffectReceipt] = Field(default_factory=list)
     authority_decisions: list[AuthorityDecision] = Field(default_factory=list)

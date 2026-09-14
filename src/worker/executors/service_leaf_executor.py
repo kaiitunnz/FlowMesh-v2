@@ -20,7 +20,9 @@ from shared.harness import (
     HarnessResult,
     HarnessResultKind,
     OutcomeKind,
+    ServiceLeafEpisodeDispatch,
 )
+from shared.inference import CanonicalInferenceRequest, declared_sampling
 from shared.tasks.specs import EmbeddingSpecStrict, InferenceSpecStrict
 from shared.tasks.task_type import TaskType
 from shared.tools.model.schema import MODEL_INTERFACE
@@ -42,7 +44,24 @@ def _call_correlation(task_id: str) -> str:
     return f"{_CALL_CORRELATION_PREFIX}{task_id}"
 
 
+def _declared_request_payload(task: ExecutorTask) -> str | None:
+    """The engine request a resolved contract names, or None to build one from the spec.
+
+    A leaf whose contract the fabric resolves is handed the request every embodiment of
+    it issues, including the sampling its author left undeclared. The executor reads a
+    request, never an embodiment.
+    """
+    if task.declared_contract is None:
+        return None
+    contract = CanonicalInferenceRequest.model_validate_json(task.declared_contract)
+    return json.dumps(contract.chat_body())
+
+
 _PROMPT_FIELDS = ("prompt", "input", "content", "text")
+# A leaf declares its prompts either as a scalar field or as a literal list. Both are
+# read here, so a leaf whose inputs a local generation reads declares them once and a
+# replica serves the same request.
+_LIST_PROMPT_FIELDS = ("prompts", "items")
 
 _EMBEDDING_INTERFACE = "embedding"
 _EMBEDDING_INPUT_FIELDS = ("input", "items", "inputs", "texts", "prompts")
@@ -72,12 +91,17 @@ class ServiceLeafExecutor(Executor):
         settled = next((o for o in outcomes if o.call_correlation == correlation), None)
         if settled is not None:
             return self._complete(settled)
-        return self._yield_boundary(task, dispatch.interface, correlation)
+        return self._yield_boundary(task, dispatch, correlation)
 
     def _yield_boundary(
-        self, task: ExecutorTask, interface: str, correlation: str
+        self,
+        task: ExecutorTask,
+        dispatch: ServiceLeafEpisodeDispatch,
+        correlation: str,
     ) -> EpisodeStepResult:
-        payload = _resident_request_payload(task, interface)
+        payload = _declared_request_payload(task) or _resident_request_payload(
+            task, dispatch.interface
+        )
         request = BoundaryRequest(
             kind=BoundaryEventKind.INVOCATION,
             interface=MODEL_INTERFACE,
@@ -143,21 +167,27 @@ def _resident_request_payload(task: ExecutorTask, interface: str) -> str:
     if interface == _EMBEDDING_INTERFACE:
         return _embedding_payload(task, data, inference)
 
+    params = declared_sampling(inference)
     for source in (inference, data):
         if isinstance(messages := source.get("messages"), list):
-            return json.dumps({"messages": messages})
+            return json.dumps({**params, "messages": messages})
 
     for source in (data, inference):
         for field in _PROMPT_FIELDS:
             if isinstance(value := source.get(field), str) and value:
-                return value
-        if isinstance(prompts := source.get("prompts"), list) and prompts:
-            return str(prompts[0])
+                return _chat_payload(params, value)
+        for field in _LIST_PROMPT_FIELDS:
+            if isinstance(prompts := source.get(field), list) and prompts:
+                return _chat_payload(params, str(prompts[0]))
 
     raise ExecutionError(
         f"resident {interface} leaf {task.task_id} declares no prompt or messages "
         "in spec.data or spec.inference"
     )
+
+
+def _chat_payload(params: dict[str, Any], prompt: str) -> str:
+    return json.dumps({**params, "messages": [{"role": "user", "content": prompt}]})
 
 
 def _embedding_payload(

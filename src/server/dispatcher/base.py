@@ -27,6 +27,7 @@ from shared.tasks import (
 from shared.tasks.placeholders import PLACEHOLDER_PATTERN
 from shared.tasks.specs import (
     ConditionSpec,
+    InferenceEmbodimentKind,
     SSHSpecStrict,
     SSHSpecTemplate,
 )
@@ -39,6 +40,12 @@ from ..task.metadata import extract_model_dataset_names
 from ..task.models import TaskRecord, TaskStatus
 from ..task.runtime import TaskRuntime
 from ..utils.time import now_iso
+from .embodiment import (
+    EmbodimentSelector,
+    EmbodimentSnapshot,
+    PrimaryEmbodimentSelector,
+    relay_placement_task,
+)
 from .worker_selector import DEFAULT_WORKER_SELECTION, select_worker
 
 _SENTINEL: Any = object()
@@ -70,6 +77,8 @@ class Dispatcher:
         enable_stage_weight_stickiness: bool = False,
         no_worker_grace_sec: int = 60,
         metrics_recorder: MetricsRecorder | None = None,
+        resident_capacity_enabled: bool = False,
+        embodiment_selector: EmbodimentSelector | None = None,
     ) -> None:
         self._runtime = runtime
         self._worker_registry = worker_registry
@@ -85,6 +94,8 @@ class Dispatcher:
         self._stage_weight_stickiness_enabled = enable_stage_weight_stickiness
         self._no_worker_grace_sec = max(0, no_worker_grace_sec)
         self._metrics = metrics_recorder
+        self._resident_capacity_enabled = resident_capacity_enabled
+        self._embodiment_selector = embodiment_selector or PrimaryEmbodimentSelector()
         self._weight_reference_hints: tuple[str, ...] = (
             "checkpoint",
             "weight",
@@ -96,11 +107,11 @@ class Dispatcher:
             "artifact",
         )
 
-    def eligible_worker_ids(self, record: TaskRecord) -> set[str]:
+    def eligible_worker_ids(self, record: TaskRecord, relay: bool = False) -> set[str]:
         """Worker ids whose hardware satisfies the task, honoring selected_worker."""
+        task = relay_placement_task(record.task) if relay else record.task
         eligible = {
-            worker.id
-            for worker in self._worker_registry.satisfying_workers(record.task)
+            worker.id for worker in self._worker_registry.satisfying_workers(task)
         }
         if record.selected_worker:
             eligible &= set(record.selected_worker)
@@ -233,11 +244,86 @@ class Dispatcher:
         )
         return False
 
+    def _resolve_embodiment(self, task_id: str, record: TaskRecord) -> bool:
+        """Bind a menu node to one embodiment, or defer holding no worker.
+
+        A task whose node offers no menu passes straight through, as does one whose
+        embodiment is already committed: the choice is re-resolvable only while no
+        attempt has carried it to a worker and no invocation has issued.
+
+        A primary that can never be placed would otherwise defer forever, so a
+        continuously deferred menu reaches the same grace-then-fail a task no worker can
+        satisfy does. It fails rather than switching: an embodiment the author did not
+        declare stays unreachable.
+        """
+        menu = self._runtime.embodiment_menu(task_id)
+        if menu is None or self._runtime.embodiment_pinned(task_id):
+            return True
+        snapshot = self._embodiment_snapshot(record)
+        decision = self._embodiment_selector(menu, snapshot)
+        if decision.alternative_id is None:
+            self._logger.debug(
+                "Deferring %s: no embodiment placeable (%s)",
+                task_id,
+                decision.defer_reason,
+            )
+            return self._grace_then_fail(
+                task_id,
+                record,
+                reason=f"embodiment_deferred:{decision.defer_reason}",
+                message=(
+                    "No embodiment of the task can be placed: its declared primary "
+                    f"is unavailable ({decision.defer_reason})"
+                ),
+            )
+        bound = self._runtime.record_embodiment_selection(
+            task_id,
+            decision.alternative_id,
+            self._embodiment_selector.name,
+            snapshot.evidence(),
+        )
+        if bound is None:
+            # The work item went away mid-dispatch; without a durable selection there is
+            # no fence, so the task waits rather than running an unrecorded embodiment.
+            self.requeue_task(
+                task_id, reason="embodiment_unrecorded", count_retry=False
+            )
+            return False
+        record.no_eligible_since = None
+        return True
+
+    def _embodiment_snapshot(self, record: TaskRecord) -> EmbodimentSnapshot:
+        """Read live feasibility for one menu node. It reserves nothing."""
+        return EmbodimentSnapshot(
+            local_capable_workers=len(self.eligible_worker_ids(record)),
+            relay_capable_workers=len(self.eligible_worker_ids(record, relay=True)),
+            resident_capacity_enabled=self._resident_capacity_enabled,
+        )
+
+    def _relays_only(self, task_id: str) -> bool:
+        """Whether this dispatch carries an invocation rather than running a model.
+
+        A resident-served embodiment runs its model on a replica, so the local model
+        requirement its leaf declares for the other embodiment does not apply to the
+        worker that carries the invocation.
+        """
+        resolved = self._runtime.resolved_embodiment(task_id)
+        return (
+            resolved is not None
+            and resolved.kind is InferenceEmbodimentKind.RESIDENT_SERVED
+        )
+
     def dispatch_once(self, task_id: str) -> bool:
         """Dispatch a single task if possible; requeue when no worker."""
         record = self._runtime.get_record(task_id)
         if not record:
             return True
+
+        # Resolve and durably bind the embodiment before anything else this dispatch
+        # does: publication precedes attempt bookkeeping, so a choice recorded after it
+        # would not survive a loss between the two.
+        if not self._resolve_embodiment(task_id, record):
+            return False
 
         # Live-feasibility handoff: defer an episode whose declared alternative is not
         # feasible to place now, holding no worker. It admits no capacity object.
@@ -248,6 +334,10 @@ class Dispatcher:
             return False
 
         task = record.task
+        # Placement reads the resolved embodiment, never the leaf's own binding: a
+        # resident-served dispatch carries the invocation and loads no model locally.
+        relays_only = self._relays_only(task_id)
+        placement_task = relay_placement_task(task) if relays_only else task
 
         model_names, dataset_names = extract_model_dataset_names(task)
         task_category = (
@@ -260,7 +350,7 @@ class Dispatcher:
             task_age = max(0.0, time.time() - record.last_queue_ts)
 
         # 1. Get idle worker pool
-        pool = self._worker_registry.idle_satisfying_pool(task)
+        pool = self._worker_registry.idle_satisfying_pool(placement_task)
 
         # 2. Filter by selected_worker hint if present
         if record.selected_worker:
@@ -299,7 +389,7 @@ class Dispatcher:
         # 3. No idle worker: wait for a busy one, or grace-then-fail when no worker can
         # take the task, or every eligible worker has already failed it.
         if not pool:
-            eligible = self.eligible_worker_ids(record)
+            eligible = self.eligible_worker_ids(record, relay=relays_only)
             if not eligible:
                 return self._grace_then_fail(
                     task_id,
@@ -323,7 +413,7 @@ class Dispatcher:
             filtered_pool = [c for c in pool if c.id not in failed_ids]
             if filtered_pool:
                 pool = filtered_pool
-            elif self.eligible_worker_ids(record) - failed_ids:
+            elif self.eligible_worker_ids(record, relay=relays_only) - failed_ids:
                 # Untried eligible workers exist but are busy; wait for them.
                 record.no_eligible_since = None
                 self._logger.debug(
@@ -572,6 +662,7 @@ class Dispatcher:
                 OwnerFence(worker_id=worker.id, incarnation=worker.incarnation),
             ),
             service_episode=self._runtime.service_episode_dispatch(task_id),
+            declared_contract=self._runtime.declared_contract(task_id),
         )
 
         # 8. Publish task

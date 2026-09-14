@@ -12,16 +12,32 @@ from unittest.mock import MagicMock
 import pytest
 
 from shared.harness import BoundaryEventKind, HarnessResultKind
+from shared.inference import CanonicalInferenceRequest
+from shared.schemas.result import BaseExecutorResult
 from shared.tasks.task_type import TaskType
 from shared.tools.model.schema import MODEL_INTERFACE
 from tests.worker.factories import make_worker_config, make_worker_task_message
 from worker.executors import EXECUTOR_REGISTRY
 from worker.executors.base_executor import ExecutionError
+from worker.executors.episode_support import EpisodeStepResult
 from worker.executors.service_leaf_executor import (
     ServiceLeafExecutor,
     _call_correlation,
 )
 from worker.resident import ResidentRequestStore
+
+
+def _body(store: ResidentRequestStore) -> dict:
+    """The engine request the executor kept in worker-private custody."""
+    payload = store.peek("tsk-test", _CORR)
+    assert payload is not None
+    return json.loads(payload)
+
+
+def _step(result: BaseExecutorResult) -> EpisodeStepResult:
+    assert isinstance(result, EpisodeStepResult)
+    return result
+
 
 _CORR = _call_correlation("tsk-test")
 
@@ -39,6 +55,73 @@ def _msg(spec_data: dict, **episode: object):
         task_type=TaskType.INFERENCE,
         service_episode={"interface": "chat", **episode},
     )
+
+
+def _inference_msg(spec_data: dict, inference: dict, **episode: object):
+    return make_worker_task_message(
+        {"taskType": "inference", "data": spec_data, "inference": inference},
+        task_type=TaskType.INFERENCE,
+        service_episode={"interface": "chat", **episode},
+    )
+
+
+def test_the_declared_sampling_is_carried_to_the_replica() -> None:
+    # A leaf's declared sampling governs its generation wherever it runs. Dropping it
+    # here made a resident run of the same leaf generate under the engine's defaults
+    # while a local run honoured the spec.
+    ex, store = _executor()
+    ex.run(
+        _inference_msg(
+            {"prompt": "hello there"},
+            {"max_tokens": 10, "temperature": 0.0, "stop": ["\n"]},
+        ),
+        Path("/tmp"),  # noqa: S108
+    )
+
+    body = _body(store)
+    assert body["max_tokens"] == 10
+    assert body["temperature"] == 0.0
+    assert body["stop"] == ["\n"]
+    assert body["messages"] == [{"role": "user", "content": "hello there"}]
+
+
+def test_a_handed_contract_is_issued_unchanged(tmp_path: Path) -> None:
+    # The fabric builds one request for a leaf whose contract it resolves, so the
+    # executor issues that rather than deriving a second one from the spec.
+    ex, store = _executor()
+    msg = _msg({"prompt": "ignored"})
+    msg.declared_contract = CanonicalInferenceRequest(
+        model="m", prompt="hi", params={"max_tokens": 512}
+    ).model_dump_json()
+    ex.run(msg, tmp_path)
+
+    assert _body(store) == {
+        "max_tokens": 512,
+        "messages": [{"role": "user", "content": "hi"}],
+    }
+
+
+def test_a_leaf_declaring_a_literal_prompt_list_is_served(tmp_path: Path) -> None:
+    # The shape a local generation reads. A leaf that admits both embodiments declares
+    # its prompt once, so the replica has to read the same declaration.
+    ex, store = _executor()
+    ex.run(_msg({"type": "list", "items": ["hello there"]}), tmp_path)
+
+    assert _body(store) == {"messages": [{"role": "user", "content": "hello there"}]}
+
+
+def test_inputs_and_executor_settings_are_not_sent_as_engine_params() -> None:
+    # A leaf with one embodiment builds its own request and carries what it declared;
+    # a leaf whose embodiment the fabric resolves is handed the request to issue.
+    ex, store = _executor()
+    ex.run(
+        _inference_msg({"prompt": "hi"}, {"max_tokens": 4, "batch_size": 8}),
+        Path("/tmp"),  # noqa: S108
+    )
+
+    body = _body(store)
+    assert body["max_tokens"] == 4
+    assert "batch_size" not in body
 
 
 def _embedding_msg(spec_data: dict, **episode: object):
@@ -70,7 +153,7 @@ def test_first_step_captures_the_request_and_yields_a_resident_boundary(
     # The raw request is stripped to a digest and kept worker-private.
     assert req.request_payload is None
     assert req.request_digest is not None
-    assert store.peek("tsk-test", _CORR) == "hello there"
+    assert _body(store) == {"messages": [{"role": "user", "content": "hello there"}]}
 
 
 def test_explicit_messages_pass_through_as_a_chat_request(tmp_path: Path) -> None:
@@ -83,18 +166,20 @@ def test_explicit_messages_pass_through_as_a_chat_request(tmp_path: Path) -> Non
 
 def test_resume_completes_with_the_settled_value(tmp_path: Path) -> None:
     ex, _store = _executor()
-    out = ex.run(
-        _msg(
-            {"prompt": "hello"},
-            delivered_outcomes=[
-                {
-                    "call_correlation": _CORR,
-                    "kind": "result",
-                    "value": "the answer",
-                }
-            ],
-        ),
-        tmp_path,
+    out = _step(
+        ex.run(
+            _msg(
+                {"prompt": "hello"},
+                delivered_outcomes=[
+                    {
+                        "call_correlation": _CORR,
+                        "kind": "result",
+                        "value": "the answer",
+                    }
+                ],
+            ),
+            tmp_path,
+        )
     )
     assert out.harness_result.kind is HarnessResultKind.COMPLETION
     assert out.value == "the answer"
@@ -102,18 +187,20 @@ def test_resume_completes_with_the_settled_value(tmp_path: Path) -> None:
 
 def test_resume_on_a_denied_outcome_fails_the_leaf(tmp_path: Path) -> None:
     ex, _store = _executor()
-    out = ex.run(
-        _msg(
-            {"prompt": "hello"},
-            delivered_outcomes=[
-                {
-                    "call_correlation": _CORR,
-                    "kind": "denied",
-                    "denial": "authority",
-                }
-            ],
-        ),
-        tmp_path,
+    out = _step(
+        ex.run(
+            _msg(
+                {"prompt": "hello"},
+                delivered_outcomes=[
+                    {
+                        "call_correlation": _CORR,
+                        "kind": "denied",
+                        "denial": "authority",
+                    }
+                ],
+            ),
+            tmp_path,
+        )
     )
     assert out.harness_result.kind is HarnessResultKind.FAILURE
 
@@ -141,18 +228,20 @@ def test_embedding_leaf_captures_the_input_list_and_yields_a_boundary(
 def test_embedding_resume_completes_with_the_settled_vectors(tmp_path: Path) -> None:
     ex, _store = _executor()
     vectors = json.dumps([{"index": 0, "embedding": [0.1, 0.2]}])
-    out = ex.run(
-        _embedding_msg(
-            {"input": ["alpha"]},
-            delivered_outcomes=[
-                {
-                    "call_correlation": _CORR,
-                    "kind": "result",
-                    "value": vectors,
-                }
-            ],
-        ),
-        tmp_path,
+    out = _step(
+        ex.run(
+            _embedding_msg(
+                {"input": ["alpha"]},
+                delivered_outcomes=[
+                    {
+                        "call_correlation": _CORR,
+                        "kind": "result",
+                        "value": vectors,
+                    }
+                ],
+            ),
+            tmp_path,
+        )
     )
     assert out.harness_result.kind is HarnessResultKind.COMPLETION
     assert out.value is not None

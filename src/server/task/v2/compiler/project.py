@@ -10,6 +10,7 @@ from shared.tasks.specs import (
     EmbeddingSpecTemplate,
     InferenceSpecStrict,
     InferenceSpecTemplate,
+    ServiceBindingMode,
 )
 from shared.tasks.specs.common import ModelSpecTemplate
 
@@ -26,6 +27,8 @@ from ..representations.operators import (
     EffectBoundary,
     EffectClass,
     EffectReplayContract,
+    InferenceEmbodimentBinding,
+    InferenceEmbodimentEligibility,
     LeafOperator,
     LogicalOperator,
     ModelRef,
@@ -36,6 +39,7 @@ from ..representations.operators import (
     operator_service_dependency,
 )
 from ..representations.plan import (
+    InferenceEmbodimentMenu,
     PhysicalNode,
     ResidencyIntent,
     ServiceFamilyRequirement,
@@ -68,6 +72,14 @@ from .bindings import (
     leaf_profile,
 )
 from .diagnostics import compile_error
+from .embodiment import embodiment_menu, reject_unproven, unproven_reason
+
+_SERVICE_BACKED_SPECS = (
+    InferenceSpecStrict,
+    InferenceSpecTemplate,
+    EmbeddingSpecStrict,
+    EmbeddingSpecTemplate,
+)
 
 
 def _model_ref(task: ParsedTask) -> ModelRef | None:
@@ -148,6 +160,7 @@ def _leaf_operator(
     operator_ids: set[str],
 ) -> LeafOperator:
     inputs, outputs = _ports(task, task_type)
+    embodiment = _leaf_embodiment(task)
     return LeafOperator(
         operator_id=task.task_id,
         source_ref=task.task_id,
@@ -156,34 +169,66 @@ def _leaf_operator(
         profile=leaf_profile(task_type),
         guard=_condition_guard(task, name_to_op, operator_ids),
         residency_only=binding_class(task_type) is BindingClass.RESIDENCY,
-        service_dependency=_leaf_service_dependency(task, task_type),
+        service_dependency=_leaf_service_dependency(task, task_type, embodiment),
+        embodiment=embodiment,
+    )
+
+
+def _leaf_embodiment(task: ParsedTask) -> InferenceEmbodimentBinding | None:
+    """Pin an inference/embedding leaf's embodiment disposition from its source.
+
+    An inference leaf admits both embodiments whenever they provably run one contract,
+    whether or not it declares a binding. A leaf the proof does not clear, and a leaf
+    kind for which only one embodiment is proven, keeps the embodiment its source names:
+    resident when it declares a binding, self-contained when it declares none. A leaf
+    that asks for both explicitly is failed rather than quietly narrowed.
+    """
+    spec = task.task.spec
+    if not isinstance(spec, _SERVICE_BACKED_SPECS):
+        return None
+    binding = spec.service
+    named = (
+        InferenceEmbodimentEligibility.RESIDENT_REQUIRED
+        if binding is not None
+        else InferenceEmbodimentEligibility.SELF_CONTAINED_REQUIRED
+    )
+    if binding is not None and binding.mode is ServiceBindingMode.RESIDENT:
+        return InferenceEmbodimentBinding(eligibility=named)
+    if not isinstance(spec, (InferenceSpecStrict, InferenceSpecTemplate)):
+        return InferenceEmbodimentBinding(eligibility=named)
+    if binding is not None and binding.mode is ServiceBindingMode.LOCAL_ELIGIBLE:
+        reject_unproven(task, spec)
+    elif unproven_reason(spec) is not None:
+        return InferenceEmbodimentBinding(eligibility=named)
+    return InferenceEmbodimentBinding(
+        eligibility=InferenceEmbodimentEligibility.LOCAL_ELIGIBLE,
+        primary=binding.primary if binding else None,
     )
 
 
 def _leaf_service_dependency(
-    task: ParsedTask, task_type: TaskType
+    task: ParsedTask,
+    task_type: TaskType,
+    embodiment: InferenceEmbodimentBinding | None,
 ) -> ServiceDependency | None:
-    """Normalize an inference/embedding leaf's resident binding into a dependency.
+    """Normalize the resident embodiment of a leaf that admits one into a dependency.
 
     The service reference defaults to the task's own model source; a declared adapter
     rides ``adapter`` so it constrains a compatible base replica's slot. The interface
     is the leaf's own — an embedding leaf never shares a chat batch for the same model.
+    A leaf whose only embodiment is self-contained names no service.
     """
     spec = task.task.spec
-    if not isinstance(
-        spec,
-        (
-            InferenceSpecStrict,
-            InferenceSpecTemplate,
-            EmbeddingSpecStrict,
-            EmbeddingSpecTemplate,
-        ),
+    if not isinstance(spec, _SERVICE_BACKED_SPECS):
+        return None
+    if (
+        embodiment is None
+        or embodiment.eligibility
+        is InferenceEmbodimentEligibility.SELF_CONTAINED_REQUIRED
     ):
         return None
     binding = spec.service
-    if binding is None:
-        return None
-    service_ref = binding.service_model_ref or spec.model_name
+    service_ref = (binding.service_model_ref if binding else None) or spec.model_name
     if not service_ref:
         source_kind, source_id = _task_source(task)
         raise compile_error(
@@ -213,7 +258,7 @@ def _leaf_service_dependency(
         interface=interface,
         adapter=adapter,
         adapter_source=_leaf_adapter_source(spec),
-        isolation=binding.isolation,
+        isolation=binding.isolation if binding else None,
     )
 
 
@@ -412,17 +457,51 @@ def lower_tasks(
                 source_ref=operator_id,
             )
         )
-        dependency = operator_service_dependency(ops_by_id.get(operator_id))
+        op = ops_by_id.get(operator_id)
+        dependency = operator_service_dependency(op)
+        node_id = f"phys:{operator_id}"
+        if (menu := _embodiment_menu(task, op, dependency, node_id)) is not None:
+            # A menu holds its boundary and resident annotations per candidate, so an
+            # unresolved node registers no service family and no residency demand.
+            acc.nodes.append(
+                PhysicalNode(
+                    node_id=node_id,
+                    source_ref=operator_id,
+                    logical_ref=operator_id,
+                    embodiment_menu=menu,
+                )
+            )
+            continue
         requirement, intent = _service_family_annotations(dependency, policy)
         acc.nodes.append(
             PhysicalNode(
-                node_id=f"phys:{operator_id}",
+                node_id=node_id,
                 source_ref=operator_id,
                 logical_ref=operator_id,
                 service_family_requirement=requirement,
                 residency_intent=intent,
             )
         )
+
+
+def _embodiment_menu(
+    task: ParsedTask,
+    op: LogicalOperator | None,
+    dependency: ServiceDependency | None,
+    node_id: str,
+) -> InferenceEmbodimentMenu | None:
+    """The embodiment menu a local-eligible inference leaf lowers to, or None."""
+    spec = task.task.spec
+    if (
+        not isinstance(op, LeafOperator)
+        or op.embodiment is None
+        or op.embodiment.eligibility
+        is not InferenceEmbodimentEligibility.LOCAL_ELIGIBLE
+        or dependency is None
+        or not isinstance(spec, (InferenceSpecStrict, InferenceSpecTemplate))
+    ):
+        return None
+    return embodiment_menu(task, spec, dependency, op.profile, node_id)
 
 
 def _service_family_annotations(

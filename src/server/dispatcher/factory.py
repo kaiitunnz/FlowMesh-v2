@@ -21,6 +21,7 @@ def create_dispatcher(
     results_dir: Path,
     logger: logging.Logger,
     metrics_recorder: MetricsRecorder | None = None,
+    resident_capacity_enabled: bool = False,
 ) -> Dispatcher:
     """
     Instantiate a dispatcher according to the selected mode.
@@ -59,4 +60,5 @@ def create_dispatcher(
         enable_stage_weight_stickiness=config.enable_stage_weight_stickiness,
         no_worker_grace_sec=config.no_worker_grace_sec,
         metrics_recorder=metrics_recorder,
+        resident_capacity_enabled=resident_capacity_enabled,
     )

@@ -173,6 +173,19 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   recovery are the same whether or not one runs. The fusion refinement applies to the
   episode-cut lowering; family and residency refinement applies to both lowerings.
   Enable with `ORCHESTRATOR_POLICY_SURFACE_ENABLED=true`.
+- **Inference-embodiment menus.** An inference leaf declares one model contract; whether
+  resident capacity or a local executor serves it is the fabric's to decide. Such a leaf
+  lowers to one physical node carrying the embodiments that contract admits — a
+  resident-served candidate and a self-contained one — each with its own `EpisodeSpec`
+  and either a local executor and resource envelope or a `ServiceFamilyRequirement` and a
+  *conditional* `ResidencyIntent`. The compiler emits a menu only for leaves it proves run
+  one declared contract, built from one effective engine request; any other leaf keeps the
+  embodiment its source names, and `mode: resident` pins resident serving. An unresolved
+  menu registers no residency demand, mints no claim, and is never read as one episode. At
+  dispatch a scheduler-owned `EmbodimentSelector` reads a read-only feasibility snapshot
+  and returns a selection or a defer, holding no capacity authority. The selection records
+  to the ledger before the task is published and lands on the attempt, and the dispatcher
+  materializes the task it implies. See [`EXECUTORS.md`](EXECUTORS.md).
 - **Live-feasibility handoff.** A ready episode carries the lowerer's declared
   alternative; a feasibility check lets the scheduler defer an infeasible alternative,
   holding no worker, rather than dispatching it. It resolves no resident capacity.

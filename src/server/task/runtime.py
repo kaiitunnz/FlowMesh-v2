@@ -21,6 +21,7 @@ from shared.harness import (
     InputBindingMember,
     ServiceLeafEpisodeDispatch,
 )
+from shared.inference import CanonicalProjectionError, canonical_request
 from shared.outcome import OutcomeManifest
 from shared.private_state import (
     OwnerFence,
@@ -42,7 +43,12 @@ from shared.sandbox import (
 from shared.schemas.command import InterruptMessage, MediatedOpMessage
 from shared.schemas.result import ResultEnvelope, result_file_path
 from shared.tasks import TaskEnvelopeTemplate
-from shared.tasks.specs import ModelBindingMode
+from shared.tasks.specs import (
+    InferenceEmbodimentKind,
+    InferenceSpecStrict,
+    InferenceSpecTemplate,
+    ModelBindingMode,
+)
 from shared.tools.contract import AgentModelTurnProposal, MediatedOperationOutcome
 from shared.tools.facade import FacadeDescriptor, FacadeResolution
 from shared.utils import new_workflow_id
@@ -104,9 +110,10 @@ from .v2.policy import PolicySurface
 from .v2.representations.operators import (
     AgentModelGatewayBinding,
     AgentOperator,
+    ResolvedEmbodiment,
     ServiceDependency,
 )
-from .v2.representations.plan import EpisodeSpec
+from .v2.representations.plan import EpisodeSpec, InferenceEmbodimentMenu
 
 # A live-feasibility check: whether a lowered episode's declared alternative can be
 # placed now.
@@ -1929,6 +1936,10 @@ class TaskRuntime:
         Only a resident-backed inference/embedding leaf takes this path; an agent whose
         model binding is resident runs its resident boundary through the agent episode.
         A resume ships the settled outcome to inject; a first dispatch ships none.
+
+        A leaf that admits more than one embodiment names a service dependency for its
+        resident candidate alone, so the resolved embodiment decides this path rather
+        than the dependency's presence.
         """
         with self._lock:
             record = self._tasks.get(task_id)
@@ -1938,10 +1949,76 @@ class TaskRuntime:
             dependency = engine.service_dependency(task_id)
             if dependency is None or engine.agent_operator(task_id) is not None:
                 return None
+            if engine.embodiment_menu(task_id) is not None:
+                resolved = self._resolved_embodiment_locked(engine, task_id)
+                if (
+                    resolved is None
+                    or resolved.kind is not InferenceEmbodimentKind.RESIDENT_SERVED
+                ):
+                    return None
             _capsule, outcomes = engine.episode_context(task_id)
             return ServiceLeafEpisodeDispatch(
-                interface=dependency.interface.value, delivered_outcomes=outcomes
+                interface=dependency.interface.value,
+                delivered_outcomes=outcomes,
             )
+
+    def _resolved_embodiment_locked(
+        self, engine: OrchestrationEngine, task_id: str
+    ) -> ResolvedEmbodiment | None:
+        menu = engine.embodiment_menu(task_id)
+        if menu is None or (selection := engine.embodiment_selection(task_id)) is None:
+            return None
+        candidate = menu.candidate(selection.alternative_id)
+        if candidate is None:
+            return None
+        return ResolvedEmbodiment(
+            alternative_id=candidate.alternative_id, kind=candidate.kind
+        )
+
+    def embodiment_pinned(self, task_id: str) -> bool:
+        """Whether a task's resolved embodiment is committed to the run carrying it."""
+        with self._lock:
+            record = self._tasks.get(task_id)
+            engine = self._engines.get(record.workflow_id) if record else None
+            return engine.embodiment_pinned(task_id) if engine else False
+
+    def resolved_embodiment(self, task_id: str) -> ResolvedEmbodiment | None:
+        """The embodiment a menu node's task is bound to, for its worker message."""
+        with self._lock:
+            record = self._tasks.get(task_id)
+            engine = self._engines.get(record.workflow_id) if record else None
+            if engine is None:
+                return None
+            return self._resolved_embodiment_locked(engine, task_id)
+
+    def embodiment_menu(self, task_id: str) -> InferenceEmbodimentMenu | None:
+        """The embodiments a ready task's plan node offers, if it offers a menu."""
+        with self._lock:
+            record = self._tasks.get(task_id)
+            engine = self._engines.get(record.workflow_id) if record else None
+            return engine.embodiment_menu(task_id) if engine else None
+
+    def record_embodiment_selection(
+        self, task_id: str, alternative_id: str, selector: str, evidence: str
+    ) -> str | None:
+        """Durably bind a task to one embodiment, returning the bound alternative.
+
+        Recorded before the task's worker message is published, so the choice survives a
+        loss between publication and the attempt bookkeeping that follows it. A pinned
+        selection is kept and returned unchanged.
+        """
+        with self._lock:
+            record = self._tasks.get(task_id)
+            engine = self._engines.get(record.workflow_id) if record else None
+            if engine is None or record is None:
+                return None
+            selection = engine.record_embodiment_selection(
+                task_id, alternative_id, selector, evidence
+            )
+            if selection is None:
+                return None
+            self._save_ledger_locked(record.workflow_id)
+            return selection.alternative_id
 
     def _synthesize_ready_children_locked(
         self, workflow_id: str, engine: OrchestrationEngine, advance: Advance
@@ -2014,14 +2091,25 @@ class TaskRuntime:
         The generic live-feasibility handoff from the lowerer's episode annotation to
         the scheduler: an infeasible alternative is deferred by the dispatcher, holding
         no worker. Absent a configured check, or for a task the plan did not cut into an
-        episode, placement is always feasible.
+        episode, placement is always feasible. A menu node is checked through the
+        episode of the embodiment already resolved for it, never as one implicit episode
+        over the whole menu.
         """
         if self._feasibility_check is None:
             return True
         with self._lock:
             record = self._tasks.get(task_id)
             engine = self._engines.get(record.workflow_id) if record else None
-            spec = engine.episode_spec(task_id) if engine else None
+            if engine is None:
+                spec = None
+            elif (menu := engine.embodiment_menu(task_id)) is not None:
+                selection = engine.embodiment_selection(task_id)
+                candidate = (
+                    menu.candidate(selection.alternative_id) if selection else None
+                )
+                spec = candidate.episode if candidate else None
+            else:
+                spec = engine.episode_spec(task_id)
         return True if spec is None else self._feasibility_check(spec)
 
     def retry_deferred_fanout(self, producer_task_id: str) -> None:
@@ -2044,6 +2132,33 @@ class TaskRuntime:
             )
             if self._apply_advance_locked(record.workflow_id, advance):
                 self._cv.notify_all()
+
+    def declared_contract(self, task_id: str) -> str | None:
+        """The canonical request a menu leaf runs, for the worker to issue and report.
+
+        A leaf that admits more than one embodiment resolves its contract here rather
+        than in the executor, so every embodiment issues one engine request and stores
+        one result shape. It names no embodiment: the worker reads a declared contract
+        and never learns which one it is running.
+        """
+        with self._lock:
+            record = self._tasks.get(task_id)
+            engine = self._engines.get(record.workflow_id) if record else None
+            if record is None or engine is None:
+                return None
+            if engine.embodiment_menu(task_id) is None:
+                return None
+            spec = record.task.spec
+            if not isinstance(spec, (InferenceSpecStrict, InferenceSpecTemplate)):
+                return None
+            try:
+                return canonical_request(spec).model_dump_json()
+            except CanonicalProjectionError:
+                self._logger.warning(
+                    "[fabric] a menu leaf's request is no longer projectable: %s",
+                    task_id,
+                )
+                return None
 
     def resolve_v2_output(
         self, workflow_id: str, output_id: str

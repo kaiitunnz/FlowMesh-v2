@@ -8,6 +8,7 @@ from .common import (
     ModelInferSpecTemplate,
     ParallelSpec,
     ParallelSpecTemplate,
+    ServiceBindingMode,
     ServiceBindingSpec,
     validate_adapters_loadable,
 )
@@ -76,11 +77,15 @@ def _inference_backend(
 def _validate_inference_dispatchable(
     spec: InferenceSpecStrict | InferenceSpecTemplate,
 ) -> None:
-    if spec.service is not None:
-        # A resident-served leaf admits to a replica, so it carries no worker-local GPU
-        # requirement; its adapter still must be loadable on that replica.
+    if (binding := spec.service) is not None:
         validate_adapters_loadable(spec.adapters, resident=True)
-        return
+        if binding.mode is ServiceBindingMode.RESIDENT:
+            # A resident-served leaf admits to a replica, so it carries no worker-local
+            # GPU requirement; its adapter still must be loadable on that replica.
+            return
+    # A self-contained embodiment loads the model on its worker, so a leaf that admits
+    # one carries the local executor and GPU requirement even when a resident embodiment
+    # is equally legal.
     validate_adapters_loadable(spec.adapters, resident=False)
 
     model = spec.model

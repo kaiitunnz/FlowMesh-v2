@@ -296,6 +296,7 @@ if IS_ROOT_NODE:
         RESULTS_DIR,
         logger=logger,
         metrics_recorder=METRICS_RECORDER,
+        resident_capacity_enabled=config.orchestration.resident.enabled,
     )
 
     _pf_cfg = config.port_forward

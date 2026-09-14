@@ -56,7 +56,7 @@ from ..task.v2.representations.operators import (
     SpawnRegion,
     operator_service_dependency,
 )
-from ..task.v2.representations.plan import EpisodeSpec
+from ..task.v2.representations.plan import EpisodeSpec, InferenceEmbodimentMenu
 from ..task.v2.representations.results import CardinalityKind
 from ..utils.time import now_iso
 from .guardrails import ScopeBudget
@@ -87,6 +87,7 @@ from .state import (
     DelegatedAuthorityGrant,
     DenialKind,
     EffectReceipt,
+    EmbodimentSelection,
     Invocation,
     InvocationState,
     LedgerSnapshot,
@@ -227,6 +228,9 @@ class OrchestrationEngine:
         }
         self._invocations = {i.invocation_id: i for i in snapshot.invocations}
         self._attempts = {a.attempt_id: a for a in snapshot.attempts}
+        self._embodiment_selections = {
+            sel.work_item_id: sel for sel in snapshot.embodiment_selections
+        }
         self._receipts = {r.invocation_id: r for r in snapshot.effect_receipts}
         self._decisions = list(snapshot.authority_decisions)
         self._grants = {g.grant_id: g for g in snapshot.delegated_grants}
@@ -565,6 +569,11 @@ class OrchestrationEngine:
             attempt_no=len(wi.attempt_ids) + 1,
             worker_id=worker_id,
             started_at=now_iso(),
+            alternative_id=(
+                selection.alternative_id
+                if (selection := self._embodiment_selections.get(wi.work_item_id))
+                else None
+            ),
         )
         wi.attempt_ids.append(attempt.attempt_id)
         self._attempts[attempt.attempt_id] = attempt
@@ -3191,6 +3200,69 @@ class OrchestrationEngine:
         cap = self._capability(scope_id, ProgressAxis.CHILD_INIT)
         return cap.status is CapabilityStatus.OPEN
 
+    def embodiment_menu(self, task_id: str) -> InferenceEmbodimentMenu | None:
+        """The finite set of embodiments a task's plan node offers, if it offers one."""
+        wi = self._work_item_for_task(task_id)
+        if wi is None:
+            return None
+        return next(
+            (
+                node.embodiment_menu
+                for node in self._bundle.plan.nodes
+                if node.embodiment_menu is not None
+                and node.logical_ref == wi.operator_id
+            ),
+            None,
+        )
+
+    def embodiment_selection(self, task_id: str) -> EmbodimentSelection | None:
+        """The embodiment a task is already bound to, if one was resolved."""
+        wi = self._work_item_for_task(task_id)
+        return self._embodiment_selections.get(wi.work_item_id) if wi else None
+
+    def embodiment_pinned(self, task_id: str) -> bool:
+        """Whether a resolved embodiment is committed to the run that carries it.
+
+        An embodiment changes only before its candidate-specific issue or delivery. A
+        resident candidate commits at its invocation, after which reconciliation reuses
+        that invocation and its idempotency and credit path rather than running the
+        other embodiment; a local candidate carries no invocation and commits when its
+        attempt is issued, which is where it was delivered to a worker.
+        """
+        wi = self._work_item_for_task(task_id)
+        if wi is None or wi.work_item_id not in self._embodiment_selections:
+            return False
+        return wi.invocation_id is not None or bool(wi.attempt_ids)
+
+    def record_embodiment_selection(
+        self, task_id: str, alternative_id: str, selector: str, evidence: str
+    ) -> EmbodimentSelection | None:
+        """Bind a task to one embodiment durably, before its worker message goes out.
+
+        A pinned selection is kept: the caller receives the standing one rather than a
+        replacement.
+        """
+        wi = self._work_item_for_task(task_id)
+        if wi is None:
+            return None
+        if (standing := self._embodiment_selections.get(wi.work_item_id)) is not None:
+            if self.embodiment_pinned(task_id):
+                return standing
+        selection = EmbodimentSelection(
+            work_item_id=wi.work_item_id,
+            alternative_id=alternative_id,
+            plan_version=self._bundle.plan.plan_version.content_digest,
+            selector=selector,
+            evidence=evidence,
+        )
+        self._embodiment_selections[wi.work_item_id] = selection
+        self._emit(
+            "embodiment_selected",
+            work_item_id=wi.work_item_id,
+            detail={"alternative_id": alternative_id, "selector": selector},
+        )
+        return selection
+
     def episode_spec(self, task_id: str) -> EpisodeSpec | None:
         """The run-to-yield episode a task's operator lowers to, if the plan cut it."""
         wi = self._work_item_for_task(task_id)
@@ -3306,6 +3378,7 @@ class OrchestrationEngine:
             region_aggregates=list(self._region_aggregates),
             invocations=list(self._invocations.values()),
             attempts=list(self._attempts.values()),
+            embodiment_selections=list(self._embodiment_selections.values()),
             boundary_events=list(self._boundary_events.values()),
             effect_receipts=list(self._receipts.values()),
             authority_decisions=list(self._decisions),

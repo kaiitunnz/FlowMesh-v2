@@ -267,6 +267,45 @@ JSON — is injected on a resume and becomes the leaf's result. The resident-req
 and reference-backed outcome hydration are the same caller-neutral substrate the
 agent-episode executor uses.
 
+### Inference leaves that admit both embodiments
+
+An inference leaf declares one model contract. Where the compiler can prove that resident
+capacity and a self-contained local executor run that contract identically, the leaf
+admits both and the fabric picks one at dispatch. The proof is narrow: it admits a chat
+leaf that pins the vLLM engine, declares one literal prompt under `spec.data.items`, and
+declares no adapter, shard, parallel split, or postprocessing step. A leaf declaring an
+inference setting a relayed request does not carry — guided decoding from a template,
+chat-template arguments — keeps one embodiment for the same reason. Any other leaf keeps
+the embodiment its source names — resident when it declares a `service` binding,
+self-contained when it does not.
+
+Such a leaf carries both sets of constraints: the resident binding fields above, and the
+local model, executor, and GPU requirement a `{mode: resident}` leaf drops. Declare
+`{mode: resident}` to pin resident serving, or `{primary: self_contained}` to prefer the
+local embodiment.
+
+The leaf's declared sampling governs its generation wherever it runs, and values it
+leaves out take the same defaults on both sides, so both embodiments issue one engine
+request. Equivalence is over that request and the declared result, not over sampled
+tokens: a leaf that needs reproducible output declares greedy sampling. Both report one
+result — the pinned model, its prompt, and its output. Fields only a local generation can
+report (`finish_reason`, `metadata`) and token accounting (`usage`) are dropped from
+both.
+
+At dispatch a scheduler-owned selector reads live feasibility and either binds one
+embodiment or defers, holding no worker and admitting no capacity object. It runs the
+primary, defers while the fleet momentarily cannot place it, and falls through to the
+other embodiment where the deployment rules the primary out: a deployment serving no
+resident capacity runs the leaf locally. A primary fails the task once it stays
+unplaceable past the no-worker grace.
+
+The choice is recorded durably before the task is published and on the attempt. The
+dispatcher then materializes the task it implies, so the worker runs an ordinary typed
+task: a resident-served dispatch carries only the invocation and is placed without the
+accelerator the other embodiment needs. A resident embodiment is pinned once its
+invocation exists, so a retry reconciles through that invocation instead of running the
+model locally.
+
 A service dependency's family folds the service interface, base model, and isolation
 domain. A shared base model and interface reuse a warm replica; a differing interface, base
 model, or isolation domain resolves to a distinct family and cannot share a batch or route

@@ -5,9 +5,14 @@ from server.task.v2.compiler.agent_binding import AgentBindingDefaults
 from server.task.v2.compiler.diagnostics import CompileError
 from server.task.v2.compiler.episodes import lower_to_episodes
 from server.task.v2.compiler.pipeline import compile_workflow
-from server.task.v2.representations.operators import LeafOperator, ServiceInterface
+from server.task.v2.representations.operators import (
+    InferenceEmbodimentEligibility,
+    LeafOperator,
+    ServiceInterface,
+)
 from server.task.v2.representations.plan import EpisodeBoundaryKind
 from server.task.v2.representations.source import FrontendWorkflowSource
+from shared.tasks.specs import InferenceEmbodimentKind
 
 
 def _compile(text):
@@ -168,3 +173,265 @@ spec:
 """
     with pytest.raises(CompileError, match="service.missing-ref"):
         _compile(text)
+
+
+def _inference_leaf(template) -> LeafOperator:
+    return next(op for op in template.operators if isinstance(op, LeafOperator))
+
+
+def test_a_resident_binding_pins_a_resident_required_embodiment():
+    template, _plan = _compile(_resident_inference("{mode: resident}"))
+    embodiment = _inference_leaf(template).embodiment
+    assert embodiment.eligibility is InferenceEmbodimentEligibility.RESIDENT_REQUIRED
+    assert embodiment.primary is None
+
+
+def test_no_service_binding_pins_a_self_contained_required_embodiment():
+    text = """
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {name: t}
+spec:
+  taskType: echo
+  graph:
+    nodes:
+      - name: a
+        spec:
+          taskType: inference
+          model: {source: {identifier: Qwen/Qwen3-4B}}
+"""
+    template, _plan = _compile(text)
+    embodiment = _inference_leaf(template).embodiment
+    assert (
+        embodiment.eligibility is InferenceEmbodimentEligibility.SELF_CONTAINED_REQUIRED
+    )
+    assert embodiment.primary is None
+
+
+def _undeclared_binding(**overrides: str) -> str:
+    """A leaf that declares no service binding at all, so its default decides."""
+    body = {
+        "model": (
+            "{source: {identifier: Qwen/Qwen3-4B}, "
+            "vllm: {gpu_memory_utilization: 0.9}}"
+        ),
+        "data": '{type: list, items: ["hello"]}',
+        "resources": "{hardware: {gpu: {count: 1}}}",
+        **overrides,
+    }
+    fields = "\n".join(f"          {k}: {v}" for k, v in body.items())
+    return f"""
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {{name: t}}
+spec:
+  taskType: echo
+  graph:
+    nodes:
+      - name: a
+        spec:
+          taskType: inference
+{fields}
+"""
+
+
+def test_an_undeclared_binding_compiles_to_a_menu_with_a_derived_primary():
+    template, plan = _compile(_undeclared_binding())
+    embodiment = _inference_leaf(template).embodiment
+    assert embodiment.eligibility is InferenceEmbodimentEligibility.LOCAL_ELIGIBLE
+    assert embodiment.primary is None
+    menu = _menu_node(plan).embodiment_menu
+    assert menu.candidate(menu.primary).kind is InferenceEmbodimentKind.RESIDENT_SERVED
+
+
+def test_an_undeclared_binding_that_is_unprovable_keeps_one_embodiment():
+    # The proof, not the default, bounds the menu: a leaf that pins no vLLM engine
+    # keeps exactly the embodiment it had before, and names no service.
+    template, plan = _compile(_undeclared_binding(model="{source: {identifier: q}}"))
+    leaf = _inference_leaf(template)
+    assert (
+        leaf.embodiment.eligibility
+        is InferenceEmbodimentEligibility.SELF_CONTAINED_REQUIRED
+    )
+    assert leaf.service_dependency is None
+    assert all(n.embodiment_menu is None for n in plan.nodes)
+
+
+def test_a_leaf_whose_inference_settings_do_not_relay_keeps_one_embodiment():
+    # Guided decoding from a declared template is applied by a local generation and is
+    # not carried to a replica, so the two would produce structurally different output.
+    template, plan = _compile(
+        _undeclared_binding(inference='{templates: {answer: "{a}"}}')
+    )
+    leaf = _inference_leaf(template)
+    assert (
+        leaf.embodiment.eligibility
+        is InferenceEmbodimentEligibility.SELF_CONTAINED_REQUIRED
+    )
+    assert all(n.embodiment_menu is None for n in plan.nodes)
+
+
+def test_declared_sampling_still_admits_a_menu():
+    # Sampling IS carried, so declaring it must not cost the leaf its menu.
+    _template, plan = _compile(_undeclared_binding(inference="{max_tokens: 10}"))
+    assert any(n.embodiment_menu is not None for n in plan.nodes)
+
+
+def test_an_undeclared_mode_with_a_provable_contract_compiles_to_a_menu():
+    # A binding that names a served model but no mode still declares one contract, so
+    # it admits both embodiments; only an explicit mode pins a single one.
+    template, plan = _compile(_local_eligible(service="{isolation: tenant-a}"))
+    leaf = _inference_leaf(template)
+    assert leaf.embodiment.eligibility is InferenceEmbodimentEligibility.LOCAL_ELIGIBLE
+    menu = _menu_node(plan).embodiment_menu
+    assert menu.candidate(menu.primary).kind is InferenceEmbodimentKind.RESIDENT_SERVED
+
+
+def test_an_undeclared_mode_with_an_unprovable_contract_stays_resident():
+    # An adapter is rejected by the proof and is exactly the resident serving case, so
+    # the fallback keeps the resident embodiment the binding named rather than
+    # stripping it down to a self-contained one.
+    template, _plan = _compile(
+        _local_eligible(
+            service="{isolation: tenant-a}",
+            model=(
+                "{source: {identifier: Qwen/Qwen3-4B}, "
+                "vllm: {gpu_memory_utilization: 0.9}, "
+                "adapters: [{type: lora, name: a, path: hf/a}]}"
+            ),
+        )
+    )
+    leaf = _inference_leaf(template)
+    assert (
+        leaf.embodiment.eligibility is InferenceEmbodimentEligibility.RESIDENT_REQUIRED
+    )
+    assert leaf.service_dependency is not None
+
+
+def _local_eligible(
+    primary: str = "resident_served", service: str | None = None, **overrides: str
+) -> str:
+    body = {
+        "model": (
+            "{source: {identifier: Qwen/Qwen3-4B}, "
+            "vllm: {gpu_memory_utilization: 0.9}}"
+        ),
+        "data": '{type: list, items: ["hello"]}',
+        "resources": "{hardware: {gpu: {count: 1}}}",
+        **overrides,
+    }
+    binding = service or f"{{mode: local_eligible, primary: {primary}}}"
+    fields = "\n".join(f"          {k}: {v}" for k, v in body.items())
+    return f"""
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {{name: t}}
+spec:
+  taskType: echo
+  graph:
+    nodes:
+      - name: a
+        spec:
+          taskType: inference
+{fields}
+          service: {binding}
+"""
+
+
+def test_a_local_eligible_binding_pins_both_embodiments_and_its_primary():
+    template, _plan = _compile(_local_eligible(primary="self_contained"))
+    embodiment = _inference_leaf(template).embodiment
+    assert embodiment.eligibility is InferenceEmbodimentEligibility.LOCAL_ELIGIBLE
+    assert embodiment.primary is InferenceEmbodimentKind.SELF_CONTAINED
+
+
+def _menu_node(plan):
+    return next(n for n in plan.nodes if n.embodiment_menu is not None)
+
+
+def test_a_local_eligible_leaf_compiles_to_a_two_candidate_menu():
+    _template, plan = _compile(_local_eligible())
+    node = _menu_node(plan)
+    menu = node.embodiment_menu
+
+    kinds = {c.kind for c in menu.candidates}
+    assert kinds == {
+        InferenceEmbodimentKind.RESIDENT_SERVED,
+        InferenceEmbodimentKind.SELF_CONTAINED,
+    }
+    assert menu.contract_fingerprint
+    assert menu.candidate(menu.primary).kind is InferenceEmbodimentKind.RESIDENT_SERVED
+
+    # One logical leaf, one source map, one physical node.
+    assert node.logical_ref == node.source_ref
+    assert len([n for n in plan.nodes if n.logical_ref == node.logical_ref]) == 1
+
+
+def test_an_unresolved_menu_registers_no_residency_demand():
+    _template, plan = _compile(_local_eligible())
+    node = _menu_node(plan)
+    assert node.service_family_requirement is None
+    assert node.residency_intent is None
+    assert node.episode is None
+
+    resident = next(
+        c
+        for c in node.embodiment_menu.candidates
+        if c.kind is InferenceEmbodimentKind.RESIDENT_SERVED
+    )
+    assert resident.residency_intent.conditional is True
+    assert resident.residency_intent.required is False
+    assert resident.service_family_requirement.family == "Qwen/Qwen3-4B|chat"
+
+
+def test_each_candidate_carries_its_own_episode_and_envelope():
+    _template, plan = _compile(_local_eligible())
+    by_kind = {c.kind: c for c in _menu_node(plan).embodiment_menu.candidates}
+
+    resident = by_kind[InferenceEmbodimentKind.RESIDENT_SERVED]
+    assert resident.episode.boundary is EpisodeBoundaryKind.SERVICE_ISSUE
+    assert resident.local is None
+
+    local = by_kind[InferenceEmbodimentKind.SELF_CONTAINED]
+    assert local.episode.boundary is EpisodeBoundaryKind.TASK
+    assert local.local.executor_key == "vllm"
+    assert local.local.gpu_count == 1
+
+
+@pytest.mark.parametrize(
+    "overrides, reason",
+    [
+        ({"data": '{type: list, items: ["a", "b"]}'}, "exactly one prompt"),
+        ({"data": "{type: dataset, url: squad}"}, "not projectable"),
+        ({"data": "{type: list, expr: upstream.items}"}, "literal list"),
+        (
+            {"model": "{source: {identifier: Qwen/Qwen3-4B}}"},
+            "does not pin the vLLM engine",
+        ),
+        (
+            {"postprocess": "{jsonl_export: {path: out.jsonl, fields: {a: b}}}"},
+            "postprocessing",
+        ),
+    ],
+)
+def test_an_unproven_contract_compiles_to_no_menu(overrides, reason):
+    with pytest.raises(CompileError, match=reason):
+        _compile(_local_eligible(**overrides))
+
+
+def test_a_resident_required_leaf_compiles_to_a_single_embodiment():
+    _template, plan = _compile(_resident_inference("{mode: resident}"))
+    assert all(n.embodiment_menu is None for n in plan.nodes)
+    resident = [n for n in plan.nodes if n.service_family_requirement is not None]
+    assert resident[0].residency_intent.required is True
+    assert resident[0].residency_intent.conditional is False
+
+
+def test_a_local_eligible_embedding_leaf_is_rejected():
+    with pytest.raises(ValueError, match="local_eligible is available for inference"):
+        _compile(
+            _resident_inference(
+                "{mode: local_eligible, primary: self_contained}",
+                task_type="embedding",
+            )
+        )
