@@ -1,7 +1,8 @@
 """Caller-neutral substrate shared by the run-to-yield episode executors."""
 
+from shared.content import ContentStoreError
 from shared.harness import DeliveredOutcome, HarnessResult
-from shared.outcome import ContentStoreError, FabricContentStore
+from shared.outcome import FabricContentStore
 from shared.private_state import PrivateStateSealReport
 from shared.schemas.result import BaseExecutorResult
 from shared.tools.facade import FacadeTurnGroup

@@ -211,6 +211,15 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   strings, or past its envelope fails the task before any model I/O and before admission,
   creating no claim and switching no embodiment. A re-driven task runs only when it
   re-resolves to its recorded binding.
+- **Optional-envelope input preparation.** An upstream inference source may leave its item
+  envelope (`max_items`) undeclared. Such a leaf is prepared before an embodiment is chosen
+  for it: one bounded dispatch resolves the pinned source once on a worker and records the
+  exact request it produces, so selection and resident admission are sized from the actual
+  conversation count rather than a declared bound. The recorded request is immutable — a
+  re-driven task hydrates and verifies it rather than resolving the source again, and a
+  missing or mismatched request fails closed. The preparation reserves no capacity and pins
+  no embodiment. `ORCHESTRATOR_MAX_PREPARED_INPUT_BYTES` optionally caps a prepared
+  request's size; unset, it is uncapped.
 - **Live-feasibility handoff.** A ready episode carries the lowerer's declared
   alternative; a feasibility check lets the scheduler defer an infeasible alternative,
   holding no worker, rather than dispatching it. It resolves no resident capacity.
@@ -384,7 +393,9 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   ledger before the continuation re-readies or a linked `ServiceClaim` credit releases, and a
   resumed worker hydrates and digest-verifies the reference before injection. Root and
   supervisors relay opaque frames and hold only the manifest. Materialization is idempotent
-  under `idm-*`. The mediated-egress-sidecar tool path and the worker-materialized resident
+  under `idm-*`. Outcome finalization and a prepared inference request are stored over one
+  content-addressed object core under separate facades, so neither becomes a name for the
+  other. The mediated-egress-sidecar tool path and the worker-materialized resident
   completion settle by reference; the model gateway settles inline. See
   [`EXECUTORS.md`](EXECUTORS.md).
 - **Task merging.** Compatible adjacent tasks in a DAG (same `taskType`,

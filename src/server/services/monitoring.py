@@ -490,7 +490,10 @@ class EventMonitor:
             case "TASK_SUCCEEDED":
                 self._unregister_port_forward(event.task_id)
                 self._maybe_drain_serve(event.task_id)
-                self._metrics.record_task_event(event)
+                if "input_materialization" not in payload:
+                    # A preparation yields its lane back and the task runs again, so
+                    # counting it as a completion would report two for one task.
+                    self._metrics.record_task_event(event)
                 merged_children = self._runtime.get_merged_children(event.task_id)
                 if merged_children:
                     self.mirror_task_results(event.task_id, merged_children)

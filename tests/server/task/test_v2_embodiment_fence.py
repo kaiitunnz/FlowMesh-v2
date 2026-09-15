@@ -282,18 +282,26 @@ spec:
           model:
             source: {identifier: Qwen/Qwen3-4B}
 ENGINE
-          data: {type: list, expr: src.items.output, max_items: 8}
+          data: {type: list, expr: src.items.outputMAXITEMS}
           resources: {hardware: {gpu: {count: 1}}}
 SERVICE
 """
 
 
 async def _upstream_task(
-    runtime: TaskRuntime, service: str = "", engine: bool = True
+    runtime: TaskRuntime,
+    service: str = "",
+    engine: bool = True,
+    max_items: int | None = 8,
 ) -> str:
-    text = UPSTREAM_SOURCED.replace(
-        "ENGINE", "            vllm: {gpu_memory_utilization: 0.9}" if engine else ""
-    ).replace("SERVICE", f"          service: {service}" if service else "")
+    text = (
+        UPSTREAM_SOURCED.replace(
+            "ENGINE",
+            "            vllm: {gpu_memory_utilization: 0.9}" if engine else "",
+        )
+        .replace("SERVICE", f"          service: {service}" if service else "")
+        .replace("MAXITEMS", "" if max_items is None else f", max_items: {max_items}")
+    )
     _wfl, ids = await _register(runtime, text)
     return ids["gen"]
 

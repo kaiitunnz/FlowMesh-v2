@@ -39,6 +39,7 @@ listed here is in `.env.example`.
 | `ORCHESTRATOR_MAX_ACTIVATIONS` | `10000` | Max dynamic activations per v2 workflow instance |
 | `ORCHESTRATOR_MAX_SPAWNS_PER_TURN` | `32` | Max spawn children admitted in one facade turn group |
 | `ORCHESTRATOR_MAX_SPAWNS_PER_REGION` | `256` | Max spawn children admitted per agent child region |
+| `ORCHESTRATOR_MAX_PREPARED_INPUT_BYTES` | – | Max prepared inference input bytes; unset is uncapped |
 | `ORCHESTRATOR_EPISODE_LOWERING` | `false` | Lower v2 templates into run-to-yield episodes |
 | `ORCHESTRATOR_POLICY_SURFACE_ENABLED` | `false` | Enable the advisory policy surface |
 | `ORCHESTRATOR_LOWERING_POLICY` | `conservative` | Advisory lowering policy |

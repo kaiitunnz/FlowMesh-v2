@@ -34,7 +34,10 @@ class _ForcedSelector:
         self._kind = kind
 
     def __call__(
-        self, menu: InferenceEmbodimentMenu, snapshot: EmbodimentSnapshot
+        self,
+        menu: InferenceEmbodimentMenu,
+        snapshot: EmbodimentSnapshot,
+        batch_size: int | None = None,
     ) -> EmbodimentDecision:
         chosen = next(c for c in menu.candidates if c.kind is self._kind)
         return EmbodimentDecision.select(chosen.alternative_id)

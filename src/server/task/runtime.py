@@ -28,6 +28,8 @@ from shared.inference import (
     CanonicalProjectionError,
     InferenceSourceKind,
     InputResolutionBinding,
+    ResolvedInputMaterialization,
+    ResolvedInputReference,
     canonical_contract,
 )
 from shared.outcome import OutcomeManifest
@@ -68,6 +70,7 @@ from ..orchestration import (
     AcceptedInput,
     AcceptedInputMember,
     Advance,
+    InputResolution,
     LedgerSnapshot,
     OrchestrationEngine,
     PublicationOutcome,
@@ -276,6 +279,7 @@ class TaskRuntime:
         self._web_search = orchestration.web_search
         self._model_egress_timeout_sec = orchestration.gateway.timeout_sec
         self._input_budget_bytes = orchestration.agent_input_budget_bytes
+        self._max_prepared_input_bytes = orchestration.max_prepared_input_bytes
         self._agent_binding_defaults = _binding_defaults(
             orchestration.agent_binding,
             orchestration.agent_sandbox_enabled,
@@ -1327,12 +1331,20 @@ class TaskRuntime:
         # bounded (a no-op when a suspend already closed it).
         if engine := self._engines.get(record.workflow_id):
             engine.close_latest_attempt(task_id)
+        self._requeue_front_locked(record)
+
+    def _requeue_front_locked(self, record: TaskRecord) -> None:
+        """Return a dispatched task to the head of the ready queue.
+
+        The dispatch that ends here yielded rather than failed, so the task keeps its
+        retry budget for the failures that budget is for.
+        """
         record.status = TaskStatus.PENDING
         record.assigned_worker = None
         record.dispatched_ts = None
         record.started_ts = None
-        self._enqueue_ready_locked(task_id, front=True)
-        self._persist_locked(task_id)
+        self._enqueue_ready_locked(record.task_id, front=True)
+        self._persist_locked(record.task_id)
 
     def settle_episode_invocation(
         self,
@@ -2206,12 +2218,93 @@ class TaskRuntime:
     def input_resolution_binding(self, task_id: str) -> InputResolutionBinding | None:
         """The binding a task's recorded resolution carries, if one was recorded."""
         with self._lock:
-            record = self._tasks.get(task_id)
-            engine = self._engines.get(record.workflow_id) if record else None
-            if engine is None:
-                return None
-            resolution = engine.input_resolution(task_id)
+            resolution = self._input_resolution_locked(task_id)
         return resolution.binding if resolution is not None else None
+
+    def recorded_input_reference(self, task_id: str) -> ResolvedInputReference | None:
+        """Where a task's prepared request is, for the run that hydrates it."""
+        with self._lock:
+            resolution = self._input_resolution_locked(task_id)
+        return resolution.reference if resolution is not None else None
+
+    def _input_resolution_locked(self, task_id: str) -> InputResolution | None:
+        record = self._tasks.get(task_id)
+        engine = self._engines.get(record.workflow_id) if record else None
+        return engine.input_resolution(task_id) if engine else None
+
+    def prepares_inputs(self, task_id: str) -> bool:
+        """Whether this dispatch resolves a task's inputs rather than running it.
+
+        A leaf whose source declares no envelope is screened against the request it
+        actually produces, so that request is materialized on a worker before any
+        embodiment can be chosen for it. Once the materialization is committed the leaf
+        dispatches like any other.
+        """
+        with self._lock:
+            contract = self.declared_contract(task_id)
+            if contract is None or not contract.source.prepared_before_selection:
+                return False
+            resolution = self._input_resolution_locked(task_id)
+            return resolution is None or resolution.reference is None
+
+    def _apply_input_materialization_locked(self, task_id: str, payload: Any) -> None:
+        """Commit one preparation's binding and request reference, and re-ready.
+
+        Both facts land together, so the request a later run hydrates becomes durable
+        exactly when the binding proving what it is does. The task then returns to the
+        ready queue for the dispatch that chooses an embodiment and runs it.
+        """
+        record = self._tasks.get(task_id)
+        engine = self._engines.get(record.workflow_id) if record else None
+        if record is None or engine is None:
+            return
+        if record.status in TERMINAL_TASK_STATUSES or (
+            record.status == TaskStatus.CANCELLING
+        ):
+            # A preparation runs no model and finishes fast, so its success can land
+            # after a cancel has settled the task — and the interrupt cannot reach a
+            # preparation the worker already finished. Re-readying here would re-admit
+            # cancelled work under a work item that is already settled.
+            return
+        if (standing := engine.input_resolution(task_id)) is not None and (
+            standing.reference is not None
+        ):
+            # The stream is at-least-once: a replayed success finds its own commit
+            # standing. Re-readying would pull the run it already released back to the
+            # queue and dispatch a second embodiment against one work item.
+            return
+        try:
+            materialization = ResolvedInputMaterialization.model_validate(payload)
+        except ValidationError:
+            self._settle_preparation_failure_locked(
+                record, engine, "a preparation reported an unreadable materialization"
+            )
+            return
+        size = materialization.reference.size_bytes
+        if (limit := self._max_prepared_input_bytes) is not None and size > limit:
+            self._settle_preparation_failure_locked(
+                record,
+                engine,
+                f"the prepared request is {size} bytes and this deployment admits at "
+                f"most {limit} (ORCHESTRATOR_MAX_PREPARED_INPUT_BYTES)",
+            )
+            return
+        engine.record_input_resolution(
+            task_id, materialization.binding, materialization.reference
+        )
+        self._save_ledger_locked(record.workflow_id)
+        self._requeue_front_locked(record)
+        self._cv.notify_all()
+
+    def _settle_preparation_failure_locked(
+        self, record: TaskRecord, engine: OrchestrationEngine, reason: str
+    ) -> None:
+        if self._apply_advance_locked(
+            record.workflow_id,
+            engine.on_failed(record.task_id, reason, retryable=False),
+        ):
+            self._cv.notify_all()
+        self._save_ledger_locked(record.workflow_id)
 
     def resolve_v2_output(
         self, workflow_id: str, output_id: str
@@ -2846,7 +2939,9 @@ class TaskRuntime:
     # State updates (dispatch & events)
     # ------------------------------------------------------------------ #
 
-    def mark_dispatched(self, task_id: str, worker: Worker) -> None:
+    def mark_dispatched(
+        self, task_id: str, worker: Worker, *, input_preparation: bool = False
+    ) -> None:
         supplier_id = ""
         for resolver in SUPPLIER_RESOLVERS:
             if (resolved := resolver.resolve(worker)) is not None:
@@ -2874,7 +2969,10 @@ class TaskRuntime:
                 dispatched=[task_id],
             )
             if engine := self._engines.get(record.workflow_id):
-                engine.on_dispatched(task_id, worker.id)
+                if input_preparation:
+                    engine.on_input_preparation_dispatched(task_id, worker.id)
+                else:
+                    engine.on_dispatched(task_id, worker.id)
                 self._save_ledger_locked(record.workflow_id)
 
     def mark_started(
@@ -2940,6 +3038,12 @@ class TaskRuntime:
 
         with self._cv:
             record = self._tasks.get(task_id)
+            if (prepared := payload.get("input_materialization")) is not None:
+                # A preparation resolved the task's inputs and ran nothing else, so it
+                # commits what it materialized and the task goes back to the queue for
+                # the dispatch that chooses an embodiment and runs it.
+                self._apply_input_materialization_locked(task_id, prepared)
+                return []
             episode_step = payload.get("agent_episode")
             if episode_step is not None and record is not None:
                 harness_result = HarnessResult.model_validate(episode_step)

@@ -6,9 +6,10 @@ so a literal leaf and an upstream-sourced one reach the same canonical request a
 embodiment of either runs that one request. The descriptor travels with the contract;
 the values it resolves to are attempt facts.
 
-The declared envelope is what makes an upstream source safe to admit: it bounds the
-request before anything is known about the upstream value, so a scheduler can screen
-feasibility and a resolution that exceeds it fails as a typed input error.
+An upstream source that declares an envelope is screenable before its value exists: the
+envelope bounds the request, a scheduler screens feasibility against it, and a
+resolution exceeding it fails as a typed input error. One that declares none is prepared
+first and screened against the request it actually produced.
 """
 
 import hashlib
@@ -48,11 +49,11 @@ class CanonicalInferenceInputSource(BaseModel):
     node: str | None = None
     path: str | None = None
     resolver_version: str = INPUT_RESOLVER_VERSION
-    # The most prompts a resolution of this source may yield. For a literal source it is
-    # the item count; for an upstream one the leaf declares it, because the admission
-    # slots a resident embodiment reserves are screened against it long before a value
-    # exists.
-    max_items: int = Field(ge=1)
+    # The most prompts a resolution of this source may yield. A literal source resolves
+    # to its own items, so it is their count. An upstream source declares it to be
+    # screened against before its value exists, or leaves it out and is prepared before
+    # anything is screened.
+    max_items: int | None = Field(default=None, ge=1)
 
     @model_validator(mode="after")
     def _validate_kind(self) -> "CanonicalInferenceInputSource":
@@ -72,6 +73,15 @@ class CanonicalInferenceInputSource(BaseModel):
             if not self.node or not self.path:
                 raise ValueError("an upstream source names both a node and a path")
         return self
+
+    @property
+    def prepared_before_selection(self) -> bool:
+        """Whether this source is resolved before an embodiment can be screened.
+
+        Without a declared envelope there is nothing to screen a candidate against, so
+        the request is materialized first and the choice follows from what it holds.
+        """
+        return self.kind is InferenceSourceKind.UPSTREAM and self.max_items is None
 
     @property
     def expression(self) -> str:

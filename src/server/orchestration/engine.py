@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from typing import Self
 
 from shared.harness import DeliveredOutcome, OutcomeKind
-from shared.inference import InputResolutionBinding
+from shared.inference import InputResolutionBinding, ResolvedInputReference
 from shared.outcome import OutcomeManifest
 from shared.private_state import (
     OwnerFence,
@@ -89,6 +89,7 @@ from .state import (
     DenialKind,
     EffectReceipt,
     EmbodimentSelection,
+    InputPreparation,
     InputResolution,
     Invocation,
     InvocationState,
@@ -235,6 +236,9 @@ class OrchestrationEngine:
         }
         self._input_resolutions = {
             res.work_item_id: res for res in snapshot.input_resolutions
+        }
+        self._input_preparations = {
+            prep.work_item_id: prep for prep in snapshot.input_preparations
         }
         self._receipts = {r.invocation_id: r for r in snapshot.effect_receipts}
         self._decisions = list(snapshot.authority_decisions)
@@ -3273,21 +3277,56 @@ class OrchestrationEngine:
         wi = self._work_item_for_task(task_id)
         return self._input_resolutions.get(wi.work_item_id) if wi else None
 
+    def input_preparation(self, task_id: str) -> InputPreparation | None:
+        """The preparation dispatch a task's inputs are being resolved by, if any."""
+        wi = self._work_item_for_task(task_id)
+        return self._input_preparations.get(wi.work_item_id) if wi else None
+
+    def on_input_preparation_dispatched(
+        self, task_id: str, worker_id: str | None
+    ) -> None:
+        """Record that a work item's inputs are being resolved on a worker.
+
+        This deliberately mints neither an invocation nor an attempt: both are
+        candidate-specific commitments, and a work item whose inputs are still being
+        resolved has not chosen an embodiment to commit to.
+        """
+        wi = self._work_item_for_task(task_id)
+        if wi is None or wi.status in _TERMINAL_WI:
+            return
+        self._input_preparations[wi.work_item_id] = InputPreparation(
+            work_item_id=wi.work_item_id, worker_id=worker_id
+        )
+        self._emit(
+            "input_preparation_dispatched",
+            work_item_id=wi.work_item_id,
+            operator_id=wi.operator_id,
+        )
+
     def record_input_resolution(
-        self, task_id: str, binding: InputResolutionBinding
+        self,
+        task_id: str,
+        binding: InputResolutionBinding,
+        reference: ResolvedInputReference | None = None,
     ) -> InputResolution | None:
         """Record how a work item's inputs resolved, before its embodiment runs.
 
         A standing resolution is kept: a re-drive that reaches the same request records
         nothing new, and one that reaches a different request leaves the recorded
         binding in place for the reconciliation that compares against it.
+
+        A resolution carrying its request's reference commits both together, so the
+        request a later run hydrates is durable exactly when the binding proving what it
+        is becomes durable.
         """
         wi = self._work_item_for_task(task_id)
-        if wi is None:
+        if wi is None or wi.status in _TERMINAL_WI:
             return None
         if (standing := self._input_resolutions.get(wi.work_item_id)) is not None:
             return standing
-        resolution = InputResolution(work_item_id=wi.work_item_id, binding=binding)
+        resolution = InputResolution(
+            work_item_id=wi.work_item_id, binding=binding, reference=reference
+        )
         self._input_resolutions[wi.work_item_id] = resolution
         self._emit(
             "input_resolved",
@@ -3416,6 +3455,7 @@ class OrchestrationEngine:
             attempts=list(self._attempts.values()),
             embodiment_selections=list(self._embodiment_selections.values()),
             input_resolutions=list(self._input_resolutions.values()),
+            input_preparations=list(self._input_preparations.values()),
             boundary_events=list(self._boundary_events.values()),
             effect_receipts=list(self._receipts.values()),
             authority_decisions=list(self._decisions),

@@ -660,6 +660,7 @@ class OrchestrationConfig:
     max_activations: int | None = None
     max_spawns_per_turn: int | None = None
     max_spawns_per_region: int | None = None
+    max_prepared_input_bytes: int | None = None
     episode_lowering: bool = False
     agent_sandbox_enabled: bool = False
     agent_sandbox_egress_enabled: bool = False
@@ -689,6 +690,9 @@ class OrchestrationConfig:
             max_activations=parse_int_env("ORCHESTRATOR_MAX_ACTIVATIONS"),
             max_spawns_per_turn=parse_int_env("ORCHESTRATOR_MAX_SPAWNS_PER_TURN"),
             max_spawns_per_region=parse_int_env("ORCHESTRATOR_MAX_SPAWNS_PER_REGION"),
+            max_prepared_input_bytes=parse_int_env(
+                "ORCHESTRATOR_MAX_PREPARED_INPUT_BYTES"
+            ),
             episode_lowering=parse_bool_env("ORCHESTRATOR_EPISODE_LOWERING", False),
             agent_sandbox_enabled=parse_bool_env("AGENT_SANDBOX_ENABLED", False),
             agent_sandbox_egress_enabled=parse_bool_env(

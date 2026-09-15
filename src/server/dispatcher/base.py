@@ -39,6 +39,7 @@ from ..services.metrics import MetricsRecorder
 from ..task.metadata import extract_model_dataset_names
 from ..task.models import TaskRecord, TaskStatus
 from ..task.runtime import TaskRuntime
+from ..task.v2.representations.plan import InferenceEmbodimentMenu
 from ..utils.time import now_iso
 from .embodiment import (
     EmbodimentSelector,
@@ -262,7 +263,21 @@ class Dispatcher:
         if menu is None or self._runtime.embodiment_pinned(task_id):
             return True
         snapshot = self._embodiment_snapshot(record)
-        decision = self._embodiment_selector(menu, snapshot)
+        batch_size = self._selection_batch_size(task_id, menu)
+        if batch_size is None:
+            # The node declares no bound and no preparation reported one, so every
+            # candidate would be screened against nothing. Waiting is the safe answer:
+            # selecting here could admit a resident batch larger than it reserves.
+            return self._grace_then_fail(
+                task_id,
+                record,
+                reason="embodiment_deferred:unknown_batch_size",
+                message=(
+                    "No embodiment of the task can be placed: it declares no "
+                    "conversation bound and its inputs have not been prepared"
+                ),
+            )
+        decision = self._embodiment_selector(menu, snapshot, batch_size)
         if decision.alternative_id is None:
             self._logger.debug(
                 "Deferring %s: no embodiment placeable (%s)",
@@ -294,6 +309,19 @@ class Dispatcher:
         record.no_eligible_since = None
         return True
 
+    def _selection_batch_size(
+        self, task_id: str, menu: InferenceEmbodimentMenu
+    ) -> int | None:
+        """The conversation count a menu node's candidates are screened against.
+
+        A declared bound screens before any value exists. A node without one is screened
+        against the count its preparation actually materialized.
+        """
+        if menu.max_batch_size is not None:
+            return menu.max_batch_size
+        binding = self._runtime.input_resolution_binding(task_id)
+        return binding.cardinality if binding is not None else None
+
     def _embodiment_snapshot(self, record: TaskRecord) -> EmbodimentSnapshot:
         """Read live feasibility for one menu node. It reserves nothing."""
         return EmbodimentSnapshot(
@@ -322,15 +350,20 @@ class Dispatcher:
         if not record:
             return True
 
+        # A leaf whose source declares no envelope is prepared first: this dispatch
+        # resolves its inputs on a worker and reports the request it materialized, and
+        # the dispatch after it chooses an embodiment knowing what that request holds.
+        preparing = self._runtime.prepares_inputs(task_id)
+
         # Resolve and durably bind the embodiment before anything else this dispatch
         # does: publication precedes attempt bookkeeping, so a choice recorded after it
         # would not survive a loss between the two.
-        if not self._resolve_embodiment(task_id, record):
+        if not preparing and not self._resolve_embodiment(task_id, record):
             return False
 
         # Live-feasibility handoff: defer an episode whose declared alternative is not
         # feasible to place now, holding no worker. It admits no capacity object.
-        if not self._runtime.episode_feasible(task_id):
+        if not preparing and not self._runtime.episode_feasible(task_id):
             self.requeue_task(
                 task_id, reason="infeasible_alternative", count_retry=False
             )
@@ -339,7 +372,9 @@ class Dispatcher:
         task = record.task
         # Placement reads the resolved embodiment, never the leaf's own binding: a
         # resident-served dispatch carries the invocation and loads no model locally.
-        relays_only = self._relays_only(task_id)
+        # A preparation places the same way: it reads an upstream value and runs no
+        # model, so it needs no accelerator either.
+        relays_only = preparing or self._relays_only(task_id)
         placement_task = relay_placement_task(task) if relays_only else task
 
         model_names, dataset_names = extract_model_dataset_names(task)
@@ -525,7 +560,11 @@ class Dispatcher:
 
         # Plan task merge: coalesce sibling merge candidates onto this worker
         merged_children: list[str] = []
-        if self._task_merge_enabled and self._task_merge_max_batch_size > 1:
+        if (
+            self._task_merge_enabled
+            and self._task_merge_max_batch_size > 1
+            and not preparing
+        ):
             merged_children = self._runtime.plan_merge(
                 task_id, self._task_merge_max_batch_size, worker.id
             )
@@ -667,6 +706,8 @@ class Dispatcher:
             service_episode=self._runtime.service_episode_dispatch(task_id),
             declared_contract=self._runtime.declared_contract(task_id),
             recorded_resolution=self._runtime.input_resolution_binding(task_id),
+            input_preparation=preparing,
+            recorded_input=self._runtime.recorded_input_reference(task_id),
         )
 
         # 8. Publish task
@@ -707,7 +748,7 @@ class Dispatcher:
 
         # 9. Mark dispatched
         record.no_dispatch_since = None
-        self._runtime.mark_dispatched(task_id, worker)
+        self._runtime.mark_dispatched(task_id, worker, input_preparation=preparing)
         if merged_children:
             try:
                 self._logger.info(

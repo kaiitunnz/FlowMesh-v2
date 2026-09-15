@@ -11,9 +11,9 @@ import threading
 from collections.abc import AsyncIterator
 from typing import Any
 
+from shared.content import content_digest
 from shared.network.relay_frame import RelayDirection, RelayFrame, RelayFrameKind
 from shared.outcome import FabricContentStore, OutcomeManifest
-from shared.outcome.manifest import content_digest
 from shared.resident.carriage import ResidentCarriagePlan
 from shared.resident.contracts import (
     AdmissionHandoff,
@@ -36,6 +36,11 @@ class _MemStore(FabricContentStore):
     def __init__(self) -> None:
         self._by_idem: dict[str, OutcomeManifest] = {}
         self._by_digest: dict[str, bytes] = {}
+
+    def put_object(self, data: bytes) -> str:
+        digest = content_digest(data)
+        self._by_digest[digest] = data
+        return digest
 
     def find(self, idempotency_key: str) -> OutcomeManifest | None:
         return self._by_idem.get(idempotency_key)

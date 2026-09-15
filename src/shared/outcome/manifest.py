@@ -12,14 +12,7 @@ principal, so a resume authenticated as the same principal hydrates the content 
 different one cannot. ``tenant`` records that scope for audit; it is not a second gate.
 """
 
-import hashlib
-
 from pydantic import BaseModel, ConfigDict
-
-
-def content_digest(data: bytes) -> str:
-    """The immutable content identity: a hex sha256 over the materialized bytes."""
-    return hashlib.sha256(data).hexdigest()
 
 
 class OutcomeManifest(BaseModel):

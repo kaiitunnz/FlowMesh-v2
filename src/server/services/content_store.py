@@ -11,12 +11,8 @@ scoped to the requesting principal, so it never reaches another principal's cont
 
 from pathlib import Path
 
-from shared.outcome import (
-    ContentStoreError,
-    OutcomeHydrationError,
-    OutcomeManifest,
-    content_digest,
-)
+from shared.content import ContentStoreError
+from shared.outcome import OutcomeHydrationError, OutcomeManifest, content_digest
 from shared.utils.atomic import atomic_write_bytes
 
 _SAFE = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
@@ -50,6 +46,12 @@ class ServerContentStore:
             / "idem"
             / f"{_segment(idempotency_key)}.json"
         )
+
+    def put_object(self, principal: str | None, data: bytes) -> str:
+        """Store bytes under the principal's scope and return the digest naming them."""
+        digest = content_digest(data)
+        atomic_write_bytes(self._object_path(principal, digest), data, if_absent=True)
+        return digest
 
     def find(
         self, principal: str | None, idempotency_key: str

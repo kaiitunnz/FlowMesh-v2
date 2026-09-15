@@ -1,7 +1,7 @@
 """An in-memory ``FabricContentStore`` for exercising reference-backed outcomes."""
 
+from shared.content import ContentStoreError
 from shared.outcome import (
-    ContentStoreError,
     FabricContentStore,
     OutcomeHydrationError,
     OutcomeManifest,
@@ -22,6 +22,13 @@ class InMemoryContentStore(FabricContentStore):
         self._idm: dict[str, OutcomeManifest] = {}
         self.fail_finalize = False
         self.write_count = 0
+
+    def put_object(self, data: bytes) -> str:
+        digest = content_digest(data)
+        if digest not in self._objects:
+            self._objects[digest] = data
+            self.write_count += 1
+        return digest
 
     def find(self, idempotency_key: str) -> OutcomeManifest | None:
         return self._idm.get(idempotency_key)

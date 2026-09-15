@@ -73,7 +73,6 @@ class TestCanonicalRequest:
             ({"type": "list", "items": [{"role": "user"}]}, "literal non-empty"),
             ({"type": "list", "items": ["a", ""]}, "literal non-empty"),
             ({"type": "dataset", "url": "squad"}, "not projectable"),
-            ({"type": "list", "expr": "up.items"}, "must declare spec.data.max_items"),
             (
                 {"type": "list", "items": ["a"], "s3_cfg": "s3://bucket"},
                 "literal items",

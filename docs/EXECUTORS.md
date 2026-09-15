@@ -300,18 +300,29 @@ data: {type: list, expr: research.items.output, max_items: 16}
 
 A projection reads one node named in `dependsOn` and indexes into its result — mapping
 keys, model attributes, `[i]` indexes, and an attribute plucked across a list — and must
-yield a non-empty list of strings. `max_items` bounds how many prompts it may yield and is
-required, because the admission capacity a resident embodiment is screened against is
-fixed before the upstream value exists. A projection reaching a table, a dataset, an
-artifact, or any other value is not a prompt vector and fails.
+yield a non-empty list of strings. A projection reaching a table, a dataset, an artifact,
+or any other value is not a prompt vector and fails.
+
+`max_items` bounds how many prompts a projection may yield, and is optional. Declare it
+and a resident embodiment's capacity is screened against that bound before the upstream
+value exists, and a resolution exceeding it fails. Leave it out and the leaf is prepared
+first: one bounded dispatch resolves the projection on a worker and records the request
+it produces, and the embodiment is chosen from the count that actually resolved. A
+deployment may cap a prepared request's size with
+`ORCHESTRATOR_MAX_PREPARED_INPUT_BYTES`; unset, it is uncapped.
 
 The worker holding the upstream value resolves the projection once, before either
 embodiment reaches a model, and both run that one request — a replica receives the
 prompts, never the projection. A source that is missing, does not project, yields
 something other than a non-empty list of strings, or exceeds its envelope fails the task
 there, before any generation and before a resident claim exists; it never falls back to
-the other embodiment. A retried task runs only if it resolves to the same request from the
-same upstream content.
+the other embodiment.
+
+A retry runs the same request or it does not run. A leaf that was prepared hydrates the
+recorded request and verifies it, so a re-drive or a move to another worker never reads
+the projection again, and a request that is missing or does not verify fails closed. A
+leaf that resolves its own source runs only if it reaches the same request from the same
+upstream content.
 
 The leaf's declared sampling governs its generation wherever it runs, and values it
 leaves out take the same defaults on both sides, so both embodiments issue one engine

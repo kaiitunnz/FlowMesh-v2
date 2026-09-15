@@ -7,9 +7,10 @@ partitions content by its principal, and is authoritative for the manifest ident
 
 import requests
 
+from shared.content import ContentStoreError, ObjectWriteAck
 from shared.utils.http import auth_headers
 
-from .content_store import ContentStoreError, FabricContentStore, OutcomeHydrationError
+from .content_store import FabricContentStore, OutcomeHydrationError
 from .manifest import OutcomeManifest
 
 
@@ -22,6 +23,17 @@ class HttpFabricContentStore(FabricContentStore):
 
     def _url(self, path: str) -> str:
         return f"{self._base}/api/v1/content{path}"
+
+    def put_object(self, data: bytes) -> str:
+        resp = requests.put(
+            self._url("/objects"),
+            data=data,
+            headers={**auth_headers(), "Content-Type": "application/octet-stream"},
+            timeout=self._timeout,
+        )
+        if resp.status_code >= 400:
+            raise ContentStoreError(f"object write failed: {resp.status_code}")
+        return ObjectWriteAck.model_validate_json(resp.content).content_digest
 
     def find(self, idempotency_key: str) -> OutcomeManifest | None:
         resp = requests.get(
