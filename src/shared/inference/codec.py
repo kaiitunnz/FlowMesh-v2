@@ -405,15 +405,6 @@ def canonical_contract(spec: InferenceSpec) -> CanonicalInferenceContract:
     )
 
 
-def canonical_request(spec: InferenceSpec) -> CanonicalInferenceRequest:
-    """The request a literal leaf runs, projected straight from its spec.
-
-    A leaf whose prompts come from upstream has no request until that value exists, so
-    it resolves through its contract instead.
-    """
-    return resolve_contract(canonical_contract(spec), None).request
-
-
 def canonical_result(
     request: CanonicalInferenceRequest, outputs: Sequence[str]
 ) -> InferenceResult:

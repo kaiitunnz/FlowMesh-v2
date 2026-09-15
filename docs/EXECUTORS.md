@@ -273,10 +273,11 @@ An inference leaf declares one model contract. Where the compiler can prove that
 capacity and a self-contained local executor run that contract identically, the leaf
 admits both and the fabric picks one at dispatch. The proof is narrow: it admits a chat
 leaf that pins the vLLM engine, names its prompts through one of the two sources below,
-and declares no adapter, shard, parallel split, or postprocessing step. A leaf declaring an inference setting a relayed request does not carry — guided
-decoding from a template, chat-template arguments — keeps one embodiment for the same
-reason. Any other leaf keeps the embodiment its source names — resident when it declares
-a `service` binding, self-contained when it does not.
+and declares no adapter, shard, parallel split, or postprocessing step. A leaf
+declaring an inference setting a relayed request does not carry — guided decoding from
+a template, chat-template arguments — keeps one embodiment for the same reason. Any
+other leaf keeps the embodiment its source names — resident when it declares a
+`service` binding, self-contained when it does not.
 
 Such a leaf carries both sets of constraints: the resident binding fields above, and the
 local model, executor, and GPU requirement a `{mode: resident}` leaf drops. Declare

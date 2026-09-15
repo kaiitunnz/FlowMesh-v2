@@ -218,9 +218,9 @@ def _contract_fingerprint(
 ) -> str:
     """Digest the attributes both embodiments are proven to share.
 
-    The contract is digested rather than a prompt vector: a leaf resolving its prompts
-    from upstream has none at compile time, and what both embodiments are proven to
-    share is the source they resolve and the request they build from it.
+    What they share is the contract: the source they resolve their prompts from and the
+    request they build around it. A leaf sourcing its prompts from upstream has no
+    prompt vector at compile time, so the contract carries that shared identity.
     """
     return content_digest(
         json.dumps(

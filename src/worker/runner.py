@@ -313,11 +313,10 @@ class Runner:
     def _materialize_contract(self, msg: WorkerTaskMessage) -> None:
         """Resolve a task's inference contract, once, before its embodiment runs.
 
-        The resolution happens here rather than in an executor so that one request
-        serves whichever embodiment follows, and so the binding recording how it was
-        reached is durable before a local generation or a resident service issue. A
-        source that does not resolve within what the leaf declared fails the task here,
-        where no model has run and no claim exists.
+        One request serves whichever embodiment follows, and the binding recording how
+        it was reached is durable before a local generation or a resident service issue.
+        A source that does not resolve within what the leaf declared fails the task
+        here, where no model has run and no claim exists.
         """
         if msg.declared_contract is None:
             return

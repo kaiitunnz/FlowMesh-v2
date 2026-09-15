@@ -14,6 +14,7 @@ feasibility and a resolution that exceeds it fails as a typed input error.
 import hashlib
 import json
 from enum import StrEnum
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -136,17 +137,17 @@ class InputResolutionBinding(BaseModel):
         )
 
 
-def content_version(value: object) -> str:
+def content_version(value: Any) -> str:
     """The content identity of an upstream value, for a binding's provenance."""
     return _digest(value)
 
 
-def request_digest(model: str, prompts: tuple[str, ...], params: dict) -> str:
+def request_digest(model: str, prompts: tuple[str, ...], params: dict[str, Any]) -> str:
     """The identity of a resolved request, over everything an embodiment issues."""
     return _digest({"model": model, "prompts": list(prompts), "params": params})
 
 
-def _digest(payload: object) -> str:
+def _digest(payload: Any) -> str:
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(canonical.encode()).hexdigest()
 
