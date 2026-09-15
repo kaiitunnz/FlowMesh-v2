@@ -161,9 +161,14 @@ class ServiceDependency(BaseModel):
     adapter: str | None = None
     adapter_source: str | None = None
     isolation: str | None = None
-    # How many conversations one invocation of this leaf carries. Each runs as its own
-    # engine sequence, so it is what the leaf's claim reserves admission capacity for.
-    batch_size: int = Field(default=1, ge=1)
+    # How many conversations one invocation of this leaf carries, when its source names
+    # them outright. A leaf resolving its prompts from upstream knows this only once
+    # that value is in hand, and carries None until then.
+    batch_size: int | None = Field(default=1, ge=1)
+    # The most conversations any invocation of this leaf can carry. Each runs as its own
+    # engine sequence, so this is what a resident embodiment's feasibility is screened
+    # against before a prompt vector exists.
+    max_batch_size: int = Field(default=1, ge=1)
 
     @property
     def service_family(self) -> str:

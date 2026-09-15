@@ -764,7 +764,7 @@ class ResidentCapacityControl:
             engine_batch_key=dependency.engine_batch_key,
             adapter_ref=dependency.adapter,
             adapter_source=dependency.adapter_source,
-            batch_size=dependency.batch_size,
+            batch_size=_admitted_batch_size(dependency),
         )
         await self._drive_claim(orig, dependency, profile)
 
@@ -1525,3 +1525,16 @@ class ResidentCapacityControl:
         self._settle_origination_error(
             orig, f"resident admission denied ({label}): {detail}"
         )
+
+
+def _admitted_batch_size(dependency: ServiceDependency) -> int:
+    """The admission slots one invocation of this leaf reserves.
+
+    A leaf naming its conversations outright reserves exactly that many. One resolving
+    them from upstream reserves its declared bound until the resolution that
+    materialized them reports the count it reached, so admission is never sized below
+    what the invocation will run.
+    """
+    if dependency.batch_size is None:
+        return dependency.max_batch_size
+    return dependency.batch_size

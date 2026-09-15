@@ -436,7 +436,7 @@ def test_a_leaf_declaring_several_prompts_compiles_to_a_menu():
     assert menu.candidate(menu.primary) is not None
     # The number the claim's credit is sized from. A menu that lost it would admit the
     # whole batch on one slot.
-    assert menu.batch_size == 3
+    assert menu.max_batch_size == 3
 
 
 def test_a_leafs_dependency_carries_the_batch_its_claim_reserves_for():

@@ -159,19 +159,19 @@ class PrimaryEmbodimentSelector:
         primary = menu.candidate(menu.primary)
         if primary is None:
             return EmbodimentDecision.defer("primary_embodiment_missing")
-        if candidate_feasible(primary, snapshot, menu.batch_size):
+        if candidate_feasible(primary, snapshot, menu.max_batch_size):
             return EmbodimentDecision.select(primary.alternative_id)
-        if not candidate_unavailable(primary, snapshot, menu.batch_size):
+        if not candidate_unavailable(primary, snapshot, menu.max_batch_size):
             return EmbodimentDecision.defer(f"{primary.kind.value}_infeasible")
         fallthrough = [
             candidate
             for candidate in menu.candidates
             if candidate.alternative_id != primary.alternative_id
-            and candidate_feasible(candidate, snapshot, menu.batch_size)
+            and candidate_feasible(candidate, snapshot, menu.max_batch_size)
         ]
         if len(fallthrough) != 1:
             return EmbodimentDecision.defer(
-                _unavailable_reason(primary, snapshot, menu.batch_size)
+                _unavailable_reason(primary, snapshot, menu.max_batch_size)
             )
         return EmbodimentDecision.select(fallthrough[0].alternative_id)
 

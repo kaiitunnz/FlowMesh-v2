@@ -9,9 +9,9 @@ this module does not check keeps the single embodiment its binding names.
 import json
 
 from shared.inference import (
-    CanonicalInferenceRequest,
+    CanonicalInferenceContract,
     CanonicalProjectionError,
-    canonical_request,
+    canonical_contract,
     declares_multiple_prompts,
     unforwarded_inference_keys,
 )
@@ -60,7 +60,7 @@ def embodiment_menu(
     a leaf declares one model contract, and which capacity serves it is the fabric's to
     decide from what a deployment actually runs.
     """
-    request = _canonical_request(task, spec)
+    contract = _canonical_contract(task, spec)
     resource_class = profile.binding.task_type.value
     resident = InferenceEmbodimentCandidate(
         alternative_id=f"{node_id}:{InferenceEmbodimentKind.RESIDENT_SERVED.value}",
@@ -93,18 +93,18 @@ def embodiment_menu(
     declared = spec.service.primary if spec.service else None
     primary = by_kind[declared] if declared else resident
     return InferenceEmbodimentMenu(
-        contract_fingerprint=_contract_fingerprint(spec, dependency, profile, request),
+        contract_fingerprint=_contract_fingerprint(spec, dependency, profile, contract),
         primary=primary.alternative_id,
         candidates=(resident, local),
-        batch_size=dependency.batch_size,
+        max_batch_size=dependency.max_batch_size,
     )
 
 
-def _canonical_request(
+def _canonical_contract(
     task: ParsedTask, spec: InferenceSpecStrict | InferenceSpecTemplate
-) -> CanonicalInferenceRequest:
+) -> CanonicalInferenceContract:
     try:
-        return canonical_request(spec)
+        return canonical_contract(spec)
     except CanonicalProjectionError as exc:
         raise _unproven(task, f"its request projection is not shared: {exc}") from exc
 
@@ -136,7 +136,7 @@ def unproven_reason(
             "generation applies and a relayed request does not carry"
         )
     try:
-        canonical_request(spec)
+        canonical_contract(spec)
     except CanonicalProjectionError as exc:
         return f"its request projection is not shared: {exc}"
     return None
@@ -214,13 +214,18 @@ def _contract_fingerprint(
     spec: InferenceSpecStrict | InferenceSpecTemplate,
     dependency: ServiceDependency,
     profile: LeafProfile,
-    request: CanonicalInferenceRequest,
+    contract: CanonicalInferenceContract,
 ) -> str:
-    """Digest the attributes both embodiments are proven to share."""
+    """Digest the attributes both embodiments are proven to share.
+
+    The contract is digested rather than a prompt vector: a leaf resolving its prompts
+    from upstream has none at compile time, and what both embodiments are proven to
+    share is the source they resolve and the request they build from it.
+    """
     return content_digest(
         json.dumps(
             {
-                "request": request.model_dump(mode="json"),
+                "contract": contract.model_dump(mode="json"),
                 "service_ref": dependency.service_ref,
                 "interface": dependency.interface.value,
                 "isolation": dependency.isolation,

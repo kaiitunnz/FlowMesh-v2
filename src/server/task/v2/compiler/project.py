@@ -1,7 +1,11 @@
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
-from shared.inference import canonical_request
+from shared.inference import (
+    CanonicalInferenceInputSource,
+    InferenceSourceKind,
+    canonical_source,
+)
 from shared.sandbox import SandboxEgressMode
 from shared.tasks import TaskType
 from shared.tasks.specs import (
@@ -269,21 +273,38 @@ def _leaf_service_dependency(
         adapter_source=_leaf_adapter_source(spec),
         isolation=binding.isolation if binding else None,
         batch_size=_declared_batch_size(spec),
+        max_batch_size=_declared_max_batch_size(spec),
     )
 
 
-def _declared_batch_size(spec: TaskSpecBase) -> int:
+def _declared_batch_size(spec: TaskSpecBase) -> int | None:
     """How many conversations one invocation of a chat leaf carries.
 
     Only a leaf whose request projects into one contract runs several conversations on
     one invocation; anything else carries one. An embedding leaf embeds its whole input
-    list in a single request, so it is one either way.
+    list in a single request, so it is one either way. A leaf projecting its prompts
+    from upstream carries None: the count it will run is a fact about a value that does
+    not exist yet, and reporting a placeholder here would size an admission against it.
     """
+    source = _projectable_source(spec)
+    if source is None:
+        return 1
+    return len(source.items) if source.kind is InferenceSourceKind.LITERAL else None
+
+
+def _declared_max_batch_size(spec: TaskSpecBase) -> int:
+    """The most conversations one invocation of a chat leaf can ever carry."""
+    source = _projectable_source(spec)
+    return 1 if source is None else source.max_items
+
+
+def _projectable_source(spec: TaskSpecBase) -> CanonicalInferenceInputSource | None:
+    """The input source of a leaf whose request projects, or None when it does not."""
     if not isinstance(spec, (InferenceSpecStrict, InferenceSpecTemplate)):
-        return 1
+        return None
     if unproven_reason(spec) is not None:
-        return 1
-    return len(canonical_request(spec).prompts)
+        return None
+    return canonical_source(spec)
 
 
 def _leaf_adapter_ref(

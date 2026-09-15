@@ -150,9 +150,10 @@ class InferenceEmbodimentMenu(BaseModel):
     contract_fingerprint: str
     primary: str
     candidates: tuple[InferenceEmbodimentCandidate, ...]
-    # How many conversations one invocation of the node carries. Every entry runs the
-    # same ones, so it belongs to the menu rather than to any single entry.
-    batch_size: int = Field(default=1, ge=1)
+    # The most conversations one invocation of the node can carry. Every entry runs the
+    # same ones, so it belongs to the menu rather than to any single entry. A node whose
+    # prompts come from upstream is screened against this bound, not an exact count.
+    max_batch_size: int = Field(default=1, ge=1)
 
     @model_validator(mode="after")
     def _validate_candidates(self) -> "InferenceEmbodimentMenu":

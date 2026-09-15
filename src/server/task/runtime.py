@@ -21,7 +21,11 @@ from shared.harness import (
     InputBindingMember,
     ServiceLeafEpisodeDispatch,
 )
-from shared.inference import CanonicalProjectionError, canonical_request
+from shared.inference import (
+    CanonicalProjectionError,
+    InferenceSourceKind,
+    canonical_contract,
+)
 from shared.outcome import OutcomeManifest
 from shared.private_state import (
     OwnerFence,
@@ -2134,38 +2138,43 @@ class TaskRuntime:
                 self._cv.notify_all()
 
     def declared_contract(self, task_id: str) -> str | None:
-        """The canonical request a leaf's contract names, for it to issue and report.
+        """The contract a leaf carries to the worker, for it to resolve and report.
 
-        A leaf that admits more than one embodiment resolves its contract here rather
-        than in the executor, so every embodiment issues one engine request and stores
-        one result shape. A leaf pinned to resident serving resolves one when it
-        declares a batch, because the conversations a replica serves under its one
-        claim are the contract's. It names no embodiment: the worker reads a declared
+        A leaf that admits more than one embodiment names its contract here rather than
+        in the executor, so every embodiment resolves one request and stores one result
+        shape. A leaf pinned to resident serving names one when it declares a batch,
+        because the conversations a replica serves under its one claim are the
+        contract's, and whenever its prompts come from upstream, because only the worker
+        holding that value can resolve them. It names no embodiment: the worker reads a
         contract and never learns which one it is running.
 
-        A pinned single-prompt leaf declares none and keeps reporting the native result
-        its own embodiment has always reported.
+        A pinned single-prompt literal leaf declares none and keeps reporting the native
+        result its own embodiment has always reported.
         """
         with self._lock:
             record = self._tasks.get(task_id)
             engine = self._engines.get(record.workflow_id) if record else None
             if record is None or engine is None:
                 return None
-            if engine.embodiment_menu(task_id) is None:
-                dependency = engine.service_dependency(task_id)
-                if dependency is None or dependency.batch_size <= 1:
-                    return None
             spec = record.task.spec
             if not isinstance(spec, (InferenceSpecStrict, InferenceSpecTemplate)):
                 return None
             try:
-                return canonical_request(spec).model_dump_json()
+                contract = canonical_contract(spec)
             except CanonicalProjectionError:
                 self._logger.warning(
                     "[fabric] a contract leaf's request is no longer projectable: %s",
                     task_id,
                 )
                 return None
+            if (
+                engine.embodiment_menu(task_id) is None
+                and contract.source.kind is InferenceSourceKind.LITERAL
+            ):
+                dependency = engine.service_dependency(task_id)
+                if dependency is None or len(contract.source.items) <= 1:
+                    return None
+            return contract.model_dump_json()
 
     def resolve_v2_output(
         self, workflow_id: str, output_id: str
