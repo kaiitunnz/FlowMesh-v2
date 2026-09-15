@@ -16,7 +16,6 @@ from .codec import (
     unforwarded_inference_keys,
 )
 from .source import (
-    DEFAULT_MAX_PROMPT_CHARS,
     INPUT_RESOLVER_VERSION,
     CanonicalInferenceInputSource,
     InferenceSourceKind,
@@ -28,7 +27,6 @@ from .source import (
 )
 
 __all__ = [
-    "DEFAULT_MAX_PROMPT_CHARS",
     "INPUT_RESOLVER_VERSION",
     "LIST_PROMPT_FIELDS",
     "PROJECTION_DROPS",

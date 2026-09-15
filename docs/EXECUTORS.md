@@ -302,9 +302,8 @@ A projection reads one node named in `dependsOn` and indexes into its result —
 keys, model attributes, `[i]` indexes, and an attribute plucked across a list — and must
 yield a non-empty list of strings. `max_items` bounds how many prompts it may yield and is
 required, because the admission capacity a resident embodiment is screened against is
-fixed before the upstream value exists; `max_prompt_chars` bounds each prompt and defaults
-to 64000. A projection reaching a table, a dataset, an artifact, or any other value is not
-a prompt vector and fails.
+fixed before the upstream value exists. A projection reaching a table, a dataset, an
+artifact, or any other value is not a prompt vector and fails.
 
 The worker holding the upstream value resolves the projection once, before either
 embodiment reaches a model, and both run that one request — a replica receives the

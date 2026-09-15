@@ -16,7 +16,6 @@ from ..schemas.result.catalog import InferenceResult
 from ..schemas.result.payloads import InferenceItem
 from ..tasks.specs import InferenceSpecStrict, InferenceSpecTemplate
 from .source import (
-    DEFAULT_MAX_PROMPT_CHARS,
     INPUT_RESOLVER_VERSION,
     CanonicalInferenceInputSource,
     InferenceSourceKind,
@@ -32,7 +31,7 @@ _LIST_DATA_TYPE = "list"
 # naming inputs only one embodiment reads — an object store, an image group, a dataset —
 # fails toward no menu instead of toward a silently different request.
 _PROJECTABLE_DATA_KEYS = frozenset(
-    {"type", "items", "expr", "node", "path", "max_items", "max_prompt_chars"}
+    {"type", "items", "expr", "node", "path", "max_items"}
 )
 
 # What a local generation applies when the leaf declares nothing. A resident replica
@@ -160,11 +159,6 @@ def resolve_contract(
         raise InputResolutionError(
             f"the source resolved {len(prompts)} prompts and declares at most "
             f"{source.max_items}"
-        )
-    if oversized := [len(p) for p in prompts if len(p) > source.max_prompt_chars]:
-        raise InputResolutionError(
-            f"the source resolved a {max(oversized)}-character prompt and declares at "
-            f"most {source.max_prompt_chars}"
         )
     request = CanonicalInferenceRequest(
         model=contract.model, prompts=prompts, params=contract.params
@@ -308,18 +302,12 @@ def canonical_source(spec: InferenceSpec) -> CanonicalInferenceInputSource:
             f"spec.data declares {', '.join(extra)}; a projectable leaf resolves its "
             "prompts from literal items or one bounded upstream projection"
         )
-    declared_chars = _positive_int(data, "max_prompt_chars")
-    max_prompt_chars = (
-        DEFAULT_MAX_PROMPT_CHARS if declared_chars is None else declared_chars
-    )
     if (items := data.get("items")) is not None:
-        return _literal_source(data, items, max_prompt_chars)
-    return _upstream_source(data, max_prompt_chars)
+        return _literal_source(data, items)
+    return _upstream_source(data)
 
 
-def _literal_source(
-    data: dict[str, Any], items: Any, max_prompt_chars: int
-) -> CanonicalInferenceInputSource:
+def _literal_source(data: dict[str, Any], items: Any) -> CanonicalInferenceInputSource:
     if not isinstance(items, list) or not items:
         raise CanonicalProjectionError(
             "spec.data.items must be a non-empty literal list"
@@ -337,13 +325,10 @@ def _literal_source(
         kind=InferenceSourceKind.LITERAL,
         items=tuple(items),
         max_items=len(items),
-        max_prompt_chars=max_prompt_chars,
     )
 
 
-def _upstream_source(
-    data: dict[str, Any], max_prompt_chars: int
-) -> CanonicalInferenceInputSource:
+def _upstream_source(data: dict[str, Any]) -> CanonicalInferenceInputSource:
     node, path = _normalized_projection(data)
     if (max_items := _positive_int(data, "max_items")) is None:
         raise CanonicalProjectionError(
@@ -356,7 +341,6 @@ def _upstream_source(
         node=node,
         path=path,
         max_items=max_items,
-        max_prompt_chars=max_prompt_chars,
     )
 
 

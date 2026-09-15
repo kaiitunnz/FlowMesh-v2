@@ -22,11 +22,6 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 # was proven against, and a resolver refuses one it does not implement.
 INPUT_RESOLVER_VERSION = "1"
 
-# The conservative per-prompt character bound a source carries when its leaf declares
-# none. Generous enough for a document-sized prompt, finite enough that an unbounded
-# upstream value fails before it reaches an engine.
-DEFAULT_MAX_PROMPT_CHARS = 64_000
-
 
 class InferenceSourceKind(StrEnum):
     LITERAL = "literal"
@@ -58,7 +53,6 @@ class CanonicalInferenceInputSource(BaseModel):
     # slots a resident embodiment reserves are screened against it long before a value
     # exists.
     max_items: int = Field(ge=1)
-    max_prompt_chars: int = Field(default=DEFAULT_MAX_PROMPT_CHARS, ge=1)
 
     @model_validator(mode="after")
     def _validate_kind(self) -> "CanonicalInferenceInputSource":
@@ -153,7 +147,6 @@ def _digest(payload: Any) -> str:
 
 
 __all__ = [
-    "DEFAULT_MAX_PROMPT_CHARS",
     "INPUT_RESOLVER_VERSION",
     "CanonicalInferenceInputSource",
     "InferenceSourceKind",

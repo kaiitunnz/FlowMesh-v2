@@ -234,7 +234,9 @@ class TestResolveContract:
         with pytest.raises(InputResolutionError, match=reason):
             resolve_contract(_upstream_contract(), projected)
 
-    def test_an_oversized_prompt_fails_against_the_declared_envelope(self) -> None:
-        contract = _upstream_contract(max_prompt_chars=8)
-        with pytest.raises(InputResolutionError, match="declares at most 8"):
-            resolve_contract(contract, ["fits", "far too long to fit"])
+    def test_a_long_prompt_resolves(self) -> None:
+        # A prompt's size is the engine's context length to answer, not the source
+        # envelope's: the envelope bounds how many conversations a resolution admits.
+        long_prompt = "x" * 200_000
+        resolved = resolve_contract(_upstream_contract(), [long_prompt])
+        assert resolved.request.prompts == (long_prompt,)
