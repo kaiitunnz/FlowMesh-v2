@@ -5,14 +5,13 @@ from collections.abc import Sequence
 from typing import Any
 
 import pandas as pd
-from pydantic import BaseModel
 
 from shared.schemas.result import BaseExecutorResult
 from shared.tasks.specs import TaskSpecStrictBase
 from shared.utils.json import validate_keys
 
-from ...utils.serialization import try_deserialize_dataframe
 from ..base_executor import ExecutionError
+from .expressions import project_expression
 from .safe_eval import safe_execute_function, safe_materialize_function
 
 _SENTINEL: Any = object()
@@ -141,7 +140,7 @@ def _resolve_columns(
 
         if expr:
             assert data is None
-            value = _evaluate_expr(expr.strip(), context)
+            value = project_expression(expr.strip(), context)
             if value is None:
                 if "default" in raw:
                     value = raw.get("default")
@@ -584,87 +583,6 @@ def _format_column_line(label: str, value: str) -> str:
     else:
         indented = cleaned
     return f"• {label}: {indented}"
-
-
-def _evaluate_expr(expr: str, context: dict[str, BaseExecutorResult]) -> Any:
-    if not expr:
-        return None
-
-    parts = expr.split(".")
-    root = parts[0]
-    result = context.get(root)
-    if result is None:
-        return None
-
-    value: Any = result
-    for token in parts[1:]:
-        if not token:
-            continue
-        attr, indexes = _split_indexes(token)
-        if attr:
-            if isinstance(value, dict) and attr in value:
-                value = value[attr]
-            elif isinstance(value, list) and all(
-                isinstance(v, dict) and attr in v for v in value
-            ):
-                value = [v[attr] for v in value]
-            elif isinstance(value, list) and all(
-                isinstance(v, pd.DataFrame) for v in value
-            ):
-                if any(attr not in v.columns for v in value):
-                    raise ExecutionError(
-                        f"{attr} not a valid column in one of the "
-                        f"DataFrames for {token}."
-                    )
-                value = [v[attr].tolist() for v in value]
-            elif isinstance(value, pd.DataFrame):
-                if attr not in value.columns:
-                    raise ExecutionError(
-                        f"{attr} not a valid column in DataFrame for {token}."
-                    )
-                value = value[attr].tolist()
-            elif isinstance(value, BaseModel):
-                resolved = getattr(value, attr, _SENTINEL)
-                if resolved is _SENTINEL:
-                    raise ExecutionError(
-                        f"{attr} not a valid attribute of {type(value).__name__} "
-                        f"for {token}."
-                    )
-                value = resolved
-            else:
-                raise ExecutionError(
-                    f"{attr} in {parts} is not a valid key - "
-                    f"{type(value).__name__}, {value}"
-                )
-        for idx in indexes:
-            if isinstance(value, list) and -len(value) <= idx < len(value):
-                value = value[idx]
-            elif isinstance(value, list) and all(isinstance(v, list) for v in value):
-                value = [v[idx] for v in value]
-            else:
-                raise ExecutionError(
-                    f"{idx} not a valid index in {token} - {len(value)}"
-                )
-        # Attempt to deserialize DataFrame if applicable
-        if isinstance(value, dict):
-            value = try_deserialize_dataframe(value)
-        elif isinstance(value, list) and all(isinstance(v, dict) for v in value):
-            value = [try_deserialize_dataframe(v) for v in value]
-    return value
-
-
-def _split_indexes(token: str) -> tuple[str, list[int]]:
-    parts = token.split("[")
-    attr = parts[0]
-    idx_list: list[int] = []
-    for part in parts[1:]:
-        part = part.rstrip("]")
-        if part:
-            try:
-                idx_list.append(int(part))
-            except ValueError:
-                idx_list.append(-1)
-    return attr, idx_list
 
 
 _TEMPLATE_REGISTRY: dict[str, Any] = {

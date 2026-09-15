@@ -27,8 +27,8 @@ from ..utils.artifacts import (
     resolve_artifact,
 )
 from ..utils.data_utils import normalize_prompt_payload
+from ..utils.expressions import project_expression
 from ..utils.graph_templates import (
-    _evaluate_expr,
     _resolve_columns,
     build_prompts_from_graph_template,
 )
@@ -429,7 +429,7 @@ class DataMixin(GovernanceMixin):
                 if expr:
                     context = self._spec_upstream_results(spec)
                     resolved_expr = expr.strip()
-                    items = _evaluate_expr(resolved_expr, context)
+                    items = project_expression(resolved_expr, context)
                     root_node = resolved_expr.split(".", 1)[0] or None
             if not isinstance(items, list):
                 raise ExecutionError(
@@ -680,7 +680,7 @@ class DataMixin(GovernanceMixin):
             resolved_node = node_hint
             if not resolved_node and isinstance(expr, str):
                 resolved_node = expr.split(".", 1)[0].strip() or None
-            image_embedding_spec: Any = _evaluate_expr(expr.strip(), context)
+            image_embedding_spec: Any = project_expression(expr.strip(), context)
             artifact_source = maybe_resolve_artifact_ref(
                 image_embedding_spec, context, resolved_node
             )
