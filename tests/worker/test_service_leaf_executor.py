@@ -7,6 +7,7 @@ settled completion and finishes the leaf.
 
 import json
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -27,7 +28,7 @@ from worker.executors.service_leaf_executor import (
 from worker.resident import ResidentRequestStore
 
 
-def _body(store: ResidentRequestStore) -> dict:
+def _body(store: ResidentRequestStore) -> Any:
     """The engine request the executor kept in worker-private custody."""
     payload = store.peek("tsk-test", _CORR)
     assert payload is not None
@@ -91,7 +92,7 @@ def test_a_handed_contract_is_issued_unchanged(tmp_path: Path) -> None:
     ex, store = _executor()
     msg = _msg({"prompt": "ignored"})
     msg.declared_contract = CanonicalInferenceRequest(
-        model="m", prompt="hi", params={"max_tokens": 512}
+        model="m", prompts=("hi",), params={"max_tokens": 512}
     ).model_dump_json()
     ex.run(msg, tmp_path)
 
@@ -99,6 +100,27 @@ def test_a_handed_contract_is_issued_unchanged(tmp_path: Path) -> None:
         "max_tokens": 512,
         "messages": [{"role": "user", "content": "hi"}],
     }
+
+
+def test_a_batch_contract_yields_one_boundary_carrying_every_prompt(
+    tmp_path: Path,
+) -> None:
+    # One leaf is one invocation whatever its prompt count, so the whole batch rides a
+    # single boundary rather than one admission cycle per prompt.
+    ex, store = _executor()
+    msg = _msg({"prompt": "ignored"})
+    msg.declared_contract = CanonicalInferenceRequest(
+        model="m", prompts=("hi", "there"), params={"max_tokens": 512}
+    ).model_dump_json()
+    step = _step(ex.run(msg, tmp_path))
+
+    assert _body(store) == [
+        {"max_tokens": 512, "messages": [{"role": "user", "content": "hi"}]},
+        {"max_tokens": 512, "messages": [{"role": "user", "content": "there"}]},
+    ]
+    assert step.harness_result.kind is HarnessResultKind.BOUNDARY
+    request = step.harness_result.request
+    assert request is not None and request.call_correlation == _CORR
 
 
 def test_a_leaf_declaring_a_literal_prompt_list_is_served(tmp_path: Path) -> None:

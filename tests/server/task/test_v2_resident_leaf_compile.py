@@ -29,7 +29,10 @@ def _resident_leaf(template) -> LeafOperator:
     )
 
 
-def _resident_inference(service_body: str, task_type: str = "inference") -> str:
+def _resident_inference(
+    service_body: str, task_type: str = "inference", data: str | None = None
+) -> str:
+    data_line = f"\n          data: {data}" if data else ""
     return f"""
 apiVersion: flowmesh/v2
 kind: Workflow
@@ -41,7 +44,7 @@ spec:
       - name: a
         spec:
           taskType: {task_type}
-          model: {{source: {{identifier: Qwen/Qwen3-4B}}}}
+          model: {{source: {{identifier: Qwen/Qwen3-4B}}}}{data_line}
           service: {service_body}
 """
 
@@ -401,7 +404,6 @@ def test_each_candidate_carries_its_own_episode_and_envelope():
 @pytest.mark.parametrize(
     "overrides, reason",
     [
-        ({"data": '{type: list, items: ["a", "b"]}'}, "exactly one prompt"),
         ({"data": "{type: dataset, url: squad}"}, "not projectable"),
         ({"data": "{type: list, expr: upstream.items}"}, "literal list"),
         (
@@ -419,12 +421,114 @@ def test_an_unproven_contract_compiles_to_no_menu(overrides, reason):
         _compile(_local_eligible(**overrides))
 
 
+def test_a_leaf_declaring_several_prompts_compiles_to_a_menu():
+    # A batch declares one contract and is served as one invocation, so it admits the
+    # same two embodiments a single-prompt leaf does.
+    _template, plan = _compile(
+        _local_eligible(data='{type: list, items: ["a", "b", "c"]}')
+    )
+    menu = _menu_node(plan).embodiment_menu
+
+    assert {c.kind for c in menu.candidates} == {
+        InferenceEmbodimentKind.RESIDENT_SERVED,
+        InferenceEmbodimentKind.SELF_CONTAINED,
+    }
+    assert menu.candidate(menu.primary) is not None
+    # The number the claim's credit is sized from. A menu that lost it would admit the
+    # whole batch on one slot.
+    assert menu.batch_size == 3
+
+
+def test_a_leafs_dependency_carries_the_batch_its_claim_reserves_for():
+    template, _plan = _compile(
+        _local_eligible(data='{type: list, items: ["a", "b", "c"]}')
+    )
+    assert _inference_leaf(template).service_dependency.batch_size == 3
+
+
+def test_a_single_prompt_leafs_dependency_reserves_one():
+    template, _plan = _compile(_local_eligible())
+    assert _inference_leaf(template).service_dependency.batch_size == 1
+
+
+def test_an_embedding_leafs_dependency_reserves_one():
+    # An embedding request carries its whole input list, so it is one engine sequence.
+    template, _plan = _compile(
+        _resident_inference(
+            "{mode: resident}",
+            task_type="embedding",
+            data='{type: list, items: ["a", "b"]}',
+        )
+    )
+    assert _resident_leaf(template).service_dependency.batch_size == 1
+
+
 def test_a_resident_required_leaf_compiles_to_a_single_embodiment():
     _template, plan = _compile(_resident_inference("{mode: resident}"))
     assert all(n.embodiment_menu is None for n in plan.nodes)
     resident = [n for n in plan.nodes if n.service_family_requirement is not None]
     assert resident[0].residency_intent.required is True
     assert resident[0].residency_intent.conditional is False
+
+
+def test_a_pinned_resident_leaf_serves_the_batch_its_contract_projects():
+    # A pin asks for a replica, and a replica serves a projectable batch under one
+    # claim, so the author gets the batch they pinned rather than a refusal.
+    template, plan = _compile(
+        _local_eligible(
+            service="{mode: resident}", data='{type: list, items: ["a", "b"]}'
+        )
+    )
+    leaf = _inference_leaf(template)
+    assert (
+        leaf.embodiment.eligibility is InferenceEmbodimentEligibility.RESIDENT_REQUIRED
+    )
+    assert leaf.service_dependency.batch_size == 2
+    # The pin forbids the self-contained embodiment, so there is nothing to choose.
+    assert all(n.embodiment_menu is None for n in plan.nodes)
+
+
+def test_a_pinned_resident_batch_with_no_projectable_request_is_rejected():
+    # A leaf with no contract to project has no batch to serve, so serving its first
+    # prompt alone would lose the rest silently.
+    with pytest.raises(CompileError, match="serves several prompts as the batch"):
+        _compile(
+            _resident_inference(
+                "{mode: resident}", data='{type: list, items: ["a", "b"]}'
+            )
+        )
+
+
+def test_an_unprovable_resident_leaf_declaring_several_prompts_is_rejected():
+    # The same holds for a leaf that falls back to resident because its embodiments
+    # are not provably equivalent: there is no proven contract to project either way.
+    with pytest.raises(CompileError, match="serves several prompts as the batch"):
+        _compile(
+            _resident_inference(
+                "{isolation: tenant-a}",
+                data='{type: list, items: ["a", "b"]}',
+            )
+        )
+
+
+def test_a_pinned_resident_leaf_declaring_one_prompt_still_compiles():
+    _template, plan = _compile(
+        _resident_inference("{mode: resident}", data='{type: list, items: ["a"]}')
+    )
+    assert all(n.embodiment_menu is None for n in plan.nodes)
+
+
+def test_a_resident_embedding_leaf_embeds_several_inputs():
+    # An embedding request carries its whole input list, so it is not a batch of
+    # conversations and the rejection does not apply to it.
+    _template, plan = _compile(
+        _resident_inference(
+            "{mode: resident}",
+            task_type="embedding",
+            data='{type: list, items: ["a", "b"]}',
+        )
+    )
+    assert any(n.service_family_requirement is not None for n in plan.nodes)
 
 
 def test_a_local_eligible_embedding_leaf_is_rejected():

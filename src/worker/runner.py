@@ -11,11 +11,7 @@ from typing import Any
 
 import requests
 
-from shared.inference import (
-    CanonicalInferenceRequest,
-    canonical_result,
-    generated_output,
-)
+from shared.inference import CanonicalInferenceRequest, canonical_result
 from shared.network.mtls import MutualTlsMaterial
 from shared.outcome import FabricContentStore
 from shared.schemas.result import BaseExecutorResult
@@ -36,6 +32,7 @@ from shared.utils.time import now_iso
 from .egress import MediatedEgressSidecar, ModelEgress, SearchEgress
 from .executors.base_executor import ExecutionError, Executor, TaskCancelledError
 from .executors.episode_support import EpisodeStepResult
+from .executors.inference.projection import generated_outputs
 from .executors.utils.checkpoints import get_http_destination, write_executor_result
 from .lifecycle import Lifecycle
 from .model_turn import HeldModelEgress, ModelTurnRendezvous, ResponsesFacade
@@ -56,8 +53,8 @@ def _declared_result(
     if declared_contract is None:
         return None
     request = CanonicalInferenceRequest.model_validate_json(declared_contract)
-    output = generated_output(result.model_dump())
-    return None if output is None else canonical_result(request, output)
+    outputs = generated_outputs(result, request)
+    return None if outputs is None else canonical_result(request, outputs)
 
 
 class Runner:

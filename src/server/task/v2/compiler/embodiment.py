@@ -12,6 +12,7 @@ from shared.inference import (
     CanonicalInferenceRequest,
     CanonicalProjectionError,
     canonical_request,
+    declares_multiple_prompts,
     unforwarded_inference_keys,
 )
 from shared.tasks.specs import (
@@ -19,10 +20,15 @@ from shared.tasks.specs import (
     InferenceEmbodimentKind,
     InferenceSpecStrict,
     InferenceSpecTemplate,
+    TaskSpecBase,
 )
 
 from ...parser import ParsedTask
-from ..representations.operators import LeafProfile, ServiceDependency
+from ..representations.operators import (
+    InferenceEmbodimentEligibility,
+    LeafProfile,
+    ServiceDependency,
+)
 from ..representations.plan import (
     EpisodeBoundaryKind,
     EpisodeSpec,
@@ -90,6 +96,7 @@ def embodiment_menu(
         contract_fingerprint=_contract_fingerprint(spec, dependency, profile, request),
         primary=primary.alternative_id,
         candidates=(resident, local),
+        batch_size=dependency.batch_size,
     )
 
 
@@ -143,19 +150,56 @@ def reject_unproven(
         raise _unproven(task, reason)
 
 
+def reject_resident_batch(
+    task: ParsedTask, spec: TaskSpecBase, eligibility: InferenceEmbodimentEligibility
+) -> None:
+    """Fail a resident-served leaf that declares several prompts it cannot project.
+
+    A batch is served from the contract its leaf projects into: the contract carries
+    every conversation on one boundary and names the result they report. A leaf whose
+    request does not project has no such contract, so serving its first prompt alone
+    would lose the rest silently. A leaf that does project is served, whether its
+    embodiment is pinned or chosen from a menu. An embedding leaf embeds a list of
+    inputs in one request and is unaffected.
+
+    NOTE: a non-projectable resident batch could be served later by building the
+    fan-out from the spec directly and reporting a native batch result, rather than
+    the canonical projection. It is refused here because it has no equivalence
+    contract to project, not because a replica cannot serve it.
+    """
+    if eligibility is not InferenceEmbodimentEligibility.RESIDENT_REQUIRED:
+        return
+    if not isinstance(spec, (InferenceSpecStrict, InferenceSpecTemplate)):
+        return
+    if not declares_multiple_prompts(spec):
+        return
+    if (reason := unproven_reason(spec)) is None:
+        return
+    raise _reject(
+        task,
+        "embodiment.resident-batch-unserved",
+        f"a resident-served inference leaf serves several prompts as the batch its "
+        f"contract projects; here {reason}. Declare one prompt, or declare a leaf "
+        f"whose request projects",
+    )
+
+
 def _unproven(task: ParsedTask, reason: str) -> Exception:
+    return _reject(
+        task,
+        "embodiment.not-contract-equivalent",
+        f"a local_eligible inference leaf admits both embodiments only when they run "
+        f"one proven contract; here {reason}",
+    )
+
+
+def _reject(task: ParsedTask, code: str, message: str) -> Exception:
     source_kind, source_id = (
         ("graph_node", task.graph_node_name)
         if task.graph_node_name
         else ("stage", task.local_name) if task.local_name else ("legacy", task.task_id)
     )
-    return compile_error(
-        "embodiment.not-contract-equivalent",
-        f"a local_eligible inference leaf admits both embodiments only when they run "
-        f"one proven contract; here {reason}",
-        source_id or task.task_id,
-        source_kind,
-    )
+    return compile_error(code, message, source_id or task.task_id, source_kind)
 
 
 def _declared_gpu_count(

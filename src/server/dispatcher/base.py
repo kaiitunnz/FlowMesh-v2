@@ -78,6 +78,7 @@ class Dispatcher:
         no_worker_grace_sec: int = 60,
         metrics_recorder: MetricsRecorder | None = None,
         resident_capacity_enabled: bool = False,
+        resident_admission_slots: int = 0,
         embodiment_selector: EmbodimentSelector | None = None,
     ) -> None:
         self._runtime = runtime
@@ -95,6 +96,7 @@ class Dispatcher:
         self._no_worker_grace_sec = max(0, no_worker_grace_sec)
         self._metrics = metrics_recorder
         self._resident_capacity_enabled = resident_capacity_enabled
+        self._resident_admission_slots = max(0, resident_admission_slots)
         self._embodiment_selector = embodiment_selector or PrimaryEmbodimentSelector()
         self._weight_reference_hints: tuple[str, ...] = (
             "checkpoint",
@@ -298,6 +300,7 @@ class Dispatcher:
             local_capable_workers=len(self.eligible_worker_ids(record)),
             relay_capable_workers=len(self.eligible_worker_ids(record, relay=True)),
             resident_capacity_enabled=self._resident_capacity_enabled,
+            resident_admission_slots=self._resident_admission_slots,
         )
 
     def _relays_only(self, task_id: str) -> bool:

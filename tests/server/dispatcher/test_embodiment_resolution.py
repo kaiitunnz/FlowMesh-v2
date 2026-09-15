@@ -4,6 +4,7 @@ import logging
 import tempfile
 from pathlib import Path
 from typing import Any, cast
+from unittest import mock
 
 import pytest
 
@@ -252,3 +253,18 @@ async def test_placement_relaxes_the_accelerator_only_for_a_relaying_embodiment(
 async def test_a_task_with_no_resolved_embodiment_places_as_declared() -> None:
     dispatcher, runtime, task_id = await _setup()
     assert dispatcher._relays_only(task_id) is False
+
+
+def test_the_snapshot_reports_the_deployments_admission_bound() -> None:
+    # The bound a batch's credit is measured against reaches the selector only through
+    # this snapshot, and it is the one number that decides whether a large batch can
+    # ever be served resident.
+    dispatcher = make_capturing_dispatcher(
+        resident_capacity_enabled=True, resident_admission_slots=5
+    )
+    dispatcher.eligible_worker_ids = lambda record, relay=False: {"wkr-1"}  # type: ignore[method-assign]
+    snapshot = dispatcher._embodiment_snapshot(cast(Any, mock.Mock()))
+
+    assert snapshot.resident_admission_slots == 5
+    assert snapshot.admits_batch(5)
+    assert not snapshot.admits_batch(6)

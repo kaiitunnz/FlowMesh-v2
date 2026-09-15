@@ -41,21 +41,26 @@ def _local() -> InferenceEmbodimentCandidate:
     )
 
 
-def _menu(primary: str) -> InferenceEmbodimentMenu:
+def _menu(primary: str, batch_size: int = 1) -> InferenceEmbodimentMenu:
     return InferenceEmbodimentMenu(
         contract_fingerprint="fp",
         primary=primary,
         candidates=(_resident(), _local()),
+        batch_size=batch_size,
     )
 
 
 def _snapshot(
-    workers: int = 2, resident: bool = True, relays: int | None = None
+    workers: int = 2,
+    resident: bool = True,
+    relays: int | None = None,
+    slots: int = 8,
 ) -> EmbodimentSnapshot:
     return EmbodimentSnapshot(
         local_capable_workers=workers,
         relay_capable_workers=workers if relays is None else relays,
         resident_capacity_enabled=resident,
+        resident_admission_slots=slots,
     )
 
 
@@ -136,3 +141,37 @@ class TestCandidateFeasibility:
         relay_only = _snapshot(workers=0, relays=2)
         assert candidate_feasible(_resident(), relay_only) is True
         assert candidate_feasible(_local(), relay_only) is False
+
+
+class TestBatchAdmissionBound:
+    def test_a_batch_within_the_admission_bound_runs_resident(self) -> None:
+        decision = PrimaryEmbodimentSelector()(
+            _menu(RESIDENT_ID, batch_size=8), _snapshot(slots=8)
+        )
+        assert decision.alternative_id == RESIDENT_ID
+
+    def test_a_batch_past_the_admission_bound_runs_self_contained(self) -> None:
+        # One conversation occupies one sequence, so no wait frees enough slots. The
+        # menu holds an embodiment that can serve it, so the batch runs rather than
+        # waiting for capacity that can never arrive.
+        decision = PrimaryEmbodimentSelector()(
+            _menu(RESIDENT_ID, batch_size=20), _snapshot(slots=8)
+        )
+        assert decision.alternative_id == LOCAL_ID
+
+    def test_a_batch_no_embodiment_can_serve_says_why(self) -> None:
+        decision = PrimaryEmbodimentSelector()(
+            _menu(RESIDENT_ID, batch_size=20), _snapshot(workers=0, slots=8)
+        )
+        assert decision.alternative_id is None
+        reason = decision.defer_reason or ""
+        assert "20 conversations" in reason
+        assert "RESIDENT_ADMISSION_SLOTS" in reason
+
+    def test_a_snapshot_reporting_no_bound_does_not_rule_a_batch_out(self) -> None:
+        # Admission enforces its own capacity; the scheduler rules a candidate out only
+        # on evidence it holds.
+        decision = PrimaryEmbodimentSelector()(
+            _menu(RESIDENT_ID, batch_size=20), _snapshot(slots=0)
+        )
+        assert decision.alternative_id == RESIDENT_ID

@@ -2134,12 +2134,17 @@ class TaskRuntime:
                 self._cv.notify_all()
 
     def declared_contract(self, task_id: str) -> str | None:
-        """The canonical request a menu leaf runs, for the worker to issue and report.
+        """The canonical request a leaf's contract names, for it to issue and report.
 
         A leaf that admits more than one embodiment resolves its contract here rather
         than in the executor, so every embodiment issues one engine request and stores
-        one result shape. It names no embodiment: the worker reads a declared contract
-        and never learns which one it is running.
+        one result shape. A leaf pinned to resident serving resolves one when it
+        declares a batch, because the conversations a replica serves under its one
+        claim are the contract's. It names no embodiment: the worker reads a declared
+        contract and never learns which one it is running.
+
+        A pinned single-prompt leaf declares none and keeps reporting the native result
+        its own embodiment has always reported.
         """
         with self._lock:
             record = self._tasks.get(task_id)
@@ -2147,7 +2152,9 @@ class TaskRuntime:
             if record is None or engine is None:
                 return None
             if engine.embodiment_menu(task_id) is None:
-                return None
+                dependency = engine.service_dependency(task_id)
+                if dependency is None or dependency.batch_size <= 1:
+                    return None
             spec = record.task.spec
             if not isinstance(spec, (InferenceSpecStrict, InferenceSpecTemplate)):
                 return None
@@ -2155,7 +2162,7 @@ class TaskRuntime:
                 return canonical_request(spec).model_dump_json()
             except CanonicalProjectionError:
                 self._logger.warning(
-                    "[fabric] a menu leaf's request is no longer projectable: %s",
+                    "[fabric] a contract leaf's request is no longer projectable: %s",
                     task_id,
                 )
                 return None

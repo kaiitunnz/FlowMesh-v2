@@ -1,6 +1,7 @@
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
+from shared.inference import canonical_request
 from shared.sandbox import SandboxEgressMode
 from shared.tasks import TaskType
 from shared.tasks.specs import (
@@ -11,6 +12,7 @@ from shared.tasks.specs import (
     InferenceSpecStrict,
     InferenceSpecTemplate,
     ServiceBindingMode,
+    TaskSpecBase,
 )
 from shared.tasks.specs.common import ModelSpecTemplate
 
@@ -72,7 +74,12 @@ from .bindings import (
     leaf_profile,
 )
 from .diagnostics import compile_error
-from .embodiment import embodiment_menu, reject_unproven, unproven_reason
+from .embodiment import (
+    embodiment_menu,
+    reject_resident_batch,
+    reject_unproven,
+    unproven_reason,
+)
 
 _SERVICE_BACKED_SPECS = (
     InferenceSpecStrict,
@@ -193,12 +200,14 @@ def _leaf_embodiment(task: ParsedTask) -> InferenceEmbodimentBinding | None:
         else InferenceEmbodimentEligibility.SELF_CONTAINED_REQUIRED
     )
     if binding is not None and binding.mode is ServiceBindingMode.RESIDENT:
+        reject_resident_batch(task, spec, named)
         return InferenceEmbodimentBinding(eligibility=named)
     if not isinstance(spec, (InferenceSpecStrict, InferenceSpecTemplate)):
         return InferenceEmbodimentBinding(eligibility=named)
     if binding is not None and binding.mode is ServiceBindingMode.LOCAL_ELIGIBLE:
         reject_unproven(task, spec)
     elif unproven_reason(spec) is not None:
+        reject_resident_batch(task, spec, named)
         return InferenceEmbodimentBinding(eligibility=named)
     return InferenceEmbodimentBinding(
         eligibility=InferenceEmbodimentEligibility.LOCAL_ELIGIBLE,
@@ -259,7 +268,22 @@ def _leaf_service_dependency(
         adapter=adapter,
         adapter_source=_leaf_adapter_source(spec),
         isolation=binding.isolation if binding else None,
+        batch_size=_declared_batch_size(spec),
     )
+
+
+def _declared_batch_size(spec: TaskSpecBase) -> int:
+    """How many conversations one invocation of a chat leaf carries.
+
+    Only a leaf whose request projects into one contract runs several conversations on
+    one invocation; anything else carries one. An embedding leaf embeds its whole input
+    list in a single request, so it is one either way.
+    """
+    if not isinstance(spec, (InferenceSpecStrict, InferenceSpecTemplate)):
+        return 1
+    if unproven_reason(spec) is not None:
+        return 1
+    return len(canonical_request(spec).prompts)
 
 
 def _leaf_adapter_ref(

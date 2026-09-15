@@ -185,7 +185,16 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   dispatch a scheduler-owned `EmbodimentSelector` reads a read-only feasibility snapshot
   and returns a selection or a defer, holding no capacity authority. The selection records
   to the ledger before the task is published and lands on the attempt, and the dispatcher
-  materializes the task it implies. See [`EXECUTORS.md`](EXECUTORS.md).
+  materializes the task it implies. A leaf declaring several prompts is one batch,
+  whether its embodiment is chosen from a menu or pinned to resident serving: it carries
+  every conversation on one boundary under one `ServiceClaim` and one `invocation_id`,
+  whose credit reserves an admission slot per conversation, and the replica issues each
+  as its own concurrent engine request so the engine's continuous batching combines
+  them. A batch past a replica's admission bound is a structural resident infeasibility
+  the menu answers with its self-contained embodiment; a pinned leaf admits no other
+  embodiment, so it fails at admission instead. A leaf whose request the compiler cannot
+  project runs one prompt per invocation and is refused at submission when it declares
+  more. See [`EXECUTORS.md`](EXECUTORS.md).
 - **Live-feasibility handoff.** A ready episode carries the lowerer's declared
   alternative; a feasibility check lets the scheduler defer an infeasible alternative,
   holding no worker, rather than dispatching it. It resolves no resident capacity.

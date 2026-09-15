@@ -161,6 +161,9 @@ class ServiceDependency(BaseModel):
     adapter: str | None = None
     adapter_source: str | None = None
     isolation: str | None = None
+    # How many conversations one invocation of this leaf carries. Each runs as its own
+    # engine sequence, so it is what the leaf's claim reserves admission capacity for.
+    batch_size: int = Field(default=1, ge=1)
 
     @property
     def service_family(self) -> str:

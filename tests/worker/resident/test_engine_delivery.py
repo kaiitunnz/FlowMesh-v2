@@ -12,7 +12,7 @@ import json
 from collections.abc import Iterator
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from threading import Thread
+from threading import Barrier, Thread
 from typing import Any
 
 import httpx
@@ -26,15 +26,24 @@ from worker.resident.engine import (
     unload_adapter,
 )
 
+# The conversation a stand-in engine refuses, so a test can fail one member of a batch
+# without depending on which request the engine happens to serve first.
+_REFUSED = "refuse-me"
+
 
 class _Handler(BaseHTTPRequestHandler):
     server: "_Server"
+
+    # Every reply carries a Content-Length, so HTTP/1.1 keep-alive is safe here and a
+    # test can observe whether a delivery actually reuses its connection.
+    protocol_version = "HTTP/1.1"
 
     def log_message(self, *args: Any) -> None:
         pass
 
     def _record(self) -> bytes:
         raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        self.server.peers.append(self.client_address[1])
         self.server.seen.append(
             {
                 "method": self.command,
@@ -112,8 +121,18 @@ class _Handler(BaseHTTPRequestHandler):
             if self.server.chat_override is not None:
                 self._reply(*self.server.chat_override)
                 return
+            if (barrier := self.server.chat_barrier) is not None:
+                # Times out unless every conversation of the batch is in flight at once,
+                # so a sequential fan-out fails here rather than passing quietly.
+                barrier.wait(timeout=5.0)
+            content = "hi there"
+            if self.server.echo_chat:
+                content = str(body["messages"][-1]["content"])
+            if content == _REFUSED:
+                self._reply(500, "application/json", b'{"error":"refused"}')
+                return
             payload = {
-                "choices": [{"message": {"role": "assistant", "content": "hi there"}}]
+                "choices": [{"message": {"role": "assistant", "content": content}}]
             }
         self._reply(200, "application/json", json.dumps(payload).encode())
 
@@ -130,7 +149,10 @@ class _Server(ThreadingHTTPServer):
         self.unloaded: list[str | None] = []
         self.unload_response: tuple[int, str] = (200, "success")
         self.chat_override: tuple[int, str, bytes] | None = None
+        self.chat_barrier: Barrier | None = None
+        self.echo_chat = False
         self.seen: list[dict[str, Any]] = []
+        self.peers: list[int] = []
         self.extra_response_headers: list[tuple[str, str]] = []
 
 
@@ -145,6 +167,11 @@ def _running() -> Iterator[_Server]:
         server.shutdown()
         server.server_close()
         thread.join(timeout=5.0)
+
+
+def _chat_endpoint(server: "_Server") -> ReplicaEndpoint:
+    base = f"http://127.0.0.1:{server.server_address[1]}/v1"
+    return ReplicaEndpoint(base_url=base, model="m", interface="chat")
 
 
 async def _drain(
@@ -164,6 +191,53 @@ def test_chat_interface_posts_chat_completions_and_streams_text() -> None:
         base = f"http://127.0.0.1:{server.server_address[1]}/v1"
         endpoint = ReplicaEndpoint(base_url=base, model="m", interface="chat")
         content = asyncio.run(_drain(endpoint, "hello"))
+    assert server.paths == ["/v1/chat/completions"]
+    assert content == "hi there"
+
+
+def _batch_payload(*prompts: str) -> str:
+    return json.dumps(
+        [
+            {"max_tokens": 4, "messages": [{"role": "user", "content": prompt}]}
+            for prompt in prompts
+        ]
+    )
+
+
+def test_a_batch_boundary_issues_one_engine_request_per_conversation() -> None:
+    with _running() as server:
+        server.echo_chat = True
+        base = f"http://127.0.0.1:{server.server_address[1]}/v1"
+        endpoint = ReplicaEndpoint(base_url=base, model="m", interface="chat")
+        content = asyncio.run(_drain(endpoint, _batch_payload("a", "b", "c")))
+    assert server.paths == ["/v1/chat/completions"] * 3
+    # Each conversation is its own request carrying the replica's model and the
+    # boundary's own sampling, and the texts come back in declared order.
+    assert [b["model"] for b in server.bodies] == ["m", "m", "m"]
+    assert [b["max_tokens"] for b in server.bodies] == [4, 4, 4]
+    assert json.loads(content) == ["a", "b", "c"]
+
+
+def test_a_batch_is_issued_concurrently() -> None:
+    # The engine combines whole requests through its own continuous batching, which it
+    # can only do for conversations that are in flight together.
+    with _running() as server:
+        server.echo_chat = True
+        server.chat_barrier = Barrier(3)
+        base = f"http://127.0.0.1:{server.server_address[1]}/v1"
+        endpoint = ReplicaEndpoint(base_url=base, model="m", interface="chat")
+        content = asyncio.run(_drain(endpoint, _batch_payload("a", "b", "c")))
+    assert json.loads(content) == ["a", "b", "c"]
+
+
+def test_a_single_conversation_is_not_read_as_a_batch() -> None:
+    # The batch shape is a list of chat requests; anything else stays one request whose
+    # text is returned verbatim, so an agent boundary is unaffected.
+    with _running() as server:
+        base = f"http://127.0.0.1:{server.server_address[1]}/v1"
+        endpoint = ReplicaEndpoint(base_url=base, model="m", interface="chat")
+        single = json.dumps({"messages": [{"role": "user", "content": "a"}]})
+        content = asyncio.run(_drain(endpoint, single))
     assert server.paths == ["/v1/chat/completions"]
     assert content == "hi there"
 
@@ -397,3 +471,66 @@ def test_embedding_interface_posts_embeddings_and_streams_vectors() -> None:
     vectors = json.loads(content)
     assert [v["index"] for v in vectors] == [0, 1]
     assert vectors[0]["embedding"] == [0.0]
+
+
+def test_one_refused_conversation_fails_the_whole_batch() -> None:
+    # The invocation carrying a batch settles whole, so a member the engine refuses
+    # fails it rather than settling a partial result under the same credit.
+    with _running() as server:
+        server.echo_chat = True
+        base = f"http://127.0.0.1:{server.server_address[1]}/v1"
+        endpoint = ReplicaEndpoint(base_url=base, model="m", interface="chat")
+        with pytest.raises(httpx.HTTPStatusError):
+            asyncio.run(_drain(endpoint, _batch_payload("a", _REFUSED, "c")))
+
+
+async def _drain_twice(endpoint: ReplicaEndpoint, delivery: HttpEngineDelivery) -> None:
+    for _ in range(2):
+        opened = await delivery(endpoint, "hello")
+        [chunk async for chunk in opened.chunks]
+        await opened.aclose()
+
+
+def test_one_delivery_reuses_its_connection_across_invocations() -> None:
+    # A replica is called for the life of its lane, so the client is held on the
+    # delivery: the second invocation arrives on the connection the first opened
+    # rather than paying a fresh pool.
+    async def body(endpoint: ReplicaEndpoint) -> None:
+        delivery = HttpEngineDelivery()
+        await _drain_twice(endpoint, delivery)
+        await delivery.aclose()
+
+    with _running() as server:
+        asyncio.run(body(_chat_endpoint(server)))
+    assert len(server.peers) == 2
+    assert server.peers[0] == server.peers[1]
+
+
+def test_separate_deliveries_do_not_share_a_connection() -> None:
+    # The control for the assertion above: reuse is the shared client's doing, not the
+    # stand-in server's, so two deliveries must arrive on two connections.
+    async def body(endpoint: ReplicaEndpoint) -> None:
+        for _ in range(2):
+            delivery = HttpEngineDelivery()
+            await _drain_twice(endpoint, delivery)
+            await delivery.aclose()
+
+    with _running() as server:
+        asyncio.run(body(_chat_endpoint(server)))
+    assert len(server.peers) == 4
+    assert server.peers[0] != server.peers[2]
+
+
+def test_a_closed_delivery_serves_again_on_a_fresh_client() -> None:
+    # Closing releases the connections without poisoning the delivery: a lane reaped and
+    # driven again opens a new client rather than reusing a closed one.
+    async def body(endpoint: ReplicaEndpoint) -> None:
+        delivery = HttpEngineDelivery()
+        await _drain_twice(endpoint, delivery)
+        await delivery.aclose()
+        await _drain_twice(endpoint, delivery)
+        await delivery.aclose()
+
+    with _running() as server:
+        asyncio.run(body(_chat_endpoint(server)))
+    assert server.peers[1] != server.peers[2]

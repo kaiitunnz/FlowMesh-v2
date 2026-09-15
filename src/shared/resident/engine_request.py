@@ -19,6 +19,11 @@ def chat_body(request_payload: str | None, model: str) -> dict[str, Any]:
             parsed = json.loads(request_payload)
         except (json.JSONDecodeError, TypeError):
             parsed = None
+    if isinstance(parsed, list):
+        raise ValueError(
+            "a list payload carries several conversations; build its requests with "
+            "batch_chat_bodies"
+        )
     if isinstance(parsed, dict) and isinstance(parsed.get("messages"), list):
         return {**parsed, "model": model}
     if isinstance(parsed, dict):
@@ -30,6 +35,42 @@ def chat_body(request_payload: str | None, model: str) -> dict[str, Any]:
                 }
     prompt = request_payload or ""
     return {"model": model, "messages": [{"role": "user", "content": prompt}]}
+
+
+def _batch_requests(request_payload: str | None) -> list[dict[str, Any]] | None:
+    """The conversations a batch boundary carries, or ``None`` if it carries one.
+
+    A leaf declaring several prompts sends its conversations as a list, because a chat
+    request serves exactly one conversation. Any other payload reads as a single request
+    so a single-prompt leaf and an agent boundary are unaffected.
+    """
+    if not request_payload:
+        return None
+    try:
+        parsed = json.loads(request_payload)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(parsed, list) or not parsed:
+        return None
+    if not all(
+        isinstance(body, dict) and isinstance(body.get("messages"), list)
+        for body in parsed
+    ):
+        return None
+    return parsed
+
+
+def is_batch_request(request_payload: str | None) -> bool:
+    """Whether a boundary payload carries several conversations."""
+    return _batch_requests(request_payload) is not None
+
+
+def batch_chat_bodies(
+    request_payload: str | None, model: str
+) -> list[dict[str, Any]] | None:
+    """The chat requests a batch boundary issues, with the replica's model pinned."""
+    requests = _batch_requests(request_payload)
+    return None if requests is None else [{**body, "model": model} for body in requests]
 
 
 def embeddings_body(request_payload: str | None, model: str) -> dict[str, Any]:

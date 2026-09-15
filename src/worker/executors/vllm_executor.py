@@ -66,7 +66,7 @@ except Exception:
         _HAS_VLLM = False
         StructuredOutputsParams = None  # type: ignore
 
-from shared.inference import SAMPLING_DEFAULTS
+from shared.inference import SAMPLING_DEFAULTS, CanonicalInferenceRequest
 from shared.schemas.governance import SpanType
 from shared.schemas.result import (
     BaseExecutorResult,
@@ -88,6 +88,20 @@ from .utils.checkpoints import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _contract_conversations(task: ExecutorTask) -> list[list[Any]] | None:
+    """The conversations a resolved contract names, or None when it names none.
+
+    A leaf whose contract the fabric resolves runs the same request wherever it runs, so
+    it generates from the conversations that contract carries and the engine applies the
+    model's own chat template to each — the rendering a replica would apply to the same
+    request. A leaf without one generates from the prompts its spec names.
+    """
+    if task.declared_contract is None:
+        return None
+    contract = CanonicalInferenceRequest.model_validate_json(task.declared_contract)
+    return [list(body["messages"]) for body in contract.chat_bodies()]
 
 
 class _RawJsonSchema:
@@ -927,6 +941,7 @@ Summary:"""
     ) -> BaseExecutorResult:
         task_id = task.task_id.strip()
         spec = self.require_spec(task, InferenceSpecStrict)
+        contract = _contract_conversations(task)
         merge_children = task.merged_children or []
         entries: list[PreparedInferenceEntry] = []
         collection_jobs: list[dict[str, Any]] = [
@@ -949,6 +964,12 @@ Summary:"""
         self._ensure_llm(spec, task_ids)
         assert self._llm is not None
 
+        # A contract names conversations, and only a model whose tokenizer carries a
+        # chat template can render one. A model without one generates from the prompts
+        # its spec prepared, as a leaf carrying no contract does; the result it reports
+        # is projected from the contract either way.
+        conversations = contract if self._should_apply_chat_template() else None
+
         dependencies_by_task: dict[str, list[str]] = {}
         results: dict[str, tuple[PreparedInferenceEntry, list[str]]] = {}
 
@@ -960,6 +981,11 @@ Summary:"""
             raw_entry: InferenceEntry = self._collect_prompts_for_spec(
                 job_spec, task_id=job_task_id
             )
+            if conversations is not None:
+                # The engine renders each conversation itself, so the prompts reach it
+                # unrendered: rendering here too would apply the model's chat template
+                # twice and prepend a second sequence of special tokens.
+                raw_entry.inference_cfg["apply_chat_template"] = False
             postprocessed_entry = self._postprocess_prompts(raw_entry)
             deps = self._extract_source_data_ids(job_spec)
             return job_task_id, postprocessed_entry, deps
@@ -1071,11 +1097,26 @@ Summary:"""
                 "prompt_count": len(self._batched_inputs),
             },
         ):
-            outputs = self._llm.generate(
-                self._batched_inputs,
-                sampling_params=sampling_params,
-                **generate_kwargs,
-            )  # type: ignore[attr-defined]
+            if conversations is not None:
+                if len(conversations) != len(self._batched_inputs):
+                    # The result items are assembled by position against the prompts the
+                    # spec prepared, so a contract that disagrees with them would report
+                    # each output under the wrong prompt.
+                    raise ExecutionError(
+                        f"task {task_id} declares {len(conversations)} conversations "
+                        f"but prepared {len(self._batched_inputs)} prompts"
+                    )
+                outputs = self._llm.chat(
+                    conversations,
+                    sampling_params=sampling_params,
+                    **generate_kwargs,
+                )  # type: ignore[attr-defined]
+            else:
+                outputs = self._llm.generate(
+                    self._batched_inputs,
+                    sampling_params=sampling_params,
+                    **generate_kwargs,
+                )  # type: ignore[attr-defined]
         latency = time.time() - t0
 
         with self._span(

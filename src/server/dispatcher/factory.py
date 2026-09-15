@@ -22,6 +22,7 @@ def create_dispatcher(
     logger: logging.Logger,
     metrics_recorder: MetricsRecorder | None = None,
     resident_capacity_enabled: bool = False,
+    resident_admission_slots: int = 0,
 ) -> Dispatcher:
     """
     Instantiate a dispatcher according to the selected mode.
@@ -61,4 +62,5 @@ def create_dispatcher(
         no_worker_grace_sec=config.no_worker_grace_sec,
         metrics_recorder=metrics_recorder,
         resident_capacity_enabled=resident_capacity_enabled,
+        resident_admission_slots=resident_admission_slots,
     )

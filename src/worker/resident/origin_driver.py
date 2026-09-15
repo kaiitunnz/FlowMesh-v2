@@ -27,6 +27,7 @@ from shared.resident.carriage import (
     ResidentCarriagePlan,
 )
 from shared.resident.contracts import AdmissionHandoff, RouteAuthorization
+from shared.resident.engine_request import is_batch_request
 from shared.resident.reports import (
     ResidentBootstrapAck,
     ResidentBootstrapOutcome,
@@ -261,7 +262,11 @@ class ResidentOriginDriver:
                 return
 
     def _finalize(self, req: ResidentOriginRequest, completion: str) -> None:
-        """Materialize the completion into the content store and report the manifest."""
+        """Materialize the completion into the content store and report the manifest.
+
+        A batch settles as one outcome like any other invocation: its completions are
+        assembled into the single JSON document the boundary's contract declares.
+        """
         idm = req.handoff.idempotency_key
         if self._content_store is None or idm is None:
             self._report_outcome(
@@ -272,8 +277,13 @@ class ResidentOriginDriver:
                 )
             )
             return
+        media_type = (
+            "application/json"
+            if is_batch_request(req.request_payload)
+            else "text/plain"
+        )
         manifest = self._content_store.materialize(
-            idm, completion.encode(), media_type="text/plain"
+            idm, completion.encode(), media_type=media_type
         )
         self._report_outcome(
             self._outcome(req, ResidentStreamStatus.SUCCESS, manifest=manifest)
