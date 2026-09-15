@@ -150,7 +150,10 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   each child dispatches to a worker like any other task.
 - **Cancellation.** A `flowmesh/v2` workflow cancels through the orchestration engine as
   a durable semantic event, so the ledger stays consistent with the task records and a
-  cancelled workflow survives a restart without re-admitting cancelled work.
+  cancelled workflow survives a restart without re-admitting cancelled work. A worker
+  success that races the cancel — a dispatch the worker had already finished, such as an
+  agent-episode step or an input preparation — settles the cancellation in place, since
+  the dispatch that would carry the worker's own terminal is the one the cancel withholds.
 - **Physical episode lowering.** The compiler lowers a v2 template either transparently
   (one physical node per operator, the compatibility baseline) or into run-to-yield
   **episodes**: each node is annotated with the boundary that closes it (service issue,
