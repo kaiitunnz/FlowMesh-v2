@@ -1197,6 +1197,10 @@ class TaskRuntime:
         engine = self._engines.get(record.workflow_id) if record else None
         if record is None or engine is None:
             return
+        if record.status == TaskStatus.CANCELLING:
+            self._settle_cancelled_locked(record, time.time())
+            self._cv.notify_all()
+            return
         if hr.kind in (HarnessResultKind.FAILURE, HarnessResultKind.CANCELLATION):
             self._pending_facade_groups.pop(task_id, None)
             record.pending_facade_group = None
@@ -1326,6 +1330,9 @@ class TaskRuntime:
         """Re-ready a still-running agent episode for its next run-to-yield step."""
         record = self._tasks.get(task_id)
         if record is None or record.status in TERMINAL_TASK_STATUSES:
+            return
+        if record.status == TaskStatus.CANCELLING:
+            self._settle_cancelled_locked(record, time.time())
             return
         # Settle the finished attempt so a long continuing episode's history stays
         # bounded (a no-op when a suspend already closed it).
@@ -2258,13 +2265,11 @@ class TaskRuntime:
         engine = self._engines.get(record.workflow_id) if record else None
         if record is None or engine is None:
             return
-        if record.status in TERMINAL_TASK_STATUSES or (
-            record.status == TaskStatus.CANCELLING
-        ):
-            # A preparation runs no model and finishes fast, so its success can land
-            # after a cancel has settled the task — and the interrupt cannot reach a
-            # preparation the worker already finished. Re-readying here would re-admit
-            # cancelled work under a work item that is already settled.
+        if record.status in TERMINAL_TASK_STATUSES:
+            return
+        if record.status == TaskStatus.CANCELLING:
+            self._settle_cancelled_locked(record, time.time())
+            self._cv.notify_all()
             return
         if (standing := engine.input_resolution(task_id)) is not None and (
             standing.reference is not None
@@ -3433,33 +3438,55 @@ class TaskRuntime:
                     record.status,
                 )
                 return usages
-            record.status = TaskStatus.CANCELLED
-            record.finished_ts = finished_ts
-            if started_ts:
-                record.started_ts = started_ts
-            record.merged_children = None
-            if usage is not None:
-                record.usages.append(usage)
-            # TODO(kaiitunnz): Handle usages for cancelled tasks
-            self._completed.discard(task_id)
-            self._failed.discard(task_id)
-            self._pending_deps.pop(task_id, None)
-            self._remove_from_ready_locked(task_id)
-            self._merge_bucket_remove(task_id)
-            self._merge_key_by_task.pop(task_id, None)
-            self._merge_children_map.pop(task_id, None)
-            record.assigned_worker = None
-            # Persist the task terminal record first, then mirror the cancellation
-            # into the ledger and snapshot last, so the ledger never leads task state.
-            self._persist_terminal_locked(task_id, sched=False)
-            if (engine := self._engines.get(record.workflow_id)) is not None:
-                advance = engine.on_cancelled(task_id)
-                assert not (
-                    advance.ready or advance.retry
-                ), "a whole-instance cancel readies no work"
-                self._save_ledger_locked(record.workflow_id)
-            self._reclaim_vault_if_settled_locked(record.workflow_id)
+            self._settle_cancelled_locked(
+                record, finished_ts, started_ts=started_ts, usage=usage
+            )
             return usages
+
+    def _settle_cancelled_locked(
+        self,
+        record: TaskRecord,
+        finished_ts: float,
+        *,
+        started_ts: float | None = None,
+        usage: TaskUsage | None = None,
+    ) -> None:
+        """Settle a task CANCELLED and mirror the cancellation into the ledger.
+
+        A cancel interrupts the worker and waits for its terminal, but an interrupt
+        cannot un-finish a dispatch the worker already completed: that dispatch reports
+        a success, and the next one — which is what would carry the worker's terminal
+        back — is the one a cancel withholds. A success landing on a CANCELLING task
+        therefore settles the cancellation here rather than re-admitting the task or
+        waiting for a terminal that never arrives.
+        """
+        task_id = record.task_id
+        record.status = TaskStatus.CANCELLED
+        record.finished_ts = finished_ts
+        if started_ts:
+            record.started_ts = started_ts
+        record.merged_children = None
+        if usage is not None:
+            record.usages.append(usage)
+        # TODO(kaiitunnz): Handle usages for cancelled tasks
+        self._completed.discard(task_id)
+        self._failed.discard(task_id)
+        self._pending_deps.pop(task_id, None)
+        self._remove_from_ready_locked(task_id)
+        self._merge_bucket_remove(task_id)
+        self._merge_key_by_task.pop(task_id, None)
+        self._merge_children_map.pop(task_id, None)
+        record.assigned_worker = None
+        # Persist the task terminal record first, then mirror the cancellation
+        # into the ledger and snapshot last, so the ledger never leads task state.
+        self._persist_terminal_locked(task_id, sched=False)
+        if (engine := self._engines.get(record.workflow_id)) is not None:
+            advance = engine.on_cancelled(task_id)
+            assert not (
+                advance.ready or advance.retry
+            ), "a whole-instance cancel readies no work"
+            self._save_ledger_locked(record.workflow_id)
+        self._reclaim_vault_if_settled_locked(record.workflow_id)
 
     def get_record(self, task_id: str) -> TaskRecord | None:
         with self._lock:
