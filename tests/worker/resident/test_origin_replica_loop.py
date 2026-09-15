@@ -43,7 +43,7 @@ class _MemStore(FabricContentStore):
         self._by_idem: dict[str, OutcomeManifest] = {}
         self._by_digest: dict[str, bytes] = {}
 
-    def put_object(self, data: bytes, *, media_type: str) -> str:
+    def put_object(self, data: bytes) -> str:
         digest = content_digest(data)
         self._by_digest[digest] = data
         return digest

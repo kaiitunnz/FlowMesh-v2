@@ -3320,7 +3320,7 @@ class OrchestrationEngine:
         is becomes durable.
         """
         wi = self._work_item_for_task(task_id)
-        if wi is None:
+        if wi is None or wi.status in _TERMINAL_WI:
             return None
         if (standing := self._input_resolutions.get(wi.work_item_id)) is not None:
             return standing

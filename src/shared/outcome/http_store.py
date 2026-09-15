@@ -24,11 +24,11 @@ class HttpFabricContentStore(FabricContentStore):
     def _url(self, path: str) -> str:
         return f"{self._base}/api/v1/content{path}"
 
-    def put_object(self, data: bytes, *, media_type: str) -> str:
+    def put_object(self, data: bytes) -> str:
         resp = requests.put(
             self._url("/objects"),
             data=data,
-            headers={**auth_headers(), "Content-Type": media_type},
+            headers={**auth_headers(), "Content-Type": "application/octet-stream"},
             timeout=self._timeout,
         )
         if resp.status_code >= 400:

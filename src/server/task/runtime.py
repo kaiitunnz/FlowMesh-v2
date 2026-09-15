@@ -2258,6 +2258,21 @@ class TaskRuntime:
         engine = self._engines.get(record.workflow_id) if record else None
         if record is None or engine is None:
             return
+        if record.status in TERMINAL_TASK_STATUSES or (
+            record.status == TaskStatus.CANCELLING
+        ):
+            # A preparation runs no model and finishes fast, so its success can land
+            # after a cancel has settled the task — and the interrupt cannot reach a
+            # preparation the worker already finished. Re-readying here would re-admit
+            # cancelled work under a work item that is already settled.
+            return
+        if (standing := engine.input_resolution(task_id)) is not None and (
+            standing.reference is not None
+        ):
+            # The stream is at-least-once: a replayed success finds its own commit
+            # standing. Re-readying would pull the run it already released back to the
+            # queue and dispatch a second embodiment against one work item.
+            return
         try:
             materialization = ResolvedInputMaterialization.model_validate(payload)
         except ValidationError:
@@ -3028,7 +3043,7 @@ class TaskRuntime:
                 # commits what it materialized and the task goes back to the queue for
                 # the dispatch that chooses an embodiment and runs it.
                 self._apply_input_materialization_locked(task_id, prepared)
-                return usages
+                return []
             episode_step = payload.get("agent_episode")
             if episode_step is not None and record is not None:
                 harness_result = HarnessResult.model_validate(episode_step)

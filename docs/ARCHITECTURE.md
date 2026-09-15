@@ -224,7 +224,7 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   aggregate `ClaimCredit` read the cardinality and conservative token demand the binding
   records, and the selected worker hydrates and digest-verifies that one recorded request
   rather than reading the source again — a reference that is missing, out of scope, or
-  digest-mismatched fails closed. Request bytes stay worker-produced and outside `DS`/`CS`;
+  digest-mismatched fails closed. Request bytes are worker-produced and outside `DS`/`CS`;
   the interim object path is the root content router, not a data-direct hydration.
   `ORCHESTRATOR_MAX_PREPARED_INPUT_BYTES` screens a reported preparation before any
   candidate-specific work; unset, it caps nothing, and ordinary candidate feasibility,

@@ -21,9 +21,9 @@ RESOLVED_INPUT_MEDIA_TYPE = "application/json"
 class ResolvedInputReference(BaseModel):
     """A bounded, immutable reference to one worker-materialized resolved request.
 
-    It carries the identity and the scope a holder needs to fetch and verify the bytes,
-    and nothing that would let a reader reach them another way: no bearer URL and no
-    worker-local path.
+    It carries the identity a holder needs to fetch and verify the bytes, and nothing
+    that would let a reader reach them another way: no bearer URL and no worker-local
+    path.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -31,8 +31,6 @@ class ResolvedInputReference(BaseModel):
     content_digest: str
     size_bytes: int = Field(ge=0)
     media_type: str = RESOLVED_INPUT_MEDIA_TYPE
-    # The principal scope the object was written under; a read authenticates as it.
-    scope: str | None = None
 
 
 class ResolvedInputMaterialization(BaseModel):
@@ -51,16 +49,12 @@ class ResolvedInputMaterialization(BaseModel):
 
 
 def write_resolved_input(
-    store: FabricObjectStore,
-    resolved: ResolvedCanonicalInferenceRequest,
-    *,
-    scope: str | None = None,
+    store: FabricObjectStore, resolved: ResolvedCanonicalInferenceRequest
 ) -> ResolvedInputReference:
     """Store a resolved request and return the reference a later run hydrates it by."""
     data = resolved.model_dump_json().encode()
-    digest = store.put_object(data, media_type=RESOLVED_INPUT_MEDIA_TYPE)
     return ResolvedInputReference(
-        content_digest=digest, size_bytes=len(data), scope=scope
+        content_digest=store.put_object(data), size_bytes=len(data)
     )
 
 

@@ -23,7 +23,7 @@ class InMemoryContentStore(FabricContentStore):
         self.fail_finalize = False
         self.write_count = 0
 
-    def put_object(self, data: bytes, *, media_type: str) -> str:
+    def put_object(self, data: bytes) -> str:
         digest = content_digest(data)
         if digest not in self._objects:
             self._objects[digest] = data

@@ -175,6 +175,55 @@ async def test_the_first_committed_preparation_stands() -> None:
 
 
 @pytest.mark.anyio
+async def test_a_preparation_success_does_not_revive_a_cancelled_task() -> None:
+    # A preparation runs no model and finishes fast, so its success can land after a
+    # cancel has already settled the task. Re-readying it here would re-admit cancelled
+    # work and leave a PENDING record contradicting a cancelled work item.
+    runtime = _runtime()
+    task_id = await _upstream_task(runtime, max_items=None)
+    record = runtime.get_record(task_id)
+    assert record is not None
+    record.status = TaskStatus.CANCELLED
+
+    _report(runtime, task_id)
+
+    assert record.status == TaskStatus.CANCELLED
+    assert runtime.recorded_input_reference(task_id) is None
+
+
+@pytest.mark.anyio
+async def test_a_preparation_success_does_not_revive_a_cancelling_task() -> None:
+    # A cancel in flight is not yet terminal, and the interrupt cannot reach a
+    # preparation the worker has already finished.
+    runtime = _runtime()
+    task_id = await _upstream_task(runtime, max_items=None)
+    record = runtime.get_record(task_id)
+    assert record is not None
+    record.status = TaskStatus.CANCELLING
+
+    _report(runtime, task_id)
+
+    assert record.status == TaskStatus.CANCELLING
+
+
+@pytest.mark.anyio
+async def test_a_replayed_preparation_success_does_not_redispatch_the_leaf() -> None:
+    # The task event stream is at-least-once. A replay after the embodiment already
+    # dispatched would otherwise yank the running task back to the queue and run a
+    # second embodiment, admitting a second claim against one work item.
+    runtime = _runtime()
+    task_id = await _upstream_task(runtime, max_items=None)
+    _report(runtime, task_id)
+    record = runtime.get_record(task_id)
+    assert record is not None and record.status == TaskStatus.PENDING
+    record.status = TaskStatus.DISPATCHED
+
+    _report(runtime, task_id)
+
+    assert record.status == TaskStatus.DISPATCHED
+
+
+@pytest.mark.anyio
 async def test_an_unset_aggregate_limit_admits_a_large_prepared_request() -> None:
     runtime = _runtime(max_prepared_input_bytes=None)
     task_id = await _upstream_task(runtime, max_items=None)

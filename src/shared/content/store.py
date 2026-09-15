@@ -14,11 +14,7 @@ from pydantic import BaseModel, ConfigDict
 
 
 class ObjectWriteAck(BaseModel):
-    """What a store acknowledges a write with: the identity it stored the bytes under.
-
-    A writer pairs this with the meaning it already holds to form its own reference; the
-    ack itself names no scope and no media type, so it is not one.
-    """
+    """What a store acknowledges a write with: the identity it stored bytes under."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -43,7 +39,7 @@ class FabricObjectStore(ABC):
     """Put-if-absent by digest, authorized read, and digest-verified hydration."""
 
     @abstractmethod
-    def put_object(self, data: bytes, *, media_type: str) -> str:
+    def put_object(self, data: bytes) -> str:
         """Store the bytes under the caller's scope and return their digest.
 
         A digest already present is left as it is: identical bytes, so the first write
