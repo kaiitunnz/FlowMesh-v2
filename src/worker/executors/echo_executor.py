@@ -11,7 +11,7 @@ from shared.tasks.task_type import TaskType
 from .base_executor import ExecutionError, Executor, ExecutorTask
 from .mixins.data import DataMixin
 from .utils.checkpoints import maybe_upload_traces
-from .utils.graph_templates import _evaluate_expr
+from .utils.expressions import project_expression
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +44,7 @@ class EchoExecutor(DataMixin, Executor):
                 "echo executor mapping item must contain either 'expr' or "
                 "both 'node' and 'path'"
             )
-        resolved = _evaluate_expr(expr.strip(), context)
+        resolved = project_expression(expr.strip(), context)
         if resolved is None:
             raise ExecutionError(
                 f"echo executor expression resolved to null: '{expr.strip()}'"

@@ -195,6 +195,22 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   embodiment, so it fails at admission instead. A leaf whose request the compiler cannot
   project runs one prompt per invocation and is refused at submission when it declares
   more. See [`EXECUTORS.md`](EXECUTORS.md).
+- **Upstream-resolved inference inputs.** An inference leaf names its prompts through one
+  `CanonicalInferenceInputSource`: literal items, or one bounded projection of a declared
+  direct upstream input, written as `data.expr` or `data.node` plus `data.path` and
+  normalized to one descriptor. Compilation proves and fingerprints the descriptor and its
+  declared envelope without reading a future upstream value, and candidate feasibility is
+  screened against that envelope rather than an exact count. The origin worker resolves the
+  source once against the upstream snapshot pinned to its task and records an
+  `InputResolutionBinding` — source and resolver digests, ordered upstream content
+  provenance, and the resolved request's digest and cardinality — before either embodiment
+  reaches a model. Both embodiments then run that one request, so a replica receives
+  prompts rather than a projection to interpret, and the raw upstream values never leave
+  the origin worker. A resident claim reserves an admission slot per conversation the
+  resolution materialized. A source that is missing, unprojectable, not a non-empty list of
+  strings, or past its envelope fails the task before any model I/O and before admission,
+  creating no claim and switching no embodiment. A re-driven task runs only when it
+  re-resolves to its recorded binding.
 - **Live-feasibility handoff.** A ready episode carries the lowerer's declared
   alternative; a feasibility check lets the scheduler defer an infeasible alternative,
   holding no worker, rather than dispatching it. It resolves no resident capacity.

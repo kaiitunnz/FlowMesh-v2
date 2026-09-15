@@ -666,6 +666,7 @@ class Dispatcher:
             ),
             service_episode=self._runtime.service_episode_dispatch(task_id),
             declared_contract=self._runtime.declared_contract(task_id),
+            recorded_resolution=self._runtime.input_resolution_binding(task_id),
         )
 
         # 8. Publish task

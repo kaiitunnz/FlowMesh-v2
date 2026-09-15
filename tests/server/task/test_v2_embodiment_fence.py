@@ -9,7 +9,7 @@ import pytest
 
 from server.config import OrchestrationConfig
 from server.task.runtime import TaskRuntime
-from shared.inference import CanonicalInferenceRequest
+from shared.inference import InputResolutionBinding, UpstreamProvenance
 from shared.tasks.specs import InferenceEmbodimentKind
 
 from .test_v2_orchestration import (
@@ -197,7 +197,8 @@ async def test_a_pinned_resident_batch_carries_its_contract() -> None:
 
     contract = runtime.declared_contract(task_id)
     assert contract is not None
-    assert CanonicalInferenceRequest.model_validate_json(contract).prompts == ("a", "b")
+    source = contract.source
+    assert source.items == ("a", "b")
     # The pin forbids the other embodiment, so it dispatches resident with no selection.
     assert runtime.service_episode_dispatch(task_id) is not None
 
@@ -213,4 +214,120 @@ async def test_a_pinned_single_prompt_leaf_declares_no_contract() -> None:
 async def test_a_menu_leaf_still_carries_its_contract() -> None:
     runtime = _runtime(FakeRegistry())
     task_id, _primary = await _menu_task(runtime)
+    assert runtime.declared_contract(task_id) is not None
+
+
+def _binding(request_digest: str = "req", cardinality: int = 2):
+    return InputResolutionBinding(
+        source_digest="src",
+        resolver_version="1",
+        request_digest=request_digest,
+        cardinality=cardinality,
+        upstream=(UpstreamProvenance(node="up", content_digest="c1"),),
+    )
+
+
+@pytest.mark.anyio
+async def test_a_reported_input_resolution_is_recorded_against_its_work_item() -> None:
+    runtime = _runtime(FakeRegistry())
+    task_id, _primary = await _menu_task(runtime)
+    assert runtime.input_resolution_binding(task_id) is None
+
+    runtime.record_input_resolution(task_id, _binding().model_dump(mode="json"))
+    recorded = runtime.input_resolution_binding(task_id)
+    assert recorded is not None
+    assert recorded.request_digest == "req"
+    assert recorded.cardinality == 2
+    assert recorded.upstream[0].node == "up"
+
+
+@pytest.mark.anyio
+async def test_a_recorded_resolution_is_kept_across_a_re_drive() -> None:
+    # An in-flight invocation reuses the request it was admitted under, so a later
+    # report never replaces the recorded one.
+    runtime = _runtime(FakeRegistry())
+    task_id, _primary = await _menu_task(runtime)
+    runtime.record_input_resolution(task_id, _binding().model_dump(mode="json"))
+    runtime.record_input_resolution(
+        task_id, _binding(request_digest="other", cardinality=9).model_dump(mode="json")
+    )
+    recorded = runtime.input_resolution_binding(task_id)
+    assert recorded is not None
+    assert recorded.request_digest == "req"
+
+
+@pytest.mark.anyio
+async def test_an_unreadable_resolution_report_records_nothing() -> None:
+    runtime = _runtime(FakeRegistry())
+    task_id, _primary = await _menu_task(runtime)
+    runtime.record_input_resolution(task_id, {"cardinality": "many"})
+    assert runtime.input_resolution_binding(task_id) is None
+
+
+UPSTREAM_SOURCED = """
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {name: upstream}
+spec:
+  graph:
+    nodes:
+      - name: src
+        spec:
+          taskType: echo
+          data: {type: list, items: ["a", "b"]}
+      - name: gen
+        dependsOn: [src]
+        spec:
+          taskType: inference
+          model:
+            source: {identifier: Qwen/Qwen3-4B}
+ENGINE
+          data: {type: list, expr: src.items.output, max_items: 8}
+          resources: {hardware: {gpu: {count: 1}}}
+SERVICE
+"""
+
+
+async def _upstream_task(
+    runtime: TaskRuntime, service: str = "", engine: bool = True
+) -> str:
+    text = UPSTREAM_SOURCED.replace(
+        "ENGINE", "            vllm: {gpu_memory_utilization: 0.9}" if engine else ""
+    ).replace("SERVICE", f"          service: {service}" if service else "")
+    _wfl, ids = await _register(runtime, text)
+    return ids["gen"]
+
+
+@pytest.mark.anyio
+async def test_a_locally_served_upstream_leaf_declares_no_contract() -> None:
+    # One embodiment served locally resolves its own prompts, so it reports the native
+    # result it always has. An upstream source does not make a leaf a fabric contract,
+    # any more than a literal one does.
+    runtime = _runtime(FakeRegistry())
+    task_id = await _upstream_task(runtime, engine=False)
+    assert runtime.embodiment_menu(task_id) is None
+
+    engine = runtime.orchestration_engine(_workflow_of(runtime, task_id))
+    assert engine is not None and engine.service_dependency(task_id) is None
+    assert runtime.declared_contract(task_id) is None
+
+
+@pytest.mark.anyio
+async def test_a_resident_bound_upstream_leaf_carries_its_contract() -> None:
+    # A replica cannot read an upstream node, so the request has to be resolved for it.
+    runtime = _runtime(FakeRegistry())
+    task_id = await _upstream_task(runtime, "{mode: resident}")
+    assert runtime.embodiment_menu(task_id) is None
+
+    contract = runtime.declared_contract(task_id)
+    assert contract is not None
+    source = contract.source
+    assert (source.node, source.path) == ("src", "items.output")
+
+
+@pytest.mark.anyio
+async def test_a_menu_upstream_leaf_carries_its_contract() -> None:
+    runtime = _runtime(FakeRegistry())
+    task_id = await _upstream_task(runtime)
+    assert runtime.embodiment_menu(task_id) is not None
     assert runtime.declared_contract(task_id) is not None

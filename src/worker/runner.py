@@ -11,7 +11,11 @@ from typing import Any
 
 import requests
 
-from shared.inference import CanonicalInferenceRequest, canonical_result
+from shared.inference import (
+    CanonicalInferenceRequest,
+    InputResolutionError,
+    canonical_result,
+)
 from shared.network.mtls import MutualTlsMaterial
 from shared.outcome import FabricContentStore
 from shared.schemas.result import BaseExecutorResult
@@ -33,6 +37,7 @@ from .egress import MediatedEgressSidecar, ModelEgress, SearchEgress
 from .executors.base_executor import ExecutionError, Executor, TaskCancelledError
 from .executors.episode_support import EpisodeStepResult
 from .executors.inference.projection import generated_outputs
+from .executors.inference.resolution import resolve_task_contract
 from .executors.utils.checkpoints import get_http_destination, write_executor_result
 from .lifecycle import Lifecycle
 from .model_turn import HeldModelEgress, ModelTurnRendezvous, ResponsesFacade
@@ -41,7 +46,7 @@ from .utils.logging import TaskLogEmitter
 
 
 def _declared_result(
-    result: BaseExecutorResult, declared_contract: str | None
+    result: BaseExecutorResult, request: CanonicalInferenceRequest | None
 ) -> BaseExecutorResult | None:
     """Rewrite a result into the shape its contract declares, or None to store it as is.
 
@@ -50,9 +55,8 @@ def _declared_result(
     before the result is stored, so the shape does not depend on the result reaching any
     other node. A step that generated nothing yet has nothing to declare.
     """
-    if declared_contract is None:
+    if request is None:
         return None
-    request = CanonicalInferenceRequest.model_validate_json(declared_contract)
     outputs = generated_outputs(result, request)
     return None if outputs is None else canonical_result(request, outputs)
 
@@ -304,6 +308,34 @@ class Runner:
             return
         self.logger.warning("Unknown mediated-op frame kind: %s", frame_kind)
 
+    def _materialize_contract(self, msg: WorkerTaskMessage) -> None:
+        """Resolve a task's inference contract, once, before its embodiment runs.
+
+        One request serves whichever embodiment follows, and the binding recording how
+        it was reached is durable before a local generation or a resident service issue.
+        A source that does not resolve within what the leaf declared fails the task
+        here, where no model has run and no claim exists.
+        """
+        if msg.declared_contract is None:
+            return
+        try:
+            resolved = resolve_task_contract(msg)
+        except InputResolutionError as exc:
+            raise ExecutionError(str(exc), retryable=False) from exc
+        if resolved is None:
+            return
+        committed = msg.recorded_resolution
+        if committed is not None and not committed.matches(resolved.binding):
+            raise ExecutionError(
+                f"task {msg.task_id} is committed to the inputs it already resolved, "
+                "and its source resolves to a different request now",
+                retryable=False,
+            )
+        msg.resolved_contract = resolved.request
+        self.lifecycle.notify_task_update(
+            msg.task_id, {"input_resolution": resolved.binding.model_dump(mode="json")}
+        )
+
     def _resolve_output_dir(self, task_id: str) -> Path:
         """Prepare and return the canonical output directory for a task's results."""
         out_dir = self.results_dir / task_id
@@ -317,15 +349,12 @@ class Runner:
         merged_children: list[MergedChildTaskStrict],
         out_dir: Path,
         result: BaseExecutorResult | None,
-        declared_contract: str | None = None,
+        request: CanonicalInferenceRequest | None = None,
     ):
         if result is None:
             return
         self._write_single_result(
-            task_id,
-            spec,
-            out_dir,
-            _declared_result(result, declared_contract) or result,
+            task_id, spec, out_dir, _declared_result(result, request) or result
         )
 
         child_lookup = {entry.task_id: entry for entry in merged_children}
@@ -730,6 +759,8 @@ class Runner:
                         )
                         notified_task_started = True
 
+                        self._materialize_contract(msg)
+
                         # Disable idle checker during execution
                         self._active_executor_last_used_at = None
                         executor_to_run = self._active_executor
@@ -742,7 +773,7 @@ class Runner:
                         merged_children,
                         out_dir,
                         out,
-                        msg.declared_contract,
+                        msg.resolved_contract,
                     )
                     metadata = self._build_task_metadata(
                         task_type,

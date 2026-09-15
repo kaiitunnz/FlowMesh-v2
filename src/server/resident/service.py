@@ -22,6 +22,7 @@ from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from shared.inference import InputResolutionBinding
 from shared.network.frame_stream import split_host_port
 from shared.resident.carriage import CONTROL_RELAY, ResidentCarriagePlan
 from shared.resident.contracts import (
@@ -76,6 +77,8 @@ ResidentListenerPortOf = Callable[[str], int]
 
 # Resolves a task's normalized resident dependency: (workflow_id, dependency) or None.
 DependencyResolver = Callable[[str], tuple[str, ServiceDependency] | None]
+# The binding a task's inputs resolved under, once its origin worker has recorded one.
+InputResolutionResolver = Callable[[str], InputResolutionBinding | None]
 # Settles a mediated boundary back at its originating call, or fails it with an error.
 SettleCallback = Callable[..., bool]
 # Re-drives a still-pending mediated boundary off-lane without settling it.
@@ -312,6 +315,7 @@ class ResidentCapacityControl:
         lifecycle: LifecycleScaleManager,
         limits: ResidentPolicyLimits,
         dependency_resolver: DependencyResolver,
+        input_resolution_resolver: InputResolutionResolver = lambda _task_id: None,
         settle_cb: SettleCallback,
         redispatch_cb: RedispatchCallback,
         endpoint_probe: EndpointProbe,
@@ -328,6 +332,7 @@ class ResidentCapacityControl:
         self._lifecycle = lifecycle
         self._limits = limits
         self._resolve_dependency = dependency_resolver
+        self._resolve_input_resolution = input_resolution_resolver
         self._settle = settle_cb
         self._redispatch = redispatch_cb
         self._probe_endpoint = endpoint_probe
@@ -760,11 +765,13 @@ class ResidentCapacityControl:
             ),
             origin_worker=origin_worker,
         )
+        binding = self._resolve_input_resolution(env.task_id)
         profile = AdmissionProfile(
             engine_batch_key=dependency.engine_batch_key,
             adapter_ref=dependency.adapter,
             adapter_source=dependency.adapter_source,
-            batch_size=dependency.batch_size,
+            batch_size=_admitted_batch_size(dependency, binding),
+            max_output_tokens=binding.projected_output_tokens if binding else None,
         )
         await self._drive_claim(orig, dependency, profile)
 
@@ -1525,3 +1532,20 @@ class ResidentCapacityControl:
         self._settle_origination_error(
             orig, f"resident admission denied ({label}): {detail}"
         )
+
+
+def _admitted_batch_size(
+    dependency: ServiceDependency, binding: InputResolutionBinding | None
+) -> int:
+    """The admission slots one invocation of this leaf reserves.
+
+    The resolution that materialized the conversations reports how many there are, and
+    that count is what the claim reserves. Without one, a leaf naming its conversations
+    outright reserves exactly that many and a leaf resolving them from upstream reserves
+    its declared bound, so admission is never sized below what the invocation runs.
+    """
+    if binding is not None:
+        return binding.cardinality
+    if dependency.batch_size is None:
+        return dependency.max_batch_size
+    return dependency.batch_size

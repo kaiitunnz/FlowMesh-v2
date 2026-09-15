@@ -91,9 +91,9 @@ def test_a_handed_contract_is_issued_unchanged(tmp_path: Path) -> None:
     # executor issues that rather than deriving a second one from the spec.
     ex, store = _executor()
     msg = _msg({"prompt": "ignored"})
-    msg.declared_contract = CanonicalInferenceRequest(
+    msg.resolved_contract = CanonicalInferenceRequest(
         model="m", prompts=("hi",), params={"max_tokens": 512}
-    ).model_dump_json()
+    )
     ex.run(msg, tmp_path)
 
     assert _body(store) == {
@@ -109,9 +109,9 @@ def test_a_batch_contract_yields_one_boundary_carrying_every_prompt(
     # single boundary rather than one admission cycle per prompt.
     ex, store = _executor()
     msg = _msg({"prompt": "ignored"})
-    msg.declared_contract = CanonicalInferenceRequest(
+    msg.resolved_contract = CanonicalInferenceRequest(
         model="m", prompts=("hi", "there"), params={"max_tokens": 512}
-    ).model_dump_json()
+    )
     step = _step(ex.run(msg, tmp_path))
 
     assert _body(store) == [

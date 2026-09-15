@@ -10,6 +10,11 @@ from pydantic import (
 )
 
 from shared.harness import AgentEpisodeDispatch, ServiceLeafEpisodeDispatch
+from shared.inference import (
+    CanonicalInferenceContract,
+    CanonicalInferenceRequest,
+    InputResolutionBinding,
+)
 from shared.schemas.worker import WorkerStatus
 from shared.tasks import (
     TaskEnvelopeStrict,
@@ -50,12 +55,27 @@ class WorkerTaskMessage(BaseModel):
         default=None,
         description="Resident service-leaf episode context for a run-to-yield step.",
     )
-    declared_contract: str | None = Field(
+    declared_contract: CanonicalInferenceContract | None = Field(
         default=None,
         description=(
-            "Canonical inference request for a leaf whose contract the fabric resolves "
-            "rather than the executor: the request to issue and the result shape to "
-            "report."
+            "Canonical inference contract for a leaf the fabric resolves rather than "
+            "the executor: the model, sampling, and the source its prompts come from."
+        ),
+    )
+    recorded_resolution: InputResolutionBinding | None = Field(
+        default=None,
+        description=(
+            "The input resolution this task is already committed to, when one was "
+            "recorded: a re-drive that resolves to anything else fails instead of "
+            "running against substituted input."
+        ),
+    )
+    resolved_contract: CanonicalInferenceRequest | None = Field(
+        default=None,
+        description=(
+            "The request a worker materialized from declared_contract, set on the "
+            "origin worker before either embodiment reaches its model: the request to "
+            "issue and the result shape to report."
         ),
     )
 

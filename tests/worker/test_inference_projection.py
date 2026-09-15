@@ -7,8 +7,9 @@ import pytest
 from shared.harness import HarnessResult, HarnessResultKind
 from shared.inference import (
     CanonicalInferenceRequest,
-    canonical_request,
+    canonical_contract,
     canonical_result,
+    resolve_contract,
 )
 from shared.schemas.result.catalog import EmbeddingResult, InferenceResult
 from shared.schemas.result.payloads import InferenceItem
@@ -28,6 +29,11 @@ def _spec(**fields: object) -> InferenceSpecStrict:
     )
 
 
+def _request(spec: InferenceSpecStrict):
+    """The request a spec's contract resolves to, through the path production runs."""
+    return resolve_contract(canonical_contract(spec), None).request
+
+
 def _batch_spec() -> InferenceSpecStrict:
     return _spec(data={"type": "list", "items": ["hello", "goodbye", "again"]})
 
@@ -40,7 +46,7 @@ def _step(value: str | None) -> EpisodeStepResult:
 
 class TestGeneratedOutputs:
     def test_a_local_generation_reports_its_items(self) -> None:
-        request = canonical_request(_batch_spec())
+        request = _request(_batch_spec())
         result = InferenceResult(
             items=[
                 InferenceItem(index=0, prompt="hello", output="a"),
@@ -51,7 +57,7 @@ class TestGeneratedOutputs:
         assert generated_outputs(result, request) == ["a", "b", "c"]
 
     def test_a_relayed_batch_reports_one_completion_per_prompt(self) -> None:
-        request = canonical_request(_batch_spec())
+        request = _request(_batch_spec())
         assert generated_outputs(_step(json.dumps(["a", "b", "c"])), request) == [
             "a",
             "b",
@@ -61,11 +67,11 @@ class TestGeneratedOutputs:
     def test_a_single_completion_is_read_verbatim(self) -> None:
         # A one-prompt contract never parses its completion, so a model that happens to
         # generate a JSON array is reported as the text it generated.
-        request = canonical_request(_spec())
+        request = _request(_spec())
         assert generated_outputs(_step('["a", "b"]'), request) == ['["a", "b"]']
 
     def test_projecting_a_projected_result_reproduces_it(self) -> None:
-        request = canonical_request(_batch_spec())
+        request = _request(_batch_spec())
         once = canonical_result(request, ["a", "b", "c"])
         reread = generated_outputs(once, request)
         assert reread is not None
@@ -78,10 +84,10 @@ class TestGeneratedOutputs:
     def test_a_batch_value_that_does_not_match_the_contract_is_not_read(
         self, value: str
     ) -> None:
-        assert generated_outputs(_step(value), canonical_request(_batch_spec())) is None
+        assert generated_outputs(_step(value), _request(_batch_spec())) is None
 
     def test_a_step_that_generated_nothing_reports_nothing(self) -> None:
-        assert generated_outputs(_step(None), canonical_request(_spec())) is None
+        assert generated_outputs(_step(None), _request(_spec())) is None
 
     def test_an_item_count_that_does_not_match_the_contract_is_not_read(self) -> None:
         request = CanonicalInferenceRequest(

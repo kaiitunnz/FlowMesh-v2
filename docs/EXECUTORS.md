@@ -272,17 +272,46 @@ agent-episode executor uses.
 An inference leaf declares one model contract. Where the compiler can prove that resident
 capacity and a self-contained local executor run that contract identically, the leaf
 admits both and the fabric picks one at dispatch. The proof is narrow: it admits a chat
-leaf that pins the vLLM engine, declares its prompts as literal strings under
-`spec.data.items`, and declares no adapter, shard, parallel split, or postprocessing
-step. A leaf declaring an inference setting a relayed request does not carry — guided
-decoding from a template, chat-template arguments — keeps one embodiment for the same
-reason. Any other leaf keeps the embodiment its source names — resident when it declares
-a `service` binding, self-contained when it does not.
+leaf that pins the vLLM engine, names its prompts through one of the two sources below,
+and declares no adapter, shard, parallel split, or postprocessing step. A leaf
+declaring an inference setting a relayed request does not carry — guided decoding from
+a template, chat-template arguments — keeps one embodiment for the same reason. Any
+other leaf keeps the embodiment its source names — resident when it declares a
+`service` binding, self-contained when it does not.
 
 Such a leaf carries both sets of constraints: the resident binding fields above, and the
 local model, executor, and GPU requirement a `{mode: resident}` leaf drops. Declare
 `{mode: resident}` to pin resident serving, or `{primary: self_contained}` to prefer the
 local embodiment.
+
+#### Where the prompts come from
+
+A leaf names its prompts either as literal strings or as one bounded projection of an
+upstream node it depends on:
+
+```yaml
+data: {type: list, items: ["summarize this", "and this"]}
+```
+
+```yaml
+# equivalently: {type: list, node: research, path: items.output, max_items: 16}
+data: {type: list, expr: research.items.output, max_items: 16}
+```
+
+A projection reads one node named in `dependsOn` and indexes into its result — mapping
+keys, model attributes, `[i]` indexes, and an attribute plucked across a list — and must
+yield a non-empty list of strings. `max_items` bounds how many prompts it may yield and is
+required, because the admission capacity a resident embodiment is screened against is
+fixed before the upstream value exists. A projection reaching a table, a dataset, an
+artifact, or any other value is not a prompt vector and fails.
+
+The worker holding the upstream value resolves the projection once, before either
+embodiment reaches a model, and both run that one request — a replica receives the
+prompts, never the projection. A source that is missing, does not project, yields
+something other than a non-empty list of strings, or exceeds its envelope fails the task
+there, before any generation and before a resident claim exists; it never falls back to
+the other embodiment. A retried task runs only if it resolves to the same request from the
+same upstream content.
 
 The leaf's declared sampling governs its generation wherever it runs, and values it
 leaves out take the same defaults on both sides, so both embodiments issue one engine

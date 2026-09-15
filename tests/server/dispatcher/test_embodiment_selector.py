@@ -41,12 +41,12 @@ def _local() -> InferenceEmbodimentCandidate:
     )
 
 
-def _menu(primary: str, batch_size: int = 1) -> InferenceEmbodimentMenu:
+def _menu(primary: str, max_batch_size: int = 1) -> InferenceEmbodimentMenu:
     return InferenceEmbodimentMenu(
         contract_fingerprint="fp",
         primary=primary,
         candidates=(_resident(), _local()),
-        batch_size=batch_size,
+        max_batch_size=max_batch_size,
     )
 
 
@@ -146,7 +146,7 @@ class TestCandidateFeasibility:
 class TestBatchAdmissionBound:
     def test_a_batch_within_the_admission_bound_runs_resident(self) -> None:
         decision = PrimaryEmbodimentSelector()(
-            _menu(RESIDENT_ID, batch_size=8), _snapshot(slots=8)
+            _menu(RESIDENT_ID, max_batch_size=8), _snapshot(slots=8)
         )
         assert decision.alternative_id == RESIDENT_ID
 
@@ -155,13 +155,13 @@ class TestBatchAdmissionBound:
         # menu holds an embodiment that can serve it, so the batch runs rather than
         # waiting for capacity that can never arrive.
         decision = PrimaryEmbodimentSelector()(
-            _menu(RESIDENT_ID, batch_size=20), _snapshot(slots=8)
+            _menu(RESIDENT_ID, max_batch_size=20), _snapshot(slots=8)
         )
         assert decision.alternative_id == LOCAL_ID
 
     def test_a_batch_no_embodiment_can_serve_says_why(self) -> None:
         decision = PrimaryEmbodimentSelector()(
-            _menu(RESIDENT_ID, batch_size=20), _snapshot(workers=0, slots=8)
+            _menu(RESIDENT_ID, max_batch_size=20), _snapshot(workers=0, slots=8)
         )
         assert decision.alternative_id is None
         reason = decision.defer_reason or ""
@@ -172,6 +172,6 @@ class TestBatchAdmissionBound:
         # Admission enforces its own capacity; the scheduler rules a candidate out only
         # on evidence it holds.
         decision = PrimaryEmbodimentSelector()(
-            _menu(RESIDENT_ID, batch_size=20), _snapshot(slots=0)
+            _menu(RESIDENT_ID, max_batch_size=20), _snapshot(slots=0)
         )
         assert decision.alternative_id == RESIDENT_ID

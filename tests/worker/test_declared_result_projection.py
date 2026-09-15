@@ -47,7 +47,11 @@ class _FixedExecutor(Executor):
         return None
 
 
-def _stored(tmp_path: Path, result: BaseExecutorResult, contract: str | None) -> dict:
+def _stored(
+    tmp_path: Path,
+    result: BaseExecutorResult,
+    contract: CanonicalInferenceRequest | None,
+) -> dict:
     """Run one task through the real runner and read the result it stored."""
     lifecycle = MagicMock()
     lifecycle.worker_id = "wrk-test"
@@ -60,7 +64,7 @@ def _stored(tmp_path: Path, result: BaseExecutorResult, contract: str | None) ->
         {"taskType": "inference", "data": {"prompt": "name one planet"}},
         task_type=TaskType.INFERENCE,
     )
-    msg.declared_contract = contract
+    msg.resolved_contract = contract
     runner = Runner(
         lifecycle=lifecycle,
         task_stream=[msg],
@@ -117,7 +121,7 @@ def _native_resident_batch() -> EpisodeStepResult:
 
 
 def test_a_local_generation_stores_the_declared_shape(tmp_path: Path) -> None:
-    stored = _stored(tmp_path, _native_local(), _CONTRACT.model_dump_json())
+    stored = _stored(tmp_path, _native_local(), _CONTRACT)
 
     assert stored["model"] == _CONTRACT.model
     assert [(i["index"], i["prompt"], i["output"]) for i in stored["items"]] == [
@@ -130,10 +134,8 @@ def test_a_local_generation_stores_the_declared_shape(tmp_path: Path) -> None:
 
 def test_a_relayed_invocation_stores_the_same_shape(tmp_path: Path) -> None:
     # The point of the projection: a reader cannot tell which embodiment ran the leaf.
-    local = _stored(tmp_path / "local", _native_local(), _CONTRACT.model_dump_json())
-    resident = _stored(
-        tmp_path / "resident", _native_resident(), _CONTRACT.model_dump_json()
-    )
+    local = _stored(tmp_path / "local", _native_local(), _CONTRACT)
+    resident = _stored(tmp_path / "resident", _native_resident(), _CONTRACT)
     # The artifact root is the task's own directory on the worker that ran it, not part
     # of what the leaf declares.
     local.pop("_artifacts", None)
@@ -146,7 +148,7 @@ def test_a_batch_leaf_stores_one_item_per_declared_prompt(tmp_path: Path) -> Non
     stored = _stored(
         tmp_path,
         _native_local(_BATCH_PROMPTS, _BATCH_OUTPUTS),
-        _BATCH_CONTRACT.model_dump_json(),
+        _BATCH_CONTRACT,
     )
 
     assert [(i["index"], i["prompt"], i["output"]) for i in stored["items"]] == [
@@ -162,12 +164,12 @@ def test_a_relayed_batch_stores_the_same_shape(tmp_path: Path) -> None:
     local = _stored(
         tmp_path / "local",
         _native_local(_BATCH_PROMPTS, _BATCH_OUTPUTS),
-        _BATCH_CONTRACT.model_dump_json(),
+        _BATCH_CONTRACT,
     )
     resident = _stored(
         tmp_path / "resident",
         _native_resident_batch(),
-        _BATCH_CONTRACT.model_dump_json(),
+        _BATCH_CONTRACT,
     )
     local.pop("_artifacts", None)
     resident.pop("_artifacts", None)
@@ -176,19 +178,23 @@ def test_a_relayed_batch_stores_the_same_shape(tmp_path: Path) -> None:
     assert len(resident["items"]) == len(_BATCH_PROMPTS)
 
 
-def test_a_leaf_with_no_declared_contract_stores_its_own_result(
+def test_a_leaf_with_no_resolved_contract_stores_its_own_result(
     tmp_path: Path,
 ) -> None:
-    # A leaf that admits one embodiment reports what that embodiment produced.
+    # A leaf that admits one embodiment reports what that embodiment produced, whether
+    # it read its prompts from literal items or resolved them from an upstream node:
+    # only a menu or a replica needs a result rewritten into the canonical shape, and a
+    # guard reading a field this leaf has always reported still finds it.
     stored = _stored(tmp_path, _native_local(), None)
 
     assert stored["usage"] is not None
     assert stored["items"][0]["finish_reason"] == "stop"
+    assert stored["items"][0]["metadata"] == {"engine": "vllm"}
 
 
 def test_the_dropped_fields_are_unset_under_both_embodiments(tmp_path: Path) -> None:
     for name, native in (("local", _native_local()), ("resident", _native_resident())):
-        stored = _stored(tmp_path / name, native, _CONTRACT.model_dump_json())
+        stored = _stored(tmp_path / name, native, _CONTRACT)
         for field in PROJECTION_DROPS:
             assert stored.get(field) is None
             for item in stored["items"]:

@@ -66,7 +66,7 @@ except Exception:
         _HAS_VLLM = False
         StructuredOutputsParams = None  # type: ignore
 
-from shared.inference import SAMPLING_DEFAULTS, CanonicalInferenceRequest
+from shared.inference import SAMPLING_DEFAULTS
 from shared.schemas.governance import SpanType
 from shared.schemas.result import (
     BaseExecutorResult,
@@ -98,10 +98,9 @@ def _contract_conversations(task: ExecutorTask) -> list[list[Any]] | None:
     model's own chat template to each — the rendering a replica would apply to the same
     request. A leaf without one generates from the prompts its spec names.
     """
-    if task.declared_contract is None:
+    if task.resolved_contract is None:
         return None
-    contract = CanonicalInferenceRequest.model_validate_json(task.declared_contract)
-    return [list(body["messages"]) for body in contract.chat_bodies()]
+    return [list(body["messages"]) for body in task.resolved_contract.chat_bodies()]
 
 
 class _RawJsonSchema:

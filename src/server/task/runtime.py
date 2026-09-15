@@ -9,6 +9,8 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
+from pydantic import ValidationError
+
 from shared.harness import (
     AgentEpisodeDispatch,
     BoundaryEventKind,
@@ -21,7 +23,13 @@ from shared.harness import (
     InputBindingMember,
     ServiceLeafEpisodeDispatch,
 )
-from shared.inference import CanonicalProjectionError, canonical_request
+from shared.inference import (
+    CanonicalInferenceContract,
+    CanonicalProjectionError,
+    InferenceSourceKind,
+    InputResolutionBinding,
+    canonical_contract,
+)
 from shared.outcome import OutcomeManifest
 from shared.private_state import (
     OwnerFence,
@@ -2133,39 +2141,77 @@ class TaskRuntime:
             if self._apply_advance_locked(record.workflow_id, advance):
                 self._cv.notify_all()
 
-    def declared_contract(self, task_id: str) -> str | None:
-        """The canonical request a leaf's contract names, for it to issue and report.
+    def declared_contract(self, task_id: str) -> CanonicalInferenceContract | None:
+        """The contract a leaf carries to the worker, for it to resolve and report.
 
-        A leaf that admits more than one embodiment resolves its contract here rather
-        than in the executor, so every embodiment issues one engine request and stores
-        one result shape. A leaf pinned to resident serving resolves one when it
-        declares a batch, because the conversations a replica serves under its one
-        claim are the contract's. It names no embodiment: the worker reads a declared
+        A leaf that admits more than one embodiment names its contract here rather than
+        in the executor, so every embodiment resolves one request and stores one result
+        shape. A leaf pinned to resident serving names one when it declares a batch,
+        because the conversations a replica serves under its one claim are the
+        contract's, and whenever its prompts come from upstream, because only the worker
+        holding that value can resolve them. It names no embodiment: the worker reads a
         contract and never learns which one it is running.
 
-        A pinned single-prompt leaf declares none and keeps reporting the native result
-        its own embodiment has always reported.
+        A leaf that admits one embodiment and serves it locally declares none, whether
+        its prompts are literal or come from upstream: it resolves them in its own
+        executor and keeps reporting the native result that embodiment has always
+        reported. So does a pinned single-prompt literal leaf.
         """
         with self._lock:
             record = self._tasks.get(task_id)
             engine = self._engines.get(record.workflow_id) if record else None
             if record is None or engine is None:
                 return None
-            if engine.embodiment_menu(task_id) is None:
-                dependency = engine.service_dependency(task_id)
-                if dependency is None or dependency.batch_size <= 1:
-                    return None
             spec = record.task.spec
             if not isinstance(spec, (InferenceSpecStrict, InferenceSpecTemplate)):
                 return None
             try:
-                return canonical_request(spec).model_dump_json()
+                contract = canonical_contract(spec)
             except CanonicalProjectionError:
                 self._logger.warning(
                     "[fabric] a contract leaf's request is no longer projectable: %s",
                     task_id,
                 )
                 return None
+            if engine.embodiment_menu(task_id) is None:
+                if engine.service_dependency(task_id) is None:
+                    return None
+                if (
+                    contract.source.kind is InferenceSourceKind.LITERAL
+                    and len(contract.source.items) <= 1
+                ):
+                    return None
+            return contract
+
+    def record_input_resolution(self, task_id: str, binding_payload: Any) -> None:
+        """Record how a task's inputs resolved on its origin worker.
+
+        The worker reports this before either embodiment reaches a model, so the
+        resolution is durable ahead of a local generation or a resident service issue,
+        and the admission that follows is sized from the cardinality that materialized.
+        """
+        try:
+            binding = InputResolutionBinding.model_validate(binding_payload)
+        except ValidationError:
+            self._logger.warning(
+                "[fabric] a task reported an unreadable input resolution: %s", task_id
+            )
+            return
+        with self._lock:
+            record = self._tasks.get(task_id)
+            engine = self._engines.get(record.workflow_id) if record else None
+            if engine is not None:
+                engine.record_input_resolution(task_id, binding)
+
+    def input_resolution_binding(self, task_id: str) -> InputResolutionBinding | None:
+        """The binding a task's recorded resolution carries, if one was recorded."""
+        with self._lock:
+            record = self._tasks.get(task_id)
+            engine = self._engines.get(record.workflow_id) if record else None
+            if engine is None:
+                return None
+            resolution = engine.input_resolution(task_id)
+        return resolution.binding if resolution is not None else None
 
     def resolve_v2_output(
         self, workflow_id: str, output_id: str

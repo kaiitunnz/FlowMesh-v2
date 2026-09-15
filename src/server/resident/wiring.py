@@ -114,6 +114,7 @@ def build_resident_capacity(
         lifecycle=lifecycle,
         limits=limits,
         dependency_resolver=runtime.resolve_service_dependency,
+        input_resolution_resolver=runtime.input_resolution_binding,
         settle_cb=runtime.settle_episode_invocation,
         redispatch_cb=runtime.redispatch_episode_invocation,
         endpoint_probe=endpoint,
