@@ -53,6 +53,11 @@ def is_feasible(
     safe headroom for the whole credit this profile reserves after every outstanding
     one. The gate is conservative: it never packs past the reported safe slots even to
     make a denser batch.
+
+    The bound here is the one a replica reports; the scheduler screens an oversized
+    batch against the deployment's configured bound. A report structurally smaller than
+    the configuration has to reach the scheduler as well, or a batch ruled out here is
+    one the scheduler believes is servable.
     """
     if not report.healthy or report.state not in SERVABLE_REPLICA_STATES:
         return False

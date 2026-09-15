@@ -70,9 +70,9 @@ TERMINAL --(permitted reissue)--> successor PENDING (same invocation_id, fresh e
   overcommit a replica's reported safe slots.
 - **Credit size.** A claim reserves one admission slot per conversation its invocation
   carries, so an invocation carrying a batch reserves the whole batch and admits only
-  where all of it fits. The claim is still one credit: it releases whole, and a batch
-  never releases part of itself. `RESIDENT_ADMISSION_SLOTS` bounds a replica, so a batch
-  larger than it is never admitted on any replica.
+  where all of it fits. The claim is one credit: it releases whole.
+  `RESIDENT_ADMISSION_SLOTS` bounds a replica, so a batch larger than it is never
+  admitted on any replica.
 - **Credit release.** A `TERMINAL` transition releases the derived credit. For an accepted
   or streaming claim the only normal release is a fenced terminal outcome recorded in `DS`
   and consumed by `invocation_id`; a stream close or a telemetry report alone never releases

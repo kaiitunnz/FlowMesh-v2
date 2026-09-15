@@ -60,6 +60,12 @@ class EmbodimentSnapshot:
 
         A snapshot reporting no bound does not constrain one: admission enforces its own
         capacity, and the scheduler rules a candidate out only on evidence it holds.
+
+        This reads the deployment's configured bound, while admission gates on the
+        bound a replica reports. The two agree while every replica reports the
+        configured number. An adapter reporting a structurally smaller one has to reach
+        here too, or a batch that fits the configured bound pins the resident
+        embodiment, never admits, and defers instead of falling through.
         """
         return (
             self.resident_admission_slots <= 0

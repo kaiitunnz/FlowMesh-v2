@@ -31,15 +31,20 @@ def _completion(text: str) -> SimpleNamespace:
     )
 
 
-def _run(prompts: list[str], contract: str | None, out_dir: Path) -> MagicMock:
+def _run(
+    prompts: list[str],
+    contract: str | None,
+    out_dir: Path,
+    chat_template: str | None = "a-chat-template",
+) -> MagicMock:
     """Run one task through the executor against a stand-in engine.
 
-    The stand-in tokenizer carries a chat template, which is what makes the executor
-    render prompts itself unless a contract says the engine will.
+    The stand-in tokenizer carries a chat template unless a test takes it away, which is
+    what decides whether conversations can be rendered at all.
     """
     executor = VLLMExecutor(DEFAULT_WORKER_CONFIG, lifecycle=None)
     llm = MagicMock()
-    llm.get_tokenizer.return_value.chat_template = "a-chat-template"
+    llm.get_tokenizer.return_value.chat_template = chat_template
     llm.get_tokenizer.return_value.apply_chat_template.return_value = "<rendered>"
     llm.chat.return_value = [_completion(f"out-{i}") for i in range(len(prompts))]
     llm.generate.return_value = llm.chat.return_value
@@ -96,3 +101,27 @@ def test_a_leaf_without_a_contract_still_renders_and_generates_its_prompts(
     llm.chat.assert_not_called()
     llm.get_tokenizer.return_value.apply_chat_template.assert_called()
     assert llm.generate.call_args.args[0] == ["<rendered>", "<rendered>"]
+
+
+def test_a_model_without_a_chat_template_generates_from_its_prompts(
+    tmp_path: Path,
+) -> None:
+    # A contract names conversations, and only a model whose tokenizer carries a chat
+    # template can render one. A base model generates from the prompts its spec
+    # prepared, as a leaf carrying no contract does, rather than failing on a template
+    # it does not have.
+    llm = _run(["a", "b"], _contract("a", "b"), tmp_path, chat_template=None)
+
+    llm.chat.assert_not_called()
+    assert llm.generate.call_args.args[0] == ["a", "b"]
+
+
+def test_a_model_without_a_chat_template_still_stores_the_declared_shape(
+    tmp_path: Path,
+) -> None:
+    # The result projection is embodiment-blind and reads the contract either way, so
+    # the generation path a model forces does not change what the leaf reports.
+    llm = _run(["a"], _contract("a"), tmp_path, chat_template=None)
+
+    assert llm.generate.called
+    llm.get_tokenizer.return_value.apply_chat_template.assert_not_called()

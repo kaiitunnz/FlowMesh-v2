@@ -72,9 +72,9 @@ class CanonicalInferenceRequest(BaseModel):
     value the author left out still has to be the same on both sides for the two runs
     to be one contract.
 
-    A contract carries the leaf's prompts in declared order. Each is its own
-    conversation: the contract never merges them, because a chat request serves one
-    conversation and the engine batches whole requests itself.
+    A contract carries the leaf's prompts in declared order, each as its own
+    conversation: a chat request serves one conversation, and the engine batches whole
+    requests itself.
     """
 
     model_config = ConfigDict(frozen=True)
