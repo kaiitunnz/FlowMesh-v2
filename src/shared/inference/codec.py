@@ -11,7 +11,7 @@ import json
 from collections.abc import Sequence
 from typing import Any, cast
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from ..schemas.result.catalog import InferenceResult
 from ..schemas.result.payloads import InferenceItem
@@ -193,32 +193,62 @@ def canonical_request(spec: InferenceSpec) -> CanonicalInferenceRequest:
     )
 
 
+class _ProjectedItem(BaseModel):
+    """One item of an already-projected result."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    output: str
+
+
+class _ProjectedItems(BaseModel):
+    """The declared result shape, as a second pass over a projected result reads it."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    items: list[_ProjectedItem]
+
+
+class _TerminalValue(BaseModel):
+    """The terminal value shape a relayed invocation reports."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    value: str
+
+
+def _read[T: BaseModel](shape: type[T], payload: dict[str, Any]) -> T | None:
+    """Read one shape out of a result payload, or None where it is not that shape."""
+    try:
+        return shape.model_validate(payload)
+    except ValidationError:
+        return None
+
+
 def generated_outputs(
     payload: dict[str, Any], request: CanonicalInferenceRequest
 ) -> list[str] | None:
     """The generated texts, read the same way from either embodiment's own result.
 
     A local generation reports items and a relayed invocation reports the episode's
-    terminal value. Reading the already declared shape first is what makes a second pass
-    over a projected result reproduce it.
+    terminal value. The two read-shapes are validated rather than indexed, and each is
+    read on its own, so a payload that is not the first shape falls through to the
+    second instead of failing. Reading the already declared shape first is what makes a
+    second pass over a projected result reproduce it.
 
     The contract's own prompt count decides how the terminal value reads, so a single
     completion is always taken verbatim and never mistaken for a batch because the model
     happened to generate a JSON array.
     """
-    items = payload.get("items")
-    if isinstance(items, list) and len(items) == len(request.prompts):
-        outputs = [
-            item.get("output") if isinstance(item, dict) else None for item in items
-        ]
-        if all(isinstance(output, str) for output in outputs):
-            return cast(list[str], outputs)
-    value = payload.get("value")
-    if not isinstance(value, str):
+    projected = _read(_ProjectedItems, payload)
+    if projected is not None and len(projected.items) == len(request.prompts):
+        return [item.output for item in projected.items]
+    terminal = _read(_TerminalValue, payload)
+    if terminal is None:
         return None
     if len(request.prompts) == 1:
-        return [value]
-    return _batch_value(value, len(request.prompts))
+        return [terminal.value]
+    return _batch_value(terminal.value, len(request.prompts))
 
 
 def _batch_value(value: str, expected: int) -> list[str] | None:
