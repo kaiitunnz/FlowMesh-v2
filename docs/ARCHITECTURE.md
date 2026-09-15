@@ -228,7 +228,7 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   the interim object path is the root content router, not a data-direct hydration.
   `ORCHESTRATOR_MAX_PREPARED_INPUT_BYTES` screens a reported preparation before any
   candidate-specific work; unset, it caps nothing, and ordinary candidate feasibility,
-  resident admission, and aggregate-credit safety still apply.
+  resident admission, and aggregate-credit safety apply independently of it.
 - **Live-feasibility handoff.** A ready episode carries the lowerer's declared
   alternative; a feasibility check lets the scheduler defer an infeasible alternative,
   holding no worker, rather than dispatching it. It resolves no resident capacity.

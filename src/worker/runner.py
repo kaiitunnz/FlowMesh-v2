@@ -17,6 +17,7 @@ from shared.inference import (
     InputResolutionError,
     ResolvedCanonicalInferenceRequest,
     ResolvedInputMaterialization,
+    ResolvedInputReference,
     canonical_result,
     hydrate_resolved_input,
     write_resolved_input,
@@ -361,8 +362,10 @@ class Runner:
         """
         if msg.declared_contract is None:
             return
-        if msg.recorded_input is not None:
-            msg.resolved_contract = self._hydrate_prepared_request(msg).request
+        if (prepared := msg.recorded_input) is not None:
+            msg.resolved_contract = self._hydrate_prepared_request(
+                msg, prepared
+            ).request
             return
         resolved = self._resolve_contract(msg)
         if resolved is None:
@@ -380,7 +383,7 @@ class Runner:
         )
 
     def _hydrate_prepared_request(
-        self, msg: WorkerTaskMessage
+        self, msg: WorkerTaskMessage, reference: ResolvedInputReference
     ) -> ResolvedCanonicalInferenceRequest:
         """Fetch the prepared request this task runs, failing closed on anything else.
 
@@ -388,8 +391,7 @@ class Runner:
         missing, out of the task's scope, or not the bytes its digest names fails the
         task before any model I/O and before any admission.
         """
-        reference = msg.recorded_input
-        if reference is None or self._content_store is None:
+        if self._content_store is None:
             raise ExecutionError(
                 f"task {msg.task_id} runs a prepared request and this worker reaches "
                 "no fabric content store to hydrate it from",

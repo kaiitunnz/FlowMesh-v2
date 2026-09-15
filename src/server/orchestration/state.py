@@ -484,9 +484,9 @@ class InputPreparation(BaseModel):
     """One dispatch that resolves a work item's inputs and runs nothing else.
 
     It is not a candidate attempt: it carries no invocation, reserves no capacity, and
-    names no embodiment, so a work item that has only been prepared is still free to
-    run either of them. It exists so the preparation a work item is waiting on is
-    visible in its own right.
+    names no embodiment, so a work item that has only been prepared can run either of
+    them. It exists so the preparation a work item is waiting on is visible in its own
+    right.
     """
 
     model_config = ConfigDict(frozen=True)
