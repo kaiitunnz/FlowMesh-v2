@@ -153,12 +153,19 @@ def reject_unproven(
 def reject_resident_batch(
     task: ParsedTask, spec: TaskSpecBase, eligibility: InferenceEmbodimentEligibility
 ) -> None:
-    """Fail a leaf served from a replica without a menu that declares several prompts.
+    """Fail a resident-served leaf that declares several prompts it cannot project.
 
-    A replica serves one conversation per chat request, so several prompts are served by
-    the batch a menu compiles and not otherwise. Failing names what the leaf declared,
-    where serving its first prompt alone would lose the rest silently. An embedding leaf
-    embeds a list of inputs in one request and is unaffected.
+    A batch is served from the contract its leaf projects into: the contract carries
+    every conversation on one boundary and names the result they report. A leaf whose
+    request does not project has no such contract, so serving its first prompt alone
+    would lose the rest silently. A leaf that does project is served, whether its
+    embodiment is pinned or chosen from a menu. An embedding leaf embeds a list of
+    inputs in one request and is unaffected.
+
+    NOTE: a non-projectable resident batch could be served later by building the
+    fan-out from the spec directly and reporting a native batch result, rather than
+    the canonical projection. It is refused here because it has no equivalence
+    contract to project, not because a replica cannot serve it.
     """
     if eligibility is not InferenceEmbodimentEligibility.RESIDENT_REQUIRED:
         return
@@ -166,11 +173,14 @@ def reject_resident_batch(
         return
     if not declares_multiple_prompts(spec):
         return
+    if (reason := unproven_reason(spec)) is None:
+        return
     raise _reject(
         task,
         "embodiment.resident-batch-unserved",
-        "a resident-served inference leaf runs one prompt; declare one prompt, or "
-        "leave the binding mode undeclared so the leaf admits both embodiments",
+        f"a resident-served inference leaf serves several prompts as the batch its "
+        f"contract projects; here {reason}. Declare one prompt, or declare a leaf "
+        f"whose request projects",
     )
 
 

@@ -471,10 +471,27 @@ def test_a_resident_required_leaf_compiles_to_a_single_embodiment():
     assert resident[0].residency_intent.conditional is False
 
 
-def test_a_pinned_resident_leaf_declaring_several_prompts_is_rejected():
-    # Without a menu a replica serves one conversation per request, so a batch that
-    # would silently lose every prompt but the first fails instead.
-    with pytest.raises(CompileError, match="runs one prompt"):
+def test_a_pinned_resident_leaf_serves_the_batch_its_contract_projects():
+    # A pin asks for a replica, and a replica serves a projectable batch under one
+    # claim, so the author gets the batch they pinned rather than a refusal.
+    template, plan = _compile(
+        _local_eligible(
+            service="{mode: resident}", data='{type: list, items: ["a", "b"]}'
+        )
+    )
+    leaf = _inference_leaf(template)
+    assert (
+        leaf.embodiment.eligibility is InferenceEmbodimentEligibility.RESIDENT_REQUIRED
+    )
+    assert leaf.service_dependency.batch_size == 2
+    # The pin forbids the self-contained embodiment, so there is nothing to choose.
+    assert all(n.embodiment_menu is None for n in plan.nodes)
+
+
+def test_a_pinned_resident_batch_with_no_projectable_request_is_rejected():
+    # A leaf with no contract to project has no batch to serve, so serving its first
+    # prompt alone would lose the rest silently.
+    with pytest.raises(CompileError, match="serves several prompts as the batch"):
         _compile(
             _resident_inference(
                 "{mode: resident}", data='{type: list, items: ["a", "b"]}'
@@ -484,8 +501,8 @@ def test_a_pinned_resident_leaf_declaring_several_prompts_is_rejected():
 
 def test_an_unprovable_resident_leaf_declaring_several_prompts_is_rejected():
     # The same holds for a leaf that falls back to resident because its embodiments
-    # are not provably equivalent: batch serving is the menu's, not the fallback's.
-    with pytest.raises(CompileError, match="runs one prompt"):
+    # are not provably equivalent: there is no proven contract to project either way.
+    with pytest.raises(CompileError, match="serves several prompts as the batch"):
         _compile(
             _resident_inference(
                 "{isolation: tenant-a}",

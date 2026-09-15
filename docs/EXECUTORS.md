@@ -301,9 +301,16 @@ issues each conversation as its own concurrent engine request, so the engine's c
 batching combines them, and their completions settle as that one invocation's outcome.
 The self-contained embodiment generates the same conversations in one batched call. A
 batch larger than a replica's admission bound (`RESIDENT_ADMISSION_SLOTS`) can never be
-admitted, so the leaf runs self-contained instead. Resident serving without a menu runs
-one prompt: a leaf pinned to `{mode: resident}`, or one whose embodiments are not provably
-equivalent, is rejected at submission when it declares more than one.
+admitted, so the leaf runs self-contained instead.
+
+A leaf pinned to `{mode: resident}` is served the same batch, on one boundary under one
+claim, with the same aggregate credit and the same whole-batch terminal — the pin selects
+no embodiment, so there is no menu and nothing to fall through to, and a batch past the
+admission bound fails there rather than running locally. A leaf whose request does not
+project into a contract — an adapter, a shard or parallel split, postprocessing, an
+engine other than vLLM, or inputs only one embodiment reads — runs one prompt and is
+rejected at submission when it declares more, because there is no contract to carry its
+conversations or to name the result they report.
 
 At dispatch a scheduler-owned selector reads live feasibility and either binds one
 embodiment or defers, holding no worker and admitting no capacity object. It runs the

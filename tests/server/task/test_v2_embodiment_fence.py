@@ -9,6 +9,7 @@ import pytest
 
 from server.config import OrchestrationConfig
 from server.task.runtime import TaskRuntime
+from shared.inference import CanonicalInferenceRequest
 from shared.tasks.specs import InferenceEmbodimentKind
 
 from .test_v2_orchestration import (
@@ -160,3 +161,56 @@ async def test_a_restart_resumes_the_recorded_embodiment() -> None:
     await restored.rehydrate()
     resolved = restored.resolved_embodiment(task_id)
     assert resolved is not None and resolved.alternative_id == primary
+
+
+RESIDENT_PINNED = """
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {name: pinned}
+spec:
+  graph:
+    nodes:
+      - name: gen
+        spec:
+          taskType: inference
+          model:
+            source: {identifier: Qwen/Qwen3-4B}
+            vllm: {gpu_memory_utilization: 0.9}
+          data: {type: list, items: [ITEMS]}
+          resources: {hardware: {gpu: {count: 1}}}
+          service: {mode: resident}
+"""
+
+
+async def _pinned_task(runtime: TaskRuntime, items: str) -> str:
+    _wfl, ids = await _register(runtime, RESIDENT_PINNED.replace("ITEMS", items))
+    return ids["gen"]
+
+
+@pytest.mark.anyio
+async def test_a_pinned_resident_batch_carries_its_contract() -> None:
+    # A pinned batch has no menu to resolve, so the contract is what carries every
+    # conversation onto its one boundary and names the result they report.
+    runtime = _runtime(FakeRegistry())
+    task_id = await _pinned_task(runtime, '"a", "b"')
+    assert runtime.embodiment_menu(task_id) is None
+
+    contract = runtime.declared_contract(task_id)
+    assert contract is not None
+    assert CanonicalInferenceRequest.model_validate_json(contract).prompts == ("a", "b")
+    # The pin forbids the other embodiment, so it dispatches resident with no selection.
+    assert runtime.service_episode_dispatch(task_id) is not None
+
+
+@pytest.mark.anyio
+async def test_a_pinned_single_prompt_leaf_declares_no_contract() -> None:
+    # A single-prompt pin keeps reporting the native result its embodiment always has.
+    runtime = _runtime(FakeRegistry())
+    assert runtime.declared_contract(await _pinned_task(runtime, '"a"')) is None
+
+
+@pytest.mark.anyio
+async def test_a_menu_leaf_still_carries_its_contract() -> None:
+    runtime = _runtime(FakeRegistry())
+    task_id, _primary = await _menu_task(runtime)
+    assert runtime.declared_contract(task_id) is not None

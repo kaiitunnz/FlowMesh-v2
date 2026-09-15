@@ -190,8 +190,11 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   `invocation_id`, whose credit reserves an admission slot per conversation, and the
   replica issues each as its own concurrent engine request so the engine's continuous
   batching combines them. A batch past a replica's admission bound is a structural
-  resident infeasibility the menu answers with its self-contained embodiment. Resident
-  serving without a menu runs one prompt per invocation. See
+  resident infeasibility the menu answers with its self-contained embodiment. A leaf
+  pinned to resident serving carries its batch the same way, under the same single
+  claim, and fails at admission rather than falling through, because the pin admits no
+  other embodiment; a leaf whose request the compiler cannot project runs one prompt per
+  invocation and is refused at submission when it declares more. See
   [`EXECUTORS.md`](EXECUTORS.md).
 - **Live-feasibility handoff.** A ready episode carries the lowerer's declared
   alternative; a feasibility check lets the scheduler defer an infeasible alternative,

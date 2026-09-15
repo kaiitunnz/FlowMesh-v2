@@ -1,7 +1,7 @@
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
-from shared.inference import CanonicalProjectionError, canonical_request
+from shared.inference import canonical_request
 from shared.sandbox import SandboxEgressMode
 from shared.tasks import TaskType
 from shared.tasks.specs import (
@@ -281,10 +281,9 @@ def _declared_batch_size(spec: TaskSpecBase) -> int:
     """
     if not isinstance(spec, (InferenceSpecStrict, InferenceSpecTemplate)):
         return 1
-    try:
-        return len(canonical_request(spec).prompts)
-    except CanonicalProjectionError:
+    if unproven_reason(spec) is not None:
         return 1
+    return len(canonical_request(spec).prompts)
 
 
 def _leaf_adapter_ref(
