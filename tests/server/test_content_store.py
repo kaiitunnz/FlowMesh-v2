@@ -3,7 +3,8 @@
 import pytest
 
 from server.services.content_store import ServerContentStore
-from shared.outcome import ContentStoreError, OutcomeHydrationError, content_digest
+from shared.content import ContentStoreError
+from shared.outcome import OutcomeHydrationError, content_digest
 
 
 def _store(tmp_path) -> ServerContentStore:

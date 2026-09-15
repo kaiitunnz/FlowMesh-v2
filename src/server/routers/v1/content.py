@@ -12,7 +12,8 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import Response
 
-from shared.outcome import ContentStoreError, OutcomeHydrationError, OutcomeManifest
+from shared.content import ContentStoreError, ObjectWriteAck
+from shared.outcome import OutcomeHydrationError, OutcomeManifest
 
 from ...app_state import get_content_store, get_logger
 from ...auth.security import (
@@ -63,6 +64,30 @@ async def put_content(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
         ) from exc
+
+
+@router.put(
+    "/objects",
+    summary="Write an immutable object",
+    description="Store bytes content-addressed under the caller's tenant.",
+)
+async def put_object(
+    request: Request,
+    store: ServerContentStore | None = Depends(get_content_store),
+    principal: PrincipalContext = Depends(authenticate_connection),
+    logger: logging.Logger = Depends(get_logger),
+) -> ObjectWriteAck:
+    await require_permission(
+        principal, ResourceKind.RESULT, None, ResourceAction.WRITE, logger
+    )
+    body = await request.body()
+    try:
+        digest = _require_store(store).put_object(principal.org_id, body)
+    except ContentStoreError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        ) from exc
+    return ObjectWriteAck(content_digest=digest, size_bytes=len(body))
 
 
 @router.get(

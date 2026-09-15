@@ -1,15 +1,12 @@
 """Reference-backed invocation outcomes: bounded manifests over immutable content."""
 
+from shared.content import content_digest
+
 from .carrier import InlineControl, ManifestRef, OutcomeCarrier
-from .content_store import (
-    ContentStoreError,
-    FabricContentStore,
-    OutcomeHydrationError,
-)
-from .manifest import OutcomeManifest, content_digest
+from .content_store import FabricContentStore, OutcomeHydrationError
+from .manifest import OutcomeManifest
 
 __all__ = [
-    "ContentStoreError",
     "FabricContentStore",
     "InlineControl",
     "ManifestRef",
