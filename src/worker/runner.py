@@ -13,7 +13,6 @@ import requests
 
 from shared.inference import (
     CanonicalInferenceRequest,
-    InputResolutionBinding,
     InputResolutionError,
     canonical_result,
 )
@@ -47,7 +46,7 @@ from .utils.logging import TaskLogEmitter
 
 
 def _declared_result(
-    result: BaseExecutorResult, resolved_contract: str | None
+    result: BaseExecutorResult, request: CanonicalInferenceRequest | None
 ) -> BaseExecutorResult | None:
     """Rewrite a result into the shape its contract declares, or None to store it as is.
 
@@ -56,9 +55,8 @@ def _declared_result(
     before the result is stored, so the shape does not depend on the result reaching any
     other node. A step that generated nothing yet has nothing to declare.
     """
-    if resolved_contract is None:
+    if request is None:
         return None
-    request = CanonicalInferenceRequest.model_validate_json(resolved_contract)
     outputs = generated_outputs(result, request)
     return None if outputs is None else canonical_result(request, outputs)
 
@@ -326,17 +324,14 @@ class Runner:
             raise ExecutionError(str(exc), retryable=False) from exc
         if resolved is None:
             return
-        if msg.recorded_resolution is not None:
-            committed = InputResolutionBinding.model_validate_json(
-                msg.recorded_resolution
+        committed = msg.recorded_resolution
+        if committed is not None and not committed.matches(resolved.binding):
+            raise ExecutionError(
+                f"task {msg.task_id} is committed to the inputs it already resolved, "
+                "and its source resolves to a different request now",
+                retryable=False,
             )
-            if not committed.matches(resolved.binding):
-                raise ExecutionError(
-                    f"task {msg.task_id} is committed to the inputs it already "
-                    "resolved, and its source resolves to a different request now",
-                    retryable=False,
-                )
-        msg.resolved_contract = resolved.request.model_dump_json()
+        msg.resolved_contract = resolved.request
         self.lifecycle.notify_task_update(
             msg.task_id, {"input_resolution": resolved.binding.model_dump(mode="json")}
         )
@@ -354,15 +349,12 @@ class Runner:
         merged_children: list[MergedChildTaskStrict],
         out_dir: Path,
         result: BaseExecutorResult | None,
-        resolved_contract: str | None = None,
+        request: CanonicalInferenceRequest | None = None,
     ):
         if result is None:
             return
         self._write_single_result(
-            task_id,
-            spec,
-            out_dir,
-            _declared_result(result, resolved_contract) or result,
+            task_id, spec, out_dir, _declared_result(result, request) or result
         )
 
         child_lookup = {entry.task_id: entry for entry in merged_children}

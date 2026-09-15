@@ -5,11 +5,7 @@ from typing import Any
 import pandas as pd
 import pytest
 
-from shared.inference import (
-    CanonicalInferenceContract,
-    InputResolutionError,
-    canonical_contract,
-)
+from shared.inference import InputResolutionError, canonical_contract
 from shared.schemas.result import BaseExecutorResult
 from shared.schemas.result.catalog import InferenceResult
 from shared.schemas.result.payloads import InferenceItem
@@ -45,7 +41,7 @@ def _task(data: dict[str, Any], upstream: dict[str, Any] | None = None):
     spec = _spec(data, upstream)
     return make_worker_task_message(
         spec.model_dump(by_alias=True),
-        declared_contract=canonical_contract(spec).model_dump_json(),
+        declared_contract=canonical_contract(spec),
     )
 
 
@@ -158,11 +154,11 @@ def test_a_resolved_request_carries_no_source_syntax() -> None:
 
 def test_a_contract_declaring_an_unimplemented_resolver_fails() -> None:
     task = _task(_EXPR, {"up": _upstream("a")})
-    contract = CanonicalInferenceContract.model_validate_json(task.declared_contract)
-    bumped = contract.model_copy(
+    contract = task.declared_contract
+    assert contract is not None
+    task.declared_contract = contract.model_copy(
         update={"source": contract.source.model_copy(update={"resolver_version": "99"})}
     )
-    task.declared_contract = bumped.model_dump_json()
     with pytest.raises(InputResolutionError, match="resolver version"):
         resolve_task_contract(task)
 
@@ -194,7 +190,7 @@ class TestRecoveryFence:
         again = _task(_EXPR, {"up": _upstream("a", "b")})
         resolved = resolve_task_contract(first)
         assert resolved is not None
-        again.recorded_resolution = resolved.binding.model_dump_json()
+        again.recorded_resolution = resolved.binding
         runner._materialize_contract(again)
         assert again.resolved_contract == first.resolved_contract
 
@@ -205,7 +201,7 @@ class TestRecoveryFence:
         committed = resolve_task_contract(_task(_EXPR, {"up": _upstream("a", "b")}))
         assert committed is not None
         retry = _task(_EXPR, {"up": _upstream("a", "changed")})
-        retry.recorded_resolution = committed.binding.model_dump_json()
+        retry.recorded_resolution = committed.binding
         with pytest.raises(ExecutionError, match="committed to the inputs"):
             runner._materialize_contract(retry)
 

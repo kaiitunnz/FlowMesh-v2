@@ -24,6 +24,7 @@ from shared.harness import (
     ServiceLeafEpisodeDispatch,
 )
 from shared.inference import (
+    CanonicalInferenceContract,
     CanonicalProjectionError,
     InferenceSourceKind,
     InputResolutionBinding,
@@ -2140,7 +2141,7 @@ class TaskRuntime:
             if self._apply_advance_locked(record.workflow_id, advance):
                 self._cv.notify_all()
 
-    def declared_contract(self, task_id: str) -> str | None:
+    def declared_contract(self, task_id: str) -> CanonicalInferenceContract | None:
         """The contract a leaf carries to the worker, for it to resolve and report.
 
         A leaf that admits more than one embodiment names its contract here rather than
@@ -2180,7 +2181,7 @@ class TaskRuntime:
                     and len(contract.source.items) <= 1
                 ):
                     return None
-            return contract.model_dump_json()
+            return contract
 
     def record_input_resolution(self, task_id: str, binding_payload: Any) -> None:
         """Record how a task's inputs resolved on its origin worker.

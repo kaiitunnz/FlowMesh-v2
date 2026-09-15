@@ -9,11 +9,7 @@ import pytest
 
 from server.config import OrchestrationConfig
 from server.task.runtime import TaskRuntime
-from shared.inference import (
-    CanonicalInferenceContract,
-    InputResolutionBinding,
-    UpstreamProvenance,
-)
+from shared.inference import InputResolutionBinding, UpstreamProvenance
 from shared.tasks.specs import InferenceEmbodimentKind
 
 from .test_v2_orchestration import (
@@ -201,7 +197,7 @@ async def test_a_pinned_resident_batch_carries_its_contract() -> None:
 
     contract = runtime.declared_contract(task_id)
     assert contract is not None
-    source = CanonicalInferenceContract.model_validate_json(contract).source
+    source = contract.source
     assert source.items == ("a", "b")
     # The pin forbids the other embodiment, so it dispatches resident with no selection.
     assert runtime.service_episode_dispatch(task_id) is not None
@@ -325,7 +321,7 @@ async def test_a_resident_bound_upstream_leaf_carries_its_contract() -> None:
 
     contract = runtime.declared_contract(task_id)
     assert contract is not None
-    source = CanonicalInferenceContract.model_validate_json(contract).source
+    source = contract.source
     assert (source.node, source.path) == ("src", "items.output")
 
 

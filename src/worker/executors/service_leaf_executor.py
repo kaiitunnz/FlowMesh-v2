@@ -22,11 +22,7 @@ from shared.harness import (
     OutcomeKind,
     ServiceLeafEpisodeDispatch,
 )
-from shared.inference import (
-    LIST_PROMPT_FIELDS,
-    CanonicalInferenceRequest,
-    declared_sampling,
-)
+from shared.inference import LIST_PROMPT_FIELDS, declared_sampling
 from shared.tasks.specs import EmbeddingSpecStrict, InferenceSpecStrict
 from shared.tasks.task_type import TaskType
 from shared.tools.model.schema import MODEL_INTERFACE
@@ -60,8 +56,7 @@ def _declared_request_payload(task: ExecutorTask) -> str | None:
     """
     if task.resolved_contract is None:
         return None
-    contract = CanonicalInferenceRequest.model_validate_json(task.resolved_contract)
-    bodies = contract.chat_bodies()
+    bodies = task.resolved_contract.chat_bodies()
     return json.dumps(bodies[0] if len(bodies) == 1 else list(bodies))
 
 

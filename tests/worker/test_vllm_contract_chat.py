@@ -33,7 +33,7 @@ def _completion(text: str) -> SimpleNamespace:
 
 def _run(
     prompts: list[str],
-    contract: str | None,
+    contract: CanonicalInferenceRequest | None,
     out_dir: Path,
     chat_template: str | None = "a-chat-template",
 ) -> MagicMock:
@@ -66,10 +66,10 @@ def _run(
     return llm
 
 
-def _contract(*prompts: str) -> str:
+def _contract(*prompts: str) -> CanonicalInferenceRequest:
     return CanonicalInferenceRequest(
         model="Qwen/Qwen3-4B", prompts=tuple(prompts), params={"max_tokens": 8}
-    ).model_dump_json()
+    )
 
 
 def test_a_resolved_contract_generates_from_its_conversations(tmp_path: Path) -> None:

@@ -25,9 +25,9 @@ def resolve_task_contract(
     task: ExecutorTask,
 ) -> ResolvedCanonicalInferenceRequest | None:
     """The request a task's contract names, or None when it carries no contract."""
-    if task.declared_contract is None:
+    contract = task.declared_contract
+    if contract is None:
         return None
-    contract = CanonicalInferenceContract.model_validate_json(task.declared_contract)
     if contract.source.kind is InferenceSourceKind.LITERAL:
         return resolve_contract(contract, None)
     return _resolve_upstream(task, contract)

@@ -666,7 +666,7 @@ class Dispatcher:
             ),
             service_episode=self._runtime.service_episode_dispatch(task_id),
             declared_contract=self._runtime.declared_contract(task_id),
-            recorded_resolution=self._recorded_resolution(task_id),
+            recorded_resolution=self._runtime.input_resolution_binding(task_id),
         )
 
         # 8. Publish task
@@ -1239,11 +1239,6 @@ class Dispatcher:
                 continue
             results[name] = envelope.result
         return results
-
-    def _recorded_resolution(self, task_id: str) -> str | None:
-        """The input resolution a task is already committed to, if one was recorded."""
-        binding = self._runtime.input_resolution_binding(task_id)
-        return None if binding is None else binding.model_dump_json()
 
     def _resolve_upstream_task_ids(
         self, record: TaskRecord, spec: TaskSpecStrict
