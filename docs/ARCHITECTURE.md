@@ -211,6 +211,24 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   strings, or past its envelope fails the task before any model I/O and before admission,
   creating no claim and switching no embodiment. A re-driven task runs only when it
   re-resolves to its recorded binding.
+- **Optional-envelope input preparation.** An upstream source may declare no envelope, and
+  is then screened against the request it produces rather than a bound. Such a leaf runs one
+  bounded input-preparation dispatch first: a worker resolves the pinned source once through
+  the same shared resolver, stores the serialized request as an immutable, principal-scoped
+  object, and reports one `ResolvedInputMaterialization` — the `InputResolutionBinding` and
+  a `ResolvedInputReference` carrying only scope, digest, size, and media type. The engine
+  commits both as one fact and re-readies the work item, so an object written before that
+  commit belongs to no resolution and makes nothing runnable. The preparation is its own
+  substate: it mints no invocation, attempt, `EmbodimentSelection`, claim, credit, or route,
+  so it pins no embodiment. Selection and, after it, the resident `AdmissionProfile` and
+  aggregate `ClaimCredit` read the cardinality and conservative token demand the binding
+  records, and the selected worker hydrates and digest-verifies that one recorded request
+  rather than reading the source again — a reference that is missing, out of scope, or
+  digest-mismatched fails closed. Request bytes stay worker-produced and outside `DS`/`CS`;
+  the interim object path is the root content router, not a data-direct hydration.
+  `ORCHESTRATOR_MAX_PREPARED_INPUT_BYTES` screens a reported preparation before any
+  candidate-specific work; unset, it caps nothing, and ordinary candidate feasibility,
+  resident admission, and aggregate-credit safety still apply.
 - **Live-feasibility handoff.** A ready episode carries the lowerer's declared
   alternative; a feasibility check lets the scheduler defer an infeasible alternative,
   holding no worker, rather than dispatching it. It resolves no resident capacity.
@@ -384,8 +402,11 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   ledger before the continuation re-readies or a linked `ServiceClaim` credit releases, and a
   resumed worker hydrates and digest-verifies the reference before injection. Root and
   supervisors relay opaque frames and hold only the manifest. Materialization is idempotent
-  under `idm-*`. The mediated-egress-sidecar tool path and the worker-materialized resident
-  completion settle by reference; the model gateway settles inline. See
+  under `idm-*`. Outcome finalization and a prepared inference request are stored over one
+  immutable-object core — put-if-absent by digest, authorized read, digest-verified
+  hydration — under separate facades, so neither becomes a name for the other. The
+  mediated-egress-sidecar tool path and the worker-materialized resident completion settle
+  by reference; the model gateway settles inline. See
   [`EXECUTORS.md`](EXECUTORS.md).
 - **Task merging.** Compatible adjacent tasks in a DAG (same `taskType`,
   model, hardware shape, and merge key) coalesce into a single dispatch.
