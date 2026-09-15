@@ -3070,7 +3070,10 @@ class TaskRuntime:
                     # A non-terminal episode step routes its boundary and re-dispatches;
                     # a completion falls through to the terminal path below.
                     self._apply_episode_step_locked(task_id, harness_result)
-                    return usages
+                    # The row bills the dispatch that ran this step, and the task it
+                    # belongs to has not settled, so it carries the in-flight status.
+                    step_usage = TaskUsage.from_payload(payload, TaskStatus.DISPATCHED)
+                    return [(task_id, step_usage)] if step_usage is not None else []
                 if group is not None:
                     # The gateway captured a turn-scoped facade group: the clean
                     # turn-completion is a yield on that group, not the episode's
