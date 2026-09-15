@@ -98,9 +98,9 @@ def _contract_conversations(task: ExecutorTask) -> list[list[Any]] | None:
     model's own chat template to each — the rendering a replica would apply to the same
     request. A leaf without one generates from the prompts its spec names.
     """
-    if task.declared_contract is None:
+    if task.resolved_contract is None:
         return None
-    contract = CanonicalInferenceRequest.model_validate_json(task.declared_contract)
+    contract = CanonicalInferenceRequest.model_validate_json(task.resolved_contract)
     return [list(body["messages"]) for body in contract.chat_bodies()]
 
 

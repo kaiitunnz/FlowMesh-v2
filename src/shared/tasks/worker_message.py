@@ -53,9 +53,16 @@ class WorkerTaskMessage(BaseModel):
     declared_contract: str | None = Field(
         default=None,
         description=(
-            "Canonical inference request for a leaf whose contract the fabric resolves "
-            "rather than the executor: the request to issue and the result shape to "
-            "report."
+            "Canonical inference contract for a leaf the fabric resolves rather than "
+            "the executor: the model, sampling, and the source its prompts come from."
+        ),
+    )
+    resolved_contract: str | None = Field(
+        default=None,
+        description=(
+            "The request a worker materialized from declared_contract, set on the "
+            "origin worker before either embodiment reaches its model: the request to "
+            "issue and the result shape to report."
         ),
     )
 

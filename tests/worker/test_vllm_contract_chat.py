@@ -61,7 +61,7 @@ def _run(
         },
         task_type=TaskType.INFERENCE,
     )
-    msg.declared_contract = contract
+    msg.resolved_contract = contract
     executor.run(msg, out_dir)
     return llm
 

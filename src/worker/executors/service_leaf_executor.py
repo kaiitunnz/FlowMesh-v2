@@ -58,9 +58,9 @@ def _declared_request_payload(task: ExecutorTask) -> str | None:
     A leaf declaring several prompts carries them on the one boundary as a list of chat
     requests, so the whole batch is admitted and served as a single invocation.
     """
-    if task.declared_contract is None:
+    if task.resolved_contract is None:
         return None
-    contract = CanonicalInferenceRequest.model_validate_json(task.declared_contract)
+    contract = CanonicalInferenceRequest.model_validate_json(task.resolved_contract)
     bodies = contract.chat_bodies()
     return json.dumps(bodies[0] if len(bodies) == 1 else list(bodies))
 

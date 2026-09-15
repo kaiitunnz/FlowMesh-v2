@@ -60,7 +60,7 @@ def _stored(tmp_path: Path, result: BaseExecutorResult, contract: str | None) ->
         {"taskType": "inference", "data": {"prompt": "name one planet"}},
         task_type=TaskType.INFERENCE,
     )
-    msg.declared_contract = contract
+    msg.resolved_contract = contract
     runner = Runner(
         lifecycle=lifecycle,
         task_stream=[msg],
@@ -176,7 +176,7 @@ def test_a_relayed_batch_stores_the_same_shape(tmp_path: Path) -> None:
     assert len(resident["items"]) == len(_BATCH_PROMPTS)
 
 
-def test_a_leaf_with_no_declared_contract_stores_its_own_result(
+def test_a_leaf_with_no_resolved_contract_stores_its_own_result(
     tmp_path: Path,
 ) -> None:
     # A leaf that admits one embodiment reports what that embodiment produced.
