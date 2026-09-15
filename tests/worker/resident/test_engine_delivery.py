@@ -34,11 +34,16 @@ _REFUSED = "refuse-me"
 class _Handler(BaseHTTPRequestHandler):
     server: "_Server"
 
+    # Every reply carries a Content-Length, so HTTP/1.1 keep-alive is safe here and a
+    # test can observe whether a delivery actually reuses its connection.
+    protocol_version = "HTTP/1.1"
+
     def log_message(self, *args: Any) -> None:
         pass
 
     def _record(self) -> bytes:
         raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        self.server.peers.append(self.client_address[1])
         self.server.seen.append(
             {
                 "method": self.command,
@@ -147,6 +152,7 @@ class _Server(ThreadingHTTPServer):
         self.chat_barrier: Barrier | None = None
         self.echo_chat = False
         self.seen: list[dict[str, Any]] = []
+        self.peers: list[int] = []
         self.extra_response_headers: list[tuple[str, str]] = []
 
 
@@ -161,6 +167,11 @@ def _running() -> Iterator[_Server]:
         server.shutdown()
         server.server_close()
         thread.join(timeout=5.0)
+
+
+def _chat_endpoint(server: "_Server") -> ReplicaEndpoint:
+    base = f"http://127.0.0.1:{server.server_address[1]}/v1"
+    return ReplicaEndpoint(base_url=base, model="m", interface="chat")
 
 
 async def _drain(
@@ -471,3 +482,55 @@ def test_one_refused_conversation_fails_the_whole_batch() -> None:
         endpoint = ReplicaEndpoint(base_url=base, model="m", interface="chat")
         with pytest.raises(httpx.HTTPStatusError):
             asyncio.run(_drain(endpoint, _batch_payload("a", _REFUSED, "c")))
+
+
+async def _drain_twice(endpoint: ReplicaEndpoint, delivery: HttpEngineDelivery) -> None:
+    for _ in range(2):
+        opened = await delivery(endpoint, "hello")
+        [chunk async for chunk in opened.chunks]
+        await opened.aclose()
+
+
+def test_one_delivery_reuses_its_connection_across_invocations() -> None:
+    # A replica is called for the life of its lane, so the client is held on the
+    # delivery: the second invocation arrives on the connection the first opened
+    # rather than paying a fresh pool.
+    async def body(endpoint: ReplicaEndpoint) -> None:
+        delivery = HttpEngineDelivery()
+        await _drain_twice(endpoint, delivery)
+        await delivery.aclose()
+
+    with _running() as server:
+        asyncio.run(body(_chat_endpoint(server)))
+    assert len(server.peers) == 2
+    assert server.peers[0] == server.peers[1]
+
+
+def test_separate_deliveries_do_not_share_a_connection() -> None:
+    # The control for the assertion above: reuse is the shared client's doing, not the
+    # stand-in server's, so two deliveries must arrive on two connections.
+    async def body(endpoint: ReplicaEndpoint) -> None:
+        for _ in range(2):
+            delivery = HttpEngineDelivery()
+            await _drain_twice(endpoint, delivery)
+            await delivery.aclose()
+
+    with _running() as server:
+        asyncio.run(body(_chat_endpoint(server)))
+    assert len(server.peers) == 4
+    assert server.peers[0] != server.peers[2]
+
+
+def test_a_closed_delivery_serves_again_on_a_fresh_client() -> None:
+    # Closing releases the connections without poisoning the delivery: a lane reaped and
+    # driven again opens a new client rather than reusing a closed one.
+    async def body(endpoint: ReplicaEndpoint) -> None:
+        delivery = HttpEngineDelivery()
+        await _drain_twice(endpoint, delivery)
+        await delivery.aclose()
+        await _drain_twice(endpoint, delivery)
+        await delivery.aclose()
+
+    with _running() as server:
+        asyncio.run(body(_chat_endpoint(server)))
+    assert server.peers[1] != server.peers[2]

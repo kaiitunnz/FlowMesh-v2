@@ -129,6 +129,28 @@ class HttpEngineDelivery:
     def __init__(self, *, timeout_sec: float = 300.0, chunk_chars: int = 8192) -> None:
         self._timeout = timeout_sec
         self._chunk_chars = max(1, chunk_chars)
+        self._client: httpx.AsyncClient | None = None
+        self._client_lock = asyncio.Lock()
+
+    async def _shared_client(self) -> httpx.AsyncClient:
+        """The client every invocation shares, so its connections stay warm.
+
+        A replica is called repeatedly over loopback for the life of the lane, and a
+        client per call would hand each invocation a cold pool. One client keeps the
+        engine connections alive across invocations, and is safe to drive concurrently,
+        so the conversations of a batch share it.
+        """
+        if self._client is None:
+            async with self._client_lock:
+                if self._client is None:
+                    self._client = httpx.AsyncClient(timeout=self._timeout)
+        return self._client
+
+    async def aclose(self) -> None:
+        """Release the shared client's connections when the lane is reaped."""
+        client, self._client = self._client, None
+        if client is not None:
+            await client.aclose()
 
     async def __call__(
         self,
@@ -150,15 +172,15 @@ class HttpEngineDelivery:
         if endpoint.api_key:
             headers["Authorization"] = f"Bearer {endpoint.api_key}"
         base = endpoint.base_url.rstrip("/")
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
-            if adapter_name is not None and adapter_source is not None:
-                await self._ensure_adapter(
-                    client, base, headers, adapter_name, adapter_source
-                )
-            # The conversations of a batch are issued together and concurrently: each is
-            # its own engine request, so the engine's continuous batching combines them
-            # as it does requests from any other source.
-            responses = await self._post_all(client, f"{base}{path}", bodies, headers)
+        client = await self._shared_client()
+        if adapter_name is not None and adapter_source is not None:
+            await self._ensure_adapter(
+                client, base, headers, adapter_name, adapter_source
+            )
+        # The conversations of a batch are issued together and concurrently: each is
+        # its own engine request, so the engine's continuous batching combines them
+        # as it does requests from any other source.
+        responses = await self._post_all(client, f"{base}{path}", bodies, headers)
         if embedding:
             content = json.dumps(responses[0]["data"])
         elif batch is not None:

@@ -316,5 +316,8 @@ class ResidentLaneHost:
         if self._replica is not None:
             with contextlib.suppress(Exception):
                 self._call(self._replica.aclose).result(timeout=5)
+        if isinstance(self._engine_open, HttpEngineDelivery):
+            with contextlib.suppress(Exception):
+                self._call(self._engine_open.aclose).result(timeout=5)
         self._loop.call_soon_threadsafe(self._loop.stop)
         self._thread.join(timeout=5)
