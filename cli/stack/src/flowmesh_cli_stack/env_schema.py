@@ -331,6 +331,15 @@ STACK_ENV_SCHEMA = EnvSchema(
                     min_value=1,
                 ),
                 EnvVar(
+                    "ORCHESTRATOR_MAX_PREPARED_INPUT_BYTES",
+                    "",
+                    description=(
+                        "Max prepared inference input bytes; unset is uncapped."
+                    ),
+                    var_type=EnvVarType.INT,
+                    min_value=1,
+                ),
+                EnvVar(
                     "ORCHESTRATOR_EPISODE_LOWERING",
                     "0",
                     description="Lower v2 templates into run-to-yield episodes.",

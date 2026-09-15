@@ -14,6 +14,7 @@ from shared.inference import (
     CanonicalInferenceContract,
     CanonicalInferenceRequest,
     InputResolutionBinding,
+    ResolvedInputReference,
 )
 from shared.schemas.worker import WorkerStatus
 from shared.tasks import (
@@ -68,6 +69,21 @@ class WorkerTaskMessage(BaseModel):
             "The input resolution this task is already committed to, when one was "
             "recorded: a re-drive that resolves to anything else fails instead of "
             "running against substituted input."
+        ),
+    )
+    input_preparation: bool = Field(
+        default=False,
+        description=(
+            "Whether this dispatch only resolves the task's declared_contract and "
+            "reports the request it materialized, running no model and no executor."
+        ),
+    )
+    recorded_input: ResolvedInputReference | None = Field(
+        default=None,
+        description=(
+            "The prepared request this task runs, when a preparation committed one: "
+            "the worker hydrates and verifies it rather than resolving the source "
+            "again."
         ),
     )
     resolved_contract: CanonicalInferenceRequest | None = Field(

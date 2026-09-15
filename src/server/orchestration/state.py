@@ -18,7 +18,7 @@ from enum import StrEnum
 from pydantic import BaseModel, ConfigDict, Field
 
 from shared.harness.boundary import DenialKind
-from shared.inference import InputResolutionBinding
+from shared.inference import InputResolutionBinding, ResolvedInputReference
 from shared.outcome import OutcomeManifest
 from shared.private_state import PrivateStateAttachment, PrivateStateBinding
 
@@ -474,7 +474,26 @@ class InputResolution(BaseModel):
 
     work_item_id: str
     binding: InputResolutionBinding
+    # Where the request itself is, for a run that hydrates rather than re-resolves. A
+    # resolution recorded without one was reached by the running worker itself.
+    reference: ResolvedInputReference | None = None
     resolved_at: str = Field(default_factory=now_iso)
+
+
+class InputPreparation(BaseModel):
+    """One dispatch that resolves a work item's inputs and runs nothing else.
+
+    It is not a candidate attempt: it carries no invocation, reserves no capacity, and
+    names no embodiment, so a work item that has only been prepared is still free to
+    run either of them. It exists so the preparation a work item is waiting on is
+    visible in its own right.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    work_item_id: str
+    worker_id: str | None = None
+    dispatched_at: str = Field(default_factory=now_iso)
 
 
 class EffectReceipt(BaseModel):
@@ -569,6 +588,7 @@ class LedgerSnapshot(BaseModel):
     attempts: list[Attempt] = Field(default_factory=list)
     embodiment_selections: list[EmbodimentSelection] = Field(default_factory=list)
     input_resolutions: list[InputResolution] = Field(default_factory=list)
+    input_preparations: list[InputPreparation] = Field(default_factory=list)
     boundary_events: list[BoundaryEvent] = Field(default_factory=list)
     effect_receipts: list[EffectReceipt] = Field(default_factory=list)
     authority_decisions: list[AuthorityDecision] = Field(default_factory=list)

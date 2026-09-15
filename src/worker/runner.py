@@ -11,10 +11,15 @@ from typing import Any
 
 import requests
 
+from shared.content import ContentStoreError
 from shared.inference import (
     CanonicalInferenceRequest,
     InputResolutionError,
+    ResolvedCanonicalInferenceRequest,
+    ResolvedInputMaterialization,
     canonical_result,
+    hydrate_resolved_input,
+    write_resolved_input,
 )
 from shared.network.mtls import MutualTlsMaterial
 from shared.outcome import FabricContentStore
@@ -308,20 +313,58 @@ class Runner:
             return
         self.logger.warning("Unknown mediated-op frame kind: %s", frame_kind)
 
-    def _materialize_contract(self, msg: WorkerTaskMessage) -> None:
-        """Resolve a task's inference contract, once, before its embodiment runs.
+    def _prepare_inputs(self, msg: WorkerTaskMessage) -> ResolvedInputMaterialization:
+        """Resolve a task's declared contract and store the request it materialized.
 
-        One request serves whichever embodiment follows, and the binding recording how
-        it was reached is durable before a local generation or a resident service issue.
-        A source that does not resolve within what the leaf declared fails the task
-        here, where no model has run and no claim exists.
+        The bytes are written before the binding that names them is reported, so a loss
+        anywhere here leaves an object no resolution claims rather than a resolution
+        pointing at nothing.
+        """
+        if self._content_store is None:
+            raise ExecutionError(
+                f"task {msg.task_id} prepares its inputs, and this worker reaches no "
+                "fabric content store to store the request in",
+                retryable=True,
+            )
+        resolved = self._resolve_contract(msg)
+        if resolved is None:
+            raise ExecutionError(
+                f"task {msg.task_id} was dispatched to prepare inputs and carries no "
+                "contract to resolve",
+                retryable=False,
+            )
+        reference = write_resolved_input(self._content_store, resolved)
+        return ResolvedInputMaterialization(
+            binding=resolved.binding, reference=reference
+        )
+
+    def _resolve_contract(
+        self, msg: WorkerTaskMessage
+    ) -> ResolvedCanonicalInferenceRequest | None:
+        """The request a task's contract names, resolved against its pinned upstream."""
+        if msg.declared_contract is None:
+            return None
+        try:
+            return resolve_task_contract(msg)
+        except InputResolutionError as exc:
+            raise ExecutionError(str(exc), retryable=False) from exc
+
+    def _materialize_contract(self, msg: WorkerTaskMessage) -> None:
+        """Settle the one request a task runs, before its embodiment reaches a model.
+
+        A task carrying a prepared request hydrates and verifies it, so the run issues
+        exactly what the preparation produced and reads no source syntax. Otherwise the
+        contract resolves here, and the binding recording how it was reached is durable
+        before a local generation or a resident service issue. Either way a source that
+        does not resolve within what the leaf declared fails the task where no model has
+        run and no claim exists.
         """
         if msg.declared_contract is None:
             return
-        try:
-            resolved = resolve_task_contract(msg)
-        except InputResolutionError as exc:
-            raise ExecutionError(str(exc), retryable=False) from exc
+        if msg.recorded_input is not None:
+            msg.resolved_contract = self._hydrate_prepared_request(msg).request
+            return
+        resolved = self._resolve_contract(msg)
         if resolved is None:
             return
         committed = msg.recorded_resolution
@@ -335,6 +378,39 @@ class Runner:
         self.lifecycle.notify_task_update(
             msg.task_id, {"input_resolution": resolved.binding.model_dump(mode="json")}
         )
+
+    def _hydrate_prepared_request(
+        self, msg: WorkerTaskMessage
+    ) -> ResolvedCanonicalInferenceRequest:
+        """Fetch the prepared request this task runs, failing closed on anything else.
+
+        Verification is what makes the reference safe to run from: content that is
+        missing, out of the task's scope, or not the bytes its digest names fails the
+        task before any model I/O and before any admission.
+        """
+        reference = msg.recorded_input
+        if reference is None or self._content_store is None:
+            raise ExecutionError(
+                f"task {msg.task_id} runs a prepared request and this worker reaches "
+                "no fabric content store to hydrate it from",
+                retryable=True,
+            )
+        try:
+            hydrated = hydrate_resolved_input(self._content_store, reference)
+        except ContentStoreError as exc:
+            raise ExecutionError(
+                f"task {msg.task_id} cannot hydrate the request its preparation "
+                f"recorded: {exc}",
+                retryable=False,
+            ) from exc
+        committed = msg.recorded_resolution
+        if committed is not None and not committed.matches(hydrated.binding):
+            raise ExecutionError(
+                f"task {msg.task_id} is committed to the inputs it already resolved, "
+                "and the request it hydrated records a different resolution",
+                retryable=False,
+            )
+        return hydrated
 
     def _resolve_output_dir(self, task_id: str) -> Path:
         """Prepare and return the canonical output directory for a task's results."""
@@ -679,6 +755,29 @@ class Runner:
                             f"Task {task_id} was cancelled before execution"
                         )
                     self._current_task_id = task_id
+                    if msg.input_preparation:
+                        self.lifecycle.notify_task_started(
+                            task_id,
+                            task_type=task_type,
+                            dispatched_at=dispatched_at,
+                            started_at=start_iso,
+                        )
+                        notified_task_started = True
+                        prepared = self._prepare_inputs(msg)
+                        metadata = self._build_task_metadata(
+                            task_type,
+                            dispatched_at,
+                            start_iso,
+                            start_wall,
+                            shard_index=shard_index,
+                            shard_total=shard_total,
+                        )
+                        metadata["input_materialization"] = prepared.model_dump(
+                            mode="json"
+                        )
+                        self.lifecycle.set_succeeded(task_id, metadata=metadata)
+                        self.logger.info("Task %s prepared its inputs", task_id)
+                        continue
                     if msg.service_episode is not None:
                         # A resident service-backed leaf runs the service-episode path
                         # (capture the model request, yield a resident boundary, resume

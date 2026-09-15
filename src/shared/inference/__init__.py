@@ -15,6 +15,13 @@ from .codec import (
     resolve_contract,
     unforwarded_inference_keys,
 )
+from .input_store import (
+    RESOLVED_INPUT_MEDIA_TYPE,
+    ResolvedInputMaterialization,
+    ResolvedInputReference,
+    hydrate_resolved_input,
+    write_resolved_input,
+)
 from .source import (
     INPUT_RESOLVER_VERSION,
     CanonicalInferenceInputSource,
@@ -28,6 +35,7 @@ from .source import (
 
 __all__ = [
     "INPUT_RESOLVER_VERSION",
+    "RESOLVED_INPUT_MEDIA_TYPE",
     "LIST_PROMPT_FIELDS",
     "PROJECTION_DROPS",
     "SAMPLING_DEFAULTS",
@@ -39,6 +47,8 @@ __all__ = [
     "InputResolutionBinding",
     "InputResolutionError",
     "ResolvedCanonicalInferenceRequest",
+    "ResolvedInputMaterialization",
+    "ResolvedInputReference",
     "UpstreamProvenance",
     "canonical_contract",
     "canonical_result",
@@ -47,7 +57,9 @@ __all__ = [
     "content_version",
     "declared_sampling",
     "declares_multiple_prompts",
+    "hydrate_resolved_input",
     "request_digest",
     "resolve_contract",
     "unforwarded_inference_keys",
+    "write_resolved_input",
 ]
