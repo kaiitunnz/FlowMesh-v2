@@ -303,24 +303,26 @@ keys, model attributes, `[i]` indexes, and an attribute plucked across a list â€
 yield a non-empty list of strings. A projection reaching a table, a dataset, an artifact,
 or any other value is not a prompt vector and fails.
 
-`max_items` bounds how many prompts a projection may yield. Declare it and a resident
-embodiment's admission capacity is screened against it before the upstream value exists,
-and a resolution exceeding it fails. Leave it out and the leaf is prepared first: one
-bounded dispatch resolves the projection on a worker and records the request it
-materialized, and the embodiment is chosen from the count that actually materialized.
-`ORCHESTRATOR_MAX_PREPARED_INPUT_BYTES` caps what a preparation may report; unset, it
-caps nothing.
+`max_items` bounds how many prompts a projection may yield, and is optional. Declare it
+and a resident embodiment's capacity is screened against that bound before the upstream
+value exists, and a resolution exceeding it fails. Leave it out and the leaf is prepared
+first: one bounded dispatch resolves the projection on a worker and records the request
+it produces, and the embodiment is chosen from the count that actually resolved. A
+deployment may cap a prepared request's size with
+`ORCHESTRATOR_MAX_PREPARED_INPUT_BYTES`; unset, it is uncapped.
 
 The worker holding the upstream value resolves the projection once, before either
 embodiment reaches a model, and both run that one request â€” a replica receives the
 prompts, never the projection. A source that is missing, does not project, yields
 something other than a non-empty list of strings, or exceeds its envelope fails the task
 there, before any generation and before a resident claim exists; it never falls back to
-the other embodiment. A prepared leaf hydrates the request its preparation recorded and
-verifies it against the digest naming it, so a re-drive or a relocation runs that request
-rather than reading the projection again, and content that is missing, out of scope, or
-not the bytes its digest names fails closed. A retried task that resolves its own source
-runs only if it reaches the same request from the same upstream content.
+the other embodiment.
+
+A retry runs the same request or it does not run. A leaf that was prepared hydrates the
+recorded request and verifies it, so a re-drive or a move to another worker never reads
+the projection again, and a request that is missing or does not verify fails closed. A
+leaf that resolves its own source runs only if it reaches the same request from the same
+upstream content.
 
 The leaf's declared sampling governs its generation wherever it runs, and values it
 leaves out take the same defaults on both sides, so both embodiments issue one engine
