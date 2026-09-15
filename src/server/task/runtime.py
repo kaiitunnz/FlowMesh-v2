@@ -3390,6 +3390,13 @@ class TaskRuntime:
                 resident_invocation_ids = (
                     engine.cancel_outstanding_boundary_invocations()
                 )
+                # An episode suspended on a boundary holds no dispatch, so the
+                # interrupt reaches nothing running and no worker terminal follows.
+                # The reap leaves its boundary unsettled, so the cancel settles here.
+                for suspended in engine.suspended_boundary_tasks():
+                    held = self._tasks.get(suspended)
+                    if held is not None and held.status == TaskStatus.CANCELLING:
+                        self._settle_cancelled_locked(held, time.time())
                 self._save_ledger_locked(workflow_id)
 
         # A cancelled in-flight resident invocation releases its credit from this fenced

@@ -108,6 +108,69 @@ def test_a_step_success_racing_a_cancel_does_not_re_admit_the_episode() -> None:
     asyncio.run(run())
 
 
+def test_cancelling_an_episode_suspended_on_a_boundary_settles_it() -> None:
+    async def run() -> None:
+        registry = FakeRegistry()
+        runtime = _runtime(registry)
+        workflow_id, ids = await _register(runtime, _AGENT_WF)
+        writer = ids["writer"]
+        adapter = ScriptedHarnessAdapter(
+            [
+                ScriptedStep(
+                    op="boundary",
+                    kind=BoundaryEventKind.INVOCATION,
+                    call="m0",
+                    interface="model",
+                    payload="draft",
+                ),
+                ScriptedStep(op="complete", value_from="m0"),
+            ],
+            "v1",
+        )
+
+        # No settler is installed, so the model boundary suspends the lane: the worker
+        # holds no dispatch for this task and will report no terminal for it.
+        result = _run_step(runtime, adapter, writer)
+        runtime.mark_succeeded(
+            writer, "wkr-1", {"agent_episode": result.model_dump(mode="json")}, _TS
+        )
+        engine = runtime.orchestration_engine(workflow_id)
+        assert engine is not None
+        assert engine.suspended_boundary_tasks() == [writer]
+
+        runtime.cancel_workflow(workflow_id)
+
+        record = runtime._tasks[writer]
+        assert record.status == TaskStatus.CANCELLED
+        assert registry.remaining_of(workflow_id) == set()
+        # A boundary outcome arriving afterwards settles nothing and revives nothing.
+        assert runtime.settle_episode_invocation(writer, "m0", "late") is False
+        assert runtime._tasks[writer].status == TaskStatus.CANCELLED
+
+    asyncio.run(run())
+
+
+def test_cancelling_an_episode_running_a_step_waits_for_its_worker() -> None:
+    async def run() -> None:
+        runtime = _runtime(FakeRegistry())
+        workflow_id, ids = await _register(runtime, _AGENT_WF)
+        writer = ids["writer"]
+        adapter = ScriptedHarnessAdapter(_SCRIPT, "v1")
+
+        # The episode is running a step, so it holds no unsettled boundary: its worker
+        # gets the interrupt and owns the terminal.
+        _run_step(runtime, adapter, writer)
+        engine = runtime.orchestration_engine(workflow_id)
+        assert engine is not None
+        assert engine.suspended_boundary_tasks() == []
+
+        runtime.cancel_workflow(workflow_id)
+
+        assert runtime._tasks[writer].status == TaskStatus.CANCELLING
+
+    asyncio.run(run())
+
+
 def test_a_live_episode_step_bills_its_dispatch_as_in_flight() -> None:
     async def run() -> None:
         runtime = _runtime(FakeRegistry())
