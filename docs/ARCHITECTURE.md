@@ -394,10 +394,9 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   resumed worker hydrates and digest-verifies the reference before injection. Root and
   supervisors relay opaque frames and hold only the manifest. Materialization is idempotent
   under `idm-*`. Outcome finalization and a prepared inference request are stored over one
-  content-addressed object core under separate facades, so neither becomes a name for
-  the other. The
-  mediated-egress-sidecar tool path and the worker-materialized resident completion settle
-  by reference; the model gateway settles inline. See
+  content-addressed object core under separate facades, so neither becomes a name for the
+  other. The mediated-egress-sidecar tool path and the worker-materialized resident
+  completion settle by reference; the model gateway settles inline. See
   [`EXECUTORS.md`](EXECUTORS.md).
 - **Task merging.** Compatible adjacent tasks in a DAG (same `taskType`,
   model, hardware shape, and merge key) coalesce into a single dispatch.
