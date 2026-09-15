@@ -15,7 +15,7 @@ from shared.inference import CanonicalInferenceRequest
 from shared.schemas.result import BaseExecutorResult
 from shared.schemas.result.catalog import InferenceResult
 
-from .episode_support import EpisodeStepResult
+from ..episode_support import EpisodeStepResult
 
 
 def generated_outputs(

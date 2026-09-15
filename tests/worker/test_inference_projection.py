@@ -14,7 +14,7 @@ from shared.schemas.result.catalog import EmbeddingResult, InferenceResult
 from shared.schemas.result.payloads import InferenceItem
 from shared.tasks.specs import InferenceSpecStrict
 from worker.executors.episode_support import EpisodeStepResult
-from worker.executors.inference_projection import generated_outputs
+from worker.executors.inference.projection import generated_outputs
 
 
 def _spec(**fields: object) -> InferenceSpecStrict:
