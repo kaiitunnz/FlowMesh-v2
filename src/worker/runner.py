@@ -13,6 +13,7 @@ import requests
 
 from shared.inference import (
     CanonicalInferenceRequest,
+    InputResolutionBinding,
     InputResolutionError,
     canonical_result,
 )
@@ -326,6 +327,16 @@ class Runner:
             raise ExecutionError(str(exc), retryable=False) from exc
         if resolved is None:
             return
+        if msg.recorded_resolution is not None:
+            committed = InputResolutionBinding.model_validate_json(
+                msg.recorded_resolution
+            )
+            if not committed.matches(resolved.binding):
+                raise ExecutionError(
+                    f"task {msg.task_id} is committed to the inputs it already "
+                    "resolved, and its source resolves to a different request now",
+                    retryable=False,
+                )
         msg.resolved_contract = resolved.request.model_dump_json()
         self.lifecycle.notify_task_update(
             msg.task_id, {"input_resolution": resolved.binding.model_dump(mode="json")}

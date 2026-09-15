@@ -57,6 +57,14 @@ class WorkerTaskMessage(BaseModel):
             "the executor: the model, sampling, and the source its prompts come from."
         ),
     )
+    recorded_resolution: str | None = Field(
+        default=None,
+        description=(
+            "The input resolution this task is already committed to, when one was "
+            "recorded: a re-drive that resolves to anything else fails instead of "
+            "running against substituted input."
+        ),
+    )
     resolved_contract: str | None = Field(
         default=None,
         description=(

@@ -15,7 +15,9 @@ from shared.schemas.result.catalog import InferenceResult
 from shared.schemas.result.payloads import InferenceItem
 from shared.tasks.specs import InferenceSpecStrict
 from tests.worker.factories import make_worker_task_message
+from worker.executors.base_executor import ExecutionError
 from worker.executors.inference.resolution import resolve_task_contract
+from worker.runner import Runner
 
 
 def _spec(data: dict[str, Any], upstream: dict[str, Any] | None = None):
@@ -163,3 +165,53 @@ def test_a_contract_declaring_an_unimplemented_resolver_fails() -> None:
     task.declared_contract = bumped.model_dump_json()
     with pytest.raises(InputResolutionError, match="resolver version"):
         resolve_task_contract(task)
+
+
+class TestRecoveryFence:
+    def _runner(self):
+        updates: list[tuple[str, dict[str, Any]]] = []
+
+        class _Lifecycle:
+            def notify_task_update(self, task_id: str, payload: dict[str, Any]) -> None:
+                updates.append((task_id, payload))
+
+        runner = Runner.__new__(Runner)
+        runner.lifecycle = _Lifecycle()
+        return runner, updates
+
+    def test_a_resolution_is_recorded_before_the_embodiment_runs(self) -> None:
+        runner, updates = self._runner()
+        task = _task(_EXPR, {"up": _upstream("a", "b")})
+        runner._materialize_contract(task)
+        assert task.resolved_contract is not None
+        assert updates and "input_resolution" in updates[0][1]
+        assert updates[0][1]["input_resolution"]["cardinality"] == 2
+
+    def test_a_re_drive_reaching_the_same_request_runs(self) -> None:
+        runner, _updates = self._runner()
+        first = _task(_EXPR, {"up": _upstream("a", "b")})
+        runner._materialize_contract(first)
+        again = _task(_EXPR, {"up": _upstream("a", "b")})
+        resolved = resolve_task_contract(first)
+        assert resolved is not None
+        again.recorded_resolution = resolved.binding.model_dump_json()
+        runner._materialize_contract(again)
+        assert again.resolved_contract == first.resolved_contract
+
+    def test_a_re_drive_on_substituted_upstream_content_fails_closed(self) -> None:
+        # The committed invocation runs the inputs it resolved; a retry that would
+        # carry different ones fails rather than silently running them.
+        runner, _updates = self._runner()
+        committed = resolve_task_contract(_task(_EXPR, {"up": _upstream("a", "b")}))
+        assert committed is not None
+        retry = _task(_EXPR, {"up": _upstream("a", "changed")})
+        retry.recorded_resolution = committed.binding.model_dump_json()
+        with pytest.raises(ExecutionError, match="committed to the inputs"):
+            runner._materialize_contract(retry)
+
+    def test_a_source_that_does_not_resolve_fails_the_task(self) -> None:
+        runner, updates = self._runner()
+        with pytest.raises(ExecutionError, match="does not declare a dependency"):
+            runner._materialize_contract(_task(_EXPR, {"other": _upstream("a")}))
+        # Nothing was recorded, so no claim can be sized from a resolution that failed.
+        assert updates == []
