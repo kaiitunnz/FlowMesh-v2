@@ -139,10 +139,9 @@ def resolve_contract(
 
     ``projected`` is what the contract's source projected out of the pinned upstream
     snapshot, and is unread for a literal source, which carries its own items;
-    ``upstream`` is the provenance of the inputs that projection read. Both kinds are
-    validated against the same declared envelope here, so a resolution that exceeds what
-    the leaf declared fails as a typed input error before any model I/O and before any
-    admission.
+    ``upstream`` is the provenance of the inputs that projection read. A declared
+    envelope is validated here for either kind, so a resolution exceeding what the leaf
+    declared fails as a typed input error before any model I/O and before any admission.
     """
     source = contract.source
     if source.resolver_version != INPUT_RESOLVER_VERSION:
@@ -155,7 +154,7 @@ def resolve_contract(
         if source.kind is InferenceSourceKind.LITERAL
         else _projected_prompts(source, projected)
     )
-    if len(prompts) > source.max_items:
+    if source.max_items is not None and len(prompts) > source.max_items:
         raise InputResolutionError(
             f"the source resolved {len(prompts)} prompts and declares at most "
             f"{source.max_items}"
@@ -281,8 +280,9 @@ def canonical_source(spec: InferenceSpec) -> CanonicalInferenceInputSource:
     Two shapes project. Literal prompts under ``spec.data.items`` resolve to exactly
     themselves. One bounded projection of a declared direct upstream input — written as
     ``spec.data.expr``, or as ``spec.data.node`` plus ``spec.data.path`` — resolves to
-    the prompt vector that projection yields, within the envelope the leaf declares
-    under ``spec.data.max_items``. A dataset, an object store, or an image group is
+    the prompt vector that projection yields. A leaf bounds that vector under
+    ``spec.data.max_items``, or declares no bound and has its request prepared before an
+    embodiment is chosen for it. A dataset, an object store, or an image group is
     rejected rather than projected, because the two embodiments do not read those
     identically.
 
@@ -330,17 +330,11 @@ def _literal_source(data: dict[str, Any], items: Any) -> CanonicalInferenceInput
 
 def _upstream_source(data: dict[str, Any]) -> CanonicalInferenceInputSource:
     node, path = _normalized_projection(data)
-    if (max_items := _positive_int(data, "max_items")) is None:
-        raise CanonicalProjectionError(
-            "an upstream projection must declare spec.data.max_items; the admission "
-            "capacity its embodiments are screened against is bounded before the "
-            "upstream value exists"
-        )
     return CanonicalInferenceInputSource(
         kind=InferenceSourceKind.UPSTREAM,
         node=node,
         path=path,
-        max_items=max_items,
+        max_items=_positive_int(data, "max_items"),
     )
 
 

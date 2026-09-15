@@ -292,8 +292,12 @@ def _declared_batch_size(spec: TaskSpecBase) -> int | None:
     return len(source.items) if source.kind is InferenceSourceKind.LITERAL else None
 
 
-def _declared_max_batch_size(spec: TaskSpecBase) -> int:
-    """The most conversations one invocation of a chat leaf can ever carry."""
+def _declared_max_batch_size(spec: TaskSpecBase) -> int | None:
+    """The most conversations one invocation of a chat leaf can ever carry.
+
+    A leaf projecting its prompts from upstream without declaring a bound carries None:
+    there is nothing to screen a candidate against until its request is prepared.
+    """
     source = _projectable_source(spec)
     return 1 if source is None else source.max_items
 

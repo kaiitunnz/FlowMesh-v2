@@ -55,11 +55,13 @@ class EmbodimentSnapshot:
     resident_capacity_enabled: bool
     resident_admission_slots: int = 0
 
-    def admits_batch(self, batch_size: int) -> bool:
+    def admits_batch(self, batch_size: int | None) -> bool:
         """Whether a replica's admission bound can ever hold a batch this size.
 
-        A snapshot reporting no bound does not constrain one: admission enforces its own
-        capacity, and the scheduler rules a candidate out only on evidence it holds.
+        A snapshot reporting no bound does not constrain one, and neither does a batch
+        of unknown size: admission enforces its own capacity, and the scheduler rules a
+        candidate out only on evidence it holds. A node whose bound is unknown is
+        prepared before it is selected, so the size reaching this is its actual one.
 
         This reads the deployment's configured bound, while admission gates on the
         bound a replica reports. The two agree while every replica reports the
@@ -69,6 +71,7 @@ class EmbodimentSnapshot:
         """
         return (
             self.resident_admission_slots <= 0
+            or batch_size is None
             or batch_size <= self.resident_admission_slots
         )
 
@@ -103,14 +106,17 @@ class EmbodimentSelector(Protocol):
     name: str
 
     def __call__(
-        self, menu: InferenceEmbodimentMenu, snapshot: EmbodimentSnapshot
+        self,
+        menu: InferenceEmbodimentMenu,
+        snapshot: EmbodimentSnapshot,
+        batch_size: int | None = None,
     ) -> EmbodimentDecision: ...
 
 
 def candidate_feasible(
     candidate: InferenceEmbodimentCandidate,
     snapshot: EmbodimentSnapshot,
-    batch_size: int = 1,
+    batch_size: int | None = 1,
 ) -> bool:
     """Whether a candidate's own envelope can be satisfied right now."""
     if candidate.kind is InferenceEmbodimentKind.RESIDENT_SERVED:
@@ -125,7 +131,7 @@ def candidate_feasible(
 def candidate_unavailable(
     candidate: InferenceEmbodimentCandidate,
     snapshot: EmbodimentSnapshot,
-    batch_size: int = 1,
+    batch_size: int | None = 1,
 ) -> bool:
     """Whether the deployment's own configuration rules a candidate out entirely.
 
@@ -154,24 +160,28 @@ class PrimaryEmbodimentSelector:
     name = "primary"
 
     def __call__(
-        self, menu: InferenceEmbodimentMenu, snapshot: EmbodimentSnapshot
+        self,
+        menu: InferenceEmbodimentMenu,
+        snapshot: EmbodimentSnapshot,
+        batch_size: int | None = None,
     ) -> EmbodimentDecision:
+        batch_size = menu.max_batch_size if batch_size is None else batch_size
         primary = menu.candidate(menu.primary)
         if primary is None:
             return EmbodimentDecision.defer("primary_embodiment_missing")
-        if candidate_feasible(primary, snapshot, menu.max_batch_size):
+        if candidate_feasible(primary, snapshot, batch_size):
             return EmbodimentDecision.select(primary.alternative_id)
-        if not candidate_unavailable(primary, snapshot, menu.max_batch_size):
+        if not candidate_unavailable(primary, snapshot, batch_size):
             return EmbodimentDecision.defer(f"{primary.kind.value}_infeasible")
         fallthrough = [
             candidate
             for candidate in menu.candidates
             if candidate.alternative_id != primary.alternative_id
-            and candidate_feasible(candidate, snapshot, menu.max_batch_size)
+            and candidate_feasible(candidate, snapshot, batch_size)
         ]
         if len(fallthrough) != 1:
             return EmbodimentDecision.defer(
-                _unavailable_reason(primary, snapshot, menu.max_batch_size)
+                _unavailable_reason(primary, snapshot, batch_size)
             )
         return EmbodimentDecision.select(fallthrough[0].alternative_id)
 
@@ -179,7 +189,7 @@ class PrimaryEmbodimentSelector:
 def _unavailable_reason(
     primary: InferenceEmbodimentCandidate,
     snapshot: EmbodimentSnapshot,
-    batch_size: int,
+    batch_size: int | None,
 ) -> str:
     """Why no embodiment of a node can run, in terms an operator can act on."""
     base = f"{primary.kind.value}_unavailable"

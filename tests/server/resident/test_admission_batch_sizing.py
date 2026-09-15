@@ -8,7 +8,7 @@ from shared.inference import InputResolutionBinding
 
 
 def _dependency(
-    batch_size: int | None = 1, max_batch_size: int = 1
+    batch_size: int | None = 1, max_batch_size: int | None = 1
 ) -> ServiceDependency:
     return ServiceDependency(
         service_ref="Qwen/Qwen3-4B",
@@ -43,11 +43,20 @@ def test_an_unresolved_upstream_leaf_reserves_its_declared_bound() -> None:
     assert _admitted_batch_size(dependency, None) == 16
 
 
+def test_an_undeclared_bound_with_no_resolution_sizes_nothing() -> None:
+    # Nothing says how many conversations the invocation runs, and admitting it would
+    # reserve fewer slots than it occupies.
+    dependency = _dependency(batch_size=None, max_batch_size=None)
+    assert _admitted_batch_size(dependency, None) is None
+
+
 def test_a_resolution_below_the_declared_bound_reserves_only_what_it_runs() -> None:
     dependency = _dependency(batch_size=None, max_batch_size=16)
+    batch_size = _admitted_batch_size(dependency, _binding(2, tokens=1024))
+    assert batch_size is not None
     profile = AdmissionProfile(
         engine_batch_key="k",
-        batch_size=_admitted_batch_size(dependency, _binding(2, tokens=1024)),
+        batch_size=batch_size,
         max_output_tokens=1024,
     )
     credit = default_credit(profile)

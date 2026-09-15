@@ -766,11 +766,18 @@ class ResidentCapacityControl:
             origin_worker=origin_worker,
         )
         binding = self._resolve_input_resolution(env.task_id)
+        if (batch_size := _admitted_batch_size(dependency, binding)) is None:
+            self._settle_origination_error(
+                orig,
+                "the leaf declares no conversation bound and no resolution recorded "
+                "how many it runs",
+            )
+            return
         profile = AdmissionProfile(
             engine_batch_key=dependency.engine_batch_key,
             adapter_ref=dependency.adapter,
             adapter_source=dependency.adapter_source,
-            batch_size=_admitted_batch_size(dependency, binding),
+            batch_size=batch_size,
             max_output_tokens=binding.projected_output_tokens if binding else None,
         )
         await self._drive_claim(orig, dependency, profile)
@@ -1536,13 +1543,15 @@ class ResidentCapacityControl:
 
 def _admitted_batch_size(
     dependency: ServiceDependency, binding: InputResolutionBinding | None
-) -> int:
+) -> int | None:
     """The admission slots one invocation of this leaf reserves.
 
     The resolution that materialized the conversations reports how many there are, and
     that count is what the claim reserves. Without one, a leaf naming its conversations
     outright reserves exactly that many and a leaf resolving them from upstream reserves
-    its declared bound, so admission is never sized below what the invocation runs.
+    its declared bound, so admission is never sized below what the invocation runs. A
+    leaf that declares neither is sized by nothing, and admitting it would reserve less
+    capacity than it runs.
     """
     if binding is not None:
         return binding.cardinality

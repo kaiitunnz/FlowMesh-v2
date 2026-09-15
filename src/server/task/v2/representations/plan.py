@@ -152,8 +152,9 @@ class InferenceEmbodimentMenu(BaseModel):
     candidates: tuple[InferenceEmbodimentCandidate, ...]
     # The most conversations one invocation of the node can carry. Every entry runs the
     # same ones, so it belongs to the menu rather than to any single entry. A node whose
-    # prompts come from upstream is screened against this bound, not an exact count.
-    max_batch_size: int = Field(default=1, ge=1)
+    # prompts come from upstream is screened against this bound, not an exact count; one
+    # declaring no bound carries None until its preparation reports the exact count.
+    max_batch_size: int | None = Field(default=1, ge=1)
 
     @model_validator(mode="after")
     def _validate_candidates(self) -> "InferenceEmbodimentMenu":

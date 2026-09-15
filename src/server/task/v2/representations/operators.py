@@ -167,8 +167,9 @@ class ServiceDependency(BaseModel):
     batch_size: int | None = Field(default=1, ge=1)
     # The most conversations any invocation of this leaf can carry. Each runs as its own
     # engine sequence, so this is what a resident embodiment's feasibility is screened
-    # against before a prompt vector exists.
-    max_batch_size: int = Field(default=1, ge=1)
+    # against before a prompt vector exists. A leaf declaring no bound carries None and
+    # is screened against the request its preparation produced.
+    max_batch_size: int | None = Field(default=1, ge=1)
 
     @property
     def service_family(self) -> str:
