@@ -266,3 +266,72 @@ async def test_an_unreadable_resolution_report_records_nothing() -> None:
     task_id, _primary = await _menu_task(runtime)
     runtime.record_input_resolution(task_id, {"cardinality": "many"})
     assert runtime.input_resolution_binding(task_id) is None
+
+
+UPSTREAM_SOURCED = """
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {name: upstream}
+spec:
+  graph:
+    nodes:
+      - name: src
+        spec:
+          taskType: echo
+          data: {type: list, items: ["a", "b"]}
+      - name: gen
+        dependsOn: [src]
+        spec:
+          taskType: inference
+          model:
+            source: {identifier: Qwen/Qwen3-4B}
+ENGINE
+          data: {type: list, expr: src.items.output, max_items: 8}
+          resources: {hardware: {gpu: {count: 1}}}
+SERVICE
+"""
+
+
+async def _upstream_task(
+    runtime: TaskRuntime, service: str = "", engine: bool = True
+) -> str:
+    text = UPSTREAM_SOURCED.replace(
+        "ENGINE", "            vllm: {gpu_memory_utilization: 0.9}" if engine else ""
+    ).replace("SERVICE", f"          service: {service}" if service else "")
+    _wfl, ids = await _register(runtime, text)
+    return ids["gen"]
+
+
+@pytest.mark.anyio
+async def test_a_locally_served_upstream_leaf_declares_no_contract() -> None:
+    # One embodiment served locally resolves its own prompts, so it reports the native
+    # result it always has. An upstream source does not make a leaf a fabric contract,
+    # any more than a literal one does.
+    runtime = _runtime(FakeRegistry())
+    task_id = await _upstream_task(runtime, engine=False)
+    assert runtime.embodiment_menu(task_id) is None
+
+    engine = runtime.orchestration_engine(_workflow_of(runtime, task_id))
+    assert engine is not None and engine.service_dependency(task_id) is None
+    assert runtime.declared_contract(task_id) is None
+
+
+@pytest.mark.anyio
+async def test_a_resident_bound_upstream_leaf_carries_its_contract() -> None:
+    # A replica cannot read an upstream node, so the request has to be resolved for it.
+    runtime = _runtime(FakeRegistry())
+    task_id = await _upstream_task(runtime, "{mode: resident}")
+    assert runtime.embodiment_menu(task_id) is None
+
+    contract = runtime.declared_contract(task_id)
+    assert contract is not None
+    source = CanonicalInferenceContract.model_validate_json(contract).source
+    assert (source.node, source.path) == ("src", "items.output")
+
+
+@pytest.mark.anyio
+async def test_a_menu_upstream_leaf_carries_its_contract() -> None:
+    runtime = _runtime(FakeRegistry())
+    task_id = await _upstream_task(runtime)
+    assert runtime.embodiment_menu(task_id) is not None
+    assert runtime.declared_contract(task_id) is not None

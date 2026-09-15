@@ -2151,8 +2151,10 @@ class TaskRuntime:
         holding that value can resolve them. It names no embodiment: the worker reads a
         contract and never learns which one it is running.
 
-        A pinned single-prompt literal leaf declares none and keeps reporting the native
-        result its own embodiment has always reported.
+        A leaf that admits one embodiment and serves it locally declares none, whether
+        its prompts are literal or come from upstream: it resolves them in its own
+        executor and keeps reporting the native result that embodiment has always
+        reported. So does a pinned single-prompt literal leaf.
         """
         with self._lock:
             record = self._tasks.get(task_id)
@@ -2170,12 +2172,13 @@ class TaskRuntime:
                     task_id,
                 )
                 return None
-            if (
-                engine.embodiment_menu(task_id) is None
-                and contract.source.kind is InferenceSourceKind.LITERAL
-            ):
-                dependency = engine.service_dependency(task_id)
-                if dependency is None or len(contract.source.items) <= 1:
+            if engine.embodiment_menu(task_id) is None:
+                if engine.service_dependency(task_id) is None:
+                    return None
+                if (
+                    contract.source.kind is InferenceSourceKind.LITERAL
+                    and len(contract.source.items) <= 1
+                ):
                     return None
             return contract.model_dump_json()
 

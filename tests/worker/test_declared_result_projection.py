@@ -179,11 +179,15 @@ def test_a_relayed_batch_stores_the_same_shape(tmp_path: Path) -> None:
 def test_a_leaf_with_no_resolved_contract_stores_its_own_result(
     tmp_path: Path,
 ) -> None:
-    # A leaf that admits one embodiment reports what that embodiment produced.
+    # A leaf that admits one embodiment reports what that embodiment produced, whether
+    # it read its prompts from literal items or resolved them from an upstream node:
+    # only a menu or a replica needs a result rewritten into the canonical shape, and a
+    # guard reading a field this leaf has always reported still finds it.
     stored = _stored(tmp_path, _native_local(), None)
 
     assert stored["usage"] is not None
     assert stored["items"][0]["finish_reason"] == "stop"
+    assert stored["items"][0]["metadata"] == {"engine": "vllm"}
 
 
 def test_the_dropped_fields_are_unset_under_both_embodiments(tmp_path: Path) -> None:
