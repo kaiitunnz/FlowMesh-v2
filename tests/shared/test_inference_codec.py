@@ -6,8 +6,13 @@ import pytest
 
 from shared.inference import (
     CanonicalProjectionError,
+    InferenceSourceKind,
+    InputResolutionError,
+    canonical_contract,
     canonical_request,
     canonical_result,
+    canonical_source,
+    resolve_contract,
 )
 from shared.tasks.specs import InferenceSpecStrict
 
@@ -64,7 +69,7 @@ class TestCanonicalRequest:
             ({"type": "list", "items": [{"role": "user"}]}, "literal non-empty"),
             ({"type": "list", "items": ["a", ""]}, "literal non-empty"),
             ({"type": "dataset", "url": "squad"}, "not projectable"),
-            ({"type": "list", "expr": "up.items"}, "non-empty literal list"),
+            ({"type": "list", "expr": "up.items"}, "must declare spec.data.max_items"),
             (
                 {"type": "list", "items": ["a"], "s3_cfg": "s3://bucket"},
                 "literal items",
@@ -111,3 +116,121 @@ class TestCanonicalResult:
         # An embodiment that does not report token counts leaves usage unset rather
         # than changing what the leaf declares.
         assert canonical_result(canonical_request(_spec()), ["world"]).usage is None
+
+
+class TestCanonicalSource:
+    def test_literal_items_are_a_source_bounded_by_their_own_count(self) -> None:
+        source = canonical_source(_batch_spec())
+        assert source.kind is InferenceSourceKind.LITERAL
+        assert source.items == ("hello", "goodbye", "again")
+        assert source.max_items == 3
+
+    @pytest.mark.parametrize(
+        "data",
+        [
+            {"type": "list", "expr": "up.items.output", "max_items": 8},
+            {"type": "list", "node": "up", "path": "items.output", "max_items": 8},
+        ],
+    )
+    def test_both_upstream_forms_normalize_to_one_descriptor(
+        self, data: dict[str, Any]
+    ) -> None:
+        source = canonical_source(_spec(data=data))
+        assert source.kind is InferenceSourceKind.UPSTREAM
+        assert (source.node, source.path) == ("up", "items.output")
+        assert source.expression == "up.items.output"
+
+    def test_the_two_upstream_forms_digest_identically(self) -> None:
+        by_expr = canonical_source(
+            _spec(data={"type": "list", "expr": "up.items.output", "max_items": 8})
+        )
+        by_node = canonical_source(
+            _spec(
+                data={
+                    "type": "list",
+                    "node": "up",
+                    "path": "items.output",
+                    "max_items": 8,
+                }
+            )
+        )
+        assert by_expr.digest() == by_node.digest()
+
+    @pytest.mark.parametrize(
+        "data, reason",
+        [
+            ({"type": "list", "expr": "up", "max_items": 2}, "as '<node>.<path>'"),
+            ({"type": "list", "node": "up", "max_items": 2}, "spec.data.path"),
+            (
+                {"type": "list", "items": ["a"], "expr": "up.x", "max_items": 1},
+                "exactly one source",
+            ),
+            (
+                {"type": "list", "expr": "up.x", "node": "up", "max_items": 1},
+                "declare one projection",
+            ),
+            ({"type": "list", "expr": "up.x", "max_items": 0}, "positive integer"),
+        ],
+    )
+    def test_an_unprojectable_source_is_rejected(
+        self, data: dict[str, Any], reason: str
+    ) -> None:
+        with pytest.raises(CanonicalProjectionError, match=reason):
+            canonical_source(_spec(data=data))
+
+
+def _upstream_contract(max_items: int = 4, **data: Any):
+    return canonical_contract(
+        _spec(
+            data={"type": "list", "expr": "up.items.output", **data}
+            | {"max_items": max_items}
+        )
+    )
+
+
+class TestResolveContract:
+    def test_a_literal_contract_resolves_to_its_own_items(self) -> None:
+        resolved = resolve_contract(canonical_contract(_batch_spec()), None)
+        assert resolved.request.prompts == ("hello", "goodbye", "again")
+        assert resolved.binding.cardinality == 3
+        assert resolved.binding.upstream == ()
+
+    def test_an_upstream_contract_resolves_to_the_projected_vector(self) -> None:
+        resolved = resolve_contract(_upstream_contract(), ["a", "b"])
+        assert resolved.request.prompts == ("a", "b")
+        assert resolved.binding.cardinality == 2
+        assert resolved.binding.upstream == ()
+
+    def test_both_kinds_reach_the_same_request_from_the_same_values(self) -> None:
+        # One resolution seam, so a literal leaf and an upstream one that yields the
+        # same vector are the same request to everything downstream.
+        literal = resolve_contract(canonical_contract(_batch_spec()), None)
+        upstream = resolve_contract(_upstream_contract(), ["hello", "goodbye", "again"])
+        assert literal.request == upstream.request
+        assert literal.binding.request_digest == upstream.binding.request_digest
+
+    def test_the_binding_projects_the_whole_vectors_token_demand(self) -> None:
+        resolved = resolve_contract(_upstream_contract(), ["a", "b"])
+        assert resolved.binding.projected_output_tokens == 1024
+
+    @pytest.mark.parametrize(
+        "projected, reason",
+        [
+            (None, "resolved nothing"),
+            ("a", "resolved str"),
+            ([], "resolved list"),
+            (["a", 2], "non-string or empty"),
+            (["a", " "], "non-string or empty"),
+            (["a"] * 5, "declares at most 4"),
+        ],
+    )
+    def test_a_source_outside_its_declared_shape_fails_typed(
+        self, projected: Any, reason: str
+    ) -> None:
+        with pytest.raises(InputResolutionError, match=reason):
+            resolve_contract(_upstream_contract(), projected)
+
+    def test_an_oversized_prompt_fails_against_the_declared_envelope(self) -> None:
+        contract = _upstream_contract(max_prompt_chars=8)
+        with pytest.raises(InputResolutionError, match="declares at most 8"):
+            resolve_contract(contract, ["fits", "far too long to fit"])

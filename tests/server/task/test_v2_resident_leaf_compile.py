@@ -405,7 +405,7 @@ def test_each_candidate_carries_its_own_episode_and_envelope():
     "overrides, reason",
     [
         ({"data": "{type: dataset, url: squad}"}, "not projectable"),
-        ({"data": "{type: list, expr: upstream.items}"}, "literal list"),
+        ({"data": "{type: list, expr: upstream.items}"}, "max_items"),
         (
             {"model": "{source: {identifier: Qwen/Qwen3-4B}}"},
             "does not pin the vLLM engine",
