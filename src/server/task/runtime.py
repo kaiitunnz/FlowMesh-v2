@@ -1198,6 +1198,8 @@ class TaskRuntime:
         if record is None or engine is None:
             return
         if record.status == TaskStatus.CANCELLING:
+            self._pending_facade_groups.pop(task_id, None)
+            record.pending_facade_group = None
             self._settle_cancelled_locked(record, time.time())
             return
         if hr.kind in (HarnessResultKind.FAILURE, HarnessResultKind.CANCELLATION):
