@@ -1199,7 +1199,6 @@ class TaskRuntime:
             return
         if record.status == TaskStatus.CANCELLING:
             self._settle_cancelled_locked(record, time.time())
-            self._cv.notify_all()
             return
         if hr.kind in (HarnessResultKind.FAILURE, HarnessResultKind.CANCELLATION):
             self._pending_facade_groups.pop(task_id, None)
@@ -2269,7 +2268,6 @@ class TaskRuntime:
             return
         if record.status == TaskStatus.CANCELLING:
             self._settle_cancelled_locked(record, time.time())
-            self._cv.notify_all()
             return
         if (standing := engine.input_resolution(task_id)) is not None and (
             standing.reference is not None
