@@ -154,6 +154,9 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   success that races the cancel — a dispatch the worker had already finished, such as an
   agent-episode step or an input preparation — settles the cancellation in place, since
   the dispatch that would carry the worker's own terminal is the one the cancel withholds.
+  An episode suspended on a mediated boundary settles at the cancel itself for the same
+  reason: the cancel reaps that boundary, and no worker holds a dispatch for the task. A
+  task running a step settles from its worker's own terminal.
 - **Physical episode lowering.** The compiler lowers a v2 template either transparently
   (one physical node per operator, the compatibility baseline) or into run-to-yield
   **episodes**: each node is annotated with the boundary that closes it (service issue,
