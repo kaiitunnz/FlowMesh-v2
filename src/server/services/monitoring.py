@@ -453,6 +453,21 @@ class EventMonitor:
             self._logger.debug("Failed to parse task stream event: %s (%s)", raw, exc)
             return None
 
+    def _handle_input_resolution(
+        self, task_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Record a reported input resolution and keep it out of the task's updates.
+
+        It is a durable resolution fact rather than task progress, so it is recorded
+        and removed instead of being stored as the task's latest update.
+        """
+        if (binding := payload.get("input_resolution")) is None:
+            return payload
+        self._runtime.record_input_resolution(task_id, binding)
+        return {
+            key: value for key, value in payload.items() if key != "input_resolution"
+        }
+
     def _handle_task_event(self, event: TaskEvent) -> None:
         payload = event.payload or {}
         event_type = event.type
@@ -463,6 +478,7 @@ class EventMonitor:
                     event.task_id, event.worker_id, payload, event.ts
                 )
             case "TASK_UPDATE":
+                payload = self._handle_input_resolution(event.task_id, payload)
                 payload = self._handle_ssh_task_update(
                     event.task_id, event.worker_id, payload
                 )

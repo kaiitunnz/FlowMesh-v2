@@ -18,6 +18,7 @@ from enum import StrEnum
 from pydantic import BaseModel, ConfigDict, Field
 
 from shared.harness.boundary import DenialKind
+from shared.inference import InputResolutionBinding
 from shared.outcome import OutcomeManifest
 from shared.private_state import PrivateStateAttachment, PrivateStateBinding
 
@@ -460,6 +461,22 @@ class EmbodimentSelection(BaseModel):
     selected_at: str = Field(default_factory=now_iso)
 
 
+class InputResolution(BaseModel):
+    """The resolution a work item's inputs were materialized under.
+
+    The origin worker records it before either embodiment reaches a model, so what the
+    invocation ran is known from the resolution's own identity rather than from the
+    values, which stay on that worker. A re-drive that reaches the same request carries
+    the same binding; one that does not is a changed input.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    work_item_id: str
+    binding: InputResolutionBinding
+    resolved_at: str = Field(default_factory=now_iso)
+
+
 class EffectReceipt(BaseModel):
     """Idempotent record of an externally visible or terminal action."""
 
@@ -551,6 +568,7 @@ class LedgerSnapshot(BaseModel):
     invocations: list[Invocation] = Field(default_factory=list)
     attempts: list[Attempt] = Field(default_factory=list)
     embodiment_selections: list[EmbodimentSelection] = Field(default_factory=list)
+    input_resolutions: list[InputResolution] = Field(default_factory=list)
     boundary_events: list[BoundaryEvent] = Field(default_factory=list)
     effect_receipts: list[EffectReceipt] = Field(default_factory=list)
     authority_decisions: list[AuthorityDecision] = Field(default_factory=list)

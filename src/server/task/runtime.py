@@ -9,6 +9,8 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
+from pydantic import ValidationError
+
 from shared.harness import (
     AgentEpisodeDispatch,
     BoundaryEventKind,
@@ -24,6 +26,7 @@ from shared.harness import (
 from shared.inference import (
     CanonicalProjectionError,
     InferenceSourceKind,
+    InputResolutionBinding,
     canonical_contract,
 )
 from shared.outcome import OutcomeManifest
@@ -2175,6 +2178,36 @@ class TaskRuntime:
                 if dependency is None or len(contract.source.items) <= 1:
                     return None
             return contract.model_dump_json()
+
+    def record_input_resolution(self, task_id: str, binding_payload: Any) -> None:
+        """Record how a task's inputs resolved on its origin worker.
+
+        The worker reports this before either embodiment reaches a model, so the
+        resolution is durable ahead of a local generation or a resident service issue,
+        and the admission that follows is sized from the cardinality that materialized.
+        """
+        try:
+            binding = InputResolutionBinding.model_validate(binding_payload)
+        except ValidationError:
+            self._logger.warning(
+                "[fabric] a task reported an unreadable input resolution: %s", task_id
+            )
+            return
+        with self._lock:
+            record = self._tasks.get(task_id)
+            engine = self._engines.get(record.workflow_id) if record else None
+            if engine is not None:
+                engine.record_input_resolution(task_id, binding)
+
+    def input_resolution_binding(self, task_id: str) -> InputResolutionBinding | None:
+        """The binding a task's recorded resolution carries, if one was recorded."""
+        with self._lock:
+            record = self._tasks.get(task_id)
+            engine = self._engines.get(record.workflow_id) if record else None
+            if engine is None:
+                return None
+            resolution = engine.input_resolution(task_id)
+        return resolution.binding if resolution is not None else None
 
     def resolve_v2_output(
         self, workflow_id: str, output_id: str

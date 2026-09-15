@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from typing import Self
 
 from shared.harness import DeliveredOutcome, OutcomeKind
+from shared.inference import InputResolutionBinding
 from shared.outcome import OutcomeManifest
 from shared.private_state import (
     OwnerFence,
@@ -88,6 +89,7 @@ from .state import (
     DenialKind,
     EffectReceipt,
     EmbodimentSelection,
+    InputResolution,
     Invocation,
     InvocationState,
     LedgerSnapshot,
@@ -230,6 +232,9 @@ class OrchestrationEngine:
         self._attempts = {a.attempt_id: a for a in snapshot.attempts}
         self._embodiment_selections = {
             sel.work_item_id: sel for sel in snapshot.embodiment_selections
+        }
+        self._input_resolutions = {
+            res.work_item_id: res for res in snapshot.input_resolutions
         }
         self._receipts = {r.invocation_id: r for r in snapshot.effect_receipts}
         self._decisions = list(snapshot.authority_decisions)
@@ -3263,6 +3268,37 @@ class OrchestrationEngine:
         )
         return selection
 
+    def input_resolution(self, task_id: str) -> InputResolution | None:
+        """The resolution a task's inputs were materialized under, if one exists."""
+        wi = self._work_item_for_task(task_id)
+        return self._input_resolutions.get(wi.work_item_id) if wi else None
+
+    def record_input_resolution(
+        self, task_id: str, binding: InputResolutionBinding
+    ) -> InputResolution | None:
+        """Record how a work item's inputs resolved, before its embodiment runs.
+
+        A standing resolution is kept: a re-drive that reaches the same request records
+        nothing new, and one that reaches a different request leaves the recorded
+        binding in place for the reconciliation that compares against it.
+        """
+        wi = self._work_item_for_task(task_id)
+        if wi is None:
+            return None
+        if (standing := self._input_resolutions.get(wi.work_item_id)) is not None:
+            return standing
+        resolution = InputResolution(work_item_id=wi.work_item_id, binding=binding)
+        self._input_resolutions[wi.work_item_id] = resolution
+        self._emit(
+            "input_resolved",
+            work_item_id=wi.work_item_id,
+            detail={
+                "request_digest": binding.request_digest,
+                "cardinality": str(binding.cardinality),
+            },
+        )
+        return resolution
+
     def episode_spec(self, task_id: str) -> EpisodeSpec | None:
         """The run-to-yield episode a task's operator lowers to, if the plan cut it."""
         wi = self._work_item_for_task(task_id)
@@ -3379,6 +3415,7 @@ class OrchestrationEngine:
             invocations=list(self._invocations.values()),
             attempts=list(self._attempts.values()),
             embodiment_selections=list(self._embodiment_selections.values()),
+            input_resolutions=list(self._input_resolutions.values()),
             boundary_events=list(self._boundary_events.values()),
             effect_receipts=list(self._receipts.values()),
             authority_decisions=list(self._decisions),
