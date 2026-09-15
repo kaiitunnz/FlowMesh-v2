@@ -1,16 +1,13 @@
 """Tests for the canonical inference request and result projection."""
 
-import json
 from typing import Any
 
 import pytest
 
 from shared.inference import (
-    CanonicalInferenceRequest,
     CanonicalProjectionError,
     canonical_request,
     canonical_result,
-    generated_outputs,
 )
 from shared.tasks.specs import InferenceSpecStrict
 
@@ -114,56 +111,3 @@ class TestCanonicalResult:
         # An embodiment that does not report token counts leaves usage unset rather
         # than changing what the leaf declares.
         assert canonical_result(canonical_request(_spec()), ["world"]).usage is None
-
-
-class TestGeneratedOutputs:
-    def test_a_local_generation_reports_its_items(self) -> None:
-        request = canonical_request(_batch_spec())
-        payload = {
-            "items": [
-                {"index": 0, "prompt": "hello", "output": "a"},
-                {"index": 1, "prompt": "goodbye", "output": "b"},
-                {"index": 2, "prompt": "again", "output": "c"},
-            ]
-        }
-        assert generated_outputs(payload, request) == ["a", "b", "c"]
-
-    def test_a_relayed_batch_reports_one_completion_per_prompt(self) -> None:
-        request = canonical_request(_batch_spec())
-        payload = {"value": json.dumps(["a", "b", "c"])}
-        assert generated_outputs(payload, request) == ["a", "b", "c"]
-
-    def test_a_single_completion_is_read_verbatim(self) -> None:
-        # A one-prompt contract never parses its completion, so a model that happens to
-        # generate a JSON array is reported as the text it generated.
-        request = canonical_request(_spec())
-        assert generated_outputs({"value": '["a", "b"]'}, request) == ['["a", "b"]']
-
-    def test_projecting_a_projected_result_reproduces_it(self) -> None:
-        request = canonical_request(_batch_spec())
-        once = canonical_result(request, ["a", "b", "c"])
-        reread = generated_outputs(once.model_dump(), request)
-        assert reread is not None
-        assert canonical_result(request, reread) == once
-
-    @pytest.mark.parametrize(
-        "value",
-        ["not json", json.dumps(["a", "b"]), json.dumps(["a", "b", 3])],
-    )
-    def test_a_batch_value_that_does_not_match_the_contract_is_not_read(
-        self, value: str
-    ) -> None:
-        assert (
-            generated_outputs({"value": value}, canonical_request(_batch_spec()))
-            is None
-        )
-
-    def test_a_step_that_generated_nothing_reports_nothing(self) -> None:
-        assert generated_outputs({}, canonical_request(_spec())) is None
-
-    def test_an_item_count_that_does_not_match_the_contract_is_not_read(self) -> None:
-        request = CanonicalInferenceRequest(
-            model="Qwen/Qwen3-4B", prompts=("hello", "goodbye")
-        )
-        payload = {"items": [{"index": 0, "prompt": "hello", "output": "a"}]}
-        assert generated_outputs(payload, request) is None

@@ -294,23 +294,22 @@ sampling. Both report one result — the pinned model, and one item per declared
 carrying its index, its prompt, and its output. Fields only a local generation can report
 (`finish_reason`, `metadata`) and token accounting (`usage`) are dropped from both.
 
-A leaf declaring several prompts is served as one batch. It yields one resident boundary
-carrying every conversation and is admitted under one `ServiceClaim` and one
-`invocation_id`, whose credit reserves one admission slot per conversation; the replica
-issues each conversation as its own concurrent engine request, so the engine's continuous
-batching combines them, and their completions settle as that one invocation's outcome.
-The self-contained embodiment generates the same conversations in one batched call. A
-batch larger than a replica's admission bound (`RESIDENT_ADMISSION_SLOTS`) can never be
-admitted, so the leaf runs self-contained instead.
+A leaf declaring several prompts is served as one batch, whether its embodiment is chosen
+from a menu or pinned to `{mode: resident}`. It yields one resident boundary carrying
+every conversation and is admitted under one `ServiceClaim` and one `invocation_id`,
+whose credit reserves one admission slot per conversation; the replica issues each
+conversation as its own concurrent engine request, so the engine's continuous batching
+combines them, and their completions settle as that one invocation's outcome. The
+self-contained embodiment generates the same conversations in one batched call.
 
-A leaf pinned to `{mode: resident}` is served the same batch, on one boundary under one
-claim, with the same aggregate credit and the same whole-batch terminal — the pin selects
-no embodiment, so there is no menu and nothing to fall through to, and a batch past the
-admission bound fails there rather than running locally. A leaf whose request does not
-project into a contract — an adapter, a shard or parallel split, postprocessing, an
-engine other than vLLM, or inputs only one embodiment reads — runs one prompt and is
-rejected at submission when it declares more, because there is no contract to carry its
-conversations or to name the result they report.
+A batch larger than a replica's admission bound (`RESIDENT_ADMISSION_SLOTS`) can never be
+admitted, so the leaf runs self-contained instead. A pinned leaf selects no embodiment,
+so there is no menu and nothing to fall through to, and such a batch fails at admission
+rather than running locally. A leaf whose request does not project into a contract — an
+adapter, a shard or parallel split, postprocessing, an engine other than vLLM, or inputs
+only one embodiment reads — runs one prompt and is rejected at submission when it
+declares more, because there is no contract to carry its conversations or to name the
+result they report.
 
 At dispatch a scheduler-owned selector reads live feasibility and either binds one
 embodiment or defers, holding no worker and admitting no capacity object. It runs the
