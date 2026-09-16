@@ -223,6 +223,7 @@ if IS_ROOT_NODE:
             system_principal=_resident_owner,
             registry=RESIDENT_REGISTRY,
             logger=logger,
+            profiler=CONTROL_PROFILER,
         )
         RUNTIME.set_resident_terminal_hook(RESIDENT_CONTROL.on_invocation_terminal)
         RUNTIME.set_resident_handlers(

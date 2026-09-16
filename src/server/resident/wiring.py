@@ -21,6 +21,7 @@ from ..network.reverse_relay import RelaySessionStore
 from ..network.service import NetworkPlane
 from ..registries import WorkerRegistry
 from ..registries.resident import ResidentRegistry
+from ..services.profiling import NULL_PROFILER, Profiler
 from ..task.models import TERMINAL_TASK_STATUSES
 from ..task.runtime import TaskRuntime
 from .admission import AdmissionController
@@ -43,6 +44,7 @@ def build_resident_capacity(
     system_principal: SystemPrincipalProvider,
     registry: ResidentRegistry,
     logger: logging.Logger,
+    profiler: Profiler = NULL_PROFILER,
 ) -> ResidentCapacityControl:
     """Wire and return resident-capacity control for the enabled resident config."""
     cfg = orchestration.resident
@@ -123,6 +125,7 @@ def build_resident_capacity(
         idle_sweep_interval_sec=sweep_interval,
         redrive_backoff_sec=cfg.redrive_backoff_sec,
         max_transient_redrives=cfg.max_transient_redrives,
+        profiler=profiler,
     )
 
 

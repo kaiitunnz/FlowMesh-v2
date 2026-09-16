@@ -10,6 +10,8 @@ from typing import Any, cast
 import pytest
 
 from server.config import OrchestrationConfig
+from server.resident.service import _subject_workflow_id
+from server.resident.state import InvocationSubject, InvocationSubjectKind
 from server.services.metrics import MetricsRecorder
 from server.services.profiling import build_profiler
 from server.task.runtime import TaskRuntime
@@ -54,7 +56,9 @@ class _NoopSecretVault:
         return None
 
 
-def _submit(body: str, *, enabled: bool) -> tuple[str, MetricsRecorder]:
+def _submit(
+    body: str, *, enabled: bool
+) -> tuple[str, MetricsRecorder, TaskRuntime, list]:
     recorder = MetricsRecorder(
         pathlib.Path(tempfile.mkdtemp()),
         logging.getLogger("control-profiling-test"),
@@ -73,12 +77,12 @@ def _submit(body: str, *, enabled: bool) -> tuple[str, MetricsRecorder]:
         secret_vault=cast(Any, _NoopSecretVault()),
         profiler=build_profiler(recorder, enabled=enabled),
     )
-    workflow_id, _results = asyncio.run(runtime.register("owner", "org", body))
-    return workflow_id, recorder
+    workflow_id, results = asyncio.run(runtime.register("owner", "org", body))
+    return workflow_id, recorder, runtime, results
 
 
 def test_a_v2_submission_decomposes_its_submit_window() -> None:
-    workflow_id, recorder = _submit(_V2, enabled=True)
+    workflow_id, recorder, _runtime, _results = _submit(_V2, enabled=True)
     submit = recorder.control_plane_breakdown()["workflows"][workflow_id]["windows"][
         "submit"
     ]
@@ -94,7 +98,7 @@ def test_a_v2_submission_decomposes_its_submit_window() -> None:
 
 
 def test_the_submit_window_sum_excludes_the_nested_snapshot() -> None:
-    workflow_id, recorder = _submit(_V2, enabled=True)
+    workflow_id, recorder, _runtime, _results = _submit(_V2, enabled=True)
     submit = recorder.control_plane_breakdown()["workflows"][workflow_id]["windows"][
         "submit"
     ]
@@ -110,10 +114,27 @@ def test_the_submit_window_sum_excludes_the_nested_snapshot() -> None:
 
 
 def test_a_v1_submission_records_no_control_plane_stage() -> None:
-    workflow_id, recorder = _submit(_V1, enabled=True)
+    workflow_id, recorder, _runtime, _results = _submit(_V1, enabled=True)
     assert workflow_id not in recorder.control_plane_breakdown()["workflows"]
 
 
 def test_the_gate_off_records_nothing_for_a_v2_submission() -> None:
-    _workflow_id, recorder = _submit(_V2, enabled=False)
+    _workflow_id, recorder, _runtime, _results = _submit(_V2, enabled=False)
     assert recorder.control_plane_breakdown() == {"workflows": {}}
+
+
+def test_a_ledger_transition_records_a_post_start_drive() -> None:
+    workflow_id, recorder, runtime, results = _submit(_V2, enabled=True)
+    root = next(r for r in results if r.graph_node_name == "a")
+    runtime._engines[workflow_id].on_succeeded(root.task_id, empty=True)
+    post_start = recorder.control_plane_breakdown()["workflows"][workflow_id][
+        "windows"
+    ]["post_start"]
+    assert post_start["stages"]["ds_drive"]["count"] == 1
+
+
+def test_a_serve_subject_attributes_to_no_workflow() -> None:
+    workflow = InvocationSubject(kind=InvocationSubjectKind.WORKFLOW, id="wfl-1")
+    external = InvocationSubject(kind=InvocationSubjectKind.EXTERNAL, id="user-1")
+    assert _subject_workflow_id(workflow) == "wfl-1"
+    assert _subject_workflow_id(external) is None

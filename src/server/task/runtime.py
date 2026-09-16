@@ -1619,17 +1619,23 @@ class TaskRuntime:
             env.interface
         )
         deadline = time.time() + timeout_sec + _OP_PERMIT_SLACK_SEC
-        permit = engine.mint_operation_permit(
-            env.task_id,
-            env.call_correlation,
-            target_id=worker_id,
-            target_generation=worker.incarnation,
-            max_results=max_results,
-            timeout_sec=timeout_sec,
-            result_char_cap=result_char_cap,
-            deadline_epoch=deadline,
-            credential=self._resolve_op_credential(agent, env.interface),
-        )
+        with self._profiler.stage(
+            ControlPlaneStage.PERMIT,
+            StageWindow.POST_START,
+            workflow_id=agent.workflow_id,
+            invocation_id=env.invocation_id,
+        ):
+            permit = engine.mint_operation_permit(
+                env.task_id,
+                env.call_correlation,
+                target_id=worker_id,
+                target_generation=worker.incarnation,
+                max_results=max_results,
+                timeout_sec=timeout_sec,
+                result_char_cap=result_char_cap,
+                deadline_epoch=deadline,
+                credential=self._resolve_op_credential(agent, env.interface),
+            )
         if permit is None:
             self.settle_episode_invocation(
                 env.task_id, env.call_correlation, error="could not mint a permit"

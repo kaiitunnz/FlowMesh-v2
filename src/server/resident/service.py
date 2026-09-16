@@ -52,6 +52,12 @@ from ..network.state import (
     Transport,
 )
 from ..orchestration.tool_dispatch import ToolInvocationEnvelope
+from ..services.profiling import (
+    NULL_PROFILER,
+    ControlPlaneStage,
+    Profiler,
+    StageWindow,
+)
 from ..task.v2.representations.admission import ResidentAdmissionBinding
 from ..task.v2.representations.operators import ServiceDependency
 from ..task.v2.representations.plan import ResidencyWarmth
@@ -258,6 +264,13 @@ class ServeOrigination:
     request_id: str | None = None
 
 
+def _subject_workflow_id(subject: InvocationSubject) -> str | None:
+    """The submitting workflow of a workflow subject; a serve subject owns none."""
+    if subject.kind is InvocationSubjectKind.WORKFLOW:
+        return subject.id
+    return None
+
+
 @dataclass
 class _Origination:
     """The subject-neutral identity and routing an origination drives its claim."""
@@ -328,7 +341,9 @@ class ResidentCapacityControl:
         idle_sweep_interval_sec: float = 0.0,
         redrive_backoff_sec: float = 0.5,
         max_transient_redrives: int = 3,
+        profiler: Profiler = NULL_PROFILER,
     ) -> None:
+        self._profiler = profiler
         self._stores = stores
         self._admission = admission
         self._lifecycle = lifecycle
@@ -839,9 +854,15 @@ class ResidentCapacityControl:
                     family=family,
                     profile=profile,
                 )
-            handoff = await self._acquire_capacity(
-                orig, family, model_ref, claim, profile
-            )
+            with self._profiler.stage(
+                ControlPlaneStage.ADMISSION,
+                StageWindow.POST_START,
+                workflow_id=_subject_workflow_id(orig.subject),
+                invocation_id=orig.invocation_id,
+            ):
+                handoff = await self._acquire_capacity(
+                    orig, family, model_ref, claim, profile
+                )
             if handoff is None:
                 return
         replica = self._stores.directory.get(handoff.replica_id)
@@ -851,7 +872,13 @@ class ResidentCapacityControl:
                 orig, "resident replica endpoint is unavailable"
             )
             return
-        await self._relay_bootstrap(orig, claim, profile, handoff, replica)
+        with self._profiler.stage(
+            ControlPlaneStage.RELAY,
+            StageWindow.POST_START,
+            workflow_id=_subject_workflow_id(orig.subject),
+            invocation_id=orig.invocation_id,
+        ):
+            await self._relay_bootstrap(orig, claim, profile, handoff, replica)
 
     async def _originate_serve_inner(self, request: ServeOrigination) -> None:
         orig = _Origination(
