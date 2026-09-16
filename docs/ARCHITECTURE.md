@@ -169,11 +169,10 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   with a dependency's engine-batch key, and express warmth, reuse, affinity, or
   preemption preference. The hooks are selected independently, so a deployment composes
   the facets it wants. The compiler screens every answer, so fusion stays bounded to the
-  pure,
-  deterministic, local set, an episode only ever cuts more often, and a refinement
-  holds the dependency's engine-batch key and isolation as well as its pinned family
-  and requiredness. Choosing a worker, reserving capacity, minting a claim or
-  attachment, and replacing a pinned resident binding belong to the fabric. A policy is
+  pure, deterministic, local set, an episode only ever cuts more often, and a refinement
+  holds the dependency's engine-batch key and isolation as well as its pinned family and
+  requiredness. Choosing a worker, reserving capacity, minting a claim or attachment,
+  and replacing a pinned resident binding belong to the fabric. A policy is
   deployment-global — a workflow submission selects none — and every hook defaults to a
   conservative policy that lowers identically to the compiler alone, so a workflow's
   declared outputs, effects, and recovery are the same whichever policies run. The
@@ -183,12 +182,12 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   embodiment menu carries its intent per candidate, so neither consults the policy. A
   plan records the episode strategy and the policy effective at each hook, and the v2
   dry-run inspection compiles under the same configured set, so a validation report and
-  a persisted submission describe the same physical decision. Two policies ship:
-  `recompute-only` fuses a pair only where both operators recover by recomputation, so
-  one recovering from a recorded output keeps its own episode rather than being
-  recomputed with the segment around it; `warm-retention` prefers a warm resident family
-  for a required, unconditional dependency, which the lifecycle retains for twice the
-  base idle window. Select policies with `ORCHESTRATOR_FUSION_POLICY`,
+  a persisted submission describe the same physical decision. The fabric provides two
+  policies: `recompute-only` fuses a pair only where both operators recover by
+  recomputation, so one recovering from a recorded output keeps its own episode rather
+  than being recomputed with the segment around it; `warm-retention` prefers a warm
+  resident family for a required, unconditional dependency, which the lifecycle retains
+  for twice the base idle window. Select policies with `ORCHESTRATOR_FUSION_POLICY`,
   `ORCHESTRATOR_RESIDENCY_POLICY`, and `ORCHESTRATOR_SERVICE_FAMILY_POLICY`.
 - **Inference-embodiment menus.** An inference leaf declares one model contract; whether
   resident capacity or a local executor serves it is the fabric's to decide. Such a leaf

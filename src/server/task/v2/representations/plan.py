@@ -69,17 +69,17 @@ class ResidencyWarmth(StrEnum):
     WARM = "warm"
 
 
-def known_warmth(value: Any) -> Any:
-    """A warmth this fabric does not express reads as none at all.
+def known_warmth(value: Any) -> ResidencyWarmth | None:
+    """Normalize a warmth value to the fabric's vocabulary, mapping any other to none.
 
-    Warmth is a retention preference, so a persisted value from another vocabulary
-    leaves the family at the base retention rather than failing to load.
+    Warmth is a retention preference, so a value from another vocabulary leaves the
+    family at the base retention rather than failing to load.
     """
     if value is None or isinstance(value, ResidencyWarmth):
         return value
     try:
         return ResidencyWarmth(value)
-    except ValueError:
+    except (ValueError, TypeError):
         return None
 
 
@@ -235,8 +235,8 @@ class LoweringProvenance(BaseModel):
 
     Names the episode strategy and the advisory policy effective at each lowering
     hook, so a dry-run inspection and a persisted submission are comparable at the
-    decisions that produced them. A hook a deployment selects no policy for records
-    ``conservative``, its effective policy.
+    decisions that produced them. A hook for which a deployment selects no policy
+    records ``conservative``, its effective policy.
     """
 
     model_config = ConfigDict(frozen=True)

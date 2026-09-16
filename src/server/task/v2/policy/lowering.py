@@ -46,7 +46,7 @@ class FusionPolicy:
 
 
 class ServiceFamilyPolicy:
-    """Which of the families compatible with a dependency it binds."""
+    """Which of a dependency's compatible families it binds."""
 
     name = CONSERVATIVE_POLICY
 

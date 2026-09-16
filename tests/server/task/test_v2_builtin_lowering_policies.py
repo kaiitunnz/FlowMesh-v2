@@ -462,3 +462,17 @@ def test_a_warmth_the_fabric_does_not_express_is_screened_out() -> None:
 def test_a_recognized_warmth_is_carried_as_the_fabric_s_own_value() -> None:
     intent = _intent(_Workflow(_PRELUDE).plan(residency=WarmRetention()))
     assert intent.warmth is ResidencyWarmth.WARM
+
+
+class _UnhashableWarmth(ResidencyPolicy):
+    name = "test-unhashable-warmth"
+
+    def residency(self, intent: ResidencyIntent) -> ResidencyIntent:
+        return intent.model_copy(update={"warmth": ["warm"]})
+
+
+def test_a_warmth_that_is_not_even_a_value_is_screened_out() -> None:
+    # The screen is what makes a custom policy's answer legal, so a malformed one is
+    # screened out like any other rather than failing the compile.
+    intent = _intent(_Workflow(_PRELUDE).plan(residency=_UnhashableWarmth()))
+    assert intent.warmth is None

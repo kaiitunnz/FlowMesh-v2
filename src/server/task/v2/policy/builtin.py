@@ -1,4 +1,4 @@
-"""The advisory lowering policies the fabric ships.
+"""The advisory lowering policies the fabric provides.
 
 Each refines one choice the compiler has already found legal, so the physical
 realization changes while the logical template and its declared contract do not. A
