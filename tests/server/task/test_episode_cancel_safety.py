@@ -2,7 +2,7 @@
 
 A cancel moves an in-flight episode to CANCELLING and interrupts its worker, but the
 worker may already have finished the step it was running and report it as a success.
-That success settles the cancellation instead of returning the episode to the queue,
+That success settles the cancellation, not returning the episode to the queue,
 and the per-step usage row it carries is tagged with the status the task is actually in.
 """
 

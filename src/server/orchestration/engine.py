@@ -1379,12 +1379,10 @@ class OrchestrationEngine:
         return ids
 
     def suspended_boundary_tasks(self) -> list[str]:
-        """The tasks whose lane an unsettled mediated boundary holds.
+        """Tasks suspended at an unsettled mediated boundary.
 
-        Each is the owner of one boundary the cancellation reaps: its worker released
-        the lane at that boundary and runs nothing for it, so a cancellation reaches no
-        dispatch there and no terminal comes back from a worker. A task running a step
-        holds no such boundary.
+        Such a task's worker released the lane, so it holds no dispatch and returns no
+        terminal; a task mid-step is not among them.
         """
         tasks: list[str] = []
         for activation, _ in self._unsettled_invocation_boundaries():

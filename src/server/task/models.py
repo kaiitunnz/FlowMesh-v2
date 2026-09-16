@@ -3,7 +3,6 @@ from typing import Any
 
 from pydantic import BaseModel, Field, computed_field
 
-from shared.harness import HarnessResultKind
 from shared.tasks import TaskEnvelopeTemplate
 from shared.tasks.worker_message import HardwareUsage
 
@@ -43,22 +42,6 @@ class TaskStatus(str):
 TERMINAL_TASK_STATUSES = frozenset(
     {TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.DONE}
 )
-
-
-def success_settles_task(payload: dict[str, Any]) -> bool:
-    """Whether a worker success ends its task or yields the lane back for another run.
-
-    An input preparation and a non-completion agent-episode step both return the task
-    to the queue, so a caller counting task completions counts one per task rather than
-    one per dispatch.
-    """
-    if payload.get("input_materialization") is not None:
-        return False
-    if (step := payload.get("agent_episode")) is not None:
-        return (
-            isinstance(step, dict) and step.get("kind") == HarnessResultKind.COMPLETION
-        )
-    return True
 
 
 class TaskUsage(BaseModel):

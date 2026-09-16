@@ -254,6 +254,14 @@ def _compute_merge_key(task: TaskEnvelopeTemplate) -> str | None:
         return None
 
 
+def _in_flight_usage(
+    task_id: str, payload: dict[str, Any]
+) -> list[tuple[str, TaskUsage]]:
+    """The usage row for a dispatch whose task runs on rather than settling."""
+    usage = TaskUsage.from_payload(payload, TaskStatus.DISPATCHED)
+    return [(task_id, usage)] if usage is not None else []
+
+
 class TaskRuntime:
     """In-memory task registry with FIFO-ready queue and dependency tracking."""
 
@@ -1198,8 +1206,6 @@ class TaskRuntime:
         if record is None or engine is None:
             return
         if record.status == TaskStatus.CANCELLING:
-            self._pending_facade_groups.pop(task_id, None)
-            record.pending_facade_group = None
             self._settle_cancelled_locked(record, time.time())
             return
         if hr.kind in (HarnessResultKind.FAILURE, HarnessResultKind.CANCELLATION):
@@ -1806,6 +1812,25 @@ class TaskRuntime:
             )
             return
         self.originate_facade_turn_group(task_id, group)
+
+    def success_settles_task(self, task_id: str, payload: dict[str, Any]) -> bool:
+        """Whether a worker success ends its task or yields the lane back to run again.
+
+        An input preparation, a non-completion episode step, and a turn completion that
+        carries or resumes a captured facade group each return the task to the queue,
+        so a caller counting task completions counts one per task, not one per dispatch.
+        """
+        if payload.get("input_materialization") is not None:
+            return False
+        if (step := payload.get("agent_episode")) is None:
+            return True
+        if not isinstance(step, dict):
+            return False
+        if step.get("kind") != HarnessResultKind.COMPLETION:
+            return False
+        if payload.get("agent_episode_facade_group") is not None:
+            return False
+        return not self.has_pending_facade(task_id)
 
     def has_pending_facade(self, task_id: str) -> bool:
         """Whether a facade group is already captured or still open for this episode.
@@ -3075,10 +3100,7 @@ class TaskRuntime:
                     # A non-terminal episode step routes its boundary and re-dispatches;
                     # a completion falls through to the terminal path below.
                     self._apply_episode_step_locked(task_id, harness_result)
-                    # The row bills the dispatch that ran this step, and the task it
-                    # belongs to has not settled, so it carries the in-flight status.
-                    step_usage = TaskUsage.from_payload(payload, TaskStatus.DISPATCHED)
-                    return [(task_id, step_usage)] if step_usage is not None else []
+                    return _in_flight_usage(task_id, payload)
                 if group is not None:
                     # The gateway captured a turn-scoped facade group: the clean
                     # turn-completion is a yield on that group, not the episode's
@@ -3088,7 +3110,7 @@ class TaskRuntime:
                     self._route_and_dispatch_facade_group_locked(
                         task_id, group, harness_result.capsule
                     )
-                    return usages
+                    return _in_flight_usage(task_id, payload)
                 engine = self._engines.get(record.workflow_id)
                 if (
                     engine is not None
@@ -3390,9 +3412,8 @@ class TaskRuntime:
                 resident_invocation_ids = (
                     engine.cancel_outstanding_boundary_invocations()
                 )
-                # An episode suspended on a boundary holds no dispatch, so the
-                # interrupt reaches nothing running and no worker terminal follows.
-                # The reap leaves its boundary unsettled, so the cancel settles here.
+                # A suspended-boundary episode has no dispatch to interrupt and
+                # returns no terminal, so the cancel settles it here.
                 for suspended in engine.suspended_boundary_tasks():
                     held = self._tasks.get(suspended)
                     if held is not None and held.status == TaskStatus.CANCELLING:
@@ -3468,6 +3489,9 @@ class TaskRuntime:
         waiting for a terminal that never arrives.
         """
         task_id = record.task_id
+        # A captured turn's group is meaningless once the episode settles cancelled.
+        self._pending_facade_groups.pop(task_id, None)
+        record.pending_facade_group = None
         record.status = TaskStatus.CANCELLED
         record.finished_ts = finished_ts
         if started_ts:
