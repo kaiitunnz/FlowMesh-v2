@@ -209,7 +209,7 @@ class LoweringProvenance(BaseModel):
     Names the episode strategy and the advisory policy that refined it, so a
     dry-run inspection and a persisted submission are comparable at the decision
     that produced them. A deployment running no policy records ``conservative``,
-    the effective policy, rather than an unused selection knob.
+    its effective policy.
     """
 
     model_config = ConfigDict(frozen=True)

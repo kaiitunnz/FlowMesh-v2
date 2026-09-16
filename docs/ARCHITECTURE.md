@@ -179,9 +179,9 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   residency refinement reaches an ordinary resident dependency: a `serve` node declares
   its own standing residency and an unresolved embodiment menu carries its intent per
   candidate, so neither consults the policy. A plan records the episode strategy and the
-  effective policy that produced it, inside its version digest, and the v2 dry-run
-  inspection compiles under the same configured pair, so a validation report and a
-  persisted submission describe the same physical decision. Enable with
+  effective policy that produced it, and the v2 dry-run inspection compiles under the
+  same configured pair, so a validation report and a persisted submission describe the
+  same physical decision. Enable with
   `ORCHESTRATOR_POLICY_SURFACE_ENABLED=true` and select a registration with
   `ORCHESTRATOR_LOWERING_POLICY`.
 - **Inference-embodiment menus.** An inference leaf declares one model contract; whether
@@ -279,8 +279,7 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   artifacts. These fences are the activation's own — a private-state generation, its
   write epoch, and the ledger's owner fence — and are separate from the replica
   incarnation, listener generation, and admission epoch that fence a resident
-  allocation. No attachment is a `ServiceClaim` and no sandbox host is a
-  `ServiceFamily`. `WORKER_PRIVATE_STATE_DIR` sets the root.
+  allocation. `WORKER_PRIVATE_STATE_DIR` sets the root.
 - **Agent-local sandbox execution.** An agent that declares the `sandbox.execute`
   interface runs commands worker-locally in its own `workspace_fs`, on the worker its
   private-state attachment selected; an ordinary command makes no control-plane round
