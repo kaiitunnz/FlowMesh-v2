@@ -128,7 +128,7 @@ def compile_workflow(
     if strategy is LoweringStrategy.EPISODE_CUT:
         with timed(ControlPlaneStage.COMPILE_EPISODES):
             nodes = lower_to_episodes(template, nodes, policies)
-    with timed(ControlPlaneStage.COMPILE_ASSEMBLE):
+    with timed(ControlPlaneStage.COMPILE_FINALIZE):
         plan = _finalize_plan(
             workflow_id,
             template.version,
