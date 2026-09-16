@@ -13,7 +13,7 @@ out of its predecessor's episode, which cuts more often than the compiler would 
 and is contract-equivalent to the cut it reaches.
 """
 
-from ..policy.lowering import LoweringPolicy
+from ..policy.lowering import FusionPolicy, PolicySurface
 from ..representations.operators import (
     AgentOperator,
     BoundaryEventKind,
@@ -80,10 +80,10 @@ def _resource_class_for(op: LogicalOperator | None) -> str | None:
 def lower_to_episodes(
     template: LogicalWorkflowTemplate,
     nodes: tuple[PhysicalNode, ...],
-    policy: LoweringPolicy | None = None,
+    surface: PolicySurface | None = None,
 ) -> tuple[PhysicalNode, ...]:
     """Rewrite transparent nodes into episode nodes with boundaries and fusion."""
-    policy = policy or LoweringPolicy()
+    policy = (surface or PolicySurface()).fusion
     ops = {op.operator_id: op for op in template.operators}
     child_templates = {
         op.child_template_ref
@@ -149,7 +149,7 @@ def _fuse_chains(
     child_templates: set[str],
     succ: dict[str, list[str]],
     pred: dict[str, list[str]],
-    policy: LoweringPolicy,
+    policy: FusionPolicy,
 ) -> dict[str, str]:
     """Map each fused operator to its chain head, folding maximal pure-leaf runs.
 

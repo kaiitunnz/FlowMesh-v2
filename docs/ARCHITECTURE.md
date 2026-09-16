@@ -163,27 +163,29 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   contract-equivalent — an episode cut changes only where work yields, never a declared
   output, effect visibility, or progress closure. `ORCHESTRATOR_EPISODE_LOWERING=true`
   selects the episode-cut lowering.
-- **Advisory lowering policy.** A deployment may enable a compile-time policy that
-  refines a lowering the compiler has already found legal: it can keep a fusible
-  operator out of its predecessor's episode, pick among the families compatible with a
-  dependency's engine-batch key, and express warmth, reuse, affinity, or preemption
-  preference. The compiler screens every answer, so fusion stays bounded to the pure,
+- **Advisory lowering policy.** A deployment selects a compile-time policy at each
+  lowering hook, refining a lowering the compiler has already found legal: it can keep a
+  fusible operator out of its predecessor's episode, pick among the families compatible
+  with a dependency's engine-batch key, and express warmth, reuse, affinity, or
+  preemption preference. The hooks are selected independently, so a deployment composes
+  the facets it wants. The compiler screens every answer, so fusion stays bounded to the
+  pure,
   deterministic, local set, an episode only ever cuts more often, and a refinement
   holds the dependency's engine-batch key and isolation as well as its pinned family
   and requiredness. Choosing a worker, reserving capacity, minting a claim or
-  attachment, and replacing a pinned resident binding belong to the fabric. The policy
-  is deployment-global — a workflow submission selects none — and the default lowers
-  identically to the compiler alone, so a workflow's declared outputs, effects, and
-  recovery are the same whether or not one runs. The fusion refinement applies to the
-  episode-cut lowering; family and residency refinement applies to both lowerings. A
-  residency refinement reaches an ordinary resident dependency: a `serve` node declares
-  its own standing residency and an unresolved embodiment menu carries its intent per
-  candidate, so neither consults the policy. A plan records the episode strategy and the
-  effective policy that produced it, and the v2 dry-run inspection compiles under the
-  same configured pair, so a validation report and a persisted submission describe the
-  same physical decision. Enable with
-  `ORCHESTRATOR_POLICY_SURFACE_ENABLED=true` and select a registration with
-  `ORCHESTRATOR_LOWERING_POLICY`.
+  attachment, and replacing a pinned resident binding belong to the fabric. A policy is
+  deployment-global — a workflow submission selects none — and every hook defaults to a
+  conservative policy that lowers identically to the compiler alone, so a workflow's
+  declared outputs, effects, and recovery are the same whichever policies run. The
+  fusion refinement applies to the episode-cut lowering; family and residency refinement
+  applies to both lowerings. A residency refinement reaches an ordinary resident
+  dependency: a `serve` node declares its own standing residency and an unresolved
+  embodiment menu carries its intent per candidate, so neither consults the policy. A
+  plan records the episode strategy and the policy effective at each hook, and the v2
+  dry-run inspection compiles under the same configured set, so a validation report and
+  a persisted submission describe the same physical decision. Select policies with
+  `ORCHESTRATOR_FUSION_POLICY`, `ORCHESTRATOR_RESIDENCY_POLICY`, and
+  `ORCHESTRATOR_SERVICE_FAMILY_POLICY`.
 - **Inference-embodiment menus.** An inference leaf declares one model contract; whether
   resident capacity or a local executor serves it is the fabric's to decide. Such a leaf
   lowers to one physical node carrying the embodiments that contract admits — a

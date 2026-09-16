@@ -2,7 +2,7 @@ from pydantic import BaseModel, ConfigDict
 
 from ...parser import ParsedWorkflow
 from ..mode import LoweringStrategy
-from ..policy.lowering import LoweringPolicy
+from ..policy.lowering import PolicySurface
 from ..representations.plan import PhysicalExecutionPlan
 from ..representations.source import FrontendWorkflowSource
 from ..representations.template import LogicalWorkflowTemplate
@@ -59,7 +59,12 @@ class InspectionReport(BaseModel):
                 )
         lines.append(f"  physical nodes: {len(self.plan.nodes)}")
         if (lowering := self.plan.lowering) is not None:
-            lines.append(f"  lowering: {lowering.strategy} policy={lowering.policy}")
+            lines.append(
+                f"  lowering: {lowering.strategy}"
+                f" fusion={lowering.fusion}"
+                f" residency={lowering.residency}"
+                f" service_family={lowering.service_family}"
+            )
         if self.diagnostics:
             lines.append("  diagnostics:")
             for diag in self.diagnostics:
@@ -77,14 +82,14 @@ def build_inspection(
     source: FrontendWorkflowSource,
     bindings: AgentBindingDefaults | None = None,
     strategy: LoweringStrategy = LoweringStrategy.TRANSPARENT,
-    policy: LoweringPolicy | None = None,
+    surface: PolicySurface | None = None,
 ) -> InspectionReport:
     """Compile a parsed workflow into an inspection report.
 
     Structural frontend errors raise :class:`CompileError`; semantic validation
     findings, including agent-binding resolution failures, are returned as
-    diagnostics on the report rather than raised. ``bindings``, ``strategy``, and
-    ``policy`` must match the deployment defaults a real submission uses so a
+    diagnostics on the report rather than raised. ``bindings``, ``strategy``, and the
+    policy ``surface`` must match the deployment defaults a real submission uses so a
     dry-run agrees with it.
     """
     defaults = bindings if bindings is not None else neutral_defaults()
@@ -95,7 +100,7 @@ def build_inspection(
         validate=False,
         strategy=strategy,
         bindings=defaults,
-        policy=policy,
+        surface=surface,
     )
     diagnostics = validate_compilation(template, plan, defaults.sandbox_egress_enabled)
     return InspectionReport(

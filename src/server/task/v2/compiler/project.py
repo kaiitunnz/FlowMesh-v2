@@ -22,7 +22,7 @@ from shared.tasks.specs.common import ModelSpecTemplate
 
 from ...parser import ParsedTask, ParsedWorkflow
 from ..policy.lowering import (
-    LoweringPolicy,
+    PolicySurface,
     screen_residency,
     screen_service_family,
 )
@@ -430,7 +430,7 @@ def lower_tasks(
     acc: LoweringAccumulator,
     defaults: AgentBindingDefaults,
     secret_refs: Mapping[str, str],
-    policy: LoweringPolicy | None = None,
+    surface: PolicySurface | None = None,
 ) -> None:
     """Lower each legacy task into a symbolic leaf/agent/residency operator.
 
@@ -440,6 +440,7 @@ def lower_tasks(
     resident model dependency also emits a plan-derived service-family requirement and
     a required residency intent. Nothing here carries worker/replica/endpoint bindings.
     """
+    policies = surface if surface is not None else PolicySurface()
     task_ids: set[str] = {task.task_id for task in parsed.tasks}
     # A task may depend on a region node, whose operator id is its source name.
     known_ids: set[str] = task_ids | {region.name for region in parsed.regions}
@@ -522,7 +523,7 @@ def lower_tasks(
                 )
             )
             continue
-        requirement, intent = _service_family_annotations(dependency, policy)
+        requirement, intent = _service_family_annotations(dependency, policies)
         acc.nodes.append(
             PhysicalNode(
                 node_id=node_id,
@@ -555,7 +556,7 @@ def _embodiment_menu(
 
 
 def _service_family_annotations(
-    dependency: ServiceDependency | None, policy: LoweringPolicy | None = None
+    dependency: ServiceDependency | None, surface: PolicySurface
 ) -> tuple[ServiceFamilyRequirement | None, ResidencyIntent | None]:
     """Derive the plan-derived resident requirement from a service dependency.
 
@@ -573,13 +574,11 @@ def _service_family_annotations(
         engine_batch_key=dependency.engine_batch_key,
         isolation=dependency.isolation,
     )
-    if policy is not None:
-        requirement = screen_service_family(
-            requirement, policy.service_family(requirement)
-        )
+    requirement = screen_service_family(
+        requirement, surface.service_family.service_family(requirement)
+    )
     intent = ResidencyIntent(service_family=requirement.family, required=True)
-    if policy is not None:
-        intent = screen_residency(intent, policy.residency(intent))
+    intent = screen_residency(intent, surface.residency.residency(intent))
     return requirement, intent
 
 

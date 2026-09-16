@@ -4,6 +4,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from shared.tasks.specs import InferenceEmbodimentKind
 
+from ..mode import LoweringStrategy
 from .versioning import VersionId
 
 
@@ -60,6 +61,9 @@ class ServiceFamilyRequirement(BaseModel):
 # The one residency warmth preference the fabric expresses: a family carrying it is
 # retained longer after its last credit-bearing invocation.
 WARM = "warm"
+
+# The policy that answers every lowering hook as the compiler itself would.
+CONSERVATIVE_POLICY = "conservative"
 
 
 class ResidencyIntent(BaseModel):
@@ -206,16 +210,18 @@ class PhysicalNode(BaseModel):
 class LoweringProvenance(BaseModel):
     """The lowering a plan was produced under.
 
-    Names the episode strategy and the advisory policy that refined it, so a
-    dry-run inspection and a persisted submission are comparable at the decision
-    that produced them. A deployment running no policy records ``conservative``,
-    its effective policy.
+    Names the episode strategy and the advisory policy effective at each lowering
+    hook, so a dry-run inspection and a persisted submission are comparable at the
+    decisions that produced them. A hook a deployment selects no policy for records
+    ``conservative``, its effective policy.
     """
 
     model_config = ConfigDict(frozen=True)
 
-    strategy: str
-    policy: str = "conservative"
+    strategy: LoweringStrategy
+    fusion: str = CONSERVATIVE_POLICY
+    residency: str = CONSERVATIVE_POLICY
+    service_family: str = CONSERVATIVE_POLICY
 
 
 class PhysicalExecutionPlan(BaseModel):

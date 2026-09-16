@@ -1,17 +1,24 @@
 """Advisory hooks over the physical lowering of a compiled template.
 
-A lowering policy refines choices the compiler has already found legal: it may veto a
-fusion, steer a service dependency to a compatible family, and express residency
-preference. The compiler screens every answer, so a policy only narrows: fusion is
-bounded to the pure, deterministic, local set, and a family refinement holds the
-dependency's engine-batch key and isolation.
+A policy refines choices the compiler has already found legal: it may keep a fusible
+operator out of its predecessor's episode, steer a service dependency to a compatible
+family, and express residency preference. The compiler screens every answer, so a policy
+only narrows: fusion is bounded to the pure, deterministic, local set, and a family
+refinement holds the dependency's engine-batch key and isolation.
+
+There is one policy per hook, so a deployment composes the facets it wants
+independently. Each hook's default reproduces the compiler's own choice, so a surface
+that overrides nothing lowers identically to the compiler alone.
 
 Choosing a worker, reserving capacity, minting a claim or attachment, and replacing a
 pinned resident binding belong to the fabric; a policy picks among the alternatives the
 compiler already proved legal.
 """
 
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
+
+from ..representations.plan import CONSERVATIVE_POLICY
 
 if TYPE_CHECKING:
     from ..representations.operators import LogicalOperator
@@ -21,21 +28,27 @@ if TYPE_CHECKING:
     )
 
 
-class LoweringPolicy:
-    """The lowerer's advisory hook surface, with conservative defaults.
+class FusionPolicy:
+    """Whether an operator joins the episode of the operator before it."""
 
-    Each method answers for one operator of the template being compiled. The defaults
-    reproduce the compiler's own choices, so an unconfigured deployment and a policy
-    that overrides nothing lower identically.
-    """
-
-    name = "conservative"
+    name = CONSERVATIVE_POLICY
 
     def fuse(
         self, predecessor: "LogicalOperator", candidate: "LogicalOperator"
     ) -> bool:
-        """Whether a fusible operator joins its predecessor's episode."""
+        """Whether a fusible operator joins its predecessor's episode.
+
+        The pair is asked one predecessor and one candidate at a time, in template
+        order, so an answer can rest on the two operators it names and never on what
+        follows them.
+        """
         return True
+
+
+class ServiceFamilyPolicy:
+    """Which of the families compatible with a dependency it binds."""
+
+    name = CONSERVATIVE_POLICY
 
     def service_family(
         self, requirement: "ServiceFamilyRequirement"
@@ -43,9 +56,28 @@ class LoweringPolicy:
         """The family a service dependency binds, among the compatible ones."""
         return requirement
 
+
+class ResidencyPolicy:
+    """The residency preference a plan-derived resident dependency carries."""
+
+    name = CONSERVATIVE_POLICY
+
     def residency(self, intent: "ResidencyIntent") -> "ResidencyIntent":
         """The warmth, reuse, affinity, and preemption preference for a dependency."""
         return intent
+
+
+@dataclass(frozen=True)
+class PolicySurface:
+    """The advisory policy a deployment runs at each lowering hook.
+
+    Its default is the conservative policy at every hook, which the compiler consults
+    like any other and which answers with the compiler's own choice.
+    """
+
+    fusion: FusionPolicy = field(default_factory=FusionPolicy)
+    residency: ResidencyPolicy = field(default_factory=ResidencyPolicy)
+    service_family: ServiceFamilyPolicy = field(default_factory=ServiceFamilyPolicy)
 
 
 def screen_service_family(

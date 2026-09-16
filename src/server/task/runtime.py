@@ -275,14 +275,14 @@ class TaskRuntime:
         logger: logging.Logger,
         secret_vault: ModelSecretVault,
         feasibility_check: EpisodeFeasibility | None = None,
-        policy: PolicySurface | None = None,
+        surface: PolicySurface | None = None,
     ) -> None:
         self._workflow_registry = workflow_registry
         self._worker_registry = worker_registry
         self._logger = logger
         self._results_dir = results_dir
         self._feasibility_check = feasibility_check
-        self._lowering_policy = policy.lowering if policy else None
+        self._policy_surface = surface if surface is not None else PolicySurface()
         self._secret_vault = secret_vault
         self._scope_budget = ScopeBudget.from_config(orchestration)
         self._web_search = orchestration.web_search
@@ -392,7 +392,7 @@ class TaskRuntime:
             source,
             bindings=self._agent_binding_defaults,
             strategy=self._lowering_strategy,
-            policy=self._lowering_policy,
+            surface=self._policy_surface,
         )
 
     async def _vault_inline_secrets(
@@ -444,7 +444,7 @@ class TaskRuntime:
                 strategy=self._lowering_strategy,
                 bindings=self._agent_binding_defaults,
                 secret_refs=secret_refs,
-                policy=self._lowering_policy,
+                surface=self._policy_surface,
             )
             v2_engine = OrchestrationEngine.build(
                 workflow_id, owner_id, org_id, v2_bundle, budget=self._scope_budget

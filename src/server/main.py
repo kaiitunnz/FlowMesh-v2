@@ -177,7 +177,7 @@ if IS_ROOT_NODE:
         RESULTS_DIR,
         logger,
         secret_vault=MODEL_SECRET_VAULT,
-        policy=POLICY_SURFACE,
+        surface=POLICY_SURFACE,
     )
     AGENT_MODEL_GATEWAY = AgentModelGateway(
         RUNTIME, config.orchestration.gateway, logger

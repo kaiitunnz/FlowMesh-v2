@@ -635,21 +635,25 @@ class NetworkPlaneConfig:
 
 @dataclass
 class PolicySurfaceConfig:
-    """The deployment's advisory policy selection.
+    """The deployment's advisory policy selection, one policy per lowering hook.
 
-    A policy is deployment-global: a workflow submission selects none. While
-    ``enabled`` is false the surface is inert.
+    A policy is deployment-global: a workflow submission selects none. Each hook
+    defaults to the conservative policy, which lowers as the compiler alone would.
     """
 
-    enabled: bool = False
-    lowering: str = "conservative"
+    fusion: str = "conservative"
+    residency: str = "conservative"
+    service_family: str = "conservative"
 
     @classmethod
     def from_env(cls) -> "PolicySurfaceConfig":
         defaults = cls()
         return cls(
-            enabled=parse_bool_env("ORCHESTRATOR_POLICY_SURFACE_ENABLED", False),
-            lowering=_env_or_none("ORCHESTRATOR_LOWERING_POLICY") or defaults.lowering,
+            fusion=_env_or_none("ORCHESTRATOR_FUSION_POLICY") or defaults.fusion,
+            residency=_env_or_none("ORCHESTRATOR_RESIDENCY_POLICY")
+            or defaults.residency,
+            service_family=_env_or_none("ORCHESTRATOR_SERVICE_FAMILY_POLICY")
+            or defaults.service_family,
         )
 
 

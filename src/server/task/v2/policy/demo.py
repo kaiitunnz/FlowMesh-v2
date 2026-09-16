@@ -2,14 +2,14 @@
 
 Each refines one choice the compiler has already found legal, so the physical
 realization changes while the logical template and its declared contract do not.
-A deployment selects one by name; none is the default.
+A deployment selects one per hook by name; none is the default.
 """
 
 from shared.tasks import TaskType
 
 from ..representations.operators import LeafOperator, LogicalOperator
 from ..representations.plan import WARM, ResidencyIntent
-from .lowering import LoweringPolicy
+from .lowering import FusionPolicy, ResidencyPolicy
 
 
 def _is_echo(op: LogicalOperator) -> bool:
@@ -18,7 +18,7 @@ def _is_echo(op: LogicalOperator) -> bool:
     )
 
 
-class FusionVetoPolicy(LoweringPolicy):
+class FusionVetoPolicy(FusionPolicy):
     """Keeps a fusible ``echo`` leaf out of its predecessor's episode.
 
     The compiler asks only about pairs it has already proved pure, deterministic,
@@ -31,7 +31,7 @@ class FusionVetoPolicy(LoweringPolicy):
         return not _is_echo(candidate)
 
 
-class WarmthPolicy(LoweringPolicy):
+class WarmthPolicy(ResidencyPolicy):
     """Prefers a warm resident family for a required, unconditional dependency.
 
     Warmth is a retention preference a family definition carries; it allocates no
@@ -44,9 +44,3 @@ class WarmthPolicy(LoweringPolicy):
         if not intent.required or intent.conditional:
             return intent
         return intent.model_copy(update={"warmth": WARM})
-
-
-class DemoPolicy(FusionVetoPolicy, WarmthPolicy):
-    """Both fixed refinements under one selectable name."""
-
-    name = "demo"
