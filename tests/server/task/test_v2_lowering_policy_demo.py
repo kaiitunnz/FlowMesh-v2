@@ -320,3 +320,31 @@ def test_a_dry_run_inspection_matches_what_the_runtime_would_register() -> None:
     lowering = _lowering(report.plan)
     assert lowering.policy == "d30-demo"
     assert lowering.strategy == LoweringStrategy.TRANSPARENT.value
+
+
+_INLINE_SECRET = """
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {name: secretive}
+spec:
+  taskType: echo
+  graph:
+    nodes:
+      - name: a
+        spec:
+          taskType: agent
+          harness: {backend: scripted, params: {script: []}}
+          model_binding:
+            mode: openai
+            url: "https://h/v1"
+            model: m
+            api_key: "sk-secret"
+"""
+
+
+def test_a_dry_run_under_a_policy_still_vaults_nothing_and_redacts() -> None:
+    runtime = _runtime("d30-demo")
+    report = runtime.inspect_v2(_INLINE_SECRET, format="native")
+    assert report is not None
+    assert _lowering(report.plan).policy == "d30-demo"
+    assert "sk-secret" not in report.model_dump_json()
