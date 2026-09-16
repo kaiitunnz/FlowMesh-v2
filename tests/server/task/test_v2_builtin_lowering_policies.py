@@ -382,7 +382,7 @@ def _runtime(**knobs: str) -> TaskRuntime:
         cast(Any, worker_stub),
         OrchestrationConfig(policy=config),
         pathlib.Path(tempfile.gettempdir()),
-        logging.getLogger("lowering-policy-demo-test"),
+        logging.getLogger("builtin-lowering-policies-test"),
         secret_vault=cast(Any, _NoopSecretVault()),
         surface=build_policy_surface(config),
     )
