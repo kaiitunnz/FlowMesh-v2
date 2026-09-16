@@ -54,7 +54,7 @@ from ..network.state import (
 from ..orchestration.tool_dispatch import ToolInvocationEnvelope
 from ..task.v2.representations.admission import ResidentAdmissionBinding
 from ..task.v2.representations.operators import ServiceDependency
-from ..task.v2.representations.plan import WARM
+from ..task.v2.representations.plan import ResidencyWarmth
 from .admission import AdmissionController
 from .lifecycle import LifecycleScaleManager
 from .policy import ResidentPolicyLimits
@@ -630,7 +630,7 @@ class ResidentCapacityControl:
         # A standing allocation is pinned to its serve task for the task's lifetime,
         # so its family records the warm preference its residency node declares.
         self._stores.families.register(
-            self._family_definition(dependency, family, WARM)
+            self._family_definition(dependency, family, ResidencyWarmth.WARM)
         )
         definition = self._stores.families.get(family)
         if definition is None:
@@ -1446,7 +1446,7 @@ class ResidentCapacityControl:
         return f"{split_host_port(endpoint.url)[0]}:{port}"
 
     def _family_definition(
-        self, dependency: ServiceDependency, family: str, warmth: str | None
+        self, dependency: ServiceDependency, family: str, warmth: ResidencyWarmth | None
     ) -> ServiceFamily:
         """The family definition a dependency admits against, under one warmth.
 

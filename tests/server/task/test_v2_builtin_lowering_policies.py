@@ -21,6 +21,7 @@ from server.task.v2.representations.plan import (
     PhysicalExecutionPlan,
     PhysicalNode,
     ResidencyIntent,
+    ResidencyWarmth,
 )
 from server.task.v2.representations.template import LogicalWorkflowTemplate
 
@@ -97,16 +98,18 @@ spec:
 """
 
 
-# A warmth value no shipped policy produces, stamped on every intent the hook is asked
+# A preference no shipped policy expresses, stamped on every intent the hook is asked
 # about, so a node that never consults it is distinguishable from one a policy declines.
-_PROBE = "probe-warmth"
+# It rides a screened field the fabric passes through rather than warmth, whose
+# vocabulary the screen closes.
+_PROBE = "probe-reuse-domain"
 
 
 class _StampEveryIntent(ResidencyPolicy):
     name = "test-stamp-every-intent"
 
     def residency(self, intent: ResidencyIntent) -> ResidencyIntent:
-        return intent.model_copy(update={"warmth": _PROBE})
+        return intent.model_copy(update={"reuse_domain": _PROBE})
 
 
 class _Workflow:
@@ -226,7 +229,7 @@ def test_warm_retention_leaves_the_rest_of_the_intent_alone() -> None:
 def test_the_probe_policy_reaches_an_ordinary_dependency() -> None:
     # The teeth for the two tests below: an intent the hook is asked about changes.
     assert (
-        _intent(_Workflow(_PRELUDE).plan(residency=_StampEveryIntent())).warmth
+        _intent(_Workflow(_PRELUDE).plan(residency=_StampEveryIntent())).reuse_domain
         == _PROBE
     )
 
@@ -238,7 +241,7 @@ def test_the_residency_hook_is_not_consulted_for_a_serve_node() -> None:
     # wrote it.
     stamped = _intent(serve.plan(residency=_StampEveryIntent()))
     assert stamped == _intent(serve.plan())
-    assert stamped.warmth != _PROBE
+    assert stamped.reuse_domain != _PROBE
 
 
 def test_the_residency_hook_is_not_consulted_for_an_unresolved_menu() -> None:
@@ -253,7 +256,7 @@ def test_the_residency_hook_is_not_consulted_for_an_unresolved_menu() -> None:
         if candidate.residency_intent is not None
     ]
     assert intents and all(
-        intent.conditional and intent.warmth is None for intent in intents
+        intent.conditional and intent.reuse_domain != _PROBE for intent in intents
     )
 
 
@@ -442,3 +445,20 @@ def test_a_dry_run_under_a_policy_still_vaults_nothing_and_redacts() -> None:
     assert report is not None
     assert _lowering(report.plan).residency == WarmRetention.name
     assert "sk-secret" not in report.model_dump_json()
+
+
+class _UnknownWarmth(ResidencyPolicy):
+    name = "test-unknown-warmth"
+
+    def residency(self, intent: ResidencyIntent) -> ResidencyIntent:
+        return intent.model_copy(update={"warmth": "scalding"})
+
+
+def test_a_warmth_the_fabric_does_not_express_is_screened_out() -> None:
+    intent = _intent(_Workflow(_PRELUDE).plan(residency=_UnknownWarmth()))
+    assert intent.warmth is None
+
+
+def test_a_recognized_warmth_is_carried_as_the_fabric_s_own_value() -> None:
+    intent = _intent(_Workflow(_PRELUDE).plan(residency=WarmRetention()))
+    assert intent.warmth is ResidencyWarmth.WARM

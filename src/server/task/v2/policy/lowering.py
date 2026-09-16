@@ -18,7 +18,7 @@ compiler already proved legal.
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from ..representations.plan import CONSERVATIVE_POLICY
+from ..representations.plan import CONSERVATIVE_POLICY, known_warmth
 
 if TYPE_CHECKING:
     from ..representations.operators import LogicalOperator
@@ -104,11 +104,12 @@ def screen_residency(
 
     A required resident dependency is pinned by the template's binding; a policy carries
     preference only, so warmth, reuse domain, affinity, and preemption are taken from
-    the refinement and the rest from the plan.
+    the refinement and the rest from the plan. A warmth outside the vocabulary the
+    fabric expresses is dropped here, so no later reader has to interpret one.
     """
     return derived.model_copy(
         update={
-            "warmth": refined.warmth,
+            "warmth": known_warmth(refined.warmth),
             "reuse_domain": refined.reuse_domain,
             "affinity": refined.affinity,
             "preemption": refined.preemption,

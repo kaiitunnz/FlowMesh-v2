@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 from shared.resident.contracts import ReplicaEndpoint
 
 from ..network.state import ReplicaListenerAdvertisement
+from ..task.v2.representations.plan import Warmth
 from ..utils.time import now_iso
 
 
@@ -180,7 +181,7 @@ class ServiceFamily(BaseModel):
     interface: str = "chat"
     isolation: str | None = None
     selection_strategy: str = "batch-aware-best-fit"
-    warmth: str | None = None
+    warmth: Warmth = None
     created_at: str = Field(default_factory=now_iso)
 
 

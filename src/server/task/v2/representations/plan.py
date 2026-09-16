@@ -1,6 +1,7 @@
 from enum import StrEnum
+from typing import Annotated, Any
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
 
 from shared.tasks.specs import InferenceEmbodimentKind
 
@@ -58,9 +59,31 @@ class ServiceFamilyRequirement(BaseModel):
     isolation: str | None = None
 
 
-# The one residency warmth preference the fabric expresses: a family carrying it is
-# retained longer after its last credit-bearing invocation.
-WARM = "warm"
+class ResidencyWarmth(StrEnum):
+    """The residency warmth preferences the fabric expresses.
+
+    A family carrying ``WARM`` is retained longer after its last credit-bearing
+    invocation.
+    """
+
+    WARM = "warm"
+
+
+def known_warmth(value: Any) -> Any:
+    """A warmth this fabric does not express reads as none at all.
+
+    Warmth is a retention preference, so a persisted value from another vocabulary
+    leaves the family at the base retention rather than failing to load.
+    """
+    if value is None or isinstance(value, ResidencyWarmth):
+        return value
+    try:
+        return ResidencyWarmth(value)
+    except ValueError:
+        return None
+
+
+type Warmth = Annotated[ResidencyWarmth | None, BeforeValidator(known_warmth)]
 
 # The policy that answers every lowering hook as the compiler itself would.
 CONSERVATIVE_POLICY = "conservative"
@@ -80,7 +103,7 @@ class ResidencyIntent(BaseModel):
 
     service_family: str | None = None
     required: bool = False
-    warmth: str | None = None
+    warmth: Warmth = None
     reuse_domain: str | None = None
     affinity: str | None = None
     preemption: str | None = None

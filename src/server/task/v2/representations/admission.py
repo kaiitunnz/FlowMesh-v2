@@ -1,7 +1,7 @@
 from pydantic import BaseModel, ConfigDict
 
 from .operators import ServiceDependency
-from .plan import ResidencyIntent, ServiceFamilyRequirement
+from .plan import ResidencyIntent, ResidencyWarmth, ServiceFamilyRequirement
 
 
 class ResidentAdmissionBinding(BaseModel):
@@ -23,7 +23,7 @@ class ResidentAdmissionBinding(BaseModel):
     intent: ResidencyIntent | None = None
 
     @property
-    def warmth(self) -> str | None:
+    def warmth(self) -> ResidencyWarmth | None:
         """The screened residency warmth preference, when the plan carries one."""
         return self.intent.warmth if self.intent is not None else None
 

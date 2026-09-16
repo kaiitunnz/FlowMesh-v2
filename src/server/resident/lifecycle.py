@@ -14,7 +14,7 @@ from typing import Literal
 
 from shared.utils.ids import new_allocation_lease_id, new_replica_id
 
-from ..task.v2.representations.plan import WARM as WARM_RESIDENCY
+from ..task.v2.representations.plan import ResidencyWarmth
 from ..utils.time import now_iso, parse_iso_ts
 from .policy import ProvisioningDecision, ResidentPolicyLimits, decide_materialization
 from .state import (
@@ -371,7 +371,7 @@ class LifecycleScaleManager:
         keeps the base.
         """
         definition = self._stores.families.get(family)
-        warm = definition is not None and definition.warmth == WARM_RESIDENCY
+        warm = definition is not None and definition.warmth is ResidencyWarmth.WARM
         return self._idle_retain_sec * (2 if warm else 1)
 
     def _idle_past_retain(self, replica: ReplicaIncarnation, reference: float) -> bool:

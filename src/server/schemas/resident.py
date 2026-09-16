@@ -7,6 +7,7 @@ from ..resident.state import (
     ServiceClaim,
     ServiceFamily,
 )
+from ..task.v2.representations.plan import ResidencyWarmth
 
 
 class ResidentFamilyInfo(BaseModel):
@@ -21,7 +22,9 @@ class ResidentFamilyInfo(BaseModel):
     selection_strategy: str = Field(
         description="Per-family replica-selection strategy."
     )
-    warmth: str | None = Field(default=None, description="Warmth policy, if any.")
+    warmth: ResidencyWarmth | None = Field(
+        default=None, description="Warmth policy, if any."
+    )
     created_at: str = Field(description="Family registration timestamp.")
 
     @classmethod

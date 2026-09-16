@@ -11,7 +11,7 @@ from ..representations.operators import (
     LogicalOperator,
     RecoveryClass,
 )
-from ..representations.plan import WARM, ResidencyIntent
+from ..representations.plan import ResidencyIntent, ResidencyWarmth
 from .lowering import FusionPolicy, ResidencyPolicy
 
 
@@ -48,4 +48,4 @@ class WarmRetention(ResidencyPolicy):
     def residency(self, intent: ResidencyIntent) -> ResidencyIntent:
         if not intent.required or intent.conditional:
             return intent
-        return intent.model_copy(update={"warmth": WARM})
+        return intent.model_copy(update={"warmth": ResidencyWarmth.WARM})
