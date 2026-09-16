@@ -77,6 +77,18 @@ spec:
 """
 
 
+# A warmth value no shipped policy produces, stamped on every intent the hook is asked
+# about, so a node that never consults it is distinguishable from one a policy declines.
+_PROBE = "probe-warmth"
+
+
+class _StampEveryIntent(LoweringPolicy):
+    name = "test-stamp-every-intent"
+
+    def residency(self, intent: ResidencyIntent) -> ResidencyIntent:
+        return intent.model_copy(update={"warmth": _PROBE})
+
+
 class _Workflow:
     """One parse, compiled under several policies so operator ids line up."""
 
@@ -177,19 +189,24 @@ def test_the_warmth_policy_leaves_the_rest_of_the_intent_alone() -> None:
     assert refined == baseline.model_copy(update={"warmth": "warm"})
 
 
-def test_the_warmth_policy_does_not_reach_a_serve_node() -> None:
+def test_the_probe_policy_reaches_an_ordinary_dependency() -> None:
+    # The teeth for the two tests below: an intent the hook is asked about changes.
+    assert _intent(_Workflow(_PRELUDE).plan(_StampEveryIntent())).warmth == _PROBE
+
+
+def test_the_residency_hook_is_not_consulted_for_a_serve_node() -> None:
     serve = _Workflow(_SERVE)
-    # A serve node declares its own standing residency and never consults the hook,
-    # so its intent is the same with and without the policy.
-    assert (
-        _resident_node(serve.plan(WarmthPolicy())).residency_intent
-        == _resident_node(serve.plan()).residency_intent
-    )
+    # A serve node declares its own standing residency rather than asking the hook, so
+    # even a policy that stamps every intent it sees leaves this one as the compiler
+    # wrote it.
+    stamped = _intent(serve.plan(_StampEveryIntent()))
+    assert stamped == _intent(serve.plan())
+    assert stamped.warmth != _PROBE
 
 
-def test_the_warmth_policy_does_not_reach_an_unresolved_menu() -> None:
+def test_the_residency_hook_is_not_consulted_for_an_unresolved_menu() -> None:
     menu = _Workflow(_MENU)
-    (node,) = [n for n in menu.plan(WarmthPolicy()).nodes if n.embodiment_menu]
+    (node,) = [n for n in menu.plan(_StampEveryIntent()).nodes if n.embodiment_menu]
     assert node.residency_intent is None and node.embodiment_menu is not None
     intents = [
         candidate.residency_intent
@@ -212,7 +229,7 @@ def test_a_plan_records_the_lowering_that_produced_it() -> None:
     prelude = _Workflow(_PRELUDE)
     lowering = _lowering(prelude.plan(DemoPolicy()))
     assert lowering.strategy == LoweringStrategy.EPISODE_CUT.value
-    assert lowering.policy == "d30-demo"
+    assert lowering.policy == "demo"
 
 
 def test_a_deployment_running_no_policy_records_the_effective_one() -> None:
@@ -242,11 +259,11 @@ def test_an_inspection_reports_the_plan_the_same_lowering_produces() -> None:
         policy=DemoPolicy(),
     )
     assert report.plan == prelude.plan(DemoPolicy(), LoweringStrategy.EPISODE_CUT)
-    assert "policy=d30-demo" in report.render_text()
+    assert "policy=demo" in report.render_text()
 
 
 def test_each_demo_policy_is_selectable_by_name() -> None:
-    for name in ("conservative", "d30-fusion", "d30-warmth", "d30-demo"):
+    for name in ("conservative", "demo-fusion", "demo-warmth", "demo"):
         surface = build_policy_surface(PolicySurfaceConfig(enabled=True, lowering=name))
         assert surface is not None and surface.lowering.name == name
 
@@ -301,7 +318,7 @@ def _resident_binding(lowering: str):
 
 
 def test_the_configured_policy_reaches_the_resolved_admission_binding() -> None:
-    binding = _resident_binding("d30-warmth")
+    binding = _resident_binding("demo-warmth")
     assert binding is not None
     assert binding.warmth == "warm"
     assert binding.compatible()
@@ -314,11 +331,11 @@ def test_a_conservative_deployment_resolves_an_unstyled_binding() -> None:
 
 
 def test_a_dry_run_inspection_matches_what_the_runtime_would_register() -> None:
-    runtime = _runtime("d30-demo")
+    runtime = _runtime("demo")
     report = runtime.inspect_v2(_PRELUDE, format="native")
     assert report is not None
     lowering = _lowering(report.plan)
-    assert lowering.policy == "d30-demo"
+    assert lowering.policy == "demo"
     assert lowering.strategy == LoweringStrategy.TRANSPARENT.value
 
 
@@ -343,8 +360,8 @@ spec:
 
 
 def test_a_dry_run_under_a_policy_still_vaults_nothing_and_redacts() -> None:
-    runtime = _runtime("d30-demo")
+    runtime = _runtime("demo")
     report = runtime.inspect_v2(_INLINE_SECRET, format="native")
     assert report is not None
-    assert _lowering(report.plan).policy == "d30-demo"
+    assert _lowering(report.plan).policy == "demo"
     assert "sk-secret" not in report.model_dump_json()
