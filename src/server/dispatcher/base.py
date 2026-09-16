@@ -357,10 +357,16 @@ class Dispatcher:
         record = self._runtime.get_record(task_id)
         if not record:
             return True
+        # The dispatcher serves both tracks; only a v2 task's dispatch belongs to the
+        # v2 control-plane breakdown.
+        workflow_id = (
+            record.workflow_id
+            if self._profiler.enabled
+            and self._runtime.is_v2_workflow(record.workflow_id)
+            else None
+        )
         with self._profiler.stage(
-            ControlPlaneStage.DISPATCH,
-            StageWindow.QUEUE,
-            workflow_id=record.workflow_id,
+            ControlPlaneStage.DISPATCH, StageWindow.QUEUE, workflow_id=workflow_id
         ):
             return self._dispatch_once(task_id, record)
 

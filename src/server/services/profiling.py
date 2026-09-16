@@ -80,6 +80,8 @@ class ControlStageSink(Protocol):
 class ControlPlaneProfiler:
     """Times control-plane stages into a sink."""
 
+    enabled = True
+
     def __init__(self, sink: ControlStageSink) -> None:
         self._sink = sink
 
@@ -109,6 +111,7 @@ class ControlPlaneProfiler:
 class _NullProfiler:
     """Disabled profiler; every stage is a reused no-op context."""
 
+    enabled = False
     _context = nullcontext()
 
     def stage(

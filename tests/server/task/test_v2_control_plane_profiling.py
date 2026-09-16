@@ -138,3 +138,11 @@ def test_a_serve_subject_attributes_to_no_workflow() -> None:
     external = InvocationSubject(kind=InvocationSubjectKind.EXTERNAL, id="user-1")
     assert _subject_workflow_id(workflow) == "wfl-1"
     assert _subject_workflow_id(external) is None
+
+
+def test_a_v1_workflow_is_not_a_v2_engine_owner() -> None:
+    """The dispatch stage keys off this predicate, so a v1 body must not satisfy it."""
+    v1_id, _recorder, v1_runtime, _results = _submit(_V1, enabled=True)
+    v2_id, _recorder2, v2_runtime, _results2 = _submit(_V2, enabled=True)
+    assert v1_runtime.is_v2_workflow(v1_id) is False
+    assert v2_runtime.is_v2_workflow(v2_id) is True
