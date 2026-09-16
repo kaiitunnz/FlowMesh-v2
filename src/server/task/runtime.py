@@ -1499,7 +1499,13 @@ class TaskRuntime:
         )
 
     def _is_resident_env(self, env: ToolInvocationEnvelope) -> bool:
-        return self.resolve_service_dependency(env.task_id) is not None
+        """Whether the task consumes a resident dependency, without reading its plan."""
+        with self._lock:
+            record = self._tasks.get(env.task_id)
+            engine = self._engines.get(record.workflow_id) if record else None
+            if record is None or engine is None:
+                return False
+            return engine.service_dependency(env.task_id) is not None
 
     def _dispatch_resident_op(self, env: ToolInvocationEnvelope) -> None:
         """Originate a worker-captured resident boundary through resident admission."""
