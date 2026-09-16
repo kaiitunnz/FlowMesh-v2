@@ -274,3 +274,63 @@ def test_a_requeue_does_not_erase_a_cancellation() -> None:
         assert runtime.requeue(writer, front=True) is False
 
     asyncio.run(run())
+
+
+def test_a_completion_racing_a_cancel_settles_cancelled() -> None:
+    async def run() -> None:
+        registry = FakeRegistry()
+        runtime = _runtime(registry)
+        workflow_id, ids = await _register(runtime, _AGENT_WF)
+        writer = ids["writer"]
+        adapter = ScriptedHarnessAdapter(
+            [ScriptedStep(op="complete", value="done")], "v1"
+        )
+
+        # The worker ran the episode's last step; the cancel lands before it reports.
+        result = _run_step(runtime, adapter, writer)
+        runtime.cancel_workflow(workflow_id)
+        assert runtime._tasks[writer].status == TaskStatus.CANCELLING
+
+        usages = runtime.mark_succeeded(
+            writer,
+            "wkr-1",
+            {"agent_episode": result.model_dump(mode="json"), **_USAGE_PAYLOAD},
+            _TS,
+        )
+
+        record = runtime._tasks[writer]
+        assert record.status == TaskStatus.CANCELLED
+        assert record.error == "cancelled"
+        assert [usage.status for _, usage in usages] == [TaskStatus.CANCELLED]
+        engine = runtime.orchestration_engine(workflow_id)
+        assert engine is not None
+        wi = engine.work_item(writer)
+        assert wi is not None and wi.status is WorkItemStatus.CANCELLED
+        assert registry.remaining_of(workflow_id) == set()
+
+    asyncio.run(run())
+
+
+def test_a_failure_racing_a_cancel_settles_cancelled() -> None:
+    async def run() -> None:
+        registry = FakeRegistry()
+        runtime = _runtime(registry)
+        workflow_id, ids = await _register(runtime, _AGENT_WF)
+        writer = ids["writer"]
+        adapter = ScriptedHarnessAdapter(_SCRIPT, "v1")
+
+        _run_step(runtime, adapter, writer)
+        runtime.cancel_workflow(workflow_id)
+
+        impacted, merged, usages = runtime.mark_failed(
+            writer, "wkr-1", dict(_USAGE_PAYLOAD), _TS, error="worker blew up"
+        )
+
+        record = runtime._tasks[writer]
+        assert record.status == TaskStatus.CANCELLED
+        assert record.error == "cancelled"
+        assert (impacted, merged) == ([], [])
+        assert [usage.status for _, usage in usages] == [TaskStatus.CANCELLED]
+        assert registry.remaining_of(workflow_id) == set()
+
+    asyncio.run(run())

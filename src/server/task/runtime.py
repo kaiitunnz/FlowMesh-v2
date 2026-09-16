@@ -3150,6 +3150,15 @@ class TaskRuntime:
                         task_id,
                     )
                     return []
+                if record.status == TaskStatus.CANCELLING:
+                    # The cancel already resolved this task's declared output to its
+                    # cancellation outcome and withheld the dispatch that would have
+                    # carried a terminal back, so its completion settles the
+                    # cancellation rather than reporting a success the ledger no
+                    # longer publishes.
+                    return self._settle_cancelled_usage_locked(
+                        record, payload, finished_ts, started_ts
+                    )
                 record.status = TaskStatus.DONE
                 record.error = None
                 record.finished_ts = finished_ts
@@ -3257,6 +3266,17 @@ class TaskRuntime:
                         task_id,
                     )
                     return [], [], []
+                if record.status == TaskStatus.CANCELLING:
+                    # The cancellation is the settled outcome, so a failure racing it
+                    # neither overrides it nor cascades into dependents the cancel has
+                    # already settled.
+                    return (
+                        [],
+                        [],
+                        self._settle_cancelled_usage_locked(
+                            record, payload, finished_ts, started_ts
+                        ),
+                    )
                 record.status = TaskStatus.FAILED
                 record.error = message
                 record.finished_ts = finished_ts
@@ -3473,6 +3493,24 @@ class TaskRuntime:
                 record, finished_ts, started_ts=started_ts, usage=usage
             )
             return usages
+
+    def _settle_cancelled_usage_locked(
+        self,
+        record: TaskRecord,
+        payload: dict[str, Any],
+        finished_ts: float,
+        started_ts: float | None,
+    ) -> list[tuple[str, TaskUsage]]:
+        """Settle a cancellation a worker terminal raced, billing its own dispatch.
+
+        The dispatch that reports here ran to its end, so it is billed -- under the
+        status the task actually settles into, not the one its report carried.
+        """
+        usage = TaskUsage.from_payload(payload, TaskStatus.CANCELLED)
+        self._settle_cancelled_locked(
+            record, finished_ts, started_ts=started_ts, usage=usage
+        )
+        return [(record.task_id, usage)] if usage is not None else []
 
     def _settle_cancelled_locked(
         self,
