@@ -9,12 +9,16 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from ....config import PolicySurfaceConfig
+from .demo import DemoPolicy, FusionVetoPolicy, WarmthPolicy
 from .lowering import LoweringPolicy
 
 type _Factory[T] = Callable[[PolicySurfaceConfig], T]
 
 _LOWERING: dict[str, _Factory[LoweringPolicy]] = {
-    LoweringPolicy.name: lambda _: LoweringPolicy()
+    LoweringPolicy.name: lambda _: LoweringPolicy(),
+    FusionVetoPolicy.name: lambda _: FusionVetoPolicy(),
+    WarmthPolicy.name: lambda _: WarmthPolicy(),
+    DemoPolicy.name: lambda _: DemoPolicy(),
 }
 
 

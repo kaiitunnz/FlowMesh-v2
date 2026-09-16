@@ -57,6 +57,11 @@ class ServiceFamilyRequirement(BaseModel):
     isolation: str | None = None
 
 
+# The one residency warmth preference the fabric expresses: a family carrying it is
+# retained longer after its last credit-bearing invocation.
+WARM = "warm"
+
+
 class ResidencyIntent(BaseModel):
     """A plan-time residency preference hook.
 

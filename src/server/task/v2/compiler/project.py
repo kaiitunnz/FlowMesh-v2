@@ -45,6 +45,7 @@ from ..representations.operators import (
     operator_service_dependency,
 )
 from ..representations.plan import (
+    WARM,
     InferenceEmbodimentMenu,
     PhysicalNode,
     ResidencyIntent,
@@ -481,7 +482,7 @@ def lower_tasks(
                     source_ref=operator_id,
                     logical_ref=operator_id,
                     service_family_requirement=ServiceFamilyRequirement(family=family),
-                    residency_intent=ResidencyIntent(warmth="warm"),
+                    residency_intent=ResidencyIntent(warmth=WARM),
                 )
             )
             continue
