@@ -355,7 +355,7 @@ STACK_ENV_SCHEMA = EnvSchema(
                     "ORCHESTRATOR_LOWERING_POLICY",
                     "conservative",
                     description="Advisory lowering policy.",
-                    choices=["conservative", "d30-fusion", "d30-warmth", "d30-demo"],
+                    choices=["conservative", "demo-fusion", "demo-warmth", "demo"],
                 ),
             ],
         ),

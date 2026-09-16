@@ -25,7 +25,7 @@ class FusionVetoPolicy(LoweringPolicy):
     and local, so the veto cuts one more episode within the same contract.
     """
 
-    name = "d30-fusion"
+    name = "demo-fusion"
 
     def fuse(self, predecessor: LogicalOperator, candidate: LogicalOperator) -> bool:
         return not _is_echo(candidate)
@@ -38,7 +38,7 @@ class WarmthPolicy(LoweringPolicy):
     capacity and changes no claim, admission, route, or credit.
     """
 
-    name = "d30-warmth"
+    name = "demo-warmth"
 
     def residency(self, intent: ResidencyIntent) -> ResidencyIntent:
         if not intent.required or intent.conditional:
@@ -49,4 +49,4 @@ class WarmthPolicy(LoweringPolicy):
 class DemoPolicy(FusionVetoPolicy, WarmthPolicy):
     """Both fixed refinements under one selectable name."""
 
-    name = "d30-demo"
+    name = "demo"
