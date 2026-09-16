@@ -44,6 +44,9 @@ and artifacts.
   endpoint advertisements, the derived reachability view and its state machine,
   the pure route resolver, the three transports, and the bounded relay session.
   Read before touching `src/server/network/`.
+- **[`docs/PROFILING.md`](docs/PROFILING.md)** — control-plane profiling:
+  the v2 stage decomposition, its submit / queue / post-start windows,
+  and the v1-versus-v2 comparison harness.
 - **[`docs/ENV.md`](docs/ENV.md)** — curated server / worker /
   supervisor env var tables (the knobs you actually tune). Full schema
   in `cli/stack/src/flowmesh_cli_stack/env_schema.py`.

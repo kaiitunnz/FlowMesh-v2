@@ -414,6 +414,15 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   other. The mediated-egress-sidecar tool path and the worker-materialized resident
   completion settle by reference; the model gateway settles inline. See
   [`EXECUTORS.md`](EXECUTORS.md).
+- **Control-plane profiling.** A v2 submission's server-side control stages —
+  compilation, orchestration-ledger drive and settle, ledger snapshot serialization,
+  dispatch, resident admission, mediated-boundary permit minting, and relay
+  establishment — are timed and rolled up per workflow in the metrics recorder, reported
+  through `GET /api/v1/system/metrics`. Each measurement carries the window it fires in:
+  the submit request, a task's queue window, or mid-episode after the task started. Since
+  v1 and v2 share one process, dispatcher and worker pool, submitting the same body on
+  both tracks isolates the v2 control-plane cost. Enable with
+  `SERVER_METRICS_CONTROL_PROFILING=true`. See [`PROFILING.md`](PROFILING.md).
 - **Task merging.** Compatible adjacent tasks in a DAG (same `taskType`,
   model, hardware shape, and merge key) coalesce into a single dispatch.
   Merged children ride on `WorkerTaskMessage.merged_children`; the worker
