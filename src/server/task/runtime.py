@@ -96,6 +96,7 @@ from ..registries.workflow import PersistedTask, WorkflowRegistry, WorkflowSched
 from ..services.model_secret_vault import ModelSecretVault
 from ..utils.time import parse_iso_ts
 from .models import (
+    SETTLING_TASK_STATUSES,
     TERMINAL_TASK_STATUSES,
     TaskInfo,
     TaskParsingResult,
@@ -1122,7 +1123,9 @@ class TaskRuntime:
             record = self._tasks.get(task_id)
             if not record:
                 return
-            if record.status == TaskStatus.CANCELLED:
+            if record.status in (TaskStatus.CANCELLED, TaskStatus.CANCELLING):
+                # A requeue never returns cancelled work to the queue, and never clears
+                # the cancellation a settle path is still waiting to apply.
                 return
             record.status = TaskStatus.PENDING
             record.assigned_worker = None
@@ -2982,8 +2985,8 @@ class TaskRuntime:
             record = self._tasks.get(task_id)
             if not record:
                 return
-            if record.status in TERMINAL_TASK_STATUSES:
-                # A replayed or late dispatch must not regress a terminal task.
+            if record.status in SETTLING_TASK_STATUSES:
+                # A replayed or late dispatch must not regress a settling task.
                 return
             record.status = TaskStatus.DISPATCHED
             record.assigned_worker = worker.id
@@ -3017,8 +3020,8 @@ class TaskRuntime:
             record = self._tasks.get(task_id)
             if not record:
                 return
-            if record.status in TERMINAL_TASK_STATUSES:
-                # A replayed or late start must not regress a terminal task.
+            if record.status in SETTLING_TASK_STATUSES:
+                # A replayed or late start must not regress a settling task.
                 return
             record.status = TaskStatus.DISPATCHED
             record.started_ts = started_ts

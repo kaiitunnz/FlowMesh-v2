@@ -43,6 +43,11 @@ TERMINAL_TASK_STATUSES = frozenset(
     {TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.DONE}
 )
 
+# A cancelling task is waiting for its worker's terminal, and every path that settles
+# the cancellation keys on that status, so a late or replayed transition that rewrote it
+# would re-admit work the cancel already stopped.
+SETTLING_TASK_STATUSES = TERMINAL_TASK_STATUSES | {TaskStatus.CANCELLING}
+
 
 class TaskUsage(BaseModel):
     started_at: str = Field(description="Start timestamp.")
