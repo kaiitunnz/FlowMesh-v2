@@ -44,6 +44,7 @@ listed here is in `.env.example`.
 | `ORCHESTRATOR_FUSION_POLICY` | `conservative` | Advisory episode-fusion policy |
 | `ORCHESTRATOR_RESIDENCY_POLICY` | `conservative` | Advisory residency-preference policy |
 | `ORCHESTRATOR_SERVICE_FAMILY_POLICY` | `conservative` | Advisory service-family policy |
+| `SERVER_METRICS_CONTROL_PROFILING` | `false` | Record v2 control-plane stage timings |
 | `AGENT_SANDBOX_ENABLED` | `false` | Allow agents to run code in a worker-local sandbox |
 | `AGENT_SANDBOX_EGRESS_ENABLED` | `false` | Allow sandbox commands to reach the network |
 | `AGENT_INPUT_BUDGET_BYTES` | `262144` | Max resolved first-turn input bytes per agent |

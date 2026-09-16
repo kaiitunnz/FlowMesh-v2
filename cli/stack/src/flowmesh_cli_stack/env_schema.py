@@ -363,6 +363,12 @@ STACK_ENV_SCHEMA = EnvSchema(
                     description="Advisory service-family policy.",
                     choices=["conservative"],
                 ),
+                EnvVar(
+                    "SERVER_METRICS_CONTROL_PROFILING",
+                    "0",
+                    description="Record v2 control-plane stage timings.",
+                    var_type=EnvVarType.BOOL,
+                ),
             ],
         ),
         EnvSection(

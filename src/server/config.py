@@ -253,6 +253,7 @@ class MetricsConfig:
     dir: Path | None = None
     enable_density_plot: bool = False
     density_bucket_sec: int = 60
+    enable_control_profiling: bool = False
 
     @classmethod
     def from_env(cls, results_dir: Path) -> "MetricsConfig":
@@ -269,6 +270,9 @@ class MetricsConfig:
             ),
             density_bucket_sec=max(
                 1, parse_int_env("SERVER_METRICS_DENSITY_BUCKET_SEC", 60)
+            ),
+            enable_control_profiling=parse_bool_env(
+                "SERVER_METRICS_CONTROL_PROFILING", False
             ),
         )
 

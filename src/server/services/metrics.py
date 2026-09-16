@@ -11,6 +11,12 @@ from shared.tasks.worker_message import WorkerHardware
 
 from ..task.models import categorize_task_type
 from ..utils.time import now_iso, parse_iso_ts
+from .profiling import NESTED_STAGES, ControlPlaneStage, StageWindow
+
+# Workflows retained in the control-plane stage breakdown. The breakdown is a
+# development instrument read per run, so the oldest workflow is evicted past
+# this many rather than letting a long-lived server accumulate them.
+_MAX_PROFILED_WORKFLOWS = 256
 
 
 def _fresh_timing_bucket() -> dict[str, dict[str, float]]:
@@ -40,6 +46,7 @@ class MetricsRecorder:
         *,
         enable_density_plot: bool = False,
         density_bucket_seconds: int = 60,
+        enable_control_profiling: bool = False,
     ) -> None:
         self._dir = Path(base_dir).expanduser().resolve()
         self._dir.mkdir(parents=True, exist_ok=True)
@@ -73,6 +80,10 @@ class MetricsRecorder:
         }
 
         self._worker_meta: dict[str, dict[str, Any]] = {}
+
+        self._control_profiling_enabled = bool(enable_control_profiling)
+        self._control_stages: dict[str, dict[str, dict[str, float]]] = {}
+        self._control_invocations: dict[str, set[str]] = {}
 
         self._density_plot_enabled = bool(enable_density_plot)
         self._density_bucket_sec = max(1, int(density_bucket_seconds))
@@ -175,6 +186,49 @@ class MetricsRecorder:
 
             self._append_event(event)
             self._write_metrics()
+
+    def record_control_stage(
+        self,
+        stage: ControlPlaneStage,
+        window: StageWindow,
+        seconds: float,
+        *,
+        workflow_id: str | None,
+        invocation_id: str | None = None,
+    ) -> None:
+        """Accumulate one timed v2 control-plane stage under its workflow.
+
+        Kept out of the per-event snapshot write: a stage fires far more often
+        than a task event, and serializing the snapshot each time would move the
+        very timings this records.
+        """
+        if not self._control_profiling_enabled or not workflow_id:
+            return
+        duration = max(0.0, float(seconds))
+        with self._lock:
+            stages = self._control_stages.get(workflow_id)
+            if stages is None:
+                if len(self._control_stages) >= _MAX_PROFILED_WORKFLOWS:
+                    oldest = next(iter(self._control_stages))
+                    del self._control_stages[oldest]
+                    self._control_invocations.pop(oldest, None)
+                stages = {}
+                self._control_stages[workflow_id] = stages
+            bucket = stages.setdefault(
+                f"{window.value}/{stage.value}", {"sum": 0.0, "count": 0.0, "max": 0.0}
+            )
+            bucket["sum"] += duration
+            bucket["count"] += 1
+            bucket["max"] = max(bucket["max"], duration)
+            if invocation_id:
+                self._control_invocations.setdefault(workflow_id, set()).add(
+                    invocation_id
+                )
+
+    def control_plane_breakdown(self) -> dict[str, Any]:
+        """Per-workflow v2 control-plane stage decomposition."""
+        with self._lock:
+            return self._build_control_breakdown()
 
     def finalize_task_failure(self, task_id: str) -> None:
         self._finalize_task_terminal(task_id, "failed")
@@ -730,6 +784,8 @@ class MetricsRecorder:
             "active_workers_count": len(self._active_workers),
             "completed_tasks": sorted(self._completed_tasks),
         }
+        if self._control_profiling_enabled:
+            snapshot["v2_control_plane"] = self._build_control_breakdown()
         if self._density_plot_enabled:
             snapshot["density_bucket_seconds"] = self._density_bucket_sec
             snapshot["task_density_buckets"] = self._serialize_task_density()
@@ -742,6 +798,32 @@ class MetricsRecorder:
             snapshot["avg_completion_rate_per_min"] = rates.get("completion_per_min")
             snapshot["density_rates"] = rates
         return snapshot
+
+    def _build_control_breakdown(self) -> dict[str, Any]:
+        workflows: dict[str, Any] = {}
+        for workflow_id, stages in self._control_stages.items():
+            windows: dict[str, Any] = {
+                window.value: {"total_sec": 0.0, "nested_sec": 0.0, "stages": {}}
+                for window in StageWindow
+            }
+            for key, bucket in stages.items():
+                window_name, _, stage_name = key.partition("/")
+                count = int(bucket["count"])
+                total = bucket["sum"]
+                window = windows[window_name]
+                window["stages"][stage_name] = {
+                    "count": count,
+                    "total_sec": total,
+                    "avg_sec": (total / count) if count else None,
+                    "max_sec": bucket["max"],
+                }
+                nested = ControlPlaneStage(stage_name) in NESTED_STAGES
+                window["nested_sec" if nested else "total_sec"] += total
+            workflows[workflow_id] = {
+                "windows": windows,
+                "invocations": len(self._control_invocations.get(workflow_id, ())),
+            }
+        return {"workflows": workflows}
 
     def _summarize_timing(self, bucket: dict[str, dict[str, float]]) -> dict[str, Any]:
         summary: dict[str, Any] = {}

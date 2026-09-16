@@ -54,6 +54,7 @@ from .services.metrics import MetricsRecorder
 from .services.model_secret_vault import ModelSecretVault
 from .services.monitoring import EventMonitor
 from .services.port_forward import PortForwardService
+from .services.profiling import build_profiler
 from .services.ssh_audit import SshAuditService
 from .services.watchdog import WorkerWatchdog
 from .startup import (
@@ -120,6 +121,10 @@ METRICS_RECORDER = MetricsRecorder(
     logger,
     enable_density_plot=config.metrics.enable_density_plot,
     density_bucket_seconds=config.metrics.density_bucket_sec,
+    enable_control_profiling=config.metrics.enable_control_profiling,
+)
+CONTROL_PROFILER = build_profiler(
+    METRICS_RECORDER, enabled=config.metrics.enable_control_profiling
 )
 
 SUPERVISOR: WorkerSupervisor | None = None
