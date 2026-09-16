@@ -14,6 +14,7 @@ from typing import Literal
 
 from shared.utils.ids import new_allocation_lease_id, new_replica_id
 
+from ..task.v2.representations.plan import ResidencyWarmth
 from ..utils.time import now_iso, parse_iso_ts
 from .policy import ProvisioningDecision, ResidentPolicyLimits, decide_materialization
 from .state import (
@@ -339,9 +340,10 @@ class LifecycleScaleManager:
         """Drain idle servable replicas past the retain window, then stop drained ones.
 
         A conservative scale-down: a servable replica holding no admission credit and
-        idle past the retain window is drained; a drained replica still holding no
-        credit is stopped, cancelling its serve task. A later eligible claim then
-        materializes the family from zero again. A non-positive window disables it.
+        idle past its family's retain window is drained; a drained replica still holding
+        no credit is stopped, cancelling its serve task. A later eligible claim then
+        materializes the family from zero again. A non-positive base window disables it
+        for every family.
         """
         if self._idle_retain_sec <= 0:
             return
@@ -361,9 +363,20 @@ class LifecycleScaleManager:
             elif replica.state is ReplicaState.DRAINING and held == 0:
                 self.stop(replica.replica_id)
 
+    def _retain_sec(self, family: str) -> float:
+        """The idle window a family's replicas are retained for.
+
+        A warm family is retained for twice the deployment's base window; every other
+        family, and one whose recorded preference is not a value this fabric expresses,
+        keeps the base.
+        """
+        definition = self._stores.families.get(family)
+        warm = definition is not None and definition.warmth is ResidencyWarmth.WARM
+        return self._idle_retain_sec * (2 if warm else 1)
+
     def _idle_past_retain(self, replica: ReplicaIncarnation, reference: float) -> bool:
         idle_for = reference - parse_iso_ts(replica.last_active_at)
-        return idle_for >= self._idle_retain_sec
+        return idle_for >= self._retain_sec(replica.family)
 
     def on_preempt(self, replica_id: str) -> None:
         """Invalidate a preempted or failed replica incarnation for reconciliation.

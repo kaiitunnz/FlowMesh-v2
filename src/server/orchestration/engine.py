@@ -39,6 +39,7 @@ from shared.utils import (
     new_work_item_id,
 )
 
+from ..task.v2.representations.admission import ResidentAdmissionBinding
 from ..task.v2.representations.bundle import PersistedV2Workflow
 from ..task.v2.representations.operators import (
     AgentOperator,
@@ -3445,6 +3446,34 @@ class OrchestrationEngine:
         wi = self._work_item_for_task(task_id)
         operator_id = wi.operator_id if wi is not None else task_id
         return operator_service_dependency(self._operators.get(operator_id))
+
+    def resident_admission_binding(
+        self, workflow_id: str, task_id: str
+    ) -> ResidentAdmissionBinding | None:
+        """The dependency a task consumes joined with its own plan node's annotations.
+
+        The node is the one the task's operator lowered to; an unresolved embodiment
+        menu carries its resident annotations per candidate, so it contributes none.
+        """
+        wi = self._work_item_for_task(task_id)
+        operator_id = wi.operator_id if wi is not None else task_id
+        dependency = operator_service_dependency(self._operators.get(operator_id))
+        if dependency is None:
+            return None
+        node = next(
+            (
+                n
+                for n in self._bundle.plan.nodes
+                if n.logical_ref == operator_id and n.embodiment_menu is None
+            ),
+            None,
+        )
+        return ResidentAdmissionBinding(
+            workflow_id=workflow_id,
+            dependency=dependency,
+            requirement=node.service_family_requirement if node else None,
+            intent=node.residency_intent if node else None,
+        )
 
     def invocation_for_task(self, task_id: str) -> Invocation | None:
         wi = self._work_item_for_task(task_id)

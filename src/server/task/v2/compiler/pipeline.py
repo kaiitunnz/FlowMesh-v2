@@ -4,9 +4,13 @@ from pydantic import ValidationError
 
 from ...parser import ParsedWorkflow
 from ..mode import LoweringStrategy
-from ..policy.lowering import LoweringPolicy
+from ..policy.lowering import PolicySurface
 from ..representations.bundle import PersistedV2Workflow
-from ..representations.plan import PhysicalExecutionPlan, PhysicalNode
+from ..representations.plan import (
+    LoweringProvenance,
+    PhysicalExecutionPlan,
+    PhysicalNode,
+)
 from ..representations.source import FrontendWorkflowSource
 from ..representations.template import LogicalWorkflowTemplate
 from ..representations.versioning import VersionId, content_digest
@@ -62,12 +66,14 @@ def _finalize_plan(
     workflow_id: str,
     template_version: VersionId,
     nodes: tuple[PhysicalNode, ...],
+    lowering: LoweringProvenance,
 ) -> PhysicalExecutionPlan:
     lineage = f"{workflow_id}:plan"
     provisional = PhysicalExecutionPlan(
         plan_version=VersionId(lineage=lineage, content_digest=""),
         template_version=template_version,
         nodes=nodes,
+        lowering=lowering,
     )
     digest = content_digest(provisional.model_dump_json(exclude={"plan_version"}))
     return provisional.model_copy(
@@ -83,7 +89,7 @@ def compile_workflow(
     strategy: LoweringStrategy = LoweringStrategy.TRANSPARENT,
     bindings: AgentBindingDefaults | None = None,
     secret_refs: Mapping[str, str] | None = None,
-    policy: LoweringPolicy | None = None,
+    surface: PolicySurface | None = None,
 ) -> tuple[LogicalWorkflowTemplate, PhysicalExecutionPlan]:
     """Compile a parsed workflow into symbolic v2 representations.
 
@@ -98,9 +104,10 @@ def compile_workflow(
     bindings and no activation tags.
     """
     defaults = bindings if bindings is not None else neutral_defaults()
+    policies = surface if surface is not None else PolicySurface()
     acc = LoweringAccumulator()
     name_to_op = build_name_map(parsed)
-    lower_tasks(parsed, name_to_op, acc, defaults, secret_refs or {}, policy)
+    lower_tasks(parsed, name_to_op, acc, defaults, secret_refs or {}, policies)
     lower_frontend_v2(parsed, acc)
     induce_effect_boundaries(acc)
     pin_agent_sandbox(acc, defaults.sandbox_enabled)
@@ -108,8 +115,18 @@ def compile_workflow(
     template = _assemble_template(workflow_id, source, acc)
     nodes = tuple(acc.nodes)
     if strategy is LoweringStrategy.EPISODE_CUT:
-        nodes = lower_to_episodes(template, nodes, policy)
-    plan = _finalize_plan(workflow_id, template.version, nodes)
+        nodes = lower_to_episodes(template, nodes, policies)
+    plan = _finalize_plan(
+        workflow_id,
+        template.version,
+        nodes,
+        LoweringProvenance(
+            strategy=strategy,
+            fusion=policies.fusion.name,
+            residency=policies.residency.name,
+            service_family=policies.service_family.name,
+        ),
+    )
     if validate:
         diagnostics = validate_compilation(
             template, plan, defaults.sandbox_egress_enabled
@@ -126,7 +143,7 @@ def compile_bundle(
     strategy: LoweringStrategy = LoweringStrategy.TRANSPARENT,
     bindings: AgentBindingDefaults | None = None,
     secret_refs: Mapping[str, str] | None = None,
-    policy: LoweringPolicy | None = None,
+    surface: PolicySurface | None = None,
 ) -> PersistedV2Workflow:
     """Compile a parsed workflow into the durable plan-time bundle."""
     template, plan = compile_workflow(
@@ -136,6 +153,6 @@ def compile_bundle(
         strategy=strategy,
         bindings=bindings,
         secret_refs=secret_refs,
-        policy=policy,
+        surface=surface,
     )
     return PersistedV2Workflow(source=source, template=template, plan=plan)

@@ -7,6 +7,15 @@ from shared.tasks.specs import ModelBindingMode
 from shared.utils.parsing import parse_bool_env, parse_float_env, parse_int_env
 
 
+def _conservative_policy() -> str:
+    # Lazy import: the v2 package eagerly pulls in the compiler and the policy surface,
+    # which imports this module, so naming the canonical default at call time breaks the
+    # cycle.
+    from .task.v2.representations.plan import CONSERVATIVE_POLICY
+
+    return CONSERVATIVE_POLICY
+
+
 def _default_selection_strategy() -> str:
     # Lazy import: the resident package pulls in the orchestration chain, which imports
     # this module, so referencing the canonical default at call time breaks the cycle.
@@ -635,21 +644,24 @@ class NetworkPlaneConfig:
 
 @dataclass
 class PolicySurfaceConfig:
-    """The deployment's advisory policy selection.
+    """The deployment's advisory policy selection, one policy per lowering hook.
 
-    A policy is deployment-global: a workflow submission selects none. While
-    ``enabled`` is false the surface is inert.
+    A policy is deployment-global: a workflow submission selects none. Each hook
+    defaults to the conservative policy, which lowers as the compiler alone would.
     """
 
-    enabled: bool = False
-    lowering: str = "conservative"
+    fusion: str = field(default_factory=_conservative_policy)
+    residency: str = field(default_factory=_conservative_policy)
+    service_family: str = field(default_factory=_conservative_policy)
 
     @classmethod
     def from_env(cls) -> "PolicySurfaceConfig":
-        defaults = cls()
+        conservative = _conservative_policy()
         return cls(
-            enabled=parse_bool_env("ORCHESTRATOR_POLICY_SURFACE_ENABLED", False),
-            lowering=_env_or_none("ORCHESTRATOR_LOWERING_POLICY") or defaults.lowering,
+            fusion=_env_or_none("ORCHESTRATOR_FUSION_POLICY") or conservative,
+            residency=_env_or_none("ORCHESTRATOR_RESIDENCY_POLICY") or conservative,
+            service_family=_env_or_none("ORCHESTRATOR_SERVICE_FAMILY_POLICY")
+            or conservative,
         )
 
 

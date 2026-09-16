@@ -119,11 +119,11 @@ from .v2.compiler.agent_binding import AgentBindingDefaults
 from .v2.compiler.facades import run_command_schema
 from .v2.credentials import pop_inline_model_secrets, redact_source_text
 from .v2.policy import PolicySurface
+from .v2.representations.admission import ResidentAdmissionBinding
 from .v2.representations.operators import (
     AgentModelGatewayBinding,
     AgentOperator,
     ResolvedEmbodiment,
-    ServiceDependency,
 )
 from .v2.representations.plan import EpisodeSpec, InferenceEmbodimentMenu
 
@@ -275,14 +275,14 @@ class TaskRuntime:
         logger: logging.Logger,
         secret_vault: ModelSecretVault,
         feasibility_check: EpisodeFeasibility | None = None,
-        policy: PolicySurface | None = None,
+        surface: PolicySurface | None = None,
     ) -> None:
         self._workflow_registry = workflow_registry
         self._worker_registry = worker_registry
         self._logger = logger
         self._results_dir = results_dir
         self._feasibility_check = feasibility_check
-        self._lowering_policy = policy.lowering if policy else None
+        self._policy_surface = surface if surface is not None else PolicySurface()
         self._secret_vault = secret_vault
         self._scope_budget = ScopeBudget.from_config(orchestration)
         self._web_search = orchestration.web_search
@@ -391,6 +391,8 @@ class TaskRuntime:
             parsed_workflow,
             source,
             bindings=self._agent_binding_defaults,
+            strategy=self._lowering_strategy,
+            surface=self._policy_surface,
         )
 
     async def _vault_inline_secrets(
@@ -442,7 +444,7 @@ class TaskRuntime:
                 strategy=self._lowering_strategy,
                 bindings=self._agent_binding_defaults,
                 secret_refs=secret_refs,
-                policy=self._lowering_policy,
+                surface=self._policy_surface,
             )
             v2_engine = OrchestrationEngine.build(
                 workflow_id, owner_id, org_id, v2_bundle, budget=self._scope_budget
@@ -1497,7 +1499,13 @@ class TaskRuntime:
         )
 
     def _is_resident_env(self, env: ToolInvocationEnvelope) -> bool:
-        return self.resolve_service_dependency(env.task_id) is not None
+        """Whether the task consumes a resident dependency, without reading its plan."""
+        with self._lock:
+            record = self._tasks.get(env.task_id)
+            engine = self._engines.get(record.workflow_id) if record else None
+            if record is None or engine is None:
+                return False
+            return engine.service_dependency(env.task_id) is not None
 
     def _dispatch_resident_op(self, env: ToolInvocationEnvelope) -> None:
         """Originate a worker-captured resident boundary through resident admission."""
@@ -1891,20 +1899,20 @@ class TaskRuntime:
 
     def resolve_service_dependency(
         self, task_id: str
-    ) -> tuple[str, ServiceDependency] | None:
-        """The task's owning workflow and its normalized resident dependency.
+    ) -> ResidentAdmissionBinding | None:
+        """What the task binds for resident admission, read from its own plan node.
 
         Resolves for both an agent whose model binding is resident and an inference or
         embedding leaf that consumes a resident family; a non-resident task resolves to
-        None. The workflow id scopes admission bookkeeping to the submitting workflow.
+        None. The binding's workflow id scopes admission bookkeeping to the submitting
+        workflow.
         """
         with self._lock:
             record = self._tasks.get(task_id)
             engine = self._engines.get(record.workflow_id) if record else None
             if record is None or engine is None:
                 return None
-            dependency = engine.service_dependency(task_id)
-            return (record.workflow_id, dependency) if dependency is not None else None
+            return engine.resident_admission_binding(record.workflow_id, task_id)
 
     def _apply_private_state_seal_locked(self, task_id: str, sealed: Any) -> None:
         """Record the generation a holder sealed, ignoring a fenced-out report."""

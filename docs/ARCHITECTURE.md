@@ -163,20 +163,28 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   contract-equivalent — an episode cut changes only where work yields, never a declared
   output, effect visibility, or progress closure. `ORCHESTRATOR_EPISODE_LOWERING=true`
   selects the episode-cut lowering.
-- **Advisory lowering policy.** A deployment may enable a compile-time policy that
-  refines a lowering the compiler has already found legal: it can keep a fusible
-  operator out of its predecessor's episode, pick among the families compatible with a
-  dependency's engine-batch key, and express warmth, reuse, affinity, or preemption
-  preference. The compiler screens every answer, so fusion stays bounded to the pure,
-  deterministic, local set, an episode only ever cuts more often, and a refinement
-  holds the dependency's engine-batch key and isolation as well as its pinned family
-  and requiredness. Choosing a worker, reserving capacity, minting a claim or
-  attachment, and replacing a pinned resident binding belong to the fabric. The policy
-  is deployment-global — a workflow submission selects none — and the default lowers
-  identically to the compiler alone, so a workflow's declared outputs, effects, and
-  recovery are the same whether or not one runs. The fusion refinement applies to the
-  episode-cut lowering; family and residency refinement applies to both lowerings.
-  Enable with `ORCHESTRATOR_POLICY_SURFACE_ENABLED=true`.
+- **Advisory lowering policy.** A deployment selects a compile-time policy at each
+  lowering hook, refining a lowering the compiler has already found legal: it can keep a
+  fusible operator out of its predecessor's episode, pick among the families compatible
+  with a dependency's engine-batch key, and express warmth, reuse, affinity, or
+  preemption preference. The hooks are selected independently, so a deployment composes
+  the facets it wants. The compiler screens every answer, so fusion stays bounded to the
+  pure, deterministic, local set, an episode only ever cuts more often, and a refinement
+  holds the dependency's engine-batch key and isolation as well as its pinned family and
+  requiredness. Choosing a worker, reserving capacity, minting a claim or attachment,
+  and replacing a pinned resident binding belong to the fabric. A policy is
+  deployment-global — a workflow submission selects none — and every hook defaults to a
+  conservative policy that lowers identically to the compiler alone, so a workflow's
+  declared outputs, effects, and recovery are the same whichever policies run. The
+  fusion refinement applies to the episode-cut lowering; family and residency refinement
+  applies to both lowerings. A residency refinement reaches an ordinary resident
+  dependency: a `serve` node declares its own standing residency and an unresolved
+  embodiment menu carries its intent per candidate, so neither consults the policy. A
+  plan records the episode strategy and the policy effective at each hook, and the v2
+  dry-run inspection compiles under the same configured set, so a validation report and
+  a persisted submission describe the same physical decision. Select policies with
+  `ORCHESTRATOR_FUSION_POLICY`, `ORCHESTRATOR_RESIDENCY_POLICY`, and
+  `ORCHESTRATOR_SERVICE_FAMILY_POLICY`.
 - **Inference-embodiment menus.** An inference leaf declares one model contract; whether
   resident capacity or a local executor serves it is the fabric's to decide. Such a leaf
   lowers to one physical node carrying the embodiments that contract admits — a
@@ -248,27 +256,31 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   validation. `agent` is a v2-only task type: a legacy v1 agent submission is rejected.
 - **Activation-private state.** An agent activation owns its mutable harness state
   under an opaque `ActivationPrivateStateReference`, whose lifecycle and recovery the
-  orchestration ledger owns. A `PrivateStateBinding` names the generation and recovery
-  mode a continuation resumes on, an immutable `StateBundleManifest` describes one
-  sealed generation over registered typed components (`harness_home_fs`,
-  `workspace_fs`), and a `PrivateStateAttachment` grants one worker incarnation the
-  exclusive, epoch-fenced authority to materialize and write it. An attachment is
-  physical execution authority over one activation's state, distinct from the capacity
-  admission a `ServiceClaim` carries.
+  orchestration ledger owns. A `PrivateStateBinding` names the private-state generation
+  and recovery mode a continuation resumes on, an immutable `StateBundleManifest`
+  describes one sealed private-state generation over registered typed components
+  (`harness_home_fs`, `workspace_fs`), and a `PrivateStateAttachment` grants one worker
+  incarnation the exclusive, write-epoch-fenced authority to materialize and write it. An
+  attachment is physical execution authority over one activation's state, distinct from
+  the capacity admission a `ServiceClaim` carries.
   Each dispatch mints a fresh write epoch, so a superseded holder can neither write nor
   seal. Components seal together at one quiescence fence, so a harness home never
-  resumes beside a workspace from another generation. While a generation is sealed
-  local to the holder that produced it, that holder is a hard scheduler feasibility
-  constraint resolved at dispatch: the episode lane yields as any other does, and an
-  episode waits while its holder is busy. Owner loss, an incarnation change, or a
-  component that does not match its seal fails closed as a typed
+  resumes beside a workspace from another private-state generation. While a generation is
+  sealed local to the holder that produced it, that holder is a hard scheduler
+  feasibility constraint resolved at dispatch: the episode lane yields as any other does,
+  and an episode waits while its holder is busy. Owner loss, a worker-incarnation change,
+  or a component that does not match its seal fails closed as a typed
   `PrivateStateUnavailable` rather than resuming against a fresh or partial home. One
   activation reaches another's state only by holding a valid binding and attachment for
-  it, which the ledger's owner and epoch fences decide; the `0700` private root, keyed
-  by the opaque reference, separates a holder's lineages from other users on its node,
+  it, which the ledger's owner and write-epoch fences decide; the `0700` private root,
+  keyed by the opaque reference, separates a holder's lineages from other users on its
+  node,
   and a harness works inside its own components under its sandbox. Only opaque
   references cross into the ledger, control state, operation frames, logs, results, or
-  artifacts. `WORKER_PRIVATE_STATE_DIR` sets the root.
+  artifacts. These fences are the activation's own — a private-state generation, its
+  write epoch, and the ledger's owner fence — and are separate from the replica
+  incarnation, listener generation, and admission epoch that fence a resident
+  allocation. `WORKER_PRIVATE_STATE_DIR` sets the root.
 - **Agent-local sandbox execution.** An agent that declares the `sandbox.execute`
   interface runs commands worker-locally in its own `workspace_fs`, on the worker its
   private-state attachment selected; an ordinary command makes no control-plane round

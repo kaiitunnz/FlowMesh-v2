@@ -41,8 +41,9 @@ listed here is in `.env.example`.
 | `ORCHESTRATOR_MAX_SPAWNS_PER_REGION` | `256` | Max spawn children admitted per agent child region |
 | `ORCHESTRATOR_MAX_PREPARED_INPUT_BYTES` | – | Max prepared inference input bytes; unset is uncapped |
 | `ORCHESTRATOR_EPISODE_LOWERING` | `false` | Lower v2 templates into run-to-yield episodes |
-| `ORCHESTRATOR_POLICY_SURFACE_ENABLED` | `false` | Enable the advisory policy surface |
-| `ORCHESTRATOR_LOWERING_POLICY` | `conservative` | Advisory lowering policy |
+| `ORCHESTRATOR_FUSION_POLICY` | `conservative` | Advisory episode-fusion policy |
+| `ORCHESTRATOR_RESIDENCY_POLICY` | `conservative` | Advisory residency-preference policy |
+| `ORCHESTRATOR_SERVICE_FAMILY_POLICY` | `conservative` | Advisory service-family policy |
 | `AGENT_SANDBOX_ENABLED` | `false` | Allow agents to run code in a worker-local sandbox |
 | `AGENT_SANDBOX_EGRESS_ENABLED` | `false` | Allow sandbox commands to reach the network |
 | `AGENT_INPUT_BUDGET_BYTES` | `262144` | Max resolved first-turn input bytes per agent |
@@ -77,7 +78,7 @@ listed here is in `.env.example`.
 | `RESIDENT_ALLOWED_MODELS` | – | Comma-separated allowed model catalog; any if empty |
 | `RESIDENT_FORWARD_API_KEY` | – | Credential the adapter presents to a keyless replica |
 | `RESIDENT_SELECTION_STRATEGY` | `batch-aware-best-fit` | Per-family replica-selection strategy |
-| `RESIDENT_IDLE_RETAIN_SEC` | `0` | Idle retain window before teardown; 0 disables |
+| `RESIDENT_IDLE_RETAIN_SEC` | `0` | Base idle retain window before teardown; 0 disables |
 | `RESIDENT_IDLE_SWEEP_INTERVAL_SEC` | `30` | Idle-teardown sweep interval (seconds) |
 | `RESIDENT_SIDECAR_DIRECTLY_ROUTABLE` | `false` | Advertise the resident sidecar as directly routable |
 | `NETWORK_PLANE_ENABLED` | `false` | Enable the route-discovery and relay substrate |

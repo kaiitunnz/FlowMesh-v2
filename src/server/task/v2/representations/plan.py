@@ -1,9 +1,11 @@
 from enum import StrEnum
+from typing import Annotated, Any
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
 
 from shared.tasks.specs import InferenceEmbodimentKind
 
+from ..mode import LoweringStrategy
 from .versioning import VersionId
 
 
@@ -57,6 +59,36 @@ class ServiceFamilyRequirement(BaseModel):
     isolation: str | None = None
 
 
+class ResidencyWarmth(StrEnum):
+    """The residency warmth preferences the fabric expresses.
+
+    A family carrying ``WARM`` is retained longer after its last credit-bearing
+    invocation.
+    """
+
+    WARM = "warm"
+
+
+def known_warmth(value: Any) -> ResidencyWarmth | None:
+    """Normalize a warmth value to the fabric's vocabulary, mapping any other to none.
+
+    Warmth is a retention preference, so a value from another vocabulary leaves the
+    family at the base retention rather than failing to load.
+    """
+    if value is None or isinstance(value, ResidencyWarmth):
+        return value
+    try:
+        return ResidencyWarmth(value)
+    except (ValueError, TypeError):
+        return None
+
+
+type Warmth = Annotated[ResidencyWarmth | None, BeforeValidator(known_warmth)]
+
+# The policy that answers every lowering hook as the compiler itself would.
+CONSERVATIVE_POLICY = "conservative"
+
+
 class ResidencyIntent(BaseModel):
     """A plan-time residency preference hook.
 
@@ -71,7 +103,7 @@ class ResidencyIntent(BaseModel):
 
     service_family: str | None = None
     required: bool = False
-    warmth: str | None = None
+    warmth: Warmth = None
     reuse_domain: str | None = None
     affinity: str | None = None
     preemption: str | None = None
@@ -198,6 +230,23 @@ class PhysicalNode(BaseModel):
     embodiment_menu: InferenceEmbodimentMenu | None = None
 
 
+class LoweringProvenance(BaseModel):
+    """The lowering a plan was produced under.
+
+    Names the episode strategy and the advisory policy effective at each lowering
+    hook, so a dry-run inspection and a persisted submission are comparable at the
+    decisions that produced them. A hook for which a deployment selects no policy
+    records ``conservative``, its effective policy.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    strategy: LoweringStrategy
+    fusion: str = CONSERVATIVE_POLICY
+    residency: str = CONSERVATIVE_POLICY
+    service_family: str = CONSERVATIVE_POLICY
+
+
 class PhysicalExecutionPlan(BaseModel):
     """A finite, versioned, symbolic menu of legal physical lowerings.
 
@@ -213,6 +262,7 @@ class PhysicalExecutionPlan(BaseModel):
     plan_version: VersionId
     template_version: VersionId
     nodes: tuple[PhysicalNode, ...] = ()
+    lowering: LoweringProvenance | None = None
 
     @model_validator(mode="after")
     def _validate_node_ids(self) -> "PhysicalExecutionPlan":

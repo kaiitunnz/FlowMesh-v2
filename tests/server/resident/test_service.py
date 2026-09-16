@@ -37,9 +37,15 @@ from server.resident import (
 )
 from server.resident.service import ResidentWorkerDelivery
 from server.resident.state import ReplicaIncarnation
+from server.task.v2.representations.admission import ResidentAdmissionBinding
 from server.task.v2.representations.operators import (
     ServiceDependency,
     ServiceInterface,
+)
+from server.task.v2.representations.plan import (
+    ResidencyIntent,
+    ResidencyWarmth,
+    ServiceFamilyRequirement,
 )
 from shared.harness import BoundaryEventKind
 from shared.outcome import OutcomeManifest
@@ -54,6 +60,25 @@ from shared.resident.reports import (
 
 def _dependency(model_ref: str = "m") -> ServiceDependency:
     return ServiceDependency(service_ref=model_ref)
+
+
+def _admission(
+    dependency: ServiceDependency | None = None,
+    warmth: ResidencyWarmth | None = None,
+) -> ResidentAdmissionBinding:
+    dep = dependency or _dependency()
+    return ResidentAdmissionBinding(
+        workflow_id="wfl-1",
+        dependency=dep,
+        requirement=ServiceFamilyRequirement(
+            family=dep.service_family,
+            engine_batch_key=dep.engine_batch_key,
+            isolation=dep.isolation,
+        ),
+        intent=ResidencyIntent(
+            service_family=dep.service_family, required=True, warmth=warmth
+        ),
+    )
 
 
 def _env(invocation_id: str = "inv-1") -> ToolInvocationEnvelope:
@@ -150,6 +175,7 @@ def _build(
     materialize_fn: Any = None,
     deliver: bool = True,
     dependency: ServiceDependency | None = None,
+    warmth: ResidencyWarmth | None = None,
 ) -> tuple[ResidentCapacityControl, ResidentStores, list[Any], _Delivery]:
     stores = ResidentStores()
     limits = limits or ResidentPolicyLimits()
@@ -186,7 +212,7 @@ def _build(
         admission=admission,
         lifecycle=lifecycle,
         limits=limits,
-        dependency_resolver=lambda task_id: ("wfl-1", dependency or _dependency()),
+        dependency_resolver=lambda task_id: _admission(dependency, warmth),
         settle_cb=settle_cb,
         redispatch_cb=redispatch_cb,
         endpoint_probe=lambda serve_task_id: ReplicaEndpoint(
@@ -632,3 +658,35 @@ def test_path_evidence_from_the_worker_lane_runs_on_the_origination_loop():
     assert delivery.network.observations == [
         (Transport.WORKER_DIRECT, RouteObservationOutcome.VERIFIED)
     ]
+
+
+def test_a_plan_warmth_preference_reaches_the_family_definition():
+    svc, stores, _settled, _delivery = _build(warmth=ResidencyWarmth.WARM)
+    asyncio.run(svc._originate(_env()))
+
+    family = stores.families.get(stores.claims.by_invocation("inv-1")[0].family)
+    assert family is not None and family.warmth is ResidencyWarmth.WARM
+
+
+def test_an_unstyled_plan_leaves_the_family_definition_unstyled():
+    svc, stores, _settled, _delivery = _build()
+    asyncio.run(svc._originate(_env()))
+
+    family = stores.families.get(stores.claims.by_invocation("inv-1")[0].family)
+    assert family is not None and family.warmth is None
+
+
+def test_a_plan_annotation_for_another_node_is_not_read_as_this_one_s():
+    # The projection's physical requirement names a different family than the
+    # dependency admits against, so its residency preference is not this
+    # dependency's to carry.
+    other = ServiceFamilyRequirement(family="other", engine_batch_key="other-key")
+    binding = _admission(warmth=ResidencyWarmth.WARM).model_copy(
+        update={"requirement": other}
+    )
+    svc, stores, _settled, _delivery = _build()
+    svc._resolve_dependency = lambda task_id: binding
+    asyncio.run(svc._originate(_env()))
+
+    family = stores.families.get(stores.claims.by_invocation("inv-1")[0].family)
+    assert family is not None and family.warmth is None
