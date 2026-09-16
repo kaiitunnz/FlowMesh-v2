@@ -3455,11 +3455,11 @@ class OrchestrationEngine:
         The node is the one the task's operator lowered to; an unresolved embodiment
         menu carries its resident annotations per candidate, so it contributes none.
         """
-        dependency = self.service_dependency(task_id)
-        if dependency is None:
-            return None
         wi = self._work_item_for_task(task_id)
         operator_id = wi.operator_id if wi is not None else task_id
+        dependency = operator_service_dependency(self._operators.get(operator_id))
+        if dependency is None:
+            return None
         node = next(
             (
                 n
@@ -3470,8 +3470,6 @@ class OrchestrationEngine:
         )
         return ResidentAdmissionBinding(
             workflow_id=workflow_id,
-            plan_version=self._bundle.plan.plan_version,
-            node_id=node.node_id if node else None,
             dependency=dependency,
             requirement=node.service_family_requirement if node else None,
             intent=node.residency_intent if node else None,

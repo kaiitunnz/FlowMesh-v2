@@ -46,7 +46,6 @@ from server.task.v2.representations.plan import (
     ResidencyIntent,
     ServiceFamilyRequirement,
 )
-from server.task.v2.representations.versioning import VersionId
 from shared.harness import BoundaryEventKind
 from shared.outcome import OutcomeManifest
 from shared.resident.reports import (
@@ -68,8 +67,6 @@ def _admission(
     dep = dependency or _dependency()
     return ResidentAdmissionBinding(
         workflow_id="wfl-1",
-        plan_version=VersionId(lineage="wfl-1:plan", content_digest="d"),
-        node_id="phys:tsk-1",
         dependency=dep,
         requirement=ServiceFamilyRequirement(
             family=dep.service_family,

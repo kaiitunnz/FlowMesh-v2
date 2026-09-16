@@ -2,7 +2,6 @@ from pydantic import BaseModel, ConfigDict
 
 from .operators import ServiceDependency
 from .plan import ResidencyIntent, ServiceFamilyRequirement
-from .versioning import VersionId
 
 
 class ResidentAdmissionBinding(BaseModel):
@@ -19,8 +18,6 @@ class ResidentAdmissionBinding(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     workflow_id: str
-    plan_version: VersionId
-    node_id: str | None = None
     dependency: ServiceDependency
     requirement: ServiceFamilyRequirement | None = None
     intent: ResidencyIntent | None = None
