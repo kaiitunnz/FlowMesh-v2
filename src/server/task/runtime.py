@@ -461,7 +461,12 @@ class TaskRuntime:
                 workflow_id=workflow_id,
             ):
                 v2_engine = OrchestrationEngine.build(
-                    workflow_id, owner_id, org_id, v2_bundle, budget=self._scope_budget
+                    workflow_id,
+                    owner_id,
+                    org_id,
+                    v2_bundle,
+                    budget=self._scope_budget,
+                    profiler=self._profiler,
                 )
 
         with self._cv:
@@ -778,7 +783,9 @@ class TaskRuntime:
             elif record.status in (TaskStatus.DISPATCHED, TaskStatus.CANCELLING):
                 self._rehydrated_dispatched[task_id] = rehydrated_at
 
-        engine = OrchestrationEngine(snapshot, bundle, budget=self._scope_budget)
+        engine = OrchestrationEngine(
+            snapshot, bundle, budget=self._scope_budget, profiler=self._profiler
+        )
         self._engines[workflow_id] = engine
         cancelled = False
         for persisted in tasks:

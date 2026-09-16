@@ -5,6 +5,7 @@ from ..config import DispatchConfig
 from ..dispatcher import Dispatcher
 from ..registries.worker import WorkerRegistry
 from ..services.metrics import MetricsRecorder
+from ..services.profiling import NULL_PROFILER, Profiler
 from ..task.runtime import TaskRuntime
 
 DEFAULT_DISPATCH_MODE = "adaptive"
@@ -23,6 +24,7 @@ def create_dispatcher(
     metrics_recorder: MetricsRecorder | None = None,
     resident_capacity_enabled: bool = False,
     resident_admission_slots: int = 0,
+    profiler: Profiler = NULL_PROFILER,
 ) -> Dispatcher:
     """
     Instantiate a dispatcher according to the selected mode.
@@ -47,6 +49,7 @@ def create_dispatcher(
         "other": config.lambda_other,
     }
     return dispatcher_cls(
+        profiler=profiler,
         runtime=runtime,
         worker_registry=worker_registry,
         results_dir=results_dir,

@@ -14,9 +14,10 @@ seals and drains, never on an observed empty set. Scheduler/worker placement sta
 physical decision that never changes what the engine considers ready.
 """
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Self
+from functools import wraps
+from typing import Concatenate, Self
 
 from shared.harness import DeliveredOutcome, OutcomeKind
 from shared.inference import InputResolutionBinding, ResolvedInputReference
@@ -39,6 +40,12 @@ from shared.utils import (
     new_work_item_id,
 )
 
+from ..services.profiling import (
+    NULL_PROFILER,
+    ControlPlaneStage,
+    Profiler,
+    StageWindow,
+)
 from ..task.v2.representations.admission import ResidentAdmissionBinding
 from ..task.v2.representations.bundle import PersistedV2Workflow
 from ..task.v2.representations.operators import (
@@ -196,6 +203,23 @@ class Advance:
         return self
 
 
+def _timed_drive[**P, R](
+    method: Callable[Concatenate["OrchestrationEngine", P], R],
+) -> Callable[Concatenate["OrchestrationEngine", P], R]:
+    """Time one ledger transition as a post-start control-plane drive."""
+
+    @wraps(method)
+    def wrapper(self: "OrchestrationEngine", *args: P.args, **kwargs: P.kwargs) -> R:
+        with self._profiler.stage(
+            ControlPlaneStage.DS_DRIVE,
+            StageWindow.POST_START,
+            workflow_id=self._instance.instance_id,
+        ):
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
+
 class OrchestrationEngine:
     """Drives one workflow instance's semantic readiness over its durable ledger."""
 
@@ -205,7 +229,9 @@ class OrchestrationEngine:
         bundle: PersistedV2Workflow,
         *,
         budget: ScopeBudget | None = None,
+        profiler: Profiler = NULL_PROFILER,
     ) -> None:
+        self._profiler = profiler
         self._instance = snapshot.instance
         self._root_scope = snapshot.root_scope
         self._root_grant = snapshot.root_grant
@@ -393,6 +419,7 @@ class OrchestrationEngine:
         policy_envelope: str | None = None,
         granted_interfaces: frozenset[str] | None = None,
         budget: ScopeBudget | None = None,
+        profiler: Profiler = NULL_PROFILER,
     ) -> "OrchestrationEngine":
         """Materialize an engine from a compiled bundle.
 
@@ -542,7 +569,7 @@ class OrchestrationEngine:
             continuations=continuations,
             result_slots=slots,
         )
-        engine = cls(snapshot, bundle, budget=budget)
+        engine = cls(snapshot, bundle, budget=budget, profiler=profiler)
         engine._initial = engine._open_roots()
         return engine
 
@@ -610,6 +637,7 @@ class OrchestrationEngine:
             invocation_id=wi.invocation_id,
         )
 
+    @_timed_drive
     def on_succeeded(self, task_id: str, *, empty: bool = False) -> Advance:
         """Settle a work item on success and release its successors.
 
@@ -657,6 +685,7 @@ class OrchestrationEngine:
             invocation.state = next_on_terminal(invocation.state)
             self._record_receipt(wi, outcome)
 
+    @_timed_drive
     def on_failed(self, task_id: str, error: str, *, retryable: bool) -> Advance:
         """Retry a work item as a fresh attempt, or settle it and cascade failure."""
         wi = self._work_item_for_task(task_id)
@@ -686,6 +715,7 @@ class OrchestrationEngine:
             return advance.extend(released)
         return Advance(failed=self._settle_failure(wi.work_item_id)).extend(released)
 
+    @_timed_drive
     def on_uncertain(self, task_id: str) -> Advance:
         """Resolve a lost acknowledgement or route loss for an in-flight work item."""
         wi = self._work_item_for_task(task_id)
@@ -734,6 +764,7 @@ class OrchestrationEngine:
         released = self._agent_terminal_regions(wi.operator_id, wi.activation_id)
         return Advance(failed=self._settle_failure(wi.work_item_id)).extend(released)
 
+    @_timed_drive
     def route_boundary_event(self, task_id: str, event: BoundaryEvent) -> Advance:
         """Route an episode's boundary request back into the ledger, validated first.
 
@@ -1301,6 +1332,7 @@ class OrchestrationEngine:
         env = self._boundary_events.get((wi.activation_id, call_correlation))
         return env is not None and not self._boundary_resolved(env)
 
+    @_timed_drive
     def settle_boundary_outcome(
         self,
         task_id: str,
@@ -2288,6 +2320,7 @@ class OrchestrationEngine:
         """Cancel the whole workflow instance: the root scope and every descendant."""
         return self.on_cancelled(self._root_scope.scope_id)
 
+    @_timed_drive
     def on_cancelled(self, scope_or_task: str) -> Advance:
         """Cancel a scope subtree as a durable, recorded-before-terminal event.
 

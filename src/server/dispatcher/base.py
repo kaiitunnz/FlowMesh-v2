@@ -36,6 +36,12 @@ from shared.tasks.worker_message import WorkerStatus, WorkerTaskMessage
 from ..clients.redis import REDIS_CONN_ERRORS
 from ..registries.worker import Worker, WorkerRegistry
 from ..services.metrics import MetricsRecorder
+from ..services.profiling import (
+    NULL_PROFILER,
+    ControlPlaneStage,
+    Profiler,
+    StageWindow,
+)
 from ..task.metadata import extract_model_dataset_names
 from ..task.models import TaskRecord, TaskStatus
 from ..task.runtime import TaskRuntime
@@ -81,7 +87,9 @@ class Dispatcher:
         resident_capacity_enabled: bool = False,
         resident_admission_slots: int = 0,
         embodiment_selector: EmbodimentSelector | None = None,
+        profiler: Profiler = NULL_PROFILER,
     ) -> None:
+        self._profiler = profiler
         self._runtime = runtime
         self._worker_registry = worker_registry
         self._logger = logger
@@ -349,6 +357,14 @@ class Dispatcher:
         record = self._runtime.get_record(task_id)
         if not record:
             return True
+        with self._profiler.stage(
+            ControlPlaneStage.DISPATCH,
+            StageWindow.QUEUE,
+            workflow_id=record.workflow_id,
+        ):
+            return self._dispatch_once(task_id, record)
+
+    def _dispatch_once(self, task_id: str, record: TaskRecord) -> bool:
 
         # A leaf whose source declares no envelope is prepared first: this dispatch
         # resolves its inputs on a worker and reports the request it materialized, and
