@@ -783,7 +783,7 @@ class ResidentCapacityControl:
         orig: _Origination,
         dependency: ServiceDependency,
         profile: AdmissionProfile,
-        admission: ResidentAdmissionBinding | None = None,
+        admission: ResidentAdmissionBinding | None,
     ) -> None:
         """Admit the invocation's claim and relay its bootstrap, subject-neutrally.
 
@@ -865,7 +865,9 @@ class ResidentCapacityControl:
             serve=request.delivery,
             request_id=request.request_id,
         )
-        await self._drive_claim(orig, request.dependency, request.profile)
+        # A serve subject admits against its pre-registered allocation family, which
+        # its adoption defined; no workflow plan node backs it.
+        await self._drive_claim(orig, request.dependency, request.profile, None)
 
     def _settle_origination_error(self, orig: _Origination, detail: str) -> None:
         """Route an origination-phase error to its subject's settle path."""
