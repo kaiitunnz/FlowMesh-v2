@@ -2125,7 +2125,7 @@ class TaskRuntime:
             )
             if selection is None:
                 return None
-            self._save_ledger_locked(record.workflow_id)
+            self._save_ledger_locked(record.workflow_id, StageWindow.QUEUE, nested=True)
             return selection.alternative_id
 
     def _synthesize_ready_children_locked(
@@ -2442,11 +2442,18 @@ class TaskRuntime:
         return advance
 
     def _save_ledger_locked(
-        self, workflow_id: str, window: StageWindow = StageWindow.POST_START
+        self,
+        workflow_id: str,
+        window: StageWindow = StageWindow.POST_START,
+        *,
+        nested: bool = False,
     ) -> None:
         if (engine := self._engines.get(workflow_id)) is not None:
             with self._profiler.stage(
-                ControlPlaneStage.LEDGER_SNAPSHOT, window, workflow_id=workflow_id
+                ControlPlaneStage.LEDGER_SNAPSHOT,
+                window,
+                workflow_id=workflow_id,
+                nested=nested,
             ):
                 snapshot = engine.to_snapshot()
             self._workflow_registry.save_ledger_snapshot(workflow_id, snapshot)
@@ -3064,7 +3071,9 @@ class TaskRuntime:
                     engine.on_input_preparation_dispatched(task_id, worker.id)
                 else:
                     engine.on_dispatched(task_id, worker.id)
-                self._save_ledger_locked(record.workflow_id, StageWindow.QUEUE)
+                self._save_ledger_locked(
+                    record.workflow_id, StageWindow.QUEUE, nested=True
+                )
 
     def mark_started(
         self,

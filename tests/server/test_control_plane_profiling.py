@@ -83,7 +83,7 @@ def test_repeated_stage_accumulates_sum_count_and_max(
     assert entry["invocations"] == 1
 
 
-def test_nested_stage_is_reported_beside_the_window_total(
+def test_a_sibling_stage_counts_toward_the_window_total(
     tmp_path: Path, logger: logging.Logger
 ) -> None:
     recorder = _recorder(tmp_path, logger, enabled=True)
@@ -94,7 +94,49 @@ def test_nested_stage_is_reported_beside_the_window_total(
         ControlPlaneStage.LEDGER_SNAPSHOT, StageWindow.QUEUE, 0.4, workflow_id="wfl-1"
     )
     queue = recorder.control_plane_breakdown()["workflows"]["wfl-1"]["windows"]["queue"]
+    assert queue["total_sec"] == pytest.approx(1.4)
+    assert queue["nested_sec"] == 0.0
+
+
+def test_a_nested_stage_is_reported_beside_the_window_total(
+    tmp_path: Path, logger: logging.Logger
+) -> None:
+    recorder = _recorder(tmp_path, logger, enabled=True)
+    recorder.record_control_stage(
+        ControlPlaneStage.DISPATCH, StageWindow.QUEUE, 1.0, workflow_id="wfl-1"
+    )
+    recorder.record_control_stage(
+        ControlPlaneStage.LEDGER_SNAPSHOT,
+        StageWindow.QUEUE,
+        0.4,
+        workflow_id="wfl-1",
+        nested=True,
+    )
+    queue = recorder.control_plane_breakdown()["workflows"]["wfl-1"]["windows"]["queue"]
     assert queue["total_sec"] == pytest.approx(1.0)
+    assert queue["nested_sec"] == pytest.approx(0.4)
+    assert queue["nested"]["ledger_snapshot"]["total_sec"] == pytest.approx(0.4)
+
+
+def test_one_stage_both_nested_and_sibling_stays_separable(
+    tmp_path: Path, logger: logging.Logger
+) -> None:
+    """The queue window sees both: one snapshot inside dispatch, one beside it."""
+    recorder = _recorder(tmp_path, logger, enabled=True)
+    recorder.record_control_stage(
+        ControlPlaneStage.LEDGER_SNAPSHOT,
+        StageWindow.QUEUE,
+        0.4,
+        workflow_id="wfl-1",
+        nested=True,
+    )
+    recorder.record_control_stage(
+        ControlPlaneStage.LEDGER_SNAPSHOT, StageWindow.QUEUE, 0.3, workflow_id="wfl-1"
+    )
+    queue = recorder.control_plane_breakdown()["workflows"]["wfl-1"]["windows"]["queue"]
+    assert queue["stages"]["ledger_snapshot"]["total_sec"] == pytest.approx(0.3)
+    assert queue["nested"]["ledger_snapshot"]["total_sec"] == pytest.approx(0.4)
+    assert queue["total_sec"] == pytest.approx(0.3)
     assert queue["nested_sec"] == pytest.approx(0.4)
 
 
@@ -112,8 +154,8 @@ def test_same_stage_in_two_windows_stays_separate(
         workflow_id="wfl-1",
     )
     windows = recorder.control_plane_breakdown()["workflows"]["wfl-1"]["windows"]
-    assert windows["submit"]["nested_sec"] == pytest.approx(0.2)
-    assert windows["post_start"]["nested_sec"] == pytest.approx(0.3)
+    assert windows["submit"]["total_sec"] == pytest.approx(0.2)
+    assert windows["post_start"]["total_sec"] == pytest.approx(0.3)
 
 
 def test_stage_without_a_workflow_is_dropped(

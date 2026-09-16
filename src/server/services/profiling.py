@@ -8,14 +8,14 @@ measurement to a :class:`ControlStageSink` — :class:`~.metrics.MetricsRecorder
 in the server — keyed by ``workflow_id`` and, for stages that run mid-episode,
 ``invocation_id``.
 
-Each measurement carries the :class:`StageWindow` it fired in. A stage can fire
-in more than one window — the ledger snapshot serializes during submission,
-dispatch and outcome settlement alike — so the window is a property of the
-control point, recorded by the call site rather than derived from the stage.
+Each measurement carries the :class:`StageWindow` it fired in, and whether it
+ran inside an enclosing timed stage. Both are properties of the control point
+rather than of the stage: the ledger snapshot serializes during submission,
+dispatch and outcome settlement alike, and is enclosed by the dispatch stage at
+some of those sites and a sibling of it at others.
 
 Timing is off unless a deployment enables it; :data:`NULL_PROFILER` is the
-disabled form and costs one attribute load and one reused context manager per
-call site.
+disabled form.
 """
 
 from collections.abc import Iterator
@@ -43,6 +43,7 @@ class ControlPlaneStage(StrEnum):
 
     COMPILE_LOWER = "compile_lower"
     COMPILE_ASSEMBLE = "compile_assemble"
+    COMPILE_FINALIZE = "compile_finalize"
     COMPILE_EPISODES = "compile_episodes"
     COMPILE_VALIDATE = "compile_validate"
     ENGINE_BUILD = "engine_build"
@@ -53,14 +54,6 @@ class ControlPlaneStage(StrEnum):
     PERMIT = "permit"
     RELAY = "relay"
     LEDGER_SNAPSHOT = "ledger_snapshot"
-
-
-# Stages that run inside another stage. Their cost is already counted by the
-# enclosing stage, so a window's reconciliation sum excludes them and reports
-# them as an "of which" figure instead.
-NESTED_STAGES: frozenset[ControlPlaneStage] = frozenset(
-    {ControlPlaneStage.LEDGER_SNAPSHOT}
-)
 
 
 class ControlStageSink(Protocol):
@@ -74,6 +67,7 @@ class ControlStageSink(Protocol):
         *,
         workflow_id: str | None,
         invocation_id: str | None = None,
+        nested: bool = False,
     ) -> None: ...
 
 
@@ -93,8 +87,13 @@ class ControlPlaneProfiler:
         *,
         workflow_id: str | None,
         invocation_id: str | None = None,
+        nested: bool = False,
     ) -> Iterator[None]:
-        """Time the enclosed block and record it, whether or not it raises."""
+        """Time the enclosed block and record it, whether or not it raises.
+
+        ``nested`` marks a call site an enclosing timed stage already covers, so
+        the window total counts it once.
+        """
         started = perf_counter()
         try:
             yield
@@ -105,6 +104,7 @@ class ControlPlaneProfiler:
                 perf_counter() - started,
                 workflow_id=workflow_id,
                 invocation_id=invocation_id,
+                nested=nested,
             )
 
 
@@ -121,6 +121,7 @@ class _NullProfiler:
         *,
         workflow_id: str | None,
         invocation_id: str | None = None,
+        nested: bool = False,
     ) -> nullcontext[None]:
         return self._context
 

@@ -3,7 +3,9 @@
 import asyncio
 import logging
 import pathlib
+import statistics
 import tempfile
+import time
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -32,6 +34,26 @@ spec:
 
 _V2 = _V1.replace("flowmesh/v1", "flowmesh/v2")
 
+_V1_WIDE = """
+apiVersion: flowmesh/v1
+kind: Workflow
+metadata: {name: wide}
+spec:
+  taskType: echo
+  resources: {hardware: {cpu: 1, memory: 256Mi}}
+  graph:
+    nodes:
+""" + "\n".join(
+    f"      - name: n{i}\n"
+    f"        spec: {{taskType: echo, data: {{type: list, items: [x]}}}}"
+    for i in range(30)
+)
+
+_V2_WIDE = _V1_WIDE.replace("flowmesh/v1", "flowmesh/v2")
+
+# Enough repetitions that the median is not one scheduling hiccup.
+_WALL_SAMPLES = 15
+
 
 class _CapturingRegistry:
     async def register_workflow_async(
@@ -56,19 +78,12 @@ class _NoopSecretVault:
         return None
 
 
-def _submit(
-    body: str, *, enabled: bool
-) -> tuple[str, MetricsRecorder, TaskRuntime, list]:
-    recorder = MetricsRecorder(
-        pathlib.Path(tempfile.mkdtemp()),
-        logging.getLogger("control-profiling-test"),
-        enable_control_profiling=enabled,
-    )
+def _runtime_for(recorder: MetricsRecorder, *, enabled: bool) -> TaskRuntime:
     worker_stub = SimpleNamespace(
         get_worker=lambda wid: SimpleNamespace(id=wid, node_id="nde-1"),
         publish_interrupt=lambda *a: 0,
     )
-    runtime = TaskRuntime(
+    return TaskRuntime(
         cast(Any, _CapturingRegistry()),
         cast(Any, worker_stub),
         OrchestrationConfig(),
@@ -77,6 +92,17 @@ def _submit(
         secret_vault=cast(Any, _NoopSecretVault()),
         profiler=build_profiler(recorder, enabled=enabled),
     )
+
+
+def _submit(
+    body: str, *, enabled: bool
+) -> tuple[str, MetricsRecorder, TaskRuntime, list]:
+    recorder = MetricsRecorder(
+        pathlib.Path(tempfile.mkdtemp()),
+        logging.getLogger("control-profiling-test"),
+        enable_control_profiling=enabled,
+    )
+    runtime = _runtime_for(recorder, enabled=enabled)
     workflow_id, results = asyncio.run(runtime.register("owner", "org", body))
     return workflow_id, recorder, runtime, results
 
@@ -97,19 +123,62 @@ def test_a_v2_submission_decomposes_its_submit_window() -> None:
     assert submit["total_sec"] > 0.0
 
 
-def test_the_submit_window_sum_excludes_the_nested_snapshot() -> None:
+def test_the_submit_window_total_is_the_sum_of_its_stages() -> None:
     workflow_id, recorder, _runtime, _results = _submit(_V2, enabled=True)
     submit = recorder.control_plane_breakdown()["workflows"][workflow_id]["windows"][
         "submit"
     ]
-    partition = sum(
-        entry["total_sec"]
-        for name, entry in submit["stages"].items()
-        if name != "ledger_snapshot"
-    )
+    partition = sum(entry["total_sec"] for entry in submit["stages"].values())
     assert submit["total_sec"] == pytest.approx(partition)
-    assert submit["nested_sec"] == pytest.approx(
-        submit["stages"]["ledger_snapshot"]["total_sec"]
+
+
+def test_the_submit_window_counts_the_ledger_snapshot() -> None:
+    """The snapshot is a sibling of the submit stages, so the total includes it."""
+    workflow_id, recorder, _runtime, _results = _submit(_V2, enabled=True)
+    submit = recorder.control_plane_breakdown()["workflows"][workflow_id]["windows"][
+        "submit"
+    ]
+    assert "ledger_snapshot" in submit["stages"]
+    assert submit["nested"] == {}
+    assert submit["nested_sec"] == 0.0
+
+
+def test_the_submit_window_accounts_for_the_measured_v2_register_delta() -> None:
+    """Anchored to an independent wall, not to the breakdown's own partition.
+
+    A window total that dropped a stage would still self-reconcile, so the check
+    that catches it compares against time measured outside the instrument: the
+    difference between submitting the same body on v1 and on v2 is what the v2
+    control plane costs, and the submit window is meant to account for it.
+    """
+
+    def median_register_wall(body: str) -> tuple[float, dict[str, Any]]:
+        recorder = MetricsRecorder(
+            pathlib.Path(tempfile.mkdtemp()),
+            logging.getLogger("control-profiling-test"),
+            enable_control_profiling=True,
+        )
+        runtime = _runtime_for(recorder, enabled=True)
+        for _ in range(3):
+            asyncio.run(runtime.register("owner", "org", body))
+        walls: list[float] = []
+        submit: dict[str, Any] = {}
+        for _ in range(_WALL_SAMPLES):
+            started = time.perf_counter()
+            workflow_id, _results = asyncio.run(runtime.register("owner", "org", body))
+            walls.append(time.perf_counter() - started)
+            entry = recorder.control_plane_breakdown()["workflows"].get(workflow_id)
+            if entry:
+                submit = entry["windows"]["submit"]
+        return statistics.median(walls), submit
+
+    v1_wall, _ = median_register_wall(_V1_WIDE)
+    v2_wall, submit = median_register_wall(_V2_WIDE)
+    delta = v2_wall - v1_wall
+    assert delta > 0, f"v2 register ({v2_wall}) is not slower than v1 ({v1_wall})"
+    assert submit["total_sec"] >= delta * 0.5, (
+        f"submit window {submit['total_sec']:.6f}s accounts for too little of the "
+        f"measured {delta:.6f}s v1-to-v2 register() delta: {sorted(submit['stages'])}"
     )
 
 

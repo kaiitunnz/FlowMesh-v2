@@ -11,11 +11,11 @@ from shared.tasks.worker_message import WorkerHardware
 
 from ..task.models import categorize_task_type
 from ..utils.time import now_iso, parse_iso_ts
-from .profiling import NESTED_STAGES, ControlPlaneStage, StageWindow
+from .profiling import ControlPlaneStage, StageWindow
 
 # Workflows retained in the control-plane stage breakdown. The breakdown is a
 # development instrument read per run, so the oldest workflow is evicted past
-# this many rather than letting a long-lived server accumulate them.
+# this many.
 _MAX_PROFILED_WORKFLOWS = 256
 
 
@@ -195,12 +195,14 @@ class MetricsRecorder:
         *,
         workflow_id: str | None,
         invocation_id: str | None = None,
+        nested: bool = False,
     ) -> None:
         """Accumulate one timed v2 control-plane stage under its workflow.
 
-        Kept out of the per-event snapshot write: a stage fires far more often
-        than a task event, and serializing the snapshot each time would move the
-        very timings this records.
+        Does not trigger a snapshot write: a stage fires far more often than a
+        task event, and serializing each time would move the timings it records.
+        A ``nested`` measurement is reported beside its window total, which an
+        enclosing stage already counts.
         """
         if not self._control_profiling_enabled or not workflow_id:
             return
@@ -214,8 +216,10 @@ class MetricsRecorder:
                     self._control_invocations.pop(oldest, None)
                 stages = {}
                 self._control_stages[workflow_id] = stages
+            group = "nested" if nested else "additive"
             bucket = stages.setdefault(
-                f"{window.value}/{stage.value}", {"sum": 0.0, "count": 0.0, "max": 0.0}
+                f"{window.value}/{group}/{stage.value}",
+                {"sum": 0.0, "count": 0, "max": 0.0},
             )
             bucket["sum"] += duration
             bucket["count"] += 1
@@ -809,22 +813,31 @@ class MetricsRecorder:
         workflows: dict[str, Any] = {}
         for workflow_id, stages in self._control_stages.items():
             windows: dict[str, Any] = {
-                window.value: {"total_sec": 0.0, "nested_sec": 0.0, "stages": {}}
+                window.value: {
+                    "total_sec": 0.0,
+                    "nested_sec": 0.0,
+                    "stages": {},
+                    "nested": {},
+                }
                 for window in StageWindow
             }
             for key, bucket in stages.items():
-                window_name, _, stage_name = key.partition("/")
+                window_name, group, stage_name = key.split("/", 2)
                 count = int(bucket["count"])
                 total = bucket["sum"]
                 window = windows[window_name]
-                window["stages"][stage_name] = {
+                entry = {
                     "count": count,
                     "total_sec": total,
                     "avg_sec": (total / count) if count else None,
                     "max_sec": bucket["max"],
                 }
-                nested = ControlPlaneStage(stage_name) in NESTED_STAGES
-                window["nested_sec" if nested else "total_sec"] += total
+                if group == "nested":
+                    window["nested"][stage_name] = entry
+                    window["nested_sec"] += total
+                else:
+                    window["stages"][stage_name] = entry
+                    window["total_sec"] += total
             workflows[workflow_id] = {
                 "windows": windows,
                 "invocations": len(self._control_invocations.get(workflow_id, ())),
