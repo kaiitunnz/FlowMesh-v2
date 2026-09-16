@@ -659,3 +659,33 @@ def test_path_evidence_from_the_worker_lane_runs_on_the_origination_loop():
     assert delivery.network.observations == [
         (Transport.WORKER_DIRECT, RouteObservationOutcome.VERIFIED)
     ]
+
+
+def test_a_plan_warmth_preference_reaches_the_family_definition():
+    svc, stores, _settled, _delivery = _build(warmth="warm")
+    asyncio.run(svc._originate(_env()))
+
+    family = stores.families.get(stores.claims.by_invocation("inv-1")[0].family)
+    assert family is not None and family.warmth == "warm"
+
+
+def test_an_unstyled_plan_leaves_the_family_definition_unstyled():
+    svc, stores, _settled, _delivery = _build()
+    asyncio.run(svc._originate(_env()))
+
+    family = stores.families.get(stores.claims.by_invocation("inv-1")[0].family)
+    assert family is not None and family.warmth is None
+
+
+def test_a_plan_annotation_for_another_node_is_not_read_as_this_one_s():
+    # The projection's physical requirement names a different family than the
+    # dependency admits against, so its residency preference is not this
+    # dependency's to carry.
+    other = ServiceFamilyRequirement(family="other", engine_batch_key="other-key")
+    binding = _admission(warmth="warm").model_copy(update={"requirement": other})
+    svc, stores, _settled, _delivery = _build()
+    svc._resolve_dependency = lambda task_id: binding
+    asyncio.run(svc._originate(_env()))
+
+    family = stores.families.get(stores.claims.by_invocation("inv-1")[0].family)
+    assert family is not None and family.warmth is None
