@@ -355,6 +355,7 @@ STACK_ENV_SCHEMA = EnvSchema(
                     "ORCHESTRATOR_LOWERING_POLICY",
                     "conservative",
                     description="Advisory lowering policy.",
+                    choices=["conservative", "d30-fusion", "d30-warmth", "d30-demo"],
                 ),
             ],
         ),
@@ -582,7 +583,7 @@ STACK_ENV_SCHEMA = EnvSchema(
                 EnvVar(
                     "RESIDENT_IDLE_RETAIN_SEC",
                     "0",
-                    description="Idle retain window before teardown; 0 disables.",
+                    description="Base idle retain window before teardown; 0 disables.",
                     var_type=EnvVarType.FLOAT,
                     min_value=0,
                 ),

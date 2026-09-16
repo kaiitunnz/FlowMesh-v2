@@ -179,9 +179,13 @@ bounded zero-to-one materialization. Before creating an allocation, policy check
 model catalog, the per-family replica quota, and the concurrent cold-start limit; a refusal
 is a typed durable outcome that creates no allocation, handoff, or credit and never
 substitutes an external provider. A drain rejects new claims while admitted work reaches a
-safe outcome. Idle teardown is off by default; when a retain window is configured, a
-background sweep drains a servable replica that has held no credit past the window and stops
-it once drained, and a later eligible claim materializes the family from zero again.
+safe outcome. Idle teardown is off by default; when a base retain window is configured, a
+background sweep drains a servable replica that has held no credit past its family's window
+and stops it once drained, and a later eligible claim materializes the family from zero
+again. The window is per family: a family whose definition records the warm preference its
+plan node carries is retained for twice the base, and every other family keeps the base. A
+standing `serve` allocation is pinned to its task and exempt. Warmth is a retention
+preference only — it reserves nothing and changes no claim, admission, route, or credit.
 
 ## Selection strategy
 
@@ -200,7 +204,8 @@ network plane, so `RESIDENT_CAPACITY_ENABLED` without the network plane fails cl
 startup. See the `RESIDENT_*` rows in [`ENV.md`](ENV.md) for
 enablement, the serving substrate (`serve` or `dev_model`), the policy caps, the conservative
 admission-slot count, the cold-start budget, the per-family selection strategy, and the
-idle-teardown retain window (`RESIDENT_IDLE_RETAIN_SEC`, `0` disables).
+base idle-teardown retain window (`RESIDENT_IDLE_RETAIN_SEC`, `0` disables it for every
+family).
 
 ## Observability
 
