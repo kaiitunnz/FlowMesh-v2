@@ -203,6 +203,21 @@ class PhysicalNode(BaseModel):
     embodiment_menu: InferenceEmbodimentMenu | None = None
 
 
+class LoweringProvenance(BaseModel):
+    """The lowering a plan was produced under.
+
+    Names the episode strategy and the advisory policy that refined it, so a
+    dry-run inspection and a persisted submission are comparable at the decision
+    that produced them. A deployment running no policy records ``conservative``,
+    the effective policy, rather than an unused selection knob.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    strategy: str
+    policy: str = "conservative"
+
+
 class PhysicalExecutionPlan(BaseModel):
     """A finite, versioned, symbolic menu of legal physical lowerings.
 
@@ -218,6 +233,7 @@ class PhysicalExecutionPlan(BaseModel):
     plan_version: VersionId
     template_version: VersionId
     nodes: tuple[PhysicalNode, ...] = ()
+    lowering: LoweringProvenance | None = None
 
     @model_validator(mode="after")
     def _validate_node_ids(self) -> "PhysicalExecutionPlan":

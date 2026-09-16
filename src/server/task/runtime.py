@@ -391,6 +391,8 @@ class TaskRuntime:
             parsed_workflow,
             source,
             bindings=self._agent_binding_defaults,
+            strategy=self._lowering_strategy,
+            policy=self._lowering_policy,
         )
 
     async def _vault_inline_secrets(

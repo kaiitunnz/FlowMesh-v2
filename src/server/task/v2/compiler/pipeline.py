@@ -6,7 +6,11 @@ from ...parser import ParsedWorkflow
 from ..mode import LoweringStrategy
 from ..policy.lowering import LoweringPolicy
 from ..representations.bundle import PersistedV2Workflow
-from ..representations.plan import PhysicalExecutionPlan, PhysicalNode
+from ..representations.plan import (
+    LoweringProvenance,
+    PhysicalExecutionPlan,
+    PhysicalNode,
+)
 from ..representations.source import FrontendWorkflowSource
 from ..representations.template import LogicalWorkflowTemplate
 from ..representations.versioning import VersionId, content_digest
@@ -62,12 +66,14 @@ def _finalize_plan(
     workflow_id: str,
     template_version: VersionId,
     nodes: tuple[PhysicalNode, ...],
+    lowering: LoweringProvenance,
 ) -> PhysicalExecutionPlan:
     lineage = f"{workflow_id}:plan"
     provisional = PhysicalExecutionPlan(
         plan_version=VersionId(lineage=lineage, content_digest=""),
         template_version=template_version,
         nodes=nodes,
+        lowering=lowering,
     )
     digest = content_digest(provisional.model_dump_json(exclude={"plan_version"}))
     return provisional.model_copy(
@@ -109,7 +115,15 @@ def compile_workflow(
     nodes = tuple(acc.nodes)
     if strategy is LoweringStrategy.EPISODE_CUT:
         nodes = lower_to_episodes(template, nodes, policy)
-    plan = _finalize_plan(workflow_id, template.version, nodes)
+    plan = _finalize_plan(
+        workflow_id,
+        template.version,
+        nodes,
+        LoweringProvenance(
+            strategy=strategy.value,
+            policy=policy.name if policy is not None else LoweringPolicy.name,
+        ),
+    )
     if validate:
         diagnostics = validate_compilation(
             template, plan, defaults.sandbox_egress_enabled
