@@ -800,6 +800,12 @@ class MetricsRecorder:
         return snapshot
 
     def _build_control_breakdown(self) -> dict[str, Any]:
+        # Walked from the unlocked per-event snapshot write as well as from the
+        # locked readers, while stages land from the dispatcher and drive threads.
+        with self._lock:
+            return self._control_breakdown_locked()
+
+    def _control_breakdown_locked(self) -> dict[str, Any]:
         workflows: dict[str, Any] = {}
         for workflow_id, stages in self._control_stages.items():
             windows: dict[str, Any] = {
