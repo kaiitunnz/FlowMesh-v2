@@ -254,6 +254,14 @@ def _compute_merge_key(task: TaskEnvelopeTemplate) -> str | None:
         return None
 
 
+def _in_flight_usage(
+    task_id: str, payload: dict[str, Any]
+) -> list[tuple[str, TaskUsage]]:
+    """The usage row for a dispatch whose task runs on rather than settling."""
+    usage = TaskUsage.from_payload(payload, TaskStatus.DISPATCHED)
+    return [(task_id, usage)] if usage is not None else []
+
+
 class TaskRuntime:
     """In-memory task registry with FIFO-ready queue and dependency tracking."""
 
@@ -1197,6 +1205,9 @@ class TaskRuntime:
         engine = self._engines.get(record.workflow_id) if record else None
         if record is None or engine is None:
             return
+        if record.status == TaskStatus.CANCELLING:
+            self._settle_cancelled_locked(record, time.time())
+            return
         if hr.kind in (HarnessResultKind.FAILURE, HarnessResultKind.CANCELLATION):
             self._pending_facade_groups.pop(task_id, None)
             record.pending_facade_group = None
@@ -1326,6 +1337,9 @@ class TaskRuntime:
         """Re-ready a still-running agent episode for its next run-to-yield step."""
         record = self._tasks.get(task_id)
         if record is None or record.status in TERMINAL_TASK_STATUSES:
+            return
+        if record.status == TaskStatus.CANCELLING:
+            self._settle_cancelled_locked(record, time.time())
             return
         # Settle the finished attempt so a long continuing episode's history stays
         # bounded (a no-op when a suspend already closed it).
@@ -1799,6 +1813,25 @@ class TaskRuntime:
             return
         self.originate_facade_turn_group(task_id, group)
 
+    def success_settles_task(self, task_id: str, payload: dict[str, Any]) -> bool:
+        """Whether a worker success ends its task or yields the lane back to run again.
+
+        An input preparation, a non-completion episode step, and a turn completion that
+        carries or resumes a captured facade group each return the task to the queue,
+        so a caller counting task completions counts one per task, not one per dispatch.
+        """
+        if payload.get("input_materialization") is not None:
+            return False
+        if (step := payload.get("agent_episode")) is None:
+            return True
+        if not isinstance(step, dict):
+            return False
+        if step.get("kind") != HarnessResultKind.COMPLETION:
+            return False
+        if payload.get("agent_episode_facade_group") is not None:
+            return False
+        return not self.has_pending_facade(task_id)
+
     def has_pending_facade(self, task_id: str) -> bool:
         """Whether a facade group is already captured or still open for this episode.
 
@@ -2258,13 +2291,10 @@ class TaskRuntime:
         engine = self._engines.get(record.workflow_id) if record else None
         if record is None or engine is None:
             return
-        if record.status in TERMINAL_TASK_STATUSES or (
-            record.status == TaskStatus.CANCELLING
-        ):
-            # A preparation runs no model and finishes fast, so its success can land
-            # after a cancel has settled the task — and the interrupt cannot reach a
-            # preparation the worker already finished. Re-readying here would re-admit
-            # cancelled work under a work item that is already settled.
+        if record.status in TERMINAL_TASK_STATUSES:
+            return
+        if record.status == TaskStatus.CANCELLING:
+            self._settle_cancelled_locked(record, time.time())
             return
         if (standing := engine.input_resolution(task_id)) is not None and (
             standing.reference is not None
@@ -3070,7 +3100,7 @@ class TaskRuntime:
                     # A non-terminal episode step routes its boundary and re-dispatches;
                     # a completion falls through to the terminal path below.
                     self._apply_episode_step_locked(task_id, harness_result)
-                    return usages
+                    return _in_flight_usage(task_id, payload)
                 if group is not None:
                     # The gateway captured a turn-scoped facade group: the clean
                     # turn-completion is a yield on that group, not the episode's
@@ -3080,7 +3110,7 @@ class TaskRuntime:
                     self._route_and_dispatch_facade_group_locked(
                         task_id, group, harness_result.capsule
                     )
-                    return usages
+                    return _in_flight_usage(task_id, payload)
                 engine = self._engines.get(record.workflow_id)
                 if (
                     engine is not None
@@ -3382,6 +3412,12 @@ class TaskRuntime:
                 resident_invocation_ids = (
                     engine.cancel_outstanding_boundary_invocations()
                 )
+                # A suspended-boundary episode has no dispatch to interrupt and
+                # returns no terminal, so the cancel settles it here.
+                for suspended in engine.suspended_boundary_tasks():
+                    held = self._tasks.get(suspended)
+                    if held is not None and held.status == TaskStatus.CANCELLING:
+                        self._settle_cancelled_locked(held, time.time())
                 self._save_ledger_locked(workflow_id)
 
         # A cancelled in-flight resident invocation releases its credit from this fenced
@@ -3430,33 +3466,58 @@ class TaskRuntime:
                     record.status,
                 )
                 return usages
-            record.status = TaskStatus.CANCELLED
-            record.finished_ts = finished_ts
-            if started_ts:
-                record.started_ts = started_ts
-            record.merged_children = None
-            if usage is not None:
-                record.usages.append(usage)
-            # TODO(kaiitunnz): Handle usages for cancelled tasks
-            self._completed.discard(task_id)
-            self._failed.discard(task_id)
-            self._pending_deps.pop(task_id, None)
-            self._remove_from_ready_locked(task_id)
-            self._merge_bucket_remove(task_id)
-            self._merge_key_by_task.pop(task_id, None)
-            self._merge_children_map.pop(task_id, None)
-            record.assigned_worker = None
-            # Persist the task terminal record first, then mirror the cancellation
-            # into the ledger and snapshot last, so the ledger never leads task state.
-            self._persist_terminal_locked(task_id, sched=False)
-            if (engine := self._engines.get(record.workflow_id)) is not None:
-                advance = engine.on_cancelled(task_id)
-                assert not (
-                    advance.ready or advance.retry
-                ), "a whole-instance cancel readies no work"
-                self._save_ledger_locked(record.workflow_id)
-            self._reclaim_vault_if_settled_locked(record.workflow_id)
+            self._settle_cancelled_locked(
+                record, finished_ts, started_ts=started_ts, usage=usage
+            )
             return usages
+
+    def _settle_cancelled_locked(
+        self,
+        record: TaskRecord,
+        finished_ts: float,
+        *,
+        started_ts: float | None = None,
+        usage: TaskUsage | None = None,
+    ) -> None:
+        """Settle a task CANCELLED and mirror the cancellation into the ledger.
+
+        A cancel interrupts the worker and waits for its terminal, but an interrupt
+        cannot un-finish a dispatch the worker already completed: that dispatch reports
+        a success, and the next one — which is what would carry the worker's terminal
+        back — is the one a cancel withholds. A success landing on a CANCELLING task
+        therefore settles the cancellation here rather than re-admitting the task or
+        waiting for a terminal that never arrives.
+        """
+        task_id = record.task_id
+        # A captured turn's group is meaningless once the episode settles cancelled.
+        self._pending_facade_groups.pop(task_id, None)
+        record.pending_facade_group = None
+        record.status = TaskStatus.CANCELLED
+        record.finished_ts = finished_ts
+        if started_ts:
+            record.started_ts = started_ts
+        record.merged_children = None
+        if usage is not None:
+            record.usages.append(usage)
+        # TODO(kaiitunnz): Handle usages for cancelled tasks
+        self._completed.discard(task_id)
+        self._failed.discard(task_id)
+        self._pending_deps.pop(task_id, None)
+        self._remove_from_ready_locked(task_id)
+        self._merge_bucket_remove(task_id)
+        self._merge_key_by_task.pop(task_id, None)
+        self._merge_children_map.pop(task_id, None)
+        record.assigned_worker = None
+        # Persist the task terminal record first, then mirror the cancellation
+        # into the ledger and snapshot last, so the ledger never leads task state.
+        self._persist_terminal_locked(task_id, sched=False)
+        if (engine := self._engines.get(record.workflow_id)) is not None:
+            advance = engine.on_cancelled(task_id)
+            assert not (
+                advance.ready or advance.retry
+            ), "a whole-instance cancel readies no work"
+            self._save_ledger_locked(record.workflow_id)
+        self._reclaim_vault_if_settled_locked(record.workflow_id)
 
     def get_record(self, task_id: str) -> TaskRecord | None:
         with self._lock:

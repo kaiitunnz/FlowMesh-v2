@@ -1372,13 +1372,34 @@ class OrchestrationEngine:
         cancellation terminal rather than being stranded.
         """
         ids: list[str] = []
-        for env in self._boundary_events.values():
-            if env.invocation_id is None or self._boundary_resolved(env):
-                continue
-            if (invocation := self._invocations.get(env.invocation_id)) is not None:
+        for _, invocation_id in self._unsettled_invocation_boundaries():
+            if (invocation := self._invocations.get(invocation_id)) is not None:
                 invocation.state = next_on_terminal(invocation.state)
-            ids.append(env.invocation_id)
+            ids.append(invocation_id)
         return ids
+
+    def suspended_boundary_tasks(self) -> list[str]:
+        """Tasks suspended at an unsettled mediated boundary.
+
+        Such a task's worker released the lane, so it holds no dispatch and returns no
+        terminal; a task mid-step is not among them.
+        """
+        tasks: list[str] = []
+        for activation, _ in self._unsettled_invocation_boundaries():
+            wi_id = self._wi_by_activation.get(activation)
+            if (wi := self._work_items.get(wi_id) if wi_id else None) is None:
+                continue
+            if wi.legacy_task_id not in tasks:
+                tasks.append(wi.legacy_task_id)
+        return tasks
+
+    def _unsettled_invocation_boundaries(self) -> list[tuple[str, str]]:
+        """Each unsettled mediated-boundary invocation id and its owning activation."""
+        return [
+            (activation, env.invocation_id)
+            for (activation, _), env in self._boundary_events.items()
+            if env.invocation_id is not None and not self._boundary_resolved(env)
+        ]
 
     def episode_context(
         self, task_id: str
