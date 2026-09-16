@@ -43,6 +43,10 @@ TERMINAL_TASK_STATUSES = frozenset(
     {TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.DONE}
 )
 
+# A settling task has reached a terminal or is on its way to one (CANCELLING, awaiting
+# its worker's terminal); the status writers refuse to regress one to an active state.
+SETTLING_TASK_STATUSES = TERMINAL_TASK_STATUSES | {TaskStatus.CANCELLING}
+
 
 class TaskUsage(BaseModel):
     started_at: str = Field(description="Start timestamp.")

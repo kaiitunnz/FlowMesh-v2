@@ -96,6 +96,7 @@ from ..registries.workflow import PersistedTask, WorkflowRegistry, WorkflowSched
 from ..services.model_secret_vault import ModelSecretVault
 from ..utils.time import parse_iso_ts
 from .models import (
+    SETTLING_TASK_STATUSES,
     TERMINAL_TASK_STATUSES,
     TaskInfo,
     TaskParsingResult,
@@ -760,10 +761,13 @@ class TaskRuntime:
                 engine.on_failed(
                     record.task_id, record.error or "task failed", retryable=False
                 )
-            elif record.status == TaskStatus.CANCELLED:
+            elif record.status in (TaskStatus.CANCELLED, TaskStatus.CANCELLING):
                 cancelled = True
         # Replay cancellation after the settled facts so a settled outcome is never
-        # overwritten; a cancelled workflow is then never re-admitted below.
+        # overwritten; a cancelled workflow is then never re-admitted below. A record
+        # left CANCELLING carries the cancel just as a settled one does: a crash between
+        # the cancelled task write and the ledger save would otherwise restore a
+        # workflow the cancel never reached.
         if cancelled:
             engine.cancel_instance()
 
@@ -1122,7 +1126,9 @@ class TaskRuntime:
             record = self._tasks.get(task_id)
             if not record:
                 return
-            if record.status == TaskStatus.CANCELLED:
+            if record.status in (TaskStatus.CANCELLED, TaskStatus.CANCELLING):
+                # A requeue never returns cancelled work to the queue, and never clears
+                # the cancellation a settle path is still waiting to apply.
                 return
             record.status = TaskStatus.PENDING
             record.assigned_worker = None
@@ -2739,7 +2745,9 @@ class TaskRuntime:
         failed_now: list[str] = []
         for task_id in task_ids:
             record = self._tasks.get(task_id)
-            if not record or record.status in TERMINAL_TASK_STATUSES:
+            if not record or record.status in SETTLING_TASK_STATUSES:
+                # A settling task is already on its way to a terminal; failing it would
+                # overwrite the cancellation a settle path is still waiting to apply.
                 continue
             record.status = TaskStatus.FAILED
             record.error = reason
@@ -2982,8 +2990,8 @@ class TaskRuntime:
             record = self._tasks.get(task_id)
             if not record:
                 return
-            if record.status in TERMINAL_TASK_STATUSES:
-                # A replayed or late dispatch must not regress a terminal task.
+            if record.status in SETTLING_TASK_STATUSES:
+                # A replayed or late dispatch must not regress a settling task.
                 return
             record.status = TaskStatus.DISPATCHED
             record.assigned_worker = worker.id
@@ -3017,8 +3025,8 @@ class TaskRuntime:
             record = self._tasks.get(task_id)
             if not record:
                 return
-            if record.status in TERMINAL_TASK_STATUSES:
-                # A replayed or late start must not regress a terminal task.
+            if record.status in SETTLING_TASK_STATUSES:
+                # A replayed or late start must not regress a settling task.
                 return
             record.status = TaskStatus.DISPATCHED
             record.started_ts = started_ts
@@ -3101,6 +3109,12 @@ class TaskRuntime:
                     # a completion falls through to the terminal path below.
                     self._apply_episode_step_locked(task_id, harness_result)
                     return _in_flight_usage(task_id, payload)
+                if record.status == TaskStatus.CANCELLING:
+                    # A completion racing the cancel settles it before routing a
+                    # captured facade group or consulting the reroute guard.
+                    return self._settle_cancelled_usage_locked(
+                        record, payload, finished_ts, started_ts
+                    )
                 if group is not None:
                     # The gateway captured a turn-scoped facade group: the clean
                     # turn-completion is a yield on that group, not the episode's
@@ -3147,6 +3161,15 @@ class TaskRuntime:
                         task_id,
                     )
                     return []
+                if record.status == TaskStatus.CANCELLING:
+                    # The cancel already resolved this task's declared output to its
+                    # cancellation outcome and withheld the dispatch that would have
+                    # carried a terminal back, so its completion settles the
+                    # cancellation rather than reporting a success the ledger does
+                    # not publish.
+                    return self._settle_cancelled_usage_locked(
+                        record, payload, finished_ts, started_ts
+                    )
                 record.status = TaskStatus.DONE
                 record.error = None
                 record.finished_ts = finished_ts
@@ -3254,6 +3277,17 @@ class TaskRuntime:
                         task_id,
                     )
                     return [], [], []
+                if record.status == TaskStatus.CANCELLING:
+                    # The cancellation is the settled outcome, so a failure racing it
+                    # neither overrides it nor cascades into dependents the cancel has
+                    # already settled.
+                    return (
+                        [],
+                        [],
+                        self._settle_cancelled_usage_locked(
+                            record, payload, finished_ts, started_ts
+                        ),
+                    )
                 record.status = TaskStatus.FAILED
                 record.error = message
                 record.finished_ts = finished_ts
@@ -3470,6 +3504,24 @@ class TaskRuntime:
                 record, finished_ts, started_ts=started_ts, usage=usage
             )
             return usages
+
+    def _settle_cancelled_usage_locked(
+        self,
+        record: TaskRecord,
+        payload: dict[str, Any],
+        finished_ts: float,
+        started_ts: float | None,
+    ) -> list[tuple[str, TaskUsage]]:
+        """Settle a cancellation a completion or failure raced, billing its dispatch.
+
+        The dispatch that reports here ran to its end, so it is billed under the
+        status the task settles into, not the one its report carried.
+        """
+        usage = TaskUsage.from_payload(payload, TaskStatus.CANCELLED)
+        self._settle_cancelled_locked(
+            record, finished_ts, started_ts=started_ts, usage=usage
+        )
+        return [(record.task_id, usage)] if usage is not None else []
 
     def _settle_cancelled_locked(
         self,

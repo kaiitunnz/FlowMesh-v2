@@ -7,12 +7,23 @@ and the per-step usage row it carries is tagged with the status the task is actu
 """
 
 import asyncio
+from typing import Any, cast
 
 from server.orchestration import WorkItemStatus
+from server.orchestration.tool_dispatch import (
+    FacadeCallMember,
+    FacadeCompletionMode,
+    FacadeTurnGroup,
+)
 from server.task.models import TaskStatus
 from shared.harness import BoundaryEventKind, HarnessCapsule, HarnessResult
 from shared.private_state import OwnerFence
-from tests.server.task.test_v2_orchestration import FakeRegistry, _register, _runtime
+from tests.server.task.test_v2_orchestration import (
+    FakeRegistry,
+    _register,
+    _runtime,
+    _worker,
+)
 from worker.executors.harness.scripted import ScriptedHarnessAdapter, ScriptedStep
 
 _HOLDER = OwnerFence(worker_id="wkr-1", incarnation=1)
@@ -188,5 +199,193 @@ def test_a_live_episode_step_bills_its_dispatch_as_in_flight() -> None:
 
         assert runtime._tasks[writer].status == TaskStatus.PENDING
         assert [usage.status for _, usage in usages] == [TaskStatus.DISPATCHED]
+
+    asyncio.run(run())
+
+
+def test_a_late_start_does_not_erase_a_cancellation() -> None:
+    async def run() -> None:
+        registry = FakeRegistry()
+        runtime = _runtime(registry)
+        workflow_id, ids = await _register(runtime, _AGENT_WF)
+        writer = ids["writer"]
+        adapter = ScriptedHarnessAdapter(_SCRIPT, "v1")
+
+        # The worker's start event lands after the cancel has already moved the task to
+        # CANCELLING, so it arrives on a task the cancel is waiting to settle.
+        result = _run_step(runtime, adapter, writer)
+        runtime.cancel_workflow(workflow_id)
+        runtime.mark_started(writer, "wkr-1", {}, _TS)
+        assert runtime._tasks[writer].status == TaskStatus.CANCELLING
+
+        runtime.mark_succeeded(
+            writer,
+            "wkr-1",
+            {"agent_episode": result.model_dump(mode="json"), **_USAGE_PAYLOAD},
+            _TS,
+        )
+
+        assert runtime._tasks[writer].status == TaskStatus.CANCELLED
+        assert writer not in runtime._ready_index
+        assert registry.remaining_of(workflow_id) == set()
+
+    asyncio.run(run())
+
+
+def test_a_racing_dispatch_does_not_erase_a_cancellation() -> None:
+    async def run() -> None:
+        registry = FakeRegistry()
+        runtime = _runtime(registry)
+        workflow_id, ids = await _register(runtime, _AGENT_WF)
+        writer = ids["writer"]
+        adapter = ScriptedHarnessAdapter(_SCRIPT, "v1")
+
+        result = _run_step(runtime, adapter, writer)
+        runtime.cancel_workflow(workflow_id)
+        runtime.mark_dispatched(writer, cast(Any, _worker("wkr-2")))
+        assert runtime._tasks[writer].status == TaskStatus.CANCELLING
+        assert runtime._tasks[writer].assigned_worker != "wkr-2"
+
+        runtime.mark_succeeded(
+            writer,
+            "wkr-1",
+            {"agent_episode": result.model_dump(mode="json"), **_USAGE_PAYLOAD},
+            _TS,
+        )
+
+        assert runtime._tasks[writer].status == TaskStatus.CANCELLED
+        assert writer not in runtime._ready_index
+        assert registry.remaining_of(workflow_id) == set()
+
+    asyncio.run(run())
+
+
+def test_a_requeue_does_not_erase_a_cancellation() -> None:
+    async def run() -> None:
+        runtime = _runtime(FakeRegistry())
+        workflow_id, ids = await _register(runtime, _AGENT_WF)
+        writer = ids["writer"]
+        adapter = ScriptedHarnessAdapter(_SCRIPT, "v1")
+
+        _run_step(runtime, adapter, writer)
+        runtime.cancel_workflow(workflow_id)
+        runtime.mark_pending(writer)
+
+        record = runtime._tasks[writer]
+        assert record.status == TaskStatus.CANCELLING
+        assert record.error == "cancelled"
+        # The requeue that follows a mark_pending finds nothing to re-queue, so the
+        # cancelled episode is never handed back to the dispatcher.
+        assert runtime.requeue(writer, front=True) is False
+
+    asyncio.run(run())
+
+
+def test_a_completion_racing_a_cancel_settles_cancelled() -> None:
+    async def run() -> None:
+        registry = FakeRegistry()
+        runtime = _runtime(registry)
+        workflow_id, ids = await _register(runtime, _AGENT_WF)
+        writer = ids["writer"]
+        adapter = ScriptedHarnessAdapter(
+            [ScriptedStep(op="complete", value="done")], "v1"
+        )
+
+        # The worker ran the episode's last step; the cancel lands before it reports.
+        result = _run_step(runtime, adapter, writer)
+        runtime.cancel_workflow(workflow_id)
+        assert runtime._tasks[writer].status == TaskStatus.CANCELLING
+
+        usages = runtime.mark_succeeded(
+            writer,
+            "wkr-1",
+            {"agent_episode": result.model_dump(mode="json"), **_USAGE_PAYLOAD},
+            _TS,
+        )
+
+        record = runtime._tasks[writer]
+        assert record.status == TaskStatus.CANCELLED
+        assert record.error == "cancelled"
+        assert [usage.status for _, usage in usages] == [TaskStatus.CANCELLED]
+        engine = runtime.orchestration_engine(workflow_id)
+        assert engine is not None
+        wi = engine.work_item(writer)
+        assert wi is not None and wi.status is WorkItemStatus.CANCELLED
+        assert registry.remaining_of(workflow_id) == set()
+
+    asyncio.run(run())
+
+
+def test_a_failure_racing_a_cancel_settles_cancelled() -> None:
+    async def run() -> None:
+        registry = FakeRegistry()
+        runtime = _runtime(registry)
+        workflow_id, ids = await _register(runtime, _AGENT_WF)
+        writer = ids["writer"]
+        adapter = ScriptedHarnessAdapter(_SCRIPT, "v1")
+
+        _run_step(runtime, adapter, writer)
+        runtime.cancel_workflow(workflow_id)
+
+        impacted, merged, usages = runtime.mark_failed(
+            writer, "wkr-1", dict(_USAGE_PAYLOAD), _TS, error="worker blew up"
+        )
+
+        record = runtime._tasks[writer]
+        assert record.status == TaskStatus.CANCELLED
+        assert record.error == "cancelled"
+        assert (impacted, merged) == ([], [])
+        assert [usage.status for _, usage in usages] == [TaskStatus.CANCELLED]
+        assert registry.remaining_of(workflow_id) == set()
+
+    asyncio.run(run())
+
+
+def test_a_completion_with_a_facade_group_racing_a_cancel_settles_cancelled() -> None:
+    async def run() -> None:
+        registry = FakeRegistry()
+        runtime = _runtime(registry)
+        workflow_id, ids = await _register(runtime, _AGENT_WF)
+        writer = ids["writer"]
+        adapter = ScriptedHarnessAdapter(
+            [ScriptedStep(op="complete", value="done")], "v1"
+        )
+
+        # The worker finished the episode's last step and captured a facade group; the
+        # cancel lands before it reports. The group must not route its members.
+        result = _run_step(runtime, adapter, writer)
+        group = FacadeTurnGroup(
+            group_id=f"{writer}:0",
+            activation_id=writer,
+            turn_id="0",
+            members=(
+                FacadeCallMember(
+                    ordinal=0,
+                    kind=BoundaryEventKind.INVOCATION,
+                    completion_mode=FacadeCompletionMode.AWAIT_OUTCOME,
+                    call_correlation=f"{writer}:0:0",
+                    harness_call_id="call0",
+                    tool_name="web_search",
+                    interface_or_region="search/v1",
+                    request_payload='{"query": "q0"}',
+                ),
+            ),
+        )
+        runtime.originate_facade_turn_group(writer, group)
+        runtime.cancel_workflow(workflow_id)
+        assert runtime._tasks[writer].status == TaskStatus.CANCELLING
+
+        usages = runtime.mark_succeeded(
+            writer,
+            "wkr-1",
+            {"agent_episode": result.model_dump(mode="json"), **_USAGE_PAYLOAD},
+            _TS,
+        )
+
+        record = runtime._tasks[writer]
+        assert record.status == TaskStatus.CANCELLED
+        assert record.pending_facade_group is None
+        assert [usage.status for _, usage in usages] == [TaskStatus.CANCELLED]
+        assert registry.remaining_of(workflow_id) == set()
 
     asyncio.run(run())
