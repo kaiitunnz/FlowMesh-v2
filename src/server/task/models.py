@@ -43,9 +43,8 @@ TERMINAL_TASK_STATUSES = frozenset(
     {TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.DONE}
 )
 
-# A cancelling task is waiting for its worker's terminal, and every path that settles
-# the cancellation keys on that status, so a late or replayed transition that rewrote it
-# would re-admit work the cancel already stopped.
+# A settling task has reached a terminal or is on its way to one (CANCELLING, awaiting
+# its worker's terminal); the status writers refuse to regress one to an active state.
 SETTLING_TASK_STATUSES = TERMINAL_TASK_STATUSES | {TaskStatus.CANCELLING}
 
 
