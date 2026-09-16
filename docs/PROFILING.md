@@ -21,6 +21,9 @@ because they sit in different places relative to a task's lifetime.
 | `queue` | between a task's submission and its start | `dispatch` |
 | `post_start` | mid-episode, after the task has started | `ds_drive`, `admission`, `permit`, `relay` |
 
+`engine_build` covers opening the plan's roots, so `ds_initial_advance` is the cost of
+admitting that advance into the queue rather than of computing it.
+
 `ledger_snapshot` fires in every window — the ledger serializes during submission,
 dispatch and outcome settlement alike. It runs inside another stage, so a window's
 `total_sec` excludes it and reports it separately as `nested_sec`.

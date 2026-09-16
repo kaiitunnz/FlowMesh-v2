@@ -596,6 +596,8 @@ class TaskRuntime:
         with self._cv:
             if v2_engine is not None:
                 self._engines[workflow_id] = v2_engine
+                # The engine opens its roots while building, so this stage covers
+                # admitting that advance into the queue, not computing it.
                 with self._profiler.stage(
                     ControlPlaneStage.DS_INITIAL_ADVANCE,
                     StageWindow.SUBMIT,
