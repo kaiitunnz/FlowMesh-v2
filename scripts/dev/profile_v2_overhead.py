@@ -22,6 +22,8 @@ from typing import Any
 from flowmesh import FlowMesh
 
 _V1_API_VERSION = "flowmesh/v1"
+# Reported beside a window total rather than inside it: it runs within other stages.
+_NESTED_STAGE = "ledger_snapshot"
 _V2_API_VERSION = "flowmesh/v2"
 
 
@@ -72,8 +74,13 @@ def _format_windows(windows: dict[str, Any]) -> str:
         if not stages:
             continue
         lines.append(f"  {name}: {window['total_sec'] * 1e3:.2f} ms")
+        # The window total covers only its non-nested stages; the nested ones are
+        # already inside them and print below as an "of which" line.
+        counted = {
+            stage: entry for stage, entry in stages.items() if stage != _NESTED_STAGE
+        }
         for stage, entry in sorted(
-            stages.items(), key=lambda item: -item[1]["total_sec"]
+            counted.items(), key=lambda item: -item[1]["total_sec"]
         ):
             lines.append(
                 f"    {stage:<20} {entry['total_sec'] * 1e3:8.2f} ms"
@@ -81,7 +88,7 @@ def _format_windows(windows: dict[str, Any]) -> str:
             )
         if window.get("nested_sec"):
             lines.append(
-                f"    (of which ledger_snapshot {window['nested_sec'] * 1e3:.2f} ms)"
+                f"    (of which {_NESTED_STAGE} {window['nested_sec'] * 1e3:.2f} ms)"
             )
     return "\n".join(lines)
 
