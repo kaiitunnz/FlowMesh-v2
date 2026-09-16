@@ -1060,6 +1060,8 @@ async def test_rehydration_replays_a_cancel_left_mid_flight() -> None:
     assert [wi.status for wi in engine.to_snapshot().work_items] == [
         WorkItemStatus.CANCELLED
     ]
+    # The CANCELLING record is never PENDING-reconciled, so the queue is empty by
+    # construction; the load-bearing assertion is the work item settling CANCELLED.
     assert restored.ready_queue_length() == 0
 
 

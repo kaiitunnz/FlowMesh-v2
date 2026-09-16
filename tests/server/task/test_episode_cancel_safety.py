@@ -10,6 +10,11 @@ import asyncio
 from typing import Any, cast
 
 from server.orchestration import WorkItemStatus
+from server.orchestration.tool_dispatch import (
+    FacadeCallMember,
+    FacadeCompletionMode,
+    FacadeTurnGroup,
+)
 from server.task.models import TaskStatus
 from shared.harness import BoundaryEventKind, HarnessCapsule, HarnessResult
 from shared.private_state import OwnerFence
@@ -330,6 +335,56 @@ def test_a_failure_racing_a_cancel_settles_cancelled() -> None:
         assert record.status == TaskStatus.CANCELLED
         assert record.error == "cancelled"
         assert (impacted, merged) == ([], [])
+        assert [usage.status for _, usage in usages] == [TaskStatus.CANCELLED]
+        assert registry.remaining_of(workflow_id) == set()
+
+    asyncio.run(run())
+
+
+def test_a_completion_with_a_facade_group_racing_a_cancel_settles_cancelled() -> None:
+    async def run() -> None:
+        registry = FakeRegistry()
+        runtime = _runtime(registry)
+        workflow_id, ids = await _register(runtime, _AGENT_WF)
+        writer = ids["writer"]
+        adapter = ScriptedHarnessAdapter(
+            [ScriptedStep(op="complete", value="done")], "v1"
+        )
+
+        # The worker finished the episode's last step and captured a facade group; the
+        # cancel lands before it reports. The group must not route its members.
+        result = _run_step(runtime, adapter, writer)
+        group = FacadeTurnGroup(
+            group_id=f"{writer}:0",
+            activation_id=writer,
+            turn_id="0",
+            members=(
+                FacadeCallMember(
+                    ordinal=0,
+                    kind=BoundaryEventKind.INVOCATION,
+                    completion_mode=FacadeCompletionMode.AWAIT_OUTCOME,
+                    call_correlation=f"{writer}:0:0",
+                    harness_call_id="call0",
+                    tool_name="web_search",
+                    interface_or_region="search/v1",
+                    request_payload='{"query": "q0"}',
+                ),
+            ),
+        )
+        runtime.originate_facade_turn_group(writer, group)
+        runtime.cancel_workflow(workflow_id)
+        assert runtime._tasks[writer].status == TaskStatus.CANCELLING
+
+        usages = runtime.mark_succeeded(
+            writer,
+            "wkr-1",
+            {"agent_episode": result.model_dump(mode="json"), **_USAGE_PAYLOAD},
+            _TS,
+        )
+
+        record = runtime._tasks[writer]
+        assert record.status == TaskStatus.CANCELLED
+        assert record.pending_facade_group is None
         assert [usage.status for _, usage in usages] == [TaskStatus.CANCELLED]
         assert registry.remaining_of(workflow_id) == set()
 

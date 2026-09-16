@@ -2745,7 +2745,9 @@ class TaskRuntime:
         failed_now: list[str] = []
         for task_id in task_ids:
             record = self._tasks.get(task_id)
-            if not record or record.status in TERMINAL_TASK_STATUSES:
+            if not record or record.status in SETTLING_TASK_STATUSES:
+                # A settling task is already on its way to a terminal; failing it would
+                # overwrite the cancellation a settle path is still waiting to apply.
                 continue
             record.status = TaskStatus.FAILED
             record.error = reason
@@ -3107,6 +3109,12 @@ class TaskRuntime:
                     # a completion falls through to the terminal path below.
                     self._apply_episode_step_locked(task_id, harness_result)
                     return _in_flight_usage(task_id, payload)
+                if record.status == TaskStatus.CANCELLING:
+                    # A completion racing the cancel settles it before routing a
+                    # captured facade group or consulting the reroute guard.
+                    return self._settle_cancelled_usage_locked(
+                        record, payload, finished_ts, started_ts
+                    )
                 if group is not None:
                     # The gateway captured a turn-scoped facade group: the clean
                     # turn-completion is a yield on that group, not the episode's
@@ -3157,8 +3165,8 @@ class TaskRuntime:
                     # The cancel already resolved this task's declared output to its
                     # cancellation outcome and withheld the dispatch that would have
                     # carried a terminal back, so its completion settles the
-                    # cancellation rather than reporting a success the ledger no
-                    # longer publishes.
+                    # cancellation rather than reporting a success the ledger does
+                    # not publish.
                     return self._settle_cancelled_usage_locked(
                         record, payload, finished_ts, started_ts
                     )
@@ -3504,10 +3512,10 @@ class TaskRuntime:
         finished_ts: float,
         started_ts: float | None,
     ) -> list[tuple[str, TaskUsage]]:
-        """Settle a cancellation a worker terminal raced, billing its own dispatch.
+        """Settle a cancellation a completion or failure raced, billing its dispatch.
 
-        The dispatch that reports here ran to its end, so it is billed -- under the
-        status the task actually settles into, not the one its report carried.
+        The dispatch that reports here ran to its end, so it is billed under the
+        status the task settles into, not the one its report carried.
         """
         usage = TaskUsage.from_payload(payload, TaskStatus.CANCELLED)
         self._settle_cancelled_locked(
