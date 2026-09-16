@@ -223,6 +223,22 @@ def _bundle(text: str, workflow_id: str = "wfl-x") -> Any:
     return compile_bundle(workflow_id, parsed, source)
 
 
+_CANCELLING_SINGLE = """
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {name: cancelling-single}
+spec:
+  graph:
+    nodes:
+      - name: solo
+        spec:
+          taskType: agent
+          v2:
+            authority: {invoke: [model], delegate: []}
+            tools: [{name: model}]
+          harness: {backend: scripted, version: v1, params: {script: []}}
+"""
+
 LINEAR = """
 apiVersion: flowmesh/v2
 kind: Workflow
@@ -1013,6 +1029,37 @@ async def test_rehydration_heals_when_ledger_snapshot_lags_terminal_records() ->
             p for p in snap.result_publications if p.output_id == f"legacy:{name}"
         ]
         assert len(matched) == 1
+    assert restored.ready_queue_length() == 0
+
+
+@pytest.mark.anyio
+async def test_rehydration_replays_a_cancel_left_mid_flight() -> None:
+    registry = FakeRegistry()
+    runtime = _runtime(registry)
+    workflow_id, ids = await _register(runtime, _CANCELLING_SINGLE)
+    solo = ids["solo"]
+    # Snapshot the ledger as it stood before the cancel.
+    stale_ledger = registry.ledger_blobs[workflow_id]
+    stop = threading.Event()
+
+    runtime.next_ready(stop, timeout=0.01)
+    runtime.mark_dispatched(solo, cast(Any, _worker()))
+    runtime.cancel_workflow(workflow_id)
+    assert runtime.get_record(solo).status == TaskStatus.CANCELLING  # type: ignore[union-attr]
+    # Simulate a crash after the cancelling task records committed but before the
+    # ledger snapshot: no task is CANCELLED yet, so only the records carry the cancel.
+    registry.ledger_blobs[workflow_id] = stale_ledger
+
+    restored = _runtime(registry)
+    await restored.rehydrate()
+
+    # The restored instance is cancelled, so the work item the cancel stopped is not
+    # left READY against a CANCELLING task that no dispatch will ever settle.
+    engine = restored.orchestration_engine(workflow_id)
+    assert engine is not None
+    assert [wi.status for wi in engine.to_snapshot().work_items] == [
+        WorkItemStatus.CANCELLED
+    ]
     assert restored.ready_queue_length() == 0
 
 

@@ -761,10 +761,13 @@ class TaskRuntime:
                 engine.on_failed(
                     record.task_id, record.error or "task failed", retryable=False
                 )
-            elif record.status == TaskStatus.CANCELLED:
+            elif record.status in (TaskStatus.CANCELLED, TaskStatus.CANCELLING):
                 cancelled = True
         # Replay cancellation after the settled facts so a settled outcome is never
-        # overwritten; a cancelled workflow is then never re-admitted below.
+        # overwritten; a cancelled workflow is then never re-admitted below. A record
+        # left CANCELLING carries the cancel just as a settled one does: a crash between
+        # the cancelled task write and the ledger save would otherwise restore a
+        # workflow the cancel never reached.
         if cancelled:
             engine.cancel_instance()
 
