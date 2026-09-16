@@ -183,6 +183,7 @@ if IS_ROOT_NODE:
         logger,
         secret_vault=MODEL_SECRET_VAULT,
         surface=POLICY_SURFACE,
+        profiler=CONTROL_PROFILER,
     )
     AGENT_MODEL_GATEWAY = AgentModelGateway(
         RUNTIME, config.orchestration.gateway, logger

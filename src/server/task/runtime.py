@@ -94,6 +94,12 @@ from ..orchestration.tool_dispatch import (
 from ..registries.worker import Worker, WorkerRegistry
 from ..registries.workflow import PersistedTask, WorkflowRegistry, WorkflowSched
 from ..services.model_secret_vault import ModelSecretVault
+from ..services.profiling import (
+    NULL_PROFILER,
+    ControlPlaneStage,
+    Profiler,
+    StageWindow,
+)
 from ..utils.time import parse_iso_ts
 from .models import (
     SETTLING_TASK_STATUSES,
@@ -276,6 +282,7 @@ class TaskRuntime:
         secret_vault: ModelSecretVault,
         feasibility_check: EpisodeFeasibility | None = None,
         surface: PolicySurface | None = None,
+        profiler: Profiler = NULL_PROFILER,
     ) -> None:
         self._workflow_registry = workflow_registry
         self._worker_registry = worker_registry
@@ -283,6 +290,7 @@ class TaskRuntime:
         self._results_dir = results_dir
         self._feasibility_check = feasibility_check
         self._policy_surface = surface if surface is not None else PolicySurface()
+        self._profiler = profiler
         self._secret_vault = secret_vault
         self._scope_budget = ScopeBudget.from_config(orchestration)
         self._web_search = orchestration.web_search
@@ -445,10 +453,16 @@ class TaskRuntime:
                 bindings=self._agent_binding_defaults,
                 secret_refs=secret_refs,
                 surface=self._policy_surface,
+                profiler=self._profiler,
             )
-            v2_engine = OrchestrationEngine.build(
-                workflow_id, owner_id, org_id, v2_bundle, budget=self._scope_budget
-            )
+            with self._profiler.stage(
+                ControlPlaneStage.ENGINE_BUILD,
+                StageWindow.SUBMIT,
+                workflow_id=workflow_id,
+            ):
+                v2_engine = OrchestrationEngine.build(
+                    workflow_id, owner_id, org_id, v2_bundle, budget=self._scope_budget
+                )
 
         with self._cv:
             if (
@@ -577,8 +591,14 @@ class TaskRuntime:
         with self._cv:
             if v2_engine is not None:
                 self._engines[workflow_id] = v2_engine
-                if self._apply_advance_locked(workflow_id, v2_engine.initial_advance()):
-                    new_ready = True
+                with self._profiler.stage(
+                    ControlPlaneStage.DS_INITIAL_ADVANCE,
+                    StageWindow.SUBMIT,
+                    workflow_id=workflow_id,
+                ):
+                    advance = v2_engine.initial_advance()
+                    if self._apply_advance_locked(workflow_id, advance):
+                        new_ready = True
             for task_id in candidate_ready:
                 maybe_record = self._tasks.get(task_id)
                 if not maybe_record or maybe_record.status != TaskStatus.PENDING:
@@ -593,8 +613,14 @@ class TaskRuntime:
         # Snapshot last, after the initial advance has persisted any authority-denied
         # roots, so the ledger never leads durable task state.
         if v2_engine is not None:
+            with self._profiler.stage(
+                ControlPlaneStage.LEDGER_SNAPSHOT,
+                StageWindow.SUBMIT,
+                workflow_id=workflow_id,
+            ):
+                snapshot = v2_engine.to_snapshot()
             await self._workflow_registry.save_ledger_snapshot_async(
-                workflow_id, v2_engine.to_snapshot()
+                workflow_id, snapshot
             )
 
         return workflow_id, results
@@ -2400,11 +2426,15 @@ class TaskRuntime:
         self._save_ledger_locked(record.workflow_id)
         return advance
 
-    def _save_ledger_locked(self, workflow_id: str) -> None:
+    def _save_ledger_locked(
+        self, workflow_id: str, window: StageWindow = StageWindow.POST_START
+    ) -> None:
         if (engine := self._engines.get(workflow_id)) is not None:
-            self._workflow_registry.save_ledger_snapshot(
-                workflow_id, engine.to_snapshot()
-            )
+            with self._profiler.stage(
+                ControlPlaneStage.LEDGER_SNAPSHOT, window, workflow_id=workflow_id
+            ):
+                snapshot = engine.to_snapshot()
+            self._workflow_registry.save_ledger_snapshot(workflow_id, snapshot)
 
     def _apply_advance_locked(self, workflow_id: str, advance: Advance) -> bool:
         # A ready/settle advance never carries a retry; the failure path drives those.
@@ -3019,7 +3049,7 @@ class TaskRuntime:
                     engine.on_input_preparation_dispatched(task_id, worker.id)
                 else:
                     engine.on_dispatched(task_id, worker.id)
-                self._save_ledger_locked(record.workflow_id)
+                self._save_ledger_locked(record.workflow_id, StageWindow.QUEUE)
 
     def mark_started(
         self,
@@ -3047,7 +3077,7 @@ class TaskRuntime:
             )
             if engine := self._engines.get(record.workflow_id):
                 engine.on_started(task_id)
-                self._save_ledger_locked(record.workflow_id)
+                self._save_ledger_locked(record.workflow_id, StageWindow.QUEUE)
 
     def mark_updated(self, task_id: str, payload: dict[str, Any]) -> None:
         with self._lock:
