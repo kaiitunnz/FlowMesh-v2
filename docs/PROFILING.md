@@ -7,8 +7,7 @@ drive and settle, ledger snapshot serialization, resident admission, mediated-bo
 permit minting, and relay establishment. Control-plane profiling times those stages and
 reports them per workflow.
 
-Enable it with `SERVER_METRICS_CONTROL_PROFILING=1` on the server. It is off by default,
-and off it records nothing.
+Enable it with `SERVER_METRICS_CONTROL_PROFILING=1` on the server. It is off by default.
 
 ## Windows
 
@@ -17,7 +16,7 @@ because they sit in different places relative to a task's lifetime.
 
 | Window | When | Stages |
 |--------|------|--------|
-| `submit` | inside the submit request, before any task's queue window opens | `compile_lower`, `compile_assemble`, `compile_episodes`, `compile_validate`, `engine_build`, `ds_initial_advance` |
+| `submit` | inside the submit request, before any task's queue window opens | `compile_lower`, `compile_assemble`, `compile_episodes`, `compile_finalize`, `compile_validate`, `engine_build`, `ds_initial_advance` |
 | `queue` | between a task's submission and its start | `dispatch` |
 | `post_start` | mid-episode, after the task has started | `ds_drive`, `admission`, `permit`, `relay` |
 
@@ -25,11 +24,14 @@ because they sit in different places relative to a task's lifetime.
 admitting that advance into the queue rather than of computing it.
 
 `ledger_snapshot` fires in every window — the ledger serializes during submission,
-dispatch and outcome settlement alike. It runs inside another stage, so a window's
-`total_sec` excludes it and reports it separately as `nested_sec`.
+dispatch and outcome settlement alike. At most sites it is a sibling of the other stages
+and counts toward the window total; inside the dispatch stage it is enclosed, and an
+enclosed measurement is reported under `nested` and summed into `nested_sec` so the
+window total counts it once. Whether a measurement is enclosed is a property of the call
+site, not of the stage.
 
-A window's `total_sec` is the sum of its non-nested stages, so it reconciles against the
-aggregate it decomposes: `submit` against the submit request's duration, `queue` against
+A window's `total_sec` is the sum of its `stages`, which is the window's wall: `submit`
+accounts for the difference between submitting a body on v1 and on v2, and `queue` for
 the task's recorded `queue_time`.
 
 ## Reading the breakdown
@@ -44,10 +46,11 @@ the task's recorded `queue_time`.
         "windows": {
           "submit": {
             "total_sec": 0.031,
-            "nested_sec": 0.004,
+            "nested_sec": 0.0,
             "stages": {
               "compile_lower": {"count": 1, "total_sec": 0.012, "avg_sec": 0.012, "max_sec": 0.012}
-            }
+            },
+            "nested": {}
           }
         },
         "invocations": 0
@@ -60,8 +63,7 @@ the task's recorded `queue_time`.
 `invocations` counts the distinct invocations the post-start stages recorded against the
 workflow.
 
-The oldest workflow is evicted once the breakdown is tracking its cap, so it reports
-recent runs rather than a server's whole history.
+The breakdown holds a bounded number of workflows, evicting the oldest.
 
 ## Comparing v1 and v2
 

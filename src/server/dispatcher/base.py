@@ -371,7 +371,6 @@ class Dispatcher:
             return self._dispatch_once(task_id, record)
 
     def _dispatch_once(self, task_id: str, record: TaskRecord) -> bool:
-
         # A leaf whose source declares no envelope is prepared first: this dispatch
         # resolves its inputs on a worker and reports the request it materialized, and
         # the dispatch after it chooses an embodiment knowing what that request holds.
