@@ -7,6 +7,15 @@ from shared.tasks.specs import ModelBindingMode
 from shared.utils.parsing import parse_bool_env, parse_float_env, parse_int_env
 
 
+def _conservative_policy() -> str:
+    # Lazy import: the v2 package eagerly pulls in the compiler and the policy surface,
+    # which imports this module, so naming the canonical default at call time breaks the
+    # cycle.
+    from .task.v2.representations.plan import CONSERVATIVE_POLICY
+
+    return CONSERVATIVE_POLICY
+
+
 def _default_selection_strategy() -> str:
     # Lazy import: the resident package pulls in the orchestration chain, which imports
     # this module, so referencing the canonical default at call time breaks the cycle.
@@ -641,19 +650,18 @@ class PolicySurfaceConfig:
     defaults to the conservative policy, which lowers as the compiler alone would.
     """
 
-    fusion: str = "conservative"
-    residency: str = "conservative"
-    service_family: str = "conservative"
+    fusion: str = field(default_factory=_conservative_policy)
+    residency: str = field(default_factory=_conservative_policy)
+    service_family: str = field(default_factory=_conservative_policy)
 
     @classmethod
     def from_env(cls) -> "PolicySurfaceConfig":
-        defaults = cls()
+        conservative = _conservative_policy()
         return cls(
-            fusion=_env_or_none("ORCHESTRATOR_FUSION_POLICY") or defaults.fusion,
-            residency=_env_or_none("ORCHESTRATOR_RESIDENCY_POLICY")
-            or defaults.residency,
+            fusion=_env_or_none("ORCHESTRATOR_FUSION_POLICY") or conservative,
+            residency=_env_or_none("ORCHESTRATOR_RESIDENCY_POLICY") or conservative,
             service_family=_env_or_none("ORCHESTRATOR_SERVICE_FAMILY_POLICY")
-            or defaults.service_family,
+            or conservative,
         )
 
 

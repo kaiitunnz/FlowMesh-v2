@@ -2,7 +2,7 @@
 
 import pytest
 
-from server.config import PolicySurfaceConfig
+from server.config import OrchestrationConfig, PolicySurfaceConfig
 from server.task.v2.policy import (
     FusionPolicy,
     PolicySurface,
@@ -12,7 +12,7 @@ from server.task.v2.policy import (
     screen_residency,
     screen_service_family,
 )
-from server.task.v2.policy.builtin import RecomputeOnlyFusion
+from server.task.v2.policy.builtin import RecomputeOnlyFusion, WarmRetention
 from server.task.v2.representations.plan import (
     ResidencyIntent,
     ServiceFamilyRequirement,
@@ -111,3 +111,16 @@ def test_residency_refinement_holds_the_pinned_family() -> None:
     assert screened.service_family == "fam-a"
     assert screened.required is True
     assert screened.warmth == "warm"
+
+
+def test_the_orchestration_config_carries_each_hook_selector(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ORCHESTRATOR_FUSION_POLICY", RecomputeOnlyFusion.name)
+    monkeypatch.setenv("ORCHESTRATOR_RESIDENCY_POLICY", WarmRetention.name)
+
+    surface = build_policy_surface(OrchestrationConfig.from_env().policy)
+
+    assert surface.fusion.name == RecomputeOnlyFusion.name
+    assert surface.residency.name == WarmRetention.name
+    assert surface.service_family.name == ServiceFamilyPolicy.name

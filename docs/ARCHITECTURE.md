@@ -182,13 +182,9 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   embodiment menu carries its intent per candidate, so neither consults the policy. A
   plan records the episode strategy and the policy effective at each hook, and the v2
   dry-run inspection compiles under the same configured set, so a validation report and
-  a persisted submission describe the same physical decision. The fabric provides two
-  policies: `recompute-only` fuses a pair only where both operators recover by
-  recomputation, so one recovering from a recorded output keeps its own episode rather
-  than being recomputed with the segment around it; `warm-retention` prefers a warm
-  resident family for a required, unconditional dependency, which the lifecycle retains
-  for twice the base idle window. Select policies with `ORCHESTRATOR_FUSION_POLICY`,
-  `ORCHESTRATOR_RESIDENCY_POLICY`, and `ORCHESTRATOR_SERVICE_FAMILY_POLICY`.
+  a persisted submission describe the same physical decision. Select policies with
+  `ORCHESTRATOR_FUSION_POLICY`, `ORCHESTRATOR_RESIDENCY_POLICY`, and
+  `ORCHESTRATOR_SERVICE_FAMILY_POLICY`.
 - **Inference-embodiment menus.** An inference leaf declares one model contract; whether
   resident capacity or a local executor serves it is the fabric's to decide. Such a leaf
   lowers to one physical node carrying the embodiments that contract admits — a
