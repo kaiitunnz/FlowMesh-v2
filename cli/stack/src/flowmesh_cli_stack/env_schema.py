@@ -349,13 +349,13 @@ STACK_ENV_SCHEMA = EnvSchema(
                     "ORCHESTRATOR_FUSION_POLICY",
                     "conservative",
                     description="Advisory episode-fusion policy.",
-                    choices=["conservative", "demo-fusion"],
+                    choices=["conservative", "recompute-only"],
                 ),
                 EnvVar(
                     "ORCHESTRATOR_RESIDENCY_POLICY",
                     "conservative",
                     description="Advisory residency-preference policy.",
-                    choices=["conservative", "demo-warmth"],
+                    choices=["conservative", "warm-retention"],
                 ),
                 EnvVar(
                     "ORCHESTRATOR_SERVICE_FAMILY_POLICY",

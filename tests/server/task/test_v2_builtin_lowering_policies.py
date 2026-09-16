@@ -1,4 +1,4 @@
-"""The fixed demonstration policies, and the reach each one has."""
+"""The built-in advisory lowering policies, and the reach each one has."""
 
 import asyncio
 import logging
@@ -14,7 +14,7 @@ from server.task.v2 import FrontendWorkflowSource, compile_workflow
 from server.task.v2.compiler.inspect import build_inspection
 from server.task.v2.mode import LoweringStrategy
 from server.task.v2.policy import PolicySurface, ResidencyPolicy
-from server.task.v2.policy.demo import FusionVetoPolicy, WarmthPolicy
+from server.task.v2.policy.builtin import RecomputeOnlyFusion, WarmRetention
 from server.task.v2.policy.surface import build_policy_surface
 from server.task.v2.representations.plan import (
     LoweringProvenance,
@@ -24,8 +24,9 @@ from server.task.v2.representations.plan import (
 )
 from server.task.v2.representations.template import LogicalWorkflowTemplate
 
-# Two fusible pure leaves feeding a resident model boundary: the pair the
-# conservative episode-cut lowering folds into one episode.
+# Three fusible pure leaves feeding a resident model boundary. The middle one recovers
+# from a recorded output rather than by recomputation, and the conservative episode-cut
+# lowering folds all three into one episode regardless.
 _PRELUDE = """
 apiVersion: flowmesh/v2
 kind: Workflow
@@ -37,14 +38,33 @@ spec:
         spec: {taskType: echo, data: {type: list, items: [x]}}
       - name: b
         dependsOn: [a]
-        spec: {taskType: echo, data: {type: list, items: [x]}}
+        spec: {taskType: rag, data: {type: list, items: ["q"]}}
       - name: c
         dependsOn: [b]
+        spec: {taskType: echo, data: {type: list, items: [x]}}
+      - name: d
+        dependsOn: [c]
         spec:
           taskType: inference
           model: {source: {identifier: Qwen/Qwen3-4B}}
           data: {type: list, items: ["hello"]}
           service: {mode: resident}
+"""
+
+# Two leaves that both recover by recomputation, so the policy fuses them as the
+# compiler would: the control that separates it from a policy that never fuses.
+_RECOMPUTED_PAIR = """
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {name: recomputed}
+spec:
+  graph:
+    nodes:
+      - name: a
+        spec: {taskType: echo, data: {type: list, items: [x]}}
+      - name: b
+        dependsOn: [a]
+        spec: {taskType: echo, data: {type: list, items: [x]}}
 """
 
 _SERVE = """
@@ -149,17 +169,27 @@ def _lowering(plan: PhysicalExecutionPlan) -> LoweringProvenance:
     return plan.lowering
 
 
-def test_the_fusion_veto_cuts_the_boundary_adjacent_pure_leaf() -> None:
+def test_recompute_only_fusion_isolates_a_recorded_leaf() -> None:
     prelude = _Workflow(_PRELUDE)
-    assert prelude.named(prelude.plan()) == {"a": ("b",), "c": ()}
-    refined = prelude.named(prelude.plan(fusion=FusionVetoPolicy()))
-    assert refined == {"a": (), "b": (), "c": ()}
+    assert prelude.named(prelude.plan()) == {"a": ("b", "c"), "d": ()}
+    refined = prelude.named(prelude.plan(fusion=RecomputeOnlyFusion()))
+    assert refined == {"a": (), "b": (), "c": (), "d": ()}
 
 
-def test_the_fusion_veto_preserves_the_logical_contract() -> None:
+def test_recompute_only_fusion_still_fuses_a_recomputed_pair() -> None:
+    # The teeth against a policy that simply never fuses: where both operators recover
+    # by recomputation, the policy folds them exactly as the compiler alone would.
+    pair = _Workflow(_RECOMPUTED_PAIR)
+    assert pair.named(pair.plan(fusion=RecomputeOnlyFusion())) == pair.named(
+        pair.plan()
+    )
+    assert pair.named(pair.plan()) == {"a": ("b",)}
+
+
+def test_recompute_only_fusion_preserves_the_logical_contract() -> None:
     prelude = _Workflow(_PRELUDE)
     baseline, base_plan = prelude.compile()
-    refined, refined_plan = prelude.compile(fusion=FusionVetoPolicy())
+    refined, refined_plan = prelude.compile(fusion=RecomputeOnlyFusion())
     assert refined.operators == baseline.operators
     assert refined.edges == baseline.edges
     assert refined.source_map == baseline.source_map
@@ -171,25 +201,25 @@ def test_the_fusion_veto_preserves_the_logical_contract() -> None:
     )
 
 
-def test_the_fusion_veto_is_inert_under_the_transparent_strategy() -> None:
+def test_recompute_only_fusion_is_inert_under_the_transparent_strategy() -> None:
     prelude = _Workflow(_PRELUDE)
-    refined = prelude.plan(LoweringStrategy.TRANSPARENT, fusion=FusionVetoPolicy())
+    refined = prelude.plan(LoweringStrategy.TRANSPARENT, fusion=RecomputeOnlyFusion())
     baseline = prelude.plan(LoweringStrategy.TRANSPARENT)
     assert refined.nodes == baseline.nodes
 
 
-def test_the_warmth_policy_stamps_a_required_ordinary_dependency() -> None:
+def test_warm_retention_stamps_a_required_ordinary_dependency() -> None:
     prelude = _Workflow(_PRELUDE)
     assert _intent(prelude.plan()).warmth is None
-    intent = _intent(prelude.plan(residency=WarmthPolicy()))
+    intent = _intent(prelude.plan(residency=WarmRetention()))
     assert intent.warmth == "warm"
     assert intent.required is True
 
 
-def test_the_warmth_policy_leaves_the_rest_of_the_intent_alone() -> None:
+def test_warm_retention_leaves_the_rest_of_the_intent_alone() -> None:
     prelude = _Workflow(_PRELUDE)
     baseline = _intent(prelude.plan())
-    refined = _intent(prelude.plan(residency=WarmthPolicy()))
+    refined = _intent(prelude.plan(residency=WarmRetention()))
     assert refined == baseline.model_copy(update={"warmth": "warm"})
 
 
@@ -229,19 +259,42 @@ def test_the_residency_hook_is_not_consulted_for_an_unresolved_menu() -> None:
 
 def test_selecting_a_policy_at_each_hook_applies_both_refinements() -> None:
     prelude = _Workflow(_PRELUDE)
-    plan = prelude.plan(fusion=FusionVetoPolicy(), residency=WarmthPolicy())
-    assert prelude.named(plan) == prelude.named(prelude.plan(fusion=FusionVetoPolicy()))
+    plan = prelude.plan(fusion=RecomputeOnlyFusion(), residency=WarmRetention())
+
+    assert prelude.named(plan) == prelude.named(
+        prelude.plan(fusion=RecomputeOnlyFusion())
+    )
     assert _intent(plan).warmth == "warm"
+    lowering = _lowering(plan)
+    assert (lowering.fusion, lowering.residency) == (
+        RecomputeOnlyFusion.name,
+        WarmRetention.name,
+    )
+
+
+def test_a_policy_at_one_hook_leaves_the_other_hook_conservative() -> None:
+    prelude = _Workflow(_PRELUDE)
+    conservative = prelude.plan()
+
+    fused_only = prelude.plan(fusion=RecomputeOnlyFusion())
+    assert prelude.named(fused_only) != prelude.named(conservative)
+    assert _intent(fused_only).warmth is None
+    assert _lowering(fused_only).residency == "conservative"
+
+    warm_only = prelude.plan(residency=WarmRetention())
+    assert prelude.named(warm_only) == prelude.named(conservative)
+    assert _intent(warm_only).warmth == "warm"
+    assert _lowering(warm_only).fusion == "conservative"
 
 
 def test_a_plan_records_the_lowering_that_produced_it() -> None:
     prelude = _Workflow(_PRELUDE)
     lowering = _lowering(
-        prelude.plan(fusion=FusionVetoPolicy(), residency=WarmthPolicy())
+        prelude.plan(fusion=RecomputeOnlyFusion(), residency=WarmRetention())
     )
     assert lowering.strategy is LoweringStrategy.EPISODE_CUT
-    assert lowering.fusion == FusionVetoPolicy.name
-    assert lowering.residency == WarmthPolicy.name
+    assert lowering.fusion == RecomputeOnlyFusion.name
+    assert lowering.residency == WarmRetention.name
 
 
 def test_a_deployment_running_no_policy_records_the_effective_one() -> None:
@@ -257,7 +310,7 @@ def test_a_deployment_running_no_policy_records_the_effective_one() -> None:
 def test_the_lowering_separates_two_otherwise_equal_plan_versions() -> None:
     prelude = _Workflow(_PRELUDE)
     baseline = prelude.plan(LoweringStrategy.TRANSPARENT)
-    refined = prelude.plan(LoweringStrategy.TRANSPARENT, fusion=FusionVetoPolicy())
+    refined = prelude.plan(LoweringStrategy.TRANSPARENT, fusion=RecomputeOnlyFusion())
     # Nothing but the recorded lowering differs, and the version still separates them.
     assert refined.nodes == baseline.nodes
     assert refined.plan_version != baseline.plan_version
@@ -265,7 +318,7 @@ def test_the_lowering_separates_two_otherwise_equal_plan_versions() -> None:
 
 def test_an_inspection_reports_the_plan_the_same_lowering_produces() -> None:
     prelude = _Workflow(_PRELUDE)
-    fusion, residency = FusionVetoPolicy(), WarmthPolicy()
+    fusion, residency = RecomputeOnlyFusion(), WarmRetention()
     report = build_inspection(
         "wfl-d",
         prelude.parsed,
@@ -277,16 +330,18 @@ def test_an_inspection_reports_the_plan_the_same_lowering_produces() -> None:
         LoweringStrategy.EPISODE_CUT, fusion=fusion, residency=residency
     )
     rendered = report.render_text()
-    assert f"fusion={FusionVetoPolicy.name}" in rendered
-    assert f"residency={WarmthPolicy.name}" in rendered
+    assert f"fusion={RecomputeOnlyFusion.name}" in rendered
+    assert f"residency={WarmRetention.name}" in rendered
 
 
 def test_each_policy_is_selectable_at_its_own_hook() -> None:
     surface = build_policy_surface(
-        PolicySurfaceConfig(fusion=FusionVetoPolicy.name, residency=WarmthPolicy.name)
+        PolicySurfaceConfig(
+            fusion=RecomputeOnlyFusion.name, residency=WarmRetention.name
+        )
     )
-    assert surface.fusion.name == FusionVetoPolicy.name
-    assert surface.residency.name == WarmthPolicy.name
+    assert surface.fusion.name == RecomputeOnlyFusion.name
+    assert surface.residency.name == WarmRetention.name
     assert surface.service_family.name == "conservative"
 
 
@@ -335,12 +390,12 @@ def _resident_binding(**knobs: str):
     _workflow_id, results = asyncio.run(
         runtime.register("owner", "org", _PRELUDE, format="native")
     )
-    inference = next(r for r in results if r.graph_node_name == "c")
+    inference = next(r for r in results if r.graph_node_name == "d")
     return runtime.resolve_service_dependency(inference.task_id)
 
 
 def test_the_configured_policy_reaches_the_resolved_admission_binding() -> None:
-    binding = _resident_binding(residency=WarmthPolicy.name)
+    binding = _resident_binding(residency=WarmRetention.name)
     assert binding is not None
     assert binding.warmth == "warm"
     assert binding.compatible()
@@ -353,11 +408,11 @@ def test_a_conservative_deployment_resolves_an_unstyled_binding() -> None:
 
 
 def test_a_dry_run_inspection_matches_what_the_runtime_would_register() -> None:
-    runtime = _runtime(residency=WarmthPolicy.name)
+    runtime = _runtime(residency=WarmRetention.name)
     report = runtime.inspect_v2(_PRELUDE, format="native")
     assert report is not None
     lowering = _lowering(report.plan)
-    assert lowering.residency == WarmthPolicy.name
+    assert lowering.residency == WarmRetention.name
     assert lowering.strategy is LoweringStrategy.TRANSPARENT
 
 
@@ -382,8 +437,8 @@ spec:
 
 
 def test_a_dry_run_under_a_policy_still_vaults_nothing_and_redacts() -> None:
-    runtime = _runtime(residency=WarmthPolicy.name)
+    runtime = _runtime(residency=WarmRetention.name)
     report = runtime.inspect_v2(_INLINE_SECRET, format="native")
     assert report is not None
-    assert _lowering(report.plan).residency == WarmthPolicy.name
+    assert _lowering(report.plan).residency == WarmRetention.name
     assert "sk-secret" not in report.model_dump_json()

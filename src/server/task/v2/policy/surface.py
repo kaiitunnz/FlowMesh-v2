@@ -9,7 +9,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from ....config import PolicySurfaceConfig
-from .demo import FusionVetoPolicy, WarmthPolicy
+from .builtin import RecomputeOnlyFusion, WarmRetention
 from .lowering import (
     FusionPolicy,
     PolicySurface,
@@ -32,7 +32,7 @@ _FUSION = _Axis[FusionPolicy](
     knob="ORCHESTRATOR_FUSION_POLICY",
     registry={
         FusionPolicy.name: lambda _: FusionPolicy(),
-        FusionVetoPolicy.name: lambda _: FusionVetoPolicy(),
+        RecomputeOnlyFusion.name: lambda _: RecomputeOnlyFusion(),
     },
 )
 
@@ -40,7 +40,7 @@ _RESIDENCY = _Axis[ResidencyPolicy](
     knob="ORCHESTRATOR_RESIDENCY_POLICY",
     registry={
         ResidencyPolicy.name: lambda _: ResidencyPolicy(),
-        WarmthPolicy.name: lambda _: WarmthPolicy(),
+        WarmRetention.name: lambda _: WarmRetention(),
     },
 )
 

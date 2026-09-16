@@ -12,7 +12,7 @@ from server.task.v2.policy import (
     screen_residency,
     screen_service_family,
 )
-from server.task.v2.policy.demo import FusionVetoPolicy
+from server.task.v2.policy.builtin import RecomputeOnlyFusion
 from server.task.v2.representations.plan import (
     ResidencyIntent,
     ServiceFamilyRequirement,
@@ -85,7 +85,7 @@ def test_an_unknown_name_is_rejected_against_its_own_hook() -> None:
 def test_a_fusion_name_is_not_selectable_at_the_residency_hook() -> None:
     """Each hook admits only the policies that answer it."""
     with pytest.raises(ValueError, match="ORCHESTRATOR_RESIDENCY_POLICY"):
-        build_policy_surface(PolicySurfaceConfig(residency=FusionVetoPolicy.name))
+        build_policy_surface(PolicySurfaceConfig(residency=RecomputeOnlyFusion.name))
 
 
 def test_service_family_refinement_holds_the_compatibility_key() -> None:
