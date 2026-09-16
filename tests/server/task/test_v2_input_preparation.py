@@ -25,9 +25,12 @@ from tests.server.task.test_v2_embodiment_fence import (
 from tests.server.task.test_v2_orchestration import FakeRegistry
 
 
-def _runtime(max_prepared_input_bytes: int | None = None) -> TaskRuntime:
+def _runtime(
+    max_prepared_input_bytes: int | None = None,
+    registry: FakeRegistry | None = None,
+) -> TaskRuntime:
     return TaskRuntime(
-        cast(Any, FakeRegistry()),
+        cast(Any, registry or FakeRegistry()),
         cast(Any, _WorkerRegistryStub()),
         OrchestrationConfig(max_prepared_input_bytes=max_prepared_input_bytes),
         Path(tempfile.gettempdir()),
@@ -192,10 +195,12 @@ async def test_a_preparation_success_does_not_revive_a_cancelled_task() -> None:
 
 
 @pytest.mark.anyio
-async def test_a_preparation_success_does_not_revive_a_cancelling_task() -> None:
-    # A cancel in flight is not yet terminal, and the interrupt cannot reach a
-    # preparation the worker has already finished.
-    runtime = _runtime()
+async def test_a_preparation_success_settles_a_cancelling_task() -> None:
+    # The interrupt cannot reach a preparation the worker has already finished, and
+    # withholding its next dispatch withholds the terminal that dispatch would carry,
+    # so the racing success settles the cancellation rather than re-admitting the task.
+    registry = FakeRegistry()
+    runtime = _runtime(registry=registry)
     task_id = await _upstream_task(runtime, max_items=None)
     record = runtime.get_record(task_id)
     assert record is not None
@@ -203,7 +208,11 @@ async def test_a_preparation_success_does_not_revive_a_cancelling_task() -> None
 
     _report(runtime, task_id)
 
-    assert record.status == TaskStatus.CANCELLING
+    assert record.status == TaskStatus.CANCELLED
+    assert runtime.recorded_input_reference(task_id) is None
+    # The task leaves the workflow's remaining set, so the workflow can reach a
+    # terminal status instead of hanging on a task no dispatch will ever settle.
+    assert task_id not in registry.remaining_of(record.workflow_id)
 
 
 @pytest.mark.anyio
