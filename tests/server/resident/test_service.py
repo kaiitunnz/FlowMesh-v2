@@ -37,10 +37,16 @@ from server.resident import (
 )
 from server.resident.service import ResidentWorkerDelivery
 from server.resident.state import ReplicaIncarnation
+from server.task.v2.representations.admission import ResidentAdmissionBinding
 from server.task.v2.representations.operators import (
     ServiceDependency,
     ServiceInterface,
 )
+from server.task.v2.representations.plan import (
+    ResidencyIntent,
+    ServiceFamilyRequirement,
+)
+from server.task.v2.representations.versioning import VersionId
 from shared.harness import BoundaryEventKind
 from shared.outcome import OutcomeManifest
 from shared.resident.reports import (
@@ -54,6 +60,26 @@ from shared.resident.reports import (
 
 def _dependency(model_ref: str = "m") -> ServiceDependency:
     return ServiceDependency(service_ref=model_ref)
+
+
+def _admission(
+    dependency: ServiceDependency | None = None, warmth: str | None = None
+) -> ResidentAdmissionBinding:
+    dep = dependency or _dependency()
+    return ResidentAdmissionBinding(
+        workflow_id="wfl-1",
+        plan_version=VersionId(lineage="wfl-1:plan", content_digest="d"),
+        node_id="phys:tsk-1",
+        dependency=dep,
+        requirement=ServiceFamilyRequirement(
+            family=dep.service_family,
+            engine_batch_key=dep.engine_batch_key,
+            isolation=dep.isolation,
+        ),
+        intent=ResidencyIntent(
+            service_family=dep.service_family, required=True, warmth=warmth
+        ),
+    )
 
 
 def _env(invocation_id: str = "inv-1") -> ToolInvocationEnvelope:
@@ -150,6 +176,7 @@ def _build(
     materialize_fn: Any = None,
     deliver: bool = True,
     dependency: ServiceDependency | None = None,
+    warmth: str | None = None,
 ) -> tuple[ResidentCapacityControl, ResidentStores, list[Any], _Delivery]:
     stores = ResidentStores()
     limits = limits or ResidentPolicyLimits()
@@ -186,7 +213,7 @@ def _build(
         admission=admission,
         lifecycle=lifecycle,
         limits=limits,
-        dependency_resolver=lambda task_id: ("wfl-1", dependency or _dependency()),
+        dependency_resolver=lambda task_id: _admission(dependency, warmth),
         settle_cb=settle_cb,
         redispatch_cb=redispatch_cb,
         endpoint_probe=lambda serve_task_id: ReplicaEndpoint(

@@ -52,7 +52,9 @@ from ..network.state import (
     Transport,
 )
 from ..orchestration.tool_dispatch import ToolInvocationEnvelope
+from ..task.v2.representations.admission import ResidentAdmissionBinding
 from ..task.v2.representations.operators import ServiceDependency
+from ..task.v2.representations.plan import WARM
 from .admission import AdmissionController
 from .lifecycle import LifecycleScaleManager
 from .policy import ResidentPolicyLimits
@@ -75,8 +77,8 @@ from .stores import ResidentStores
 # The port of the claim-gated resident peer listener a worker hosts, or 0.
 ResidentListenerPortOf = Callable[[str], int]
 
-# Resolves a task's normalized resident dependency: (workflow_id, dependency) or None.
-DependencyResolver = Callable[[str], tuple[str, ServiceDependency] | None]
+# Resolves what a task binds for resident admission, or None for a non-resident task.
+DependencyResolver = Callable[[str], ResidentAdmissionBinding | None]
 # The binding a task's inputs resolved under, once its origin worker has recorded one.
 InputResolutionResolver = Callable[[str], InputResolutionBinding | None]
 # Settles a mediated boundary back at its originating call, or fails it with an error.
@@ -625,17 +627,11 @@ class ResidentCapacityControl:
         lifetime and never materializes from zero — the serve task already runs the
         engine.
         """
-        if family not in self._stores.families:
-            self._stores.families.register(
-                ServiceFamily(
-                    family=family,
-                    engine_batch_key=dependency.engine_batch_key,
-                    model_ref=dependency.service_ref,
-                    interface=dependency.interface.value,
-                    isolation=dependency.isolation,
-                    selection_strategy=self._limits.selection_strategy,
-                )
-            )
+        # A standing allocation is pinned to its serve task for the task's lifetime,
+        # so its family records the warm preference its residency node declares.
+        self._stores.families.register(
+            self._family_definition(dependency, family, WARM)
+        )
         definition = self._stores.families.get(family)
         if definition is None:
             return
@@ -740,8 +736,8 @@ class ResidentCapacityControl:
             )
 
     async def _originate_inner(self, env: ToolInvocationEnvelope) -> None:
-        resolved = self._resolve_dependency(env.task_id)
-        if resolved is None or not resolved[1].service_ref:
+        admission = self._resolve_dependency(env.task_id)
+        if admission is None or not admission.dependency.service_ref:
             self._settle(
                 env.task_id,
                 env.call_correlation,
@@ -749,7 +745,7 @@ class ResidentCapacityControl:
                 error="resident model binding is unresolved",
             )
             return
-        workflow_id, dependency = resolved
+        workflow_id, dependency = admission.workflow_id, admission.dependency
         origin_worker = (
             self._delivery.origin_worker_of_task(env.task_id)
             if self._delivery is not None
@@ -780,13 +776,14 @@ class ResidentCapacityControl:
             batch_size=batch_size,
             max_output_tokens=binding.projected_output_tokens if binding else None,
         )
-        await self._drive_claim(orig, dependency, profile)
+        await self._drive_claim(orig, dependency, profile, admission)
 
     async def _drive_claim(
         self,
         orig: _Origination,
         dependency: ServiceDependency,
         profile: AdmissionProfile,
+        admission: ResidentAdmissionBinding | None = None,
     ) -> None:
         """Admit the invocation's claim and relay its bootstrap, subject-neutrally.
 
@@ -828,7 +825,7 @@ class ResidentCapacityControl:
                     orig, "serve task has no live standing allocation"
                 )
                 return
-            elif orig.serve is None and not self._ensure_family(dependency):
+            elif orig.serve is None and not self._ensure_family(dependency, admission):
                 self._fail(
                     orig,
                     ProvisioningDenialReason.MODEL_NOT_ALLOWED,
@@ -1446,22 +1443,45 @@ class ResidentCapacityControl:
             return None
         return f"{split_host_port(endpoint.url)[0]}:{port}"
 
-    def _ensure_family(self, dependency: ServiceDependency) -> bool:
+    def _family_definition(
+        self, dependency: ServiceDependency, family: str, warmth: str | None
+    ) -> ServiceFamily:
+        """The family definition a dependency admits against, under one warmth.
+
+        Both the demand-managed and the standing creation path build a definition
+        here, so a family's warmth has one origin.
+        """
+        return ServiceFamily(
+            family=family,
+            engine_batch_key=dependency.engine_batch_key,
+            model_ref=dependency.service_ref,
+            interface=dependency.interface.value,
+            isolation=dependency.isolation,
+            selection_strategy=self._limits.selection_strategy,
+            warmth=warmth,
+        )
+
+    def _ensure_family(
+        self, dependency: ServiceDependency, admission: ResidentAdmissionBinding | None
+    ) -> bool:
+        """Register the dependency's family, carrying the plan's residency preference.
+
+        The registry refines an existing definition's warmth and never rewrites its
+        compatibility identity, so a family shared across workflows keeps one
+        definition. A plan annotation describing another node is not this
+        dependency's to read.
+        """
         family = dependency.service_family
-        if family in self._stores.families:
-            return True
         model_ref = dependency.service_ref
         if self._limits.allowed_models and model_ref not in self._limits.allowed_models:
-            return False
+            return family in self._stores.families
+        warmth = (
+            admission.warmth
+            if admission is not None and admission.compatible()
+            else None
+        )
         self._stores.families.register(
-            ServiceFamily(
-                family=family,
-                engine_batch_key=dependency.engine_batch_key,
-                model_ref=model_ref,
-                interface=dependency.interface.value,
-                isolation=dependency.isolation,
-                selection_strategy=self._limits.selection_strategy,
-            )
+            self._family_definition(dependency, family, warmth)
         )
         return True
 
