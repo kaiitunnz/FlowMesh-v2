@@ -22,6 +22,15 @@ if __name__ == "__main__" and __package__ is None:
 
 from shared._version import FLOWMESH_RELEASE_VERSION
 from shared.outcome import ManifestRef, OutcomeCarrier
+from shared.telemetry.control import ControlPlaneTracer
+from shared.telemetry.provider import build_tracer
+from shared.telemetry.semconv import (
+    RESOURCE_ROLE,
+    SERVICE_NAME,
+    SERVICE_VERSION,
+    ProcessRole,
+    ServiceName,
+)
 
 from .auth import reconcile_resources, resolve_system_principal
 from .clients import RedisClient
@@ -170,6 +179,17 @@ if IS_ROOT_NODE:
         REDIS_CLIENT, config.orchestration.model_secret_vault.ttl_sec, logger
     )
     POLICY_SURFACE = build_policy_surface(config.orchestration.policy)
+    CONTROL_TRACER = ControlPlaneTracer(
+        build_tracer(
+            config.metrics.telemetry,
+            {
+                SERVICE_NAME: ServiceName.SERVER,
+                SERVICE_VERSION: FLOWMESH_RELEASE_VERSION,
+                RESOURCE_ROLE: ProcessRole.ROOT,
+            },
+        ),
+        config.metrics.telemetry,
+    )
     RUNTIME = TaskRuntime(
         WORKFLOW_REGISTRY,
         WORKER_REGISTRY,
@@ -178,6 +198,7 @@ if IS_ROOT_NODE:
         logger,
         secret_vault=MODEL_SECRET_VAULT,
         surface=POLICY_SURFACE,
+        control=CONTROL_TRACER,
     )
     AGENT_MODEL_GATEWAY = AgentModelGateway(
         RUNTIME, config.orchestration.gateway, logger
@@ -217,6 +238,7 @@ if IS_ROOT_NODE:
             system_principal=_resident_owner,
             registry=RESIDENT_REGISTRY,
             logger=logger,
+            control=CONTROL_TRACER,
         )
         RUNTIME.set_resident_terminal_hook(RESIDENT_CONTROL.on_invocation_terminal)
         RUNTIME.set_resident_handlers(
@@ -298,6 +320,7 @@ if IS_ROOT_NODE:
         metrics_recorder=METRICS_RECORDER,
         resident_capacity_enabled=config.orchestration.resident.enabled,
         resident_admission_slots=config.orchestration.resident.admission_slots,
+        control=CONTROL_TRACER,
     )
 
     _pf_cfg = config.port_forward

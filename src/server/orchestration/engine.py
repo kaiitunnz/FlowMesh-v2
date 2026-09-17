@@ -14,9 +14,10 @@ seals and drains, never on an observed empty set. Scheduler/worker placement sta
 physical decision that never changes what the engine considers ready.
 """
 
-from collections.abc import Sequence
+import functools
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Self
+from typing import Any, Self
 
 from shared.harness import DeliveredOutcome, OutcomeKind
 from shared.inference import InputResolutionBinding, ResolvedInputReference
@@ -27,6 +28,8 @@ from shared.private_state import (
     PrivateStateBinding,
     StateBundleManifest,
 )
+from shared.telemetry.control import NULL_CONTROL_TRACER, ControlPlaneTracer
+from shared.telemetry.semconv import ControlPlaneStage, ControlPlaneWindow
 from shared.tools.contract import MediatedOperationPermit
 from shared.utils import (
     new_activation_id,
@@ -196,6 +199,44 @@ class Advance:
         return self
 
 
+def _ds_drive(
+    window: ControlPlaneWindow,
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """Wrap an engine transition in the explicitly-parented ``ds_drive`` span.
+
+    Parents on the episode owning the wrapped call's first positional argument (a task
+    id) when one resolves to a work item; falls back to the workflow when it does not
+    — ``on_cancelled`` may be called with a scope id rather than a task id, which
+    resolves no work item.
+    """
+
+    def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
+        @functools.wraps(fn)
+        def wrapper(
+            self: "OrchestrationEngine", candidate: str, *args: Any, **kwargs: Any
+        ) -> Any:
+            if not self._control.enabled:
+                return fn(self, candidate, *args, **kwargs)
+            wi = self._work_item_for_task(candidate)
+            if wi is not None:
+                span_cm = self._control.episode_stage(
+                    ControlPlaneStage.DS_DRIVE,
+                    window,
+                    self._instance.instance_id,
+                    wi.work_item_id,
+                )
+            else:
+                span_cm = self._control.workflow_stage(
+                    ControlPlaneStage.DS_DRIVE, window, self._instance.instance_id
+                )
+            with span_cm:
+                return fn(self, candidate, *args, **kwargs)
+
+        return wrapper
+
+    return decorator
+
+
 class OrchestrationEngine:
     """Drives one workflow instance's semantic readiness over its durable ledger."""
 
@@ -205,6 +246,7 @@ class OrchestrationEngine:
         bundle: PersistedV2Workflow,
         *,
         budget: ScopeBudget | None = None,
+        control: ControlPlaneTracer | None = None,
     ) -> None:
         self._instance = snapshot.instance
         self._root_scope = snapshot.root_scope
@@ -213,6 +255,7 @@ class OrchestrationEngine:
         self._budget = budget or ScopeBudget()
         self._next_seq = snapshot.next_seq
         self._initial = Advance()
+        self._control = control if control is not None else NULL_CONTROL_TRACER
 
         self._scopes = {s.scope_id: s for s in snapshot.scopes}
         self._scopes.setdefault(self._root_scope.scope_id, self._root_scope)
@@ -393,6 +436,7 @@ class OrchestrationEngine:
         policy_envelope: str | None = None,
         granted_interfaces: frozenset[str] | None = None,
         budget: ScopeBudget | None = None,
+        control: ControlPlaneTracer | None = None,
     ) -> "OrchestrationEngine":
         """Materialize an engine from a compiled bundle.
 
@@ -542,7 +586,7 @@ class OrchestrationEngine:
             continuations=continuations,
             result_slots=slots,
         )
-        engine = cls(snapshot, bundle, budget=budget)
+        engine = cls(snapshot, bundle, budget=budget, control=control)
         engine._initial = engine._open_roots()
         return engine
 
@@ -554,6 +598,7 @@ class OrchestrationEngine:
     # Physical attempt lifecycle (dispatchable leaves)
     # ------------------------------------------------------------------ #
 
+    @_ds_drive(ControlPlaneWindow.QUEUE)
     def on_dispatched(self, task_id: str, worker_id: str | None) -> None:
         """Record a physical attempt and issue or reissue the work item's invocation."""
         wi = self._work_item_for_task(task_id)
@@ -596,6 +641,7 @@ class OrchestrationEngine:
             operator_id=wi.operator_id,
         )
 
+    @_ds_drive(ControlPlaneWindow.POST_START)
     def on_started(self, task_id: str) -> None:
         wi = self._work_item_for_task(task_id)
         if wi is None or wi.invocation_id is None:
@@ -610,6 +656,7 @@ class OrchestrationEngine:
             invocation_id=wi.invocation_id,
         )
 
+    @_ds_drive(ControlPlaneWindow.POST_START)
     def on_succeeded(self, task_id: str, *, empty: bool = False) -> Advance:
         """Settle a work item on success and release its successors.
 
@@ -657,6 +704,7 @@ class OrchestrationEngine:
             invocation.state = next_on_terminal(invocation.state)
             self._record_receipt(wi, outcome)
 
+    @_ds_drive(ControlPlaneWindow.POST_START)
     def on_failed(self, task_id: str, error: str, *, retryable: bool) -> Advance:
         """Retry a work item as a fresh attempt, or settle it and cascade failure."""
         wi = self._work_item_for_task(task_id)
@@ -686,6 +734,7 @@ class OrchestrationEngine:
             return advance.extend(released)
         return Advance(failed=self._settle_failure(wi.work_item_id)).extend(released)
 
+    @_ds_drive(ControlPlaneWindow.POST_START)
     def on_uncertain(self, task_id: str) -> Advance:
         """Resolve a lost acknowledgement or route loss for an in-flight work item."""
         wi = self._work_item_for_task(task_id)
@@ -2288,6 +2337,7 @@ class OrchestrationEngine:
         """Cancel the whole workflow instance: the root scope and every descendant."""
         return self.on_cancelled(self._root_scope.scope_id)
 
+    @_ds_drive(ControlPlaneWindow.POST_START)
     def on_cancelled(self, scope_or_task: str) -> Advance:
         """Cancel a scope subtree as a durable, recorded-before-terminal event.
 
@@ -3657,6 +3707,10 @@ class OrchestrationEngine:
     def _work_item_for_task(self, task_id: str) -> WorkItem | None:
         wi_id = self._wi_by_task.get(task_id)
         return self._work_items.get(wi_id) if wi_id else None
+
+    def work_item_id_for_task(self, task_id: str) -> str | None:
+        """The episode (work item) id backing a legacy task id, or None."""
+        return self._wi_by_task.get(task_id)
 
     def _operator_for_task(self, task_id: str) -> str | None:
         wi = self._work_item_for_task(task_id)

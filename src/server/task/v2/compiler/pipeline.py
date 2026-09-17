@@ -2,6 +2,9 @@ from collections.abc import Mapping
 
 from pydantic import ValidationError
 
+from shared.telemetry.control import NULL_CONTROL_TRACER, ControlPlaneTracer
+from shared.telemetry.semconv import ControlPlaneStage, ControlPlaneWindow
+
 from ...parser import ParsedWorkflow
 from ..mode import LoweringStrategy
 from ..policy.lowering import PolicySurface
@@ -90,6 +93,7 @@ def compile_workflow(
     bindings: AgentBindingDefaults | None = None,
     secret_refs: Mapping[str, str] | None = None,
     surface: PolicySurface | None = None,
+    control: ControlPlaneTracer | None = None,
 ) -> tuple[LogicalWorkflowTemplate, PhysicalExecutionPlan]:
     """Compile a parsed workflow into symbolic v2 representations.
 
@@ -103,36 +107,52 @@ def compile_workflow(
     error-severity diagnostic is produced. The result carries no worker/replica/endpoint
     bindings and no activation tags.
     """
+    tracer = control if control is not None else NULL_CONTROL_TRACER
     defaults = bindings if bindings is not None else neutral_defaults()
     policies = surface if surface is not None else PolicySurface()
     acc = LoweringAccumulator()
-    name_to_op = build_name_map(parsed)
-    lower_tasks(parsed, name_to_op, acc, defaults, secret_refs or {}, policies)
-    lower_frontend_v2(parsed, acc)
-    induce_effect_boundaries(acc)
-    pin_agent_sandbox(acc, defaults.sandbox_enabled)
-    pin_agent_facades(acc)
-    template = _assemble_template(workflow_id, source, acc)
-    nodes = tuple(acc.nodes)
+    with tracer.workflow_stage(
+        ControlPlaneStage.COMPILE_LOWER, ControlPlaneWindow.SUBMIT, workflow_id
+    ):
+        name_to_op = build_name_map(parsed)
+        lower_tasks(parsed, name_to_op, acc, defaults, secret_refs or {}, policies)
+        lower_frontend_v2(parsed, acc)
+        induce_effect_boundaries(acc)
+        pin_agent_sandbox(acc, defaults.sandbox_enabled)
+        pin_agent_facades(acc)
+    with tracer.workflow_stage(
+        ControlPlaneStage.COMPILE_ASSEMBLE, ControlPlaneWindow.SUBMIT, workflow_id
+    ):
+        template = _assemble_template(workflow_id, source, acc)
+        nodes = tuple(acc.nodes)
     if strategy is LoweringStrategy.EPISODE_CUT:
-        nodes = lower_to_episodes(template, nodes, policies)
-    plan = _finalize_plan(
-        workflow_id,
-        template.version,
-        nodes,
-        LoweringProvenance(
-            strategy=strategy,
-            fusion=policies.fusion.name,
-            residency=policies.residency.name,
-            service_family=policies.service_family.name,
-        ),
-    )
-    if validate:
-        diagnostics = validate_compilation(
-            template, plan, defaults.sandbox_egress_enabled
+        with tracer.workflow_stage(
+            ControlPlaneStage.COMPILE_EPISODES, ControlPlaneWindow.SUBMIT, workflow_id
+        ):
+            nodes = lower_to_episodes(template, nodes, policies)
+    with tracer.workflow_stage(
+        ControlPlaneStage.COMPILE_FINALIZE, ControlPlaneWindow.SUBMIT, workflow_id
+    ):
+        plan = _finalize_plan(
+            workflow_id,
+            template.version,
+            nodes,
+            LoweringProvenance(
+                strategy=strategy,
+                fusion=policies.fusion.name,
+                residency=policies.residency.name,
+                service_family=policies.service_family.name,
+            ),
         )
-        if has_errors(diagnostics):
-            raise CompileError(tuple(diagnostics))
+    if validate:
+        with tracer.workflow_stage(
+            ControlPlaneStage.COMPILE_VALIDATE, ControlPlaneWindow.SUBMIT, workflow_id
+        ):
+            diagnostics = validate_compilation(
+                template, plan, defaults.sandbox_egress_enabled
+            )
+            if has_errors(diagnostics):
+                raise CompileError(tuple(diagnostics))
     return template, plan
 
 
@@ -144,6 +164,7 @@ def compile_bundle(
     bindings: AgentBindingDefaults | None = None,
     secret_refs: Mapping[str, str] | None = None,
     surface: PolicySurface | None = None,
+    control: ControlPlaneTracer | None = None,
 ) -> PersistedV2Workflow:
     """Compile a parsed workflow into the durable plan-time bundle."""
     template, plan = compile_workflow(
@@ -154,5 +175,6 @@ def compile_bundle(
         bindings=bindings,
         secret_refs=secret_refs,
         surface=surface,
+        control=control,
     )
     return PersistedV2Workflow(source=source, template=template, plan=plan)

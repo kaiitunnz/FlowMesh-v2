@@ -78,6 +78,7 @@ class MediatedOperationPermit(BaseModel):
     timeout_sec: float
     result_char_cap: int
     credential: str | None = Field(default=None, repr=False)
+    traceparent: str | None = None
 
 
 class ToolOutcomeStatus(StrEnum):

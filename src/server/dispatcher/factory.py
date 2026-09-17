@@ -1,6 +1,8 @@
 import logging
 from pathlib import Path
 
+from shared.telemetry.control import ControlPlaneTracer
+
 from ..config import DispatchConfig
 from ..dispatcher import Dispatcher
 from ..registries.worker import WorkerRegistry
@@ -23,6 +25,7 @@ def create_dispatcher(
     metrics_recorder: MetricsRecorder | None = None,
     resident_capacity_enabled: bool = False,
     resident_admission_slots: int = 0,
+    control: ControlPlaneTracer | None = None,
 ) -> Dispatcher:
     """
     Instantiate a dispatcher according to the selected mode.
@@ -63,4 +66,5 @@ def create_dispatcher(
         metrics_recorder=metrics_recorder,
         resident_capacity_enabled=resident_capacity_enabled,
         resident_admission_slots=resident_admission_slots,
+        control=control,
     )

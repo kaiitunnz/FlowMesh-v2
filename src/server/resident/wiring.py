@@ -15,6 +15,7 @@ from lumid_hooks import PrincipalContext
 
 from shared.resident.contracts import ReplicaEndpoint
 from shared.schemas.command import MediatedOpMessage
+from shared.telemetry.control import ControlPlaneTracer
 
 from ..config import OrchestrationConfig, ResidentCapacityConfig
 from ..network.reverse_relay import RelaySessionStore
@@ -43,6 +44,7 @@ def build_resident_capacity(
     system_principal: SystemPrincipalProvider,
     registry: ResidentRegistry,
     logger: logging.Logger,
+    control: ControlPlaneTracer | None = None,
 ) -> ResidentCapacityControl:
     """Wire and return resident-capacity control for the enabled resident config."""
     cfg = orchestration.resident
@@ -123,6 +125,7 @@ def build_resident_capacity(
         idle_sweep_interval_sec=sweep_interval,
         redrive_backoff_sec=cfg.redrive_backoff_sec,
         max_transient_redrives=cfg.max_transient_redrives,
+        control=control,
     )
 
 

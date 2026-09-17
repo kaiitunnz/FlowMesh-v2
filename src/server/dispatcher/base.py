@@ -32,6 +32,8 @@ from shared.tasks.specs import (
     SSHSpecTemplate,
 )
 from shared.tasks.worker_message import WorkerStatus, WorkerTaskMessage
+from shared.telemetry.control import NULL_CONTROL_TRACER, ControlPlaneTracer
+from shared.telemetry.semconv import ControlPlaneStage, ControlPlaneWindow
 
 from ..clients.redis import REDIS_CONN_ERRORS
 from ..registries.worker import Worker, WorkerRegistry
@@ -81,6 +83,7 @@ class Dispatcher:
         resident_capacity_enabled: bool = False,
         resident_admission_slots: int = 0,
         embodiment_selector: EmbodimentSelector | None = None,
+        control: ControlPlaneTracer | None = None,
     ) -> None:
         self._runtime = runtime
         self._worker_registry = worker_registry
@@ -99,6 +102,7 @@ class Dispatcher:
         self._resident_capacity_enabled = resident_capacity_enabled
         self._resident_admission_slots = max(0, resident_admission_slots)
         self._embodiment_selector = embodiment_selector or PrimaryEmbodimentSelector()
+        self._control = control if control is not None else NULL_CONTROL_TRACER
         self._weight_reference_hints: tuple[str, ...] = (
             "checkpoint",
             "weight",
@@ -345,7 +349,35 @@ class Dispatcher:
         )
 
     def dispatch_once(self, task_id: str) -> bool:
-        """Dispatch a single task if possible; requeue when no worker."""
+        """Dispatch a single task if possible; requeue when no worker.
+
+        Wrapped in the ``dispatch`` control-plane span for a v2 episode: the dispatcher
+        loop thread has no ambient span, so the span's parent is built explicitly from
+        the episode (work item) id rather than relied upon. A v1 task, or a v2 task
+        whose work item is not yet known, dispatches with no span at all.
+        """
+        if not self._control.enabled:
+            return self._dispatch_once_impl(task_id)
+        record = self._runtime.get_record(task_id)
+        engine = (
+            self._runtime.orchestration_engine(record.workflow_id)
+            if record is not None
+            else None
+        )
+        work_item_id = (
+            engine.work_item_id_for_task(task_id) if engine is not None else None
+        )
+        if record is None or work_item_id is None:
+            return self._dispatch_once_impl(task_id)
+        with self._control.episode_stage(
+            ControlPlaneStage.DISPATCH,
+            ControlPlaneWindow.QUEUE,
+            record.workflow_id,
+            work_item_id,
+        ):
+            return self._dispatch_once_impl(task_id)
+
+    def _dispatch_once_impl(self, task_id: str) -> bool:
         record = self._runtime.get_record(task_id)
         if not record:
             return True
