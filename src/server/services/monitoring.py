@@ -1252,9 +1252,17 @@ class EventMonitor:
             )
             return
 
-        submitted_at = self._runtime.workflow_submitted_at(workflow_id)
-        if submitted_at is not None:
-            self._workflow_span_emitter.emit(workflow_id, submitted_at, now_iso())
+        # Telemetry never decides whether the log stream closes: this reads the
+        # workflow record and emits a span, and a failure in either must not strand a
+        # completed workflow's stream open.
+        try:
+            submitted_at = self._runtime.workflow_submitted_at(workflow_id)
+            if submitted_at is not None:
+                self._workflow_span_emitter.emit(workflow_id, submitted_at, now_iso())
+        except Exception as exc:
+            self._logger.debug(
+                "Failed to emit the workflow span for %s: %s", workflow_id, exc
+            )
 
         event = LogEvent(
             ts=now_iso(),
