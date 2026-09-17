@@ -276,19 +276,6 @@ class MetricsConfig:
             metrics_dir = Path(metrics_env).expanduser().resolve()
         else:
             metrics_dir = results_dir.parent / "metrics"
-        level_raw = (
-            (os.getenv("SERVER_METRICS_TELEMETRY_LEVEL") or TelemetryLevel.OFF.value)
-            .strip()
-            .lower()
-        )
-        try:
-            telemetry_level = TelemetryLevel(level_raw)
-        except ValueError as exc:
-            allowed = ", ".join(level.value for level in TelemetryLevel)
-            raise SystemExit(
-                f"SERVER_METRICS_TELEMETRY_LEVEL must be one of: {allowed} "
-                f"(got {level_raw!r})"
-            ) from exc
         return cls(
             dir=metrics_dir,
             enable_density_plot=parse_bool_env(
@@ -297,14 +284,7 @@ class MetricsConfig:
             density_bucket_sec=max(
                 1, parse_int_env("SERVER_METRICS_DENSITY_BUCKET_SEC", 60)
             ),
-            telemetry=TelemetryConfig(
-                level=telemetry_level,
-                traces_enabled=parse_bool_env("SERVER_METRICS_TRACES_ENABLED", True),
-                metrics_enabled=parse_bool_env("SERVER_METRICS_METRICS_ENABLED", True),
-                sample_ratio=parse_float_env("SERVER_METRICS_TRACE_SAMPLE_RATIO", 1.0),
-                otlp_endpoint=(os.getenv("SERVER_METRICS_OTLP_ENDPOINT") or "").strip()
-                or None,
-            ),
+            telemetry=TelemetryConfig.from_env(),
             otlp_timeout_sec=max(
                 1, parse_int_env("SERVER_METRICS_OTLP_TIMEOUT_SEC", 10)
             ),
