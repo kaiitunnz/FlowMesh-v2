@@ -1,4 +1,4 @@
-"""Contract §4.2 H3: ``ServeRequestEnvelope.digest()`` is identical whether telemetry
+"""``ServeRequestEnvelope.digest()`` is identical whether telemetry
 is on or off.
 
 The envelope's headers are digested into the claim fence (``freeze_request_envelope``),
@@ -6,7 +6,7 @@ and ``traceparent`` is on neither strip list, so writing one there would land in
 digest and break the resident path -- nothing would fail locally, which is exactly why
 this needs a test rather than a read of the code. Serve-request tracing takes its
 context from the serve trace root and rides ``RelayFrame.tp`` outside the digested
-envelope (contract §1.1), so the serve path must never inject, rewrite, or strip a
+envelope, so the serve path must never inject, rewrite, or strip a
 ``traceparent`` in ``ServeRequestEnvelope.headers``.
 
 This drives ``freeze_request_envelope`` -- exactly what ``routers/v1/serve.py``'s

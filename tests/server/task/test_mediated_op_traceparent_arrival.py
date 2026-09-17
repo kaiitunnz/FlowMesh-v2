@@ -1,4 +1,4 @@
-"""Contract §4.2: the ten ``mediated_op`` frame kinds, each proven for arrival.
+"""The ten ``mediated_op`` frame kinds, each proven for arrival.
 
 Three carriers (``permit``, ``resident_handoff``, ``resident_frame``) must reach the
 worker-side router carrying their traceparent (or ``tp``, for ``resident_frame``); the
@@ -6,13 +6,12 @@ other seven must carry nothing, ever -- adding a carrier to one of them would be
 misattribution (``resident_sidecar_bind`` in particular is replica-lifecycle, not
 invocation-scoped, and sounds like it should carry one).
 
-Every kind here is driven through the real ``TaskListener._handle_message`` rebuild
-(H1's first layer, the Redis pub/sub JSON rebuild) or the ``enqueue_local`` bypass
-``resident_frame`` actually uses, and then through the real gRPC ``Struct`` round trip
-(H1's second layer) -- the two places a model round-trip test would miss a drop. A test
-that only asserts ``MediatedOpMessage`` round-trips through Pydantic is not a gate for
-this task; the assertion here is the dict that would reach ``Runner._route_mediated_op``
-or ``ResidentLaneHost.route``.
+Every kind here is driven through the real ``TaskListener._handle_message`` rebuild of
+the Redis pub/sub JSON, or the ``enqueue_local`` bypass ``resident_frame`` actually
+uses, and then through the real gRPC ``Struct`` round trip -- the two places a model
+round-trip test would miss a drop. A test that only asserts ``MediatedOpMessage``
+round-trips through Pydantic is not a gate here; the assertion is the dict that would
+reach ``Runner._route_mediated_op`` or ``ResidentLaneHost.route``.
 
 The kind set is re-derived from the worker-side router
 (``runner.py::_route_mediated_op`` plus ``resident/lane_host.py::route``), not from the

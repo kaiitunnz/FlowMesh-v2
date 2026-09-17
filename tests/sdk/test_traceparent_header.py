@@ -1,4 +1,4 @@
-"""Contract P1: the SDK forwards the caller's ambient trace context as a
+"""The SDK forwards the caller's ambient trace context as a
 ``traceparent`` header, without a hard OpenTelemetry dependency.
 
 The SDK soft-imports the OTel propagator, so both paths must be proven: with the API

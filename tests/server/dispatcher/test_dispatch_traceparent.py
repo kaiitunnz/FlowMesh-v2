@@ -1,4 +1,4 @@
-"""The task dispatch carrier: ``WorkerTaskMessage.traceparent`` (contract P2, ``task``).
+"""The task dispatch carrier: ``WorkerTaskMessage.traceparent``.
 
 The dispatcher never derives a traceparent itself: it reads ``TaskRuntime``'s read-only
 accessor and forwards the result onto the published ``WorkerTaskMessage``, so a worker's
@@ -115,7 +115,7 @@ def test_a_dispatched_task_carries_a_stubbed_accessors_traceparent() -> None:
 def test_a_v2_dispatch_names_the_workflows_trace_and_the_episodes_span() -> None:
     # End to end through the real accessor: the value the dispatcher forwards is the
     # workflow's derived trace id and the dispatched task's episode (work item) span id
-    # -- not the attempt, which does not exist yet at publish time (contract §3.2).
+    # -- not the attempt, which does not exist yet at publish time.
     control, _exporter = recording_control_tracer()
     runtime = _runtime(control=control)
     workflow_id, results = asyncio.run(

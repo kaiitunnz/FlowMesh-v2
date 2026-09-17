@@ -200,7 +200,7 @@ def test_existing_authorization_header_preserved(
     assert out.headers["Authorization"] == "Bearer caller-supplied"
 
 
-# ---- Contract P5: ambient traceparent on the worker->server HTTP hop -------
+# ---- ambient traceparent on the worker->server HTTP hop -------
 
 
 def test_flowmesh_origin_carries_the_ambient_traceparent(

@@ -1,4 +1,4 @@
-"""Contract P4: ``RelayFrame.tp`` survives all four codecs, or is absent when unset.
+"""``RelayFrame.tp`` survives all four codecs, or is absent when unset.
 
 ``RelayFrame`` is carried three ways -- Redis stream fields, the worker<->supervisor
 attachment JSON, and the direct-dial byte stream ``frame_stream.py`` frames

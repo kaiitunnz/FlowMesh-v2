@@ -1,5 +1,5 @@
-"""Contract P3, the far end: a dispatched task's traceparent reaches the lifecycle
-notifications the runner makes around its run.
+"""The far end of the dispatch hop: a dispatched task's traceparent reaches the
+lifecycle notifications the runner makes around its run.
 
 ``WorkerTaskMessage.traceparent`` is set once at dispatch; this drives one task through
 the real ``Runner.start()`` loop and asserts every lifecycle call it makes along the way

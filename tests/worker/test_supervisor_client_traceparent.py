@@ -1,4 +1,4 @@
-"""Contract P3: the worker's task-status events carry the dispatch traceparent.
+"""The worker's task-status events carry the dispatch traceparent.
 
 Each ``task_*`` helper is the far end of the worker->supervisor->server hop for
 ``TaskEvent``; this proves the value each is given reaches the enqueued event payload

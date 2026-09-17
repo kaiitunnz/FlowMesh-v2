@@ -66,7 +66,7 @@ def test_hydrate_missing_raises(store) -> None:
 
 
 def test_every_request_carries_the_ambient_traceparent(store) -> None:
-    # Contract P5: the worker's content-store calls run inside a task's span, so the
+    # The worker's content-store calls run inside a task's span, so the
     # ambient trace context is forwarded onto each request's header dict.
     def _inject(headers: dict[str, str]) -> dict[str, str]:
         headers["traceparent"] = (
