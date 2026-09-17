@@ -9,6 +9,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
+from opentelemetry.trace import Tracer
 from pydantic import ValidationError
 
 from shared.harness import (
@@ -59,6 +60,7 @@ from shared.tasks.specs import (
     InferenceSpecTemplate,
     ModelBindingMode,
 )
+from shared.telemetry.config import TelemetryConfig
 from shared.telemetry.control import (
     NULL_CONTROL_TRACER,
     ControlPlaneTracer,
@@ -94,6 +96,7 @@ from ..orchestration import (
 )
 from ..orchestration.episode import BoundaryEvent
 from ..orchestration.harness import to_boundary_event
+from ..orchestration.telemetry import build_span_emitter
 from ..orchestration.tool_dispatch import (
     MODEL_INTERFACE,
     SEARCH_INTERFACE,
@@ -288,6 +291,8 @@ class TaskRuntime:
         feasibility_check: EpisodeFeasibility | None = None,
         surface: PolicySurface | None = None,
         control: ControlPlaneTracer | None = None,
+        tracer: Tracer | None = None,
+        telemetry: TelemetryConfig | None = None,
     ) -> None:
         self._workflow_registry = workflow_registry
         self._worker_registry = worker_registry
@@ -297,6 +302,8 @@ class TaskRuntime:
         self._policy_surface = surface if surface is not None else PolicySurface()
         self._secret_vault = secret_vault
         self._control = control if control is not None else NULL_CONTROL_TRACER
+        self._tracer = tracer
+        self._telemetry = telemetry
         self._scope_budget = ScopeBudget.from_config(orchestration)
         self._web_search = orchestration.web_search
         self._model_egress_timeout_sec = orchestration.gateway.timeout_sec
@@ -472,6 +479,9 @@ class TaskRuntime:
                     v2_bundle,
                     budget=self._scope_budget,
                     control=self._control,
+                    emitter=build_span_emitter(
+                        self._tracer, self._telemetry, workflow_id
+                    ),
                 )
 
         with self._cv:
@@ -785,7 +795,12 @@ class TaskRuntime:
             elif record.status in (TaskStatus.DISPATCHED, TaskStatus.CANCELLING):
                 self._rehydrated_dispatched[task_id] = rehydrated_at
 
-        engine = OrchestrationEngine(snapshot, bundle, budget=self._scope_budget)
+        engine = OrchestrationEngine(
+            snapshot,
+            bundle,
+            budget=self._scope_budget,
+            emitter=build_span_emitter(self._tracer, self._telemetry, workflow_id),
+        )
         self._engines[workflow_id] = engine
         cancelled = False
         for persisted in tasks:
@@ -3662,6 +3677,11 @@ class TaskRuntime:
     def get_record(self, task_id: str) -> TaskRecord | None:
         with self._lock:
             return self._tasks.get(task_id)
+
+    def workflow_submitted_at(self, workflow_id: str) -> str | None:
+        """The workflow's durable submission timestamp, or ``None`` if unknown."""
+        record = self._workflow_registry.get_workflow_record(workflow_id)
+        return record.submitted_at if record is not None else None
 
     def get_merged_children(self, task_id: str) -> list[str]:
         """Read the merged-children list without consuming it."""
