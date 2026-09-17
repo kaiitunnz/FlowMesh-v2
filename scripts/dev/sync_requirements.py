@@ -31,7 +31,7 @@ SERVER_REQ = REPO_ROOT / "src" / "server" / "requirements.txt"
 WORKER_CPU_REQ = REPO_ROOT / "src" / "worker" / "requirements" / "requirements.txt"
 WORKER_GPU_REQ = REPO_ROOT / "src" / "worker" / "requirements" / "requirements.gpu.txt"
 
-SERVER_GROUPS: list[str] = ["runtime-server", "runtime-observability"]
+SERVER_GROUPS: list[str] = ["runtime-server"]
 
 # Worker CPU layer: Dockerfile.cpu, and Dockerfile.cuda runtime stage.
 WORKER_CPU_GROUPS: list[str] = [
