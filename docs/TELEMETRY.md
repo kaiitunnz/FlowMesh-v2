@@ -101,6 +101,42 @@ A deployment with resident capacity disabled still reports queue depth.
 
 `GET /api/v1/system/metrics` is unchanged.
 
+## Storage
+
+A deployment that wants the bundled store selects the `telemetry` Compose profile,
+which adds an OpenTelemetry Collector and a ClickHouse instance beside the core stack
+and leaves that stack otherwise untouched. The Collector receives OTLP on 4317 and
+4318, writes spans and metrics to ClickHouse, and is the store's sole writer;
+`TELEMETRY_CLICKHOUSE_DSN` points it at the bundled instance or at one the deployment
+already runs. ClickHouse keeps its data in a named volume, so a stack restart does not
+discard a trace.
+
+The server's read path is configured separately, through `SERVER_METRICS_CLICKHOUSE_*`,
+and never writes. The two halves commonly address the same instance but are never the
+same configuration, so either one can be repointed or replaced without the other: the
+collector and the read port never touch.
+
+## Querying
+
+`flowmesh trace tree <workflow-id>` renders a workflow's spans as an indented tree, one
+line per span carrying its name, its duration, and the one or two ids that identify its
+level; `--json` emits the same tree with the logical and physical attribute views intact
+and separate. `flowmesh trace aggregate --metric <name> --group-by <attribute>` rolls one
+metric up by one attribute key, with `--stat` selecting count, sum, avg, min, max, p50,
+p95 or p99, `--kind` selecting the gauge or histogram table, and `--workflow-id`
+restricting the aggregate to one workflow. The same two queries are `client.traces.tree()`
+and `client.traces.aggregate()` on the SDK.
+
+Both read through the server, which resolves them against the store behind its read port;
+neither the CLI nor the SDK holds a store driver, so replacing the store is a collector
+configuration change plus one adapter, with no client change. A workflow whose spans were
+never recorded returns an empty tree, and a deployment with no store configured answers
+that telemetry querying is unavailable there.
+
+`flowmesh trace fetch` and `flowmesh trace analyze` are a different instrument on a
+different pipeline — the worker-side `spans.jsonl` the governance analyzer reads — and
+behave identically at every telemetry level.
+
 ## Propagation
 
 Context crosses each process hop in the envelope's metadata half, never in an opaque
