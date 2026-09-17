@@ -1,9 +1,11 @@
 # Telemetry
 
-FlowMesh emits one OpenTelemetry trace per workflow, spanning every process the workflow
-touches: the root server's control plane, each supervisor it dispatches through, and each
-worker that runs a task. Spans, and the metrics that summarize them, export over OTLP to a
-collector and are queried back through the server.
+FlowMesh emits one OpenTelemetry trace per workflow, spanning the processes that act on
+it: the root server's control plane and each worker that runs a task. A supervisor relays
+frames without decoding them and opens no span of its own, so a workflow's trace crosses
+it without recording it. Spans, and the metrics that summarize them, export over OTLP to a
+collector and are queried back through the server. Each span names the service that
+emitted it.
 
 Telemetry is observation only. No span or metric is read by admission, credit release,
 embodiment selection, dispatch, or recovery, and nothing it records enters the

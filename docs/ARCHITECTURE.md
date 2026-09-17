@@ -438,9 +438,10 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
 - **Cursor pagination.** List endpoints accept `limit` and `before` /
   `after` cursors. The cursor is an opaque base64 of `(timestamp, id)`;
   do not parse client-side.
-- **Cluster telemetry.** A workflow emits one OpenTelemetry trace spanning every
-  process it touches — the root server's control plane, each supervisor it dispatches
-  through, and each worker that runs a task — with a `trace_id` every producer derives
+- **Cluster telemetry.** A workflow emits one OpenTelemetry trace spanning the processes
+  that act on it — the root server's control plane and each worker that runs a task,
+  with a supervisor relaying frames it never decodes and so never records — with a
+  `trace_id` every producer derives
   from the `workflow_id` by the same pure function, so they agree with no coordination
   and a trace survives a restart. Context crosses each hop in that hop's own metadata,
   never in a payload body. Spans carry ids and digests only, and telemetry is

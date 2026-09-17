@@ -95,6 +95,7 @@ class TraceSpanNode(BaseModel):
     end_time: datetime
     duration_seconds: float
     status: str
+    service_name: str = ""
     logical: dict[str, str] = Field(default_factory=dict)
     physical: dict[str, str] = Field(default_factory=dict)
     children: list["TraceSpanNode"] = Field(default_factory=list)
