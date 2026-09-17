@@ -18,14 +18,16 @@ from collections.abc import Callable
 import pynvml
 from opentelemetry.metrics import Meter
 
-from shared.telemetry.semconv import RESOURCE_NODE_ID, RESOURCE_WORKER_ID
+from shared.telemetry.semconv import (
+    GPU_INDEX,
+    GPU_UUID,
+    RESOURCE_NODE_ID,
+    RESOURCE_WORKER_ID,
+)
 
 __all__ = ["GpuSampler", "build_gpu_sampler"]
 
 logger = logging.getLogger(__name__)
-
-_GPU_INDEX_ATTR = "flowmesh.gpu.index"
-_GPU_UUID_ATTR = "flowmesh.gpu.uuid"
 
 
 class GpuSampler:
@@ -118,10 +120,10 @@ class GpuSampler:
         for idx in range(pynvml.nvmlDeviceGetCount()):
             handle = pynvml.nvmlDeviceGetHandleByIndex(idx)
             attrs = dict(base_attrs)
-            attrs[_GPU_INDEX_ATTR] = str(idx)
+            attrs[GPU_INDEX] = str(idx)
             try:
                 uuid_raw = pynvml.nvmlDeviceGetUUID(handle)
-                attrs[_GPU_UUID_ATTR] = (
+                attrs[GPU_UUID] = (
                     uuid_raw.decode() if isinstance(uuid_raw, bytes) else uuid_raw
                 )
             except pynvml.NVMLError:

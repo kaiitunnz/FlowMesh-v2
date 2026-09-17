@@ -7,6 +7,11 @@ from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from opentelemetry.sdk.resources import Resource
 
+from shared.telemetry.semconv import (
+    GPU_INDEX,
+    RESOURCE_NODE_ID,
+    RESOURCE_WORKER_ID,
+)
 from worker import gpu_sampler
 from worker.gpu_sampler import build_gpu_sampler
 
@@ -107,9 +112,9 @@ def test_sample_once_emits_gauges_with_node_and_worker_id(monkeypatch):
     points = _datapoints(reader)
     util_value, util_attrs = points["flowmesh.gpu.utilization_ratio"][0]
     assert util_value == 0.42
-    assert util_attrs["flowmesh.node_id"] == "nde-1"
-    assert util_attrs["flowmesh.worker_id"] == "wkr-1"
-    assert util_attrs["flowmesh.gpu.index"] == "0"
+    assert util_attrs[RESOURCE_NODE_ID] == "nde-1"
+    assert util_attrs[RESOURCE_WORKER_ID] == "wkr-1"
+    assert util_attrs[GPU_INDEX] == "0"
 
     assert points["flowmesh.gpu.memory_used_bytes"][0][0] == 1024
     assert points["flowmesh.gpu.power_watts"][0][0] == 50.0
