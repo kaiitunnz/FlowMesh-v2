@@ -107,9 +107,9 @@ A deployment with resident capacity disabled still reports queue depth.
 
 ## Storage
 
-A deployment that wants the bundled store selects the `telemetry` Compose profile,
-which adds an OpenTelemetry Collector and a ClickHouse instance beside the core stack
-and leaves that stack otherwise untouched. The Collector receives OTLP on 4317 and
+A deployment that wants the bundled store sets `COMPOSE_PROFILES=telemetry` in its
+stack env file, which adds an OpenTelemetry Collector and a ClickHouse instance beside
+the core stack and leaves that stack otherwise untouched. The Collector receives OTLP on 4317 and
 4318, writes spans and metrics to ClickHouse, and is the store's sole writer;
 `TELEMETRY_CLICKHOUSE_DSN` points it at the bundled instance or at one the deployment
 already runs. ClickHouse keeps its data in a named volume, so a stack restart does not

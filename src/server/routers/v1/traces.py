@@ -2,6 +2,7 @@
 
 import logging
 from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -34,7 +35,13 @@ from ...schemas.traces import (
     TraceSpanNode,
     TraceTree,
 )
-from ...telemetry.store import AggregateStat, MetricKind, SpanRow, TelemetryStore
+from ...telemetry.store import (
+    AggregateStat,
+    MetricKind,
+    SpanRow,
+    TelemetryStore,
+    TelemetryStoreError,
+)
 
 router = APIRouter(prefix="/traces", tags=["Traces"])
 
@@ -163,6 +170,26 @@ def _require_telemetry_store(store: TelemetryStore | None) -> TelemetryStore:
     return store
 
 
+@contextmanager
+def _store_available() -> Iterator[None]:
+    """Answer a configured-but-unreachable store with guidance, not a traceback.
+
+    A store the deployment configured and a store it can currently reach are different
+    failures, and the second one is the one an operator can act on -- most often the
+    store was never deployed at all.
+    """
+    try:
+        yield
+    except TelemetryStoreError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                f"The configured telemetry store could not be queried: {exc}. "
+                "Check that the telemetry services are deployed and reachable."
+            ),
+        ) from exc
+
+
 def _node_sort_key(node: TraceSpanNode) -> tuple[datetime, str]:
     return (node.start_time, node.span_id)
 
@@ -267,7 +294,8 @@ async def get_workflow_span_tree(
     await require_permission(
         principal, ResourceKind.WORKFLOW, workflow_id, ResourceAction.READ, logger
     )
-    rows = _require_telemetry_store(store).fetch_trace(workflow_id)
+    with _store_available():
+        rows = _require_telemetry_store(store).fetch_trace(workflow_id)
     return build_span_tree(workflow_id, rows)
 
 
@@ -295,13 +323,14 @@ async def aggregate_metric(
     await require_permission(
         principal, ResourceKind.WORKFLOW, workflow_id, ResourceAction.READ, logger
     )
-    buckets = _require_telemetry_store(store).aggregate(
-        metric=metric,
-        group_by=group_by,
-        stat=stat,
-        kind=kind,
-        workflow_id=workflow_id,
-    )
+    with _store_available():
+        buckets = _require_telemetry_store(store).aggregate(
+            metric=metric,
+            group_by=group_by,
+            stat=stat,
+            kind=kind,
+            workflow_id=workflow_id,
+        )
     return TraceAggregate(
         metric=metric,
         group_by=group_by,

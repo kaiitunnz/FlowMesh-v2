@@ -5,7 +5,7 @@ import os
 import re
 import shutil
 import subprocess
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -53,18 +53,29 @@ def compose(
     )
 
 
+def profile_args(profile: str | Sequence[str] | None) -> list[str]:
+    """``--profile`` flags for one or more profiles.
+
+    Compose's ``--profile`` flag REPLACES ``COMPOSE_PROFILES`` rather than adding to
+    it, so a caller that needs both its own profile and the operator's must pass every
+    one of them as its own flag.
+    """
+    if not profile:
+        return []
+    names = [profile] if isinstance(profile, str) else list(profile)
+    return [arg for name in names if name for arg in ("--profile", name)]
+
+
 def compose_logs(
     compose_file: Path,
     env_file: Path | None,
     env: Mapping[str, str] | None = None,
     service: str | None = None,
     capture_output: bool = False,
-    profile: str | None = None,
+    profile: str | Sequence[str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Stream compose logs, optionally for a specific service."""
-    args: list[str] = []
-    if profile:
-        args += ["--profile", profile]
+    args: list[str] = profile_args(profile)
     args += ["logs", "-f"]
     if service:
         args.append(service)
@@ -464,7 +475,7 @@ class DockerComposeStack:
         self,
         env_file: Path,
         service: str | None = None,
-        profile: str | None = None,
+        profile: str | Sequence[str] | None = None,
     ) -> int:
         """Stream stack logs and fall back to container logs when needed."""
         self.load_env(env_file)

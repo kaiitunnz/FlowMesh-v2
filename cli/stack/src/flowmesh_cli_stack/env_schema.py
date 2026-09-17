@@ -1062,6 +1062,11 @@ STACK_ENV_SCHEMA = EnvSchema(
                     min_value=1,
                 ),
                 EnvVar(
+                    "COMPOSE_PROFILES",
+                    "",
+                    description="Optional compose profiles to deploy (e.g. telemetry).",
+                ),
+                EnvVar(
                     "SERVER_METRICS_CLICKHOUSE_URL",
                     "",
                     description="ClickHouse HTTP URL for the store read port.",

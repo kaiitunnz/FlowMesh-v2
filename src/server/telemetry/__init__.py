@@ -13,6 +13,7 @@ from .store import (
     MetricPoint,
     SpanRow,
     TelemetryStore,
+    TelemetryStoreError,
 )
 
 __all__ = [
@@ -22,5 +23,6 @@ __all__ = [
     "MetricPoint",
     "SpanRow",
     "TelemetryStore",
+    "TelemetryStoreError",
     "build_telemetry_store",
 ]

@@ -26,6 +26,7 @@ from .store import (
     MetricKind,
     SpanRow,
     TelemetryStore,
+    TelemetryStoreError,
 )
 
 _TRACES_TABLE = "flowmesh_spans"
@@ -43,10 +44,6 @@ _STAT_EXPR: dict[AggregateStat, str] = {
     "p95": "quantile(0.95)(Value)",
     "p99": "quantile(0.99)(Value)",
 }
-
-
-class TelemetryStoreError(RuntimeError):
-    """The store rejected a query or returned a response the adapter cannot parse."""
 
 
 def _trace_id_hex(workflow_id: str) -> str:
@@ -127,9 +124,14 @@ class ClickHouseTelemetryStore(TelemetryStore):
     def _query_rows(self, sql: str, params: dict[str, str]) -> list[dict[str, object]]:
         query_params = {f"param_{k}": v for k, v in params.items()}
         query_params["database"] = self._database
-        response = self._client.post(
-            "/", params=query_params, content=f"{sql}\nFORMAT JSONEachRow"
-        )
+        try:
+            response = self._client.post(
+                "/", params=query_params, content=f"{sql}\nFORMAT JSONEachRow"
+            )
+        except httpx.HTTPError as exc:
+            raise TelemetryStoreError(
+                f"telemetry store at {self._client.base_url} is unreachable: {exc}"
+            ) from exc
         if response.status_code != httpx.codes.OK:
             raise TelemetryStoreError(
                 f"telemetry store query failed "

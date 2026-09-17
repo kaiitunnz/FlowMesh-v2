@@ -21,6 +21,14 @@ AggregateStat = Literal["count", "sum", "avg", "min", "max", "p50", "p95", "p99"
 MetricKind = Literal["gauge", "histogram"]
 
 
+class TelemetryStoreError(RuntimeError):
+    """A store could not answer a query.
+
+    Part of the port, not of any one adapter: a caller programs against the protocol
+    and handles this without knowing which store is behind it.
+    """
+
+
 @dataclass(frozen=True)
 class SpanRow:
     """One span as stored, with its logical/physical attribute views already split.
