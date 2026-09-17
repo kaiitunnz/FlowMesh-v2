@@ -207,10 +207,20 @@ class ControlPlaneTracer:
         under it instead of constructing a second, disconnected parent. Where none is
         open — a settle path with no enclosing stage — it falls back to an explicit
         workflow parent. Never a root either way.
+
+        The ambient span is trusted only when it is actually this workflow's: an
+        inbound external ``traceparent`` (§1.1) must become a Link, never a parent, so
+        if some other producer's ambient context ever leaked in as this workflow's
+        current span, adopting it here would silently carry the snapshot out of the
+        workflow's own trace. A mismatch falls back to the explicit workflow parent
+        exactly as the no-ambient-span case does.
         """
         if not self._should_emit(ControlPlaneStage.LEDGER_SNAPSHOT):
             return _NULL_SPAN
-        if get_current_span().get_span_context().is_valid:
+        ambient = get_current_span().get_span_context()
+        if ambient.is_valid and ambient.trace_id == workflow_to_trace_id_int(
+            workflow_id
+        ):
             return self._open(ControlPlaneStage.LEDGER_SNAPSHOT, None, None, attributes)
         context = _explicit_parent(
             workflow_to_trace_id_int(workflow_id),

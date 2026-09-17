@@ -112,6 +112,31 @@ def test_ledger_snapshot_falls_back_to_workflow_parent_with_no_enclosing_stage()
     )
 
 
+def test_ledger_snapshot_ignores_a_foreign_trace_ambient_span() -> None:
+    """An inbound external ``traceparent`` must become a Link, never a parent (§1.1).
+
+    If some other producer's ambient context ever leaked in as the current span
+    during a ``ledger_snapshot`` call, adopting it would silently carry the snapshot
+    out of the workflow's own trace. It must fall back to the explicit workflow
+    parent instead, exactly as the no-ambient-span case does.
+    """
+    control, exporter = recording_control_tracer(TelemetryLevel.FULL)
+    workflow_id = "wfl-deadbeefdeadbeefdeadbeefdeadbeef"
+    foreign_workflow_id = "wfl-cafebabecafebabecafebabecafebabe"
+
+    with control.workflow_stage(
+        ControlPlaneStage.ENGINE_BUILD, ControlPlaneWindow.SUBMIT, foreign_workflow_id
+    ):
+        with control.ledger_snapshot(workflow_id):
+            pass
+
+    span = spans_by_stage(exporter, "ledger_snapshot")[0]
+    assert span.context is not None
+    assert span.context.trace_id == workflow_to_trace_id_int(workflow_id)
+    assert span.parent is not None
+    assert span.parent.span_id == derived_span_id(SpanIdKind.WORKFLOW, workflow_id)
+
+
 def test_boundary_stage_uses_the_supplied_trace_id_not_a_workflow_derivation() -> None:
     """A boundary may belong to a serve invocation, which owns no workflow_id."""
     control, exporter = recording_control_tracer(TelemetryLevel.COARSE)
