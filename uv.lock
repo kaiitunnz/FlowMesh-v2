@@ -254,43 +254,6 @@ wheels = [
 ]
 
 [[package]]
-name = "arize-phoenix-client"
-version = "1.21.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "httpx" },
-    { name = "openinference-instrumentation" },
-    { name = "openinference-semantic-conventions" },
-    { name = "opentelemetry-exporter-otlp" },
-    { name = "opentelemetry-sdk" },
-    { name = "tqdm" },
-    { name = "typing-extensions" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/ca/00/ffef83cc5a335061f0eee538e6d0d0ab594d1a9920b23b6560c095db3b04/arize_phoenix_client-1.21.0.tar.gz", hash = "sha256:72e5ce34f0cbe731d189cda9c93cd0e011886eaadf42be289b96b72187623e1b", size = 122369, upload-time = "2025-09-29T18:58:00.224Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/09/31/3cfaf7721858390da6cd6c1f8c5b65c4e0421b67958c723c61c43e86688e/arize_phoenix_client-1.21.0-py3-none-any.whl", hash = "sha256:be3574363f686508f1f21f8cb956d5141ea6781b0b8b573844f1e8278a927e57", size = 129062, upload-time = "2025-09-29T18:57:59.124Z" },
-]
-
-[[package]]
-name = "arize-phoenix-otel"
-version = "0.13.1"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "openinference-instrumentation" },
-    { name = "openinference-semantic-conventions" },
-    { name = "opentelemetry-exporter-otlp" },
-    { name = "opentelemetry-proto" },
-    { name = "opentelemetry-sdk" },
-    { name = "opentelemetry-semantic-conventions" },
-    { name = "typing-extensions" },
-    { name = "wrapt" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/44/3b/8745dc29b9d7db658f64d4a14d100285d1b74f38827171c22120aa5b7c9c/arize_phoenix_otel-0.13.1.tar.gz", hash = "sha256:6fb7bcfed4260b9ddd5bcaa20a678b60e388525e4bbaec1247092f163a0e0204", size = 20166, upload-time = "2025-09-10T06:09:30.954Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/8d/40/1d421e172453f07fc8a91b5a2407350bbba598e37b9025ae84b68b0ce8a2/arize_phoenix_otel-0.13.1-py3-none-any.whl", hash = "sha256:98d34da78aebac7f60ec4bc30f0eab1e4490c7329b2c74988b9684f9dc182949", size = 17717, upload-time = "2025-09-10T06:09:30.037Z" },
-]
-
-[[package]]
 name = "astor"
 version = "0.8.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1490,8 +1453,6 @@ sdk = [
 ci = [
     { name = "accelerate" },
     { name = "aiohttp" },
-    { name = "arize-phoenix-client" },
-    { name = "arize-phoenix-otel" },
     { name = "bitsandbytes" },
     { name = "black" },
     { name = "boto3" },
@@ -1516,8 +1477,8 @@ ci = [
     { name = "mypy" },
     { name = "nvidia-ml-py" },
     { name = "openai-codex" },
-    { name = "openinference-instrumentation-openai" },
     { name = "opentelemetry-api" },
+    { name = "opentelemetry-exporter-otlp" },
     { name = "opentelemetry-instrumentation" },
     { name = "opentelemetry-sdk" },
     { name = "opentelemetry-semantic-conventions" },
@@ -1617,10 +1578,8 @@ runtime-inference-gpu = [
     { name = "vllm-omni" },
 ]
 runtime-observability = [
-    { name = "arize-phoenix-client" },
-    { name = "arize-phoenix-otel" },
-    { name = "openinference-instrumentation-openai" },
     { name = "opentelemetry-api" },
+    { name = "opentelemetry-exporter-otlp" },
     { name = "opentelemetry-instrumentation" },
     { name = "opentelemetry-sdk" },
     { name = "opentelemetry-semantic-conventions" },
@@ -1668,8 +1627,6 @@ runtime-worker-core = [
 ]
 runtime-worker-cpu = [
     { name = "accelerate" },
-    { name = "arize-phoenix-client" },
-    { name = "arize-phoenix-otel" },
     { name = "boto3" },
     { name = "colorama" },
     { name = "colorlog" },
@@ -1681,8 +1638,8 @@ runtime-worker-cpu = [
     { name = "httpx" },
     { name = "nvidia-ml-py" },
     { name = "openai-codex" },
-    { name = "openinference-instrumentation-openai" },
     { name = "opentelemetry-api" },
+    { name = "opentelemetry-exporter-otlp" },
     { name = "opentelemetry-instrumentation" },
     { name = "opentelemetry-sdk" },
     { name = "opentelemetry-semantic-conventions" },
@@ -1723,8 +1680,6 @@ provides-extras = ["sdk", "cli", "hook", "all"]
 ci = [
     { name = "accelerate", specifier = ">=1.12.0" },
     { name = "aiohttp", specifier = ">=3.14.3" },
-    { name = "arize-phoenix-client", specifier = ">=1.21.0" },
-    { name = "arize-phoenix-otel", specifier = ">=0.13.1" },
     { name = "bitsandbytes", specifier = ">=0.49.2" },
     { name = "black", specifier = ">=25.12.0" },
     { name = "boto3", specifier = ">=1.41.5" },
@@ -1749,8 +1704,8 @@ ci = [
     { name = "mypy", specifier = ">=1.19.1" },
     { name = "nvidia-ml-py", specifier = ">=13.580.82" },
     { name = "openai-codex", specifier = "==0.147.0" },
-    { name = "openinference-instrumentation-openai", specifier = ">=0.1.39" },
     { name = "opentelemetry-api", specifier = ">=1.38.0" },
+    { name = "opentelemetry-exporter-otlp", specifier = ">=1.38.0" },
     { name = "opentelemetry-instrumentation", specifier = ">=0.59b0" },
     { name = "opentelemetry-sdk", specifier = ">=1.38.0" },
     { name = "opentelemetry-semantic-conventions", specifier = ">=0.59b0" },
@@ -1846,10 +1801,8 @@ runtime-inference-gpu = [
     { name = "vllm-omni", specifier = "==0.24.0" },
 ]
 runtime-observability = [
-    { name = "arize-phoenix-client", specifier = ">=1.21.0" },
-    { name = "arize-phoenix-otel", specifier = ">=0.13.1" },
-    { name = "openinference-instrumentation-openai", specifier = ">=0.1.39" },
     { name = "opentelemetry-api", specifier = ">=1.38.0" },
+    { name = "opentelemetry-exporter-otlp", specifier = ">=1.38.0" },
     { name = "opentelemetry-instrumentation", specifier = ">=0.59b0" },
     { name = "opentelemetry-sdk", specifier = ">=1.38.0" },
     { name = "opentelemetry-semantic-conventions", specifier = ">=0.59b0" },
@@ -1895,8 +1848,6 @@ runtime-worker-core = [
 ]
 runtime-worker-cpu = [
     { name = "accelerate", specifier = ">=1.12.0" },
-    { name = "arize-phoenix-client", specifier = ">=1.21.0" },
-    { name = "arize-phoenix-otel", specifier = ">=0.13.1" },
     { name = "boto3", specifier = ">=1.41.5" },
     { name = "colorama", specifier = ">=0.4.6" },
     { name = "colorlog", specifier = ">=6.9.0" },
@@ -1908,8 +1859,8 @@ runtime-worker-cpu = [
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "nvidia-ml-py", specifier = ">=13.580.82" },
     { name = "openai-codex", specifier = "==0.147.0" },
-    { name = "openinference-instrumentation-openai", specifier = ">=0.1.39" },
     { name = "opentelemetry-api", specifier = ">=1.38.0" },
+    { name = "opentelemetry-exporter-otlp", specifier = ">=1.38.0" },
     { name = "opentelemetry-instrumentation", specifier = ">=0.59b0" },
     { name = "opentelemetry-sdk", specifier = ">=1.38.0" },
     { name = "opentelemetry-semantic-conventions", specifier = ">=0.59b0" },
@@ -4305,48 +4256,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/4b/33/b5db29a6c00eb8f50708110d8d453747ca125c8b805bc437b289dbdcc057/opencv_python_headless-4.13.0.92-cp37-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:0bd48544f77c68b2941392fcdf9bcd2b9cdf00e98cb8c29b2455d194763cf99e", size = 60391106, upload-time = "2026-02-05T10:30:14.236Z" },
     { url = "https://files.pythonhosted.org/packages/fb/c3/52cfea47cd33e53e8c0fbd6e7c800b457245c1fda7d61660b4ffe9596a7f/opencv_python_headless-4.13.0.92-cp37-abi3-win32.whl", hash = "sha256:a7cf08e5b191f4ebb530791acc0825a7986e0d0dee2a3c491184bd8599848a4b", size = 30812232, upload-time = "2026-02-05T07:02:29.594Z" },
     { url = "https://files.pythonhosted.org/packages/4a/90/b338326131ccb2aaa3c2c85d00f41822c0050139a4bfe723cfd95455bd2d/opencv_python_headless-4.13.0.92-cp37-abi3-win_amd64.whl", hash = "sha256:77a82fe35ddcec0f62c15f2ba8a12ecc2ed4207c17b0902c7a3151ae29f37fb6", size = 40070414, upload-time = "2026-02-05T07:02:26.448Z" },
-]
-
-[[package]]
-name = "openinference-instrumentation"
-version = "0.1.41"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "openinference-semantic-conventions" },
-    { name = "opentelemetry-api" },
-    { name = "opentelemetry-sdk" },
-    { name = "wrapt" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/fb/1d/e40227fb6fd0683bdf47c8fed93c15b42f878a0054ef3a09c30dee9b5496/openinference_instrumentation-0.1.41.tar.gz", hash = "sha256:95beaebf8cd2729a4681aaf96a607657c9ed4d4bab6a2fce25e2e1c20850e224", size = 23835, upload-time = "2025-10-20T13:56:00.935Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/ec/9f/09b901e2987f2742cc449694514be3423fd5af71d2f6ffbc5c4e157328c9/openinference_instrumentation-0.1.41-py3-none-any.whl", hash = "sha256:bc206d561ae2b745383a3f18bfc4efba3fc40617e7fee67015924852942704f9", size = 29967, upload-time = "2025-10-20T13:56:00.09Z" },
-]
-
-[[package]]
-name = "openinference-instrumentation-openai"
-version = "0.1.39"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "openinference-instrumentation" },
-    { name = "openinference-semantic-conventions" },
-    { name = "opentelemetry-api" },
-    { name = "opentelemetry-instrumentation" },
-    { name = "opentelemetry-semantic-conventions" },
-    { name = "typing-extensions" },
-    { name = "wrapt" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/56/0b/bc3d634467c468941d110e9f4bd32d37e8d8d04a5b44595f0efb5f90e4c8/openinference_instrumentation_openai-0.1.39.tar.gz", hash = "sha256:86beb3f48fe08caafb2b4cc30a6ac81e790906d9c3fae188618314a50dea1b82", size = 22843, upload-time = "2025-10-10T03:48:47.605Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/8a/d8/1c7e900f5b6895e70befdd04a733f045ddd17b9a5efe72388a37e2f14a21/openinference_instrumentation_openai-0.1.39-py3-none-any.whl", hash = "sha256:0ab0da12e77e9cf28265d491837e8d43488f01a7bbc005fed2cff1d8f5fff162", size = 30254, upload-time = "2025-10-10T03:48:46.315Z" },
-]
-
-[[package]]
-name = "openinference-semantic-conventions"
-version = "0.1.24"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/07/15/be7566a4bba4b57f7c70b088f42735f2005e2c0adce646a537f63dcf21de/openinference_semantic_conventions-0.1.24.tar.gz", hash = "sha256:3223b8c3958525457a369d58ebf0c56230a1f00567ae1e99f1c2049a8ac2cacd", size = 12741, upload-time = "2025-10-10T03:49:13.987Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/9f/c5/fa81b19042b387826151f984a91fa3d0b52b08374e4d5786521ac2d9e704/openinference_semantic_conventions-0.1.24-py3-none-any.whl", hash = "sha256:b2d650ca7e39c5fb02bf908b8049d6ece2a2657757448e1925a38b59548a80b3", size = 10373, upload-time = "2025-10-10T03:49:00.318Z" },
 ]
 
 [[package]]
