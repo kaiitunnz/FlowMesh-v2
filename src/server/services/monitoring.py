@@ -54,6 +54,10 @@ from ..hooks import (
     ResourceKind,
     UsageRow,
 )
+from ..orchestration.telemetry import (
+    NULL_WORKFLOW_SPAN_EMITTER,
+    WorkflowSpanEmitter,
+)
 from ..registries.node import NodeRegistry
 from ..registries.worker import WorkerRegistry
 from ..schemas.logs import LogEvent
@@ -131,6 +135,7 @@ class EventMonitor:
         log_stream_ttl_sec: int = 0,
         server_base_url: str = "http://localhost:8000",
         on_node_removed: Callable[[str], None] | None = None,
+        workflow_span_emitter: WorkflowSpanEmitter | None = None,
     ) -> None:
         self._redis_client = redis_client
         self._on_node_removed = on_node_removed
@@ -148,6 +153,11 @@ class EventMonitor:
         self._results_dir = Path(results_dir)
         self._log_stream_ttl_sec = max(0, int(log_stream_ttl_sec))
         self._server_base_url = self._validate_server_base_url(server_base_url)
+        self._workflow_span_emitter = (
+            workflow_span_emitter
+            if workflow_span_emitter is not None
+            else NULL_WORKFLOW_SPAN_EMITTER
+        )
 
         self._pending_result_clones: dict[str, list[str]] = {}
         self._pending_lock = threading.RLock()
@@ -1241,6 +1251,10 @@ class EventMonitor:
                 "Failed to evaluate workflow completion for %s: %s", workflow_id, exc
             )
             return
+
+        submitted_at = self._runtime.workflow_submitted_at(workflow_id)
+        if submitted_at is not None:
+            self._workflow_span_emitter.emit(workflow_id, submitted_at, now_iso())
 
         event = LogEvent(
             ts=now_iso(),

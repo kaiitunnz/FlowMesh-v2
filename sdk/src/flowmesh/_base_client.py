@@ -20,6 +20,11 @@ from .exceptions import (
     ValidationError,
 )
 
+try:
+    from opentelemetry.propagate import inject as _otel_inject
+except ImportError:  # pragma: no cover - exercised when the SDK runs without OTel
+    _otel_inject = None  # type: ignore[assignment]
+
 
 def _build_headers(api_key: str | None) -> dict[str, str]:
     headers: dict[str, str] = {
@@ -28,6 +33,11 @@ def _build_headers(api_key: str | None) -> dict[str, str]:
     }
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
+    if _otel_inject is not None:
+        # Forward the caller's ambient trace context so a workflow's trace continues
+        # across the client->server hop. A silent no-op when OpenTelemetry is not
+        # installed, so the SDK carries no hard OTel dependency.
+        _otel_inject(headers)
     return headers
 
 

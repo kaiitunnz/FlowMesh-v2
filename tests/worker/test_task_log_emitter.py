@@ -19,7 +19,9 @@ class _CapturingStream:
         pass
 
 
-def _make_emitter() -> tuple[TaskLogEmitter, _CapturingStream]:
+def _make_emitter(
+    traceparent: str | None = None,
+) -> tuple[TaskLogEmitter, _CapturingStream]:
     with mock.patch("worker.utils.logging._GrpcLogStream"):
         emitter = TaskLogEmitter(
             stub=mock.Mock(),
@@ -30,6 +32,7 @@ def _make_emitter() -> tuple[TaskLogEmitter, _CapturingStream]:
             workflow_id="wfl-1",
             owner_id="own-1",
             worker_id="wrk-1",
+            traceparent=traceparent,
         )
     capture = _CapturingStream()
     emitter._stream = cast(Any, capture)
@@ -71,3 +74,30 @@ def test_emit_plain_message_without_exc_info() -> None:
 
     assert len(capture.payloads) == 1
     assert capture.payloads[0]["message"] == "Task tsk-1 failed: bad spec"
+
+
+_TP = "00-11111111111111111111111111111111-2222222222222222-01"
+
+
+def test_emit_carries_the_traceparent_when_telemetry_is_on() -> None:
+    emitter, capture = _make_emitter(traceparent=_TP)
+
+    emitter.emit(_record("Task %s started", ("tsk-1",)))
+
+    assert capture.payloads[0]["traceparent"] == _TP
+
+
+def test_emit_carries_no_traceparent_key_when_telemetry_is_off() -> None:
+    emitter, capture = _make_emitter(traceparent=None)
+
+    emitter.emit(_record("Task %s started", ("tsk-1",)))
+
+    assert "traceparent" not in capture.payloads[0]
+
+
+def test_emit_warning_only_carries_the_traceparent_when_present() -> None:
+    emitter, capture = _make_emitter(traceparent=_TP)
+
+    emitter.emit_warning_only("merged tasks with different owners")
+
+    assert capture.payloads[0]["traceparent"] == _TP

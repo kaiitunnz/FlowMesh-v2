@@ -740,6 +740,7 @@ class Dispatcher:
             recorded_resolution=self._runtime.input_resolution_binding(task_id),
             input_preparation=preparing,
             recorded_input=self._runtime.recorded_input_reference(task_id),
+            traceparent=self._runtime.dispatch_traceparent(task_id),
         )
 
         # 8. Publish task

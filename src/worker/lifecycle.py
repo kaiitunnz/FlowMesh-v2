@@ -139,29 +139,50 @@ class Lifecycle:
         error: str | None = None,
         metadata: dict[str, Any] | None = None,
         retryable: bool = True,
+        traceparent: str | None = None,
     ):
         try:
             self.client.task_failed(
-                task_id, error=error, metadata=metadata, retryable=retryable
+                task_id,
+                error=error,
+                metadata=metadata,
+                retryable=retryable,
+                traceparent=traceparent,
             )
         except Exception:
             pass
 
-    def set_succeeded(self, task_id: str, metadata: dict[str, Any] | None = None):
+    def set_succeeded(
+        self,
+        task_id: str,
+        metadata: dict[str, Any] | None = None,
+        traceparent: str | None = None,
+    ):
         try:
-            self.client.task_succeeded(task_id, metadata=metadata)
+            self.client.task_succeeded(
+                task_id, metadata=metadata, traceparent=traceparent
+            )
         except Exception:
             pass
 
-    def set_cancelled(self, task_id: str, metadata: dict[str, Any] | None = None):
+    def set_cancelled(
+        self,
+        task_id: str,
+        metadata: dict[str, Any] | None = None,
+        traceparent: str | None = None,
+    ):
         try:
-            self.client.task_cancelled(task_id, metadata=metadata)
+            self.client.task_cancelled(
+                task_id, metadata=metadata, traceparent=traceparent
+            )
         except Exception:
             pass
 
-    def notify_task_update(self, task_id: str, payload: dict[str, Any]) -> None:
+    def notify_task_update(
+        self, task_id: str, payload: dict[str, Any], traceparent: str | None = None
+    ) -> None:
         try:
-            self.client.task_update(task_id, payload)
+            self.client.task_update(task_id, payload, traceparent=traceparent)
         except Exception:
             pass
 
@@ -171,6 +192,7 @@ class Lifecycle:
         task_type: str | None,
         dispatched_at: str | None,
         started_at: str,
+        traceparent: str | None = None,
     ) -> None:
         try:
             self.client.task_started(
@@ -178,6 +200,7 @@ class Lifecycle:
                 task_type=task_type,
                 dispatched_at=dispatched_at,
                 started_at=started_at,
+                traceparent=traceparent,
             )
         except Exception:
             pass
