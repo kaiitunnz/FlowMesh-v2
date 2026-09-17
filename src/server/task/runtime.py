@@ -799,6 +799,7 @@ class TaskRuntime:
             snapshot,
             bundle,
             budget=self._scope_budget,
+            control=self._control,
             emitter=build_span_emitter(self._tracer, self._telemetry, workflow_id),
         )
         self._engines[workflow_id] = engine

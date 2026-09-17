@@ -2471,7 +2471,7 @@ class OrchestrationEngine:
         )
         # Recorded before the emitter reads the trace: a cancelled item with no attempt
         # has no other event carrying its work_item_id, so this is the sole source the
-        # work-item span's "or latest matching event" end-time rule can find (§1.4).
+        # work-item span's "or latest matching event" end-time rule can find.
         self._emit(
             "work_item_cancelled",
             work_item_id=wi.work_item_id,
