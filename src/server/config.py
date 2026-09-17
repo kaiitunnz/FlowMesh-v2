@@ -315,6 +315,34 @@ class MetricsConfig:
 
 
 @dataclass
+class TelemetryStoreConfig:
+    """Read-side connection settings for the server's view of the telemetry store.
+
+    Distinct from the Collector's own ``TELEMETRY_CLICKHOUSE_*`` compose variables
+    (cli/stack/.../compose.yml), which configure the *write* path's export target: these
+    configure the *read* path's query target. They commonly point at the same ClickHouse
+    instance but are never the same config object -- the write and read paths must stay
+    independently swappable.
+    """
+
+    url: str | None = None
+    database: str = "flowmesh"
+    username: str = "default"
+    password: str = ""
+    timeout_sec: float = 10.0
+
+    @classmethod
+    def from_env(cls) -> "TelemetryStoreConfig":
+        return cls(
+            url=(os.getenv("SERVER_METRICS_CLICKHOUSE_URL") or "").strip() or None,
+            database=os.getenv("SERVER_METRICS_CLICKHOUSE_DATABASE", "flowmesh"),
+            username=os.getenv("SERVER_METRICS_CLICKHOUSE_USERNAME", "default"),
+            password=os.getenv("SERVER_METRICS_CLICKHOUSE_PASSWORD", ""),
+            timeout_sec=parse_float_env("SERVER_METRICS_CLICKHOUSE_TIMEOUT_SEC", 10.0),
+        )
+
+
+@dataclass
 class WorkerManagementConfig:
     enabled: bool = True
     config_path: str = "configs/worker_config.yaml"

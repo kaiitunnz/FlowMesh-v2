@@ -1,4 +1,4 @@
-"""The ``TelemetryStore`` read port: protocol, row shapes, and its config edge.
+"""The ``TelemetryStore`` read port: protocol and row shapes.
 
 A narrow, backend-agnostic surface over the telemetry store's two queries -- a
 workflow's whole trace, and an aggregate over one metric. Backends implement the
@@ -8,14 +8,14 @@ CLI/SDK surface built on top.
 
 Read-only: nothing here writes a span or a metric, and nothing here is a second ingest
 path. The OTel Collector is the store's sole writer.
+
+The read-side connection settings live in ``server.config.TelemetryStoreConfig`` (read
+at the config edge and injected down); this module never reads the environment.
 """
 
-import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Literal, Protocol
-
-from shared.utils.parsing import parse_float_env
 
 AggregateStat = Literal["count", "sum", "avg", "min", "max", "p50", "p95", "p99"]
 MetricKind = Literal["gauge", "histogram"]
@@ -94,32 +94,3 @@ class TelemetryStore(Protocol):
         counter/gauge FlowMesh emits today.
         """
         ...
-
-
-@dataclass(frozen=True)
-class TelemetryStoreConfig:
-    """Connection settings for the server's read-only view of the telemetry store.
-
-    Distinct from the Collector's own ``TELEMETRY_CLICKHOUSE_*`` compose-level
-    variables (cli/stack/.../compose.yml): those configure the *write* path's export
-    target, these configure the *read* path's query target. They commonly point at the
-    same ClickHouse instance but are never the same config object -- the write and read
-    paths must stay independently swappable (contract: the write path and the read path
-    never touch).
-    """
-
-    url: str | None
-    database: str
-    username: str
-    password: str
-    timeout_sec: float
-
-    @classmethod
-    def from_env(cls) -> "TelemetryStoreConfig":
-        return cls(
-            url=os.getenv("SERVER_METRICS_CLICKHOUSE_URL") or None,
-            database=os.getenv("SERVER_METRICS_CLICKHOUSE_DATABASE", "flowmesh"),
-            username=os.getenv("SERVER_METRICS_CLICKHOUSE_USERNAME", "default"),
-            password=os.getenv("SERVER_METRICS_CLICKHOUSE_PASSWORD", ""),
-            timeout_sec=parse_float_env("SERVER_METRICS_CLICKHOUSE_TIMEOUT_SEC", 10.0),
-        )

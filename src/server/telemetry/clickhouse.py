@@ -17,6 +17,7 @@ from datetime import datetime, timedelta
 
 import httpx
 
+from server.config import TelemetryStoreConfig
 from shared.telemetry.semconv import LOGICAL_ATTRIBUTE_PREFIX, PHYSICAL_ATTRIBUTE_PREFIX
 
 from .store import (
@@ -25,7 +26,6 @@ from .store import (
     MetricKind,
     SpanRow,
     TelemetryStore,
-    TelemetryStoreConfig,
 )
 
 _TRACES_TABLE = "flowmesh_spans"

@@ -10,9 +10,9 @@ HH:MM:SS.nnnnnnnnn"`` timestamps, a combined attribute Map) rather than assumed.
 import httpx
 import pytest
 
+from server.config import TelemetryStoreConfig
 from server.telemetry import build_telemetry_store
 from server.telemetry.clickhouse import ClickHouseTelemetryStore, TelemetryStoreError
-from server.telemetry.store import TelemetryStoreConfig
 from shared.telemetry.ids import workflow_to_trace_id_int
 
 

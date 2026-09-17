@@ -1061,6 +1061,33 @@ STACK_ENV_SCHEMA = EnvSchema(
                     var_type=EnvVarType.INT,
                     min_value=1,
                 ),
+                EnvVar(
+                    "SERVER_METRICS_CLICKHOUSE_URL",
+                    "",
+                    description="ClickHouse HTTP URL for the store read port.",
+                ),
+                EnvVar(
+                    "SERVER_METRICS_CLICKHOUSE_DATABASE",
+                    "flowmesh",
+                    description="ClickHouse database for the store read port.",
+                ),
+                EnvVar(
+                    "SERVER_METRICS_CLICKHOUSE_USERNAME",
+                    "default",
+                    description="ClickHouse user for the store read port.",
+                ),
+                EnvVar(
+                    "SERVER_METRICS_CLICKHOUSE_PASSWORD",
+                    "",
+                    description="ClickHouse password for the store read port.",
+                ),
+                EnvVar(
+                    "SERVER_METRICS_CLICKHOUSE_TIMEOUT_SEC",
+                    "10",
+                    description="ClickHouse query timeout (seconds).",
+                    var_type=EnvVarType.FLOAT,
+                    min_value=0.0,
+                ),
             ],
         ),
         EnvSection(
