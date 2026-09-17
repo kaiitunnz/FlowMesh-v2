@@ -1213,6 +1213,28 @@ class TaskRuntime:
         with self._lock:
             return self._engines.get(workflow_id)
 
+    def dispatch_traceparent(self, task_id: str) -> str | None:
+        """The ``traceparent`` a dispatched task's worker-side span should parent on.
+
+        Read-only: names the task's episode (work item) span without touching the
+        ledger. Names nothing (``None``) rather than a synthesized-anyway value when
+        telemetry is off, the task has no v2 work item, or the workflow isn't a v2
+        one, so the dispatcher can omit the wire field entirely instead of carrying a
+        placeholder.
+        """
+        if not self._control.enabled:
+            return None
+        with self._lock:
+            record = self._tasks.get(task_id)
+            engine = self._engines.get(record.workflow_id) if record else None
+            work_item_id = engine.work_item_id_for_task(task_id) if engine else None
+        if record is None or work_item_id is None:
+            return None
+        return format_traceparent(
+            workflow_to_trace_id_int(record.workflow_id),
+            derived_span_id(SpanIdKind.WORK_ITEM, work_item_id),
+        )
+
     def apply_boundary_event(self, task_id: str, event: BoundaryEvent) -> bool:
         """Carry an episode's boundary event into the ledger and dispatch its effect.
 
