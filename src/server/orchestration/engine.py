@@ -2465,17 +2465,20 @@ class OrchestrationEngine:
         if wi.status in _TERMINAL_WI:
             return
         wi.status = WorkItemStatus.CANCELLED
-        self._emitter.emit_work_item(wi)
-        self._emitter.emit_activation(wi.activation_id)
         self._private_state.release(wi.activation_id)
         self._publish(
             wi.operator_id, PublicationOutcome.EXPLICIT_EMPTY, ValueRef(kind="empty")
         )
+        # Recorded before the emitter reads the trace: a cancelled item with no attempt
+        # has no other event carrying its work_item_id, so this is the sole source the
+        # work-item span's "or latest matching event" end-time rule can find (§1.4).
         self._emit(
             "work_item_cancelled",
             work_item_id=wi.work_item_id,
             operator_id=wi.operator_id,
         )
+        self._emitter.emit_work_item(wi)
+        self._emitter.emit_activation(wi.activation_id)
 
     def _resolve_scope(self, handle: str) -> str | None:
         if handle in self._scopes:

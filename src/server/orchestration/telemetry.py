@@ -14,8 +14,8 @@ own completion detector rather than from the engine -- workflow status is derive
 read, so there is no ledger transition to hook for it.
 """
 
-from opentelemetry.sdk.trace import Span as _SdkSpan
 from opentelemetry.sdk.trace import Tracer as _SdkTracer
+from opentelemetry.sdk.trace import _Span as _SdkSpan
 from opentelemetry.trace import (
     NonRecordingSpan,
     SpanContext,
@@ -82,7 +82,16 @@ _NO_EXTENT_OPERATOR_KINDS = frozenset(
 # a scope: unlike a spawn child, the loop primitive materializes no dispatchable body
 # for its own activation. Checked directly since it is already a first-class
 # Activation.kind, not an operator id needing a cross-reference.
-_NO_EXTENT_ACTIVATION_KINDS = frozenset({"iteration"})
+#
+# ``leaf``/``agent`` root activations that name a spawn's ``child_template_ref`` are
+# the same story under a different kind: ``engine.py::build`` excludes a child template
+# from ``dispatchable`` (it is only ever instantiated as a "child"-kind activation per
+# spawn, never dispatched itself), so it permanently owns neither a work item nor a
+# scope. The work-item branch is checked first, so this is reachable only once that
+# has already come back empty -- a genuinely dispatchable leaf/agent always owns a
+# work item from the moment ``build()`` constructs it, so this never masks one that
+# merely has not settled yet.
+_NO_EXTENT_ACTIVATION_KINDS = frozenset({"iteration", "leaf", "agent"})
 
 _TERMINAL_WI = frozenset({WorkItemStatus.SETTLED, WorkItemStatus.CANCELLED})
 _TERMINAL_INVOCATION = frozenset(
@@ -140,9 +149,10 @@ def _export_span(
     """Build and export one synthesized span with an explicit id, parent, and extent.
 
     Bypasses ``Tracer.start_span``, which always mints a random span id from the
-    provider's ``IdGenerator``, by constructing the SDK span directly from the same
-    sampler/resource/processor/scope the tracer would otherwise use internally. A
-    caller gates on its own enabled check first, but the ``None`` / non-SDK guard is
+    provider's ``IdGenerator`` and exposes no parameter to override it, by
+    constructing the span through the same ``_Span`` class the tracer itself builds
+    internally, with the same sampler/resource/processor/scope it would otherwise use.
+    A caller gates on its own enabled check first, but the ``None`` / non-SDK guard is
     repeated here too (the null twin, when telemetry is off) so this function is safe
     to call unconditionally.
     """
