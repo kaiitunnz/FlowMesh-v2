@@ -3678,6 +3678,11 @@ class TaskRuntime:
         with self._lock:
             return self._tasks.get(task_id)
 
+    def workflow_submitted_at(self, workflow_id: str) -> str | None:
+        """The workflow's durable submission timestamp, or ``None`` if unknown."""
+        record = self._workflow_registry.get_workflow_record(workflow_id)
+        return record.submitted_at if record is not None else None
+
     def get_merged_children(self, task_id: str) -> list[str]:
         """Read the merged-children list without consuming it."""
         with self._cv:
