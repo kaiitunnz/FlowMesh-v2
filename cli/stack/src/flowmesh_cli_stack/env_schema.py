@@ -1013,6 +1013,57 @@ STACK_ENV_SCHEMA = EnvSchema(
             ],
         ),
         EnvSection(
+            title="Telemetry",
+            vars=[
+                EnvVar(
+                    "SERVER_METRICS_TELEMETRY_LEVEL",
+                    "off",
+                    description="OTel span/metric verbosity.",
+                    var_type=EnvVarType.ENUM,
+                    choices=["off", "coarse", "fine", "full"],
+                ),
+                EnvVar(
+                    "SERVER_METRICS_TRACES_ENABLED",
+                    "true",
+                    description="Whether to emit OTel traces.",
+                    var_type=EnvVarType.BOOL,
+                ),
+                EnvVar(
+                    "SERVER_METRICS_METRICS_ENABLED",
+                    "true",
+                    description="Whether to emit OTel metrics.",
+                    var_type=EnvVarType.BOOL,
+                ),
+                EnvVar(
+                    "SERVER_METRICS_TRACE_SAMPLE_RATIO",
+                    "1.0",
+                    description="Per-workflow trace sampling ratio.",
+                    var_type=EnvVarType.FLOAT,
+                    min_value=0.0,
+                    max_value=1.0,
+                ),
+                EnvVar(
+                    "SERVER_METRICS_OTLP_ENDPOINT",
+                    "",
+                    description="OTLP collector endpoint; unset disables export.",
+                ),
+                EnvVar(
+                    "SERVER_METRICS_OTLP_TIMEOUT_SEC",
+                    "10",
+                    description="OTLP export request timeout (seconds).",
+                    var_type=EnvVarType.INT,
+                    min_value=1,
+                ),
+                EnvVar(
+                    "SERVER_METRICS_RESOURCE_SAMPLE_SEC",
+                    "15",
+                    description="Worker GPU/resource sampling interval (seconds).",
+                    var_type=EnvVarType.INT,
+                    min_value=1,
+                ),
+            ],
+        ),
+        EnvSection(
             title="Vast.ai Configuration",
             vars=[
                 EnvVar("VAST_SEARCH_LIMIT", var_type=EnvVarType.INT, min_value=0),

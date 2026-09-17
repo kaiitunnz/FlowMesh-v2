@@ -118,6 +118,13 @@ listed here is in `.env.example`.
 | `SERVER_SERVE_FORWARD_PORT_START` | `34000` | Lowest forward serve exposure port |
 | `SERVER_SERVE_FORWARD_PORT_END` | `34099` | Highest forward serve exposure port |
 | `SERVER_SERVE_FORWARD_BODY_BUDGET_BYTES` | `536870912` | Cap on total in-flight forward request body bytes |
+| `SERVER_METRICS_TELEMETRY_LEVEL` | `off` | OTel span/metric verbosity |
+| `SERVER_METRICS_TRACES_ENABLED` | `true` | Whether to emit OTel traces |
+| `SERVER_METRICS_METRICS_ENABLED` | `true` | Whether to emit OTel metrics |
+| `SERVER_METRICS_TRACE_SAMPLE_RATIO` | `1.0` | Per-workflow trace sampling ratio |
+| `SERVER_METRICS_OTLP_ENDPOINT` | – | OTLP collector endpoint; unset disables export |
+| `SERVER_METRICS_OTLP_TIMEOUT_SEC` | `10` | OTLP export request timeout (seconds) |
+| `SERVER_METRICS_RESOURCE_SAMPLE_SEC` | `15` | Worker GPU/resource sampling interval (seconds) |
 | `LOG_LEVEL` | `INFO` | Server log level |
 
 **Notes:**
