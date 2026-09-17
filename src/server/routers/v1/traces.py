@@ -8,13 +8,17 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from fastapi.responses import StreamingResponse
-from starlette.requests import HTTPConnection
 
 from shared.schemas.result import result_file_path
 from shared.telemetry.ids import workflow_to_trace_id_int
 from shared.utils.json import encode_jsonl_bytes, read_jsonl
 
-from ...app_state import get_logger, get_results_dir, get_workflow_registry
+from ...app_state import (
+    get_logger,
+    get_results_dir,
+    get_telemetry_store,
+    get_workflow_registry,
+)
 from ...auth.security import (
     PrincipalContext,
     authenticate_connection,
@@ -145,10 +149,6 @@ async def upload_task_trace(
             detail=f"Failed to store trace: {exc}",
         ) from exc
     return PathResponse(ok=True, path=target_path.as_posix())
-
-
-def get_telemetry_store(conn: HTTPConnection) -> TelemetryStore | None:
-    return getattr(conn.app.state, "telemetry_store", None)
 
 
 def _require_telemetry_store(store: TelemetryStore | None) -> TelemetryStore:
