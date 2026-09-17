@@ -14,6 +14,7 @@ from unittest.mock import MagicMock
 
 from opentelemetry import trace
 
+from server.governance.analyzer import analyze
 from shared.schemas.result import BaseExecutorResult
 from shared.tasks.task_type import TaskType
 from shared.telemetry.config import TelemetryConfig, TelemetryLevel
@@ -213,3 +214,77 @@ def test_inbound_traceparent_is_entered_as_parent_context(tmp_path: Path) -> Non
     )
 
     assert executor.captured["trace_id"] == _INBOUND_TRACE_ID
+
+
+_WALL_CLOCK_FIELDS = frozenset(
+    {
+        "start_time",
+        "end_time",
+        "duration_seconds",
+        "critical_path_seconds",
+        "total_seconds",
+        "avg_seconds",
+        "active_seconds",
+        "wait_seconds",
+        "e2e_seconds",
+        "workflow_duration_seconds",
+    }
+)
+
+
+def _without_wall_clock(value: Any) -> Any:
+    """The summary with every wall-clock-derived field blanked.
+
+    Two runs of the same workload cannot produce identical timings, so comparing
+    those would only ever assert that time passes. What must not change is the
+    analysis itself -- which spans were selected, how they nest, what the critical
+    path is -- and that is what survives this.
+    """
+    if isinstance(value, dict):
+        return {
+            k: (None if k in _WALL_CLOCK_FIELDS else _without_wall_clock(v))
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [_without_wall_clock(v) for v in value]
+    return value
+
+
+def _read_span_rows(tmp_path: Path, task_id: str) -> list[dict[str, Any]]:
+    path = _spans_path(tmp_path, task_id)
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text().splitlines() if line]
+
+
+def test_the_profile_summary_is_identical_whether_telemetry_is_on_or_off(
+    tmp_path: Path,
+) -> None:
+    """The acceptance gate, asserted on the summary itself rather than its inputs.
+
+    Opening ``flowmesh.task`` around the executor gives the shipped ``task`` span a
+    non-null parent, so the rows are not identical and the analyzer reaches the same
+    span by its second selection pass instead of its first. Everything downstream of
+    that is reasoning; this runs it.
+    """
+    # The same task id under two roots: a differing id would show up as a summary
+    # difference of the test's own making.
+    off_root, on_root = tmp_path / "off", tmp_path / "on"
+    _run(off_root, _ShippedLikeExecutor(), _OFF, task_id="tsk-sum")
+    _run(on_root, _ShippedLikeExecutor(), _COARSE, task_id="tsk-sum")
+
+    off_rows = _read_span_rows(off_root, "tsk-sum")
+    on_rows = _read_span_rows(on_root, "tsk-sum")
+
+    # The premise: the rows genuinely differ, so this is not passing by construction.
+    off_task = next(r for r in off_rows if r["name"] == "task")
+    on_task = next(r for r in on_rows if r["name"] == "task")
+    assert off_task.get("parent_id") in (None, "")
+    assert on_task.get("parent_id") not in (None, "")
+
+    off_summary = analyze(off_rows, [], [])
+    on_summary = analyze(on_rows, [], [])
+
+    assert _without_wall_clock(on_summary.model_dump()) == _without_wall_clock(
+        off_summary.model_dump()
+    )
