@@ -805,6 +805,7 @@ class ServerConfig:
     log_stream: LogStreamConfig
     orchestration: OrchestrationConfig
     content_store: ContentStoreConfig = field(default_factory=ContentStoreConfig)
+    telemetry_store: TelemetryStoreConfig = field(default_factory=TelemetryStoreConfig)
     results_dir: Path = Path("./results")
     plugins: list[str] = field(default_factory=list)
 
@@ -834,6 +835,7 @@ class ServerConfig:
             log_stream=LogStreamConfig.from_env(),
             orchestration=OrchestrationConfig.from_env(),
             content_store=ContentStoreConfig.from_env(results_dir),
+            telemetry_store=TelemetryStoreConfig.from_env(),
             results_dir=results_dir,
             plugins=plugins,
         )

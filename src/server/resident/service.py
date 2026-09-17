@@ -385,6 +385,11 @@ class ResidentCapacityControl:
         self._admit_lock = asyncio.Lock()
         self._sweep_task: asyncio.Task[None] | None = None
 
+    @property
+    def stores(self) -> ResidentStores:
+        """The control-state stores, for read-only observers such as fleet sampling."""
+        return self._stores
+
     def set_worker_delivery(self, delivery: ResidentWorkerDelivery) -> None:
         """Enable the worker-owned data path once the network plane is available."""
         self._delivery = delivery
