@@ -91,9 +91,11 @@ series families, sampled every `SERVER_METRICS_RESOURCE_SAMPLE_SEC` seconds and
 carrying the same attribute keys the spans do, so a series joins the trace it
 summarizes rather than being correlated by wall clock.
 
-Each worker reports GPU utilization, memory, power and temperature per device,
-keyed by worker and node and distinguished per device where a worker has several.
-A worker without an accelerator reports nothing and logs nothing.
+Each worker reports GPU utilization, memory, power and temperature per device, keyed
+by worker and distinguished per device where a worker has several. A worker without an
+accelerator reports nothing and logs nothing. The node a series belongs to is reached
+by joining its worker id through the worker registry, which is where a worker's node is
+recorded.
 
 The root server reports the resident fleet per service family — replica count,
 admission slots in use, and claim credit held — alongside the ready-queue depth.

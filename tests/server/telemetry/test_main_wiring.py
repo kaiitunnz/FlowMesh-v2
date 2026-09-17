@@ -79,3 +79,25 @@ def test_an_unconfigured_store_still_sets_the_attribute(
     monkeypatch.setenv("SERVER_METRICS_DIR", (tmp_path / "metrics").as_posix())
     with _imported_server_main() as module:
         assert module.app.state.telemetry_store is None
+
+
+def test_off_builds_no_provider_and_no_sampler(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """At the default level the entrypoint builds no instrument to pay for."""
+    from opentelemetry.sdk.metrics import Meter as SdkMeter
+    from opentelemetry.sdk.trace import Tracer as SdkTracer
+
+    monkeypatch.setenv("SERVER_METRICS_TELEMETRY_LEVEL", "off")
+    monkeypatch.delenv("SERVER_METRICS_CLICKHOUSE_URL", raising=False)
+    monkeypatch.setenv("RESULTS_DIR", (tmp_path / "results").as_posix())
+    monkeypatch.setenv("SERVER_METRICS_DIR", (tmp_path / "metrics").as_posix())
+
+    with _imported_server_main() as module:
+        # Neither instrument is backed by an SDK provider, so nothing was built
+        # and no exporter thread is running.
+        assert not isinstance(module.SERVER_TRACER, SdkTracer)
+        assert not isinstance(module.SERVER_METER, SdkMeter)
+        assert not module.CONTROL_TRACER.enabled
+        assert not module.FLEET_SAMPLER._enabled
+        assert module.app.state.telemetry_store is None
