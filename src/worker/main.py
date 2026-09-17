@@ -329,6 +329,8 @@ def main() -> None:
         peer_enabled=cfg.peer_enabled,
         peer_material=_peer_material(cfg, logger),
         peer_listener_sock=peer_sock,
+        telemetry=cfg.telemetry,
+        otlp_timeout_sec=cfg.otlp_timeout_sec,
     )
 
     # Install signal handlers to allow graceful shutdown
