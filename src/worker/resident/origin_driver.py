@@ -15,9 +15,12 @@ finds an already materialized outcome re-reports it rather than re-running the e
 import asyncio
 import contextlib
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
+
+from opentelemetry.trace import Span
 
 from shared.network.relay_frame import RelayFrame
 from shared.outcome import FabricContentStore, OutcomeManifest
@@ -44,6 +47,12 @@ from shared.resident.wire import (
     KIND_REJECT,
     KIND_STREAM,
 )
+from shared.schemas.network import Transport
+from shared.telemetry.config import TelemetryLevel
+from shared.telemetry.propagation import extract_context
+from shared.telemetry.semconv import PHYSICAL_INVOCATION_ID, transport_span_name
+
+from ..executors.mixins import _otel
 
 AckSink = Callable[[ResidentBootstrapAck], None]
 OutcomeSink = Callable[[ResidentOpOutcome], None]
@@ -65,6 +74,7 @@ class ResidentOriginRequest:
     handoff: AdmissionHandoff
     request_payload: str | None
     carriage_plan: ResidentCarriagePlan
+    traceparent: str | None = None
 
 
 @dataclass
@@ -156,9 +166,36 @@ class ResidentOriginDriver:
         if task is not None and task is not asyncio.current_task() and not task.done():
             task.cancel()
 
+    @contextmanager
+    def _transport_span(self, req: ResidentOriginRequest) -> Iterator[Span | None]:
+        """Open ``flowmesh.transport.<transport>`` for one invocation's carriage.
+
+        The parent comes from the ``resident_handoff`` frame's own ``traceparent``
+        key, not ambient context — this coroutine runs on the resident lane
+        host's own event loop, off the task lane the boundary's episode is on.
+        """
+        if not _otel.emits(TelemetryLevel.FINE):
+            yield None
+            return
+        parent_context = extract_context(req.traceparent)
+        attributes = _otel.new_span_attributes(
+            {PHYSICAL_INVOCATION_ID: req.handoff.invocation_id}
+        )
+        span_name = transport_span_name(Transport(req.carriage_plan.selected_transport))
+        with _otel.get_tracer().start_as_current_span(
+            span_name, context=parent_context, attributes=attributes
+        ) as span:
+            yield span
+
     async def _drive(self, origin: _Origin) -> None:
         req = origin.request
         idm = req.handoff.idempotency_key
+        with self._transport_span(req):
+            await self._drive_body(origin, req, idm)
+
+    async def _drive_body(
+        self, origin: _Origin, req: ResidentOriginRequest, idm: str | None
+    ) -> None:
         try:
             if (prior := self._prior_manifest(idm)) is not None:
                 # A post-manifest re-drive: the outcome already committed, so re-report
