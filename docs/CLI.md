@@ -17,7 +17,7 @@ flowmesh worker   {list, info}
 flowmesh node     {list, info, worker {list, start, stop}}
 flowmesh ssh      {connect, run, proxy, connections}
 flowmesh result   {fetch, download}
-flowmesh trace    {fetch, analyze}
+flowmesh trace    {fetch, analyze, tree, aggregate}
 flowmesh system   {metrics}
 flowmesh stack    {build, push, pull, pullall, up, down, restart, ps, logs}
 flowmesh stack bundle {export, init}
@@ -61,6 +61,27 @@ flowmesh trace analyze <wfl-id> --format critical-path
 `trace fetch` accepts `spans`, `assets`, or `lineage`. `trace analyze
 --format` accepts `rich`, `critical-path` (`cp`), `end-to-end` (`e2e`),
 `queuing`, `lineage`, or `json`.
+
+Query the cluster telemetry a deployment's telemetry store holds:
+
+```bash
+flowmesh trace tree <wfl-id>
+flowmesh trace aggregate --metric <name> --group-by worker_id --stat p95
+```
+
+`trace tree` prints the workflow's spans as an indented tree, one line per
+span with its duration and the ids identifying its level; `--json` prints the
+same tree with both the logical and the physical attribute views intact. A
+workflow with no recorded spans prints an empty tree.
+
+`trace aggregate` rolls one metric up by one attribute key. `--stat` accepts
+`count`, `sum`, `avg`, `min`, `max`, `p50`, `p95`, or `p99`; `--kind` selects
+`gauge` (the default) or `histogram`; `--workflow-id` restricts the aggregate
+to one workflow.
+
+Both commands read through the server, which queries the telemetry store, and
+report that telemetry querying is unavailable where a deployment has no store
+configured.
 
 ## Local stack lifecycle
 
