@@ -65,8 +65,11 @@ from .state import (
 __all__ = [
     "ActivationClassificationError",
     "NULL_SPAN_EMITTER",
+    "NULL_WORKFLOW_SPAN_EMITTER",
     "TelemetrySpanEmitter",
     "WorkflowSpanEmitter",
+    "build_span_emitter",
+    "build_workflow_span_emitter",
 ]
 
 # Operator kinds whose root activation settles inside the ledger and never
@@ -563,3 +566,36 @@ class WorkflowSpanEmitter:
 
 
 NULL_WORKFLOW_SPAN_EMITTER = WorkflowSpanEmitter(None, _OFF_TELEMETRY_CONFIG)
+
+
+def build_span_emitter(
+    tracer: Tracer | None, config: TelemetryConfig | None, workflow_id: str
+) -> TelemetrySpanEmitter:
+    """Build the per-workflow ledger-span emitter, or the null twin when disabled.
+
+    The null twin is returned when telemetry is off (or no config was supplied) so a
+    caller can construct it unconditionally; the emitter's own per-level gates then
+    make every call a no-op.
+    """
+    if (
+        tracer is None
+        or config is None
+        or not config.traces_enabled
+        or not config.emits(TelemetryLevel.COARSE)
+    ):
+        return NULL_SPAN_EMITTER
+    return TelemetrySpanEmitter(tracer, config, workflow_id)
+
+
+def build_workflow_span_emitter(
+    tracer: Tracer | None, config: TelemetryConfig | None
+) -> WorkflowSpanEmitter:
+    """Build the process-wide workflow-root emitter, or the null twin when disabled."""
+    if (
+        tracer is None
+        or config is None
+        or not config.traces_enabled
+        or not config.emits(TelemetryLevel.COARSE)
+    ):
+        return NULL_WORKFLOW_SPAN_EMITTER
+    return WorkflowSpanEmitter(tracer, config)
