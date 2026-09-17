@@ -1,4 +1,4 @@
-"""The two permit-mint traceparent stamps (contract §4.2) reach the worker-side
+"""The two permit-mint traceparent stamps reach the worker-side
 handler, and are absent — not null — from the wire when telemetry is off.
 
 Both stamps are post-mint: the boundary span id derives from the minted permit's own

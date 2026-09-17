@@ -51,7 +51,7 @@ def serve_trace_id_int(serve_task_id: str, request_id: str) -> int:
     """Stable 128-bit trace id for a gated serve request's own trace root.
 
     A serve request is driven by an external principal and owns no ``workflow_id``,
-    so it must not borrow the workflow bijection (contract §1.1) — it roots a trace
+    so it must not borrow the workflow bijection — it roots a trace
     keyed by its own identity instead.
     """
     digest = hashlib.blake2b(
@@ -143,7 +143,7 @@ class ControlPlaneTracer:
 
         For the five ``compile_*`` stages, ``engine_build`` and ``ds_initial_advance``:
         all run inside the submit request, which does have ambient context, but the
-        parent is still built explicitly rather than relied upon (§3.0a).
+        parent is still built explicitly rather than relied upon.
         """
         if not self._should_emit(stage):
             return _NULL_SPAN
@@ -187,7 +187,7 @@ class ControlPlaneTracer:
         For ``admission``, ``permit`` and ``relay`` (async control paths, no ambient
         span). ``trace_id`` is supplied by the caller rather than derived from a
         ``workflow_id`` here, because a boundary may belong to a gated serve request
-        that owns no workflow and roots its own trace instead (§1.1).
+        that owns no workflow and roots its own trace instead.
         """
         if not self._should_emit(stage):
             return _NULL_SPAN
@@ -201,7 +201,7 @@ class ControlPlaneTracer:
     ) -> AbstractContextManager[Span]:
         """Open the ``ledger_snapshot`` span, gated to the ``full`` level.
 
-        The one carve-out from explicit-parent-always (§3.0a): where a control-stage
+        The one carve-out from explicit-parent-always: where a control-stage
         span already encloses the call site (``dispatch``, ``ds_drive``), that span is
         in the same call stack and ambient context reliably names it, so this nests
         under it instead of constructing a second, disconnected parent. Where none is
@@ -209,7 +209,7 @@ class ControlPlaneTracer:
         workflow parent. Never a root either way.
 
         The ambient span is trusted only when it is actually this workflow's: an
-        inbound external ``traceparent`` (§1.1) must become a Link, never a parent, so
+        inbound external ``traceparent`` must become a Link, never a parent, so
         if some other producer's ambient context ever leaked in as this workflow's
         current span, adopting it here would silently carry the snapshot out of the
         workflow's own trace. A mismatch falls back to the explicit workflow parent

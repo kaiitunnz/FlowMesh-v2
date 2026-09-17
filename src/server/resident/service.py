@@ -113,7 +113,7 @@ def _subject_trace_id(
 ) -> int:
     """The trace id a boundary's control spans and carrier stamps root on.
 
-    A workflow subject derives from the workflow bijection (§1.1); a gated serve
+    A workflow subject derives from the workflow bijection; a gated serve
     subject owns no workflow and roots its own trace, keyed by its serve task id and
     request id instead.
     """
@@ -1122,7 +1122,7 @@ class ResidentCapacityControl:
         }
         if self._control.enabled:
             # A gated serve subject owns no workflow_id, so its trace is rooted here
-            # rather than borrowed from the workflow bijection (§1.1): the receiving
+            # rather than borrowed from the workflow bijection: the receiving
             # worker cannot derive it independently, which is exactly why it rides
             # this stamp rather than being recomputed at the far end.
             handoff_payload["traceparent"] = format_traceparent(

@@ -128,7 +128,7 @@ def test_resident_handoff_carries_no_traceparent_key_when_telemetry_is_off() -> 
 
 
 def test_resident_sidecar_bind_never_carries_a_traceparent() -> None:
-    """The one carrier that must stay absent even with telemetry on (§4.2)."""
+    """The one carrier that must stay absent even with telemetry on."""
     control, _exporter = recording_control_tracer(TelemetryLevel.COARSE)
     svc, delivery = _build(control)
 

@@ -66,7 +66,7 @@ class TelemetryStore(Protocol):
     """Read-only port over the telemetry store.
 
     Never writes a span or a metric, and is never a second ingest path -- the Collector
-    is the store's sole writer (contract: the write path and the read path never touch).
+    is the store's sole writer: the write path and the read path never touch.
     """
 
     def fetch_trace(self, workflow_id: str) -> list[SpanRow]:

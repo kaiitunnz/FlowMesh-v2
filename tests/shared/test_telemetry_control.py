@@ -113,7 +113,7 @@ def test_ledger_snapshot_falls_back_to_workflow_parent_with_no_enclosing_stage()
 
 
 def test_ledger_snapshot_ignores_a_foreign_trace_ambient_span() -> None:
-    """An inbound external ``traceparent`` must become a Link, never a parent (§1.1).
+    """An inbound external ``traceparent`` must become a Link, never a parent.
 
     If some other producer's ambient context ever leaked in as the current span
     during a ``ledger_snapshot`` call, adopting it would silently carry the snapshot
