@@ -203,6 +203,7 @@ def _to_node(row: SpanRow) -> TraceSpanNode:
         end_time=row.end_time,
         duration_seconds=row.duration_ns / 1e9,
         status=row.status_code,
+        service_name=row.service_name,
         logical=dict(row.logical),
         physical=dict(row.physical),
     )

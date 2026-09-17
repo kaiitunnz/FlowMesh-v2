@@ -97,6 +97,7 @@ def _row(
     name: str | None = None,
     logical: dict[str, str] | None = None,
     physical: dict[str, str] | None = None,
+    service_name: str = "flowmesh-server",
 ) -> SpanRow:
     start = BASE + timedelta(seconds=offset_sec)
     return SpanRow(
@@ -109,7 +110,7 @@ def _row(
         end_time=start + timedelta(seconds=duration_sec),
         duration_ns=int(duration_sec * 1e9),
         status_code="Unset",
-        service_name="flowmesh-server",
+        service_name=service_name,
         logical=logical or {},
         physical=physical or {},
     )
@@ -302,3 +303,18 @@ async def test_aggregate_route_reports_an_unconfigured_store(principal, logger) 
         )
 
     assert excinfo.value.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
+
+
+def test_each_node_names_the_service_that_emitted_it() -> None:
+    """A trace that spans processes is only readable as one if a reader can tell
+    which process each span came from, so the value must survive to the node."""
+    rows = [
+        _row("aa", None, service_name="flowmesh-server"),
+        _row("bb", "aa", offset_sec=1, service_name="flowmesh-worker"),
+    ]
+
+    tree = build_span_tree(WORKFLOW_ID, rows)
+
+    root = tree.roots[0]
+    assert root.service_name == "flowmesh-server"
+    assert [child.service_name for child in root.children] == ["flowmesh-worker"]

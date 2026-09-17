@@ -23,7 +23,7 @@ class TraceSpanNode(BaseModel):
     end_time: datetime = Field(description="Span end timestamp.")
     duration_seconds: float = Field(description="Span duration in seconds.")
     status: str = Field(description="Span status code.")
-    service_name: str = Field(default="", description="Service that emitted the span.")
+    service_name: str = Field(description="Service that emitted the span.")
     logical: dict[str, str] = Field(
         default_factory=dict, description="Logical-namespace attributes."
     )
