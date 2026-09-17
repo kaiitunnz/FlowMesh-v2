@@ -168,3 +168,47 @@ async def test_an_unreadable_submission_time_does_not_strand_the_log_stream(
     )
 
     assert f"workflow:{workflow_id}:logs:closed" in redis.keys
+
+
+@pytest.mark.anyio
+async def test_an_already_terminal_task_event_still_closes_the_workflow() -> None:
+    """A task settled before its event is handled still completes the detector.
+
+    The dispatcher settles a no-eligible-worker task in the runtime itself, so an
+    event for it arrives describing a task that is already terminal. The detector
+    handles that correctly -- but note the dispatcher does not in fact deliver such
+    an event today, so this guards the detector rather than describing that path.
+    """
+    registry = FakeRegistry()
+    runtime = _runtime(registry)
+    workflow_id, ids = await _register(runtime, _CHAIN)
+    head, tail = ids["head"], ids["tail"]
+
+    redis = _RedisMirroringTaskState(runtime, [head, tail])
+    redis.keys[f"workflow:{workflow_id}"] = "1"
+    emitter = _RecordingWorkflowSpanEmitter()
+    monitor = _monitor(runtime, redis, emitter)
+
+    # Dispatcher.fail_task settles in the runtime first; this then delivers the
+    # event it builds, which is the step that does not happen in production.
+    runtime.mark_failed(
+        head,
+        None,
+        {"reason": "no_eligible_worker"},
+        _TS,
+        error="No worker satisfies the task requirements",
+    )
+    monitor._handle_task_event(
+        TaskEvent(
+            type="TASK_FAILED",
+            task_id=head,
+            error="No worker satisfies the task requirements",
+            retryable=False,
+            payload={"reason": "no_eligible_worker"},
+            ts=_TS,
+        )
+    )
+
+    assert redis.set_members(f"workflow:{workflow_id}:tasks") == set()
+    assert f"workflow:{workflow_id}:logs:closed" in redis.keys
+    assert emitter.emitted == [workflow_id]
