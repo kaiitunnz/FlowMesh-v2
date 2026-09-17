@@ -18,6 +18,7 @@ from .services.ssh_audit import SshAuditService
 from .services.watchdog import WorkerWatchdog
 from .supervisor.supervisor import WorkerSupervisor
 from .task.runtime import TaskRuntime
+from .telemetry.store import TelemetryStore
 
 
 def get_logger(conn: HTTPConnection) -> logging.Logger:
@@ -114,3 +115,7 @@ def get_network_plane(conn: HTTPConnection) -> NetworkPlane | None:
 
 def get_content_store(conn: HTTPConnection) -> ServerContentStore | None:
     return conn.app.state.content_store
+
+
+def get_telemetry_store(conn: HTTPConnection) -> TelemetryStore | None:
+    return conn.app.state.telemetry_store
