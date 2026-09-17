@@ -17,6 +17,7 @@ from shared.tasks.worker_message import (
     WorkerHardware,
     WorkerTaskMessage,
 )
+from shared.telemetry.config import TelemetryConfig, TelemetryLevel
 from worker.config import WorkerConfig
 
 DEFAULT_WORKER_CONFIG: Final[WorkerConfig] = WorkerConfig(
@@ -56,6 +57,15 @@ DEFAULT_WORKER_CONFIG: Final[WorkerConfig] = WorkerConfig(
     docker_gpu_runtime=None,
     ssh_limits=None,
     enable_ssh_gpu_limit=False,
+    telemetry=TelemetryConfig(
+        level=TelemetryLevel.OFF,
+        traces_enabled=True,
+        metrics_enabled=True,
+        sample_ratio=1.0,
+        otlp_endpoint=None,
+    ),
+    otlp_timeout_sec=10,
+    resource_sample_sec=15,
 )
 
 

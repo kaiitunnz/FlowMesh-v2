@@ -4,16 +4,27 @@ import signal
 import socket
 from collections.abc import Mapping
 
+from shared._version import FLOWMESH_RELEASE_VERSION
 from shared.network.mtls import MutualTlsMaterial, MutualTlsMaterialError
 from shared.schemas.worker import WorkerCapabilities
 from shared.tasks.task_type import TaskType
 from shared.tasks.worker_message import WorkerHardware
+from shared.telemetry.config import TelemetryLevel
+from shared.telemetry.provider import build_meter
+from shared.telemetry.semconv import (
+    RESOURCE_ROLE,
+    SERVICE_NAME,
+    SERVICE_VERSION,
+    ProcessRole,
+    ServiceName,
+)
 
 from .config import WorkerConfig
 from .content_store import build_content_store
 from .executors import EXECUTOR_REGISTRY, IMPORT_ERRORS, get_executor_class_name
 from .executors.base_executor import Executor
 from .executors.mp_executor import MPExecutor
+from .gpu_sampler import build_gpu_sampler
 from .hw import collect_hw
 from .lifecycle import Lifecycle
 from .power import PowerMonitor
@@ -278,6 +289,31 @@ def main() -> None:
     hardware = collect_hw(bandwidth_bytes_per_sec=cfg.network_bandwidth_bytes_per_sec)
     logger.info("Collected hardware info: %s", hardware)
 
+    def _worker_id_or_none() -> str | None:
+        try:
+            return lifecycle.worker_id
+        except RuntimeError:
+            return None
+
+    # No channel currently reports this worker's node id to itself (it is a
+    # supervisor-side concept, assigned by the server handshake); GPU metrics
+    # carry an empty flowmesh.node_id until one exists.
+    gpu_sampler = build_gpu_sampler(
+        build_meter(
+            cfg.telemetry,
+            {
+                SERVICE_NAME: ServiceName.WORKER,
+                SERVICE_VERSION: FLOWMESH_RELEASE_VERSION,
+                RESOURCE_ROLE: ProcessRole.WORKER,
+            },
+        ),
+        node_id=lambda: None,
+        worker_id=_worker_id_or_none,
+        interval_sec=cfg.resource_sample_sec,
+        enabled=cfg.telemetry.metrics_enabled
+        and cfg.telemetry.emits(TelemetryLevel.COARSE),
+    )
+
     executors, default_executor = initialize_executors(
         cfg,
         hardware,
@@ -309,6 +345,7 @@ def main() -> None:
         ssh_limits=ssh_limits,
         tags=cfg.tags,
     )
+    gpu_sampler.start()
 
     task_stream = supervisor_client.iter_tasks()
     runner = Runner(
@@ -329,6 +366,8 @@ def main() -> None:
         peer_enabled=cfg.peer_enabled,
         peer_material=_peer_material(cfg, logger),
         peer_listener_sock=peer_sock,
+        telemetry=cfg.telemetry,
+        otlp_timeout_sec=cfg.otlp_timeout_sec,
     )
 
     # Install signal handlers to allow graceful shutdown
@@ -346,6 +385,7 @@ def main() -> None:
     try:
         runner.start()
     finally:
+        gpu_sampler.shutdown()
         lifecycle.shutdown()
 
 

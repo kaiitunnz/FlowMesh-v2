@@ -10,7 +10,10 @@ from shared.sandbox import (
     SandboxCommandResult,
     SandboxDenied,
 )
+from shared.telemetry.config import TelemetryLevel
+from shared.telemetry.semconv import PHYSICAL_WORKER_ID, SPAN_SANDBOX_COMMAND
 
+from ..executors.mixins import _otel
 from ..private_state import MaterializedState
 from .runtime import SandboxRuntime
 
@@ -42,18 +45,30 @@ class AgentSandboxRuntime(LocalSandboxExecutor):
     def execute(self, command: SandboxCommand) -> SandboxCommandResult:
         self._check_fence()
         _LOG.info("[sandbox] %s", " ".join(command.argv)[:200])
-        result = self._runtime.run(
-            self._state.workspace,
-            command,
-            self._capability.profile,
-            self._capability.egress_allowed,
-        )
+        if _otel.emits(TelemetryLevel.FULL):
+            with _otel.get_tracer().start_as_current_span(
+                SPAN_SANDBOX_COMMAND,
+                attributes=_otel.new_span_attributes(
+                    {PHYSICAL_WORKER_ID: self._capability.worker_id}
+                ),
+            ):
+                result = self._run(command)
+        else:
+            result = self._run(command)
         _LOG.info(
             "[sandbox] exit=%s%s",
             result.exit_code,
             " (timed out)" if result.timed_out else "",
         )
         return result
+
+    def _run(self, command: SandboxCommand) -> SandboxCommandResult:
+        return self._runtime.run(
+            self._state.workspace,
+            command,
+            self._capability.profile,
+            self._capability.egress_allowed,
+        )
 
     def _check_fence(self) -> None:
         """Refuse a command whose capability is not this dispatch's write authority.

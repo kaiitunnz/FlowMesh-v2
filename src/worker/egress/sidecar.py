@@ -18,12 +18,22 @@ failure, never a retryable provider response.
 import logging
 import threading
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
+from opentelemetry.trace import Span
+
 from shared.outcome import FabricContentStore, OutcomeManifest
+from shared.telemetry.config import TelemetryLevel
+from shared.telemetry.propagation import extract_context
+from shared.telemetry.semconv import (
+    PHYSICAL_INVOCATION_ID,
+    PHYSICAL_PERMIT_ID,
+    SPAN_EGRESS,
+)
 from shared.tools.contract import (
     MediatedOperationOutcome,
     MediatedOperationPermit,
@@ -33,6 +43,7 @@ from shared.tools.contract import (
 from shared.tools.model.egress import ModelEgressError
 from shared.tools.model.schema import ModelCompletion
 
+from ..executors.mixins import _otel
 from .fence import fence_reason, materialize_tool_outcome
 from .request_store import CapturedRequest, PendingEgressRequestStore
 
@@ -147,20 +158,48 @@ class MediatedEgressSidecar:
     def stop(self) -> None:
         self._pool.shutdown(wait=False, cancel_futures=True)
 
+    @contextmanager
+    def _egress_span(self, permit: MediatedOperationPermit) -> Iterator[Span | None]:
+        """Open ``flowmesh.egress`` at the boundary its ``traceparent`` carries.
+
+        ``_drive`` runs on this sidecar's own thread pool, off the task lane the
+        boundary's episode is on, so the parent comes from the permit's carried
+        traceparent rather than ambient context — there is none to inherit.
+        """
+        if not _otel.emits(TelemetryLevel.FINE):
+            yield None
+            return
+        parent_context = extract_context(permit.traceparent)
+        attributes = _otel.new_span_attributes(
+            {
+                PHYSICAL_INVOCATION_ID: permit.invocation_id,
+                PHYSICAL_PERMIT_ID: permit.permit_id,
+            }
+        )
+        with _otel.get_tracer().start_as_current_span(
+            SPAN_EGRESS, context=parent_context, attributes=attributes
+        ) as span:
+            yield span
+
     def _drive(self, permit: MediatedOperationPermit) -> None:
         key = (permit.agent_task_id, permit.call_correlation)
-        try:
-            report = self._produce(permit)
-        except Exception as exc:  # noqa: BLE001 - a crashed egress leaves it ambiguous
-            # No report: the control plane holds the boundary pending and re-drives
-            # under the same idempotency key with a fresh permit.
-            self._log.warning("mediated egress raised, leaving it ambiguous: %s", exc)
-            report = None
-        finally:
-            with self._lock:
-                self._inflight.pop(key, None)
-                cancelled = key in self._cancelled
-                self._cancelled.discard(key)
+        with self._egress_span(permit):
+            try:
+                report = self._produce(permit)
+            except (
+                Exception
+            ) as exc:  # noqa: BLE001 - a crashed egress leaves it ambiguous
+                # No report: the control plane holds the boundary pending and
+                # re-drives under the same idempotency key with a fresh permit.
+                self._log.warning(
+                    "mediated egress raised, leaving it ambiguous: %s", exc
+                )
+                report = None
+            finally:
+                with self._lock:
+                    self._inflight.pop(key, None)
+                    cancelled = key in self._cancelled
+                    self._cancelled.discard(key)
         if report is not None and not cancelled:
             self._sink(report)
 
