@@ -1,6 +1,7 @@
 """The worker HTTP content-store client, driven against the real content router."""
 
 import logging
+from unittest import mock
 
 import pytest
 from fastapi import FastAPI
@@ -62,3 +63,20 @@ def test_hydrate_missing_raises(store) -> None:
     tampered = manifest.model_copy(update={"content_digest": "0" * 64})
     with pytest.raises(OutcomeHydrationError):
         store.hydrate(tampered)
+
+
+def test_every_request_carries_the_ambient_traceparent(store) -> None:
+    # Contract P5: the worker's content-store calls run inside a task's span, so the
+    # ambient trace context is forwarded onto each request's header dict.
+    def _inject(headers: dict[str, str]) -> dict[str, str]:
+        headers["traceparent"] = (
+            "00-11111111111111111111111111111111-2222222222222222-01"
+        )
+        return headers
+
+    with mock.patch(
+        "shared.outcome.http_store.inject_ambient_traceparent", side_effect=_inject
+    ):
+        manifest = store.materialize("idm-tp", b"x", media_type="application/json")
+        assert store.find("idm-tp") == manifest
+        assert store.read(manifest.content_digest) == b"x"

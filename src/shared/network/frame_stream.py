@@ -11,7 +11,7 @@ and the caller closes the connection: a stream whose framing is lost cannot resy
 
 import asyncio
 import json
-from typing import Protocol
+from typing import Any, Protocol
 
 from .relay_frame import RelayDirection, RelayFrame, RelayFrameKind
 
@@ -45,18 +45,18 @@ def split_host_port(endpoint: str) -> tuple[str, int]:
 
 
 def _meta(frame: RelayFrame) -> bytes:
-    return json.dumps(
-        {
-            "kind": frame.kind.value,
-            "session_id": frame.session_id,
-            "invocation_id": frame.invocation_id,
-            "idm": frame.idm,
-            "direction": frame.direction.value,
-            "seq": frame.seq,
-            "ack": frame.ack,
-        },
-        separators=(",", ":"),
-    ).encode()
+    meta: dict[str, Any] = {
+        "kind": frame.kind.value,
+        "session_id": frame.session_id,
+        "invocation_id": frame.invocation_id,
+        "idm": frame.idm,
+        "direction": frame.direction.value,
+        "seq": frame.seq,
+        "ack": frame.ack,
+    }
+    if frame.tp:
+        meta["tp"] = frame.tp
+    return json.dumps(meta, separators=(",", ":")).encode()
 
 
 async def write_relay_frame(writer: FrameWriter, frame: RelayFrame) -> None:
@@ -94,6 +94,7 @@ async def read_relay_frame(reader: asyncio.StreamReader) -> RelayFrame:
             seq=int(meta.get("seq", 0)),
             ack=int(meta.get("ack", 0)),
             payload=payload,
+            tp=meta.get("tp") or None,
         )
     except (KeyError, ValueError, TypeError) as exc:
         raise FrameStreamError("undecodable relay frame header") from exc

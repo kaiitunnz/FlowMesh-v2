@@ -14,6 +14,7 @@ import requests
 from shared.schemas.artifact import ArtifactContext
 from shared.schemas.result import BaseExecutorResult, ResultEnvelope
 from shared.tasks.specs import TaskSpecStrictBase
+from shared.telemetry.propagation import inject_ambient_traceparent
 from shared.utils.atomic import atomic_write_text
 from shared.utils.http import add_auth_headers
 from shared.utils.parsing import parse_bool_env
@@ -144,6 +145,7 @@ def download_and_unpack(load_cfg: dict[str, Any], out_dir: Path) -> Path:
     headers = {str(k): str(v) for k, v in (load_cfg.get("headers") or {}).items()}
     if is_flowmesh_origin_url(url):
         add_auth_headers(headers)
+        inject_ambient_traceparent(headers)
     timeout = float(load_cfg.get("timeoutSec", 60))
     dest_root = out_dir / "imported_checkpoint"
     if dest_root.exists():
@@ -358,6 +360,7 @@ def get_http_destination(spec: TaskSpecStrictBase) -> HTTPDestination | None:
             return None
     if is_flowmesh_origin_url(url):
         add_auth_headers(headers)
+        inject_ambient_traceparent(headers)
     return HTTPDestination(
         method=method,
         url=url,

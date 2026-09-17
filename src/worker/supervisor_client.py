@@ -263,12 +263,18 @@ class SupervisorClient:
         )
         self._send_event(event)
 
-    def task_update(self, task_id: str, payload: dict[str, Any]) -> None:
+    def task_update(
+        self,
+        task_id: str,
+        payload: dict[str, Any],
+        traceparent: str | None = None,
+    ) -> None:
         event = TaskEvent(
             type="TASK_UPDATE",
             worker_id=self.worker_id,
             task_id=task_id,
             payload=payload,
+            traceparent=traceparent,
         )
         self._send_event(event)
 
@@ -278,6 +284,7 @@ class SupervisorClient:
         error: str | None,
         metadata: dict[str, Any] | None = None,
         retryable: bool = True,
+        traceparent: str | None = None,
     ) -> None:
         event = TaskEvent(
             type="TASK_FAILED",
@@ -286,17 +293,22 @@ class SupervisorClient:
             error=error,
             retryable=retryable,
             payload=metadata or {},
+            traceparent=traceparent,
         )
         self._send_event(event)
 
     def task_succeeded(
-        self, task_id: str, metadata: dict[str, Any] | None = None
+        self,
+        task_id: str,
+        metadata: dict[str, Any] | None = None,
+        traceparent: str | None = None,
     ) -> None:
         event = TaskEvent(
             type="TASK_SUCCEEDED",
             worker_id=self.worker_id,
             task_id=task_id,
             payload=metadata or {},
+            traceparent=traceparent,
         )
         self._send_event(event)
 
@@ -306,6 +318,7 @@ class SupervisorClient:
         task_type: str | None = None,
         dispatched_at: str | None = None,
         started_at: str | None = None,
+        traceparent: str | None = None,
     ) -> None:
         payload: dict[str, Any] = {}
         if task_type is not None:
@@ -319,17 +332,22 @@ class SupervisorClient:
             worker_id=self.worker_id,
             task_id=task_id,
             payload=payload,
+            traceparent=traceparent,
         )
         self._send_event(event)
 
     def task_cancelled(
-        self, task_id: str, metadata: dict[str, Any] | None = None
+        self,
+        task_id: str,
+        metadata: dict[str, Any] | None = None,
+        traceparent: str | None = None,
     ) -> None:
         event = TaskEvent(
             type="TASK_CANCELLED",
             worker_id=self.worker_id,
             task_id=task_id,
             payload=metadata or {},
+            traceparent=traceparent,
         )
         self._send_event(event)
 
@@ -340,6 +358,7 @@ class SupervisorClient:
         owner_id: str,
         task_refs: list[dict[str, str]] | None = None,
         log_paths: dict[str, Path] | None = None,
+        traceparent: str | None = None,
     ) -> TaskLogEmitter | None:
         if self._stub is None:
             return None
@@ -354,6 +373,7 @@ class SupervisorClient:
             worker_id=self.worker_id,
             task_refs=task_refs,
             log_paths=log_paths,
+            traceparent=traceparent,
         )
 
     # ------------------------------------------------------------------ #
@@ -601,7 +621,12 @@ class SupervisorClient:
         # Wait until the stream is ready without an explicit timeout.
         if not self._event_ready.wait():
             raise RuntimeError("Supervisor event stream not ready")
-        self._event_queue.put(serialize_event(event))
+        payload = serialize_event(event)
+        if payload.get("traceparent") is None:
+            # Zero bytes on the wire when the event carries no trace context, rather
+            # than an explicit null every disabled-telemetry event would otherwise add.
+            payload.pop("traceparent", None)
+        self._event_queue.put(payload)
 
     def push_mediated_outcome(self, outcome: MediatedOperationOutcome) -> None:
         """Report one fenced mediated-operation outcome over the event stream."""

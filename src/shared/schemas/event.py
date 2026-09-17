@@ -15,6 +15,10 @@ class BaseEvent(BaseModel):
         ..., description="Event type, expected to be an uppercase enum value."
     )
     ts: str = Field(default_factory=now_iso, description="Event timestamp (ISO8601).")
+    traceparent: str | None = Field(
+        default=None,
+        description="W3C traceparent naming the trace this event belongs to.",
+    )
 
     @field_validator("type")
     @classmethod

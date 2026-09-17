@@ -3,6 +3,7 @@ spec.output.destination and the WORKER_UPLOAD_RESULTS opt-in.
 """
 
 from typing import Any
+from unittest import mock
 from unittest.mock import MagicMock
 
 import pytest
@@ -197,3 +198,44 @@ def test_existing_authorization_header_preserved(
     out = get_http_destination(spec)
     assert out is not None
     assert out.headers["Authorization"] == "Bearer caller-supplied"
+
+
+# ---- Contract P5: ambient traceparent on the worker->server HTTP hop -------
+
+
+def test_flowmesh_origin_carries_the_ambient_traceparent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FLOWMESH_API_KEY", "flm-test")
+    monkeypatch.setenv("FLOWMESH_BASE_URL", "http://flowmesh.example")
+    spec = _spec({"type": "http", "url": "http://flowmesh.example/api/v1/results"})
+
+    with mock.patch(
+        "worker.executors.utils.checkpoints.inject_ambient_traceparent",
+        side_effect=lambda h: h.update(
+            {"traceparent": "00-11111111111111111111111111111111-2222222222222222-01"}
+        ),
+    ):
+        out = get_http_destination(spec)
+
+    assert out is not None
+    assert out.headers["traceparent"] == (
+        "00-11111111111111111111111111111111-2222222222222222-01"
+    )
+
+
+def test_external_destination_carries_no_traceparent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FLOWMESH_API_KEY", "flm-test")
+    monkeypatch.setenv("FLOWMESH_BASE_URL", "http://flowmesh.example")
+    spec = _spec({"type": "http", "url": "https://external.example/results"})
+
+    with mock.patch(
+        "worker.executors.utils.checkpoints.inject_ambient_traceparent"
+    ) as inject:
+        out = get_http_destination(spec)
+
+    assert out is not None
+    inject.assert_not_called()
+    assert "traceparent" not in out.headers
