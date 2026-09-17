@@ -4,6 +4,7 @@ from enum import StrEnum
 from pathlib import Path
 
 from shared.tasks.specs import ModelBindingMode
+from shared.telemetry.config import TelemetryConfig, TelemetryLevel
 from shared.utils.parsing import parse_bool_env, parse_float_env, parse_int_env
 
 
@@ -248,11 +249,24 @@ class WatchdogConfig:
         )
 
 
+def _default_telemetry() -> TelemetryConfig:
+    return TelemetryConfig(
+        level=TelemetryLevel.OFF,
+        traces_enabled=True,
+        metrics_enabled=True,
+        sample_ratio=1.0,
+        otlp_endpoint=None,
+    )
+
+
 @dataclass
 class MetricsConfig:
     dir: Path | None = None
     enable_density_plot: bool = False
     density_bucket_sec: int = 60
+    telemetry: TelemetryConfig = field(default_factory=_default_telemetry)
+    otlp_timeout_sec: int = 10
+    resource_sample_sec: int = 15
 
     @classmethod
     def from_env(cls, results_dir: Path) -> "MetricsConfig":
@@ -262,6 +276,19 @@ class MetricsConfig:
             metrics_dir = Path(metrics_env).expanduser().resolve()
         else:
             metrics_dir = results_dir.parent / "metrics"
+        level_raw = (
+            (os.getenv("SERVER_METRICS_TELEMETRY_LEVEL") or TelemetryLevel.OFF.value)
+            .strip()
+            .lower()
+        )
+        try:
+            telemetry_level = TelemetryLevel(level_raw)
+        except ValueError as exc:
+            allowed = ", ".join(level.value for level in TelemetryLevel)
+            raise SystemExit(
+                f"SERVER_METRICS_TELEMETRY_LEVEL must be one of: {allowed} "
+                f"(got {level_raw!r})"
+            ) from exc
         return cls(
             dir=metrics_dir,
             enable_density_plot=parse_bool_env(
@@ -269,6 +296,20 @@ class MetricsConfig:
             ),
             density_bucket_sec=max(
                 1, parse_int_env("SERVER_METRICS_DENSITY_BUCKET_SEC", 60)
+            ),
+            telemetry=TelemetryConfig(
+                level=telemetry_level,
+                traces_enabled=parse_bool_env("SERVER_METRICS_TRACES_ENABLED", True),
+                metrics_enabled=parse_bool_env("SERVER_METRICS_METRICS_ENABLED", True),
+                sample_ratio=parse_float_env("SERVER_METRICS_TRACE_SAMPLE_RATIO", 1.0),
+                otlp_endpoint=(os.getenv("SERVER_METRICS_OTLP_ENDPOINT") or "").strip()
+                or None,
+            ),
+            otlp_timeout_sec=max(
+                1, parse_int_env("SERVER_METRICS_OTLP_TIMEOUT_SEC", 10)
+            ),
+            resource_sample_sec=max(
+                1, parse_int_env("SERVER_METRICS_RESOURCE_SAMPLE_SEC", 15)
             ),
         )
 
