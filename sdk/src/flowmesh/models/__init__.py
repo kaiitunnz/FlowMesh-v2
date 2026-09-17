@@ -79,6 +79,10 @@ from .traces import (
     LineageEdge,
     ProfileSummary,
     TaskTiming,
+    TraceAggregate,
+    TraceAggregateBucket,
+    TraceSpanNode,
+    TraceTree,
 )
 from .workers import (
     CPUInfo,
@@ -188,6 +192,10 @@ __all__ = [
     "TaskTiming",
     "TaskType",
     "TaskUsage",
+    "TraceAggregate",
+    "TraceAggregateBucket",
+    "TraceSpanNode",
+    "TraceTree",
     "VersionResponse",
     "Worker",
     "WorkerCapabilities",

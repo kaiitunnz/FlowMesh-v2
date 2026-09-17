@@ -37,6 +37,10 @@ from flowmesh.models import (
     TaskInfo,
     TaskType,
     TaskUsage,
+    TraceAggregate,
+    TraceAggregateBucket,
+    TraceSpanNode,
+    TraceTree,
     VersionResponse,
     Worker,
     WorkerHardware,
@@ -78,6 +82,10 @@ from server.schemas.node import NodeWorkerInfo as SrvNodeWorkerInfo
 from server.schemas.node import StorageInfo as SrvStorageInfo
 from server.schemas.node import WorkerHardware as SrvWorkerHardware
 from server.schemas.node import WorkerRegisterResponse as SrvWorkerRegisterResponse
+from server.schemas.traces import TraceAggregate as SrvTraceAggregate
+from server.schemas.traces import TraceAggregateBucket as SrvTraceAggregateBucket
+from server.schemas.traces import TraceSpanNode as SrvTraceSpanNode
+from server.schemas.traces import TraceTree as SrvTraceTree
 from server.schemas.workflow import WorkflowSubmitResponse as SrvWorkflowSubmitResponse
 from server.schemas.workflow import (
     WorkflowSubmitTaskEntry as SrvWorkflowSubmitTaskEntry,
@@ -209,6 +217,11 @@ MODEL_PAIRS = [
     # Artifacts
     (SrvArtifactContext, ArtifactContext),
     (SrvArtifactRef, ArtifactRef),
+    # Telemetry queries
+    (SrvTraceSpanNode, TraceSpanNode),
+    (SrvTraceTree, TraceTree),
+    (SrvTraceAggregateBucket, TraceAggregateBucket),
+    (SrvTraceAggregate, TraceAggregate),
     # Exact result subclasses + nested payload models
     *RESULT_MODEL_PAIRS,
 ]
