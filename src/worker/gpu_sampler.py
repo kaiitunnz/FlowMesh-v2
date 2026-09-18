@@ -111,6 +111,10 @@ class GpuSampler:
             self._emit()
         except pynvml.NVMLError:
             self._nvml_ready = False
+        except Exception:
+            # A sampling failure costs one interval's points; letting it end the thread
+            # would stop the series with nothing said.
+            logger.exception("GPU metric sampling failed")
 
     def _emit(self) -> None:
         base_attrs = {

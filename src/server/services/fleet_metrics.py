@@ -100,7 +100,12 @@ class FleetResidencySampler:
     async def _run(self) -> None:
         try:
             while True:
-                self._sample_once()
+                try:
+                    self._sample_once()
+                except Exception:
+                    # A sampling failure costs one interval's points; letting it end the
+                    # task would stop the series with nothing said.
+                    logger.exception("Fleet metric sampling failed")
                 await asyncio.sleep(self._interval_sec)
         except asyncio.CancelledError:
             return
