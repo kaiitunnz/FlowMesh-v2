@@ -43,6 +43,7 @@ from ...telemetry.store import (
     SpanRow,
     TelemetryStore,
     TelemetryStoreError,
+    UnsupportedAggregateError,
 )
 
 router = APIRouter(prefix="/traces", tags=["Traces"])
@@ -182,6 +183,12 @@ def _store_available() -> Iterator[None]:
     """
     try:
         yield
+    except UnsupportedAggregateError as exc:
+        # The store answered: what was asked for is not derivable from what the metric
+        # carries, so it is the request that is wrong, not the deployment.
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        ) from exc
     except TelemetryStoreError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

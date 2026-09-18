@@ -29,6 +29,17 @@ class TelemetryStoreError(RuntimeError):
     """
 
 
+class UnsupportedAggregateError(TelemetryStoreError):
+    """A well-formed aggregate the stored metric cannot answer.
+
+    The query reached the store and the store is healthy; what it asks for is not
+    derivable from what the metric's datapoints carry, so retrying it or repointing at
+    another instance of the same store answers nothing. A caller surfaces this as a bad
+    request. Refusing is the contract: a statistic a datapoint does not support has no
+    honest value to return, and an empty result would read as "no data".
+    """
+
+
 @dataclass(frozen=True)
 class SpanRow:
     """One span as stored, with its logical/physical attribute views already split.
@@ -100,5 +111,16 @@ class TelemetryStore(Protocol):
         separately from the spanmetrics-derived histogram); callers that don't know a
         metric's kind ahead of time try ``"gauge"`` first, the default for every
         counter/gauge FlowMesh emits today.
+
+        A gauge point carries one value, so every statistic applies to it directly. A
+        histogram point carries bucket counts rather than the observations behind them:
+        ``count``, ``sum`` and ``avg`` come out exact, a percentile is interpolated
+        inside the bucket it lands in, and ``min``/``max`` raise
+        ``UnsupportedAggregateError``. ``workflow_id`` raises it too, for any metric:
+        nothing the store holds carries a workflow id (``fetch_trace`` is the
+        workflow-scoped surface).
+
+        ``sample_count`` is the number of observations behind a bucket, which for a
+        histogram is the sum of its points' counts rather than a row count.
         """
         ...

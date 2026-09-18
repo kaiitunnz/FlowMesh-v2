@@ -76,8 +76,12 @@ workflow with no recorded spans prints an empty tree.
 
 `trace aggregate` rolls one metric up by one attribute key. `--stat` accepts
 `count`, `sum`, `avg`, `min`, `max`, `p50`, `p95`, or `p99`; `--kind` selects
-`gauge` (the default) or `histogram`; `--workflow-id` restricts the aggregate
-to one workflow.
+`gauge` (the default) or `histogram`. A histogram holds bucket counts rather
+than the observations behind them, so `--stat min` and `--stat max` are
+rejected there and a percentile is resolved to the width of the bucket it falls
+in. An aggregate is fleet-wide: no metric carries a workflow id, so
+`--workflow-id` is rejected — read a workflow's own telemetry from its span
+tree.
 
 Both commands read through the server, which queries the telemetry store, and
 report that telemetry querying is unavailable where a deployment has no store

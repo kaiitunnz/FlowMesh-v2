@@ -13,6 +13,7 @@ import pytest
 from server.config import TelemetryStoreConfig
 from server.telemetry import build_telemetry_store
 from server.telemetry.clickhouse import ClickHouseTelemetryStore, TelemetryStoreError
+from server.telemetry.store import UnsupportedAggregateError
 from shared.telemetry.ids import workflow_to_trace_id_int
 
 
@@ -94,48 +95,89 @@ def test_fetch_trace_raises_on_non_200() -> None:
         store.fetch_trace("wfl-x")
 
 
-def test_aggregate_builds_correct_query_and_parses_buckets() -> None:
+def test_aggregate_binds_the_metric_and_grouping_key_and_parses_buckets() -> None:
     captured: dict[str, object] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured["params"] = dict(request.url.params)
-        captured["body"] = request.content.decode()
         rows = [
-            {"group_value": "dispatch", "stat_value": "1.5", "sample_count": "10"},
-            {"group_value": "admission", "stat_value": "0.2", "sample_count": "4"},
+            {"group_value": "0", "stat_value": "1.5", "sample_count": "10"},
+            {"group_value": "1", "stat_value": "0.2", "sample_count": "4"},
         ]
         body = "\n".join(__import__("json").dumps(r) for r in rows)
         return httpx.Response(200, text=body)
 
     store = _store(handler)
     buckets = store.aggregate(
-        metric="flowmesh.duration",
-        group_by="flowmesh.physical.stage",
-        stat="avg",
-        kind="histogram",
-        workflow_id="wfl-abc",
+        metric="flowmesh.gpu.utilization", group_by="flowmesh.gpu.index", stat="avg"
     )
 
     params = captured["params"]
     assert isinstance(params, dict)
-    assert params["param_metric"] == "flowmesh.duration"
-    assert params["param_group_by_key"] == "flowmesh.physical.stage"
-    assert params["param_workflow_key"] == "flowmesh.logical.workflow_id"
-    assert params["param_workflow_value"] == "wfl-abc"
-    body = captured["body"]
-    assert isinstance(body, str)
-    assert "flowmesh_metrics_histogram" in body
+    assert params["param_metric"] == "flowmesh.gpu.utilization"
+    assert params["param_group_by_key"] == "flowmesh.gpu.index"
 
-    assert [b.group_value for b in buckets] == ["dispatch", "admission"]
+    assert [b.group_value for b in buckets] == ["0", "1"]
     assert buckets[0].value == 1.5
     assert buckets[0].sample_count == 10
     assert buckets[0].stat == "avg"
+
+
+def test_aggregate_histogram_sample_count_is_the_observation_total() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        # What the histogram query returns: `sample_count` is the summed point count
+        # of the bucket's series, not the number of rows they were spread over.
+        row = {"group_value": "dispatch", "stat_value": "437.5", "sample_count": "5"}
+        return httpx.Response(200, text=__import__("json").dumps(row))
+
+    store = _store(handler)
+    buckets = store.aggregate(
+        metric="flowmesh.duration",
+        group_by="flowmesh.physical.stage",
+        stat="p95",
+        kind="histogram",
+    )
+    assert buckets[0].sample_count == 5
+    assert buckets[0].value == 437.5
 
 
 def test_aggregate_unknown_kind_raises() -> None:
     store = _store(lambda request: httpx.Response(200, text=""))
     with pytest.raises(TelemetryStoreError, match="unknown metric kind"):
         store.aggregate(metric="m", group_by="g", kind="sum")  # type: ignore[arg-type]
+
+
+def _refusing_store() -> ClickHouseTelemetryStore:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("an unanswerable aggregate must not reach the store")
+
+    return _store(handler)
+
+
+def test_aggregate_refuses_a_workflow_scoped_filter() -> None:
+    for kind in ("gauge", "histogram"):
+        with pytest.raises(UnsupportedAggregateError, match="workflow"):
+            _refusing_store().aggregate(
+                metric="flowmesh.duration",
+                group_by="flowmesh.physical.stage",
+                kind=kind,  # type: ignore[arg-type]
+                workflow_id="wfl-abc",
+            )
+
+
+def test_aggregate_refuses_histogram_min_and_max() -> None:
+    for stat in ("min", "max"):
+        with pytest.raises(UnsupportedAggregateError, match="bucket counts"):
+            _refusing_store().aggregate(
+                metric="flowmesh.duration",
+                group_by="flowmesh.physical.stage",
+                stat=stat,  # type: ignore[arg-type]
+                kind="histogram",
+            )
+
+
+def test_unsupported_aggregate_stays_a_telemetry_store_error() -> None:
+    assert issubclass(UnsupportedAggregateError, TelemetryStoreError)
 
 
 def test_build_telemetry_store_returns_none_when_unconfigured() -> None:
