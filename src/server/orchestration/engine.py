@@ -14,8 +14,11 @@ seals and drains, never on an observed empty set. Scheduler/worker placement sta
 physical decision that never changes what the engine considers ready.
 """
 
+import contextlib
 import functools
+import logging
 from collections.abc import Callable, Sequence
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from typing import Any, Self
 
@@ -200,6 +203,36 @@ class Advance:
         return self
 
 
+_logger = logging.getLogger("orchestration-engine")
+
+
+def _drive_span(
+    engine: "OrchestrationEngine", candidate: str, window: ControlPlaneWindow
+) -> AbstractContextManager[Any]:
+    """Resolve the stage span for one transition, or nothing if resolving it fails.
+
+    Resolution runs eagerly -- it reads the work item, derives ids and opens the span --
+    inside a call that is about to mutate durable state. Synthesis elsewhere absorbs its
+    own faults for exactly that reason; this is the one telemetry seam wrapping a
+    mutation, so it absorbs them here too rather than failing the transition.
+    """
+    try:
+        wi = engine._work_item_for_task(candidate)
+        if wi is not None:
+            return engine._control.episode_stage(
+                ControlPlaneStage.DS_DRIVE,
+                window,
+                engine._instance.instance_id,
+                wi.work_item_id,
+            )
+        return engine._control.workflow_stage(
+            ControlPlaneStage.DS_DRIVE, window, engine._instance.instance_id
+        )
+    except Exception as exc:
+        _logger.debug("Control-plane span setup failed for %s: %s", candidate, exc)
+        return contextlib.nullcontext()
+
+
 def _ds_drive(
     window: ControlPlaneWindow,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
@@ -218,19 +251,7 @@ def _ds_drive(
         ) -> Any:
             if not self._control.enabled:
                 return fn(self, candidate, *args, **kwargs)
-            wi = self._work_item_for_task(candidate)
-            if wi is not None:
-                span_cm = self._control.episode_stage(
-                    ControlPlaneStage.DS_DRIVE,
-                    window,
-                    self._instance.instance_id,
-                    wi.work_item_id,
-                )
-            else:
-                span_cm = self._control.workflow_stage(
-                    ControlPlaneStage.DS_DRIVE, window, self._instance.instance_id
-                )
-            with span_cm:
+            with _drive_span(self, candidate, window):
                 return fn(self, candidate, *args, **kwargs)
 
         return wrapper
