@@ -66,7 +66,7 @@ from ..task.metadata import extract_model_dataset_names
 from ..task.models import TaskRecord, TaskStatus, TaskUsage
 from ..task.runtime import TaskRuntime
 from ..utils.logging import log_node_event, log_worker_event
-from ..utils.time import now_iso
+from ..utils.time import now_iso, ts_to_iso
 from .metrics import MetricsRecorder
 from .port_forward import PortForwardService
 from .watchdog import WorkerWatchdog
@@ -1258,7 +1258,16 @@ class EventMonitor:
         try:
             submitted_at = self._runtime.workflow_submitted_at(workflow_id)
             if submitted_at is not None:
-                self._workflow_span_emitter.emit(workflow_id, submitted_at, now_iso())
+                # The last task's own finish, not the clock: this runs once per
+                # workflow but may run again after a restart, and a durable end makes
+                # the re-emitted span identical to the first rather than merely
+                # deduplicable.
+                closed_at = (
+                    ts_to_iso(record.finished_ts)
+                    if record.finished_ts is not None
+                    else now_iso()
+                )
+                self._workflow_span_emitter.emit(workflow_id, submitted_at, closed_at)
         except Exception as exc:
             self._logger.debug(
                 "Failed to emit the workflow span for %s: %s", workflow_id, exc

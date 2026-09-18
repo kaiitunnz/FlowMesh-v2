@@ -16,6 +16,7 @@ import pytest
 from server.services.monitoring import EventMonitor
 from server.task.models import TaskStatus
 from shared.schemas.event import TaskEvent
+from shared.utils.time import ts_to_iso
 from tests.server.task.test_v2_orchestration import (
     FakeRegistry,
     _register,
@@ -78,9 +79,11 @@ class _RedisMirroringTaskState:
 class _RecordingWorkflowSpanEmitter:
     def __init__(self) -> None:
         self.emitted: list[str] = []
+        self.extents: list[tuple[str, str]] = []
 
     def emit(self, workflow_id: str, submitted_at: str, ended_at: str) -> None:
         self.emitted.append(workflow_id)
+        self.extents.append((submitted_at, ended_at))
 
 
 def _monitor(runtime: Any, redis: Any, emitter: Any) -> EventMonitor:
@@ -212,3 +215,44 @@ async def test_an_already_terminal_task_event_still_closes_the_workflow() -> Non
     assert redis.set_members(f"workflow:{workflow_id}:tasks") == set()
     assert f"workflow:{workflow_id}:logs:closed" in redis.keys
     assert emitter.emitted == [workflow_id]
+
+
+@pytest.mark.anyio
+async def test_the_workflow_span_ends_at_the_last_tasks_recorded_finish() -> None:
+    """The end is read from the ledger, not the clock.
+
+    The detector runs once per workflow but runs again after a restart, so an end taken
+    from wall clock gives the re-emitted span a different duration than the first. Every
+    other synthesized span reads both its ends from durable records; this one must too.
+    """
+    registry = FakeRegistry()
+    runtime = _runtime(registry)
+    workflow_id, ids = await _register(runtime, _CHAIN)
+    head, tail = ids["head"], ids["tail"]
+
+    registry.submitted_at = _TS
+    redis = _RedisMirroringTaskState(runtime, [head, tail])
+    redis.keys[f"workflow:{workflow_id}"] = "1"
+    emitter = _RecordingWorkflowSpanEmitter()
+    monitor = _monitor(runtime, redis, emitter)
+
+    runtime.mark_dispatched(head, cast(Any, _worker()))
+    monitor._handle_task_event(
+        TaskEvent(
+            type="TASK_FAILED",
+            task_id=head,
+            worker_id="wkr-1",
+            error="boom",
+            retryable=False,
+            ts=_TS,
+        )
+    )
+
+    finishes = [
+        record.finished_ts
+        for task_id in (head, tail)
+        if (record := runtime.get_record(task_id)) is not None
+        and record.finished_ts is not None
+    ]
+    assert len(finishes) == 2
+    assert emitter.extents == [(_TS, ts_to_iso(max(finishes)))]
