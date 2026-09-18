@@ -12,7 +12,17 @@ episode, attempt, boundary), bound one per engine. ``WorkflowSpanEmitter`` is th
 owner of the workflow root span, bound once per process and called from the workflow's
 own completion detector rather than from the engine -- workflow status is derived on
 read, so there is no ledger transition to hook for it.
+
+Synthesis is observation, and both emitters are called from inside ledger transitions
+that hold the runtime lock. Two properties keep it that way: every public method
+absorbs its own failures, so no synthesis fault can interrupt a transition mid-mutation;
+and every derivation reads an index kept incrementally over the ledger's append-only
+collections, so no emit walks the whole ledger.
 """
+
+import logging
+from collections.abc import Callable
+from functools import wraps
 
 from opentelemetry.sdk.trace import Tracer as _SdkTracer
 from opentelemetry.sdk.trace import _Span as _SdkSpan
@@ -110,14 +120,60 @@ _OFF_TELEMETRY_CONFIG = TelemetryConfig(
     otlp_endpoint=None,
 )
 
+_logger = logging.getLogger("orchestration-telemetry")
+
 
 class ActivationClassificationError(RuntimeError):
     """An activation's kind and shape match no known span-synthesis rule.
 
-    Raised rather than silently emitting a wrong or missing extent, so a fifth
-    activation class added later fails at synthesis instead of producing a plausible
-    but incorrect trace.
+    Raised rather than silently deriving a wrong or missing extent, so a fifth
+    activation class added later drops its span and logs instead of producing a
+    plausible but incorrect trace.
     """
+
+
+def _absorbs_faults[**P](method: Callable[P, None]) -> Callable[P, None]:
+    """Contain every failure of one span-emitter entry point.
+
+    Each entry point runs inside a ledger transition that has already begun mutating
+    durable state, so an escaping exception would leave the transition half-applied
+    and the workflow wedged. Synthesis is observation: a failure costs a span.
+    """
+
+    @wraps(method)
+    def guarded(*args: P.args, **kwargs: P.kwargs) -> None:
+        try:
+            method(*args, **kwargs)
+        except Exception as exc:
+            _logger.debug("Span synthesis failed in %s: %s", method.__name__, exc)
+
+    return guarded
+
+
+def _keep_earliest(
+    index: dict[str, tuple[int, str]], key: str, stamp: tuple[int, str]
+) -> None:
+    current = index.get(key)
+    if current is None or stamp[0] < current[0]:
+        index[key] = stamp
+
+
+def _keep_latest(
+    index: dict[str, tuple[int, str]], key: str, stamp: tuple[int, str]
+) -> None:
+    current = index.get(key)
+    if current is None or stamp[0] > current[0]:
+        index[key] = stamp
+
+
+def _appended[T](source: dict[str, T], indexed: int) -> list[T]:
+    """The values added to an append-only dict beyond its first ``indexed`` entries."""
+    count = len(source) - indexed
+    if count <= 0:
+        return []
+    cursor = reversed(source)
+    keys = [next(cursor) for _ in range(count)]
+    return [source[key] for key in reversed(keys)]
 
 
 def _iso_to_ns(value: str) -> int:
@@ -208,7 +264,9 @@ class TelemetrySpanEmitter:
         self._invocations: dict[str, Invocation] = {}
         self._trace: list[OrchestrationEvent] = []
         self._released_scopes: set[str] = set()
+        self._reset_indexes()
 
+    @_absorbs_faults
     def attach(
         self,
         *,
@@ -227,7 +285,64 @@ class TelemetrySpanEmitter:
         self._invocations = invocations
         self._trace = trace
         self._released_scopes = released_scopes
+        self._reset_indexes()
         self._rehydrate()
+
+    # ------------------------------------------------------------------ #
+    # Derived indexes over the ledger's append-only collections
+    # ------------------------------------------------------------------ #
+
+    def _reset_indexes(self) -> None:
+        self._trace_seen = 0
+        self._work_items_seen = 0
+        self._scopes_seen = 0
+        self._activations_seen = 0
+        self._ready_by_work_item: dict[str, tuple[int, str]] = {}
+        self._last_by_work_item: dict[str, tuple[int, str]] = {}
+        self._recorded_by_invocation: dict[str, tuple[int, str]] = {}
+        self._last_by_invocation: dict[str, tuple[int, str]] = {}
+        self._work_item_ids_by_activation: dict[str, list[str]] = {}
+        self._scope_by_owner: dict[str, str] = {}
+        self._child_scope_ids: dict[str, list[str]] = {}
+        self._activation_ids_by_scope: dict[str, list[str]] = {}
+
+    def _sync_indexes(self) -> None:
+        for event in self._trace[self._trace_seen :]:
+            stamp = (event.seq, event.at)
+            if event.work_item_id is not None:
+                if event.kind == "work_item_ready":
+                    _keep_earliest(self._ready_by_work_item, event.work_item_id, stamp)
+                _keep_latest(self._last_by_work_item, event.work_item_id, stamp)
+            if event.invocation_id is not None:
+                if event.kind == "boundary_recorded":
+                    _keep_earliest(
+                        self._recorded_by_invocation, event.invocation_id, stamp
+                    )
+                _keep_latest(self._last_by_invocation, event.invocation_id, stamp)
+        self._trace_seen = len(self._trace)
+
+        for wi in _appended(self._work_items, self._work_items_seen):
+            self._work_item_ids_by_activation.setdefault(wi.activation_id, []).append(
+                wi.work_item_id
+            )
+        self._work_items_seen = len(self._work_items)
+
+        for scope in _appended(self._scopes, self._scopes_seen):
+            if scope.owner_activation_id is not None:
+                self._scope_by_owner.setdefault(
+                    scope.owner_activation_id, scope.scope_id
+                )
+            if scope.parent_scope_id is not None:
+                self._child_scope_ids.setdefault(scope.parent_scope_id, []).append(
+                    scope.scope_id
+                )
+        self._scopes_seen = len(self._scopes)
+
+        for activation in _appended(self._activations, self._activations_seen):
+            self._activation_ids_by_scope.setdefault(activation.scope_id, []).append(
+                activation.activation_id
+            )
+        self._activations_seen = len(self._activations)
 
     def _rehydrate(self) -> None:
         if not self._emits(TelemetryLevel.COARSE):
@@ -248,34 +363,15 @@ class TelemetrySpanEmitter:
             and self._config.emits(minimum)
         )
 
-    def _event_ns(
-        self,
-        *,
-        latest: bool,
-        kind: str | None = None,
-        work_item_id: str | None = None,
-        invocation_id: str | None = None,
-    ) -> int | None:
-        matching = [
-            e
-            for e in self._trace
-            if (kind is None or e.kind == kind)
-            and (work_item_id is None or e.work_item_id == work_item_id)
-            and (invocation_id is None or e.invocation_id == invocation_id)
-        ]
-        if not matching:
-            return None
-        chosen = (
-            max(matching, key=lambda e: e.seq)
-            if latest
-            else min(matching, key=lambda e: e.seq)
-        )
-        return _iso_to_ns(chosen.at)
+    def _event_ns(self, index: dict[str, tuple[int, str]], key: str) -> int | None:
+        stamp = index.get(key)
+        return None if stamp is None else _iso_to_ns(stamp[1])
 
     # ------------------------------------------------------------------ #
     # Attempt
     # ------------------------------------------------------------------ #
 
+    @_absorbs_faults
     def emit_attempt(self, attempt: Attempt) -> None:
         if not self._emits(TelemetryLevel.FULL):
             return
@@ -318,9 +414,7 @@ class TelemetrySpanEmitter:
     def _work_item_extent(self, wi: WorkItem) -> tuple[int, int] | None:
         if wi.status not in _TERMINAL_WI:
             return None
-        start_ns = self._event_ns(
-            kind="work_item_ready", work_item_id=wi.work_item_id, latest=False
-        )
+        start_ns = self._event_ns(self._ready_by_work_item, wi.work_item_id)
         if start_ns is None:
             return None
         attempt_ends = [
@@ -328,12 +422,13 @@ class TelemetrySpanEmitter:
             for aid in wi.attempt_ids
             if (a := self._attempts.get(aid)) is not None and a.finished_at is not None
         ]
-        event_end = self._event_ns(work_item_id=wi.work_item_id, latest=True)
+        event_end = self._event_ns(self._last_by_work_item, wi.work_item_id)
         candidates = attempt_ends + ([event_end] if event_end is not None else [])
         if not candidates:
             return None
         return start_ns, max(candidates)
 
+    @_absorbs_faults
     def emit_work_item(self, wi: WorkItem) -> None:
         if not self._emits(TelemetryLevel.COARSE):
             return
@@ -341,6 +436,7 @@ class TelemetrySpanEmitter:
         key = (self._trace_id, span_id)
         if key in self._emitted:
             return
+        self._sync_indexes()
         extent = self._work_item_extent(wi)
         if extent is None:
             return
@@ -379,10 +475,10 @@ class TelemetrySpanEmitter:
         while cursor < len(order):
             current = order[cursor]
             cursor += 1
-            for scope in self._scopes.values():
-                if scope.parent_scope_id == current and scope.scope_id not in seen:
-                    seen.add(scope.scope_id)
-                    order.append(scope.scope_id)
+            for scope_id in self._child_scope_ids.get(current, ()):
+                if scope_id not in seen:
+                    seen.add(scope_id)
+                    order.append(scope_id)
         return order
 
     def _scope_subtree_extent(self, scope_id: str) -> tuple[int, int] | None:
@@ -391,10 +487,8 @@ class TelemetrySpanEmitter:
         starts: list[int] = []
         ends: list[int] = []
         for sid in self._scope_subtree_ids(scope_id):
-            for activation in self._activations.values():
-                if activation.scope_id != sid:
-                    continue
-                extent = self._activation_extent(activation.activation_id)
+            for activation_id in self._activation_ids_by_scope.get(sid, ()):
+                extent = self._activation_extent(activation_id)
                 if extent is not None:
                     starts.append(extent[0])
                     ends.append(extent[1])
@@ -403,14 +497,7 @@ class TelemetrySpanEmitter:
         return min(starts), max(ends)
 
     def _owned_scope_id(self, activation_id: str) -> str | None:
-        return next(
-            (
-                s.scope_id
-                for s in self._scopes.values()
-                if s.owner_activation_id == activation_id
-            ),
-            None,
-        )
+        return self._scope_by_owner.get(activation_id)
 
     def _activation_extent(self, activation_id: str) -> tuple[int, int] | None:
         """(start_ns, end_ns) once closed; ``None`` while still open or extent-less.
@@ -422,7 +509,8 @@ class TelemetrySpanEmitter:
         if activation is None:
             return None
         owned_work_items = [
-            wi for wi in self._work_items.values() if wi.activation_id == activation_id
+            self._work_items[wi_id]
+            for wi_id in self._work_item_ids_by_activation.get(activation_id, ())
         ]
         if owned_work_items:
             extents = [self._work_item_extent(wi) for wi in owned_work_items]
@@ -454,6 +542,7 @@ class TelemetrySpanEmitter:
             return derived_span_id(SpanIdKind.ACTIVATION, scope.owner_activation_id)
         return derived_span_id(SpanIdKind.WORKFLOW, self._workflow_id)
 
+    @_absorbs_faults
     def emit_activation(self, activation_id: str) -> None:
         if not self._emits(TelemetryLevel.FINE):
             return
@@ -464,6 +553,7 @@ class TelemetrySpanEmitter:
         activation = self._activations.get(activation_id)
         if activation is None:
             return
+        self._sync_indexes()
         extent = self._activation_extent(activation_id)
         if extent is None:
             return
@@ -497,6 +587,7 @@ class TelemetrySpanEmitter:
     # Boundary (invocation)
     # ------------------------------------------------------------------ #
 
+    @_absorbs_faults
     def emit_boundary(self, invocation: Invocation) -> None:
         if not self._emits(TelemetryLevel.FINE):
             return
@@ -506,14 +597,13 @@ class TelemetrySpanEmitter:
         key = (self._trace_id, span_id)
         if key in self._emitted:
             return
+        self._sync_indexes()
         start_ns = self._event_ns(
-            kind="boundary_recorded",
-            invocation_id=invocation.invocation_id,
-            latest=False,
+            self._recorded_by_invocation, invocation.invocation_id
         )
         if start_ns is None:
             return
-        end_ns = self._event_ns(invocation_id=invocation.invocation_id, latest=True)
+        end_ns = self._event_ns(self._last_by_invocation, invocation.invocation_id)
         if end_ns is None:
             return
         parent_span_id = derived_span_id(SpanIdKind.WORK_ITEM, invocation.work_item_id)
@@ -554,6 +644,7 @@ class WorkflowSpanEmitter:
         self._tracer = tracer
         self._config = config
 
+    @_absorbs_faults
     def emit(self, workflow_id: str, submitted_at: str, closed_at: str) -> None:
         if (
             self._tracer is None

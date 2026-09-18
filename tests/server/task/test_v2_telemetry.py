@@ -556,8 +556,14 @@ def test_loop_iteration_activation_produces_no_span_and_does_not_raise() -> None
 # --------------------------------------------------------------------------- #
 
 
-def test_classification_guard_raises_on_an_unrecognized_activation_kind() -> None:
-    tracer, _exporter, config = recording_tracer(TelemetryLevel.FULL)
+def test_an_unclassifiable_activation_drops_its_span_instead_of_raising() -> None:
+    """The guard still refuses to guess a shape, and the refusal stays inside telemetry.
+
+    ``attach()`` rehydrates every activation eagerly, at engine construction. A raise
+    there would make a workflow holding one unclassifiable activation unrestartable,
+    so the emitter absorbs it: the activation simply has no span.
+    """
+    tracer, exporter, config = recording_tracer(TelemetryLevel.FULL)
     emitter = TelemetrySpanEmitter(tracer, config, _WORKFLOW_ID)
     mystery = Activation(
         activation_id="act-mystery",
@@ -566,19 +572,19 @@ def test_classification_guard_raises_on_an_unrecognized_activation_kind() -> Non
         operator_id="op-mystery",
         kind="mystery",
     )
-    # attach() itself rehydrates every activation eagerly, so an unclassifiable one
-    # raises at attach time -- i.e. at engine construction -- not only on a later
-    # explicit emit_activation() call.
+    emitter.attach(
+        activations={mystery.activation_id: mystery},
+        scopes={},
+        work_items={},
+        attempts={},
+        invocations={},
+        trace=[],
+        released_scopes=set(),
+    )
+
+    assert _spans_named(exporter, SPAN_OPERATOR) == []
     with pytest.raises(ActivationClassificationError):
-        emitter.attach(
-            activations={mystery.activation_id: mystery},
-            scopes={},
-            work_items={},
-            attempts={},
-            invocations={},
-            trace=[],
-            released_scopes=set(),
-        )
+        emitter._activation_extent(mystery.activation_id)  # noqa: SLF001
 
 
 # --------------------------------------------------------------------------- #
