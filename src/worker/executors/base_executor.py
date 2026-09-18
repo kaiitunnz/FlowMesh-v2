@@ -29,7 +29,7 @@ Contract:
 import json
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, ClassVar, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
 from shared.schemas.result import BaseExecutorResult
 from shared.tasks import MergedChildTaskStrict
@@ -37,9 +37,14 @@ from shared.tasks.specs import TaskSpecStrictBase
 from shared.tasks.task_type import TaskType
 from shared.tasks.worker_message import WorkerHardware, WorkerTaskMessage
 from worker.config import WorkerConfig
-from worker.egress import PendingEgressRequestStore
-from worker.lifecycle import Lifecycle
-from worker.resident import ResidentRequestStore
+
+if TYPE_CHECKING:
+    # worker.egress, worker.resident and worker.lifecycle all reach this module
+    # through worker.executors, so importing any of them here at runtime closes a
+    # cycle. All three are only ever annotations.
+    from worker.egress import PendingEgressRequestStore
+    from worker.lifecycle import Lifecycle
+    from worker.resident import ResidentRequestStore
 
 type ExecutorTask = WorkerTaskMessage
 type TaskReference = WorkerTaskMessage | MergedChildTaskStrict
@@ -79,7 +84,7 @@ class Executor(ABC):
         self,
         config: WorkerConfig,
         hardware: WorkerHardware | None = None,
-        lifecycle: Lifecycle | None = None,
+        lifecycle: "Lifecycle | None" = None,
     ) -> None:
         super().__init__()
         self._config = config
@@ -106,7 +111,7 @@ class Executor(ABC):
         if self._lifecycle is not None:
             self._lifecycle.notify_task_update(task_id, payload)
 
-    def _pending_egress_requests(self) -> PendingEgressRequestStore:
+    def _pending_egress_requests(self) -> "PendingEgressRequestStore":
         """The worker-private store for captured, not-yet-executed egress requests.
 
         Raises if no lifecycle was injected, so a misconfigured worker fails cleanly
@@ -116,7 +121,7 @@ class Executor(ABC):
             raise ExecutionError("executor has no worker lifecycle")
         return self._lifecycle.pending_egress_requests
 
-    def _resident_requests(self) -> ResidentRequestStore:
+    def _resident_requests(self) -> "ResidentRequestStore":
         """The worker-private store for a captured resident boundary's raw request."""
         if self._lifecycle is None:
             raise ExecutionError("executor has no worker lifecycle")
