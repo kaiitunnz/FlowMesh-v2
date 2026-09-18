@@ -1636,8 +1636,6 @@ class TaskRuntime:
 
         Stamped post-mint: the boundary span id derives from the permit's own
         ``invocation_id``, which does not exist as an object until minting returns.
-        When telemetry is off the key is popped rather than serialized as ``null`` —
-        the wire carries zero bytes for it, not an empty one.
         """
         if self._control.enabled:
             permit = permit.model_copy(
@@ -1648,10 +1646,7 @@ class TaskRuntime:
                     )
                 }
             )
-        payload = permit.model_dump(mode="json")
-        if permit.traceparent is None:
-            payload.pop("traceparent", None)
-        return payload
+        return permit.model_dump(mode="json")
 
     def _dispatch_worker_originated_op(self, env: ToolInvocationEnvelope) -> None:
         """Mint a permit and relay a boundary's egress operation to its origin worker.
