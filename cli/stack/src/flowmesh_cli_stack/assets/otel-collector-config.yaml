@@ -36,6 +36,14 @@ processors:
       - context: span
         statements:
           - keep_matching_keys(span.attributes, "^flowmesh\\.(logical|physical|gpu)\\.|^flowmesh\\.(node_id|worker_id|role)$")
+          # A span's status message and its events are the two fields no instrumentation
+          # site names: OTel writes an exception's message and stacktrace into both by
+          # default. Producers suppress that at the span, and this drops it again here,
+          # so a span reaching the store carries no free text whatever produced it.
+          - set(span.status.message, "")
+      - context: spanevent
+        statements:
+          - keep_matching_keys(spanevent.attributes, "^flowmesh\\.(logical|physical|gpu)\\.|^flowmesh\\.(node_id|worker_id|role)$")
     metric_statements:
       - context: datapoint
         statements:
@@ -45,8 +53,8 @@ processors:
     timeout: 5s
 
 connectors:
-  # Derives the per-stage duration histogram from flowmesh.control.* spans. Zero producer
-  # change: T1 emits spans only, this connector is what turns them into a metric.
+  # Derives the per-stage duration histogram from flowmesh.control.* spans: producers
+  # emit spans only, and this connector is what turns them into a metric.
   span_metrics:
     namespace: flowmesh
     histogram:

@@ -39,6 +39,7 @@ from opentelemetry.sdk.trace.id_generator import IdGenerator, RandomIdGenerator
 
 from shared.schemas.governance import SpanType
 from shared.telemetry.config import TelemetryConfig, TelemetryLevel
+from shared.telemetry.provider import PayloadFreeSpanExporter
 from shared.utils.ids import PREFIX_WORKFLOW
 
 _HEX_ONLY = re.compile(r"[^0-9a-f]")
@@ -166,9 +167,11 @@ def _ensure_tracer_provider() -> None:
         if emits(TelemetryLevel.COARSE) and _telemetry_config.otlp_endpoint:
             provider.add_span_processor(
                 BatchSpanProcessor(
-                    OTLPSpanExporter(
-                        endpoint=_telemetry_config.otlp_endpoint,
-                        timeout=_otlp_timeout_sec,
+                    PayloadFreeSpanExporter(
+                        OTLPSpanExporter(
+                            endpoint=_telemetry_config.otlp_endpoint,
+                            timeout=_otlp_timeout_sec,
+                        )
                     )
                 )
             )

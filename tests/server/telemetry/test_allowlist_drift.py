@@ -58,8 +58,12 @@ def _allowlist_patterns() -> list[str]:
                 match = re.search(
                     r'keep_matching_keys\([^,]+,\s*"((?:[^"\\]|\\.)*)"\)', statement
                 )
-                assert match, f"could not find keep_matching_keys(...) in: {statement}"
+                # The allowlist also carries statements that clear a field outright
+                # rather than filter its keys; only key filters have a pattern to drift.
+                if match is None:
+                    continue
                 patterns.append(match.group(1).replace("\\\\", "\\"))
+    assert patterns, "the allowlist should declare at least one key filter"
     return patterns
 
 

@@ -27,7 +27,7 @@ from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapProp
 
 from .config import TelemetryConfig, TelemetryLevel
 from .ids import SpanIdKind, derived_span_id, workflow_to_trace_id_int
-from .provider import build_tracer
+from .provider import build_tracer, payload_free_span
 from .semconv import (
     PHYSICAL_STAGE,
     PHYSICAL_WINDOW,
@@ -128,8 +128,8 @@ class ControlPlaneTracer:
         if window is not None:
             attrs[PHYSICAL_WINDOW] = str(window)
         attrs.update(attributes)
-        return self._tracer.start_as_current_span(
-            control_span_name(stage), context=context, attributes=attrs
+        return payload_free_span(
+            self._tracer, control_span_name(stage), context=context, attributes=attrs
         )
 
     def workflow_stage(

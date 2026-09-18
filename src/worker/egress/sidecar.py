@@ -29,6 +29,7 @@ from opentelemetry.trace import Span
 from shared.outcome import FabricContentStore, OutcomeManifest
 from shared.telemetry.config import TelemetryLevel
 from shared.telemetry.propagation import extract_context
+from shared.telemetry.provider import payload_free_span
 from shared.telemetry.semconv import (
     PHYSICAL_INVOCATION_ID,
     PHYSICAL_PERMIT_ID,
@@ -176,8 +177,11 @@ class MediatedEgressSidecar:
                 PHYSICAL_PERMIT_ID: permit.permit_id,
             }
         )
-        with _otel.get_tracer().start_as_current_span(
-            SPAN_EGRESS, context=parent_context, attributes=attributes
+        with payload_free_span(
+            _otel.get_tracer(),
+            SPAN_EGRESS,
+            context=parent_context,
+            attributes=attributes,
         ) as span:
             yield span
 

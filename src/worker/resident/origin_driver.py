@@ -50,6 +50,7 @@ from shared.resident.wire import (
 from shared.schemas.network import Transport
 from shared.telemetry.config import TelemetryLevel
 from shared.telemetry.propagation import extract_context
+from shared.telemetry.provider import payload_free_span
 from shared.telemetry.semconv import PHYSICAL_INVOCATION_ID, transport_span_name
 
 from ..executors.mixins import _otel
@@ -182,8 +183,8 @@ class ResidentOriginDriver:
             {PHYSICAL_INVOCATION_ID: req.handoff.invocation_id}
         )
         span_name = transport_span_name(Transport(req.carriage_plan.selected_transport))
-        with _otel.get_tracer().start_as_current_span(
-            span_name, context=parent_context, attributes=attributes
+        with payload_free_span(
+            _otel.get_tracer(), span_name, context=parent_context, attributes=attributes
         ) as span:
             yield span
 

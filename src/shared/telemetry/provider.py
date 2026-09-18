@@ -6,20 +6,27 @@ Each process calls ``build_tracer`` / ``build_meter`` once, from its own
 global provider.
 """
 
-from collections.abc import Mapping
-from contextlib import AbstractContextManager, nullcontext
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 
+from opentelemetry.context import Context
 from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 from opentelemetry.metrics import Meter, NoOpMeter
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import MetricReader, PeriodicExportingMetricReader
 from opentelemetry.sdk.resources import Resource
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
+from opentelemetry.sdk.trace.export import (
+    BatchSpanProcessor,
+    SpanExporter,
+    SpanExportResult,
+)
 from opentelemetry.trace import INVALID_SPAN, Span, Tracer
+from opentelemetry.trace.status import Status, StatusCode
 
 from .config import TelemetryConfig, TelemetryLevel
+from .semconv import PHYSICAL_ERROR_TYPE
 
 _TRACER_NAME = "flowmesh"
 _METER_NAME = "flowmesh"
@@ -49,6 +56,78 @@ class _NullTracer(Tracer):
 _NULL_TRACER = _NullTracer()
 
 
+def _without_free_text(span: ReadableSpan) -> ReadableSpan:
+    if not span.events and not span.status.description:
+        return span
+    return ReadableSpan(
+        name=span.name,
+        context=span.get_span_context(),
+        parent=span.parent,
+        resource=span.resource,
+        attributes=span.attributes,
+        events=(),
+        links=span.links,
+        kind=span.kind,
+        status=Status(span.status.status_code),
+        start_time=span.start_time,
+        end_time=span.end_time,
+        instrumentation_scope=span.instrumentation_scope,
+    )
+
+
+class PayloadFreeSpanExporter(SpanExporter):
+    """Exports through ``exporter`` with the two untyped span fields removed.
+
+    A span's attributes are chosen one key at a time by the site that sets them, but
+    an exception crossing an instrumented block writes its message and stacktrace into
+    a span event and a status description without any site naming them. Both are
+    dropped here, as the span leaves the process, so that what a raise site happens to
+    put in an exception message cannot decide whether a payload reaches the store.
+    """
+
+    def __init__(self, exporter: SpanExporter) -> None:
+        self._exporter = exporter
+
+    def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
+        return self._exporter.export([_without_free_text(span) for span in spans])
+
+    def shutdown(self) -> None:
+        self._exporter.shutdown()
+
+    def force_flush(self, timeout_millis: int = 30000) -> bool:
+        return self._exporter.force_flush(timeout_millis)
+
+
+@contextmanager
+def payload_free_span(
+    tracer: Tracer,
+    name: str,
+    *,
+    context: Context | None = None,
+    attributes: Mapping[str, str] | None = None,
+) -> Iterator[Span]:
+    """Open a span that records a failure's type and never its text.
+
+    OTel's defaults write an exception's message and stacktrace into a span event and
+    its status description. A failure is worth recording, so the span is still marked
+    ERROR and carries the exception's class name, which is fixed by the code rather
+    than built from whatever the raise site had in hand.
+    """
+    with tracer.start_as_current_span(
+        name,
+        context=context,
+        attributes=attributes,
+        record_exception=False,
+        set_status_on_exception=False,
+    ) as span:
+        try:
+            yield span
+        except Exception as exc:
+            span.set_attribute(PHYSICAL_ERROR_TYPE, type(exc).__name__)
+            span.set_status(Status(StatusCode.ERROR))
+            raise
+
+
 def _traces_active(config: TelemetryConfig) -> bool:
     return config.traces_enabled and config.emits(TelemetryLevel.COARSE)
 
@@ -74,8 +153,10 @@ def build_tracer(
     if config.otlp_endpoint:
         provider.add_span_processor(
             BatchSpanProcessor(
-                OTLPSpanExporter(
-                    endpoint=config.otlp_endpoint, timeout=otlp_timeout_sec
+                PayloadFreeSpanExporter(
+                    OTLPSpanExporter(
+                        endpoint=config.otlp_endpoint, timeout=otlp_timeout_sec
+                    )
                 )
             )
         )

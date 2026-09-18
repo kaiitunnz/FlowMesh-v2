@@ -35,6 +35,7 @@ from shared.tasks.specs import (
 from shared.tasks.worker_message import HardwareUsage, WorkerHardware, WorkerTaskMessage
 from shared.telemetry.config import TelemetryConfig, TelemetryLevel
 from shared.telemetry.propagation import extract_context
+from shared.telemetry.provider import payload_free_span
 from shared.telemetry.semconv import (
     LOGICAL_WORKFLOW_ID,
     PHYSICAL_TASK_ID,
@@ -463,8 +464,11 @@ class Runner:
             }
         )
         with _otel.workflow_trace_context(msg.workflow_id):
-            with _otel.get_tracer().start_as_current_span(
-                SPAN_TASK, context=parent_context, attributes=attributes
+            with payload_free_span(
+                _otel.get_tracer(),
+                SPAN_TASK,
+                context=parent_context,
+                attributes=attributes,
             ):
                 return executor.run(msg, out_dir)
 
