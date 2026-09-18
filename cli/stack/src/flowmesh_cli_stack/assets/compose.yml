@@ -185,13 +185,6 @@ services:
       retries: 3
       start_period: 40s
 
-  # Optional telemetry profile: an OTel Collector plus a ClickHouse store for the
-  # flowmesh.* trace/metric substrate. Absent unless the `telemetry` profile is
-  # selected (e.g. COMPOSE_PROFILES=telemetry in .env) -- the core stack above is
-  # unaffected by these two services existing. The server's TelemetryStore reads
-  # ClickHouse directly; the Collector only ever writes to it (see
-  # otel-collector-config.yaml). TELEMETRY_CLICKHOUSE_DSN may point at an external /
-  # bring-your-own ClickHouse instead of the bundled `clickhouse` service below.
   otel_collector:
     image: otel/opentelemetry-collector-contrib:0.161.0
     profiles: [telemetry]

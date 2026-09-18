@@ -69,22 +69,11 @@ flowmesh trace tree <wfl-id>
 flowmesh trace aggregate --metric <name> --group-by flowmesh.worker_id --stat p95
 ```
 
-`trace tree` prints the workflow's spans as an indented tree, one line per
-span with its duration and the ids identifying its level; `--json` prints the
-same tree with both the logical and the physical attribute views intact. A
-workflow with no recorded spans prints an empty tree.
-
-`trace aggregate` rolls one metric up by one attribute key. `--stat` accepts
-`count`, `sum`, `avg`, `min`, `max`, `p50`, `p95`, or `p99`; `--kind` selects
-`gauge` (the default) or `histogram`. A histogram holds bucket counts rather
-than the observations behind them, so `--stat min` and `--stat max` are
-rejected there and a percentile is resolved to the width of the bucket it falls
-in. An aggregate is fleet-wide — no metric carries a workflow id — so it takes a
-system-admin right; read a workflow's own telemetry from its span tree.
-
-Both commands read through the server, which queries the telemetry store, and
-report that telemetry querying is unavailable where a deployment has no store
-configured.
+`trace tree` prints a workflow's spans as an indented tree. `trace aggregate`
+rolls one metric up by one attribute key, with `--stat` selecting
+`count`/`sum`/`avg`/`min`/`max`/`p50`/`p95`/`p99` and `--kind` selecting
+`gauge` or `histogram`. See [`TELEMETRY.md`](TELEMETRY.md) for the query
+surface, span/attribute semantics, and access scope.
 
 ## Local stack lifecycle
 

@@ -441,15 +441,12 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
 - **Cluster telemetry.** A workflow emits one OpenTelemetry trace spanning the processes
   that act on it — the root server's control plane and each worker that runs a task,
   with a supervisor relaying frames it never decodes and so never records — with a
-  `trace_id` every producer derives
-  from the `workflow_id` by the same pure function, so they agree with no coordination
-  and a trace survives a restart. Context crosses each hop in that hop's own metadata,
-  never in a payload body. Spans carry ids and digests only, and telemetry is
-  observation: nothing it records is read by admission, credit release, embodiment
-  selection, dispatch or recovery, and it writes nothing to the orchestration ledger.
-  Spans and metrics export over OTLP to a collector, and are read back through the
-  server behind a store port the CLI and SDK never bypass. Off by default; enable with
-  `SERVER_METRICS_TELEMETRY_LEVEL`. See [`TELEMETRY.md`](TELEMETRY.md).
+  `trace_id` every producer derives from the `workflow_id` by the same pure function, so
+  they agree with no coordination and a trace survives a restart. Spans carry ids only,
+  and telemetry is observation: nothing it records is read by admission, credit release,
+  embodiment selection, dispatch or recovery, and it writes nothing to the orchestration
+  ledger. Off by default; enable with `SERVER_METRICS_TELEMETRY_LEVEL`. See
+  [`TELEMETRY.md`](TELEMETRY.md).
 - **Redis channels.** The runtime uses three namespaces:
   - `flowmesh:control:*` — control plane (task assignments,
     cancellations, worker lifecycle).

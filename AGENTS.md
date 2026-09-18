@@ -51,9 +51,8 @@ and artifacts.
   loader semantics (`FLOWMESH_PLUGINS`), and a worked example.
 - **[`docs/TELEMETRY.md`](docs/TELEMETRY.md)** — the OpenTelemetry trace and
   metric substrate: the `SERVER_METRICS_*` knob and its `off`-is-free
-  discipline, trace and span identity, the span tree and its attribute
-  namespaces, context propagation across process hops, the collector and
-  store deployment, and the query surface.
+  discipline, trace and span identity and the span tree, and the query
+  surface.
 
 Concrete examples and runnable workflows live in `examples/templates/`.
 When code, APIs, CLI commands, SDK methods, env vars, workflow formats, or
