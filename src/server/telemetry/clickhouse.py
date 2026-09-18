@@ -152,7 +152,7 @@ class ClickHouseTelemetryStore(TelemetryStore):
                 ResourceAttributes, SpanAttributes
             FROM {_TRACES_TABLE} FINAL
             WHERE TraceId = {{trace_id:String}}
-            """,
+            """,  # nosec B608 - table name is a module constant; trace_id is a bound param
             {"trace_id": trace_id},
         )
         spans: list[SpanRow] = []
@@ -222,7 +222,7 @@ class ClickHouseTelemetryStore(TelemetryStore):
             WHERE {" AND ".join(where)}
             GROUP BY group_value
             ORDER BY group_value
-            """,
+            """,  # nosec B608 - table and stat come from closed maps; values are bound params
             params,
         )
         return [
