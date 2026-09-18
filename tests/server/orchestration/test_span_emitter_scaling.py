@@ -21,33 +21,66 @@ from tests.server.orchestration.helpers import (
     spawning_agent_bundle,
 )
 
-_CHILDREN = 1500
+_CHILDREN = 750
 
-# A per-settle rescan reads the whole trace each time, so the records it touches grow
-# with the square of the region's width -- around a million at this one. A bound that
-# is generous per settle is still three orders of magnitude below that.
-_MAX_RECORDS_READ_PER_SETTLE = 40
+# Doubling the width of a region doubles the work a linear emitter does and quadruples
+# a scanning one, so the ratio separates them whatever the absolute counts are -- and
+# it stays honest if someone adds another collection the emitter walks.
+_MAX_GROWTH_FACTOR = 3.0
+
+
+class _Reads:
+    """Shared tally of ledger records read, across every collection the emitter walks.
+
+    The cost this guards is algorithmic, so it is asserted as work done rather than as
+    elapsed time: a wall-clock bound on a shared machine measures the machine. It must
+    count every attached collection, because the quadratic had two halves -- rescans of
+    the event trace, and scans of the work-item and activation dicts.
+    """
+
+    def __init__(self) -> None:
+        self.count = 0
 
 
 class _CountingTrace(list):
-    """A ledger trace that counts the records read from it.
-
-    The cost this guards is algorithmic, so it is asserted as work done rather than as
-    elapsed time: a wall-clock bound on a shared machine measures the machine.
-    """
-
-    def __init__(self, *args: Any) -> None:
+    def __init__(self, reads: _Reads, *args: Any) -> None:
         super().__init__(*args)
-        self.records_read = 0
+        self._reads = reads
 
     def __iter__(self) -> Any:
-        self.records_read += len(self)
+        self._reads.count += len(self)
         return super().__iter__()
+
+    def __reversed__(self) -> Any:
+        self._reads.count += len(self)
+        return super().__reversed__()
 
     def __getitem__(self, index: Any) -> Any:
         item = super().__getitem__(index)
-        self.records_read += len(item) if isinstance(index, slice) else 1
+        self._reads.count += len(item) if isinstance(index, slice) else 1
         return item
+
+
+class _CountingDict(dict):
+    def __init__(self, reads: _Reads, *args: Any) -> None:
+        super().__init__(*args)
+        self._reads = reads
+
+    def __iter__(self) -> Any:
+        self._reads.count += len(self)
+        return super().__iter__()
+
+    def values(self) -> Any:
+        self._reads.count += len(self)
+        return super().values()
+
+    def items(self) -> Any:
+        self._reads.count += len(self)
+        return super().items()
+
+    def __getitem__(self, key: Any) -> Any:
+        self._reads.count += 1
+        return super().__getitem__(key)
 
 
 def _spawn_children(eng: OrchestrationEngine, count: int) -> list[str]:
@@ -79,53 +112,65 @@ def _seal(eng: OrchestrationEngine) -> None:
     )
 
 
-def _drive(level: TelemetryLevel) -> tuple[int, int, int]:
+def _drive(level: TelemetryLevel, children_count: int) -> tuple[int, int, int]:
     """Records read during the settle loop and during the seal, plus spans emitted."""
     span_emitter, exporter = emitter(level)
     eng = engine(spawning_agent_bundle(), emitter=span_emitter)
-    # The emitter reads the trace list the engine handed it at attach, so the counting
-    # list has to replace that one before anything binds to it.
-    trace = _CountingTrace(eng._trace)  # noqa: SLF001 - test instrumentation
-    eng._trace = trace  # noqa: SLF001 - test instrumentation
+    reads = _Reads()
+    # The emitter reads the collections the engine handed it at attach, so the counting
+    # ones have to replace those before anything binds to them.
+    eng._trace = _CountingTrace(reads, eng._trace)  # noqa: SLF001 - instrumentation
+    eng._work_items = _CountingDict(reads, eng._work_items)  # noqa: SLF001
+    eng._activations = _CountingDict(reads, eng._activations)  # noqa: SLF001
+    eng._scopes = _CountingDict(reads, eng._scopes)  # noqa: SLF001
     span_emitter.attach(
         activations=eng._activations,  # noqa: SLF001 - test instrumentation
         scopes=eng._scopes,  # noqa: SLF001 - test instrumentation
         work_items=eng._work_items,  # noqa: SLF001 - test instrumentation
         attempts=eng._attempts,  # noqa: SLF001 - test instrumentation
         invocations=eng._invocations,  # noqa: SLF001 - test instrumentation
-        trace=trace,
+        trace=eng._trace,  # noqa: SLF001 - test instrumentation
         released_scopes=eng._released_scopes,  # noqa: SLF001 - test instrumentation
     )
-    children = _spawn_children(eng, _CHILDREN)
-    assert len(children) == _CHILDREN
+    children = _spawn_children(eng, children_count)
+    assert len(children) == children_count
 
-    before = trace.records_read
+    before = reads.count
     for child in children:
         eng.on_dispatched(child, "w1")
         eng.on_succeeded(child)
-    settle = trace.records_read - before
+    settle = reads.count - before
 
-    before = trace.records_read
+    before = reads.count
     _seal(eng)
-    seal = trace.records_read - before
+    seal = reads.count - before
     return settle, seal, len(exporter.get_finished_spans())
 
 
-def test_settling_a_wide_region_reads_the_ledger_a_bounded_number_of_times() -> None:
-    quiet_settle, quiet_seal, quiet_spans = _drive(TelemetryLevel.OFF)
-    traced_settle, traced_seal, traced_spans = _drive(TelemetryLevel.FINE)
+def _traced_reads(children_count: int) -> tuple[int, int]:
+    """The settle and seal reads telemetry adds, over the same run with it off."""
+    quiet_settle, quiet_seal, quiet_spans = _drive(TelemetryLevel.OFF, children_count)
+    traced_settle, traced_seal, traced_spans = _drive(
+        TelemetryLevel.FINE, children_count
+    )
 
     assert quiet_spans == 0
-    assert traced_spans > _CHILDREN, "the traced run must really synthesize spans"
+    assert traced_spans > children_count, "the traced run must really synthesize spans"
+    return traced_settle - quiet_settle, traced_seal - quiet_seal
 
-    budget = _MAX_RECORDS_READ_PER_SETTLE * _CHILDREN
-    assert traced_settle - quiet_settle < budget, (
-        f"settling {_CHILDREN} children read {traced_settle - quiet_settle} extra "
-        f"ledger records at fine, over a {budget} budget"
+
+def test_span_synthesis_reads_the_ledger_linearly_in_a_regions_width() -> None:
+    narrow_settle, narrow_seal = _traced_reads(_CHILDREN)
+    wide_settle, wide_seal = _traced_reads(_CHILDREN * 2)
+
+    assert narrow_settle > 0 and narrow_seal > 0, "sanity: telemetry reads something"
+    assert wide_settle < _MAX_GROWTH_FACTOR * narrow_settle, (
+        f"doubling the region grew settle reads {narrow_settle} -> {wide_settle}, "
+        "which is superlinear"
     )
-    assert traced_seal - quiet_seal < budget, (
-        f"sealing a {_CHILDREN}-child region read {traced_seal - quiet_seal} extra "
-        f"ledger records at fine, over a {budget} budget"
+    assert wide_seal < _MAX_GROWTH_FACTOR * narrow_seal, (
+        f"doubling the region grew seal reads {narrow_seal} -> {wide_seal}, "
+        "which is superlinear"
     )
 
 

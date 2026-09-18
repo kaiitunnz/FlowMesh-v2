@@ -138,8 +138,12 @@ def test_ledger_snapshot_ignores_a_foreign_trace_ambient_span() -> None:
 
 
 def test_boundary_stage_uses_the_supplied_trace_id_not_a_workflow_derivation() -> None:
-    """A boundary may belong to a serve invocation, which owns no workflow_id."""
-    control, exporter = recording_control_tracer(TelemetryLevel.COARSE)
+    """A boundary may belong to a serve invocation, which owns no workflow_id.
+
+    Driven at ``fine`` because that is where a boundary stage emits: it parents on the
+    invocation span, which is synthesized at that level and no lower.
+    """
+    control, exporter = recording_control_tracer(TelemetryLevel.FINE)
     serve_trace_id = serve_trace_id_int("tsk-serve", "req-1")
 
     with control.boundary_stage(

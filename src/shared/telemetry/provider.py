@@ -22,11 +22,18 @@ from opentelemetry.sdk.trace.export import (
     SpanExporter,
     SpanExportResult,
 )
-from opentelemetry.sdk.trace.sampling import ParentBased, TraceIdRatioBased
+from opentelemetry.sdk.trace.sampling import (
+    Decision,
+    ParentBased,
+    Sampler,
+    SamplingResult,
+)
 from opentelemetry.trace import INVALID_SPAN, Span, Tracer
 from opentelemetry.trace.status import Status, StatusCode
+from opentelemetry.util.types import Attributes
 
 from .config import TelemetryConfig, TelemetryLevel
+from .ids import trace_sampled
 from .semconv import PHYSICAL_ERROR_TYPE
 
 _TRACER_NAME = "flowmesh"
@@ -129,6 +136,35 @@ def payload_free_span(
             raise
 
 
+class _WorkflowRatioSampler(Sampler):
+    """Samples a live span by the same decision the synthesized spans use.
+
+    The SDK's own ratio sampler reads the low 64 bits of the trace id, which a
+    workflow-derived id does not distribute uniformly. Sharing one predicate is also
+    what keeps a live span and a span synthesized from the ledger on the same side of
+    the decision, so a traced workflow is traced whole.
+    """
+
+    def __init__(self, ratio: float) -> None:
+        self._ratio = ratio
+
+    def should_sample(
+        self,
+        parent_context: Context | None,
+        trace_id: int,
+        name: str,
+        *args: object,
+        attributes: Attributes = None,
+        **kwargs: object,
+    ) -> SamplingResult:
+        sampled = trace_sampled(self._ratio, trace_id)
+        decision = Decision.RECORD_AND_SAMPLE if sampled else Decision.DROP
+        return SamplingResult(decision, attributes if sampled else None)
+
+    def get_description(self) -> str:
+        return f"FlowMeshWorkflowRatio{{{self._ratio}}}"
+
+
 def _traces_active(config: TelemetryConfig) -> bool:
     return config.traces_enabled and config.emits(TelemetryLevel.COARSE)
 
@@ -152,7 +188,7 @@ def build_tracer(
         return _NULL_TRACER
     provider = TracerProvider(
         resource=Resource.create(dict(resource_attributes)),
-        sampler=ParentBased(root=TraceIdRatioBased(max(config.sample_ratio, 0.0))),
+        sampler=ParentBased(root=_WorkflowRatioSampler(config.sample_ratio)),
     )
     if config.otlp_endpoint:
         provider.add_span_processor(

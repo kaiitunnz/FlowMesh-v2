@@ -64,7 +64,7 @@ class TelemetryConfig:
             level=level,
             traces_enabled=parse_bool_env("SERVER_METRICS_TRACES_ENABLED", True),
             metrics_enabled=parse_bool_env("SERVER_METRICS_METRICS_ENABLED", True),
-            sample_ratio=parse_float_env("SERVER_METRICS_TRACE_SAMPLE_RATIO", 1.0),
+            sample_ratio=_sample_ratio(),
             otlp_endpoint=_otlp_endpoint(),
         )
 
@@ -85,3 +85,19 @@ def _otlp_endpoint() -> str | None:
             f"(got {endpoint!r}); use http://<host>:4317 for a plaintext collector."
         )
     return endpoint
+
+
+def _sample_ratio() -> float:
+    """The configured trace sample ratio, refused outside ``[0.0, 1.0]``.
+
+    Every process parses this independently, so a value one of them would clamp and
+    another would reject is a deployment where the root and its workers disagree about
+    which workflows are traced. Refusing at the edge keeps that disagreement impossible.
+    """
+    ratio = parse_float_env("SERVER_METRICS_TRACE_SAMPLE_RATIO", 1.0)
+    if not 0.0 <= ratio <= 1.0:
+        raise ValueError(
+            "SERVER_METRICS_TRACE_SAMPLE_RATIO must be between 0.0 and 1.0 "
+            f"(got {ratio!r})."
+        )
+    return ratio

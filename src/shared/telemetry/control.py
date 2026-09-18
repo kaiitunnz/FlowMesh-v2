@@ -205,11 +205,17 @@ class ControlPlaneTracer:
         span). ``trace_id`` is supplied by the caller rather than derived from a
         ``workflow_id`` here, because a boundary may belong to a gated serve request
         that owns no workflow and roots its own trace instead.
+
+        Gated to ``fine``: the invocation span these parent on is synthesized at that
+        level, so emitting them below it would leave three spans hanging off a parent
+        no level ever exported.
         """
-        if not self._should_emit(stage):
+        if not self._should_emit(stage) or not self._config.emits(TelemetryLevel.FINE):
             return _NULL_SPAN
         context = _explicit_parent(
-            trace_id, derived_span_id(SpanIdKind.INVOCATION, invocation_id)
+            trace_id,
+            derived_span_id(SpanIdKind.INVOCATION, invocation_id),
+            trace_sampled(self._config.sample_ratio, trace_id),
         )
         return self._open(stage, window, context, attributes)
 
