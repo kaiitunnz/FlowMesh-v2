@@ -263,11 +263,7 @@ class SupervisorClient:
         )
         self._send_event(event)
 
-    def task_update(
-        self,
-        task_id: str,
-        payload: dict[str, Any],
-    ) -> None:
+    def task_update(self, task_id: str, payload: dict[str, Any]) -> None:
         event = TaskEvent(
             type="TASK_UPDATE",
             worker_id=self.worker_id,
@@ -294,9 +290,7 @@ class SupervisorClient:
         self._send_event(event)
 
     def task_succeeded(
-        self,
-        task_id: str,
-        metadata: dict[str, Any] | None = None,
+        self, task_id: str, metadata: dict[str, Any] | None = None
     ) -> None:
         event = TaskEvent(
             type="TASK_SUCCEEDED",
@@ -329,9 +323,7 @@ class SupervisorClient:
         self._send_event(event)
 
     def task_cancelled(
-        self,
-        task_id: str,
-        metadata: dict[str, Any] | None = None,
+        self, task_id: str, metadata: dict[str, Any] | None = None
     ) -> None:
         event = TaskEvent(
             type="TASK_CANCELLED",

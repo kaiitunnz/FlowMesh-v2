@@ -395,8 +395,7 @@ class Runner:
             )
         msg.resolved_contract = resolved.request
         self.lifecycle.notify_task_update(
-            msg.task_id,
-            {"input_resolution": resolved.binding.model_dump(mode="json")},
+            msg.task_id, {"input_resolution": resolved.binding.model_dump(mode="json")}
         )
 
     def _hydrate_prepared_request(

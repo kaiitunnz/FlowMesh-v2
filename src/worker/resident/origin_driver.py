@@ -192,9 +192,9 @@ class ResidentOriginDriver:
         req = origin.request
         idm = req.handoff.idempotency_key
         with self._transport_span(req):
-            await self._drive_body(origin, req, idm)
+            await self._drive_impl(origin, req, idm)
 
-    async def _drive_body(
+    async def _drive_impl(
         self, origin: _Origin, req: ResidentOriginRequest, idm: str | None
     ) -> None:
         try:

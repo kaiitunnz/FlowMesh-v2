@@ -142,29 +142,18 @@ class Lifecycle:
     ):
         try:
             self.client.task_failed(
-                task_id,
-                error=error,
-                metadata=metadata,
-                retryable=retryable,
+                task_id, error=error, metadata=metadata, retryable=retryable
             )
         except Exception:
             pass
 
-    def set_succeeded(
-        self,
-        task_id: str,
-        metadata: dict[str, Any] | None = None,
-    ):
+    def set_succeeded(self, task_id: str, metadata: dict[str, Any] | None = None):
         try:
             self.client.task_succeeded(task_id, metadata=metadata)
         except Exception:
             pass
 
-    def set_cancelled(
-        self,
-        task_id: str,
-        metadata: dict[str, Any] | None = None,
-    ):
+    def set_cancelled(self, task_id: str, metadata: dict[str, Any] | None = None):
         try:
             self.client.task_cancelled(task_id, metadata=metadata)
         except Exception:
