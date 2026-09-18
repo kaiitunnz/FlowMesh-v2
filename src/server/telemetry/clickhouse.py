@@ -1,8 +1,6 @@
 """ClickHouse adapter for the ``TelemetryStore`` read port.
 
-Queries the store over ClickHouse's plain HTTP interface -- no new dependency: the
-server already carries ``httpx``, and the HTTP interface avoids pulling in a native
-ClickHouse driver for what is a handful of read queries. Every query is parameterized
+Queries the store over ClickHouse's plain HTTP interface. Every query is parameterized
 (ClickHouse's own ``{name:Type}`` binding, never string interpolation) so a
 caller-supplied workflow id or attribute key cannot inject SQL.
 
@@ -21,6 +19,7 @@ therefore reduces each series to its latest point first, and only then combines 
 
 import json
 from datetime import datetime, timedelta
+from typing import Any
 
 import httpx
 
@@ -199,13 +198,13 @@ def _trace_id_hex(workflow_id: str) -> str:
     return format(workflow_to_trace_id_int(workflow_id), "032x")
 
 
-def _as_str(value: object) -> str:
+def _as_str(value: Any) -> str:
     if not isinstance(value, str):
         raise TelemetryStoreError(f"expected a string column value, got {value!r}")
     return value
 
 
-def _as_int(value: object) -> int:
+def _as_int(value: Any) -> int:
     # ClickHouse's JSONEachRow encodes UInt64 columns as strings, so accept both.
     if isinstance(value, bool):
         raise TelemetryStoreError(f"expected an integer column value, got {value!r}")
@@ -221,7 +220,7 @@ def _as_int(value: object) -> int:
     raise TelemetryStoreError(f"expected an integer column value, got {value!r}")
 
 
-def _as_float(value: object) -> float:
+def _as_float(value: Any) -> float:
     # ClickHouse's JSONEachRow encodes Float64 columns as strings, so accept both.
     if isinstance(value, bool):
         raise TelemetryStoreError(f"expected a numeric column value, got {value!r}")
@@ -268,7 +267,7 @@ class ClickHouseTelemetryStore(TelemetryStore):
     def close(self) -> None:
         self._client.close()
 
-    def _query_rows(self, sql: str, params: dict[str, str]) -> list[dict[str, object]]:
+    def _query_rows(self, sql: str, params: dict[str, str]) -> list[dict[str, Any]]:
         query_params = {f"param_{k}": v for k, v in params.items()}
         query_params["database"] = self._database
         try:
