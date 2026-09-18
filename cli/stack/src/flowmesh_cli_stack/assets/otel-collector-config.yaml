@@ -73,8 +73,9 @@ connectors:
   # stripped on the way to the store anyway, and a stage's successful and failed points
   # would arrive sharing every key column -- one series per key has to hold at the
   # producer, because a reader cannot recover a split it can no longer see. A per-stage
-  # error rate would need status.code added to the allow-list AND to the series key
-  # together; adding it to either alone reinstates the undercount.
+  # error rate would need status.code added to the allow-list and to the series key
+  # together: adding it to the series key without the allow-list reinstates the
+  # undercount, by re-splitting a series the store can no longer tell apart.
   span_metrics:
     namespace: flowmesh
     histogram:
