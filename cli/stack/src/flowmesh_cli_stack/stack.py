@@ -70,14 +70,12 @@ def _stack() -> DockerComposeStack:
 def _profiles(env_file: Path, profile: str | None) -> list[str]:
     """This node's own compose profile plus any the operator selected.
 
-    Compose's ``--profile`` flag replaces ``COMPOSE_PROFILES`` rather than adding to
-    it, so a node that passes only its own role profile would silently drop every
-    optional service the operator asked for -- the telemetry collector and store among
-    them.
+    ``--profile`` replaces ``COMPOSE_PROFILES`` rather than adding to it, so both are
+    passed explicitly here, de-duplicated and order-preserving.
     """
     selected = [profile] if profile else []
     raw = parse_env_file(env_file).get("COMPOSE_PROFILES", "")
-    selected += [name for part in raw.split(",") if (name := part.strip())]
+    selected.extend(name for part in raw.split(",") if (name := part.strip()))
     seen: dict[str, None] = {}
     for name in selected:
         seen.setdefault(name, None)

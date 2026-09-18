@@ -83,10 +83,8 @@ class ProfileSummary(_ProfileBase):
     critical_path: CriticalPathSummary | None = None
 
 
-class TraceSpanNode(BaseModel):
+class TraceSpanNode(_ProfileBase):
     """One span in a workflow's assembled trace, with its children nested under it."""
-
-    model_config = ConfigDict(extra="forbid")
 
     span_id: str
     parent_span_id: str | None = None
@@ -101,10 +99,8 @@ class TraceSpanNode(BaseModel):
     children: list["TraceSpanNode"] = Field(default_factory=list)
 
 
-class TraceTree(BaseModel):
+class TraceTree(_ProfileBase):
     """A workflow's spans assembled into their parent/child hierarchy."""
-
-    model_config = ConfigDict(extra="forbid")
 
     workflow_id: str
     trace_id: str
@@ -113,19 +109,15 @@ class TraceTree(BaseModel):
     roots: list[TraceSpanNode] = Field(default_factory=list)
 
 
-class TraceAggregateBucket(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class TraceAggregateBucket(_ProfileBase):
     group_value: str
     stat: str
     value: float
     sample_count: int
 
 
-class TraceAggregate(BaseModel):
+class TraceAggregate(_ProfileBase):
     """One telemetry metric aggregated into a bucket per grouping value."""
-
-    model_config = ConfigDict(extra="forbid")
 
     metric: str
     group_by: str

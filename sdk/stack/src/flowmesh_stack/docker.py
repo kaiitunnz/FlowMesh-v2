@@ -56,13 +56,12 @@ def compose(
 def profile_args(profile: str | Sequence[str] | None) -> list[str]:
     """``--profile`` flags for one or more profiles.
 
-    Compose's ``--profile`` flag REPLACES ``COMPOSE_PROFILES`` rather than adding to
-    it, so a caller that needs both its own profile and the operator's must pass every
-    one of them as its own flag.
+    ``--profile`` replaces ``COMPOSE_PROFILES`` rather than adding to it, so every
+    profile a caller needs is passed as its own explicit flag.
     """
     if not profile:
         return []
-    names = [profile] if isinstance(profile, str) else list(profile)
+    names = [profile] if isinstance(profile, str) else profile
     return [arg for name in names if name for arg in ("--profile", name)]
 
 
