@@ -294,12 +294,23 @@ def _restated_series(
     ]
 
 
+_DISPATCH_RUN_ONE = _restated_series(
+    # One series per stage per run: the collector merges the span name, kind and status
+    # dimensions that would otherwise split dispatch's successes from its failures, so
+    # the 40 ms failure is part of this series rather than a second one beside it.
+    "dispatch",
+    _RUN_ONE,
+    _RUN_ONE_INTERVALS,
+    [6.0, 7.0, 300.0, 40.0],
+)
+
 _HISTOGRAM_ROWS = (
-    # dispatch's OK and ERROR series, indistinguishable once the allowlist has run.
-    _restated_series("dispatch", _RUN_ONE, _RUN_ONE_INTERVALS, [6.0, 7.0, 300.0])
-    + _restated_series("dispatch", _RUN_ONE, _RUN_ONE_INTERVALS, [40.0])
+    _DISPATCH_RUN_ONE
     + _restated_series("admission", _RUN_ONE, _RUN_ONE_INTERVALS, [12.0, 40000.0])
     + _restated_series("dispatch", _RUN_TWO, _RUN_TWO_INTERVALS, [6.0, 6.0])
+    # A re-delivered insert: the table does not deduplicate and the exporter retries, so
+    # a point that commits but times out lands a second time, verbatim.
+    + [dict(_DISPATCH_RUN_ONE[-1])]
 )
 
 _GAUGE_ROWS = [
