@@ -191,9 +191,7 @@ class MediatedEgressSidecar:
         with self._egress_span(permit):
             try:
                 report = self._produce(permit)
-            except (
-                Exception
-            ) as exc:  # noqa: BLE001 - a crashed egress leaves it ambiguous
+            except Exception as exc:
                 # No report: the control plane holds the boundary pending and
                 # re-drives under the same idempotency key with a fresh permit.
                 self._log.warning(

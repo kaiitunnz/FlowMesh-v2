@@ -301,9 +301,7 @@ def test_full_run_covers_every_activation_class_with_no_orphans_or_dupes() -> No
     wi_a = eng.work_item("A")
     assert wi_a is not None
     child_task = next(
-        act.activation_id
-        for act in eng._activations.values()  # noqa: SLF001 - test inspection
-        if act.kind == "child"
+        act.activation_id for act in eng._activations.values() if act.kind == "child"
     )
     wi_child = eng.work_item(child_task)
     assert wi_child is not None
@@ -385,7 +383,7 @@ def test_full_run_covers_every_activation_class_with_no_orphans_or_dupes() -> No
         _attrs(s)["flowmesh.logical.activation_id"] for s in operator_spans
     }
     region_opener = next(
-        act for act in eng._activations.values() if act.kind == "region"  # noqa: SLF001
+        act for act in eng._activations.values() if act.kind == "region"
     )
     assert wi_a.activation_id in operator_activation_ids
     assert region_opener.activation_id in operator_activation_ids
@@ -426,9 +424,7 @@ def test_restart_reemits_settled_spans_byte_identically() -> None:
         ),
     )
     child_task = next(
-        act.activation_id
-        for act in eng._activations.values()  # noqa: SLF001
-        if act.kind == "child"
+        act.activation_id for act in eng._activations.values() if act.kind == "child"
     )
     _dispatch(eng, child_task)
     eng.on_succeeded(child_task)
@@ -452,7 +448,7 @@ def test_restart_reemits_settled_spans_byte_identically() -> None:
     emitter_b = TelemetrySpanEmitter(tracer_b, config_b, _WORKFLOW_ID)
     OrchestrationEngine(
         cast(LedgerSnapshot, snapshot),
-        eng._bundle,  # noqa: SLF001 - the same compiled bundle, as the runtime holds it
+        eng._bundle,
         budget=ScopeBudget(),
         emitter=emitter_b,
     )
@@ -483,8 +479,8 @@ def test_cancelled_never_dispatched_work_item_span_is_closed() -> None:
     )
     child_wi = next(
         wi
-        for wi in eng._work_items.values()  # noqa: SLF001
-        if eng._activations[wi.activation_id].kind == "child"  # noqa: SLF001
+        for wi in eng._work_items.values()
+        if eng._activations[wi.activation_id].kind == "child"
     )
     assert child_wi.status is WorkItemStatus.READY
     assert not child_wi.attempt_ids  # never dispatched: zero attempts
@@ -528,7 +524,7 @@ def test_top_level_spawn_root_gets_an_operator_span_at_scope_release() -> None:
 
     root_spawn_activation = next(
         act
-        for act in eng._activations.values()  # noqa: SLF001
+        for act in eng._activations.values()
         if act.operator_id == "S" and act.kind == "spawn"
     )
     operator_spans = _spans_named(exporter, SPAN_OPERATOR)
@@ -598,7 +594,7 @@ def test_an_unclassifiable_activation_drops_its_span_instead_of_raising() -> Non
 
     assert _spans_named(exporter, SPAN_OPERATOR) == []
     with pytest.raises(ActivationClassificationError):
-        emitter._activation_extent(mystery.activation_id, {})  # noqa: SLF001
+        emitter._activation_extent(mystery.activation_id, {})
 
 
 # --------------------------------------------------------------------------- #
@@ -617,9 +613,7 @@ def _drive_a_representative_sequence(eng: OrchestrationEngine) -> None:
         ),
     )
     child_task = next(
-        act.activation_id
-        for act in eng._activations.values()  # noqa: SLF001
-        if act.kind == "child"
+        act.activation_id for act in eng._activations.values() if act.kind == "child"
     )
     _dispatch(eng, child_task)
     eng.on_failed(child_task, "transient", retryable=True)
@@ -834,7 +828,7 @@ def test_the_workflow_span_starts_no_later_than_its_earliest_child() -> None:
 
     engine = runtime.orchestration_engine(workflow_id)
     assert engine is not None
-    events = engine._trace  # noqa: SLF001 - the ledger's own recorded timestamps
+    events = engine._trace
     assert events, "expected the build to record at least one ledger event"
 
     submitted_at = parse_iso_datetime(registry.submitted_at)

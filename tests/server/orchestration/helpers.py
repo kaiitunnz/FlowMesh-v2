@@ -239,7 +239,7 @@ def rehydrated(
 ) -> OrchestrationEngine:
     return OrchestrationEngine(
         live.to_snapshot(),
-        live._bundle,  # noqa: SLF001 - the same compiled bundle the runtime holds
+        live._bundle,
         budget=ScopeBudget(),
         emitter=emitter,
     )

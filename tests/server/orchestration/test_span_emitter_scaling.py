@@ -96,11 +96,7 @@ def _spawn_children(eng: OrchestrationEngine, count: int) -> list[str]:
                 child_region_ref="worker",
             ),
         )
-    return [
-        a.activation_id
-        for a in eng._activations.values()  # noqa: SLF001 - test inspection
-        if a.kind == "child"
-    ]
+    return [a.activation_id for a in eng._activations.values() if a.kind == "child"]
 
 
 def _seal(eng: OrchestrationEngine) -> None:
@@ -121,18 +117,18 @@ def _drive(level: TelemetryLevel, children_count: int) -> tuple[int, int, int]:
     reads = _Reads()
     # The emitter reads the collections the engine handed it at attach, so the counting
     # ones have to replace those before anything binds to them.
-    eng._trace = _CountingTrace(reads, eng._trace)  # noqa: SLF001 - instrumentation
-    eng._work_items = _CountingDict(reads, eng._work_items)  # noqa: SLF001
-    eng._activations = _CountingDict(reads, eng._activations)  # noqa: SLF001
-    eng._scopes = _CountingDict(reads, eng._scopes)  # noqa: SLF001
+    eng._trace = _CountingTrace(reads, eng._trace)
+    eng._work_items = _CountingDict(reads, eng._work_items)
+    eng._activations = _CountingDict(reads, eng._activations)
+    eng._scopes = _CountingDict(reads, eng._scopes)
     span_emitter.attach(
-        activations=eng._activations,  # noqa: SLF001 - test instrumentation
-        scopes=eng._scopes,  # noqa: SLF001 - test instrumentation
-        work_items=eng._work_items,  # noqa: SLF001 - test instrumentation
-        attempts=eng._attempts,  # noqa: SLF001 - test instrumentation
-        invocations=eng._invocations,  # noqa: SLF001 - test instrumentation
-        trace=eng._trace,  # noqa: SLF001 - test instrumentation
-        released_scopes=eng._released_scopes,  # noqa: SLF001 - test instrumentation
+        activations=eng._activations,
+        scopes=eng._scopes,
+        work_items=eng._work_items,
+        attempts=eng._attempts,
+        invocations=eng._invocations,
+        trace=eng._trace,
+        released_scopes=eng._released_scopes,
     )
     children = _spawn_children(eng, children_count)
     assert len(children) == children_count
@@ -217,7 +213,7 @@ def test_indexes_pick_up_records_added_after_the_first_emit() -> None:
         )
     second = [
         a.activation_id
-        for a in eng._activations.values()  # noqa: SLF001 - test inspection
+        for a in eng._activations.values()
         if a.kind == "child" and a.activation_id not in set(first)
     ]
     assert len(second) == 3
@@ -233,7 +229,7 @@ def test_indexes_pick_up_records_added_after_the_first_emit() -> None:
     }
     settled = {
         wi.work_item_id
-        for wi in eng._work_items.values()  # noqa: SLF001 - test inspection
+        for wi in eng._work_items.values()
         if wi.activation_id in set(first) | set(second)
     }
     assert settled <= episode_work_items
@@ -303,7 +299,7 @@ def _spawn_chain(eng: OrchestrationEngine, depth: int) -> list[str]:
         )
         child = next(
             a.activation_id
-            for a in eng._activations.values()  # noqa: SLF001 - test inspection
+            for a in eng._activations.values()
             if a.kind == "child" and a.activation_id not in known
         )
         known.add(child)
@@ -326,7 +322,7 @@ def _extent_computations(depth: int, monkeypatch: Any) -> int:
     assert len(chain) == depth
 
     computed = 0
-    original = TelemetrySpanEmitter._compute_activation_extent  # noqa: SLF001
+    original = TelemetrySpanEmitter._compute_activation_extent
 
     def counting(self: Any, activation_id: str, memo: Any) -> Any:
         nonlocal computed
