@@ -89,7 +89,14 @@ _HISTOGRAM_COLUMNS: dict[str, str] = {
     "AggregationTemporality": "Int32",
 }
 
-_HISTOGRAM_STATS: tuple[AggregateStat, ...] = ("count", "sum", "avg", "p50", "p95")
+_HISTOGRAM_STATS: tuple[AggregateStat, ...] = (
+    "count",
+    "sum",
+    "avg",
+    "p50",
+    "p95",
+    "p99",
+)
 _GAUGE_STATS: tuple[AggregateStat, ...] = (
     "count",
     "sum",
@@ -148,9 +155,9 @@ def test_histogram_query_reduces_each_series_before_combining(
     stat: AggregateStat,
 ) -> None:
     sql = _histogram_sql(stat)
-    assert "argMax(point_count, TimeUnix)" in sql
-    assert "argMax(point_sum, TimeUnix)" in sql
-    assert "argMax(point_buckets, TimeUnix)" in sql
+    assert "argMax(Count, TimeUnix)" in sql
+    assert "argMax(Sum, TimeUnix)" in sql
+    assert "argMax(BucketCounts, TimeUnix)" in sql
     # A cumulative point restates the series' totals, so counting rows, or adding a
     # series' rows up, multiplies the answer by the number of export intervals.
     assert re.search(r"count\(\)", sql) is None
@@ -161,26 +168,25 @@ def test_histogram_query_reduces_each_series_before_combining(
 
 
 @pytest.mark.parametrize("stat", _HISTOGRAM_STATS)
-def test_histogram_query_combines_points_sharing_a_key_and_timestamp(
+def test_histogram_query_takes_one_point_per_series_never_a_sum_of_rows(
     stat: AggregateStat,
 ) -> None:
-    """Distinct series reach the store indistinguishable, and all of them must count.
+    """A duplicate row must not change the answer.
 
-    A span-derived histogram splits its series by span name, kind and status, and the
-    collector's allowlist drops those keys before export, so one stage's successful and
-    failed points land on the same key at the same timestamp. Reducing that key with an
-    ``argMax`` keeps one of them, so they are summed into one cumulative point first.
+    The store's table does not deduplicate inserts and the collector retries, so an
+    insert that commits but times out can land twice. Taking one point per series key
+    ignores the copy; adding the rows up would count it. Keeping one series per key is
+    the collector's job -- it merges the dimensions that would otherwise split a stage.
     """
     sql = _histogram_sql(stat)
-    raw_reduction = r"argMax\(\s*(?:Count|Sum|BucketCounts|ExplicitBounds)\s*,"
-    assert re.search(raw_reduction, sql) is None, (
-        "reducing raw rows by TimeUnix drops every point that shares a key and a "
-        "timestamp with another"
-    )
+    summed_rows = r"sum(?:ForEach)?\(\s*(?:Count|Sum|BucketCounts)\s*\)"
+    assert (
+        re.search(summed_rows, sql) is None
+    ), "adding a series' rows together counts a re-delivered insert twice"
     clauses = _group_by_clauses(sql)
-    assert any(
-        {"StartTimeUnix", "TimeUnix"} <= clause for clause in clauses
-    ), "points sharing a series key and a timestamp must be combined before the argMax"
+    assert not any(
+        "TimeUnix" in clause and "StartTimeUnix" not in clause for clause in clauses
+    ), "no grouping may key on the point timestamp, which a duplicate row shares"
 
 
 def test_histogram_refuses_min_and_max() -> None:
@@ -208,9 +214,21 @@ def test_generated_sql_binds_every_caller_supplied_value() -> None:
 
 
 _LIVE_URL = os.getenv("FLOWMESH_TEST_CLICKHOUSE_URL")
+# CI runs a store, so a missing URL there means the service did not come up rather than
+# that the developer has none: skipping would retire the only tests that check what the
+# queries answer, leaving the ones that check how they are spelled.
 _live = pytest.mark.skipif(
     not _LIVE_URL, reason="FLOWMESH_TEST_CLICKHOUSE_URL is not set"
 )
+
+
+@pytest.mark.skipif(not os.getenv("CI"), reason="only CI is expected to run a store")
+def test_ci_runs_the_queries_against_a_real_store() -> None:
+    assert _LIVE_URL, (
+        "FLOWMESH_TEST_CLICKHOUSE_URL is unset in CI: the telemetry store service is "
+        "not running, so nothing here checks what the generated SQL answers"
+    )
+
 
 # What the collector writes for a spanmetrics histogram: two stages, the buckets the
 # collector config declares, at cumulative temporality. Each stage's series is split by

@@ -88,13 +88,12 @@ def _histogram_series_sql() -> str:
     cumulative run whose counts start again from zero, and keying on it keeps both runs'
     totals instead of letting the later run's smaller numbers win the ``argMax``.
 
-    Several distinct series can nonetheless reach the store carrying that same key at
-    the same ``TimeUnix``. A span-derived histogram splits its series by span name, kind
-    and status, and the collector's attribute allowlist drops those keys on the way out,
-    so one stage's successful and failed points arrive indistinguishable. Points sharing
-    a key and a timestamp are therefore summed into one cumulative point before any
-    ``argMax`` runs -- reducing them directly keeps one of them and drops the rest,
-    which undercounts every stage that ever fails.
+    Taking one point per key rather than adding the points up is also what makes the
+    read safe against a duplicate row. The store's table does not deduplicate inserts
+    and the collector retries, so an insert that commits but times out can land twice;
+    a query that summed rows sharing a key would count that copy. One series per key is
+    the pipeline's job, not this query's -- the collector merges the dimensions that
+    would otherwise split a stage in two.
     """
     return f"""
         SELECT
@@ -105,29 +104,13 @@ def _histogram_series_sql() -> str:
             any(series_bounds) AS bounds
         FROM (
             SELECT
-                group_value,
-                argMax(point_count, TimeUnix) AS series_count,
-                argMax(point_sum, TimeUnix) AS series_sum,
-                argMax(point_buckets, TimeUnix) AS series_buckets,
-                argMax(point_bounds, TimeUnix) AS series_bounds
-            FROM (
-                SELECT
-                    Attributes[{{group_by_key:String}}] AS group_value,
-                    ServiceName,
-                    ResourceAttributes,
-                    Attributes,
-                    StartTimeUnix,
-                    TimeUnix,
-                    sum(Count) AS point_count,
-                    sum(Sum) AS point_sum,
-                    sumForEach(BucketCounts) AS point_buckets,
-                    any(ExplicitBounds) AS point_bounds
-                FROM {_HISTOGRAM_TABLE}
-                WHERE MetricName = {{metric:String}}
-                GROUP BY
-                    group_value, ServiceName, ResourceAttributes, Attributes,
-                    StartTimeUnix, TimeUnix
-            )
+                Attributes[{{group_by_key:String}}] AS group_value,
+                argMax(Count, TimeUnix) AS series_count,
+                argMax(Sum, TimeUnix) AS series_sum,
+                argMax(BucketCounts, TimeUnix) AS series_buckets,
+                argMax(ExplicitBounds, TimeUnix) AS series_bounds
+            FROM {_HISTOGRAM_TABLE}
+            WHERE MetricName = {{metric:String}}
             GROUP BY
                 group_value, ServiceName, ResourceAttributes, Attributes, StartTimeUnix
         )

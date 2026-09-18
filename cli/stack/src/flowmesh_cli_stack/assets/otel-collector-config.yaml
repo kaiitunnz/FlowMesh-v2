@@ -48,18 +48,34 @@ processors:
       - context: datapoint
         statements:
           - keep_matching_keys(datapoint.attributes, "^flowmesh\\.(logical|physical|gpu)\\.|^flowmesh\\.(node_id|worker_id|role)$")
+  # Only a control-plane stage span becomes a duration histogram; every other span
+  # would land in one unnamed bucket together.
+  filter/control_spans:
+    error_mode: ignore
+    traces:
+      span:
+        - 'not IsMatch(name, "^flowmesh\.control\.")'
   batch:
     send_batch_size: 512
     timeout: 5s
 
 connectors:
   # Derives the per-stage duration histogram from flowmesh.control.* spans: producers
-  # emit spans only, and this connector is what turns them into a metric.
+  # emit spans only, and this connector is what turns them into a metric. The traces
+  # pipeline feeding it filters to those spans, so a stage's histogram is not summed
+  # together with workflow, episode and task spans.
+  #
+  # exclude_dimensions drops the three dimensions the connector splits a series by
+  # before it names one. They are not in the attribute allow-list, so they would be
+  # stripped on the way to the store anyway, and a stage's successful and failed points
+  # would arrive sharing every key column -- one series per key has to hold at the
+  # producer, because a reader cannot recover a split it can no longer see.
   span_metrics:
     namespace: flowmesh
     histogram:
       explicit:
         buckets: [5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 2.5s, 5s, 10s, 30s]
+    exclude_dimensions: [span.name, span.kind, status.code]
     dimensions:
       - name: flowmesh.physical.stage
       - name: flowmesh.physical.window
@@ -95,7 +111,11 @@ service:
     traces:
       receivers: [otlp]
       processors: [memory_limiter, transform/allowlist, batch]
-      exporters: [clickhouse/traces, span_metrics]
+      exporters: [clickhouse/traces]
+    traces/spanmetrics:
+      receivers: [otlp]
+      processors: [memory_limiter, transform/allowlist, filter/control_spans, batch]
+      exporters: [span_metrics]
     metrics:
       receivers: [otlp, span_metrics]
       processors: [memory_limiter, transform/allowlist, batch]

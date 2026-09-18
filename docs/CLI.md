@@ -66,7 +66,7 @@ Query the cluster telemetry a deployment's telemetry store holds:
 
 ```bash
 flowmesh trace tree <wfl-id>
-flowmesh trace aggregate --metric <name> --group-by worker_id --stat p95
+flowmesh trace aggregate --metric <name> --group-by flowmesh.worker_id --stat p95
 ```
 
 `trace tree` prints the workflow's spans as an indented tree, one line per
