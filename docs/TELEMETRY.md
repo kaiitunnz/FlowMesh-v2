@@ -30,11 +30,10 @@ At `off` nothing is built: no `TracerProvider`, no `MeterProvider`, no OTLP expo
 exporter thread. A disabled tracer hands back one reused context manager on every call, so
 an instrumentation site costs a single attribute read.
 
-The worker's own tracer is the exception, and it is deliberate: the tracer that writes each
-task's `spans.jsonl` for the governance analyzer predates this knob and runs
-unconditionally. The level gates the OTLP export and the `flowmesh.*` spans, never the
-JSONL sink — so `flowmesh trace analyze` and its `ProfileSummary` behave identically at
-every level, including `off`.
+The worker also writes each task's `spans.jsonl` for the governance analyzer, and that
+sink runs unconditionally. The level gates the OTLP export and the `flowmesh.*` spans,
+never the JSONL sink — so `flowmesh trace analyze` and its `ProfileSummary` behave
+identically at every level, including `off`.
 
 ## Identity
 
@@ -69,7 +68,7 @@ stages and the operator activations beneath it; an activation holds its episodes
 episode holds its dispatch, its attempts, the worker-side task span, and the boundaries it
 opens. Attributes are split into two namespaces — `flowmesh.logical.*` for operator,
 activation, scope and result identity, and `flowmesh.physical.*` for work item, attempt,
-worker, claim, permit and transport identity — so a consumer builds the logical view by
+worker, claim, permit and replica identity — so a consumer builds the logical view by
 reading one prefix.
 
 The workflow span is emitted when the workflow's last task goes terminal, which the server
@@ -114,7 +113,7 @@ recorded.
 
 The root server reports the resident fleet per service family — replica count,
 admission slots in use, and claim credit held — alongside the ready-queue depth.
-A deployment with resident capacity disabled still reports queue depth.
+A deployment with resident capacity disabled reports queue depth alone.
 
 `GET /api/v1/system/metrics` is unchanged.
 
@@ -127,6 +126,10 @@ the core stack and leaves that stack otherwise untouched. The Collector receives
 `TELEMETRY_CLICKHOUSE_DSN` points it at the bundled instance or at one the deployment
 already runs. ClickHouse keeps its data in a named volume, so a stack restart does not
 discard a trace.
+
+Both halves default to the bundled instance's development password. A deployment that
+exposes ClickHouse beyond its own host sets `TELEMETRY_CLICKHOUSE_PASSWORD` and
+`SERVER_METRICS_CLICKHOUSE_PASSWORD` to a real one.
 
 The server's read path is configured separately, through `SERVER_METRICS_CLICKHOUSE_*`,
 and never writes. The two halves commonly address the same instance but are never the

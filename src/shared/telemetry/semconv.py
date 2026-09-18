@@ -34,7 +34,6 @@ __all__ = [
     "LOGICAL_LOOP_TIME",
     "LOGICAL_CHILD_INDEX",
     "LOGICAL_OPERATOR_KIND",
-    "LOGICAL_RESULT_SLOT",
     "LOGICAL_OUTCOME",
     "PHYSICAL_WORK_ITEM_ID",
     "PHYSICAL_ATTEMPT_ID",
@@ -42,23 +41,17 @@ __all__ = [
     "PHYSICAL_TASK_ID",
     "PHYSICAL_INVOCATION_ID",
     "PHYSICAL_WORKER_ID",
-    "PHYSICAL_NODE_ID",
     "PHYSICAL_ALTERNATIVE_ID",
     "PHYSICAL_CLAIM_ID",
     "PHYSICAL_PERMIT_ID",
-    "PHYSICAL_HANDOFF_ID",
     "PHYSICAL_REPLICA_ID",
     "GPU_ATTRIBUTE_PREFIX",
     "GPU_INDEX",
     "GPU_UUID",
     "PHYSICAL_SERVICE_FAMILY",
-    "PHYSICAL_RELAY_SESSION_ID",
-    "PHYSICAL_TRANSPORT",
-    "PHYSICAL_MODEL",
     "PHYSICAL_STAGE",
     "PHYSICAL_WINDOW",
     "PHYSICAL_ERROR_TYPE",
-    "PHYSICAL_RETRY_OF_ATTEMPT",
     "SPAN_WORKFLOW",
     "SPAN_OPERATOR",
     "SPAN_EPISODE",
@@ -110,7 +103,6 @@ LOGICAL_PARENT_ACTIVATION_ID = f"{LOGICAL_ATTRIBUTE_PREFIX}parent_activation_id"
 LOGICAL_LOOP_TIME = f"{LOGICAL_ATTRIBUTE_PREFIX}loop_time"
 LOGICAL_CHILD_INDEX = f"{LOGICAL_ATTRIBUTE_PREFIX}child_index"
 LOGICAL_OPERATOR_KIND = f"{LOGICAL_ATTRIBUTE_PREFIX}operator_kind"
-LOGICAL_RESULT_SLOT = f"{LOGICAL_ATTRIBUTE_PREFIX}result_slot"
 LOGICAL_OUTCOME = f"{LOGICAL_ATTRIBUTE_PREFIX}outcome"
 
 # flowmesh.physical.* — scheduling and carriage diagnostics.
@@ -120,24 +112,18 @@ PHYSICAL_ATTEMPT_NO = f"{PHYSICAL_ATTRIBUTE_PREFIX}attempt_no"
 PHYSICAL_TASK_ID = f"{PHYSICAL_ATTRIBUTE_PREFIX}task_id"
 PHYSICAL_INVOCATION_ID = f"{PHYSICAL_ATTRIBUTE_PREFIX}invocation_id"
 PHYSICAL_WORKER_ID = f"{PHYSICAL_ATTRIBUTE_PREFIX}worker_id"
-PHYSICAL_NODE_ID = f"{PHYSICAL_ATTRIBUTE_PREFIX}node_id"
 PHYSICAL_ALTERNATIVE_ID = f"{PHYSICAL_ATTRIBUTE_PREFIX}alternative_id"
 PHYSICAL_CLAIM_ID = f"{PHYSICAL_ATTRIBUTE_PREFIX}claim_id"
 PHYSICAL_PERMIT_ID = f"{PHYSICAL_ATTRIBUTE_PREFIX}permit_id"
-PHYSICAL_HANDOFF_ID = f"{PHYSICAL_ATTRIBUTE_PREFIX}handoff_id"
 PHYSICAL_REPLICA_ID = f"{PHYSICAL_ATTRIBUTE_PREFIX}replica_id"
 PHYSICAL_SERVICE_FAMILY = f"{PHYSICAL_ATTRIBUTE_PREFIX}service_family"
+PHYSICAL_STAGE = f"{PHYSICAL_ATTRIBUTE_PREFIX}stage"
+PHYSICAL_WINDOW = f"{PHYSICAL_ATTRIBUTE_PREFIX}window"
+PHYSICAL_ERROR_TYPE = f"{PHYSICAL_ATTRIBUTE_PREFIX}error_type"
 
 GPU_ATTRIBUTE_PREFIX = "flowmesh.gpu."
 GPU_INDEX = f"{GPU_ATTRIBUTE_PREFIX}index"
 GPU_UUID = f"{GPU_ATTRIBUTE_PREFIX}uuid"
-PHYSICAL_RELAY_SESSION_ID = f"{PHYSICAL_ATTRIBUTE_PREFIX}relay_session_id"
-PHYSICAL_TRANSPORT = f"{PHYSICAL_ATTRIBUTE_PREFIX}transport"
-PHYSICAL_MODEL = f"{PHYSICAL_ATTRIBUTE_PREFIX}model"
-PHYSICAL_STAGE = f"{PHYSICAL_ATTRIBUTE_PREFIX}stage"
-PHYSICAL_WINDOW = f"{PHYSICAL_ATTRIBUTE_PREFIX}window"
-PHYSICAL_ERROR_TYPE = f"{PHYSICAL_ATTRIBUTE_PREFIX}error_type"
-PHYSICAL_RETRY_OF_ATTEMPT = f"{PHYSICAL_ATTRIBUTE_PREFIX}retry_of_attempt"
 
 # Span names — the catalog's fixed (non-parameterized) names.
 SPAN_WORKFLOW = "flowmesh.workflow"
@@ -155,12 +141,7 @@ TRANSPORT_SPAN_PREFIX = "flowmesh.transport."
 
 
 class ControlPlaneStage(StrEnum):
-    """The control-plane boundaries instrumented as ``flowmesh.control.<stage>``.
-
-    There is deliberately no ``nested`` member: a span tree already expresses
-    enclosure, so a consumer wanting self-time subtracts child spans instead of
-    reading a hand-maintained flag.
-    """
+    """The control-plane boundaries instrumented as ``flowmesh.control.<stage>``."""
 
     COMPILE_LOWER = "compile_lower"
     COMPILE_ASSEMBLE = "compile_assemble"
