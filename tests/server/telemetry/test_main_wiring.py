@@ -13,6 +13,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -24,9 +25,15 @@ def _imported_server_main() -> Iterator[Any]:
     The module registers an ``atexit`` metrics export on import, so a test that
     imports it repeatedly would leave a handler per import to fire against pytest's
     already-closed streams at interpreter shutdown.
+
+    Its Redis client connects while the module body runs and exits the process when it
+    cannot, so the import is stubbed: every producer asserted here is handed its
+    instrument by the same module body regardless, and a suite that reached Redis would
+    pass or fail on whether the machine running it happens to have one.
     """
     sys.modules.pop("server.main", None)
-    module = importlib.import_module("server.main")
+    with patch("server.clients.RedisClient", return_value=MagicMock()):
+        module = importlib.import_module("server.main")
     try:
         yield module
     finally:
