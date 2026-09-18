@@ -19,6 +19,7 @@ import pynvml
 from opentelemetry.metrics import Meter
 
 from shared.telemetry.semconv import (
+    GPU_ATTRIBUTE_PREFIX,
     GPU_INDEX,
     GPU_UUID,
     RESOURCE_NODE_ID,
@@ -56,22 +57,22 @@ class GpuSampler:
         self._nvml_ready = False
 
         self._utilization = meter.create_gauge(
-            "flowmesh.gpu.utilization_ratio",
+            f"{GPU_ATTRIBUTE_PREFIX}utilization_ratio",
             unit="1",
             description="GPU compute utilization, 0-1.",
         )
         self._memory_used = meter.create_gauge(
-            "flowmesh.gpu.memory_used_bytes",
+            f"{GPU_ATTRIBUTE_PREFIX}memory_used_bytes",
             unit="By",
             description="GPU memory in use.",
         )
         self._power = meter.create_gauge(
-            "flowmesh.gpu.power_watts",
+            f"{GPU_ATTRIBUTE_PREFIX}power_watts",
             unit="W",
             description="GPU power draw.",
         )
         self._temperature = meter.create_gauge(
-            "flowmesh.gpu.temperature_celsius",
+            f"{GPU_ATTRIBUTE_PREFIX}temperature_celsius",
             unit="Cel",
             description="GPU die temperature.",
         )
