@@ -52,10 +52,9 @@ rather than held open. Everything shorter-lived uses an ordinary random span id.
 A gated `serve` request is driven by an external principal and owns no workflow, so it
 roots its own trace keyed by its serve task and request instead.
 
-An inbound `traceparent` from outside the fabric is never adopted as a parent. Adopting
-it would take the caller's `trace_id`, and a workflow's trace would then differ between
-a CI-invoked and a CLI-invoked run; a workflow's trace is keyed to its own id whatever
-called it.
+An inbound `traceparent` from outside the fabric is never read. Adopting it would take
+the caller's `trace_id`, and a workflow's trace would then differ between a CI-invoked
+and a CLI-invoked run; a workflow's trace is keyed to its own id whatever called it.
 
 `SERVER_METRICS_TRACE_SAMPLE_RATIO` below `1.0` traces that fraction of workflows. The
 decision reads the derived trace id alone, so every process reaches it independently and
@@ -173,7 +172,5 @@ mediated-operation permit, and a field on every relay frame across all three tra
 Each of those is read at the far end to parent the span the hop opens. At `off` the field
 is omitted entirely, so a disabled deployment puts zero extra bytes on any wire.
 
-A client's own `traceparent` reaches the server on the submit request and on
-worker-to-server HTTP, and rides task and worker events, but nothing reads it: a
-workflow's trace is keyed to its own id, so the fabric derives the same trace whatever
-called it.
+A workflow's trace is keyed to its own id, so the fabric derives the same trace whatever
+called it and carries context only on the hops that read it.
