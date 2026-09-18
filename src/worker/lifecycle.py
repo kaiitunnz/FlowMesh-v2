@@ -139,7 +139,6 @@ class Lifecycle:
         error: str | None = None,
         metadata: dict[str, Any] | None = None,
         retryable: bool = True,
-        traceparent: str | None = None,
     ):
         try:
             self.client.task_failed(
@@ -147,7 +146,6 @@ class Lifecycle:
                 error=error,
                 metadata=metadata,
                 retryable=retryable,
-                traceparent=traceparent,
             )
         except Exception:
             pass
@@ -156,12 +154,9 @@ class Lifecycle:
         self,
         task_id: str,
         metadata: dict[str, Any] | None = None,
-        traceparent: str | None = None,
     ):
         try:
-            self.client.task_succeeded(
-                task_id, metadata=metadata, traceparent=traceparent
-            )
+            self.client.task_succeeded(task_id, metadata=metadata)
         except Exception:
             pass
 
@@ -169,20 +164,15 @@ class Lifecycle:
         self,
         task_id: str,
         metadata: dict[str, Any] | None = None,
-        traceparent: str | None = None,
     ):
         try:
-            self.client.task_cancelled(
-                task_id, metadata=metadata, traceparent=traceparent
-            )
+            self.client.task_cancelled(task_id, metadata=metadata)
         except Exception:
             pass
 
-    def notify_task_update(
-        self, task_id: str, payload: dict[str, Any], traceparent: str | None = None
-    ) -> None:
+    def notify_task_update(self, task_id: str, payload: dict[str, Any]) -> None:
         try:
-            self.client.task_update(task_id, payload, traceparent=traceparent)
+            self.client.task_update(task_id, payload)
         except Exception:
             pass
 
@@ -192,7 +182,6 @@ class Lifecycle:
         task_type: str | None,
         dispatched_at: str | None,
         started_at: str,
-        traceparent: str | None = None,
     ) -> None:
         try:
             self.client.task_started(
@@ -200,7 +189,6 @@ class Lifecycle:
                 task_type=task_type,
                 dispatched_at=dispatched_at,
                 started_at=started_at,
-                traceparent=traceparent,
             )
         except Exception:
             pass

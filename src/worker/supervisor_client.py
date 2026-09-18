@@ -267,14 +267,12 @@ class SupervisorClient:
         self,
         task_id: str,
         payload: dict[str, Any],
-        traceparent: str | None = None,
     ) -> None:
         event = TaskEvent(
             type="TASK_UPDATE",
             worker_id=self.worker_id,
             task_id=task_id,
             payload=payload,
-            traceparent=traceparent,
         )
         self._send_event(event)
 
@@ -284,7 +282,6 @@ class SupervisorClient:
         error: str | None,
         metadata: dict[str, Any] | None = None,
         retryable: bool = True,
-        traceparent: str | None = None,
     ) -> None:
         event = TaskEvent(
             type="TASK_FAILED",
@@ -293,7 +290,6 @@ class SupervisorClient:
             error=error,
             retryable=retryable,
             payload=metadata or {},
-            traceparent=traceparent,
         )
         self._send_event(event)
 
@@ -301,14 +297,12 @@ class SupervisorClient:
         self,
         task_id: str,
         metadata: dict[str, Any] | None = None,
-        traceparent: str | None = None,
     ) -> None:
         event = TaskEvent(
             type="TASK_SUCCEEDED",
             worker_id=self.worker_id,
             task_id=task_id,
             payload=metadata or {},
-            traceparent=traceparent,
         )
         self._send_event(event)
 
@@ -318,7 +312,6 @@ class SupervisorClient:
         task_type: str | None = None,
         dispatched_at: str | None = None,
         started_at: str | None = None,
-        traceparent: str | None = None,
     ) -> None:
         payload: dict[str, Any] = {}
         if task_type is not None:
@@ -332,7 +325,6 @@ class SupervisorClient:
             worker_id=self.worker_id,
             task_id=task_id,
             payload=payload,
-            traceparent=traceparent,
         )
         self._send_event(event)
 
@@ -340,14 +332,12 @@ class SupervisorClient:
         self,
         task_id: str,
         metadata: dict[str, Any] | None = None,
-        traceparent: str | None = None,
     ) -> None:
         event = TaskEvent(
             type="TASK_CANCELLED",
             worker_id=self.worker_id,
             task_id=task_id,
             payload=metadata or {},
-            traceparent=traceparent,
         )
         self._send_event(event)
 
@@ -358,7 +348,6 @@ class SupervisorClient:
         owner_id: str,
         task_refs: list[dict[str, str]] | None = None,
         log_paths: dict[str, Path] | None = None,
-        traceparent: str | None = None,
     ) -> TaskLogEmitter | None:
         if self._stub is None:
             return None
@@ -373,7 +362,6 @@ class SupervisorClient:
             worker_id=self.worker_id,
             task_refs=task_refs,
             log_paths=log_paths,
-            traceparent=traceparent,
         )
 
     # ------------------------------------------------------------------ #

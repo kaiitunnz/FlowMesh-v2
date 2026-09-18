@@ -168,12 +168,7 @@ class TestRecoveryFence:
         updates: list[tuple[str, dict[str, Any]]] = []
 
         class _Lifecycle:
-            def notify_task_update(
-                self,
-                task_id: str,
-                payload: dict[str, Any],
-                traceparent: str | None = None,
-            ) -> None:
+            def notify_task_update(self, task_id: str, payload: dict[str, Any]) -> None:
                 updates.append((task_id, payload))
 
         runner = Runner.__new__(Runner)

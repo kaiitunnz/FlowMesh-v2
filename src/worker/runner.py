@@ -404,7 +404,6 @@ class Runner:
         self.lifecycle.notify_task_update(
             msg.task_id,
             {"input_resolution": resolved.binding.model_dump(mode="json")},
-            traceparent=msg.traceparent,
         )
 
     def _hydrate_prepared_request(
@@ -819,7 +818,6 @@ class Runner:
                             task_type=task_type,
                             dispatched_at=dispatched_at,
                             started_at=start_iso,
-                            traceparent=msg.traceparent,
                         )
                         notified_task_started = True
                         prepared = self._prepare_inputs(msg)
@@ -834,9 +832,7 @@ class Runner:
                         metadata["input_materialization"] = prepared.model_dump(
                             mode="json"
                         )
-                        self.lifecycle.set_succeeded(
-                            task_id, metadata=metadata, traceparent=msg.traceparent
-                        )
+                        self.lifecycle.set_succeeded(task_id, metadata=metadata)
                         self.logger.info("Task %s prepared its inputs", task_id)
                         continue
                     if msg.service_episode is not None:
@@ -916,7 +912,6 @@ class Runner:
                             task_type=task_type,
                             dispatched_at=dispatched_at,
                             started_at=start_iso,
-                            traceparent=msg.traceparent,
                         )
                         notified_task_started = True
 
@@ -960,9 +955,7 @@ class Runner:
                             metadata["agent_episode_private_state"] = (
                                 out.private_state.model_dump(mode="json")
                             )
-                    self.lifecycle.set_succeeded(
-                        task_id, metadata=metadata, traceparent=msg.traceparent
-                    )
+                    self.lifecycle.set_succeeded(task_id, metadata=metadata)
                     self.logger.info("Task %s completed successfully", task_id)
                 except TaskCancelledError as e:
                     if not notified_task_started:
@@ -971,7 +964,6 @@ class Runner:
                             task_type=task_type,
                             dispatched_at=dispatched_at,
                             started_at=start_iso,
-                            traceparent=msg.traceparent,
                         )
                         notified_task_started = True
                     metadata = self._build_task_metadata(
@@ -982,9 +974,7 @@ class Runner:
                         shard_index=shard_index,
                         shard_total=shard_total,
                     )
-                    self.lifecycle.set_cancelled(
-                        task_id, metadata=metadata, traceparent=msg.traceparent
-                    )
+                    self.lifecycle.set_cancelled(task_id, metadata=metadata)
                     self.logger.info("Task %s cancelled: %s", task_id, e)
                 except Exception as e:
                     if not notified_task_started:
@@ -993,7 +983,6 @@ class Runner:
                             task_type=task_type,
                             dispatched_at=dispatched_at,
                             started_at=start_iso,
-                            traceparent=msg.traceparent,
                         )
                         notified_task_started = True
                     metadata = self._build_task_metadata(
@@ -1010,7 +999,6 @@ class Runner:
                         str(e),
                         metadata=metadata,
                         retryable=retryable,
-                        traceparent=msg.traceparent,
                     )
                     if isinstance(e, ExecutionError):
                         self.logger.error("Task %s failed: %s", task_id, e)
@@ -1070,7 +1058,6 @@ class Runner:
                     owner_id=msg.owner_id,
                     task_refs=task_refs,
                     log_paths=log_paths,
-                    traceparent=msg.traceparent,
                 )
                 if task_log_emitter is not None:
                     task_log_emitter.emit_warning_only(
@@ -1090,7 +1077,6 @@ class Runner:
                     owner_id=msg.owner_id,
                     task_refs=task_refs,
                     log_paths=log_paths,
-                    traceparent=msg.traceparent,
                 )
                 if task_log_emitter is not None:
                     root_logger = logging.getLogger()

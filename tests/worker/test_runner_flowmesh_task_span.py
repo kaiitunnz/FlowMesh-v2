@@ -2,9 +2,8 @@
 
 Every task type gets one, entering the propagated context from the dispatch envelope,
 without perturbing the shipped span tree the governance analyzer reads. These tests
-drive a real ``Runner.start()`` loop (as ``test_runner_traceparent.py`` does) rather
-than calling the span helpers directly, so they exercise the exact call site the
-runner wraps.
+drive a real ``Runner.start()`` loop rather than calling the span helpers directly, so
+they exercise the exact call site the runner wraps.
 """
 
 import json

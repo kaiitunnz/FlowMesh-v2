@@ -274,7 +274,6 @@ class TaskLogEmitter(logging.Handler):
         log_paths: dict[str, Path] | None = None,
         flush_interval_sec: float = 5.0,
         flush_max_entries: int = 100,
-        traceparent: str | None = None,
     ) -> None:
         super().__init__(level=logging.NOTSET)
         self._logger = logger
@@ -282,7 +281,6 @@ class TaskLogEmitter(logging.Handler):
         self._workflow_id = workflow_id
         self._owner_id = owner_id
         self._worker_id = worker_id
-        self._traceparent = traceparent
         self._task_refs = (
             [{"task_id": task_id, "workflow_id": workflow_id}]
             if task_refs is None
@@ -335,8 +333,6 @@ class TaskLogEmitter(logging.Handler):
             "logger": record.name,
             "message": message,
         }
-        if self._traceparent:
-            payload["traceparent"] = self._traceparent
         self._stream.send(payload)
         if self._sink is not None:
             self._sink.send(payload)
@@ -364,8 +360,6 @@ class TaskLogEmitter(logging.Handler):
             "logger": "task_log_emitter",
             "message": message,
         }
-        if self._traceparent:
-            payload["traceparent"] = self._traceparent
         try:
             self._stream.send(payload)
             if self._sink is not None:
