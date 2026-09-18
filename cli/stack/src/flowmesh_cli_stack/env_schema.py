@@ -914,6 +914,11 @@ STACK_ENV_SCHEMA = EnvSchema(
                 EnvVar(
                     "LOG_LEVEL", "INFO", var_type=EnvVarType.LOG_LEVEL, required=True
                 ),
+                EnvVar(
+                    "COMPOSE_PROFILES",
+                    "",
+                    description="Optional compose profiles to deploy (e.g. telemetry).",
+                ),
             ],
         ),
         EnvSection(
@@ -1044,7 +1049,7 @@ STACK_ENV_SCHEMA = EnvSchema(
                 ),
                 EnvVar(
                     "SERVER_METRICS_OTLP_ENDPOINT",
-                    "",
+                    "http://localhost:4317",
                     description="OTLP collector endpoint; unset disables export.",
                 ),
                 EnvVar(
@@ -1062,14 +1067,12 @@ STACK_ENV_SCHEMA = EnvSchema(
                     min_value=1,
                 ),
                 EnvVar(
-                    "COMPOSE_PROFILES",
-                    "",
-                    description="Optional compose profiles to deploy (e.g. telemetry).",
-                ),
-                EnvVar(
                     "SERVER_METRICS_CLICKHOUSE_URL",
                     "",
-                    description="ClickHouse HTTP URL for the store read port.",
+                    description=(
+                        "ClickHouse HTTP URL for the store read port "
+                        "(e.g. http://localhost:8123); unset disables telemetry queries."
+                    ),
                 ),
                 EnvVar(
                     "SERVER_METRICS_CLICKHOUSE_DATABASE",

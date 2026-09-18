@@ -122,11 +122,10 @@ listed here is in `.env.example`.
 | `SERVER_METRICS_TRACES_ENABLED` | `true` | Whether to emit OTel traces |
 | `SERVER_METRICS_METRICS_ENABLED` | `true` | Whether to emit OTel metrics |
 | `SERVER_METRICS_TRACE_SAMPLE_RATIO` | `1.0` | Per-workflow trace sampling ratio |
-| `SERVER_METRICS_OTLP_ENDPOINT` | – | OTLP collector endpoint; unset disables export |
+| `SERVER_METRICS_OTLP_ENDPOINT` | `http://localhost:4317` | OTLP collector endpoint; unset disables export |
 | `SERVER_METRICS_OTLP_TIMEOUT_SEC` | `10` | OTLP export request timeout (seconds) |
 | `SERVER_METRICS_RESOURCE_SAMPLE_SEC` | `15` | Worker GPU/resource sampling interval (seconds) |
-| `COMPOSE_PROFILES` | – | Optional compose profiles to deploy (e.g. telemetry) |
-| `SERVER_METRICS_CLICKHOUSE_URL` | – | ClickHouse HTTP URL for the store read port |
+| `SERVER_METRICS_CLICKHOUSE_URL` | – | ClickHouse HTTP URL for the store read port (e.g. `http://localhost:8123`); unset disables telemetry queries |
 | `SERVER_METRICS_CLICKHOUSE_DATABASE` | `flowmesh` | ClickHouse database for the store read port |
 | `SERVER_METRICS_CLICKHOUSE_USERNAME` | `default` | ClickHouse user for the store read port |
 | `SERVER_METRICS_CLICKHOUSE_PASSWORD` | `flowmesh` | ClickHouse password for the store read port |
@@ -140,6 +139,7 @@ listed here is in `.env.example`.
 | `TELEMETRY_OTLP_GRPC_PORT` | `4317` | Host port for the collector's OTLP gRPC receiver |
 | `TELEMETRY_OTLP_HTTP_PORT` | `4318` | Host port for the collector's OTLP HTTP receiver |
 | `LOG_LEVEL` | `INFO` | Server log level |
+| `COMPOSE_PROFILES` | – | Optional compose profiles to deploy (e.g. telemetry) |
 
 **Notes:**
 - In Docker deployments, `SERVER_RESULTS_DIR` and `WORKER_RESULTS_DIR`
