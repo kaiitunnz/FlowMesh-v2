@@ -12,7 +12,11 @@ context for a worker->server call that runs inside a task's span.
 from opentelemetry.context import Context
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
-__all__ = ["extract_context", "inject_ambient_traceparent"]
+__all__ = [
+    "ambient_traceparent",
+    "extract_context",
+    "inject_ambient_traceparent",
+]
 
 _PROPAGATOR = TraceContextTextMapPropagator()
 
@@ -38,3 +42,15 @@ def inject_ambient_traceparent(headers: dict[str, str]) -> dict[str, str]:
     """
     _PROPAGATOR.inject(headers)
     return headers
+
+
+def ambient_traceparent() -> str | None:
+    """The ambient trace context as a ``traceparent``, or ``None`` outside a span.
+
+    For carriers that are a typed field rather than a header dict. With telemetry off
+    there is no active span, so the propagator injects nothing and the field stays
+    absent instead of travelling as an explicit null.
+    """
+    carrier: dict[str, str] = {}
+    _PROPAGATOR.inject(carrier)
+    return carrier.get("traceparent")
