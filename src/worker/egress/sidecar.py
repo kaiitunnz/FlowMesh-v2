@@ -163,9 +163,10 @@ class MediatedEgressSidecar:
     def _egress_span(self, permit: MediatedOperationPermit) -> Iterator[Span | None]:
         """Open ``flowmesh.egress`` at the boundary its ``traceparent`` carries.
 
-        ``_drive`` runs on this sidecar's own thread pool, off the task lane the
-        boundary's episode is on, so the parent comes from the permit's carried
-        traceparent rather than ambient context — there is none to inherit.
+        Neither egress path runs on the task lane the boundary's episode is on --
+        ``_drive`` takes this sidecar's own thread pool and ``egress_now`` the calling
+        facade's thread -- so the parent comes from the permit's carried traceparent
+        rather than ambient context, of which there is none to inherit.
         """
         if not _otel.emits(TelemetryLevel.FINE):
             yield None
@@ -272,6 +273,12 @@ class MediatedEgressSidecar:
         terminal reject the facade fails the turn on. Custody is left for the facade to
         reap once the turn resolves.
         """
+        with self._egress_span(permit):
+            return self._egress_now(permit)
+
+    def _egress_now(
+        self, permit: MediatedOperationPermit
+    ) -> ModelCompletion | HeldEgressReject:
         with self._lock:
             if not self._consume_permit(permit.permit_id, permit.deadline_epoch):
                 return HeldEgressReject(reason="permit replay")
