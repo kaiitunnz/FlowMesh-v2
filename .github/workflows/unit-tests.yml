@@ -23,6 +23,22 @@ jobs:
   unit-tests:
     name: Unit tests
     runs-on: ubuntu-latest
+    # The telemetry store's queries are generated SQL over a schema the collector
+    # creates, so asserting their shape catches a typo and not a wrong answer. They run
+    # against the real engine, pinned to the version the stack deploys.
+    services:
+      clickhouse:
+        image: clickhouse/clickhouse-server:24.8
+        env:
+          CLICKHOUSE_PASSWORD: flowmesh
+        ports:
+          - 8123:8123
+        options: >-
+          --health-cmd "wget --spider -q http://localhost:8123/ping"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    env:
+      FLOWMESH_TEST_CLICKHOUSE_URL: http://127.0.0.1:8123
+      FLOWMESH_TEST_CLICKHOUSE_PASSWORD: flowmesh
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
