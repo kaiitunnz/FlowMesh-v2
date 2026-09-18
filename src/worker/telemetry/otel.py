@@ -1,4 +1,4 @@
-"""OpenTelemetry tracing wiring for worker executors.
+"""OpenTelemetry tracing wiring for the worker process.
 
 Sets up a single process-wide ``TracerProvider`` with a JSONL exporter that
 appends ``ReadableSpan.to_json()`` to ``<out_dir>/logs/spans.jsonl`` for
@@ -37,7 +37,11 @@ from opentelemetry.sdk.trace.export import (
 from opentelemetry.sdk.trace.id_generator import IdGenerator, RandomIdGenerator
 
 from shared.schemas.governance import SpanType
-from shared.telemetry.config import TelemetryConfig, TelemetryLevel
+from shared.telemetry.config import (
+    DISABLED_TELEMETRY_CONFIG,
+    TelemetryConfig,
+    TelemetryLevel,
+)
 from shared.telemetry.ids import trace_sampled, workflow_to_trace_id_int
 from shared.telemetry.provider import PayloadFreeSpanExporter
 
@@ -53,13 +57,7 @@ _current_spans_path_var: ContextVar[Path | None] = ContextVar(
 )
 _lock = threading.Lock()
 
-_telemetry_config = TelemetryConfig(
-    level=TelemetryLevel.OFF,
-    traces_enabled=True,
-    metrics_enabled=True,
-    sample_ratio=1.0,
-    otlp_endpoint=None,
-)
+_telemetry_config = DISABLED_TELEMETRY_CONFIG
 _otlp_timeout_sec = _DEFAULT_OTLP_TIMEOUT_SEC
 
 
@@ -119,7 +117,8 @@ class _SampledSpanExporter(SpanExporter):
         kept = [
             span
             for span in spans
-            if trace_sampled(self._sample_ratio, span.get_span_context().trace_id)
+            if (ctx := span.get_span_context()) is not None
+            and trace_sampled(self._sample_ratio, ctx.trace_id)
         ]
         if not kept:
             return SpanExportResult.SUCCESS

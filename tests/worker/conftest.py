@@ -1,7 +1,7 @@
 """Worker-wide test isolation for the process-global tracer state.
 
 The worker's telemetry config and tracer provider are module globals written once per
-process: ``_otel.configure`` sets the config, and ``_ensure_tracer_provider`` builds the
+process: ``otel.configure`` sets the config, and ``_ensure_tracer_provider`` builds the
 provider and hands it to OpenTelemetry's own global. Production writes them once at
 startup; a test session writes them many times, and anything a test leaves behind is
 inherited by every test after it. ``Runner.__init__`` calls ``configure`` on its own, so
@@ -15,23 +15,23 @@ import pytest
 from opentelemetry import trace
 from opentelemetry.util._once import Once
 
-from worker.executors.mixins import _otel
+from worker.telemetry import otel
 
 
 @pytest.fixture(autouse=True)
 def _restore_worker_tracer_globals() -> Iterator[None]:
     """Snapshot the worker's tracer globals and put them back after every test."""
-    config = _otel._telemetry_config
-    timeout = _otel._otlp_timeout_sec
-    initialized = _otel._PROVIDER_INITIALIZED
+    config = otel._telemetry_config
+    timeout = otel._otlp_timeout_sec
+    initialized = otel._PROVIDER_INITIALIZED
     provider = trace._TRACER_PROVIDER
     set_once = trace._TRACER_PROVIDER_SET_ONCE
     try:
         yield
     finally:
-        _otel._telemetry_config = config
-        _otel._otlp_timeout_sec = timeout
-        _otel._PROVIDER_INITIALIZED = initialized
+        otel._telemetry_config = config
+        otel._otlp_timeout_sec = timeout
+        otel._PROVIDER_INITIALIZED = initialized
         trace._TRACER_PROVIDER = provider
         # Without restoring the guard as well, a later ``set_tracer_provider`` is
         # logged and ignored, so the next test silently keeps this one's provider.

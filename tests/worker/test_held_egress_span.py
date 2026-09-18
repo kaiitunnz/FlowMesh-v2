@@ -24,7 +24,7 @@ from shared.tools.model.schema import (
 from shared.utils.ids import new_mediated_permit_id
 from tests.worker.otel_support import fresh_worker_provider, worker_telemetry
 from worker.egress import MediatedEgressSidecar, PendingEgressRequestStore
-from worker.executors.mixins import _otel
+from worker.telemetry import otel
 
 _WORKER = "wkr-1"
 _GEN = 3
@@ -98,7 +98,7 @@ def _run_held_turn(spans_path: Path, traceparent: str | None) -> None:
         outcome_sink=lambda _outcome: None,
     )
     try:
-        with _otel.task_trace_context(_WORKFLOW, spans_path):
+        with otel.task_trace_context(_WORKFLOW, spans_path):
             result = sidecar.egress_now(_permit(traceparent))
         assert isinstance(result, ModelCompletion)
     finally:

@@ -14,7 +14,7 @@ from pathlib import Path
 
 from shared.telemetry.config import TelemetryLevel
 from tests.worker.otel_support import fresh_worker_provider, worker_telemetry
-from worker.executors.mixins import _otel
+from worker.telemetry import otel
 
 
 def _read_span_names(path: Path) -> set[str]:
@@ -32,7 +32,7 @@ def test_off_lane_thread_span_does_not_land_in_the_active_tasks_spans_jsonl(
 
     def off_lane_work() -> None:
         entered.wait(timeout=5)
-        with _otel.get_tracer().start_as_current_span("flowmesh.egress"):
+        with otel.get_tracer().start_as_current_span("flowmesh.egress"):
             pass
         off_lane_done.set()
 
@@ -40,9 +40,9 @@ def test_off_lane_thread_span_does_not_land_in_the_active_tasks_spans_jsonl(
         thread = threading.Thread(target=off_lane_work)
         thread.start()
         try:
-            with _otel.workflow_trace_context("wfl-task-a"):
-                with _otel.task_trace_context("wfl-task-a", task_a_path):
-                    with _otel.get_tracer().start_as_current_span("task"):
+            with otel.workflow_trace_context("wfl-task-a"):
+                with otel.task_trace_context("wfl-task-a", task_a_path):
+                    with otel.get_tracer().start_as_current_span("task"):
                         entered.set()
                         assert off_lane_done.wait(timeout=5)
         finally:
@@ -58,7 +58,7 @@ def test_off_lane_thread_resolves_no_spans_path_by_default() -> None:
     resolved: dict[str, object] = {}
 
     def check() -> None:
-        resolved["path"] = _otel._resolve_path()
+        resolved["path"] = otel._resolve_path()
 
     thread = threading.Thread(target=check)
     thread.start()

@@ -44,7 +44,7 @@ from shared.tools.contract import (
 from shared.tools.model.egress import ModelEgressError
 from shared.tools.model.schema import ModelCompletion
 
-from ..executors.mixins import _otel
+from ..telemetry import otel
 from .fence import fence_reason, materialize_tool_outcome
 from .request_store import CapturedRequest, PendingEgressRequestStore
 
@@ -168,18 +168,18 @@ class MediatedEgressSidecar:
         facade's thread -- so the parent comes from the permit's carried traceparent
         rather than ambient context, of which there is none to inherit.
         """
-        if not _otel.emits(TelemetryLevel.FINE):
+        if not otel.emits(TelemetryLevel.FINE):
             yield None
             return
         parent_context = extract_context(permit.traceparent)
-        attributes = _otel.new_span_attributes(
+        attributes = otel.new_span_attributes(
             {
                 PHYSICAL_INVOCATION_ID: permit.invocation_id,
                 PHYSICAL_PERMIT_ID: permit.permit_id,
             }
         )
         with payload_free_span(
-            _otel.get_tracer(),
+            otel.get_tracer(),
             SPAN_EGRESS,
             context=parent_context,
             attributes=attributes,

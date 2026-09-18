@@ -16,7 +16,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from opentelemetry.util._once import Once
 
 from shared.telemetry.config import TelemetryConfig, TelemetryLevel
-from worker.executors.mixins import _otel
+from worker.telemetry import otel
 
 
 def worker_telemetry(
@@ -42,12 +42,12 @@ def fresh_worker_provider(config: TelemetryConfig) -> Iterator[TracerProvider]:
     next test's, so a result would depend on what ran before it.
     """
     with (
-        patch.object(_otel, "_telemetry_config", config),
-        patch.object(_otel, "_PROVIDER_INITIALIZED", False),
+        patch.object(otel, "_telemetry_config", config),
+        patch.object(otel, "_PROVIDER_INITIALIZED", False),
         patch.object(trace, "_TRACER_PROVIDER", None),
         patch.object(trace, "_TRACER_PROVIDER_SET_ONCE", Once()),
     ):
-        _otel.get_tracer()
+        otel.get_tracer()
         provider = trace.get_tracer_provider()
         assert isinstance(provider, TracerProvider)
         yield provider

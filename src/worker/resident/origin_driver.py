@@ -53,7 +53,7 @@ from shared.telemetry.propagation import extract_context
 from shared.telemetry.provider import payload_free_span
 from shared.telemetry.semconv import PHYSICAL_INVOCATION_ID, transport_span_name
 
-from ..executors.mixins import _otel
+from ..telemetry import otel
 
 AckSink = Callable[[ResidentBootstrapAck], None]
 OutcomeSink = Callable[[ResidentOpOutcome], None]
@@ -175,16 +175,16 @@ class ResidentOriginDriver:
         key, not ambient context — this coroutine runs on the resident lane
         host's own event loop, off the task lane the boundary's episode is on.
         """
-        if not _otel.emits(TelemetryLevel.FINE):
+        if not otel.emits(TelemetryLevel.FINE):
             yield None
             return
         parent_context = extract_context(req.traceparent)
-        attributes = _otel.new_span_attributes(
+        attributes = otel.new_span_attributes(
             {PHYSICAL_INVOCATION_ID: req.handoff.invocation_id}
         )
         span_name = transport_span_name(Transport(req.carriage_plan.selected_transport))
         with payload_free_span(
-            _otel.get_tracer(), span_name, context=parent_context, attributes=attributes
+            otel.get_tracer(), span_name, context=parent_context, attributes=attributes
         ) as span:
             yield span
 

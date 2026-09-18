@@ -11,14 +11,14 @@ import re
 from pathlib import Path
 
 from shared.telemetry import ids
-from worker.executors.mixins import _otel
+from worker.telemetry import otel
 
 _SRC = Path(__file__).resolve().parents[3] / "src"
 _DEFINITION = re.compile(r"^def workflow_to_trace_id_int\b", re.MULTILINE)
 
 
 def test_the_worker_derives_trace_ids_with_the_canonical_function() -> None:
-    assert _otel.workflow_to_trace_id_int is ids.workflow_to_trace_id_int
+    assert otel.workflow_to_trace_id_int is ids.workflow_to_trace_id_int
 
 
 def test_the_derivation_is_defined_exactly_once() -> None:

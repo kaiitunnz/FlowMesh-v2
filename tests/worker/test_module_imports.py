@@ -21,7 +21,7 @@ _MODULES = [
     "worker.egress.sidecar",
     "worker.executors",
     "worker.executors.base_executor",
-    "worker.executors.mixins._otel",
+    "worker.telemetry.otel",
     "worker.resident",
     "worker.sandbox.agent_runtime",
 ]

@@ -53,11 +53,11 @@ from .executors.base_executor import ExecutionError, Executor, TaskCancelledErro
 from .executors.episode_support import EpisodeStepResult
 from .executors.inference.projection import generated_outputs
 from .executors.inference.resolution import resolve_task_contract
-from .executors.mixins import _otel
 from .executors.utils.checkpoints import get_http_destination, write_executor_result
 from .lifecycle import Lifecycle
 from .model_turn import HeldModelEgress, ModelTurnRendezvous, ResponsesFacade
 from .resident.lane_host import ResidentLaneHost
+from .telemetry import otel
 from .utils.logging import TaskLogEmitter
 
 _DEFAULT_TELEMETRY_CONFIG = TelemetryConfig(
@@ -108,7 +108,7 @@ class Runner:
         telemetry: TelemetryConfig | None = None,
         otlp_timeout_sec: float = 10.0,
     ):
-        _otel.configure(
+        otel.configure(
             telemetry or _DEFAULT_TELEMETRY_CONFIG, otlp_timeout_sec=otlp_timeout_sec
         )
         self.lifecycle = lifecycle
@@ -450,19 +450,19 @@ class Runner:
         one, nests inside this one. At ``off`` this opens nothing and calls the executor
         directly, leaving the shipped span as the analyzer's only root.
         """
-        if not _otel.emits(TelemetryLevel.COARSE):
+        if not otel.emits(TelemetryLevel.COARSE):
             return executor.run(msg, out_dir)
         parent_context = extract_context(msg.traceparent)
-        attributes = _otel.new_span_attributes(
+        attributes = otel.new_span_attributes(
             {
                 PHYSICAL_TASK_ID: msg.task_id,
                 LOGICAL_WORKFLOW_ID: msg.workflow_id,
                 PHYSICAL_WORKER_ID: self.lifecycle.worker_id,
             }
         )
-        with _otel.workflow_trace_context(msg.workflow_id):
+        with otel.workflow_trace_context(msg.workflow_id):
             with payload_free_span(
-                _otel.get_tracer(),
+                otel.get_tracer(),
                 SPAN_TASK,
                 context=parent_context,
                 attributes=attributes,

@@ -16,7 +16,7 @@ from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 
 from shared.telemetry.config import TelemetryLevel
 from tests.worker.otel_support import fresh_worker_provider, worker_telemetry
-from worker.executors.mixins import _otel
+from worker.telemetry import otel
 
 _NONCE = "SECRET-NONCE-42"
 
@@ -55,10 +55,10 @@ def test_the_worker_provider_is_wired_through_the_payload_free_exporter() -> Non
         TelemetryLevel.FINE, otlp_endpoint="http://collector.invalid:4317"
     )
     with patch(
-        "worker.executors.mixins._otel.OTLPSpanExporter", lambda **_kwargs: captured
+        "worker.executors.mixins.otel.OTLPSpanExporter", lambda **_kwargs: captured
     ):
         with fresh_worker_provider(config) as provider:
-            tracer = _otel.get_tracer()
+            tracer = otel.get_tracer()
             with pytest.raises(_Boom):
                 with tracer.start_as_current_span("unowned"):
                     raise _Boom(f"model said: {_NONCE}")

@@ -52,7 +52,7 @@ from shared.telemetry.semconv import (
     SPAN_ENGINE_REQUEST,
 )
 
-from ..executors.mixins import _otel
+from ..telemetry import otel
 from .engine import (
     EngineOpen,
     EngineUnload,
@@ -319,11 +319,11 @@ class ResidentReplicaSidecar:
         ``DATA`` frame that opened this session carries the invocation's own
         context on its ``RelayFrame.tp`` field instead.
         """
-        if not _otel.emits(TelemetryLevel.FINE):
+        if not otel.emits(TelemetryLevel.FINE):
             yield None
             return
         parent_context = extract_context(self._traceparents.get(session_id))
-        attributes = _otel.new_span_attributes(
+        attributes = otel.new_span_attributes(
             {
                 PHYSICAL_INVOCATION_ID: handoff.invocation_id,
                 PHYSICAL_REPLICA_ID: handoff.replica_id,
@@ -331,7 +331,7 @@ class ResidentReplicaSidecar:
             }
         )
         with payload_free_span(
-            _otel.get_tracer(),
+            otel.get_tracer(),
             SPAN_ENGINE_REQUEST,
             context=parent_context,
             attributes=attributes,

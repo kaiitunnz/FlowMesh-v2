@@ -14,8 +14,8 @@ from shared.telemetry.config import TelemetryLevel
 from shared.telemetry.provider import payload_free_span
 from shared.telemetry.semconv import PHYSICAL_WORKER_ID, SPAN_SANDBOX_COMMAND
 
-from ..executors.mixins import _otel
 from ..private_state import MaterializedState
+from ..telemetry import otel
 from .runtime import SandboxRuntime
 
 _LOG = logging.getLogger("agent-sandbox")
@@ -46,11 +46,11 @@ class AgentSandboxRuntime(LocalSandboxExecutor):
     def execute(self, command: SandboxCommand) -> SandboxCommandResult:
         self._check_fence()
         _LOG.info("[sandbox] %s", " ".join(command.argv)[:200])
-        if _otel.emits(TelemetryLevel.FULL):
+        if otel.emits(TelemetryLevel.FULL):
             with payload_free_span(
-                _otel.get_tracer(),
+                otel.get_tracer(),
                 SPAN_SANDBOX_COMMAND,
-                attributes=_otel.new_span_attributes(
+                attributes=otel.new_span_attributes(
                     {PHYSICAL_WORKER_ID: self._capability.worker_id}
                 ),
             ):
