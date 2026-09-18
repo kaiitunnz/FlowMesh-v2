@@ -10,6 +10,8 @@ import hashlib
 import re
 from enum import StrEnum
 
+from opentelemetry.sdk.trace.sampling import TraceIdRatioBased
+
 from shared.utils.ids import PREFIX_WORKFLOW
 
 _HEX_ONLY = re.compile(r"[^0-9a-f]")
@@ -60,3 +62,21 @@ def derived_span_id(kind: SpanIdKind, durable_id: str) -> int:
         if value != 0:
             return value
         salt += b"\x00"
+
+
+def trace_sampled(ratio: float, trace_id: int) -> bool:
+    """Whether ``trace_id`` falls inside the configured sample.
+
+    The decision reads the trace id alone, which every producer derives from the
+    workflow id by the same function, so the root, a supervisor and a worker agree on
+    whether a workflow is traced without coordinating -- and a trace is never half
+    present. Delegates to the SDK's own ratio sampler rather than restating its bound.
+    """
+    if ratio >= 1.0:
+        return True
+    if ratio <= 0.0:
+        return False
+    result = TraceIdRatioBased(ratio).should_sample(
+        parent_context=None, trace_id=trace_id, name=""
+    )
+    return result.decision.is_sampled()

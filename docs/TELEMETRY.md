@@ -53,9 +53,14 @@ rather than held open. Everything shorter-lived uses an ordinary random span id.
 A gated `serve` request is driven by an external principal and owns no workflow, so it
 roots its own trace keyed by its serve task and request instead.
 
-An inbound `traceparent` from outside the fabric is recorded as a span **link**, never
-adopted as the parent. Adopting it would take the caller's `trace_id` and a workflow's
-trace would then differ between a CI-invoked and a CLI-invoked run.
+An inbound `traceparent` from outside the fabric is never adopted as a parent. Adopting
+it would take the caller's `trace_id`, and a workflow's trace would then differ between
+a CI-invoked and a CLI-invoked run; a workflow's trace is keyed to its own id whatever
+called it.
+
+`SERVER_METRICS_TRACE_SAMPLE_RATIO` below `1.0` traces that fraction of workflows. The
+decision reads the derived trace id alone, so every process reaches it independently and
+a traced workflow is traced in all of them.
 
 ## The span tree
 
@@ -133,9 +138,16 @@ line per span carrying its name, its duration, and the one or two ids that ident
 level; `--json` emits the same tree with the logical and physical attribute views intact
 and separate. `flowmesh trace aggregate --metric <name> --group-by <attribute>` rolls one
 metric up by one attribute key, with `--stat` selecting count, sum, avg, min, max, p50,
-p95 or p99, `--kind` selecting the gauge or histogram table, and `--workflow-id`
-restricting the aggregate to one workflow. The same two queries are `client.traces.tree()`
-and `client.traces.aggregate()` on the SDK.
+p95 or p99 and `--kind` selecting the gauge or histogram table. A gauge point carries one
+value, so every statistic reads off it directly. A histogram point carries bucket counts
+for a whole series, restated in full at each export, so the histogram table is aggregated
+from each series' latest point: count, sum and avg come out exact, a percentile is
+interpolated inside the bucket it lands in and reports the largest bucket bound when it
+lands past one, and min and max are rejected there, a histogram point holding no
+observation to read them off. An aggregate is fleet-wide — no metric carries a workflow
+id, so `--workflow-id` is rejected too and a workflow's own telemetry is its span tree.
+The same two queries are `client.traces.tree()` and `client.traces.aggregate()` on the
+SDK.
 
 Both read through the server, which resolves them against the store behind its read port;
 neither the CLI nor the SDK holds a store driver, so replacing the store is a collector

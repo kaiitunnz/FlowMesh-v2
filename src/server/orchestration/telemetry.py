@@ -35,7 +35,12 @@ from opentelemetry.trace import (
 )
 
 from shared.telemetry.config import TelemetryConfig, TelemetryLevel
-from shared.telemetry.ids import SpanIdKind, derived_span_id, workflow_to_trace_id_int
+from shared.telemetry.ids import (
+    SpanIdKind,
+    derived_span_id,
+    trace_sampled,
+    workflow_to_trace_id_int,
+)
 from shared.telemetry.semconv import (
     LOGICAL_ACTIVATION_ID,
     LOGICAL_CHILD_INDEX,
@@ -255,6 +260,7 @@ class TelemetrySpanEmitter:
         self._config = config
         self._workflow_id = workflow_id
         self._trace_id = workflow_to_trace_id_int(workflow_id)
+        self._sampled = trace_sampled(config.sample_ratio, self._trace_id)
         self._emitted: set[tuple[int, int]] = set()
 
         self._activations: dict[str, Activation] = {}
@@ -359,6 +365,7 @@ class TelemetrySpanEmitter:
     def _emits(self, minimum: TelemetryLevel) -> bool:
         return (
             self._tracer is not None
+            and self._sampled
             and self._config.traces_enabled
             and self._config.emits(minimum)
         )
@@ -428,6 +435,19 @@ class TelemetrySpanEmitter:
             return None
         return start_ns, max(candidates)
 
+    def _episode_parent_span_id(self, wi: WorkItem) -> int:
+        """The episode's parent: its activation, or the workflow below ``fine``.
+
+        The activation layer starts at ``fine``. Below that no activation span is
+        emitted, so naming one as the parent would name a span the reader never
+        receives and render every episode as its own root. The episode carries its
+        operator and activation ids as attributes either way, so flattening the tree
+        at ``coarse`` costs nesting, not identity.
+        """
+        if self._config.emits(TelemetryLevel.FINE):
+            return derived_span_id(SpanIdKind.ACTIVATION, wi.activation_id)
+        return derived_span_id(SpanIdKind.WORKFLOW, self._workflow_id)
+
     @_absorbs_faults
     def emit_work_item(self, wi: WorkItem) -> None:
         if not self._emits(TelemetryLevel.COARSE):
@@ -441,7 +461,7 @@ class TelemetrySpanEmitter:
         if extent is None:
             return
         start_ns, end_ns = extent
-        parent_span_id = derived_span_id(SpanIdKind.ACTIVATION, wi.activation_id)
+        parent_span_id = self._episode_parent_span_id(wi)
         attrs = {
             LOGICAL_WORKFLOW_ID: self._workflow_id,
             LOGICAL_OPERATOR_ID: wi.operator_id,
@@ -653,6 +673,8 @@ class WorkflowSpanEmitter:
         ):
             return
         trace_id = workflow_to_trace_id_int(workflow_id)
+        if not trace_sampled(self._config.sample_ratio, trace_id):
+            return
         span_id = derived_span_id(SpanIdKind.WORKFLOW, workflow_id)
         _export_span(
             self._tracer,

@@ -7,12 +7,18 @@ correctness rests entirely on what it derives from durable state, so a wrong der
 would otherwise produce a tree that looks plausible while being silently wrong.
 """
 
+import asyncio
+import logging
+import tempfile
+from dataclasses import replace
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
 from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
+from server.config import OrchestrationConfig
 from server.orchestration import (
     OrchestrationEngine,
     ScopeBudget,
@@ -22,7 +28,9 @@ from server.orchestration.state import Activation, BoundaryEvent, LedgerSnapshot
 from server.orchestration.telemetry import (
     ActivationClassificationError,
     TelemetrySpanEmitter,
+    WorkflowSpanEmitter,
 )
+from server.task.runtime import TaskRuntime
 from server.task.v2 import FrontendWorkflowSource, PersistedV2Workflow
 from server.task.v2.compiler.bindings import leaf_profile
 from server.task.v2.representations.operators import (
@@ -55,13 +63,19 @@ from server.task.v2.representations.template import (
 )
 from server.task.v2.representations.versioning import VersionId
 from shared.tasks import TaskType
-from shared.telemetry.config import TelemetryLevel
+from shared.telemetry.config import TelemetryConfig, TelemetryLevel
 from shared.telemetry.ids import SpanIdKind, derived_span_id, workflow_to_trace_id_int
 from shared.telemetry.semconv import (
     SPAN_ATTEMPT,
     SPAN_BOUNDARY,
     SPAN_EPISODE,
     SPAN_OPERATOR,
+)
+from shared.utils.time import now_iso, parse_iso_datetime
+from tests.server.task.test_v2_orchestration import (
+    FakeRegistry,
+    _NoopSecretVault,
+    _WorkerRegistryStub,
 )
 from tests.server.telemetry_helpers import recording_tracer
 
@@ -656,3 +670,174 @@ def test_telemetry_never_triggers_a_snapshot(monkeypatch: pytest.MonkeyPatch) ->
     _drive_a_representative_sequence(eng)
 
     assert calls["n"] == 0, "no telemetry path may trigger to_snapshot()"
+
+
+# --------------------------------------------------------------------------- #
+# Every level: a connected tree, never a forest
+# --------------------------------------------------------------------------- #
+
+
+def _drive_every_span_kind(eng: OrchestrationEngine) -> None:
+    """One sequence settling an activation, an episode, an attempt and a boundary."""
+    _drive_a_representative_sequence(eng)
+    eng.route_boundary_event(
+        "A",
+        BoundaryEvent(
+            kind=BoundaryEventKind.INVOCATION, call_correlation="m0", interface="model"
+        ),
+    )
+    eng.settle_boundary_outcome("A", "m0", value="answer")
+    eng.terminalize_boundary_invocation("A", "m0")
+
+
+@pytest.mark.parametrize("level", list(TelemetryLevel))
+def test_every_level_emits_a_connected_tree(level: TelemetryLevel) -> None:
+    """No level may name a parent span that level never emits.
+
+    The workflow root is the one parent a ledger span may name without emitting it --
+    a different emitter owns it -- so it is the only accepted unknown id.
+    """
+    tracer, exporter, config = recording_tracer(level)
+    emitter = TelemetrySpanEmitter(tracer, config, _WORKFLOW_ID)
+    eng = _engine(_spawning_agent_bundle(), emitter=emitter)
+    _drive_every_span_kind(eng)
+
+    spans = exporter.get_finished_spans()
+    if level is TelemetryLevel.OFF:
+        assert not spans
+        return
+
+    assert spans, f"expected spans at {level}"
+    workflow_span_id = derived_span_id(SpanIdKind.WORKFLOW, _WORKFLOW_ID)
+    emitted = {s.context.span_id for s in spans}
+    for span in spans:
+        assert span.context.trace_id == workflow_to_trace_id_int(_WORKFLOW_ID)
+        assert span.parent is not None, f"{span.name!r} has no parent at {level}"
+        assert (
+            span.parent.span_id in emitted or span.parent.span_id == workflow_span_id
+        ), f"orphan parent for {span.name!r} at {level}"
+
+
+def test_coarse_hangs_its_episodes_on_the_workflow_root() -> None:
+    """``coarse`` emits no activation layer, so an episode parents on the workflow.
+
+    The operator and activation ids stay on the episode as attributes, so what the
+    flattening costs is nesting, not identity.
+    """
+    tracer, exporter, config = recording_tracer(TelemetryLevel.COARSE)
+    emitter = TelemetrySpanEmitter(tracer, config, _WORKFLOW_ID)
+    eng = _engine(_spawning_agent_bundle(), emitter=emitter)
+    _drive_every_span_kind(eng)
+
+    assert _spans_named(exporter, SPAN_OPERATOR) == []
+    episodes = _spans_named(exporter, SPAN_EPISODE)
+    assert episodes
+    workflow_span_id = derived_span_id(SpanIdKind.WORKFLOW, _WORKFLOW_ID)
+    for span in episodes:
+        assert span.parent is not None and span.parent.span_id == workflow_span_id
+        assert _attrs(span)["flowmesh.logical.activation_id"]
+
+
+# --------------------------------------------------------------------------- #
+# Sample ratio: the trace-id-derived decision the SDK sampler never sees
+# --------------------------------------------------------------------------- #
+
+
+def _sampled_config(config: TelemetryConfig, ratio: float) -> TelemetryConfig:
+    return replace(config, sample_ratio=ratio)
+
+
+def test_an_unsampled_workflow_synthesizes_no_ledger_span() -> None:
+    tracer, exporter, config = recording_tracer(TelemetryLevel.FULL)
+    emitter = TelemetrySpanEmitter(tracer, _sampled_config(config, 0.0), _WORKFLOW_ID)
+    eng = _engine(_spawning_agent_bundle(), emitter=emitter)
+    _drive_every_span_kind(eng)
+
+    assert not exporter.get_finished_spans()
+
+
+def test_a_sampled_workflow_still_synthesizes_its_ledger_spans() -> None:
+    tracer, exporter, config = recording_tracer(TelemetryLevel.FULL)
+    emitter = TelemetrySpanEmitter(tracer, _sampled_config(config, 1.0), _WORKFLOW_ID)
+    eng = _engine(_spawning_agent_bundle(), emitter=emitter)
+    _drive_every_span_kind(eng)
+
+    assert exporter.get_finished_spans()
+
+
+def test_the_workflow_root_span_honors_the_same_sample_decision() -> None:
+    tracer, exporter, config = recording_tracer(TelemetryLevel.COARSE)
+    unsampled = WorkflowSpanEmitter(tracer, _sampled_config(config, 0.0))
+    unsampled.emit(
+        _WORKFLOW_ID, "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:01+00:00"
+    )
+    assert not exporter.get_finished_spans()
+
+    sampled = WorkflowSpanEmitter(tracer, _sampled_config(config, 1.0))
+    sampled.emit(_WORKFLOW_ID, "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:01+00:00")
+    assert len(exporter.get_finished_spans()) == 1
+
+
+# --------------------------------------------------------------------------- #
+# Workflow record: submission time, not record-construction time
+# --------------------------------------------------------------------------- #
+
+_V2_LINEAR = """
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {name: linear}
+spec:
+  graph:
+    nodes:
+      - name: a
+        spec: {taskType: echo, data: {type: list, items: [x]}}
+      - name: b
+        dependsOn: [a]
+        spec: {taskType: echo, data: {type: list, items: [y]}}
+"""
+
+
+class _SubmitTimeRegistry(FakeRegistry):
+    """Records the submission timestamp ``register`` stamps the workflow record with."""
+
+    async def register_workflow_async(
+        self,
+        workflow_id: str,
+        tasks: list[Any],
+        v2: Any = None,
+        submitted_at: str | None = None,
+    ) -> None:
+        # Falls back to stamping here, exactly as the record's own default does, so
+        # the assertion measures the ordering rather than the plumbing.
+        self.submitted_at = submitted_at or now_iso()
+        await super().register_workflow_async(workflow_id, tasks, v2=v2)
+
+
+def test_the_workflow_span_starts_no_later_than_its_earliest_child() -> None:
+    """The workflow span's extent must cover the submit work it is meant to measure.
+
+    ``submitted_at`` is what the root span starts at. A v2 submission compiles the
+    template and drives the ledger's first work items before the workflow record is
+    written, so a timestamp taken at record construction lands after the spans nested
+    under it.
+    """
+    registry = _SubmitTimeRegistry()
+    runtime = TaskRuntime(
+        cast(Any, registry),
+        cast(Any, _WorkerRegistryStub()),
+        OrchestrationConfig(),
+        Path(tempfile.gettempdir()),
+        logging.getLogger("v2-telemetry-submit"),
+        secret_vault=cast(Any, _NoopSecretVault()),
+    )
+    workflow_id, _ = asyncio.run(runtime.register("owner", "org", _V2_LINEAR))
+
+    engine = runtime.orchestration_engine(workflow_id)
+    assert engine is not None
+    events = engine._trace  # noqa: SLF001 - the ledger's own recorded timestamps
+    assert events, "expected the build to record at least one ledger event"
+
+    submitted_at = parse_iso_datetime(registry.submitted_at)
+    child_starts = [at for event in events if (at := parse_iso_datetime(event.at))]
+    assert submitted_at is not None and child_starts
+    assert submitted_at <= min(child_starts)

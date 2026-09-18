@@ -39,6 +39,7 @@ from opentelemetry.sdk.trace.id_generator import IdGenerator, RandomIdGenerator
 
 from shared.schemas.governance import SpanType
 from shared.telemetry.config import TelemetryConfig, TelemetryLevel
+from shared.telemetry.ids import trace_sampled
 from shared.telemetry.provider import PayloadFreeSpanExporter
 from shared.utils.ids import PREFIX_WORKFLOW
 
@@ -116,6 +117,37 @@ class _JSONLSpanExporter(SpanExporter):
         return None
 
 
+class _SampledSpanExporter(SpanExporter):
+    """Applies the configured sample ratio to what leaves over OTLP.
+
+    The sample decision cannot live on the provider here: the JSONL sink the
+    governance analyzer reads is unconditional at every level, and a provider-level
+    sampler would drop a span before both processors. Sampling on this side keeps that
+    sink whole while the exported trace honours the same trace-id-derived decision the
+    server applies, so a sampled workflow is sampled in both processes.
+    """
+
+    def __init__(self, sample_ratio: float, exporter: SpanExporter) -> None:
+        self._sample_ratio = sample_ratio
+        self._exporter = exporter
+
+    def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
+        kept = [
+            span
+            for span in spans
+            if trace_sampled(self._sample_ratio, span.get_span_context().trace_id)
+        ]
+        if not kept:
+            return SpanExportResult.SUCCESS
+        return self._exporter.export(kept)
+
+    def shutdown(self) -> None:
+        self._exporter.shutdown()
+
+    def force_flush(self, timeout_millis: int = 30000) -> bool:
+        return self._exporter.force_flush(timeout_millis)
+
+
 def _resolve_path() -> Path | None:
     return _current_spans_path_var.get()
 
@@ -167,11 +199,14 @@ def _ensure_tracer_provider() -> None:
         if emits(TelemetryLevel.COARSE) and _telemetry_config.otlp_endpoint:
             provider.add_span_processor(
                 BatchSpanProcessor(
-                    PayloadFreeSpanExporter(
-                        OTLPSpanExporter(
-                            endpoint=_telemetry_config.otlp_endpoint,
-                            timeout=_otlp_timeout_sec,
-                        )
+                    _SampledSpanExporter(
+                        _telemetry_config.sample_ratio,
+                        PayloadFreeSpanExporter(
+                            OTLPSpanExporter(
+                                endpoint=_telemetry_config.otlp_endpoint,
+                                timeout=_otlp_timeout_sec,
+                            )
+                        ),
                     )
                 )
             )

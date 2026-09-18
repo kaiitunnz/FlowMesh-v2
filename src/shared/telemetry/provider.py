@@ -22,6 +22,7 @@ from opentelemetry.sdk.trace.export import (
     SpanExporter,
     SpanExportResult,
 )
+from opentelemetry.sdk.trace.sampling import ParentBased, TraceIdRatioBased
 from opentelemetry.trace import INVALID_SPAN, Span, Tracer
 from opentelemetry.trace.status import Status, StatusCode
 
@@ -149,7 +150,10 @@ def build_tracer(
     """
     if not _traces_active(config):
         return _NULL_TRACER
-    provider = TracerProvider(resource=Resource.create(dict(resource_attributes)))
+    provider = TracerProvider(
+        resource=Resource.create(dict(resource_attributes)),
+        sampler=ParentBased(root=TraceIdRatioBased(max(config.sample_ratio, 0.0))),
+    )
     if config.otlp_endpoint:
         provider.add_span_processor(
             BatchSpanProcessor(

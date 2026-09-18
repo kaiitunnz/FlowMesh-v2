@@ -26,7 +26,12 @@ from opentelemetry.trace import (
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
 from .config import TelemetryConfig, TelemetryLevel
-from .ids import SpanIdKind, derived_span_id, workflow_to_trace_id_int
+from .ids import (
+    SpanIdKind,
+    derived_span_id,
+    trace_sampled,
+    workflow_to_trace_id_int,
+)
 from .provider import build_tracer, payload_free_span
 from .semconv import (
     PHYSICAL_STAGE,
@@ -60,17 +65,25 @@ def serve_trace_id_int(serve_task_id: str, request_id: str) -> int:
     return int.from_bytes(digest, "big") or 1
 
 
-def _span_context(trace_id: int, span_id: int) -> SpanContext:
+def _span_context(trace_id: int, span_id: int, sampled: bool) -> SpanContext:
     return SpanContext(
         trace_id=trace_id,
         span_id=span_id,
         is_remote=False,
-        trace_flags=TraceFlags(TraceFlags.SAMPLED),
+        trace_flags=TraceFlags(TraceFlags.SAMPLED if sampled else TraceFlags.DEFAULT),
     )
 
 
-def _explicit_parent(trace_id: int, span_id: int) -> Context:
-    return set_span_in_context(NonRecordingSpan(_span_context(trace_id, span_id)))
+def _explicit_parent(trace_id: int, span_id: int, sampled: bool = True) -> Context:
+    """A parent the stage span attaches to explicitly.
+
+    The parent carries the workflow's own sample decision: a stage span inherits it
+    through ``ParentBased``, so a workflow outside the sample is absent from the trace
+    in whole rather than reduced to its control-plane half.
+    """
+    return set_span_in_context(
+        NonRecordingSpan(_span_context(trace_id, span_id, sampled))
+    )
 
 
 def format_traceparent(trace_id: int, span_id: int) -> str:
@@ -147,9 +160,11 @@ class ControlPlaneTracer:
         """
         if not self._should_emit(stage):
             return _NULL_SPAN
+        trace_id = workflow_to_trace_id_int(workflow_id)
         context = _explicit_parent(
-            workflow_to_trace_id_int(workflow_id),
+            trace_id,
             derived_span_id(SpanIdKind.WORKFLOW, workflow_id),
+            trace_sampled(self._config.sample_ratio, trace_id),
         )
         return self._open(stage, window, context, attributes)
 
@@ -168,9 +183,11 @@ class ControlPlaneTracer:
         """
         if not self._should_emit(stage):
             return _NULL_SPAN
+        trace_id = workflow_to_trace_id_int(workflow_id)
         context = _explicit_parent(
-            workflow_to_trace_id_int(workflow_id),
+            trace_id,
             derived_span_id(SpanIdKind.WORK_ITEM, work_item_id),
+            trace_sampled(self._config.sample_ratio, trace_id),
         )
         return self._open(stage, window, context, attributes)
 
@@ -222,9 +239,11 @@ class ControlPlaneTracer:
             workflow_id
         ):
             return self._open(ControlPlaneStage.LEDGER_SNAPSHOT, None, None, attributes)
+        trace_id = workflow_to_trace_id_int(workflow_id)
         context = _explicit_parent(
-            workflow_to_trace_id_int(workflow_id),
+            trace_id,
             derived_span_id(SpanIdKind.WORKFLOW, workflow_id),
+            trace_sampled(self._config.sample_ratio, trace_id),
         )
         return self._open(ControlPlaneStage.LEDGER_SNAPSHOT, None, context, attributes)
 
