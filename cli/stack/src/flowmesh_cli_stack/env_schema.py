@@ -1071,7 +1071,7 @@ STACK_ENV_SCHEMA = EnvSchema(
                     "",
                     description=(
                         "ClickHouse HTTP URL for the store read port "
-                        "(e.g. http://localhost:8123); unset disables telemetry queries."
+                        "(e.g. http://localhost:8123); unset disables queries."
                     ),
                 ),
                 EnvVar(

@@ -125,7 +125,7 @@ listed here is in `.env.example`.
 | `SERVER_METRICS_OTLP_ENDPOINT` | `http://localhost:4317` | OTLP collector endpoint; unset disables export |
 | `SERVER_METRICS_OTLP_TIMEOUT_SEC` | `10` | OTLP export request timeout (seconds) |
 | `SERVER_METRICS_RESOURCE_SAMPLE_SEC` | `15` | Worker GPU/resource sampling interval (seconds) |
-| `SERVER_METRICS_CLICKHOUSE_URL` | – | ClickHouse HTTP URL for the store read port (e.g. `http://localhost:8123`); unset disables telemetry queries |
+| `SERVER_METRICS_CLICKHOUSE_URL` | – | ClickHouse HTTP URL for the store read port (e.g. `http://localhost:8123`); unset disables queries |
 | `SERVER_METRICS_CLICKHOUSE_DATABASE` | `flowmesh` | ClickHouse database for the store read port |
 | `SERVER_METRICS_CLICKHOUSE_USERNAME` | `default` | ClickHouse user for the store read port |
 | `SERVER_METRICS_CLICKHOUSE_PASSWORD` | `flowmesh` | ClickHouse password for the store read port |
