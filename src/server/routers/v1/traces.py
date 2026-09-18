@@ -1,5 +1,6 @@
 """Trace endpoints — per-task upload, workflow-level read + analyzer, span queries."""
 
+import functools
 import logging
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
@@ -8,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 
 from shared.schemas.result import result_file_path
@@ -296,7 +298,9 @@ async def get_workflow_span_tree(
         principal, ResourceKind.WORKFLOW, workflow_id, ResourceAction.READ, logger
     )
     with _store_available():
-        rows = _require_telemetry_store(store).fetch_trace(workflow_id)
+        rows = await run_in_threadpool(
+            _require_telemetry_store(store).fetch_trace, workflow_id
+        )
     return build_span_tree(workflow_id, rows)
 
 
@@ -325,12 +329,15 @@ async def aggregate_metric(
         principal, ResourceKind.WORKFLOW, workflow_id, ResourceAction.READ, logger
     )
     with _store_available():
-        buckets = _require_telemetry_store(store).aggregate(
-            metric=metric,
-            group_by=group_by,
-            stat=stat,
-            kind=kind,
-            workflow_id=workflow_id,
+        buckets = await run_in_threadpool(
+            functools.partial(
+                _require_telemetry_store(store).aggregate,
+                metric=metric,
+                group_by=group_by,
+                stat=stat,
+                kind=kind,
+                workflow_id=workflow_id,
+            )
         )
     return TraceAggregate(
         metric=metric,

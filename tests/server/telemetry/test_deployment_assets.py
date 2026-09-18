@@ -113,7 +113,7 @@ def test_collector_config_exporters_target_only_clickhouse() -> None:
 def test_store_module_defines_no_receiver_or_listen_socket() -> None:
     """The read port must never become a second ingest path.
 
-    A structural guard on the module set T6 owns: no OTLP/receiver-shaped symbol, no
+    A structural guard on the store modules: no OTLP/receiver-shaped symbol, and no
     server socket construction.
     """
     import inspect
