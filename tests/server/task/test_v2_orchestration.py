@@ -64,6 +64,7 @@ class FakeRegistry:
         workflow_id: str,
         tasks: list[Any],
         v2: Any = None,
+        submitted_at: str | None = None,
     ) -> None:
         self.workflow_task_ids[workflow_id] = [t.task_id for t in tasks]
         self.remaining[workflow_id] = {

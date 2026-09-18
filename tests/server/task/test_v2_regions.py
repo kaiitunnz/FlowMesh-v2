@@ -165,6 +165,7 @@ class _CapturingRegistry:
         workflow_id: str,
         tasks: list[Any],
         v2: Any = None,
+        submitted_at: str | None = None,
     ) -> None:
         self.v2[workflow_id] = v2
 

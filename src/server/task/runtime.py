@@ -108,7 +108,7 @@ from ..orchestration.tool_dispatch import (
 from ..registries.worker import Worker, WorkerRegistry
 from ..registries.workflow import PersistedTask, WorkflowRegistry, WorkflowSched
 from ..services.model_secret_vault import ModelSecretVault
-from ..utils.time import parse_iso_ts
+from ..utils.time import now_iso, parse_iso_ts
 from .models import (
     SETTLING_TASK_STATUSES,
     TERMINAL_TASK_STATUSES,
@@ -443,6 +443,7 @@ class TaskRuntime:
         *,
         resident: bool = False,
     ) -> tuple[str, list[TaskParsingResult]]:
+        submitted_at = now_iso()
         parsed_workflow = parse_workflow(payload, format)
         specs = parsed_workflow.tasks
         yaml_text = redact_source_text(payload, format)
@@ -591,7 +592,7 @@ class TaskRuntime:
                     self._workflow_epoch_frontier[workflow_id] = 0
 
         await self._workflow_registry.register_workflow_async(
-            workflow_id, task_records, v2=v2_bundle
+            workflow_id, task_records, v2=v2_bundle, submitted_at=submitted_at
         )
 
         with self._cv:
