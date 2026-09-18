@@ -54,9 +54,7 @@ def test_the_worker_provider_is_wired_through_the_payload_free_exporter() -> Non
     config = worker_telemetry(
         TelemetryLevel.FINE, otlp_endpoint="http://collector.invalid:4317"
     )
-    with patch(
-        "worker.executors.mixins.otel.OTLPSpanExporter", lambda **_kwargs: captured
-    ):
+    with patch("worker.telemetry.otel.OTLPSpanExporter", lambda **_kwargs: captured):
         with fresh_worker_provider(config) as provider:
             tracer = otel.get_tracer()
             with pytest.raises(_Boom):
