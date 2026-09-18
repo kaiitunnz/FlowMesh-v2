@@ -34,7 +34,7 @@ def failing_synthesis(monkeypatch: pytest.MonkeyPatch) -> None:
     def boom(value: str) -> int:
         raise _Boom(f"synthesis failed on {value!r}")
 
-    monkeypatch.setattr(telemetry_module, "_iso_to_ns", boom)
+    monkeypatch.setattr(telemetry_module, "iso_to_ns", boom)
 
 
 def test_a_failing_emit_still_publishes_the_slot_and_releases_successors(
@@ -79,7 +79,7 @@ def test_a_failing_emit_leaves_the_ledger_identical_to_no_telemetry(
     def boom(value: str) -> int:
         raise _Boom(value)
 
-    monkeypatch.setattr(telemetry_module, "_iso_to_ns", boom)
+    monkeypatch.setattr(telemetry_module, "iso_to_ns", boom)
     failing_emitter, _exporter = emitter(TelemetryLevel.FULL)
     failing_trace, failing_output = drive(failing_emitter)
 

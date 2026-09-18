@@ -81,6 +81,7 @@ from .outcomes import (
 )
 from .private_state import PrivateStateLedger
 from .state import (
+    TERMINAL_WORK_ITEM_STATUSES,
     AcceptedInput,
     AcceptedInputMember,
     Activation,
@@ -160,7 +161,6 @@ _DEDUP_CAPABLE = frozenset(
 _EARLY_JOINS = frozenset(
     {JoinCompletion.ANY, JoinCompletion.FIRST_K, JoinCompletion.PREDICATE}
 )
-_TERMINAL_WI = frozenset({WorkItemStatus.SETTLED, WorkItemStatus.CANCELLED})
 
 
 class RegionError(ValueError):
@@ -640,7 +640,7 @@ class OrchestrationEngine:
     def on_dispatched(self, task_id: str, worker_id: str | None) -> None:
         """Record a physical attempt and issue or reissue the work item's invocation."""
         wi = self._work_item_for_task(task_id)
-        if wi is None or wi.status in _TERMINAL_WI:
+        if wi is None or wi.status in TERMINAL_WORK_ITEM_STATUSES:
             return
         if wi.invocation_id is None:
             invocation = Invocation(
@@ -702,7 +702,7 @@ class OrchestrationEngine:
         an explicit-empty publication rather than a value.
         """
         wi = self._work_item_for_task(task_id)
-        if wi is None or wi.status in _TERMINAL_WI:
+        if wi is None or wi.status in TERMINAL_WORK_ITEM_STATUSES:
             return Advance()
         outcome = (
             PublicationOutcome.EXPLICIT_EMPTY if empty else PublicationOutcome.SUCCESS
@@ -750,7 +750,7 @@ class OrchestrationEngine:
     def on_failed(self, task_id: str, error: str, *, retryable: bool) -> Advance:
         """Retry a work item as a fresh attempt, or settle it and cascade failure."""
         wi = self._work_item_for_task(task_id)
-        if wi is None or wi.status in _TERMINAL_WI:
+        if wi is None or wi.status in TERMINAL_WORK_ITEM_STATUSES:
             return Advance()
         if attempt := self._latest_attempt(wi):
             attempt.status = AttemptStatus.FAILED
@@ -781,7 +781,11 @@ class OrchestrationEngine:
     def on_uncertain(self, task_id: str) -> Advance:
         """Resolve a lost acknowledgement or route loss for an in-flight work item."""
         wi = self._work_item_for_task(task_id)
-        if wi is None or wi.status in _TERMINAL_WI or wi.invocation_id is None:
+        if (
+            wi is None
+            or wi.status in TERMINAL_WORK_ITEM_STATUSES
+            or wi.invocation_id is None
+        ):
             return Advance()
         if wi.status is WorkItemStatus.BLOCKED and self._has_pending_local_boundary(wi):
             # The worker that captured this boundary's request is lost, and the
@@ -845,7 +849,7 @@ class OrchestrationEngine:
         state access records the declared reference.
         """
         wi = self._work_item_for_task(task_id)
-        if wi is None or wi.status in _TERMINAL_WI:
+        if wi is None or wi.status in TERMINAL_WORK_ITEM_STATUSES:
             return Advance()
         # A recorded call is a re-drive whether it was granted or denied: it maps to its
         # key and creates no new work, so re-validation and duplicate records are cut.
@@ -916,7 +920,7 @@ class OrchestrationEngine:
         duplicate child or invocation.
         """
         wi = self._work_item_for_task(task_id)
-        if wi is None or wi.status in _TERMINAL_WI:
+        if wi is None or wi.status in TERMINAL_WORK_ITEM_STATUSES:
             return Advance()
         op = self._operators.get(wi.operator_id)
         advance = Advance()
@@ -2242,7 +2246,7 @@ class OrchestrationEngine:
         outcome: PublicationOutcome,
         value_ref: ValueRef | None,
     ) -> Advance:
-        if wi.status in _TERMINAL_WI:
+        if wi.status in TERMINAL_WORK_ITEM_STATUSES:
             return Advance()
         wi.status = WorkItemStatus.SETTLED
         wi.outcome = outcome
@@ -2427,7 +2431,7 @@ class OrchestrationEngine:
                 )
         self._apply_cancellation_residual(scope_id)
         for wi in self._scope_work_items(scope_id, kinds=("leaf", "agent")):
-            if wi.status not in _TERMINAL_WI:
+            if wi.status not in TERMINAL_WORK_ITEM_STATUSES:
                 self._cancel_work_item(wi)
         if scope.grant_id and scope.grant_id in self._grants:
             grant = self._grants[scope.grant_id]
@@ -2483,7 +2487,7 @@ class OrchestrationEngine:
     def _cancel_work_item(self, wi: WorkItem) -> None:
         # A cancelled in-flight external effect is not compensated here; compensation on
         # cancel rides with the deferred effect-commit machinery.
-        if wi.status in _TERMINAL_WI:
+        if wi.status in TERMINAL_WORK_ITEM_STATUSES:
             return
         wi.status = WorkItemStatus.CANCELLED
         self._private_state.release(wi.activation_id)
@@ -2822,7 +2826,7 @@ class OrchestrationEngine:
         cap = self._capabilities.get((scope_id, ProgressAxis.CHILD_INIT))
         for child in self._materialized_children(scope_id):
             wi = self._work_items[self._wi_by_activation[child.activation_id]]
-            if wi.status not in _TERMINAL_WI:
+            if wi.status not in TERMINAL_WORK_ITEM_STATUSES:
                 self._cancel_work_item(wi)
                 if cap is not None:
                     cap.outstanding = max(0, cap.outstanding - 1)
@@ -3113,7 +3117,7 @@ class OrchestrationEngine:
             if wi_id is None:
                 return
             wi = self._work_items[wi_id]
-            if wi.status in _TERMINAL_WI:
+            if wi.status in TERMINAL_WORK_ITEM_STATUSES:
                 return
             wi.status = WorkItemStatus.SETTLED
             wi.outcome = PublicationOutcome.EXPLICIT_EMPTY
@@ -3128,7 +3132,7 @@ class OrchestrationEngine:
 
     def _settle_failure(self, work_item_id: str) -> list[str]:
         wi = self._work_items[work_item_id]
-        if wi.status in _TERMINAL_WI:
+        if wi.status in TERMINAL_WORK_ITEM_STATUSES:
             return []
         wi.status = WorkItemStatus.SETTLED
         wi.outcome = PublicationOutcome.DECLARED_FAILURE
@@ -3431,7 +3435,7 @@ class OrchestrationEngine:
         resolved has not chosen an embodiment to commit to.
         """
         wi = self._work_item_for_task(task_id)
-        if wi is None or wi.status in _TERMINAL_WI:
+        if wi is None or wi.status in TERMINAL_WORK_ITEM_STATUSES:
             return
         self._input_preparations[wi.work_item_id] = InputPreparation(
             work_item_id=wi.work_item_id, worker_id=worker_id
@@ -3459,7 +3463,7 @@ class OrchestrationEngine:
         is becomes durable.
         """
         wi = self._work_item_for_task(task_id)
-        if wi is None or wi.status in _TERMINAL_WI:
+        if wi is None or wi.status in TERMINAL_WORK_ITEM_STATUSES:
             return None
         if (standing := self._input_resolutions.get(wi.work_item_id)) is not None:
             return standing
@@ -3518,7 +3522,7 @@ class OrchestrationEngine:
         released.
         """
         wi = self._work_item_for_task(task_id)
-        if wi is None or wi.status in _TERMINAL_WI:
+        if wi is None or wi.status in TERMINAL_WORK_ITEM_STATUSES:
             return None
         if self.agent_operator(task_id) is None:
             return None
@@ -3646,7 +3650,7 @@ class OrchestrationEngine:
         blocked.
         """
         wi = self._work_item_for_task(task_id)
-        if wi is None or wi.status in _TERMINAL_WI:
+        if wi is None or wi.status in TERMINAL_WORK_ITEM_STATUSES:
             return False
         cont = self._continuations.get(wi.work_item_id)
         if cont is not None and cont.waiting_on:

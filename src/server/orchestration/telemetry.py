@@ -37,7 +37,11 @@ from opentelemetry.trace import (
     set_span_in_context,
 )
 
-from shared.telemetry.config import TelemetryConfig, TelemetryLevel
+from shared.telemetry.config import (
+    DISABLED_TELEMETRY_CONFIG,
+    TelemetryConfig,
+    TelemetryLevel,
+)
 from shared.telemetry.ids import (
     SpanIdKind,
     derived_span_id,
@@ -67,9 +71,11 @@ from shared.telemetry.semconv import (
     SPAN_OPERATOR,
     SPAN_WORKFLOW,
 )
-from shared.utils.time import parse_iso_datetime
+from shared.utils.time import iso_to_ns
 
+from ..task.v2.representations.operators import REGION_OPERATOR_KINDS
 from .state import (
+    TERMINAL_WORK_ITEM_STATUSES,
     Activation,
     Attempt,
     Invocation,
@@ -77,7 +83,6 @@ from .state import (
     OrchestrationEvent,
     Scope,
     WorkItem,
-    WorkItemStatus,
 )
 
 __all__ = [
@@ -93,9 +98,7 @@ __all__ = [
 # Operator kinds whose root activation settles inside the ledger and never
 # dispatches; distinct vocabulary from an Activation's own kind
 # (``child``/``iteration``/``region``).
-_NO_EXTENT_OPERATOR_KINDS = frozenset(
-    {"branch", "merge", "join", "spawn", "loop_context"}
-)
+_NO_EXTENT_OPERATOR_KINDS = REGION_OPERATOR_KINDS
 # ``iteration`` activations (``engine.py::loop_feedback``) own neither a work item nor
 # a scope: unlike a spawn child, the loop primitive materializes no dispatchable body
 # for its own activation. Checked directly since it is already a first-class
@@ -111,21 +114,12 @@ _NO_EXTENT_OPERATOR_KINDS = frozenset(
 # merely has not settled yet.
 _NO_EXTENT_ACTIVATION_KINDS = frozenset({"iteration", "leaf", "agent"})
 
-_TERMINAL_WI = frozenset({WorkItemStatus.SETTLED, WorkItemStatus.CANCELLED})
 _TERMINAL_INVOCATION = frozenset(
     {
         InvocationState.TERMINAL,
         InvocationState.AMBIGUITY_TERMINAL,
         InvocationState.COMPENSATION_REQUIRED,
     }
-)
-
-_OFF_TELEMETRY_CONFIG = TelemetryConfig(
-    level=TelemetryLevel.OFF,
-    traces_enabled=False,
-    metrics_enabled=False,
-    sample_ratio=1.0,
-    otlp_endpoint=None,
 )
 
 _logger = logging.getLogger("orchestration-telemetry")
@@ -193,13 +187,6 @@ def _appended[T](source: dict[str, T], indexed: int) -> list[T]:
     cursor = reversed(source)
     keys = [next(cursor) for _ in range(count)]
     return [source[key] for key in reversed(keys)]
-
-
-def _iso_to_ns(value: str) -> int:
-    dt = parse_iso_datetime(value)
-    if dt is None:
-        raise ValueError(f"empty or malformed timestamp: {value!r}")
-    return int(dt.timestamp()) * 1_000_000_000 + dt.microsecond * 1_000
 
 
 def _span_context(trace_id: int, span_id: int) -> SpanContext:
@@ -387,7 +374,7 @@ class TelemetrySpanEmitter:
 
     def _event_ns(self, index: dict[str, tuple[int, str]], key: str) -> int | None:
         stamp = index.get(key)
-        return None if stamp is None else _iso_to_ns(stamp[1])
+        return None if stamp is None else iso_to_ns(stamp[1])
 
     # ------------------------------------------------------------------ #
     # Attempt
@@ -423,8 +410,8 @@ class TelemetrySpanEmitter:
             self._trace_id,
             span_id,
             parent_span_id,
-            _iso_to_ns(attempt.started_at),
-            _iso_to_ns(attempt.finished_at),
+            iso_to_ns(attempt.started_at),
+            iso_to_ns(attempt.finished_at),
             attrs,
         )
         self._emitted.add(key)
@@ -434,18 +421,20 @@ class TelemetrySpanEmitter:
     # ------------------------------------------------------------------ #
 
     def _work_item_extent(self, wi: WorkItem) -> tuple[int, int] | None:
-        if wi.status not in _TERMINAL_WI:
+        if wi.status not in TERMINAL_WORK_ITEM_STATUSES:
             return None
         start_ns = self._event_ns(self._ready_by_work_item, wi.work_item_id)
         if start_ns is None:
             return None
-        attempt_ends = [
-            _iso_to_ns(a.finished_at)
+        candidates = [
+            iso_to_ns(a.finished_at)
             for aid in wi.attempt_ids
             if (a := self._attempts.get(aid)) is not None and a.finished_at is not None
         ]
-        event_end = self._event_ns(self._last_by_work_item, wi.work_item_id)
-        candidates = attempt_ends + ([event_end] if event_end is not None else [])
+        if (
+            event_end := self._event_ns(self._last_by_work_item, wi.work_item_id)
+        ) is not None:
+            candidates.append(event_end)
         if not candidates:
             return None
         return start_ns, max(candidates)
@@ -544,10 +533,12 @@ class TelemetrySpanEmitter:
         Classification (not readiness) is checked first, so an activation whose shape
         this cannot recognize raises regardless of whether it happens to be closed yet.
 
-        A scope-owning activation's extent spans its whole subtree, so without ``memo``
-        a nested chain re-walks each level once per ancestor. The memo is supplied by
-        the caller and lives for one sweep over an unchanging ledger rather than on the
-        instance, so an entry can never outlive the state it was computed from.
+        A scope-owning activation's extent spans its whole subtree, and each owner in a
+        nested chain re-enters the walk for every activation beneath it, so without
+        ``memo`` the work is exponential in scope-nesting depth -- on the settle path,
+        holding the lock. The memo is supplied by the caller and lives for one sweep
+        over an unchanging ledger rather than on the instance, so an entry can never
+        outlive the state it was computed from.
         """
         if activation_id in memo:
             return memo[activation_id]
@@ -683,7 +674,7 @@ class TelemetrySpanEmitter:
         self._emitted.add(key)
 
 
-NULL_SPAN_EMITTER = TelemetrySpanEmitter(None, _OFF_TELEMETRY_CONFIG, "")
+NULL_SPAN_EMITTER = TelemetrySpanEmitter(None, DISABLED_TELEMETRY_CONFIG, "")
 
 
 class WorkflowSpanEmitter:
@@ -717,13 +708,13 @@ class WorkflowSpanEmitter:
             trace_id,
             span_id,
             None,
-            _iso_to_ns(submitted_at),
-            _iso_to_ns(closed_at),
+            iso_to_ns(submitted_at),
+            iso_to_ns(closed_at),
             {LOGICAL_WORKFLOW_ID: workflow_id},
         )
 
 
-NULL_WORKFLOW_SPAN_EMITTER = WorkflowSpanEmitter(None, _OFF_TELEMETRY_CONFIG)
+NULL_WORKFLOW_SPAN_EMITTER = WorkflowSpanEmitter(None, DISABLED_TELEMETRY_CONFIG)
 
 
 def build_span_emitter(
