@@ -4,7 +4,7 @@ import os
 from dataclasses import dataclass
 from enum import StrEnum
 
-from shared.utils.parsing import parse_bool_env, parse_float_env
+from shared.utils.parsing import parse_bool_env, parse_float_env, parse_int_env
 
 
 class TelemetryLevel(StrEnum):
@@ -29,6 +29,8 @@ class TelemetryConfig:
     metrics_enabled: bool
     sample_ratio: float
     otlp_endpoint: str | None
+    otlp_timeout_sec: int = 10
+    resource_sample_sec: int = 15
 
     def emits(self, minimum: TelemetryLevel) -> bool:
         """Whether this config's level is at least as verbose as ``minimum``.
@@ -66,7 +68,23 @@ class TelemetryConfig:
             metrics_enabled=parse_bool_env("SERVER_METRICS_METRICS_ENABLED", True),
             sample_ratio=_sample_ratio(),
             otlp_endpoint=_otlp_endpoint(),
+            otlp_timeout_sec=max(
+                1, parse_int_env("SERVER_METRICS_OTLP_TIMEOUT_SEC", 10)
+            ),
+            resource_sample_sec=max(
+                1, parse_int_env("SERVER_METRICS_RESOURCE_SAMPLE_SEC", 15)
+            ),
         )
+
+
+DISABLED_TELEMETRY_CONFIG = TelemetryConfig(
+    level=TelemetryLevel.OFF,
+    traces_enabled=False,
+    metrics_enabled=False,
+    sample_ratio=1.0,
+    otlp_endpoint=None,
+)
+"""The config a process holds when telemetry is off, shared by every null twin."""
 
 
 def _otlp_endpoint() -> str | None:
