@@ -11,11 +11,13 @@ from typing import Any
 
 from server.orchestration import OrchestrationEngine
 from server.orchestration.state import BoundaryEvent
+from server.orchestration.telemetry import TelemetrySpanEmitter
 from server.task.v2.representations.operators import BoundaryEventKind
 from shared.telemetry.config import TelemetryLevel
 from tests.server.orchestration.helpers import (
     emitter,
     engine,
+    recursive_agent_bundle,
     rehydrated,
     span_signature,
     spawning_agent_bundle,
@@ -261,3 +263,101 @@ def test_every_child_activation_gets_a_closed_extent() -> None:
     for span in operator_spans:
         assert span.start_time is not None and span.end_time is not None
         assert span.end_time >= span.start_time
+
+
+_DEPTH = 10
+
+# A scope-owning activation's extent covers its whole subtree, so each generation's
+# extent subsumes every generation below it. Recomputing that per ancestor doubles the
+# work per level added -- exponential, not merely quadratic. Emitting D activations and
+# reading each one's subtree once is inherently quadratic in total, so doubling the
+# depth may quadruple the work; this separates that from the explosion.
+_MAX_DEPTH_GROWTH_FACTOR = 5.0
+
+
+def _seal_region(eng: OrchestrationEngine, task_id: str) -> None:
+    eng.route_boundary_event(
+        task_id,
+        BoundaryEvent(
+            kind=BoundaryEventKind.SPAWN_SEAL,
+            call_correlation="seal",
+            child_region_ref="worker",
+        ),
+    )
+
+
+def _spawn_chain(eng: OrchestrationEngine, depth: int) -> list[str]:
+    """One child per generation: a scope tree ``depth`` deep and one wide."""
+    chain: list[str] = []
+    known: set[str] = set()
+    parent = "A"
+    for i in range(depth):
+        eng.on_dispatched(parent, "w1")
+        eng.route_boundary_event(
+            parent,
+            BoundaryEvent(
+                kind=BoundaryEventKind.SPAWN,
+                call_correlation=f"s{i}",
+                child_region_ref="worker",
+            ),
+        )
+        child = next(
+            a.activation_id
+            for a in eng._activations.values()  # noqa: SLF001 - test inspection
+            if a.kind == "child" and a.activation_id not in known
+        )
+        known.add(child)
+        chain.append(child)
+        parent = child
+    eng.on_dispatched(parent, "w1")
+    return chain
+
+
+def _extent_computations(depth: int, monkeypatch: Any) -> int:
+    """Extent derivations run while a chain ``depth`` deep settles innermost-first.
+
+    Counts the derivation itself rather than ledger records, because this defect lives
+    entirely in one recursion: a memo that stops working would be invisible under the
+    linear reads the rest of a settle does.
+    """
+    span_emitter, exporter = emitter(TelemetryLevel.FINE)
+    eng = engine(recursive_agent_bundle(), emitter=span_emitter)
+    chain = _spawn_chain(eng, depth)
+    assert len(chain) == depth
+
+    computed = 0
+    original = TelemetrySpanEmitter._compute_activation_extent  # noqa: SLF001
+
+    def counting(self: Any, activation_id: str, memo: Any) -> Any:
+        nonlocal computed
+        computed += 1
+        return original(self, activation_id, memo)
+
+    monkeypatch.setattr(
+        TelemetrySpanEmitter,
+        "_compute_activation_extent",
+        counting,
+    )
+    eng.on_succeeded(chain[-1])
+    for activation_id in reversed(chain[:-1]):
+        _seal_region(eng, activation_id)
+        eng.on_succeeded(activation_id)
+    _seal_region(eng, "A")
+    eng.on_succeeded("A")
+
+    assert len(exporter.get_finished_spans()) > depth, "the run must synthesize spans"
+    return computed
+
+
+def test_span_synthesis_does_not_explode_in_a_regions_depth(
+    monkeypatch: Any,
+) -> None:
+    """Width is guarded above; this is the same defect along the other axis."""
+    shallow = _extent_computations(_DEPTH, monkeypatch)
+    deep = _extent_computations(_DEPTH * 2, monkeypatch)
+
+    assert shallow > 0, "sanity: the settle derives extents"
+    assert deep < _MAX_DEPTH_GROWTH_FACTOR * shallow, (
+        f"doubling the nesting grew extent derivations {shallow} -> {deep}, "
+        "which is worse than the quadratic a per-activation subtree read costs"
+    )

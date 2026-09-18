@@ -598,7 +598,7 @@ def test_an_unclassifiable_activation_drops_its_span_instead_of_raising() -> Non
 
     assert _spans_named(exporter, SPAN_OPERATOR) == []
     with pytest.raises(ActivationClassificationError):
-        emitter._activation_extent(mystery.activation_id)  # noqa: SLF001
+        emitter._activation_extent(mystery.activation_id, {})  # noqa: SLF001
 
 
 # --------------------------------------------------------------------------- #

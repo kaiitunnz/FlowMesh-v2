@@ -2,10 +2,13 @@
 
 A synthesized span is built once, at a durable record's settle transition, with an
 explicitly-set derived span id, explicit start/end times read from durable records, and
-an explicitly-resolved parent. It is never held open across a call. Re-emission --
-after a restart, or a repeated hook call within one process -- recomputes the same id
-and the same timestamps from the same durable records, so it is byte-identical; the
-in-process emitted-set below, and the store's own dedup, both exist to collapse it.
+an explicitly-resolved parent. It is never held open across a call. Re-emission -- after
+a restart, or a repeated hook call within one process -- recomputes every field from the
+same durable records rather than from the clock. A span's identity and its start are
+therefore stable, which is what the store dedups on; an end recomputed after a later
+record changed (a compensation, a re-driven attempt) moves with it, giving one row a
+revised duration rather than a second row. The in-process emitted-set below, and the
+store's own dedup, both exist to collapse the repeat.
 
 ``TelemetrySpanEmitter`` is the sole owner of the four ledger-derived levels (operator,
 episode, attempt, boundary), bound one per engine. ``WorkflowSpanEmitter`` is the sole
@@ -126,6 +129,7 @@ _OFF_TELEMETRY_CONFIG = TelemetryConfig(
 )
 
 _logger = logging.getLogger("orchestration-telemetry")
+_reported_faults: set[str] = set()
 
 
 class ActivationClassificationError(RuntimeError):
@@ -150,7 +154,17 @@ def _absorbs_faults[**P](method: Callable[P, None]) -> Callable[P, None]:
         try:
             method(*args, **kwargs)
         except Exception as exc:
-            _logger.debug("Span synthesis failed in %s: %s", method.__name__, exc)
+            # A systematic emitter fault would otherwise be invisible, and a per-record
+            # one repeats for every record, so the first of each kind is reported and
+            # the rest are left to debug.
+            first = method.__name__ not in _reported_faults
+            _reported_faults.add(method.__name__)
+            _logger.log(
+                logging.WARNING if first else logging.DEBUG,
+                "Span synthesis failed in %s: %s",
+                method.__name__,
+                exc,
+            )
 
     return guarded
 
@@ -357,8 +371,9 @@ class TelemetrySpanEmitter:
             self.emit_attempt(attempt)
         for wi in self._work_items.values():
             self.emit_work_item(wi)
+        extent_memo: dict[str, tuple[int, int] | None] = {}
         for activation_id in list(self._activations):
-            self.emit_activation(activation_id)
+            self.emit_activation(activation_id, extent_memo)
         for invocation in self._invocations.values():
             self.emit_boundary(invocation)
 
@@ -501,14 +516,16 @@ class TelemetrySpanEmitter:
                     order.append(scope_id)
         return order
 
-    def _scope_subtree_extent(self, scope_id: str) -> tuple[int, int] | None:
+    def _scope_subtree_extent(
+        self, scope_id: str, memo: dict[str, tuple[int, int] | None]
+    ) -> tuple[int, int] | None:
         if scope_id not in self._released_scopes:
             return None
         starts: list[int] = []
         ends: list[int] = []
         for sid in self._scope_subtree_ids(scope_id):
             for activation_id in self._activation_ids_by_scope.get(sid, ()):
-                extent = self._activation_extent(activation_id)
+                extent = self._activation_extent(activation_id, memo)
                 if extent is not None:
                     starts.append(extent[0])
                     ends.append(extent[1])
@@ -519,12 +536,28 @@ class TelemetrySpanEmitter:
     def _owned_scope_id(self, activation_id: str) -> str | None:
         return self._scope_by_owner.get(activation_id)
 
-    def _activation_extent(self, activation_id: str) -> tuple[int, int] | None:
+    def _activation_extent(
+        self, activation_id: str, memo: dict[str, tuple[int, int] | None]
+    ) -> tuple[int, int] | None:
         """(start_ns, end_ns) once closed; ``None`` while still open or extent-less.
 
         Classification (not readiness) is checked first, so an activation whose shape
         this cannot recognize raises regardless of whether it happens to be closed yet.
+
+        A scope-owning activation's extent spans its whole subtree, so without ``memo``
+        a nested chain re-walks each level once per ancestor. The memo is supplied by
+        the caller and lives for one sweep over an unchanging ledger rather than on the
+        instance, so an entry can never outlive the state it was computed from.
         """
+        if activation_id in memo:
+            return memo[activation_id]
+        extent = self._compute_activation_extent(activation_id, memo)
+        memo[activation_id] = extent
+        return extent
+
+    def _compute_activation_extent(
+        self, activation_id: str, memo: dict[str, tuple[int, int] | None]
+    ) -> tuple[int, int] | None:
         activation = self._activations.get(activation_id)
         if activation is None:
             return None
@@ -541,7 +574,7 @@ class TelemetrySpanEmitter:
             return min(starts), max(ends)
         scope_id = self._owned_scope_id(activation_id)
         if scope_id is not None:
-            return self._scope_subtree_extent(scope_id)
+            return self._scope_subtree_extent(scope_id, memo)
         if (
             activation.kind in _NO_EXTENT_ACTIVATION_KINDS
             or activation.kind in _NO_EXTENT_OPERATOR_KINDS
@@ -563,7 +596,9 @@ class TelemetrySpanEmitter:
         return derived_span_id(SpanIdKind.WORKFLOW, self._workflow_id)
 
     @_absorbs_faults
-    def emit_activation(self, activation_id: str) -> None:
+    def emit_activation(
+        self, activation_id: str, memo: dict[str, tuple[int, int] | None] | None = None
+    ) -> None:
         if not self._emits(TelemetryLevel.FINE):
             return
         span_id = derived_span_id(SpanIdKind.ACTIVATION, activation_id)
@@ -574,7 +609,7 @@ class TelemetrySpanEmitter:
         if activation is None:
             return
         self._sync_indexes()
-        extent = self._activation_extent(activation_id)
+        extent = self._activation_extent(activation_id, {} if memo is None else memo)
         if extent is None:
             return
         start_ns, end_ns = extent

@@ -165,6 +165,41 @@ def spawning_agent_bundle() -> PersistedV2Workflow:
     )
 
 
+def recursive_agent_bundle() -> PersistedV2Workflow:
+    """Agent ``A`` whose ``worker`` region spawns ``A`` again -- a nestable chain.
+
+    A child that is the enclosing agent stays dispatchable and owns its own child-init
+    scope, so routing one spawn per generation builds a scope tree of arbitrary depth.
+    """
+    spawn = SpawnRegion(
+        operator_id="worker:spawn",
+        source_ref="worker:spawn",
+        outputs=(Port(name="children"),),
+        child_template_ref="A",
+    )
+    join = JoinRegion(
+        operator_id="worker:spawn:join",
+        source_ref="worker:spawn:join",
+        inputs=(Port(name="children"),),
+        outputs=(Port(name="out"),),
+        completion=JoinCompletion.ALL_SETTLED,
+    )
+    agent = AgentOperator(
+        operator_id="A",
+        source_ref="A",
+        binding=BindingKey(task_type=TaskType.AGENT),
+        authority=AuthorityCeiling(invoke=("model",), delegate=()),
+        boundary=_SIGNATURE,
+        child_region_refs=(ChildRegionRef(name="worker", spawn_ref="worker:spawn"),),
+        outputs=(Port(name="out"),),
+    )
+    return _bundle(
+        [agent, spawn, join],
+        [TemplateEdge(from_op="worker:spawn", to_op="worker:spawn:join")],
+        (_decl("out:A", "A"),),
+    )
+
+
 def emitter(
     level: TelemetryLevel = TelemetryLevel.FULL,
 ) -> tuple[TelemetrySpanEmitter, InMemorySpanExporter]:
