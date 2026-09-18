@@ -64,8 +64,6 @@ DEFAULT_WORKER_CONFIG: Final[WorkerConfig] = WorkerConfig(
         sample_ratio=1.0,
         otlp_endpoint=None,
     ),
-    otlp_timeout_sec=10,
-    resource_sample_sec=15,
 )
 
 

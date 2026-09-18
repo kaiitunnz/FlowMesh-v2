@@ -249,24 +249,11 @@ class WatchdogConfig:
         )
 
 
-def _default_telemetry() -> TelemetryConfig:
-    return TelemetryConfig(
-        level=TelemetryLevel.OFF,
-        traces_enabled=True,
-        metrics_enabled=True,
-        sample_ratio=1.0,
-        otlp_endpoint=None,
-    )
-
-
 @dataclass
 class MetricsConfig:
     dir: Path | None = None
     enable_density_plot: bool = False
     density_bucket_sec: int = 60
-    telemetry: TelemetryConfig = field(default_factory=_default_telemetry)
-    otlp_timeout_sec: int = 10
-    resource_sample_sec: int = 15
 
     @classmethod
     def from_env(cls, results_dir: Path) -> "MetricsConfig":
@@ -283,13 +270,6 @@ class MetricsConfig:
             ),
             density_bucket_sec=max(
                 1, parse_int_env("SERVER_METRICS_DENSITY_BUCKET_SEC", 60)
-            ),
-            telemetry=TelemetryConfig.from_env(),
-            otlp_timeout_sec=max(
-                1, parse_int_env("SERVER_METRICS_OTLP_TIMEOUT_SEC", 10)
-            ),
-            resource_sample_sec=max(
-                1, parse_int_env("SERVER_METRICS_RESOURCE_SAMPLE_SEC", 15)
             ),
         )
 
@@ -781,6 +761,7 @@ class ServerConfig:
     dispatch: DispatchConfig
     watchdog: WatchdogConfig
     metrics: MetricsConfig
+    telemetry: TelemetryConfig
     worker_management: WorkerManagementConfig
     log_stream: LogStreamConfig
     orchestration: OrchestrationConfig
@@ -811,6 +792,7 @@ class ServerConfig:
             dispatch=DispatchConfig.from_env(),
             watchdog=WatchdogConfig.from_env(),
             metrics=MetricsConfig.from_env(results_dir),
+            telemetry=TelemetryConfig.from_env(),
             worker_management=WorkerManagementConfig.from_env(),
             log_stream=LogStreamConfig.from_env(),
             orchestration=OrchestrationConfig.from_env(),

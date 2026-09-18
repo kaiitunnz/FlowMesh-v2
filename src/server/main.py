@@ -186,7 +186,7 @@ if IS_ROOT_NODE:
     )
     POLICY_SURFACE = build_policy_surface(config.orchestration.policy)
     SERVER_TRACER = build_tracer(
-        config.metrics.telemetry,
+        config.telemetry,
         {
             SERVICE_NAME: ServiceName.SERVER,
             SERVICE_VERSION: FLOWMESH_RELEASE_VERSION,
@@ -194,15 +194,14 @@ if IS_ROOT_NODE:
         },
     )
     SERVER_METER = build_meter(
-        config.metrics.telemetry,
+        config.telemetry,
         {
             SERVICE_NAME: ServiceName.SERVER,
             SERVICE_VERSION: FLOWMESH_RELEASE_VERSION,
             RESOURCE_ROLE: ProcessRole.ROOT,
         },
-        otlp_timeout_sec=config.metrics.otlp_timeout_sec,
     )
-    CONTROL_TRACER = ControlPlaneTracer(SERVER_TRACER, config.metrics.telemetry)
+    CONTROL_TRACER = ControlPlaneTracer(SERVER_TRACER, config.telemetry)
     RUNTIME = TaskRuntime(
         WORKFLOW_REGISTRY,
         WORKER_REGISTRY,
@@ -213,7 +212,7 @@ if IS_ROOT_NODE:
         surface=POLICY_SURFACE,
         control=CONTROL_TRACER,
         tracer=SERVER_TRACER,
-        telemetry=config.metrics.telemetry,
+        telemetry=config.telemetry,
     )
     TELEMETRY_STORE = build_telemetry_store(config.telemetry_store)
     AGENT_MODEL_GATEWAY = AgentModelGateway(
@@ -291,9 +290,9 @@ if IS_ROOT_NODE:
         stores=RESIDENT_CONTROL.stores if RESIDENT_CONTROL is not None else None,
         runtime=RUNTIME,
         node_id=lambda: ROOT_NODE_ID,
-        interval_sec=config.metrics.resource_sample_sec,
-        enabled=config.metrics.telemetry.metrics_enabled
-        and config.metrics.telemetry.emits(TelemetryLevel.COARSE),
+        interval_sec=config.telemetry.resource_sample_sec,
+        enabled=config.telemetry.metrics_enabled
+        and config.telemetry.emits(TelemetryLevel.COARSE),
     )
 
     FABRIC_TOOL_BROKER = FabricToolBroker.build(
@@ -395,7 +394,7 @@ if IS_ROOT_NODE:
         log_stream_ttl_sec=config.log_stream.ttl_sec,
         server_base_url=config.identity.base_url,
         workflow_span_emitter=build_workflow_span_emitter(
-            SERVER_TRACER, config.metrics.telemetry
+            SERVER_TRACER, config.telemetry
         ),
         on_node_removed=(
             NETWORK_PLANE.forget_node if NETWORK_PLANE is not None else None

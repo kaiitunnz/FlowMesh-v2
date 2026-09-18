@@ -57,8 +57,6 @@ class WorkerConfig:
     ssh_limits: SSHLimits | None
     enable_ssh_gpu_limit: bool
     telemetry: TelemetryConfig
-    otlp_timeout_sec: int
-    resource_sample_sec: int
     grpc_keepalive_time_ms: int | None = None
     grpc_keepalive_timeout_ms: int | None = None
     network_mode: str | None = None
@@ -203,10 +201,6 @@ class WorkerConfig:
         enable_ssh_gpu_limit = parse_bool_env("ENABLE_SSH_GPU_LIMIT", False)
 
         telemetry = TelemetryConfig.from_env()
-        otlp_timeout_sec = max(1, parse_int_env("SERVER_METRICS_OTLP_TIMEOUT_SEC", 10))
-        resource_sample_sec = max(
-            1, parse_int_env("SERVER_METRICS_RESOURCE_SAMPLE_SEC", 15)
-        )
 
         return WorkerConfig(
             worker_token=worker_token,
@@ -245,8 +239,6 @@ class WorkerConfig:
             ssh_limits=ssh_limits,
             enable_ssh_gpu_limit=enable_ssh_gpu_limit,
             telemetry=telemetry,
-            otlp_timeout_sec=otlp_timeout_sec,
-            resource_sample_sec=resource_sample_sec,
             grpc_keepalive_time_ms=grpc_keepalive_time_ms,
             grpc_keepalive_timeout_ms=grpc_keepalive_timeout_ms,
             network_mode=network_mode,

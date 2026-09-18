@@ -22,7 +22,6 @@ from worker.telemetry import otel
 def _restore_worker_tracer_globals() -> Iterator[None]:
     """Snapshot the worker's tracer globals and put them back after every test."""
     config = otel._telemetry_config
-    timeout = otel._otlp_timeout_sec
     initialized = otel._PROVIDER_INITIALIZED
     provider = trace._TRACER_PROVIDER
     set_once = trace._TRACER_PROVIDER_SET_ONCE
@@ -30,7 +29,6 @@ def _restore_worker_tracer_globals() -> Iterator[None]:
         yield
     finally:
         otel._telemetry_config = config
-        otel._otlp_timeout_sec = timeout
         otel._PROVIDER_INITIALIZED = initialized
         trace._TRACER_PROVIDER = provider
         # Without restoring the guard as well, a later ``set_tracer_provider`` is

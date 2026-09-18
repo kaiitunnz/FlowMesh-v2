@@ -174,8 +174,6 @@ def _metrics_active(config: TelemetryConfig) -> bool:
 def build_tracer(
     config: TelemetryConfig,
     resource_attributes: Mapping[str, str],
-    *,
-    otlp_timeout_sec: float = _DEFAULT_OTLP_TIMEOUT_SEC,
 ) -> Tracer:
     """Build the process tracer, or the zero-allocation null twin when disabled.
 
@@ -193,7 +191,7 @@ def build_tracer(
             BatchSpanProcessor(
                 PayloadFreeSpanExporter(
                     OTLPSpanExporter(
-                        endpoint=config.otlp_endpoint, timeout=otlp_timeout_sec
+                        endpoint=config.otlp_endpoint, timeout=config.otlp_timeout_sec
                     )
                 )
             )
@@ -204,8 +202,6 @@ def build_tracer(
 def build_meter(
     config: TelemetryConfig,
     resource_attributes: Mapping[str, str],
-    *,
-    otlp_timeout_sec: float = _DEFAULT_OTLP_TIMEOUT_SEC,
 ) -> Meter:
     """Build the process meter, or the no-op twin when disabled.
 
@@ -219,7 +215,7 @@ def build_meter(
         readers.append(
             PeriodicExportingMetricReader(
                 OTLPMetricExporter(
-                    endpoint=config.otlp_endpoint, timeout=otlp_timeout_sec
+                    endpoint=config.otlp_endpoint, timeout=config.otlp_timeout_sec
                 )
             )
         )

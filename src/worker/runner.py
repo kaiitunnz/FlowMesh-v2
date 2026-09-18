@@ -33,7 +33,11 @@ from shared.tasks.specs import (
     TaskSpecStrictBase,
 )
 from shared.tasks.worker_message import HardwareUsage, WorkerHardware, WorkerTaskMessage
-from shared.telemetry.config import TelemetryConfig, TelemetryLevel
+from shared.telemetry.config import (
+    DISABLED_TELEMETRY_CONFIG,
+    TelemetryConfig,
+    TelemetryLevel,
+)
 from shared.telemetry.propagation import extract_context
 from shared.telemetry.provider import payload_free_span
 from shared.telemetry.semconv import (
@@ -59,14 +63,6 @@ from .model_turn import HeldModelEgress, ModelTurnRendezvous, ResponsesFacade
 from .resident.lane_host import ResidentLaneHost
 from .telemetry import otel
 from .utils.logging import TaskLogEmitter
-
-_DEFAULT_TELEMETRY_CONFIG = TelemetryConfig(
-    level=TelemetryLevel.OFF,
-    traces_enabled=True,
-    metrics_enabled=True,
-    sample_ratio=1.0,
-    otlp_endpoint=None,
-)
 
 
 def _declared_result(
@@ -106,11 +102,8 @@ class Runner:
         peer_material: MutualTlsMaterial | None = None,
         peer_listener_sock: socket.socket | None = None,
         telemetry: TelemetryConfig | None = None,
-        otlp_timeout_sec: float = 10.0,
     ):
-        otel.configure(
-            telemetry or _DEFAULT_TELEMETRY_CONFIG, otlp_timeout_sec=otlp_timeout_sec
-        )
+        otel.configure(telemetry or DISABLED_TELEMETRY_CONFIG)
         self.lifecycle = lifecycle
         self.task_stream = task_stream
         self.results_dir = results_dir

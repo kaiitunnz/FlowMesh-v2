@@ -47,7 +47,6 @@ from shared.telemetry.provider import PayloadFreeSpanExporter
 
 _TRACER_NAME = "flowmesh.worker"
 _SERVICE_NAME = "flowmesh-worker"
-_DEFAULT_OTLP_TIMEOUT_SEC = 10.0
 
 _workflow_id_var: ContextVar[str | None] = ContextVar(
     "flowmesh_workflow_id", default=None
@@ -58,7 +57,6 @@ _current_spans_path_var: ContextVar[Path | None] = ContextVar(
 _lock = threading.Lock()
 
 _telemetry_config = DISABLED_TELEMETRY_CONFIG
-_otlp_timeout_sec = _DEFAULT_OTLP_TIMEOUT_SEC
 
 
 class _FlowMeshIdGenerator(IdGenerator):
@@ -138,11 +136,7 @@ def _resolve_path() -> Path | None:
 _PROVIDER_INITIALIZED = False
 
 
-def configure(
-    config: TelemetryConfig,
-    *,
-    otlp_timeout_sec: float = _DEFAULT_OTLP_TIMEOUT_SEC,
-) -> None:
+def configure(config: TelemetryConfig) -> None:
     """Set the telemetry config the worker's tracer provider is built from.
 
     Must be called before the first task runs (before anything reaches
@@ -151,9 +145,8 @@ def configure(
     ``flowmesh.*`` spans and the OTLP exporter; the shipped JSONL sink is
     unconditional regardless of what is configured here.
     """
-    global _telemetry_config, _otlp_timeout_sec
+    global _telemetry_config
     _telemetry_config = config
-    _otlp_timeout_sec = otlp_timeout_sec
 
 
 def emits(minimum: TelemetryLevel) -> bool:
@@ -187,7 +180,7 @@ def _ensure_tracer_provider() -> None:
                         PayloadFreeSpanExporter(
                             OTLPSpanExporter(
                                 endpoint=_telemetry_config.otlp_endpoint,
-                                timeout=_otlp_timeout_sec,
+                                timeout=_telemetry_config.otlp_timeout_sec,
                             )
                         ),
                     )

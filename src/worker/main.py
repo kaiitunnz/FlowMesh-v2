@@ -309,7 +309,7 @@ def main() -> None:
         ),
         node_id=lambda: None,
         worker_id=_worker_id_or_none,
-        interval_sec=cfg.resource_sample_sec,
+        interval_sec=cfg.telemetry.resource_sample_sec,
         enabled=cfg.telemetry.metrics_enabled
         and cfg.telemetry.emits(TelemetryLevel.COARSE),
     )
@@ -367,7 +367,6 @@ def main() -> None:
         peer_material=_peer_material(cfg, logger),
         peer_listener_sock=peer_sock,
         telemetry=cfg.telemetry,
-        otlp_timeout_sec=cfg.otlp_timeout_sec,
     )
 
     # Install signal handlers to allow graceful shutdown
