@@ -13,9 +13,9 @@ from typing import Any
 
 from lumid_hooks import PrincipalContext
 
+from server.telemetry.control import ControlPlaneTracer
 from shared.resident.contracts import ReplicaEndpoint
 from shared.schemas.command import MediatedOpMessage
-from shared.telemetry.control import ControlPlaneTracer
 
 from ..config import OrchestrationConfig, ResidentCapacityConfig
 from ..network.reverse_relay import RelaySessionStore

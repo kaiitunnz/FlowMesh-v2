@@ -22,6 +22,12 @@ from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from server.telemetry.control import (
+    NULL_CONTROL_TRACER,
+    ControlPlaneTracer,
+    format_traceparent,
+    serve_trace_id_int,
+)
 from shared.inference import InputResolutionBinding
 from shared.network.frame_stream import split_host_port
 from shared.resident.carriage import CONTROL_RELAY, ResidentCarriagePlan
@@ -41,12 +47,6 @@ from shared.resident.reports import (
     ResidentStreamStatus,
 )
 from shared.schemas.network import PEER_PROTOCOL
-from shared.telemetry.control import (
-    NULL_CONTROL_TRACER,
-    ControlPlaneTracer,
-    format_traceparent,
-    serve_trace_id_int,
-)
 from shared.telemetry.ids import SpanIdKind, derived_span_id, workflow_to_trace_id_int
 from shared.telemetry.semconv import (
     PHYSICAL_TASK_ID,

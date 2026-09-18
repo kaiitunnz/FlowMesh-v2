@@ -5,8 +5,8 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import Tracer
 
+from server.telemetry.control import ControlPlaneTracer
 from shared.telemetry.config import TelemetryConfig, TelemetryLevel
-from shared.telemetry.control import ControlPlaneTracer
 
 
 def recording_control_tracer(

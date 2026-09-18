@@ -12,6 +12,11 @@ from typing import Any
 from opentelemetry.trace import Tracer
 from pydantic import ValidationError
 
+from server.telemetry.control import (
+    NULL_CONTROL_TRACER,
+    ControlPlaneTracer,
+    format_traceparent,
+)
 from shared.harness import (
     AgentEpisodeDispatch,
     BoundaryEventKind,
@@ -61,11 +66,6 @@ from shared.tasks.specs import (
     ModelBindingMode,
 )
 from shared.telemetry.config import TelemetryConfig
-from shared.telemetry.control import (
-    NULL_CONTROL_TRACER,
-    ControlPlaneTracer,
-    format_traceparent,
-)
 from shared.telemetry.ids import SpanIdKind, derived_span_id, workflow_to_trace_id_int
 from shared.telemetry.semconv import ControlPlaneStage, ControlPlaneWindow
 from shared.tools.contract import (

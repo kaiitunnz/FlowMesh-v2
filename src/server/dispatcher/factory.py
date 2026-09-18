@@ -1,7 +1,7 @@
 import logging
 from pathlib import Path
 
-from shared.telemetry.control import ControlPlaneTracer
+from server.telemetry.control import ControlPlaneTracer
 
 from ..config import DispatchConfig
 from ..dispatcher import Dispatcher

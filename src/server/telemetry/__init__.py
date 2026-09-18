@@ -1,9 +1,9 @@
-"""Server-side read port over the telemetry store.
+"""The server's own telemetry surfaces: the control-plane spans and the store read port.
 
-The OTel Collector (``cli/stack/.../otel-collector-config.yaml``) is the store's sole
-writer. Everything in this package only ever reads: the ``TelemetryStore`` protocol, its
-ClickHouse adapter, and the factory that builds one from an injected
-``server.config.TelemetryStoreConfig``.
+``control`` is the write side, opening a span at each control-plane stage. The read side
+is the ``TelemetryStore`` protocol, its ClickHouse adapter, and the factory that builds
+one from an injected ``server.config.TelemetryStoreConfig``; the OTel Collector
+(``cli/stack/.../otel-collector-config.yaml``) is the store's sole writer.
 """
 
 from .clickhouse import ClickHouseTelemetryStore, build_telemetry_store

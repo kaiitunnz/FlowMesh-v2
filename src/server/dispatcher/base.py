@@ -8,6 +8,7 @@ from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
+from server.telemetry.control import NULL_CONTROL_TRACER, ControlPlaneTracer
 from shared.private_state import OwnerFence, PrivateStateUnavailableReason
 from shared.schemas.artifact import ArtifactRef
 from shared.schemas.event import TaskEvent
@@ -32,7 +33,6 @@ from shared.tasks.specs import (
     SSHSpecTemplate,
 )
 from shared.tasks.worker_message import WorkerStatus, WorkerTaskMessage
-from shared.telemetry.control import NULL_CONTROL_TRACER, ControlPlaneTracer
 from shared.telemetry.semconv import ControlPlaneStage, ControlPlaneWindow
 
 from ..clients.redis import REDIS_CONN_ERRORS

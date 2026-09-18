@@ -25,15 +25,19 @@ from opentelemetry.trace import (
 )
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
-from .config import TelemetryConfig, TelemetryLevel
-from .ids import (
+from shared.telemetry.config import (
+    DISABLED_TELEMETRY_CONFIG,
+    TelemetryConfig,
+    TelemetryLevel,
+)
+from shared.telemetry.ids import (
     SpanIdKind,
     derived_span_id,
     trace_sampled,
     workflow_to_trace_id_int,
 )
-from .provider import build_tracer, payload_free_span
-from .semconv import (
+from shared.telemetry.provider import build_tracer, payload_free_span
+from shared.telemetry.semconv import (
     PHYSICAL_STAGE,
     PHYSICAL_WINDOW,
     ControlPlaneStage,
@@ -252,16 +256,6 @@ class ControlPlaneTracer:
         return self._open(ControlPlaneStage.LEDGER_SNAPSHOT, None, context, attributes)
 
 
-def _null_telemetry_config() -> TelemetryConfig:
-    return TelemetryConfig(
-        level=TelemetryLevel.OFF,
-        traces_enabled=False,
-        metrics_enabled=False,
-        sample_ratio=1.0,
-        otlp_endpoint=None,
-    )
-
-
 NULL_CONTROL_TRACER = ControlPlaneTracer(
-    build_tracer(_null_telemetry_config(), {}), _null_telemetry_config()
+    build_tracer(DISABLED_TELEMETRY_CONFIG, {}), DISABLED_TELEMETRY_CONFIG
 )

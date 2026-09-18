@@ -4,13 +4,13 @@
 
 from opentelemetry import trace as otel_trace
 
-from shared.telemetry.config import TelemetryConfig, TelemetryLevel
-from shared.telemetry.control import (
+from server.telemetry.control import (
     NULL_CONTROL_TRACER,
     ControlPlaneTracer,
     format_traceparent,
     serve_trace_id_int,
 )
+from shared.telemetry.config import TelemetryConfig, TelemetryLevel
 from shared.telemetry.ids import SpanIdKind, derived_span_id, workflow_to_trace_id_int
 from shared.telemetry.provider import build_tracer
 from shared.telemetry.semconv import ControlPlaneStage, ControlPlaneWindow
