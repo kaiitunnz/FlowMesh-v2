@@ -94,7 +94,16 @@ def parse_event(data: dict[str, Any]) -> Event:
 
 
 def serialize_event(event: Event) -> dict[str, Any]:
-    return event.model_dump(mode="python")
+    """Serialize an event, omitting trace context it does not carry.
+
+    An absent ``traceparent`` is dropped rather than travelling as an explicit null, so
+    a deployment with telemetry off puts no extra bytes on any of the paths this
+    crosses -- several of which re-serialize an event they relayed.
+    """
+    payload = event.model_dump(mode="python")
+    if payload.get("traceparent") is None:
+        payload.pop("traceparent", None)
+    return payload
 
 
 __all__ = [

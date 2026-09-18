@@ -621,12 +621,7 @@ class SupervisorClient:
         # Wait until the stream is ready without an explicit timeout.
         if not self._event_ready.wait():
             raise RuntimeError("Supervisor event stream not ready")
-        payload = serialize_event(event)
-        if payload.get("traceparent") is None:
-            # Zero bytes on the wire when the event carries no trace context, rather
-            # than an explicit null every disabled-telemetry event would otherwise add.
-            payload.pop("traceparent", None)
-        self._event_queue.put(payload)
+        self._event_queue.put(serialize_event(event))
 
     def push_mediated_outcome(self, outcome: MediatedOperationOutcome) -> None:
         """Report one fenced mediated-operation outcome over the event stream."""
