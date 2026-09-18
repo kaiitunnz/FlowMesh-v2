@@ -25,6 +25,7 @@ from datetime import datetime, timedelta
 import httpx
 
 from server.config import TelemetryStoreConfig
+from shared.telemetry.ids import workflow_to_trace_id_int
 from shared.telemetry.semconv import LOGICAL_ATTRIBUTE_PREFIX, PHYSICAL_ATTRIBUTE_PREFIX
 
 from .store import (
@@ -195,8 +196,6 @@ def _histogram_quantile_sql(quantile: float) -> str:
 
 
 def _trace_id_hex(workflow_id: str) -> str:
-    from shared.telemetry.ids import workflow_to_trace_id_int
-
     return format(workflow_to_trace_id_int(workflow_id), "032x")
 
 
@@ -252,7 +251,7 @@ def _split_namespaces(
 
 
 class ClickHouseTelemetryStore(TelemetryStore):
-    """Read-only ClickHouse adapter. Never issues an INSERT."""
+    """Read-only ClickHouse adapter for the telemetry store."""
 
     def __init__(
         self, config: TelemetryStoreConfig, client: httpx.Client | None = None

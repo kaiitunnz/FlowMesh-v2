@@ -17,7 +17,6 @@ a workflow-consistent trace id even when no executor-level context runs.
 Sub-spans inherit the trace id from the OTel parent context automatically.
 """
 
-import re
 import threading
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
@@ -39,11 +38,9 @@ from opentelemetry.sdk.trace.id_generator import IdGenerator, RandomIdGenerator
 
 from shared.schemas.governance import SpanType
 from shared.telemetry.config import TelemetryConfig, TelemetryLevel
-from shared.telemetry.ids import trace_sampled
+from shared.telemetry.ids import trace_sampled, workflow_to_trace_id_int
 from shared.telemetry.provider import PayloadFreeSpanExporter
-from shared.utils.ids import PREFIX_WORKFLOW
 
-_HEX_ONLY = re.compile(r"[^0-9a-f]")
 _TRACER_NAME = "flowmesh.worker"
 _SERVICE_NAME = "flowmesh-worker"
 _DEFAULT_OTLP_TIMEOUT_SEC = 10.0
@@ -64,19 +61,6 @@ _telemetry_config = TelemetryConfig(
     otlp_endpoint=None,
 )
 _otlp_timeout_sec = _DEFAULT_OTLP_TIMEOUT_SEC
-
-
-def workflow_to_trace_id_int(workflow_id: str) -> int:
-    """Stable 128-bit trace id derived from the workflow id.
-
-    Strips the ``wfl-`` prefix before hex extraction so the prefix's ``f``
-    doesn't shift the bit pattern.
-    """
-    body = workflow_id.lower().removeprefix(f"{PREFIX_WORKFLOW}-")
-    hex_only = _HEX_ONLY.sub("", body)
-    if not hex_only:
-        return 0
-    return int(hex_only.zfill(32)[:32], 16)
 
 
 class _FlowMeshIdGenerator(IdGenerator):
