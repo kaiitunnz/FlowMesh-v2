@@ -78,7 +78,7 @@ class FleetResidencySampler:
 
     @property
     def is_running(self) -> bool:
-        """Whether the sampling task is active — the ``off`` gate asserts False."""
+        """Whether the sampling task is active."""
         return self._task is not None
 
     def start(self, loop: asyncio.AbstractEventLoop | None = None) -> None:

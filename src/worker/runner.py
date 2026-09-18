@@ -447,11 +447,9 @@ class Runner:
     ) -> BaseExecutorResult | EpisodeStepResult | None:
         """Run the executor inside ``flowmesh.task``, entering the propagated context.
 
-        Wraps every task type, not just the six whose executor opens its own
-        shipped ``task`` span — that span, when present, nests unchanged inside
-        this one. At ``off`` this opens nothing and calls the executor directly,
-        so the shipped span stays the analyzer's only root, exactly as before
-        this span existed.
+        Wraps every task type; an executor's own shipped ``task`` span, where it opens
+        one, nests inside this one. At ``off`` this opens nothing and calls the executor
+        directly, leaving the shipped span as the analyzer's only root.
         """
         if not _otel.emits(TelemetryLevel.COARSE):
             return executor.run(msg, out_dir)

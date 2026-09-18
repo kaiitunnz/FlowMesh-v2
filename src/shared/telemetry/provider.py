@@ -116,10 +116,8 @@ def payload_free_span(
 ) -> Iterator[Span]:
     """Open a span that records a failure's type and never its text.
 
-    OTel's defaults write an exception's message and stacktrace into a span event and
-    its status description. A failure is worth recording, so the span is still marked
-    ERROR and carries the exception's class name, which is fixed by the code rather
-    than built from whatever the raise site had in hand.
+    A failing span is marked ERROR and carries the exception's class name, which the
+    code fixes, rather than the message and stacktrace OTel records by default.
     """
     with tracer.start_as_current_span(
         name,

@@ -78,7 +78,7 @@ class GpuSampler:
 
     @property
     def is_running(self) -> bool:
-        """Whether the sampling thread is active — the ``off`` gate asserts False."""
+        """Whether the sampling thread is active."""
         return self._thread is not None
 
     def start(self) -> None:
