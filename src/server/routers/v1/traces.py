@@ -29,7 +29,7 @@ from ...auth.security import (
 )
 from ...governance import ProfileSummary, analyze
 from ...hooks import ResourceAction, ResourceKind
-from ...registries.workflow import WorkflowRegistry
+from ...registries.workflow import Workflow, WorkflowRegistry
 from ...schemas.common import PathResponse
 from ...schemas.traces import (
     TraceAggregate,
@@ -67,14 +67,18 @@ def _iter_workflow_jsonl(
         yield from read_jsonl(_logs_dir_for_task(results_dir, task_id) / filename)
 
 
-async def _resolve_task_ids(workflow_id: str, registry: WorkflowRegistry) -> list[str]:
+async def _resolve_workflow(workflow_id: str, registry: WorkflowRegistry) -> Workflow:
     workflow = await registry.get_workflow_async(workflow_id)
     if not workflow:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Workflow '{workflow_id}' not found",
         )
-    return workflow.task_ids
+    return workflow
+
+
+async def _resolve_task_ids(workflow_id: str, registry: WorkflowRegistry) -> list[str]:
+    return (await _resolve_workflow(workflow_id, registry)).task_ids
 
 
 @router.get(
@@ -298,12 +302,16 @@ def _reroot_unreachable(
 async def get_workflow_span_tree(
     workflow_id: str,
     principal: PrincipalContext = Depends(authenticate_connection),
+    registry: WorkflowRegistry = Depends(get_workflow_registry),
     store: TelemetryStore | None = Depends(get_telemetry_store),
     logger: logging.Logger = Depends(get_logger),
 ) -> TraceTree:
     await require_permission(
         principal, ResourceKind.WORKFLOW, workflow_id, ResourceAction.READ, logger
     )
+    # The trace id is derived from the workflow id by a lossy mapping, so many strings
+    # address one trace: only an id the registry knows may be read through it.
+    await _resolve_workflow(workflow_id, registry)
     with _store_available():
         rows = await run_in_threadpool(
             _require_telemetry_store(store).fetch_trace, workflow_id
@@ -325,15 +333,14 @@ async def aggregate_metric(
     kind: MetricKind = Query(
         default="gauge", description="Metric kind selecting the store's metric table."
     ),
-    workflow_id: str | None = Query(
-        default=None, description="Restrict the aggregate to one workflow."
-    ),
     principal: PrincipalContext = Depends(authenticate_connection),
     store: TelemetryStore | None = Depends(get_telemetry_store),
     logger: logging.Logger = Depends(get_logger),
 ) -> TraceAggregate:
+    # The answer spans every tenant's workflows, so it is gated like the fleet-wide
+    # system metrics snapshot rather than as a read of one workflow.
     await require_permission(
-        principal, ResourceKind.WORKFLOW, workflow_id, ResourceAction.READ, logger
+        principal, ResourceKind.SYSTEM, None, ResourceAction.ADMIN, logger
     )
     with _store_available():
         buckets = await run_in_threadpool(
@@ -343,14 +350,12 @@ async def aggregate_metric(
                 group_by=group_by,
                 stat=stat,
                 kind=kind,
-                workflow_id=workflow_id,
             )
         )
     return TraceAggregate(
         metric=metric,
         group_by=group_by,
         stat=stat,
-        workflow_id=workflow_id,
         buckets=[
             TraceAggregateBucket(
                 group_value=bucket.group_value,

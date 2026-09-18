@@ -130,5 +130,4 @@ class TraceAggregate(BaseModel):
     metric: str
     group_by: str
     stat: str
-    workflow_id: str | None = None
     buckets: list[TraceAggregateBucket] = Field(default_factory=list)

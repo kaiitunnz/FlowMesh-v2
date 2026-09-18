@@ -103,9 +103,11 @@ class TelemetryStore(Protocol):
         group_by: str,
         stat: AggregateStat = "avg",
         kind: MetricKind = "gauge",
-        workflow_id: str | None = None,
     ) -> list[AggregateBucket]:
         """Aggregate one metric's datapoints, grouped by one attribute key.
+
+        The aggregate is fleet-wide: no metric the store holds carries a workflow id, so
+        ``fetch_trace`` is the workflow-scoped surface.
 
         ``kind`` selects which physical metric table the point lives in (gauges land
         separately from the spanmetrics-derived histogram); callers that don't know a
@@ -116,9 +118,7 @@ class TelemetryStore(Protocol):
         histogram point carries bucket counts rather than the observations behind them:
         ``count``, ``sum`` and ``avg`` come out exact, a percentile is interpolated
         inside the bucket it lands in, and ``min``/``max`` raise
-        ``UnsupportedAggregateError``. ``workflow_id`` raises it too, for any metric:
-        nothing the store holds carries a workflow id (``fetch_trace`` is the
-        workflow-scoped surface).
+        ``UnsupportedAggregateError``.
 
         ``sample_count`` is the number of observations behind a bucket, which for a
         histogram is the sum of its points' counts rather than a row count.

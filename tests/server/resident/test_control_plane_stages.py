@@ -68,7 +68,9 @@ def _build(control: Any = None) -> tuple[ResidentCapacityControl, _Delivery]:
 
 
 def test_admission_and_relay_share_the_workflow_trace_id() -> None:
-    control, exporter = recording_control_tracer(TelemetryLevel.COARSE)
+    # Driven at fine: a boundary stage parents on the invocation span, which is
+    # synthesized at that level and no lower.
+    control, exporter = recording_control_tracer(TelemetryLevel.FINE)
     svc, delivery = _build(control)
 
     asyncio.run(svc._originate(_env()))
@@ -88,7 +90,7 @@ def test_admission_and_relay_share_the_workflow_trace_id() -> None:
 
 
 def test_permit_stage_shares_the_workflow_trace_id() -> None:
-    control, exporter = recording_control_tracer(TelemetryLevel.COARSE)
+    control, exporter = recording_control_tracer(TelemetryLevel.FINE)
     svc, delivery = _build(control)
     asyncio.run(svc._originate(_env()))
 

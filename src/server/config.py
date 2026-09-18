@@ -317,7 +317,7 @@ class TelemetryStoreConfig:
             url=(os.getenv("SERVER_METRICS_CLICKHOUSE_URL") or "").strip() or None,
             database=os.getenv("SERVER_METRICS_CLICKHOUSE_DATABASE", "flowmesh"),
             username=os.getenv("SERVER_METRICS_CLICKHOUSE_USERNAME", "default"),
-            password=os.getenv("SERVER_METRICS_CLICKHOUSE_PASSWORD", ""),
+            password=os.getenv("SERVER_METRICS_CLICKHOUSE_PASSWORD", "flowmesh"),
             timeout_sec=parse_float_env("SERVER_METRICS_CLICKHOUSE_TIMEOUT_SEC", 10.0),
         )
 

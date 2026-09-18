@@ -79,9 +79,8 @@ workflow with no recorded spans prints an empty tree.
 `gauge` (the default) or `histogram`. A histogram holds bucket counts rather
 than the observations behind them, so `--stat min` and `--stat max` are
 rejected there and a percentile is resolved to the width of the bucket it falls
-in. An aggregate is fleet-wide: no metric carries a workflow id, so
-`--workflow-id` is rejected — read a workflow's own telemetry from its span
-tree.
+in. An aggregate is fleet-wide — no metric carries a workflow id — so it takes a
+system-admin right; read a workflow's own telemetry from its span tree.
 
 Both commands read through the server, which queries the telemetry store, and
 report that telemetry querying is unavailable where a deployment has no store

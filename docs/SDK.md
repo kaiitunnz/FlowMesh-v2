@@ -60,7 +60,8 @@ async with AsyncFlowMesh(base_url="...", api_key="...") as client:
   hierarchy with the logical and physical attribute views kept separate;
   `client.traces.aggregate(metric, group_by, stat="p95")` returns a
   `TraceAggregate`, one bucket per distinct value of the grouping
-  attribute. Both read through the server.
+  attribute, fleet-wide and behind a system-admin right. Both read
+  through the server.
 - **Cancel** — `client.workflows.cancel(wf_id)`.
 
 ## Cursor pagination

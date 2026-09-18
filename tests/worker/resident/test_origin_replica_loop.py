@@ -8,8 +8,10 @@ re-reports the recorded reference without re-running the engine.
 
 import asyncio
 import contextlib
+import contextvars
 import socket
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
+from typing import Any
 
 from shared.content import content_digest
 from shared.network.relay_frame import RelayFrame
@@ -72,12 +74,23 @@ class _MemStore(FabricContentStore):
 
 
 class _ToPeer:
-    def __init__(self) -> None:
-        self.on_peer: Callable[[RelayFrame], Awaitable[None]] | None = None
+    """One direction's frame sink, delivering straight into the peer's handler.
+
+    Delivery runs in a fresh context: the peer is another process, so it inherits
+    nothing ambient from the sender and reads only what the frame carries.
+    """
+
+    def __init__(self, observe: Callable[[RelayFrame], None] | None = None) -> None:
+        self.on_peer: Callable[[RelayFrame], Coroutine[Any, Any, None]] | None = None
+        self._observe = observe
 
     async def send(self, frame: RelayFrame) -> None:
         assert self.on_peer is not None
-        await self.on_peer(frame)
+        if self._observe is not None:
+            self._observe(frame)
+        await asyncio.get_running_loop().create_task(
+            self.on_peer(frame), context=contextvars.Context()
+        )
 
 
 def _engine(calls: list[int]) -> Callable[..., Awaitable[EngineResponse]]:
@@ -131,14 +144,14 @@ def _auth() -> RouteAuthorization:
 
 
 class _Harness:
-    def __init__(self) -> None:
+    def __init__(self, observe: Callable[[RelayFrame], None] | None = None) -> None:
         self.store = _MemStore()
         self.engine_calls: list[int] = []
         self.acks: list[ResidentBootstrapAck] = []
         self.outcomes: list[ResidentOpOutcome] = []
         self.done = asyncio.Event()
 
-        origin_sink, replica_sink = _ToPeer(), _ToPeer()
+        origin_sink, replica_sink = _ToPeer(observe), _ToPeer(observe)
         self.sidecar = ResidentReplicaSidecar(
             sink=replica_sink, engine_open=_engine(self.engine_calls)
         )
@@ -168,7 +181,10 @@ class _Harness:
         self.done.set()
 
     def begin(
-        self, session_no: int = 1, request_payload: str | None = '{"prompt": "hi"}'
+        self,
+        session_no: int = 1,
+        request_payload: str | None = '{"prompt": "hi"}',
+        traceparent: str | None = None,
     ) -> None:
         self.origin.begin(
             ResidentOriginRequest(
@@ -178,6 +194,7 @@ class _Harness:
                 handoff=_handoff(session_no),
                 request_payload=request_payload,
                 carriage_plan=ResidentCarriagePlan(session_id=f"rly-{session_no}"),
+                traceparent=traceparent,
             )
         )
 

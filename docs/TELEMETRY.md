@@ -86,9 +86,11 @@ metric, and the collector drops any attribute outside the published set.
 
 A `flowmesh/v2` submission pays server-side control cost a `flowmesh/v1` static DAG does
 not: template compilation, orchestration-ledger drive and settle, ledger snapshot
-serialization, dispatch, resident admission, mediated-boundary permit minting, and relay
-establishment. Each is timed as its own span under the workflow, named
-`flowmesh.control.<stage>`.
+serialization, dispatch, resident admission, the authorization a resident invocation is
+issued, and relay establishment. Each is timed as its own span named
+`flowmesh.control.<stage>`, under the workflow for the stages that run inside a
+submission and under the boundary's invocation for admission, authorization and relay,
+which are emitted at `fine` and above.
 
 Each stage span carries the window it fires in — `submit` inside the submit request,
 `queue` between a task's submission and its start, `post_start` mid-episode — because where
@@ -145,9 +147,10 @@ from each series' latest point: count, sum and avg come out exact, a percentile 
 interpolated inside the bucket it lands in and reports the largest bucket bound when it
 lands past one, and min and max are rejected there, a histogram point holding no
 observation to read them off. An aggregate is fleet-wide — no metric carries a workflow
-id, so `--workflow-id` is rejected too and a workflow's own telemetry is its span tree.
-The same two queries are `client.traces.tree()` and `client.traces.aggregate()` on the
-SDK.
+id, so it answers across every workflow the cluster ran and takes a system-admin right,
+and a workflow's own telemetry is its span tree, read at the workflow id the server
+knows. The same two queries are `client.traces.tree()` and `client.traces.aggregate()`
+on the SDK.
 
 Both read through the server, which resolves them against the store behind its read port;
 neither the CLI nor the SDK holds a store driver, so replacing the store is a collector
@@ -162,8 +165,12 @@ behave identically at every telemetry level.
 ## Propagation
 
 Context crosses each process hop in the envelope's metadata half, never in an opaque
-payload body: the HTTP `traceparent` at submission, a field inside each dispatch kind's own
-payload container, a field on task and worker events, a field on the mediated-operation
-permit, a field on every relay frame across all three transports, and the existing header
-dict on worker-to-server HTTP. At `off` the field is omitted entirely, so a disabled
-deployment puts zero extra bytes on any wire.
+payload body: a field inside each dispatch kind's own payload container, a field on the
+mediated-operation permit, and a field on every relay frame across all three transports.
+Each of those is read at the far end to parent the span the hop opens. At `off` the field
+is omitted entirely, so a disabled deployment puts zero extra bytes on any wire.
+
+A client's own `traceparent` reaches the server on the submit request and on
+worker-to-server HTTP, and rides task and worker events, but nothing reads it: a
+workflow's trace is keyed to its own id, so the fabric derives the same trace whatever
+called it.

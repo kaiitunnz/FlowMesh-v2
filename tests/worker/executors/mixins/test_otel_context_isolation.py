@@ -12,7 +12,8 @@ import json
 import threading
 from pathlib import Path
 
-from shared.telemetry.config import TelemetryConfig, TelemetryLevel
+from shared.telemetry.config import TelemetryLevel
+from tests.worker.otel_support import fresh_worker_provider, worker_telemetry
 from worker.executors.mixins import _otel
 
 
@@ -25,15 +26,6 @@ def _read_span_names(path: Path) -> set[str]:
 def test_off_lane_thread_span_does_not_land_in_the_active_tasks_spans_jsonl(
     tmp_path: Path,
 ) -> None:
-    _otel.configure(
-        TelemetryConfig(
-            level=TelemetryLevel.COARSE,
-            traces_enabled=True,
-            metrics_enabled=True,
-            sample_ratio=1.0,
-            otlp_endpoint=None,
-        )
-    )
     task_a_path = tmp_path / "task-a" / "spans.jsonl"
     entered = threading.Event()
     off_lane_done = threading.Event()
@@ -44,16 +36,17 @@ def test_off_lane_thread_span_does_not_land_in_the_active_tasks_spans_jsonl(
             pass
         off_lane_done.set()
 
-    thread = threading.Thread(target=off_lane_work)
-    thread.start()
-    try:
-        with _otel.workflow_trace_context("wfl-task-a"):
-            with _otel.task_trace_context("wfl-task-a", task_a_path):
-                with _otel.get_tracer().start_as_current_span("task"):
-                    entered.set()
-                    assert off_lane_done.wait(timeout=5)
-    finally:
-        thread.join(timeout=5)
+    with fresh_worker_provider(worker_telemetry(TelemetryLevel.COARSE)):
+        thread = threading.Thread(target=off_lane_work)
+        thread.start()
+        try:
+            with _otel.workflow_trace_context("wfl-task-a"):
+                with _otel.task_trace_context("wfl-task-a", task_a_path):
+                    with _otel.get_tracer().start_as_current_span("task"):
+                        entered.set()
+                        assert off_lane_done.wait(timeout=5)
+        finally:
+            thread.join(timeout=5)
 
     names = _read_span_names(task_a_path)
     assert names == {"task"}

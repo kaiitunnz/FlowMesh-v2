@@ -58,9 +58,6 @@ class TraceAggregate(BaseModel):
     metric: str = Field(description="Aggregated metric name.")
     group_by: str = Field(description="Attribute key the metric is grouped by.")
     stat: str = Field(description="Statistic applied to the metric's datapoints.")
-    workflow_id: str | None = Field(
-        default=None, description="Workflow the aggregate is scoped to, if any."
-    )
     buckets: list[TraceAggregateBucket] = Field(
         default_factory=list, description="One bucket per distinct grouping value."
     )

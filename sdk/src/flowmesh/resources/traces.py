@@ -30,16 +30,9 @@ MetricKind = Literal["gauge", "histogram"]
 
 
 def _aggregate_params(
-    metric: str,
-    group_by: str,
-    stat: AggregateStat,
-    kind: MetricKind,
-    workflow_id: str | None,
+    metric: str, group_by: str, stat: AggregateStat, kind: MetricKind
 ) -> dict[str, str]:
-    params = {"metric": metric, "group_by": group_by, "stat": stat, "kind": kind}
-    if workflow_id is not None:
-        params["workflow_id"] = workflow_id
-    return params
+    return {"metric": metric, "group_by": group_by, "stat": stat, "kind": kind}
 
 
 class Traces(SyncResource):
@@ -82,14 +75,13 @@ class Traces(SyncResource):
         group_by: str,
         stat: AggregateStat = "avg",
         kind: MetricKind = "gauge",
-        workflow_id: str | None = None,
     ) -> TraceAggregate:
         """Aggregate one telemetry metric, grouped by one attribute key."""
         return TraceAggregate.model_validate(
             self._client._request(
                 "GET",
                 "/traces/aggregate",
-                params=_aggregate_params(metric, group_by, stat, kind, workflow_id),
+                params=_aggregate_params(metric, group_by, stat, kind),
             )
         )
 
@@ -137,12 +129,11 @@ class AsyncTraces(AsyncResource):
         group_by: str,
         stat: AggregateStat = "avg",
         kind: MetricKind = "gauge",
-        workflow_id: str | None = None,
     ) -> TraceAggregate:
         return TraceAggregate.model_validate(
             await self._client._request(
                 "GET",
                 "/traces/aggregate",
-                params=_aggregate_params(metric, group_by, stat, kind, workflow_id),
+                params=_aggregate_params(metric, group_by, stat, kind),
             )
         )

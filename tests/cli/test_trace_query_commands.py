@@ -141,7 +141,6 @@ class TestTraceAggregate:
             metric="m",
             group_by="worker_id",
             stat="p95",
-            workflow_id="wfl-1",
             buckets=[
                 TraceAggregateBucket(
                     group_value="wkr-1", stat="p95", value=1.0, sample_count=3
@@ -164,16 +163,37 @@ class TestTraceAggregate:
                     "p95",
                     "--kind",
                     "histogram",
+                ],
+            )
+
+        assert result.exit_code == 0
+        traces.aggregate.assert_called_once_with("m", "worker_id", "p95", "histogram")
+        assert "wkr-1" in result.output
+
+    def test_offers_no_workflow_scope_the_aggregate_cannot_honour(self) -> None:
+        """No metric carries a workflow id, so the surface never advertises one."""
+        traces = MagicMock()
+        with patch(
+            "flowmesh_cli.commands.trace.FlowMesh", return_value=_client(traces)
+        ):
+            help_text = runner.invoke(_app(), ["trace", "aggregate", "--help"]).output
+            result = runner.invoke(
+                _app(),
+                [
+                    "trace",
+                    "aggregate",
+                    "--metric",
+                    "m",
+                    "--group-by",
+                    "worker_id",
                     "--workflow-id",
                     "wfl-1",
                 ],
             )
 
-        assert result.exit_code == 0
-        traces.aggregate.assert_called_once_with(
-            "m", "worker_id", "p95", "histogram", "wfl-1"
-        )
-        assert "wkr-1" in result.output
+        assert "--workflow-id" not in help_text
+        assert result.exit_code != 0
+        traces.aggregate.assert_not_called()
 
     def test_reports_an_empty_aggregate(self) -> None:
         traces = MagicMock()

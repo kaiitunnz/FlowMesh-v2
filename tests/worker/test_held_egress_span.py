@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from shared.telemetry.config import TelemetryConfig, TelemetryLevel
+from shared.telemetry.config import TelemetryLevel
 from shared.tools.contract import (
     MediatedOperationPermit,
     ToolOperationEnvelope,
@@ -22,6 +22,7 @@ from shared.tools.model.schema import (
     model_request_digest,
 )
 from shared.utils.ids import new_mediated_permit_id
+from tests.worker.otel_support import fresh_worker_provider, worker_telemetry
 from worker.egress import MediatedEgressSidecar, PendingEgressRequestStore
 from worker.executors.mixins import _otel
 
@@ -104,29 +105,12 @@ def _run_held_turn(spans_path: Path, traceparent: str | None) -> None:
         sidecar.stop()
 
 
-def _configure(level: TelemetryLevel) -> TelemetryConfig:
-    previous = _otel._telemetry_config  # noqa: SLF001 - restored by the caller
-    _otel.configure(
-        TelemetryConfig(
-            level=level,
-            traces_enabled=True,
-            metrics_enabled=False,
-            sample_ratio=1.0,
-            otlp_endpoint=None,
-        )
-    )
-    return previous
-
-
 def test_a_held_turn_opens_an_egress_span_under_the_permits_parent(
     tmp_path: Path,
 ) -> None:
     spans_path = tmp_path / "held" / "spans.jsonl"
-    previous = _configure(TelemetryLevel.FINE)
-    try:
+    with fresh_worker_provider(worker_telemetry(TelemetryLevel.FINE)):
         _run_held_turn(spans_path, _TRACEPARENT)
-    finally:
-        _otel.configure(previous)
 
     spans = _egress_spans(spans_path)
     assert len(spans) == 1, "a held model turn must open its own egress span"
@@ -137,10 +121,7 @@ def test_a_held_turn_opens_an_egress_span_under_the_permits_parent(
 
 def test_a_held_turn_opens_no_egress_span_below_fine(tmp_path: Path) -> None:
     spans_path = tmp_path / "coarse" / "spans.jsonl"
-    previous = _configure(TelemetryLevel.COARSE)
-    try:
+    with fresh_worker_provider(worker_telemetry(TelemetryLevel.COARSE)):
         _run_held_turn(spans_path, _TRACEPARENT)
-    finally:
-        _otel.configure(previous)
 
     assert _egress_spans(spans_path) == []

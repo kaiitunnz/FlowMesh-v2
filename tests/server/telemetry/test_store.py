@@ -9,6 +9,7 @@ HH:MM:SS.nnnnnnnnn"`` timestamps, a combined attribute Map) rather than assumed.
 
 import httpx
 import pytest
+from flowmesh_cli_stack.env_schema import STACK_ENV_SCHEMA
 
 from server.config import TelemetryStoreConfig
 from server.telemetry import build_telemetry_store
@@ -154,17 +155,6 @@ def _refusing_store() -> ClickHouseTelemetryStore:
     return _store(handler)
 
 
-def test_aggregate_refuses_a_workflow_scoped_filter() -> None:
-    for kind in ("gauge", "histogram"):
-        with pytest.raises(UnsupportedAggregateError, match="workflow"):
-            _refusing_store().aggregate(
-                metric="flowmesh.duration",
-                group_by="flowmesh.physical.stage",
-                kind=kind,  # type: ignore[arg-type]
-                workflow_id="wfl-abc",
-            )
-
-
 def test_aggregate_refuses_histogram_min_and_max() -> None:
     for stat in ("min", "max"):
         with pytest.raises(UnsupportedAggregateError, match="bucket counts"):
@@ -178,6 +168,34 @@ def test_aggregate_refuses_histogram_min_and_max() -> None:
 
 def test_unsupported_aggregate_stays_a_telemetry_store_error() -> None:
     assert issubclass(UnsupportedAggregateError, TelemetryStoreError)
+
+
+def test_read_port_defaults_match_the_values_the_env_chain_declares(
+    monkeypatch,
+) -> None:
+    """A deployment whose ``.env`` predates a variable must land on its declared value.
+
+    The schema is what renders ``.env.example`` and documents the knob, so a code
+    default that disagrees with it silently authenticates a fresh server differently
+    from the one an operator reads about.
+    """
+    declared = {
+        var.key: var.default
+        for section in STACK_ENV_SCHEMA.sections
+        for var in section.vars
+        if var.key.startswith("SERVER_METRICS_CLICKHOUSE_")
+    }
+    for key in declared:
+        monkeypatch.delenv(key, raising=False)
+
+    config = TelemetryStoreConfig.from_env()
+
+    assert config.database == declared["SERVER_METRICS_CLICKHOUSE_DATABASE"]
+    assert config.username == declared["SERVER_METRICS_CLICKHOUSE_USERNAME"]
+    assert config.password == declared["SERVER_METRICS_CLICKHOUSE_PASSWORD"]
+    assert config.timeout_sec == float(
+        declared["SERVER_METRICS_CLICKHOUSE_TIMEOUT_SEC"]
+    )
 
 
 def test_build_telemetry_store_returns_none_when_unconfigured() -> None:

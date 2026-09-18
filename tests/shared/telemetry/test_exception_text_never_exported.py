@@ -7,19 +7,28 @@ is visible at the raise site, and the exceptions that carry the most payload -- 
 response that failed to parse, a validation error echoing its input -- are raised by
 code that has no idea a span is open around it.
 
-Both halves are asserted here: the span itself is clean, and an exporter that receives
-a dirty span from anywhere else emits a clean one.
+All three halves are asserted here: the span itself is clean, an exporter that receives
+a dirty span from anywhere else emits a clean one, and the tracer this process actually
+builds is wired through that exporter.
 """
 
 from typing import Any
+from unittest.mock import patch
 
 import pytest
-from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
+from opentelemetry.sdk.trace import ReadableSpan
+from opentelemetry.sdk.trace import Tracer as SDKTracer
+from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace.status import StatusCode
 
-from shared.telemetry.provider import PayloadFreeSpanExporter, payload_free_span
+from shared.telemetry.config import TelemetryConfig, TelemetryLevel
+from shared.telemetry.provider import (
+    PayloadFreeSpanExporter,
+    build_tracer,
+    payload_free_span,
+)
 from shared.telemetry.semconv import PHYSICAL_ERROR_TYPE
 
 _NONCE = "SECRET-NONCE-42"
@@ -123,3 +132,37 @@ def test_the_exporter_cleans_a_span_it_did_not_open() -> None:
     assert clean.name == dirty.name
     assert clean.get_span_context().span_id == dirty.get_span_context().span_id
     assert clean.attributes == dirty.attributes
+
+
+def test_the_process_tracer_is_wired_through_the_payload_free_exporter() -> None:
+    """The unit above holds only while ``build_tracer`` keeps the wrapper in the chain.
+
+    Dropping it changes nothing observable in this process -- every span still exports,
+    still carries its attributes, and still reports its error -- so only what reaches
+    the exporter can tell the two apart.
+    """
+    captured = _Capturing()
+    config = TelemetryConfig(
+        level=TelemetryLevel.FINE,
+        traces_enabled=True,
+        metrics_enabled=False,
+        sample_ratio=1.0,
+        otlp_endpoint="http://collector.invalid:4317",
+    )
+    with patch(
+        "shared.telemetry.provider.OTLPSpanExporter", lambda **_kwargs: captured
+    ):
+        tracer = build_tracer(config, {"service.name": "flowmesh-test"})
+
+    assert isinstance(tracer, SDKTracer)
+    try:
+        with pytest.raises(_Boom):
+            with tracer.start_as_current_span("unowned"):
+                raise _Boom(f"model said: {_NONCE}")
+    finally:
+        tracer.span_processor.shutdown()
+
+    (span,) = captured.spans
+    assert _NONCE not in _rendered(span)
+    assert span.events == ()
+    assert not span.status.description

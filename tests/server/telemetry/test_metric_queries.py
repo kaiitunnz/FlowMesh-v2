@@ -11,8 +11,10 @@ query is a run-time "Unknown identifier", not a wrong number.
 The gauge and histogram tables differ in more than columns. A gauge row is one datapoint
 carrying one ``Value``. A histogram row is a whole series at cumulative temporality --
 the collector re-exports each series' running totals every interval -- so every
-statistic has to reduce each series to its latest point before combining series, and the
-tests below lock that reduction in as well.
+statistic has to reduce each series to its latest point before combining series. Several
+series can nonetheless reach the store on one key at one timestamp, the collector's
+attribute allowlist having dropped the keys that told them apart, so those are summed
+into one point before that reduction runs. The tests below lock in both steps.
 
 Setting ``FLOWMESH_TEST_CLICKHOUSE_URL`` (plus the optional ``..._USERNAME`` /
 ``..._PASSWORD``) runs the arithmetic itself against a live ClickHouse: the tests build
@@ -111,6 +113,15 @@ def _columns_read(sql: str) -> set[str]:
     return set(re.findall(r"\b[A-Z][a-z][A-Za-z0-9]*\b", re.sub(r"\{[^}]*\}", "", sql)))
 
 
+def _group_by_clauses(sql: str) -> list[set[str]]:
+    """The column set each ``GROUP BY`` in the query keys on."""
+    clauses: list[set[str]] = []
+    for tail in re.split(r"\bGROUP BY\s+", sql)[1:]:
+        body = re.split(r"\)|ORDER BY|SELECT", tail, maxsplit=1)[0]
+        clauses.append({token.strip() for token in body.split(",") if token.strip()})
+    return clauses
+
+
 @pytest.mark.parametrize("stat", _HISTOGRAM_STATS)
 def test_histogram_query_reads_only_histogram_columns(stat: AggregateStat) -> None:
     unknown = _columns_read(_histogram_sql(stat)) - set(_HISTOGRAM_COLUMNS)
@@ -137,17 +148,39 @@ def test_histogram_query_reduces_each_series_before_combining(
     stat: AggregateStat,
 ) -> None:
     sql = _histogram_sql(stat)
-    assert "argMax(Count, TimeUnix)" in sql
-    assert "argMax(Sum, TimeUnix)" in sql
-    assert "argMax(BucketCounts, TimeUnix)" in sql
-    # A cumulative point restates the series' totals, so adding rows up multiplies the
-    # answer by the number of export intervals.
-    assert re.search(r"sum\(\s*Count\s*\)", sql) is None
-    assert re.search(r"sum\(\s*Sum\s*\)", sql) is None
+    assert "argMax(point_count, TimeUnix)" in sql
+    assert "argMax(point_sum, TimeUnix)" in sql
+    assert "argMax(point_buckets, TimeUnix)" in sql
+    # A cumulative point restates the series' totals, so counting rows, or adding a
+    # series' rows up, multiplies the answer by the number of export intervals.
     assert re.search(r"count\(\)", sql) is None
-    # A producer restart opens a fresh cumulative run; keying series on its start keeps
-    # the earlier run's totals instead of letting the restarted run's argMax win.
-    assert "StartTimeUnix" in sql
+    clauses = _group_by_clauses(sql)
+    assert any(
+        "StartTimeUnix" in clause and "TimeUnix" not in clause for clause in clauses
+    ), "a series' cumulative points must be reduced to the latest one, not summed"
+
+
+@pytest.mark.parametrize("stat", _HISTOGRAM_STATS)
+def test_histogram_query_combines_points_sharing_a_key_and_timestamp(
+    stat: AggregateStat,
+) -> None:
+    """Distinct series reach the store indistinguishable, and all of them must count.
+
+    A span-derived histogram splits its series by span name, kind and status, and the
+    collector's allowlist drops those keys before export, so one stage's successful and
+    failed points land on the same key at the same timestamp. Reducing that key with an
+    ``argMax`` keeps one of them, so they are summed into one cumulative point first.
+    """
+    sql = _histogram_sql(stat)
+    raw_reduction = r"argMax\(\s*(?:Count|Sum|BucketCounts|ExplicitBounds)\s*,"
+    assert re.search(raw_reduction, sql) is None, (
+        "reducing raw rows by TimeUnix drops every point that shares a key and a "
+        "timestamp with another"
+    )
+    clauses = _group_by_clauses(sql)
+    assert any(
+        {"StartTimeUnix", "TimeUnix"} <= clause for clause in clauses
+    ), "points sharing a series key and a timestamp must be combined before the argMax"
 
 
 def test_histogram_refuses_min_and_max() -> None:
@@ -179,15 +212,22 @@ _live = pytest.mark.skipif(
     not _LIVE_URL, reason="FLOWMESH_TEST_CLICKHOUSE_URL is not set"
 )
 
-# One collector export interval of a spanmetrics histogram: two stages, the buckets the
-# collector config declares, at cumulative temporality. `dispatch` observed 6ms, 7ms and
-# 300ms; `admission` observed 12ms and one 40s that lands in the unbounded overflow
-# bucket. The second row of each pair is the next interval restating the same totals,
-# and the `dispatch` pair at a later StartTimeUnix is the run a collector restart opens,
-# adding observations of 6ms and 6ms.
+# What the collector writes for a spanmetrics histogram: two stages, the buckets the
+# collector config declares, at cumulative temporality. Each stage's series is split by
+# span name, kind and status before export and the collector's attribute allowlist then
+# drops those three keys, so the successful and failed points of one stage arrive with
+# the same key columns AND the same TimeUnix -- two rows the store cannot tell apart.
+#
+# `dispatch` succeeded at 6ms, 7ms and 300ms and failed once at 40ms; `admission`
+# succeeded at 12ms and once at 40s, which lands in the unbounded overflow bucket. Each
+# row is written twice, the second being the next interval restating the same running
+# totals, and the `dispatch` rows at a later StartTimeUnix are the run a producer
+# restart opens, adding successful observations of 6ms and 6ms.
 _BOUNDS = [5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0, 10000.0]
 _RUN_ONE = "2026-09-17 00:00:00"
+_RUN_ONE_INTERVALS = ("2026-09-17 00:01:00", "2026-09-17 00:02:00")
 _RUN_TWO = "2026-09-17 01:00:00"
+_RUN_TWO_INTERVALS = ("2026-09-17 01:01:00", "2026-09-17 01:02:00")
 
 
 def _histogram_row(
@@ -210,40 +250,38 @@ def _histogram_row(
     }
 
 
-def _dispatch_buckets() -> list[int]:
+def _buckets(*observations: float) -> list[int]:
     counts = [0] * (len(_BOUNDS) + 1)
-    counts[1] = 2  # 6ms and 7ms, in (5, 10]
-    counts[6] = 1  # 300ms, in (250, 500]
+    for observation in observations:
+        index = next(
+            (i for i, bound in enumerate(_BOUNDS) if observation <= bound), len(_BOUNDS)
+        )
+        counts[index] += 1
     return counts
 
 
-def _admission_buckets() -> list[int]:
-    counts = [0] * (len(_BOUNDS) + 1)
-    counts[2] = 1  # 12ms, in (10, 25]
-    counts[-1] = 1  # 40s, past the last bound
-    return counts
-
-
-def _restart_buckets() -> list[int]:
-    counts = [0] * (len(_BOUNDS) + 1)
-    counts[1] = 2  # 6ms and 6ms
-    return counts
+def _restated_series(
+    stage: str, start: str, intervals: tuple[str, ...], observations: list[float]
+) -> list[dict[str, object]]:
+    return [
+        _histogram_row(
+            stage,
+            start,
+            at,
+            len(observations),
+            sum(observations),
+            _buckets(*observations),
+        )
+        for at in intervals
+    ]
 
 
 _HISTOGRAM_ROWS = (
-    [
-        _histogram_row("dispatch", _RUN_ONE, t, 3, 313.0, _dispatch_buckets())
-        for t in ("2026-09-17 00:01:00", "2026-09-17 00:02:00")
-    ]
-    + [
-        _histogram_row("admission", _RUN_ONE, t, 2, 40012.0, _admission_buckets())
-        for t in ("2026-09-17 00:01:00", "2026-09-17 00:02:00")
-    ]
-    + [
-        _histogram_row(
-            "dispatch", _RUN_TWO, "2026-09-17 01:01:00", 2, 12.0, _restart_buckets()
-        )
-    ]
+    # dispatch's OK and ERROR series, indistinguishable once the allowlist has run.
+    _restated_series("dispatch", _RUN_ONE, _RUN_ONE_INTERVALS, [6.0, 7.0, 300.0])
+    + _restated_series("dispatch", _RUN_ONE, _RUN_ONE_INTERVALS, [40.0])
+    + _restated_series("admission", _RUN_ONE, _RUN_ONE_INTERVALS, [12.0, 40000.0])
+    + _restated_series("dispatch", _RUN_TWO, _RUN_TWO_INTERVALS, [6.0, 6.0])
 )
 
 _GAUGE_ROWS = [
@@ -342,14 +380,17 @@ def _values(
 
 
 @_live
-def test_live_histogram_count_and_sum_survive_cumulative_restatement(
+def test_live_histogram_count_and_sum_hold_every_series_at_its_latest_point(
     live_store,
 ) -> None:
-    # Five dispatch observations reported across three cumulative rows, two of which
-    # restate the first run's totals: a row-wise sum would answer 8, a row count 3.
-    assert _values(live_store, "count") == {"dispatch": (5.0, 5), "admission": (2.0, 2)}
+    # Six dispatch observations reported across six cumulative rows, half of them
+    # restating totals already reported: a row-wise sum would answer 14, a row count 6.
+    # dispatch's failed 40ms observation rides its own series, which reaches the store
+    # on dispatch's key at dispatch's timestamp, so reducing that key to a single row
+    # loses either it or the three successes it arrived beside.
+    assert _values(live_store, "count") == {"dispatch": (6.0, 6), "admission": (2.0, 2)}
     assert _values(live_store, "sum") == {
-        "dispatch": (325.0, 5),
+        "dispatch": (365.0, 6),
         "admission": (40012.0, 2),
     }
 
@@ -359,7 +400,7 @@ def test_live_histogram_avg_is_the_mean_of_the_observations(
     live_store: ClickHouseTelemetryStore,
 ) -> None:
     assert _values(live_store, "avg") == {
-        "dispatch": (65.0, 5),
+        "dispatch": (round(365 / 6, 6), 6),
         "admission": (20006.0, 2),
     }
 
@@ -368,11 +409,11 @@ def test_live_histogram_avg_is_the_mean_of_the_observations(
 def test_live_histogram_quantile_interpolates_inside_its_bucket(
     live_store: ClickHouseTelemetryStore,
 ) -> None:
-    # Five dispatch observations: four in (5, 10] and one in (250, 500]. The median's
-    # rank of 2.5 lands 2.5/4 of the way into the first of those.
-    assert _values(live_store, "p50")["dispatch"] == (8.125, 5)
-    # The 95th's rank of 4.75 lands three quarters into the single-observation bucket.
-    assert _values(live_store, "p95")["dispatch"] == (437.5, 5)
+    # Six dispatch observations: four in (5, 10], one in (25, 50] and one in (250, 500].
+    # The median's rank of 3 lands 3/4 of the way into the first of those.
+    assert _values(live_store, "p50")["dispatch"] == (8.75, 6)
+    # The 95th's rank of 5.7 lands 0.7 into the single-observation bucket above.
+    assert _values(live_store, "p95")["dispatch"] == (425.0, 6)
 
 
 @_live

@@ -467,9 +467,6 @@ def aggregate(
     kind: _MetricKind = typer.Option(
         _MetricKind.GAUGE, "--kind", "-k", help="Metric kind selecting the store table"
     ),
-    workflow_id: str | None = typer.Option(
-        None, "--workflow-id", "-w", help="Restrict the aggregate to one workflow"
-    ),
     as_json: bool = typer.Option(
         False, "--json", help="Print the aggregate as JSON instead of a table."
     ),
@@ -477,9 +474,7 @@ def aggregate(
     """Aggregate one telemetry metric, grouped by one attribute key."""
     client = FlowMesh()
     try:
-        result = client.traces.aggregate(
-            metric, group_by, stat.value, kind.value, workflow_id
-        )
+        result = client.traces.aggregate(metric, group_by, stat.value, kind.value)
     except FlowMeshError as exc:
         logging.error(str(exc))
         raise typer.Exit(code=1)

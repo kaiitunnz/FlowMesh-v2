@@ -6,12 +6,16 @@ not any one backend's query.
 """
 
 import logging
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from typing import Any, cast
 
 import pytest
 from fastapi import HTTPException, status
-from lumid_hooks import PrincipalContext
+from lumid_hooks import PrincipalContext, ResourceRef
 
+from server.hooks import PERMISSION_CHECKERS
+from server.registries.workflow import Workflow, WorkflowRegistry, WorkflowStatus
 from server.routers.v1.traces import (
     aggregate_metric,
     build_span_tree,
@@ -28,6 +32,9 @@ from shared.telemetry.ids import workflow_to_trace_id_int
 
 WORKFLOW_ID = "wfl-0102030405060708090a0b0c0d0e0f10"
 TRACE_ID = format(workflow_to_trace_id_int(WORKFLOW_ID), "032x")
+# A different string the trace-id derivation maps onto the same trace: the mapping
+# strips every non-hex character, so many ids address one trace.
+TRACE_ID_ALIAS = f"{WORKFLOW_ID}-zz"
 BASE = datetime(2026, 1, 1, tzinfo=UTC)
 
 
@@ -58,8 +65,10 @@ class FakeStore:
         self.rows = rows or []
         self.buckets = buckets or []
         self.aggregate_calls: list[dict[str, object]] = []
+        self.fetched: list[str] = []
 
     def fetch_trace(self, workflow_id: str) -> list[SpanRow]:
+        self.fetched.append(workflow_id)
         return list(self.rows)
 
     def aggregate(
@@ -69,16 +78,9 @@ class FakeStore:
         group_by: str,
         stat: AggregateStat = "avg",
         kind: MetricKind = "gauge",
-        workflow_id: str | None = None,
     ) -> list[AggregateBucket]:
         self.aggregate_calls.append(
-            {
-                "metric": metric,
-                "group_by": group_by,
-                "stat": stat,
-                "kind": kind,
-                "workflow_id": workflow_id,
-            }
+            {"metric": metric, "group_by": group_by, "stat": stat, "kind": kind}
         )
         return list(self.buckets)
 
@@ -86,6 +88,34 @@ class FakeStore:
 def _as_port(store: FakeStore) -> TelemetryStore:
     """Type-checked proof the fake satisfies the read port the routes depend on."""
     return store
+
+
+def _workflow(workflow_id: str) -> Workflow:
+    return Workflow(
+        workflow_id=workflow_id,
+        task_ids=["tsk-1"],
+        submitted_at="2026-01-01T00:00:00Z",
+        updated_at="2026-01-01T00:00:00Z",
+        status=WorkflowStatus.DONE,
+        dispatched_tasks=[],
+        completed_tasks=["tsk-1"],
+        failed_tasks=[],
+        cancelled_tasks=[],
+    )
+
+
+class FakeRegistry:
+    """A registry that knows exactly the workflow ids it was seeded with."""
+
+    def __init__(self, *workflow_ids: str) -> None:
+        self.known = set(workflow_ids)
+
+    async def get_workflow_async(self, workflow_id: str) -> Workflow | None:
+        return _workflow(workflow_id) if workflow_id in self.known else None
+
+
+def _as_registry(registry: FakeRegistry) -> WorkflowRegistry:
+    return cast(WorkflowRegistry, registry)
 
 
 def _row(
@@ -237,11 +267,38 @@ async def test_tree_route_returns_the_assembled_tree(principal, logger) -> None:
     store = _as_port(FakeStore([_row("r", None), _row("c", "r", offset_sec=1)]))
 
     tree = await get_workflow_span_tree(
-        WORKFLOW_ID, principal=principal, store=store, logger=logger
+        WORKFLOW_ID,
+        principal=principal,
+        registry=_as_registry(FakeRegistry(WORKFLOW_ID)),
+        store=store,
+        logger=logger,
     )
 
     assert _ids(tree.roots) == ["r"]
     assert _ids(tree.roots[0].children) == ["c"]
+
+
+@pytest.mark.asyncio
+async def test_tree_route_refuses_an_id_the_registry_does_not_know(
+    principal, logger
+) -> None:
+    """An alias of a real workflow id derives the same trace and must not read it."""
+    assert workflow_to_trace_id_int(TRACE_ID_ALIAS) == workflow_to_trace_id_int(
+        WORKFLOW_ID
+    )
+    fake = FakeStore([_row("r", None)])
+
+    with pytest.raises(HTTPException) as excinfo:
+        await get_workflow_span_tree(
+            TRACE_ID_ALIAS,
+            principal=principal,
+            registry=_as_registry(FakeRegistry(WORKFLOW_ID)),
+            store=_as_port(fake),
+            logger=logger,
+        )
+
+    assert excinfo.value.status_code == status.HTTP_404_NOT_FOUND
+    assert fake.fetched == []
 
 
 @pytest.mark.asyncio
@@ -256,7 +313,6 @@ async def test_aggregate_route_passes_every_argument_to_the_store(
         group_by="worker_id",
         stat="p95",
         kind="histogram",
-        workflow_id=WORKFLOW_ID,
         principal=principal,
         store=store,
         logger=logger,
@@ -268,7 +324,6 @@ async def test_aggregate_route_passes_every_argument_to_the_store(
             "group_by": "worker_id",
             "stat": "p95",
             "kind": "histogram",
-            "workflow_id": WORKFLOW_ID,
         }
     ]
     assert result.metric == "flowmesh.control.stage.duration"
@@ -277,11 +332,86 @@ async def test_aggregate_route_passes_every_argument_to_the_store(
     assert result.buckets[0].sample_count == 40
 
 
+class _RecordingChecker:
+    """Records what it was asked, and gates a SYSTEM resource on an admin principal."""
+
+    name = "recording"
+
+    def __init__(self) -> None:
+        self.asked: list[tuple[str, str | None, str]] = []
+
+    async def require(
+        self,
+        principal: PrincipalContext,
+        resource: ResourceRef,
+        action: str,
+        logger: logging.Logger,
+    ) -> None:
+        self.asked.append((resource.kind, resource.id, action))
+        if resource.kind == "system" and principal.principal_type != "admin":
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "forbidden")
+
+    async def accessible_ids(self, *args: Any, **kwargs: Any) -> frozenset[str] | None:
+        return None
+
+
+@pytest.fixture
+def recording_checker() -> Iterator[_RecordingChecker]:
+    checker = _RecordingChecker()
+    PERMISSION_CHECKERS.append(checker)
+    try:
+        yield checker
+    finally:
+        PERMISSION_CHECKERS.remove(checker)
+
+
+@pytest.mark.asyncio
+async def test_a_fleet_wide_aggregate_is_gated_on_a_system_admin_right(
+    principal, logger, recording_checker
+) -> None:
+    """The answer spans every tenant, so a tenant-level workflow read cannot buy it."""
+    fake = FakeStore(buckets=[AggregateBucket("wkr-1", "avg", 1.0, 2)])
+
+    with pytest.raises(HTTPException) as excinfo:
+        await aggregate_metric(
+            metric="flowmesh.gpu.utilization",
+            group_by="worker_id",
+            stat="avg",
+            kind="gauge",
+            principal=principal,
+            store=_as_port(fake),
+            logger=logger,
+        )
+
+    assert excinfo.value.status_code == status.HTTP_403_FORBIDDEN
+    assert recording_checker.asked == [("system", None, "admin")]
+    assert fake.aggregate_calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_workflow_span_tree_stays_a_workflow_level_read(
+    principal, logger, recording_checker
+) -> None:
+    await get_workflow_span_tree(
+        WORKFLOW_ID,
+        principal=principal,
+        registry=_as_registry(FakeRegistry(WORKFLOW_ID)),
+        store=_as_port(FakeStore([_row("r", None)])),
+        logger=logger,
+    )
+
+    assert recording_checker.asked == [("workflow", WORKFLOW_ID, "read")]
+
+
 @pytest.mark.asyncio
 async def test_tree_route_reports_an_unconfigured_store(principal, logger) -> None:
     with pytest.raises(HTTPException) as excinfo:
         await get_workflow_span_tree(
-            WORKFLOW_ID, principal=principal, store=None, logger=logger
+            WORKFLOW_ID,
+            principal=principal,
+            registry=_as_registry(FakeRegistry(WORKFLOW_ID)),
+            store=None,
+            logger=logger,
         )
 
     assert excinfo.value.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
@@ -296,7 +426,6 @@ async def test_aggregate_route_reports_an_unconfigured_store(principal, logger) 
             group_by="worker_id",
             stat="avg",
             kind="gauge",
-            workflow_id=None,
             principal=principal,
             store=None,
             logger=logger,
