@@ -53,6 +53,20 @@ jobs:
       - name: Install dependencies
         run: uv sync --all-packages --group ci --frozen
 
+      # The collector refuses a malformed OTTL statement at startup, so a config that
+      # only looks right takes the whole telemetry deployment down and nothing reaches
+      # the store. Its own validator is the only thing that reads these the way it does.
+      - name: Validate the collector config
+        run: >
+          docker run --rm
+          -e TELEMETRY_CLICKHOUSE_DSN=clickhouse://localhost:9000
+          -e TELEMETRY_CLICKHOUSE_DATABASE=flowmesh
+          -e TELEMETRY_CLICKHOUSE_USERNAME=default
+          -e TELEMETRY_CLICKHOUSE_PASSWORD=flowmesh
+          -v "$GITHUB_WORKSPACE/cli/stack/src/flowmesh_cli_stack/assets/otel-collector-config.yaml:/cfg.yaml:ro"
+          otel/opentelemetry-collector-contrib:0.161.0@sha256:fd328de2552466ad78385e1b1289c3f2402b1c45f265b252aab1955b42845ac1
+          validate --config=/cfg.yaml
+
       - name: Run unit tests
         # Skip the multiprocessing GPU-cleanup test — it's too costly to
         # run on every PR (vllm engine startup + multi-process cleanup).

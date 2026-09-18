@@ -49,12 +49,15 @@ processors:
         statements:
           - keep_matching_keys(datapoint.attributes, "^flowmesh\\.(logical|physical|gpu)\\.|^flowmesh\\.(node_id|worker_id|role)$")
   # Only a control-plane stage span becomes a duration histogram; every other span
-  # would land in one unnamed bucket together.
+  # would land in one unnamed bucket together. The regex is OTTL's, inside a
+  # single-quoted YAML scalar that passes backslashes through untouched, so a dot is
+  # escaped for OTTL as \\. -- \. is what a YAML reader wants and OTTL rejects it,
+  # taking the whole collector down at startup.
   filter/control_spans:
     error_mode: ignore
     traces:
       span:
-        - 'not IsMatch(name, "^flowmesh\.control\.")'
+        - 'not IsMatch(name, "^flowmesh\\.control\\.")'
   batch:
     send_batch_size: 512
     timeout: 5s
@@ -69,7 +72,9 @@ connectors:
   # before it names one. They are not in the attribute allow-list, so they would be
   # stripped on the way to the store anyway, and a stage's successful and failed points
   # would arrive sharing every key column -- one series per key has to hold at the
-  # producer, because a reader cannot recover a split it can no longer see.
+  # producer, because a reader cannot recover a split it can no longer see. A per-stage
+  # error rate would need status.code added to the allow-list AND to the series key
+  # together; adding it to either alone reinstates the undercount.
   span_metrics:
     namespace: flowmesh
     histogram:
