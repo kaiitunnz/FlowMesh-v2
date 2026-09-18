@@ -1083,7 +1083,7 @@ STACK_ENV_SCHEMA = EnvSchema(
                 ),
                 EnvVar(
                     "SERVER_METRICS_CLICKHOUSE_PASSWORD",
-                    "",
+                    "flowmesh",
                     description="ClickHouse password for the store read port.",
                 ),
                 EnvVar(
@@ -1092,6 +1092,54 @@ STACK_ENV_SCHEMA = EnvSchema(
                     description="ClickHouse query timeout (seconds).",
                     var_type=EnvVarType.FLOAT,
                     min_value=0.0,
+                ),
+                EnvVar(
+                    "TELEMETRY_CLICKHOUSE_DSN",
+                    "clickhouse://clickhouse:9000?dial_timeout=10s",
+                    description="ClickHouse DSN the collector writes to.",
+                ),
+                EnvVar(
+                    "TELEMETRY_CLICKHOUSE_DATABASE",
+                    "flowmesh",
+                    description="ClickHouse database for the telemetry profile.",
+                ),
+                EnvVar(
+                    "TELEMETRY_CLICKHOUSE_USERNAME",
+                    "default",
+                    description="ClickHouse user for the telemetry profile.",
+                ),
+                EnvVar(
+                    "TELEMETRY_CLICKHOUSE_PASSWORD",
+                    "flowmesh",
+                    description="ClickHouse password for the telemetry profile.",
+                ),
+                EnvVar(
+                    "TELEMETRY_CLICKHOUSE_HTTP_PORT",
+                    "8123",
+                    description="Host port for the ClickHouse HTTP interface.",
+                    var_type=EnvVarType.INT,
+                    min_value=1,
+                ),
+                EnvVar(
+                    "TELEMETRY_CLICKHOUSE_NATIVE_PORT",
+                    "9000",
+                    description="Host port for the ClickHouse native interface.",
+                    var_type=EnvVarType.INT,
+                    min_value=1,
+                ),
+                EnvVar(
+                    "TELEMETRY_OTLP_GRPC_PORT",
+                    "4317",
+                    description="Host port for the collector's OTLP gRPC receiver.",
+                    var_type=EnvVarType.INT,
+                    min_value=1,
+                ),
+                EnvVar(
+                    "TELEMETRY_OTLP_HTTP_PORT",
+                    "4318",
+                    description="Host port for the collector's OTLP HTTP receiver.",
+                    var_type=EnvVarType.INT,
+                    min_value=1,
                 ),
             ],
         ),

@@ -129,8 +129,16 @@ listed here is in `.env.example`.
 | `SERVER_METRICS_CLICKHOUSE_URL` | – | ClickHouse HTTP URL for the store read port |
 | `SERVER_METRICS_CLICKHOUSE_DATABASE` | `flowmesh` | ClickHouse database for the store read port |
 | `SERVER_METRICS_CLICKHOUSE_USERNAME` | `default` | ClickHouse user for the store read port |
-| `SERVER_METRICS_CLICKHOUSE_PASSWORD` | – | ClickHouse password for the store read port |
+| `SERVER_METRICS_CLICKHOUSE_PASSWORD` | `flowmesh` | ClickHouse password for the store read port |
 | `SERVER_METRICS_CLICKHOUSE_TIMEOUT_SEC` | `10` | ClickHouse query timeout (seconds) |
+| `TELEMETRY_CLICKHOUSE_DSN` | `clickhouse://clickhouse:9000?dial_timeout=10s` | ClickHouse DSN the collector writes to |
+| `TELEMETRY_CLICKHOUSE_DATABASE` | `flowmesh` | ClickHouse database for the telemetry profile |
+| `TELEMETRY_CLICKHOUSE_USERNAME` | `default` | ClickHouse user for the telemetry profile |
+| `TELEMETRY_CLICKHOUSE_PASSWORD` | `flowmesh` | ClickHouse password for the telemetry profile |
+| `TELEMETRY_CLICKHOUSE_HTTP_PORT` | `8123` | Host port for the ClickHouse HTTP interface |
+| `TELEMETRY_CLICKHOUSE_NATIVE_PORT` | `9000` | Host port for the ClickHouse native interface |
+| `TELEMETRY_OTLP_GRPC_PORT` | `4317` | Host port for the collector's OTLP gRPC receiver |
+| `TELEMETRY_OTLP_HTTP_PORT` | `4318` | Host port for the collector's OTLP HTTP receiver |
 | `LOG_LEVEL` | `INFO` | Server log level |
 
 **Notes:**

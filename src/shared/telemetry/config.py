@@ -65,6 +65,23 @@ class TelemetryConfig:
             traces_enabled=parse_bool_env("SERVER_METRICS_TRACES_ENABLED", True),
             metrics_enabled=parse_bool_env("SERVER_METRICS_METRICS_ENABLED", True),
             sample_ratio=parse_float_env("SERVER_METRICS_TRACE_SAMPLE_RATIO", 1.0),
-            otlp_endpoint=(os.getenv("SERVER_METRICS_OTLP_ENDPOINT") or "").strip()
-            or None,
+            otlp_endpoint=_otlp_endpoint(),
         )
+
+
+def _otlp_endpoint() -> str | None:
+    """The configured collector endpoint, or ``None`` when export is not configured.
+
+    The endpoint must name its scheme. Without one the OTLP exporter negotiates TLS
+    against a collector that is almost always serving plaintext, and the export fails
+    where nothing reports it -- on the exporter's own background thread.
+    """
+    endpoint = (os.getenv("SERVER_METRICS_OTLP_ENDPOINT") or "").strip()
+    if not endpoint:
+        return None
+    if not endpoint.startswith(("http://", "https://")):
+        raise ValueError(
+            "SERVER_METRICS_OTLP_ENDPOINT must start with http:// or https:// "
+            f"(got {endpoint!r}); use http://<host>:4317 for a plaintext collector."
+        )
+    return endpoint
