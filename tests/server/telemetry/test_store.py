@@ -7,6 +7,8 @@ live ClickHouse instance during this change (string-encoded UInt64, ``"YYYY-MM-D
 HH:MM:SS.nnnnnnnnn"`` timestamps, a combined attribute Map) rather than assumed.
 """
 
+import json
+
 import httpx
 import pytest
 from flowmesh_cli_stack.env_schema import STACK_ENV_SCHEMA
@@ -59,7 +61,7 @@ def test_fetch_trace_derives_the_same_trace_id_producers_use() -> None:
                 "flowmesh.gpu.index": "0",  # not logical or physical -- must be dropped
             },
         }
-        return httpx.Response(200, text=__import__("json").dumps(row) + "\n")
+        return httpx.Response(200, text=json.dumps(row) + "\n")
 
     store = _store(handler)
     spans = store.fetch_trace(workflow_id)
@@ -105,7 +107,7 @@ def test_aggregate_binds_the_metric_and_grouping_key_and_parses_buckets() -> Non
             {"group_value": "0", "stat_value": "1.5", "sample_count": "10"},
             {"group_value": "1", "stat_value": "0.2", "sample_count": "4"},
         ]
-        body = "\n".join(__import__("json").dumps(r) for r in rows)
+        body = "\n".join(json.dumps(r) for r in rows)
         return httpx.Response(200, text=body)
 
     store = _store(handler)
@@ -129,7 +131,7 @@ def test_aggregate_histogram_sample_count_is_the_observation_total() -> None:
         # What the histogram query returns: `sample_count` is the summed point count
         # of the bucket's series, not the number of rows they were spread over.
         row = {"group_value": "dispatch", "stat_value": "437.5", "sample_count": "5"}
-        return httpx.Response(200, text=__import__("json").dumps(row))
+        return httpx.Response(200, text=json.dumps(row))
 
     store = _store(handler)
     buckets = store.aggregate(

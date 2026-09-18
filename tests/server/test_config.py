@@ -43,11 +43,11 @@ def test_port_forward_config_reads_ssh_proxy_capability(
 
 
 def test_metrics_config_telemetry_defaults_to_off(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.delenv("SERVER_METRICS_TELEMETRY_LEVEL", raising=False)
 
-    config = MetricsConfig.from_env(Path("/tmp/results"))
+    config = MetricsConfig.from_env(tmp_path)
 
     assert config.telemetry.level is TelemetryLevel.OFF
     assert config.telemetry.traces_enabled is True
@@ -60,13 +60,13 @@ def test_metrics_config_telemetry_defaults_to_off(
 
 @pytest.mark.parametrize("level", ["coarse", "fine", "full"])
 def test_metrics_config_reads_telemetry_level(
-    monkeypatch: pytest.MonkeyPatch, level: str
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, level: str
 ) -> None:
     monkeypatch.setenv("SERVER_METRICS_TELEMETRY_LEVEL", level)
     monkeypatch.setenv("SERVER_METRICS_OTLP_ENDPOINT", "http://collector:4317")
     monkeypatch.setenv("SERVER_METRICS_TRACE_SAMPLE_RATIO", "0.25")
 
-    config = MetricsConfig.from_env(Path("/tmp/results"))
+    config = MetricsConfig.from_env(tmp_path)
 
     assert config.telemetry.level is TelemetryLevel(level)
     assert config.telemetry.otlp_endpoint == "http://collector:4317"
@@ -74,9 +74,9 @@ def test_metrics_config_reads_telemetry_level(
 
 
 def test_metrics_config_rejects_unknown_telemetry_level(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setenv("SERVER_METRICS_TELEMETRY_LEVEL", "verbose")
 
     with pytest.raises(SystemExit):
-        MetricsConfig.from_env(Path("/tmp/results"))
+        MetricsConfig.from_env(tmp_path)
