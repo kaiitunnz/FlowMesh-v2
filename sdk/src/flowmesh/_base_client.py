@@ -33,12 +33,22 @@ def _build_headers(api_key: str | None) -> dict[str, str]:
     }
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    if _otel_inject is not None:
-        # Forward the caller's ambient trace context so a workflow's trace continues
-        # across the client->server hop. A silent no-op when OpenTelemetry is not
-        # installed, so the SDK carries no hard OTel dependency.
-        _otel_inject(headers)
     return headers
+
+
+def _traced_headers(headers: dict[str, str] | None) -> dict[str, str] | None:
+    """``headers`` plus the caller's trace context, read at the moment of the call.
+
+    A client outlives the span it was constructed under, so the context belongs to the
+    request rather than to the client: injected once at construction it would stamp
+    whatever was active then onto every later request. A silent no-op when
+    OpenTelemetry is not installed, so the SDK carries no hard OTel dependency.
+    """
+    if _otel_inject is None:
+        return headers
+    carrier = dict(headers) if headers else {}
+    _otel_inject(carrier)
+    return carrier or None
 
 
 def _make_url(base_url: str, path: str) -> str:
@@ -125,8 +135,8 @@ class BaseClient:
             kwargs["json"] = json_body
         if data is not None:
             kwargs["content"] = data
-        if headers:
-            kwargs["headers"] = headers
+        if traced := _traced_headers(headers):
+            kwargs["headers"] = traced
         try:
             response = self._http.request(method, url, **kwargs)
         except httpx.ConnectError as exc:
@@ -147,8 +157,8 @@ class BaseClient:
         kwargs: dict[str, Any] = {}
         if params:
             kwargs["params"] = params
-        if headers:
-            kwargs["headers"] = headers
+        if traced := _traced_headers(headers):
+            kwargs["headers"] = traced
         try:
             response = self._http.request(method, url, **kwargs)
         except httpx.ConnectError as exc:
@@ -166,6 +176,7 @@ class BaseClient:
         url = _make_url(self.base_url, path)
         headers = self._headers.copy()
         headers["Accept"] = "text/event-stream"
+        headers = _traced_headers(headers) or headers
         params = params.copy() if params else {}
         if cursor:
             params["cursor"] = cursor
@@ -281,8 +292,8 @@ class BaseAsyncClient:
             kwargs["json"] = json_body
         if data is not None:
             kwargs["content"] = data
-        if headers:
-            kwargs["headers"] = headers
+        if traced := _traced_headers(headers):
+            kwargs["headers"] = traced
         try:
             response = await self._http.request(method, url, **kwargs)
         except httpx.ConnectError as exc:
@@ -303,8 +314,8 @@ class BaseAsyncClient:
         kwargs: dict[str, Any] = {}
         if params:
             kwargs["params"] = params
-        if headers:
-            kwargs["headers"] = headers
+        if traced := _traced_headers(headers):
+            kwargs["headers"] = traced
         try:
             response = await self._http.request(method, url, **kwargs)
         except httpx.ConnectError as exc:
@@ -322,6 +333,7 @@ class BaseAsyncClient:
         url = _make_url(self.base_url, path)
         headers = dict(self._headers)
         headers["Accept"] = "text/event-stream"
+        headers = _traced_headers(headers) or headers
         params = dict(params) if params else {}
         if cursor:
             params["cursor"] = cursor
