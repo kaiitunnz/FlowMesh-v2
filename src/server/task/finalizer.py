@@ -19,12 +19,12 @@ from ..clients.redis import (
 )
 from ..orchestration.telemetry import WorkflowSpanEmitter
 from ..schemas.logs import LogEvent
-from ..task.models import WorkflowSettlement
-from ..task.runtime import TaskRuntime
 from ..utils.time import now_iso, ts_to_iso
+from .models import WorkflowSettlement
+from .runtime import TaskRuntime
 
 
-class WorkflowCompletionFinalizer:
+class WorkflowFinalizer:
     """Closes each completed workflow exactly once, serialized across its callers.
 
     Callers name a workflow; the finalizer decides whether it is complete and, if so,

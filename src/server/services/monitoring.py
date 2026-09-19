@@ -58,12 +58,12 @@ from ..registries.node import NodeRegistry
 from ..registries.worker import WorkerRegistry
 from ..schemas.logs import LogEvent
 from ..serve import ServeAccessMode, is_public_base_url
+from ..task.finalizer import WorkflowFinalizer
 from ..task.metadata import extract_model_dataset_names
 from ..task.models import TaskRecord, TaskStatus, TaskUsage
 from ..task.runtime import TaskRuntime
 from ..utils.logging import log_node_event, log_worker_event
 from ..utils.time import now_iso
-from .completion import WorkflowCompletionFinalizer
 from .metrics import MetricsRecorder
 from .port_forward import PortForwardService
 from .watchdog import WorkerWatchdog
@@ -150,7 +150,7 @@ class EventMonitor:
         self._results_dir = Path(results_dir)
         self._log_stream_ttl_sec = max(0, int(log_stream_ttl_sec))
         self._server_base_url = self._validate_server_base_url(server_base_url)
-        self._completion = WorkflowCompletionFinalizer(
+        self._finalizer = WorkflowFinalizer(
             redis_client=redis_client,
             runtime=runtime,
             logger=logger,
@@ -218,19 +218,19 @@ class EventMonitor:
                 target=self._node_events_loop, name="nodes-events", daemon=True
             ),
             threading.Thread(
-                target=self._completion_loop, name="workflow-completion", daemon=True
+                target=self._finalizer_loop, name="workflow-completion", daemon=True
             ),
         ]
         for thread in self._threads:
             thread.start()
 
     @property
-    def completion(self) -> WorkflowCompletionFinalizer:
-        """The workflow-completion finalizer this monitor drains."""
-        return self._completion
+    def finalizer(self) -> WorkflowFinalizer:
+        """The workflow finalizer this monitor drains."""
+        return self._finalizer
 
-    def _completion_loop(self) -> None:
-        self._completion.run(self._stop_event)
+    def _finalizer_loop(self) -> None:
+        self._finalizer.run(self._stop_event)
 
     def set_own_node(self, node_id: str) -> None:
         """Record the node_id of the supervisor co-located with this server."""
@@ -554,7 +554,7 @@ class EventMonitor:
                         )
                         self._metrics.record_task_event(child_event, is_child=True)
                         self._close_task_log_stream(child_id)
-                        self._completion.close_task_workflow(child_id)
+                        self._finalizer.close_task_workflow(child_id)
                 if event.worker_id:
                     try:
                         record = self._runtime.get_record(event.task_id)
@@ -578,7 +578,7 @@ class EventMonitor:
                         )
                     except Exception:
                         pass
-                self._completion.close_task_workflow(event.task_id)
+                self._finalizer.close_task_workflow(event.task_id)
             case "TASK_FAILED":
                 record = self._runtime.get_record(event.task_id)
                 if record:
@@ -640,7 +640,7 @@ class EventMonitor:
                     self._metrics.record_task_event(derived)
                     self._metrics.finalize_task_failure(task_id)
                     self._close_task_log_stream(task_id)
-                    self._completion.close_task_workflow(task_id)
+                    self._finalizer.close_task_workflow(task_id)
                 for child_id in merged_children:
                     child_payload = dict(payload)
                     child_payload["parent_task_id"] = event.task_id
@@ -656,8 +656,8 @@ class EventMonitor:
                     self._metrics.record_task_event(child_event, is_child=True)
                     self._metrics.finalize_task_failure(child_id)
                     self._close_task_log_stream(child_id)
-                    self._completion.close_task_workflow(child_id)
-                self._completion.close_task_workflow(event.task_id)
+                    self._finalizer.close_task_workflow(child_id)
+                self._finalizer.close_task_workflow(event.task_id)
             case "TASK_CANCELLED":
                 self._unregister_port_forward(event.task_id)
                 self._maybe_drain_serve(event.task_id)
@@ -678,7 +678,7 @@ class EventMonitor:
                         )
                     except Exception:
                         pass
-                self._completion.close_task_workflow(event.task_id)
+                self._finalizer.close_task_workflow(event.task_id)
             case _:
                 self._logger.debug(
                     "Ignoring task event type=%s payload=%s", event_type, payload
@@ -835,7 +835,7 @@ class EventMonitor:
                             if record and record.status == TaskStatus.CANCELLING:
                                 self._runtime.mark_cancelled(task_id, worker_id, {}, ts)
                                 self._close_task_log_stream(task_id)
-                                self._completion.close_task_workflow(task_id)
+                                self._finalizer.close_task_workflow(task_id)
                             else:
                                 to_requeue.append(task_id)
                         if to_requeue:

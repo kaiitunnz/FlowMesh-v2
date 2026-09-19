@@ -62,7 +62,7 @@ def test_the_workflow_root_span_has_an_emitter(server_main: Any) -> None:
     from server.orchestration.telemetry import WorkflowSpanEmitter
 
     assert isinstance(
-        server_main.EVENT_MONITOR.completion._workflow_span_emitter,
+        server_main.EVENT_MONITOR.finalizer._workflow_span_emitter,
         WorkflowSpanEmitter,
     )
 
@@ -72,7 +72,7 @@ def test_the_runtime_notifies_the_completion_finalizer(server_main: Any) -> None
     # wiring such a workflow never emits its span and never closes its log stream.
     assert (
         server_main.RUNTIME._on_workflow_settled
-        == server_main.EVENT_MONITOR.completion.request
+        == server_main.EVENT_MONITOR.finalizer.request
     )
 
 

@@ -4,7 +4,7 @@ Most terminals reach the server as a published task event. Some never do: a task
 worker can satisfy, an exhausted retry and a model boundary the gateway fails are all
 settled by the control plane itself, which records metrics but publishes nothing. Such
 a workflow used to keep its log stream open forever and emit no workflow span. The
-runtime now notifies the completion finalizer from its own terminal-persist step, so
+runtime now notifies the finalizer from its own terminal-persist step, so
 both kinds of terminal close through the one path.
 """
 
@@ -16,7 +16,7 @@ from typing import Any, cast
 from unittest.mock import MagicMock
 
 from server.config import OrchestrationConfig
-from server.services.completion import WorkflowCompletionFinalizer
+from server.task.finalizer import WorkflowFinalizer
 from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime
 from shared.harness import BoundaryEventKind
@@ -75,11 +75,11 @@ spec:
 """
 
 
-def _finalizer(runtime: Any, redis: Any, emitter: Any) -> WorkflowCompletionFinalizer:
-    finalizer = WorkflowCompletionFinalizer(
+def _finalizer(runtime: Any, redis: Any, emitter: Any) -> WorkflowFinalizer:
+    finalizer = WorkflowFinalizer(
         redis_client=cast(Any, redis),
         runtime=runtime,
-        logger=logging.getLogger("test.completion"),
+        logger=logging.getLogger("test.finalizer"),
         workflow_span_emitter=cast(Any, emitter),
     )
     runtime.set_completion_notifier(finalizer.request)
@@ -116,7 +116,7 @@ class _RedisMirroringRemainingSet:
 
 def _wired(
     runtime: Any, registry: FakeRegistry, workflow_id: str
-) -> tuple[WorkflowCompletionFinalizer, Any, _RecordingWorkflowSpanEmitter]:
+) -> tuple[WorkflowFinalizer, Any, _RecordingWorkflowSpanEmitter]:
     redis = _RedisMirroringRemainingSet(registry)
     redis.keys[f"workflow:{workflow_id}"] = "1"
     emitter = _RecordingWorkflowSpanEmitter()
@@ -498,7 +498,7 @@ def test_a_spawn_that_seals_with_no_children_closes_the_workflow(
             cast(Any, _WorkerRegistryStub()),
             OrchestrationConfig(),
             tmp_path,
-            logging.getLogger("test.completion.fanout"),
+            logging.getLogger("test.finalizer.fanout"),
             secret_vault=cast(Any, _NoopSecretVault()),
         )
         registry.submitted_at = _TS

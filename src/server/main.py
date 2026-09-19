@@ -402,7 +402,7 @@ if IS_ROOT_NODE:
     )
     # The runtime settles terminals the task-event stream never carries, so it tells
     # the monitor's finalizer when a workflow may have ended; the finalizer decides.
-    RUNTIME.set_completion_notifier(EVENT_MONITOR.completion.request)
+    RUNTIME.set_completion_notifier(EVENT_MONITOR.finalizer.request)
 
     if GATED_SERVE is not None:
         # A forward exposure goes live off the request path (its listener binds after
