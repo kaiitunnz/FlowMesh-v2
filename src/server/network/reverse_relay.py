@@ -28,7 +28,12 @@ from shared.network.relay_frame import (
 )
 
 from ..clients.redis import (
+    CONTENT_RELAY_ROOT_CURSOR_KEY,
     RESIDENT_RELAY_ROOT_CURSOR_KEY,
+    content_relay_down_cursor_key,
+    content_relay_down_key,
+    content_relay_session_key,
+    content_relay_up_key,
     resident_relay_down_cursor_key,
     resident_relay_down_key,
     resident_relay_session_key,
@@ -66,6 +71,14 @@ RESIDENT_RELAY_KEYSPACE = RelayKeyspace(
     session=resident_relay_session_key,
     root_cursor=RESIDENT_RELAY_ROOT_CURSOR_KEY,
     down_cursor=resident_relay_down_cursor_key,
+)
+
+CONTENT_RELAY_KEYSPACE = RelayKeyspace(
+    up=content_relay_up_key,
+    down=content_relay_down_key,
+    session=content_relay_session_key,
+    root_cursor=CONTENT_RELAY_ROOT_CURSOR_KEY,
+    down_cursor=content_relay_down_cursor_key,
 )
 
 
@@ -240,6 +253,7 @@ class RelayLease:
 
 
 __all__ = [
+    "CONTENT_RELAY_KEYSPACE",
     "RESIDENT_RELAY_KEYSPACE",
     "BinaryRedis",
     "RelayDirection",

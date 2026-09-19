@@ -18,13 +18,13 @@ from shared.network.mtls import MutualTlsMaterial
 from shared.network.mtls_listener import ConnectionHandler, MutualTlsFrameListener
 from shared.network.relay_frame import RelayFrame
 
-from ...resident.worker_bridge import ResidentWorkerBridge
+from ...network.worker_bridge import RelayWorkerBridge
 
 
 class _UplinkConnection(ConnectionHandler):
     """Binds each session this connection carries to the node's local sidecar uplink."""
 
-    def __init__(self, bridge: ResidentWorkerBridge, sink: FrameSink) -> None:
+    def __init__(self, bridge: RelayWorkerBridge, sink: FrameSink) -> None:
         self._bridge = bridge
         self._sink = sink
         self._sessions: set[str] = set()
@@ -53,7 +53,7 @@ class NodePeerListener:
         *,
         endpoint: str,
         material: MutualTlsMaterial | None,
-        bridge: ResidentWorkerBridge,
+        bridge: RelayWorkerBridge,
         logger: logging.Logger | None = None,
     ) -> None:
         self._endpoint = endpoint

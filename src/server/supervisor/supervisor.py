@@ -337,8 +337,8 @@ def _run_supervisor(
     from ..clients.redis import resident_relay_client
     from ..network.listeners import NetworkPlaneListeners
     from ..network.reverse_relay import BinaryRedis
+    from ..network.worker_bridge import RelayWorkerBridge
     from ..registries.node import NodeRegistry
-    from ..resident.worker_bridge import ResidentWorkerBridge
     from ..utils.logging import get_logger as _get_logger
     from .manager import WorkerManager
     from .registry import WorkerRegistry as WorkerAdapterRegistry
@@ -438,7 +438,7 @@ def _run_supervisor(
         logger,
         capacity_change_callback=lifecycle.heartbeat_now,
     )
-    resident_bridge: ResidentWorkerBridge | None = None
+    resident_bridge: RelayWorkerBridge | None = None
     resident_attachment: ReverseRelayAttachment | None = None
     if network_cfg.enabled:
         relay_redis = cast(
@@ -451,7 +451,7 @@ def _run_supervisor(
                 tls_ca_file=redis_cfg.tls_ca_file,
             ),
         )
-        resident_bridge = ResidentWorkerBridge(
+        resident_bridge = RelayWorkerBridge(
             relay_redis,
             node_id,
             task_listener.enqueue_local,

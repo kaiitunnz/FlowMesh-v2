@@ -24,7 +24,7 @@ from ...clients.redis import (
     SyncRedisClient,
     worker_key,
 )
-from ...resident.worker_bridge import ResidentWorkerBridge
+from ...network.worker_bridge import RelayWorkerBridge
 from ..adapters.base import WorkerAdapter, WorkerTokenType
 from ..registry import WorkerRegistry
 from ..schemas import WorkerStatus
@@ -99,7 +99,7 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
         task_listener: TaskListener,
         relay_service: RelayService,
         logger: logging.Logger,
-        resident_bridge: ResidentWorkerBridge | None = None,
+        resident_bridge: RelayWorkerBridge | None = None,
     ) -> None:
         self._registry = registry
         self._task_listener = task_listener
@@ -314,7 +314,7 @@ class GrpcServer:
         task_listener: TaskListener,
         relay_service: RelayService,
         logger: logging.Logger,
-        resident_bridge: ResidentWorkerBridge | None = None,
+        resident_bridge: RelayWorkerBridge | None = None,
     ) -> None:
         self._logger = logger
         self._server: grpc.aio.Server | None = None

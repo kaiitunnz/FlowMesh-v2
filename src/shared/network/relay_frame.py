@@ -35,17 +35,18 @@ _CONTROL_KINDS = frozenset({RelayFrameKind.WINDOW, RelayFrameKind.CANCEL})
 class RelayFrame:
     """One relay frame. ``payload`` is opaque bytes the servers never read (a protocol's
     own fence and body ride inside it); the rest are routing and flow-control metadata
-    they may read. ``correlation_id`` and ``operation_id`` name whatever exchange and
-    one-use operation the protocol over this session correlates by — a resident
-    invocation and its idempotency key, a content transfer and its hydration grant —
-    and the transport only carries them. ``seq`` orders a direction's data for receiver
-    dedup; ``ack`` carries a grant's cumulative byte credit."""
+    they may read. ``correlation_id`` and ``operation_id`` name whatever the protocol
+    over this session correlates by — a resident invocation and its idempotency key, a
+    content transfer's hydration grant — and the transport only carries them, so a
+    protocol that needs one of them leaves the other empty. ``seq`` orders a
+    direction's data for receiver dedup; ``ack`` carries a grant's cumulative byte
+    credit."""
 
     kind: RelayFrameKind
     session_id: str
-    correlation_id: str
-    operation_id: str
     direction: RelayDirection
+    correlation_id: str = ""
+    operation_id: str = ""
     seq: int = 0
     ack: int = 0
     payload: bytes = b""

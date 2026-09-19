@@ -188,6 +188,28 @@ def resident_relay_down_cursor_key(node_id: str) -> str:
 RESIDENT_RELAY_ROOT_CURSOR_KEY = "rr:root:up_cursor"
 
 
+# Content-relay namespace (ct:*): the same reverse-attachment shape for content
+# hydration transfers, disjoint from the resident streams so neither shares a stream,
+# session record, lease, or cursor with the other.
+def content_relay_up_key(node_id: str) -> str:
+    return f"ct:node:{node_id}:up"
+
+
+def content_relay_down_key(node_id: str) -> str:
+    return f"ct:node:{node_id}:down"
+
+
+def content_relay_session_key(session_id: str) -> str:
+    return f"ct:sess:{session_id}"
+
+
+def content_relay_down_cursor_key(node_id: str) -> str:
+    return f"ct:node:{node_id}:down_cursor"
+
+
+CONTENT_RELAY_ROOT_CURSOR_KEY = "ct:root:up_cursor"
+
+
 def ssh_connection_key(connection_id: str) -> str:
     return f"ssh:connection:{connection_id}"
 

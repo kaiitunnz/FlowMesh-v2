@@ -48,10 +48,10 @@ class FramedRelaySession:
         self,
         *,
         session_id: str,
-        correlation_id: str,
-        operation_id: str,
         role: RelaySessionRole,
         sink: FrameSink,
+        correlation_id: str = "",
+        operation_id: str = "",
         window_bytes: int = 65536,
     ) -> None:
         self._session_id = session_id

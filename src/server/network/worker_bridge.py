@@ -1,11 +1,13 @@
-"""The node-local resident bridge: opaque frames between the relay and a worker.
+"""The node-local bridge: opaque frames between the relay and a co-located worker.
 
 On each node the reverse-relay attachment hands every down frame here, and it forwards
-the frame — opaquely — to the co-located worker the session names: a response toward an
-invocation this node originated goes to the origin worker, a request toward a replica
-this node hosts goes to the replica worker, chosen by the frame's direction. A worker's
+the frame — opaquely — to the co-located worker the session names: a frame travelling
+toward the origin goes to the worker that opened the exchange, one travelling toward the
+target goes to the worker serving it, chosen by the frame's direction. A worker's
 produced frames publish to the up stream for the root to bridge onward. The bridge never
-decodes a resident wire body, cursor, or window: the worker endpoints own the protocol.
+decodes a wire body, cursor, or window: the worker endpoints own the protocol. One
+instance serves one namespace, so a node carrying both resident invocations and content
+transfers runs one bridge per keyspace.
 """
 
 import logging
@@ -15,14 +17,20 @@ from typing import Any
 from shared.network.frame_stream import FrameSink
 from shared.network.relay_frame import RelayDirection, RelayFrame
 
-from ..network.reverse_relay import BinaryRedis, RelaySessionStore, RelayStreamStore
+from .reverse_relay import (
+    RESIDENT_RELAY_KEYSPACE,
+    BinaryRedis,
+    RelayKeyspace,
+    RelaySessionStore,
+    RelayStreamStore,
+)
 
 # Enqueues a dispatch payload straight to a co-located worker; True if it is local.
 LocalEnqueue = Callable[[str, dict[str, Any]], Awaitable[bool]]
 
 
-class ResidentWorkerBridge:
-    """Forwards resident relay frames between the reverse-relay and local workers."""
+class RelayWorkerBridge:
+    """Forwards one namespace's relay frames between the relay and local workers."""
 
     def __init__(
         self,
@@ -30,14 +38,17 @@ class ResidentWorkerBridge:
         node_id: str,
         enqueue_local: LocalEnqueue,
         *,
+        keyspace: RelayKeyspace = RESIDENT_RELAY_KEYSPACE,
+        frame_kind: str = "resident_frame",
         logger: logging.Logger | None = None,
     ) -> None:
-        self._streams = RelayStreamStore(redis)
-        self._sessions = RelaySessionStore(redis)
+        self._streams = RelayStreamStore(redis, keyspace)
+        self._sessions = RelaySessionStore(redis, keyspace)
         self._node_id = node_id
         self._enqueue_local = enqueue_local
+        self._frame_kind = frame_kind
         self._peers: dict[str, FrameSink] = {}
-        self._logger = logger or logging.getLogger("resident-worker-bridge")
+        self._logger = logger or logging.getLogger("relay-worker-bridge")
 
     async def on_frame(self, frame: RelayFrame) -> None:
         """Forward one down frame to the local worker its session and direction name."""
@@ -54,7 +65,7 @@ class ResidentWorkerBridge:
             worker_id,
             {
                 "kind": "mediated_op",
-                "frame_kind": "resident_frame",
+                "frame_kind": self._frame_kind,
                 "payload": frame.to_wire(),
             },
         )
