@@ -4,7 +4,7 @@
 
 from opentelemetry import trace as otel_trace
 
-from server.telemetry.control import (
+from server.telemetry.tracing import (
     NULL_CONTROL_TRACER,
     ControlPlaneTracer,
     format_traceparent,

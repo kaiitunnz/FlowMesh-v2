@@ -22,7 +22,7 @@ from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from server.telemetry.control import (
+from server.telemetry.tracing import (
     NULL_CONTROL_TRACER,
     ControlPlaneTracer,
     format_traceparent,

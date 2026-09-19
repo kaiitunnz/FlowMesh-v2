@@ -13,7 +13,7 @@ import asyncio
 from typing import Any
 
 from server.resident.state import ReplicaIncarnation, ServiceFamily
-from server.telemetry.control import serve_trace_id_int
+from server.telemetry.tracing import serve_trace_id_int
 from shared.resident.reports import ResidentBootstrapOutcome
 from shared.telemetry.config import TelemetryLevel
 from shared.telemetry.ids import SpanIdKind, derived_span_id, workflow_to_trace_id_int

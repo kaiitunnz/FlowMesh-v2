@@ -8,7 +8,7 @@ from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
-from server.telemetry.control import NULL_CONTROL_TRACER, ControlPlaneTracer
+from server.telemetry.tracing import NULL_CONTROL_TRACER, ControlPlaneTracer
 from shared.private_state import OwnerFence, PrivateStateUnavailableReason
 from shared.schemas.artifact import ArtifactRef
 from shared.schemas.event import TaskEvent

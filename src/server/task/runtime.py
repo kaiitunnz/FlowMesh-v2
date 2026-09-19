@@ -12,7 +12,7 @@ from typing import Any
 from opentelemetry.trace import Tracer
 from pydantic import ValidationError
 
-from server.telemetry.control import (
+from server.telemetry.tracing import (
     NULL_CONTROL_TRACER,
     ControlPlaneTracer,
     format_traceparent,

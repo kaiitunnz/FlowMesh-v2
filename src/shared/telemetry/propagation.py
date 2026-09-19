@@ -1,7 +1,7 @@
 """Decoding a carried ``traceparent`` back into an OTel context, and injecting the
 ambient context into an HTTP header dict.
 
-The decode counterpart of :func:`server.telemetry.control.format_traceparent`: every
+The decode counterpart of :func:`server.telemetry.tracing.format_traceparent`: every
 hop that carries a W3C ``traceparent`` string (``WorkerTaskMessage.traceparent``, a
 mediated-op payload's ``traceparent`` key, ``RelayFrame.tp``) hands the string here to
 get back a context a worker-side span can enter as its parent. The inject side forwards

@@ -22,7 +22,7 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from typing import Any, Self
 
-from server.telemetry.control import NULL_CONTROL_TRACER, ControlPlaneTracer
+from server.telemetry.tracing import NULL_CONTROL_TRACER, ControlPlaneTracer
 from shared.harness import DeliveredOutcome, OutcomeKind
 from shared.inference import InputResolutionBinding, ResolvedInputReference
 from shared.outcome import OutcomeManifest

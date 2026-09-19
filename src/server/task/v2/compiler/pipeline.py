@@ -2,7 +2,7 @@ from collections.abc import Mapping
 
 from pydantic import ValidationError
 
-from server.telemetry.control import NULL_CONTROL_TRACER, ControlPlaneTracer
+from server.telemetry.tracing import NULL_CONTROL_TRACER, ControlPlaneTracer
 from shared.telemetry.semconv import ControlPlaneStage, ControlPlaneWindow
 
 from ...parser import ParsedWorkflow

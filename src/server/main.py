@@ -20,7 +20,7 @@ if __name__ == "__main__" and __package__ is None:
     __package__ = "server"
     sys.modules.setdefault("server.main", sys.modules[__name__])
 
-from server.telemetry.control import ControlPlaneTracer
+from server.telemetry.tracing import ControlPlaneTracer
 from shared._version import FLOWMESH_RELEASE_VERSION
 from shared.outcome import ManifestRef, OutcomeCarrier
 from shared.telemetry.config import TelemetryLevel
