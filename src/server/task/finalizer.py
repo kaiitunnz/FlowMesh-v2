@@ -79,8 +79,7 @@ class WorkflowFinalizer:
 
     def _take_requests(self, timeout: float) -> set[str]:
         with self._requests_cv:
-            if not self._requests:
-                self._requests_cv.wait(timeout)
+            self._requests_cv.wait_for(lambda: bool(self._requests), timeout)
             pending, self._requests = self._requests, set()
             return pending
 
@@ -133,10 +132,18 @@ class WorkflowFinalizer:
             # re-emitted span identical to the first.
             finished_ts = settlement.finished_ts
             if submitted_at is None or finished_ts is None:
+                missing = [
+                    name
+                    for name, value in (
+                        ("submission time", submitted_at),
+                        ("finish time", finished_ts),
+                    )
+                    if value is None
+                ]
                 self._logger.warning(
                     "Omitting the workflow span for %s: no durable %s",
                     workflow_id,
-                    "submission time" if submitted_at is None else "finish time",
+                    " or ".join(missing),
                 )
                 return
             self._workflow_span_emitter.emit(
@@ -159,19 +166,19 @@ class WorkflowFinalizer:
         payload = event.model_dump(exclude_none=True)
         payload["type"] = "LOG_STREAM_CLOSED"
         encoded = json.dumps(payload, ensure_ascii=False)
+        stream_key = workflow_log_stream_key(workflow_id)
+        closed_key = workflow_log_closed_key(workflow_id)
         try:
             self._redis_client.xadd_telemetry(
-                workflow_log_stream_key(workflow_id),
+                stream_key,
                 {"payload": encoded, "workflow_id": workflow_id},
             )
-            self._redis_client.set_value(workflow_log_closed_key(workflow_id), "1")
+            self._redis_client.set_value(closed_key, "1")
             if self._log_stream_ttl_sec:
                 self._redis_client.expire_telemetry(
-                    workflow_log_stream_key(workflow_id), self._log_stream_ttl_sec
+                    stream_key, self._log_stream_ttl_sec
                 )
-                self._redis_client.expire(
-                    workflow_log_closed_key(workflow_id), self._log_stream_ttl_sec
-                )
+                self._redis_client.expire(closed_key, self._log_stream_ttl_sec)
         except Exception as exc:
             self._logger.debug(
                 "Failed to append log sentinel for workflow %s: %s", workflow_id, exc

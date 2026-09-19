@@ -958,8 +958,9 @@ class TaskRuntime:
     def _notify_terminal_transition(self, workflow_id: str) -> None:
         """Tell the completion finalizer a workflow may have reached its end.
 
-        Every terminal settles through the persist above, whether a worker reported it
-        or the control plane settled it alone, so one notification here covers both.
+        Every terminal commit funnels through `_persist_terminal_locked`, whether a
+        worker reported it or the control plane settled it alone, so one notification
+        covers both.
         It carries a workflow id and nothing else: the finalizer decides whether the
         workflow is complete, and does so off this thread.
         """
