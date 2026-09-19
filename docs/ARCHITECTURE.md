@@ -447,6 +447,10 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   embodiment selection, dispatch or recovery, and it writes nothing to the orchestration
   ledger. Off by default; enable with `SERVER_METRICS_TELEMETRY_LEVEL`. See
   [`TELEMETRY.md`](TELEMETRY.md).
+- **Workflow completion.** A workflow closes once, through one serialized finalizer:
+  its log stream is sealed and its `flowmesh.workflow` span emitted when every task has
+  settled. The span's end is the last durable finish among its tasks, so a workflow that
+  closes again after a restart closes the same way it did the first time.
 - **Redis channels.** The runtime uses three namespaces:
   - `flowmesh:control:*` — control plane (task assignments,
     cancellations, worker lifecycle).

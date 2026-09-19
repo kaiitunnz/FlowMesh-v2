@@ -70,11 +70,9 @@ activation, scope and result identity, and `flowmesh.physical.*` for work item, 
 worker, claim, permit and replica identity — so a consumer builds the logical view by
 reading one prefix.
 
-The workflow span is emitted when the workflow's last task goes terminal, which the server
-observes from that task's published event. A failure the control plane settles without
-publishing one — a task no worker can satisfy, an exhausted retry, or a model boundary the
-gateway fails — leaves the span unemitted, and the workflow's remaining spans then read as
-separate roots rather than one tree. The task spans and their attributes are unaffected.
+The workflow span is emitted when the workflow's last task goes terminal. Its end is the
+last durable finish among the workflow's tasks, so a span re-emitted after a restart is
+identical to the first.
 
 Spans carry ids and digests only. A prompt, a completion, a tool argument or result, a
 credential, content bytes, a relay payload, or a header value never appears on a span or a

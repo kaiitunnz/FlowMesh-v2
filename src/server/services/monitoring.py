@@ -41,10 +41,6 @@ from ..clients.redis import (
     iter_pubsub_messages,
     task_log_closed_key,
     task_log_stream_key,
-    workflow_key,
-    workflow_log_closed_key,
-    workflow_log_stream_key,
-    workflow_tasks_key,
 )
 from ..dispatcher import Dispatcher
 from ..hooks import (
@@ -62,11 +58,12 @@ from ..registries.node import NodeRegistry
 from ..registries.worker import WorkerRegistry
 from ..schemas.logs import LogEvent
 from ..serve import ServeAccessMode, is_public_base_url
+from ..task.finalizer import WorkflowFinalizer
 from ..task.metadata import extract_model_dataset_names
 from ..task.models import TaskRecord, TaskStatus, TaskUsage
 from ..task.runtime import TaskRuntime
 from ..utils.logging import log_node_event, log_worker_event
-from ..utils.time import now_iso, ts_to_iso
+from ..utils.time import now_iso
 from .metrics import MetricsRecorder
 from .port_forward import PortForwardService
 from .watchdog import WorkerWatchdog
@@ -153,10 +150,16 @@ class EventMonitor:
         self._results_dir = Path(results_dir)
         self._log_stream_ttl_sec = max(0, int(log_stream_ttl_sec))
         self._server_base_url = self._validate_server_base_url(server_base_url)
-        self._workflow_span_emitter = (
-            workflow_span_emitter
-            if workflow_span_emitter is not None
-            else NULL_WORKFLOW_SPAN_EMITTER
+        self._finalizer = WorkflowFinalizer(
+            redis_client=redis_client,
+            runtime=runtime,
+            logger=logger,
+            workflow_span_emitter=(
+                workflow_span_emitter
+                if workflow_span_emitter is not None
+                else NULL_WORKFLOW_SPAN_EMITTER
+            ),
+            log_stream_ttl_sec=self._log_stream_ttl_sec,
         )
 
         self._pending_result_clones: dict[str, list[str]] = {}
@@ -214,9 +217,20 @@ class EventMonitor:
             threading.Thread(
                 target=self._node_events_loop, name="nodes-events", daemon=True
             ),
+            threading.Thread(
+                target=self._finalizer_loop, name="workflow-completion", daemon=True
+            ),
         ]
         for thread in self._threads:
             thread.start()
+
+    @property
+    def finalizer(self) -> WorkflowFinalizer:
+        """The workflow finalizer this monitor drains."""
+        return self._finalizer
+
+    def _finalizer_loop(self) -> None:
+        self._finalizer.run(self._stop_event)
 
     def set_own_node(self, node_id: str) -> None:
         """Record the node_id of the supervisor co-located with this server."""
@@ -540,7 +554,7 @@ class EventMonitor:
                         )
                         self._metrics.record_task_event(child_event, is_child=True)
                         self._close_task_log_stream(child_id)
-                        self._maybe_close_workflow_log_stream(child_id)
+                        self._finalizer.close_task_workflow(child_id)
                 if event.worker_id:
                     try:
                         record = self._runtime.get_record(event.task_id)
@@ -564,7 +578,7 @@ class EventMonitor:
                         )
                     except Exception:
                         pass
-                self._maybe_close_workflow_log_stream(event.task_id)
+                self._finalizer.close_task_workflow(event.task_id)
             case "TASK_FAILED":
                 record = self._runtime.get_record(event.task_id)
                 if record:
@@ -626,7 +640,7 @@ class EventMonitor:
                     self._metrics.record_task_event(derived)
                     self._metrics.finalize_task_failure(task_id)
                     self._close_task_log_stream(task_id)
-                    self._maybe_close_workflow_log_stream(task_id)
+                    self._finalizer.close_task_workflow(task_id)
                 for child_id in merged_children:
                     child_payload = dict(payload)
                     child_payload["parent_task_id"] = event.task_id
@@ -642,8 +656,8 @@ class EventMonitor:
                     self._metrics.record_task_event(child_event, is_child=True)
                     self._metrics.finalize_task_failure(child_id)
                     self._close_task_log_stream(child_id)
-                    self._maybe_close_workflow_log_stream(child_id)
-                self._maybe_close_workflow_log_stream(event.task_id)
+                    self._finalizer.close_task_workflow(child_id)
+                self._finalizer.close_task_workflow(event.task_id)
             case "TASK_CANCELLED":
                 self._unregister_port_forward(event.task_id)
                 self._maybe_drain_serve(event.task_id)
@@ -664,7 +678,7 @@ class EventMonitor:
                         )
                     except Exception:
                         pass
-                self._maybe_close_workflow_log_stream(event.task_id)
+                self._finalizer.close_task_workflow(event.task_id)
             case _:
                 self._logger.debug(
                     "Ignoring task event type=%s payload=%s", event_type, payload
@@ -821,7 +835,7 @@ class EventMonitor:
                             if record and record.status == TaskStatus.CANCELLING:
                                 self._runtime.mark_cancelled(task_id, worker_id, {}, ts)
                                 self._close_task_log_stream(task_id)
-                                self._maybe_close_workflow_log_stream(task_id)
+                                self._finalizer.close_task_workflow(task_id)
                             else:
                                 to_requeue.append(task_id)
                         if to_requeue:
@@ -1231,73 +1245,4 @@ class EventMonitor:
         except Exception as exc:
             self._logger.debug(
                 "Failed to append log sentinel for task %s: %s", task_id, exc
-            )
-
-    def _maybe_close_workflow_log_stream(self, task_id: str) -> None:
-        record = self._runtime.get_record(task_id)
-        if not record:
-            return
-        workflow_id = record.workflow_id
-        try:
-            if self._redis_client.exists(workflow_log_closed_key(workflow_id)):
-                return
-            remaining = self._redis_client.set_members(workflow_tasks_key(workflow_id))
-            if remaining:
-                return
-            if not self._redis_client.exists(workflow_key(workflow_id)):
-                return
-        except Exception as exc:
-            self._logger.debug(
-                "Failed to evaluate workflow completion for %s: %s", workflow_id, exc
-            )
-            return
-
-        # Telemetry never decides whether the log stream closes: this reads the
-        # workflow record and emits a span, and a failure in either must not strand a
-        # completed workflow's stream open.
-        try:
-            submitted_at = self._runtime.workflow_submitted_at(workflow_id)
-            if submitted_at is not None:
-                # The last task's own finish, not the clock: this runs once per
-                # workflow but may run again after a restart, and a durable end makes
-                # the re-emitted span identical to the first rather than merely
-                # deduplicable.
-                closed_at = (
-                    ts_to_iso(record.finished_ts)
-                    if record.finished_ts is not None
-                    else now_iso()
-                )
-                self._workflow_span_emitter.emit(workflow_id, submitted_at, closed_at)
-        except Exception as exc:
-            self._logger.debug(
-                "Failed to emit the workflow span for %s: %s", workflow_id, exc
-            )
-
-        event = LogEvent(
-            ts=now_iso(),
-            workflow_id=workflow_id,
-            level="INFO",
-            stream="system",
-            source="server",
-            message="Workflow log stream closed.",
-        )
-        payload = event.model_dump(exclude_none=True)
-        payload["type"] = "LOG_STREAM_CLOSED"
-        encoded = json.dumps(payload, ensure_ascii=False)
-        try:
-            self._redis_client.xadd_telemetry(
-                workflow_log_stream_key(workflow_id),
-                {"payload": encoded, "workflow_id": workflow_id},
-            )
-            self._redis_client.set_value(workflow_log_closed_key(workflow_id), "1")
-            if self._log_stream_ttl_sec:
-                self._redis_client.expire_telemetry(
-                    workflow_log_stream_key(workflow_id), self._log_stream_ttl_sec
-                )
-                self._redis_client.expire(
-                    workflow_log_closed_key(workflow_id), self._log_stream_ttl_sec
-                )
-        except Exception as exc:
-            self._logger.debug(
-                "Failed to append log sentinel for workflow %s: %s", workflow_id, exc
             )

@@ -1,10 +1,9 @@
 """The workflow span closes whenever the workflow's last task goes terminal.
 
-The span is emitted by the workflow-completion detector, which runs off a task event
-and returns early unless every task has already left the remaining-task set. A workflow
-whose final tasks settle as a cascade settles several tasks under one event, so whether
-the span is emitted at all depends on the detector seeing the drained set on that one
-call -- there is no later event to try again on.
+The span is emitted by the completion finalizer, which returns early unless every task
+has already left the remaining-task set. A workflow whose final tasks settle as a
+cascade settles several tasks under one event, so the span depends on the finalizer
+seeing the drained set on that call -- there is no later event to try again on.
 """
 
 import logging
@@ -139,7 +138,7 @@ async def test_an_unreadable_submission_time_does_not_strand_the_log_stream(
 ) -> None:
     """The span lookup must not be able to take the log-stream close down with it.
 
-    Reading the workflow's submission time is a Redis read like the detector's other
+    Reading the workflow's submission time is a Redis read like the finalizer's other
     three, but it sits after their shared guard and before the close, so a failure
     there leaves the workflow's log stream open forever and the close silently never
     happens.
@@ -175,12 +174,12 @@ async def test_an_unreadable_submission_time_does_not_strand_the_log_stream(
 
 @pytest.mark.anyio
 async def test_an_already_terminal_task_event_still_closes_the_workflow() -> None:
-    """A task settled before its event is handled still completes the detector.
+    """A task settled before its event is handled still closes the workflow.
 
     The dispatcher settles a no-eligible-worker task in the runtime itself, so an
-    event for it arrives describing a task that is already terminal. The detector
+    event for it arrives describing a task that is already terminal. The finalizer
     handles that correctly -- but note the dispatcher does not in fact deliver such
-    an event today, so this guards the detector rather than describing that path.
+    an event today, so this guards the finalizer rather than describing that path.
     """
     registry = FakeRegistry()
     runtime = _runtime(registry)
@@ -221,7 +220,7 @@ async def test_an_already_terminal_task_event_still_closes_the_workflow() -> Non
 async def test_the_workflow_span_ends_at_the_last_tasks_recorded_finish() -> None:
     """The end is read from the ledger, not the clock.
 
-    The detector runs once per workflow but runs again after a restart, so an end taken
+    The finalizer runs once per workflow but runs again after a restart, so an end taken
     from wall clock gives the re-emitted span a different duration than the first. Every
     other synthesized span reads both its ends from durable records; this one must too.
     """
