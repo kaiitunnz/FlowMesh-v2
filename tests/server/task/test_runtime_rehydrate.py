@@ -60,6 +60,19 @@ class FakeWorkflowRegistry:
     async def load_ledger_snapshot_async(self, workflow_id: str) -> Any:
         return self.load_ledger_snapshot(workflow_id)
 
+    async def get_remaining_tasks_async(self, workflow_id: str) -> set[str]:
+        ids = [
+            *self.workflow_task_ids.get(workflow_id, ()),
+            *sorted(self.dynamic_task_ids.get(workflow_id, set())),
+        ]
+        return {
+            task_id
+            for task_id in ids
+            if (blob := self.task_blobs.get(task_id))
+            and PersistedTask.model_validate_json(blob).record.status
+            not in (TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.CANCELLED)
+        }
+
     def get_workflow_ids(self) -> set[str]:
         return set(self.workflow_task_ids)
 

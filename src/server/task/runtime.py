@@ -680,6 +680,9 @@ class TaskRuntime:
             ]
             if not tasks:
                 continue
+            remaining = await self._workflow_registry.get_remaining_tasks_async(
+                workflow_id
+            )
             sched = await self._workflow_registry.load_workflow_sched_async(workflow_id)
             snapshot = await self._workflow_registry.load_ledger_snapshot_async(
                 workflow_id
@@ -698,6 +701,15 @@ class TaskRuntime:
                     self._install_rehydrated_workflow_locked(
                         workflow_id, tasks, sched, rehydrated_at
                     )
+                # A non-terminal record the remaining set no longer lists was
+                # retired before the crash, and nothing will ever dispatch it; the
+                # durable set is what carries that fact across a restart.
+                self._retired_region_templates.setdefault(workflow_id, set()).update(
+                    persisted.record.task_id
+                    for persisted in tasks
+                    if persisted.record.status not in TERMINAL_TASK_STATUSES
+                    and persisted.record.task_id not in remaining
+                )
                 # A workflow whose last task settled just before the crash has no
                 # event left to close it: replay the completion notification for
                 # every restored workflow, and let the finalizer reject the ones
@@ -995,7 +1007,16 @@ class TaskRuntime:
             self._secret_vault.purge(workflow_id)
 
     def _workflow_settlement_locked(self, workflow_id: str) -> WorkflowSettlement:
-        records = [r for r in self._tasks.values() if r.workflow_id == workflow_id]
+        # A retired task -- a sealed spawn's child template, replaced by the children it
+        # instantiated -- no longer holds the workflow open, and its record stays
+        # PENDING forever because it is never dispatched. Counting it would leave every
+        # workflow with a spawn region permanently unsettled.
+        retired = self._retired_region_templates.get(workflow_id) or set()
+        records = [
+            r
+            for r in self._tasks.values()
+            if r.workflow_id == workflow_id and r.task_id not in retired
+        ]
         if not records or any(r.status not in TERMINAL_TASK_STATUSES for r in records):
             return WorkflowSettlement(settled=False, finished_ts=None)
         finishes = [r.finished_ts for r in records if r.finished_ts is not None]
@@ -2258,6 +2279,10 @@ class TaskRuntime:
                 engine.to_snapshot(),
                 retire=retire,
             )
+            if retire:
+                self._retired_region_templates.setdefault(workflow_id, set()).update(
+                    retire
+                )
 
     def _retire_sealed_region_templates_locked(
         self, workflow_id: str, engine: OrchestrationEngine
@@ -2269,9 +2294,7 @@ class TaskRuntime:
         from the remaining set (idempotently, tracked per workflow) with the ledger.
         """
         already = self._retired_region_templates.setdefault(workflow_id, set())
-        pending = engine.sealed_region_child_templates() - already
-        if pending:
-            already.update(pending)
+        if pending := engine.sealed_region_child_templates() - already:
             self._commit_new_children_locked(
                 workflow_id, engine, [], retire=sorted(pending)
             )

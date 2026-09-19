@@ -13,6 +13,7 @@ import logging
 import threading
 import time
 from typing import Any, cast
+from unittest.mock import MagicMock
 
 from server.services.completion import WorkflowCompletionFinalizer
 from server.task.models import TaskStatus
@@ -20,9 +21,12 @@ from shared.harness import BoundaryEventKind
 from shared.utils.time import ts_to_iso
 from tests.server.services.test_workflow_span_close import (
     _RecordingWorkflowSpanEmitter,
-    _RedisMirroringTaskState,
 )
-from tests.server.task.test_episode_cancel_safety import _run_step
+from tests.server.task.test_episode_cancel_safety import (
+    _AGENT_WF,
+    _SCRIPT,
+    _run_step,
+)
 from tests.server.task.test_v2_orchestration import (
     FakeRegistry,
     _register,
@@ -32,6 +36,7 @@ from tests.server.task.test_v2_orchestration import (
 from worker.executors.harness.scripted import ScriptedHarnessAdapter, ScriptedStep
 
 _TS = "2026-09-16T00:00:00Z"
+_TERMINAL = (TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.CANCELLED)
 
 _AGENT = """
 apiVersion: flowmesh/v2
@@ -75,10 +80,38 @@ def _finalizer(runtime: Any, redis: Any, emitter: Any) -> WorkflowCompletionFina
     return finalizer
 
 
+class _RedisMirroringRemainingSet:
+    """A Redis stand-in whose remaining-task set is the registry's own.
+
+    Production drains that set as tasks settle, adds the children a spawn materializes,
+    and drops the sealed spawn's child template -- so deriving it from the registry
+    keeps this honest about *when* a workflow reads as complete rather than hard-coding
+    an answer.
+    """
+
+    def __init__(self, registry: FakeRegistry) -> None:
+        self._registry = registry
+        self.keys: dict[str, str] = {}
+
+    def exists(self, key: str) -> int:
+        return 1 if key in self.keys else 0
+
+    def set_value(self, key: str, value: str) -> None:
+        self.keys[key] = value
+
+    def set_members(self, key: str) -> set[str]:
+        if not key.endswith(":tasks"):
+            return set()
+        return self._registry.remaining_of(key.split(":")[1])
+
+    def __getattr__(self, name: str) -> Any:
+        return MagicMock()
+
+
 def _wired(
-    runtime: Any, workflow_id: str, task_ids: list[str]
+    runtime: Any, registry: FakeRegistry, workflow_id: str
 ) -> tuple[WorkflowCompletionFinalizer, Any, _RecordingWorkflowSpanEmitter]:
-    redis = _RedisMirroringTaskState(runtime, task_ids)
+    redis = _RedisMirroringRemainingSet(registry)
     redis.keys[f"workflow:{workflow_id}"] = "1"
     emitter = _RecordingWorkflowSpanEmitter()
     return _finalizer(runtime, redis, emitter), redis, emitter
@@ -97,8 +130,8 @@ def test_a_failure_the_control_plane_settles_closes_the_workflow() -> None:
         runtime = _runtime(registry)
         registry.submitted_at = _TS
         workflow_id, ids = await _register(runtime, _CHAIN)
-        head, tail = ids["head"], ids["tail"]
-        finalizer, redis, emitter = _wired(runtime, workflow_id, [head, tail])
+        head = ids["head"]
+        finalizer, redis, emitter = _wired(runtime, registry, workflow_id)
 
         runtime.mark_failed(
             head,
@@ -129,7 +162,7 @@ def test_a_failed_model_boundary_closes_the_workflow() -> None:
         registry.submitted_at = _TS
         workflow_id, ids = await _register(runtime, _AGENT)
         writer = ids["writer"]
-        finalizer, redis, emitter = _wired(runtime, workflow_id, [writer])
+        finalizer, redis, emitter = _wired(runtime, registry, workflow_id)
 
         adapter = ScriptedHarnessAdapter(
             [
@@ -178,7 +211,7 @@ def test_a_restart_closes_a_workflow_that_finished_during_the_outage() -> None:
         runtime.mark_failed(head, None, {}, _TS, error="boom")
 
         restarted = _runtime(registry)
-        finalizer, redis, emitter = _wired(restarted, workflow_id, [head, tail])
+        finalizer, redis, emitter = _wired(restarted, registry, workflow_id)
         await restarted.rehydrate()
         finalizer.drain()
 
@@ -204,7 +237,7 @@ def test_a_workflow_with_work_left_is_not_closed() -> None:
         registry.submitted_at = _TS
         workflow_id, ids = await _register(runtime, _CHAIN)
         head, tail = ids["head"], ids["tail"]
-        finalizer, redis, emitter = _wired(runtime, workflow_id, [head, tail])
+        finalizer, redis, emitter = _wired(runtime, registry, workflow_id)
 
         runtime.mark_dispatched(head, cast(Any, _worker()))
         runtime.mark_succeeded(head, "wkr-1", {}, _TS)
@@ -225,13 +258,13 @@ def test_the_log_stream_closes_even_when_the_span_cannot_be_emitted() -> None:
         registry = FakeRegistry()
         runtime = _runtime(registry)
         workflow_id, ids = await _register(runtime, _CHAIN)
-        head, tail = ids["head"], ids["tail"]
+        head = ids["head"]
 
         class _Exploding:
             def emit(self, *_args: str) -> None:
                 raise RuntimeError("exporter down")
 
-        redis = _RedisMirroringTaskState(runtime, [head, tail])
+        redis = _RedisMirroringRemainingSet(registry)
         redis.keys[f"workflow:{workflow_id}"] = "1"
         finalizer = _finalizer(runtime, redis, _Exploding())
 
@@ -254,8 +287,8 @@ def test_requesting_a_close_never_waits_on_the_runtime() -> None:
         registry = FakeRegistry()
         runtime = _runtime(registry)
         workflow_id, ids = await _register(runtime, _CHAIN)
-        head, tail = ids["head"], ids["tail"]
-        finalizer, _redis, _emitter = _wired(runtime, workflow_id, [head, tail])
+        head = ids["head"]
+        finalizer, _redis, _emitter = _wired(runtime, registry, workflow_id)
         runtime.mark_failed(head, None, {}, _TS, error="boom")
 
         reading = threading.Event()
@@ -333,8 +366,8 @@ def test_the_finalizer_thread_closes_without_being_polled() -> None:
         runtime = _runtime(registry)
         registry.submitted_at = _TS
         workflow_id, ids = await _register(runtime, _CHAIN)
-        head, tail = ids["head"], ids["tail"]
-        finalizer, redis, _emitter = _wired(runtime, workflow_id, [head, tail])
+        head = ids["head"]
+        finalizer, redis, _emitter = _wired(runtime, registry, workflow_id)
 
         stop = threading.Event()
         thread = threading.Thread(target=finalizer.run, args=(stop, 0.05), daemon=True)
@@ -351,5 +384,59 @@ def test_the_finalizer_thread_closes_without_being_polled() -> None:
             thread.join(5.0)
 
         assert f"workflow:{workflow_id}:logs:closed" in redis.keys
+
+    asyncio.run(run())
+
+
+def test_a_workflow_with_a_spawn_region_closes() -> None:
+    """A sealed spawn's child template must not hold the workflow open.
+
+    The template is never dispatched, so its record stays PENDING forever; the sealing
+    spawn drops it from the workflow's remaining set instead. A completion check that
+    counted every record it holds would leave every spawn-region workflow unsettled,
+    and every such workflow is one that used to close.
+    """
+
+    async def run() -> None:
+        registry = FakeRegistry()
+        runtime = _runtime(registry)
+        registry.submitted_at = _TS
+        workflow_id, ids = await _register(runtime, _AGENT_WF)
+        writer, reviewer = ids["writer"], ids["reviewer"]
+        finalizer, redis, emitter = _wired(runtime, registry, workflow_id)
+
+        adapter = ScriptedHarnessAdapter(_SCRIPT, "v1")
+        for _ in range(8):
+            record = runtime.get_record(writer)
+            assert record is not None
+            if record.status not in _TERMINAL:
+                result = _run_step(runtime, adapter, writer)
+                runtime.mark_succeeded(
+                    writer,
+                    "wkr-1",
+                    {"agent_episode": result.model_dump(mode="json")},
+                    _TS,
+                )
+            # The spawn's child is an ordinary dispatchable task; settle each one the
+            # fan-out materialized so the region can close.
+            for child in [
+                task_id
+                for task_id, child_record in runtime.tasks.items()
+                if child_record.workflow_id == workflow_id
+                and task_id.startswith("act-")
+                and child_record.status not in _TERMINAL
+            ]:
+                runtime.mark_dispatched(child, cast(Any, _worker()))
+                runtime.mark_succeeded(child, "wkr-1", {}, _TS)
+            if runtime.workflow_settlement(workflow_id).settled:
+                break
+        finalizer.drain()
+
+        template = runtime.get_record(reviewer)
+        assert template is not None and template.status == TaskStatus.PENDING
+        assert registry.remaining_of(workflow_id) == set()
+        assert runtime.workflow_settlement(workflow_id).settled
+        assert f"workflow:{workflow_id}:logs:closed" in redis.keys
+        assert emitter.emitted == [workflow_id]
 
     asyncio.run(run())
