@@ -440,3 +440,33 @@ def test_a_workflow_with_a_spawn_region_closes() -> None:
         assert emitter.emitted == [workflow_id]
 
     asyncio.run(run())
+
+
+def test_cancelling_a_workflow_closes_it() -> None:
+    """An API cancel commits its terminals on its own path, not the per-task one.
+
+    Its tasks never reach a worker, so no event follows the cancel either -- without
+    its own notification the workflow stays open until something unrelated (a restart
+    sweep) happens to close it.
+    """
+
+    async def run() -> None:
+        registry = FakeRegistry()
+        runtime = _runtime(registry)
+        registry.submitted_at = _TS
+        workflow_id, ids = await _register(runtime, _CHAIN)
+        finalizer, redis, emitter = _wired(runtime, registry, workflow_id)
+
+        runtime.cancel_workflow(workflow_id)
+        finalizer.drain()
+
+        assert all(
+            (record := runtime.get_record(task_id)) is not None
+            and record.status == TaskStatus.CANCELLED
+            for task_id in ids.values()
+        )
+        assert registry.remaining_of(workflow_id) == set()
+        assert f"workflow:{workflow_id}:logs:closed" in redis.keys
+        assert emitter.emitted == [workflow_id]
+
+    asyncio.run(run())

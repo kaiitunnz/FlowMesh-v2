@@ -3610,6 +3610,12 @@ class TaskRuntime:
                         self._settle_cancelled_locked(held, time.time())
                 self._save_ledger_locked(workflow_id)
 
+            # A whole-workflow cancel commits its terminals here rather than through the
+            # per-task terminal persist, so it notifies for itself. A cancel that leaves
+            # tasks CANCELLING settles nothing yet; the finalizer reads that and waits
+            # for their own terminals.
+            self._notify_terminal_transition(workflow_id)
+
         # A cancelled in-flight resident invocation releases its credit from this fenced
         # cancellation terminal, so a lost or draining replica is not held forever.
         for invocation_id in resident_invocation_ids:
