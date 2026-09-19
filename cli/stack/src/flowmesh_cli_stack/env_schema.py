@@ -89,6 +89,16 @@ STACK_ENV_SCHEMA = EnvSchema(
             ],
         ),
         EnvSection(
+            title="Compose Settings",
+            vars=[
+                EnvVar(
+                    "COMPOSE_PROFILES",
+                    "",
+                    description="Optional compose profiles to deploy (e.g. telemetry).",
+                ),
+            ],
+        ),
+        EnvSection(
             title="Node Identity",
             vars=[
                 EnvVar(
@@ -913,11 +923,6 @@ STACK_ENV_SCHEMA = EnvSchema(
                 EnvVar("TZ", "Asia/Singapore", required=True),
                 EnvVar(
                     "LOG_LEVEL", "INFO", var_type=EnvVarType.LOG_LEVEL, required=True
-                ),
-                EnvVar(
-                    "COMPOSE_PROFILES",
-                    "",
-                    description="Optional compose profiles to deploy (e.g. telemetry).",
                 ),
             ],
         ),

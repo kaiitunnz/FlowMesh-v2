@@ -12,6 +12,7 @@ listed here is in `.env.example`.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `COMPOSE_PROFILES` | – | Optional compose profiles to deploy (e.g. telemetry) |
 | `NODE_ROLE` | `root` | `root` deploys local Redis; `worker` skips it and connects to the root's Redis via the URLs below |
 | `REDIS_CONTROL_URL` | `redis://localhost:6379/0` | Redis control channel. On worker nodes, must point at the root node's reachable Redis endpoint |
 | `REDIS_TELEMETRY_URL` | `redis://localhost:6380/0` | Redis telemetry channel. On worker nodes, must point at the root node's reachable Redis endpoint |
@@ -139,7 +140,6 @@ listed here is in `.env.example`.
 | `TELEMETRY_OTLP_GRPC_PORT` | `4317` | Host port for the collector's OTLP gRPC receiver |
 | `TELEMETRY_OTLP_HTTP_PORT` | `4318` | Host port for the collector's OTLP HTTP receiver |
 | `LOG_LEVEL` | `INFO` | Server log level |
-| `COMPOSE_PROFILES` | – | Optional compose profiles to deploy (e.g. telemetry) |
 
 **Notes:**
 - In Docker deployments, `SERVER_RESULTS_DIR` and `WORKER_RESULTS_DIR`
