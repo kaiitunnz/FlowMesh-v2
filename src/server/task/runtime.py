@@ -2283,6 +2283,12 @@ class TaskRuntime:
                 self._retired_region_templates.setdefault(workflow_id, set()).update(
                     retire
                 )
+                # A retire drains the remaining set as a terminal does, and can drain
+                # its last entry: a spawn that seals with no children leaves the
+                # workflow complete with no task terminal behind it. The two drains --
+                # a terminal commit and a retire -- each notify, and they are the only
+                # two, so no completion escapes the finalizer.
+                self._notify_terminal_transition(workflow_id)
 
     def _retire_sealed_region_templates_locked(
         self, workflow_id: str, engine: OrchestrationEngine

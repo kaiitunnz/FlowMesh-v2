@@ -19,6 +19,7 @@ from ..clients.redis import (
 )
 from ..orchestration.telemetry import WorkflowSpanEmitter
 from ..schemas.logs import LogEvent
+from ..task.models import WorkflowSettlement
 from ..task.runtime import TaskRuntime
 from ..utils.time import now_iso, ts_to_iso
 
@@ -28,8 +29,7 @@ class WorkflowCompletionFinalizer:
 
     Callers name a workflow; the finalizer decides whether it is complete and, if so,
     emits its span and closes its log stream. Serializing the whole decision keeps two
-    callers from both reading an unclosed workflow and both closing it, and lets the
-    notification carry nothing but a workflow id.
+    callers from both reading an unclosed workflow and both closing it.
     """
 
     def __init__(
@@ -90,8 +90,7 @@ class WorkflowCompletionFinalizer:
             return
         with self._finalize_lock:
             try:
-                if not self._is_complete(workflow_id):
-                    return
+                settlement = self._settlement_if_complete(workflow_id)
             except Exception as exc:
                 self._logger.debug(
                     "Failed to evaluate workflow completion for %s: %s",
@@ -99,7 +98,9 @@ class WorkflowCompletionFinalizer:
                     exc,
                 )
                 return
-            self._emit_workflow_span(workflow_id)
+            if settlement is None:
+                return
+            self._emit_workflow_span(workflow_id, settlement)
             self._close_log_stream(workflow_id)
 
     def close_task_workflow(self, task_id: str) -> None:
@@ -108,16 +109,20 @@ class WorkflowCompletionFinalizer:
         if record is not None:
             self.close(record.workflow_id)
 
-    def _is_complete(self, workflow_id: str) -> bool:
+    def _settlement_if_complete(self, workflow_id: str) -> WorkflowSettlement | None:
+        """The workflow's settlement when it is complete and unclosed, else None."""
         if self._redis_client.exists(workflow_log_closed_key(workflow_id)):
-            return False
+            return None
         if self._redis_client.set_members(workflow_tasks_key(workflow_id)):
-            return False
+            return None
         if not self._redis_client.exists(workflow_key(workflow_id)):
-            return False
-        return self._runtime.workflow_settlement(workflow_id).settled
+            return None
+        settlement = self._runtime.workflow_settlement(workflow_id)
+        return settlement if settlement.settled else None
 
-    def _emit_workflow_span(self, workflow_id: str) -> None:
+    def _emit_workflow_span(
+        self, workflow_id: str, settlement: WorkflowSettlement
+    ) -> None:
         # Telemetry never decides whether the log stream closes: this reads the
         # workflow record and emits a span, and a failure in either must not strand a
         # completed workflow's stream open.
@@ -125,8 +130,8 @@ class WorkflowCompletionFinalizer:
             submitted_at = self._runtime.workflow_submitted_at(workflow_id)
             # The workflow's own last finish, not the clock: this runs once per
             # workflow but may run again after a restart, and a durable end makes the
-            # re-emitted span identical to the first rather than merely deduplicable.
-            finished_ts = self._runtime.workflow_settlement(workflow_id).finished_ts
+            # re-emitted span identical to the first.
+            finished_ts = settlement.finished_ts
             if submitted_at is None or finished_ts is None:
                 self._logger.warning(
                     "Omitting the workflow span for %s: no durable %s",

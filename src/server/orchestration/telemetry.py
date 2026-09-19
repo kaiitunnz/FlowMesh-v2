@@ -13,7 +13,7 @@ store's own dedup, both exist to collapse the repeat.
 ``TelemetrySpanEmitter`` is the sole owner of the four ledger-derived levels (operator,
 episode, attempt, boundary), bound one per engine. ``WorkflowSpanEmitter`` is the sole
 owner of the workflow root span, bound once per process and called from the workflow's
-own completion detector rather than from the engine -- workflow status is derived on
+own completion finalizer rather than from the engine -- workflow status is derived on
 read, so there is no ledger transition to hook for it.
 
 Synthesis is observation, and both emitters are called from inside ledger transitions
@@ -681,9 +681,9 @@ class WorkflowSpanEmitter:
     """Sole owner of the ``flowmesh.workflow`` root span.
 
     Bound once per process, like ``ControlPlaneTracer`` -- not once per workflow, since
-    it is called from a shared completion detector rather than from a per-workflow
-    engine. That detector is already gated to fire at most once per workflow (a durable
-    Redis key checked before it runs), so this carries no dedup bookkeeping of its own.
+    it is called from a shared completion finalizer rather than from a per-workflow
+    engine. That finalizer serializes its decision and checks a durable Redis key before
+    it runs, so this carries no dedup bookkeeping of its own.
     """
 
     def __init__(self, tracer: Tracer | None, config: TelemetryConfig) -> None:

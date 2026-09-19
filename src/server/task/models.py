@@ -49,7 +49,8 @@ SETTLING_TASK_STATUSES = TERMINAL_TASK_STATUSES | {TaskStatus.CANCELLING}
 
 
 class WorkflowSettlement(NamedTuple):
-    """Whether a workflow's every task has settled, and the last of their finishes."""
+    """Whether every task of a workflow has settled, and the last of their
+    finishes."""
 
     settled: bool
     finished_ts: float | None

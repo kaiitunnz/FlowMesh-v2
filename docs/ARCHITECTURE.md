@@ -450,12 +450,11 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
 - **Workflow completion.** A workflow closes once, through one serialized finalizer:
   its log stream is sealed and its `flowmesh.workflow` span emitted when every task has
   settled. A terminal the control plane settles alone — a task no worker can satisfy, an
-  exhausted retry, a model boundary the gateway fails — publishes no task event, so the
-  runtime notifies the finalizer from its own terminal-persist step and the finalizer
-  decides on the durable remaining-task set and the scheduler's own record of the
-  workflow. A restart replays the notification for every workflow it rehydrates, so a
-  workflow that finished during the outage still closes, and the span's end is the last
-  durable finish among its tasks rather than the clock.
+  exhausted retry, a model boundary the gateway fails, a cancellation — publishes no task
+  event, so the runtime notifies the finalizer whenever it settles one, and the finalizer
+  decides whether the workflow is complete. A restart replays the notification for every
+  workflow it rehydrates, so a workflow that finished during the outage still closes, and
+  the span's end is the last durable finish among its tasks rather than the clock.
 - **Redis channels.** The runtime uses three namespaces:
   - `flowmesh:control:*` — control plane (task assignments,
     cancellations, worker lifecycle).
