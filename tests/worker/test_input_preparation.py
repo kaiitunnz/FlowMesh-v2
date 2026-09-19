@@ -59,6 +59,7 @@ def _runner(store: InMemoryContentStore | None) -> Runner:
     """A runner with only what resolving and storing a request reads."""
     runner = object.__new__(Runner)
     runner._content_store = store
+    runner._content_plane = None
     runner.lifecycle = mock.Mock()
     return runner
 

@@ -65,6 +65,11 @@ listed here is in `.env.example`.
 | `WEB_SEARCH_MAX_PARALLEL_CALLS_PER_TURN` | `4` | Parallel searches per turn |
 | `CONTENT_STORE_ENABLED` | `true` | Serve the outcome content store |
 | `CONTENT_STORE_ROOT` | – | Content-store root; under the data dir if empty |
+| `CONTENT_HYDRATION_ENABLED` | `false` | Hold content on workers and hydrate it between them (requires `NETWORK_PLANE_ENABLED`) |
+| `CONTENT_HYDRATION_GRANT_TTL_SEC` | `60` | Hydration grant lifetime (seconds) |
+| `CONTENT_HOLDER_TTL_SEC` | `300` | Holder report lifetime (seconds) |
+| `CONTENT_ORPHAN_GRACE_SEC` | `900` | Grace before an unbound write is reclaimed (seconds) |
+| `CONTENT_TRANSFER_TIMEOUT_SEC` | `60` | Content transfer deadline (seconds) |
 | `RESIDENT_CAPACITY_ENABLED` | `false` | Serve resident model bindings via admission |
 | `RESIDENT_INFERENCE_SUBSTRATE` | `serve` | Resident replica substrate (`serve` or `dev_model`) |
 | `RESIDENT_ADMISSION_SLOTS` | `8` | Conservative safe admission slots per replica |
@@ -164,6 +169,7 @@ Spark), set `DOCKER_GPU_RUNTIME=` in the stack env.
 | `WORKER_TOKEN` | – | Auth token for supervisor gRPC |
 | `SUPERVISOR_GRPC_TARGET` | – | Supervisor gRPC endpoint |
 | `RESULTS_DIR` | `./results` | Task output directory |
+| `WORKER_CONTENT_DIR` | – | Root for the content this worker holds; defaults to a content subdirectory of `RESULTS_DIR` |
 | `WORKER_PRIVATE_STATE_DIR` | – | Root for activation-private harness state; defaults to a private subdirectory of `RESULTS_DIR` |
 | `WORKER_TAGS` | `` | Scheduler hints |
 | `WORKER_COST_PER_HOUR` | `1.0` | Cost metadata |

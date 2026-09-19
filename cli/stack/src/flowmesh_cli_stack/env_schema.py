@@ -25,6 +25,19 @@ def _require_network_plane_for_resident(
         )
 
 
+def _require_network_plane_for_content(
+    env: dict[str, str], errors: list[str], warnings: list[str]
+) -> None:
+    """Worker-to-worker content hydration is carried by the network plane."""
+    if parse_bool(env.get("CONTENT_HYDRATION_ENABLED", "")) and not parse_bool(
+        env.get("NETWORK_PLANE_ENABLED", "")
+    ):
+        errors.append(
+            "CONTENT_HYDRATION_ENABLED requires NETWORK_PLANE_ENABLED: a content "
+            "transfer is carried by the network plane's relay"
+        )
+
+
 def _require_peer_trust(
     env: dict[str, str], errors: list[str], warnings: list[str]
 ) -> None:
@@ -633,6 +646,43 @@ STACK_ENV_SCHEMA = EnvSchema(
                     "",
                     description="Content-store root; under the data dir if empty.",
                 ),
+                EnvVar(
+                    "CONTENT_HYDRATION_ENABLED",
+                    "false",
+                    description="Hold content on workers and hydrate it between them.",
+                    var_type=EnvVarType.BOOL,
+                ),
+                EnvVar(
+                    "CONTENT_HYDRATION_GRANT_TTL_SEC",
+                    "60",
+                    description="Hydration grant lifetime (seconds).",
+                    var_type=EnvVarType.FLOAT,
+                    min_value=0,
+                    min_inclusive=False,
+                ),
+                EnvVar(
+                    "CONTENT_HOLDER_TTL_SEC",
+                    "300",
+                    description="Holder report lifetime (seconds).",
+                    var_type=EnvVarType.FLOAT,
+                    min_value=0,
+                    min_inclusive=False,
+                ),
+                EnvVar(
+                    "CONTENT_ORPHAN_GRACE_SEC",
+                    "900",
+                    description="Grace before an unbound write is reclaimed (seconds).",
+                    var_type=EnvVarType.FLOAT,
+                    min_value=0,
+                ),
+                EnvVar(
+                    "CONTENT_TRANSFER_TIMEOUT_SEC",
+                    "60",
+                    description="Content transfer deadline (seconds).",
+                    var_type=EnvVarType.FLOAT,
+                    min_value=0,
+                    min_inclusive=False,
+                ),
             ],
         ),
         EnvSection(
@@ -1197,6 +1247,14 @@ STACK_ENV_SCHEMA = EnvSchema(
                     ],
                 ),
                 EnvVar(
+                    "WORKER_CONTENT_DIR",
+                    var_type=EnvVarType.DIR_PATH,
+                    description=[
+                        "Defaults to a content subdirectory of the results volume "
+                        "when empty."
+                    ],
+                ),
+                EnvVar(
                     "WORKER_PRIVATE_STATE_DIR",
                     var_type=EnvVarType.DIR_PATH,
                     description=[
@@ -1395,6 +1453,7 @@ STACK_ENV_SCHEMA = EnvSchema(
         ),
         _require_peer_trust,
         _require_network_plane_for_resident,
+        _require_network_plane_for_content,
     ],
 )
 

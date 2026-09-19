@@ -11,7 +11,7 @@ from typing import Any
 
 import requests
 
-from shared.content import ContentReference, ContentStoreError
+from shared.content import ContentReference, ContentStoreError, FabricObjectStore
 from shared.inference import (
     CanonicalInferenceRequest,
     InputResolutionError,
@@ -51,6 +51,7 @@ from shared.tools.search.schema import DEFAULT_SEARCH_PROVIDER
 from shared.utils.manifest import prepare_output_dir, sync_manifest
 from shared.utils.time import now_iso
 
+from .content import WorkerContentPlane
 from .egress import MediatedEgressSidecar, ModelEgress, SearchEgress
 from .executors.base_executor import ExecutionError, Executor, TaskCancelledError
 from .executors.episode_support import EpisodeStepResult
@@ -97,6 +98,7 @@ class Runner:
         model_api_key: str | None = None,
         model_egress_timeout_sec: float = 120.0,
         content_store: FabricContentStore | None = None,
+        content_plane: WorkerContentPlane | None = None,
         peer_enabled: bool = False,
         peer_material: MutualTlsMaterial | None = None,
         peer_listener_sock: socket.socket | None = None,
@@ -148,6 +150,7 @@ class Runner:
         self._model_api_key = model_api_key
         self._model_egress_timeout_sec = model_egress_timeout_sec
         self._content_store = content_store
+        self._content_plane = content_plane
         # The worker-local mediated-egress sidecar, built on the first permit relayed
         # over the attachment (once the worker id and incarnation are known).
         self._mediated_sidecar: MediatedEgressSidecar | None = None
@@ -292,6 +295,10 @@ class Runner:
             if (host := self._ensure_resident_host()) is not None:
                 host.route(frame_kind, frame)
             return
+        if frame_kind.startswith("content_"):
+            if self._content_plane is not None:
+                self._content_plane.route(frame_kind, frame)
+            return
         if frame_kind == "deny":
             # A held model turn's denial: only a facade waiter consumes it.
             self._model_turn_rendezvous.deliver_deny(
@@ -329,6 +336,12 @@ class Runner:
             return
         self.logger.warning("Unknown mediated-op frame kind: %s", frame_kind)
 
+    def _object_store(self, task_id: str) -> FabricObjectStore | None:
+        """Where this task's objects live: its own content surface, or the server's."""
+        if self._content_plane is not None:
+            return self._content_plane.for_task(task_id)
+        return self._content_store
+
     def _prepare_inputs(self, msg: WorkerTaskMessage) -> ResolvedInputMaterialization:
         """Resolve a task's declared contract and store the request it materialized.
 
@@ -336,7 +349,8 @@ class Runner:
         anywhere here leaves an object no resolution claims rather than a resolution
         pointing at nothing.
         """
-        if self._content_store is None:
+        store = self._object_store(msg.task_id)
+        if store is None:
             raise ExecutionError(
                 f"task {msg.task_id} prepares its inputs, and this worker reaches no "
                 "fabric content store to store the request in",
@@ -349,9 +363,7 @@ class Runner:
                 "contract to resolve",
                 retryable=False,
             )
-        reference = write_resolved_input(
-            self._content_store, msg.content_scope, resolved
-        )
+        reference = write_resolved_input(store, msg.content_scope, resolved)
         return ResolvedInputMaterialization(
             binding=resolved.binding, reference=reference
         )
@@ -408,7 +420,8 @@ class Runner:
         missing, out of the task's scope, or not the bytes its digest names fails the
         task before any model I/O and before any admission.
         """
-        if self._content_store is None:
+        store = self._object_store(msg.task_id)
+        if store is None:
             raise ExecutionError(
                 f"task {msg.task_id} runs a prepared request and this worker reaches "
                 "no fabric content store to hydrate it from",
@@ -421,7 +434,7 @@ class Runner:
                 retryable=False,
             )
         try:
-            hydrated = hydrate_resolved_input(self._content_store, reference)
+            hydrated = hydrate_resolved_input(store, reference)
         except ContentStoreError as exc:
             raise ExecutionError(
                 f"task {msg.task_id} cannot hydrate the request its preparation "
@@ -832,6 +845,8 @@ class Runner:
                             mode="json"
                         )
                         self.lifecycle.set_succeeded(task_id, metadata=metadata)
+                        if self._content_plane is not None:
+                            self._content_plane.bind(prepared.reference)
                         self.logger.info("Task %s prepared its inputs", task_id)
                         continue
                     if msg.service_episode is not None:

@@ -20,6 +20,7 @@ from shared.schemas.network import (
 )
 
 from ..config import (
+    ContentStoreConfig,
     GrpcConfig,
     IdentityConfig,
     LoggingConfig,
@@ -54,6 +55,7 @@ class WorkerSupervisor:
         logging_config: LoggingConfig,
         logger: logging.Logger,
         network: NetworkPlaneConfig | None = None,
+        content: ContentStoreConfig | None = None,
     ) -> None:
         self._identity = identity
         self._redis = redis
@@ -61,6 +63,7 @@ class WorkerSupervisor:
         self._worker_management = worker_management
         self._logging_config = logging_config
         self._network = network or NetworkPlaneConfig()
+        self._content = content or ContentStoreConfig()
         self._logger = logger
         self._process: BaseProcess | None = None
         self._cmd_sender: TaskSender[CommandMessage, CommandResponse] | None = None
@@ -98,6 +101,7 @@ class WorkerSupervisor:
                 "wm_cfg": self._worker_management,
                 "log_cfg": self._logging_config,
                 "network_cfg": self._network,
+                "content_cfg": self._content,
                 "cmd_receiver": self._cmd_receiver,
                 "node_id_queue": self._node_id_queue,
                 "system_principal": system_principal,
@@ -321,6 +325,7 @@ def _run_supervisor(
     wm_cfg: WorkerManagementConfig,
     log_cfg: LoggingConfig,
     network_cfg: NetworkPlaneConfig,
+    content_cfg: ContentStoreConfig,
     cmd_receiver: TaskReceiver[CommandMessage, CommandResponse] | None,
     node_id_queue: MPQueue[str],
     system_principal: PrincipalContext,
@@ -336,7 +341,7 @@ def _run_supervisor(
     from ..clients import RedisClient
     from ..clients.redis import resident_relay_client
     from ..network.listeners import NetworkPlaneListeners
-    from ..network.reverse_relay import BinaryRedis
+    from ..network.reverse_relay import CONTENT_RELAY_KEYSPACE, BinaryRedis
     from ..network.worker_bridge import RelayWorkerBridge
     from ..registries.node import NodeRegistry
     from ..utils.logging import get_logger as _get_logger
@@ -440,6 +445,8 @@ def _run_supervisor(
     )
     resident_bridge: RelayWorkerBridge | None = None
     resident_attachment: ReverseRelayAttachment | None = None
+    content_bridge: RelayWorkerBridge | None = None
+    content_attachment: ReverseRelayAttachment | None = None
     if network_cfg.enabled:
         relay_redis = cast(
             BinaryRedis,
@@ -464,6 +471,23 @@ def _run_supervisor(
             owner=f"{node_id}:{os.getpid()}",
             logger=logger,
         )
+        if content_cfg.hydration_enabled:
+            content_bridge = RelayWorkerBridge(
+                relay_redis,
+                node_id,
+                task_listener.enqueue_local,
+                keyspace=CONTENT_RELAY_KEYSPACE,
+                frame_kind="content_frame",
+                logger=logger,
+            )
+            content_attachment = ReverseRelayAttachment(
+                relay_redis,
+                node_id,
+                content_bridge,
+                owner=f"{node_id}:{os.getpid()}:content",
+                keyspace=CONTENT_RELAY_KEYSPACE,
+                logger=logger,
+            )
     command_listener = CommandListener(
         redis=redis_client.sync,
         node_id=node_id,
@@ -483,6 +507,7 @@ def _run_supervisor(
         relay_service=relay_service,
         logger=logger,
         resident_bridge=resident_bridge,
+        content_bridge=content_bridge,
     )
 
     peer_listener: NodePeerListener | None = None
@@ -556,6 +581,8 @@ def _run_supervisor(
             await network_listeners.start()
         if resident_attachment is not None:
             resident_attachment.start(loop)
+        if content_attachment is not None:
+            content_attachment.start(loop)
         if peer_listener is not None:
             await peer_listener.start()
         # Wire the re-register callback only once the reader threads are up
@@ -572,6 +599,8 @@ def _run_supervisor(
         lifecycle.publish_unregister()
         if peer_listener is not None:
             await peer_listener.stop()
+        if content_attachment is not None:
+            await content_attachment.stop()
         if resident_attachment is not None:
             await resident_attachment.stop()
         if network_listeners is not None:

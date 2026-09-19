@@ -421,6 +421,10 @@ class SyncRedisClient:
     def hash_set(self, key: str, mapping: dict[str, Any]) -> None:
         self._control.hset(key, mapping=mapping)
 
+    def hash_delete(self, key: str, *fields: str) -> None:
+        if fields:
+            self._control.hdel(key, *fields)
+
     # ---- Set helpers ----
     def set_members(self, key: str) -> set[str]:
         return _sync(self._control.smembers(key))

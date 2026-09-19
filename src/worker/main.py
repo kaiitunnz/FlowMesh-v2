@@ -20,6 +20,7 @@ from shared.telemetry.semconv import (
 )
 
 from .config import WorkerConfig
+from .content import ContentLaneHost, WorkerContentPlane, WorkerObjectStore
 from .content_store import build_content_store
 from .executors import EXECUTOR_REGISTRY, IMPORT_ERRORS, get_executor_class_name
 from .executors.base_executor import Executor
@@ -252,6 +253,40 @@ def _bind_peer_listener(cfg: WorkerConfig) -> socket.socket | None:
     return sock
 
 
+def _build_content_plane(
+    cfg: WorkerConfig, client: SupervisorClient, logger: logging.Logger
+) -> WorkerContentPlane | None:
+    """The worker's content plane, where the deployment runs the transfer protocol.
+
+    Without it a worker keeps writing to and reading from the server-hosted store, so
+    the plane is absent rather than empty.
+    """
+    if not cfg.content_hydration_enabled:
+        return None
+    lane = ContentLaneHost(
+        store=WorkerObjectStore(
+            cfg.content_dir, orphan_grace_sec=cfg.content_orphan_grace_sec
+        ),
+        push_frame=client.push_content_frame,
+        request_grant=lambda reference, task_id: client.push_content_hydration_request(
+            reference.model_dump(mode="json"), task_id
+        ),
+        worker_id=client.worker_id,
+        generation=client.incarnation,
+        transfer_timeout_sec=cfg.content_transfer_timeout_sec,
+        logger=logger,
+    )
+    lane.start()
+    return WorkerContentPlane(
+        lane,
+        compat=build_content_store(cfg.server_base_url),
+        announce=lambda reference: client.push_content_holding(
+            reference.model_dump(mode="json")
+        ),
+        logger=logger,
+    )
+
+
 def main() -> None:
     args = _parse_args()
     if args.collect_hw:
@@ -347,6 +382,8 @@ def main() -> None:
     )
     gpu_sampler.start()
 
+    content_plane = _build_content_plane(cfg, supervisor_client, logger)
+
     task_stream = supervisor_client.iter_tasks()
     runner = Runner(
         lifecycle,
@@ -363,6 +400,7 @@ def main() -> None:
         model_api_key=cfg.model_api_key,
         model_egress_timeout_sec=cfg.model_egress_timeout_sec,
         content_store=build_content_store(cfg.server_base_url),
+        content_plane=content_plane,
         peer_enabled=cfg.peer_enabled,
         peer_material=_peer_material(cfg, logger),
         peer_listener_sock=peer_sock,

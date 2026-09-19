@@ -3,6 +3,7 @@
 from .client import ContentHydrationClient, GrantDenied
 from .holder import ContentHolder
 from .lane_host import ContentLaneHost
+from .plane import TaskContentStore, WorkerContentPlane
 from .store import WorkerObjectStore
 
 __all__ = [
@@ -10,5 +11,7 @@ __all__ = [
     "ContentHydrationClient",
     "ContentLaneHost",
     "GrantDenied",
+    "TaskContentStore",
+    "WorkerContentPlane",
     "WorkerObjectStore",
 ]

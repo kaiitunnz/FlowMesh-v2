@@ -127,6 +127,12 @@ WORKER_RESULTS_DIR: str = (
     os.getenv("WORKER_RESULTS_DIR", "").strip() or "flowmesh_results"
 )
 WORKER_PRIVATE_STATE_DIR: str = os.getenv("WORKER_PRIVATE_STATE_DIR", "").strip()
+WORKER_CONTENT_DIR: str = os.getenv("WORKER_CONTENT_DIR", "").strip()
+CONTENT_HYDRATION_ENABLED: bool = parse_bool_env("CONTENT_HYDRATION_ENABLED", False)
+CONTENT_ORPHAN_GRACE_SEC: float = parse_float_env("CONTENT_ORPHAN_GRACE_SEC", 900.0)
+CONTENT_TRANSFER_TIMEOUT_SEC: float = parse_float_env(
+    "CONTENT_TRANSFER_TIMEOUT_SEC", 60.0
+)
 HF_CACHE_DIR: str | None = os.getenv("HF_CACHE_DIR") or None
 PREDOWNLOAD_MODEL_LIST: str = os.getenv("PREDOWNLOAD_MODEL_LIST", "")
 WORKER_TAGS: str = os.getenv("WORKER_TAGS", "")

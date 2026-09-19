@@ -33,6 +33,10 @@ class WorkerConfig:
     supervisor_grpc_tls_ca_b64: str | None
     results_dir: Path
     private_state_dir: Path
+    content_dir: Path
+    content_hydration_enabled: bool
+    content_orphan_grace_sec: float
+    content_transfer_timeout_sec: float
     results_mount_source: str | None
     hb_interval_sec: int
     hb_ttl_sec: int
@@ -115,6 +119,10 @@ class WorkerConfig:
         private_state_dir = Path(
             os.getenv("WORKER_PRIVATE_STATE_DIR", "").strip()
             or (results_dir / "private_state")
+        ).absolute()
+
+        content_dir = Path(
+            os.getenv("WORKER_CONTENT_DIR", "").strip() or (results_dir / "content")
         ).absolute()
 
         hb_interval, hb_ttl, hb_file = get_hb_config()
@@ -215,6 +223,14 @@ class WorkerConfig:
             peer_tls_key_b64=peer_tls_key_b64,
             results_dir=results_dir,
             private_state_dir=private_state_dir,
+            content_dir=content_dir,
+            content_hydration_enabled=parse_bool_env(
+                "CONTENT_HYDRATION_ENABLED", False
+            ),
+            content_orphan_grace_sec=parse_float_env("CONTENT_ORPHAN_GRACE_SEC", 900.0),
+            content_transfer_timeout_sec=parse_float_env(
+                "CONTENT_TRANSFER_TIMEOUT_SEC", 60.0
+            ),
             results_mount_source=results_mount_source,
             hb_interval_sec=hb_interval,
             hb_ttl_sec=hb_ttl,

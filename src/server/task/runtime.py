@@ -2421,6 +2421,32 @@ class TaskRuntime:
             resolution = self._input_resolution_locked(task_id)
         return resolution.binding if resolution is not None else None
 
+    def content_binding_authorizes(
+        self, task_id: str, worker_id: str, reference: ContentReference
+    ) -> bool:
+        """Whether a task's own binding entitles its worker to read this object.
+
+        Read-only evidence for the content authority: the worker must be the one
+        running the task, and the task must already be bound to exactly this reference
+        — the request it was prepared with, or an outcome the engine delivered into its
+        episode. Naming an object it merely knows of authorizes nothing.
+        """
+        with self._lock:
+            record = self._tasks.get(task_id)
+            if record is None or record.assigned_worker != worker_id:
+                return False
+            resolution = self._input_resolution_locked(task_id)
+            if resolution is not None and resolution.reference == reference:
+                return True
+            engine = self._engines.get(record.workflow_id)
+            if engine is None:
+                return False
+            _, outcomes = engine.episode_context(task_id)
+        return any(
+            outcome.outcome_ref is not None and outcome.outcome_ref.content == reference
+            for outcome in outcomes
+        )
+
     def recorded_input_reference(self, task_id: str) -> ContentReference | None:
         """Where a task's prepared request is, for the run that hydrates it."""
         with self._lock:

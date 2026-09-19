@@ -538,15 +538,20 @@ class WebSearchConfig:
 
 @dataclass
 class ContentStoreConfig:
-    """The reference-backed outcome content store's local root.
+    """Where fabric content lives, and whether workers hydrate it from each other.
 
     ``root`` is the server-hosted content-addressed object root a worker writes and
     hydrates over the content router. Every provider result materializes by reference
     regardless of size; only a bounded worker-produced control datum is carried inline.
+    ``hydration_enabled`` turns on the worker-held content plane, where a worker holds
+    what it wrote and another hydrates it over a control-granted transfer.
     """
 
     enabled: bool = True
     root: Path = Path("./content")
+    hydration_enabled: bool = False
+    grant_ttl_sec: float = 60.0
+    holder_record_ttl_sec: float = 300.0
 
     @classmethod
     def from_env(cls, results_dir: Path) -> "ContentStoreConfig":
@@ -556,7 +561,13 @@ class ContentStoreConfig:
             if override
             else results_dir.parent / "content"
         )
-        return cls(enabled=parse_bool_env("CONTENT_STORE_ENABLED", True), root=root)
+        return cls(
+            enabled=parse_bool_env("CONTENT_STORE_ENABLED", True),
+            root=root,
+            hydration_enabled=parse_bool_env("CONTENT_HYDRATION_ENABLED", False),
+            grant_ttl_sec=parse_float_env("CONTENT_HYDRATION_GRANT_TTL_SEC", 60.0),
+            holder_record_ttl_sec=parse_float_env("CONTENT_HOLDER_TTL_SEC", 300.0),
+        )
 
 
 @dataclass

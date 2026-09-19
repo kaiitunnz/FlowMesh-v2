@@ -37,10 +37,16 @@ from .auth import reconcile_resources, resolve_system_principal
 from .clients import RedisClient
 from .clients.redis import resident_relay_client
 from .config import NodeRole, ServerConfig
+from .content import (
+    ContentHolderDirectory,
+    ContentHydrationAuthority,
+    ContentTransferSessions,
+)
 from .dispatcher.factory import create_dispatcher
 from .hooks import register
 from .network.rendezvous import RootCursorStore, RootRendezvousBridge
 from .network.reverse_relay import (
+    CONTENT_RELAY_KEYSPACE,
     BinaryRedis,
     RelaySessionStore,
     RelayStreamStore,
@@ -70,7 +76,7 @@ from .services.ssh_audit import SshAuditService
 from .services.watchdog import WorkerWatchdog
 from .startup import (
     rehydrate_root_state,
-    start_resident_bridge_pump,
+    start_relay_bridge_pump,
 )
 from .supervisor import WorkerSupervisor
 from .task.runtime import TaskRuntime
@@ -145,6 +151,7 @@ if config.worker_management.enabled:
         logging_config=config.logging,
         logger=logger,
         network=config.orchestration.network,
+        content=config.content_store,
     )
 
 # --------------------------------------------------------------------------- # Root
@@ -264,6 +271,7 @@ if IS_ROOT_NODE:
         )
 
     _relay_redis: BinaryRedis | None = None
+    CONTENT_BRIDGE: RootRendezvousBridge | None = None
     if config.orchestration.network.enabled:
         NETWORK_PLANE = NetworkPlane(
             config.orchestration.network, NODE_REGISTRY, logger
@@ -284,6 +292,13 @@ if IS_ROOT_NODE:
             RootCursorStore(_relay_redis),
             logger=logger,
         )
+        if config.content_store.hydration_enabled:
+            CONTENT_BRIDGE = RootRendezvousBridge(
+                RelayStreamStore(_relay_redis, CONTENT_RELAY_KEYSPACE),
+                RelaySessionStore(_relay_redis, CONTENT_RELAY_KEYSPACE),
+                RootCursorStore(_relay_redis, CONTENT_RELAY_KEYSPACE),
+                logger=logger,
+            )
 
     FLEET_SAMPLER = build_fleet_sampler(
         SERVER_METER,
@@ -378,6 +393,21 @@ if IS_ROOT_NODE:
         rehydration_grace_seconds=config.watchdog.rehydration_grace_sec,
     )
 
+    CONTENT_AUTHORITY: ContentHydrationAuthority | None = None
+    if config.content_store.hydration_enabled and WORKER_REGISTRY is not None:
+        CONTENT_AUTHORITY = ContentHydrationAuthority(
+            ContentHolderDirectory(
+                REDIS_CLIENT, record_ttl_sec=config.content_store.holder_record_ttl_sec
+            ),
+            WORKER_REGISTRY,
+            authorizes=RUNTIME.content_binding_authorizes,
+            grant_ttl_sec=config.content_store.grant_ttl_sec,
+            sessions=ContentTransferSessions(
+                REDIS_CLIENT, ttl_sec=config.content_store.grant_ttl_sec * 10
+            ),
+            logger=logger,
+        )
+
     EVENT_MONITOR = EventMonitor(
         redis_client=REDIS_CLIENT.sync,
         logger=logger,
@@ -399,6 +429,7 @@ if IS_ROOT_NODE:
         on_node_removed=(
             NETWORK_PLANE.forget_node if NETWORK_PLANE is not None else None
         ),
+        content_authority=CONTENT_AUTHORITY,
     )
     # The runtime settles terminals the task-event stream never carries, so it tells
     # the monitor's finalizer when a workflow may have ended; the finalizer decides.
@@ -589,8 +620,12 @@ async def _lifespan(_: FastAPI):
             )
             if RESIDENT_BRIDGE is not None and NODE_REGISTRY is not None:
                 edge_ids = (SERVE_EDGE_STREAM_ID,) if GATED_SERVE is not None else ()
-                app.state.resident_bridge_task = start_resident_bridge_pump(
+                app.state.resident_bridge_task = start_relay_bridge_pump(
                     RESIDENT_BRIDGE, NODE_REGISTRY, logger, edge_ids
+                )
+            if CONTENT_BRIDGE is not None and NODE_REGISTRY is not None:
+                app.state.content_bridge_task = start_relay_bridge_pump(
+                    CONTENT_BRIDGE, NODE_REGISTRY, logger
                 )
             if GATED_SERVE is not None:
                 GATED_SERVE.relay.start(asyncio.get_running_loop())
