@@ -1,5 +1,6 @@
 """Immutable, content-addressed objects the fabric stores within one scope."""
 
+from .filesystem import FilesystemObjectBacking
 from .grant import (
     ContentHydrationGrant,
     ContentOperation,
@@ -31,6 +32,7 @@ __all__ = [
     "ContentStoreError",
     "DigestAlgorithm",
     "FabricObjectStore",
+    "FilesystemObjectBacking",
     "GrantRejection",
     "HolderGrantGate",
     "content_digest",

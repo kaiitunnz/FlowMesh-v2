@@ -14,52 +14,28 @@ the store holding one.
 
 from pathlib import Path
 
-from shared.content import (
-    OCTET_STREAM,
-    ContentHydrationError,
-    ContentReference,
-    ContentStoreError,
-    reference_for,
-)
+from shared.content import OCTET_STREAM, ContentReference, FilesystemObjectBacking
+from shared.content.filesystem import safe_segment
 from shared.outcome import OutcomeManifest
 from shared.utils.atomic import atomic_write_bytes
-
-_SAFE = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
-
-
-def _segment(value: str | None) -> str:
-    """A single path segment safe from traversal, or ``_`` for an empty scope."""
-    if not value:
-        return "_"
-    if value in {".", ".."} or any(c not in _SAFE for c in value):
-        raise ContentStoreError(f"unsafe content-store segment {value!r}")
-    return value
 
 
 class ServerContentStore:
     """A per-scope, content-addressed immutable store under a local directory."""
 
     def __init__(self, root: Path) -> None:
-        self._root = root
-
-    def _object_path(self, scope: str | None, digest: str) -> Path:
-        digest = _segment(digest)
-        return self._root / _segment(scope) / "objects" / _segment(digest[:2]) / digest
+        self._objects = FilesystemObjectBacking(root)
 
     def _idem_path(self, scope: str | None, idempotency_key: str) -> Path:
-        return (
-            self._root / _segment(scope) / "idem" / f"{_segment(idempotency_key)}.json"
+        return self._objects.scope_path(scope, "idem") / (
+            f"{safe_segment(idempotency_key)}.json"
         )
 
     def write(
         self, scope: str, data: bytes, *, media_type: str = OCTET_STREAM
     ) -> ContentReference:
         """Store bytes in a scope and return the reference naming them."""
-        reference = reference_for(scope, data, media_type=media_type)
-        atomic_write_bytes(
-            self._object_path(scope, reference.content_digest), data, if_absent=True
-        )
-        return reference
+        return self._objects.write(scope, data, media_type=media_type)
 
     def find(self, scope: str, idempotency_key: str) -> OutcomeManifest | None:
         path = self._idem_path(scope, idempotency_key)
@@ -78,9 +54,8 @@ class ServerContentStore:
     ) -> OutcomeManifest:
         if (found := self.find(scope, idempotency_key)) is not None:
             return found
-        reference = self.write(scope, data, media_type=media_type)
         manifest = OutcomeManifest(
-            content=reference,
+            content=self.write(scope, data, media_type=media_type),
             provenance=provenance,
             idempotency_key=idempotency_key,
         )
@@ -92,10 +67,7 @@ class ServerContentStore:
         return manifest
 
     def read(self, scope: str, digest: str) -> bytes:
-        path = self._object_path(scope, digest)
-        if not path.exists():
-            raise ContentHydrationError(f"no content for {digest} in scope {scope}")
-        return path.read_bytes()
+        return self._objects.read(scope, digest)
 
     def fetch(self, reference: ContentReference) -> bytes:
         return self.read(reference.authorization_scope, reference.content_digest)
