@@ -22,8 +22,8 @@ from shared.schemas.result import BaseExecutorResult
 from shared.tasks.specs import TaskSpecStrictBase
 from shared.utils.time import now_iso
 
+from ...telemetry.otel import attributes_with_type, get_tracer, task_trace_context
 from ..base_executor import ExecutionError
-from ._otel import attributes_with_type, get_tracer, task_trace_context
 
 logger = logging.getLogger(__name__)
 

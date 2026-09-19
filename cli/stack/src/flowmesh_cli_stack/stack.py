@@ -16,6 +16,7 @@ from flowmesh_stack.docker import (
     DockerError,
     ensure_docker_available,
     image_env_overrides,
+    profile_args,
 )
 from flowmesh_stack.doctor import DoctorFinding, run_doctor_checks
 from flowmesh_stack.env import ensure_env_file, load_env, parse_env_file
@@ -66,6 +67,21 @@ def _stack() -> DockerComposeStack:
     )
 
 
+def _profiles(env_file: Path, profile: str | None) -> list[str]:
+    """This node's own compose profile plus any the operator selected.
+
+    ``--profile`` replaces ``COMPOSE_PROFILES`` rather than adding to it, so both are
+    passed explicitly here, de-duplicated and order-preserving.
+    """
+    selected = [profile] if profile else []
+    raw = parse_env_file(env_file).get("COMPOSE_PROFILES", "")
+    selected.extend(name for part in raw.split(",") if (name := part.strip()))
+    seen: dict[str, None] = {}
+    for name in selected:
+        seen.setdefault(name, None)
+    return list(seen)
+
+
 def _compose(
     args: list[str],
     env_file: Path,
@@ -74,7 +90,7 @@ def _compose(
     profile: str | None = None,
 ) -> None:
     ensure_env_file(env_file, stack_env_example())
-    full_args = (["--profile", profile] if profile else []) + args
+    full_args = profile_args(_profiles(env_file, profile)) + args
     result = _stack().run(full_args, env_file=env_file, env=env, to_deploy=to_deploy)
     if result.returncode != 0:
         raise typer.Exit(code=result.returncode)
@@ -619,7 +635,9 @@ def logs(
     ),
 ) -> None:
     """Stream logs from stack services or a specific service container."""
-    code = _stack().stream_logs(env_file=env_file, service=service, profile="root")
+    code = _stack().stream_logs(
+        env_file=env_file, service=service, profile=_profiles(env_file, "root")
+    )
     if code != 0:
         raise typer.Exit(code=code)
 

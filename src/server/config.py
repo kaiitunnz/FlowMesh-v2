@@ -4,6 +4,7 @@ from enum import StrEnum
 from pathlib import Path
 
 from shared.tasks.specs import ModelBindingMode
+from shared.telemetry.config import TelemetryConfig
 from shared.utils.parsing import parse_bool_env, parse_float_env, parse_int_env
 
 
@@ -270,6 +271,34 @@ class MetricsConfig:
             density_bucket_sec=max(
                 1, parse_int_env("SERVER_METRICS_DENSITY_BUCKET_SEC", 60)
             ),
+        )
+
+
+@dataclass
+class TelemetryStoreConfig:
+    """Read-side connection settings for the server's view of the telemetry store.
+
+    Distinct from the Collector's own ``TELEMETRY_CLICKHOUSE_*`` compose variables
+    (cli/stack/.../compose.yml), which configure the *write* path's export target: these
+    configure the *read* path's query target. They commonly point at the same ClickHouse
+    instance but are never the same config object -- the write and read paths must stay
+    independently swappable.
+    """
+
+    url: str | None = None
+    database: str = "flowmesh"
+    username: str = "default"
+    password: str = "flowmesh"
+    timeout_sec: float = 10.0
+
+    @classmethod
+    def from_env(cls) -> "TelemetryStoreConfig":
+        return cls(
+            url=(os.getenv("SERVER_METRICS_CLICKHOUSE_URL") or "").strip() or None,
+            database=os.getenv("SERVER_METRICS_CLICKHOUSE_DATABASE", "flowmesh"),
+            username=os.getenv("SERVER_METRICS_CLICKHOUSE_USERNAME", "default"),
+            password=os.getenv("SERVER_METRICS_CLICKHOUSE_PASSWORD", "flowmesh"),
+            timeout_sec=parse_float_env("SERVER_METRICS_CLICKHOUSE_TIMEOUT_SEC", 10.0),
         )
 
 
@@ -732,10 +761,12 @@ class ServerConfig:
     dispatch: DispatchConfig
     watchdog: WatchdogConfig
     metrics: MetricsConfig
+    telemetry: TelemetryConfig
     worker_management: WorkerManagementConfig
     log_stream: LogStreamConfig
     orchestration: OrchestrationConfig
     content_store: ContentStoreConfig = field(default_factory=ContentStoreConfig)
+    telemetry_store: TelemetryStoreConfig = field(default_factory=TelemetryStoreConfig)
     results_dir: Path = Path("./results")
     plugins: list[str] = field(default_factory=list)
 
@@ -761,10 +792,12 @@ class ServerConfig:
             dispatch=DispatchConfig.from_env(),
             watchdog=WatchdogConfig.from_env(),
             metrics=MetricsConfig.from_env(results_dir),
+            telemetry=TelemetryConfig.from_env(),
             worker_management=WorkerManagementConfig.from_env(),
             log_stream=LogStreamConfig.from_env(),
             orchestration=OrchestrationConfig.from_env(),
             content_store=ContentStoreConfig.from_env(results_dir),
+            telemetry_store=TelemetryStoreConfig.from_env(),
             results_dir=results_dir,
             plugins=plugins,
         )

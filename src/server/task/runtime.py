@@ -9,8 +9,14 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
+from opentelemetry.trace import Tracer
 from pydantic import ValidationError
 
+from server.telemetry.tracing import (
+    NULL_CONTROL_TRACER,
+    ControlPlaneTracer,
+    format_traceparent,
+)
 from shared.harness import (
     AgentEpisodeDispatch,
     BoundaryEventKind,
@@ -59,7 +65,14 @@ from shared.tasks.specs import (
     InferenceSpecTemplate,
     ModelBindingMode,
 )
-from shared.tools.contract import AgentModelTurnProposal, MediatedOperationOutcome
+from shared.telemetry.config import TelemetryConfig
+from shared.telemetry.ids import SpanIdKind, derived_span_id, workflow_to_trace_id_int
+from shared.telemetry.semconv import ControlPlaneStage, ControlPlaneWindow
+from shared.tools.contract import (
+    AgentModelTurnProposal,
+    MediatedOperationOutcome,
+    MediatedOperationPermit,
+)
 from shared.tools.facade import FacadeDescriptor, FacadeResolution
 from shared.utils import new_workflow_id
 from shared.utils.ids import new_model_secret_ref
@@ -83,6 +96,7 @@ from ..orchestration import (
 )
 from ..orchestration.episode import BoundaryEvent
 from ..orchestration.harness import to_boundary_event
+from ..orchestration.telemetry import build_span_emitter
 from ..orchestration.tool_dispatch import (
     MODEL_INTERFACE,
     SEARCH_INTERFACE,
@@ -94,7 +108,7 @@ from ..orchestration.tool_dispatch import (
 from ..registries.worker import Worker, WorkerRegistry
 from ..registries.workflow import PersistedTask, WorkflowRegistry, WorkflowSched
 from ..services.model_secret_vault import ModelSecretVault
-from ..utils.time import parse_iso_ts
+from ..utils.time import now_iso, parse_iso_ts
 from .models import (
     SETTLING_TASK_STATUSES,
     TERMINAL_TASK_STATUSES,
@@ -276,6 +290,9 @@ class TaskRuntime:
         secret_vault: ModelSecretVault,
         feasibility_check: EpisodeFeasibility | None = None,
         surface: PolicySurface | None = None,
+        control: ControlPlaneTracer | None = None,
+        tracer: Tracer | None = None,
+        telemetry: TelemetryConfig | None = None,
     ) -> None:
         self._workflow_registry = workflow_registry
         self._worker_registry = worker_registry
@@ -284,6 +301,9 @@ class TaskRuntime:
         self._feasibility_check = feasibility_check
         self._policy_surface = surface if surface is not None else PolicySurface()
         self._secret_vault = secret_vault
+        self._control = control if control is not None else NULL_CONTROL_TRACER
+        self._tracer = tracer
+        self._telemetry = telemetry
         self._scope_budget = ScopeBudget.from_config(orchestration)
         self._web_search = orchestration.web_search
         self._model_egress_timeout_sec = orchestration.gateway.timeout_sec
@@ -423,6 +443,7 @@ class TaskRuntime:
         *,
         resident: bool = False,
     ) -> tuple[str, list[TaskParsingResult]]:
+        submitted_at = now_iso()
         parsed_workflow = parse_workflow(payload, format)
         specs = parsed_workflow.tasks
         yaml_text = redact_source_text(payload, format)
@@ -445,10 +466,24 @@ class TaskRuntime:
                 bindings=self._agent_binding_defaults,
                 secret_refs=secret_refs,
                 surface=self._policy_surface,
+                control=self._control,
             )
-            v2_engine = OrchestrationEngine.build(
-                workflow_id, owner_id, org_id, v2_bundle, budget=self._scope_budget
-            )
+            with self._control.workflow_stage(
+                ControlPlaneStage.ENGINE_BUILD,
+                ControlPlaneWindow.SUBMIT,
+                workflow_id,
+            ):
+                v2_engine = OrchestrationEngine.build(
+                    workflow_id,
+                    owner_id,
+                    org_id,
+                    v2_bundle,
+                    budget=self._scope_budget,
+                    control=self._control,
+                    emitter=build_span_emitter(
+                        self._tracer, self._telemetry, workflow_id
+                    ),
+                )
 
         with self._cv:
             if (
@@ -557,7 +592,7 @@ class TaskRuntime:
                     self._workflow_epoch_frontier[workflow_id] = 0
 
         await self._workflow_registry.register_workflow_async(
-            workflow_id, task_records, v2=v2_bundle
+            workflow_id, task_records, v2=v2_bundle, submitted_at=submitted_at
         )
 
         with self._cv:
@@ -577,7 +612,15 @@ class TaskRuntime:
         with self._cv:
             if v2_engine is not None:
                 self._engines[workflow_id] = v2_engine
-                if self._apply_advance_locked(workflow_id, v2_engine.initial_advance()):
+                with self._control.workflow_stage(
+                    ControlPlaneStage.DS_INITIAL_ADVANCE,
+                    ControlPlaneWindow.SUBMIT,
+                    workflow_id,
+                ):
+                    advance_applied = self._apply_advance_locked(
+                        workflow_id, v2_engine.initial_advance()
+                    )
+                if advance_applied:
                     new_ready = True
             for task_id in candidate_ready:
                 maybe_record = self._tasks.get(task_id)
@@ -593,9 +636,10 @@ class TaskRuntime:
         # Snapshot last, after the initial advance has persisted any authority-denied
         # roots, so the ledger never leads durable task state.
         if v2_engine is not None:
-            await self._workflow_registry.save_ledger_snapshot_async(
-                workflow_id, v2_engine.to_snapshot()
-            )
+            with self._control.ledger_snapshot(workflow_id):
+                await self._workflow_registry.save_ledger_snapshot_async(
+                    workflow_id, v2_engine.to_snapshot()
+                )
 
         return workflow_id, results
 
@@ -752,7 +796,13 @@ class TaskRuntime:
             elif record.status in (TaskStatus.DISPATCHED, TaskStatus.CANCELLING):
                 self._rehydrated_dispatched[task_id] = rehydrated_at
 
-        engine = OrchestrationEngine(snapshot, bundle, budget=self._scope_budget)
+        engine = OrchestrationEngine(
+            snapshot,
+            bundle,
+            budget=self._scope_budget,
+            control=self._control,
+            emitter=build_span_emitter(self._tracer, self._telemetry, workflow_id),
+        )
         self._engines[workflow_id] = engine
         cancelled = False
         for persisted in tasks:
@@ -1180,6 +1230,28 @@ class TaskRuntime:
         with self._lock:
             return self._engines.get(workflow_id)
 
+    def dispatch_traceparent(self, task_id: str) -> str | None:
+        """The ``traceparent`` a dispatched task's worker-side span should parent on.
+
+        Read-only: names the task's episode (work item) span without touching the
+        ledger. Names nothing (``None``) rather than a synthesized-anyway value when
+        telemetry is off, the task has no v2 work item, or the workflow isn't a v2
+        one, so the dispatcher can omit the wire field entirely instead of carrying a
+        placeholder.
+        """
+        if not self._control.enabled:
+            return None
+        with self._lock:
+            record = self._tasks.get(task_id)
+            engine = self._engines.get(record.workflow_id) if record else None
+            work_item_id = engine.work_item_id_for_task(task_id) if engine else None
+        if record is None or work_item_id is None:
+            return None
+        return format_traceparent(
+            workflow_to_trace_id_int(record.workflow_id),
+            derived_span_id(SpanIdKind.WORK_ITEM, work_item_id),
+        )
+
     def apply_boundary_event(self, task_id: str, event: BoundaryEvent) -> bool:
         """Carry an episode's boundary event into the ledger and dispatch its effect.
 
@@ -1557,6 +1629,25 @@ class TaskRuntime:
         secret = self._secret_vault.resolve(agent.workflow_id, binding.secret_ref)
         return secret.get_secret_value() if secret is not None else None
 
+    def _stamped_permit_payload(
+        self, permit: MediatedOperationPermit, workflow_id: str
+    ) -> dict[str, Any]:
+        """The permit's wire payload, carrying a ``traceparent`` stamp when enabled.
+
+        Stamped post-mint: the boundary span id derives from the permit's own
+        ``invocation_id``, which does not exist as an object until minting returns.
+        """
+        if self._control.enabled:
+            permit = permit.model_copy(
+                update={
+                    "traceparent": format_traceparent(
+                        workflow_to_trace_id_int(workflow_id),
+                        derived_span_id(SpanIdKind.INVOCATION, permit.invocation_id),
+                    )
+                }
+            )
+        return permit.model_dump(mode="json")
+
     def _dispatch_worker_originated_op(self, env: ToolInvocationEnvelope) -> None:
         """Mint a permit and relay a boundary's egress operation to its origin worker.
 
@@ -1618,7 +1709,7 @@ class TaskRuntime:
             MediatedOpMessage(
                 worker_id=worker_id,
                 frame_kind="permit",
-                payload=permit.model_dump(mode="json"),
+                payload=self._stamped_permit_payload(permit, agent.workflow_id),
             ),
         )
 
@@ -1683,7 +1774,7 @@ class TaskRuntime:
                 MediatedOpMessage(
                     worker_id=worker_id,
                     frame_kind="permit",
-                    payload=permit.model_dump(mode="json"),
+                    payload=self._stamped_permit_payload(permit, agent.workflow_id),
                 ),
             )
 
@@ -2402,9 +2493,10 @@ class TaskRuntime:
 
     def _save_ledger_locked(self, workflow_id: str) -> None:
         if (engine := self._engines.get(workflow_id)) is not None:
-            self._workflow_registry.save_ledger_snapshot(
-                workflow_id, engine.to_snapshot()
-            )
+            with self._control.ledger_snapshot(workflow_id):
+                self._workflow_registry.save_ledger_snapshot(
+                    workflow_id, engine.to_snapshot()
+                )
 
     def _apply_advance_locked(self, workflow_id: str, advance: Advance) -> bool:
         # A ready/settle advance never carries a retry; the failure path drives those.
@@ -3582,6 +3674,11 @@ class TaskRuntime:
     def get_record(self, task_id: str) -> TaskRecord | None:
         with self._lock:
             return self._tasks.get(task_id)
+
+    def workflow_submitted_at(self, workflow_id: str) -> str | None:
+        """The workflow's durable submission timestamp, or ``None`` if unknown."""
+        record = self._workflow_registry.get_workflow_record(workflow_id)
+        return record.submitted_at if record is not None else None
 
     def get_merged_children(self, task_id: str) -> list[str]:
         """Read the merged-children list without consuming it."""

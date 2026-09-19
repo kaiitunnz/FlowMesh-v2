@@ -94,6 +94,13 @@ class WorkerTaskMessage(BaseModel):
             "issue and the result shape to report."
         ),
     )
+    traceparent: str | None = Field(
+        default=None,
+        description=(
+            "W3C traceparent naming the episode span this task's worker-side run "
+            "parents on, when telemetry is enabled."
+        ),
+    )
 
     @property
     def spec(self) -> TaskSpecStrict:

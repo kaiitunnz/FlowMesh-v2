@@ -21,6 +21,7 @@ class _WorkflowRegistryStub:
         workflow_id: str,
         tasks: list[Any],
         v2: Any = None,
+        submitted_at: str | None = None,
     ) -> None:
         return None
 

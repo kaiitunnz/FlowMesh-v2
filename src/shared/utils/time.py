@@ -13,6 +13,19 @@ def parse_iso_datetime(value: str | None) -> datetime.datetime | None:
     return datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
+def ts_to_iso(value: float) -> str:
+    """Unix timestamp → ISO 8601, the inverse of ``parse_iso_ts``."""
+    return datetime.datetime.fromtimestamp(value, datetime.UTC).isoformat()
+
+
+def iso_to_ns(value: str) -> int:
+    """ISO 8601 → Unix nanoseconds; raises on empty or malformed input."""
+    dt = parse_iso_datetime(value)
+    if dt is None:
+        raise ValueError(f"empty or malformed timestamp: {value!r}")
+    return int(dt.timestamp()) * 1_000_000_000 + dt.microsecond * 1_000
+
+
 def parse_iso_ts(value: str | None) -> float:
     """ISO 8601 → Unix timestamp; ``time.time()`` on missing / malformed."""
     try:

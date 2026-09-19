@@ -350,7 +350,7 @@ def test_each_policy_is_selectable_at_its_own_hook() -> None:
 
 class _CapturingRegistry:
     async def register_workflow_async(
-        self, workflow_id: str, tasks: list, v2=None
+        self, workflow_id: str, tasks: list, v2=None, submitted_at: str | None = None
     ) -> None:
         return None
 

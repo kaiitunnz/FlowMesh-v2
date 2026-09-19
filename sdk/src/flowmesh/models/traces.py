@@ -1,12 +1,13 @@
-"""Trace analyzer response payload types as seen by the SDK.
+"""Trace response payload types as seen by the SDK.
 
-These describe the wire shape returned by
-``GET /traces/workflows/analyze/{workflow_id}``.
+``ProfileSummary`` and the models under it describe the wire shape returned by
+``GET /traces/workflows/analyze/{workflow_id}``; ``TraceTree`` and ``TraceAggregate``
+describe the span-tree and metric-aggregate queries over the telemetry store.
 """
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class _ProfileBase(BaseModel):
@@ -80,3 +81,45 @@ class ProfileSummary(_ProfileBase):
     e2e_breakdown: E2EBreakdown
     per_data_id: list[TaskTiming]
     critical_path: CriticalPathSummary | None = None
+
+
+class TraceSpanNode(_ProfileBase):
+    """One span in a workflow's assembled trace, with its children nested under it."""
+
+    span_id: str
+    parent_span_id: str | None = None
+    name: str
+    start_time: datetime
+    end_time: datetime
+    duration_seconds: float
+    status: str
+    service_name: str = ""
+    logical: dict[str, str] = Field(default_factory=dict)
+    physical: dict[str, str] = Field(default_factory=dict)
+    children: list["TraceSpanNode"] = Field(default_factory=list)
+
+
+class TraceTree(_ProfileBase):
+    """A workflow's spans assembled into their parent/child hierarchy."""
+
+    workflow_id: str
+    trace_id: str
+    span_count: int
+    total_duration_seconds: float
+    roots: list[TraceSpanNode] = Field(default_factory=list)
+
+
+class TraceAggregateBucket(_ProfileBase):
+    group_value: str
+    stat: str
+    value: float
+    sample_count: int
+
+
+class TraceAggregate(_ProfileBase):
+    """One telemetry metric aggregated into a bucket per grouping value."""
+
+    metric: str
+    group_by: str
+    stat: str
+    buckets: list[TraceAggregateBucket] = Field(default_factory=list)

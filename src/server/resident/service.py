@@ -22,6 +22,12 @@ from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from server.telemetry.tracing import (
+    NULL_CONTROL_TRACER,
+    ControlPlaneTracer,
+    format_traceparent,
+    serve_trace_id_int,
+)
 from shared.inference import InputResolutionBinding
 from shared.network.frame_stream import split_host_port
 from shared.resident.carriage import CONTROL_RELAY, ResidentCarriagePlan
@@ -41,6 +47,12 @@ from shared.resident.reports import (
     ResidentStreamStatus,
 )
 from shared.schemas.network import PEER_PROTOCOL
+from shared.telemetry.ids import SpanIdKind, derived_span_id, workflow_to_trace_id_int
+from shared.telemetry.semconv import (
+    PHYSICAL_TASK_ID,
+    ControlPlaneStage,
+    ControlPlaneWindow,
+)
 from shared.utils.ids import new_relay_session_id
 
 from ..network.state import (
@@ -89,6 +101,26 @@ RedispatchCallback = Callable[[str, str], bool]
 EndpointProbe = Callable[[str], ReplicaEndpoint | None]
 # Persists the authoritative CS snapshot.
 PersistCallback = Callable[[], None]
+
+
+def _subject_workflow_id(subject: InvocationSubject) -> str | None:
+    """The workflow id a boundary belongs to, or None for a gated serve subject."""
+    return subject.id if subject.kind is InvocationSubjectKind.WORKFLOW else None
+
+
+def _subject_trace_id(
+    subject: InvocationSubject, task_id: str, request_id: str | None
+) -> int:
+    """The trace id a boundary's control spans and carrier stamps root on.
+
+    A workflow subject derives from the workflow bijection; a gated serve
+    subject owns no workflow and roots its own trace, keyed by its serve task id and
+    request id instead.
+    """
+    workflow_id = _subject_workflow_id(subject)
+    if workflow_id is not None:
+        return workflow_to_trace_id_int(workflow_id)
+    return serve_trace_id_int(task_id, request_id or "")
 
 
 def _selected_carriage(route: ResolvedRoute) -> tuple[str, str]:
@@ -328,6 +360,7 @@ class ResidentCapacityControl:
         idle_sweep_interval_sec: float = 0.0,
         redrive_backoff_sec: float = 0.5,
         max_transient_redrives: int = 3,
+        control: ControlPlaneTracer | None = None,
     ) -> None:
         self._stores = stores
         self._admission = admission
@@ -345,11 +378,17 @@ class ResidentCapacityControl:
         self._idle_sweep_interval = idle_sweep_interval_sec
         self._redrive_backoff = redrive_backoff_sec
         self._max_transient_redrives = max_transient_redrives
+        self._control = control if control is not None else NULL_CONTROL_TRACER
         self._transient_failures: dict[str, int] = {}
         self._attempts: dict[str, _Attempt] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
         self._admit_lock = asyncio.Lock()
         self._sweep_task: asyncio.Task[None] | None = None
+
+    @property
+    def stores(self) -> ResidentStores:
+        """The control-state stores, for read-only observers such as fleet sampling."""
+        return self._stores
 
     def set_worker_delivery(self, delivery: ResidentWorkerDelivery) -> None:
         """Enable the worker-owned data path once the network plane is available."""
@@ -839,9 +878,16 @@ class ResidentCapacityControl:
                     family=family,
                     profile=profile,
                 )
-            handoff = await self._acquire_capacity(
-                orig, family, model_ref, claim, profile
-            )
+            with self._control.boundary_stage(
+                ControlPlaneStage.ADMISSION,
+                ControlPlaneWindow.POST_START,
+                _subject_trace_id(orig.subject, orig.task_id, orig.request_id),
+                orig.invocation_id,
+                **{PHYSICAL_TASK_ID: orig.task_id},
+            ):
+                handoff = await self._acquire_capacity(
+                    orig, family, model_ref, claim, profile
+                )
             if handoff is None:
                 return
         replica = self._stores.directory.get(handoff.replica_id)
@@ -947,6 +993,23 @@ class ResidentCapacityControl:
         origin, an unbindable sidecar, or an unresolved origin holds the credit
         uncertain and re-drives rather than terminalizing.
         """
+        with self._control.boundary_stage(
+            ControlPlaneStage.RELAY,
+            ControlPlaneWindow.POST_START,
+            _subject_trace_id(orig.subject, orig.task_id, orig.request_id),
+            orig.invocation_id,
+            **{PHYSICAL_TASK_ID: orig.task_id},
+        ):
+            await self._relay_bootstrap_impl(orig, claim, profile, handoff, replica)
+
+    async def _relay_bootstrap_impl(
+        self,
+        orig: _Origination,
+        claim: ServiceClaim,
+        profile: AdmissionProfile,
+        handoff: AdmissionHandoff,
+        replica: ReplicaIncarnation,
+    ) -> None:
         deps = self._delivery
         assert deps is not None
         serve = orig.serve
@@ -1055,17 +1118,23 @@ class ResidentCapacityControl:
             serve.open(session_id, handoff, plan)
             return
         assert origin_worker is not None
-        delivered = deps.relay(
-            origin_worker,
-            "resident_handoff",
-            {
-                "task_id": orig.task_id,
-                "call_correlation": orig.call_correlation,
-                "session_id": session_id,
-                "handoff": handoff.model_dump(mode="json"),
-                "carriage_plan": plan.model_dump(mode="json"),
-            },
-        )
+        handoff_payload: dict[str, Any] = {
+            "task_id": orig.task_id,
+            "call_correlation": orig.call_correlation,
+            "session_id": session_id,
+            "handoff": handoff.model_dump(mode="json"),
+            "carriage_plan": plan.model_dump(mode="json"),
+        }
+        if self._control.enabled:
+            # A gated serve subject owns no workflow_id, so its trace is rooted here
+            # rather than borrowed from the workflow bijection: the receiving
+            # worker cannot derive it independently, which is exactly why it rides
+            # this stamp rather than being recomputed at the far end.
+            handoff_payload["traceparent"] = format_traceparent(
+                _subject_trace_id(orig.subject, orig.task_id, orig.request_id),
+                derived_span_id(SpanIdKind.INVOCATION, orig.invocation_id),
+            )
+        delivered = deps.relay(origin_worker, "resident_handoff", handoff_payload)
         if not delivered:
             await self._hold_and_redrive(orig, claim, "origin worker relay failed")
 
@@ -1087,34 +1156,42 @@ class ResidentCapacityControl:
         if attempt.session_id != ack.session_id:
             return
         if ack.outcome is ResidentBootstrapOutcome.ACKED:
-            if claim.state is ClaimState.RESERVED:
-                auth = self._admission.accept_and_authorize(
-                    claim,
-                    idempotency_key=attempt.idempotency_key,
-                    origin_id=attempt.origin_id,
-                    deadline_at=attempt.deadline_at,
+            with self._control.boundary_stage(
+                ControlPlaneStage.PERMIT,
+                ControlPlaneWindow.POST_START,
+                _subject_trace_id(attempt.subject, attempt.task_id, attempt.request_id),
+                attempt.invocation_id,
+                **{PHYSICAL_TASK_ID: attempt.task_id},
+            ):
+                if claim.state is ClaimState.RESERVED:
+                    auth = self._admission.accept_and_authorize(
+                        claim,
+                        idempotency_key=attempt.idempotency_key,
+                        origin_id=attempt.origin_id,
+                        deadline_at=attempt.deadline_at,
+                    )
+                    self._admission.on_stream_started(claim)
+                else:
+                    # A resumed in-flight claim keeps its held credit; re-mint the
+                    # fence.
+                    auth = self._admission.reauthorize(
+                        claim,
+                        idempotency_key=attempt.idempotency_key,
+                        origin_id=attempt.origin_id,
+                        deadline_at=attempt.deadline_at,
+                    )
+                if attempt.serve is not None:
+                    attempt.serve.authorize(attempt.session_id, auth)
+                    return
+                assert attempt.origin_worker is not None
+                delivered = deps.relay(
+                    attempt.origin_worker,
+                    "resident_authorization",
+                    {
+                        "call_correlation": attempt.call_correlation,
+                        "auth": auth.model_dump(mode="json"),
+                    },
                 )
-                self._admission.on_stream_started(claim)
-            else:
-                # A resumed in-flight claim keeps its held credit; re-mint the fence.
-                auth = self._admission.reauthorize(
-                    claim,
-                    idempotency_key=attempt.idempotency_key,
-                    origin_id=attempt.origin_id,
-                    deadline_at=attempt.deadline_at,
-                )
-            if attempt.serve is not None:
-                attempt.serve.authorize(attempt.session_id, auth)
-                return
-            assert attempt.origin_worker is not None
-            delivered = deps.relay(
-                attempt.origin_worker,
-                "resident_authorization",
-                {
-                    "call_correlation": attempt.call_correlation,
-                    "auth": auth.model_dump(mode="json"),
-                },
-            )
             if not delivered:
                 await self._hold_and_redrive_claim(
                     attempt, claim, "authorization relay failed"

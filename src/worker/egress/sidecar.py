@@ -18,12 +18,23 @@ failure, never a retryable provider response.
 import logging
 import threading
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
+from opentelemetry.trace import Span
+
 from shared.outcome import FabricContentStore, OutcomeManifest
+from shared.telemetry.config import TelemetryLevel
+from shared.telemetry.propagation import extract_context
+from shared.telemetry.provider import payload_free_span
+from shared.telemetry.semconv import (
+    PHYSICAL_INVOCATION_ID,
+    PHYSICAL_PERMIT_ID,
+    SPAN_EGRESS,
+)
 from shared.tools.contract import (
     MediatedOperationOutcome,
     MediatedOperationPermit,
@@ -33,6 +44,7 @@ from shared.tools.contract import (
 from shared.tools.model.egress import ModelEgressError
 from shared.tools.model.schema import ModelCompletion
 
+from ..telemetry import otel
 from .fence import fence_reason, materialize_tool_outcome
 from .request_store import CapturedRequest, PendingEgressRequestStore
 
@@ -147,20 +159,50 @@ class MediatedEgressSidecar:
     def stop(self) -> None:
         self._pool.shutdown(wait=False, cancel_futures=True)
 
+    @contextmanager
+    def _egress_span(self, permit: MediatedOperationPermit) -> Iterator[Span | None]:
+        """Open ``flowmesh.egress`` at the boundary its ``traceparent`` carries.
+
+        Neither egress path runs on the task lane the boundary's episode is on --
+        ``_drive`` takes this sidecar's own thread pool and ``egress_now`` the calling
+        facade's thread -- so the parent comes from the permit's carried traceparent
+        rather than ambient context, of which there is none to inherit.
+        """
+        if not otel.emits(TelemetryLevel.FINE):
+            yield None
+            return
+        parent_context = extract_context(permit.traceparent)
+        attributes = otel.new_span_attributes(
+            {
+                PHYSICAL_INVOCATION_ID: permit.invocation_id,
+                PHYSICAL_PERMIT_ID: permit.permit_id,
+            }
+        )
+        with payload_free_span(
+            otel.get_tracer(),
+            SPAN_EGRESS,
+            context=parent_context,
+            attributes=attributes,
+        ) as span:
+            yield span
+
     def _drive(self, permit: MediatedOperationPermit) -> None:
         key = (permit.agent_task_id, permit.call_correlation)
-        try:
-            report = self._produce(permit)
-        except Exception as exc:  # noqa: BLE001 - a crashed egress leaves it ambiguous
-            # No report: the control plane holds the boundary pending and re-drives
-            # under the same idempotency key with a fresh permit.
-            self._log.warning("mediated egress raised, leaving it ambiguous: %s", exc)
-            report = None
-        finally:
-            with self._lock:
-                self._inflight.pop(key, None)
-                cancelled = key in self._cancelled
-                self._cancelled.discard(key)
+        with self._egress_span(permit):
+            try:
+                report = self._produce(permit)
+            except Exception as exc:
+                # No report: the control plane holds the boundary pending and
+                # re-drives under the same idempotency key with a fresh permit.
+                self._log.warning(
+                    "mediated egress raised, leaving it ambiguous: %s", exc
+                )
+                report = None
+            finally:
+                with self._lock:
+                    self._inflight.pop(key, None)
+                    cancelled = key in self._cancelled
+                    self._cancelled.discard(key)
         if report is not None and not cancelled:
             self._sink(report)
 
@@ -229,6 +271,12 @@ class MediatedEgressSidecar:
         terminal reject the facade fails the turn on. Custody is left for the facade to
         reap once the turn resolves.
         """
+        with self._egress_span(permit):
+            return self._egress_now(permit)
+
+    def _egress_now(
+        self, permit: MediatedOperationPermit
+    ) -> ModelCompletion | HeldEgressReject:
         with self._lock:
             if not self._consume_permit(permit.permit_id, permit.deadline_epoch):
                 return HeldEgressReject(reason="permit replay")

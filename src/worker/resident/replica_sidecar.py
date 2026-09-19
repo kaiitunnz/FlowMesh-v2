@@ -12,11 +12,13 @@ gate.
 import asyncio
 import contextlib
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
+from opentelemetry.trace import Span
 from pydantic import ValidationError
 
 from shared.network.relay_frame import RelayFrame, RelayFrameKind
@@ -40,7 +42,17 @@ from shared.resident.wire import (
     KIND_STREAM,
     resident_request_digest,
 )
+from shared.telemetry.config import TelemetryLevel
+from shared.telemetry.propagation import extract_context
+from shared.telemetry.provider import payload_free_span
+from shared.telemetry.semconv import (
+    PHYSICAL_CLAIM_ID,
+    PHYSICAL_INVOCATION_ID,
+    PHYSICAL_REPLICA_ID,
+    SPAN_ENGINE_REQUEST,
+)
 
+from ..telemetry import otel
 from .engine import (
     EngineOpen,
     EngineUnload,
@@ -86,6 +98,7 @@ class ResidentReplicaSidecar:
         self._logger = logger or logging.getLogger("resident-replica-sidecar")
         self._bindings: dict[str, _Binding] = {}
         self._sessions: dict[str, ResidentRelaySession] = {}
+        self._traceparents: dict[str, str | None] = {}
         self._serves: dict[str, asyncio.Task[None]] = {}
         # The live serve task per invocation, so a fresh-session re-drive supersedes its
         # prior attempt and exactly one engine runs per invocation under one credit.
@@ -172,14 +185,24 @@ class ResidentReplicaSidecar:
                 # or window for a reaped session): nothing to route it to.
                 return
             session = self._open_session(
-                frame.session_id, frame.invocation_id, frame.idm, sink or self._sink
+                frame.session_id,
+                frame.invocation_id,
+                frame.idm,
+                sink or self._sink,
+                traceparent=frame.tp,
             )
         await session.on_frame(frame)
         if frame.kind is RelayFrameKind.CANCEL:
             self._reap(frame.session_id)
 
     def _open_session(
-        self, session_id: str, invocation_id: str, idm: str, sink: ResidentFrameSink
+        self,
+        session_id: str,
+        invocation_id: str,
+        idm: str,
+        sink: ResidentFrameSink,
+        *,
+        traceparent: str | None = None,
     ) -> ResidentRelaySession:
         session = ResidentRelaySession(
             session_id=session_id,
@@ -190,6 +213,7 @@ class ResidentReplicaSidecar:
             window_bytes=self._window_bytes,
         )
         self._sessions[session_id] = session
+        self._traceparents[session_id] = traceparent
         self._serves[session_id] = asyncio.ensure_future(
             self._serve(session_id, session)
         )
@@ -248,32 +272,33 @@ class ResidentReplicaSidecar:
             # Open the engine request and acknowledge immediately: the ack marks engine
             # receipt, not completion, so control can authorize the response stream
             # before inference finishes.
-            engine_task = self._open_engine(
-                binding.endpoint, opening, handoff, envelope
-            )
-            try:
-                await session.send_wire(KIND_ACK)
-                following = await session.recv_body_wire(self._stream_deadline)
-                if following is None:
-                    return
-                follow, _ = following
-                auth = RouteAuthorization.model_validate(follow["auth"])
-                gate = binding.gate.check_stream(auth, gate_session)
-                if not gate.admitted:
-                    await session.send_wire(KIND_REJECT, reason=str(gate.rejection))
-                    return
-                if follow.get("kind") != KIND_STREAM:
-                    return
-                self._on_load(binding.gate.load_evidence(auth, "stream"))
-                if envelope is not None:
-                    await self._relay_raw(session, engine_task)
-                else:
-                    await self._relay_parsed(session, engine_task)
-            finally:
-                if not engine_task.done():
-                    engine_task.cancel()
-                    with contextlib.suppress(Exception, asyncio.CancelledError):
-                        await engine_task
+            with self._engine_request_span(session_id, handoff):
+                engine_task = self._open_engine(
+                    binding.endpoint, opening, handoff, envelope
+                )
+                try:
+                    await session.send_wire(KIND_ACK)
+                    following = await session.recv_body_wire(self._stream_deadline)
+                    if following is None:
+                        return
+                    follow, _ = following
+                    auth = RouteAuthorization.model_validate(follow["auth"])
+                    gate = binding.gate.check_stream(auth, gate_session)
+                    if not gate.admitted:
+                        await session.send_wire(KIND_REJECT, reason=str(gate.rejection))
+                        return
+                    if follow.get("kind") != KIND_STREAM:
+                        return
+                    self._on_load(binding.gate.load_evidence(auth, "stream"))
+                    if envelope is not None:
+                        await self._relay_raw(session, engine_task)
+                    else:
+                        await self._relay_parsed(session, engine_task)
+                finally:
+                    if not engine_task.done():
+                        engine_task.cancel()
+                        with contextlib.suppress(Exception, asyncio.CancelledError):
+                            await engine_task
         except (ValidationError, KeyError, httpx.HTTPError, OSError):
             # A malformed follow frame, a dropped engine connection, or a transport
             # error before delivery closes the session without a terminal; the origin
@@ -282,6 +307,36 @@ class ResidentReplicaSidecar:
             pass
         finally:
             self._reap(session_id)
+
+    @contextmanager
+    def _engine_request_span(
+        self, session_id: str, handoff: AdmissionHandoff
+    ) -> Iterator[Span | None]:
+        """Open ``flowmesh.engine_request`` from the bootstrap frame's ``tp``.
+
+        A replica sidecar binding is shared across many invocations from many
+        workflows, so there is no ambient parent to inherit; the bootstrap
+        ``DATA`` frame that opened this session carries the invocation's own
+        context on its ``RelayFrame.tp`` field instead.
+        """
+        if not otel.emits(TelemetryLevel.FINE):
+            yield None
+            return
+        parent_context = extract_context(self._traceparents.get(session_id))
+        attributes = otel.new_span_attributes(
+            {
+                PHYSICAL_INVOCATION_ID: handoff.invocation_id,
+                PHYSICAL_REPLICA_ID: handoff.replica_id,
+                PHYSICAL_CLAIM_ID: handoff.claim_id,
+            }
+        )
+        with payload_free_span(
+            otel.get_tracer(),
+            SPAN_ENGINE_REQUEST,
+            context=parent_context,
+            attributes=attributes,
+        ) as span:
+            yield span
 
     def _open_engine(
         self,
@@ -400,6 +455,7 @@ class ResidentReplicaSidecar:
 
     def _reap(self, session_id: str) -> None:
         self._sessions.pop(session_id, None)
+        self._traceparents.pop(session_id, None)
         task = self._serves.pop(session_id, None)
         if task is not None and task is not asyncio.current_task() and not task.done():
             task.cancel()
@@ -417,4 +473,5 @@ class ResidentReplicaSidecar:
             await asyncio.gather(*pending, return_exceptions=True)
         self._serves.clear()
         self._sessions.clear()
+        self._traceparents.clear()
         self._inflight.clear()

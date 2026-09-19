@@ -49,6 +49,10 @@ and artifacts.
   in `cli/stack/src/flowmesh_cli_stack/env_schema.py`.
 - **[`docs/PLUGINS.md`](docs/PLUGINS.md)** — plugin extension contract,
   loader semantics (`FLOWMESH_PLUGINS`), and a worked example.
+- **[`docs/TELEMETRY.md`](docs/TELEMETRY.md)** — the OpenTelemetry trace and
+  metric substrate: the `SERVER_METRICS_*` knob and its `off`-is-free
+  discipline, trace and span identity and the span tree, and the query
+  surface.
 
 Concrete examples and runnable workflows live in `examples/templates/`.
 When code, APIs, CLI commands, SDK methods, env vars, workflow formats, or

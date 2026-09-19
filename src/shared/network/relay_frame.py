@@ -46,6 +46,7 @@ class RelayFrame:
     seq: int = 0
     ack: int = 0
     payload: bytes = b""
+    tp: str | None = None
 
     @property
     def is_control(self) -> bool:
@@ -63,6 +64,8 @@ class RelayFrame:
         }
         if self.payload:
             fields[b"y"] = self.payload
+        if self.tp:
+            fields[b"t"] = self.tp.encode()
         return fields
 
     @staticmethod
@@ -76,11 +79,12 @@ class RelayFrame:
             seq=int(fields[b"q"]),
             ack=int(fields[b"a"]),
             payload=fields.get(b"y", b""),
+            tp=fields[b"t"].decode() if b"t" in fields else None,
         )
 
     def to_wire(self) -> dict[str, Any]:
         """A JSON-shaped dict for the worker↔supervisor attachment (payload base64)."""
-        return {
+        wire: dict[str, Any] = {
             "kind": self.kind.value,
             "session_id": self.session_id,
             "invocation_id": self.invocation_id,
@@ -90,6 +94,9 @@ class RelayFrame:
             "ack": self.ack,
             "payload": base64.b64encode(self.payload).decode() if self.payload else "",
         }
+        if self.tp:
+            wire["tp"] = self.tp
+        return wire
 
     @staticmethod
     def from_wire(data: dict[str, Any]) -> "RelayFrame":
@@ -103,6 +110,7 @@ class RelayFrame:
             seq=int(data.get("seq", 0)),
             ack=int(data.get("ack", 0)),
             payload=base64.b64decode(raw) if raw else b"",
+            tp=data.get("tp") or None,
         )
 
 

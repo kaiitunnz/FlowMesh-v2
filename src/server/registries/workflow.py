@@ -112,9 +112,14 @@ class Workflow(BaseModel):
 
 
 def _create_workflow_record(
-    workflow_id: str, tasks: list[TaskRecord]
+    workflow_id: str, tasks: list[TaskRecord], submitted_at: str | None = None
 ) -> tuple[WorkflowRecord, list[str], list[str]]:
-    """Return (WorkflowRecord, remaining_task_ids, failed_task_ids)"""
+    """Return (WorkflowRecord, remaining_task_ids, failed_task_ids)
+
+    ``submitted_at`` is the caller's own start of submission. Stamping it here instead
+    would time the record's construction, which a v2 submission reaches only after
+    compilation and the first ledger drive.
+    """
     task_ids: list[str] = []
     remaining_tasks: list[str] = []
     failed_tasks: list[str] = []
@@ -127,7 +132,11 @@ def _create_workflow_record(
                 failed_tasks.append(task.task_id)
             case _:
                 remaining_tasks.append(task.task_id)
-    record = WorkflowRecord(workflow_id=workflow_id, task_ids=task_ids)
+    record = WorkflowRecord(
+        workflow_id=workflow_id,
+        task_ids=task_ids,
+        submitted_at=submitted_at or now_iso(),
+    )
     return record, remaining_tasks, failed_tasks
 
 
@@ -148,9 +157,10 @@ class WorkflowRegistry:
         workflow_id: str,
         tasks: list[TaskRecord],
         v2: PersistedV2Workflow | None = None,
+        submitted_at: str | None = None,
     ) -> None:
         record, remaining_tasks, failed_tasks = _create_workflow_record(
-            workflow_id, tasks
+            workflow_id, tasks, submitted_at
         )
         with self._rds.sync.control_pipeline() as pipe:
             pipe.sadd(WORKFLOWS_SET_KEY, workflow_id)
@@ -168,9 +178,10 @@ class WorkflowRegistry:
         workflow_id: str,
         tasks: list[TaskRecord],
         v2: PersistedV2Workflow | None = None,
+        submitted_at: str | None = None,
     ) -> None:
         record, remaining_tasks, failed_tasks = _create_workflow_record(
-            workflow_id, tasks
+            workflow_id, tasks, submitted_at
         )
         async with self._rds.asyncio.control_pipeline() as pipe:
             pipe.sadd(WORKFLOWS_SET_KEY, workflow_id)

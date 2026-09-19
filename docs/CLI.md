@@ -17,7 +17,7 @@ flowmesh worker   {list, info}
 flowmesh node     {list, info, worker {list, start, stop}}
 flowmesh ssh      {connect, run, proxy, connections}
 flowmesh result   {fetch, download}
-flowmesh trace    {fetch, analyze}
+flowmesh trace    {fetch, analyze, tree, aggregate}
 flowmesh system   {metrics}
 flowmesh stack    {build, push, pull, pullall, up, down, restart, ps, logs}
 flowmesh stack bundle {export, init}
@@ -61,6 +61,19 @@ flowmesh trace analyze <wfl-id> --format critical-path
 `trace fetch` accepts `spans`, `assets`, or `lineage`. `trace analyze
 --format` accepts `rich`, `critical-path` (`cp`), `end-to-end` (`e2e`),
 `queuing`, `lineage`, or `json`.
+
+Query the cluster telemetry a deployment's telemetry store holds:
+
+```bash
+flowmesh trace tree <wfl-id>
+flowmesh trace aggregate --metric <name> --group-by flowmesh.worker_id --stat p95
+```
+
+`trace tree` prints a workflow's spans as an indented tree. `trace aggregate`
+rolls one metric up by one attribute key, with `--stat` selecting
+`count`/`sum`/`avg`/`min`/`max`/`p50`/`p95`/`p99` and `--kind` selecting
+`gauge` or `histogram`. See [`TELEMETRY.md`](TELEMETRY.md) for the query
+surface, span/attribute semantics, and access scope.
 
 ## Local stack lifecycle
 

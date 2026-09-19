@@ -42,6 +42,12 @@ class WorkItemStatus(StrEnum):
     CANCELLED = "cancelled"  # terminal, withdrawn by cancellation
 
 
+TERMINAL_WORK_ITEM_STATUSES = frozenset(
+    {WorkItemStatus.SETTLED, WorkItemStatus.CANCELLED}
+)
+"""The work-item statuses past which no further attempt is admissible."""
+
+
 class AttemptStatus(StrEnum):
     """Lifecycle of one physical execution of a work item."""
 

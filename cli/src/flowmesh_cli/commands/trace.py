@@ -1,7 +1,8 @@
-"""``flowmesh trace`` — fetch raw rows or run the analyzer."""
+"""``flowmesh trace`` — raw rows, the analyzer, and telemetry span/metric queries."""
 
 import json
 from collections import defaultdict
+from collections.abc import Iterator
 from enum import StrEnum
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from flowmesh.models.traces import (
     EventSummary,
     ProfileSummary,
     TaskTiming,
+    TraceSpanNode,
 )
 from flowmesh.resources.traces import TraceType
 from pydantic import BaseModel
@@ -26,7 +28,9 @@ from rich.tree import Tree
 from ..core import logging
 from ..core.typer import get_typer
 
-app = get_typer(help="Workflow trace: fetch raw rows or run the analyzer.")
+app = get_typer(
+    help="Workflow trace: raw rows, the analyzer, and telemetry span/metric queries."
+)
 console = Console()
 
 
@@ -39,6 +43,22 @@ class _AnalyzeView(StrEnum):
     QUEUING = "queuing"
     LINEAGE = "lineage"
     JSON = "json"
+
+
+class _AggregateStat(StrEnum):
+    COUNT = "count"
+    SUM = "sum"
+    AVG = "avg"
+    MIN = "min"
+    MAX = "max"
+    P50 = "p50"
+    P95 = "p95"
+    P99 = "p99"
+
+
+class _MetricKind(StrEnum):
+    GAUGE = "gauge"
+    HISTOGRAM = "histogram"
 
 
 _ANALYZE_VIEW_ALIAS: dict[_AnalyzeView, _AnalyzeView] = {
@@ -380,3 +400,103 @@ def analyze(
             _print_queuing(summary)
         case _AnalyzeView.LINEAGE:
             _print_lineage(summary)
+
+
+def _span_label(node: TraceSpanNode) -> str:
+    """One span's line: its name, its duration, and the ids that identify its level."""
+    identity = [
+        f"{key}={node.logical[key]}"
+        for key in ("activation_id", "operator_id")
+        if key in node.logical
+    ]
+    identity += [
+        f"{key}={node.physical[key]}"
+        for key in ("work_item_id", "attempt_id", "invocation_id", "worker_id")
+        if key in node.physical
+    ]
+    suffix = f"  {' '.join(identity[:2])}" if identity else ""
+    status = "" if node.status in ("", "Unset", "OK") else f"  [{node.status}]"
+    return f"{node.name}  {node.duration_seconds:.3f}s{status}{suffix}"
+
+
+def _span_tree_lines(nodes: list[TraceSpanNode], depth: int = 0) -> Iterator[str]:
+    for node in nodes:
+        yield f"{'  ' * depth}{_span_label(node)}"
+        yield from _span_tree_lines(node.children, depth + 1)
+
+
+@app.command("tree")
+def tree(
+    workflow_id: str = typer.Argument(..., help="Workflow identifier"),
+    as_json: bool = typer.Option(
+        False, "--json", help="Print the tree as JSON instead of indented text."
+    ),
+) -> None:
+    """Render a workflow's spans as an indented tree."""
+    client = FlowMesh()
+    try:
+        result = client.traces.tree(workflow_id)
+    except FlowMeshError as exc:
+        logging.error(str(exc))
+        raise typer.Exit(code=1)
+
+    if as_json:
+        console.print(RichJSON.from_data(result.model_dump(mode="json")))
+        return
+
+    logging.log(
+        f"{result.workflow_id}  trace={result.trace_id}  "
+        f"spans={result.span_count}  {result.total_duration_seconds:.3f}s"
+    )
+    if not result.roots:
+        logging.log("(no spans recorded for this workflow)")
+        return
+    for line in _span_tree_lines(result.roots):
+        logging.log(line)
+
+
+@app.command("aggregate")
+def aggregate(
+    metric: str = typer.Option(..., "--metric", "-m", help="Metric name to aggregate"),
+    group_by: str = typer.Option(
+        ..., "--group-by", "-g", help="Attribute key to group the metric by"
+    ),
+    stat: _AggregateStat = typer.Option(
+        _AggregateStat.AVG, "--stat", "-s", help="Statistic to apply"
+    ),
+    kind: _MetricKind = typer.Option(
+        _MetricKind.GAUGE, "--kind", "-k", help="Metric kind selecting the store table"
+    ),
+    as_json: bool = typer.Option(
+        False, "--json", help="Print the aggregate as JSON instead of a table."
+    ),
+) -> None:
+    """Aggregate one telemetry metric, grouped by one attribute key."""
+    client = FlowMesh()
+    try:
+        result = client.traces.aggregate(metric, group_by, stat.value, kind.value)
+    except FlowMeshError as exc:
+        logging.error(str(exc))
+        raise typer.Exit(code=1)
+
+    if as_json:
+        console.print(RichJSON.from_data(result.model_dump(mode="json")))
+        return
+
+    if not result.buckets:
+        logging.log(f"(no datapoints for metric '{result.metric}')")
+        return
+    table = Table(
+        title=f"{result.metric} — {result.stat} by {result.group_by}",
+        box=SIMPLE,
+        header_style="bold cyan",
+        title_style="bold",
+    )
+    table.add_column(result.group_by, style="cyan", no_wrap=True)
+    table.add_column(result.stat, justify="right", style="bold")
+    table.add_column("n", justify="right", style="dim")
+    for bucket in sorted(result.buckets, key=lambda b: b.value, reverse=True):
+        table.add_row(
+            bucket.group_value, f"{bucket.value:.3f}", str(bucket.sample_count)
+        )
+    console.print(table)

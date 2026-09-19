@@ -89,6 +89,16 @@ STACK_ENV_SCHEMA = EnvSchema(
             ],
         ),
         EnvSection(
+            title="Compose Settings",
+            vars=[
+                EnvVar(
+                    "COMPOSE_PROFILES",
+                    "",
+                    description="Optional compose profiles to deploy (e.g. telemetry).",
+                ),
+            ],
+        ),
+        EnvSection(
             title="Node Identity",
             vars=[
                 EnvVar(
@@ -1010,6 +1020,135 @@ STACK_ENV_SCHEMA = EnvSchema(
                     var_type=EnvVarType.INT,
                     min_value=1,
                 )
+            ],
+        ),
+        EnvSection(
+            title="Telemetry",
+            vars=[
+                EnvVar(
+                    "SERVER_METRICS_TELEMETRY_LEVEL",
+                    "off",
+                    description="OTel span/metric verbosity.",
+                    var_type=EnvVarType.ENUM,
+                    choices=["off", "coarse", "fine", "full"],
+                ),
+                EnvVar(
+                    "SERVER_METRICS_TRACES_ENABLED",
+                    "true",
+                    description="Whether to emit OTel traces.",
+                    var_type=EnvVarType.BOOL,
+                ),
+                EnvVar(
+                    "SERVER_METRICS_METRICS_ENABLED",
+                    "true",
+                    description="Whether to emit OTel metrics.",
+                    var_type=EnvVarType.BOOL,
+                ),
+                EnvVar(
+                    "SERVER_METRICS_TRACE_SAMPLE_RATIO",
+                    "1.0",
+                    description="Per-workflow trace sampling ratio.",
+                    var_type=EnvVarType.FLOAT,
+                    min_value=0.0,
+                    max_value=1.0,
+                ),
+                EnvVar(
+                    "SERVER_METRICS_OTLP_ENDPOINT",
+                    "http://localhost:4317",
+                    description="OTLP collector endpoint; unset disables export.",
+                ),
+                EnvVar(
+                    "SERVER_METRICS_OTLP_TIMEOUT_SEC",
+                    "10",
+                    description="OTLP export request timeout (seconds).",
+                    var_type=EnvVarType.INT,
+                    min_value=1,
+                ),
+                EnvVar(
+                    "SERVER_METRICS_RESOURCE_SAMPLE_SEC",
+                    "15",
+                    description="Worker GPU/resource sampling interval (seconds).",
+                    var_type=EnvVarType.INT,
+                    min_value=1,
+                ),
+                EnvVar(
+                    "SERVER_METRICS_CLICKHOUSE_URL",
+                    "",
+                    description=(
+                        "ClickHouse HTTP URL for the store read port "
+                        "(e.g. http://localhost:8123); unset disables queries."
+                    ),
+                ),
+                EnvVar(
+                    "SERVER_METRICS_CLICKHOUSE_DATABASE",
+                    "flowmesh",
+                    description="ClickHouse database for the store read port.",
+                ),
+                EnvVar(
+                    "SERVER_METRICS_CLICKHOUSE_USERNAME",
+                    "default",
+                    description="ClickHouse user for the store read port.",
+                ),
+                EnvVar(
+                    "SERVER_METRICS_CLICKHOUSE_PASSWORD",
+                    "flowmesh",
+                    description="ClickHouse password for the store read port.",
+                ),
+                EnvVar(
+                    "SERVER_METRICS_CLICKHOUSE_TIMEOUT_SEC",
+                    "10",
+                    description="ClickHouse query timeout (seconds).",
+                    var_type=EnvVarType.FLOAT,
+                    min_value=0.0,
+                ),
+                EnvVar(
+                    "TELEMETRY_CLICKHOUSE_DSN",
+                    "clickhouse://clickhouse:9000?dial_timeout=10s",
+                    description="ClickHouse DSN the collector writes to.",
+                ),
+                EnvVar(
+                    "TELEMETRY_CLICKHOUSE_DATABASE",
+                    "flowmesh",
+                    description="ClickHouse database for the telemetry profile.",
+                ),
+                EnvVar(
+                    "TELEMETRY_CLICKHOUSE_USERNAME",
+                    "default",
+                    description="ClickHouse user for the telemetry profile.",
+                ),
+                EnvVar(
+                    "TELEMETRY_CLICKHOUSE_PASSWORD",
+                    "flowmesh",
+                    description="ClickHouse password for the telemetry profile.",
+                ),
+                EnvVar(
+                    "TELEMETRY_CLICKHOUSE_HTTP_PORT",
+                    "8123",
+                    description="Host port for the ClickHouse HTTP interface.",
+                    var_type=EnvVarType.INT,
+                    min_value=1,
+                ),
+                EnvVar(
+                    "TELEMETRY_CLICKHOUSE_NATIVE_PORT",
+                    "9000",
+                    description="Host port for the ClickHouse native interface.",
+                    var_type=EnvVarType.INT,
+                    min_value=1,
+                ),
+                EnvVar(
+                    "TELEMETRY_OTLP_GRPC_PORT",
+                    "4317",
+                    description="Host port for the collector's OTLP gRPC receiver.",
+                    var_type=EnvVarType.INT,
+                    min_value=1,
+                ),
+                EnvVar(
+                    "TELEMETRY_OTLP_HTTP_PORT",
+                    "4318",
+                    description="Host port for the collector's OTLP HTTP receiver.",
+                    var_type=EnvVarType.INT,
+                    min_value=1,
+                ),
             ],
         ),
         EnvSection(

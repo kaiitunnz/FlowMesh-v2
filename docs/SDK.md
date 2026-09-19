@@ -55,6 +55,13 @@ async with AsyncFlowMesh(base_url="...", api_key="...") as client:
 - **Fetch and analyze traces** — `client.traces.fetch(wf_id, "spans")`
   yields JSONL rows; `client.traces.analyze(wf_id)` returns a profile
   summary.
+- **Query cluster telemetry** — `client.traces.tree(wf_id)` returns a
+  `TraceTree`, the workflow's spans assembled into their parent/child
+  hierarchy with the logical and physical attribute views kept separate;
+  `client.traces.aggregate(metric, group_by, stat="p95")` returns a
+  `TraceAggregate`, one bucket per distinct value of the grouping
+  attribute, fleet-wide and behind a system-admin right. Both read
+  through the server.
 - **Cancel** — `client.workflows.cancel(wf_id)`.
 
 ## Cursor pagination

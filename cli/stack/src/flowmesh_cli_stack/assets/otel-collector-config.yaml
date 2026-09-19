@@ -1,0 +1,128 @@
+# OTel Collector pipeline for the FlowMesh telemetry store.
+#
+# Write-path only: this Collector receives OTLP from FlowMesh processes, enforces the
+# flowmesh.logical.*/flowmesh.physical.* attribute allow-list as defence in depth, and
+# exports to ClickHouse. It never serves a query -- the server-side TelemetryStore reads
+# ClickHouse directly, and this file must never gain an endpoint the server, CLI or SDK
+# call. ${env:VAR} placeholders are expanded by the Collector process itself from its own
+# container environment (set in compose.yml), not by docker compose.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
+  # Allow-list enforcement: keep only the attribute keys a span or metric datapoint is
+  # permitted to carry -- the flowmesh.logical./physical./gpu. namespaces, plus the three
+  # bare (non-prefixed) join keys flowmesh.node_id/worker_id/role that resource-shaped
+  # attributes also travel as on a datapoint (e.g. the GPU sampler's per-gauge node/worker
+  # attribution). Producers already must not emit anything else; this drops it centrally
+  # so one mis-instrumented producer cannot leak a payload attribute to the store.
+  # tests/server/telemetry enumerates every flowmesh.*-valued public constant in
+  # shared/telemetry/semconv.py (by value, not by a naming convention) and asserts each
+  # attribute-key one is covered here, so a new key under any naming convention fails the
+  # gate loudly instead of being silently dropped.
+  transform/allowlist:
+    error_mode: ignore
+    trace_statements:
+      - context: span
+        statements:
+          - keep_matching_keys(span.attributes, "^flowmesh\\.(logical|physical|gpu)\\.|^flowmesh\\.(node_id|worker_id|role)$")
+          # A span's status message and its events are the two fields no instrumentation
+          # site names: OTel writes an exception's message and stacktrace into both by
+          # default. Producers suppress that at the span, and this drops it again here,
+          # so a span reaching the store carries no free text whatever produced it.
+          - set(span.status.message, "")
+      - context: spanevent
+        statements:
+          - keep_matching_keys(spanevent.attributes, "^flowmesh\\.(logical|physical|gpu)\\.|^flowmesh\\.(node_id|worker_id|role)$")
+    metric_statements:
+      - context: datapoint
+        statements:
+          - keep_matching_keys(datapoint.attributes, "^flowmesh\\.(logical|physical|gpu)\\.|^flowmesh\\.(node_id|worker_id|role)$")
+  # Only a control-plane stage span becomes a duration histogram; every other span
+  # would land in one unnamed bucket together. The regex is OTTL's, inside a
+  # single-quoted YAML scalar that passes backslashes through untouched, so a dot is
+  # escaped for OTTL as \\. -- \. is what a YAML reader wants and OTTL rejects it,
+  # taking the whole collector down at startup.
+  filter/control_spans:
+    error_mode: ignore
+    traces:
+      span:
+        - 'not IsMatch(name, "^flowmesh\\.control\\.")'
+  batch:
+    send_batch_size: 512
+    timeout: 5s
+
+connectors:
+  # Derives the per-stage duration histogram from flowmesh.control.* spans: producers
+  # emit spans only, and this connector is what turns them into a metric. The traces
+  # pipeline feeding it filters to those spans, so a stage's histogram is not summed
+  # together with workflow, episode and task spans.
+  #
+  # exclude_dimensions drops the three dimensions the connector splits a series by
+  # before it names one. They are not in the attribute allow-list, so they would be
+  # stripped on the way to the store anyway, and a stage's successful and failed points
+  # would arrive sharing every key column -- one series per key has to hold at the
+  # producer, because a reader cannot recover a split it can no longer see. A per-stage
+  # error rate would need status.code added to the allow-list and to the series key
+  # together: adding it to the series key without the allow-list reinstates the
+  # undercount, by re-splitting a series the store can no longer tell apart.
+  span_metrics:
+    namespace: flowmesh
+    histogram:
+      explicit:
+        buckets: [5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 2.5s, 5s, 10s, 30s]
+    exclude_dimensions: [span.name, span.kind, status.code]
+    dimensions:
+      - name: flowmesh.physical.stage
+      - name: flowmesh.physical.window
+    aggregation_cardinality_limit: 1000
+    aggregation_temporality: "AGGREGATION_TEMPORALITY_CUMULATIVE"
+
+exporters:
+  # create_schema:false -- the traces table is hand-authored (clickhouse-init.sql) so its
+  # ORDER BY/ENGINE can be a trace-id-leading ReplacingMergeTree; see that file for why.
+  clickhouse/traces:
+    endpoint: ${env:TELEMETRY_CLICKHOUSE_DSN}
+    database: ${env:TELEMETRY_CLICKHOUSE_DATABASE}
+    username: ${env:TELEMETRY_CLICKHOUSE_USERNAME}
+    password: ${env:TELEMETRY_CLICKHOUSE_PASSWORD}
+    create_schema: false
+    traces_table_name: flowmesh_spans
+  # create_schema:true -- no ORDER BY/ENGINE override is needed for gauges or the
+  # spanmetrics histogram, so the exporter owns and creates their schema.
+  clickhouse/metrics:
+    endpoint: ${env:TELEMETRY_CLICKHOUSE_DSN}
+    database: ${env:TELEMETRY_CLICKHOUSE_DATABASE}
+    username: ${env:TELEMETRY_CLICKHOUSE_USERNAME}
+    password: ${env:TELEMETRY_CLICKHOUSE_PASSWORD}
+    create_schema: true
+    metrics_tables:
+      gauge:
+        name: flowmesh_metrics_gauge
+      histogram:
+        name: flowmesh_metrics_histogram
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, transform/allowlist, batch]
+      exporters: [clickhouse/traces]
+    traces/spanmetrics:
+      receivers: [otlp]
+      processors: [memory_limiter, transform/allowlist, filter/control_spans, batch]
+      exporters: [span_metrics]
+    metrics:
+      receivers: [otlp, span_metrics]
+      processors: [memory_limiter, transform/allowlist, batch]
+      exporters: [clickhouse/metrics]

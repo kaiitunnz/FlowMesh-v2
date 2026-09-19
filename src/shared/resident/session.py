@@ -25,6 +25,7 @@ from shared.resident.wire import (
     encode_body_msg,
     encode_msg,
 )
+from shared.telemetry.propagation import ambient_traceparent
 
 from .transport import ResidentFrameSink
 
@@ -98,6 +99,7 @@ class ResidentRelaySession:
                 idm=self._idm,
                 direction=self._send_dir,
                 seq=self._send_seq,
+                tp=ambient_traceparent(),
                 payload=payload,
             )
         )
@@ -164,6 +166,7 @@ class ResidentRelaySession:
                 invocation_id=self._invocation_id,
                 idm=self._idm,
                 direction=self._send_dir,
+                tp=ambient_traceparent(),
             )
         )
 
@@ -176,5 +179,6 @@ class ResidentRelaySession:
                 idm=self._idm,
                 direction=self._send_dir,
                 ack=self._recv_consumed,
+                tp=ambient_traceparent(),
             )
         )

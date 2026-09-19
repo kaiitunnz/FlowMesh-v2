@@ -104,6 +104,18 @@ class OperatorKind(StrEnum):
     LOOP_CONTEXT = "loop_context"
 
 
+REGION_OPERATOR_KINDS = frozenset(
+    {
+        OperatorKind.BRANCH,
+        OperatorKind.MERGE,
+        OperatorKind.SPAWN,
+        OperatorKind.JOIN,
+        OperatorKind.LOOP_CONTEXT,
+    }
+)
+"""The operator kinds that settle in the ledger instead of dispatching."""
+
+
 class ModelRef(BaseModel):
     """A logical, versioned reference to a model identity.
 

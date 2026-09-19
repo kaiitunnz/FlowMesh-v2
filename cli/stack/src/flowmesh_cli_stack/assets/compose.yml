@@ -185,10 +185,67 @@ services:
       retries: 3
       start_period: 40s
 
+  otel_collector:
+    image: otel/opentelemetry-collector-contrib:0.161.0
+    profiles: [telemetry]
+    container_name: ${FLOWMESH_STACK_SLUG:-flowmesh_node}_otel_collector
+    configs:
+      - source: flowmesh_otel_collector_config
+        target: /etc/otelcol-contrib/config.yaml
+    environment:
+      TELEMETRY_CLICKHOUSE_DSN: ${TELEMETRY_CLICKHOUSE_DSN:-clickhouse://clickhouse:9000?dial_timeout=10s}
+      TELEMETRY_CLICKHOUSE_DATABASE: ${TELEMETRY_CLICKHOUSE_DATABASE:-flowmesh}
+      TELEMETRY_CLICKHOUSE_USERNAME: ${TELEMETRY_CLICKHOUSE_USERNAME:-default}
+      TELEMETRY_CLICKHOUSE_PASSWORD: ${TELEMETRY_CLICKHOUSE_PASSWORD:-flowmesh}
+    ports:
+      - "${TELEMETRY_OTLP_GRPC_PORT:-4317}:4317"
+      - "${TELEMETRY_OTLP_HTTP_PORT:-4318}:4318"
+    restart: unless-stopped
+    networks:
+      - flowmesh_node_network
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+        required: false
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    profiles: [telemetry]
+    container_name: ${FLOWMESH_STACK_SLUG:-flowmesh_node}_clickhouse
+    configs:
+      - source: flowmesh_clickhouse_init
+        target: /docker-entrypoint-initdb.d/flowmesh-init.sql
+    environment:
+      CLICKHOUSE_DB: ${TELEMETRY_CLICKHOUSE_DATABASE:-flowmesh}
+      # Setting a password (even for the built-in "default" user) is what makes the
+      # official image enable network access for it at all -- unset, it locks the user
+      # to local-socket-only, which would make it unreachable from the collector and
+      # store containers.
+      CLICKHOUSE_PASSWORD: ${TELEMETRY_CLICKHOUSE_PASSWORD:-flowmesh}
+    ports:
+      - "${TELEMETRY_CLICKHOUSE_HTTP_PORT:-8123}:8123"
+      - "${TELEMETRY_CLICKHOUSE_NATIVE_PORT:-9000}:9000"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    restart: unless-stopped
+    networks:
+      - flowmesh_node_network
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
 networks:
   flowmesh_node_network:
     name: ${FLOWMESH_STACK_SLUG:-flowmesh_node}_network
     driver: bridge
+
+configs:
+  flowmesh_otel_collector_config:
+    file: ./otel-collector-config.yaml
+  flowmesh_clickhouse_init:
+    file: ./clickhouse-init.sql
 
 volumes:
   redis_control_data:
@@ -204,3 +261,5 @@ volumes:
   flowmesh_plugin_data:
     external: true
     name: ${FLOWMESH_PLUGIN_DATA_VOLUME:-${FLOWMESH_STACK_SLUG:-flowmesh_node}_plugin_data}
+  clickhouse_data:
+    name: ${FLOWMESH_STACK_SLUG:-flowmesh_node}_clickhouse_data

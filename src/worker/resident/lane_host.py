@@ -248,6 +248,7 @@ class ResidentLaneHost:
                 carriage_plan=ResidentCarriagePlan.model_validate(
                     frame["carriage_plan"]
                 ),
+                traceparent=frame.get("traceparent"),
             )
         )
 

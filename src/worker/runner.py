@@ -33,6 +33,19 @@ from shared.tasks.specs import (
     TaskSpecStrictBase,
 )
 from shared.tasks.worker_message import HardwareUsage, WorkerHardware, WorkerTaskMessage
+from shared.telemetry.config import (
+    DISABLED_TELEMETRY_CONFIG,
+    TelemetryConfig,
+    TelemetryLevel,
+)
+from shared.telemetry.propagation import extract_context
+from shared.telemetry.provider import payload_free_span
+from shared.telemetry.semconv import (
+    LOGICAL_WORKFLOW_ID,
+    PHYSICAL_TASK_ID,
+    PHYSICAL_WORKER_ID,
+    SPAN_TASK,
+)
 from shared.tools.contract import MediatedOperationPermit
 from shared.tools.model.schema import MODEL_INTERFACE
 from shared.tools.search.schema import DEFAULT_SEARCH_PROVIDER
@@ -48,6 +61,7 @@ from .executors.utils.checkpoints import get_http_destination, write_executor_re
 from .lifecycle import Lifecycle
 from .model_turn import HeldModelEgress, ModelTurnRendezvous, ResponsesFacade
 from .resident.lane_host import ResidentLaneHost
+from .telemetry import otel
 from .utils.logging import TaskLogEmitter
 
 
@@ -87,7 +101,9 @@ class Runner:
         peer_enabled: bool = False,
         peer_material: MutualTlsMaterial | None = None,
         peer_listener_sock: socket.socket | None = None,
+        telemetry: TelemetryConfig | None = None,
     ):
+        otel.configure(telemetry or DISABLED_TELEMETRY_CONFIG)
         self.lifecycle = lifecycle
         self.task_stream = task_stream
         self.results_dir = results_dir
@@ -413,6 +429,37 @@ class Runner:
                 retryable=False,
             )
         return hydrated
+
+    def _run_executor(
+        self,
+        executor: Executor,
+        msg: WorkerTaskMessage,
+        out_dir: Path,
+    ) -> BaseExecutorResult | EpisodeStepResult | None:
+        """Run the executor inside ``flowmesh.task``, entering the propagated context.
+
+        Wraps every task type; an executor's own shipped ``task`` span, where it opens
+        one, nests inside this one. At ``off`` this opens nothing and calls the executor
+        directly, leaving the shipped span as the analyzer's only root.
+        """
+        if not otel.emits(TelemetryLevel.COARSE):
+            return executor.run(msg, out_dir)
+        parent_context = extract_context(msg.traceparent)
+        attributes = otel.new_span_attributes(
+            {
+                PHYSICAL_TASK_ID: msg.task_id,
+                LOGICAL_WORKFLOW_ID: msg.workflow_id,
+                PHYSICAL_WORKER_ID: self.lifecycle.worker_id,
+            }
+        )
+        with otel.workflow_trace_context(msg.workflow_id):
+            with payload_free_span(
+                otel.get_tracer(),
+                SPAN_TASK,
+                context=parent_context,
+                attributes=attributes,
+            ):
+                return executor.run(msg, out_dir)
 
     def _resolve_output_dir(self, task_id: str) -> Path:
         """Prepare and return the canonical output directory for a task's results."""
@@ -867,7 +914,7 @@ class Runner:
                         executor_to_run = self._active_executor
                         if stop_before_start:
                             executor_to_run.stop(task_id)
-                    out = executor_to_run.run(msg, out_dir)
+                    out = self._run_executor(executor_to_run, msg, out_dir)
                     self._write_results(
                         task_id,
                         spec,

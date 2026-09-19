@@ -8,10 +8,20 @@ partitions content by its principal, and is authoritative for the manifest ident
 import requests
 
 from shared.content import ContentStoreError, ObjectWriteAck
+from shared.telemetry.propagation import inject_ambient_traceparent
 from shared.utils.http import auth_headers
 
 from .content_store import FabricContentStore, OutcomeHydrationError
 from .manifest import OutcomeManifest
+
+
+def _headers() -> dict[str, str]:
+    """The auth headers plus the ambient trace context's ``traceparent``.
+
+    The worker's content-store calls run inside a task's span, so the ambient context
+    is the right one to forward; with no active span the inject is a no-op.
+    """
+    return inject_ambient_traceparent(auth_headers())
 
 
 class HttpFabricContentStore(FabricContentStore):
@@ -28,7 +38,7 @@ class HttpFabricContentStore(FabricContentStore):
         resp = requests.put(
             self._url("/objects"),
             data=data,
-            headers={**auth_headers(), "Content-Type": "application/octet-stream"},
+            headers={**_headers(), "Content-Type": "application/octet-stream"},
             timeout=self._timeout,
         )
         if resp.status_code >= 400:
@@ -39,7 +49,7 @@ class HttpFabricContentStore(FabricContentStore):
         resp = requests.get(
             self._url(""),
             params={"idem": idempotency_key},
-            headers=auth_headers(),
+            headers=_headers(),
             timeout=self._timeout,
         )
         if resp.status_code == 404:
@@ -57,7 +67,7 @@ class HttpFabricContentStore(FabricContentStore):
             self._url(""),
             params={"idem": idempotency_key},
             data=data,
-            headers={**auth_headers(), "Content-Type": media_type},
+            headers={**_headers(), "Content-Type": media_type},
             timeout=self._timeout,
         )
         if resp.status_code >= 400:
@@ -66,7 +76,7 @@ class HttpFabricContentStore(FabricContentStore):
 
     def read(self, digest: str) -> bytes:
         resp = requests.get(
-            self._url(f"/{digest}"), headers=auth_headers(), timeout=self._timeout
+            self._url(f"/{digest}"), headers=_headers(), timeout=self._timeout
         )
         if resp.status_code == 404:
             raise OutcomeHydrationError(f"no content for {digest}")

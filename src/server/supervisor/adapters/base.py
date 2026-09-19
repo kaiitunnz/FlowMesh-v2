@@ -187,6 +187,23 @@ class WorkerAdapter(ABC):
             "PREDOWNLOAD_MODEL_LIST": config.predownload_model_list,
             "NEBULA_API_TOKEN": to_env_str(config.nebula_api_token),
             "NEBULA_API_BASE_URL": env.NEBULA_API_BASE_URL,
+            "SERVER_METRICS_TELEMETRY_LEVEL": env.SERVER_METRICS_TELEMETRY_LEVEL,
+            "SERVER_METRICS_TRACES_ENABLED": to_env_str(
+                env.SERVER_METRICS_TRACES_ENABLED
+            ),
+            "SERVER_METRICS_METRICS_ENABLED": to_env_str(
+                env.SERVER_METRICS_METRICS_ENABLED
+            ),
+            "SERVER_METRICS_TRACE_SAMPLE_RATIO": to_env_str(
+                env.SERVER_METRICS_TRACE_SAMPLE_RATIO
+            ),
+            "SERVER_METRICS_OTLP_ENDPOINT": env.SERVER_METRICS_OTLP_ENDPOINT,
+            "SERVER_METRICS_OTLP_TIMEOUT_SEC": to_env_str(
+                env.SERVER_METRICS_OTLP_TIMEOUT_SEC
+            ),
+            "SERVER_METRICS_RESOURCE_SAMPLE_SEC": to_env_str(
+                env.SERVER_METRICS_RESOURCE_SAMPLE_SEC
+            ),
         }
 
 

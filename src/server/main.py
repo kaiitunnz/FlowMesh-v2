@@ -20,8 +20,18 @@ if __name__ == "__main__" and __package__ is None:
     __package__ = "server"
     sys.modules.setdefault("server.main", sys.modules[__name__])
 
+from server.telemetry.tracing import ControlPlaneTracer
 from shared._version import FLOWMESH_RELEASE_VERSION
 from shared.outcome import ManifestRef, OutcomeCarrier
+from shared.telemetry.config import TelemetryLevel
+from shared.telemetry.provider import build_meter, build_tracer
+from shared.telemetry.semconv import (
+    RESOURCE_ROLE,
+    SERVICE_NAME,
+    SERVICE_VERSION,
+    ProcessRole,
+    ServiceName,
+)
 
 from .auth import reconcile_resources, resolve_system_principal
 from .clients import RedisClient
@@ -36,6 +46,7 @@ from .network.reverse_relay import (
     RelayStreamStore,
 )
 from .network.service import NetworkPlane
+from .orchestration.telemetry import build_workflow_span_emitter
 from .registries import WorkerRegistry, WorkflowRegistry
 from .registries.node import NodeRegistry
 from .registries.resident import ResidentRegistry
@@ -49,6 +60,7 @@ from .services.agent_model_gateway import (
     to_gateway_binding,
 )
 from .services.content_store import ServerContentStore
+from .services.fleet_metrics import build_fleet_sampler
 from .services.log_archiver import TaskLogArchiver
 from .services.metrics import MetricsRecorder
 from .services.model_secret_vault import ModelSecretVault
@@ -63,6 +75,7 @@ from .startup import (
 from .supervisor import WorkerSupervisor
 from .task.runtime import TaskRuntime
 from .task.v2.policy import build_policy_surface
+from .telemetry import build_telemetry_store
 from .tools.fabric_tool_broker import FabricToolBroker
 from .utils.logging import get_logger
 
@@ -158,6 +171,8 @@ NETWORK_PLANE = None
 POLICY_SURFACE = None
 RESIDENT_BRIDGE = None
 RESIDENT_BRIDGE_TASK = None
+TELEMETRY_STORE = None
+FLEET_SAMPLER = None
 # The root node id, resolved after the supervisor handshake; the gated serve edge reads
 # it lazily to fence its transport-only route origin.
 ROOT_NODE_ID: str | None = None
@@ -170,6 +185,23 @@ if IS_ROOT_NODE:
         REDIS_CLIENT, config.orchestration.model_secret_vault.ttl_sec, logger
     )
     POLICY_SURFACE = build_policy_surface(config.orchestration.policy)
+    SERVER_TRACER = build_tracer(
+        config.telemetry,
+        {
+            SERVICE_NAME: ServiceName.SERVER,
+            SERVICE_VERSION: FLOWMESH_RELEASE_VERSION,
+            RESOURCE_ROLE: ProcessRole.ROOT,
+        },
+    )
+    SERVER_METER = build_meter(
+        config.telemetry,
+        {
+            SERVICE_NAME: ServiceName.SERVER,
+            SERVICE_VERSION: FLOWMESH_RELEASE_VERSION,
+            RESOURCE_ROLE: ProcessRole.ROOT,
+        },
+    )
+    CONTROL_TRACER = ControlPlaneTracer(SERVER_TRACER, config.telemetry)
     RUNTIME = TaskRuntime(
         WORKFLOW_REGISTRY,
         WORKER_REGISTRY,
@@ -178,7 +210,11 @@ if IS_ROOT_NODE:
         logger,
         secret_vault=MODEL_SECRET_VAULT,
         surface=POLICY_SURFACE,
+        control=CONTROL_TRACER,
+        tracer=SERVER_TRACER,
+        telemetry=config.telemetry,
     )
+    TELEMETRY_STORE = build_telemetry_store(config.telemetry_store)
     AGENT_MODEL_GATEWAY = AgentModelGateway(
         RUNTIME, config.orchestration.gateway, logger
     )
@@ -217,6 +253,7 @@ if IS_ROOT_NODE:
             system_principal=_resident_owner,
             registry=RESIDENT_REGISTRY,
             logger=logger,
+            control=CONTROL_TRACER,
         )
         RUNTIME.set_resident_terminal_hook(RESIDENT_CONTROL.on_invocation_terminal)
         RUNTIME.set_resident_handlers(
@@ -247,6 +284,16 @@ if IS_ROOT_NODE:
             RootCursorStore(_relay_redis),
             logger=logger,
         )
+
+    FLEET_SAMPLER = build_fleet_sampler(
+        SERVER_METER,
+        stores=RESIDENT_CONTROL.stores if RESIDENT_CONTROL is not None else None,
+        runtime=RUNTIME,
+        node_id=lambda: ROOT_NODE_ID,
+        interval_sec=config.telemetry.resource_sample_sec,
+        enabled=config.telemetry.metrics_enabled
+        and config.telemetry.emits(TelemetryLevel.COARSE),
+    )
 
     FABRIC_TOOL_BROKER = FabricToolBroker.build(
         config.orchestration.web_search,
@@ -298,6 +345,7 @@ if IS_ROOT_NODE:
         metrics_recorder=METRICS_RECORDER,
         resident_capacity_enabled=config.orchestration.resident.enabled,
         resident_admission_slots=config.orchestration.resident.admission_slots,
+        control=CONTROL_TRACER,
     )
 
     _pf_cfg = config.port_forward
@@ -345,6 +393,9 @@ if IS_ROOT_NODE:
         results_dir=RESULTS_DIR,
         log_stream_ttl_sec=config.log_stream.ttl_sec,
         server_base_url=config.identity.base_url,
+        workflow_span_emitter=build_workflow_span_emitter(
+            SERVER_TRACER, config.telemetry
+        ),
         on_node_removed=(
             NETWORK_PLANE.forget_node if NETWORK_PLANE is not None else None
         ),
@@ -548,6 +599,8 @@ async def _lifespan(_: FastAPI):
             if PORT_FORWARD_SERVICE is not None:
                 await PORT_FORWARD_SERVICE.start()
             _start_root_threads()
+            if FLEET_SAMPLER is not None:
+                FLEET_SAMPLER.start(asyncio.get_running_loop())
             if EVENT_MONITOR is not None:
                 EVENT_MONITOR.start()
 
@@ -598,6 +651,8 @@ async def _lifespan(_: FastAPI):
                 await SERVE_FORWARD_INGRESS.stop()
             if GATED_SERVE is not None:
                 await GATED_SERVE.relay.stop()
+            if FLEET_SAMPLER is not None:
+                FLEET_SAMPLER.shutdown()
             if RESIDENT_CONTROL is not None:
                 RESIDENT_CONTROL.shutdown()
             if AGENT_MODEL_GATEWAY is not None:
@@ -641,6 +696,7 @@ app.state.gated_serve = GATED_SERVE
 app.state.serve_bindings = SERVE_BINDINGS
 app.state.network_plane = NETWORK_PLANE
 app.state.content_store = CONTENT_STORE
+app.state.telemetry_store = TELEMETRY_STORE
 # Started in lifespan on the root node when the resident relay bridge is enabled.
 app.state.resident_bridge_task = None
 

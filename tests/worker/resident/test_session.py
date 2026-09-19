@@ -2,14 +2,19 @@
 
 Two sessions wired sink-to-sink stand in for the origin and replica workers the relay
 bridges between. A completion far larger than one window streams under backpressure, a
-re-forwarded frame lands once, and a cancel wakes a blocked receiver.
+re-forwarded frame lands once, a cancel wakes a blocked receiver, and every frame
+carries the trace context it was sent under.
 """
 
 import asyncio
 
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+
 from shared.network.relay_frame import RelayDirection, RelayFrame, RelayFrameKind
 from shared.resident.session import ResidentRelaySession, ResidentSessionRole
 from shared.resident.wire import KIND_CHUNK, KIND_DONE, KIND_STREAM
+from shared.telemetry.propagation import extract_context
 
 
 class _PairSink:
@@ -122,5 +127,40 @@ def test_cancel_wakes_a_blocked_receiver() -> None:
         assert msg is None
         assert origin.cancelled
         assert any(f.kind is RelayFrameKind.CANCEL for f in origin_sink.sent)
+
+    asyncio.run(run())
+
+
+def test_every_frame_carries_the_context_it_was_sent_under() -> None:
+    """A frame's ``tp`` is the only way this session's context reaches the peer.
+
+    The peer is another process and shares no ambient context, so a kind that ships
+    without ``tp`` costs nothing here and nothing at the peer either -- the span it
+    should have parented simply roots its own trace, and the invocation is split in
+    two where no test looks.
+    """
+
+    async def run() -> None:
+        origin, replica, origin_sink, _ = _pair()
+        tracer = TracerProvider().get_tracer("test")
+        with tracer.start_as_current_span("carrier") as carrier:
+            await origin.send_wire(KIND_STREAM, request="hi")
+            served = asyncio.ensure_future(replica.send_wire(KIND_CHUNK, text="part"))
+            assert await origin.recv_wire(timeout=5.0) is not None
+            await served
+            await origin.cancel()
+        expected = carrier.get_span_context()
+
+        assert {frame.kind for frame in origin_sink.sent} == {
+            RelayFrameKind.DATA,
+            RelayFrameKind.WINDOW,
+            RelayFrameKind.CANCEL,
+        }
+        for frame in origin_sink.sent:
+            carried = trace.get_current_span(
+                extract_context(frame.tp)
+            ).get_span_context()
+            assert carried.span_id == expected.span_id, frame.kind
+            assert carried.trace_id == expected.trace_id, frame.kind
 
     asyncio.run(run())

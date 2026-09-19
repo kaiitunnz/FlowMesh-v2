@@ -47,6 +47,7 @@ class FakeRegistry:
     """In-memory registry that round-trips durable state through model JSON."""
 
     def __init__(self) -> None:
+        self.submitted_at: str = ""
         self.task_blobs: dict[str, str] = {}
         self.sched: dict[str, str] = {}
         self.workflow_task_ids: dict[str, list[str]] = {}
@@ -63,6 +64,7 @@ class FakeRegistry:
         workflow_id: str,
         tasks: list[Any],
         v2: Any = None,
+        submitted_at: str | None = None,
     ) -> None:
         self.workflow_task_ids[workflow_id] = [t.task_id for t in tasks]
         self.remaining[workflow_id] = {
@@ -78,7 +80,9 @@ class FakeRegistry:
 
     def get_workflow_record(self, workflow_id: str) -> Any:
         ids = self.workflow_task_ids.get(workflow_id)
-        return SimpleNamespace(task_ids=list(ids)) if ids is not None else None
+        if ids is None:
+            return None
+        return SimpleNamespace(task_ids=list(ids), submitted_at=self.submitted_at)
 
     async def get_workflow_record_async(self, workflow_id: str) -> Any:
         return self.get_workflow_record(workflow_id)

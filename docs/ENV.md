@@ -16,6 +16,7 @@ listed here is in `.env.example`.
 | `REDIS_CONTROL_URL` | `redis://localhost:6379/0` | Redis control channel. On worker nodes, must point at the root node's reachable Redis endpoint |
 | `REDIS_TELEMETRY_URL` | `redis://localhost:6380/0` | Redis telemetry channel. On worker nodes, must point at the root node's reachable Redis endpoint |
 | `REDIS_RESIDENT_RELAY_URL` | (telemetry) | Redis endpoint for the resident relay; defaults to telemetry |
+| `COMPOSE_PROFILES` | – | Optional compose profiles to deploy (e.g. telemetry) |
 | `DATABASE_URL` | – | Postgres connection string |
 | `RESULTS_DIR` | `./results` | Server-side results directory |
 | `SERVER_RESULTS_DIR` | `flowmesh_results` | Host-side directory/docker volume to mount at `RESULTS_DIR` in the server container |
@@ -118,6 +119,26 @@ listed here is in `.env.example`.
 | `SERVER_SERVE_FORWARD_PORT_START` | `34000` | Lowest forward serve exposure port |
 | `SERVER_SERVE_FORWARD_PORT_END` | `34099` | Highest forward serve exposure port |
 | `SERVER_SERVE_FORWARD_BODY_BUDGET_BYTES` | `536870912` | Cap on total in-flight forward request body bytes |
+| `SERVER_METRICS_TELEMETRY_LEVEL` | `off` | OTel span/metric verbosity |
+| `SERVER_METRICS_TRACES_ENABLED` | `true` | Whether to emit OTel traces |
+| `SERVER_METRICS_METRICS_ENABLED` | `true` | Whether to emit OTel metrics |
+| `SERVER_METRICS_TRACE_SAMPLE_RATIO` | `1.0` | Per-workflow trace sampling ratio |
+| `SERVER_METRICS_OTLP_ENDPOINT` | `http://localhost:4317` | OTLP collector endpoint; unset disables export |
+| `SERVER_METRICS_OTLP_TIMEOUT_SEC` | `10` | OTLP export request timeout (seconds) |
+| `SERVER_METRICS_RESOURCE_SAMPLE_SEC` | `15` | Worker GPU/resource sampling interval (seconds) |
+| `SERVER_METRICS_CLICKHOUSE_URL` | – | ClickHouse HTTP URL for the store read port (e.g. `http://localhost:8123`); unset disables queries |
+| `SERVER_METRICS_CLICKHOUSE_DATABASE` | `flowmesh` | ClickHouse database for the store read port |
+| `SERVER_METRICS_CLICKHOUSE_USERNAME` | `default` | ClickHouse user for the store read port |
+| `SERVER_METRICS_CLICKHOUSE_PASSWORD` | `flowmesh` | ClickHouse password for the store read port |
+| `SERVER_METRICS_CLICKHOUSE_TIMEOUT_SEC` | `10` | ClickHouse query timeout (seconds) |
+| `TELEMETRY_CLICKHOUSE_DSN` | `clickhouse://clickhouse:9000?dial_timeout=10s` | ClickHouse DSN the collector writes to |
+| `TELEMETRY_CLICKHOUSE_DATABASE` | `flowmesh` | ClickHouse database for the telemetry profile |
+| `TELEMETRY_CLICKHOUSE_USERNAME` | `default` | ClickHouse user for the telemetry profile |
+| `TELEMETRY_CLICKHOUSE_PASSWORD` | `flowmesh` | ClickHouse password for the telemetry profile |
+| `TELEMETRY_CLICKHOUSE_HTTP_PORT` | `8123` | Host port for the ClickHouse HTTP interface |
+| `TELEMETRY_CLICKHOUSE_NATIVE_PORT` | `9000` | Host port for the ClickHouse native interface |
+| `TELEMETRY_OTLP_GRPC_PORT` | `4317` | Host port for the collector's OTLP gRPC receiver |
+| `TELEMETRY_OTLP_HTTP_PORT` | `4318` | Host port for the collector's OTLP HTTP receiver |
 | `LOG_LEVEL` | `INFO` | Server log level |
 
 **Notes:**

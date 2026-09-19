@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from shared.schemas.worker import SSHLimits
+from shared.telemetry.config import TelemetryConfig
 from shared.tools.search.schema import DEFAULT_SEARCH_PROVIDER
 from shared.utils.parsing import (
     parse_bool_env,
@@ -55,6 +56,7 @@ class WorkerConfig:
     docker_gpu_runtime: str | None
     ssh_limits: SSHLimits | None
     enable_ssh_gpu_limit: bool
+    telemetry: TelemetryConfig
     grpc_keepalive_time_ms: int | None = None
     grpc_keepalive_timeout_ms: int | None = None
     network_mode: str | None = None
@@ -198,6 +200,8 @@ class WorkerConfig:
         )
         enable_ssh_gpu_limit = parse_bool_env("ENABLE_SSH_GPU_LIMIT", False)
 
+        telemetry = TelemetryConfig.from_env()
+
         return WorkerConfig(
             worker_token=worker_token,
             owner_principal=owner_principal,
@@ -234,6 +238,7 @@ class WorkerConfig:
             docker_gpu_runtime=docker_gpu_runtime,
             ssh_limits=ssh_limits,
             enable_ssh_gpu_limit=enable_ssh_gpu_limit,
+            telemetry=telemetry,
             grpc_keepalive_time_ms=grpc_keepalive_time_ms,
             grpc_keepalive_timeout_ms=grpc_keepalive_timeout_ms,
             network_mode=network_mode,
