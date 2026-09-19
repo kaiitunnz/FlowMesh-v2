@@ -48,8 +48,8 @@ def _meta(frame: RelayFrame) -> bytes:
     meta: dict[str, Any] = {
         "kind": frame.kind.value,
         "session_id": frame.session_id,
-        "invocation_id": frame.invocation_id,
-        "idm": frame.idm,
+        "correlation_id": frame.correlation_id,
+        "operation_id": frame.operation_id,
         "direction": frame.direction.value,
         "seq": frame.seq,
         "ack": frame.ack,
@@ -88,8 +88,8 @@ async def read_relay_frame(reader: asyncio.StreamReader) -> RelayFrame:
         return RelayFrame(
             kind=RelayFrameKind(meta["kind"]),
             session_id=str(meta["session_id"]),
-            invocation_id=str(meta["invocation_id"]),
-            idm=str(meta["idm"]),
+            correlation_id=str(meta["correlation_id"]),
+            operation_id=str(meta["operation_id"]),
             direction=RelayDirection(meta["direction"]),
             seq=int(meta.get("seq", 0)),
             ack=int(meta.get("ack", 0)),

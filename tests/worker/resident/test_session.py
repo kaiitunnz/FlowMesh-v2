@@ -12,7 +12,7 @@ from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 
 from shared.network.relay_frame import RelayDirection, RelayFrame, RelayFrameKind
-from shared.resident.session import ResidentRelaySession, ResidentSessionRole
+from shared.network.session import FramedRelaySession, RelaySessionRole
 from shared.resident.wire import KIND_CHUNK, KIND_DONE, KIND_STREAM
 from shared.telemetry.propagation import extract_context
 
@@ -21,7 +21,7 @@ class _PairSink:
     """Delivers each produced frame straight into the peer session."""
 
     def __init__(self) -> None:
-        self.peer: ResidentRelaySession | None = None
+        self.peer: FramedRelaySession | None = None
         self.sent: list[RelayFrame] = []
 
     async def send(self, frame: RelayFrame) -> None:
@@ -32,21 +32,21 @@ class _PairSink:
 
 def _pair(
     window_bytes: int = 64,
-) -> tuple[ResidentRelaySession, ResidentRelaySession, _PairSink, _PairSink]:
+) -> tuple[FramedRelaySession, FramedRelaySession, _PairSink, _PairSink]:
     origin_sink, replica_sink = _PairSink(), _PairSink()
-    origin = ResidentRelaySession(
+    origin = FramedRelaySession(
         session_id="s1",
-        invocation_id="inv-1",
-        idm="idm-1",
-        role=ResidentSessionRole.ORIGIN,
+        correlation_id="inv-1",
+        operation_id="idm-1",
+        role=RelaySessionRole.ORIGIN,
         sink=origin_sink,
         window_bytes=window_bytes,
     )
-    replica = ResidentRelaySession(
+    replica = FramedRelaySession(
         session_id="s1",
-        invocation_id="inv-1",
-        idm="idm-1",
-        role=ResidentSessionRole.REPLICA,
+        correlation_id="inv-1",
+        operation_id="idm-1",
+        role=RelaySessionRole.TARGET,
         sink=replica_sink,
         window_bytes=window_bytes,
     )
@@ -96,8 +96,8 @@ def test_reforwarded_data_frame_lands_once() -> None:
         frame = RelayFrame(
             kind=RelayFrameKind.DATA,
             session_id="s1",
-            invocation_id="inv-1",
-            idm="idm-1",
+            correlation_id="inv-1",
+            operation_id="idm-1",
             direction=RelayDirection.TARGET_TO_ORIGIN,
             seq=1,
             payload=b'{"kind": "chunk", "data": "one"}',

@@ -17,7 +17,7 @@ from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict
 
-from .transport import ResidentFrameSink
+from shared.network.frame_stream import FrameSink
 
 # The base transport candidate every healthy attachment resolves, and the only one a
 # carriage realizes here.
@@ -50,7 +50,7 @@ class ResidentCarriagePlan(BaseModel):
 class ClaimGatedServiceCarriage(Protocol):
     """Realizes the transport a plan selected as an origin drive's frame sink."""
 
-    def select(self, plan: ResidentCarriagePlan) -> ResidentFrameSink: ...
+    def select(self, plan: ResidentCarriagePlan) -> FrameSink: ...
 
     def close(self, session_id: str) -> None:
         """Release whatever the attempt held, on its terminal or its reap."""
@@ -65,10 +65,10 @@ class ControlRelayCarriage:
     relaying it silently, so a direct or node selection never rides the relay by chance.
     """
 
-    def __init__(self, base_sink: ResidentFrameSink) -> None:
+    def __init__(self, base_sink: FrameSink) -> None:
         self._base_sink = base_sink
 
-    def select(self, plan: ResidentCarriagePlan) -> ResidentFrameSink:
+    def select(self, plan: ResidentCarriagePlan) -> FrameSink:
         if plan.selected_transport != CONTROL_RELAY:
             raise CarriageUnavailable(plan.selected_transport)
         return self._base_sink

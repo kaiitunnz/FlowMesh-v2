@@ -19,6 +19,7 @@ import logging
 from typing import Protocol
 
 from shared.network.relay_frame import RelayFrame
+from shared.network.session import FramedRelaySession, RelaySessionRole
 
 from .carriage import (
     CarriageUnavailable,
@@ -35,7 +36,6 @@ from .reports import (
     ResidentStreamHead,
     ResidentStreamStatus,
 )
-from .session import ResidentRelaySession, ResidentSessionRole
 from .wire import (
     KIND_ACK,
     KIND_BOOTSTRAP,
@@ -63,7 +63,7 @@ class ServeControl(Protocol):
 class _Drive:
     def __init__(
         self,
-        session: ResidentRelaySession,
+        session: FramedRelaySession,
         task_id: str,
         call_correlation: str,
         invocation_id: str,
@@ -142,11 +142,11 @@ class ServeOriginDrive:
                 )
             )
             return
-        session = ResidentRelaySession(
+        session = FramedRelaySession(
             session_id=session_id,
-            invocation_id=invocation_id,
-            idm=idm,
-            role=ResidentSessionRole.ORIGIN,
+            correlation_id=invocation_id,
+            operation_id=idm,
+            role=RelaySessionRole.ORIGIN,
             sink=sink,
             window_bytes=self._window_bytes,
         )

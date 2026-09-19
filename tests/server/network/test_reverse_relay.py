@@ -25,8 +25,8 @@ def test_frame_codec_round_trips_a_raw_binary_payload() -> None:
     frame = RelayFrame(
         kind=RelayFrameKind.DATA,
         session_id="rly-9",
-        invocation_id="inv-9",
-        idm="idm-9",
+        correlation_id="inv-9",
+        operation_id="idm-9",
         direction=RelayDirection.ORIGIN_TO_TARGET,
         seq=3,
         ack=2,

@@ -9,7 +9,7 @@ waiting deputy for one this node originated), and it publishes response frames t
 ``:up`` stream for the root to bridge onward. Recovery is the durable cursor and lease,
 not a node command; a restart reclaims the lease and resumes from the stored position.
 One instance serves one namespace; a node running both the resident (``rr:*``) and the
-external-tool (``xt:*``) namespace runs one attachment per keyspace.
+content (``ct:*``) namespace runs one attachment per keyspace.
 """
 
 import asyncio

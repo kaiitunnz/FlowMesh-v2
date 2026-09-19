@@ -113,8 +113,8 @@ def test_wire_round_trip() -> None:
     frame = RelayFrame(
         kind=RelayFrameKind.DATA,
         session_id="s1",
-        invocation_id="inv-1",
-        idm="idm-1",
+        correlation_id="inv-1",
+        operation_id="idm-1",
         direction=RelayDirection.ORIGIN_TO_TARGET,
         seq=3,
         ack=0,

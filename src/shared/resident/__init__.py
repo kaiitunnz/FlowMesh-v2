@@ -1,7 +1,7 @@
 """Resident-inference protocol contracts shared by control, relay, and workers.
 
 The claim-bound admission fences (`AdmissionHandoff`, `RouteAuthorization`), the engine
-endpoint, the target-side claim gate, the framed request/response wire, and the engine
+endpoint, the target-side claim gate, the two-phase message kinds, and the engine
 request builder. Central control mints the fences and owns the `ServiceClaim` FSM; the
 origin and replica workers execute the protocol against these contracts; the servers
 relay the frames opaquely.
@@ -31,8 +31,6 @@ from .wire import (
     KIND_FAILED,
     KIND_REJECT,
     KIND_STREAM,
-    decode_msg,
-    encode_msg,
 )
 
 __all__ = [
@@ -57,6 +55,4 @@ __all__ = [
     "SidecarSession",
     "TrafficClass",
     "chat_body",
-    "decode_msg",
-    "encode_msg",
 ]

@@ -17,6 +17,7 @@ import logging
 import socket
 from collections.abc import Awaitable, Callable
 
+from shared.network.frame_stream import FrameSink
 from shared.network.mtls import MutualTlsMaterial
 from shared.network.mtls_listener import (
     MAX_CONNECTIONS,
@@ -24,10 +25,9 @@ from shared.network.mtls_listener import (
     MutualTlsFrameListener,
 )
 from shared.network.relay_frame import RelayFrame
-from shared.resident.transport import ResidentFrameSink
 
 # Routes one frame into the replica sidecar, answering over the connection's own sink.
-FrameDelivery = Callable[[RelayFrame, ResidentFrameSink], Awaitable[None]]
+FrameDelivery = Callable[[RelayFrame, FrameSink], Awaitable[None]]
 
 
 def _is_registered_origin(identities: frozenset[str]) -> bool:
@@ -38,7 +38,7 @@ def _is_registered_origin(identities: frozenset[str]) -> bool:
 class _SidecarConnection(ConnectionHandler):
     """Hands one connection's frames to the replica sidecar."""
 
-    def __init__(self, deliver: FrameDelivery, sink: ResidentFrameSink) -> None:
+    def __init__(self, deliver: FrameDelivery, sink: FrameSink) -> None:
         self._deliver = deliver
         self._sink = sink
 

@@ -18,8 +18,8 @@ def _frame(direction: RelayDirection) -> RelayFrame:
     return RelayFrame(
         kind=RelayFrameKind.DATA,
         session_id="s1",
-        invocation_id="inv-1",
-        idm="idm-1",
+        correlation_id="inv-1",
+        operation_id="idm-1",
         direction=direction,
         seq=1,
         payload=b'{"kind": "chunk", "data": "opaque"}',

@@ -21,7 +21,9 @@ import httpx
 from opentelemetry.trace import Span
 from pydantic import ValidationError
 
+from shared.network.frame_stream import FrameSink
 from shared.network.relay_frame import RelayFrame, RelayFrameKind
+from shared.network.session import FramedRelaySession, RelaySessionRole
 from shared.resident.contracts import (
     AdmissionHandoff,
     ReplicaEndpoint,
@@ -29,8 +31,6 @@ from shared.resident.contracts import (
 )
 from shared.resident.envelope import EnvelopeRejected, ServeRequestEnvelope
 from shared.resident.gate import GateRejection, LoadEvidence, SidecarClaimGate
-from shared.resident.session import ResidentRelaySession, ResidentSessionRole
-from shared.resident.transport import ResidentFrameSink
 from shared.resident.wire import (
     KIND_ACK,
     KIND_BOOTSTRAP,
@@ -79,7 +79,7 @@ class ResidentReplicaSidecar:
     def __init__(
         self,
         *,
-        sink: ResidentFrameSink,
+        sink: FrameSink,
         engine_open: EngineOpen,
         engine_open_raw: RawEngineOpen | None = None,
         engine_unload: EngineUnload | None = None,
@@ -97,7 +97,7 @@ class ResidentReplicaSidecar:
         self._on_load = on_load or (lambda _ev: None)
         self._logger = logger or logging.getLogger("resident-replica-sidecar")
         self._bindings: dict[str, _Binding] = {}
-        self._sessions: dict[str, ResidentRelaySession] = {}
+        self._sessions: dict[str, FramedRelaySession] = {}
         self._traceparents: dict[str, str | None] = {}
         self._serves: dict[str, asyncio.Task[None]] = {}
         # The live serve task per invocation, so a fresh-session re-drive supersedes its
@@ -169,9 +169,7 @@ class ResidentReplicaSidecar:
         if task is not None and task is not asyncio.current_task() and not task.done():
             task.cancel()
 
-    async def on_frame(
-        self, frame: RelayFrame, sink: ResidentFrameSink | None = None
-    ) -> None:
+    async def on_frame(self, frame: RelayFrame, sink: FrameSink | None = None) -> None:
         """Route one inbound relay frame to its session, opening one on a bootstrap.
 
         A frame an origin delivered over a connection it dialed passes that connection's
@@ -186,8 +184,8 @@ class ResidentReplicaSidecar:
                 return
             session = self._open_session(
                 frame.session_id,
-                frame.invocation_id,
-                frame.idm,
+                frame.correlation_id,
+                frame.operation_id,
                 sink or self._sink,
                 traceparent=frame.tp,
             )
@@ -200,15 +198,15 @@ class ResidentReplicaSidecar:
         session_id: str,
         invocation_id: str,
         idm: str,
-        sink: ResidentFrameSink,
+        sink: FrameSink,
         *,
         traceparent: str | None = None,
-    ) -> ResidentRelaySession:
-        session = ResidentRelaySession(
+    ) -> FramedRelaySession:
+        session = FramedRelaySession(
             session_id=session_id,
-            invocation_id=invocation_id,
-            idm=idm,
-            role=ResidentSessionRole.REPLICA,
+            correlation_id=invocation_id,
+            operation_id=idm,
+            role=RelaySessionRole.TARGET,
             sink=sink,
             window_bytes=self._window_bytes,
         )
@@ -219,7 +217,7 @@ class ResidentReplicaSidecar:
         )
         return session
 
-    async def _serve(self, session_id: str, session: ResidentRelaySession) -> None:
+    async def _serve(self, session_id: str, session: FramedRelaySession) -> None:
         try:
             received = await session.recv_body_wire(self._stream_deadline)
             if received is None:
@@ -364,7 +362,7 @@ class ResidentReplicaSidecar:
         )
 
     async def _relay_parsed(
-        self, session: ResidentRelaySession, engine_task: "asyncio.Task[Any]"
+        self, session: FramedRelaySession, engine_task: "asyncio.Task[Any]"
     ) -> None:
         """Stream a workflow consumer's extracted content, then a terminal frame."""
         try:
@@ -389,7 +387,7 @@ class ResidentReplicaSidecar:
                 await engine.aclose()
 
     async def _relay_raw(
-        self, session: ResidentRelaySession, engine_task: "asyncio.Task[Any]"
+        self, session: FramedRelaySession, engine_task: "asyncio.Task[Any]"
     ) -> None:
         """Reverse-proxy a serve request's raw engine response, always ending on a
         terminal frame.

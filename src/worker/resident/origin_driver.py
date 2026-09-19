@@ -23,6 +23,7 @@ from typing import Any
 from opentelemetry.trace import Span
 
 from shared.network.relay_frame import RelayFrame
+from shared.network.session import FramedRelaySession, RelaySessionRole
 from shared.outcome import FabricContentStore, OutcomeManifest
 from shared.resident.carriage import (
     CarriageUnavailable,
@@ -37,7 +38,6 @@ from shared.resident.reports import (
     ResidentOpOutcome,
     ResidentStreamStatus,
 )
-from shared.resident.session import ResidentRelaySession, ResidentSessionRole
 from shared.resident.wire import (
     KIND_ACK,
     KIND_BOOTSTRAP,
@@ -81,7 +81,7 @@ class ResidentOriginRequest:
 @dataclass
 class _Origin:
     request: ResidentOriginRequest
-    session: ResidentRelaySession
+    session: FramedRelaySession
     authorization: "asyncio.Future[RouteAuthorization]"
     task: "asyncio.Task[None] | None" = None
 
@@ -124,11 +124,11 @@ class ResidentOriginDriver:
                 self._uncertain(request, f"no carriage for transport {exc}")
             )
             return
-        session = ResidentRelaySession(
+        session = FramedRelaySession(
             session_id=request.session_id,
-            invocation_id=request.handoff.invocation_id,
-            idm=request.handoff.idempotency_key or "",
-            role=ResidentSessionRole.ORIGIN,
+            correlation_id=request.handoff.invocation_id,
+            operation_id=request.handoff.idempotency_key or "",
+            role=RelaySessionRole.ORIGIN,
             sink=sink,
             window_bytes=self._window_bytes,
         )

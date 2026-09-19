@@ -16,6 +16,7 @@ import threading
 from collections.abc import Callable, Coroutine
 from typing import Any
 
+from shared.network.frame_stream import FrameSink
 from shared.network.mtls import MutualTlsMaterial, client_context
 from shared.network.relay_frame import RelayDirection, RelayFrame
 from shared.outcome import FabricContentStore
@@ -36,7 +37,6 @@ from shared.resident.reports import (
     ResidentOpOutcome,
     ResidentRouteObservation,
 )
-from shared.resident.transport import ResidentFrameSink
 from shared.schemas.network import RouteObservationOutcome, Transport
 
 from .engine import EngineOpen, HttpEngineDelivery, RawEngineOpen, RawHttpEngineDelivery
@@ -117,7 +117,7 @@ class ResidentLaneHost:
         self._call(self._build).result()
 
     async def _build(self) -> None:
-        sink: ResidentFrameSink = _EventFrameSink(self._push_frame)
+        sink: FrameSink = _EventFrameSink(self._push_frame)
         carriage = self._carriage(sink)
         self._origin = ResidentOriginDriver(
             carriage=carriage,
@@ -149,7 +149,7 @@ class ResidentLaneHost:
         await listener.start()
         self._peer_listener = listener
 
-    def _carriage(self, sink: ResidentFrameSink) -> ClaimGatedServiceCarriage:
+    def _carriage(self, sink: FrameSink) -> ClaimGatedServiceCarriage:
         """The carriage this worker's origin attempts take their frame sink from.
 
         A deployment that admits no peer transport carries every attempt over the one

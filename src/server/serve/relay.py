@@ -16,12 +16,12 @@ import asyncio
 import logging
 import os
 
+from shared.network.frame_stream import FrameSink
 from shared.network.relay_frame import RelayFrame
 from shared.resident.carriage import ControlRelayCarriage, ResidentCarriagePlan
 from shared.resident.contracts import AdmissionHandoff, RouteAuthorization
 from shared.resident.envelope import ServeRequestEnvelope
 from shared.resident.serve_drive import ServeControl, ServeOriginDrive
-from shared.resident.transport import ResidentFrameSink
 
 from ..network.reverse_relay import BinaryRedis, RelayStreamStore
 from ..supervisor.services.reverse_relay_attachment import ReverseRelayAttachment
@@ -35,7 +35,7 @@ SERVE_EDGE_STREAM_ID = "serve-edge"
 __all__ = ["SERVE_EDGE_STREAM_ID", "ServeControl", "ServeRelayExecutor"]
 
 
-class _EdgeSink(ResidentFrameSink):
+class _EdgeSink(FrameSink):
     """Publishes one origin-produced frame to the edge stream for the root to bridge."""
 
     def __init__(self, streams: RelayStreamStore, edge_id: str) -> None:

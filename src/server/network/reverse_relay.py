@@ -6,9 +6,9 @@ root rendezvous, which bridges opaque framed data between their per-node streams
 module is the transport primitives — frame codec, per-node stream cursor reads, the
 durable per-session record, and the ownership lease that hands a leg's single receiver
 over on restart. It is deliberately free of any resident, claim, or admission concept:
-a frame carries an opaque payload (the resident fence and body ride inside it) and is
-keyed only by the relay session, invocation, and idempotency identifiers used for
-routing and dedupe.
+a frame carries an opaque payload (a protocol's own fence and body ride inside it) and
+is keyed only by the relay session and the correlation identifiers its protocol routes
+and dedupes by.
 
 Durability follows a cursor lease, not a consumer group: each leg has one logical
 receiver that reads its node stream from a durable stored cursor, and a restart reclaims

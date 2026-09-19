@@ -15,6 +15,7 @@ from typing import Any
 
 from shared.content import content_digest
 from shared.network.relay_frame import RelayFrame
+from shared.network.session import FramedRelaySession  # noqa: F401 - re-export check
 from shared.outcome import FabricContentStore, OutcomeManifest
 from shared.resident.carriage import ControlRelayCarriage, ResidentCarriagePlan
 from shared.resident.contracts import (
@@ -29,7 +30,6 @@ from shared.resident.reports import (
     ResidentOpOutcome,
     ResidentStreamStatus,
 )
-from shared.resident.session import ResidentRelaySession  # noqa: F401 - re-export check
 from worker.resident.engine import EngineResponse
 from worker.resident.origin_driver import ResidentOriginDriver, ResidentOriginRequest
 from worker.resident.peer_listener import ResidentPeerListener
