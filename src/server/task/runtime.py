@@ -117,6 +117,7 @@ from .models import (
     TaskRecord,
     TaskStatus,
     TaskUsage,
+    WorkflowSettlement,
     categorize_task_type,
 )
 from .parser import ParsedWorkflow, parse_workflow
@@ -368,6 +369,7 @@ class TaskRuntime:
 
         self._lock = threading.RLock()
         self._cv = threading.Condition(self._lock)
+        self._on_workflow_settled: Callable[[str], None] | None = None
 
     # ------------------------------------------------------------------ #
     # Registration & submission
@@ -678,6 +680,9 @@ class TaskRuntime:
             ]
             if not tasks:
                 continue
+            remaining = await self._workflow_registry.get_remaining_tasks_async(
+                workflow_id
+            )
             sched = await self._workflow_registry.load_workflow_sched_async(workflow_id)
             snapshot = await self._workflow_registry.load_ledger_snapshot_async(
                 workflow_id
@@ -696,6 +701,20 @@ class TaskRuntime:
                     self._install_rehydrated_workflow_locked(
                         workflow_id, tasks, sched, rehydrated_at
                     )
+                # A non-terminal record the remaining set no longer lists was
+                # retired before the crash, and nothing will ever dispatch it; the
+                # durable set is what carries that fact across a restart.
+                self._retired_region_templates.setdefault(workflow_id, set()).update(
+                    persisted.record.task_id
+                    for persisted in tasks
+                    if persisted.record.status not in TERMINAL_TASK_STATUSES
+                    and persisted.record.task_id not in remaining
+                )
+                # A workflow whose last task settled just before the crash has no
+                # event left to close it: replay the completion notification for
+                # every restored workflow, and let the finalizer reject the ones
+                # still running or already closed.
+                self._notify_terminal_transition(workflow_id)
                 self._cv.notify_all()
             restored += 1
         if restored:
@@ -934,6 +953,24 @@ class TaskRuntime:
                     cancelled=cancelled,
                     sched=self._sched_locked(workflow_id) if sched else None,
                 )
+                self._notify_terminal_transition(workflow_id)
+
+    def _notify_terminal_transition(self, workflow_id: str) -> None:
+        """Tell the completion finalizer a workflow may have reached its end.
+
+        Every terminal settles through the persist above, whether a worker reported it
+        or the control plane settled it alone, so one notification here covers both.
+        It carries a workflow id and nothing else: the finalizer decides whether the
+        workflow is complete, and does so off this thread.
+        """
+        if self._on_workflow_settled is None:
+            return
+        try:
+            self._on_workflow_settled(workflow_id)
+        except Exception as exc:
+            self._logger.debug(
+                "Failed to notify workflow completion for %s: %s", workflow_id, exc
+            )
 
     def _repersist_terminal_workflow_locked(self, workflow_id: str) -> None:
         """Re-commit the workflow's already-terminal tasks and schedule state.
@@ -966,9 +1003,26 @@ class TaskRuntime:
         Called after an event's advance materializes any new children, so a producer
         that fans out is not reclaimed while its children are still pending.
         """
-        records = [r for r in self._tasks.values() if r.workflow_id == workflow_id]
-        if records and all(r.status in TERMINAL_TASK_STATUSES for r in records):
+        if self._workflow_settlement_locked(workflow_id).settled:
             self._secret_vault.purge(workflow_id)
+
+    def _workflow_settlement_locked(self, workflow_id: str) -> WorkflowSettlement:
+        # A retired task -- a sealed spawn's child template, replaced by the children it
+        # instantiated -- no longer holds the workflow open, and its record stays
+        # PENDING forever because it is never dispatched. Counting it would leave every
+        # workflow with a spawn region permanently unsettled.
+        retired = self._retired_region_templates.get(workflow_id) or set()
+        records = [
+            r
+            for r in self._tasks.values()
+            if r.workflow_id == workflow_id and r.task_id not in retired
+        ]
+        if not records or any(r.status not in TERMINAL_TASK_STATUSES for r in records):
+            return WorkflowSettlement(settled=False, finished_ts=None)
+        finishes = [r.finished_ts for r in records if r.finished_ts is not None]
+        return WorkflowSettlement(
+            settled=True, finished_ts=max(finishes) if finishes else None
+        )
 
     # ------------------------------------------------------------------ #
     # Ready queue helpers
@@ -2225,6 +2279,16 @@ class TaskRuntime:
                 engine.to_snapshot(),
                 retire=retire,
             )
+            if retire:
+                self._retired_region_templates.setdefault(workflow_id, set()).update(
+                    retire
+                )
+                # A retire drains the remaining set as a terminal does, and can drain
+                # its last entry: a spawn that seals with no children leaves the
+                # workflow complete with no task terminal behind it. The two drains --
+                # a terminal commit and a retire -- each notify, and they are the only
+                # two, so no completion escapes the finalizer.
+                self._notify_terminal_transition(workflow_id)
 
     def _retire_sealed_region_templates_locked(
         self, workflow_id: str, engine: OrchestrationEngine
@@ -2236,9 +2300,7 @@ class TaskRuntime:
         from the remaining set (idempotently, tracked per workflow) with the ledger.
         """
         already = self._retired_region_templates.setdefault(workflow_id, set())
-        pending = engine.sealed_region_child_templates() - already
-        if pending:
-            already.update(pending)
+        if pending := engine.sealed_region_child_templates() - already:
             self._commit_new_children_locked(
                 workflow_id, engine, [], retire=sorted(pending)
             )
@@ -3554,6 +3616,12 @@ class TaskRuntime:
                         self._settle_cancelled_locked(held, time.time())
                 self._save_ledger_locked(workflow_id)
 
+            # A whole-workflow cancel commits its terminals here rather than through the
+            # per-task terminal persist, so it notifies for itself. A cancel that leaves
+            # tasks CANCELLING settles nothing yet; the finalizer reads that and waits
+            # for their own terminals.
+            self._notify_terminal_transition(workflow_id)
+
         # A cancelled in-flight resident invocation releases its credit from this fenced
         # cancellation terminal, so a lost or draining replica is not held forever.
         for invocation_id in resident_invocation_ids:
@@ -3679,6 +3747,24 @@ class TaskRuntime:
         """The workflow's durable submission timestamp, or ``None`` if unknown."""
         record = self._workflow_registry.get_workflow_record(workflow_id)
         return record.submitted_at if record is not None else None
+
+    def set_completion_notifier(self, notify: Callable[[str], None]) -> None:
+        """Install the callback that a terminal transition notifies.
+
+        The callback must be cheap and non-blocking: it runs under the scheduler lock.
+        """
+        self._on_workflow_settled = notify
+
+    def workflow_settlement(self, workflow_id: str) -> WorkflowSettlement:
+        """Whether every task of a workflow has settled, and the last of their
+        finishes.
+
+        Read under the scheduler lock, so a caller never observes the moment inside a
+        settle in which a producer's tasks have gone terminal but the children they
+        fan out do not exist yet.
+        """
+        with self._lock:
+            return self._workflow_settlement_locked(workflow_id)
 
     def get_merged_children(self, task_id: str) -> list[str]:
         """Read the merged-children list without consuming it."""

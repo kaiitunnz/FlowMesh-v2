@@ -59,6 +59,9 @@ class FakeRegistry:
     def remaining_of(self, workflow_id: str) -> set[str]:
         return set(self.remaining.get(workflow_id, set()))
 
+    async def get_remaining_tasks_async(self, workflow_id: str) -> set[str]:
+        return self.remaining_of(workflow_id)
+
     async def register_workflow_async(
         self,
         workflow_id: str,

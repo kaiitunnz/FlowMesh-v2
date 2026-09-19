@@ -400,6 +400,10 @@ if IS_ROOT_NODE:
             NETWORK_PLANE.forget_node if NETWORK_PLANE is not None else None
         ),
     )
+    # The runtime settles terminals the task-event stream never carries, so it tells
+    # the monitor's finalizer when a workflow may have ended; the finalizer decides.
+    RUNTIME.set_completion_notifier(EVENT_MONITOR.completion.request)
+
     if GATED_SERVE is not None:
         # A forward exposure goes live off the request path (its listener binds after
         # the adopting endpoint update), so republish the task's url through the monitor

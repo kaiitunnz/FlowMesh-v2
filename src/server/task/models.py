@@ -1,5 +1,5 @@
 import time
-from typing import Any
+from typing import Any, NamedTuple
 
 from pydantic import BaseModel, Field, computed_field
 
@@ -46,6 +46,14 @@ TERMINAL_TASK_STATUSES = frozenset(
 # A settling task has reached a terminal or is on its way to one (CANCELLING, awaiting
 # its worker's terminal); the status writers refuse to regress one to an active state.
 SETTLING_TASK_STATUSES = TERMINAL_TASK_STATUSES | {TaskStatus.CANCELLING}
+
+
+class WorkflowSettlement(NamedTuple):
+    """Whether every task of a workflow has settled, and the last of their
+    finishes."""
+
+    settled: bool
+    finished_ts: float | None
 
 
 class TaskUsage(BaseModel):
