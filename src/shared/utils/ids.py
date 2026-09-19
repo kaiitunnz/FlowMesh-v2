@@ -32,6 +32,7 @@ PREFIX_MEDIATED_PERMIT = "mop"  # nosec B105 - object-id prefix, not a credentia
 PREFIX_PRIVATE_STATE = "aps"
 PREFIX_STATE_BUNDLE_MANIFEST = "sbm"
 PREFIX_STATE_ATTACHMENT = "psa"
+PREFIX_HYDRATION_GRANT = "chg"  # nosec B105 - object-id prefix, not a credential
 
 
 def _uuid_str() -> str:
@@ -142,12 +143,17 @@ def new_state_attachment_id() -> str:
     return f"{PREFIX_STATE_ATTACHMENT}-{_uuid_hex()}"
 
 
+def new_hydration_grant_id() -> str:
+    return f"{PREFIX_HYDRATION_GRANT}-{secrets.token_hex(16)}"
+
+
 __all__ = [
     "PREFIX_ACTIVATION",
     "PREFIX_ADMISSION_HANDOFF",
     "PREFIX_ALLOCATION_LEASE",
     "PREFIX_ATTEMPT",
     "PREFIX_AUTHORITY_GRANT",
+    "PREFIX_HYDRATION_GRANT",
     "PREFIX_IDEMPOTENCY_KEY",
     "PREFIX_INVOCATION",
     "PREFIX_MEDIATED_PERMIT",
@@ -173,6 +179,7 @@ __all__ = [
     "new_allocation_lease_id",
     "new_attempt_id",
     "new_authority_grant_id",
+    "new_hydration_grant_id",
     "new_idempotency_key",
     "new_invocation_id",
     "new_mediated_permit_id",
