@@ -38,7 +38,6 @@ from .semconv import PHYSICAL_ERROR_TYPE
 
 _TRACER_NAME = "flowmesh"
 _METER_NAME = "flowmesh"
-_DEFAULT_OTLP_TIMEOUT_SEC = 10.0
 
 
 class _NullTracer(Tracer):
