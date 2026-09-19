@@ -49,7 +49,7 @@ def _hydrate(outcome: DeliveredOutcome, store: FabricContentStore) -> DeliveredO
     if outcome.outcome_ref is None:
         return outcome
     try:
-        value = store.hydrate(outcome.outcome_ref).decode()
+        value = store.hydrate(outcome.outcome_ref.content).decode()
     except (ContentStoreError, UnicodeDecodeError) as exc:
         raise ExecutionError(
             f"outcome hydration failed at {outcome.call_correlation}: {exc}"

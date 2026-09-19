@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 
 from server.routers.v1 import content as content_router
 from server.services.content_store import ServerContentStore
-from shared.outcome import OutcomeHydrationError
+from shared.content import ContentHydrationError
 from shared.outcome.http_store import HttpFabricContentStore
 
 
@@ -43,26 +43,38 @@ def store(tmp_path, monkeypatch) -> HttpFabricContentStore:
 
 
 def test_materialize_then_hydrate(store) -> None:
-    manifest = store.materialize("idm-1", b"payload", media_type="application/json")
-    assert store.hydrate(manifest) == b"payload"
+    manifest = store.materialize(
+        "local", "idm-1", b"payload", media_type="application/json"
+    )
+    assert store.hydrate(manifest.content) == b"payload"
 
 
 def test_materialize_finds_prior_under_idem(store) -> None:
-    first = store.materialize("idm-2", b"a", media_type="application/json")
-    assert store.find("idm-2") == first
-    second = store.materialize("idm-2", b"a", media_type="application/json")
+    first = store.materialize("local", "idm-2", b"a", media_type="application/json")
+    assert store.find("local", "idm-2") == first
+    second = store.materialize("local", "idm-2", b"a", media_type="application/json")
     assert first == second
 
 
 def test_find_missing_returns_none(store) -> None:
-    assert store.find("idm-absent") is None
+    assert store.find("local", "idm-absent") is None
 
 
 def test_hydrate_missing_raises(store) -> None:
-    manifest = store.materialize("idm-3", b"a", media_type="application/json")
-    tampered = manifest.model_copy(update={"content_digest": "0" * 64})
-    with pytest.raises(OutcomeHydrationError):
+    manifest = store.materialize("local", "idm-3", b"a", media_type="application/json")
+    tampered = manifest.content.model_copy(update={"content_digest": "0" * 64})
+    with pytest.raises(ContentHydrationError):
         store.hydrate(tampered)
+
+
+def test_a_scope_the_caller_is_not_admitted_to_is_refused(store) -> None:
+    # The test principal is the deployment-wide admin, so it may name the task's scope;
+    # the write lands there rather than being silently redirected to its own.
+    manifest = store.materialize(
+        "tenant-a", "idm-scope", b"a", media_type="application/json"
+    )
+    assert manifest.content.authorization_scope == "tenant-a"
+    assert store.find("tenant-b", "idm-scope") is None
 
 
 def test_every_request_carries_the_ambient_traceparent(store) -> None:
@@ -77,6 +89,8 @@ def test_every_request_carries_the_ambient_traceparent(store) -> None:
     with mock.patch(
         "shared.outcome.http_store.inject_ambient_traceparent", side_effect=_inject
     ):
-        manifest = store.materialize("idm-tp", b"x", media_type="application/json")
-        assert store.find("idm-tp") == manifest
-        assert store.read(manifest.content_digest) == b"x"
+        manifest = store.materialize(
+            "local", "idm-tp", b"x", media_type="application/json"
+        )
+        assert store.find("local", "idm-tp") == manifest
+        assert store.fetch(manifest.content) == b"x"

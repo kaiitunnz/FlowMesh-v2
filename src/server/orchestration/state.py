@@ -17,8 +17,9 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from shared.content import ContentReference
 from shared.harness.boundary import DenialKind
-from shared.inference import InputResolutionBinding, ResolvedInputReference
+from shared.inference import InputResolutionBinding
 from shared.outcome import OutcomeManifest
 from shared.private_state import PrivateStateAttachment, PrivateStateBinding
 
@@ -482,7 +483,7 @@ class InputResolution(BaseModel):
     binding: InputResolutionBinding
     # Where the request itself is, for a run that hydrates rather than re-resolves. A
     # resolution recorded without one was reached by the running worker itself.
-    reference: ResolvedInputReference | None = None
+    reference: ContentReference | None = None
     resolved_at: str = Field(default_factory=now_iso)
 
 

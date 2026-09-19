@@ -3,7 +3,7 @@
 from shared.content import content_digest
 
 from .carrier import InlineControl, ManifestRef, OutcomeCarrier
-from .content_store import FabricContentStore, OutcomeHydrationError
+from .content_store import FabricContentStore
 from .manifest import OutcomeManifest
 
 __all__ = [
@@ -11,7 +11,6 @@ __all__ = [
     "InlineControl",
     "ManifestRef",
     "OutcomeCarrier",
-    "OutcomeHydrationError",
     "OutcomeManifest",
     "content_digest",
 ]

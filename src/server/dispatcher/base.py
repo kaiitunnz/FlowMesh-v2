@@ -720,6 +720,7 @@ class Dispatcher:
             task_id=task_id,
             workflow_id=record.workflow_id,
             owner_id=record.owner_id,
+            content_scope=record.org_id,
             task=rendered_task,
             task_type=record.task_type,
             assigned_worker=worker.id,

@@ -23,8 +23,9 @@ from dataclasses import dataclass, field
 from typing import Any, Self
 
 from server.telemetry.tracing import NULL_CONTROL_TRACER, ControlPlaneTracer
+from shared.content import ContentReference
 from shared.harness import DeliveredOutcome, OutcomeKind
-from shared.inference import InputResolutionBinding, ResolvedInputReference
+from shared.inference import InputResolutionBinding
 from shared.outcome import OutcomeManifest
 from shared.private_state import (
     OwnerFence,
@@ -3450,7 +3451,7 @@ class OrchestrationEngine:
         self,
         task_id: str,
         binding: InputResolutionBinding,
-        reference: ResolvedInputReference | None = None,
+        reference: ContentReference | None = None,
     ) -> InputResolution | None:
         """Record how a work item's inputs resolved, before its embodiment runs.
 

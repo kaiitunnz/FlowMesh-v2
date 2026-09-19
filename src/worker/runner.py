@@ -11,13 +11,12 @@ from typing import Any
 
 import requests
 
-from shared.content import ContentStoreError
+from shared.content import ContentReference, ContentStoreError
 from shared.inference import (
     CanonicalInferenceRequest,
     InputResolutionError,
     ResolvedCanonicalInferenceRequest,
     ResolvedInputMaterialization,
-    ResolvedInputReference,
     canonical_result,
     hydrate_resolved_input,
     write_resolved_input,
@@ -350,7 +349,9 @@ class Runner:
                 "contract to resolve",
                 retryable=False,
             )
-        reference = write_resolved_input(self._content_store, resolved)
+        reference = write_resolved_input(
+            self._content_store, msg.content_scope, resolved
+        )
         return ResolvedInputMaterialization(
             binding=resolved.binding, reference=reference
         )
@@ -399,7 +400,7 @@ class Runner:
         )
 
     def _hydrate_prepared_request(
-        self, msg: WorkerTaskMessage, reference: ResolvedInputReference
+        self, msg: WorkerTaskMessage, reference: ContentReference
     ) -> ResolvedCanonicalInferenceRequest:
         """Fetch the prepared request this task runs, failing closed on anything else.
 
@@ -412,6 +413,12 @@ class Runner:
                 f"task {msg.task_id} runs a prepared request and this worker reaches "
                 "no fabric content store to hydrate it from",
                 retryable=True,
+            )
+        if reference.authorization_scope != msg.content_scope:
+            raise ExecutionError(
+                f"task {msg.task_id} runs in scope {msg.content_scope} and the request "
+                f"it recorded is in {reference.authorization_scope}",
+                retryable=False,
             )
         try:
             hydrated = hydrate_resolved_input(self._content_store, reference)

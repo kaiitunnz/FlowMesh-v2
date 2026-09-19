@@ -47,6 +47,7 @@ from server.task.v2.representations.plan import (
     ResidencyWarmth,
     ServiceFamilyRequirement,
 )
+from shared.content import reference_for
 from shared.harness import BoundaryEventKind
 from shared.outcome import OutcomeManifest
 from shared.resident.reports import (
@@ -328,7 +329,7 @@ def test_ack_accepts_and_authorizes_then_terminal_releases_credit():
     assert auth["origin_id"] == "rog-1" and auth["claim_id"] == claim.claim_id
 
     manifest = OutcomeManifest(
-        content_digest="sha", size_bytes=2, media_type="text/plain"
+        content=reference_for("local", b"ok", media_type="text/plain")
     )
     asyncio.run(
         svc._on_outcome(_outcome(svc, ResidentStreamStatus.SUCCESS, manifest=manifest))

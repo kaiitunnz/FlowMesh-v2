@@ -1,25 +1,34 @@
 """A filesystem-backed content store for reference-backed outcomes.
 
-The store holds worker-materialized outcome content as immutable, content-addressed
-objects under a per-principal partition, plus an idempotency index so a re-drive under
-the same fabric ``idempotency_key`` resolves the first materialization rather than
-writing a second object. It stores opaque bytes and metadata only; it never assembles
-content into orchestration state. Writes come from the worker over the content router;
-the server never originates a materialization. Isolation is the partition: a read is
-scoped to the requesting principal, so it never reaches another principal's content.
+The store holds worker-materialized content as immutable, content-addressed objects
+under a per-scope partition, plus an idempotency index so a re-drive under the same
+fabric ``idempotency_key`` resolves the first materialization rather than writing a
+second object. It stores opaque bytes and metadata only; it never assembles content into
+orchestration state. Writes come from the worker over the content router; the server
+never originates a materialization. Isolation is the partition: a read is scoped to the
+authorization scope its caller was admitted for, so it never reaches another's content.
+
+It backs many scopes at once: the router binds one per authenticated request rather than
+the store holding one.
 """
 
 from pathlib import Path
 
-from shared.content import ContentStoreError
-from shared.outcome import OutcomeHydrationError, OutcomeManifest, content_digest
+from shared.content import (
+    OCTET_STREAM,
+    ContentHydrationError,
+    ContentReference,
+    ContentStoreError,
+    reference_for,
+)
+from shared.outcome import OutcomeManifest
 from shared.utils.atomic import atomic_write_bytes
 
 _SAFE = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
 
 
 def _segment(value: str | None) -> str:
-    """A single path segment safe from traversal, or ``_`` for an empty principal."""
+    """A single path segment safe from traversal, or ``_`` for an empty scope."""
     if not value:
         return "_"
     if value in {".", ".."} or any(c not in _SAFE for c in value):
@@ -28,71 +37,65 @@ def _segment(value: str | None) -> str:
 
 
 class ServerContentStore:
-    """A per-principal, content-addressed immutable store under a local directory."""
+    """A per-scope, content-addressed immutable store under a local directory."""
 
     def __init__(self, root: Path) -> None:
         self._root = root
 
-    def _object_path(self, principal: str | None, digest: str) -> Path:
+    def _object_path(self, scope: str | None, digest: str) -> Path:
         digest = _segment(digest)
+        return self._root / _segment(scope) / "objects" / _segment(digest[:2]) / digest
+
+    def _idem_path(self, scope: str | None, idempotency_key: str) -> Path:
         return (
-            self._root / _segment(principal) / "objects" / _segment(digest[:2]) / digest
+            self._root / _segment(scope) / "idem" / f"{_segment(idempotency_key)}.json"
         )
 
-    def _idem_path(self, principal: str | None, idempotency_key: str) -> Path:
-        return (
-            self._root
-            / _segment(principal)
-            / "idem"
-            / f"{_segment(idempotency_key)}.json"
+    def write(
+        self, scope: str, data: bytes, *, media_type: str = OCTET_STREAM
+    ) -> ContentReference:
+        """Store bytes in a scope and return the reference naming them."""
+        reference = reference_for(scope, data, media_type=media_type)
+        atomic_write_bytes(
+            self._object_path(scope, reference.content_digest), data, if_absent=True
         )
+        return reference
 
-    def put_object(self, principal: str | None, data: bytes) -> str:
-        """Store bytes under the principal's scope and return the digest naming them."""
-        digest = content_digest(data)
-        atomic_write_bytes(self._object_path(principal, digest), data, if_absent=True)
-        return digest
-
-    def find(
-        self, principal: str | None, idempotency_key: str
-    ) -> OutcomeManifest | None:
-        path = self._idem_path(principal, idempotency_key)
+    def find(self, scope: str, idempotency_key: str) -> OutcomeManifest | None:
+        path = self._idem_path(scope, idempotency_key)
         if not path.exists():
             return None
         return OutcomeManifest.model_validate_json(path.read_text())
 
     def materialize(
         self,
-        principal: str | None,
+        scope: str,
         idempotency_key: str,
         data: bytes,
         *,
         media_type: str,
         provenance: str | None = None,
     ) -> OutcomeManifest:
-        if (found := self.find(principal, idempotency_key)) is not None:
+        if (found := self.find(scope, idempotency_key)) is not None:
             return found
-        digest = content_digest(data)
-        atomic_write_bytes(self._object_path(principal, digest), data, if_absent=True)
+        reference = self.write(scope, data, media_type=media_type)
         manifest = OutcomeManifest(
-            content_digest=digest,
-            size_bytes=len(data),
-            media_type=media_type,
+            content=reference,
             provenance=provenance,
             idempotency_key=idempotency_key,
-            tenant=principal,
         )
         atomic_write_bytes(
-            self._idem_path(principal, idempotency_key),
+            self._idem_path(scope, idempotency_key),
             manifest.model_dump_json().encode(),
             if_absent=True,
         )
         return manifest
 
-    def read(self, principal: str | None, digest: str) -> bytes:
-        path = self._object_path(principal, digest)
+    def read(self, scope: str, digest: str) -> bytes:
+        path = self._object_path(scope, digest)
         if not path.exists():
-            raise OutcomeHydrationError(
-                f"no content for {digest} under principal {principal}"
-            )
+            raise ContentHydrationError(f"no content for {digest} in scope {scope}")
         return path.read_bytes()
+
+    def fetch(self, reference: ContentReference) -> bytes:
+        return self.read(reference.authorization_scope, reference.content_digest)

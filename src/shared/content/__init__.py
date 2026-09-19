@@ -1,17 +1,29 @@
-"""Immutable, content-addressed objects the fabric stores on a principal's behalf."""
+"""Immutable, content-addressed objects the fabric stores within one scope."""
 
+from .reference import (
+    CONTENT_ENCODING_IDENTITY,
+    OCTET_STREAM,
+    ContentReference,
+    DigestAlgorithm,
+)
 from .store import (
     ContentHydrationError,
     ContentStoreError,
     FabricObjectStore,
-    ObjectWriteAck,
     content_digest,
+    reference_for,
+    verify_content,
 )
 
 __all__ = [
+    "CONTENT_ENCODING_IDENTITY",
+    "OCTET_STREAM",
     "ContentHydrationError",
+    "ContentReference",
     "ContentStoreError",
+    "DigestAlgorithm",
     "FabricObjectStore",
-    "ObjectWriteAck",
     "content_digest",
+    "reference_for",
+    "verify_content",
 ]

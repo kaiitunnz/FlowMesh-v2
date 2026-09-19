@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from shared.content import reference_for
 from shared.harness import (
     REQUIRED_MEDIATED_FACADES,
     DeliveredOutcome,
@@ -13,7 +14,7 @@ from shared.harness import (
     HarnessResultKind,
     MediatedFacade,
 )
-from shared.outcome import OutcomeManifest, content_digest
+from shared.outcome import OutcomeManifest
 from shared.tasks.task_type import TaskType
 from tests.shared.outcome_helpers import InMemoryContentStore
 from tests.worker.factories import make_worker_config, make_worker_task_message
@@ -61,7 +62,9 @@ def test_reference_outcome_is_hydrated_before_injection(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store = InMemoryContentStore()
-    manifest = store.materialize("idm-1", b"the-result", media_type="application/json")
+    manifest = store.materialize(
+        "local", "idm-1", b"the-result", media_type="application/json"
+    )
     monkeypatch.setattr(es, "build_content_store", lambda base_url: store)
     adapter = _RecordingAdapter()
     register_adapter(
@@ -81,9 +84,7 @@ def test_hydration_failure_fails_the_step(
 ) -> None:
     store = InMemoryContentStore()
     absent = OutcomeManifest(
-        content_digest=content_digest(b"absent"),
-        size_bytes=6,
-        media_type="application/json",
+        content=reference_for("local", b"absent", media_type="application/json")
     )
     monkeypatch.setattr(es, "build_content_store", lambda base_url: store)
     register_adapter(

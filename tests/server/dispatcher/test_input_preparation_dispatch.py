@@ -10,10 +10,11 @@ import pytest
 from server.config import OrchestrationConfig
 from server.dispatcher.embodiment import EmbodimentSnapshot, relay_placement_task
 from server.task.runtime import TaskRuntime
+from shared.content import ContentReference
 from shared.inference import (
+    RESOLVED_INPUT_MEDIA_TYPE,
     InputResolutionBinding,
     ResolvedInputMaterialization,
-    ResolvedInputReference,
 )
 from shared.tasks.specs import InferenceEmbodimentKind
 from shared.utils.time import now_iso
@@ -59,7 +60,12 @@ def _commit(runtime: TaskRuntime, task_id: str, cardinality: int) -> None:
             request_digest="req",
             cardinality=cardinality,
         ),
-        reference=ResolvedInputReference(content_digest="d" * 64, size_bytes=64),
+        reference=ContentReference(
+            authorization_scope="local",
+            content_digest="d" * 64,
+            size_bytes=64,
+            media_type=RESOLVED_INPUT_MEDIA_TYPE,
+        ),
     )
     runtime.mark_succeeded(
         task_id,

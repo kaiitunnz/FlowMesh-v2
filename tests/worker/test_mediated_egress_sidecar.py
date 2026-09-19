@@ -207,7 +207,7 @@ def test_redrive_after_materialize_recovers_the_prior_outcome() -> None:
     h.sidecar.submit_permit(_permit())
     second = h.report()
     assert second.outcome_ref is not None
-    assert second.outcome_ref.content_digest == first.outcome_ref.content_digest
+    assert second.outcome_ref.content == first.outcome_ref.content
     assert h.egress.calls == egressed
     h.stop()
 

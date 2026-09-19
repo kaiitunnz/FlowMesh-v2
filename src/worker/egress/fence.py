@@ -62,6 +62,7 @@ def fence_reason(
 def materialize_tool_outcome(
     outcome: ToolOutcome,
     *,
+    scope: str,
     idempotency_key: str | None,
     content_store: FabricContentStore | None,
 ) -> OutcomeManifest | ToolOutcome:
@@ -80,6 +81,7 @@ def materialize_tool_outcome(
             value="no content store is configured to materialize the result",
         )
     return content_store.materialize(
+        scope,
         idempotency_key,
         outcome.model_dump_json().encode(),
         media_type="application/json",

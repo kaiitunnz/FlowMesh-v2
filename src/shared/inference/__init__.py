@@ -18,7 +18,6 @@ from .codec import (
 from .input_store import (
     RESOLVED_INPUT_MEDIA_TYPE,
     ResolvedInputMaterialization,
-    ResolvedInputReference,
     hydrate_resolved_input,
     write_resolved_input,
 )
@@ -48,7 +47,6 @@ __all__ = [
     "InputResolutionError",
     "ResolvedCanonicalInferenceRequest",
     "ResolvedInputMaterialization",
-    "ResolvedInputReference",
     "UpstreamProvenance",
     "canonical_contract",
     "canonical_result",

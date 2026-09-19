@@ -7,7 +7,8 @@ from fastapi.testclient import TestClient
 
 from server.routers.v1 import content as content_router
 from server.services.content_store import ServerContentStore
-from shared.outcome import OutcomeManifest, content_digest
+from shared.content import content_digest
+from shared.outcome import OutcomeManifest
 
 PREFIX = "/api/v1"
 
@@ -30,10 +31,10 @@ def test_put_then_hydrate_round_trip(tmp_path) -> None:
     )
     assert put.status_code == 200
     manifest = OutcomeManifest.model_validate(put.json())
-    assert manifest.content_digest == content_digest(b"result-body")
-    assert manifest.tenant == "local"
+    assert manifest.content.content_digest == content_digest(b"result-body")
+    assert manifest.content.authorization_scope == "local"
 
-    got = client.get(f"{PREFIX}/content/{manifest.content_digest}")
+    got = client.get(f"{PREFIX}/content/{manifest.content.content_digest}")
     assert got.status_code == 200
     assert got.content == b"result-body"
 

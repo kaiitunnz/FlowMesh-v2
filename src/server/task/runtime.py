@@ -17,6 +17,7 @@ from server.telemetry.tracing import (
     ControlPlaneTracer,
     format_traceparent,
 )
+from shared.content import ContentReference
 from shared.harness import (
     AgentEpisodeDispatch,
     BoundaryEventKind,
@@ -35,7 +36,6 @@ from shared.inference import (
     InferenceSourceKind,
     InputResolutionBinding,
     ResolvedInputMaterialization,
-    ResolvedInputReference,
     canonical_contract,
 )
 from shared.outcome import OutcomeManifest
@@ -1685,23 +1685,22 @@ class TaskRuntime:
         return secret.get_secret_value() if secret is not None else None
 
     def _stamped_permit_payload(
-        self, permit: MediatedOperationPermit, workflow_id: str
+        self, permit: MediatedOperationPermit, agent: TaskRecord
     ) -> dict[str, Any]:
-        """The permit's wire payload, carrying a ``traceparent`` stamp when enabled.
+        """The permit's wire payload, carrying what only the dispatching record knows.
 
-        Stamped post-mint: the boundary span id derives from the permit's own
-        ``invocation_id``, which does not exist as an object until minting returns.
+        The content scope comes from the task's owner, so a result materializes in the
+        tenant's namespace rather than the egressing worker's. The trace stamp is
+        post-mint: the boundary span id derives from the permit's own ``invocation_id``,
+        which does not exist as an object until minting returns.
         """
+        stamp: dict[str, Any] = {"content_scope": agent.org_id}
         if self._control.enabled:
-            permit = permit.model_copy(
-                update={
-                    "traceparent": format_traceparent(
-                        workflow_to_trace_id_int(workflow_id),
-                        derived_span_id(SpanIdKind.INVOCATION, permit.invocation_id),
-                    )
-                }
+            stamp["traceparent"] = format_traceparent(
+                workflow_to_trace_id_int(agent.workflow_id),
+                derived_span_id(SpanIdKind.INVOCATION, permit.invocation_id),
             )
-        return permit.model_dump(mode="json")
+        return permit.model_copy(update=stamp).model_dump(mode="json")
 
     def _dispatch_worker_originated_op(self, env: ToolInvocationEnvelope) -> None:
         """Mint a permit and relay a boundary's egress operation to its origin worker.
@@ -1764,7 +1763,7 @@ class TaskRuntime:
             MediatedOpMessage(
                 worker_id=worker_id,
                 frame_kind="permit",
-                payload=self._stamped_permit_payload(permit, agent.workflow_id),
+                payload=self._stamped_permit_payload(permit, agent),
             ),
         )
 
@@ -1829,7 +1828,7 @@ class TaskRuntime:
                 MediatedOpMessage(
                     worker_id=worker_id,
                     frame_kind="permit",
-                    payload=self._stamped_permit_payload(permit, agent.workflow_id),
+                    payload=self._stamped_permit_payload(permit, agent),
                 ),
             )
 
@@ -2422,7 +2421,7 @@ class TaskRuntime:
             resolution = self._input_resolution_locked(task_id)
         return resolution.binding if resolution is not None else None
 
-    def recorded_input_reference(self, task_id: str) -> ResolvedInputReference | None:
+    def recorded_input_reference(self, task_id: str) -> ContentReference | None:
         """Where a task's prepared request is, for the run that hydrates it."""
         with self._lock:
             resolution = self._input_resolution_locked(task_id)

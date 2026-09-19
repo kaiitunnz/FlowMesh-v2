@@ -198,7 +198,7 @@ class ResidentOriginDriver:
         self, origin: _Origin, req: ResidentOriginRequest, idm: str | None
     ) -> None:
         try:
-            if (prior := self._prior_manifest(idm)) is not None:
+            if (prior := self._prior_manifest(req, idm)) is not None:
                 # A post-manifest re-drive: the outcome already committed, so re-report
                 # the recorded reference rather than re-running the engine.
                 self._report_outcome(
@@ -321,17 +321,22 @@ class ResidentOriginDriver:
             else "text/plain"
         )
         manifest = self._content_store.materialize(
-            idm, completion.encode(), media_type=media_type
+            req.handoff.tenant or "",
+            idm,
+            completion.encode(),
+            media_type=media_type,
         )
         self._report_outcome(
             self._outcome(req, ResidentStreamStatus.SUCCESS, manifest=manifest)
         )
 
-    def _prior_manifest(self, idm: str | None) -> OutcomeManifest | None:
+    def _prior_manifest(
+        self, req: ResidentOriginRequest, idm: str | None
+    ) -> OutcomeManifest | None:
         if self._content_store is None or idm is None:
             return None
         with contextlib.suppress(Exception):
-            return self._content_store.find(idm)
+            return self._content_store.find(req.handoff.tenant or "", idm)
         return None
 
     @staticmethod

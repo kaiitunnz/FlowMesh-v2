@@ -2,16 +2,21 @@
 
 A worker materializes an outcome by uploading its bytes to the content router and
 hydrates one by fetching content-addressed bytes; the server authenticates the worker,
-partitions content by its principal, and is authoritative for the manifest identity.
+admits it to the scope it names, and is authoritative for the manifest identity.
 """
 
 import requests
 
-from shared.content import ContentStoreError, ObjectWriteAck
+from shared.content import (
+    OCTET_STREAM,
+    ContentHydrationError,
+    ContentReference,
+    ContentStoreError,
+)
 from shared.telemetry.propagation import inject_ambient_traceparent
 from shared.utils.http import auth_headers
 
-from .content_store import FabricContentStore, OutcomeHydrationError
+from .content_store import FabricContentStore
 from .manifest import OutcomeManifest
 
 
@@ -34,21 +39,24 @@ class HttpFabricContentStore(FabricContentStore):
     def _url(self, path: str) -> str:
         return f"{self._base}/api/v1/content{path}"
 
-    def put_object(self, data: bytes) -> str:
+    def write(
+        self, scope: str, data: bytes, *, media_type: str = OCTET_STREAM
+    ) -> ContentReference:
         resp = requests.put(
             self._url("/objects"),
+            params={"scope": scope},
             data=data,
-            headers={**_headers(), "Content-Type": "application/octet-stream"},
+            headers={**_headers(), "Content-Type": media_type},
             timeout=self._timeout,
         )
         if resp.status_code >= 400:
             raise ContentStoreError(f"object write failed: {resp.status_code}")
-        return ObjectWriteAck.model_validate_json(resp.content).content_digest
+        return ContentReference.model_validate_json(resp.content)
 
-    def find(self, idempotency_key: str) -> OutcomeManifest | None:
+    def find(self, scope: str, idempotency_key: str) -> OutcomeManifest | None:
         resp = requests.get(
             self._url(""),
-            params={"idem": idempotency_key},
+            params={"scope": scope, "idem": idempotency_key},
             headers=_headers(),
             timeout=self._timeout,
         )
@@ -59,13 +67,13 @@ class HttpFabricContentStore(FabricContentStore):
         return OutcomeManifest.model_validate_json(resp.content)
 
     def materialize(
-        self, idempotency_key: str, data: bytes, *, media_type: str
+        self, scope: str, idempotency_key: str, data: bytes, *, media_type: str
     ) -> OutcomeManifest:
-        if (found := self.find(idempotency_key)) is not None:
+        if (found := self.find(scope, idempotency_key)) is not None:
             return found
         resp = requests.put(
             self._url(""),
-            params={"idem": idempotency_key},
+            params={"scope": scope, "idem": idempotency_key},
             data=data,
             headers={**_headers(), "Content-Type": media_type},
             timeout=self._timeout,
@@ -74,12 +82,15 @@ class HttpFabricContentStore(FabricContentStore):
             raise ContentStoreError(f"content materialize failed: {resp.status_code}")
         return OutcomeManifest.model_validate_json(resp.content)
 
-    def read(self, digest: str) -> bytes:
+    def fetch(self, reference: ContentReference) -> bytes:
         resp = requests.get(
-            self._url(f"/{digest}"), headers=_headers(), timeout=self._timeout
+            self._url(f"/{reference.content_digest}"),
+            params={"scope": reference.authorization_scope},
+            headers=_headers(),
+            timeout=self._timeout,
         )
         if resp.status_code == 404:
-            raise OutcomeHydrationError(f"no content for {digest}")
+            raise ContentHydrationError(f"no content for {reference.content_digest}")
         if resp.status_code >= 400:
             raise ContentStoreError(f"content read failed: {resp.status_code}")
         return resp.content

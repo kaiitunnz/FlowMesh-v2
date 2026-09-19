@@ -229,6 +229,7 @@ class MediatedEgressSidecar:
         outcome = self._egress(permit, request, egress)
         materialized = materialize_tool_outcome(
             outcome,
+            scope=permit.content_scope,
             idempotency_key=permit.idempotency_key,
             content_store=self._content_store,
         )
@@ -325,7 +326,7 @@ class MediatedEgressSidecar:
     ) -> OutcomeManifest | None:
         if self._content_store is None or permit.idempotency_key is None:
             return None
-        return self._content_store.find(permit.idempotency_key)
+        return self._content_store.find(permit.content_scope, permit.idempotency_key)
 
     def _consume_permit(self, permit_id: str, deadline_epoch: float) -> bool:
         """Atomically consume a one-use permit id; ``False`` on an exact replay."""
