@@ -34,6 +34,10 @@ class WorkerObjectStore(FabricObjectStore):
         self._objects = FilesystemObjectBacking(root)
         self._orphan_grace_sec = orphan_grace_sec
 
+    @property
+    def orphan_grace_sec(self) -> float:
+        return self._orphan_grace_sec
+
     def write(
         self, scope: str, data: bytes, *, media_type: str = OCTET_STREAM
     ) -> ContentReference:

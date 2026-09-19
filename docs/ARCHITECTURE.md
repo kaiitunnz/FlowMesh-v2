@@ -61,8 +61,9 @@ ledger adds `act-` activations, `scp-` scopes, `wki-` work items, `att-`
 attempts, `inv-` invocations, `agr-` authority grants, and `idm-` idempotency
 keys (the fabric-assigned dedupe authority for a mediated boundary). Resident-capacity
 control adds `scl-` service claims, `rpl-` replica incarnations, and `lse-` allocation
-leases. `msk-` is an unguessable ref for a workflow's vaulted model credential and `hnd-`
-an unguessable claim-bound admission handoff token. Activation-private state adds
+leases. `msk-` is an unguessable ref for a workflow's vaulted model credential, `hnd-`
+an unguessable claim-bound admission handoff token, and `chg-` an unguessable
+content-hydration grant. Activation-private state adds
 `aps-` state references, `sbm-` sealed-generation manifests, and `psa-` attachments.
 The network plane adds `rog-` route
 origins and `rly-` relay sessions. Worker-originated mediated boundaries add `mop-`
@@ -414,6 +415,27 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   other. The mediated-egress-sidecar tool path and the worker-materialized resident
   completion settle by reference; the model gateway settles inline. See
   [`EXECUTORS.md`](EXECUTORS.md).
+- **Content references.** Every value the fabric stores immutably is named by one
+  `ContentReference`: the authorization scope isolating it together with the digest and
+  size a reader verifies it by, and nothing that says where it is or what it means. An
+  outcome finalization, a prepared inference request, and any later consumer each keep
+  their own binding to a reference, so an object is never a name for what a consumer
+  calls it, and identical bytes in two scopes are two objects.
+- **Worker-held content and granted hydration.** A worker that materializes content
+  holds it and reports only where it is; a worker that needs an object it did not write
+  asks the control plane, which checks the requesting worker is running the task and
+  that the task is already bound to exactly that reference, resolves a live holder, and
+  mints one short-lived `chg-` grant it hands to both ends. The holder serves only a
+  grant it was handed, once, for that exact object; the requester verifies the digest
+  and size before anything reads the bytes. The transfer runs over the network plane's
+  relay under its own namespace, so the root bridges opaque frames and never holds,
+  assembles, or resolves the payload. An unauthorized request, an expired or replayed
+  grant, or a holder that is gone is a typed hydration failure that recreates no
+  outcome, re-resolves no input, and releases no credit. An object stays for as long as
+  a consumer binding names it; a write that never reached one is reclaimed after a
+  grace period, and nothing else is collected. Objects written before this path remain
+  readable through the server-hosted store. Enable with `CONTENT_HYDRATION_ENABLED=true`
+  (which requires `NETWORK_PLANE_ENABLED=true`).
 - **Task merging.** Compatible adjacent tasks in a DAG (same `taskType`,
   model, hardware shape, and merge key) coalesce into a single dispatch.
   Merged children ride on `WorkerTaskMessage.merged_children`; the worker

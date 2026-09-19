@@ -61,6 +61,7 @@ class ContentLaneHost:
         )
         self._holder: ContentHolder | None = None
         self._client: ContentHydrationClient | None = None
+        self._sweep: asyncio.Task[None] | None = None
 
     @property
     def store(self) -> WorkerObjectStore:
@@ -85,6 +86,7 @@ class ContentLaneHost:
             transfer_timeout_sec=self._transfer_timeout_sec,
             logger=self._logger,
         )
+        self._sweep = asyncio.ensure_future(self._sweep_orphans())
 
     def hydrate(self, reference: ContentReference, task_id: str) -> bytes:
         """Fetch one object, from this worker's own store or from its holder."""
@@ -101,6 +103,22 @@ class ContentLaneHost:
         """Sweep unbound writes, leaving anything a transfer is serving in place."""
         in_transfer = self._holder.in_transfer if self._holder else frozenset()
         return self._store.reclaim_orphans(in_transfer=in_transfer)
+
+    async def _sweep_orphans(self) -> None:
+        """Reclaim unbound writes on a cadence derived from their grace period.
+
+        A write only becomes reclaimable once it is older than the grace, so sweeping a
+        few times within one grace period is enough to keep a failed preparation's bytes
+        from accumulating without ever racing a slow report.
+        """
+        interval = max(30.0, self._store.orphan_grace_sec / 4)
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                if (reclaimed := self.reclaim_orphans()) > 0:
+                    self._logger.info("reclaimed %d unbound content writes", reclaimed)
+            except Exception:
+                self._logger.exception("content orphan sweep failed")
 
     def route(self, frame_kind: str, frame: dict[str, Any]) -> bool:
         """Marshal one content control frame onto the lane loop; return handled."""
@@ -155,6 +173,8 @@ class ContentLaneHost:
         return asyncio.run_coroutine_threadsafe(coro_fn(), self._loop)
 
     def stop(self) -> None:
+        if self._sweep is not None:
+            self._loop.call_soon_threadsafe(self._sweep.cancel)
         if self._holder is not None:
             with contextlib.suppress(Exception):
                 self._call(self._holder.aclose).result(timeout=5)
