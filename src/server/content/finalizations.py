@@ -25,6 +25,30 @@ class FinalizationIndex:
     def _key(scope: str, idempotency_key: str) -> str:
         return f"ct:finalization:{scope}:{idempotency_key}"
 
+    @staticmethod
+    def _scope_key(idempotency_key: str) -> str:
+        return f"ct:finalization-scope:{idempotency_key}"
+
+    def assign_scope(self, idempotency_key: str, scope: str) -> None:
+        """Record the scope control assigned the work this key settles.
+
+        Control decides the scope when it authorizes the work — a dispatch's own, the
+        one a permit carries, the one an admitted invocation materializes under — and
+        records it here so the binding that key later reports is checked against what
+        was assigned rather than against what the reporter says. Only control writes
+        this; a producer never reaches it.
+        """
+        if not idempotency_key or not scope:
+            return
+        key = self._scope_key(idempotency_key)
+        self._rds.sync.set_value(key, scope)
+        if self._ttl:
+            self._rds.sync.expire(key, int(self._ttl))
+
+    def assigned_scope(self, idempotency_key: str) -> str | None:
+        """The scope assigned to this key, or None if control assigned none."""
+        return self._rds.sync.get(self._scope_key(idempotency_key))
+
     def find(self, scope: str, idempotency_key: str) -> OutcomeManifest | None:
         raw = self._rds.sync.get(self._key(scope, idempotency_key))
         return OutcomeManifest.model_validate_json(raw) if raw else None

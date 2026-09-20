@@ -351,6 +351,7 @@ class ResidentCapacityControl:
         dependency_resolver: DependencyResolver,
         input_resolution_resolver: InputResolutionResolver = lambda _task_id: None,
         content_scope_resolver: Callable[[str], str] = lambda _task_id: "",
+        content_scope_authority: Callable[[str, str], None] | None = None,
         settle_cb: SettleCallback,
         redispatch_cb: RedispatchCallback,
         endpoint_probe: EndpointProbe,
@@ -370,6 +371,7 @@ class ResidentCapacityControl:
         self._resolve_dependency = dependency_resolver
         self._resolve_input_resolution = input_resolution_resolver
         self._resolve_content_scope = content_scope_resolver
+        self._content_scope_authority = content_scope_authority
         self._settle = settle_cb
         self._redispatch = redispatch_cb
         self._probe_endpoint = endpoint_probe
@@ -814,13 +816,25 @@ class ResidentCapacityControl:
             engine_batch_key=dependency.engine_batch_key,
             # The scope the origin worker materializes this invocation's completion
             # under: the one control assigned the task, not one the invocation invents.
-            tenant=self._resolve_content_scope(env.task_id),
+            tenant=self._assign_content_scope(env.task_id, env.idempotency_key),
             adapter_ref=dependency.adapter,
             adapter_source=dependency.adapter_source,
             batch_size=batch_size,
             max_output_tokens=binding.projected_output_tokens if binding else None,
         )
         await self._drive_claim(orig, dependency, profile, admission)
+
+    def _assign_content_scope(self, task_id: str, idempotency_key: str | None) -> str:
+        """The scope this invocation's completion materializes in, recorded as assigned.
+
+        The origin worker reports the finalization its completion produced, so control
+        records the scope against the key it settles under first; the binding is then
+        checked against what was assigned rather than what the worker reports.
+        """
+        scope = self._resolve_content_scope(task_id)
+        if self._content_scope_authority is not None and idempotency_key:
+            self._content_scope_authority(idempotency_key, scope)
+        return scope
 
     async def _drive_claim(
         self,

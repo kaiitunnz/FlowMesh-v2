@@ -33,20 +33,36 @@ def _require_index(index: FinalizationIndex | None) -> FinalizationIndex:
     return index
 
 
-def _admitted_scope(principal: PrincipalContext, requested: str | None) -> str:
-    """The scope this request acts in: its own, or another it is privileged to reach.
+def _binding_scope(
+    index: FinalizationIndex,
+    principal: PrincipalContext,
+    idempotency_key: str,
+    asserted: str,
+) -> str:
+    """The scope this key's finalization binds in: the one control assigned it.
 
-    A fabric component finalizes an outcome on behalf of the task's tenant rather than
-    its own credential, so a principal holding the deployment-wide scope may name one;
-    anyone else is confined to the scope their principal is.
+    A finalization is reported by the worker that produced the content, and a worker
+    carries the scope its work was authorized under rather than choosing one. So the
+    scope comes from what control recorded when it authorized this key — not from the
+    request, whose own ``scope`` is an assertion this checks and never a way to widen
+    what the reporter reaches. A key control assigned no scope has no binding to make.
     """
-    if not requested or requested == principal.org_id:
-        return principal.org_id
-    if "*" in principal.scopes:
-        return requested
-    raise HTTPException(
-        status_code=status.HTTP_403_FORBIDDEN, detail="scope not permitted"
-    )
+    assigned = index.assigned_scope(idempotency_key)
+    if not assigned:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="no scope is assigned to this idempotency key",
+        )
+    if asserted and asserted != assigned:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="scope is not the one assigned to this idempotency key",
+        )
+    if assigned != principal.org_id and "*" not in principal.scopes:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="scope not permitted"
+        )
+    return assigned
 
 
 @router.put(
@@ -57,7 +73,7 @@ def _admitted_scope(principal: PrincipalContext, requested: str | None) -> str:
 async def put_finalization(
     content: ContentReference,
     idem: str = Query(..., description="The fabric idempotency key to bind."),
-    scope: str = Query("", description="The authorization scope to bind in."),
+    scope: str = Query("", description="The scope asserted for the binding."),
     index: FinalizationIndex | None = Depends(get_finalization_index),
     principal: PrincipalContext = Depends(authenticate_connection),
     logger: logging.Logger = Depends(get_logger),
@@ -65,13 +81,14 @@ async def put_finalization(
     await require_permission(
         principal, ResourceKind.RESULT, None, ResourceAction.WRITE, logger
     )
-    admitted = _admitted_scope(principal, scope)
+    bound = _require_index(index)
+    admitted = _binding_scope(bound, principal, idem, scope)
     if content.authorization_scope != admitted:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="content is outside the admitted scope",
         )
-    return _require_index(index).record(
+    return bound.record(
         admitted, idem, content, provenance=f"principal:{principal.principal_id}"
     )
 
@@ -83,7 +100,7 @@ async def put_finalization(
 )
 async def get_finalization(
     idem: str = Query(..., description="The fabric idempotency key to resolve."),
-    scope: str = Query("", description="The authorization scope to resolve in."),
+    scope: str = Query("", description="The scope asserted for the lookup."),
     index: FinalizationIndex | None = Depends(get_finalization_index),
     principal: PrincipalContext = Depends(authenticate_connection),
     logger: logging.Logger = Depends(get_logger),
@@ -91,7 +108,8 @@ async def get_finalization(
     await require_permission(
         principal, ResourceKind.RESULT, None, ResourceAction.READ, logger
     )
-    manifest = _require_index(index).find(_admitted_scope(principal, scope), idem)
+    bound = _require_index(index)
+    manifest = bound.find(_binding_scope(bound, principal, idem, scope), idem)
     if manifest is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="no content for key"

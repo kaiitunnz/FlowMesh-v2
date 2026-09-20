@@ -294,6 +294,7 @@ class TaskRuntime:
         control: ControlPlaneTracer | None = None,
         tracer: Tracer | None = None,
         telemetry: TelemetryConfig | None = None,
+        content_scope_authority: Callable[[str, str], None] | None = None,
     ) -> None:
         self._workflow_registry = workflow_registry
         self._worker_registry = worker_registry
@@ -302,6 +303,7 @@ class TaskRuntime:
         self._feasibility_check = feasibility_check
         self._policy_surface = surface if surface is not None else PolicySurface()
         self._secret_vault = secret_vault
+        self._content_scope_authority = content_scope_authority
         self._control = control if control is not None else NULL_CONTROL_TRACER
         self._tracer = tracer
         self._telemetry = telemetry
@@ -1685,17 +1687,32 @@ class TaskRuntime:
         secret = self._secret_vault.resolve(agent.workflow_id, binding.secret_ref)
         return secret.get_secret_value() if secret is not None else None
 
+    def _assign_content_scope(
+        self, permit: MediatedOperationPermit, agent: TaskRecord
+    ) -> str:
+        """Assign the scope this permit's outcome materializes in, and record it.
+
+        The scope is the task's owner, so a result materializes in the tenant's
+        namespace rather than the egressing worker's. Recording it against the permit's
+        idempotency key is what lets the finalization this outcome later reports be
+        checked against the scope control assigned, rather than one the reporting
+        worker names for itself.
+        """
+        if self._content_scope_authority is not None and permit.idempotency_key:
+            self._content_scope_authority(permit.idempotency_key, agent.org_id)
+        return agent.org_id
+
     def _stamped_permit_payload(
         self, permit: MediatedOperationPermit, agent: TaskRecord
     ) -> dict[str, Any]:
         """The permit's wire payload, carrying what only the dispatching record knows.
 
-        The content scope comes from the task's owner, so a result materializes in the
-        tenant's namespace rather than the egressing worker's. The trace stamp is
-        post-mint: the boundary span id derives from the permit's own ``invocation_id``,
-        which does not exist as an object until minting returns.
+        The trace stamp is post-mint: the boundary span id derives from the permit's own
+        ``invocation_id``, which does not exist as an object until minting returns.
         """
-        stamp: dict[str, Any] = {"content_scope": agent.org_id}
+        stamp: dict[str, Any] = {
+            "content_scope": self._assign_content_scope(permit, agent)
+        }
         if self._control.enabled:
             stamp["traceparent"] = format_traceparent(
                 workflow_to_trace_id_int(agent.workflow_id),

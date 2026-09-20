@@ -440,7 +440,9 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   and a worker's death loses nothing. The outcome-finalization index stays on the control
   plane, binding an `idm-*` to a reference so a re-drive re-reports the first
   materialization rather than re-running a sampled producer; the store holds only bytes
-  and never treats an idempotency key as a name.
+  and never treats an idempotency key as a name. The scope that binding lands in is the
+  one control assigned the work when it authorized the key, so the producer reporting a
+  finalization is held to it rather than naming a scope of its own.
 - **Store access.** A worker reaches the store only under a `csg-` `ContentStoreAccessGrant`
   the control plane mints for one dispatched task in one authorization scope, bound to the
   worker incarnation running it and expiring shortly after. The grant records what access

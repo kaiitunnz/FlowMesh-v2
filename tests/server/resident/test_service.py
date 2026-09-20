@@ -183,6 +183,7 @@ def _build(
     limits = limits or ResidentPolicyLimits()
     settled: list[Any] = []
     redispatched: list[tuple[str, str]] = []
+    assigned_scopes: list[tuple[str, str]] = []
 
     def settle_cb(
         task_id: str,
@@ -216,6 +217,9 @@ def _build(
         limits=limits,
         dependency_resolver=lambda task_id: _admission(dependency, warmth),
         content_scope_resolver=lambda _task_id: content_scope,
+        content_scope_authority=lambda idem, scope: assigned_scopes.append(
+            (idem, scope)
+        ),
         settle_cb=settle_cb,
         redispatch_cb=redispatch_cb,
         endpoint_probe=lambda serve_task_id: ReplicaEndpoint(
@@ -226,6 +230,7 @@ def _build(
         redrive_backoff_sec=0.0,
     )
     svc._redispatched = redispatched  # type: ignore[attr-defined]
+    svc._assigned_scopes = assigned_scopes  # type: ignore[attr-defined]
     return svc, stores, settled, delivery
 
 
@@ -305,6 +310,18 @@ def test_the_handoff_carries_the_scope_the_completion_materializes_under():
 
     handoff = delivery.frame("resident_handoff")["handoff"]
     assert handoff["tenant"] == "org-acme"
+
+
+def test_control_records_the_scope_the_invocation_finalizes_under():
+    """The scope is recorded against the key before the origin can report a binding.
+
+    The origin reports the finalization its completion produced, so the binding is
+    checked against the scope control assigned rather than one the worker names.
+    """
+    svc, _stores, _settled, _delivery = _build(content_scope="org-acme")
+    asyncio.run(svc._originate(_env()))
+
+    assert svc._assigned_scopes == [("idm-1", "org-acme")]
 
 
 def test_embedding_dependency_relays_the_embedding_interface_to_the_sidecar():
