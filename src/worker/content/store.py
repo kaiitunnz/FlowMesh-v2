@@ -15,6 +15,7 @@ object: that is the control plane's, and in this slice no one does it.
 """
 
 import time
+from collections.abc import Iterator
 from pathlib import Path
 
 from shared.content import (
@@ -47,6 +48,17 @@ class WorkerObjectStore(FabricObjectStore):
         return self._objects.read(
             reference.authorization_scope, reference.content_digest
         )
+
+    def iter_bound(self) -> Iterator[tuple[str, str]]:
+        """Every object a reported binding names, as the scope and digest naming it.
+
+        The half of what this worker holds that a consumer can legitimately reach, and
+        so the half worth telling control about; the rest is either still on its way to
+        a binding or already reclaimable.
+        """
+        for scope, digest in self._objects.iter_objects():
+            if self._bound_path(scope, digest).exists():
+                yield scope, digest
 
     def holds(self, reference: ContentReference) -> bool:
         return self._objects.holds(

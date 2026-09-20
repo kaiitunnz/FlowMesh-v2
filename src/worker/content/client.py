@@ -13,7 +13,7 @@ is a typed hydration failure and the consumer's own recovery decides what follow
 import asyncio
 import logging
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 from shared.content import (
     ContentHydrationError,
@@ -34,6 +34,10 @@ from shared.network.session import FramedRelaySession, RelaySessionRole
 
 # Asks the control plane to authorize hydrating one reference for one task.
 RequestGrant = Callable[[ContentReference, str], None]
+
+# Reports the objects this worker holds, each by its scope and digest, to the holder
+# directory. One call carries a whole report so a periodic re-report is one message.
+AnnounceHolding = Callable[[Sequence[tuple[str, str]]], None]
 
 # Keyed by the object a request waits on: control answers a grant or a typed denial
 # naming that same reference, so an answer finds its request by what it is about.

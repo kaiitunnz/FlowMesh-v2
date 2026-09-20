@@ -13,7 +13,7 @@ typed hydration failure and its own consumer decides what that means.
 
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from enum import StrEnum
 from typing import Any
 
@@ -57,17 +57,24 @@ class ContentHydrationAuthority:
         self._sessions = sessions
         self._logger = logger or logging.getLogger("content-authority")
 
-    def record_holding(self, worker_id: str, reference: ContentReference) -> None:
-        """Note that a worker holds an object it wrote."""
+    def record_holding(self, worker_id: str, held: Sequence[tuple[str, str]]) -> None:
+        """Note the objects a worker holds, from its write or its periodic report.
+
+        A report is what keeps a record live, and it arrives under the reporting
+        worker's current incarnation, so a restarted holder supersedes the records its
+        previous one left behind rather than waiting for them to lapse.
+        """
         worker = self._workers.get_worker(worker_id)
         if worker is None:
             return
-        self._directory.record(
-            reference,
-            worker_id=worker_id,
-            node_id=worker.node_id,
-            generation=worker.incarnation,
-        )
+        for scope, digest in held:
+            self._directory.record(
+                scope,
+                digest,
+                worker_id=worker_id,
+                node_id=worker.node_id,
+                generation=worker.incarnation,
+            )
 
     def authorize(
         self, worker_id: str, task_id: str, reference: ContentReference
@@ -81,7 +88,9 @@ class ContentHydrationAuthority:
         if not self._authorizes(task_id, worker_id, reference):
             self._deny(requester, reference, HydrationDenial.NO_BINDING)
             return
-        reported = self._directory.holders(reference)
+        reported = self._directory.holders(
+            reference.authorization_scope, reference.content_digest
+        )
         if not reported:
             # Nothing ever reported holding it: an object from before this protocol,
             # which its consumer reaches over the compatibility store instead.
@@ -129,8 +138,13 @@ class ContentHydrationAuthority:
             if worker is not None and worker.incarnation == record.generation:
                 return worker
             # The reporting worker is gone or came back as another incarnation, so its
-            # report describes content no one can serve.
-            self._directory.forget(reference, record.worker_id)
+            # report describes content no one can serve. A restarted worker re-reports
+            # what it still holds, which lands as a record for its new incarnation.
+            self._directory.forget(
+                reference.authorization_scope,
+                reference.content_digest,
+                record.worker_id,
+            )
         return None
 
     def _deny(

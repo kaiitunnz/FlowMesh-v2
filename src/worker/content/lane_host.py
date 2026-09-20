@@ -24,7 +24,7 @@ from shared.content import (
 from shared.network.frame_stream import WireFrameSink
 from shared.network.relay_frame import RelayDirection, RelayFrame
 
-from .client import ContentHydrationClient, RequestGrant
+from .client import AnnounceHolding, ContentHydrationClient, RequestGrant
 from .holder import ContentHolder
 from .store import WorkerObjectStore
 
@@ -41,6 +41,8 @@ class ContentLaneHost:
         worker_id: str,
         generation: int,
         transfer_timeout_sec: float = 60.0,
+        announce: AnnounceHolding | None = None,
+        holder_report_ttl_sec: float = 300.0,
         logger: logging.Logger | None = None,
     ) -> None:
         self._store = store
@@ -49,6 +51,8 @@ class ContentLaneHost:
         self._worker_id = worker_id
         self._generation = generation
         self._transfer_timeout_sec = transfer_timeout_sec
+        self._announce = announce
+        self._holder_report_ttl_sec = holder_report_ttl_sec
         self._logger = logger or logging.getLogger("content-lane-host")
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(
@@ -81,7 +85,7 @@ class ContentLaneHost:
             transfer_timeout_sec=self._transfer_timeout_sec,
             logger=self._logger,
         )
-        self._sweep = asyncio.ensure_future(self._sweep_orphans())
+        self._sweep = asyncio.ensure_future(self._keep_held_reachable())
 
     def hydrate(self, reference: ContentReference, task_id: str) -> bytes:
         """Fetch one object, from this worker's own store or from its holder."""
@@ -106,21 +110,48 @@ class ContentLaneHost:
         in_transfer = self._holder.in_transfer if self._holder else frozenset()
         return self._store.reclaim_orphans(in_transfer=in_transfer)
 
-    async def _sweep_orphans(self) -> None:
-        """Reclaim unbound writes on a cadence derived from their grace period.
+    def report_held(self) -> int:
+        """Report every bound object this worker holds, and return how many.
 
-        A write only becomes reclaimable once it is older than the grace, so sweeping a
-        few times within one grace period is enough to keep a failed preparation's bytes
-        from accumulating without ever racing a slow report.
+        A holder record lapses unless its holder keeps reporting, so this runs on a
+        cadence inside the record's lifetime. It also runs before the worker takes any
+        work, which is how a restarted worker makes the objects already on its disk
+        reachable again: the report lands under its new incarnation, superseding the
+        record its previous one left behind. It reports only what a binding names — the
+        rest is either still on its way to one or already reclaimable — so the report
+        and the sweep never disagree about an object.
         """
-        interval = max(30.0, self._store.orphan_grace_sec / 4)
+        if self._announce is None:
+            return 0
+        held = list(self._store.iter_bound())
+        if held:
+            self._announce(held)
+        return len(held)
+
+    @property
+    def housekeeping_interval_sec(self) -> float:
+        """How often the loop reports and sweeps.
+
+        Several times within one holder-record lifetime, so a record is refreshed well
+        before it lapses even if a report is missed.
+        """
+        return max(5.0, min(self._holder_report_ttl_sec / 3, 60.0))
+
+    async def _keep_held_reachable(self) -> None:
+        """Re-report what this worker holds, and reclaim what no binding claims.
+
+        One loop for both because both are periodic housekeeping over the same objects,
+        split so they never disagree: a bound object is reported, an unbound one past
+        its grace is reclaimed, and neither touches the other's half.
+        """
         while True:
-            await asyncio.sleep(interval)
+            await asyncio.sleep(self.housekeeping_interval_sec)
             try:
+                self.report_held()
                 if (reclaimed := self.reclaim_orphans()) > 0:
                     self._logger.info("reclaimed %d unbound content writes", reclaimed)
             except Exception:
-                self._logger.exception("content orphan sweep failed")
+                self._logger.exception("content housekeeping failed")
 
     def route(self, frame_kind: str, frame: dict[str, Any]) -> bool:
         """Marshal one content control frame onto the lane loop; return handled."""

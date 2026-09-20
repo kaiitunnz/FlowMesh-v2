@@ -14,6 +14,7 @@ from server.content import (
 from shared.content import ContentHydrationGrant, reference_for
 
 _REFERENCE = reference_for("local", b"prepared", media_type="application/json")
+_HELD = (_REFERENCE.authorization_scope, _REFERENCE.content_digest)
 
 
 class _FakeRedis:
@@ -93,7 +94,7 @@ def _denial(workers: _Workers) -> str:
 def test_a_bound_request_grants_both_ends_the_same_grant() -> None:
     workers = _Workers(**{"wkr-1": 3, "wkr-2": 5})
     authority = _authority(workers)
-    authority.record_holding("wkr-1", _REFERENCE)
+    authority.record_holding("wkr-1", [_HELD])
 
     authority.authorize("wkr-2", "tsk-1", _REFERENCE)
 
@@ -110,7 +111,7 @@ def test_the_transfer_record_routes_between_the_two_ends() -> None:
     workers = _Workers(**{"wkr-1": 3, "wkr-2": 5})
     redis = _FakeRedis()
     authority = _authority(workers, redis=redis)
-    authority.record_holding("wkr-1", _REFERENCE)
+    authority.record_holding("wkr-1", [_HELD])
 
     authority.authorize("wkr-2", "tsk-1", _REFERENCE)
 
@@ -124,7 +125,7 @@ def test_the_transfer_record_routes_between_the_two_ends() -> None:
 def test_a_request_no_binding_authorizes_is_refused() -> None:
     workers = _Workers(**{"wkr-1": 3, "wkr-2": 5})
     authority = _authority(workers, authorizes=False)
-    authority.record_holding("wkr-1", _REFERENCE)
+    authority.record_holding("wkr-1", [_HELD])
 
     authority.authorize("wkr-2", "tsk-1", _REFERENCE)
 
@@ -144,7 +145,7 @@ def test_an_object_no_holder_reported_is_refused_as_untracked() -> None:
 def test_a_holder_that_is_gone_is_refused_rather_than_granted() -> None:
     workers = _Workers(**{"wkr-1": 3, "wkr-2": 5})
     authority = _authority(workers)
-    authority.record_holding("wkr-1", _REFERENCE)
+    authority.record_holding("wkr-1", [_HELD])
     workers.retire("wkr-1")
 
     authority.authorize("wkr-2", "tsk-1", _REFERENCE)
@@ -155,7 +156,7 @@ def test_a_holder_that_is_gone_is_refused_rather_than_granted() -> None:
 def test_a_holder_that_came_back_as_another_incarnation_is_refused() -> None:
     workers = _Workers(**{"wkr-1": 3, "wkr-2": 5})
     authority = _authority(workers)
-    authority.record_holding("wkr-1", _REFERENCE)
+    authority.record_holding("wkr-1", [_HELD])
     workers.restart("wkr-1")
 
     authority.authorize("wkr-2", "tsk-1", _REFERENCE)
@@ -166,7 +167,7 @@ def test_a_holder_that_came_back_as_another_incarnation_is_refused() -> None:
 def test_a_worker_is_never_sent_to_itself_for_an_object() -> None:
     workers = _Workers(**{"wkr-1": 3})
     authority = _authority(workers)
-    authority.record_holding("wkr-1", _REFERENCE)
+    authority.record_holding("wkr-1", [_HELD])
 
     authority.authorize("wkr-1", "tsk-1", _REFERENCE)
 
@@ -176,7 +177,7 @@ def test_a_worker_is_never_sent_to_itself_for_an_object() -> None:
 def test_a_scope_is_part_of_what_a_holder_reported() -> None:
     workers = _Workers(**{"wkr-1": 3, "wkr-2": 5})
     authority = _authority(workers)
-    authority.record_holding("wkr-1", _REFERENCE)
+    authority.record_holding("wkr-1", [_HELD])
 
     elsewhere = _REFERENCE.model_copy(update={"authorization_scope": "other"})
     authority.authorize("wkr-2", "tsk-1", elsewhere)
@@ -187,7 +188,7 @@ def test_a_scope_is_part_of_what_a_holder_reported() -> None:
 def test_an_unknown_requester_is_answered_with_nothing() -> None:
     workers = _Workers(**{"wkr-1": 3})
     authority = _authority(workers)
-    authority.record_holding("wkr-1", _REFERENCE)
+    authority.record_holding("wkr-1", [_HELD])
 
     authority.authorize("wkr-9", "tsk-1", _REFERENCE)
 
@@ -198,7 +199,7 @@ def test_an_unknown_requester_is_answered_with_nothing() -> None:
 def test_every_grant_is_freshly_minted(field: str) -> None:
     workers = _Workers(**{"wkr-1": 3, "wkr-2": 5})
     authority = _authority(workers)
-    authority.record_holding("wkr-1", _REFERENCE)
+    authority.record_holding("wkr-1", [_HELD])
 
     authority.authorize("wkr-2", "tsk-1", _REFERENCE)
     first = _granted(workers)
@@ -212,7 +213,7 @@ def test_every_grant_is_freshly_minted(field: str) -> None:
 def test_a_grant_carries_no_service_admission_identity() -> None:
     workers = _Workers(**{"wkr-1": 3, "wkr-2": 5})
     authority = _authority(workers)
-    authority.record_holding("wkr-1", _REFERENCE)
+    authority.record_holding("wkr-1", [_HELD])
 
     authority.authorize("wkr-2", "tsk-1", _REFERENCE)
 

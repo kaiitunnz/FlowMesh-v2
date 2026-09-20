@@ -147,6 +147,7 @@ class WorkerAdapter(ABC):
             "WORKER_CONTENT_DIR": env.WORKER_CONTENT_DIR,
             "CONTENT_HYDRATION_ENABLED": to_env_str(env.CONTENT_HYDRATION_ENABLED),
             "CONTENT_ORPHAN_GRACE_SEC": to_env_str(env.CONTENT_ORPHAN_GRACE_SEC),
+            "CONTENT_HOLDER_TTL_SEC": to_env_str(env.CONTENT_HOLDER_TTL_SEC),
             "CONTENT_TRANSFER_TIMEOUT_SEC": to_env_str(
                 env.CONTENT_TRANSFER_TIMEOUT_SEC
             ),

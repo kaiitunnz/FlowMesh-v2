@@ -1,7 +1,9 @@
 """Where the fabric's content is currently held.
 
 Location evidence, and only that. A holder record says a worker reported holding an
-object a moment ago; it is not a binding, does not keep the object alive, and confers no
+object recently — a holder re-reports what it has on a cadence inside the record's
+lifetime, so a record lapses when a holder stops reporting rather than when an object
+stops being read; it is not a binding, does not keep the object alive, and confers no
 right to read it — a reader still needs a grant, which is minted against the consumer
 binding rather than against this. Records expire on their own, so a holder that stops
 reporting simply falls out rather than leaving control believing an object is reachable.
@@ -14,8 +16,6 @@ choice among equals rather than the discovery of the one true copy.
 import json
 import time
 from dataclasses import dataclass
-
-from shared.content import ContentReference
 
 from ..clients.redis import RedisClient
 
@@ -41,13 +41,13 @@ class ContentHolderDirectory:
         self._ttl = record_ttl_sec
 
     @staticmethod
-    def _key(reference: ContentReference) -> str:
-        scope, algorithm, digest = reference.identity
-        return f"ct:holders:{scope}:{algorithm}:{digest}"
+    def _key(scope: str, digest: str) -> str:
+        return f"ct:holders:{scope}:{digest}"
 
     def record(
         self,
-        reference: ContentReference,
+        scope: str,
+        digest: str,
         *,
         worker_id: str,
         node_id: str,
@@ -60,7 +60,7 @@ class ContentHolderDirectory:
             generation=generation,
             expires_at_epoch=time.time() + self._ttl,
         )
-        key = self._key(reference)
+        key = self._key(scope, digest)
         self._rds.sync.hash_set(
             key,
             {
@@ -76,9 +76,9 @@ class ContentHolderDirectory:
         self._rds.sync.expire(key, int(self._ttl * 2) + 1)
         return record
 
-    def holders(self, reference: ContentReference) -> list[ContentHolderRecord]:
+    def holders(self, scope: str, digest: str) -> list[ContentHolderRecord]:
         """Every live holder reported for this object, freshest report first."""
-        raw = self._rds.sync.hash_getall(self._key(reference)) or {}
+        raw = self._rds.sync.hash_getall(self._key(scope, digest)) or {}
         records: list[ContentHolderRecord] = []
         for worker_id, value in raw.items():
             try:
@@ -96,6 +96,6 @@ class ContentHolderDirectory:
         records.sort(key=lambda r: r.expires_at_epoch, reverse=True)
         return records
 
-    def forget(self, reference: ContentReference, worker_id: str) -> None:
+    def forget(self, scope: str, digest: str, worker_id: str) -> None:
         """Drop one holder's report, for a worker that can no longer serve it."""
-        self._rds.sync.hash_delete(self._key(reference), worker_id)
+        self._rds.sync.hash_delete(self._key(scope, digest), worker_id)

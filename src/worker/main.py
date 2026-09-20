@@ -274,15 +274,20 @@ def _build_content_plane(
         worker_id=client.worker_id,
         generation=client.incarnation,
         transfer_timeout_sec=cfg.content_transfer_timeout_sec,
+        announce=client.push_content_holding,
+        holder_report_ttl_sec=cfg.content_holder_ttl_sec,
         logger=logger,
     )
     lane.start()
+    # Before this worker takes any work: an object already on its disk from a previous
+    # incarnation is unreachable until control hears who holds it, and the report has to
+    # land under the incarnation registration just assigned.
+    if (held := lane.report_held()) > 0:
+        logger.info("reported %d held content objects at startup", held)
     return WorkerContentPlane(
         lane,
         compat=build_content_store(cfg.server_base_url),
-        announce=lambda reference: client.push_content_holding(
-            reference.model_dump(mode="json")
-        ),
+        announce=client.push_content_holding,
         logger=logger,
     )
 

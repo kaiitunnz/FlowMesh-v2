@@ -809,7 +809,10 @@ class EventMonitor:
             case "CONTENT_HOLDING" if self._content_authority is not None:
                 self._content_authority.record_holding(
                     (event.worker_id or "").strip(),
-                    ContentReference.model_validate(event.payload["reference"]),
+                    [
+                        (str(scope), str(digest))
+                        for scope, digest in event.payload["held"]
+                    ],
                 )
             case "CONTENT_HYDRATION_REQUEST" if self._content_authority is not None:
                 self._content_authority.authorize(

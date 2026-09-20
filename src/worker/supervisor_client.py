@@ -5,7 +5,7 @@ import logging
 import queue
 import threading
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -646,9 +646,11 @@ class SupervisorClient:
         """Send one content transfer frame up for the supervisor to bridge onward."""
         self._push_event("CONTENT_FRAME", {"frame": frame})
 
-    def push_content_holding(self, reference: dict[str, Any]) -> None:
-        """Report that this worker now holds an object, so control can resolve it."""
-        self._push_event("CONTENT_HOLDING", {"reference": reference})
+    def push_content_holding(self, held: Sequence[tuple[str, str]]) -> None:
+        """Report the objects this worker holds, so control can resolve them."""
+        self._push_event(
+            "CONTENT_HOLDING", {"held": [[scope, digest] for scope, digest in held]}
+        )
 
     def push_content_hydration_request(
         self, reference: dict[str, Any], task_id: str

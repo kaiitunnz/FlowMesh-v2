@@ -36,6 +36,7 @@ class WorkerConfig:
     content_dir: Path
     content_hydration_enabled: bool
     content_orphan_grace_sec: float
+    content_holder_ttl_sec: float
     content_transfer_timeout_sec: float
     results_mount_source: str | None
     hb_interval_sec: int
@@ -228,6 +229,7 @@ class WorkerConfig:
                 "CONTENT_HYDRATION_ENABLED", False
             ),
             content_orphan_grace_sec=parse_float_env("CONTENT_ORPHAN_GRACE_SEC", 900.0),
+            content_holder_ttl_sec=parse_float_env("CONTENT_HOLDER_TTL_SEC", 300.0),
             content_transfer_timeout_sec=parse_float_env(
                 "CONTENT_TRANSFER_TIMEOUT_SEC", 60.0
             ),

@@ -11,19 +11,15 @@ task's own binding, so the surface is taken per task rather than shared across t
 """
 
 import logging
-from collections.abc import Callable
 
 from shared.content import OCTET_STREAM, ContentReference, FabricObjectStore
 
-from .client import GrantDenied
+from .client import AnnounceHolding, GrantDenied
 from .lane_host import ContentLaneHost
 
 # Control's word that nothing ever reported holding the object, which is what makes the
 # compatibility store the right place to look rather than a failure to report.
 _NOT_TRACKED = "not_tracked"
-
-# Reports one held object to the control plane's holder directory.
-AnnounceHolding = Callable[[ContentReference], None]
 
 
 class WorkerContentPlane:
@@ -63,7 +59,7 @@ class WorkerContentPlane:
         holder for a later grant, and keeps nothing alive by itself.
         """
         reference = self._lane.store.write(scope, data, media_type=media_type)
-        self._announce(reference)
+        self._announce([(scope, reference.content_digest)])
         return reference
 
     def hydrate(self, reference: ContentReference, task_id: str) -> bytes:

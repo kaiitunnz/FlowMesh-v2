@@ -67,7 +67,7 @@ listed here is in `.env.example`.
 | `CONTENT_STORE_ROOT` | – | Content-store root; under the data dir if empty |
 | `CONTENT_HYDRATION_ENABLED` | `false` | Hold content on workers and hydrate it between them (requires `NETWORK_PLANE_ENABLED`) |
 | `CONTENT_HYDRATION_GRANT_TTL_SEC` | `60` | Hydration grant lifetime (seconds) |
-| `CONTENT_HOLDER_TTL_SEC` | `300` | Holder report lifetime (seconds) |
+| `CONTENT_HOLDER_TTL_SEC` | `300` | Holder report lifetime; a holder re-reports well inside it (seconds) |
 | `CONTENT_ORPHAN_GRACE_SEC` | `900` | Grace before an unbound write is reclaimed (seconds) |
 | `CONTENT_TRANSFER_TIMEOUT_SEC` | `60` | Content transfer deadline (seconds) |
 | `RESIDENT_CAPACITY_ENABLED` | `false` | Serve resident model bindings via admission |

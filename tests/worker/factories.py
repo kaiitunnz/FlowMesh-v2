@@ -33,6 +33,7 @@ DEFAULT_WORKER_CONFIG: Final[WorkerConfig] = WorkerConfig(
     content_dir=Path("/tmp/test-content"),
     content_hydration_enabled=False,
     content_orphan_grace_sec=900.0,
+    content_holder_ttl_sec=300.0,
     content_transfer_timeout_sec=60.0,
     server_base_url=None,
     supervisor_grpc_target="localhost:50051",
