@@ -2,6 +2,7 @@
 
 import threading
 import time
+from collections.abc import Sequence
 from typing import Any, cast
 
 import pytest
@@ -142,3 +143,51 @@ def test_a_cache_that_cannot_serve_still_reads_the_object_from_the_store(
     reference = registry.store_for("tsk-1", "tenant-a").write("tenant-a", b"body")
 
     assert plane.hydrate("tsk-1", reference) == b"body"
+
+
+class _RecordingLane:
+    """A lane that records what the plane put in its cache."""
+
+    def __init__(self, store: Any) -> None:
+        self.store = store
+
+    def hydrate(self, reference: Any, task_id: str) -> bytes:
+        raise ContentStoreError("nothing cached here")
+
+
+def test_an_outcome_is_cached_and_announced_like_any_other_content(tmp_path) -> None:
+    """An outcome is content, so the copy and the announcement are the same as a write.
+
+    Materializing an outcome goes through the plane rather than straight to the store,
+    so the worker keeps the copy and control learns of it — without which no peer could
+    ever be served an outcome and the whole cache-to-cache path would be dead for the
+    fabric's main producer.
+    """
+    registry = _registry(tmp_path)
+    registry.accept(_access("tsk-1"))
+    cached: list[tuple[str, bytes]] = []
+    announced: list[Sequence[tuple[str, str]]] = []
+
+    class _Store:
+        def write(self, scope: str, data: bytes, *, media_type: str = "") -> Any:
+            cached.append((scope, data))
+
+    class _Index:
+        def find(self, scope: str, idem: str) -> Any:
+            return None
+
+        def record(self, scope: str, idem: str, content: Any) -> Any:
+            return content
+
+    plane = WorkerContentPlane(
+        cast(Any, _RecordingLane(_Store())),
+        registry,
+        announce=announced.append,
+        finalizations=cast(Any, _Index()),
+    )
+    store = plane.outcome_store("tsk-1")
+    assert store is not None
+    reference = store.write("tenant-a", b"outcome body", media_type="text/plain")
+
+    assert cached == [("tenant-a", b"outcome body")]
+    assert announced == [[("tenant-a", reference.content_digest)]]

@@ -68,7 +68,7 @@ class WorkerContentPlane:
         if self._finalizations is None:
             return None
         return FinalizingContentStore(
-            _TaskScopedStores(self._access, task_id), self._finalizations
+            _TaskScopedStores(self, task_id), self._finalizations
         )
 
     def accept_access(self, access: ContentStoreAccess) -> None:
@@ -132,14 +132,19 @@ class WorkerContentPlane:
 
 
 class _TaskScopedStores:
-    """One task's access to the shared store, opened per scope on demand."""
+    """One task's content plane, presented as the store each scope is reached through.
 
-    def __init__(self, access: ContentAccessRegistry, task_id: str) -> None:
-        self._access = access
+    An outcome is content like any other: it goes through the plane, so it lands in the
+    shared store, stays in this worker's cache, and is announced there — a later reader
+    can then be served the copy instead of paying for the store.
+    """
+
+    def __init__(self, plane: "WorkerContentPlane", task_id: str) -> None:
+        self._plane = plane
         self._task_id = task_id
 
     def for_scope(self, scope: str) -> FabricObjectStore:
-        return self._access.store_for(self._task_id, scope)
+        return TaskContentStore(self._plane, self._task_id)
 
 
 class TaskContentStore(FabricObjectStore):
