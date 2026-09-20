@@ -97,7 +97,6 @@ class Runner:
         web_search_api_key: str | None = None,
         model_api_key: str | None = None,
         model_egress_timeout_sec: float = 120.0,
-        content_store: FabricContentStore | None = None,
         content_plane: WorkerContentPlane | None = None,
         peer_enabled: bool = False,
         peer_material: MutualTlsMaterial | None = None,
@@ -149,7 +148,6 @@ class Runner:
         self._web_search_api_key = web_search_api_key
         self._model_api_key = model_api_key
         self._model_egress_timeout_sec = model_egress_timeout_sec
-        self._content_store = content_store
         self._content_plane = content_plane
         # The worker-local mediated-egress sidecar, built on the first permit relayed
         # over the attachment (once the worker id and incarnation are known).
@@ -227,7 +225,7 @@ class Runner:
                 ModelEgress(self._model_api_key, self.logger),
             ),
             outcome_sink=client.push_mediated_outcome,
-            content_store=self._content_store,
+            content_store_for=self._outcome_store,
             logger=self.logger,
         )
         return self._mediated_sidecar
@@ -278,7 +276,7 @@ class Runner:
             report_ack=client.push_resident_ack,
             report_outcome=client.push_resident_outcome,
             report_observation=client.push_resident_route_observation,
-            content_store=self._content_store,
+            content_store_for=self._outcome_store,
             peek_request=self.lifecycle.resident_requests.peek,
             delete_request=self.lifecycle.resident_requests.delete,
             peer_enabled=self._peer_enabled,
@@ -337,10 +335,16 @@ class Runner:
         self.logger.warning("Unknown mediated-op frame kind: %s", frame_kind)
 
     def _object_store(self, task_id: str) -> FabricObjectStore | None:
-        """Where this task's objects live: its own content surface, or the server's."""
-        if self._content_plane is not None:
-            return self._content_plane.for_task(task_id)
-        return self._content_store
+        """The content surface this task reads and writes through."""
+        if self._content_plane is None:
+            return None
+        return self._content_plane.for_task(task_id)
+
+    def _outcome_store(self, task_id: str) -> FabricContentStore | None:
+        """Where this task's outcomes materialize and deduplicate."""
+        if self._content_plane is None:
+            return None
+        return self._content_plane.outcome_store(task_id)
 
     def _prepare_inputs(self, msg: WorkerTaskMessage) -> ResolvedInputMaterialization:
         """Resolve a task's declared contract and store the request it materialized.

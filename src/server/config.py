@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
+from shared.content import ObjectStoreConfig
 from shared.tasks.specs import ModelBindingMode
 from shared.telemetry.config import TelemetryConfig
 from shared.utils.parsing import parse_bool_env, parse_float_env, parse_int_env
@@ -552,6 +553,7 @@ class ContentStoreConfig:
     hydration_enabled: bool = False
     grant_ttl_sec: float = 60.0
     holder_record_ttl_sec: float = 300.0
+    access_grant_ttl_sec: float = 900.0
 
     @classmethod
     def from_env(cls, results_dir: Path) -> "ContentStoreConfig":
@@ -567,6 +569,7 @@ class ContentStoreConfig:
             hydration_enabled=parse_bool_env("CONTENT_HYDRATION_ENABLED", False),
             grant_ttl_sec=parse_float_env("CONTENT_HYDRATION_GRANT_TTL_SEC", 60.0),
             holder_record_ttl_sec=parse_float_env("CONTENT_HOLDER_TTL_SEC", 300.0),
+            access_grant_ttl_sec=parse_float_env("CONTENT_ACCESS_TTL_SEC", 900.0),
         )
 
 
@@ -777,6 +780,7 @@ class ServerConfig:
     log_stream: LogStreamConfig
     orchestration: OrchestrationConfig
     content_store: ContentStoreConfig = field(default_factory=ContentStoreConfig)
+    object_store: ObjectStoreConfig = field(default_factory=ObjectStoreConfig)
     telemetry_store: TelemetryStoreConfig = field(default_factory=TelemetryStoreConfig)
     results_dir: Path = Path("./results")
     plugins: list[str] = field(default_factory=list)
@@ -808,6 +812,7 @@ class ServerConfig:
             log_stream=LogStreamConfig.from_env(),
             orchestration=OrchestrationConfig.from_env(),
             content_store=ContentStoreConfig.from_env(results_dir),
+            object_store=ObjectStoreConfig.from_env(results_dir),
             telemetry_store=TelemetryStoreConfig.from_env(),
             results_dir=results_dir,
             plugins=plugins,

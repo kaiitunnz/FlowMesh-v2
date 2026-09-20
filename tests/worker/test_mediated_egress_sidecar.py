@@ -97,7 +97,7 @@ class _Harness:
             audience=lambda: (_WORKER, _GEN),
             egresses=(self.egress,),
             outcome_sink=self.reports.put,
-            content_store=store,
+            content_store_for=lambda task_id: store,
         )
 
     def stash(self) -> None:

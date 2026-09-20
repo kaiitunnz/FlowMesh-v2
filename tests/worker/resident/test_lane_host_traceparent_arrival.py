@@ -36,7 +36,7 @@ def _build_host() -> ResidentLaneHost:
         push_frame=lambda frame: None,
         report_ack=lambda ack: None,
         report_outcome=lambda outcome: None,
-        content_store=None,
+        content_store_for=lambda task_id: None,
         peek_request=lambda task_id, call_correlation: "raw-request",
         delete_request=lambda task_id, call_correlation: None,
     )

@@ -1,19 +1,17 @@
 """Caller-neutral substrate shared by the run-to-yield episode executors."""
 
-import logging
+from typing import TYPE_CHECKING
 
-from shared.content import ContentStoreError
+from shared.content import ContentStoreError, FabricObjectStore
 from shared.harness import DeliveredOutcome, HarnessResult
-from shared.outcome import FabricContentStore
 from shared.private_state import PrivateStateSealReport
 from shared.schemas.result import BaseExecutorResult
 from shared.tools.facade import FacadeTurnGroup
 
-from ..config import WorkerConfig
-from ..content_store import build_content_store
 from .base_executor import ExecutionError
 
-_LOG = logging.getLogger(__name__)
+if TYPE_CHECKING:
+    from ..lifecycle import Lifecycle
 
 
 class EpisodeStepResult(BaseExecutorResult):
@@ -33,7 +31,9 @@ class EpisodeStepResult(BaseExecutorResult):
 
 
 def hydrate_delivered_outcomes(
-    config: WorkerConfig, outcomes: tuple[DeliveredOutcome, ...]
+    lifecycle: "Lifecycle | None",
+    task_id: str,
+    outcomes: tuple[DeliveredOutcome, ...],
 ) -> tuple[DeliveredOutcome, ...]:
     """Resolve any reference-backed outcome into its injected value.
 
@@ -44,13 +44,14 @@ def hydrate_delivered_outcomes(
     """
     if not any(o.outcome_ref is not None for o in outcomes):
         return outcomes
-    store = build_content_store(config, _LOG)
-    if store is None:
+    plane = lifecycle.content_plane if lifecycle is not None else None
+    if plane is None:
         raise ExecutionError("cannot hydrate a reference-backed outcome: no store")
+    store = plane.for_task(task_id)
     return tuple(_hydrate(o, store) for o in outcomes)
 
 
-def _hydrate(outcome: DeliveredOutcome, store: FabricContentStore) -> DeliveredOutcome:
+def _hydrate(outcome: DeliveredOutcome, store: FabricObjectStore) -> DeliveredOutcome:
     if outcome.outcome_ref is None:
         return outcome
     try:

@@ -107,7 +107,9 @@ STACK_ENV_SCHEMA = EnvSchema(
                 EnvVar(
                     "COMPOSE_PROFILES",
                     "",
-                    description="Optional compose profiles to deploy (e.g. telemetry).",
+                    description=(
+                        "Optional compose profiles to deploy (e.g. content, telemetry)."
+                    ),
                 ),
             ],
         ),
@@ -638,13 +640,83 @@ STACK_ENV_SCHEMA = EnvSchema(
                 EnvVar(
                     "CONTENT_STORE_ENABLED",
                     "true",
-                    description="Serve the outcome content store.",
+                    description="Serve the outcome finalization index.",
                     var_type=EnvVarType.BOOL,
                 ),
                 EnvVar(
                     "CONTENT_STORE_ROOT",
                     "",
                     description="Content-store root; under the data dir if empty.",
+                ),
+                EnvVar(
+                    "CONTENT_STORE_BACKEND",
+                    "s3",
+                    description="Shared content store backend.",
+                    choices=["s3", "filesystem"],
+                ),
+                EnvVar(
+                    "CONTENT_STORE_ENDPOINT_URL",
+                    "",
+                    description="S3-compatible endpoint; the local store if empty.",
+                ),
+                EnvVar(
+                    "CONTENT_STORE_PORT",
+                    "9000",
+                    description="Co-located content store port.",
+                    var_type=EnvVarType.INT,
+                    min_value=1,
+                ),
+                EnvVar(
+                    "CONTENT_STORE_CONSOLE_PORT",
+                    "9001",
+                    description="Co-located content store console port.",
+                    var_type=EnvVarType.INT,
+                    min_value=1,
+                ),
+                EnvVar(
+                    "CONTENT_STORE_BUCKET",
+                    "flowmesh-content",
+                    description="Bucket holding fabric content.",
+                ),
+                EnvVar(
+                    "CONTENT_STORE_PREFIX",
+                    "",
+                    description="Key prefix within the bucket.",
+                ),
+                EnvVar(
+                    "CONTENT_STORE_REGION",
+                    "us-east-1",
+                    description="Region the store is addressed in.",
+                ),
+                EnvVar(
+                    "CONTENT_STORE_ACCESS_KEY",
+                    "",
+                    description="Deployment key the control plane cuts access from.",
+                ),
+                EnvVar(
+                    "CONTENT_STORE_SECRET_KEY",
+                    "",
+                    description="Deployment secret the control plane cuts access from.",
+                ),
+                EnvVar(
+                    "CONTENT_STORE_FILESYSTEM_ROOT",
+                    "",
+                    description="Shared filesystem root; under the data dir if empty.",
+                    var_type=EnvVarType.DIR_PATH,
+                ),
+                EnvVar(
+                    "CONTENT_STORE_SCOPED_CREDENTIALS",
+                    "true",
+                    description="Cut per-scope access instead of sharing one key.",
+                    var_type=EnvVarType.BOOL,
+                ),
+                EnvVar(
+                    "CONTENT_ACCESS_TTL_SEC",
+                    "900",
+                    description="Store-access grant lifetime (seconds).",
+                    var_type=EnvVarType.FLOAT,
+                    min_value=0,
+                    min_inclusive=False,
                 ),
                 EnvVar(
                     "CONTENT_HYDRATION_ENABLED",
@@ -669,9 +741,9 @@ STACK_ENV_SCHEMA = EnvSchema(
                     min_inclusive=False,
                 ),
                 EnvVar(
-                    "CONTENT_ORPHAN_GRACE_SEC",
+                    "CONTENT_CACHE_TTL_SEC",
                     "900",
-                    description="Grace before an unbound write is reclaimed (seconds).",
+                    description="How long a worker keeps a cached copy (seconds).",
                     var_type=EnvVarType.FLOAT,
                     min_value=0,
                 ),

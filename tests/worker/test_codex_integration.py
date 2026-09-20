@@ -249,7 +249,7 @@ class _FacadeServer:
             audience=lambda: (_WORKER_ID, _WORKER_GEN),
             egresses=(ModelEgress(None, _LOG),),
             outcome_sink=lambda outcome: None,
-            content_store=None,
+            content_store_for=lambda task_id: None,
             logger=_LOG,
         )
         held_egress = HeldModelEgress(

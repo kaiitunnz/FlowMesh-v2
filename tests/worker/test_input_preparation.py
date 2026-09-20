@@ -1,6 +1,6 @@
 """Tests for the worker leg of preparing an inference leaf's inputs."""
 
-from typing import Any
+from typing import Any, cast
 from unittest import mock
 
 import pytest
@@ -55,11 +55,20 @@ def _task(
     )
 
 
+class _Plane:
+    """A content plane whose every task reads and writes one in-memory store."""
+
+    def __init__(self, store: InMemoryContentStore) -> None:
+        self._store = store
+
+    def for_task(self, task_id: str) -> InMemoryContentStore:
+        return self._store
+
+
 def _runner(store: InMemoryContentStore | None) -> Runner:
     """A runner with only what resolving and storing a request reads."""
     runner = object.__new__(Runner)
-    runner._content_store = store
-    runner._content_plane = None
+    runner._content_plane = cast(Any, _Plane(store)) if store is not None else None
     runner.lifecycle = mock.Mock()
     return runner
 

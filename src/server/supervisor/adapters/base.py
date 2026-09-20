@@ -146,7 +146,15 @@ class WorkerAdapter(ABC):
             "WORKER_PRIVATE_STATE_DIR": env.WORKER_PRIVATE_STATE_DIR,
             "WORKER_CONTENT_DIR": env.WORKER_CONTENT_DIR,
             "CONTENT_HYDRATION_ENABLED": to_env_str(env.CONTENT_HYDRATION_ENABLED),
-            "CONTENT_ORPHAN_GRACE_SEC": to_env_str(env.CONTENT_ORPHAN_GRACE_SEC),
+            "CONTENT_CACHE_TTL_SEC": to_env_str(env.CONTENT_CACHE_TTL_SEC),
+            # The store's address, but never its credential: a worker reaches content
+            # with the access control mints for each task it runs.
+            "CONTENT_STORE_BACKEND": env.CONTENT_STORE_BACKEND,
+            "CONTENT_STORE_ENDPOINT_URL": env.CONTENT_STORE_ENDPOINT_URL,
+            "CONTENT_STORE_BUCKET": env.CONTENT_STORE_BUCKET,
+            "CONTENT_STORE_PREFIX": env.CONTENT_STORE_PREFIX,
+            "CONTENT_STORE_REGION": env.CONTENT_STORE_REGION,
+            "CONTENT_STORE_FILESYSTEM_ROOT": env.CONTENT_STORE_FILESYSTEM_ROOT,
             "CONTENT_HOLDER_TTL_SEC": to_env_str(env.CONTENT_HOLDER_TTL_SEC),
             "CONTENT_TRANSFER_TIMEOUT_SEC": to_env_str(
                 env.CONTENT_TRANSFER_TIMEOUT_SEC

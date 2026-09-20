@@ -129,7 +129,7 @@ def test_two_hosts_complete_a_resident_invocation() -> None:
         push_frame=origin_pushes,
         report_ack=on_ack,
         report_outcome=on_outcome,
-        content_store=store,
+        content_store_for=lambda task_id: store,
         peek_request=peek,
         delete_request=lambda t, c: deleted.append((t, c)),
     )
@@ -137,7 +137,7 @@ def test_two_hosts_complete_a_resident_invocation() -> None:
         push_frame=replica_pushes,
         report_ack=noop_ack,
         report_outcome=noop_outcome,
-        content_store=None,
+        content_store_for=lambda task_id: None,
         peek_request=lambda _t, _c: None,
         delete_request=lambda _t, _c: None,
         engine_open=_fake_engine,
@@ -205,7 +205,7 @@ def test_bind_frame_threads_the_serve_task_fence_to_the_sidecar() -> None:
         push_frame=lambda _f: None,
         report_ack=lambda _a: None,
         report_outcome=lambda _o: None,
-        content_store=None,
+        content_store_for=lambda task_id: None,
         peek_request=lambda _t, _c: None,
         delete_request=lambda _t, _c: None,
     )

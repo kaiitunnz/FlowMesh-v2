@@ -33,6 +33,7 @@ PREFIX_PRIVATE_STATE = "aps"
 PREFIX_STATE_BUNDLE_MANIFEST = "sbm"
 PREFIX_STATE_ATTACHMENT = "psa"
 PREFIX_HYDRATION_GRANT = "chg"  # nosec B105 - object-id prefix, not a credential
+PREFIX_STORE_ACCESS_GRANT = "csg"  # nosec B105 - object-id prefix, not a credential
 
 
 def _uuid_str() -> str:
@@ -147,6 +148,10 @@ def new_hydration_grant_id() -> str:
     return f"{PREFIX_HYDRATION_GRANT}-{secrets.token_hex(16)}"
 
 
+def new_store_access_grant_id() -> str:
+    return f"{PREFIX_STORE_ACCESS_GRANT}-{secrets.token_hex(16)}"
+
+
 __all__ = [
     "PREFIX_ACTIVATION",
     "PREFIX_ADMISSION_HANDOFF",
@@ -166,6 +171,7 @@ __all__ = [
     "PREFIX_SCOPE",
     "PREFIX_SERVICE_CLAIM",
     "PREFIX_SSH_CONNECTION",
+    "PREFIX_STORE_ACCESS_GRANT",
     "PREFIX_SSH_SESSION",
     "PREFIX_STATE_ATTACHMENT",
     "PREFIX_STATE_BUNDLE_MANIFEST",
@@ -195,6 +201,7 @@ __all__ = [
     "new_ssh_session_id",
     "new_state_attachment_id",
     "new_state_bundle_manifest_id",
+    "new_store_access_grant_id",
     "new_supervisor_command_id",
     "new_task_id",
     "new_work_item_id",

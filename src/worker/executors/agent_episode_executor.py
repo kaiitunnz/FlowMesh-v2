@@ -101,7 +101,9 @@ class AgentEpisodeExecutor(Executor):
             if dispatch.capsule_blob is not None
             else None
         )
-        outcomes = hydrate_delivered_outcomes(self._config, dispatch.delivered_outcomes)
+        outcomes = hydrate_delivered_outcomes(
+            self._lifecycle, task.task_id, dispatch.delivered_outcomes
+        )
         for outcome in outcomes:
             _LOG.info(
                 "[fabric] injecting %s outcome at call %s",

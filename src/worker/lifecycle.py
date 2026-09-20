@@ -21,6 +21,7 @@ from .resident import ResidentRequestStore
 from .supervisor_client import SupervisorClient
 
 if TYPE_CHECKING:
+    from .content import WorkerContentPlane
     from .model_turn import ResponsesFacade
 
 
@@ -46,6 +47,9 @@ class Lifecycle:
         # through, built by the runner once the worker id is known and read by the
         # agent-episode executor to bind a codex adapter.
         self.responses_facade: ResponsesFacade | None = None
+        # This worker's content plane, where the deployment runs one: built once the
+        # worker id is known and read by whatever reaches fabric content.
+        self.content_plane: WorkerContentPlane | None = None
         self._stop_event = threading.Event()
         self._started_ts: float | None = None
 

@@ -6,6 +6,7 @@ from collections.abc import Mapping
 
 from shared._version import FLOWMESH_RELEASE_VERSION
 from shared.network.mtls import MutualTlsMaterial, MutualTlsMaterialError
+from shared.outcome import FinalizationIndexClient
 from shared.schemas.worker import WorkerCapabilities
 from shared.tasks.task_type import TaskType
 from shared.tasks.worker_message import WorkerHardware
@@ -21,12 +22,11 @@ from shared.telemetry.semconv import (
 
 from .config import WorkerConfig
 from .content import (
+    ContentAccessRegistry,
     ContentLaneHost,
     WorkerContentCache,
     WorkerContentPlane,
-    build_shared_store,
 )
-from .content_store import build_content_store
 from .executors import EXECUTOR_REGISTRY, IMPORT_ERRORS, get_executor_class_name
 from .executors.base_executor import Executor
 from .executors.mp_executor import MPExecutor
@@ -268,9 +268,7 @@ def _build_content_plane(
     """
     if not cfg.content_hydration_enabled:
         return None
-    shared = build_shared_store(cfg.object_store, logger)
-    if shared is None:
-        return None
+    access = ContentAccessRegistry(cfg.object_store, logger)
     lane = ContentLaneHost(
         store=WorkerContentCache(cfg.content_dir, retain_sec=cfg.content_cache_ttl_sec),
         push_frame=client.push_content_frame,
@@ -281,6 +279,7 @@ def _build_content_plane(
         generation=client.incarnation,
         transfer_timeout_sec=cfg.content_transfer_timeout_sec,
         announce=client.push_content_holding,
+        accept_access=access.accept,
         holder_report_ttl_sec=cfg.content_holder_ttl_sec,
         logger=logger,
     )
@@ -291,7 +290,15 @@ def _build_content_plane(
     if (held := lane.report_held()) > 0:
         logger.info("reported %d held content objects at startup", held)
     return WorkerContentPlane(
-        lane, shared, announce=client.push_content_holding, logger=logger
+        lane,
+        access,
+        announce=client.push_content_holding,
+        finalizations=(
+            FinalizationIndexClient(cfg.server_base_url)
+            if cfg.server_base_url
+            else None
+        ),
+        logger=logger,
     )
 
 
@@ -391,6 +398,7 @@ def main() -> None:
     gpu_sampler.start()
 
     content_plane = _build_content_plane(cfg, supervisor_client, logger)
+    lifecycle.content_plane = content_plane
 
     task_stream = supervisor_client.iter_tasks()
     runner = Runner(
@@ -407,7 +415,6 @@ def main() -> None:
         web_search_api_key=cfg.web_search_api_key,
         model_api_key=cfg.model_api_key,
         model_egress_timeout_sec=cfg.model_egress_timeout_sec,
-        content_store=build_content_store(cfg, logger),
         content_plane=content_plane,
         peer_enabled=cfg.peer_enabled,
         peer_material=_peer_material(cfg, logger),

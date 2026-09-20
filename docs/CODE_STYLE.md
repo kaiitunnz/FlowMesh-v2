@@ -39,7 +39,8 @@ resident-capacity `scl-` (service claim), `rpl-` (replica incarnation), `lse-`
 model-secret ref), the network-plane `rog-` (route origin) and `rly-` (relay
 session), the worker-originated `mop-` (one-use mediated-operation permit), the
 activation-private-state `aps-` (state reference), `sbm-` (sealed-generation manifest),
-and `psa-` (attachment), and the content-plane `chg-` (hydration grant).
+and `psa-` (attachment), and the content-plane `chg-` (cache-to-cache hydration grant) and `csg-`
+(content-store access grant).
 Always use
 `new_*_id()`/`new_idempotency_key()`/
 `new_model_secret_ref()` helpers in `src/shared/utils/ids.py`. Never use `uuid4()`

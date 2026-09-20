@@ -63,12 +63,24 @@ listed here is in `.env.example`.
 | `WEB_SEARCH_TIMEOUT_SEC` | `20` | Search request timeout (seconds) |
 | `WEB_SEARCH_RESULT_CHAR_CAP` | `6000` | Injected result size cap |
 | `WEB_SEARCH_MAX_PARALLEL_CALLS_PER_TURN` | `4` | Parallel searches per turn |
-| `CONTENT_STORE_ENABLED` | `true` | Serve the outcome content store |
-| `CONTENT_STORE_ROOT` | – | Content-store root; under the data dir if empty |
-| `CONTENT_HYDRATION_ENABLED` | `false` | Hold content on workers and hydrate it between them (requires `NETWORK_PLANE_ENABLED`) |
-| `CONTENT_HYDRATION_GRANT_TTL_SEC` | `60` | Hydration grant lifetime (seconds) |
-| `CONTENT_HOLDER_TTL_SEC` | `300` | Holder report lifetime; a holder re-reports well inside it (seconds) |
-| `CONTENT_ORPHAN_GRACE_SEC` | `900` | Grace before an unbound write is reclaimed (seconds) |
+| `CONTENT_STORE_ENABLED` | `true` | Serve the outcome finalization index |
+| `CONTENT_STORE_ROOT` | – | Unused by the store; retained for the data dir layout |
+| `CONTENT_STORE_BACKEND` | `s3` | Shared content store backend (`s3` or `filesystem`) |
+| `CONTENT_STORE_ENDPOINT_URL` | – | S3-compatible endpoint; the co-located store if empty |
+| `CONTENT_STORE_BUCKET` | `flowmesh-content` | Bucket holding fabric content |
+| `CONTENT_STORE_PREFIX` | – | Key prefix within the bucket |
+| `CONTENT_STORE_REGION` | `us-east-1` | Region the store is addressed in |
+| `CONTENT_STORE_ACCESS_KEY` | – | Deployment key the control plane cuts access from |
+| `CONTENT_STORE_SECRET_KEY` | – | Deployment secret the control plane cuts access from |
+| `CONTENT_STORE_FILESYSTEM_ROOT` | – | Shared filesystem root for the `filesystem` backend |
+| `CONTENT_STORE_SCOPED_CREDENTIALS` | `true` | Cut per-scope store access instead of sharing one key |
+| `CONTENT_STORE_PORT` | `9000` | Co-located content store port |
+| `CONTENT_STORE_CONSOLE_PORT` | `9001` | Co-located content store console port |
+| `CONTENT_ACCESS_TTL_SEC` | `900` | Store-access grant lifetime (seconds) |
+| `CONTENT_HYDRATION_ENABLED` | `false` | Cache content on workers and hydrate it between them (requires `NETWORK_PLANE_ENABLED`) |
+| `CONTENT_HYDRATION_GRANT_TTL_SEC` | `60` | Cache-to-cache hydration grant lifetime (seconds) |
+| `CONTENT_HOLDER_TTL_SEC` | `300` | Cache report lifetime; a worker re-reports well inside it (seconds) |
+| `CONTENT_CACHE_TTL_SEC` | `900` | How long a worker keeps a cached copy (seconds) |
 | `CONTENT_TRANSFER_TIMEOUT_SEC` | `60` | Content transfer deadline (seconds) |
 | `RESIDENT_CAPACITY_ENABLED` | `false` | Serve resident model bindings via admission |
 | `RESIDENT_INFERENCE_SUBSTRATE` | `serve` | Resident replica substrate (`serve` or `dev_model`) |
@@ -169,7 +181,7 @@ Spark), set `DOCKER_GPU_RUNTIME=` in the stack env.
 | `WORKER_TOKEN` | – | Auth token for supervisor gRPC |
 | `SUPERVISOR_GRPC_TARGET` | – | Supervisor gRPC endpoint |
 | `RESULTS_DIR` | `./results` | Task output directory |
-| `WORKER_CONTENT_DIR` | – | Root for the content this worker holds; defaults to a content subdirectory of `RESULTS_DIR` |
+| `WORKER_CONTENT_DIR` | – | Root for this worker's content cache; defaults to a content subdirectory of `RESULTS_DIR` |
 | `WORKER_PRIVATE_STATE_DIR` | – | Root for activation-private harness state; defaults to a private subdirectory of `RESULTS_DIR` |
 | `WORKER_TAGS` | `` | Scheduler hints |
 | `WORKER_COST_PER_HOUR` | `1.0` | Cost metadata |

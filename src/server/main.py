@@ -22,6 +22,7 @@ if __name__ == "__main__" and __package__ is None:
 
 from server.telemetry.tracing import ControlPlaneTracer
 from shared._version import FLOWMESH_RELEASE_VERSION
+from shared.content import BACKEND_S3
 from shared.outcome import ManifestRef, OutcomeCarrier
 from shared.telemetry.config import TelemetryLevel
 from shared.telemetry.provider import build_meter, build_tracer
@@ -38,10 +39,15 @@ from .clients import RedisClient
 from .clients.redis import resident_relay_client
 from .config import NodeRole, ServerConfig
 from .content import (
+    ContentAccessBroker,
     ContentHolderDirectory,
     ContentHydrationAuthority,
     ContentTransferSessions,
+    DeploymentCredentialMinter,
     FinalizationIndex,
+    ScopedCredentialMinter,
+    StsScopedCredentialMinter,
+    build_sts_client,
 )
 from .dispatcher.factory import create_dispatcher
 from .hooks import register
@@ -351,6 +357,22 @@ if IS_ROOT_NODE:
         SERVE_FORWARD_INGRESS = _serve_wiring.forward_ingress
         SERVE_BINDINGS = _serve_wiring.bindings
 
+    CONTENT_ACCESS: ContentAccessBroker | None = None
+    if config.content_store.hydration_enabled:
+        _store_cfg = config.object_store
+        if _store_cfg.scoped_credentials and _store_cfg.backend == BACKEND_S3:
+            _minter: ScopedCredentialMinter = StsScopedCredentialMinter(
+                _store_cfg, build_sts_client(_store_cfg)
+            )
+        else:
+            _minter = DeploymentCredentialMinter(_store_cfg, logger)
+        CONTENT_ACCESS = ContentAccessBroker(
+            WORKER_REGISTRY,
+            _minter,
+            grant_ttl_sec=config.content_store.access_grant_ttl_sec,
+            logger=logger,
+        )
+
     DISPATCHER = create_dispatcher(
         config.dispatch,
         RUNTIME,
@@ -360,6 +382,7 @@ if IS_ROOT_NODE:
         metrics_recorder=METRICS_RECORDER,
         resident_capacity_enabled=config.orchestration.resident.enabled,
         resident_admission_slots=config.orchestration.resident.admission_slots,
+        content_access=CONTENT_ACCESS,
         control=CONTROL_TRACER,
     )
 

@@ -127,7 +127,7 @@ class _Harness:
         )
         self.origin = ResidentOriginDriver(
             carriage=ControlRelayCarriage(origin_sink),
-            content_store=self.store,
+            content_store_for=lambda task_id: self.store,
             report_ack=self._on_ack,
             report_outcome=self._on_outcome,
         )
@@ -252,7 +252,7 @@ class _DialedHarness:
         )
         self.origin = ResidentOriginDriver(
             carriage=self.carriage,
-            content_store=self.store,
+            content_store_for=lambda task_id: self.store,
             report_ack=self._on_ack,
             report_outcome=self._on_outcome,
         )

@@ -1,5 +1,12 @@
 """Immutable, content-addressed objects the fabric stores within one scope."""
 
+from .access import (
+    ContentOperationKind,
+    ContentStoreAccess,
+    ContentStoreAccessGrant,
+    ScopedContentCredential,
+)
+from .config import BACKEND_FILESYSTEM, BACKEND_S3, ObjectStoreConfig
 from .filesystem import FilesystemObjectBacking
 from .grant import (
     ContentHydrationGrant,
@@ -24,16 +31,23 @@ from .store import (
 )
 
 __all__ = [
+    "BACKEND_FILESYSTEM",
+    "BACKEND_S3",
+    "ObjectStoreConfig",
     "CONTENT_ENCODING_IDENTITY",
     "OCTET_STREAM",
     "ContentHydrationError",
     "ContentHydrationGrant",
     "ContentOperation",
+    "ContentOperationKind",
     "ContentReference",
+    "ContentStoreAccess",
+    "ContentStoreAccessGrant",
     "ContentStoreError",
     "DigestAlgorithm",
     "FabricObjectStore",
     "FilesystemObjectBacking",
+    "ScopedContentCredential",
     "ScopedObjectStore",
     "GrantRejection",
     "HolderGrantGate",

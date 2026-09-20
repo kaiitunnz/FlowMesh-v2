@@ -59,6 +59,10 @@ AckSink = Callable[[ResidentBootstrapAck], None]
 OutcomeSink = Callable[[ResidentOpOutcome], None]
 
 
+# Resolves where one task's outcomes materialize, or None when it can finalize none.
+OutcomeStoreFor = Callable[[str], FabricContentStore | None]
+
+
 @dataclass(frozen=True)
 class ResidentOriginRequest:
     """What control hands the origin worker to drive one bootstrap attempt.
@@ -93,7 +97,7 @@ class ResidentOriginDriver:
         self,
         *,
         carriage: ClaimGatedServiceCarriage,
-        content_store: FabricContentStore | None,
+        content_store_for: OutcomeStoreFor,
         report_ack: AckSink,
         report_outcome: OutcomeSink,
         window_bytes: int = 65536,
@@ -102,7 +106,7 @@ class ResidentOriginDriver:
         logger: logging.Logger | None = None,
     ) -> None:
         self._carriage = carriage
-        self._content_store = content_store
+        self._content_store_for = content_store_for
         self._report_ack = report_ack
         self._report_outcome = report_outcome
         self._window_bytes = window_bytes
@@ -306,7 +310,8 @@ class ResidentOriginDriver:
         assembled into the single JSON document the boundary's contract declares.
         """
         idm = req.handoff.idempotency_key
-        if self._content_store is None or idm is None:
+        store = self._content_store_for(req.task_id)
+        if store is None or idm is None:
             self._report_outcome(
                 self._outcome(
                     req,
@@ -320,7 +325,7 @@ class ResidentOriginDriver:
             if is_batch_request(req.request_payload)
             else "text/plain"
         )
-        manifest = self._content_store.materialize(
+        manifest = store.materialize(
             req.handoff.tenant or "",
             idm,
             completion.encode(),
@@ -333,10 +338,11 @@ class ResidentOriginDriver:
     def _prior_manifest(
         self, req: ResidentOriginRequest, idm: str | None
     ) -> OutcomeManifest | None:
-        if self._content_store is None or idm is None:
+        store = self._content_store_for(req.task_id)
+        if store is None or idm is None:
             return None
         with contextlib.suppress(Exception):
-            return self._content_store.find(req.handoff.tenant or "", idm)
+            return store.find(req.handoff.tenant or "", idm)
         return None
 
     @staticmethod

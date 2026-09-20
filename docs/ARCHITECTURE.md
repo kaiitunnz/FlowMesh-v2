@@ -62,8 +62,9 @@ attempts, `inv-` invocations, `agr-` authority grants, and `idm-` idempotency
 keys (the fabric-assigned dedupe authority for a mediated boundary). Resident-capacity
 control adds `scl-` service claims, `rpl-` replica incarnations, and `lse-` allocation
 leases. `msk-` is an unguessable ref for a workflow's vaulted model credential, `hnd-`
-an unguessable claim-bound admission handoff token, and `chg-` an unguessable
-content-hydration grant. Activation-private state adds
+an unguessable claim-bound admission handoff token, `chg-` an unguessable
+cache-to-cache content-hydration grant, and `csg-` an unguessable content-store
+access grant. Activation-private state adds
 `aps-` state references, `sbm-` sealed-generation manifests, and `psa-` attachments.
 The network plane adds `rog-` route
 origins and `rly-` relay sessions. Worker-originated mediated boundaries add `mop-`
@@ -423,21 +424,40 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   outcome finalization, a prepared inference request, and any later consumer each keep
   their own binding to a reference, so an object is never a name for what a consumer
   calls it, and identical bytes in two scopes are two objects.
-- **Worker-held content and granted hydration.** A worker that materializes content
-  holds it and reports only where it is; a worker that needs an object it did not write
-  asks the control plane, which checks the requesting worker is running the task and
-  that the task is already bound to exactly that reference, resolves a live holder, and
-  mints one short-lived `chg-` grant it hands to both ends. The holder serves only a
-  grant it was handed, once, for that exact object; the requester verifies the digest
-  and size before anything reads the bytes. The transfer runs over the network plane's
-  relay under its own namespace, so the root bridges opaque frames and never holds,
-  assembles, or resolves the payload. An unauthorized request, an expired or replayed
-  grant, or a holder that is gone is a typed hydration failure that recreates no
-  outcome, re-resolves no input, and releases no credit. An object stays for as long as
-  a consumer binding names it; a write that never reached one is reclaimed after a
-  grace period, and nothing else is collected. Objects written before this path remain
-  readable through the server-hosted store. Enable with `CONTENT_HYDRATION_ENABLED=true`
-  (which requires `NETWORK_PLANE_ENABLED=true`).
+- **The shared content store.** Every content object lives in one shared durable store —
+  an S3-compatible service such as the MinIO a default deployment co-locates on the root
+  node, cloud S3, or a filesystem every node mounts — reached through the same
+  `FabricObjectStore` contract and selected with `CONTENT_STORE_BACKEND`. It is a service
+  beside the fabric, never the root process: the root and its supervisors hold no
+  payload. A worker writes an object there before it reports the reference naming it, so
+  a reference that reaches any binding names bytes that already outlive their producer,
+  and a worker's death loses nothing. The outcome-finalization index stays on the control
+  plane, binding an `idm-*` to a reference so a re-drive re-reports the first
+  materialization rather than re-running a sampled producer; the store holds only bytes
+  and never treats an idempotency key as a name.
+- **Store access.** A worker reaches the store only under a `csg-` `ContentStoreAccessGrant`
+  the control plane mints for one dispatched task in one authorization scope, bound to the
+  worker incarnation running it and expiring shortly after. The grant records what access
+  was given and is not itself secret; the material that opens the backend travels beside
+  it over the worker's authenticated attachment and enters no ledger, message, manifest,
+  frame, or log. A scope is the widest a task can reach, cut as a short-lived session over
+  that scope's prefix, and the grant carries no list, delete, or binding operation — which
+  references a task may use is still decided by the consumer bindings control checks. A
+  fresh dispatch or recovery gets fresh access; expiry or a policy rotation fences what
+  came before.
+- **Worker content cache and granted hydration.** What a worker holds is a cache over that
+  store, so a copy may be dropped whenever it ages out. A read tries the local copy, then
+  another worker's copy, then the store itself. For a peer's copy the control plane checks
+  that the requesting worker is running the task and that the task is already bound to
+  exactly that reference, resolves a live holder, and mints one short-lived `chg-`
+  `ContentHydrationGrant` it hands to both ends: the holder serves only a grant it was
+  handed, once, for that exact object, and the requester verifies the digest and size
+  before anything reads the bytes. That transfer runs over the network plane's relay under
+  its own namespace, so the root bridges opaque frames and never holds, assembles, or
+  resolves the payload. A refused, expired, or replayed grant, an evicted copy, or a
+  holder that is gone costs a read from the shared store rather than a failure. Enable the
+  cache and its transfers with `CONTENT_HYDRATION_ENABLED=true` (which requires
+  `NETWORK_PLANE_ENABLED=true`).
 - **Task merging.** Compatible adjacent tasks in a DAG (same `taskType`,
   model, hardware shape, and merge key) coalesce into a single dispatch.
   Merged children ride on `WorkerTaskMessage.merged_children`; the worker

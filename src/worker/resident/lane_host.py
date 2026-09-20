@@ -51,6 +51,8 @@ RequestDelete = Callable[[str, str], None]
 AckSink = Callable[[ResidentBootstrapAck], None]
 OutcomeSink = Callable[[ResidentOpOutcome], None]
 ObservationReport = Callable[[ResidentRouteObservation], None]
+# Resolves where one task's outcomes materialize, or None when it can finalize none.
+OutcomeStoreFor = Callable[[str], FabricContentStore | None]
 
 
 class ResidentLaneHost:
@@ -62,7 +64,7 @@ class ResidentLaneHost:
         push_frame: Callable[[dict[str, Any]], None],
         report_ack: AckSink,
         report_outcome: OutcomeSink,
-        content_store: FabricContentStore | None,
+        content_store_for: OutcomeStoreFor,
         peek_request: RequestLookup,
         delete_request: RequestDelete,
         engine_open: EngineOpen | None = None,
@@ -78,7 +80,7 @@ class ResidentLaneHost:
         self._push_frame = push_frame
         self._report_ack = report_ack
         self._report_outcome = report_outcome
-        self._content_store = content_store
+        self._content_store_for = content_store_for
         self._peek_request = peek_request
         self._delete_request = delete_request
         self._engine_open = engine_open or HttpEngineDelivery(
@@ -111,7 +113,7 @@ class ResidentLaneHost:
         carriage = self._carriage(sink)
         self._origin = ResidentOriginDriver(
             carriage=carriage,
-            content_store=self._content_store,
+            content_store_for=self._content_store_for,
             report_ack=self._report_ack,
             report_outcome=self._report_outcome,
             logger=self._logger,
