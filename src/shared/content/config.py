@@ -9,6 +9,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from shared.utils.parsing import parse_bool_env
+
 BACKEND_S3 = "s3"
 BACKEND_FILESYSTEM = "filesystem"
 
@@ -67,10 +69,7 @@ class ObjectStoreConfig:
                 os.getenv("CONTENT_STORE_FILESYSTEM_ROOT", "").strip()
                 or (default_root / "shared-content")
             ).absolute(),
-            scoped_credentials=(
-                os.getenv("CONTENT_STORE_SCOPED_CREDENTIALS", "true").strip().lower()
-                not in {"0", "false", "no"}
-            ),
+            scoped_credentials=parse_bool_env("CONTENT_STORE_SCOPED_CREDENTIALS", True),
         )
 
 
