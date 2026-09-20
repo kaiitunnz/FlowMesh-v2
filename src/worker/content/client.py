@@ -131,6 +131,8 @@ class ContentHydrationClient:
     ) -> bytes:
         await session.send_wire(KIND_FETCH, grant=grant.model_dump(mode="json"))
         chunks: list[bytes] = []
+        received = 0
+        limit = grant.reference.size_bytes
         while True:
             frame = await session.recv_body_wire(timeout=self._timeout)
             if frame is None:
@@ -140,6 +142,15 @@ class ContentHydrationClient:
             message, body = frame
             kind = message.get("kind")
             if kind == KIND_CHUNK:
+                received += len(body)
+                if received > limit:
+                    # The reference says how big the object is, so a holder sending
+                    # past it is never going to verify; stop reading rather than
+                    # assembling an unbounded amount of it to find that out.
+                    raise ContentHydrationError(
+                        f"content transfer {session.session_id} overran "
+                        f"{limit} declared bytes"
+                    )
                 chunks.append(body)
             elif kind == KIND_DONE:
                 return b"".join(chunks)
