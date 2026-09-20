@@ -15,6 +15,7 @@ from shared.content import (
     ContentHydrationError,
     ContentHydrationGrant,
     ContentStoreError,
+    GrantRejection,
     HolderGrantGate,
     verify_content,
 )
@@ -32,6 +33,12 @@ from shared.network.session import FramedRelaySession, RelaySessionRole
 
 from .store import WorkerObjectStore
 
+# Control relays a grant to the holder and the requester independently, so a fetch can
+# arrive before this holder's copy of the grant does. A bounded wait lets the two meet
+# without weakening the fence: what is waited for is the grant control actually sent,
+# and a fetch for a grant that never arrives is still refused.
+_GRANT_ARRIVAL_WAIT_SEC = 2.0
+
 
 class ContentHolder:
     """This worker's end of the transfers it serves."""
@@ -44,16 +51,19 @@ class ContentHolder:
         holder_id: str,
         generation: int,
         window_bytes: int = 65536,
+        grant_arrival_wait_sec: float = _GRANT_ARRIVAL_WAIT_SEC,
         logger: logging.Logger | None = None,
     ) -> None:
         self._store = store
         self._sink = sink
         self._gate = HolderGrantGate(holder_id=holder_id, generation=generation)
         self._window_bytes = window_bytes
+        self._grant_arrival_wait_sec = grant_arrival_wait_sec
         self._logger = logger or logging.getLogger("content-holder")
         self._sessions: dict[str, FramedRelaySession] = {}
         self._serves: dict[str, asyncio.Task[None]] = {}
         self._in_transfer: dict[str, str] = {}
+        self._arrivals: dict[str, asyncio.Event] = {}
 
     @property
     def in_transfer(self) -> frozenset[str]:
@@ -63,6 +73,8 @@ class ContentHolder:
     def accept_grant(self, grant: ContentHydrationGrant) -> None:
         """Register a grant control minted against this holder."""
         self._gate.accept(grant)
+        if (arrival := self._arrivals.get(grant.grant_id)) is not None:
+            arrival.set()
 
     async def on_frame(self, frame: RelayFrame) -> None:
         """Route one inbound frame to its transfer, opening one on a fetch."""
@@ -107,7 +119,12 @@ class ContentHolder:
         except (KeyError, ValueError):
             await session.send_wire(KIND_REJECT, reason="malformed_grant")
             return
-        if (rejection := self._gate.admit(grant)) is not None:
+        rejection = self._gate.admit(grant)
+        if rejection is GrantRejection.UNKNOWN_GRANT and await self._await_grant(
+            grant.grant_id
+        ):
+            rejection = self._gate.admit(grant)
+        if rejection is not None:
             self._logger.warning(
                 "refused content transfer %s: %s", session_id, rejection.value
             )
@@ -125,6 +142,18 @@ class ContentHolder:
         for start in range(0, len(data), CHUNK_BYTES):
             await session.send_body_wire(KIND_CHUNK, data[start : start + CHUNK_BYTES])
         await session.send_wire(KIND_DONE)
+
+    async def _await_grant(self, grant_id: str) -> bool:
+        """Wait out the delivery race for one grant; False once the wait is spent."""
+        arrival = self._arrivals.setdefault(grant_id, asyncio.Event())
+        try:
+            async with asyncio.timeout(self._grant_arrival_wait_sec):
+                await arrival.wait()
+        except TimeoutError:
+            return False
+        finally:
+            self._arrivals.pop(grant_id, None)
+        return True
 
     def _reap(self, session_id: str) -> None:
         self._sessions.pop(session_id, None)

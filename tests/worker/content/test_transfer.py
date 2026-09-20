@@ -59,6 +59,7 @@ class _Pair:
             sink=self.to_requester,
             holder_id="wkr-1",
             generation=holder_generation,
+            grant_arrival_wait_sec=0.05,
         )
         self.client = ContentHydrationClient(
             sink=self.to_holder,
@@ -104,6 +105,23 @@ async def test_a_transfer_carries_no_object_identity_in_its_frames(tmp_path) -> 
             frame.session_id + frame.correlation_id + frame.operation_id
         )
     assert any(frame.payload for frame in pair.to_requester.frames)
+
+
+@pytest.mark.asyncio
+async def test_a_fetch_waits_for_a_grant_still_in_flight(tmp_path) -> None:
+    # Control relays the grant to each end on its own path, so the fetch can arrive
+    # first; the holder waits for the grant it was sent rather than refusing it.
+    pair = _Pair(tmp_path)
+    reference = pair.store.write("local", _BODY, media_type="application/json")
+    grant = _grant(reference)
+
+    hydration = asyncio.ensure_future(pair.client.hydrate(reference, "tsk-1"))
+    await asyncio.sleep(0)
+    pair.client.deliver_grant(grant)
+    await asyncio.sleep(0)
+    pair.holder.accept_grant(grant)
+
+    assert await hydration == _BODY
 
 
 @pytest.mark.asyncio
