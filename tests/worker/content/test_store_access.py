@@ -2,6 +2,7 @@
 
 import threading
 import time
+from typing import Any, cast
 
 import pytest
 
@@ -10,13 +11,21 @@ from shared.content import (
     ContentOperationKind,
     ContentStoreAccess,
     ContentStoreAccessGrant,
+    ContentStoreError,
     ObjectStoreConfig,
     ScopedContentCredential,
 )
-from worker.content import ContentAccessRegistry
+from worker.content import ContentAccessRegistry, WorkerContentPlane
 from worker.content.access import ContentAccessDenied
 
 _OPS = (ContentOperationKind.READ, ContentOperationKind.WRITE)
+
+
+class _RefusingLane:
+    """A cache lane that cannot represent the object at all."""
+
+    def hydrate(self, reference: Any, task_id: str) -> bytes:
+        raise ContentStoreError("this cache cannot hold that scope")
 
 
 def _access(
@@ -110,8 +119,6 @@ def test_a_plane_with_no_cache_still_reaches_the_shared_store(tmp_path) -> None:
     The cache is the optional half of the plane. Without it there is no lane to hold a
     copy or serve a peer, and every read and write goes to the store instead.
     """
-    from worker.content import WorkerContentPlane
-
     registry = _registry(tmp_path)
     registry.accept(_access("tsk-1"))
     plane = WorkerContentPlane(None, registry)
@@ -121,10 +128,25 @@ def test_a_plane_with_no_cache_still_reaches_the_shared_store(tmp_path) -> None:
 
 
 def test_a_cacheless_plane_takes_the_access_control_relays(tmp_path) -> None:
-    from worker.content import WorkerContentPlane
-
     registry = _registry(tmp_path)
     plane = WorkerContentPlane(None, registry)
     plane.route("content_access", _access("tsk-1").model_dump(mode="json"))
 
     assert registry.store_for("tsk-1", "tenant-a") is not None
+
+
+def test_a_cache_that_cannot_serve_still_reads_the_object_from_the_store(
+    tmp_path,
+) -> None:
+    """Whatever the cache raises, the read falls through to the store that has it.
+
+    The cache keys objects by path segment, so a scope carrying a character a segment
+    cannot hold is refused there — a limit of the copy, not of the object. A read that
+    surfaced it would fail work the shared store could serve.
+    """
+    registry = _registry(tmp_path)
+    registry.accept(_access("tsk-1"))
+    plane = WorkerContentPlane(cast(Any, _RefusingLane()), registry)
+    reference = registry.store_for("tsk-1", "tenant-a").write("tenant-a", b"body")
+
+    assert plane.hydrate("tsk-1", reference) == b"body"

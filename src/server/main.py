@@ -363,8 +363,6 @@ if IS_ROOT_NODE:
     # to write what it produces, whether or not this deployment caches anything.
     if config.content_store.enabled:
         _store_cfg = config.object_store
-        if _store_cfg.backend == BACKEND_S3:
-            ensure_bucket(_store_cfg, logger)
         if _store_cfg.scoped_credentials and _store_cfg.backend == BACKEND_S3:
             _minter: ScopedCredentialMinter = StsScopedCredentialMinter(
                 _store_cfg, build_sts_client(_store_cfg)
@@ -643,6 +641,14 @@ async def _lifespan(_: FastAPI):
 
         # --- Root-only startup ---
         if IS_ROOT_NODE:
+            if (
+                config.content_store.enabled
+                and config.object_store.backend == BACKEND_S3
+            ):
+                # Off the loop and off import: reaching the store can block for as long
+                # as its own timeouts allow, and a store that is slow or unreachable
+                # must not hold up the process that would report it.
+                await asyncio.to_thread(ensure_bucket, config.object_store, logger)
             await rehydrate_root_state(
                 RUNTIME, RESIDENT_CONTROL, RESIDENT_REGISTRY, GATED_SERVE
             )
@@ -707,8 +713,12 @@ async def _lifespan(_: FastAPI):
 
             # --- Root-only shutdown ---
             _stop_background()
-            _bridge_task = app.state.resident_bridge_task
-            if _bridge_task is not None:
+            for _bridge_task in (
+                app.state.resident_bridge_task,
+                app.state.content_bridge_task,
+            ):
+                if _bridge_task is None:
+                    continue
                 _bridge_task.cancel()
                 try:
                     await _bridge_task
@@ -766,6 +776,8 @@ app.state.finalization_index = FINALIZATION_INDEX
 app.state.telemetry_store = TELEMETRY_STORE
 # Started in lifespan on the root node when the resident relay bridge is enabled.
 app.state.resident_bridge_task = None
+# Likewise for the content plane's own relay bridge.
+app.state.content_bridge_task = None
 
 # Routers — shared
 app.include_router(health.router)

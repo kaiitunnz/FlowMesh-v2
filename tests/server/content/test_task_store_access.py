@@ -8,12 +8,13 @@ dispatcher's doing, so both are asserted where the dispatch happens.
 import asyncio
 import logging
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, cast
 from unittest import mock
 
 from server.config import OrchestrationConfig
-from server.content import ContentAccessBroker
+from server.content import ContentAccessBroker, MintedCredential
 from server.registries.worker import Worker
 from server.task.runtime import TaskRuntime
 from shared.content import (
@@ -54,11 +55,14 @@ class _RecordingMinter:
 
     def mint(
         self, scope: str, operations: tuple[ContentOperationKind, ...], ttl_sec: float
-    ) -> ScopedContentCredential:
+    ) -> MintedCredential:
         self.asked.append((scope, operations, ttl_sec))
         if self._fails:
             raise RuntimeError("the backend cut no session")
-        return ScopedContentCredential(material={"token": "opaque"})
+        return MintedCredential(
+            credential=ScopedContentCredential(material={"token": "opaque"}),
+            expires_at_epoch=time.time() + ttl_sec,
+        )
 
 
 def _worker() -> Worker:

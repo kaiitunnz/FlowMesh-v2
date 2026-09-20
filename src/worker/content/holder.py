@@ -133,7 +133,12 @@ class ContentHolder:
         reference = grant.reference
         self._in_transfer[session_id] = reference.content_digest
         try:
-            data = verify_content(reference, self._store.fetch(reference))
+            # Reading the object and hashing it are both work proportional to its size,
+            # and this loop also carries every other transfer's frames and the grants
+            # control delivers, so neither runs on it.
+            data = await asyncio.to_thread(
+                lambda: verify_content(reference, self._store.fetch(reference))
+            )
         except (ContentStoreError, ContentHydrationError) as exc:
             self._logger.warning("holder cannot serve %s: %s", session_id, exc)
             await session.send_wire(KIND_REJECT, reason="unavailable")

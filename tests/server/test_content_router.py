@@ -25,6 +25,12 @@ class _FakeRedis:
     def set_value(self, key: str, value: str) -> None:
         self.values[key] = value
 
+    def set_value_if_absent(self, key: str, value: str) -> bool:
+        if key in self.values:
+            return False
+        self.values[key] = value
+        return True
+
     def expire(self, key: str, ttl_sec: int) -> bool:
         return True
 

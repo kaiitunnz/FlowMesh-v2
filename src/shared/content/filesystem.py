@@ -1,6 +1,6 @@
 """Digest-indexed object files under a per-scope directory partition.
 
-The backing both the server's compatibility store and a worker's own holder keep their
+The backing a worker's cache and a shared-filesystem content store both keep their
 objects in: one file per object, named by its digest, under the scope that isolates it.
 A write is put-if-absent, so re-writing identical bytes is free and an object is never
 rewritten in place. It holds bytes only — what an object means, and which binding keeps

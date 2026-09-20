@@ -396,6 +396,10 @@ class SyncRedisClient:
     def set_value(self, key: str, value: str) -> None:
         self._control.set(key, value)
 
+    def set_value_if_absent(self, key: str, value: str) -> bool:
+        """Write the value only if the key is unset; True when this call wrote it."""
+        return bool(self._control.set(key, value, nx=True))
+
     def set_value_telemetry(self, key: str, value: str) -> None:
         self._telemetry.set(key, value)
 

@@ -25,9 +25,9 @@ import logging
 
 from shared.content import (
     OCTET_STREAM,
-    ContentHydrationError,
     ContentReference,
     ContentStoreAccess,
+    ContentStoreError,
     FabricObjectStore,
 )
 from shared.outcome import (
@@ -116,10 +116,11 @@ class WorkerContentPlane:
         if self._lane is not None:
             try:
                 return self._lane.hydrate(reference, task_id)
-            except (GrantDenied, ContentHydrationError) as miss:
-                # Every cache path is optional: the object is in the shared store
-                # whatever happened to a copy of it, so a miss costs this read and
-                # nothing else.
+            except (GrantDenied, ContentStoreError) as miss:
+                # Every cache path is optional, and that includes a cache that cannot
+                # represent the object at all: the object is in the shared store
+                # whatever happened to a copy of it, so anything the cache raises costs
+                # this read and nothing else.
                 self._logger.debug(
                     "reading %s from the shared store: %s",
                     reference.content_digest,

@@ -22,12 +22,12 @@ from shared.content import (
     ContentOperationKind,
     ContentStoreAccess,
     ContentStoreAccessGrant,
-    ScopedContentCredential,
 )
 from shared.schemas.command import MediatedOpMessage
 from shared.utils.ids import new_store_access_grant_id
 
 from ..registries.worker import Worker, WorkerRegistry
+from .credentials import MintedCredential
 
 _OPERATIONS = (ContentOperationKind.READ, ContentOperationKind.WRITE)
 
@@ -37,7 +37,7 @@ class ScopedCredentialMinter(Protocol):
 
     def mint(
         self, scope: str, operations: tuple[ContentOperationKind, ...], ttl_sec: float
-    ) -> ScopedContentCredential: ...
+    ) -> MintedCredential: ...
 
     @property
     def policy_version(self) -> str:
@@ -65,6 +65,15 @@ class ContentAccessBroker:
         worker = self._workers.get_worker(worker_id)
         if worker is None:
             return
+        try:
+            minted = self._minter.mint(scope, _OPERATIONS, self._grant_ttl_sec)
+        except Exception:
+            # A task that cannot be given access runs without it and fails its first
+            # content read, which is the same outcome as a store it cannot reach.
+            self._logger.exception(
+                "could not mint content store access for %s", task_id
+            )
+            return
         grant = ContentStoreAccessGrant(
             grant_id=new_store_access_grant_id(),
             task_id=task_id,
@@ -73,18 +82,15 @@ class ContentAccessBroker:
             subject_generation=worker.incarnation,
             operations=_OPERATIONS,
             backend_policy_version=self._minter.policy_version,
-            expires_at_epoch=time.time() + self._grant_ttl_sec,
+            # Never past the session it opens the store with: a grant that outlived its
+            # own material would read as live while every call under it was refused.
+            expires_at_epoch=min(
+                time.time() + self._grant_ttl_sec, minted.expires_at_epoch
+            ),
         )
-        try:
-            credential = self._minter.mint(scope, _OPERATIONS, self._grant_ttl_sec)
-        except Exception:
-            # A task that cannot be given access runs without it and fails its first
-            # content read, which is the same outcome as a store it cannot reach.
-            self._logger.exception(
-                "could not mint content store access for %s", task_id
-            )
-            return
-        self._relay(worker, ContentStoreAccess(grant=grant, credential=credential))
+        self._relay(
+            worker, ContentStoreAccess(grant=grant, credential=minted.credential)
+        )
 
     def _relay(self, worker: Worker, access: ContentStoreAccess) -> None:
         self._workers.publish_mediated_op(

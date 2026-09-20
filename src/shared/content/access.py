@@ -5,10 +5,12 @@ object and the grant that opens one peer's copy of it. Control mints a
 ``ContentStoreAccessGrant`` for one dispatched task, in one authorization scope, bound
 to the worker incarnation running it and expiring shortly after; the grant says what
 access was given and is not itself secret. The material that actually opens the
-backend travels
-beside it as a ``ScopedContentCredential`` over the worker's authenticated attachment,
-and goes nowhere else: not into the ledger, a message, a manifest, a relay frame, a
-capsule, an artifact, or a log.
+backend travels beside it as a ``ScopedContentCredential``, relayed to that worker as a
+control message on its node's dispatch channel and delivered over its authenticated
+attachment — the path a minted permit's credential already takes. Nothing keeps it: it
+is never written to the ledger or any control store, never put in a manifest, a relay
+frame, a capsule, an artifact, or a log, and it lives on the worker only while the
+grant it came with does.
 
 The grant covers a scope rather than a reference, so one issuance serves everything a
 task reads and writes, and the scope is therefore the widest the store itself will let
@@ -38,6 +40,10 @@ class ContentStoreAccessGrant(BaseModel):
     ``backend_policy_version`` and ``scope_policy_epoch`` are the policy generations the
     access was cut against, so a rotation fences what was issued before it. The grant
     holds no credential: it describes access, and the material is delivered beside it.
+
+    ``operations`` is the record of what the access was cut to allow, not a check a
+    reader makes: the session delivered beside it is cut to exactly these, so the
+    backend refuses anything wider whatever a holder asks for.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -55,9 +61,6 @@ class ContentStoreAccessGrant(BaseModel):
 
     def expired(self, now: float | None = None) -> bool:
         return (time.time() if now is None else now) > self.expires_at_epoch
-
-    def permits(self, operation: ContentOperationKind) -> bool:
-        return operation in self.operations
 
 
 class ScopedContentCredential(BaseModel):

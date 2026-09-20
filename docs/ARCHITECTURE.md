@@ -445,8 +445,8 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   the control plane mints for one dispatched task in one authorization scope, bound to the
   worker incarnation running it and expiring shortly after. The grant records what access
   was given and is not itself secret; the material that opens the backend travels beside
-  it over the worker's authenticated attachment and enters no ledger, message, manifest,
-  frame, or log. A scope is the widest a task can reach, cut as a short-lived session over
+  it, relayed to that worker as a control message and delivered over its authenticated
+  attachment, and is kept nowhere — no ledger, control store, manifest, frame, or log. A scope is the widest a task can reach, cut as a short-lived session over
   that scope's prefix, and the grant carries no list, delete, or binding operation — which
   references a task may use is still decided by the consumer bindings control checks. A
   fresh dispatch or recovery gets fresh access; expiry or a policy rotation fences what

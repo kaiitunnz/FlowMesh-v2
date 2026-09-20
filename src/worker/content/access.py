@@ -16,6 +16,9 @@ import logging
 import threading
 import time
 
+import boto3
+from botocore.client import Config
+
 from shared.content import (
     BACKEND_FILESYSTEM,
     BACKEND_S3,
@@ -108,9 +111,6 @@ class ContentAccessRegistry:
                 )
 
     def _open_s3(self, credential: ScopedContentCredential) -> FabricObjectStore:
-        import boto3
-        from botocore.client import Config
-
         material = credential.material
         client = boto3.client(
             "s3",

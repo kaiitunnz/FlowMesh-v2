@@ -10,7 +10,13 @@ way up.
 
 import json
 import logging
+import time
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
+
+import boto3
+from botocore.client import Config
 
 from shared.content import (
     ContentOperationKind,
@@ -18,11 +24,34 @@ from shared.content import (
     ScopedContentCredential,
 )
 
+_SessionKey = tuple[str, tuple[ContentOperationKind, ...]]
+
+# Minimum lifetime an S3-compatible STS will cut a session for.
+_MIN_SESSION_SEC = 900
+
+
+@dataclass(frozen=True)
+class MintedCredential:
+    """Session material, and when the backend stops honouring it.
+
+    The grant a task is handed must not outlive the session it opens the store with, so
+    the minter reports the session's own end rather than leaving the grant to assume it.
+    """
+
+    credential: ScopedContentCredential
+    expires_at_epoch: float
+
+
 _READ_ACTIONS = ("s3:GetObject",)
 _WRITE_ACTIONS = ("s3:PutObject",)
 
 
-def scope_policy(bucket: str, prefix: str, scope: str, operations: tuple) -> str:
+def scope_policy(
+    bucket: str,
+    prefix: str,
+    scope: str,
+    operations: tuple[ContentOperationKind, ...],
+) -> str:
     """An S3 policy permitting exactly these operations under one scope's prefix."""
     root = f"{prefix.strip('/')}/{scope}" if prefix.strip("/") else scope
     actions: list[str] = []
@@ -54,9 +83,6 @@ def ensure_bucket(cfg: ObjectStoreConfig, logger: logging.Logger) -> None:
     nothing else to configure. An existing bucket, or a store whose credential may not
     create one, leaves it alone.
     """
-    import boto3
-    from botocore.client import Config
-
     client = boto3.client(
         "s3",
         endpoint_url=cfg.endpoint_url or None,
@@ -82,10 +108,16 @@ def ensure_bucket(cfg: ObjectStoreConfig, logger: logging.Logger) -> None:
         )
 
 
+def _session_end(session: dict[str, Any], ttl_sec: float) -> float:
+    """When the backend says the session ends, or the term it was asked for."""
+    expiration = session.get("Expiration")
+    if isinstance(expiration, datetime):
+        return expiration.timestamp()
+    return time.time() + max(_MIN_SESSION_SEC, ttl_sec)
+
+
 def build_sts_client(cfg: ObjectStoreConfig) -> Any:
     """The session-issuing client for an S3-compatible store."""
-    import boto3
-
     return boto3.client(
         "sts",
         endpoint_url=cfg.endpoint_url or None,
@@ -96,11 +128,22 @@ def build_sts_client(cfg: ObjectStoreConfig) -> Any:
 
 
 class StsScopedCredentialMinter:
-    """Short-lived S3 sessions, each limited to one scope's prefix."""
+    """Short-lived S3 sessions, each limited to one scope's prefix.
+
+    A session is cut per scope rather than per task, so tasks in the same scope share
+    one until it nears its end. Minting is a round trip to the store on the dispatch
+    path, and re-cutting an identical session for every task would put one there for no
+    added isolation.
+    """
+
+    # How long before a session's end it stops being handed out, so a task never starts
+    # with access that expires under it.
+    _RENEW_MARGIN_SEC = 60.0
 
     def __init__(self, cfg: ObjectStoreConfig, sts_client: Any) -> None:
         self._cfg = cfg
         self._sts = sts_client
+        self._sessions: dict[_SessionKey, MintedCredential] = {}
 
     @property
     def policy_version(self) -> str:
@@ -108,20 +151,38 @@ class StsScopedCredentialMinter:
 
     def mint(
         self, scope: str, operations: tuple[ContentOperationKind, ...], ttl_sec: float
-    ) -> ScopedContentCredential:
+    ) -> MintedCredential:
+        key = (scope, operations)
+        now = time.time()
+        cached = self._sessions.get(key)
+        if (
+            cached is not None
+            and now + self._RENEW_MARGIN_SEC < cached.expires_at_epoch
+        ):
+            return cached
+        minted = self._cut(scope, operations, ttl_sec)
+        self._sessions[key] = minted
+        return minted
+
+    def _cut(
+        self, scope: str, operations: tuple[ContentOperationKind, ...], ttl_sec: float
+    ) -> MintedCredential:
         response = self._sts.assume_role(
             RoleArn="arn:x:ignored:for:s3-compatible-sts",
             RoleSessionName=f"fabric-{scope}"[:64],
             Policy=scope_policy(self._cfg.bucket, self._cfg.prefix, scope, operations),
-            DurationSeconds=max(900, int(ttl_sec)),
+            DurationSeconds=max(_MIN_SESSION_SEC, int(ttl_sec)),
         )
         session = response["Credentials"]
-        return ScopedContentCredential(
-            material={
-                "access_key": session["AccessKeyId"],
-                "secret_key": session["SecretAccessKey"],
-                "session_token": session["SessionToken"],
-            }
+        return MintedCredential(
+            credential=ScopedContentCredential(
+                material={
+                    "access_key": session["AccessKeyId"],
+                    "secret_key": session["SecretAccessKey"],
+                    "session_token": session["SessionToken"],
+                }
+            ),
+            expires_at_epoch=_session_end(session, ttl_sec),
         )
 
 
@@ -146,10 +207,14 @@ class DeploymentCredentialMinter:
 
     def mint(
         self, scope: str, operations: tuple[ContentOperationKind, ...], ttl_sec: float
-    ) -> ScopedContentCredential:
-        return ScopedContentCredential(
-            material={
-                "access_key": self._cfg.access_key,
-                "secret_key": self._cfg.secret_key,
-            }
+    ) -> MintedCredential:
+        # A standing credential does not expire, so the grant's own term is its term.
+        return MintedCredential(
+            credential=ScopedContentCredential(
+                material={
+                    "access_key": self._cfg.access_key,
+                    "secret_key": self._cfg.secret_key,
+                }
+            ),
+            expires_at_epoch=time.time() + ttl_sec,
         )

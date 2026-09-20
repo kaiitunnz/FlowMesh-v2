@@ -4,6 +4,7 @@ from .access import ContentAccessBroker, ScopedCredentialMinter
 from .authority import ContentHydrationAuthority, HydrationDenial
 from .credentials import (
     DeploymentCredentialMinter,
+    MintedCredential,
     StsScopedCredentialMinter,
     build_sts_client,
     ensure_bucket,
@@ -20,6 +21,7 @@ __all__ = [
     "ContentTransferSessions",
     "DeploymentCredentialMinter",
     "FinalizationIndex",
+    "MintedCredential",
     "ScopedCredentialMinter",
     "StsScopedCredentialMinter",
     "build_sts_client",

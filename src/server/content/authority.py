@@ -92,8 +92,8 @@ class ContentHydrationAuthority:
             reference.authorization_scope, reference.content_digest
         )
         if not reported:
-            # Nothing ever reported holding it: an object from before this protocol,
-            # which its consumer reaches over the compatibility store instead.
+            # Nothing ever reported holding it — no copy was ever announced, or every
+            # holder's report has lapsed. Its consumer reads the shared store instead.
             self._deny(requester, reference, HydrationDenial.NOT_TRACKED)
             return
         holder = self._resolve_holder(reference, reported, exclude=worker_id)

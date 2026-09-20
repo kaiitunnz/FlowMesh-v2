@@ -1,6 +1,7 @@
 """One content transfer end to end between a requesting worker and its holder."""
 
 import asyncio
+import threading
 import time
 from collections.abc import Awaitable, Callable
 
@@ -50,7 +51,8 @@ class _Pair:
     """A holder and a requester wired to each other over in-process sinks."""
 
     def __init__(self, tmp_path, *, holder_generation: int = 1) -> None:
-        self.store = WorkerContentCache(tmp_path / "held", retain_sec=60.0)
+        self.store_root = tmp_path / "held"
+        self.store = WorkerContentCache(self.store_root, retain_sec=60.0)
         self.to_requester = _ToPeer()
         self.to_holder = _ToPeer()
         self.granted: list[ContentReference] = []
@@ -238,16 +240,42 @@ async def test_an_object_larger_than_one_chunk_reassembles(tmp_path) -> None:
 async def test_a_transfer_in_flight_holds_its_object_against_the_sweep(
     tmp_path,
 ) -> None:
+    """A copy being served survives a sweep that would otherwise drop it.
+
+    Eviction and a transfer run on the same worker, so a copy whose retention has
+    elapsed can come up for eviction while a peer is still reading it. Dropping it
+    mid-transfer would fail a read that was already authorized and underway.
+    """
     pair = _Pair(tmp_path)
     reference = pair.store.write("local", _BODY, media_type="application/json")
+    reading = threading.Event()
+    release = threading.Event()
+    served = pair.store.fetch
+
+    def _blocking_fetch(ref: ContentReference) -> bytes:
+        reading.set()
+        release.wait(5)
+        return served(ref)
+
+    pair.store.fetch = _blocking_fetch  # type: ignore[assignment]
     grant = _grant(reference)
     pair.holder.accept_grant(grant)
-    assert pair.holder.in_transfer == frozenset()
 
     hydration = asyncio.ensure_future(pair.client.hydrate(reference, "tsk-1"))
     await asyncio.sleep(0)
     pair.client.deliver_grant(grant)
-    await hydration
+    await asyncio.to_thread(reading.wait, 5)
+
+    # Mid-serve: the object is named as in transfer, and a sweep with nothing retained
+    # leaves it alone while every other copy goes.
+    assert reference.content_digest in pair.holder.in_transfer
+    spare = pair.store.write("local", b"another object", media_type="text/plain")
+    aged = WorkerContentCache(pair.store_root, retain_sec=0.0)
+    assert aged.evict_aged(in_transfer=pair.holder.in_transfer) == 1
+    assert pair.store.holds(reference) and not pair.store.holds(spare)
+
+    release.set()
+    assert await hydration == _BODY
 
 
 @pytest.mark.asyncio

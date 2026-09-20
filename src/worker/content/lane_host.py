@@ -152,9 +152,11 @@ class ContentLaneHost:
         while True:
             await asyncio.sleep(self.housekeeping_interval_sec)
             try:
-                if (evicted := self.evict_aged()) > 0:
+                # Both walk the cache directory, so they run off the loop that is also
+                # carrying transfers and the control frames they depend on.
+                if (evicted := await asyncio.to_thread(self.evict_aged)) > 0:
                     self._logger.info("evicted %d cached content objects", evicted)
-                self.report_held()
+                await asyncio.to_thread(self.report_held)
             except Exception:
                 self._logger.exception("content cache housekeeping failed")
 

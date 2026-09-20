@@ -41,15 +41,21 @@ class FinalizationIndex:
 
         The first binding stands: a re-drive that produced the same content records
         nothing new, and one that produced different content still settles as the
-        first, so an outcome never changes after it has been committed.
+        first, so an outcome never changes after it has been committed. The write is
+        what decides which drive was first — two drives racing here is the very thing
+        the index exists to settle, so reading before writing would let both believe
+        they won and leave the later one's content bound.
         """
         key = self._key(scope, idempotency_key)
-        if (existing := self.find(scope, idempotency_key)) is not None:
-            return existing
         manifest = OutcomeManifest(
             content=content, provenance=provenance, idempotency_key=idempotency_key
         )
-        self._rds.sync.set_value(key, manifest.model_dump_json())
+        if not self._rds.sync.set_value_if_absent(key, manifest.model_dump_json()):
+            if (existing := self.find(scope, idempotency_key)) is not None:
+                return existing
+            # The binding went away between the refused write and the read — expired,
+            # or dropped — so this drive's content is what there is to bind.
+            self._rds.sync.set_value(key, manifest.model_dump_json())
         if self._ttl:
             self._rds.sync.expire(key, int(self._ttl))
         return manifest

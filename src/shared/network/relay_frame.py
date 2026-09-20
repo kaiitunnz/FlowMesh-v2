@@ -57,8 +57,9 @@ class RelayFrame:
         return self.kind in _CONTROL_KINDS
 
     def to_fields(self) -> dict[bytes, bytes]:
-        # The stream field keys are short and positional rather than named, so they stay
-        # stable while a cluster rolls one node at a time and both versions read them.
+        # The stream field keys are short and positional rather than named, so renaming
+        # what they carry leaves them alone. The JSON framing below is named and did
+        # change, so a frame written by one version is not readable by the other.
         fields: dict[bytes, bytes] = {
             b"k": self.kind.value.encode(),
             b"s": self.session_id.encode(),
