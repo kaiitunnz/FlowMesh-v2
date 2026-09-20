@@ -69,8 +69,8 @@ listed here is in `.env.example`.
 | `CONTENT_STORE_BUCKET` | `flowmesh-content` | Bucket holding fabric content |
 | `CONTENT_STORE_PREFIX` | – | Key prefix within the bucket |
 | `CONTENT_STORE_REGION` | `us-east-1` | Region the store is addressed in |
-| `CONTENT_STORE_ACCESS_KEY` | `flowmesh` | Deployment key the control plane cuts access from |
-| `CONTENT_STORE_SECRET_KEY` | `flowmeshcontent` | Deployment secret the control plane cuts access from |
+| `CONTENT_STORE_ACCESS_KEY` | `flowmesh` | Co-located store key the control plane cuts access from; set for external storage |
+| `CONTENT_STORE_SECRET_KEY` | `flowmeshcontent` | Co-located store secret the control plane cuts access from; set for external storage |
 | `CONTENT_STORE_FILESYSTEM_ROOT` | – | Shared filesystem root; under the data dir if empty |
 | `CONTENT_STORE_SCOPED_CREDENTIALS` | `true` | Cut per-scope store access instead of sharing one key |
 | `CONTENT_STORE_PORT` | `9800` | Co-located content store port |

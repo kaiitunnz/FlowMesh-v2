@@ -689,12 +689,18 @@ STACK_ENV_SCHEMA = EnvSchema(
                 EnvVar(
                     "CONTENT_STORE_ACCESS_KEY",
                     "flowmesh",
-                    description="Deployment key the control plane cuts access from.",
+                    description=(
+                        "Co-located store key the control plane cuts access"
+                        " from; set for external storage."
+                    ),
                 ),
                 EnvVar(
                     "CONTENT_STORE_SECRET_KEY",
                     "flowmeshcontent",
-                    description="Deployment secret the control plane cuts access from.",
+                    description=(
+                        "Co-located store secret the control plane cuts access"
+                        " from; set for external storage."
+                    ),
                 ),
                 EnvVar(
                     "CONTENT_STORE_FILESYSTEM_ROOT",
