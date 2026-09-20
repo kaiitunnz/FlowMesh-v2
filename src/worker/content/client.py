@@ -11,6 +11,7 @@ is a typed hydration failure and the consumer's own recovery decides what follow
 """
 
 import asyncio
+import contextlib
 import logging
 from collections import deque
 from collections.abc import Callable, Sequence
@@ -80,9 +81,19 @@ class ContentHydrationClient:
             window_bytes=self._window_bytes,
         )
         self._sessions[grant.transfer_session_id] = session
+        served = False
         try:
-            return verify_content(reference, await self._transfer(session, grant))
+            data = verify_content(reference, await self._transfer(session, grant))
+            served = True
+            return data
         finally:
+            if not served:
+                # A transfer only advances as this end drains and grants window, so
+                # abandoning one silently would leave the holder blocked on a send
+                # nobody is reading — holding the object against eviction for as long
+                # as it lives. Telling it to reap costs one frame.
+                with contextlib.suppress(Exception):
+                    await session.cancel()
             self._sessions.pop(grant.transfer_session_id, None)
 
     async def _grant_for(
@@ -121,12 +132,12 @@ class ContentHydrationClient:
         await session.send_wire(KIND_FETCH, grant=grant.model_dump(mode="json"))
         chunks: list[bytes] = []
         while True:
-            received = await session.recv_body_wire(timeout=self._timeout)
-            if received is None:
+            frame = await session.recv_body_wire(timeout=self._timeout)
+            if frame is None:
                 raise ContentHydrationError(
                     f"content transfer {session.session_id} ended without the object"
                 )
-            message, body = received
+            message, body = frame
             kind = message.get("kind")
             if kind == KIND_CHUNK:
                 chunks.append(body)

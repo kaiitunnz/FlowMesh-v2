@@ -14,7 +14,7 @@ from shared.content import (
     reference_for,
 )
 from shared.content.wire import KIND_FETCH, KIND_REJECT
-from shared.network.relay_frame import RelayFrame
+from shared.network.relay_frame import RelayFrame, RelayFrameKind
 from shared.network.session import FramedRelaySession, RelaySessionRole
 from shared.utils.ids import new_hydration_grant_id, new_relay_session_id
 from worker.content import ContentHolder, ContentHydrationClient, WorkerContentCache
@@ -326,3 +326,46 @@ async def test_a_grant_naming_another_session_serves_nothing(tmp_path) -> None:
     assert reply is not None and reply["kind"] == KIND_REJECT
     assert reply["reason"] == "wrong_session"
     assert pair.holder.in_transfer == frozenset()
+
+
+@pytest.mark.asyncio
+async def test_an_abandoned_transfer_releases_the_holder(tmp_path) -> None:
+    """A requester that gives up tells the holder, which stops serving and lets go.
+
+    A transfer only advances as the requester drains, so one abandoned in silence
+    leaves the holder blocked on a send nobody reads — pinning the object against
+    eviction for the life of the worker.
+    """
+    pair = _Pair(tmp_path)
+    reference = pair.store.write("local", _BODY, media_type="application/json")
+    reading = threading.Event()
+    release = threading.Event()
+    served = pair.store.fetch
+
+    def _blocking_fetch(ref: ContentReference) -> bytes:
+        reading.set()
+        release.wait(5)
+        return served(ref)
+
+    pair.store.fetch = _blocking_fetch  # type: ignore[assignment]
+    grant = _grant(reference)
+    pair.holder.accept_grant(grant)
+
+    hydration = asyncio.ensure_future(pair.client.hydrate(reference, "tsk-1"))
+    await asyncio.sleep(0)
+    pair.client.deliver_grant(grant)
+    await asyncio.to_thread(reading.wait, 5)
+    assert reference.content_digest in pair.holder.in_transfer
+
+    hydration.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await hydration
+    release.set()
+    await asyncio.sleep(0.05)
+
+    assert any(
+        frame.kind is RelayFrameKind.CANCEL for frame in pair.to_holder.frames
+    ), "the requester never told the holder to stop"
+    assert pair.holder.in_transfer == frozenset()
+    aged = WorkerContentCache(pair.store_root, retain_sec=0.0)
+    assert aged.evict_aged(in_transfer=pair.holder.in_transfer) == 1

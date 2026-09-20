@@ -39,6 +39,12 @@ from .store import WorkerContentCache
 # and a fetch for a grant that never arrives is still refused.
 _GRANT_ARRIVAL_WAIT_SEC = 2.0
 
+# A transfer only advances as the requester drains and grants window, so a requester
+# that stops — a timeout, a crash, a killed worker — would otherwise leave this serve
+# blocked forever, holding its task, the object's bytes, and the digest against
+# eviction. The serve is bounded so a peer that goes quiet costs one transfer.
+_SERVE_TIMEOUT_SEC = 60.0
+
 
 class ContentHolder:
     """This worker's end of the transfers it serves."""
@@ -52,6 +58,7 @@ class ContentHolder:
         generation: int,
         window_bytes: int = 65536,
         grant_arrival_wait_sec: float = _GRANT_ARRIVAL_WAIT_SEC,
+        serve_timeout_sec: float = _SERVE_TIMEOUT_SEC,
         logger: logging.Logger | None = None,
     ) -> None:
         self._store = store
@@ -59,16 +66,29 @@ class ContentHolder:
         self._gate = HolderGrantGate(holder_id=holder_id, generation=generation)
         self._window_bytes = window_bytes
         self._grant_arrival_wait_sec = grant_arrival_wait_sec
+        self._serve_timeout_sec = serve_timeout_sec
         self._logger = logger or logging.getLogger("content-holder")
         self._sessions: dict[str, FramedRelaySession] = {}
         self._serves: dict[str, asyncio.Task[None]] = {}
         self._in_transfer: dict[str, str] = {}
+        self._serving: frozenset[str] = frozenset()
         self._arrivals: dict[str, asyncio.Event] = {}
 
     @property
     def in_transfer(self) -> frozenset[str]:
-        """The digests a transfer is serving right now, which eviction leaves alone."""
-        return frozenset(self._in_transfer.values())
+        """The digests a transfer is serving right now, which eviction leaves alone.
+
+        Eviction runs off this loop, so what it reads is a snapshot this loop replaces
+        rather than the live mapping it would otherwise iterate mid-mutation.
+        """
+        return self._serving
+
+    def _track(self, session_id: str, digest: str | None) -> None:
+        if digest is None:
+            self._in_transfer.pop(session_id, None)
+        else:
+            self._in_transfer[session_id] = digest
+        self._serving = frozenset(self._in_transfer.values())
 
     def accept_grant(self, grant: ContentHydrationGrant) -> None:
         """Register a grant control minted against this holder."""
@@ -137,7 +157,7 @@ class ContentHolder:
             await session.send_wire(KIND_REJECT, reason=rejection.value)
             return
         reference = grant.reference
-        self._in_transfer[session_id] = reference.content_digest
+        self._track(session_id, reference.content_digest)
         try:
             # Reading the object and hashing it are both work proportional to its size,
             # and this loop also carries every other transfer's frames and the grants
@@ -149,10 +169,13 @@ class ContentHolder:
             self._logger.warning("holder cannot serve %s: %s", session_id, exc)
             await session.send_wire(KIND_REJECT, reason="unavailable")
             return
-        await session.send_wire(KIND_HEAD, size_bytes=len(data))
-        for start in range(0, len(data), CHUNK_BYTES):
-            await session.send_body_wire(KIND_CHUNK, data[start : start + CHUNK_BYTES])
-        await session.send_wire(KIND_DONE)
+        async with asyncio.timeout(self._serve_timeout_sec):
+            await session.send_wire(KIND_HEAD, size_bytes=len(data))
+            for start in range(0, len(data), CHUNK_BYTES):
+                await session.send_body_wire(
+                    KIND_CHUNK, data[start : start + CHUNK_BYTES]
+                )
+            await session.send_wire(KIND_DONE)
 
     async def _await_grant(self, grant_id: str) -> bool:
         """Wait out the delivery race for one grant; False once the wait is spent."""
@@ -168,7 +191,7 @@ class ContentHolder:
 
     def _reap(self, session_id: str) -> None:
         self._sessions.pop(session_id, None)
-        self._in_transfer.pop(session_id, None)
+        self._track(session_id, None)
         task = self._serves.pop(session_id, None)
         if task is not None and task is not asyncio.current_task() and not task.done():
             task.cancel()
