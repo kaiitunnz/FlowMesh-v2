@@ -526,6 +526,7 @@ class TaskRuntime:
                     task_id=task_id,
                     workflow_id=workflow_id,
                     owner_id=owner_id,
+                    org_id=org_id,
                     raw_yaml=yaml_text,
                     task=task,
                     local_name=entry.local_name,
