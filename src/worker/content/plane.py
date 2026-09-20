@@ -111,9 +111,13 @@ class WorkerContentPlane:
             self._logger.debug(
                 "reading %s from the shared store: %s", reference.content_digest, miss
             )
-        return self._access.store_for(task_id, reference.authorization_scope).hydrate(
+        data = self._access.store_for(task_id, reference.authorization_scope).hydrate(
             reference
         )
+        self._logger.info(
+            "content %s read from the shared store", reference.content_digest
+        )
+        return data
 
 
 class _TaskScopedStores:

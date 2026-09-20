@@ -96,6 +96,9 @@ class ContentLaneHost:
     def hydrate(self, reference: ContentReference, task_id: str) -> bytes:
         """Fetch one object, from this worker's own store or from its holder."""
         if self._store.holds(reference):
+            self._logger.info(
+                "content %s read from the local cache", reference.content_digest
+            )
             return self._store.hydrate(reference)
         if self._client is None:
             raise RuntimeError("content lane is not started")
@@ -104,7 +107,11 @@ class ContentLaneHost:
         try:
             # The client bounds its own wait; this is the backstop for a transfer that
             # never returns at all, and it fails the read the same typed way.
-            return transfer.result(timeout=self._transfer_timeout_sec * 2)
+            data = transfer.result(timeout=self._transfer_timeout_sec * 2)
+            self._logger.info(
+                "content %s read from a peer cache", reference.content_digest
+            )
+            return data
         except concurrent.futures.TimeoutError as exc:
             transfer.cancel()
             raise ContentHydrationError(
