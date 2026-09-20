@@ -38,9 +38,11 @@ class ObjectStoreConfig:
             backend=os.getenv("CONTENT_STORE_BACKEND", BACKEND_S3).strip()
             or BACKEND_S3,
             endpoint_url=os.getenv("CONTENT_STORE_ENDPOINT_URL", "").strip(),
-            bucket=os.getenv("CONTENT_STORE_BUCKET", "flowmesh-content").strip(),
+            # A variable relayed to a worker arrives set-but-empty when the node that
+            # relayed it had none, so an empty value means "unset", not "no bucket".
+            bucket=os.getenv("CONTENT_STORE_BUCKET", "").strip() or "flowmesh-content",
             prefix=os.getenv("CONTENT_STORE_PREFIX", "").strip(),
-            region=os.getenv("CONTENT_STORE_REGION", "us-east-1").strip(),
+            region=os.getenv("CONTENT_STORE_REGION", "").strip() or "us-east-1",
             access_key=os.getenv("CONTENT_STORE_ACCESS_KEY", "").strip(),
             secret_key=os.getenv("CONTENT_STORE_SECRET_KEY", "").strip(),
             filesystem_root=Path(
