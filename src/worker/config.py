@@ -130,14 +130,16 @@ class WorkerConfig:
 
         hb_interval, hb_ttl, hb_file = get_hb_config()
 
-        namespace = os.getenv("WORKER_NAMESPACE", "flowmesh").strip()
-        cluster = os.getenv("WORKER_CLUSTER", "cluster").strip()
+        # A relayed variable the node never set arrives set-but-empty, so every default
+        # here is taken on an empty value as well as on a missing one.
+        namespace = os.getenv("WORKER_NAMESPACE", "").strip() or "flowmesh"
+        cluster = os.getenv("WORKER_CLUSTER", "").strip() or "cluster"
         container_name = os.getenv("WORKER_CONTAINER_NAME", "").strip() or None
         ssh_network_name = os.getenv("SSH_NETWORK_NAME", "").strip() or None
         alias = os.getenv("WORKER_ALIAS", "").strip() or os.urandom(8).hex()
         tags = [t.strip() for t in os.getenv("WORKER_TAGS", "").split(",") if t.strip()]
 
-        log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+        log_level = (os.getenv("LOG_LEVEL", "").strip() or "INFO").upper()
 
         cost_per_hour = parse_float_env("WORKER_COST_PER_HOUR", 1.0)
         if cost_per_hour < 0:
