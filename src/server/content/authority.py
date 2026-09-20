@@ -67,14 +67,12 @@ class ContentHydrationAuthority:
         worker = self._workers.get_worker(worker_id)
         if worker is None:
             return
-        for scope, digest in held:
-            self._directory.record(
-                scope,
-                digest,
-                worker_id=worker_id,
-                node_id=worker.node_id,
-                generation=worker.incarnation,
-            )
+        self._directory.record_many(
+            held,
+            worker_id=worker_id,
+            node_id=worker.node_id,
+            generation=worker.incarnation,
+        )
 
     def authorize(
         self, worker_id: str, task_id: str, reference: ContentReference

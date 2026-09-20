@@ -17,11 +17,35 @@ _REFERENCE = reference_for("local", b"prepared", media_type="application/json")
 _HELD = (_REFERENCE.authorization_scope, _REFERENCE.content_digest)
 
 
+class _FakePipeline:
+    """Queues the directory's writes and applies them when it is executed."""
+
+    def __init__(self, redis: "_FakeRedis") -> None:
+        self._redis = redis
+        self._queued: list[Any] = []
+
+    def hset(self, key: str, mapping: dict[str, Any]) -> None:
+        self._queued.append(lambda: self._redis.hash_set(key, mapping))
+
+    def expire(self, key: str, ttl_sec: int) -> None:
+        self._queued.append(lambda: None)
+
+    def execute(self) -> None:
+        for write in self._queued:
+            write()
+        self._queued.clear()
+
+
 class _FakeRedis:
     """Only the hash and expire surface the directory and session record use."""
 
     def __init__(self) -> None:
         self.hashes: dict[str, dict[str, Any]] = {}
+        self.pipelines = 0
+
+    def control_pipeline(self) -> _FakePipeline:
+        self.pipelines += 1
+        return _FakePipeline(self)
 
     def hash_set(self, key: str, mapping: dict[str, Any]) -> None:
         self.hashes.setdefault(key, {}).update(mapping)
@@ -220,3 +244,21 @@ def test_a_grant_carries_no_service_admission_identity() -> None:
     fields = set(ContentHydrationGrant.model_fields)
     assert not fields & {"idempotency_key", "invocation_id", "claim_id"}
     assert "idm-" not in str(_granted(workers).model_dump())
+
+
+def test_a_holder_report_costs_one_round_trip_whatever_it_holds() -> None:
+    """A whole report goes up in one round trip, not two commands per object.
+
+    A holder re-reports everything it caches on every cadence, and every worker's
+    report lands on the one thread that also carries heartbeats and outcomes, so the
+    cost of a large cache there has to stay flat.
+    """
+    workers = _Workers(**{"wkr-1": 3})
+    redis = _FakeRedis()
+    authority = _authority(workers, redis=redis)
+
+    held = [("local", f"{index:064x}") for index in range(50)]
+    authority.record_holding("wkr-1", held)
+
+    assert redis.pipelines == 1
+    assert len(redis.hashes) == 50
