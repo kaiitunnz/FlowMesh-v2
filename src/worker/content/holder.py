@@ -119,6 +119,12 @@ class ContentHolder:
         except (KeyError, ValueError):
             await session.send_wire(KIND_REJECT, reason="malformed_grant")
             return
+        if grant.transfer_session_id != session_id:
+            self._logger.warning(
+                "refused content transfer %s: grant names another session", session_id
+            )
+            await session.send_wire(KIND_REJECT, reason="wrong_session")
+            return
         rejection = self._gate.admit(grant)
         if rejection is GrantRejection.UNKNOWN_GRANT and await self._await_grant(
             grant.grant_id

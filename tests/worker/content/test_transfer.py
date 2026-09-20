@@ -13,7 +13,9 @@ from shared.content import (
     ContentReference,
     reference_for,
 )
+from shared.content.wire import KIND_FETCH, KIND_REJECT
 from shared.network.relay_frame import RelayFrame
+from shared.network.session import FramedRelaySession, RelaySessionRole
 from shared.utils.ids import new_hydration_grant_id, new_relay_session_id
 from worker.content import ContentHolder, ContentHydrationClient, WorkerContentCache
 
@@ -296,3 +298,31 @@ async def test_two_reads_of_one_object_each_take_their_own_grant(tmp_path) -> No
 
     assert await asyncio.gather(*reads) == [_BODY, _BODY]
     assert len(pair.granted) == 2  # each read asked for its own authorization
+
+
+@pytest.mark.asyncio
+async def test_a_grant_naming_another_session_serves_nothing(tmp_path) -> None:
+    """A grant names the session its bytes flow over, so it is good on that one only.
+
+    Control mints the grant and its transfer session together. A requester presenting
+    a real grant over a session control did not pair it with is refused, rather than
+    the pairing being a field nothing reads.
+    """
+    pair = _Pair(tmp_path)
+    reference = pair.store.write("local", _BODY, media_type="application/json")
+    grant = _grant(reference)
+    pair.holder.accept_grant(grant)
+
+    elsewhere = FramedRelaySession(
+        session_id=new_relay_session_id(),
+        correlation_id=grant.grant_id,
+        role=RelaySessionRole.ORIGIN,
+        sink=pair.to_holder,
+    )
+    pair.to_requester.peer = elsewhere.on_frame
+    await elsewhere.send_wire(KIND_FETCH, grant=grant.model_dump(mode="json"))
+    reply = await elsewhere.recv_wire(timeout=5.0)
+
+    assert reply is not None and reply["kind"] == KIND_REJECT
+    assert reply["reason"] == "wrong_session"
+    assert pair.holder.in_transfer == frozenset()
