@@ -30,6 +30,21 @@ _SessionKey = tuple[str, tuple[ContentOperationKind, ...]]
 _MIN_SESSION_SEC = 900
 
 
+def _client_config() -> Config:
+    """Short, single-attempt timeouts for the calls control makes to the store.
+
+    These run on the dispatch path, so an unreachable store has to cost a dispatch a
+    moment rather than botocore's minute-long default with retries behind it — the task
+    goes on to fail its first content read, which is the outcome either way.
+    """
+    return Config(
+        signature_version="s3v4",
+        connect_timeout=5,
+        read_timeout=10,
+        retries={"max_attempts": 1},
+    )
+
+
 @dataclass(frozen=True)
 class MintedCredential:
     """Session material, and when the backend stops honouring it.
@@ -89,7 +104,7 @@ def ensure_bucket(cfg: ObjectStoreConfig, logger: logging.Logger) -> None:
         aws_access_key_id=cfg.access_key or None,
         aws_secret_access_key=cfg.secret_key or None,
         region_name=cfg.region,
-        config=Config(signature_version="s3v4"),
+        config=_client_config(),
     )
     try:
         client.head_bucket(Bucket=cfg.bucket)
@@ -124,6 +139,7 @@ def build_sts_client(cfg: ObjectStoreConfig) -> Any:
         aws_access_key_id=cfg.access_key or None,
         aws_secret_access_key=cfg.secret_key or None,
         region_name=cfg.region,
+        config=_client_config(),
     )
 
 

@@ -44,6 +44,11 @@ class ScopedCredentialMinter(Protocol):
         """The backend policy generation this minter cuts against."""
 
 
+# How long a scope whose session the store refused is left alone before control asks
+# again, so one unreachable store does not multiply by the dispatch rate.
+_MINT_BACKOFF_SEC = 15.0
+
+
 class ContentAccessBroker:
     """Mints and relays the access each dispatched task uses against the store."""
 
@@ -59,21 +64,29 @@ class ContentAccessBroker:
         self._minter = minter
         self._grant_ttl_sec = grant_ttl_sec
         self._logger = logger or logging.getLogger("content-access")
+        self._unreachable_until: dict[str, float] = {}
 
     def issue(self, worker_id: str, task_id: str, scope: str) -> None:
         """Give one task the access it will read and write its content under."""
         worker = self._workers.get_worker(worker_id)
         if worker is None:
             return
+        if time.time() < self._unreachable_until.get(scope, 0.0):
+            # Minting runs on the dispatch path, so a store that just refused is not
+            # asked again for every task behind this one: one outage costs a pause,
+            # not a round trip per dispatch.
+            return
         try:
             minted = self._minter.mint(scope, _OPERATIONS, self._grant_ttl_sec)
         except Exception:
             # A task that cannot be given access runs without it and fails its first
             # content read, which is the same outcome as a store it cannot reach.
+            self._unreachable_until[scope] = time.time() + _MINT_BACKOFF_SEC
             self._logger.exception(
                 "could not mint content store access for %s", task_id
             )
             return
+        self._unreachable_until.pop(scope, None)
         grant = ContentStoreAccessGrant(
             grant_id=new_store_access_grant_id(),
             task_id=task_id,
