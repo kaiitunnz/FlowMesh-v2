@@ -151,6 +151,9 @@ class WorkerAdapter(ABC):
             # with the access control mints for each task it runs.
             "CONTENT_STORE_BACKEND": env.CONTENT_STORE_BACKEND,
             "CONTENT_STORE_ENDPOINT_URL": env.CONTENT_STORE_ENDPOINT_URL,
+            # The port too: with no endpoint named, both ends resolve the co-located
+            # store's address themselves, and they have to resolve the same one.
+            "CONTENT_STORE_PORT": env.CONTENT_STORE_PORT,
             "CONTENT_STORE_BUCKET": env.CONTENT_STORE_BUCKET,
             "CONTENT_STORE_PREFIX": env.CONTENT_STORE_PREFIX,
             "CONTENT_STORE_REGION": env.CONTENT_STORE_REGION,

@@ -659,14 +659,14 @@ STACK_ENV_SCHEMA = EnvSchema(
                 ),
                 EnvVar(
                     "CONTENT_STORE_PORT",
-                    "9000",
+                    "9800",
                     description="Co-located content store port.",
                     var_type=EnvVarType.INT,
                     min_value=1,
                 ),
                 EnvVar(
                     "CONTENT_STORE_CONSOLE_PORT",
-                    "9001",
+                    "9801",
                     description="Co-located content store console port.",
                     var_type=EnvVarType.INT,
                     min_value=1,
@@ -688,12 +688,12 @@ STACK_ENV_SCHEMA = EnvSchema(
                 ),
                 EnvVar(
                     "CONTENT_STORE_ACCESS_KEY",
-                    "",
+                    "flowmesh",
                     description="Deployment key the control plane cuts access from.",
                 ),
                 EnvVar(
                     "CONTENT_STORE_SECRET_KEY",
-                    "",
+                    "flowmeshcontent",
                     description="Deployment secret the control plane cuts access from.",
                 ),
                 EnvVar(

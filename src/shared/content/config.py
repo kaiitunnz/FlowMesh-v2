@@ -15,7 +15,7 @@ BACKEND_S3 = "s3"
 BACKEND_FILESYSTEM = "filesystem"
 
 # The port the store a default deployment co-locates publishes on its own host.
-_DEFAULT_STORE_PORT = "9000"
+_DEFAULT_STORE_PORT = "9800"
 
 
 def _colocated_endpoint() -> str:

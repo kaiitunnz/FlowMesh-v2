@@ -245,8 +245,8 @@ services:
       MINIO_ROOT_USER: ${CONTENT_STORE_ACCESS_KEY:-flowmesh}
       MINIO_ROOT_PASSWORD: ${CONTENT_STORE_SECRET_KEY:-flowmeshcontent}
     ports:
-      - "${CONTENT_STORE_PORT:-9000}:9000"
-      - "${CONTENT_STORE_CONSOLE_PORT:-9001}:9001"
+      - "${CONTENT_STORE_PORT:-9800}:9000"
+      - "${CONTENT_STORE_CONSOLE_PORT:-9801}:9001"
     volumes:
       - content_store_data:/data
     restart: unless-stopped
