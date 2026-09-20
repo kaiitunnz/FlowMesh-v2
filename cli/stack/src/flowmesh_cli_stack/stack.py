@@ -67,6 +67,24 @@ def _stack() -> DockerComposeStack:
     )
 
 
+# The compose profile carrying the content store a deployment co-locates with its root.
+CONTENT_PROFILE = "content"
+
+
+def _colocates_content_store(env: dict[str, str]) -> bool:
+    """Whether this node runs the content store itself.
+
+    The fabric's content has to live somewhere, so a root node brings up its own store
+    unless the deployment says where its store already is. Naming an endpoint — cloud
+    object storage, an external MinIO, another node's — is what turns the co-located one
+    off, so pointing at real storage costs one setting and leaves no unused container.
+    """
+    role = env.get("NODE_ROLE", "").strip().lower()
+    if role and role != NodeRole.ROOT.value:
+        return False
+    return not env.get("CONTENT_STORE_ENDPOINT_URL", "").strip()
+
+
 def _profiles(env_file: Path, profile: str | None) -> list[str]:
     """This node's own compose profile plus any the operator selected.
 
@@ -74,8 +92,11 @@ def _profiles(env_file: Path, profile: str | None) -> list[str]:
     passed explicitly here, de-duplicated and order-preserving.
     """
     selected = [profile] if profile else []
-    raw = parse_env_file(env_file).get("COMPOSE_PROFILES", "")
+    env = parse_env_file(env_file)
+    raw = env.get("COMPOSE_PROFILES", "")
     selected.extend(name for part in raw.split(",") if (name := part.strip()))
+    if _colocates_content_store(env):
+        selected.append(CONTENT_PROFILE)
     seen: dict[str, None] = {}
     for name in selected:
         seen.setdefault(name, None)

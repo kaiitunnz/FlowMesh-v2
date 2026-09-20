@@ -12,6 +12,15 @@ from pathlib import Path
 BACKEND_S3 = "s3"
 BACKEND_FILESYSTEM = "filesystem"
 
+# The port the store a default deployment co-locates publishes on its own host.
+_DEFAULT_STORE_PORT = "9000"
+
+
+def _colocated_endpoint() -> str:
+    """The store beside the root, as the host it runs on reaches it."""
+    port = os.getenv("CONTENT_STORE_PORT", "").strip() or _DEFAULT_STORE_PORT
+    return f"http://127.0.0.1:{port}"
+
 
 @dataclass(frozen=True)
 class ObjectStoreConfig:
@@ -20,6 +29,12 @@ class ObjectStoreConfig:
     ``backend`` selects how the fleet's store is reached: ``s3`` for anything speaking
     the S3 API — the co-located MinIO a default deployment runs, cloud S3, an external
     MinIO — or ``filesystem`` for one durable filesystem mounted on every node.
+
+    With nothing configured this describes the store a default deployment brings up
+    beside the root, so a fresh deployment stores content without being told where. A
+    deployment whose store is elsewhere — cloud object storage, an external MinIO, a
+    node not the root's — names it, and every node other than the store's own host has
+    to, since the co-located address is only local to that host.
     """
 
     backend: str = BACKEND_S3
@@ -37,7 +52,10 @@ class ObjectStoreConfig:
         return ObjectStoreConfig(
             backend=os.getenv("CONTENT_STORE_BACKEND", BACKEND_S3).strip()
             or BACKEND_S3,
-            endpoint_url=os.getenv("CONTENT_STORE_ENDPOINT_URL", "").strip(),
+            endpoint_url=(
+                os.getenv("CONTENT_STORE_ENDPOINT_URL", "").strip()
+                or _colocated_endpoint()
+            ),
             # A variable relayed to a worker arrives set-but-empty when the node that
             # relayed it had none, so an empty value means "unset", not "no bucket".
             bucket=os.getenv("CONTENT_STORE_BUCKET", "").strip() or "flowmesh-content",

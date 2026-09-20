@@ -427,7 +427,13 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
 - **The shared content store.** Every content object lives in one shared durable store —
   an S3-compatible service such as the MinIO a default deployment co-locates on the root
   node, cloud S3, or a filesystem every node mounts — reached through the same
-  `FabricObjectStore` contract and selected with `CONTENT_STORE_BACKEND`. It is a service
+  `FabricObjectStore` contract and selected with `CONTENT_STORE_BACKEND`. A deployment
+  that names no store runs the co-located one and points at it, so a fresh cluster stores
+  content without being configured; naming `CONTENT_STORE_ENDPOINT_URL` moves the fabric
+  onto real object storage and leaves the co-located store unstarted, which is the shape
+  a production deployment takes. The root provisions the bucket it is pointed at where
+  its credential allows, since the scoped session a worker reaches content under covers
+  one scope's prefix rather than the bucket. It is a service
   beside the fabric, never the root process: the root and its supervisors hold no
   payload. A worker writes an object there before it reports the reference naming it, so
   a reference that reaches any binding names bytes that already outlive their producer,

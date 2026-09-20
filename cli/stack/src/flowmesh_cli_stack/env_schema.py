@@ -108,7 +108,8 @@ STACK_ENV_SCHEMA = EnvSchema(
                     "COMPOSE_PROFILES",
                     "",
                     description=(
-                        "Optional compose profiles to deploy (e.g. content, telemetry)."
+                        "Extra compose profiles to deploy (e.g. telemetry); a root "
+                        "node runs the content store unless an endpoint names another."
                     ),
                 ),
             ],
@@ -652,7 +653,9 @@ STACK_ENV_SCHEMA = EnvSchema(
                 EnvVar(
                     "CONTENT_STORE_ENDPOINT_URL",
                     "",
-                    description="S3-compatible endpoint; the local store if empty.",
+                    description=(
+                        "S3-compatible endpoint; the co-located store if empty."
+                    ),
                 ),
                 EnvVar(
                     "CONTENT_STORE_PORT",
