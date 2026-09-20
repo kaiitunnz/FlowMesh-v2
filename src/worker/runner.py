@@ -205,6 +205,8 @@ class Runner:
             self._responses_facade.stop()
         if self._resident_host is not None:
             self._resident_host.stop()
+        if self._content_plane is not None:
+            self._content_plane.stop()
 
     def _ensure_mediated_sidecar(self) -> MediatedEgressSidecar | None:
         """Build the mediated-egress sidecar once the worker id is known."""
