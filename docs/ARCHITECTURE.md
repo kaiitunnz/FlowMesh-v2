@@ -437,7 +437,7 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   beside the fabric, never the root process: the root and its supervisors hold no
   payload. A worker writes an object there before it reports the reference naming it, so
   a reference that reaches any binding names bytes that already outlive their producer,
-  and a worker's death loses nothing. The outcome-finalization index stays on the control
+  and a worker's death loses nothing. The outcome-finalization index lives on the control
   plane, binding an `idm-*` to a reference so a re-drive re-reports the first
   materialization rather than re-running a sampled producer; the store holds only bytes
   and never treats an idempotency key as a name. The scope that binding lands in is the

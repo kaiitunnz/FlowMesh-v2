@@ -705,7 +705,9 @@ STACK_ENV_SCHEMA = EnvSchema(
                 EnvVar(
                     "CONTENT_STORE_SCOPED_CREDENTIALS",
                     "true",
-                    description="Cut per-scope access instead of sharing one key.",
+                    description=(
+                        "Cut per-scope store access instead of sharing one key."
+                    ),
                     var_type=EnvVarType.BOOL,
                 ),
                 EnvVar(
@@ -719,7 +721,7 @@ STACK_ENV_SCHEMA = EnvSchema(
                 EnvVar(
                     "CONTENT_HYDRATION_ENABLED",
                     "false",
-                    description="Hold content on workers and hydrate it between them.",
+                    description="Cache content on workers and hydrate it between them.",
                     var_type=EnvVarType.BOOL,
                 ),
                 EnvVar(

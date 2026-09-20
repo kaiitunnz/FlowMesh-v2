@@ -28,7 +28,7 @@ ACCESS_GRANT_VERSION = 1
 
 
 class ContentOperationKind(StrEnum):
-    """What a grant permits against the shared store, and nothing more."""
+    """What a grant permits against the shared store."""
 
     READ = "read"
     WRITE = "write"

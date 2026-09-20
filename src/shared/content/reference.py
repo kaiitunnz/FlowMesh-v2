@@ -13,7 +13,7 @@ from enum import StrEnum
 from pydantic import BaseModel, ConfigDict, Field
 
 OCTET_STREAM = "application/octet-stream"
-# The only encoding the fabric stores today: bytes are held exactly as written.
+# The only encoding the fabric stores: bytes are held exactly as written.
 CONTENT_ENCODING_IDENTITY = "identity"
 
 

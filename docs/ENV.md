@@ -71,14 +71,14 @@ listed here is in `.env.example`.
 | `CONTENT_STORE_REGION` | `us-east-1` | Region the store is addressed in |
 | `CONTENT_STORE_ACCESS_KEY` | `flowmesh` | Deployment key the control plane cuts access from |
 | `CONTENT_STORE_SECRET_KEY` | `flowmeshcontent` | Deployment secret the control plane cuts access from |
-| `CONTENT_STORE_FILESYSTEM_ROOT` | – | Shared filesystem root for the `filesystem` backend |
+| `CONTENT_STORE_FILESYSTEM_ROOT` | – | Shared filesystem root; under the data dir if empty |
 | `CONTENT_STORE_SCOPED_CREDENTIALS` | `true` | Cut per-scope store access instead of sharing one key |
 | `CONTENT_STORE_PORT` | `9800` | Co-located content store port |
 | `CONTENT_STORE_CONSOLE_PORT` | `9801` | Co-located content store console port |
 | `CONTENT_ACCESS_TTL_SEC` | `900` | Store-access grant lifetime (seconds) |
 | `CONTENT_HYDRATION_ENABLED` | `false` | Cache content on workers and hydrate it between them (requires `NETWORK_PLANE_ENABLED`) |
-| `CONTENT_HYDRATION_GRANT_TTL_SEC` | `60` | Cache-to-cache hydration grant lifetime (seconds) |
-| `CONTENT_HOLDER_TTL_SEC` | `300` | Cache report lifetime; a worker re-reports well inside it (seconds) |
+| `CONTENT_HYDRATION_GRANT_TTL_SEC` | `60` | Hydration grant lifetime (seconds) |
+| `CONTENT_HOLDER_TTL_SEC` | `300` | Holder report lifetime (seconds) |
 | `CONTENT_CACHE_TTL_SEC` | `900` | How long a worker keeps a cached copy (seconds) |
 | `CONTENT_TRANSFER_TIMEOUT_SEC` | `60` | Content transfer deadline (seconds) |
 | `RESIDENT_CAPACITY_ENABLED` | `false` | Serve resident model bindings via admission |

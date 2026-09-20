@@ -71,11 +71,10 @@ def reference_for(
 
 
 class ScopedObjectStore(Protocol):
-    """Opens the store a scope's content lives in.
+    """Opens the store one scope's content lives in.
 
-    Access is taken per scope rather than once per process because what a caller may
-    reach is a property of the scope it acts in: whoever implements this decides what
-    that access is, and the store it returns can reach exactly that scope's content.
+    The implementer decides what access that scope carries, and the store it returns
+    reaches exactly that scope's content.
     """
 
     def for_scope(self, scope: str) -> "FabricObjectStore": ...
