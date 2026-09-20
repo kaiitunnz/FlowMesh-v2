@@ -261,38 +261,44 @@ def _bind_peer_listener(cfg: WorkerConfig) -> socket.socket | None:
 def _build_content_plane(
     cfg: WorkerConfig, client: SupervisorClient, logger: logging.Logger
 ) -> WorkerContentPlane | None:
-    """The worker's content plane, where the deployment runs one.
+    """The worker's content plane: the shared store, and a cache over it if one runs.
 
-    It needs the shared durable store to be the source of truth for what it caches, so
-    a deployment that configures no store runs no content plane.
+    Content lives in the shared store, so a worker always reaches it — every object it
+    writes and every reference it reads resolves there. The cache is the optional half:
+    a deployment that enables it also gets a local copy of what this worker wrote and
+    can serve a peer from it, and one that does not goes to the store every time.
     """
-    if not cfg.content_hydration_enabled:
-        return None
     access = ContentAccessRegistry(cfg.object_store, logger)
-    lane = ContentLaneHost(
-        store=WorkerContentCache(cfg.content_dir, retain_sec=cfg.content_cache_ttl_sec),
-        push_frame=client.push_content_frame,
-        request_grant=lambda reference, task_id: client.push_content_hydration_request(
-            reference.model_dump(mode="json"), task_id
-        ),
-        worker_id=client.worker_id,
-        generation=client.incarnation,
-        transfer_timeout_sec=cfg.content_transfer_timeout_sec,
-        announce=client.push_content_holding,
-        accept_access=access.accept,
-        holder_report_ttl_sec=cfg.content_holder_ttl_sec,
-        logger=logger,
-    )
-    lane.start()
-    # Before this worker takes any work: an object already on its disk from a previous
-    # incarnation is unreachable until control hears who holds it, and the report has to
-    # land under the incarnation registration just assigned.
-    if (held := lane.report_held()) > 0:
-        logger.info("reported %d held content objects at startup", held)
+    lane: ContentLaneHost | None = None
+    if cfg.content_hydration_enabled:
+        lane = ContentLaneHost(
+            store=WorkerContentCache(
+                cfg.content_dir, retain_sec=cfg.content_cache_ttl_sec
+            ),
+            push_frame=client.push_content_frame,
+            request_grant=(
+                lambda reference, task_id: client.push_content_hydration_request(
+                    reference.model_dump(mode="json"), task_id
+                )
+            ),
+            worker_id=client.worker_id,
+            generation=client.incarnation,
+            transfer_timeout_sec=cfg.content_transfer_timeout_sec,
+            announce=client.push_content_holding,
+            accept_access=access.accept,
+            holder_report_ttl_sec=cfg.content_holder_ttl_sec,
+            logger=logger,
+        )
+        lane.start()
+        # Before this worker takes any work: an object already on its disk from a
+        # previous incarnation is unreachable until control hears who holds it, and the
+        # report has to land under the incarnation registration just assigned.
+        if (held := lane.report_held()) > 0:
+            logger.info("reported %d held content objects at startup", held)
     return WorkerContentPlane(
         lane,
         access,
-        announce=client.push_content_holding,
+        announce=client.push_content_holding if lane is not None else None,
         finalizations=(
             FinalizationIndexClient(cfg.server_base_url)
             if cfg.server_base_url

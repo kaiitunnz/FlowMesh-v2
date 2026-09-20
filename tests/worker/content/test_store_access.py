@@ -102,3 +102,29 @@ def test_a_released_task_keeps_nothing(tmp_path) -> None:
     registry.release("tsk-1")
     with pytest.raises(ContentAccessDenied):
         registry.store_for("tsk-1", "tenant-a")
+
+
+def test_a_plane_with_no_cache_still_reaches_the_shared_store(tmp_path) -> None:
+    """Content lives in the shared store, so a deployment running no cache still writes.
+
+    The cache is the optional half of the plane. Without it there is no lane to hold a
+    copy or serve a peer, and every read and write goes to the store instead.
+    """
+    from worker.content import WorkerContentPlane
+
+    registry = _registry(tmp_path)
+    registry.accept(_access("tsk-1"))
+    plane = WorkerContentPlane(None, registry)
+
+    reference = plane.write("tsk-1", "tenant-a", b"body", media_type="text/plain")
+    assert plane.hydrate("tsk-1", reference) == b"body"
+
+
+def test_a_cacheless_plane_takes_the_access_control_relays(tmp_path) -> None:
+    from worker.content import WorkerContentPlane
+
+    registry = _registry(tmp_path)
+    plane = WorkerContentPlane(None, registry)
+    plane.route("content_access", _access("tsk-1").model_dump(mode="json"))
+
+    assert registry.store_for("tsk-1", "tenant-a") is not None

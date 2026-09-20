@@ -12,6 +12,10 @@ What no copy can supply — nothing holds it, the holder died, the grant expired
 reads from the shared store, which always has it. So a cache miss costs a read rather
 than a failure, and a worker dying costs nothing at all.
 
+The cache is the optional half. A deployment that runs none has no lane here, and every
+read and write goes straight to the shared store, which is where the content is either
+way.
+
 Everything is taken per task, because that is how access is given: control grants one
 task the right to reach one scope's content in the shared store, and the grant control
 mints for a peer's copy rests on that task's own binding.
@@ -42,10 +46,10 @@ class WorkerContentPlane:
 
     def __init__(
         self,
-        lane: ContentLaneHost,
+        lane: ContentLaneHost | None,
         access: ContentAccessRegistry,
         *,
-        announce: AnnounceHolding,
+        announce: AnnounceHolding | None = None,
         finalizations: FinalizationIndexClient | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
@@ -76,8 +80,12 @@ class WorkerContentPlane:
         self._access.release(task_id)
 
     def route(self, frame_kind: str, frame: dict[str, object]) -> None:
-        """Hand one content control frame to the lane that consumes it."""
-        self._lane.route(frame_kind, frame)
+        """Hand one content control frame to whatever consumes it."""
+        if frame_kind == "content_access":
+            self._access.accept(ContentStoreAccess.model_validate(frame))
+            return
+        if self._lane is not None:
+            self._lane.route(frame_kind, frame)
 
     def write(
         self, task_id: str, scope: str, data: bytes, *, media_type: str = OCTET_STREAM
@@ -92,6 +100,8 @@ class WorkerContentPlane:
         reference = self._access.store_for(task_id, scope).write(
             scope, data, media_type=media_type
         )
+        if self._lane is None or self._announce is None:
+            return reference
         try:
             self._lane.store.write(scope, data, media_type=media_type)
             self._announce([(scope, reference.content_digest)])
@@ -103,14 +113,18 @@ class WorkerContentPlane:
 
     def hydrate(self, task_id: str, reference: ContentReference) -> bytes:
         """The object's verified bytes, from the nearest place that has them."""
-        try:
-            return self._lane.hydrate(reference, task_id)
-        except (GrantDenied, ContentHydrationError) as miss:
-            # Every cache path is optional: the object is in the shared store whatever
-            # happened to a copy of it, so a miss costs this read and nothing else.
-            self._logger.debug(
-                "reading %s from the shared store: %s", reference.content_digest, miss
-            )
+        if self._lane is not None:
+            try:
+                return self._lane.hydrate(reference, task_id)
+            except (GrantDenied, ContentHydrationError) as miss:
+                # Every cache path is optional: the object is in the shared store
+                # whatever happened to a copy of it, so a miss costs this read and
+                # nothing else.
+                self._logger.debug(
+                    "reading %s from the shared store: %s",
+                    reference.content_digest,
+                    miss,
+                )
         data = self._access.store_for(task_id, reference.authorization_scope).hydrate(
             reference
         )
