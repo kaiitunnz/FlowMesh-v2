@@ -1024,10 +1024,6 @@ class Runner:
                     self._current_task_id = None
                     with self._active_executor_lock:
                         self._active_executor_last_used_at = time.time()
-                    if self._content_plane is not None:
-                        # The task is over, so the access it was given has no further
-                        # use here; its cached copies stay, they are not secret.
-                        self._content_plane.release(task_id)
                     self.lifecycle.set_idle(task_id)
                     if task_log_emitter is not None:
                         if log_handler_attached:

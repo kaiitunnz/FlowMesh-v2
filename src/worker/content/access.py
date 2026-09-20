@@ -1,12 +1,16 @@
 """The access this worker holds against the shared content store.
 
 Control relays one access per dispatched task and scope; the registry keeps it for as
-long as it is good for and opens the store with it. A task with no live access does not
-fall back to anything — reaching the store is exactly what it was not given — so its
-first read or write fails rather than quietly running under whatever credential the
-process happens to have. Control relays the access on its own path, so a task can reach
-its first content operation while its access is still in flight; a read waits a bounded
-moment for the one it was sent before deciding it has none.
+long as it is good for and opens the store with it. Its grant's expiry is what ends it,
+not the task's own end: a boundary settles after the episode that raised it has already
+returned, so the outcome it materializes is written under a task whose body is over.
+
+A task with no live access does not fall back to anything — reaching the store is
+exactly what it was not given — so its first read or write fails rather than quietly
+running under whatever credential the process happens to have. Control relays the
+access on its own path, so a task can reach its first content operation while its
+access is still in flight; a read waits a bounded moment for the one it was sent before
+deciding it has none.
 
 The material never leaves here. It opens a backend client and is held only for as long
 as the grant it came with; nothing writes it down, reports it, or renders it.
@@ -92,12 +96,6 @@ class ContentAccessRegistry:
             lambda: key in self._granted, timeout=self._arrival_wait_sec
         )
         return self._granted.get(key)
-
-    def release(self, task_id: str) -> None:
-        """Drop everything a finished task was given."""
-        with self._arrived:
-            for key in [k for k in self._granted if k[0] == task_id]:
-                self._forget(key)
 
     def _open(self, credential: ScopedContentCredential) -> FabricObjectStore:
         match self._cfg.backend:

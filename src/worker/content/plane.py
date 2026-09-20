@@ -75,10 +75,6 @@ class WorkerContentPlane:
         """Take the access control granted one of this worker's tasks."""
         self._access.accept(access)
 
-    def release(self, task_id: str) -> None:
-        """Drop what a finished task held; its copies stay in the cache."""
-        self._access.release(task_id)
-
     def route(self, frame_kind: str, frame: dict[str, object]) -> None:
         """Hand one content control frame to whatever consumes it."""
         if frame_kind == "content_access":

@@ -105,14 +105,6 @@ def test_the_wait_is_bounded_and_fails_closed(tmp_path) -> None:
     assert time.monotonic() - started < 2.0
 
 
-def test_a_released_task_keeps_nothing(tmp_path) -> None:
-    registry = _registry(tmp_path, wait=0.05)
-    registry.accept(_access("tsk-1"))
-    registry.release("tsk-1")
-    with pytest.raises(ContentAccessDenied):
-        registry.store_for("tsk-1", "tenant-a")
-
-
 def test_a_plane_with_no_cache_still_reaches_the_shared_store(tmp_path) -> None:
     """Content lives in the shared store, so a deployment running no cache still writes.
 
