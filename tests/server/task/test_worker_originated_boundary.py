@@ -634,3 +634,23 @@ def test_origin_worker_loss_fails_the_boundary_clean() -> None:
         assert not runtime._pending_ops
 
     asyncio.run(run())
+
+
+def test_the_permit_carries_the_scope_its_result_materializes_under() -> None:
+    """A boundary's outcome lands in the task owner's scope, not the worker's.
+
+    The permit is what tells the egressing worker where to write, and the worker holds
+    store access for exactly the scope control assigned its task, so a permit carrying
+    none cannot materialize its outcome at all.
+    """
+
+    async def run() -> None:
+        runtime = _runtime()
+        _, ids = await _register(runtime, _SEARCH_WF)
+        _dispatch_agent(runtime, ids["writer"])
+
+        permits = _permit_frames(runtime)
+        assert len(permits) == 1
+        assert permits[0]["content_scope"] == "org"
+
+    asyncio.run(run())

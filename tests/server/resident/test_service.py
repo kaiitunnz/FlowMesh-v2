@@ -177,6 +177,7 @@ def _build(
     deliver: bool = True,
     dependency: ServiceDependency | None = None,
     warmth: ResidencyWarmth | None = None,
+    content_scope: str = "",
 ) -> tuple[ResidentCapacityControl, ResidentStores, list[Any], _Delivery]:
     stores = ResidentStores()
     limits = limits or ResidentPolicyLimits()
@@ -214,6 +215,7 @@ def _build(
         lifecycle=lifecycle,
         limits=limits,
         dependency_resolver=lambda task_id: _admission(dependency, warmth),
+        content_scope_resolver=lambda _task_id: content_scope,
         settle_cb=settle_cb,
         redispatch_cb=redispatch_cb,
         endpoint_probe=lambda serve_task_id: ReplicaEndpoint(
@@ -289,6 +291,20 @@ def test_originate_binds_sidecar_resolves_fence_and_relays_handoff():
     assert record["origin_worker"] == "wkr-origin"
     assert record["target_worker"] == "wkr-replica"
     assert record["invocation_id"] == "inv-1"
+
+
+def test_the_handoff_carries_the_scope_the_completion_materializes_under():
+    """The origin writes the completion under the scope control assigned its task.
+
+    The origin holds store access for the scope its own dispatch carried, so an
+    invocation that materializes under any other scope cannot write its completion at
+    all.
+    """
+    svc, _stores, _settled, delivery = _build(content_scope="org-acme")
+    asyncio.run(svc._originate(_env()))
+
+    handoff = delivery.frame("resident_handoff")["handoff"]
+    assert handoff["tenant"] == "org-acme"
 
 
 def test_embedding_dependency_relays_the_embedding_interface_to_the_sidecar():

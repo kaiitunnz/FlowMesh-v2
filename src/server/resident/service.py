@@ -350,6 +350,7 @@ class ResidentCapacityControl:
         limits: ResidentPolicyLimits,
         dependency_resolver: DependencyResolver,
         input_resolution_resolver: InputResolutionResolver = lambda _task_id: None,
+        content_scope_resolver: Callable[[str], str] = lambda _task_id: "",
         settle_cb: SettleCallback,
         redispatch_cb: RedispatchCallback,
         endpoint_probe: EndpointProbe,
@@ -368,6 +369,7 @@ class ResidentCapacityControl:
         self._limits = limits
         self._resolve_dependency = dependency_resolver
         self._resolve_input_resolution = input_resolution_resolver
+        self._resolve_content_scope = content_scope_resolver
         self._settle = settle_cb
         self._redispatch = redispatch_cb
         self._probe_endpoint = endpoint_probe
@@ -810,6 +812,9 @@ class ResidentCapacityControl:
             return
         profile = AdmissionProfile(
             engine_batch_key=dependency.engine_batch_key,
+            # The scope the origin worker materializes this invocation's completion
+            # under: the one control assigned the task, not one the invocation invents.
+            tenant=self._resolve_content_scope(env.task_id),
             adapter_ref=dependency.adapter,
             adapter_source=dependency.adapter_source,
             batch_size=batch_size,

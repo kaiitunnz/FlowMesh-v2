@@ -2422,6 +2422,17 @@ class TaskRuntime:
             resolution = self._input_resolution_locked(task_id)
         return resolution.binding if resolution is not None else None
 
+    def content_scope(self, task_id: str) -> str:
+        """The authorization scope a task's content is written under.
+
+        Control assigns it from the task's own owner, so every write this task makes —
+        its dispatch's and the resident completion its invocation materializes — lands
+        in one scope rather than each path deriving its own.
+        """
+        with self._lock:
+            record = self._tasks.get(task_id)
+        return record.org_id if record is not None else ""
+
     def content_binding_authorizes(
         self, task_id: str, worker_id: str, reference: ContentReference
     ) -> bool:
