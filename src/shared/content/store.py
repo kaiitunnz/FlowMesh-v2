@@ -9,6 +9,7 @@ becoming a name for the other.
 
 import hashlib
 from abc import ABC, abstractmethod
+from typing import Protocol
 
 from .reference import (
     CONTENT_ENCODING_IDENTITY,
@@ -67,6 +68,17 @@ def reference_for(
         size_bytes=len(data),
         media_type=media_type,
     )
+
+
+class ScopedObjectStore(Protocol):
+    """Opens the store a scope's content lives in.
+
+    Access is taken per scope rather than once per process because what a caller may
+    reach is a property of the scope it acts in: whoever implements this decides what
+    that access is, and the store it returns can reach exactly that scope's content.
+    """
+
+    def for_scope(self, scope: str) -> "FabricObjectStore": ...
 
 
 class FabricObjectStore(ABC):

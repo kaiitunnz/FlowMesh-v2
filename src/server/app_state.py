@@ -4,13 +4,13 @@ from pathlib import Path
 from starlette.requests import HTTPConnection
 
 from .clients import RedisClient
+from .content import FinalizationIndex
 from .dispatcher import Dispatcher
 from .hooks import PrincipalContext
 from .network.service import NetworkPlane
 from .registries import NodeRegistry, WorkerRegistry, WorkflowRegistry
 from .resident.service import ResidentCapacityControl
 from .serve import GatedServe, ServeBindingStore
-from .services.content_store import ServerContentStore
 from .services.metrics import MetricsRecorder
 from .services.monitoring import EventMonitor
 from .services.port_forward import PortForwardService
@@ -113,8 +113,8 @@ def get_network_plane(conn: HTTPConnection) -> NetworkPlane | None:
     return conn.app.state.network_plane
 
 
-def get_content_store(conn: HTTPConnection) -> ServerContentStore | None:
-    return conn.app.state.content_store
+def get_finalization_index(conn: HTTPConnection) -> FinalizationIndex | None:
+    return conn.app.state.finalization_index
 
 
 def get_telemetry_store(conn: HTTPConnection) -> TelemetryStore | None:

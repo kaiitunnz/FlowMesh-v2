@@ -1,46 +1,44 @@
-"""The reference-backed outcome content store's HTTP surface.
+"""The outcome-finalization index's HTTP surface.
 
-A worker materializes an outcome by uploading its bytes here; the store is content-
-addressed and per-scope, so the upload returns the immutable manifest and a re-drive
-under the same idempotency key resolves the first materialization. A resumed worker
-hydrates the content by digest before it injects the value. The server stores opaque
-bytes and never assembles them into orchestration state.
+A worker materializes an outcome into the shared content store and binds it here under
+the fabric idempotency key it settles against, so a re-drive resolves the first
+materialization instead of re-running a sampled producer. Only that binding crosses this
+surface: the bytes are in the shared store and never pass through the server.
 """
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from fastapi.responses import Response
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from shared.content import ContentHydrationError, ContentReference, ContentStoreError
+from shared.content import ContentReference
 from shared.outcome import OutcomeManifest
 
-from ...app_state import get_content_store, get_logger
+from ...app_state import get_finalization_index, get_logger
 from ...auth.security import (
     PrincipalContext,
     authenticate_connection,
     require_permission,
 )
+from ...content import FinalizationIndex
 from ...hooks import ResourceAction, ResourceKind
-from ...services.content_store import ServerContentStore
 
 router = APIRouter(prefix="/content", tags=["Content"])
 
 
-def _require_store(store: ServerContentStore | None) -> ServerContentStore:
-    if store is None:
+def _require_index(index: FinalizationIndex | None) -> FinalizationIndex:
+    if index is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="content store not enabled"
         )
-    return store
+    return index
 
 
 def _admitted_scope(principal: PrincipalContext, requested: str | None) -> str:
     """The scope this request acts in: its own, or another it is privileged to reach.
 
-    A fabric component writes content on behalf of the task's tenant rather than its own
-    credential, so a principal holding the deployment-wide scope may name one; anyone
-    else is confined to the scope their principal is.
+    A fabric component finalizes an outcome on behalf of the task's tenant rather than
+    its own credential, so a principal holding the deployment-wide scope may name one;
+    anyone else is confined to the scope their principal is.
     """
     if not requested or requested == principal.org_id:
         return principal.org_id
@@ -52,111 +50,50 @@ def _admitted_scope(principal: PrincipalContext, requested: str | None) -> str:
 
 
 @router.put(
-    "",
-    summary="Materialize outcome content",
-    description="Upload outcome bytes content-addressed under an admitted scope.",
+    "/finalizations",
+    summary="Bind an outcome finalization to its content",
+    description="Record the content one idempotency key materialized.",
 )
-async def put_content(
-    request: Request,
+async def put_finalization(
+    content: ContentReference,
     idem: str = Query(..., description="The fabric idempotency key to bind."),
-    scope: str = Query("", description="The authorization scope to store under."),
-    store: ServerContentStore | None = Depends(get_content_store),
+    scope: str = Query("", description="The authorization scope to bind in."),
+    index: FinalizationIndex | None = Depends(get_finalization_index),
     principal: PrincipalContext = Depends(authenticate_connection),
     logger: logging.Logger = Depends(get_logger),
 ) -> OutcomeManifest:
     await require_permission(
         principal, ResourceKind.RESULT, None, ResourceAction.WRITE, logger
     )
-    body = await request.body()
-    media_type = request.headers.get("content-type") or "application/octet-stream"
-    try:
-        return _require_store(store).materialize(
-            _admitted_scope(principal, scope),
-            idem,
-            body,
-            media_type=media_type,
-            provenance=f"principal:{principal.principal_id}",
-        )
-    except ContentStoreError as exc:
+    admitted = _admitted_scope(principal, scope)
+    if content.authorization_scope != admitted:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
-        ) from exc
-
-
-@router.put(
-    "/objects",
-    summary="Write an immutable object",
-    description="Store bytes content-addressed under an admitted scope.",
-)
-async def put_object(
-    request: Request,
-    scope: str = Query("", description="The authorization scope to store under."),
-    store: ServerContentStore | None = Depends(get_content_store),
-    principal: PrincipalContext = Depends(authenticate_connection),
-    logger: logging.Logger = Depends(get_logger),
-) -> ContentReference:
-    await require_permission(
-        principal, ResourceKind.RESULT, None, ResourceAction.WRITE, logger
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="content is outside the admitted scope",
+        )
+    return _require_index(index).record(
+        admitted, idem, content, provenance=f"principal:{principal.principal_id}"
     )
-    body = await request.body()
-    media_type = request.headers.get("content-type") or "application/octet-stream"
-    try:
-        return _require_store(store).write(
-            _admitted_scope(principal, scope), body, media_type=media_type
-        )
-    except ContentStoreError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
-        ) from exc
 
 
 @router.get(
-    "",
-    summary="Resolve materialized content by idempotency key",
-    description="Return the manifest already materialized under an idempotency key.",
+    "/finalizations",
+    summary="Resolve an outcome finalization",
+    description="Return the content already materialized under an idempotency key.",
 )
-async def get_by_idem(
+async def get_finalization(
     idem: str = Query(..., description="The fabric idempotency key to resolve."),
     scope: str = Query("", description="The authorization scope to resolve in."),
-    store: ServerContentStore | None = Depends(get_content_store),
+    index: FinalizationIndex | None = Depends(get_finalization_index),
     principal: PrincipalContext = Depends(authenticate_connection),
     logger: logging.Logger = Depends(get_logger),
 ) -> OutcomeManifest:
     await require_permission(
         principal, ResourceKind.RESULT, None, ResourceAction.READ, logger
     )
-    manifest = _require_store(store).find(_admitted_scope(principal, scope), idem)
+    manifest = _require_index(index).find(_admitted_scope(principal, scope), idem)
     if manifest is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="no content for key"
         )
     return manifest
-
-
-@router.get(
-    "/{digest}",
-    summary="Hydrate outcome content",
-    description="Return content-addressed outcome bytes from an admitted scope.",
-    response_class=Response,
-)
-async def get_content(
-    digest: str,
-    scope: str = Query("", description="The authorization scope to read in."),
-    store: ServerContentStore | None = Depends(get_content_store),
-    principal: PrincipalContext = Depends(authenticate_connection),
-    logger: logging.Logger = Depends(get_logger),
-) -> Response:
-    await require_permission(
-        principal, ResourceKind.RESULT, None, ResourceAction.READ, logger
-    )
-    try:
-        data = _require_store(store).read(_admitted_scope(principal, scope), digest)
-    except ContentHydrationError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="content not found"
-        ) from exc
-    except ContentStoreError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
-        ) from exc
-    return Response(content=data, media_type="application/octet-stream")

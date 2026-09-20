@@ -1,5 +1,7 @@
 """Caller-neutral substrate shared by the run-to-yield episode executors."""
 
+import logging
+
 from shared.content import ContentStoreError
 from shared.harness import DeliveredOutcome, HarnessResult
 from shared.outcome import FabricContentStore
@@ -7,8 +9,11 @@ from shared.private_state import PrivateStateSealReport
 from shared.schemas.result import BaseExecutorResult
 from shared.tools.facade import FacadeTurnGroup
 
+from ..config import WorkerConfig
 from ..content_store import build_content_store
 from .base_executor import ExecutionError
+
+_LOG = logging.getLogger(__name__)
 
 
 class EpisodeStepResult(BaseExecutorResult):
@@ -28,7 +33,7 @@ class EpisodeStepResult(BaseExecutorResult):
 
 
 def hydrate_delivered_outcomes(
-    server_base_url: str | None, outcomes: tuple[DeliveredOutcome, ...]
+    config: WorkerConfig, outcomes: tuple[DeliveredOutcome, ...]
 ) -> tuple[DeliveredOutcome, ...]:
     """Resolve any reference-backed outcome into its injected value.
 
@@ -39,7 +44,7 @@ def hydrate_delivered_outcomes(
     """
     if not any(o.outcome_ref is not None for o in outcomes):
         return outcomes
-    store = build_content_store(server_base_url)
+    store = build_content_store(config, _LOG)
     if store is None:
         raise ExecutionError("cannot hydrate a reference-backed outcome: no store")
     return tuple(_hydrate(o, store) for o in outcomes)

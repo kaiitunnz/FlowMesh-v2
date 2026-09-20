@@ -25,6 +25,41 @@ from .utils.health import get_hb_config
 
 
 @dataclass(frozen=True)
+class ObjectStoreConfig:
+    """Where the shared durable content store is, and how to open it.
+
+    ``backend`` selects how the fleet's store is reached: ``s3`` for anything speaking
+    the S3 API (the co-located MinIO a default deployment runs, cloud S3, an external
+    MinIO), ``filesystem`` for one durable filesystem mounted on every node.
+    """
+
+    backend: str
+    endpoint_url: str
+    bucket: str
+    prefix: str
+    region: str
+    access_key: str
+    secret_key: str
+    filesystem_root: Path
+
+    @staticmethod
+    def from_env(results_dir: Path) -> "ObjectStoreConfig":
+        return ObjectStoreConfig(
+            backend=os.getenv("CONTENT_STORE_BACKEND", "s3").strip() or "s3",
+            endpoint_url=os.getenv("CONTENT_STORE_ENDPOINT_URL", "").strip(),
+            bucket=os.getenv("CONTENT_STORE_BUCKET", "flowmesh-content").strip(),
+            prefix=os.getenv("CONTENT_STORE_PREFIX", "").strip(),
+            region=os.getenv("CONTENT_STORE_REGION", "us-east-1").strip(),
+            access_key=os.getenv("CONTENT_STORE_ACCESS_KEY", "").strip(),
+            secret_key=os.getenv("CONTENT_STORE_SECRET_KEY", "").strip(),
+            filesystem_root=Path(
+                os.getenv("CONTENT_STORE_FILESYSTEM_ROOT", "").strip()
+                or (results_dir / "shared-content")
+            ).absolute(),
+        )
+
+
+@dataclass(frozen=True)
 class WorkerConfig:
     worker_token: str
     owner_principal: dict[str, Any] | None
@@ -35,8 +70,9 @@ class WorkerConfig:
     private_state_dir: Path
     content_dir: Path
     content_hydration_enabled: bool
-    content_orphan_grace_sec: float
+    content_cache_ttl_sec: float
     content_holder_ttl_sec: float
+    object_store: ObjectStoreConfig
     content_transfer_timeout_sec: float
     results_mount_source: str | None
     hb_interval_sec: int
@@ -228,8 +264,9 @@ class WorkerConfig:
             content_hydration_enabled=parse_bool_env(
                 "CONTENT_HYDRATION_ENABLED", False
             ),
-            content_orphan_grace_sec=parse_float_env("CONTENT_ORPHAN_GRACE_SEC", 900.0),
+            content_cache_ttl_sec=parse_float_env("CONTENT_CACHE_TTL_SEC", 900.0),
             content_holder_ttl_sec=parse_float_env("CONTENT_HOLDER_TTL_SEC", 300.0),
+            object_store=ObjectStoreConfig.from_env(results_dir),
             content_transfer_timeout_sec=parse_float_env(
                 "CONTENT_TRANSFER_TIMEOUT_SEC", 60.0
             ),

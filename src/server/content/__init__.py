@@ -2,6 +2,7 @@
 
 from .authority import ContentHydrationAuthority, HydrationDenial
 from .directory import ContentHolderDirectory, ContentHolderRecord
+from .finalizations import FinalizationIndex
 from .sessions import ContentTransferSessions
 
 __all__ = [
@@ -9,5 +10,6 @@ __all__ = [
     "ContentHolderRecord",
     "ContentHydrationAuthority",
     "ContentTransferSessions",
+    "FinalizationIndex",
     "HydrationDenial",
 ]

@@ -1,25 +1,34 @@
 """This worker's view of fabric content.
 
-Three things sit behind one object surface. What the worker wrote, it holds and reads
-locally. What another worker wrote, it hydrates over an authorized transfer once control
-grants one. What predates the transfer protocol — an object no worker ever reported
-holding, which control answers with exactly that — it reads from the compatibility store
-the deployment still runs, so migrating consumers do not lose objects written before.
+Content lives in the shared durable store. A worker writes an object there before it
+reports the reference naming it, so every reference that reaches a binding names bytes
+that already outlive the worker that produced them, and it keeps a copy of what it wrote
+so the next read of it is local.
+
+Reading walks three levels, and each is only ever an optimization over the last. What
+this worker already has, it reads locally. What another worker has, it hydrates over an
+authorized transfer, which saves a trip to the shared store on the path that matters.
+What no cache can supply — nothing holds it, the holder died, the grant expired — it
+reads from the shared store, which always has it. So a cache miss costs a read rather
+than a failure, and a worker dying costs nothing at all.
 
 Every read is scoped to the task asking for it: the grant control mints rests on that
-task's own binding, so the surface is taken per task rather than shared across them.
+task's own binding, and the access opened against the shared store is the one that
+scope is entitled to.
 """
 
 import logging
 
-from shared.content import OCTET_STREAM, ContentReference, FabricObjectStore
+from shared.content import (
+    OCTET_STREAM,
+    ContentHydrationError,
+    ContentReference,
+    FabricObjectStore,
+    ScopedObjectStore,
+)
 
 from .client import AnnounceHolding, GrantDenied
 from .lane_host import ContentLaneHost
-
-# Control's word that nothing ever reported holding the object, which is what makes the
-# compatibility store the right place to look rather than a failure to report.
-_NOT_TRACKED = "not_tracked"
 
 
 class WorkerContentPlane:
@@ -28,14 +37,14 @@ class WorkerContentPlane:
     def __init__(
         self,
         lane: ContentLaneHost,
+        shared: ScopedObjectStore,
         *,
         announce: AnnounceHolding,
-        compat: FabricObjectStore | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self._lane = lane
+        self._shared = shared
         self._announce = announce
-        self._compat = compat
         self._logger = logger or logging.getLogger("content-plane")
 
     def for_task(self, task_id: str) -> "TaskContentStore":
@@ -46,33 +55,39 @@ class WorkerContentPlane:
         """Hand one content control frame to the lane that consumes it."""
         self._lane.route(frame_kind, frame)
 
-    def bind(self, reference: ContentReference) -> None:
-        """Mark an object as named by a binding this worker has reported."""
-        self._lane.store.bind(reference)
-
     def write(
         self, scope: str, data: bytes, *, media_type: str = OCTET_STREAM
     ) -> ContentReference:
-        """Hold the bytes here and tell control where they are.
+        """Put the bytes in the shared store, keep a copy, and say where the copy is.
 
-        The report is location evidence, not a binding: it lets control resolve a
-        holder for a later grant, and keeps nothing alive by itself.
+        The shared write comes first and its failure is the write's failure: nothing may
+        report a reference the durable store does not already have. Caching it and
+        telling control about the copy are what make the next read cheap, so a failure
+        there costs a local read rather than the object.
         """
-        reference = self._lane.store.write(scope, data, media_type=media_type)
-        self._announce([(scope, reference.content_digest)])
+        reference = self._shared.for_scope(scope).write(
+            scope, data, media_type=media_type
+        )
+        try:
+            self._lane.store.write(scope, data, media_type=media_type)
+            self._announce([(scope, reference.content_digest)])
+        except Exception:  # noqa: BLE001 - the object is safe; only the copy is not
+            self._logger.warning(
+                "could not cache %s locally", reference.content_digest, exc_info=True
+            )
         return reference
 
     def hydrate(self, reference: ContentReference, task_id: str) -> bytes:
-        """The object's verified bytes, from wherever this deployment still keeps it."""
+        """The object's verified bytes, from the nearest place that has them."""
         try:
             return self._lane.hydrate(reference, task_id)
-        except GrantDenied as denial:
-            if _NOT_TRACKED not in str(denial) or self._compat is None:
-                raise
+        except (GrantDenied, ContentHydrationError) as miss:
+            # Every cache path is optional: the object is in the shared store whatever
+            # happened to a copy of it, so a miss costs this read and nothing else.
             self._logger.debug(
-                "hydrating %s from the server-hosted store", reference.content_digest
+                "reading %s from the shared store: %s", reference.content_digest, miss
             )
-        return self._compat.hydrate(reference)
+        return self._shared.for_scope(reference.authorization_scope).hydrate(reference)
 
 
 class TaskContentStore(FabricObjectStore):

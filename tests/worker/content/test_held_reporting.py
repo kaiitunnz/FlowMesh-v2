@@ -2,7 +2,7 @@
 
 import pytest
 
-from worker.content import ContentLaneHost, WorkerObjectStore
+from worker.content import ContentLaneHost, WorkerContentCache
 
 
 class _Reports:
@@ -19,8 +19,8 @@ class _Reports:
 
 def _lane(tmp_path, reports: _Reports, **kwargs) -> ContentLaneHost:
     return ContentLaneHost(
-        store=WorkerObjectStore(
-            tmp_path / "content", orphan_grace_sec=kwargs.pop("grace", 900.0)
+        store=WorkerContentCache(
+            tmp_path / "content", retain_sec=kwargs.pop("retain", 900.0)
         ),
         push_frame=lambda frame: None,
         request_grant=lambda reference, task_id: None,
@@ -31,10 +31,9 @@ def _lane(tmp_path, reports: _Reports, **kwargs) -> ContentLaneHost:
     )
 
 
-def test_a_restarted_worker_reports_the_objects_still_on_its_disk(tmp_path) -> None:
-    first = WorkerObjectStore(tmp_path / "content", orphan_grace_sec=900.0)
+def test_a_restarted_worker_reports_the_copies_still_on_its_disk(tmp_path) -> None:
+    first = WorkerContentCache(tmp_path / "content", retain_sec=900.0)
     reference = first.write("local", b"prepared", media_type="application/json")
-    first.bind(reference)
 
     reports = _Reports()
     lane = _lane(tmp_path, reports)
@@ -46,26 +45,12 @@ def test_a_restarted_worker_reports_the_objects_still_on_its_disk(tmp_path) -> N
     assert reports.reported == {("local", reference.content_digest)}
 
 
-def test_a_write_no_binding_names_is_not_reported(tmp_path) -> None:
-    store = WorkerObjectStore(tmp_path / "content", orphan_grace_sec=900.0)
-    store.write("local", b"never-reported")
-
-    reports = _Reports()
-    lane = _lane(tmp_path, reports)
-    lane.start()
-    try:
-        assert lane.report_held() == 0
-    finally:
-        lane.stop()
-    assert reports.reported == set()
-
-
 def test_one_report_carries_every_object_rather_than_one_message_each(
     tmp_path,
 ) -> None:
-    store = WorkerObjectStore(tmp_path / "content", orphan_grace_sec=900.0)
+    cache = WorkerContentCache(tmp_path / "content", retain_sec=900.0)
     for index in range(5):
-        store.bind(store.write("local", f"object-{index}".encode()))
+        cache.write("local", f"object-{index}".encode())
 
     reports = _Reports()
     lane = _lane(tmp_path, reports)

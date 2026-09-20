@@ -845,8 +845,6 @@ class Runner:
                             mode="json"
                         )
                         self.lifecycle.set_succeeded(task_id, metadata=metadata)
-                        if self._content_plane is not None:
-                            self._content_plane.bind(prepared.reference)
                         self.logger.info("Task %s prepared its inputs", task_id)
                         continue
                     if msg.service_episode is not None:

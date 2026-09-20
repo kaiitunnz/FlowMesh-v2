@@ -1,17 +1,14 @@
-"""The objects a worker holds for the fabric.
+"""The content this worker keeps a copy of.
 
-A worker that materializes content keeps the bytes itself and reports only the reference
-naming them, so a payload reaches a consumer over an authorized transfer rather than
-through a server. What the worker holds is therefore live fabric state, not a cache: it
-serves a hydration the control plane granted, and it is the only holder of a new object
-until another consumer materializes the same bytes in the same scope.
+A cache over the shared durable store, not a holder of record: every object here is also
+there, so a copy may be dropped whenever it stops paying for itself and nothing is lost
+when a worker dies with copies on its disk. What the cache buys is the read — a task
+that needs an object this worker already has never leaves the node, and a task on
+another worker can be served from here instead of the shared store.
 
-Reclamation is deliberately conservative. An object stays for as long as this worker
-runs once it has been reported in a consumer's binding; only a write that never reached
-one — an execution that died between writing the bytes and reporting them — is
-reclaimed, and only after a grace period long enough that a slow report is not mistaken
-for a lost one. Nothing here reads a binding or decides that a consumer is done with an
-object: that is the control plane's, and in this slice no one does it.
+Copies are kept on disk rather than in memory so they survive the worker process, and
+the worker tells control what it holds so a peer's read can be pointed at it. A copy
+ages out once it is older than the retention window; nothing else removes one.
 """
 
 import time
@@ -24,20 +21,18 @@ from shared.content import (
     FabricObjectStore,
     FilesystemObjectBacking,
 )
-from shared.content.filesystem import safe_segment
-from shared.utils.atomic import atomic_write_bytes
 
 
-class WorkerObjectStore(FabricObjectStore):
-    """The content this worker wrote and serves, under a local directory."""
+class WorkerContentCache(FabricObjectStore):
+    """The copies this worker holds, under a local directory."""
 
-    def __init__(self, root: Path, *, orphan_grace_sec: float) -> None:
+    def __init__(self, root: Path, *, retain_sec: float) -> None:
         self._objects = FilesystemObjectBacking(root)
-        self._orphan_grace_sec = orphan_grace_sec
+        self._retain_sec = retain_sec
 
     @property
-    def orphan_grace_sec(self) -> float:
-        return self._orphan_grace_sec
+    def retain_sec(self) -> float:
+        return self._retain_sec
 
     def write(
         self, scope: str, data: bytes, *, media_type: str = OCTET_STREAM
@@ -49,53 +44,29 @@ class WorkerObjectStore(FabricObjectStore):
             reference.authorization_scope, reference.content_digest
         )
 
-    def iter_bound(self) -> Iterator[tuple[str, str]]:
-        """Every object a reported binding names, as the scope and digest naming it.
-
-        The half of what this worker holds that a consumer can legitimately reach, and
-        so the half worth telling control about; the rest is either still on its way to
-        a binding or already reclaimable.
-        """
-        for scope, digest in self._objects.iter_objects():
-            if self._bound_path(scope, digest).exists():
-                yield scope, digest
-
     def holds(self, reference: ContentReference) -> bool:
         return self._objects.holds(
             reference.authorization_scope, reference.content_digest
         )
 
-    def bind(self, reference: ContentReference) -> None:
-        """Record that a consumer's binding now names this object.
+    def iter_held(self) -> Iterator[tuple[str, str]]:
+        """Every copy this worker holds, as the scope and digest naming it."""
+        return self._objects.iter_objects()
 
-        Called once the worker has reported the reference, which is what makes the
-        object reachable and so keeps it from being swept as an unbound write. The mark
-        sits beside the object so a restarted worker does not sweep what it already
-        reported.
+    def evict_aged(self, *, in_transfer: frozenset[str] = frozenset()) -> int:
+        """Drop copies past the retention window, and return how many went.
+
+        A copy being served right now stays until its transfer is done; everything else
+        is free to go, because the object itself is in the shared store either way.
         """
-        atomic_write_bytes(self._bound_path(*self._key(reference)), b"", if_absent=True)
-
-    def _bound_path(self, scope: str, digest: str) -> Path:
-        return self._objects.scope_path(scope, "bound") / safe_segment(digest)
-
-    @staticmethod
-    def _key(reference: ContentReference) -> tuple[str, str]:
-        return reference.authorization_scope, reference.content_digest
-
-    def reclaim_orphans(self, *, in_transfer: frozenset[str] = frozenset()) -> int:
-        """Drop writes no binding claims, and return how many went.
-
-        An object is reclaimable only when every one of them holds: no binding named it,
-        it is older than the grace period, and no transfer is serving it right now.
-        """
-        deadline = time.time() - self._orphan_grace_sec
-        reclaimed = 0
+        deadline = time.time() - self._retain_sec
+        evicted = 0
         for scope, digest in list(self._objects.iter_objects()):
-            if digest in in_transfer or self._bound_path(scope, digest).exists():
+            if digest in in_transfer:
                 continue
-            written_at = self._objects.written_at(scope, digest)
-            if written_at is None or written_at > deadline:
+            cached_at = self._objects.written_at(scope, digest)
+            if cached_at is None or cached_at > deadline:
                 continue
             self._objects.remove(scope, digest)
-            reclaimed += 1
-        return reclaimed
+            evicted += 1
+        return evicted

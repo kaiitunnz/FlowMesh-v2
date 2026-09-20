@@ -14,7 +14,7 @@ from shared.content import (
 )
 from shared.network.relay_frame import RelayFrame
 from shared.utils.ids import new_hydration_grant_id, new_relay_session_id
-from worker.content import ContentHolder, ContentHydrationClient, WorkerObjectStore
+from worker.content import ContentHolder, ContentHydrationClient, WorkerContentCache
 
 _BODY = b'{"prompts": ["one", "two"]}'
 
@@ -50,7 +50,7 @@ class _Pair:
     """A holder and a requester wired to each other over in-process sinks."""
 
     def __init__(self, tmp_path, *, holder_generation: int = 1) -> None:
-        self.store = WorkerObjectStore(tmp_path / "held", orphan_grace_sec=60.0)
+        self.store = WorkerContentCache(tmp_path / "held", retain_sec=60.0)
         self.to_requester = _ToPeer()
         self.to_holder = _ToPeer()
         self.granted: list[ContentReference] = []

@@ -31,7 +31,7 @@ from shared.network.frame_stream import FrameSink
 from shared.network.relay_frame import RelayFrame, RelayFrameKind
 from shared.network.session import FramedRelaySession, RelaySessionRole
 
-from .store import WorkerObjectStore
+from .store import WorkerContentCache
 
 # Control relays a grant to the holder and the requester independently, so a fetch can
 # arrive before this holder's copy of the grant does. A bounded wait lets the two meet
@@ -46,7 +46,7 @@ class ContentHolder:
     def __init__(
         self,
         *,
-        store: WorkerObjectStore,
+        store: WorkerContentCache,
         sink: FrameSink,
         holder_id: str,
         generation: int,
@@ -67,7 +67,7 @@ class ContentHolder:
 
     @property
     def in_transfer(self) -> frozenset[str]:
-        """The digests a transfer is serving right now, which the sweep leaves alone."""
+        """The digests a transfer is serving right now, which eviction leaves alone."""
         return frozenset(self._in_transfer.values())
 
     def accept_grant(self, grant: ContentHydrationGrant) -> None:

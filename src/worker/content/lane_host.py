@@ -26,7 +26,7 @@ from shared.network.relay_frame import RelayDirection, RelayFrame
 
 from .client import AnnounceHolding, ContentHydrationClient, RequestGrant
 from .holder import ContentHolder
-from .store import WorkerObjectStore
+from .store import WorkerContentCache
 
 
 class ContentLaneHost:
@@ -35,7 +35,7 @@ class ContentLaneHost:
     def __init__(
         self,
         *,
-        store: WorkerObjectStore,
+        store: WorkerContentCache,
         push_frame: Callable[[dict[str, Any]], None],
         request_grant: RequestGrant,
         worker_id: str,
@@ -63,7 +63,7 @@ class ContentLaneHost:
         self._sweep: asyncio.Task[None] | None = None
 
     @property
-    def store(self) -> WorkerObjectStore:
+    def store(self) -> WorkerContentCache:
         return self._store
 
     def start(self) -> None:
@@ -105,25 +105,23 @@ class ContentLaneHost:
                 f"hydrating {reference.content_digest} did not complete in time"
             ) from exc
 
-    def reclaim_orphans(self) -> int:
-        """Sweep unbound writes, leaving anything a transfer is serving in place."""
+    def evict_aged(self) -> int:
+        """Drop copies past the retention window, leaving anything in transfer alone."""
         in_transfer = self._holder.in_transfer if self._holder else frozenset()
-        return self._store.reclaim_orphans(in_transfer=in_transfer)
+        return self._store.evict_aged(in_transfer=in_transfer)
 
     def report_held(self) -> int:
-        """Report every bound object this worker holds, and return how many.
+        """Report every copy this worker holds, and return how many.
 
         A holder record lapses unless its holder keeps reporting, so this runs on a
         cadence inside the record's lifetime. It also runs before the worker takes any
-        work, which is how a restarted worker makes the objects already on its disk
-        reachable again: the report lands under its new incarnation, superseding the
-        record its previous one left behind. It reports only what a binding names — the
-        rest is either still on its way to one or already reclaimable — so the report
-        and the sweep never disagree about an object.
+        work, so a restarted worker's copies are reachable again rather than sitting
+        unused on its disk: the report lands under its new incarnation, superseding the
+        record its previous one left behind.
         """
         if self._announce is None:
             return 0
-        held = list(self._store.iter_bound())
+        held = list(self._store.iter_held())
         if held:
             self._announce(held)
         return len(held)
@@ -138,20 +136,20 @@ class ContentLaneHost:
         return max(5.0, min(self._holder_report_ttl_sec / 3, 60.0))
 
     async def _keep_held_reachable(self) -> None:
-        """Re-report what this worker holds, and reclaim what no binding claims.
+        """Keep the cache reachable and bounded: report what is here, drop what aged.
 
-        One loop for both because both are periodic housekeeping over the same objects,
-        split so they never disagree: a bound object is reported, an unbound one past
-        its grace is reclaimed, and neither touches the other's half.
+        Eviction runs first so a copy on its way out is not advertised in the same
+        breath; a peer that reads a copy this tick evicts finds it gone and falls
+        through to the shared store, which is what the fall-through is for.
         """
         while True:
             await asyncio.sleep(self.housekeeping_interval_sec)
             try:
+                if (evicted := self.evict_aged()) > 0:
+                    self._logger.info("evicted %d cached content objects", evicted)
                 self.report_held()
-                if (reclaimed := self.reclaim_orphans()) > 0:
-                    self._logger.info("reclaimed %d unbound content writes", reclaimed)
             except Exception:
-                self._logger.exception("content housekeeping failed")
+                self._logger.exception("content cache housekeeping failed")
 
     def route(self, frame_kind: str, frame: dict[str, Any]) -> bool:
         """Marshal one content control frame onto the lane loop; return handled."""

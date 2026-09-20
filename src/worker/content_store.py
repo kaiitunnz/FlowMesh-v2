@@ -1,15 +1,27 @@
-"""Build the worker's content-store client from its resolved server endpoint."""
+"""Build the worker's outcome content store from its resolved configuration."""
 
-from shared.outcome import FabricContentStore
-from shared.outcome.http_store import HttpFabricContentStore
+import logging
+
+from shared.outcome import (
+    FabricContentStore,
+    FinalizationIndexClient,
+    FinalizingContentStore,
+)
+
+from .config import WorkerConfig
+from .content import build_shared_store
 
 
-def build_content_store(base_url: str | None) -> FabricContentStore | None:
-    """The HTTP content store for a resolved server base URL, or None when absent.
+def build_content_store(
+    cfg: WorkerConfig, logger: logging.Logger
+) -> FabricContentStore | None:
+    """The store outcomes materialize into, or None when this worker reaches none.
 
-    A worker with no reachable server endpoint materializes nothing and inlines its
-    outcomes as the compatibility fallback.
+    It needs both halves — the shared store for the content and the server for the
+    finalization binding — so a worker missing either materializes nothing and inlines
+    its outcomes as the compatibility fallback.
     """
-    if not base_url:
+    shared = build_shared_store(cfg.object_store, logger)
+    if shared is None or not cfg.server_base_url:
         return None
-    return HttpFabricContentStore(base_url)
+    return FinalizingContentStore(shared, FinalizationIndexClient(cfg.server_base_url))

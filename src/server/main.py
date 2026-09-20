@@ -41,6 +41,7 @@ from .content import (
     ContentHolderDirectory,
     ContentHydrationAuthority,
     ContentTransferSessions,
+    FinalizationIndex,
 )
 from .dispatcher.factory import create_dispatcher
 from .hooks import register
@@ -65,7 +66,6 @@ from .services.agent_model_gateway import (
     ResolvedGatewayBinding,
     to_gateway_binding,
 )
-from .services.content_store import ServerContentStore
 from .services.fleet_metrics import build_fleet_sampler
 from .services.log_archiver import TaskLogArchiver
 from .services.metrics import MetricsRecorder
@@ -112,12 +112,6 @@ logger = get_logger(
 RESULTS_DIR = config.results_dir
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
-CONTENT_STORE = (
-    ServerContentStore(config.content_store.root)
-    if IS_ROOT_NODE and config.content_store.enabled
-    else None
-)
-
 assert config.metrics.dir is not None
 METRICS_DIR = config.metrics.dir
 
@@ -133,6 +127,12 @@ REDIS_CLIENT = RedisClient(
 )
 
 NODE_REGISTRY = NodeRegistry(REDIS_CLIENT, logger)
+
+FINALIZATION_INDEX = (
+    FinalizationIndex(REDIS_CLIENT)
+    if IS_ROOT_NODE and config.content_store.enabled
+    else None
+)
 
 METRICS_RECORDER = MetricsRecorder(
     METRICS_DIR,
@@ -734,7 +734,7 @@ app.state.resident_control = RESIDENT_CONTROL
 app.state.gated_serve = GATED_SERVE
 app.state.serve_bindings = SERVE_BINDINGS
 app.state.network_plane = NETWORK_PLANE
-app.state.content_store = CONTENT_STORE
+app.state.finalization_index = FINALIZATION_INDEX
 app.state.telemetry_store = TELEMETRY_STORE
 # Started in lifespan on the root node when the resident relay bridge is enabled.
 app.state.resident_bridge_task = None

@@ -20,7 +20,12 @@ from shared.telemetry.semconv import (
 )
 
 from .config import WorkerConfig
-from .content import ContentLaneHost, WorkerContentPlane, WorkerObjectStore
+from .content import (
+    ContentLaneHost,
+    WorkerContentCache,
+    WorkerContentPlane,
+    build_shared_store,
+)
 from .content_store import build_content_store
 from .executors import EXECUTOR_REGISTRY, IMPORT_ERRORS, get_executor_class_name
 from .executors.base_executor import Executor
@@ -256,17 +261,18 @@ def _bind_peer_listener(cfg: WorkerConfig) -> socket.socket | None:
 def _build_content_plane(
     cfg: WorkerConfig, client: SupervisorClient, logger: logging.Logger
 ) -> WorkerContentPlane | None:
-    """The worker's content plane, where the deployment runs the transfer protocol.
+    """The worker's content plane, where the deployment runs one.
 
-    Without it a worker keeps writing to and reading from the server-hosted store, so
-    the plane is absent rather than empty.
+    It needs the shared durable store to be the source of truth for what it caches, so
+    a deployment that configures no store runs no content plane.
     """
     if not cfg.content_hydration_enabled:
         return None
+    shared = build_shared_store(cfg.object_store, logger)
+    if shared is None:
+        return None
     lane = ContentLaneHost(
-        store=WorkerObjectStore(
-            cfg.content_dir, orphan_grace_sec=cfg.content_orphan_grace_sec
-        ),
+        store=WorkerContentCache(cfg.content_dir, retain_sec=cfg.content_cache_ttl_sec),
         push_frame=client.push_content_frame,
         request_grant=lambda reference, task_id: client.push_content_hydration_request(
             reference.model_dump(mode="json"), task_id
@@ -285,10 +291,7 @@ def _build_content_plane(
     if (held := lane.report_held()) > 0:
         logger.info("reported %d held content objects at startup", held)
     return WorkerContentPlane(
-        lane,
-        compat=build_content_store(cfg.server_base_url),
-        announce=client.push_content_holding,
-        logger=logger,
+        lane, shared, announce=client.push_content_holding, logger=logger
     )
 
 
@@ -404,7 +407,7 @@ def main() -> None:
         web_search_api_key=cfg.web_search_api_key,
         model_api_key=cfg.model_api_key,
         model_egress_timeout_sec=cfg.model_egress_timeout_sec,
-        content_store=build_content_store(cfg.server_base_url),
+        content_store=build_content_store(cfg, logger),
         content_plane=content_plane,
         peer_enabled=cfg.peer_enabled,
         peer_material=_peer_material(cfg, logger),

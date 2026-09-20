@@ -18,7 +18,7 @@ from shared.tasks.worker_message import (
     WorkerTaskMessage,
 )
 from shared.telemetry.config import TelemetryConfig, TelemetryLevel
-from worker.config import WorkerConfig
+from worker.config import ObjectStoreConfig, WorkerConfig
 
 DEFAULT_WORKER_CONFIG: Final[WorkerConfig] = WorkerConfig(
     owner_principal=PrincipalContext(
@@ -32,8 +32,9 @@ DEFAULT_WORKER_CONFIG: Final[WorkerConfig] = WorkerConfig(
     private_state_dir=Path("/tmp/test-private-state"),
     content_dir=Path("/tmp/test-content"),
     content_hydration_enabled=False,
-    content_orphan_grace_sec=900.0,
+    content_cache_ttl_sec=900.0,
     content_holder_ttl_sec=300.0,
+    object_store=ObjectStoreConfig.from_env(Path("/tmp/test-results")),
     content_transfer_timeout_sec=60.0,
     server_base_url=None,
     supervisor_grpc_target="localhost:50051",
