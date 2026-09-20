@@ -27,7 +27,6 @@ from shared.content import (
     OCTET_STREAM,
     ContentReference,
     ContentStoreAccess,
-    ContentStoreError,
     FabricObjectStore,
 )
 from shared.outcome import (
@@ -37,7 +36,7 @@ from shared.outcome import (
 )
 
 from .access import ContentAccessRegistry
-from .client import AnnounceHolding, GrantDenied
+from .client import AnnounceHolding
 from .lane_host import ContentLaneHost
 
 
@@ -70,6 +69,11 @@ class WorkerContentPlane:
         return FinalizingContentStore(
             _TaskScopedStores(self, task_id), self._finalizations
         )
+
+    def stop(self) -> None:
+        """Drain the cache lane, if this worker runs one."""
+        if self._lane is not None:
+            self._lane.stop()
 
     def accept_access(self, access: ContentStoreAccess) -> None:
         """Take the access control granted one of this worker's tasks."""
@@ -112,11 +116,11 @@ class WorkerContentPlane:
         if self._lane is not None:
             try:
                 return self._lane.hydrate(reference, task_id)
-            except (GrantDenied, ContentStoreError) as miss:
-                # Every cache path is optional, and that includes a cache that cannot
-                # represent the object at all: the object is in the shared store
-                # whatever happened to a copy of it, so anything the cache raises costs
-                # this read and nothing else.
+            except Exception as miss:  # noqa: BLE001 - see below: every cache path is
+                # optional, and that includes a cache that cannot represent the object,
+                # a content directory that has gone unreadable, and a lane that is not
+                # running. The object is in the shared store whatever happened to a copy
+                # of it, so anything the cache raises costs this read and nothing else.
                 self._logger.debug(
                     "reading %s from the shared store: %s",
                     reference.content_digest,

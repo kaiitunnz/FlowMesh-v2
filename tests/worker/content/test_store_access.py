@@ -145,6 +145,28 @@ def test_a_cache_that_cannot_serve_still_reads_the_object_from_the_store(
     assert plane.hydrate("tsk-1", reference) == b"body"
 
 
+class _BrokenLane:
+    """A cache whose backing directory has gone unreadable under it."""
+
+    def hydrate(self, reference: Any, task_id: str) -> bytes:
+        raise OSError("input/output error")
+
+
+def test_a_cache_that_raises_anything_at_all_still_falls_through(tmp_path) -> None:
+    """The fall-through is unconditional, not a list of anticipated failures.
+
+    A content directory that has gone unreadable, a lane that is not running, a bug in
+    the cache: none of them is a reason to fail a read the shared store can serve, and
+    each raises something different.
+    """
+    registry = _registry(tmp_path)
+    registry.accept(_access("tsk-1"))
+    plane = WorkerContentPlane(cast(Any, _BrokenLane()), registry)
+    reference = registry.store_for("tsk-1", "tenant-a").write("tenant-a", b"body")
+
+    assert plane.hydrate("tsk-1", reference) == b"body"
+
+
 class _RecordingLane:
     """A lane that records what the plane put in its cache."""
 
