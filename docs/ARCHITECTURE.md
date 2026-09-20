@@ -417,7 +417,9 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   [`EXECUTORS.md`](EXECUTORS.md).
 - **Content references.** Every value the fabric stores immutably is named by one
   `ContentReference`: the authorization scope isolating it together with the digest and
-  size a reader verifies it by, and nothing that says where it is or what it means. An
+  size a reader verifies it by, and nothing that says where it is or what it means. The
+  control plane assigns the scope — a task's dispatch and a minted permit each carry the
+  one their work writes under — so a worker carries a scope rather than asserting one. An
   outcome finalization, a prepared inference request, and any later consumer each keep
   their own binding to a reference, so an object is never a name for what a consumer
   calls it, and identical bytes in two scopes are two objects.

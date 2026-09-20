@@ -16,7 +16,7 @@ import threading
 from collections.abc import Callable, Coroutine
 from typing import Any
 
-from shared.network.frame_stream import FrameSink
+from shared.network.frame_stream import FrameSink, WireFrameSink
 from shared.network.mtls import MutualTlsMaterial, client_context
 from shared.network.relay_frame import RelayDirection, RelayFrame
 from shared.outcome import FabricContentStore
@@ -51,16 +51,6 @@ RequestDelete = Callable[[str, str], None]
 AckSink = Callable[[ResidentBootstrapAck], None]
 OutcomeSink = Callable[[ResidentOpOutcome], None]
 ObservationReport = Callable[[ResidentRouteObservation], None]
-
-
-class _EventFrameSink:
-    """Sends each produced relay frame up as a ``RESIDENT_FRAME`` attachment event."""
-
-    def __init__(self, push_frame: Callable[[dict[str, Any]], None]) -> None:
-        self._push_frame = push_frame
-
-    async def send(self, frame: RelayFrame) -> None:
-        self._push_frame(frame.to_wire())
 
 
 class ResidentLaneHost:
@@ -117,7 +107,7 @@ class ResidentLaneHost:
         self._call(self._build).result()
 
     async def _build(self) -> None:
-        sink: FrameSink = _EventFrameSink(self._push_frame)
+        sink: FrameSink = WireFrameSink(self._push_frame)
         carriage = self._carriage(sink)
         self._origin = ResidentOriginDriver(
             carriage=carriage,

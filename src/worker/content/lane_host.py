@@ -16,22 +16,17 @@ import threading
 from collections.abc import Callable, Coroutine
 from typing import Any
 
-from shared.content import ContentHydrationGrant, ContentReference
+from shared.content import (
+    ContentHydrationError,
+    ContentHydrationGrant,
+    ContentReference,
+)
+from shared.network.frame_stream import WireFrameSink
 from shared.network.relay_frame import RelayDirection, RelayFrame
 
 from .client import ContentHydrationClient, RequestGrant
 from .holder import ContentHolder
 from .store import WorkerObjectStore
-
-
-class _EventFrameSink:
-    """Sends each produced frame up as a ``CONTENT_FRAME`` attachment event."""
-
-    def __init__(self, push_frame: Callable[[dict[str, Any]], None]) -> None:
-        self._push_frame = push_frame
-
-    async def send(self, frame: RelayFrame) -> None:
-        self._push_frame(frame.to_wire())
 
 
 class ContentLaneHost:
@@ -72,7 +67,7 @@ class ContentLaneHost:
         self._call(self._build).result()
 
     async def _build(self) -> None:
-        sink = _EventFrameSink(self._push_frame)
+        sink = WireFrameSink(self._push_frame)
         self._holder = ContentHolder(
             store=self._store,
             sink=sink,
@@ -95,9 +90,16 @@ class ContentLaneHost:
         if self._client is None:
             raise RuntimeError("content lane is not started")
         client = self._client
-        return self._call(lambda: client.hydrate(reference, task_id)).result(
-            timeout=self._transfer_timeout_sec * 2
-        )
+        transfer = self._call(lambda: client.hydrate(reference, task_id))
+        try:
+            # The client bounds its own wait; this is the backstop for a transfer that
+            # never returns at all, and it fails the read the same typed way.
+            return transfer.result(timeout=self._transfer_timeout_sec * 2)
+        except concurrent.futures.TimeoutError as exc:
+            transfer.cancel()
+            raise ContentHydrationError(
+                f"hydrating {reference.content_digest} did not complete in time"
+            ) from exc
 
     def reclaim_orphans(self) -> int:
         """Sweep unbound writes, leaving anything a transfer is serving in place."""

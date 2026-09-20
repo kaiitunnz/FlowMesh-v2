@@ -12,6 +12,7 @@ is a typed hydration failure and the consumer's own recovery decides what follow
 
 import asyncio
 import logging
+from collections import deque
 from collections.abc import Callable
 
 from shared.content import (
@@ -34,9 +35,10 @@ from shared.network.session import FramedRelaySession, RelaySessionRole
 # Asks the control plane to authorize hydrating one reference for one task.
 RequestGrant = Callable[[ContentReference, str], None]
 
-# Keyed by the object a request is waiting on: one worker asks for a given reference
-# once at a time, and control answers a grant or a denial naming that same reference.
+# Keyed by the object a request waits on: control answers a grant or a typed denial
+# naming that same reference, so an answer finds its request by what it is about.
 _WaitKey = tuple[str, str]
+_Answer = asyncio.Future["ContentHydrationGrant | str"]
 
 
 class GrantDenied(ContentHydrationError):
@@ -60,7 +62,7 @@ class ContentHydrationClient:
         self._timeout = transfer_timeout_sec
         self._window_bytes = window_bytes
         self._logger = logger or logging.getLogger("content-hydration")
-        self._waiters: dict[_WaitKey, asyncio.Future[ContentHydrationGrant | str]] = {}
+        self._waiters: dict[_WaitKey, deque[_Answer]] = {}
         self._sessions: dict[str, FramedRelaySession] = {}
 
     async def hydrate(self, reference: ContentReference, task_id: str) -> bytes:
@@ -82,22 +84,27 @@ class ContentHydrationClient:
     async def _grant_for(
         self, reference: ContentReference, task_id: str
     ) -> ContentHydrationGrant:
+        """Ask control to authorize this read, and wait for its answer.
+
+        Each request waits on its own answer because a grant is good for one transfer:
+        two tasks reading the same object each ask, and each takes the grant minted for
+        it rather than sharing one that the second would find already consumed.
+        """
         key = (reference.authorization_scope, reference.content_digest)
-        if (pending := self._waiters.get(key)) is None:
-            pending = asyncio.get_running_loop().create_future()
-            self._waiters[key] = pending
-            # Armed before the request goes up, so a grant that comes straight back
-            # finds its waiter rather than arriving at nobody.
-            self._request_grant(reference, task_id)
+        pending: _Answer = asyncio.get_running_loop().create_future()
+        waiting = self._waiters.setdefault(key, deque())
+        waiting.append(pending)
+        # Armed before the request goes up, so an answer that comes straight back finds
+        # a waiter rather than arriving at nobody.
+        self._request_grant(reference, task_id)
         try:
-            answer = await asyncio.wait_for(asyncio.shield(pending), self._timeout)
+            answer = await asyncio.wait_for(pending, self._timeout)
         except TimeoutError as exc:
             raise ContentHydrationError(
                 f"no hydration grant for {reference.content_digest} in time"
             ) from exc
         finally:
-            if pending.done():
-                self._waiters.pop(key, None)
+            self._forget(key, pending)
         if isinstance(answer, str):
             raise GrantDenied(
                 f"hydration of {reference.content_digest} denied: {answer}"
@@ -143,9 +150,24 @@ class ContentHydrationClient:
         self._settle((reference.authorization_scope, reference.content_digest), reason)
 
     def _settle(self, key: _WaitKey, answer: ContentHydrationGrant | str) -> None:
-        waiter = self._waiters.pop(key, None)
-        if waiter is not None and not waiter.done():
-            waiter.set_result(answer)
+        """Hand one answer to the longest-waiting request for that object."""
+        waiting = self._waiters.get(key)
+        while waiting:
+            waiter = waiting.popleft()
+            if not waiter.done():
+                waiter.set_result(answer)
+                break
+        if not waiting:
+            self._waiters.pop(key, None)
+
+    def _forget(self, key: _WaitKey, waiter: "_Answer") -> None:
+        waiting = self._waiters.get(key)
+        if waiting is None:
+            return
+        if waiter in waiting:
+            waiting.remove(waiter)
+        if not waiting:
+            self._waiters.pop(key, None)
 
     async def on_frame(self, frame: RelayFrame) -> None:
         """Route one inbound frame into the transfer waiting for it."""

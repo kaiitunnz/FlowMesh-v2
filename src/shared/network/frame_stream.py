@@ -11,6 +11,7 @@ and the caller closes the connection: a stream whose framing is lost cannot resy
 
 import asyncio
 import json
+from collections.abc import Callable
 from typing import Any, Protocol
 
 from .relay_frame import RelayDirection, RelayFrame, RelayFrameKind
@@ -36,6 +37,20 @@ class FrameSink(Protocol):
     """Carries one relay frame onward, whatever transport is behind it."""
 
     async def send(self, frame: RelayFrame) -> None: ...
+
+
+class WireFrameSink:
+    """Hands each produced frame to a transport that carries it as a wire dict.
+
+    A worker's lane sends through this: the frame leaves as an attachment event, and the
+    supervisor bridges it onward without reading it.
+    """
+
+    def __init__(self, push_frame: Callable[[dict[str, Any]], None]) -> None:
+        self._push_frame = push_frame
+
+    async def send(self, frame: RelayFrame) -> None:
+        self._push_frame(frame.to_wire())
 
 
 def split_host_port(endpoint: str) -> tuple[str, int]:
@@ -106,6 +121,7 @@ __all__ = [
     "FrameSink",
     "FrameStreamError",
     "FrameWriter",
+    "WireFrameSink",
     "read_relay_frame",
     "split_host_port",
     "write_relay_frame",

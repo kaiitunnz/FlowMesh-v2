@@ -230,3 +230,23 @@ async def test_a_transfer_in_flight_holds_its_object_against_the_sweep(
     await asyncio.sleep(0)
     pair.client.deliver_grant(grant)
     await hydration
+
+
+@pytest.mark.asyncio
+async def test_two_reads_of_one_object_each_take_their_own_grant(tmp_path) -> None:
+    pair = _Pair(tmp_path)
+    reference = pair.store.write("local", _BODY, media_type="application/json")
+    first, second = _grant(reference), _grant(reference)
+    pair.holder.accept_grant(first)
+    pair.holder.accept_grant(second)
+
+    reads = [
+        asyncio.ensure_future(pair.client.hydrate(reference, "tsk-1")),
+        asyncio.ensure_future(pair.client.hydrate(reference, "tsk-2")),
+    ]
+    await asyncio.sleep(0)
+    pair.client.deliver_grant(first)
+    pair.client.deliver_grant(second)
+
+    assert await asyncio.gather(*reads) == [_BODY, _BODY]
+    assert len(pair.granted) == 2  # each read asked for its own authorization

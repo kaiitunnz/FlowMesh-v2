@@ -15,13 +15,14 @@ import logging
 import time
 from collections.abc import Callable
 from enum import StrEnum
+from typing import Any
 
 from shared.content import ContentHydrationGrant, ContentReference
 from shared.schemas.command import MediatedOpMessage
 from shared.utils.ids import new_hydration_grant_id, new_relay_session_id
 
 from ..registries.worker import Worker, WorkerRegistry
-from .directory import ContentHolderDirectory
+from .directory import ContentHolderDirectory, ContentHolderRecord
 from .sessions import ContentTransferSessions
 
 # Whether the task's own binding entitles this worker to read this exact reference.
@@ -31,7 +32,6 @@ BindingCheck = Callable[[str, str, ContentReference], bool]
 class HydrationDenial(StrEnum):
     """Why control refused to authorize a hydration."""
 
-    UNKNOWN_REQUESTER = "unknown_requester"
     NO_BINDING = "no_binding"
     NOT_TRACKED = "not_tracked"
     HOLDER_UNAVAILABLE = "holder_unavailable"
@@ -58,7 +58,7 @@ class ContentHydrationAuthority:
         self._logger = logger or logging.getLogger("content-authority")
 
     def record_holding(self, worker_id: str, reference: ContentReference) -> None:
-        """Note that a worker now holds an object it wrote."""
+        """Note that a worker holds an object it wrote."""
         worker = self._workers.get_worker(worker_id)
         if worker is None:
             return
@@ -75,11 +75,19 @@ class ContentHydrationAuthority:
         """Grant one hydration, or relay the reason it is refused."""
         requester = self._workers.get_worker(worker_id)
         if requester is None:
+            # Nothing to answer: a request from a worker the registry no longer knows
+            # has no attachment to relay a grant or a refusal over.
             return
-        if (denial := self._denial(worker_id, task_id, reference)) is not None:
-            self._deny(requester, reference, denial)
+        if not self._authorizes(task_id, worker_id, reference):
+            self._deny(requester, reference, HydrationDenial.NO_BINDING)
             return
-        holder = self._resolve_holder(reference, exclude=worker_id)
+        reported = self._directory.holders(reference)
+        if not reported:
+            # Nothing ever reported holding it: an object from before this protocol,
+            # which its consumer reaches over the compatibility store instead.
+            self._deny(requester, reference, HydrationDenial.NOT_TRACKED)
+            return
+        holder = self._resolve_holder(reference, reported, exclude=worker_id)
         if holder is None:
             self._deny(requester, reference, HydrationDenial.HOLDER_UNAVAILABLE)
             return
@@ -102,29 +110,19 @@ class ContentHydrationAuthority:
             origin_worker=worker_id,
             target_worker=holder.id,
         )
-        self._relay(
-            holder, "content_serve_grant", {"grant": grant.model_dump(mode="json")}
-        )
-        self._relay(
-            requester, "content_grant", {"grant": grant.model_dump(mode="json")}
-        )
-
-    def _denial(
-        self, worker_id: str, task_id: str, reference: ContentReference
-    ) -> HydrationDenial | None:
-        if not self._authorizes(task_id, worker_id, reference):
-            return HydrationDenial.NO_BINDING
-        if not self._directory.holders(reference):
-            # Nothing ever reported holding it: an object from before this protocol,
-            # which its consumer reaches over the compatibility store instead.
-            return HydrationDenial.NOT_TRACKED
-        return None
+        payload = {"grant": grant.model_dump(mode="json")}
+        self._relay(holder, "content_serve_grant", payload)
+        self._relay(requester, "content_grant", payload)
 
     def _resolve_holder(
-        self, reference: ContentReference, *, exclude: str
+        self,
+        reference: ContentReference,
+        reported: list[ContentHolderRecord],
+        *,
+        exclude: str,
     ) -> Worker | None:
         """A live worker that holds the object, or None. Evidence, not authority."""
-        for record in self._directory.holders(reference):
+        for record in reported:
             if record.worker_id == exclude:
                 continue
             worker = self._workers.get_worker(record.worker_id)
@@ -147,9 +145,7 @@ class ContentHydrationAuthority:
             {"reference": reference.model_dump(mode="json"), "reason": denial.value},
         )
 
-    def _relay(
-        self, worker: Worker, frame_kind: str, payload: dict[str, object]
-    ) -> None:
+    def _relay(self, worker: Worker, frame_kind: str, payload: dict[str, Any]) -> None:
         self._workers.publish_mediated_op(
             worker,
             MediatedOpMessage(

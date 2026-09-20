@@ -13,12 +13,7 @@ task's own binding, so the surface is taken per task rather than shared across t
 import logging
 from collections.abc import Callable
 
-from shared.content import (
-    OCTET_STREAM,
-    ContentHydrationError,
-    ContentReference,
-    FabricObjectStore,
-)
+from shared.content import OCTET_STREAM, ContentReference, FabricObjectStore
 
 from .client import GrantDenied
 from .lane_host import ContentLaneHost
@@ -38,7 +33,7 @@ class WorkerContentPlane:
         self,
         lane: ContentLaneHost,
         *,
-        announce: "AnnounceHolding",
+        announce: AnnounceHolding,
         compat: FabricObjectStore | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
@@ -56,7 +51,7 @@ class WorkerContentPlane:
         self._lane.route(frame_kind, frame)
 
     def bind(self, reference: ContentReference) -> None:
-        """Mark an object as named by a binding this worker has now reported."""
+        """Mark an object as named by a binding this worker has reported."""
         self._lane.store.bind(reference)
 
     def write(
@@ -72,11 +67,15 @@ class WorkerContentPlane:
         return reference
 
     def hydrate(self, reference: ContentReference, task_id: str) -> bytes:
+        """The object's verified bytes, from wherever this deployment still keeps it."""
         try:
             return self._lane.hydrate(reference, task_id)
         except GrantDenied as denial:
             if _NOT_TRACKED not in str(denial) or self._compat is None:
                 raise
+            self._logger.debug(
+                "hydrating %s from the server-hosted store", reference.content_digest
+            )
         return self._compat.hydrate(reference)
 
 
@@ -93,9 +92,9 @@ class TaskContentStore(FabricObjectStore):
         return self._plane.write(scope, data, media_type=media_type)
 
     def fetch(self, reference: ContentReference) -> bytes:
-        raise ContentHydrationError(
-            "content is fetched by hydrating a reference, not by an unverified read"
-        )
+        return self._plane.hydrate(reference, self._task_id)
 
     def hydrate(self, reference: ContentReference) -> bytes:
-        return self._plane.hydrate(reference, self._task_id)
+        # Every path a read can take here verifies the bytes against this exact
+        # reference before returning them, so there is nothing left to check.
+        return self.fetch(reference)
