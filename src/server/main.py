@@ -358,7 +358,9 @@ if IS_ROOT_NODE:
         SERVE_BINDINGS = _serve_wiring.bindings
 
     CONTENT_ACCESS: ContentAccessBroker | None = None
-    if config.content_store.hydration_enabled:
+    # Reaching the store is not the cache's business: every dispatched task needs access
+    # to write what it produces, whether or not this deployment caches anything.
+    if config.content_store.enabled:
         _store_cfg = config.object_store
         if _store_cfg.scoped_credentials and _store_cfg.backend == BACKEND_S3:
             _minter: ScopedCredentialMinter = StsScopedCredentialMinter(

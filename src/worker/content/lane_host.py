@@ -20,7 +20,6 @@ from shared.content import (
     ContentHydrationError,
     ContentHydrationGrant,
     ContentReference,
-    ContentStoreAccess,
 )
 from shared.network.frame_stream import WireFrameSink
 from shared.network.relay_frame import RelayDirection, RelayFrame
@@ -28,9 +27,6 @@ from shared.network.relay_frame import RelayDirection, RelayFrame
 from .client import AnnounceHolding, ContentHydrationClient, RequestGrant
 from .holder import ContentHolder
 from .store import WorkerContentCache
-
-# Takes the access control granted one of this worker's tasks.
-AcceptAccess = Callable[[ContentStoreAccess], None]
 
 
 class ContentLaneHost:
@@ -46,7 +42,6 @@ class ContentLaneHost:
         generation: int,
         transfer_timeout_sec: float = 60.0,
         announce: AnnounceHolding | None = None,
-        accept_access: AcceptAccess | None = None,
         holder_report_ttl_sec: float = 300.0,
         logger: logging.Logger | None = None,
     ) -> None:
@@ -57,7 +52,6 @@ class ContentLaneHost:
         self._generation = generation
         self._transfer_timeout_sec = transfer_timeout_sec
         self._announce = announce
-        self._accept_access = accept_access
         self._holder_report_ttl_sec = holder_report_ttl_sec
         self._logger = logger or logging.getLogger("content-lane-host")
         self._loop = asyncio.new_event_loop()
@@ -166,9 +160,7 @@ class ContentLaneHost:
 
     def route(self, frame_kind: str, frame: dict[str, Any]) -> bool:
         """Marshal one content control frame onto the lane loop; return handled."""
-        if frame_kind == "content_access":
-            self._loop.call_soon_threadsafe(self._on_access, frame)
-        elif frame_kind == "content_grant":
+        if frame_kind == "content_grant":
             self._loop.call_soon_threadsafe(self._on_grant, frame)
         elif frame_kind == "content_grant_denied":
             self._loop.call_soon_threadsafe(self._on_denial, frame)
@@ -179,10 +171,6 @@ class ContentLaneHost:
         else:
             return False
         return True
-
-    def _on_access(self, frame: dict[str, Any]) -> None:
-        if self._accept_access is not None:
-            self._accept_access(ContentStoreAccess.model_validate(frame))
 
     def _on_grant(self, frame: dict[str, Any]) -> None:
         if self._client is not None:

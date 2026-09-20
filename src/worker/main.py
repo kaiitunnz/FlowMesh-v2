@@ -285,7 +285,6 @@ def _build_content_plane(
             generation=client.incarnation,
             transfer_timeout_sec=cfg.content_transfer_timeout_sec,
             announce=client.push_content_holding,
-            accept_access=access.accept,
             holder_report_ttl_sec=cfg.content_holder_ttl_sec,
             logger=logger,
         )
