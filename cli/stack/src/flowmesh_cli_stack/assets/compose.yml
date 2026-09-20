@@ -258,21 +258,6 @@ services:
       timeout: 3s
       retries: 10
 
-  content-store-init:
-    image: quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z
-    profiles: [content]
-    container_name: ${FLOWMESH_STACK_SLUG:-flowmesh_node}_content_store_init
-    depends_on:
-      content-store:
-        condition: service_healthy
-    entrypoint: >
-      /bin/sh -c "mc alias set fabric http://content-store:9000
-      \"${CONTENT_STORE_ACCESS_KEY:-flowmesh}\" \"${CONTENT_STORE_SECRET_KEY:-flowmeshcontent}\"
-      && mc mb --ignore-existing fabric/${CONTENT_STORE_BUCKET:-flowmesh-content}"
-    restart: "no"
-    networks:
-      - flowmesh_node_network
-
 networks:
   flowmesh_node_network:
     name: ${FLOWMESH_STACK_SLUG:-flowmesh_node}_network

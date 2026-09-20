@@ -48,6 +48,7 @@ from .content import (
     ScopedCredentialMinter,
     StsScopedCredentialMinter,
     build_sts_client,
+    ensure_bucket,
 )
 from .dispatcher.factory import create_dispatcher
 from .hooks import register
@@ -362,6 +363,8 @@ if IS_ROOT_NODE:
     # to write what it produces, whether or not this deployment caches anything.
     if config.content_store.enabled:
         _store_cfg = config.object_store
+        if _store_cfg.backend == BACKEND_S3:
+            ensure_bucket(_store_cfg, logger)
         if _store_cfg.scoped_credentials and _store_cfg.backend == BACKEND_S3:
             _minter: ScopedCredentialMinter = StsScopedCredentialMinter(
                 _store_cfg, build_sts_client(_store_cfg)

@@ -44,6 +44,44 @@ def scope_policy(bucket: str, prefix: str, scope: str, operations: tuple) -> str
     )
 
 
+def ensure_bucket(cfg: ObjectStoreConfig, logger: logging.Logger) -> None:
+    """Make sure the bucket the fabric's content lives in exists.
+
+    The control plane holds the deployment credential a scoped session is cut from, so
+    it is the one thing that can create the bucket; the sessions it hands out reach one
+    scope's prefix and never the bucket itself. Creating it here is what lets a
+    deployment bring its own store up beside the fabric and have content land in it with
+    nothing else to configure. An existing bucket, or a store whose credential may not
+    create one, leaves it alone.
+    """
+    import boto3
+    from botocore.client import Config
+
+    client = boto3.client(
+        "s3",
+        endpoint_url=cfg.endpoint_url or None,
+        aws_access_key_id=cfg.access_key or None,
+        aws_secret_access_key=cfg.secret_key or None,
+        region_name=cfg.region,
+        config=Config(signature_version="s3v4"),
+    )
+    try:
+        client.head_bucket(Bucket=cfg.bucket)
+        return
+    except Exception:  # noqa: BLE001 - absent, unreachable, or not ours: try to create
+        pass
+    try:
+        client.create_bucket(Bucket=cfg.bucket)
+        logger.info("created the content store bucket %s", cfg.bucket)
+    except Exception:  # noqa: BLE001 - a store that refuses says so on the first write
+        logger.warning(
+            "could not create the content store bucket %s; content writes will fail "
+            "until it exists",
+            cfg.bucket,
+            exc_info=True,
+        )
+
+
 def build_sts_client(cfg: ObjectStoreConfig) -> Any:
     """The session-issuing client for an S3-compatible store."""
     import boto3
