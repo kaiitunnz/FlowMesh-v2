@@ -644,11 +644,6 @@ STACK_ENV_SCHEMA = EnvSchema(
                     var_type=EnvVarType.BOOL,
                 ),
                 EnvVar(
-                    "CONTENT_STORE_ROOT",
-                    "",
-                    description="Content-store root; under the data dir if empty.",
-                ),
-                EnvVar(
                     "CONTENT_STORE_BACKEND",
                     "s3",
                     description="Shared content store backend.",

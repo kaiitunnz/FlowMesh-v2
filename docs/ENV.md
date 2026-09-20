@@ -16,7 +16,7 @@ listed here is in `.env.example`.
 | `REDIS_CONTROL_URL` | `redis://localhost:6379/0` | Redis control channel. On worker nodes, must point at the root node's reachable Redis endpoint |
 | `REDIS_TELEMETRY_URL` | `redis://localhost:6380/0` | Redis telemetry channel. On worker nodes, must point at the root node's reachable Redis endpoint |
 | `REDIS_RESIDENT_RELAY_URL` | (telemetry) | Redis endpoint for the resident relay; defaults to telemetry |
-| `COMPOSE_PROFILES` | – | Optional compose profiles to deploy (e.g. telemetry) |
+| `COMPOSE_PROFILES` | – | Optional compose profiles to deploy (e.g. content, telemetry) |
 | `DATABASE_URL` | – | Postgres connection string |
 | `RESULTS_DIR` | `./results` | Server-side results directory |
 | `SERVER_RESULTS_DIR` | `flowmesh_results` | Host-side directory/docker volume to mount at `RESULTS_DIR` in the server container |
@@ -64,7 +64,6 @@ listed here is in `.env.example`.
 | `WEB_SEARCH_RESULT_CHAR_CAP` | `6000` | Injected result size cap |
 | `WEB_SEARCH_MAX_PARALLEL_CALLS_PER_TURN` | `4` | Parallel searches per turn |
 | `CONTENT_STORE_ENABLED` | `true` | Serve the outcome finalization index |
-| `CONTENT_STORE_ROOT` | – | Unused by the store; retained for the data dir layout |
 | `CONTENT_STORE_BACKEND` | `s3` | Shared content store backend (`s3` or `filesystem`) |
 | `CONTENT_STORE_ENDPOINT_URL` | – | S3-compatible endpoint; the co-located store if empty |
 | `CONTENT_STORE_BUCKET` | `flowmesh-content` | Bucket holding fabric content |
