@@ -43,6 +43,7 @@ from ..clients.redis import (
     task_log_closed_key,
     task_log_stream_key,
 )
+from ..content import ContentAccessBroker, ContentHydrationAuthority
 from ..dispatcher import Dispatcher
 from ..hooks import (
     RESOURCE_REGISTRARS,
@@ -70,7 +71,6 @@ from .port_forward import PortForwardService
 from .watchdog import WorkerWatchdog
 
 if TYPE_CHECKING:
-    from ..content import ContentAccessBroker, ContentHydrationAuthority
     from ..serve import GatedServe
 
 # Model-serving task types adopted as standing resident allocations: the GPU vLLM serve
@@ -135,8 +135,8 @@ class EventMonitor:
         server_base_url: str = "http://localhost:8000",
         on_node_removed: Callable[[str], None] | None = None,
         workflow_span_emitter: WorkflowSpanEmitter | None = None,
-        content_authority: "ContentHydrationAuthority | None" = None,
-        content_access: "ContentAccessBroker | None" = None,
+        content_authority: ContentHydrationAuthority | None = None,
+        content_access: ContentAccessBroker | None = None,
     ) -> None:
         self._redis_client = redis_client
         self._on_node_removed = on_node_removed

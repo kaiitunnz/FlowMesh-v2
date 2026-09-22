@@ -2796,7 +2796,7 @@ class TaskRuntime:
         workflow_id: str,
         engine: OrchestrationEngine,
         producer_task_id: str,
-        prefetched: "_FanoutRead | None" = None,
+        prefetched: _FanoutRead | None = None,
     ) -> Advance:
         """Materialize one dispatchable child per element of a producer's fan-out.
 
@@ -2927,7 +2927,7 @@ class TaskRuntime:
         task_id: str,
         reference: ContentReference | None,
         skip: dict[str, Any] | None,
-    ) -> "_FanoutRead | None":
+    ) -> _FanoutRead | None:
         """Read a spawn producer's fan-out collection before its success takes the lock.
 
         The read goes to the shared store, so it runs, and retries, outside the runtime
@@ -2956,7 +2956,7 @@ class TaskRuntime:
             ResultBinding(task_id=task_id, reference=reference)
         )
 
-    def _read_collection(self, binding: ResultBinding) -> "_FanoutRead":
+    def _read_collection(self, binding: ResultBinding) -> _FanoutRead:
         """Read a producer's collection off the lock, retrying a store that is away."""
         for attempt in range(_FANOUT_READ_ATTEMPTS):
             try:
@@ -2974,7 +2974,7 @@ class TaskRuntime:
                 time.sleep(_FANOUT_READ_BACKOFF_SEC)
         raise AssertionError("unreachable")
 
-    def _read_fanout_locked(self, producer_task_id: str) -> "_FanoutRead":
+    def _read_fanout_locked(self, producer_task_id: str) -> _FanoutRead:
         """Read a settled producer's fan-out collection once, under the lock."""
         binding = self._result_binding_locked(producer_task_id)
         if binding is not None and binding.skip is not None:

@@ -324,7 +324,7 @@ def _planned(runtime: TaskRuntime, task_id: str, items: list[str]) -> dict[str, 
 
 
 def _live_runtime(
-    registry: "FakeRegistry", name: str = "live", reader: Any = None
+    registry: FakeRegistry, name: str = "live", reader: Any = None
 ) -> TaskRuntime:
     return TaskRuntime(
         cast(Any, registry),
