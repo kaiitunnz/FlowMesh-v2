@@ -556,6 +556,7 @@ class EventMonitor:
                         event.task_id,
                         reason="worker_failed",
                         front=True,
+                        unmerge_children=True,
                         extra_payload={
                             "error": event.error,
                             "attempt": attempts + 1,

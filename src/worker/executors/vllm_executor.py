@@ -78,7 +78,12 @@ from shared.tasks.specs import InferenceSpecStrict
 from shared.tasks.specs.common import ModelSpecStrict
 from shared.tasks.task_type import TaskType
 
-from .base_executor import ExecutionError, Executor, ExecutorTask
+from .base_executor import (
+    ExecutionError,
+    Executor,
+    ExecutorTask,
+    TaskCancelledError,
+)
 from .mixins.data import InferenceEntry
 from .mixins.inference import InferenceMixin, PreparedInferenceEntry
 from .utils.checkpoints import (
@@ -929,10 +934,34 @@ Summary:"""
         with self._task_span(
             task_id, task.workflow_id, out_dir, owner_id=task.owner_id
         ):
-            result = self._run_inner(task, out_dir)
+            result = self._run_batch(task, out_dir)
         maybe_upload_artifacts(task, out_dir, logger=logger)
         maybe_upload_traces(task, out_dir, logger=logger)
         return result
+
+    def _run_batch(self, task: ExecutorTask, out_dir: Path) -> BaseExecutorResult:
+        """Run a task with its merged children, or alone when the batch fails.
+
+        The engine aborts a whole batch for one request it rejects, so a failed batch
+        runs the parent's own prompts again without its children; each child then
+        returns without a result and runs on its own. A failure of the parent alone is
+        the parent's own.
+        """
+        try:
+            return self._run_inner(task, out_dir)
+        except TaskCancelledError:
+            raise
+        except Exception as exc:
+            if not task.merged_children:
+                raise
+            logger.warning(
+                "Merged batch of task %s failed; running it without its children: %s",
+                task.task_id,
+                exc,
+            )
+        return self._run_inner(
+            task.model_copy(update={"merged_children": None}), out_dir
+        )
 
     @staticmethod
     def _validate_entry(entry: PreparedInferenceEntry) -> None:

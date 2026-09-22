@@ -41,13 +41,20 @@ def _child(task_id: str, spec: dict[str, Any]) -> MergedChildTaskStrict:
 
 
 def _run(
-    parent: dict[str, Any], children: list[MergedChildTaskStrict], out_dir: Path
+    parent: dict[str, Any],
+    children: list[MergedChildTaskStrict],
+    out_dir: Path,
+    rejected: str | None = None,
 ) -> tuple[InferenceResult, MagicMock]:
+    """Run a merged dispatch against a stand-in engine, which aborts the whole batch
+    when it rejects the ``rejected`` prompt, as vLLM does."""
     executor = VLLMExecutor(DEFAULT_WORKER_CONFIG, lifecycle=None)
     llm = MagicMock()
     llm.get_tokenizer.return_value.chat_template = None
 
     def _generate(prompts: list[Any], **_kwargs: Any) -> list[SimpleNamespace]:
+        if rejected in prompts:
+            raise ValueError("The decoder prompt is longer than max_model_len")
         return [
             SimpleNamespace(
                 outputs=[
@@ -114,3 +121,26 @@ def test_the_parents_own_input_still_fails_the_dispatch(tmp_path: Path) -> None:
 
     with pytest.raises(ExecutionError):
         _run(unpreparable, [_child("tsk-ok", _spec("ok"))], tmp_path)
+
+
+def test_a_batch_a_child_aborts_runs_the_parent_alone(tmp_path: Path) -> None:
+    result, llm = _run(
+        _spec("parent"),
+        [_child("tsk-ok", _spec("ok")), _child("tsk-long", _spec("too-long"))],
+        tmp_path,
+        rejected="too-long",
+    )
+
+    assert [item.prompt for item in result.items] == ["parent"]
+    assert result.children == {}
+    assert llm.generate.call_args.args[0] == ["parent"]
+
+
+def test_a_batch_the_parent_aborts_fails_the_parent(tmp_path: Path) -> None:
+    with pytest.raises(ValueError):
+        _run(
+            _spec("too-long"),
+            [_child("tsk-ok", _spec("ok"))],
+            tmp_path,
+            rejected="too-long",
+        )

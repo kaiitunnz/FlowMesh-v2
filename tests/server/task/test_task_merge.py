@@ -5,14 +5,17 @@ from collections import defaultdict
 from collections.abc import Sequence
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import MagicMock
 
 import pytest
 
 from server.config import OrchestrationConfig
 from server.dispatcher.base import Dispatcher
 from server.registries.workflow import PersistedTask, WorkflowSched
+from server.services.monitoring import EventMonitor
 from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime
+from shared.schemas.event import TaskEvent
 from shared.schemas.worker import WorkerCapabilities
 from shared.tasks.executor_key import ExecutorKey
 from tests.server.result_store import make_result_reader, result_payload, store_result
@@ -224,6 +227,46 @@ async def test_a_failed_parent_returns_its_merged_children_to_the_queue() -> Non
     for child in (ids["b"], ids["c"]):
         _assert_returned(runtime, registry, child)
         assert runtime._tasks[child].error is None
+
+
+@pytest.mark.anyio
+async def test_a_merged_dispatch_that_fails_for_a_retry_runs_its_children_alone() -> (
+    None
+):
+    registry = _Registry()
+    runtime = _runtime(registry)
+    ids = await _dispatch_merged(runtime)
+    a = ids["a"]
+    runtime._tasks[a].max_attempts = 3
+    dispatcher = MagicMock()
+    dispatcher.requeue_task.side_effect = lambda task_id, **kw: runtime.release_merge(
+        task_id, kw.get("unmerge_children", False)
+    )
+    monitor = EventMonitor(
+        redis_client=MagicMock(),
+        logger=logging.getLogger("task-merge"),
+        runtime=runtime,
+        dispatcher=dispatcher,
+        worker_registry=MagicMock(),
+        node_registry=MagicMock(),
+        metrics_recorder=MagicMock(),
+        watchdog=MagicMock(),
+    )
+
+    monitor._handle_task_event(
+        TaskEvent(
+            type="TASK_FAILED",
+            task_id=a,
+            worker_id="wkr-1",
+            error="batch rejected",
+            retryable=True,
+            payload={},
+            ts=_TS,
+        )
+    )
+
+    for child in (ids["b"], ids["c"]):
+        _assert_returned(runtime, registry, child)
 
 
 @pytest.mark.anyio
