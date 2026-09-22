@@ -7,7 +7,7 @@ from .access import (
     ScopedContentCredential,
 )
 from .config import BACKEND_FILESYSTEM, BACKEND_S3, ObjectStoreConfig
-from .filesystem import FilesystemObjectBacking
+from .filesystem import FilesystemObjectBacking, SharedFilesystemObjectStore
 from .grant import (
     ContentHydrationGrant,
     ContentOperation,
@@ -48,6 +48,7 @@ __all__ = [
     "FabricObjectStore",
     "FilesystemObjectBacking",
     "ScopedContentCredential",
+    "SharedFilesystemObjectStore",
     "ScopedObjectStore",
     "GrantRejection",
     "HolderGrantGate",

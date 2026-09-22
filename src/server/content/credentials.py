@@ -19,10 +19,14 @@ import boto3
 from botocore.client import Config
 
 from shared.content import (
+    BACKEND_FILESYSTEM,
     ContentOperationKind,
+    FabricObjectStore,
     ObjectStoreConfig,
     ScopedContentCredential,
+    SharedFilesystemObjectStore,
 )
+from shared.content.s3_store import S3ObjectStore
 
 _SessionKey = tuple[str, tuple[ContentOperationKind, ...]]
 
@@ -121,6 +125,21 @@ def ensure_bucket(cfg: ObjectStoreConfig, logger: logging.Logger) -> None:
             cfg.bucket,
             exc_info=True,
         )
+
+
+def open_deployment_store(cfg: ObjectStoreConfig) -> FabricObjectStore:
+    """The shared store opened under the control plane's own deployment credential."""
+    if cfg.backend == BACKEND_FILESYSTEM:
+        return SharedFilesystemObjectStore(cfg.filesystem_root)
+    client = boto3.client(
+        "s3",
+        endpoint_url=cfg.endpoint_url or None,
+        aws_access_key_id=cfg.access_key or None,
+        aws_secret_access_key=cfg.secret_key or None,
+        region_name=cfg.region,
+        config=_client_config(),
+    )
+    return S3ObjectStore(client, cfg.bucket, prefix=cfg.prefix)
 
 
 def _session_end(session: dict[str, Any], ttl_sec: float) -> float:

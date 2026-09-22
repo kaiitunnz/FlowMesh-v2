@@ -31,10 +31,9 @@ from shared.content import (
     FabricObjectStore,
     ObjectStoreConfig,
     ScopedContentCredential,
+    SharedFilesystemObjectStore,
 )
 from shared.content.s3_store import S3ObjectStore
-
-from .cas import SharedFilesystemObjectStore
 
 _AccessKey = tuple[str, str]
 
