@@ -857,6 +857,10 @@ class TaskRuntime:
                 if record.selected_worker and len(record.selected_worker) == 1
                 else None
             )
+            if record.merge_key is not None:
+                # A key persisted under an earlier rule may omit what now keeps two
+                # tasks apart, so a restored task's key comes from the task itself.
+                record.merge_key = _compute_merge_key(record.task, record.org_id)
             self._merge_key_by_task[task_id] = (record.merge_key, selected_worker_hint)
             if persisted.epoch_index is not None:
                 self._task_epoch_index[task_id] = persisted.epoch_index

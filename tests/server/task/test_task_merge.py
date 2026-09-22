@@ -592,6 +592,26 @@ async def test_children_returned_during_the_render_are_left_out_of_it() -> None:
 
 
 @pytest.mark.anyio
+async def test_a_restored_task_merges_under_its_current_key() -> None:
+    registry = _Registry()
+    runtime = _runtime(registry)
+    _, x = await _register(runtime, _siblings(names=["a"]), org="org-x")
+    _, y = await _register(runtime, _siblings(names=["b"]), org="org-y")
+    legacy_key = "vllm:legacy-unscoped"
+    for task_id in (x["a"], y["b"]):
+        runtime._tasks[task_id].merge_key = legacy_key
+        runtime._persist_locked(task_id)
+
+    restored = _runtime(registry)
+    await restored.rehydrate()
+
+    assert restored._tasks[x["a"]].merge_key != restored._tasks[y["b"]].merge_key
+    parent = _next(restored)
+    assert parent is not None
+    assert restored.plan_merge(parent, 8, _VLLM_WORKER) == []
+
+
+@pytest.mark.anyio
 async def test_a_child_not_ready_yet_leaves_the_merge_still_mergeable() -> None:
     runtime = _runtime(_Registry())
     ids = await _dispatch_merged(runtime, dispatch=False)
