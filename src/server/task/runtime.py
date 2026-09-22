@@ -3403,6 +3403,18 @@ class TaskRuntime:
         )
         self._commit_locked(task_id, *returned)
 
+    def merged_child_record(self, task_id: str, child_id: str) -> TaskRecord | None:
+        """A child's record while it is still merged into ``task_id``'s dispatch."""
+        with self._cv:
+            record = self._tasks.get(child_id)
+            if (
+                record is None
+                or record.status != TaskStatus.DISPATCHED
+                or self._merge_parent_map.get(child_id) != task_id
+            ):
+                return None
+            return record
+
     def release_merged_child(self, task_id: str, child_id: str, unmerge: bool) -> None:
         """Take one child out of a task's merge and return it to the ready queue.
 

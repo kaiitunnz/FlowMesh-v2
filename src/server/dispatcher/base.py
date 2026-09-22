@@ -834,13 +834,8 @@ class Dispatcher:
         """
         rendered: list[MergedChildTaskStrict] = []
         for child_id in list(record.merged_children or []):
-            child_record = self._runtime.get_record(child_id)
+            child_record = self._runtime.merged_child_record(task_id, child_id)
             if child_record is None:
-                self._logger.warning(
-                    "Merged child %s of %s has no record; dropping it",
-                    child_id,
-                    task_id,
-                )
                 self._runtime.release_merged_child(task_id, child_id, unmerge=True)
                 continue
             try:
@@ -853,6 +848,8 @@ class Dispatcher:
                 ) != condition.equals:
                     # The child's own dispatch settles its skip.
                     self._runtime.release_merged_child(task_id, child_id, unmerge=True)
+                    continue
+                if self._runtime.merged_child_record(task_id, child_id) is None:
                     continue
                 rendered.append(
                     MergedChildTaskStrict(

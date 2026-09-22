@@ -553,6 +553,45 @@ async def test_a_child_whose_spec_cannot_dispatch_leaves_the_merge() -> None:
 
 
 @pytest.mark.anyio
+async def test_a_child_cancelled_during_the_render_is_left_out_of_it() -> None:
+    runtime = _runtime(_Registry(), _InterruptRecorder())
+    _, a = await _register(runtime, _siblings(names=["a1"]))
+    _, b = await _register(runtime, _siblings(names=["b1"]))
+    other, c = await _register(runtime, _siblings(names=["c1"]))
+    parent = _next(runtime)
+    assert parent == a["a1"]
+    assert runtime.plan_merge(parent, 8, _VLLM_WORKER) == [b["b1"], c["c1"]]
+
+    def _resolve(task_id: str, task: Any, record: Any) -> Any:
+        if task_id == c["c1"]:
+            runtime.cancel_workflow(other)
+        return task
+
+    assert _render(runtime, parent, _resolve) == [b["b1"]]
+    assert runtime._tasks[c["c1"]].status == TaskStatus.CANCELLED
+
+
+@pytest.mark.anyio
+async def test_children_returned_during_the_render_are_left_out_of_it() -> None:
+    runtime = _runtime(_Registry(), _InterruptRecorder())
+    first, a = await _register(runtime, _siblings(names=["a1"]))
+    _, b = await _register(runtime, _siblings(names=["b1", "b2"]))
+    parent = _next(runtime)
+    assert parent == a["a1"]
+    assert runtime.plan_merge(parent, 8, _VLLM_WORKER) == [b["b1"], b["b2"]]
+
+    def _resolve(task_id: str, task: Any, record: Any) -> Any:
+        if task_id == b["b1"]:
+            runtime.cancel_workflow(first)
+        return task
+
+    assert _render(runtime, parent, _resolve) == []
+    for child in (b["b1"], b["b2"]):
+        assert runtime._tasks[child].status == TaskStatus.PENDING
+        assert child in runtime._ready_index
+
+
+@pytest.mark.anyio
 async def test_a_child_not_ready_yet_leaves_the_merge_still_mergeable() -> None:
     runtime = _runtime(_Registry())
     ids = await _dispatch_merged(runtime, dispatch=False)
