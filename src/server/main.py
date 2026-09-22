@@ -138,15 +138,6 @@ REDIS_CLIENT = RedisClient(
 
 NODE_REGISTRY = NodeRegistry(REDIS_CLIENT, logger)
 
-FINALIZATION_INDEX = FinalizationIndex(REDIS_CLIENT) if IS_ROOT_NODE else None
-
-# Control assigns the scope a unit of work materializes content under, and records it
-# against the key that work settles, so the finalization the producing worker later
-# reports binds in the scope control gave it rather than one the worker names.
-CONTENT_SCOPE_AUTHORITY = (
-    FINALIZATION_INDEX.assign_scope if FINALIZATION_INDEX is not None else None
-)
-
 METRICS_RECORDER = MetricsRecorder(
     METRICS_DIR,
     logger,
@@ -173,6 +164,7 @@ if config.worker_management.enabled:
 
 WORKFLOW_REGISTRY = None
 WORKER_REGISTRY = None
+FINALIZATION_INDEX: FinalizationIndex | None = None
 RUNTIME = None
 DISPATCHER = None
 SSH_AUDIT_SERVICE = None
@@ -201,6 +193,7 @@ ROOT_NODE_ID: str | None = None
 if IS_ROOT_NODE:
     WORKFLOW_REGISTRY = WorkflowRegistry(REDIS_CLIENT)
     WORKER_REGISTRY = WorkerRegistry(REDIS_CLIENT)
+    FINALIZATION_INDEX = FinalizationIndex(REDIS_CLIENT)
     MODEL_SECRET_VAULT = ModelSecretVault(
         REDIS_CLIENT, config.orchestration.model_secret_vault.ttl_sec, logger
     )
@@ -233,7 +226,7 @@ if IS_ROOT_NODE:
         control=CONTROL_TRACER,
         tracer=SERVER_TRACER,
         telemetry=config.telemetry,
-        content_scope_authority=CONTENT_SCOPE_AUTHORITY,
+        content_scope_authority=FINALIZATION_INDEX.assign_scope,
     )
     TELEMETRY_STORE = build_telemetry_store(config.telemetry_store)
     AGENT_MODEL_GATEWAY = AgentModelGateway(
@@ -275,7 +268,7 @@ if IS_ROOT_NODE:
             registry=RESIDENT_REGISTRY,
             logger=logger,
             control=CONTROL_TRACER,
-            content_scope_authority=CONTENT_SCOPE_AUTHORITY,
+            content_scope_authority=FINALIZATION_INDEX.assign_scope,
         )
         RUNTIME.set_resident_terminal_hook(RESIDENT_CONTROL.on_invocation_terminal)
         RUNTIME.set_resident_handlers(
