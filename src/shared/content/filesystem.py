@@ -45,9 +45,6 @@ class FilesystemObjectBacking:
             / digest
         )
 
-    def scope_path(self, scope: str | None, *segments: str) -> Path:
-        return Path(self._root, safe_segment(scope), *map(safe_segment, segments))
-
     def write(
         self, scope: str, data: bytes, *, media_type: str = OCTET_STREAM
     ) -> ContentReference:
