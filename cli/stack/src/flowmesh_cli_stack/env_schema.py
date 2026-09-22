@@ -109,7 +109,8 @@ STACK_ENV_SCHEMA = EnvSchema(
                     "",
                     description=(
                         "Extra compose profiles to deploy (e.g. telemetry); a root "
-                        "node runs the content store unless an endpoint names another."
+                        "node adds the content profile unless an endpoint names "
+                        "another store."
                     ),
                 ),
             ],
@@ -636,7 +637,7 @@ STACK_ENV_SCHEMA = EnvSchema(
             ],
         ),
         EnvSection(
-            title="Reference-backed outcomes",
+            title="Content plane",
             vars=[
                 EnvVar(
                     "CONTENT_STORE_ENABLED",

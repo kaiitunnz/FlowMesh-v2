@@ -115,6 +115,12 @@ server connects to the root node's Redis via `REDIS_CONTROL_URL` and
 `REDIS_TELEMETRY_URL`, which must be set in the worker's `.env` to reachable
 endpoints on the root node.
 
+A root node that names no `CONTENT_STORE_ENDPOINT_URL` also runs the co-located
+content store, the `content` compose profile, which `flowmesh stack up` selects on its
+own. A deployment that runs `docker compose` directly selects the root node's profiles
+itself — `COMPOSE_PROFILES=root,content` — and leaves `content` out when
+`CONTENT_STORE_ENDPOINT_URL` names another store.
+
 ## Restarting services
 
 Recreate one or more Compose services in place, leaving the rest of the stack running:
