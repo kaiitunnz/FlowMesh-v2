@@ -749,9 +749,21 @@ STACK_ENV_SCHEMA = EnvSchema(
                 ),
                 EnvVar(
                     "CONTENT_CACHE_TTL_SEC",
-                    "900",
-                    description="How long a worker keeps a cached copy (seconds).",
+                    "0",
+                    description=(
+                        "How long a worker keeps an unused cached copy (seconds, "
+                        "0 = indefinitely)."
+                    ),
                     var_type=EnvVarType.FLOAT,
+                    min_value=0,
+                ),
+                EnvVar(
+                    "CONTENT_CACHE_MAX_BYTES",
+                    "0",
+                    description=(
+                        "Disk budget for a worker's cached copies (0 = unbounded)."
+                    ),
+                    var_type=EnvVarType.INT,
                     min_value=0,
                 ),
                 EnvVar(

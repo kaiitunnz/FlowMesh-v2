@@ -17,6 +17,7 @@ from collections.abc import Callable, Coroutine
 from typing import Any
 
 from shared.content import (
+    OCTET_STREAM,
     ContentHydrationError,
     ContentHydrationGrant,
     ContentReference,
@@ -112,10 +113,22 @@ class ContentLaneHost:
                 f"hydrating {reference.content_digest} did not complete in time"
             ) from exc
 
-    def evict_aged(self) -> int:
-        """Drop copies past the retention window, leaving anything in transfer alone."""
+    def keep(
+        self, scope: str, data: bytes, *, media_type: str = OCTET_STREAM
+    ) -> ContentReference | None:
+        """Cache a copy and keep the cache in bounds; the reference while it is held.
+
+        None when the copy did not survive the bounds — an object larger than the whole
+        disk budget — so nothing is announced for a copy that is not here.
+        """
+        reference = self._store.write(scope, data, media_type=media_type)
+        self.evict()
+        return reference if self._store.holds(reference) else None
+
+    def evict(self) -> int:
+        """Bring the cache within its bounds, leaving anything in transfer alone."""
         in_transfer = self._holder.in_transfer if self._holder else frozenset()
-        return self._store.evict_aged(in_transfer=in_transfer)
+        return self._store.evict(in_transfer=in_transfer)
 
     def report_held(self) -> int:
         """Report every copy this worker holds, and return how many.
@@ -143,7 +156,7 @@ class ContentLaneHost:
         return max(5.0, min(self._holder_report_ttl_sec / 3, 60.0))
 
     async def _keep_held_reachable(self) -> None:
-        """Keep the cache reachable and bounded: report what is here, drop what aged.
+        """Keep the cache reachable and bounded: report what is here, drop what is over.
 
         Eviction runs first so a copy on its way out is not advertised in the same
         breath; a peer that reads a copy this tick evicts finds it gone and falls
@@ -154,7 +167,7 @@ class ContentLaneHost:
             try:
                 # Both walk the cache directory, so they run off the loop that is also
                 # carrying transfers and the control frames they depend on.
-                if (evicted := await asyncio.to_thread(self.evict_aged)) > 0:
+                if (evicted := await asyncio.to_thread(self.evict)) > 0:
                     self._logger.info("evicted %d cached content objects", evicted)
                 await asyncio.to_thread(self.report_held)
             except Exception:

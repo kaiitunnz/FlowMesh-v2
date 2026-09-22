@@ -7,6 +7,8 @@ rewritten in place. It holds bytes only — what an object means, and which bind
 it alive, live above it.
 """
 
+import contextlib
+import os
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -67,10 +69,17 @@ class FilesystemObjectBacking:
     def holds(self, scope: str, digest: str) -> bool:
         return self.object_path(scope, digest).exists()
 
-    def written_at(self, scope: str, digest: str) -> float | None:
-        """When the object landed, or None if it is not here."""
-        path = self.object_path(scope, digest)
-        return path.stat().st_mtime if path.exists() else None
+    def stat(self, scope: str, digest: str) -> os.stat_result | None:
+        """The object file's size and last-touched time, or None if it is not here."""
+        try:
+            return self.object_path(scope, digest).stat()
+        except FileNotFoundError:
+            return None
+
+    def touch(self, scope: str, digest: str) -> None:
+        """Mark the object as touched now."""
+        with contextlib.suppress(FileNotFoundError):
+            os.utime(self.object_path(scope, digest))
 
     def remove(self, scope: str, digest: str) -> None:
         self.object_path(scope, digest).unlink(missing_ok=True)

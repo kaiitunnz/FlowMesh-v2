@@ -103,8 +103,8 @@ class WorkerContentPlane:
         if self._lane is None or self._announce is None:
             return reference
         try:
-            self._lane.store.write(scope, data, media_type=media_type)
-            self._announce([(scope, reference.content_digest)])
+            if self._lane.keep(scope, data, media_type=media_type) is not None:
+                self._announce([(scope, reference.content_digest)])
         except Exception:
             self._logger.warning(
                 "could not cache %s locally", reference.content_digest, exc_info=True

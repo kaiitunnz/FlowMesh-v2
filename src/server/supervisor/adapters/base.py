@@ -147,6 +147,7 @@ class WorkerAdapter(ABC):
             "WORKER_CONTENT_DIR": env.WORKER_CONTENT_DIR,
             "CONTENT_HYDRATION_ENABLED": to_env_str(env.CONTENT_HYDRATION_ENABLED),
             "CONTENT_CACHE_TTL_SEC": to_env_str(env.CONTENT_CACHE_TTL_SEC),
+            "CONTENT_CACHE_MAX_BYTES": to_env_str(env.CONTENT_CACHE_MAX_BYTES),
             # The store's address, but never its credential: a worker reaches content
             # with the access control mints for each task it runs.
             "CONTENT_STORE_BACKEND": env.CONTENT_STORE_BACKEND,

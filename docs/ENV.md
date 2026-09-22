@@ -79,7 +79,8 @@ listed here is in `.env.example`.
 | `CONTENT_HYDRATION_ENABLED` | `false` | Cache content on workers and hydrate it between them (requires `NETWORK_PLANE_ENABLED`) |
 | `CONTENT_HYDRATION_GRANT_TTL_SEC` | `60` | Hydration grant lifetime (seconds) |
 | `CONTENT_HOLDER_TTL_SEC` | `300` | Holder report lifetime (seconds) |
-| `CONTENT_CACHE_TTL_SEC` | `900` | How long a worker keeps a cached copy (seconds) |
+| `CONTENT_CACHE_TTL_SEC` | `0` | How long a worker keeps an unused cached copy (seconds, 0 = indefinitely) |
+| `CONTENT_CACHE_MAX_BYTES` | `0` | Disk budget for a worker's cached copies (0 = unbounded) |
 | `CONTENT_TRANSFER_TIMEOUT_SEC` | `60` | Content transfer deadline (seconds) |
 | `RESIDENT_CAPACITY_ENABLED` | `false` | Serve resident model bindings via admission |
 | `RESIDENT_INFERENCE_SUBSTRATE` | `serve` | Resident replica substrate (`serve` or `dev_model`) |

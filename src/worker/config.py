@@ -37,6 +37,7 @@ class WorkerConfig:
     content_dir: Path
     content_hydration_enabled: bool
     content_cache_ttl_sec: float
+    content_cache_max_bytes: int
     content_holder_ttl_sec: float
     object_store: ObjectStoreConfig
     content_transfer_timeout_sec: float
@@ -232,7 +233,8 @@ class WorkerConfig:
             content_hydration_enabled=parse_bool_env(
                 "CONTENT_HYDRATION_ENABLED", False
             ),
-            content_cache_ttl_sec=parse_float_env("CONTENT_CACHE_TTL_SEC", 900.0),
+            content_cache_ttl_sec=parse_float_env("CONTENT_CACHE_TTL_SEC", 0.0),
+            content_cache_max_bytes=parse_int_env("CONTENT_CACHE_MAX_BYTES", 0),
             content_holder_ttl_sec=parse_float_env("CONTENT_HOLDER_TTL_SEC", 300.0),
             object_store=ObjectStoreConfig.from_env(results_dir),
             content_transfer_timeout_sec=parse_float_env(

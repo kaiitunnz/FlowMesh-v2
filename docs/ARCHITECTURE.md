@@ -443,29 +443,31 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   and never treats an idempotency key as a name. The scope that binding lands in is the
   one control assigned the work when it authorized the key, so the producer reporting a
   finalization is held to it rather than naming a scope of its own.
-- **Store access.** A worker reaches the store only under a `csg-` `ContentStoreAccessGrant`
-  the control plane mints for one dispatched task in one authorization scope, bound to the
-  worker incarnation running it and expiring shortly after. The grant records what access
-  was given and is not itself secret; the material that opens the backend travels beside
-  it, relayed to that worker as a control message and delivered over its authenticated
-  attachment, and is kept nowhere — no ledger, control store, manifest, frame, or log. A scope is the widest a task can reach, cut as a short-lived session over
-  that scope's prefix, and the grant carries no list, delete, or binding operation — which
-  references a task may use is still decided by the consumer bindings control checks. A
-  fresh dispatch or recovery gets fresh access; expiry or a policy rotation fences what
-  came before.
+- **Store access.** A worker reaches the store only under a `csg-`
+  `ContentStoreAccessGrant` the control plane mints for one dispatched task in one
+  authorization scope, bound to the worker incarnation running it and expiring shortly
+  after. The grant records what access was given and is not itself secret; the material
+  that opens the backend travels beside it, relayed to that worker as a control message
+  and delivered over its authenticated attachment, and is kept nowhere — no ledger,
+  control store, manifest, frame, or log. A scope is the widest a task can reach, cut as a
+  short-lived session over that scope's prefix, and the grant carries no list, delete, or
+  binding operation — which references a task may use is still decided by the consumer
+  bindings control checks. A fresh dispatch or recovery gets fresh access; expiry or a
+  policy rotation fences what came before.
 - **Worker content cache and granted hydration.** What a worker holds is a cache over that
-  store, so a copy may be dropped whenever it ages out. A read tries the local copy, then
-  another worker's copy, then the store itself. For a peer's copy the control plane checks
-  that the requesting worker is running the task and that the task is already bound to
-  exactly that reference, resolves a live holder, and mints one short-lived `chg-`
-  `ContentHydrationGrant` it hands to both ends: the holder serves only a grant it was
-  handed, once, for that exact object, and the requester verifies the digest and size
-  before anything reads the bytes. That transfer runs over the network plane's relay under
-  its own namespace, so the root bridges opaque frames and never holds, assembles, or
-  resolves the payload. A refused, expired, or replayed grant, an evicted copy, or a
-  holder that is gone costs a read from the shared store rather than a failure. Enable the
-  cache and its transfers with `CONTENT_HYDRATION_ENABLED=true` (which requires
-  `NETWORK_PLANE_ENABLED=true`).
+  store, so a copy may be dropped at any time: a deployment can bound the cache by how
+  long a copy goes unused and by disk, least recently used first, and leaves both
+  unbounded by default. A read tries the local copy, then another worker's copy, then the
+  store itself. For a peer's copy the control plane checks that the requesting worker is
+  running the task and that the task is already bound to exactly that reference, resolves
+  a live holder, and mints one short-lived `chg-` `ContentHydrationGrant` it hands to both
+  ends: the holder serves only a grant it was handed, once, for that exact object, and the
+  requester verifies the digest and size before anything reads the bytes. That transfer
+  runs over the network plane's relay under its own namespace, so the root bridges opaque
+  frames and never holds, assembles, or resolves the payload. A refused, expired, or
+  replayed grant, an evicted copy, or a holder that is gone costs a read from the shared
+  store rather than a failure. Enable the cache and its transfers with
+  `CONTENT_HYDRATION_ENABLED=true` (which requires `NETWORK_PLANE_ENABLED=true`).
 - **Task merging.** Compatible adjacent tasks in a DAG (same `taskType`,
   model, hardware shape, and merge key) coalesce into a single dispatch.
   Merged children ride on `WorkerTaskMessage.merged_children`; the worker

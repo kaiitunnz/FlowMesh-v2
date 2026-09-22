@@ -273,7 +273,9 @@ def _build_content_plane(
     if cfg.content_hydration_enabled:
         lane = ContentLaneHost(
             store=WorkerContentCache(
-                cfg.content_dir, retain_sec=cfg.content_cache_ttl_sec
+                cfg.content_dir,
+                retain_sec=cfg.content_cache_ttl_sec,
+                max_bytes=cfg.content_cache_max_bytes,
             ),
             push_frame=client.push_content_frame,
             request_grant=(

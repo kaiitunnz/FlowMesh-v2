@@ -54,7 +54,7 @@ class _Pair:
 
     def __init__(self, tmp_path, *, holder_generation: int = 1) -> None:
         self.store_root = tmp_path / "held"
-        self.store = WorkerContentCache(self.store_root, retain_sec=60.0)
+        self.store = WorkerContentCache(self.store_root)
         self.to_requester = _ToPeer()
         self.to_holder = _ToPeer()
         self.granted: list[ContentReference] = []
@@ -268,12 +268,12 @@ async def test_a_transfer_in_flight_holds_its_object_against_the_sweep(
     pair.client.deliver_grant(grant)
     await asyncio.to_thread(reading.wait, 5)
 
-    # Mid-serve: the object is named as in transfer, and a sweep with nothing retained
-    # leaves it alone while every other copy goes.
+    # Mid-serve: the object is named as in transfer, and a sweep with no room for
+    # anything leaves it alone while every other copy goes.
     assert reference.content_digest in pair.holder.in_transfer
     spare = pair.store.write("local", b"another object", media_type="text/plain")
-    aged = WorkerContentCache(pair.store_root, retain_sec=0.0)
-    assert aged.evict_aged(in_transfer=pair.holder.in_transfer) == 1
+    full = WorkerContentCache(pair.store_root, max_bytes=1)
+    assert full.evict(in_transfer=pair.holder.in_transfer) == 1
     assert pair.store.holds(reference) and not pair.store.holds(spare)
 
     release.set()
@@ -367,5 +367,5 @@ async def test_an_abandoned_transfer_releases_the_holder(tmp_path) -> None:
         frame.kind is RelayFrameKind.CANCEL for frame in pair.to_holder.frames
     ), "the requester never told the holder to stop"
     assert pair.holder.in_transfer == frozenset()
-    aged = WorkerContentCache(pair.store_root, retain_sec=0.0)
-    assert aged.evict_aged(in_transfer=pair.holder.in_transfer) == 1
+    full = WorkerContentCache(pair.store_root, max_bytes=1)
+    assert full.evict(in_transfer=pair.holder.in_transfer) == 1

@@ -15,8 +15,14 @@ from shared.content import (
     ContentStoreError,
     ObjectStoreConfig,
     ScopedContentCredential,
+    reference_for,
 )
-from worker.content import ContentAccessRegistry, WorkerContentPlane
+from worker.content import (
+    ContentAccessRegistry,
+    ContentLaneHost,
+    WorkerContentCache,
+    WorkerContentPlane,
+)
 from worker.content.access import ContentAccessDenied
 
 _OPS = (ContentOperationKind.READ, ContentOperationKind.WRITE)
@@ -173,6 +179,10 @@ class _RecordingLane:
     def __init__(self, store: Any) -> None:
         self.store = store
 
+    def keep(self, scope: str, data: bytes, *, media_type: str = "") -> Any:
+        self.store.write(scope, data, media_type=media_type)
+        return reference_for(scope, data, media_type=media_type)
+
     def hydrate(self, reference: Any, task_id: str) -> bytes:
         raise ContentStoreError("nothing cached here")
 
@@ -213,3 +223,29 @@ def test_an_outcome_is_cached_and_announced_like_any_other_content(tmp_path) -> 
 
     assert cached == [("tenant-a", b"outcome body")]
     assert announced == [[("tenant-a", reference.content_digest)]]
+
+
+def test_a_copy_the_cache_cannot_keep_is_never_announced(tmp_path) -> None:
+    """A write past the whole disk budget lands in the store but claims no copy.
+
+    Announcing it would point a peer's read at a holder that already dropped it.
+    """
+    registry = _registry(tmp_path)
+    registry.accept(_access("tsk-1"))
+    announced: list[Sequence[tuple[str, str]]] = []
+    lane = ContentLaneHost(
+        store=WorkerContentCache(tmp_path / "cache", max_bytes=4),
+        push_frame=lambda frame: None,
+        request_grant=lambda reference, task_id: None,
+        worker_id="wkr-1",
+        generation=1,
+    )
+    plane = WorkerContentPlane(lane, registry, announce=announced.append)
+
+    reference = plane.write("tsk-1", "tenant-a", b"larger than the budget")
+
+    assert not lane.store.holds(reference)
+    assert announced == []
+    assert registry.store_for("tsk-1", "tenant-a").hydrate(reference) == (
+        b"larger than the budget"
+    )
