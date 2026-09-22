@@ -84,8 +84,11 @@ class ContentAccessRegistry:
         with self._arrived:
             # An access that has expired is not one still in flight, so only a task
             # that never had one waits out the relay.
-            wait = 0.0 if key in self._granted else self._arrival_wait_sec
-            access = self._await_live(key, wait)
+            access = (
+                self._live(key)
+                if key in self._granted
+                else self._await_live(key, self._arrival_wait_sec)
+            )
         if access is None and self._request_access is not None:
             try:
                 self._request_access(task_id)
