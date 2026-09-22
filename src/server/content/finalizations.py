@@ -11,7 +11,11 @@ which an idempotency key is not.
 from shared.content import ContentReference
 from shared.outcome import OutcomeManifest
 
-from ..clients.redis import RedisClient
+from ..clients.redis import (
+    RedisClient,
+    content_finalization_key,
+    content_finalization_scope_key,
+)
 
 
 class FinalizationIndex:
@@ -20,14 +24,6 @@ class FinalizationIndex:
     def __init__(self, redis: RedisClient, *, ttl_sec: float = 0.0) -> None:
         self._rds = redis
         self._ttl = ttl_sec
-
-    @staticmethod
-    def _key(scope: str, idempotency_key: str) -> str:
-        return f"ct:finalization:{scope}:{idempotency_key}"
-
-    @staticmethod
-    def _scope_key(idempotency_key: str) -> str:
-        return f"ct:finalization-scope:{idempotency_key}"
 
     def assign_scope(self, idempotency_key: str, scope: str) -> None:
         """Record the scope control assigned the work this key settles.
@@ -40,17 +36,17 @@ class FinalizationIndex:
         """
         if not idempotency_key or not scope:
             return
-        key = self._scope_key(idempotency_key)
+        key = content_finalization_scope_key(idempotency_key)
         self._rds.sync.set_value(key, scope)
         if self._ttl:
             self._rds.sync.expire(key, int(self._ttl))
 
     def assigned_scope(self, idempotency_key: str) -> str | None:
         """The scope assigned to this key, or None if control assigned none."""
-        return self._rds.sync.get(self._scope_key(idempotency_key))
+        return self._rds.sync.get(content_finalization_scope_key(idempotency_key))
 
     def find(self, scope: str, idempotency_key: str) -> OutcomeManifest | None:
-        raw = self._rds.sync.get(self._key(scope, idempotency_key))
+        raw = self._rds.sync.get(content_finalization_key(scope, idempotency_key))
         return OutcomeManifest.model_validate_json(raw) if raw else None
 
     def record(
@@ -70,7 +66,7 @@ class FinalizationIndex:
         the index exists to settle, so reading before writing would let both believe
         they won and leave the later one's content bound.
         """
-        key = self._key(scope, idempotency_key)
+        key = content_finalization_key(scope, idempotency_key)
         manifest = OutcomeManifest(
             content=content, provenance=provenance, idempotency_key=idempotency_key
         )

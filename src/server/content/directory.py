@@ -18,7 +18,7 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from ..clients.redis import RedisClient
+from ..clients.redis import RedisClient, content_holders_key
 
 
 @dataclass(frozen=True)
@@ -40,10 +40,6 @@ class ContentHolderDirectory:
     def __init__(self, redis: RedisClient, *, record_ttl_sec: float) -> None:
         self._rds = redis
         self._ttl = record_ttl_sec
-
-    @staticmethod
-    def _key(scope: str, digest: str) -> str:
-        return f"ct:holders:{scope}:{digest}"
 
     def _field(self, expires_at_epoch: float, node_id: str, generation: int) -> str:
         return json.dumps(
@@ -76,7 +72,7 @@ class ContentHolderDirectory:
         ttl = int(self._ttl * 2) + 1
         pipeline = self._rds.sync.control_pipeline()
         for scope, digest in held:
-            key = self._key(scope, digest)
+            key = content_holders_key(scope, digest)
             pipeline.hset(key, mapping={worker_id: field})
             pipeline.expire(key, ttl)
         pipeline.execute()
@@ -97,7 +93,7 @@ class ContentHolderDirectory:
             generation=generation,
             expires_at_epoch=time.time() + self._ttl,
         )
-        key = self._key(scope, digest)
+        key = content_holders_key(scope, digest)
         self._rds.sync.hash_set(
             key, {worker_id: self._field(record.expires_at_epoch, node_id, generation)}
         )
@@ -106,7 +102,7 @@ class ContentHolderDirectory:
 
     def holders(self, scope: str, digest: str) -> list[ContentHolderRecord]:
         """Every live holder reported for this object, freshest report first."""
-        raw = self._rds.sync.hash_getall(self._key(scope, digest)) or {}
+        raw = self._rds.sync.hash_getall(content_holders_key(scope, digest)) or {}
         records: list[ContentHolderRecord] = []
         for worker_id, value in raw.items():
             try:
@@ -126,4 +122,4 @@ class ContentHolderDirectory:
 
     def forget(self, scope: str, digest: str, worker_id: str) -> None:
         """Drop one holder's report, for a worker that can no longer serve it."""
-        self._rds.sync.hash_delete(self._key(scope, digest), worker_id)
+        self._rds.sync.hash_delete(content_holders_key(scope, digest), worker_id)

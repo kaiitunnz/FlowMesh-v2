@@ -210,6 +210,18 @@ def content_relay_down_cursor_key(node_id: str) -> str:
 CONTENT_RELAY_ROOT_CURSOR_KEY = "ct:root:up_cursor"
 
 
+def content_holders_key(scope: str, digest: str) -> str:
+    return f"ct:holders:{scope}:{digest}"
+
+
+def content_finalization_key(scope: str, idempotency_key: str) -> str:
+    return f"ct:finalization:{scope}:{idempotency_key}"
+
+
+def content_finalization_scope_key(idempotency_key: str) -> str:
+    return f"ct:finalization-scope:{idempotency_key}"
+
+
 def ssh_connection_key(connection_id: str) -> str:
     return f"ssh:connection:{connection_id}"
 
@@ -397,7 +409,6 @@ class SyncRedisClient:
         self._control.set(key, value)
 
     def set_value_if_absent(self, key: str, value: str) -> bool:
-        """Write the value only if the key is unset; True when this call wrote it."""
         return bool(self._control.set(key, value, nx=True))
 
     def set_value_telemetry(self, key: str, value: str) -> None:
@@ -610,6 +621,9 @@ class AsyncRedisClient:
     async def set_value(self, key: str, value: str) -> None:
         await _awaitable(self._control.set(key, value))
 
+    async def set_value_if_absent(self, key: str, value: str) -> bool:
+        return bool(await _awaitable(self._control.set(key, value, nx=True)))
+
     async def set_value_telemetry(self, key: str, value: str) -> None:
         await _awaitable(self._telemetry.set(key, value))
 
@@ -634,6 +648,10 @@ class AsyncRedisClient:
 
     async def hash_set(self, key: str, mapping: dict[str, Any]) -> None:
         await _awaitable(self._control.hset(key, mapping=mapping))
+
+    async def hash_delete(self, key: str, *fields: str) -> None:
+        if fields:
+            await _awaitable(self._control.hdel(key, *fields))
 
     # ---- Set helpers ----
     async def set_members(self, key: str) -> set[str]:
