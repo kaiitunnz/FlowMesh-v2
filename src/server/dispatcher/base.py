@@ -38,7 +38,7 @@ from ..registries.worker import Worker, WorkerRegistry
 from ..services.metrics import MetricsRecorder
 from ..task.metadata import extract_model_dataset_names
 from ..task.models import TaskRecord, TaskStatus
-from ..task.results import ResultUnreadable
+from ..task.results import ResultUnavailable, ResultUnreadable
 from ..task.runtime import TaskRuntime
 from ..task.v2.representations.plan import InferenceEmbodimentMenu
 from ..utils.time import now_iso
@@ -619,11 +619,15 @@ class Dispatcher:
                 task_id, reason="stage_reference_pending", count_retry=False
             )
             return False
-        except ResultUnreadable as exc:
+        except ResultUnavailable as exc:
+            # The store is unreachable, not the result lost: wait it out without
+            # spending the task's attempts. A missing or corrupt result fails below.
             self._logger.warning(
-                "Task %s cannot read a referenced stage result: %s", task_id, exc
+                "Task %s cannot reach a referenced stage result yet: %s", task_id, exc
             )
-            self.requeue_task(task_id, reason="stage_result_unreadable")
+            self.requeue_task(
+                task_id, reason="stage_result_unavailable", count_retry=False
+            )
             return False
         except ValidationError as exc:
             self._runtime.release_merge(task_id)
@@ -692,14 +696,17 @@ class Dispatcher:
                         task_id, reason="stage_reference_pending", count_retry=False
                     )
                     return False
-                except ResultUnreadable as exc:
+                except ResultUnavailable as exc:
                     self._logger.warning(
-                        "Merged child %s cannot read a referenced stage result: %s",
+                        "Merged child %s cannot reach a referenced stage result "
+                        "yet: %s",
                         child_id,
                         exc,
                     )
                     self._runtime.release_merge(task_id)
-                    self.requeue_task(task_id, reason="stage_result_unreadable")
+                    self.requeue_task(
+                        task_id, reason="stage_result_unavailable", count_retry=False
+                    )
                     return False
                 except Exception as exc:
                     self._logger.error(
@@ -739,12 +746,20 @@ class Dispatcher:
                 task_id,
                 OwnerFence(worker_id=worker.id, incarnation=worker.incarnation),
             )
-        except ResultUnreadable as exc:
+        except ResultUnavailable as exc:
             self._logger.warning(
-                "Task %s cannot read an accepted input result: %s", task_id, exc
+                "Task %s cannot reach an accepted input result yet: %s", task_id, exc
             )
-            self.requeue_task(task_id, reason="agent_input_unreadable")
+            self.requeue_task(
+                task_id, reason="agent_input_unavailable", count_retry=False
+            )
             return False
+        except ResultUnreadable as exc:
+            self._runtime.release_merge(task_id)
+            self.fail_task(
+                task_id, f"input_unreadable: {exc}", payload={"error": str(exc)}
+            )
+            return True
         message = WorkerTaskMessage(
             task_id=task_id,
             workflow_id=record.workflow_id,
@@ -1476,14 +1491,16 @@ class Dispatcher:
                 task_id, reason="condition_upstream_pending", count_retry=False
             )
             return True
-        except ResultUnreadable as exc:
+        except ResultUnavailable as exc:
             self._logger.warning(
-                "Task %s condition: upstream %s result unreadable: %s",
+                "Task %s condition: upstream %s result not reachable yet: %s",
                 task_id,
                 condition.node,
                 exc,
             )
-            self.requeue_task(task_id, reason="condition_upstream_unreadable")
+            self.requeue_task(
+                task_id, reason="condition_upstream_unavailable", count_retry=False
+            )
             return True
         except Exception as exc:
             self._logger.error(

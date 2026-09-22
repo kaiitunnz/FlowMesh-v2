@@ -18,6 +18,7 @@ from .reference import OCTET_STREAM, ContentReference
 from .store import (
     ContentHydrationError,
     ContentStoreError,
+    ContentUnavailable,
     FabricObjectStore,
     reference_for,
 )
@@ -63,7 +64,12 @@ class FilesystemObjectBacking:
         path = self.object_path(scope, digest)
         if not path.exists():
             raise ContentHydrationError(f"no content for {digest} in scope {scope}")
-        return path.read_bytes()
+        try:
+            return path.read_bytes()
+        except OSError as exc:
+            raise ContentUnavailable(
+                f"could not read {digest} in scope {scope}: {exc}"
+            ) from exc
 
     def holds(self, scope: str, digest: str) -> bool:
         return self.object_path(scope, digest).exists()

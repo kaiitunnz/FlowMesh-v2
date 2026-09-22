@@ -427,7 +427,7 @@ def test_oversized_input_fails_the_agent_rather_than_truncating() -> None:
     )
     engine.on_succeeded("P")
     _write_result(runtime, "P", {"taskType": "agent", "value": "x" * 5000})
-    runtime._resolve_agent_inputs_locked(engine, Advance())
+    runtime._resolve_agent_inputs_locked("wfl-test", engine, Advance())
     wi = engine.work_item("M")
     assert wi.status in (WorkItemStatus.SETTLED, WorkItemStatus.CANCELLED)
     assert wi.outcome is PublicationOutcome.DECLARED_FAILURE
@@ -452,6 +452,6 @@ def test_an_unreadable_input_fails_the_agent_rather_than_deferring() -> None:
         task_id="P",
         reference=bound.reference.model_copy(update={"content_digest": "0" * 64}),
     )
-    runtime._resolve_agent_inputs_locked(engine, Advance())
+    runtime._resolve_agent_inputs_locked("wfl-test", engine, Advance())
     wi = engine.work_item("M")
     assert wi.outcome is PublicationOutcome.DECLARED_FAILURE

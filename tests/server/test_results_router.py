@@ -12,8 +12,17 @@ from lumid_hooks import PrincipalContext, ResourceRef
 from server.hooks import PERMISSION_CHECKERS
 from server.routers.v1 import results as results_router
 from server.task.results import ResultBinding, ResultReader
-from shared.content import SharedFilesystemObjectStore
+from shared.content import (
+    ContentReference,
+    ContentUnavailable,
+    SharedFilesystemObjectStore,
+)
 from shared.schemas.result import RESULT_MEDIA_TYPE, ResultEnvelope
+
+
+class _UnreachableStore(SharedFilesystemObjectStore):
+    def fetch(self, reference: ContentReference) -> bytes:
+        raise ContentUnavailable("store down")
 
 
 class _RuntimeStub:
@@ -33,6 +42,9 @@ class _RuntimeStub:
         reference = self.store.write("org", data, media_type=RESULT_MEDIA_TYPE)
         self.bindings[task_id] = ResultBinding(task_id=task_id, reference=reference)
         return data
+
+    def unreachable(self) -> None:
+        self.reader = ResultReader(_UnreachableStore(Path("/nonexistent")))
 
     def corrupt(self, task_id: str) -> None:
         reference = self.bindings[task_id].reference
@@ -205,6 +217,7 @@ async def test_get_result_returns_the_bare_stored_result(
         ("  ", None, status.HTTP_400_BAD_REQUEST),
         ("t-unbound", None, status.HTTP_404_NOT_FOUND),
         ("t-1", "corrupt", status.HTTP_500_INTERNAL_SERVER_ERROR),
+        ("t-1", "unreachable", status.HTTP_500_INTERNAL_SERVER_ERROR),
     ],
 )
 async def test_get_result_error_contract(
@@ -218,6 +231,8 @@ async def test_get_result_error_contract(
     runtime.bind("t-1", {"items": []})
     if setup == "corrupt":
         runtime.corrupt("t-1")
+    if setup == "unreachable":
+        runtime.unreachable()
 
     with pytest.raises(HTTPException) as exc:
         await results_router.get_result(

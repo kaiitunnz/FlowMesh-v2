@@ -46,6 +46,10 @@ class ContentHydrationError(ContentStoreError):
     """Fetched content is missing, unauthorized, or fails digest verification."""
 
 
+class ContentUnavailable(ContentHydrationError):
+    """The store could not be reached for a read; the content may well be there."""
+
+
 def verify_content(reference: ContentReference, data: bytes) -> bytes:
     """Return the bytes once they are the ones the reference names, else raise.
 

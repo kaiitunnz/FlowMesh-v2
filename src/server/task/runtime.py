@@ -121,7 +121,13 @@ from .models import (
     categorize_task_type,
 )
 from .parser import ParsedWorkflow, parse_workflow
-from .results import ResultBinding, ResultReader, ResultUnreadable
+from .redrive import StoreRedriveScheduler
+from .results import (
+    ResultBinding,
+    ResultReader,
+    ResultUnavailable,
+    ResultUnreadable,
+)
 from .v2 import (
     ExecutionMode,
     FrontendWorkflowSource,
@@ -236,6 +242,8 @@ class _FanoutRead:
 
     elements: list[Any] = field(default_factory=list)
     error: str | None = None
+    # The store could not be reached; the collection is still there to read later.
+    unavailable: bool = False
 
 
 def _result_collection(payload: dict[str, Any]) -> list[Any] | None:
@@ -344,11 +352,15 @@ class TaskRuntime:
         tracer: Tracer | None = None,
         telemetry: TelemetryConfig | None = None,
         content_scope_authority: Callable[[str, str], None] | None = None,
+        redrive: Callable[
+            [Callable[[str], None], logging.Logger], StoreRedriveScheduler
+        ] = StoreRedriveScheduler,
     ) -> None:
         self._workflow_registry = workflow_registry
         self._worker_registry = worker_registry
         self._logger = logger
         self._results = results
+        self._redrive = redrive(self._redrive_workflow, logger)
         self._feasibility_check = feasibility_check
         self._policy_surface = surface if surface is not None else PolicySurface()
         self._secret_vault = secret_vault
@@ -2765,7 +2777,7 @@ class TaskRuntime:
         assert not advance.retry, "retry is applied by the failure path"
         engine = self._engines.get(workflow_id)
         if engine is not None:
-            self._resolve_agent_inputs_locked(engine, advance)
+            self._resolve_agent_inputs_locked(workflow_id, engine, advance)
             self._retire_sealed_region_templates_locked(workflow_id, engine)
         changed = False
         for task_id in advance.ready:
@@ -2821,6 +2833,16 @@ class TaskRuntime:
             )
             return advance
         read = prefetched or self._read_fanout_locked(producer_task_id)
+        if read.unavailable:
+            # The collection is in a store that could not be reached: the spawn stays
+            # open, holding the workflow, until a re-drive reads it.
+            self._logger.warning(
+                "Deferring fan-out for %s until the content store answers: %s",
+                producer_task_id,
+                read.error,
+            )
+            self._redrive.schedule(workflow_id)
+            return advance
         if read.error is not None:
             # A settled producer's result was stored before its success was reported,
             # so one that cannot be read is a broken store or binding, never an empty
@@ -2862,6 +2884,44 @@ class TaskRuntime:
         )
         return advance
 
+    def _redrive_workflow(self, workflow_id: str) -> None:
+        """Drive the advances a workflow deferred while the content store was away.
+
+        Every settled producer whose spawn has yet to fan out is read again off the
+        lock, and the fan-out and its advance are applied under it; applying the advance
+        also re-resolves the agent inputs waiting on stored values. A read that still
+        cannot reach the store schedules the next re-drive.
+        """
+        with self._lock:
+            engine = self._engines.get(workflow_id)
+            if engine is None:
+                return
+            producers = [
+                (task_id, self._result_binding_locked(task_id))
+                for task_id, record in self._tasks.items()
+                if record.workflow_id == workflow_id
+                and record.status == TaskStatus.DONE
+                and (spawn_op := engine.spawn_successor(task_id)) is not None
+                and engine.spawn_awaits_children(spawn_op)
+            ]
+        reads: dict[str, _FanoutRead] = {}
+        for task_id, binding in producers:
+            if binding is not None and binding.reference is not None:
+                reads[task_id] = self._read_collection(binding)
+        with self._cv:
+            if (engine := self._engines.get(workflow_id)) is None:
+                return
+            advance = Advance()
+            for task_id, _binding in producers:
+                advance.extend(
+                    self._fan_out_children_locked(
+                        workflow_id, engine, task_id, reads.get(task_id)
+                    )
+                )
+            if self._apply_advance_locked(workflow_id, advance):
+                self._cv.notify_all()
+            self._save_ledger_locked(workflow_id)
+
     def _prefetch_fanout(
         self,
         task_id: str,
@@ -2892,19 +2952,27 @@ class TaskRuntime:
             return _FanoutRead()
         if reference is None:
             return _FanoutRead(error=f"fan-out producer {task_id} has no bound result")
-        binding = ResultBinding(task_id=task_id, reference=reference)
+        return self._read_collection(
+            ResultBinding(task_id=task_id, reference=reference)
+        )
+
+    def _read_collection(self, binding: ResultBinding) -> "_FanoutRead":
+        """Read a producer's collection off the lock, retrying a store that is away."""
         for attempt in range(_FANOUT_READ_ATTEMPTS):
             try:
                 return _FanoutRead(
                     elements=_fanout_elements(self._results.read(binding))
                 )
             except ResultUnreadable as exc:
+                return _FanoutRead(
+                    error=f"fan-out producer {binding.task_id} result is unreadable: "
+                    f"{exc}"
+                )
+            except ResultUnavailable as exc:
                 if attempt + 1 == _FANOUT_READ_ATTEMPTS:
-                    return _FanoutRead(
-                        error=f"fan-out producer {task_id} result is unreadable: {exc}"
-                    )
+                    return _FanoutRead(error=str(exc), unavailable=True)
                 time.sleep(_FANOUT_READ_BACKOFF_SEC)
-        return None
+        raise AssertionError("unreachable")
 
     def _read_fanout_locked(self, producer_task_id: str) -> "_FanoutRead":
         """Read a settled producer's fan-out collection once, under the lock."""
@@ -2921,6 +2989,8 @@ class TaskRuntime:
             return _FanoutRead(
                 error=f"fan-out producer {producer_task_id} result is unreadable: {exc}"
             )
+        except ResultUnavailable as exc:
+            return _FanoutRead(error=str(exc), unavailable=True)
 
     def _mint_fanout_facet_locked(
         self,
@@ -2960,13 +3030,14 @@ class TaskRuntime:
         )
 
     def _resolve_agent_inputs_locked(
-        self, engine: OrchestrationEngine, advance: Advance
+        self, workflow_id: str, engine: OrchestrationEngine, advance: Advance
     ) -> None:
         """Resolve and record each edge-bound agent's accepted inputs, then re-admit.
 
         The engine owns membership and ordering; the runtime resolves every member's
         frozen value and records the durable accepted input. A member whose value is not
-        yet readable defers the whole port until a later advance.
+        yet readable defers the whole port until a later advance, and one whose store
+        cannot be reached defers it until a re-drive.
         """
         for task_id in engine.blocked_input_agents():
             plan = engine.agent_input_plan(task_id)
@@ -2975,6 +3046,7 @@ class TaskRuntime:
             resolved: list[tuple[str, AcceptedInput]] = []
             total_bytes = 0
             unreadable: str | None = None
+            unavailable = False
             for port in plan.ports:
                 members: list[AcceptedInputMember] = []
                 for member in port.members:
@@ -2989,6 +3061,9 @@ class TaskRuntime:
                     except ResultUnreadable as exc:
                         unreadable = str(exc)
                         break
+                    except ResultUnavailable:
+                        unavailable = True
+                        break
                     if value is None:
                         break
                     total_bytes += len(value.encode("utf-8"))
@@ -3002,7 +3077,7 @@ class TaskRuntime:
                             ordinal=member.ordinal,
                         )
                     )
-                if unreadable is not None:
+                if unreadable is not None or unavailable:
                     break
                 if len(members) != len(port.members):
                     continue
@@ -3017,6 +3092,9 @@ class TaskRuntime:
                         ),
                     )
                 )
+            if unavailable:
+                self._redrive.schedule(workflow_id)
+                continue
             if unreadable is not None:
                 # A bound input is stored before it is bound, so one that cannot be read
                 # fails the agent rather than deferring it on a value that never comes.
@@ -3168,6 +3246,7 @@ class TaskRuntime:
 
     def _fail_workflow_locked(self, workflow_id: str, reason: str) -> None:
         """Fail every non-terminal task of a workflow and persist the terminal facts."""
+        self._redrive.settle(workflow_id)
         non_terminal = [
             task_id
             for task_id, record in self._tasks.items()
@@ -3799,6 +3878,7 @@ class TaskRuntime:
     # ------------------------------------------------------------------ #
 
     def cancel_workflow(self, workflow_id: str, reason: str = "cancelled") -> list[str]:
+        self._redrive.settle(workflow_id)
         cancelled: list[str] = []
         cancelling: list[str] = []
         touched: list[str] = []
@@ -4117,6 +4197,7 @@ class TaskRuntime:
         return False
 
     def shutdown(self) -> None:
+        self._redrive.stop()
         with self._cv:
             self._cv.notify_all()
 

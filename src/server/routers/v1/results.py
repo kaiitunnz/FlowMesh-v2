@@ -37,7 +37,7 @@ from ...hooks import ResourceAction, ResourceKind
 from ...schemas.common import PathResponse
 from ...services.monitoring import EventMonitor
 from ...task.models import TERMINAL_TASK_STATUSES
-from ...task.results import ResultUnreadable
+from ...task.results import ResultUnavailable, ResultUnreadable
 from ...task.runtime import TaskRuntime
 
 # Sections the bundle endpoint can include.
@@ -83,7 +83,7 @@ async def get_result(
     )
     try:
         envelope = await asyncio.to_thread(runtime.read_result, task_id)
-    except ResultUnreadable as exc:
+    except (ResultUnreadable, ResultUnavailable) as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to read result: {exc}",
@@ -239,7 +239,7 @@ async def download_result_bundle(
             if "results" in sections
             else None
         )
-    except ResultUnreadable as exc:
+    except (ResultUnreadable, ResultUnavailable) as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to prepare result bundle: {exc}",
@@ -367,7 +367,7 @@ def _bundle_section_path(base_dir: Path, section: str) -> Path | None:
 async def _read_result_bytes(runtime: TaskRuntime, task_id: str) -> bytes:
     try:
         result = await asyncio.to_thread(runtime.read_result_bytes, task_id)
-    except ResultUnreadable as exc:
+    except (ResultUnreadable, ResultUnavailable) as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to read result: {exc}",

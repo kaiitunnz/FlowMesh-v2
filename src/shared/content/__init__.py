@@ -23,6 +23,7 @@ from .reference import (
 from .store import (
     ContentHydrationError,
     ContentStoreError,
+    ContentUnavailable,
     FabricObjectStore,
     ScopedObjectStore,
     content_digest,
@@ -44,6 +45,7 @@ __all__ = [
     "ContentStoreAccess",
     "ContentStoreAccessGrant",
     "ContentStoreError",
+    "ContentUnavailable",
     "DigestAlgorithm",
     "FabricObjectStore",
     "FilesystemObjectBacking",

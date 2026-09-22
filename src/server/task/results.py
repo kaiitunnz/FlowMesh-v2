@@ -3,9 +3,10 @@
 A task's result is the envelope its worker stored before reporting success, named by
 the reference that success bound. Reading it hydrates that reference and verifies the
 bytes against it, so a result that is missing, corrupt, or not the envelope it names is
-refused rather than read as some other value. Nothing here is persisted: the store is
-the only place a result lives, and this keeps just a bounded in-memory copy of what it
-recently verified, which an immutable reference makes safe to reuse.
+refused rather than read as some other value, and a store that cannot be reached is
+reported as such, since the result is still there. The store is the only place a result
+lives; a reader holds a bounded in-memory cache of recently verified envelopes, which an
+immutable reference makes safe to reuse.
 """
 
 import threading
@@ -15,14 +16,23 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from shared.content import ContentReference, ContentStoreError, FabricObjectStore
+from shared.content import (
+    ContentReference,
+    ContentStoreError,
+    ContentUnavailable,
+    FabricObjectStore,
+)
 from shared.schemas.result import BaseExecutorResult, ResultEnvelope
 
 _CACHE_MAX_BYTES = 64 * 1024 * 1024
 
 
 class ResultUnreadable(RuntimeError):
-    """A bound result could not be read from the store or is not a result envelope."""
+    """A bound result is missing from the store, corrupt, or not a result envelope."""
+
+
+class ResultUnavailable(RuntimeError):
+    """The store holding a bound result could not be reached; a retry may succeed."""
 
 
 @dataclass(frozen=True)
@@ -86,6 +96,8 @@ class ResultReader:
                 return cached
         try:
             data = self._store.hydrate(reference)
+        except ContentUnavailable as exc:
+            raise ResultUnavailable(str(exc)) from exc
         except ContentStoreError as exc:
             raise ResultUnreadable(str(exc)) from exc
         self._remember(key, data)
@@ -107,6 +119,7 @@ class ResultReader:
 __all__ = [
     "ResultBinding",
     "ResultReader",
+    "ResultUnavailable",
     "ResultUnreadable",
     "skip_envelope",
 ]
