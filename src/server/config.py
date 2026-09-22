@@ -541,14 +541,12 @@ class WebSearchConfig:
 class ContentStoreConfig:
     """What the control plane does about fabric content.
 
-    Content itself lives in the shared durable store the workers read and write;
-    ``enabled`` is whether this node serves the outcome-finalization index binding an
-    idempotency key to the reference it materialized. ``hydration_enabled`` turns on the
+    Content itself lives in the shared durable store the workers read and write, which
+    every deployment runs. ``hydration_enabled`` turns on the
     worker content cache, where a worker keeps what it wrote and another reads it over a
     control-granted transfer instead of going to the shared store.
     """
 
-    enabled: bool = True
     hydration_enabled: bool = False
     grant_ttl_sec: float = 60.0
     holder_record_ttl_sec: float = 300.0
@@ -557,7 +555,6 @@ class ContentStoreConfig:
     @classmethod
     def from_env(cls) -> "ContentStoreConfig":
         return cls(
-            enabled=parse_bool_env("CONTENT_STORE_ENABLED", True),
             hydration_enabled=parse_bool_env("CONTENT_HYDRATION_ENABLED", False),
             grant_ttl_sec=parse_float_env("CONTENT_HYDRATION_GRANT_TTL_SEC", 60.0),
             holder_record_ttl_sec=parse_float_env("CONTENT_HOLDER_TTL_SEC", 300.0),

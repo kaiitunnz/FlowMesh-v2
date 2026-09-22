@@ -63,7 +63,6 @@ listed here is in `.env.example`.
 | `WEB_SEARCH_TIMEOUT_SEC` | `20` | Search request timeout (seconds) |
 | `WEB_SEARCH_RESULT_CHAR_CAP` | `6000` | Injected result size cap |
 | `WEB_SEARCH_MAX_PARALLEL_CALLS_PER_TURN` | `4` | Parallel searches per turn |
-| `CONTENT_STORE_ENABLED` | `true` | Serve the outcome finalization index |
 | `CONTENT_STORE_BACKEND` | `s3` | Shared content store backend (`s3` or `filesystem`) |
 | `CONTENT_STORE_ENDPOINT_URL` | – | S3-compatible endpoint; the co-located store if empty |
 | `CONTENT_STORE_BUCKET` | `flowmesh-content` | Bucket holding fabric content |

@@ -640,12 +640,6 @@ STACK_ENV_SCHEMA = EnvSchema(
             title="Content plane",
             vars=[
                 EnvVar(
-                    "CONTENT_STORE_ENABLED",
-                    "true",
-                    description="Serve the outcome finalization index.",
-                    var_type=EnvVarType.BOOL,
-                ),
-                EnvVar(
                     "CONTENT_STORE_BACKEND",
                     "s3",
                     description="Shared content store backend.",

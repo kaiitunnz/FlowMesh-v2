@@ -136,11 +136,7 @@ REDIS_CLIENT = RedisClient(
 
 NODE_REGISTRY = NodeRegistry(REDIS_CLIENT, logger)
 
-FINALIZATION_INDEX = (
-    FinalizationIndex(REDIS_CLIENT)
-    if IS_ROOT_NODE and config.content_store.enabled
-    else None
-)
+FINALIZATION_INDEX = FinalizationIndex(REDIS_CLIENT) if IS_ROOT_NODE else None
 
 # Control assigns the scope a unit of work materializes content under, and records it
 # against the key that work settles, so the finalization the producing worker later
@@ -368,23 +364,21 @@ if IS_ROOT_NODE:
         SERVE_FORWARD_INGRESS = _serve_wiring.forward_ingress
         SERVE_BINDINGS = _serve_wiring.bindings
 
-    CONTENT_ACCESS: ContentAccessBroker | None = None
     # Reaching the store is not the cache's business: every dispatched task needs access
     # to write what it produces, whether or not this deployment caches anything.
-    if config.content_store.enabled:
-        _store_cfg = config.object_store
-        if _store_cfg.scoped_credentials and _store_cfg.backend == BACKEND_S3:
-            _minter: ScopedCredentialMinter = StsScopedCredentialMinter(
-                _store_cfg, build_sts_client(_store_cfg)
-            )
-        else:
-            _minter = DeploymentCredentialMinter(_store_cfg, logger)
-        CONTENT_ACCESS = ContentAccessBroker(
-            WORKER_REGISTRY,
-            _minter,
-            grant_ttl_sec=config.content_store.access_grant_ttl_sec,
-            logger=logger,
+    _store_cfg = config.object_store
+    if _store_cfg.scoped_credentials and _store_cfg.backend == BACKEND_S3:
+        _minter: ScopedCredentialMinter = StsScopedCredentialMinter(
+            _store_cfg, build_sts_client(_store_cfg)
         )
+    else:
+        _minter = DeploymentCredentialMinter(_store_cfg, logger)
+    CONTENT_ACCESS = ContentAccessBroker(
+        WORKER_REGISTRY,
+        _minter,
+        grant_ttl_sec=config.content_store.access_grant_ttl_sec,
+        logger=logger,
+    )
 
     DISPATCHER = create_dispatcher(
         config.dispatch,
@@ -651,10 +645,7 @@ async def _lifespan(_: FastAPI):
 
         # --- Root-only startup ---
         if IS_ROOT_NODE:
-            if (
-                config.content_store.enabled
-                and config.object_store.backend == BACKEND_S3
-            ):
+            if config.object_store.backend == BACKEND_S3:
                 # Off the loop and off import: reaching the store can block for as long
                 # as its own timeouts allow, and a store that is slow or unreachable
                 # must not hold up the process that would report it.
