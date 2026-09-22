@@ -56,7 +56,7 @@ class S3ObjectStore(FabricObjectStore):
                 Body=data,
                 ContentType=media_type,
             )
-        except Exception as exc:  # noqa: BLE001 - every backend failure is one to us
+        except Exception as exc:
             raise ContentStoreError(f"content write failed: {exc}") from exc
         return reference
 
@@ -65,7 +65,7 @@ class S3ObjectStore(FabricObjectStore):
             response: dict[str, Any] = self._client.get_object(
                 Bucket=self._bucket, Key=self._key(reference)
             )
-        except Exception as exc:  # noqa: BLE001 - a miss and a refusal read the same
+        except Exception as exc:
             raise ContentHydrationError(
                 f"no content for {reference.content_digest} in scope "
                 f"{reference.authorization_scope}: {exc}"

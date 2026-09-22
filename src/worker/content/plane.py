@@ -105,7 +105,7 @@ class WorkerContentPlane:
         try:
             self._lane.store.write(scope, data, media_type=media_type)
             self._announce([(scope, reference.content_digest)])
-        except Exception:  # noqa: BLE001 - the object is safe; only the copy is not
+        except Exception:
             self._logger.warning(
                 "could not cache %s locally", reference.content_digest, exc_info=True
             )
@@ -116,11 +116,12 @@ class WorkerContentPlane:
         if self._lane is not None:
             try:
                 return self._lane.hydrate(reference, task_id)
-            except Exception as miss:  # noqa: BLE001 - see below: every cache path is
-                # optional, and that includes a cache that cannot represent the object,
-                # a content directory that has gone unreadable, and a lane that is not
-                # running. The object is in the shared store whatever happened to a copy
-                # of it, so anything the cache raises costs this read and nothing else.
+            except Exception as miss:
+                # Every cache path is optional, and that includes a cache that cannot
+                # represent the object, a content directory that has gone unreadable,
+                # and a lane that is not running. The object is in the shared store
+                # whatever happened to a copy of it, so anything the cache raises costs
+                # this read and nothing else.
                 self._logger.debug(
                     "reading %s from the shared store: %s",
                     reference.content_digest,

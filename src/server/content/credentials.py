@@ -109,12 +109,12 @@ def ensure_bucket(cfg: ObjectStoreConfig, logger: logging.Logger) -> None:
     try:
         client.head_bucket(Bucket=cfg.bucket)
         return
-    except Exception:  # noqa: BLE001 - absent, unreachable, or not ours: try to create
+    except Exception:
         pass
     try:
         client.create_bucket(Bucket=cfg.bucket)
         logger.info("created the content store bucket %s", cfg.bucket)
-    except Exception:  # noqa: BLE001 - a store that refuses says so on the first write
+    except Exception:
         logger.warning(
             "could not create the content store bucket %s; content writes will fail "
             "until it exists",
