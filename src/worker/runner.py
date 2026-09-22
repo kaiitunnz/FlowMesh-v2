@@ -51,7 +51,6 @@ from shared.tools.search.schema import DEFAULT_SEARCH_PROVIDER
 from shared.utils.manifest import prepare_output_dir, sync_manifest
 from shared.utils.time import now_iso
 
-from .content import WorkerContentPlane
 from .egress import MediatedEgressSidecar, ModelEgress, SearchEgress
 from .executors.base_executor import ExecutionError, Executor, TaskCancelledError
 from .executors.episode_support import EpisodeStepResult
@@ -97,7 +96,6 @@ class Runner:
         web_search_api_key: str | None = None,
         model_api_key: str | None = None,
         model_egress_timeout_sec: float = 120.0,
-        content_plane: WorkerContentPlane | None = None,
         peer_enabled: bool = False,
         peer_material: MutualTlsMaterial | None = None,
         peer_listener_sock: socket.socket | None = None,
@@ -148,7 +146,6 @@ class Runner:
         self._web_search_api_key = web_search_api_key
         self._model_api_key = model_api_key
         self._model_egress_timeout_sec = model_egress_timeout_sec
-        self._content_plane = content_plane
         # The worker-local mediated-egress sidecar, built on the first permit relayed
         # over the attachment (once the worker id and incarnation are known).
         self._mediated_sidecar: MediatedEgressSidecar | None = None
@@ -205,8 +202,6 @@ class Runner:
             self._responses_facade.stop()
         if self._resident_host is not None:
             self._resident_host.stop()
-        if self._content_plane is not None:
-            self._content_plane.stop()
 
     def _ensure_mediated_sidecar(self) -> MediatedEgressSidecar | None:
         """Build the mediated-egress sidecar once the worker id is known."""
@@ -296,8 +291,8 @@ class Runner:
                 host.route(frame_kind, frame)
             return
         if frame_kind.startswith("content_"):
-            if self._content_plane is not None:
-                self._content_plane.route(frame_kind, frame)
+            if (plane := self.lifecycle.content_plane) is not None:
+                plane.route(frame_kind, frame)
             return
         if frame_kind == "deny":
             # A held model turn's denial: only a facade waiter consumes it.
@@ -338,15 +333,15 @@ class Runner:
 
     def _object_store(self, task_id: str) -> FabricObjectStore | None:
         """The content surface this task reads and writes through."""
-        if self._content_plane is None:
+        if (plane := self.lifecycle.content_plane) is None:
             return None
-        return self._content_plane.for_task(task_id)
+        return plane.for_task(task_id)
 
     def _outcome_store(self, task_id: str) -> FabricContentStore | None:
         """Where this task's outcomes materialize and deduplicate."""
-        if self._content_plane is None:
+        if (plane := self.lifecycle.content_plane) is None:
             return None
-        return self._content_plane.outcome_store(task_id)
+        return plane.outcome_store(task_id)
 
     def _prepare_inputs(self, msg: WorkerTaskMessage) -> ResolvedInputMaterialization:
         """Resolve a task's declared contract and store the request it materialized.

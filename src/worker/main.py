@@ -290,12 +290,6 @@ def _build_content_plane(
             holder_report_ttl_sec=cfg.content_holder_ttl_sec,
             logger=logger,
         )
-        lane.start()
-        # Before this worker takes any work: an object already on its disk from a
-        # previous incarnation is unreachable until control hears who holds it, and the
-        # report has to land under the incarnation registration just assigned.
-        if (held := lane.report_held()) > 0:
-            logger.info("reported %d held content objects at startup", held)
     return WorkerContentPlane(
         lane,
         access,
@@ -404,8 +398,7 @@ def main() -> None:
     )
     gpu_sampler.start()
 
-    content_plane = _build_content_plane(cfg, supervisor_client, logger)
-    lifecycle.content_plane = content_plane
+    lifecycle.start_content_plane(_build_content_plane(cfg, supervisor_client, logger))
 
     task_stream = supervisor_client.iter_tasks()
     runner = Runner(
@@ -422,7 +415,6 @@ def main() -> None:
         web_search_api_key=cfg.web_search_api_key,
         model_api_key=cfg.model_api_key,
         model_egress_timeout_sec=cfg.model_egress_timeout_sec,
-        content_plane=content_plane,
         peer_enabled=cfg.peer_enabled,
         peer_material=_peer_material(cfg, logger),
         peer_listener_sock=peer_sock,

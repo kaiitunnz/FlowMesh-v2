@@ -68,8 +68,10 @@ class _Plane:
 def _runner(store: InMemoryContentStore | None) -> Runner:
     """A runner with only what resolving and storing a request reads."""
     runner = object.__new__(Runner)
-    runner._content_plane = cast(Any, _Plane(store)) if store is not None else None
     runner.lifecycle = mock.Mock()
+    runner.lifecycle.content_plane = (
+        cast(Any, _Plane(store)) if store is not None else None
+    )
     return runner
 
 

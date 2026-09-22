@@ -70,6 +70,19 @@ class WorkerContentPlane:
             _TaskScopedStores(self, task_id), self._finalizations
         )
 
+    def start(self) -> None:
+        """Bring up the cache lane, if this worker runs one, and report what it holds.
+
+        The report lands before this worker takes any work: an object already on its
+        disk from a previous incarnation is unreachable until control hears who holds
+        it, and the report has to land under the incarnation registration just assigned.
+        """
+        if self._lane is None:
+            return
+        self._lane.start()
+        if (held := self._lane.report_held()) > 0:
+            self._logger.info("reported %d held content objects at startup", held)
+
     def stop(self) -> None:
         """Drain the cache lane, if this worker runs one."""
         if self._lane is not None:

@@ -47,8 +47,8 @@ class Lifecycle:
         # through, built by the runner once the worker id is known and read by the
         # agent-episode executor to bind a codex adapter.
         self.responses_facade: ResponsesFacade | None = None
-        # This worker's content plane, where the deployment runs one: built once the
-        # worker id is known and read by whatever reaches fabric content.
+        # This worker's content plane: started once the worker id is known, read by
+        # whatever reaches fabric content, and stopped when the worker shuts down.
         self.content_plane: WorkerContentPlane | None = None
         self._stop_event = threading.Event()
         self._started_ts: float | None = None
@@ -189,8 +189,21 @@ class Lifecycle:
     def stop(self) -> None:
         self.client.stop()
 
+    def start_content_plane(self, plane: "WorkerContentPlane | None") -> None:
+        """Own the worker's content plane from here to shutdown."""
+        self.content_plane = plane
+        if plane is not None:
+            plane.start()
+
     def shutdown(self):
         self._stop_event.set()
+        if self.content_plane is not None:
+            # Before unregistering: draining the lane cancels the transfers it serves,
+            # and those frames leave over the attachment unregistering closes.
+            try:
+                self.content_plane.stop()
+            except Exception:
+                pass
         try:
             self.power_monitor.sample()
         except Exception:
