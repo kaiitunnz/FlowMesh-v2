@@ -417,12 +417,13 @@ def build_artifact_context(spec: TaskSpecStrictBase, out_dir: Path) -> ArtifactC
 
 def write_executor_result(
     path: Path, task_id: str, spec: TaskSpecStrictBase, result: BaseExecutorResult
-) -> None:
-    """Stamp ``_artifacts`` onto ``result`` and persist the envelope."""
+) -> str:
+    """Stamp ``_artifacts`` onto ``result``, persist the envelope, and return it."""
     path.parent.mkdir(parents=True, exist_ok=True)
     result.artifacts_ = build_artifact_context(spec, path.parent)
-    envelope = ResultEnvelope(task_id=task_id, result=result)
-    atomic_write_text(path, envelope.model_dump_json(indent=2))
+    envelope = ResultEnvelope(task_id=task_id, result=result).model_dump_json(indent=2)
+    atomic_write_text(path, envelope)
+    return envelope
 
 
 def maybe_upload_artifacts(

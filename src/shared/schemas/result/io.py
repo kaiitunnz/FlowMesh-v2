@@ -7,6 +7,9 @@ from shared.utils.manifest import prepare_output_dir
 
 from .catalog import ResultEnvelope
 
+# How a stored result envelope is typed in the content store.
+RESULT_MEDIA_TYPE = "application/json"
+
 
 def _sanitize_task_id(task_id: str) -> str:
     return "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in task_id)

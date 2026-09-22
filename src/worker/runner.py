@@ -1,6 +1,5 @@
 """Task runner that executes assignments relayed by the server."""
 
-import json
 import logging
 import socket
 import threading
@@ -9,9 +8,8 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-import requests
-
 from shared.content import ContentReference, ContentStoreError, FabricObjectStore
+from shared.harness.adapter import HarnessResultKind
 from shared.inference import (
     CanonicalInferenceRequest,
     InputResolutionError,
@@ -23,8 +21,7 @@ from shared.inference import (
 )
 from shared.network.mtls import MutualTlsMaterial
 from shared.outcome import FabricContentStore
-from shared.schemas.result import BaseExecutorResult
-from shared.tasks import MergedChildTaskStrict
+from shared.schemas.result import RESULT_MEDIA_TYPE, BaseExecutorResult
 from shared.tasks.specs import (
     EmbeddingSpecStrict,
     InferenceBackend,
@@ -56,12 +53,23 @@ from .executors.base_executor import ExecutionError, Executor, TaskCancelledErro
 from .executors.episode_support import EpisodeStepResult
 from .executors.inference.projection import generated_outputs
 from .executors.inference.resolution import resolve_task_contract
-from .executors.utils.checkpoints import get_http_destination, write_executor_result
+from .executors.utils.checkpoints import write_executor_result
 from .lifecycle import Lifecycle
 from .model_turn import HeldModelEgress, ModelTurnRendezvous, ResponsesFacade
 from .resident.lane_host import ResidentLaneHost
 from .telemetry import otel
 from .utils.logging import TaskLogEmitter
+
+
+def _publishes_result(result: BaseExecutorResult) -> bool:
+    """Whether a result is the task's terminal value rather than an episode yield.
+
+    A run-to-yield step that is not the episode's completion hands its lane back and
+    resumes later, so only the completing step carries the value the task settles with.
+    """
+    if isinstance(result, EpisodeStepResult):
+        return result.harness_result.kind is HarnessResultKind.COMPLETION
+    return True
 
 
 def _declared_result(
@@ -90,7 +98,6 @@ class Runner:
         executors: dict[str, Executor],
         default_executor: Executor,
         logger: logging.Logger,
-        network_bandwidth_bytes_per_sec: float | None = None,
         executor_idle_cleanup_sec: float | None = None,
         web_search_provider: str = DEFAULT_SEARCH_PROVIDER,
         web_search_api_key: str | None = None,
@@ -109,7 +116,6 @@ class Runner:
         self.executors = executors
         self.logger = logger
         self.default_executor = default_executor
-        self.network_bandwidth_bytes_per_sec = network_bandwidth_bytes_per_sec
         self._peer_enabled = peer_enabled
         self._peer_material = peer_material
         self._peer_listener_sock = peer_listener_sock
@@ -490,119 +496,81 @@ class Runner:
 
     def _write_results(
         self,
-        task_id: str,
-        spec: TaskSpecStrictBase,
-        merged_children: list[MergedChildTaskStrict],
+        msg: WorkerTaskMessage,
         out_dir: Path,
         result: BaseExecutorResult | None,
-        request: CanonicalInferenceRequest | None = None,
-    ):
-        if result is None:
-            return
-        self._write_single_result(
-            task_id, spec, out_dir, _declared_result(result, request) or result
-        )
+    ) -> dict[str, Any]:
+        """Store a task's result and each merged child's, returning their references.
 
-        child_lookup = {entry.task_id: entry for entry in merged_children}
+        Every result lands in the shared store before the success that reports it, so a
+        reference control binds always names bytes that outlive this worker. A child
+        the executor produced no result for reports none, and control binds it to its
+        merged parent's.
+        """
+        if result is None:
+            return {}
+        declared = _declared_result(result, msg.resolved_contract) or result
+        reference = self._write_single_result(
+            msg, msg.task_id, msg.spec, out_dir, declared
+        )
+        if reference is None:
+            return {}
+        references: dict[str, Any] = {
+            "result_reference": reference.model_dump(mode="json")
+        }
+        child_lookup = {entry.task_id: entry for entry in msg.merged_children or []}
+        children: dict[str, Any] = {}
         for child_id, child_result in result.children.items():
             child_info = child_lookup.get(child_id)
             if child_info is None:
                 continue
-            child_out_dir = self._resolve_output_dir(child_id)
-            self._write_single_result(
-                child_id, child_info.spec, child_out_dir, child_result
+            child_reference = self._write_single_result(
+                msg,
+                child_id,
+                child_info.spec,
+                self._resolve_output_dir(child_id),
+                child_result,
             )
+            if child_reference is not None:
+                children[child_id] = child_reference.model_dump(mode="json")
+        if children:
+            references["child_result_references"] = children
+        return references
 
     def _write_single_result(
         self,
+        msg: WorkerTaskMessage,
         task_id: str,
         spec: TaskSpecStrictBase,
         out_dir: Path,
         payload: BaseExecutorResult | None,
-    ):
+    ) -> ContentReference | None:
         if payload is None:
-            return
+            return None
         out_dir.mkdir(parents=True, exist_ok=True)
-        write_executor_result(out_dir / "results.json", task_id, spec, payload)
+        envelope = write_executor_result(
+            out_dir / "results.json", task_id, spec, payload
+        )
         sync_manifest(out_dir, task_id, spec.get_artifacts())
-        self._maybe_emit_http(task_id, spec, payload)
-
-    def _simulate_bandwidth_delay(self, payload_bytes: int, destination: str) -> None:
-        if not self.network_bandwidth_bytes_per_sec:
-            return
-        if payload_bytes <= 0:
-            return
-        delay = payload_bytes / self.network_bandwidth_bytes_per_sec
-        if delay <= 0:
-            return
-        self.logger.debug(
-            "HTTP delivery to %s throttled for %.3f sec (payload=%d bytes, "
-            "bandwidth=%.0f B/s)",
-            destination,
-            delay,
-            payload_bytes,
-            self.network_bandwidth_bytes_per_sec,
-        )
-        time.sleep(delay)
-
-    def _maybe_emit_http(
-        self, task_id: str, spec: TaskSpecStrictBase, result: BaseExecutorResult
-    ) -> None:
-        """Send task results to an HTTP endpoint when requested by the spec."""
-        destination = get_http_destination(spec)
-        if destination is None:
-            return
-
-        url = destination.url
-        ignore_error = destination.ignore_error
-        payload = {
-            "task_id": task_id,
-            "result": result.model_dump(),
-            "worker_id": self.lifecycle.worker_id,
-        }
-        payload_size = len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
-        self._simulate_bandwidth_delay(payload_size, destination=url)
-
+        if not _publishes_result(payload):
+            return None
+        store = self._object_store(msg.task_id)
+        if store is None:
+            raise ExecutionError(
+                f"task {task_id} produced a result and this worker reaches no fabric "
+                "content store to store it in",
+                retryable=True,
+            )
         try:
-            response = requests.request(
-                destination.method,
-                url,
-                json=payload,
-                headers=destination.headers,
-                timeout=destination.timeout,
+            return store.write(
+                msg.content_scope,
+                envelope.encode("utf-8"),
+                media_type=RESULT_MEDIA_TYPE,
             )
-        except requests.RequestException as exc:
-            if ignore_error:
-                self.logger.warning(
-                    "Task %s failed to upload results to %s (%s); result still on disk",
-                    task_id,
-                    url,
-                    exc,
-                )
-                return
-            raise RuntimeError(
-                f"Failed to deliver task {task_id} result to {url}: {exc}"
+        except ContentStoreError as exc:
+            raise ExecutionError(
+                f"task {task_id} could not store its result: {exc}", retryable=True
             ) from exc
-
-        if response.status_code >= 400:
-            snippet = response.text[:200]
-            if ignore_error:
-                self.logger.warning(
-                    "Task %s upload to %s returned %s: %s; result still on disk",
-                    task_id,
-                    url,
-                    response.status_code,
-                    snippet,
-                )
-                return
-            raise RuntimeError(
-                f"HTTP delivery for task {task_id} returned status "
-                f"{response.status_code}: {snippet}"
-            )
-
-        self.logger.info(
-            "Task %s result delivered to %s (%s)", task_id, url, response.status_code
-        )
 
     def _select_inference_executor_key(self, spec: InferenceSpecStrict) -> str:
         if spec.backend() is InferenceBackend.TRANSFORMERS:
@@ -781,7 +749,6 @@ class Runner:
                 task_id = msg.task_id
                 spec = msg.spec
                 task_type = spec.taskType
-                merged_children = msg.merged_children or []
 
                 parent_task_id = msg.parent_task_id
                 shard_index = msg.shard_index
@@ -936,14 +903,7 @@ class Runner:
                         if stop_before_start:
                             executor_to_run.stop(task_id)
                     out = self._run_executor(executor_to_run, msg, out_dir)
-                    self._write_results(
-                        task_id,
-                        spec,
-                        merged_children,
-                        out_dir,
-                        out,
-                        msg.resolved_contract,
-                    )
+                    references = self._write_results(msg, out_dir, out)
                     metadata = self._build_task_metadata(
                         task_type,
                         dispatched_at,
@@ -952,6 +912,7 @@ class Runner:
                         shard_index=shard_index,
                         shard_total=shard_total,
                     )
+                    metadata.update(references)
                     if isinstance(out, EpisodeStepResult):
                         # The step rides the success metadata so the server routes the
                         # boundary and re-dispatches; the attempt still ends here, which
