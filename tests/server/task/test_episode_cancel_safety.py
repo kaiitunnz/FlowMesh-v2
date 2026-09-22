@@ -96,7 +96,7 @@ def test_a_step_success_racing_a_cancel_does_not_re_admit_the_episode() -> None:
         runtime.cancel_workflow(workflow_id)
         assert runtime._tasks[writer].status == TaskStatus.CANCELLING
 
-        usages = runtime.mark_succeeded(
+        _, usages = runtime.mark_succeeded(
             writer,
             "wkr-1",
             {"agent_episode": result.model_dump(mode="json"), **_USAGE_PAYLOAD},
@@ -190,7 +190,7 @@ def test_a_live_episode_step_bills_its_dispatch_as_in_flight() -> None:
         adapter = ScriptedHarnessAdapter(_SCRIPT, "v1")
 
         result = _run_step(runtime, adapter, writer)
-        usages = runtime.mark_succeeded(
+        _, usages = runtime.mark_succeeded(
             writer,
             "wkr-1",
             {"agent_episode": result.model_dump(mode="json"), **_USAGE_PAYLOAD},
@@ -296,7 +296,7 @@ def test_a_completion_racing_a_cancel_settles_cancelled() -> None:
         runtime.cancel_workflow(workflow_id)
         assert runtime._tasks[writer].status == TaskStatus.CANCELLING
 
-        usages = runtime.mark_succeeded(
+        _, usages = runtime.mark_succeeded(
             writer,
             "wkr-1",
             {"agent_episode": result.model_dump(mode="json"), **_USAGE_PAYLOAD},
@@ -375,7 +375,7 @@ def test_a_completion_with_a_facade_group_racing_a_cancel_settles_cancelled() ->
         runtime.cancel_workflow(workflow_id)
         assert runtime._tasks[writer].status == TaskStatus.CANCELLING
 
-        usages = runtime.mark_succeeded(
+        _, usages = runtime.mark_succeeded(
             writer,
             "wkr-1",
             {"agent_episode": result.model_dump(mode="json"), **_USAGE_PAYLOAD},

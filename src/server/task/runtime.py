@@ -7,6 +7,7 @@ import time
 from collections import defaultdict, deque
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from itertools import chain
 from typing import Any
 
 from opentelemetry.trace import Tracer
@@ -289,15 +290,6 @@ def _reported_child_references(payload: dict[str, Any]) -> dict[str, ContentRefe
         for child_id, raw in (payload.get("child_result_references") or {}).items()
         if (parsed := _reported_reference(raw)) is not None
     }
-
-
-def _partition_merged_children(
-    child_ids: list[str], child_references: dict[str, ContentReference]
-) -> tuple[list[str], list[str]]:
-    """Split merged children into those with a result of their own and the rest."""
-    settled = [child_id for child_id in child_ids if child_id in child_references]
-    unsettled = [child_id for child_id in child_ids if child_id not in child_references]
-    return settled, unsettled
 
 
 def _binding_defaults(
@@ -811,8 +803,9 @@ class TaskRuntime:
     def _restore_merges_locked(self) -> None:
         """Rebuild the in-flight merges from durable records.
 
-        A merge may span workflows, so it is rebuilt once every workflow is restored. A
-        merge whose parent is no longer running returns its children to the queue.
+        A merge may span workflows, so it is rebuilt once every workflow is restored.
+        A merge whose parent never dispatched returns its children to the queue, and
+        one whose parent settled returns them to run alone.
         """
         for child_id, record in self._tasks.items():
             if record.merged_parent_id and record.status == TaskStatus.DISPATCHED:
@@ -820,14 +813,20 @@ class TaskRuntime:
                 self._merge_children_map[record.merged_parent_id].append(child_id)
         parents = {
             *self._merge_children_map,
-            *(task_id for task_id, rec in self._tasks.items() if rec.merged_children),
+            *(
+                task_id
+                for task_id, rec in self._tasks.items()
+                if rec.merged_children and rec.status not in TERMINAL_TASK_STATUSES
+            ),
         }
         for parent_id in parents:
             parent = self._tasks.get(parent_id)
-            if parent is None or parent.status not in (
-                TaskStatus.DISPATCHED,
-                TaskStatus.CANCELLING,
-            ):
+            if parent is None or parent.status in TERMINAL_TASK_STATUSES:
+                children = self._merge_children_map.pop(parent_id, [])
+                self._commit_locked(
+                    *self._return_merged_children_locked(children, unmerge=True)
+                )
+            elif parent.status not in (TaskStatus.DISPATCHED, TaskStatus.CANCELLING):
                 self._release_merge_locked(parent_id)
 
     def _install_rehydrated_workflow_locked(
@@ -1023,57 +1022,45 @@ class TaskRuntime:
                 workflow_id, records=self._records_locked(*ids)
             )
 
-    def _persist_terminal_locked(self, *task_ids: str, sched: bool = True) -> None:
-        """Commit each task's final state — its record and its done/failed/cancelled
-        set membership (by current status) — and the workflow schedule, as one atomic
-        transaction per workflow and the single last step of a transition.
+    def _commit_locked(self, *task_ids: str, sched: bool = True) -> None:
+        """Commit each task's record and its status-set membership, and the workflow
+        schedule, as one atomic transaction per workflow and the single last step of a
+        transition.
 
-        Committing only after all in-memory mutations means a failed or crashed write
-        can't leave durable state half-applied: the transaction commits in full or not
-        at all. Event-driven callers additionally heal via the at-least-once replay
+        A terminal task moves to its done/failed/cancelled set, a pending one leaves the
+        dispatched set, and a dispatched one joins it. Committing only after all
+        in-memory mutations means a failed or crashed write can't leave durable state
+        half-applied: the transaction commits in full or not at all. Event-driven
+        callers additionally heal via the at-least-once replay
         (``_repersist_terminal_workflow_locked``); the API-driven cancel relies on this
         atomicity alone. Assumes the in-memory mutations never raise, which holds while
         ordered tasks carry ``position_in_epoch`` (so the ready-queue helpers never hit
         their guards).
         """
-        moves: dict[str, tuple[list[str], list[str], list[str]]] = defaultdict(
-            lambda: ([], [], [])
-        )
+        moves: dict[str, dict[str, list[str]]] = defaultdict(lambda: defaultdict(list))
         for task_id in dict.fromkeys(task_ids):
-            record = self._tasks.get(task_id)
-            if record is None:
-                continue
-            match record.status:
-                case TaskStatus.DONE:
-                    moves[record.workflow_id][0].append(task_id)
-                case TaskStatus.FAILED:
-                    moves[record.workflow_id][1].append(task_id)
-                case TaskStatus.CANCELLED:
-                    moves[record.workflow_id][2].append(task_id)
-                case _:
-                    self._logger.warning(
-                        "Non-terminal task %s (%s) skipped in terminal persist",
-                        task_id,
-                        record.status,
-                    )
-        for workflow_id, (done, failed, cancelled) in moves.items():
-            if ids := done + failed + cancelled:
-                self._workflow_registry.commit_transition(
-                    workflow_id,
-                    records=self._records_locked(*ids),
-                    done=done,
-                    failed=failed,
-                    cancelled=cancelled,
-                    sched=self._sched_locked(workflow_id) if sched else None,
-                )
+            if (record := self._tasks.get(task_id)) is not None:
+                moves[record.workflow_id][record.status].append(task_id)
+        for workflow_id, by_status in moves.items():
+            self._workflow_registry.commit_transition(
+                workflow_id,
+                records=self._records_locked(*chain.from_iterable(by_status.values())),
+                dispatched=by_status[TaskStatus.DISPATCHED],
+                pending=by_status[TaskStatus.PENDING],
+                done=by_status[TaskStatus.DONE],
+                failed=by_status[TaskStatus.FAILED],
+                cancelled=by_status[TaskStatus.CANCELLED],
+                sched=self._sched_locked(workflow_id) if sched else None,
+            )
+            if any(by_status[status] for status in TERMINAL_TASK_STATUSES):
                 self._notify_terminal_transition(workflow_id)
 
     def _notify_terminal_transition(self, workflow_id: str) -> None:
         """Tell the completion finalizer a workflow may have reached its end.
 
-        Every terminal commit funnels through `_persist_terminal_locked`, whether a
-        worker reported it or the control plane settled it alone, so one notification
-        covers both.
+        Every terminal commit funnels through `_commit_locked`, whether a worker
+        reported it or the control plane settled it alone, so one notification covers
+        both.
         It carries a workflow id and nothing else: the finalizer decides whether the
         workflow is complete, and does so off this thread.
         """
@@ -1103,7 +1090,7 @@ class TaskRuntime:
             and record.status in TERMINAL_TASK_STATUSES
         ]
         if terminal_ids:
-            self._persist_terminal_locked(*terminal_ids)
+            self._commit_locked(*terminal_ids)
         else:
             self._workflow_registry.commit_transition(
                 workflow_id, sched=self._sched_locked(workflow_id)
@@ -1295,13 +1282,19 @@ class TaskRuntime:
         workflow_id: str,
         failed_epoch: int,
         reason: str,
-    ) -> list[tuple[str, str]]:
+    ) -> tuple[list[tuple[str, str]], list[str]]:
+        """Fail the pending tasks of every epoch after ``failed_epoch``.
+
+        Returns the failed tasks with their reason, and the merged children of any of
+        them returned to the queue.
+        """
         epoch_tasks = self._workflow_epoch_tasks.get(workflow_id)
         if not epoch_tasks:
-            return []
+            return [], []
         frontier = self._workflow_epoch_frontier[workflow_id]
 
         impacted: list[tuple[str, str]] = []
+        returned: list[str] = []
         for offset, epoch_task_ids in enumerate(epoch_tasks):
             epoch = frontier + offset
             if epoch <= failed_epoch:
@@ -1320,11 +1313,12 @@ class TaskRuntime:
                 self._remove_from_ready_locked(task_id)
                 self._merge_bucket_remove(task_id)
                 self._merge_key_by_task.pop(task_id, None)
-                self._merge_parent_map.pop(task_id, None)
-                self._merge_children_map.pop(task_id, None)
+                returned += self._return_merged_children_locked(
+                    self._merge_children_map.pop(task_id, []), unmerge=True
+                )
                 impacted.append((task_id, reason))
 
-        return impacted
+        return impacted, returned
 
     def next_ready(
         self, stop_event: threading.Event, timeout: float = 1.0
@@ -3286,7 +3280,7 @@ class TaskRuntime:
             self._remove_from_ready_locked(task_id)
             failed_now.append(task_id)
         if persist and failed_now:
-            self._persist_terminal_locked(*failed_now)
+            self._commit_locked(*failed_now)
         return failed_now
 
     def _fail_workflow_locked(self, workflow_id: str, reason: str) -> None:
@@ -3382,12 +3376,7 @@ class TaskRuntime:
                 sibling_record.merged_parent_id = task_id
                 sibling_record.assigned_worker = None
                 sibling_record.merge_slice = None
-        self._workflow_registry.commit_transition(
-            record.workflow_id,
-            records=self._records_locked(task_id, *siblings),
-            dispatched=siblings,
-        )
-
+        self._commit_locked(task_id, *siblings)
         return siblings
 
     def release_merge(self, task_id: str) -> None:
@@ -3397,21 +3386,21 @@ class TaskRuntime:
     def _release_merge_locked(self, task_id: str) -> None:
         if parent := self._tasks.get(task_id):
             parent.merged_children = None
-        children = self._merge_children_map.pop(task_id, [])
-        self._persist_locked(task_id)
-        if children:
-            self._return_merged_children_locked(children)
+        returned = self._return_merged_children_locked(
+            self._merge_children_map.pop(task_id, [])
+        )
+        self._commit_locked(task_id, *returned)
 
     def _return_merged_children_locked(
         self, child_ids: list[str], unmerge: bool = False
-    ) -> None:
-        """Return merged children that never ran to the head of the ready queue.
+    ) -> list[str]:
+        """Return merged children to the head of the ready queue, spending no attempt.
 
-        A returned child spends no attempt. ``unmerge`` also drops its merge key, so
-        its next dispatch runs it alone rather than merging it into another batch that
-        may again leave it without a result of its own.
+        ``unmerge`` also drops a child's merge key, so its next dispatch runs it alone
+        rather than merging it into another batch that may again leave it without a
+        result of its own. Returns the children it moved, for the caller to commit.
         """
-        returned: dict[str, list[str]] = defaultdict(list)
+        returned: list[str] = []
         for child_id in child_ids:
             self._merge_parent_map.pop(child_id, None)
             child_record = self._tasks.get(child_id)
@@ -3425,13 +3414,36 @@ class TaskRuntime:
                 self._merge_key_by_task.pop(child_id, None)
             self._remove_from_ready_locked(child_id)
             self._enqueue_ready_locked(child_id, front=True)
-            returned[child_record.workflow_id].append(child_id)
-        for workflow_id, ids in returned.items():
-            self._workflow_registry.commit_transition(
-                workflow_id, records=self._records_locked(*ids), pending=ids
-            )
+            returned.append(child_id)
         if returned:
             self._cv.notify_all()
+        return returned
+
+    def _partition_merged_children_locked(
+        self, child_ids: list[str], child_references: dict[str, ContentReference]
+    ) -> tuple[list[str], list[str]]:
+        """Split merged children into those with a result of their own and the rest."""
+        settled = [child_id for child_id in child_ids if child_id in child_references]
+        unsettled = [
+            child_id for child_id in child_ids if child_id not in child_references
+        ]
+        return settled, unsettled
+
+    def _settle_workflows_locked(self, record: TaskRecord) -> list[str]:
+        """The workflows a task's settlement touches: its own and its merged
+        children's."""
+        return list(
+            dict.fromkeys(
+                [
+                    record.workflow_id,
+                    *(
+                        child.workflow_id
+                        for child_id in record.merged_children or []
+                        if (child := self._tasks.get(child_id)) is not None
+                    ),
+                ]
+            )
+        )
 
     def _finalize_merged_child_success(
         self,
@@ -3440,7 +3452,7 @@ class TaskRuntime:
         finished_ts: float,
         started_ts: float | None,
         usage: TaskUsage | None,
-        reference: ContentReference | None,
+        reference: ContentReference,
     ) -> list[str]:
         ready_children: list[str] = []
         child_record = self._tasks.get(child_id)
@@ -3563,10 +3575,11 @@ class TaskRuntime:
         ts: str,
         *,
         skip: dict[str, Any] | None = None,
-    ) -> list[tuple[str, TaskUsage]]:
+    ) -> tuple[list[str], list[tuple[str, TaskUsage]]]:
         """
         Mark a task as completed and enqueue any dependents that have become ready.
-        Returns the per-task usage rows produced by the completion. ``skip`` records a
+        Returns the merged children it settled and the per-task usage rows produced by
+        the completion. ``skip`` records a
         conditional-skip settlement and why, which resolves a v2 output to an
         explicit-empty publication.
 
@@ -3592,7 +3605,7 @@ class TaskRuntime:
                 # commits what it materialized and the task goes back to the queue for
                 # the dispatch that chooses an embodiment and runs it.
                 self._apply_input_materialization_locked(task_id, prepared)
-                return []
+                return [], []
             episode_step = payload.get("agent_episode")
             if episode_step is not None and record is not None:
                 harness_result = HarnessResult.model_validate(episode_step)
@@ -3619,11 +3632,11 @@ class TaskRuntime:
                     # A non-terminal episode step routes its boundary and re-dispatches;
                     # a completion falls through to the terminal path below.
                     self._apply_episode_step_locked(task_id, harness_result)
-                    return _in_flight_usage(task_id, payload)
+                    return [], _in_flight_usage(task_id, payload)
                 if record.status == TaskStatus.CANCELLING:
                     # A completion racing the cancel settles it before routing a
                     # captured facade group or consulting the reroute guard.
-                    return self._settle_cancelled_usage_locked(
+                    return [], self._settle_cancelled_usage_locked(
                         record, payload, finished_ts, started_ts
                     )
                 if group is not None:
@@ -3635,7 +3648,7 @@ class TaskRuntime:
                     self._route_and_dispatch_facade_group_locked(
                         task_id, group, harness_result.capsule
                     )
-                    return _in_flight_usage(task_id, payload)
+                    return [], _in_flight_usage(task_id, payload)
                 engine = self._engines.get(record.workflow_id)
                 if (
                     engine is not None
@@ -3647,15 +3660,16 @@ class TaskRuntime:
                     # publish the episode with a stale intermediate result. A post-DONE
                     # terminal replay is excluded so it still reaches the idempotent
                     # done-branch below (its fan-out / re-persist heal must survive).
-                    return usages
+                    return [], usages
             if record:
                 if record.status == TaskStatus.CANCELLED:
-                    return usages
+                    return [], usages
                 if record.status == TaskStatus.DONE:
                     # Idempotent: a replayed TASK_SUCCEEDED must not re-apply, but
                     # re-persist in case the original completion's write failed
                     # after its in-memory commit.
-                    self._repersist_terminal_workflow_locked(record.workflow_id)
+                    for workflow_id in self._settle_workflows_locked(record):
+                        self._repersist_terminal_workflow_locked(workflow_id)
                     # Recover a fan-out lost to a crash between the producer's terminal
                     # persist and its children: re-driving is a no-op once the spawn has
                     # sealed, so replaying an already-materialized fan-out does nothing.
@@ -3665,20 +3679,20 @@ class TaskRuntime:
                         )
                         if self._apply_advance_locked(record.workflow_id, advance):
                             self._cv.notify_all()
-                    return []
+                    return [], []
                 if record.status == TaskStatus.FAILED:
                     self._logger.warning(
                         "Ignoring TASK_SUCCEEDED for task %s in terminal status FAILED",
                         task_id,
                     )
-                    return []
+                    return [], []
                 if record.status == TaskStatus.CANCELLING:
                     # The cancel already resolved this task's declared output to its
                     # cancellation outcome and withheld the dispatch that would have
                     # carried a terminal back, so its completion settles the
                     # cancellation rather than reporting a success the ledger does
                     # not publish.
-                    return self._settle_cancelled_usage_locked(
+                    return [], self._settle_cancelled_usage_locked(
                         record, payload, finished_ts, started_ts
                     )
                 record.status = TaskStatus.DONE
@@ -3712,9 +3726,13 @@ class TaskRuntime:
                         if self._enqueue_ready_locked(child):
                             ready_children.append(child)
 
-            settled_children, unsettled_children = _partition_merged_children(
-                merged_children_ids, child_references
+            settled_children, unsettled_children = (
+                self._partition_merged_children_locked(
+                    merged_children_ids, child_references
+                )
             )
+            if record is not None:
+                record.merged_children = settled_children or None
             for merged_child in settled_children:
                 ready_children.extend(
                     self._finalize_merged_child_success(
@@ -3726,14 +3744,17 @@ class TaskRuntime:
                         child_references[merged_child],
                     )
                 )
-            self._return_merged_children_locked(unsettled_children, unmerge=True)
+            returned = self._return_merged_children_locked(
+                unsettled_children, unmerge=True
+            )
 
             if record is not None:
-                ready_children.extend(
-                    self._try_advance_epoch_frontier_locked(record.workflow_id)
-                )
+                for workflow_id in self._settle_workflows_locked(record):
+                    ready_children.extend(
+                        self._try_advance_epoch_frontier_locked(workflow_id)
+                    )
 
-            self._persist_terminal_locked(task_id, *settled_children)
+            self._commit_locked(task_id, *settled_children, *returned)
 
             notify = bool(ready_children)
             if record is not None and (engine := self._engines.get(record.workflow_id)):
@@ -3756,7 +3777,7 @@ class TaskRuntime:
             if notify:
                 self._cv.notify_all()
 
-            return usages
+            return settled_children, usages
 
     def mark_failed(
         self,
@@ -3855,19 +3876,21 @@ class TaskRuntime:
                 advance = engine.on_failed(task_id, message, retryable=False)
                 impacted.extend(self._fail_v2_cascade_locked(task_id, advance.failed))
 
-            self._return_merged_children_locked(merged_children_ids, unmerge=True)
+            returned = self._return_merged_children_locked(
+                merged_children_ids, unmerge=True
+            )
 
             failed_epoch = self._task_epoch_index.get(task_id)
             if record and failed_epoch is not None:
-                impacted.extend(
-                    self._fail_later_epochs_locked(
-                        record.workflow_id,
-                        failed_epoch,
-                        f"Blocked by failed task {task_id} in earlier epoch",
-                    )
+                blocked, blocked_returned = self._fail_later_epochs_locked(
+                    record.workflow_id,
+                    failed_epoch,
+                    f"Blocked by failed task {task_id} in earlier epoch",
                 )
+                impacted.extend(blocked)
+                returned += blocked_returned
 
-            self._persist_terminal_locked(task_id, *(dep_id for dep_id, _ in impacted))
+            self._commit_locked(task_id, *(dep_id for dep_id, _ in impacted), *returned)
             # The ledger snapshot writes last, after the task terminal records, so a
             # crash can only leave the ledger behind — never ahead — of durable task
             # state, which rehydration then reconciles.
@@ -3887,6 +3910,7 @@ class TaskRuntime:
         cancelled: list[str] = []
         cancelling: list[str] = []
         touched: list[str] = []
+        returned: list[str] = []
         interrupts: list[InterruptMessage] = []
         resident_invocation_ids: list[str] = []
         with self._cv:
@@ -3900,13 +3924,13 @@ class TaskRuntime:
             for task_id, record in workflow_tasks:
                 match record.status:
                     case TaskStatus.PENDING:
-                        self._cancel_unstarted_locked(record, reason)
+                        returned += self._cancel_in_place_locked(record, reason)
                         cancelled.append(task_id)
                         touched.append(task_id)
                     case TaskStatus.DISPATCHED if record.merged_parent_id:
-                        # A merged child settles its own cancellation; the batch it
-                        # rides in runs on for any sibling of another workflow.
-                        self._cancel_unstarted_locked(record, reason)
+                        # Cancel the child alone; its batch keeps running for siblings
+                        # from other workflows.
+                        returned += self._cancel_in_place_locked(record, reason)
                         cancelled.append(task_id)
                         touched.append(task_id)
                     case TaskStatus.DISPATCHED if record.assigned_worker:
@@ -3938,6 +3962,13 @@ class TaskRuntime:
                 records=self._records_locked(*touched),
                 cancelled=cancelled,
                 sched=self._sched_locked(workflow_id),
+            )
+            self._commit_locked(
+                *(
+                    child_id
+                    for child_id in returned
+                    if self._tasks[child_id].workflow_id != workflow_id
+                )
             )
             # Mirror the cancellation into the orchestration ledger so a v2 workflow's
             # work items settle CANCELLED in lockstep with its task records; the
@@ -3980,16 +4011,30 @@ class TaskRuntime:
         self._secret_vault.purge(workflow_id)
         return touched
 
-    def _cancel_unstarted_locked(self, record: TaskRecord, reason: str) -> None:
-        """Cancel a task that no dispatch of its own is running."""
-        task_id = record.task_id
-        if (parent_id := self._merge_parent_map.pop(task_id, None)) and task_id in (
-            siblings := self._merge_children_map.get(parent_id, [])
-        ):
-            siblings.remove(task_id)
-        record.status = TaskStatus.CANCELLED
+    def _cancel_in_place_locked(self, record: TaskRecord, reason: str) -> list[str]:
+        """Cancel a pending task or a merged child in place.
+
+        Returns any children merged into it, which go back to the queue.
+        """
         record.error = reason
-        record.finished_ts = time.time()
+        return self._mark_cancelled_locked(record, time.time())
+
+    def _mark_cancelled_locked(
+        self, record: TaskRecord, finished_ts: float
+    ) -> list[str]:
+        """Move a task to CANCELLED in memory, returning the children merged into it."""
+        task_id = record.task_id
+        if (parent_id := self._merge_parent_map.pop(task_id, None)) is not None:
+            if (siblings := self._merge_children_map.get(parent_id)) and (
+                task_id in siblings
+            ):
+                siblings.remove(task_id)
+            if (parent := self._tasks.get(parent_id)) and parent.merged_children:
+                parent.merged_children = [
+                    child for child in parent.merged_children if child != task_id
+                ] or None
+        record.status = TaskStatus.CANCELLED
+        record.finished_ts = finished_ts
         record.assigned_worker = None
         record.merged_children = None
         record.merged_parent_id = None
@@ -4000,7 +4045,7 @@ class TaskRuntime:
         self._remove_from_ready_locked(task_id)
         self._merge_bucket_remove(task_id)
         self._merge_key_by_task.pop(task_id, None)
-        self._return_merged_children_locked(
+        return self._return_merged_children_locked(
             self._merge_children_map.pop(task_id, []), unmerge=True
         )
 
@@ -4076,27 +4121,14 @@ class TaskRuntime:
         # A captured turn's group is meaningless once the episode settles cancelled.
         self._pending_facade_groups.pop(task_id, None)
         record.pending_facade_group = None
-        record.status = TaskStatus.CANCELLED
-        record.finished_ts = finished_ts
         if started_ts:
             record.started_ts = started_ts
-        record.merged_children = None
         if usage is not None:
             record.usages.append(usage)
-        # TODO(kaiitunnz): Handle usages for cancelled tasks
-        self._completed.discard(task_id)
-        self._failed.discard(task_id)
-        self._pending_deps.pop(task_id, None)
-        self._remove_from_ready_locked(task_id)
-        self._merge_bucket_remove(task_id)
-        self._merge_key_by_task.pop(task_id, None)
-        self._return_merged_children_locked(
-            self._merge_children_map.pop(task_id, []), unmerge=True
-        )
-        record.assigned_worker = None
+        returned = self._mark_cancelled_locked(record, finished_ts)
         # Persist the task terminal record first, then mirror the cancellation
         # into the ledger and snapshot last, so the ledger never leads task state.
-        self._persist_terminal_locked(task_id, sched=False)
+        self._commit_locked(task_id, *returned, sched=False)
         if (engine := self._engines.get(record.workflow_id)) is not None:
             advance = engine.on_cancelled(task_id)
             assert not (
@@ -4131,20 +4163,6 @@ class TaskRuntime:
         """
         with self._lock:
             return self._workflow_settlement_locked(workflow_id)
-
-    def merged_children_settled_by(
-        self, task_id: str, payload: dict[str, Any]
-    ) -> list[str]:
-        """The merged children a parent's success settles with results of their own."""
-        with self._cv:
-            record = self._tasks.get(task_id)
-            if record is None or record.status != TaskStatus.DISPATCHED:
-                return []
-            children = self._merge_children_map.get(task_id, [])
-        settled, _ = _partition_merged_children(
-            children, _reported_child_references(payload)
-        )
-        return settled
 
     def describe_task(self, task_id: str) -> TaskInfo | None:
         with self._lock:

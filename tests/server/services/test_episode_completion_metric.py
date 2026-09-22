@@ -141,7 +141,7 @@ def test_a_rerouted_facade_turn_bills_its_dispatch_as_in_flight() -> None:
     runtime.originate_facade_turn_group(task_id, _search_group(task_id))
     completion = HarnessResult(kind=HarnessResultKind.COMPLETION, value=None)
 
-    usages = runtime.mark_succeeded(
+    _, usages = runtime.mark_succeeded(
         task_id,
         "wkr-1",
         {

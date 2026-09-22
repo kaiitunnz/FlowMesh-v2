@@ -469,10 +469,7 @@ class EventMonitor:
                 # tally several times for one task.
                 if self._runtime.success_settles_task(event.task_id, payload):
                     self._metrics.record_task_event(event)
-                merged_children = self._runtime.merged_children_settled_by(
-                    event.task_id, payload
-                )
-                usages = self._runtime.mark_succeeded(
+                merged_children, usages = self._runtime.mark_succeeded(
                     event.task_id, event.worker_id, payload, event.ts
                 )
                 self._schedule_emit_usage(usages)
@@ -502,7 +499,7 @@ class EventMonitor:
                         payload=child_payload,
                         ts=event.ts,
                     )
-                    self._metrics.record_task_event(child_event, is_child=True)
+                    self._metrics.record_task_event(child_event)
                     self._close_task_log_stream(child_id)
                     self._finalizer.close_task_workflow(child_id)
                 if event.worker_id:

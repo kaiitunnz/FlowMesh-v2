@@ -97,8 +97,8 @@ class MetricsRecorder:
         elif isinstance(event, WorkerEvent):
             self.record_worker_event(event)
 
-    def record_task_event(self, event: TaskEvent, *, is_child: bool = False) -> None:
-        treat_as_child = is_child or self._is_child_task(event)
+    def record_task_event(self, event: TaskEvent) -> None:
+        treat_as_child = self._is_child_task(event)
         with self._lock:
             ev_type = event.type
             if ev_type == "TASK_SUCCEEDED":
