@@ -1,6 +1,4 @@
 import logging
-import tempfile
-from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -12,6 +10,7 @@ from server.task.runtime import TaskRuntime
 from server.task.v2 import PersistedV2Workflow
 from shared.harness import HarnessCapsule
 from shared.private_state import OwnerFence
+from tests.server.result_store import make_result_reader
 from tests.server.task.test_v2_orchestration import FakeRegistry, _WorkerRegistryStub
 from worker.executors.harness.scripted import ScriptedHarnessAdapter, ScriptedStep
 
@@ -60,7 +59,7 @@ def _runtime(vault: _RecordingVault, registry: FakeRegistry) -> TaskRuntime:
         cast(Any, registry),
         cast(Any, _WorkerRegistryStub()),
         OrchestrationConfig(),
-        Path(tempfile.gettempdir()),
+        make_result_reader(),
         logging.getLogger("v2-register-vaulting"),
         secret_vault=cast(Any, vault),
     )

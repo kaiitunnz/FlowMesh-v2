@@ -2,8 +2,6 @@
 
 import asyncio
 import logging
-import pathlib
-import tempfile
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -24,6 +22,7 @@ from server.task.v2.representations.plan import (
     ResidencyWarmth,
 )
 from server.task.v2.representations.template import LogicalWorkflowTemplate
+from tests.server.result_store import make_result_reader
 
 # Three fusible pure leaves feeding a resident model boundary. The middle one recovers
 # from a recorded output rather than by recomputation, and the conservative episode-cut
@@ -381,7 +380,7 @@ def _runtime(**knobs: str) -> TaskRuntime:
         cast(Any, _CapturingRegistry()),
         cast(Any, worker_stub),
         OrchestrationConfig(policy=config),
-        pathlib.Path(tempfile.gettempdir()),
+        make_result_reader(),
         logging.getLogger("builtin-lowering-policies-test"),
         secret_vault=cast(Any, _NoopSecretVault()),
         surface=build_policy_surface(config),

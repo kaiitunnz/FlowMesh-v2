@@ -1,8 +1,6 @@
 """Tests for the durable embodiment selection and its recovery fence."""
 
 import logging
-import tempfile
-from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -11,6 +9,7 @@ from server.config import OrchestrationConfig
 from server.task.runtime import TaskRuntime
 from shared.inference import InputResolutionBinding, UpstreamProvenance
 from shared.tasks.specs import InferenceEmbodimentKind
+from tests.server.result_store import make_result_reader
 
 from .test_v2_orchestration import (
     FakeRegistry,
@@ -44,7 +43,7 @@ def _runtime(registry: FakeRegistry) -> TaskRuntime:
         cast(Any, registry),
         cast(Any, _WorkerRegistryStub()),
         OrchestrationConfig(),
-        Path(tempfile.gettempdir()),
+        make_result_reader(),
         logging.getLogger("embodiment-test"),
         secret_vault=cast(Any, _NoopSecretVault()),
     )

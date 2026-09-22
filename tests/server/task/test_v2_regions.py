@@ -1,6 +1,4 @@
 import logging
-import tempfile
-from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -17,6 +15,7 @@ from server.task.v2 import (
 )
 from server.task.v2.compiler.agent_binding import AgentBindingDefaults
 from server.task.v2.representations.operators import LoopContextRegion, PortKind
+from tests.server.result_store import make_result_reader
 from tests.server.task.test_v2_orchestration import _NoopSecretVault
 
 REGIONS_WF = """
@@ -192,7 +191,7 @@ def _runtime() -> TaskRuntime:
         cast(Any, _CapturingRegistry()),
         cast(Any, worker_stub),
         OrchestrationConfig(agent_binding=AgentBindingConfig(default_backend="codex")),
-        Path(tempfile.gettempdir()),
+        make_result_reader(),
         logging.getLogger("v2-regions-test"),
         secret_vault=cast(Any, _NoopSecretVault()),
     )

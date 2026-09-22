@@ -1,6 +1,4 @@
 import logging
-import tempfile
-from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -9,6 +7,7 @@ from server.config import AgentBindingConfig, OrchestrationConfig
 from server.task.runtime import TaskRuntime
 from shared.private_state import OwnerFence
 from shared.tasks.specs import ModelBindingMode
+from tests.server.result_store import make_result_reader
 from tests.server.task.test_v2_orchestration import (
     FakeRegistry,
     _NoopSecretVault,
@@ -63,7 +62,7 @@ def _runtime() -> TaskRuntime:
         cast(Any, FakeRegistry()),
         cast(Any, _WorkerRegistryStub()),
         config,
-        Path(tempfile.gettempdir()),
+        make_result_reader(),
         logging.getLogger("v2-binding-dispatch"),
         secret_vault=cast(Any, _NoopSecretVault()),
     )

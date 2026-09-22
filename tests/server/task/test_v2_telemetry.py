@@ -9,9 +9,7 @@ would otherwise produce a tree that looks plausible while being silently wrong.
 
 import asyncio
 import logging
-import tempfile
 from dataclasses import replace
-from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -72,6 +70,7 @@ from shared.telemetry.semconv import (
     SPAN_OPERATOR,
 )
 from shared.utils.time import now_iso, parse_iso_datetime
+from tests.server.result_store import make_result_reader
 from tests.server.task.test_v2_orchestration import (
     FakeRegistry,
     _NoopSecretVault,
@@ -820,7 +819,7 @@ def test_the_workflow_span_starts_no_later_than_its_earliest_child() -> None:
         cast(Any, registry),
         cast(Any, _WorkerRegistryStub()),
         OrchestrationConfig(),
-        Path(tempfile.gettempdir()),
+        make_result_reader(),
         logging.getLogger("v2-telemetry-submit"),
         secret_vault=cast(Any, _NoopSecretVault()),
     )

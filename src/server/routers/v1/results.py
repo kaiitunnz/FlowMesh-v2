@@ -1,8 +1,10 @@
+import asyncio
 import gzip
-import json
+import io
 import logging
 import tarfile
 import tempfile
+import time
 from pathlib import Path
 
 from fastapi import (
@@ -15,16 +17,9 @@ from fastapi import (
     UploadFile,
     status,
 )
-from fastapi.responses import FileResponse
-from pydantic import ValidationError
+from fastapi.responses import FileResponse, Response
 
-from shared.schemas.result import (
-    AnyExecutorResult,
-    ResultEnvelope,
-    read_result,
-    result_file_path,
-    write_result,
-)
+from shared.schemas.result import RESULT_MEDIA_TYPE, AnyExecutorResult, result_file_path
 from shared.utils.manifest import ARTIFACTS_DIR, LOGS_DIR, RESULTS_NAME, sync_manifest
 
 from ...app_state import (
@@ -42,6 +37,7 @@ from ...hooks import ResourceAction, ResourceKind
 from ...schemas.common import PathResponse
 from ...services.monitoring import EventMonitor
 from ...task.models import TERMINAL_TASK_STATUSES
+from ...task.results import ResultUnreadable
 from ...task.runtime import TaskRuntime
 
 # Sections the bundle endpoint can include.
@@ -65,50 +61,6 @@ def _resolve_artifact_path(filename: str) -> Path:
     return Path(ARTIFACTS_DIR) / sanitized
 
 
-@router.post(
-    "",
-    summary="Submit a result",
-    description="Submit a task result payload.",
-    response_description="Submission status",
-)
-async def ingest_result(
-    envelope: ResultEnvelope,
-    principal: PrincipalContext = Depends(authenticate_connection),
-    runtime: TaskRuntime = Depends(get_runtime),
-    event_monitor: EventMonitor = Depends(get_event_monitor),
-    results_dir: Path = Depends(get_results_dir),
-    logger: logging.Logger = Depends(get_logger),
-) -> PathResponse:
-    await require_permission(
-        principal, ResourceKind.RESULT, None, ResourceAction.WRITE, logger
-    )
-    task_id = envelope.task_id.strip()
-    if not task_id:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="task_id is required"
-        )
-    envelope.task_id = task_id
-
-    try:
-        path = write_result(results_dir, envelope)
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to store result: {exc}",
-        ) from exc
-
-    expected_artifacts: list[str] = []
-    record = runtime.get_record(task_id)
-    if record:
-        expected_artifacts = record.task.spec.get_artifacts()
-    sync_manifest(path.parent, task_id, expected_artifacts)
-    runtime.retry_deferred_fanout(task_id)
-    pending_children = event_monitor.pop_pending_clones(task_id)
-    if pending_children:
-        event_monitor.mirror_task_results(task_id, pending_children)
-    return PathResponse(ok=True, path=str(path))
-
-
 @router.get(
     "/{task_id}",
     summary="Get a result",
@@ -118,7 +70,7 @@ async def ingest_result(
 async def get_result(
     task_id: str,
     principal: PrincipalContext = Depends(authenticate_connection),
-    results_dir: Path = Depends(get_results_dir),
+    runtime: TaskRuntime = Depends(get_runtime),
     logger: logging.Logger = Depends(get_logger),
 ) -> AnyExecutorResult:
     task_id = (task_id or "").strip()
@@ -130,30 +82,17 @@ async def get_result(
         principal, ResourceKind.RESULT, task_id, ResourceAction.READ, logger
     )
     try:
-        raw = read_result(results_dir, task_id)
-    except FileNotFoundError:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="result not found"
-        )
-    except OSError as exc:
+        envelope = await asyncio.to_thread(runtime.read_result, task_id)
+    except ResultUnreadable as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to read result: {exc}",
         ) from exc
-    try:
-        content = json.loads(raw)
-    except json.JSONDecodeError as exc:
+    if envelope is None:
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Result file is not valid JSON: {exc}",
-        ) from exc
-    try:
-        return ResultEnvelope.model_validate(content).result
-    except ValidationError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Result file does not match ResultEnvelope: {exc}",
-        ) from exc
+            status_code=status.HTTP_404_NOT_FOUND, detail="result not found"
+        )
+    return envelope.result
 
 
 @router.post(
@@ -166,6 +105,7 @@ async def upload_result_file(
     task_id: str,
     file: UploadFile = File(...),
     runtime: TaskRuntime = Depends(get_runtime),
+    event_monitor: EventMonitor = Depends(get_event_monitor),
     principal: PrincipalContext = Depends(authenticate_connection),
     results_dir: Path = Depends(get_results_dir),
     logger: logging.Logger = Depends(get_logger),
@@ -199,6 +139,8 @@ async def upload_result_file(
     if record:
         expected_artifacts = record.task.spec.get_artifacts()
     sync_manifest(base_dir, task_id, expected_artifacts)
+    if pending_children := event_monitor.pop_pending_clones(task_id):
+        event_monitor.mirror_task_results(task_id, pending_children)
     return PathResponse(ok=True, path=str(target_path))
 
 
@@ -213,9 +155,10 @@ async def download_result_file(
     task_id: str,
     filename: str,
     principal: PrincipalContext = Depends(authenticate_connection),
+    runtime: TaskRuntime = Depends(get_runtime),
     results_dir: Path = Depends(get_results_dir),
     logger: logging.Logger = Depends(get_logger),
-) -> FileResponse:
+) -> Response:
     await require_permission(
         principal, ResourceKind.RESULT, task_id, ResourceAction.READ, logger
     )
@@ -235,6 +178,11 @@ async def download_result_file(
         if len(sanitized.parts) != 1:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="artifact not found"
+            )
+        if sanitized.name == RESULTS_NAME:
+            return Response(
+                await _read_result_bytes(runtime, task_id),
+                media_type=RESULT_MEDIA_TYPE,
             )
         fallback = (base_dir / sanitized.name).resolve()
         try:
@@ -284,14 +232,26 @@ async def download_result_bundle(
         )
 
     base_dir = result_file_path(results_dir, task_id).parent
-    if not base_dir.exists() or not base_dir.is_dir():
+    has_dir = base_dir.is_dir()
+    try:
+        result = (
+            await asyncio.to_thread(runtime.read_result_bytes, task_id)
+            if "results" in sections
+            else None
+        )
+    except ResultUnreadable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to prepare result bundle: {exc}",
+        ) from exc
+    if result is None and not has_dir:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="result bundle not found"
         )
 
     try:
         bundle_path = _create_result_bundle_archive(
-            task_id, base_dir, sections=sections
+            task_id, base_dir, result, sections=sections
         )
     except Exception as exc:
         raise HTTPException(
@@ -361,6 +321,7 @@ def _resolve_bundle_sections(include: list[str]) -> tuple[str, ...]:
 def _create_result_bundle_archive(
     task_id: str,
     base_dir: Path,
+    result: bytes | None,
     sections: tuple[str, ...] = _BUNDLE_SECTIONS_DEFAULT,
 ) -> Path:
     with tempfile.NamedTemporaryFile(
@@ -376,6 +337,14 @@ def _create_result_bundle_archive(
             tarfile.open(fileobj=fileobj, mode="w") as archive,
         ):
             for section in sections:
+                if section == "results":
+                    if result is not None:
+                        info = tarfile.TarInfo(f"{task_id}/{RESULTS_NAME}")
+                        info.size = len(result)
+                        info.mode = 0o644
+                        info.mtime = int(time.time())
+                        archive.addfile(info, io.BytesIO(result))
+                    continue
                 candidate = _bundle_section_path(base_dir, section)
                 if candidate is None or not candidate.exists():
                     continue
@@ -388,13 +357,26 @@ def _create_result_bundle_archive(
 
 
 def _bundle_section_path(base_dir: Path, section: str) -> Path | None:
-    if section == "results":
-        return base_dir / RESULTS_NAME
     if section == "artifacts":
         return base_dir / ARTIFACTS_DIR
     if section == "logs":
         return base_dir / LOGS_DIR
     return None
+
+
+async def _read_result_bytes(runtime: TaskRuntime, task_id: str) -> bytes:
+    try:
+        result = await asyncio.to_thread(runtime.read_result_bytes, task_id)
+    except ResultUnreadable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to read result: {exc}",
+        ) from exc
+    if result is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="artifact not found"
+        )
+    return result
 
 
 def _cleanup_bundle_file(path: Path) -> None:

@@ -49,6 +49,7 @@ from .content import (
     StsScopedCredentialMinter,
     build_sts_client,
     ensure_bucket,
+    open_deployment_store,
 )
 from .dispatcher.factory import create_dispatcher
 from .hooks import register
@@ -87,6 +88,7 @@ from .startup import (
     start_relay_bridge_pump,
 )
 from .supervisor import WorkerSupervisor
+from .task.results import ResultReader
 from .task.runtime import TaskRuntime
 from .task.v2.policy import build_policy_surface
 from .telemetry import build_telemetry_store
@@ -224,7 +226,7 @@ if IS_ROOT_NODE:
         WORKFLOW_REGISTRY,
         WORKER_REGISTRY,
         config.orchestration,
-        RESULTS_DIR,
+        ResultReader(open_deployment_store(config.object_store)),
         logger,
         secret_vault=MODEL_SECRET_VAULT,
         surface=POLICY_SURFACE,
@@ -384,7 +386,6 @@ if IS_ROOT_NODE:
         config.dispatch,
         RUNTIME,
         WORKER_REGISTRY,
-        RESULTS_DIR,
         logger=logger,
         metrics_recorder=METRICS_RECORDER,
         resident_capacity_enabled=config.orchestration.resident.enabled,

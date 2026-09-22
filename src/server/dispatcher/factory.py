@@ -1,5 +1,4 @@
 import logging
-from pathlib import Path
 
 from server.telemetry.tracing import ControlPlaneTracer
 
@@ -21,7 +20,6 @@ def create_dispatcher(
     config: DispatchConfig,
     runtime: TaskRuntime,
     worker_registry: WorkerRegistry,
-    results_dir: Path,
     logger: logging.Logger,
     metrics_recorder: MetricsRecorder | None = None,
     resident_capacity_enabled: bool = False,
@@ -54,7 +52,6 @@ def create_dispatcher(
     return dispatcher_cls(
         runtime=runtime,
         worker_registry=worker_registry,
-        results_dir=results_dir,
         logger=logger,
         worker_selection_strategy=config.worker_selection,
         enable_context_reuse=config.enable_context_reuse,

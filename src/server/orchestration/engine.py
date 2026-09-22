@@ -696,11 +696,19 @@ class OrchestrationEngine:
         )
 
     @_ds_drive(ControlPlaneWindow.POST_START)
-    def on_succeeded(self, task_id: str, *, empty: bool = False) -> Advance:
+    def on_succeeded(
+        self,
+        task_id: str,
+        *,
+        empty: bool = False,
+        content: ContentReference | None = None,
+    ) -> Advance:
         """Settle a work item on success and release its successors.
 
         ``empty`` marks a conditional-skip settlement, resolving the declared output to
-        an explicit-empty publication rather than a value.
+        an explicit-empty publication rather than a value. ``content`` is the stored
+        result the settled value is bound to; it binds once, with the settlement, so a
+        later success for the same work item cannot re-point it.
         """
         wi = self._work_item_for_task(task_id)
         if wi is None or wi.status in TERMINAL_WORK_ITEM_STATUSES:
@@ -711,7 +719,11 @@ class OrchestrationEngine:
         value_ref = (
             ValueRef(kind="empty")
             if empty
-            else ValueRef(kind="legacy_task_result", legacy_task_id=wi.legacy_task_id)
+            else ValueRef(
+                kind="legacy_task_result",
+                legacy_task_id=wi.legacy_task_id,
+                content=content,
+            )
         )
         self._settle_attempt_terminal(wi, outcome)
         activation = self._activations[wi.activation_id]
@@ -726,6 +738,7 @@ class OrchestrationEngine:
             )
         wi.status = WorkItemStatus.SETTLED
         wi.outcome = outcome
+        wi.value_ref = value_ref
         self._emitter.emit_work_item(wi)
         self._emitter.emit_activation(wi.activation_id)
         self._private_state.release(wi.activation_id)
@@ -3233,6 +3246,23 @@ class OrchestrationEngine:
     def resolve_legacy_task(self, task_id: str) -> ResultPublication | None:
         """Resolve a legacy task id's induced output slot (compatibility adapter)."""
         return self.resolve_output(f"legacy:{task_id}")
+
+    def legacy_task_value(
+        self, task_id: str
+    ) -> tuple[PublicationOutcome, ValueRef | None] | None:
+        """The settled value a legacy task id reads as, or None while it is unsettled.
+
+        A task compiled from the source resolves its induced output slot. A task the
+        engine materialized at run time — a spawned child, a later loop iteration — has
+        no slot of its own, so it reads as the value its work item settled with. Either
+        way the value is the one bound at settlement and never re-pointed.
+        """
+        if (publication := self.resolve_legacy_task(task_id)) is not None:
+            return publication.outcome, publication.value_ref
+        wi = self._work_item_for_task(task_id)
+        if wi is None or wi.status is not WorkItemStatus.SETTLED or wi.outcome is None:
+            return None
+        return wi.outcome, wi.value_ref
 
     def failure_reason(self, task_id: str) -> str | None:
         """The recorded authority-denial reason for a task, when one settled it."""

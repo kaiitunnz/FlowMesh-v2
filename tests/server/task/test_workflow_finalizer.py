@@ -21,6 +21,7 @@ from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime
 from shared.harness import BoundaryEventKind
 from shared.utils.time import ts_to_iso
+from tests.server.result_store import make_result_reader
 from tests.server.services.test_workflow_span_close import (
     _RecordingWorkflowSpanEmitter,
 )
@@ -33,11 +34,11 @@ from tests.server.task.test_v2_orchestration import (
     AUTORESEARCH,
     FakeRegistry,
     _NoopSecretVault,
+    _planned,
     _register,
     _runtime,
     _worker,
     _WorkerRegistryStub,
-    _write_result,
 )
 from worker.executors.harness.scripted import ScriptedHarnessAdapter, ScriptedStep
 
@@ -478,17 +479,12 @@ def test_cancelling_a_workflow_closes_it() -> None:
     asyncio.run(run())
 
 
-def test_a_spawn_that_seals_with_no_children_closes_the_workflow(
-    tmp_path: Any,
-) -> None:
+def test_a_spawn_that_seals_with_no_children_closes_the_workflow() -> None:
     """Retiring a template drains the remaining set just as a terminal does.
 
     A producer whose result carries nothing leaves its spawn sealing with no children,
     and retiring the template drops the last entry the workflow was waiting on -- so
-    the workflow completes on a retire, with no task terminal behind it. Reached here
-    the way a multi-node deployment does: the producer's result lands out-of-band
-    through result ingest, after its own terminal was processed, and the re-driven
-    fan-out is what completes the workflow.
+    the workflow completes on a retire, with no task terminal behind it.
     """
 
     async def run() -> None:
@@ -497,7 +493,7 @@ def test_a_spawn_that_seals_with_no_children_closes_the_workflow(
             cast(Any, registry),
             cast(Any, _WorkerRegistryStub()),
             OrchestrationConfig(),
-            tmp_path,
+            make_result_reader(),
             logging.getLogger("test.finalizer.fanout"),
             secret_vault=cast(Any, _NoopSecretVault()),
         )
@@ -506,16 +502,8 @@ def test_a_spawn_that_seals_with_no_children_closes_the_workflow(
         planner = ids["planner"]
         finalizer, redis, emitter = _wired(runtime, registry, workflow_id)
 
-        # The producer settles before its result is readable here, so its fan-out
-        # defers and the template still holds the workflow open.
         runtime.mark_dispatched(planner, cast(Any, _worker()))
-        runtime.mark_succeeded(planner, "wkr-1", {}, _TS)
-        finalizer.drain()
-        assert f"workflow:{workflow_id}:logs:closed" not in redis.keys
-
-        # The result lands out-of-band and carries nothing to fan out.
-        _write_result(tmp_path, planner, [])
-        runtime.retry_deferred_fanout(planner)
+        runtime.mark_succeeded(planner, "wkr-1", _planned(runtime, planner, []), _TS)
         finalizer.drain()
 
         assert registry.remaining_of(workflow_id) == set()

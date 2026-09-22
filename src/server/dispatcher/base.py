@@ -1,6 +1,5 @@
 import copy
 import datetime
-import json
 import logging
 import time
 from pathlib import Path
@@ -15,8 +14,6 @@ from shared.schemas.event import TaskEvent
 from shared.schemas.result import (
     BaseExecutorResult,
     ResultEnvelope,
-    result_file_path,
-    write_result,
 )
 from shared.tasks import (
     MergedChildTaskStrict,
@@ -41,6 +38,7 @@ from ..registries.worker import Worker, WorkerRegistry
 from ..services.metrics import MetricsRecorder
 from ..task.metadata import extract_model_dataset_names
 from ..task.models import TaskRecord, TaskStatus
+from ..task.results import ResultUnreadable
 from ..task.runtime import TaskRuntime
 from ..task.v2.representations.plan import InferenceEmbodimentMenu
 from ..utils.time import now_iso
@@ -62,6 +60,10 @@ class StageReferenceNotReady(Exception):
     """Raised when a task references a stage whose artifacts are not yet available."""
 
 
+class StageResultMissing(ValueError):
+    """Raised when a settled stage a task references has no result to read."""
+
+
 class Dispatcher:
     """Handles FCFS task dispatching via Redis pub/sub."""
 
@@ -69,7 +71,6 @@ class Dispatcher:
         self,
         runtime: TaskRuntime,
         worker_registry: WorkerRegistry,
-        results_dir: Path,
         logger: logging.Logger,
         worker_selection_strategy: str = DEFAULT_WORKER_SELECTION,
         enable_context_reuse: bool = True,
@@ -91,7 +92,6 @@ class Dispatcher:
         self._worker_registry = worker_registry
         self._content_access = content_access
         self._logger = logger
-        self._results_dir = Path(results_dir)
         self._worker_selection_strategy = worker_selection_strategy
         self._context_reuse_enabled = enable_context_reuse
         self._task_merge_enabled = enable_task_merge
@@ -619,6 +619,12 @@ class Dispatcher:
                 task_id, reason="stage_reference_pending", count_retry=False
             )
             return False
+        except ResultUnreadable as exc:
+            self._logger.warning(
+                "Task %s cannot read a referenced stage result: %s", task_id, exc
+            )
+            self.requeue_task(task_id, reason="stage_result_unreadable")
+            return False
         except ValidationError as exc:
             self._runtime.release_merge(task_id)
             self.fail_task(
@@ -686,6 +692,15 @@ class Dispatcher:
                         task_id, reason="stage_reference_pending", count_retry=False
                     )
                     return False
+                except ResultUnreadable as exc:
+                    self._logger.warning(
+                        "Merged child %s cannot read a referenced stage result: %s",
+                        child_id,
+                        exc,
+                    )
+                    self._runtime.release_merge(task_id)
+                    self.requeue_task(task_id, reason="stage_result_unreadable")
+                    return False
                 except Exception as exc:
                     self._logger.error(
                         "Failed to resolve stage references for merged child %s: %s",
@@ -719,6 +734,17 @@ class Dispatcher:
                     return True
 
         # 7. Build WorkerTaskMessage
+        try:
+            agent_episode = self._runtime.agent_episode_dispatch(
+                task_id,
+                OwnerFence(worker_id=worker.id, incarnation=worker.incarnation),
+            )
+        except ResultUnreadable as exc:
+            self._logger.warning(
+                "Task %s cannot read an accepted input result: %s", task_id, exc
+            )
+            self.requeue_task(task_id, reason="agent_input_unreadable")
+            return False
         message = WorkerTaskMessage(
             task_id=task_id,
             workflow_id=record.workflow_id,
@@ -735,10 +761,7 @@ class Dispatcher:
             upstream_task_ids=self._resolve_upstream_task_ids(
                 record, rendered_task.spec
             ),
-            agent_episode=self._runtime.agent_episode_dispatch(
-                task_id,
-                OwnerFence(worker_id=worker.id, incarnation=worker.incarnation),
-            ),
+            agent_episode=agent_episode,
             service_episode=self._runtime.service_episode_dispatch(task_id),
             declared_contract=self._runtime.declared_contract(task_id),
             recorded_resolution=self._runtime.input_resolution_binding(task_id),
@@ -1307,13 +1330,11 @@ class Dispatcher:
                 continue
             try:
                 envelope = self._load_stage_result(record.task_id)
-            except StageReferenceNotReady as exc:
-                raise exc
-            except Exception as exc:
-                self._logger.debug(
-                    "Failed to load upstream result for %s (%s): %s",
+            except StageResultMissing as exc:
+                self._logger.warning(
+                    "Task %s receives no upstream result for %s: %s",
+                    current_task_id,
                     name,
-                    record.task_id,
                     exc,
                 )
                 continue
@@ -1349,13 +1370,10 @@ class Dispatcher:
         return resolved or None
 
     def _load_stage_result(self, stage_task_id: str) -> ResultEnvelope:
-        path = result_file_path(self._results_dir, stage_task_id)
-        if not path.exists():
-            raise StageReferenceNotReady(
-                f"Result for task {stage_task_id} not found at {path}"
-            )
-        content = json.loads(path.read_text(encoding="utf-8"))
-        return ResultEnvelope.model_validate(content)
+        envelope = self._runtime.read_result(stage_task_id)
+        if envelope is None:
+            raise StageResultMissing(f"task {stage_task_id} has no bound result")
+        return envelope
 
     def _dig_result_path(self, result: BaseExecutorResult, parts: list[str]) -> Any:
         current: Any = result
@@ -1430,19 +1448,6 @@ class Dispatcher:
                 condition.equals,
                 actual_value,
             )
-            skip_envelope = ResultEnvelope(
-                task_id=task_id,
-                result=BaseExecutorResult(),
-                metadata={
-                    "skipped": True,
-                    "reason": "condition_not_met",
-                    "condition_node": condition.node,
-                    "condition_field": condition.field,
-                    "condition_expected": condition.equals,
-                    "condition_actual": str(actual_value),
-                },
-            )
-            write_result(self._results_dir, skip_envelope)
             self._runtime.release_merge(task_id)
             ts = now_iso()
             self._runtime.mark_succeeded(
@@ -1450,7 +1455,14 @@ class Dispatcher:
                 worker_id=None,
                 payload={"finished_at": ts, "started_at": ts},
                 ts=ts,
-                empty=True,
+                skip={
+                    "skipped": True,
+                    "reason": "condition_not_met",
+                    "condition_node": condition.node,
+                    "condition_field": condition.field,
+                    "condition_expected": condition.equals,
+                    "condition_actual": str(actual_value),
+                },
             )
             return True
         except StageReferenceNotReady as exc:
@@ -1463,6 +1475,15 @@ class Dispatcher:
             self.requeue_task(
                 task_id, reason="condition_upstream_pending", count_retry=False
             )
+            return True
+        except ResultUnreadable as exc:
+            self._logger.warning(
+                "Task %s condition: upstream %s result unreadable: %s",
+                task_id,
+                condition.node,
+                exc,
+            )
+            self.requeue_task(task_id, reason="condition_upstream_unreadable")
             return True
         except Exception as exc:
             self._logger.error(

@@ -1,9 +1,7 @@
 """Shared helpers for dispatcher tests."""
 
 import logging
-import tempfile
 from collections.abc import Sequence
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest import mock
@@ -75,7 +73,6 @@ def make_capturing_dispatcher(
     return CapturingDispatcher(
         runtime=runtime if runtime is not None else mock.Mock(),
         worker_registry=registry,
-        results_dir=Path(tempfile.gettempdir()),
         logger=logging.getLogger("dispatcher-test"),
         no_worker_grace_sec=grace_sec,
         **kwargs,

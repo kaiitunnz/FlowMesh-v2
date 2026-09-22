@@ -1,8 +1,6 @@
 """Tests for resolving a menu node's embodiment inside the dispatch loop."""
 
 import logging
-import tempfile
-from pathlib import Path
 from typing import Any, cast
 from unittest import mock
 
@@ -21,6 +19,7 @@ from tests.server.dispatcher.helpers import (
     CapturingDispatcher,
     make_capturing_dispatcher,
 )
+from tests.server.result_store import make_result_reader
 from tests.server.task.test_v2_embodiment_fence import LOCAL_ELIGIBLE, _runtime
 from tests.server.task.test_v2_orchestration import FakeRegistry, _register, _worker
 
@@ -196,7 +195,7 @@ async def test_a_task_without_a_menu_passes_straight_through() -> None:
         cast(Any, FakeRegistry()),
         cast(Any, None),
         OrchestrationConfig(),
-        Path(tempfile.gettempdir()),
+        make_result_reader(),
         logging.getLogger("no-menu"),
         secret_vault=cast(Any, None),
     )

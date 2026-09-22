@@ -125,6 +125,8 @@ class ValueRef(BaseModel):
 
     kind: str  # "legacy_task_result" | "inline" | "empty" | "join_result" | "model_ref"
     legacy_task_id: str | None = None
+    # the stored result envelope a settled legacy task result is bound to
+    content: ContentReference | None = None
     collection_key: str | None = None  # element selector into a producer collection
     literal: str | None = None  # a bounded, immutable inline child-init value
     model_ref: ModelRef | None = None
@@ -404,7 +406,7 @@ class WorkItem(BaseModel):
     legacy_task_id: str
     status: WorkItemStatus = WorkItemStatus.BLOCKED
     outcome: PublicationOutcome | None = None
-    value_ref: ValueRef | None = None  # a settled child's value, for a join winner
+    value_ref: ValueRef | None = None  # the value this work item settled with
     invocation_id: str | None = None
     effect_class: EffectClass = EffectClass.PURE
     recovery: RecoveryClass = RecoveryClass.RECOMPUTE

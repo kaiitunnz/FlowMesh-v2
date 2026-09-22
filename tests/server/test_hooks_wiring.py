@@ -7,11 +7,9 @@ disconnected from a call site.
 """
 
 import logging
-import tempfile
 from collections.abc import Iterable, Iterator, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
-from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock
 
@@ -52,6 +50,7 @@ from server.task.models import TaskRecord
 from server.task.runtime import TaskRuntime
 from shared.tasks import TaskEnvelopeTemplate
 from shared.tasks.worker_message import WorkerStatus
+from tests.server.result_store import make_result_reader
 from tests.server.task.test_v2_orchestration import _NoopSecretVault
 
 
@@ -540,7 +539,7 @@ def _make_runtime_with_record(task_id: str) -> tuple[TaskRuntime, TaskRecord]:
         workflow_registry=MagicMock(),
         worker_registry=MagicMock(),
         orchestration=OrchestrationConfig(),
-        results_dir=Path(tempfile.gettempdir()),
+        results=make_result_reader(),
         logger=logging.getLogger("test.supplier"),
         secret_vault=cast(Any, _NoopSecretVault()),
     )

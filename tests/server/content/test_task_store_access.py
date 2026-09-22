@@ -7,9 +7,7 @@ dispatcher's doing, so both are asserted where the dispatch happens.
 
 import asyncio
 import logging
-import tempfile
 import time
-from pathlib import Path
 from typing import Any, cast
 from unittest import mock
 
@@ -24,6 +22,7 @@ from shared.content import (
 )
 from shared.tasks.worker_message import WorkerTaskMessage
 from tests.server.dispatcher.helpers import CapturingDispatcher
+from tests.server.result_store import make_result_reader
 from tests.server.task.test_v2_orchestration import FakeRegistry, _NoopSecretVault
 
 _ORG = "org-acme"
@@ -81,7 +80,7 @@ def _runtime() -> TaskRuntime:
         cast(Any, FakeRegistry()),
         cast(Any, mock.Mock()),
         OrchestrationConfig(),
-        Path(tempfile.gettempdir()),
+        make_result_reader(),
         logging.getLogger("content-scope-test"),
         secret_vault=cast(Any, _NoopSecretVault()),
     )
@@ -102,7 +101,6 @@ def _dispatch(minter: _RecordingMinter) -> mock.Mock:
     CapturingDispatcher(
         runtime=runtime,
         worker_registry=registry,
-        results_dir=Path(tempfile.gettempdir()),
         logger=logging.getLogger("content-scope-dispatch"),
         content_access=broker,
     ).dispatch_once(results[0].task_id)
