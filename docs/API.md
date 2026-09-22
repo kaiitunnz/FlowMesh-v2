@@ -53,14 +53,12 @@ self-authenticate the same way, sending `FLOWMESH_API_KEY` as the bearer.
 
 ## Content
 
-Content-addressed, scope-isolated object store a worker writes and hydrates. Every call acts in one authorization scope: the caller's own, or the scope it names when its principal is permitted to act for others.
+The outcome-finalization index: the binding from a fabric idempotency key to the content it materialized, so a re-driven producer resolves its first materialization instead of producing again. Content bytes never cross the server — a worker reads and writes them directly in the shared content store. The binding lands in the scope control assigned the key's work; a `scope` the caller names must match it.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| PUT | `/api/v1/content?idem={idm}&scope={scope}` | Materialize outcome bytes; returns the `OutcomeManifest`. |
-| PUT | `/api/v1/content/objects?scope={scope}` | Write an immutable object; returns its `ContentReference`. |
-| GET | `/api/v1/content?idem={idm}&scope={scope}` | Resolve the manifest already materialized under an idempotency key. |
-| GET | `/api/v1/content/{digest}?scope={scope}` | Hydrate content by digest. |
+| PUT | `/api/v1/content/finalizations?idem={idm}&scope={scope}` | Bind the `ContentReference` in the body to an idempotency key; returns the `OutcomeManifest`. |
+| GET | `/api/v1/content/finalizations?idem={idm}&scope={scope}` | Resolve the `OutcomeManifest` already bound to an idempotency key. |
 
 ## Traces
 
