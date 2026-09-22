@@ -9,6 +9,7 @@ from typing import Any, cast
 import pytest
 
 from server.config import OrchestrationConfig
+from server.dispatcher.base import Dispatcher
 from server.registries.workflow import PersistedTask, WorkflowSched
 from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime
@@ -429,6 +430,59 @@ async def test_a_merge_planned_while_the_store_is_down_returns_its_siblings() ->
         assert runtime._tasks[child].status == TaskStatus.PENDING
         assert runtime._tasks[child].merged_parent_id is None
     assert {_next(runtime), _next(runtime), _next(runtime)} == set(t.values())
+
+
+@pytest.mark.anyio
+async def test_a_child_the_dispatch_cannot_render_leaves_the_merge() -> None:
+    registry = _Registry()
+    runtime = _runtime(registry)
+    ids = await _dispatch_merged(runtime, dispatch=False)
+    a, b, c = ids["a"], ids["b"], ids["c"]
+
+    def _resolve(task_id: str, task: Any, record: Any) -> Any:
+        if task_id == c:
+            raise ValueError("bad child input")
+        return task
+
+    dispatcher = cast(
+        Dispatcher,
+        SimpleNamespace(
+            _runtime=runtime,
+            _logger=logging.getLogger("task-merge"),
+            _resolve_stage_references=_resolve,
+        ),
+    )
+    rendered = Dispatcher._render_merged_children(dispatcher, a, runtime._tasks[a])
+
+    assert [child.task_id for child in rendered or []] == [b]
+    assert runtime._tasks[a].merged_children == [b]
+    _assert_returned(runtime, registry, c)
+
+
+@pytest.mark.anyio
+async def test_a_child_not_ready_yet_leaves_the_merge_still_mergeable() -> None:
+    runtime = _runtime(_Registry())
+    ids = await _dispatch_merged(runtime, dispatch=False)
+
+    runtime.release_merged_child(ids["a"], ids["c"], unmerge=False)
+
+    record = runtime._tasks[ids["c"]]
+    assert record.status == TaskStatus.PENDING
+    assert record.merge_key is not None
+    assert runtime._tasks[ids["a"]].merged_children == [ids["b"]]
+
+
+@pytest.mark.anyio
+async def test_releasing_a_child_no_longer_merged_leaves_it_alone() -> None:
+    runtime = _runtime(_Registry())
+    ids = await _dispatch_merged(runtime, dispatch=False)
+    runtime.release_merged_child(ids["a"], ids["c"], unmerge=True)
+    assert _next(runtime) == ids["c"]
+    runtime.mark_dispatched(ids["c"], _VLLM_WORKER)
+
+    runtime.release_merged_child(ids["a"], ids["c"], unmerge=True)
+
+    assert runtime._tasks[ids["c"]].status == TaskStatus.DISPATCHED
 
 
 @pytest.mark.anyio

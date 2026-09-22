@@ -594,21 +594,19 @@ class Dispatcher:
             return False
 
         # Plan task merge: coalesce sibling merge candidates onto this worker
-        merged_children: list[str] = []
         if (
             self._task_merge_enabled
             and self._task_merge_max_batch_size > 1
             and not preparing
-        ):
-            merged_children = self._runtime.plan_merge(
-                task_id, self._task_merge_max_batch_size, worker
-            )
-            if merged_children:
-                self._logger.debug(
-                    "Coalesced task %s with siblings %s",
-                    task_id,
-                    ", ".join(merged_children),
+            and (
+                merged := self._runtime.plan_merge(
+                    task_id, self._task_merge_max_batch_size, worker
                 )
+            )
+        ):
+            self._logger.debug(
+                "Coalesced task %s with siblings %s", task_id, ", ".join(merged)
+            )
 
         # 6. Resolve stage references
         try:
@@ -659,86 +657,7 @@ class Dispatcher:
         if self._evaluate_condition_skip(task_id, rendered_task, record):
             return True
 
-        # Resolve merged-child rendered payloads
-        rendered_children: list[MergedChildTaskStrict] | None = None
-        if record.merged_children:
-            rendered_children = []
-            for child_id in record.merged_children:
-                if not child_id:
-                    self._runtime.release_merge(task_id)
-                    self.fail_task(
-                        task_id,
-                        "merged_child_missing_task_id",
-                        payload={"error": "Merged child entry missing task_id"},
-                    )
-                    return True
-                child_record = self._runtime.get_record(child_id)
-                if not child_record:
-                    self._runtime.release_merge(task_id)
-                    self.fail_task(
-                        task_id,
-                        "merged_child_missing_record",
-                        payload={"error": f"Merged child record missing: {child_id}"},
-                    )
-                    return True
-                try:
-                    resolved_child_task = self._resolve_stage_references(
-                        child_id, child_record.task, child_record
-                    )
-                except StageReferenceNotReady as exc:
-                    self._logger.debug(
-                        "Merged child %s waiting on stage artifacts: %s",
-                        child_id,
-                        exc,
-                    )
-                    self._runtime.release_merge(task_id)
-                    self.requeue_task(
-                        task_id, reason="stage_reference_pending", count_retry=False
-                    )
-                    return False
-                except ResultUnavailable as exc:
-                    self._logger.warning(
-                        "Merged child %s cannot reach a referenced stage result "
-                        "yet: %s",
-                        child_id,
-                        exc,
-                    )
-                    self._runtime.release_merge(task_id)
-                    self.requeue_task(
-                        task_id, reason="stage_result_unavailable", count_retry=False
-                    )
-                    return False
-                except Exception as exc:
-                    self._logger.error(
-                        "Failed to resolve stage references for merged child %s: %s",
-                        child_id,
-                        exc,
-                    )
-                    self._runtime.release_merge(task_id)
-                    self.fail_task(
-                        task_id,
-                        f"Failed to resolve merged child {child_id}: {exc}",
-                        payload={"error": str(exc)},
-                    )
-                    return True
-                try:
-                    rendered_children.append(
-                        MergedChildTaskStrict(
-                            task_id=child_id,
-                            owner_id=child_record.owner_id,
-                            workflow_id=child_record.workflow_id,
-                            spec=resolved_child_task.spec,
-                            metadata=resolved_child_task.metadata,
-                        )
-                    )
-                except ValidationError as exc:
-                    self._runtime.release_merge(task_id)
-                    self.fail_task(
-                        task_id,
-                        "merged_child_schema_validation_failed",
-                        payload={"error": str(exc), "child_task_id": child_id},
-                    )
-                    return True
+        rendered_children = self._render_merged_children(task_id, record)
 
         # 7. Build WorkerTaskMessage
         try:
@@ -826,16 +745,13 @@ class Dispatcher:
         # 9. Mark dispatched
         record.no_dispatch_since = None
         self._runtime.mark_dispatched(task_id, worker, input_preparation=preparing)
-        if merged_children:
-            try:
-                self._logger.info(
-                    "[TaskMerge] parent=%s merged_children=%d -> %s",
-                    task_id,
-                    len(merged_children),
-                    ", ".join(merged_children),
-                )
-            except Exception:
-                pass
+        if rendered_children:
+            self._logger.info(
+                "[TaskMerge] parent=%s merged_children=%d -> %s",
+                task_id,
+                len(rendered_children),
+                ", ".join(child.task_id for child in rendered_children),
+            )
         try:
             self._worker_registry.update_worker_status(worker.id, WorkerStatus.BUSY)
         except Exception as exc:
@@ -905,6 +821,54 @@ class Dispatcher:
                 self._runtime.requeue(task_id, front=True)
             except Exception:
                 self._logger.exception("In-memory requeue of %s failed", task_id)
+
+    def _render_merged_children(
+        self, task_id: str, record: TaskRecord
+    ) -> list[MergedChildTaskStrict] | None:
+        """Render the children merged into a dispatch.
+
+        A child that cannot be rendered leaves the merge rather than failing the
+        dispatch: one that is not ready yet returns to the queue still mergeable, and
+        one whose own input is at fault returns to run alone and settle its own error.
+        """
+        rendered: list[MergedChildTaskStrict] = []
+        for child_id in list(record.merged_children or []):
+            child_record = self._runtime.get_record(child_id)
+            if child_record is None:
+                self._logger.warning(
+                    "Merged child %s of %s has no record; dropping it",
+                    child_id,
+                    task_id,
+                )
+                self._runtime.release_merged_child(task_id, child_id, unmerge=True)
+                continue
+            try:
+                resolved = self._resolve_stage_references(
+                    child_id, child_record.task, child_record
+                )
+                rendered.append(
+                    MergedChildTaskStrict(
+                        task_id=child_id,
+                        owner_id=child_record.owner_id,
+                        workflow_id=child_record.workflow_id,
+                        spec=resolved.spec,
+                        metadata=resolved.metadata,
+                    )
+                )
+            except (StageReferenceNotReady, ResultUnavailable) as exc:
+                self._logger.debug(
+                    "Merged child %s of %s is not ready yet: %s", child_id, task_id, exc
+                )
+                self._runtime.release_merged_child(task_id, child_id, unmerge=False)
+            except Exception as exc:
+                self._logger.warning(
+                    "Merged child %s of %s cannot be rendered; it runs alone: %s",
+                    child_id,
+                    task_id,
+                    exc,
+                )
+                self._runtime.release_merged_child(task_id, child_id, unmerge=True)
+        return rendered or None
 
     def requeue_task(
         self,
