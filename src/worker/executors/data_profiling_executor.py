@@ -29,9 +29,9 @@ class DataProfilingExecutor(DataMixin, Executor):
 
     def run(self, task: ExecutorTask, out_dir: Path) -> DataProfilingResult:
         spec = self.require_spec(task, DataProfilingSpecStrict)
-        return self._run_single_profile(spec, task.task_id)
+        return self._profile(spec, task.task_id)
 
-    def _run_single_profile(
+    def _profile(
         self, spec: DataProfilingSpecStrict, task_id: str
     ) -> DataProfilingResult:
         data_cfg = spec.data
