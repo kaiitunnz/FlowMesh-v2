@@ -14,6 +14,7 @@ from shared.inference import PROJECTION_DROPS, CanonicalInferenceRequest
 from shared.schemas.result import BaseExecutorResult
 from shared.schemas.result.catalog import InferenceResult
 from shared.schemas.result.payloads import GenerationUsage, InferenceItem
+from shared.tasks.executor_key import ExecutorKey
 from shared.tasks.task_type import TaskType
 from tests.worker.factories import make_worker_hardware, make_worker_task_message
 from worker.executors.base_executor import Executor
@@ -70,7 +71,7 @@ def _stored(
         task_stream=[msg],
         results_dir=tmp_path,
         hardware=make_worker_hardware(),
-        executors={"inference": executor, "default": executor},
+        executors={ExecutorKey.VLLM: executor, ExecutorKey.DEFAULT: executor},
         default_executor=executor,
         logger=MagicMock(),
     )

@@ -21,7 +21,7 @@ def _import_executor(name: str, module: str) -> type[Executor] | None:
     return None
 
 
-EXECUTOR_MODULES: dict[str, tuple[str, str]] = {
+EXECUTOR_MODULES: dict[ExecutorKey, tuple[str, str]] = {
     ExecutorKey.VLLM: ("VLLMExecutor", ".vllm_executor"),
     ExecutorKey.VLLM_LORA: ("VLLMLoRAExecutor", ".vllm_lora_executor"),
     ExecutorKey.VLLM_EMBEDDING: ("VLLMEmbeddingExecutor", ".vllm_embedding_executor"),
@@ -64,11 +64,11 @@ EXECUTOR_MODULES: dict[str, tuple[str, str]] = {
 }
 
 
-class ExecutorRegistry(Mapping[str, type[Executor] | None]):
+class ExecutorRegistry(Mapping[ExecutorKey, type[Executor] | None]):
     def __init__(self) -> None:
-        self._executors: dict[str, type[Executor] | None] = {}
+        self._executors: dict[ExecutorKey, type[Executor] | None] = {}
 
-    def __getitem__(self, key: str) -> type[Executor] | None:
+    def __getitem__(self, key: ExecutorKey) -> type[Executor] | None:
         if key in self._executors:
             return self._executors[key]
         if key not in EXECUTOR_MODULES:
@@ -78,7 +78,7 @@ class ExecutorRegistry(Mapping[str, type[Executor] | None]):
         self._executors[key] = executor
         return executor
 
-    def __iter__(self) -> Iterator[str]:
+    def __iter__(self) -> Iterator[ExecutorKey]:
         return iter(EXECUTOR_MODULES)
 
     def __len__(self) -> int:
@@ -89,10 +89,12 @@ EXECUTOR_REGISTRY = ExecutorRegistry()
 
 
 @overload
-def get_executor_class_name[T](key: str, default: T) -> str | T: ...
+def get_executor_class_name[T](key: ExecutorKey, default: T) -> str | T: ...
 @overload
-def get_executor_class_name(key: str, default: None = None) -> str | None: ...
-def get_executor_class_name[T](key: str, default: T | None = None) -> str | T | None:
+def get_executor_class_name(key: ExecutorKey, default: None = None) -> str | None: ...
+def get_executor_class_name[T](
+    key: ExecutorKey, default: T | None = None
+) -> str | T | None:
     return mod[0] if (mod := EXECUTOR_MODULES.get(key)) else default
 
 

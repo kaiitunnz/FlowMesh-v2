@@ -1,10 +1,11 @@
 """A task spec resolves to the executor a worker runs it on."""
 
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
+from shared.schemas.worker import WorkerCapabilities
 from shared.tasks.executor_key import ExecutorKey, resolve_executor_key
 from shared.tasks.specs import (
     EmbeddingSpecStrict,
@@ -15,6 +16,11 @@ from shared.tasks.task_type import TaskType
 from worker.executors import EXECUTOR_MODULES
 
 _MODEL: dict[str, Any] = {"source": {"identifier": "Qwen/Qwen3-0.6B"}}
+
+
+def _typed(task_type: TaskType) -> Any:
+    """A spec standing in for any task type the resolver decides by type alone."""
+    return SimpleNamespace(taskType=task_type)
 
 
 def _inference(**fields: Any) -> InferenceSpecStrict:
@@ -64,13 +70,23 @@ def test_an_embedding_spec_resolves_by_its_vllm_config() -> None:
     assert resolve_executor_key(plain) is ExecutorKey.DEFAULT
 
 
-def test_every_executor_key_names_a_registered_executor() -> None:
-    assert set(EXECUTOR_MODULES) == set(ExecutorKey)
+def test_the_remaining_task_types_resolve_by_their_own_executor() -> None:
+    assert resolve_executor_key(_typed(TaskType.SERVE)) is ExecutorKey.VLLM_SERVE
+    assert resolve_executor_key(_typed(TaskType.DIFFUSION)) is ExecutorKey.DIFFUSERS
+    assert resolve_executor_key(_typed(TaskType.AGENT)) is ExecutorKey.AGENT_EPISODE
+    assert resolve_executor_key(_typed(TaskType.RAG)) is ExecutorKey.RAG
+
+
+def test_a_worker_that_advertises_no_batching_executor_batches_none() -> None:
+    caps = WorkerCapabilities.model_validate(
+        {"supported_task_types": [TaskType.INFERENCE]}
+    )
+
+    assert caps.merge_batching_executors == frozenset()
 
 
 def test_every_task_type_resolves_to_a_registered_executor() -> None:
     for task_type in TaskType:
         if task_type in {TaskType.INFERENCE, TaskType.EMBEDDING}:
             continue
-        key = resolve_executor_key(cast(Any, SimpleNamespace(taskType=task_type)))
-        assert key in EXECUTOR_MODULES
+        assert resolve_executor_key(_typed(task_type)) in EXECUTOR_MODULES

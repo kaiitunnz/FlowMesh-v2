@@ -82,7 +82,7 @@ def initialize_executors(
     hardware: WorkerHardware,
     logger: logging.Logger,
     lifecycle: Lifecycle,
-    registry: Mapping[str, type[Executor] | None] | None = None,
+    registry: Mapping[ExecutorKey, type[Executor] | None] | None = None,
     import_errors: dict[str, str] | None = None,
     cuda_available: bool | None = None,
     enable_mp_executors: bool = True,
@@ -132,7 +132,7 @@ def initialize_executors(
             logger.warning("Failed to initialize executor %s: %s", key, exc)
             return None
 
-    executors: dict[str, Executor] = {}
+    executors: dict[ExecutorKey, Executor] = {}
     default_executor = init_executor(ExecutorKey.DEFAULT)
     if default_executor:
         executors[ExecutorKey.DEFAULT] = default_executor
@@ -195,8 +195,8 @@ def initialize_executors(
 
 
 def build_capabilities(
-    executors: dict[str, Executor],
-    registry: Mapping[str, type[Executor] | None] | None = None,
+    executors: dict[ExecutorKey, Executor],
+    registry: Mapping[ExecutorKey, type[Executor] | None] | None = None,
     resident_listener_port: int = 0,
 ) -> WorkerCapabilities:
     registry = registry or EXECUTOR_REGISTRY
@@ -206,9 +206,7 @@ def build_capabilities(
             *(cls.supported_task_types for cls in classes.values())
         ),
         merge_batching_executors=frozenset(
-            ExecutorKey(key)
-            for key, cls in classes.items()
-            if cls.batches_merged_children
+            key for key, cls in classes.items() if cls.batches_merged_children
         ),
         resident_listener_port=resident_listener_port,
     )

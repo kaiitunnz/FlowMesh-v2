@@ -91,7 +91,7 @@ class Runner:
         task_stream: Iterable[WorkerTaskMessage],
         results_dir: Path,
         hardware: WorkerHardware,
-        executors: dict[str, Executor],
+        executors: dict[ExecutorKey, Executor],
         default_executor: Executor,
         logger: logging.Logger,
         executor_idle_cleanup_sec: float | None = None,

@@ -1,5 +1,6 @@
-"""Guard tests: serve tasks must route to the vllm_serve executor, not default."""
+"""The serve executor is registered under its key and services serve tasks alone."""
 
+from shared.tasks.executor_key import ExecutorKey
 from shared.tasks.task_type import TaskType
 from worker.executors import EXECUTOR_REGISTRY
 from worker.executors.vllm_serve_executor import VLLMServeExecutor
@@ -10,7 +11,7 @@ class TestServeRoutingViaRegistry:
         assert "vllm_serve" in EXECUTOR_REGISTRY
 
     def test_vllm_serve_executor_handles_serve_task_type(self) -> None:
-        cls = EXECUTOR_REGISTRY.get("vllm_serve")
+        cls = EXECUTOR_REGISTRY.get(ExecutorKey.VLLM_SERVE)
         assert cls is not None
         assert TaskType.SERVE in cls.supported_task_types
 

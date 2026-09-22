@@ -15,6 +15,7 @@ from shared.content import (
 from shared.harness.adapter import HarnessResult, HarnessResultKind
 from shared.schemas.result import BaseExecutorResult
 from shared.tasks import MergedChildTaskStrict
+from shared.tasks.executor_key import ExecutorKey
 from shared.tasks.task_type import TaskType
 from tests.worker.factories import make_worker_hardware, make_worker_task_message
 from worker.executors.base_executor import Executor
@@ -77,7 +78,7 @@ def _run(
         task_stream=[msg],
         results_dir=tmp_path / "out",
         hardware=make_worker_hardware(),
-        executors={"echo": executor, "default": executor},
+        executors={ExecutorKey.ECHO: executor, ExecutorKey.DEFAULT: executor},
         default_executor=executor,
         logger=MagicMock(),
     ).start()

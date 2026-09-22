@@ -19,6 +19,7 @@ from shared.harness import (
     HarnessResultKind,
     MediatedFacade,
 )
+from shared.tasks.executor_key import ExecutorKey
 from shared.tasks.task_type import TaskType
 from shared.tasks.worker_message import WorkerTaskMessage
 from tests.worker.factories import make_worker_config, make_worker_task_message
@@ -69,16 +70,16 @@ def _dispatch_msg(**episode: object) -> WorkerTaskMessage:
 
 def test_agent_episode_key_is_registered() -> None:
     assert "agent_episode" in EXECUTOR_REGISTRY
-    cls = EXECUTOR_REGISTRY.get("agent_episode")
+    cls = EXECUTOR_REGISTRY.get(ExecutorKey.AGENT_EPISODE)
     assert cls is not None and cls.supported_task_types == frozenset({TaskType.AGENT})
 
 
 def test_worker_advertises_agent_through_the_episode_executor() -> None:
     # The episode executor is dependency-light, so a CPU worker advertises AGENT through
     # it — the only executor that services the task type.
-    cls = EXECUTOR_REGISTRY.get("agent_episode")
+    cls = EXECUTOR_REGISTRY.get(ExecutorKey.AGENT_EPISODE)
     assert cls is not None
-    caps = build_capabilities({"agent_episode": cls(make_worker_config())})
+    caps = build_capabilities({ExecutorKey.AGENT_EPISODE: cls(make_worker_config())})
     assert TaskType.AGENT in caps.supported_task_types
 
 
@@ -153,7 +154,7 @@ class _RecordingExecutor(Executor):
         return self._result
 
 
-def _runner(tmp_path: Path, executors: dict[str, Executor]) -> Runner:
+def _runner(tmp_path: Path, executors: dict[ExecutorKey, Executor]) -> Runner:
     from unittest.mock import MagicMock
 
     from tests.worker.factories import make_worker_hardware
@@ -170,7 +171,7 @@ def _runner(tmp_path: Path, executors: dict[str, Executor]) -> Runner:
         results_dir=tmp_path,
         hardware=make_worker_hardware(),
         executors=executors,
-        default_executor=executors["default"],
+        default_executor=executors[ExecutorKey.DEFAULT],
         logger=MagicMock(),
     )
 
@@ -190,7 +191,9 @@ def test_runner_routes_an_episode_message_to_the_episode_executor(
     # other executor. This is the production seam the dispatcher and runner select.
     episode = _RecordingExecutor(_agent_result())
     default = _RecordingExecutor(_agent_result())
-    runner = _runner(tmp_path, {"agent_episode": episode, "default": default})
+    runner = _runner(
+        tmp_path, {ExecutorKey.AGENT_EPISODE: episode, ExecutorKey.DEFAULT: default}
+    )
 
     with_episode = make_worker_task_message(
         {"taskType": "agent"},

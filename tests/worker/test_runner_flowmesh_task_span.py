@@ -15,6 +15,7 @@ from opentelemetry import trace
 
 from server.governance.analyzer import analyze
 from shared.schemas.result import BaseExecutorResult
+from shared.tasks.executor_key import ExecutorKey
 from shared.tasks.task_type import TaskType
 from shared.telemetry.config import TelemetryConfig, TelemetryLevel
 from shared.telemetry.ids import workflow_to_trace_id_int
@@ -131,7 +132,7 @@ def _run(
         task_stream=[msg],
         results_dir=tmp_path,
         hardware=make_worker_hardware(),
-        executors={"echo": executor, "default": executor},
+        executors={ExecutorKey.ECHO: executor, ExecutorKey.DEFAULT: executor},
         default_executor=executor,
         logger=MagicMock(),
         telemetry=telemetry,
