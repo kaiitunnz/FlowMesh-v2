@@ -3370,6 +3370,14 @@ class OrchestrationEngine:
                 sealed.add(template)
         return frozenset(sealed)
 
+    def spawn_awaits_children(self, spawn_op: str) -> bool:
+        """Whether a spawn has yet to fan out: unopened, or open and not sealed."""
+        scope_id = self._scope_id_for(spawn_op)
+        if scope_id is None:
+            return True
+        cap = self._capability(scope_id, ProgressAxis.CHILD_INIT)
+        return cap.status is CapabilityStatus.OPEN
+
     def spawn_is_open(self, spawn_op: str) -> bool:
         """Whether a spawn's child-init capability still admits new children.
 

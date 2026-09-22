@@ -1225,3 +1225,39 @@ spec:
     assert denied and denied[0].work_item_id
     pub = led.resolve_legacy_task(caller)
     assert pub is not None and pub.outcome is PublicationOutcome.DECLARED_FAILURE
+
+
+@pytest.mark.anyio
+async def test_a_fan_out_reads_its_collection_before_taking_the_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = FakeRegistry()
+    runtime = _live_runtime(registry)
+    workflow_id, ids = await _register(runtime, AUTORESEARCH)
+    planner = ids["planner"]
+
+    def _locked_read(*_args: Any) -> Any:
+        raise AssertionError("the collection was read under the runtime lock")
+
+    monkeypatch.setattr(runtime, "_read_fanout_locked", _locked_read)
+    runtime.mark_dispatched(planner, cast(Any, _worker()))
+    runtime.mark_succeeded(
+        planner, "wkr-1", _planned(runtime, planner, ["h1", "h2", "h3"]), _TS
+    )
+    engine = runtime.orchestration_engine(workflow_id)
+    assert engine is not None
+    assert len(_pop_ready(runtime)) == 3 and _child_count(engine) == 3
+
+
+@pytest.mark.anyio
+async def test_a_skipped_producer_fans_out_to_no_children() -> None:
+    registry = FakeRegistry()
+    runtime = _live_runtime(registry)
+    workflow_id, ids = await _register(runtime, AUTORESEARCH)
+    planner = ids["planner"]
+    runtime.mark_dispatched(planner, cast(Any, _worker()))
+    runtime.mark_succeeded(planner, None, {}, _TS, skip={"skipped": True})
+    engine = runtime.orchestration_engine(workflow_id)
+    assert engine is not None
+    assert _child_count(engine) == 0 and engine.region_closed("collect")
+    assert registry.remaining_of(workflow_id) == set()

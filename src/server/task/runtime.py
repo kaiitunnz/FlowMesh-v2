@@ -227,7 +227,7 @@ def _stringify(value: Any) -> str:
 
 # A spawn producer's fan-out read retries off the lock before the workflow fails.
 _FANOUT_READ_ATTEMPTS = 3
-_FANOUT_READ_BACKOFF_SEC = 0.5
+_FANOUT_READ_BACKOFF_SEC = 0.2
 
 
 @dataclass(frozen=True)
@@ -2674,6 +2674,19 @@ class TaskRuntime:
             return None
         return ResultBinding(task_id=task_id, reference=value_ref.content)
 
+    def _settled_unbound_locked(self, task_id: str) -> bool:
+        """Whether a task settled successfully with no result bound to read."""
+        record = self._tasks.get(task_id)
+        if record is None or record.status != TaskStatus.DONE:
+            return False
+        if record.result_skip is not None:
+            return False
+        engine = self._engines.get(record.workflow_id)
+        if engine is None:
+            return record.result_reference is None
+        settled = engine.legacy_task_value(task_id)
+        return settled is not None and settled[0] is PublicationOutcome.SUCCESS
+
     def _bind_result_locked(
         self,
         record: TaskRecord,
@@ -2850,21 +2863,31 @@ class TaskRuntime:
         return advance
 
     def _prefetch_fanout(
-        self, task_id: str, reference: ContentReference | None
+        self,
+        task_id: str,
+        reference: ContentReference | None,
+        skip: dict[str, Any] | None,
     ) -> "_FanoutRead | None":
         """Read a spawn producer's fan-out collection before its success takes the lock.
 
         The read goes to the shared store, so it runs, and retries, outside the runtime
-        lock; only a success that will open an unsealed spawn pays for it.
+        lock; only a success feeding a spawn that has yet to fan out pays for it. A
+        skipped producer has no collection, so its spawn fans out to no children.
         """
         with self._lock:
             record = self._tasks.get(task_id)
             engine = self._engines.get(record.workflow_id) if record else None
             spawn_op = engine.spawn_successor(task_id) if engine else None
-            if spawn_op is None or engine is None or not engine.spawn_is_open(spawn_op):
+            if (
+                record is None
+                or engine is None
+                or spawn_op is None
+                or not engine.spawn_awaits_children(spawn_op)
+            ):
                 return None
-            assert record is not None
             reference = self._accepted_reference(record, reference)
+        if skip is not None:
+            return _FanoutRead()
         if reference is None:
             return _FanoutRead(error=f"fan-out producer {task_id} has no bound result")
         binding = ResultBinding(task_id=task_id, reference=reference)
@@ -2878,12 +2901,18 @@ class TaskRuntime:
                     return _FanoutRead(
                         error=f"fan-out producer {task_id} result is unreadable: {exc}"
                     )
-                time.sleep(_FANOUT_READ_BACKOFF_SEC * (attempt + 1))
+                time.sleep(_FANOUT_READ_BACKOFF_SEC)
         return None
 
     def _read_fanout_locked(self, producer_task_id: str) -> "_FanoutRead":
         """Read a settled producer's fan-out collection once, under the lock."""
         binding = self._result_binding_locked(producer_task_id)
+        if (
+            binding is not None
+            and binding.reference is None
+            and binding.skip is not None
+        ):
+            return _FanoutRead()
         if binding is None or binding.reference is None:
             return _FanoutRead(
                 error=f"fan-out producer {producer_task_id} has no bound result"
@@ -3033,6 +3062,10 @@ class TaskRuntime:
             return None
         binding = self._result_binding_locked(value_ref.legacy_task_id)
         if binding is None or binding.reference is None:
+            if self._settled_unbound_locked(value_ref.legacy_task_id):
+                raise ResultUnreadable(
+                    f"task {value_ref.legacy_task_id} settled with no bound result"
+                )
             return None
         payload = self._results.read(binding).result.model_dump()
         if value_ref.collection_key is not None:
@@ -3451,7 +3484,7 @@ class TaskRuntime:
             for child_id, raw in (payload.get("child_result_references") or {}).items()
             if (parsed := _reported_reference(raw)) is not None
         }
-        fanout = self._prefetch_fanout(task_id, reference)
+        fanout = self._prefetch_fanout(task_id, reference, skip)
         finished_ts = parse_iso_ts(str(payload.get("finished_at") or ts))
         maybe_started = payload.get("started_at")
         started_ts = parse_iso_ts(str(maybe_started)) if maybe_started else None
