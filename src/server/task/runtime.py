@@ -2880,6 +2880,8 @@ class TaskRuntime:
             spawn_op = engine.spawn_successor(task_id) if engine else None
             if (
                 record is None
+                or record.status in TERMINAL_TASK_STATUSES
+                or record.status == TaskStatus.CANCELLING
                 or engine is None
                 or spawn_op is None
                 or not engine.spawn_awaits_children(spawn_op)
@@ -2907,11 +2909,7 @@ class TaskRuntime:
     def _read_fanout_locked(self, producer_task_id: str) -> "_FanoutRead":
         """Read a settled producer's fan-out collection once, under the lock."""
         binding = self._result_binding_locked(producer_task_id)
-        if (
-            binding is not None
-            and binding.reference is None
-            and binding.skip is not None
-        ):
+        if binding is not None and binding.skip is not None:
             return _FanoutRead()
         if binding is None or binding.reference is None:
             return _FanoutRead(
