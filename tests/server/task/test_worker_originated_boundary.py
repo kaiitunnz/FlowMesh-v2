@@ -145,7 +145,9 @@ class _StubVault:
         return None
 
 
-def _runtime(vault: Any | None = None) -> TaskRuntime:
+def _runtime(
+    vault: Any | None = None, assigned: list[tuple[str, str]] | None = None
+) -> TaskRuntime:
     return TaskRuntime(
         cast(Any, FakeRegistry()),
         cast(Any, _WorkerStub()),
@@ -153,6 +155,11 @@ def _runtime(vault: Any | None = None) -> TaskRuntime:
         Path(tempfile.gettempdir()),
         logging.getLogger("wo-test"),
         secret_vault=cast(Any, vault or _NoopSecretVault()),
+        content_scope_authority=(
+            None
+            if assigned is None
+            else lambda idem, scope: assigned.append((idem, scope))
+        ),
     )
 
 
@@ -632,5 +639,46 @@ def test_origin_worker_loss_fails_the_boundary_clean() -> None:
         runtime.recover_tasks_for_worker("wkr-1")
         assert runtime._tasks[writer].status == TaskStatus.FAILED
         assert not runtime._pending_ops
+
+    asyncio.run(run())
+
+
+def test_the_permit_carries_the_scope_its_result_materializes_under() -> None:
+    """A boundary's outcome lands in the task owner's scope, not the worker's.
+
+    The permit is what tells the egressing worker where to write, and the worker holds
+    store access for exactly the scope control assigned its task, so a permit carrying
+    none cannot materialize its outcome at all.
+    """
+
+    async def run() -> None:
+        runtime = _runtime()
+        _, ids = await _register(runtime, _SEARCH_WF)
+        _dispatch_agent(runtime, ids["writer"])
+
+        permits = _permit_frames(runtime)
+        assert len(permits) == 1
+        assert permits[0]["content_scope"] == "org"
+
+    asyncio.run(run())
+
+
+def test_control_records_the_scope_the_boundary_finalizes_under() -> None:
+    """The scope is recorded against the permit's key, before the worker can report.
+
+    The egressing worker reports the finalization its outcome produced, and the binding
+    is checked against the scope control assigned that key rather than one the worker
+    names for itself.
+    """
+
+    async def run() -> None:
+        assigned: list[tuple[str, str]] = []
+        runtime = _runtime(assigned=assigned)
+        _, ids = await _register(runtime, _SEARCH_WF)
+        _dispatch_agent(runtime, ids["writer"])
+
+        permits = _permit_frames(runtime)
+        assert len(permits) == 1
+        assert assigned == [(permits[0]["idempotency_key"], "org")]
 
     asyncio.run(run())

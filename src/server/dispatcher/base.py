@@ -36,6 +36,7 @@ from shared.tasks.worker_message import WorkerStatus, WorkerTaskMessage
 from shared.telemetry.semconv import ControlPlaneStage, ControlPlaneWindow
 
 from ..clients.redis import REDIS_CONN_ERRORS
+from ..content import ContentAccessBroker
 from ..registries.worker import Worker, WorkerRegistry
 from ..services.metrics import MetricsRecorder
 from ..task.metadata import extract_model_dataset_names
@@ -83,10 +84,12 @@ class Dispatcher:
         resident_capacity_enabled: bool = False,
         resident_admission_slots: int = 0,
         embodiment_selector: EmbodimentSelector | None = None,
+        content_access: ContentAccessBroker | None = None,
         control: ControlPlaneTracer | None = None,
     ) -> None:
         self._runtime = runtime
         self._worker_registry = worker_registry
+        self._content_access = content_access
         self._logger = logger
         self._results_dir = Path(results_dir)
         self._worker_selection_strategy = worker_selection_strategy
@@ -720,6 +723,7 @@ class Dispatcher:
             task_id=task_id,
             workflow_id=record.workflow_id,
             owner_id=record.owner_id,
+            content_scope=record.org_id,
             task=rendered_task,
             task_type=record.task_type,
             assigned_worker=worker.id,
@@ -743,7 +747,9 @@ class Dispatcher:
             traceparent=self._runtime.dispatch_traceparent(task_id),
         )
 
-        # 8. Publish task
+        # 8. Give the task what it reads and writes its content under, then publish it
+        if self._content_access is not None:
+            self._content_access.issue(worker.id, task_id, record.org_id)
         try:
             receivers = self._worker_registry.publish_task(worker, message)
         except Exception as exc:

@@ -1,14 +1,17 @@
 """Caller-neutral substrate shared by the run-to-yield episode executors."""
 
-from shared.content import ContentStoreError
+from typing import TYPE_CHECKING
+
+from shared.content import ContentStoreError, FabricObjectStore
 from shared.harness import DeliveredOutcome, HarnessResult
-from shared.outcome import FabricContentStore
 from shared.private_state import PrivateStateSealReport
 from shared.schemas.result import BaseExecutorResult
 from shared.tools.facade import FacadeTurnGroup
 
-from ..content_store import build_content_store
 from .base_executor import ExecutionError
+
+if TYPE_CHECKING:
+    from ..lifecycle import Lifecycle
 
 
 class EpisodeStepResult(BaseExecutorResult):
@@ -28,7 +31,9 @@ class EpisodeStepResult(BaseExecutorResult):
 
 
 def hydrate_delivered_outcomes(
-    server_base_url: str | None, outcomes: tuple[DeliveredOutcome, ...]
+    lifecycle: "Lifecycle | None",
+    task_id: str,
+    outcomes: tuple[DeliveredOutcome, ...],
 ) -> tuple[DeliveredOutcome, ...]:
     """Resolve any reference-backed outcome into its injected value.
 
@@ -39,17 +44,18 @@ def hydrate_delivered_outcomes(
     """
     if not any(o.outcome_ref is not None for o in outcomes):
         return outcomes
-    store = build_content_store(server_base_url)
-    if store is None:
+    plane = lifecycle.content_plane if lifecycle is not None else None
+    if plane is None:
         raise ExecutionError("cannot hydrate a reference-backed outcome: no store")
+    store = plane.for_task(task_id)
     return tuple(_hydrate(o, store) for o in outcomes)
 
 
-def _hydrate(outcome: DeliveredOutcome, store: FabricContentStore) -> DeliveredOutcome:
+def _hydrate(outcome: DeliveredOutcome, store: FabricObjectStore) -> DeliveredOutcome:
     if outcome.outcome_ref is None:
         return outcome
     try:
-        value = store.hydrate(outcome.outcome_ref).decode()
+        value = store.hydrate(outcome.outcome_ref.content).decode()
     except (ContentStoreError, UnicodeDecodeError) as exc:
         raise ExecutionError(
             f"outcome hydration failed at {outcome.call_correlation}: {exc}"

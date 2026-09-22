@@ -37,9 +37,10 @@ orchestration-ledger `act-`, `scp-`, `wki-`, `att-`, `inv-`, `agr-`, `idm-`, the
 resident-capacity `scl-` (service claim), `rpl-` (replica incarnation), `lse-`
 (allocation lease), `hnd-` (claim-bound admission handoff), `msk-` (a vaulted
 model-secret ref), the network-plane `rog-` (route origin) and `rly-` (relay
-session), the worker-originated `mop-` (one-use mediated-operation permit), and the
+session), the worker-originated `mop-` (one-use mediated-operation permit), the
 activation-private-state `aps-` (state reference), `sbm-` (sealed-generation manifest),
-and `psa-` (attachment).
+and `psa-` (attachment), and the content-plane `chg-` (cache-to-cache hydration grant) and `csg-`
+(content-store access grant).
 Always use
 `new_*_id()`/`new_idempotency_key()`/
 `new_model_secret_ref()` helpers in `src/shared/utils/ids.py`. Never use `uuid4()`

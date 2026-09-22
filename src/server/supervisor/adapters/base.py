@@ -144,6 +144,25 @@ class WorkerAdapter(ABC):
             "NETWORK_PLANE_PEER_TLS_KEY_B64": env.NETWORK_PLANE_PEER_TLS_KEY_B64,
             "RESULTS_DIR": config.results_dir,
             "WORKER_PRIVATE_STATE_DIR": env.WORKER_PRIVATE_STATE_DIR,
+            "WORKER_CONTENT_DIR": env.WORKER_CONTENT_DIR,
+            "CONTENT_HYDRATION_ENABLED": to_env_str(env.CONTENT_HYDRATION_ENABLED),
+            "CONTENT_CACHE_TTL_SEC": to_env_str(env.CONTENT_CACHE_TTL_SEC),
+            "CONTENT_CACHE_MAX_BYTES": to_env_str(env.CONTENT_CACHE_MAX_BYTES),
+            # The store's address, but never its credential: a worker reaches content
+            # with the access control mints for each task it runs.
+            "CONTENT_STORE_BACKEND": env.CONTENT_STORE_BACKEND,
+            "CONTENT_STORE_ENDPOINT_URL": env.CONTENT_STORE_ENDPOINT_URL,
+            # The port too: with no endpoint named, both ends resolve the co-located
+            # store's address themselves, and they have to resolve the same one.
+            "CONTENT_STORE_PORT": env.CONTENT_STORE_PORT,
+            "CONTENT_STORE_BUCKET": env.CONTENT_STORE_BUCKET,
+            "CONTENT_STORE_PREFIX": env.CONTENT_STORE_PREFIX,
+            "CONTENT_STORE_REGION": env.CONTENT_STORE_REGION,
+            "CONTENT_STORE_FILESYSTEM_ROOT": env.CONTENT_STORE_FILESYSTEM_ROOT,
+            "CONTENT_HOLDER_TTL_SEC": to_env_str(env.CONTENT_HOLDER_TTL_SEC),
+            "CONTENT_TRANSFER_TIMEOUT_SEC": to_env_str(
+                env.CONTENT_TRANSFER_TIMEOUT_SEC
+            ),
             "HEARTBEAT_INTERVAL_SEC": to_env_str(config.hb_interval),
             "WORKER_HB_FILE": hb_file,
             "WORKER_NAMESPACE": env.NODE_NAMESPACE,

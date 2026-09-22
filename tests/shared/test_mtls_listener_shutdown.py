@@ -31,8 +31,8 @@ def _frame() -> RelayFrame:
     return RelayFrame(
         kind=RelayFrameKind.DATA,
         session_id="rly-1",
-        invocation_id="inv-1",
-        idm="idm-1",
+        correlation_id="inv-1",
+        operation_id="idm-1",
         direction=RelayDirection.ORIGIN_TO_TARGET,
         seq=1,
         payload=b"x",

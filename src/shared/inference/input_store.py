@@ -3,34 +3,20 @@
 The worker that resolves a leaf's source writes the request it materialized as an
 immutable object and reports a bounded reference to it. Whichever embodiment runs next
 hydrates that object and verifies it against the digest naming it, so the run issues the
-exact request the resolution produced rather than re-reading upstream syntax. The
-reference is its own type: it records an input, which is neither an invocation outcome
-nor a declared result, and nothing here names one.
+exact request the resolution produced rather than re-reading upstream syntax. The object
+is named by an ordinary content reference; what makes it this leaf's input is the
+binding recorded beside it, so nothing here turns a stored object into a declared
+result or an invocation outcome.
 """
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
-from shared.content import ContentHydrationError, FabricObjectStore
+from shared.content import ContentHydrationError, ContentReference, FabricObjectStore
 
 from .codec import ResolvedCanonicalInferenceRequest
 from .source import InputResolutionBinding
 
 RESOLVED_INPUT_MEDIA_TYPE = "application/json"
-
-
-class ResolvedInputReference(BaseModel):
-    """A bounded, immutable reference to one worker-materialized resolved request.
-
-    It carries the identity a holder needs to fetch and verify the bytes, and nothing
-    that would let a reader reach them another way: no bearer URL and no worker-local
-    path.
-    """
-
-    model_config = ConfigDict(frozen=True)
-
-    content_digest: str
-    size_bytes: int = Field(ge=0)
-    media_type: str = RESOLVED_INPUT_MEDIA_TYPE
 
 
 class ResolvedInputMaterialization(BaseModel):
@@ -45,24 +31,33 @@ class ResolvedInputMaterialization(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     binding: InputResolutionBinding
-    reference: ResolvedInputReference
+    reference: ContentReference
 
 
 def write_resolved_input(
-    store: FabricObjectStore, resolved: ResolvedCanonicalInferenceRequest
-) -> ResolvedInputReference:
+    store: FabricObjectStore, scope: str, resolved: ResolvedCanonicalInferenceRequest
+) -> ContentReference:
     """Store a resolved request and return the reference a later run hydrates it by."""
-    data = resolved.model_dump_json().encode()
-    return ResolvedInputReference(
-        content_digest=store.put_object(data), size_bytes=len(data)
+    return store.write(
+        scope,
+        resolved.model_dump_json().encode(),
+        media_type=RESOLVED_INPUT_MEDIA_TYPE,
     )
 
 
 def hydrate_resolved_input(
-    store: FabricObjectStore, reference: ResolvedInputReference
+    store: FabricObjectStore, reference: ContentReference
 ) -> ResolvedCanonicalInferenceRequest:
-    """Fetch and verify the request a reference names, before anything issues it."""
-    data = store.hydrate_object(reference.content_digest)
+    """Fetch and verify the request a reference names, before anything issues it.
+
+    The media type is checked with the digest: an object of another type in the same
+    scope is not this leaf's request, whatever its bytes hash to.
+    """
+    if reference.media_type != RESOLVED_INPUT_MEDIA_TYPE:
+        raise ContentHydrationError(
+            f"the object at {reference.content_digest} is not a resolved request"
+        )
+    data = store.hydrate(reference)
     try:
         return ResolvedCanonicalInferenceRequest.model_validate_json(data)
     except ValueError as exc:

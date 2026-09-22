@@ -8,8 +8,12 @@ stream. The bridge never decodes the resident wire body it carries.
 import asyncio
 from typing import Any
 
-from server.network.reverse_relay import RelaySessionStore, RelayStreamStore
-from server.resident.worker_bridge import ResidentWorkerBridge
+from server.network.reverse_relay import (
+    RESIDENT_RELAY_KEYSPACE,
+    RelaySessionStore,
+    RelayStreamStore,
+)
+from server.network.worker_bridge import RelayWorkerBridge
 from shared.network.relay_frame import RelayDirection, RelayFrame, RelayFrameKind
 from tests.server.network._relay_fakes import FakeBinaryRedis
 
@@ -18,8 +22,8 @@ def _frame(direction: RelayDirection) -> RelayFrame:
     return RelayFrame(
         kind=RelayFrameKind.DATA,
         session_id="s1",
-        invocation_id="inv-1",
-        idm="idm-1",
+        correlation_id="inv-1",
+        operation_id="idm-1",
         direction=direction,
         seq=1,
         payload=b'{"kind": "chunk", "data": "opaque"}',
@@ -29,7 +33,7 @@ def _frame(direction: RelayDirection) -> RelayFrame:
 def test_forwards_by_direction_to_the_named_local_worker() -> None:
     async def run() -> None:
         redis = FakeBinaryRedis()
-        await RelaySessionStore(redis).update(
+        await RelaySessionStore(redis, RESIDENT_RELAY_KEYSPACE).update(
             "s1",
             origin_node="nde-o",
             target_node="nde-t",
@@ -42,7 +46,9 @@ def test_forwards_by_direction_to_the_named_local_worker() -> None:
             sent.append((worker_id, payload))
             return True
 
-        bridge = ResidentWorkerBridge(redis, "nde-t", enqueue)
+        bridge = RelayWorkerBridge(
+            redis, "nde-t", enqueue, keyspace=RESIDENT_RELAY_KEYSPACE
+        )
 
         await bridge.on_frame(_frame(RelayDirection.ORIGIN_TO_TARGET))
         await bridge.on_frame(_frame(RelayDirection.TARGET_TO_ORIGIN))
@@ -67,9 +73,13 @@ def test_publish_up_writes_the_node_up_stream() -> None:
         async def enqueue(_worker: str, _payload: dict[str, Any]) -> bool:
             return True
 
-        bridge = ResidentWorkerBridge(redis, "nde-o", enqueue)
+        bridge = RelayWorkerBridge(
+            redis, "nde-o", enqueue, keyspace=RESIDENT_RELAY_KEYSPACE
+        )
         await bridge.publish_up(_frame(RelayDirection.TARGET_TO_ORIGIN))
-        entries, _ = await RelayStreamStore(redis).read_up("nde-o", "0", 10, None)
+        entries, _ = await RelayStreamStore(redis, RESIDENT_RELAY_KEYSPACE).read_up(
+            "nde-o", "0", 10, None
+        )
         assert len(entries) == 1
         assert entries[0].frame.session_id == "s1"
 
@@ -85,7 +95,9 @@ def test_unknown_session_is_dropped() -> None:
             sent.append(worker_id)
             return True
 
-        bridge = ResidentWorkerBridge(redis, "nde-t", enqueue)
+        bridge = RelayWorkerBridge(
+            redis, "nde-t", enqueue, keyspace=RESIDENT_RELAY_KEYSPACE
+        )
         await bridge.on_frame(_frame(RelayDirection.ORIGIN_TO_TARGET))
         assert sent == []
 

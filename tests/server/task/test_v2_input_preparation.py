@@ -10,10 +10,11 @@ import pytest
 from server.config import OrchestrationConfig
 from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime
+from shared.content import ContentReference
 from shared.inference import (
+    RESOLVED_INPUT_MEDIA_TYPE,
     InputResolutionBinding,
     ResolvedInputMaterialization,
-    ResolvedInputReference,
 )
 from shared.utils.time import now_iso
 from tests.server.task.test_v2_embodiment_fence import (
@@ -50,8 +51,11 @@ def _materialization(
             cardinality=cardinality,
             projected_output_tokens=512 * cardinality,
         ),
-        reference=ResolvedInputReference(
-            content_digest="d" * 64, size_bytes=size_bytes
+        reference=ContentReference(
+            authorization_scope="local",
+            content_digest="d" * 64,
+            size_bytes=size_bytes,
+            media_type=RESOLVED_INPUT_MEDIA_TYPE,
         ),
     )
 

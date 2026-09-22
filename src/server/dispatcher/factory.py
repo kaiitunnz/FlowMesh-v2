@@ -4,6 +4,7 @@ from pathlib import Path
 from server.telemetry.tracing import ControlPlaneTracer
 
 from ..config import DispatchConfig
+from ..content import ContentAccessBroker
 from ..dispatcher import Dispatcher
 from ..registries.worker import WorkerRegistry
 from ..services.metrics import MetricsRecorder
@@ -25,6 +26,7 @@ def create_dispatcher(
     metrics_recorder: MetricsRecorder | None = None,
     resident_capacity_enabled: bool = False,
     resident_admission_slots: int = 0,
+    content_access: ContentAccessBroker | None = None,
     control: ControlPlaneTracer | None = None,
 ) -> Dispatcher:
     """
@@ -66,5 +68,6 @@ def create_dispatcher(
         metrics_recorder=metrics_recorder,
         resident_capacity_enabled=resident_capacity_enabled,
         resident_admission_slots=resident_admission_slots,
+        content_access=content_access,
         control=control,
     )

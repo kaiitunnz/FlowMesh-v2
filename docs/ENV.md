@@ -16,7 +16,7 @@ listed here is in `.env.example`.
 | `REDIS_CONTROL_URL` | `redis://localhost:6379/0` | Redis control channel. On worker nodes, must point at the root node's reachable Redis endpoint |
 | `REDIS_TELEMETRY_URL` | `redis://localhost:6380/0` | Redis telemetry channel. On worker nodes, must point at the root node's reachable Redis endpoint |
 | `REDIS_RESIDENT_RELAY_URL` | (telemetry) | Redis endpoint for the resident relay; defaults to telemetry |
-| `COMPOSE_PROFILES` | – | Optional compose profiles to deploy (e.g. telemetry) |
+| `COMPOSE_PROFILES` | – | Extra compose profiles to deploy (e.g. `telemetry`); a root node adds the `content` profile unless an endpoint names another store |
 | `DATABASE_URL` | – | Postgres connection string |
 | `RESULTS_DIR` | `./results` | Server-side results directory |
 | `SERVER_RESULTS_DIR` | `flowmesh_results` | Host-side directory/docker volume to mount at `RESULTS_DIR` in the server container |
@@ -63,8 +63,25 @@ listed here is in `.env.example`.
 | `WEB_SEARCH_TIMEOUT_SEC` | `20` | Search request timeout (seconds) |
 | `WEB_SEARCH_RESULT_CHAR_CAP` | `6000` | Injected result size cap |
 | `WEB_SEARCH_MAX_PARALLEL_CALLS_PER_TURN` | `4` | Parallel searches per turn |
-| `CONTENT_STORE_ENABLED` | `true` | Serve the outcome content store |
-| `CONTENT_STORE_ROOT` | – | Content-store root; under the data dir if empty |
+| `CONTENT_STORE_ENABLED` | `true` | Serve the outcome finalization index |
+| `CONTENT_STORE_BACKEND` | `s3` | Shared content store backend (`s3` or `filesystem`) |
+| `CONTENT_STORE_ENDPOINT_URL` | – | S3-compatible endpoint; the co-located store if empty |
+| `CONTENT_STORE_BUCKET` | `flowmesh-content` | Bucket holding fabric content |
+| `CONTENT_STORE_PREFIX` | – | Key prefix within the bucket |
+| `CONTENT_STORE_REGION` | `us-east-1` | Region the store is addressed in |
+| `CONTENT_STORE_ACCESS_KEY` | `flowmesh` | Co-located store key the control plane cuts access from; set for external storage |
+| `CONTENT_STORE_SECRET_KEY` | `flowmeshcontent` | Co-located store secret the control plane cuts access from; set for external storage |
+| `CONTENT_STORE_FILESYSTEM_ROOT` | – | Shared filesystem root; under the data dir if empty |
+| `CONTENT_STORE_SCOPED_CREDENTIALS` | `true` | Cut per-scope store access instead of sharing one key |
+| `CONTENT_STORE_PORT` | `9800` | Co-located content store port |
+| `CONTENT_STORE_CONSOLE_PORT` | `9801` | Co-located content store console port |
+| `CONTENT_ACCESS_TTL_SEC` | `900` | Store-access grant lifetime (seconds) |
+| `CONTENT_HYDRATION_ENABLED` | `false` | Cache content on workers and hydrate it between them (requires `NETWORK_PLANE_ENABLED`) |
+| `CONTENT_HYDRATION_GRANT_TTL_SEC` | `60` | Hydration grant lifetime (seconds) |
+| `CONTENT_HOLDER_TTL_SEC` | `300` | Holder report lifetime (seconds) |
+| `CONTENT_CACHE_TTL_SEC` | `0` | How long a worker keeps an unused cached copy (seconds, 0 = indefinitely) |
+| `CONTENT_CACHE_MAX_BYTES` | `0` | Disk budget for a worker's cached copies (0 = unbounded) |
+| `CONTENT_TRANSFER_TIMEOUT_SEC` | `60` | Longest a content transfer may go without progress (seconds) |
 | `RESIDENT_CAPACITY_ENABLED` | `false` | Serve resident model bindings via admission |
 | `RESIDENT_INFERENCE_SUBSTRATE` | `serve` | Resident replica substrate (`serve` or `dev_model`) |
 | `RESIDENT_ADMISSION_SLOTS` | `8` | Conservative safe admission slots per replica |
@@ -164,6 +181,7 @@ Spark), set `DOCKER_GPU_RUNTIME=` in the stack env.
 | `WORKER_TOKEN` | – | Auth token for supervisor gRPC |
 | `SUPERVISOR_GRPC_TARGET` | – | Supervisor gRPC endpoint |
 | `RESULTS_DIR` | `./results` | Task output directory |
+| `WORKER_CONTENT_DIR` | – | Root for this worker's content cache; defaults to a content subdirectory of `RESULTS_DIR` |
 | `WORKER_PRIVATE_STATE_DIR` | – | Root for activation-private harness state; defaults to a private subdirectory of `RESULTS_DIR` |
 | `WORKER_TAGS` | `` | Scheduler hints |
 | `WORKER_COST_PER_HOUR` | `1.0` | Cost metadata |

@@ -22,6 +22,7 @@ if __name__ == "__main__" and __package__ is None:
 
 from server.telemetry.tracing import ControlPlaneTracer
 from shared._version import FLOWMESH_RELEASE_VERSION
+from shared.content import BACKEND_S3
 from shared.outcome import ManifestRef, OutcomeCarrier
 from shared.telemetry.config import TelemetryLevel
 from shared.telemetry.provider import build_meter, build_tracer
@@ -37,10 +38,24 @@ from .auth import reconcile_resources, resolve_system_principal
 from .clients import RedisClient
 from .clients.redis import resident_relay_client
 from .config import NodeRole, ServerConfig
+from .content import (
+    ContentAccessBroker,
+    ContentHolderDirectory,
+    ContentHydrationAuthority,
+    ContentTransferSessions,
+    DeploymentCredentialMinter,
+    FinalizationIndex,
+    ScopedCredentialMinter,
+    StsScopedCredentialMinter,
+    build_sts_client,
+    ensure_bucket,
+)
 from .dispatcher.factory import create_dispatcher
 from .hooks import register
 from .network.rendezvous import RootCursorStore, RootRendezvousBridge
 from .network.reverse_relay import (
+    CONTENT_RELAY_KEYSPACE,
+    RESIDENT_RELAY_KEYSPACE,
     BinaryRedis,
     RelaySessionStore,
     RelayStreamStore,
@@ -59,7 +74,6 @@ from .services.agent_model_gateway import (
     ResolvedGatewayBinding,
     to_gateway_binding,
 )
-from .services.content_store import ServerContentStore
 from .services.fleet_metrics import build_fleet_sampler
 from .services.log_archiver import TaskLogArchiver
 from .services.metrics import MetricsRecorder
@@ -70,7 +84,7 @@ from .services.ssh_audit import SshAuditService
 from .services.watchdog import WorkerWatchdog
 from .startup import (
     rehydrate_root_state,
-    start_resident_bridge_pump,
+    start_relay_bridge_pump,
 )
 from .supervisor import WorkerSupervisor
 from .task.runtime import TaskRuntime
@@ -106,12 +120,6 @@ logger = get_logger(
 RESULTS_DIR = config.results_dir
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
-CONTENT_STORE = (
-    ServerContentStore(config.content_store.root)
-    if IS_ROOT_NODE and config.content_store.enabled
-    else None
-)
-
 assert config.metrics.dir is not None
 METRICS_DIR = config.metrics.dir
 
@@ -127,6 +135,19 @@ REDIS_CLIENT = RedisClient(
 )
 
 NODE_REGISTRY = NodeRegistry(REDIS_CLIENT, logger)
+
+FINALIZATION_INDEX = (
+    FinalizationIndex(REDIS_CLIENT)
+    if IS_ROOT_NODE and config.content_store.enabled
+    else None
+)
+
+# Control assigns the scope a unit of work materializes content under, and records it
+# against the key that work settles, so the finalization the producing worker later
+# reports binds in the scope control gave it rather than one the worker names.
+CONTENT_SCOPE_AUTHORITY = (
+    FINALIZATION_INDEX.assign_scope if FINALIZATION_INDEX is not None else None
+)
 
 METRICS_RECORDER = MetricsRecorder(
     METRICS_DIR,
@@ -145,6 +166,7 @@ if config.worker_management.enabled:
         logging_config=config.logging,
         logger=logger,
         network=config.orchestration.network,
+        content=config.content_store,
     )
 
 # --------------------------------------------------------------------------- # Root
@@ -213,6 +235,7 @@ if IS_ROOT_NODE:
         control=CONTROL_TRACER,
         tracer=SERVER_TRACER,
         telemetry=config.telemetry,
+        content_scope_authority=CONTENT_SCOPE_AUTHORITY,
     )
     TELEMETRY_STORE = build_telemetry_store(config.telemetry_store)
     AGENT_MODEL_GATEWAY = AgentModelGateway(
@@ -254,6 +277,7 @@ if IS_ROOT_NODE:
             registry=RESIDENT_REGISTRY,
             logger=logger,
             control=CONTROL_TRACER,
+            content_scope_authority=CONTENT_SCOPE_AUTHORITY,
         )
         RUNTIME.set_resident_terminal_hook(RESIDENT_CONTROL.on_invocation_terminal)
         RUNTIME.set_resident_handlers(
@@ -264,6 +288,7 @@ if IS_ROOT_NODE:
         )
 
     _relay_redis: BinaryRedis | None = None
+    CONTENT_BRIDGE: RootRendezvousBridge | None = None
     if config.orchestration.network.enabled:
         NETWORK_PLANE = NetworkPlane(
             config.orchestration.network, NODE_REGISTRY, logger
@@ -279,11 +304,18 @@ if IS_ROOT_NODE:
             ),
         )
         RESIDENT_BRIDGE = RootRendezvousBridge(
-            RelayStreamStore(_relay_redis),
-            RelaySessionStore(_relay_redis),
-            RootCursorStore(_relay_redis),
+            RelayStreamStore(_relay_redis, RESIDENT_RELAY_KEYSPACE),
+            RelaySessionStore(_relay_redis, RESIDENT_RELAY_KEYSPACE),
+            RootCursorStore(_relay_redis, RESIDENT_RELAY_KEYSPACE),
             logger=logger,
         )
+        if config.content_store.hydration_enabled:
+            CONTENT_BRIDGE = RootRendezvousBridge(
+                RelayStreamStore(_relay_redis, CONTENT_RELAY_KEYSPACE),
+                RelaySessionStore(_relay_redis, CONTENT_RELAY_KEYSPACE),
+                RootCursorStore(_relay_redis, CONTENT_RELAY_KEYSPACE),
+                logger=logger,
+            )
 
     FLEET_SAMPLER = build_fleet_sampler(
         SERVER_METER,
@@ -314,7 +346,7 @@ if IS_ROOT_NODE:
             network=NETWORK_PLANE,
             worker_registry=WORKER_REGISTRY,
             runtime=RUNTIME,
-            sessions=RelaySessionStore(_relay_redis),
+            sessions=RelaySessionStore(_relay_redis, RESIDENT_RELAY_KEYSPACE),
             resident_cfg=config.orchestration.resident,
             root_node_id=lambda: ROOT_NODE_ID,
             edge_id=SERVE_EDGE_STREAM_ID,
@@ -336,6 +368,24 @@ if IS_ROOT_NODE:
         SERVE_FORWARD_INGRESS = _serve_wiring.forward_ingress
         SERVE_BINDINGS = _serve_wiring.bindings
 
+    CONTENT_ACCESS: ContentAccessBroker | None = None
+    # Reaching the store is not the cache's business: every dispatched task needs access
+    # to write what it produces, whether or not this deployment caches anything.
+    if config.content_store.enabled:
+        _store_cfg = config.object_store
+        if _store_cfg.scoped_credentials and _store_cfg.backend == BACKEND_S3:
+            _minter: ScopedCredentialMinter = StsScopedCredentialMinter(
+                _store_cfg, build_sts_client(_store_cfg)
+            )
+        else:
+            _minter = DeploymentCredentialMinter(_store_cfg, logger)
+        CONTENT_ACCESS = ContentAccessBroker(
+            WORKER_REGISTRY,
+            _minter,
+            grant_ttl_sec=config.content_store.access_grant_ttl_sec,
+            logger=logger,
+        )
+
     DISPATCHER = create_dispatcher(
         config.dispatch,
         RUNTIME,
@@ -345,6 +395,7 @@ if IS_ROOT_NODE:
         metrics_recorder=METRICS_RECORDER,
         resident_capacity_enabled=config.orchestration.resident.enabled,
         resident_admission_slots=config.orchestration.resident.admission_slots,
+        content_access=CONTENT_ACCESS,
         control=CONTROL_TRACER,
     )
 
@@ -378,6 +429,21 @@ if IS_ROOT_NODE:
         rehydration_grace_seconds=config.watchdog.rehydration_grace_sec,
     )
 
+    CONTENT_AUTHORITY: ContentHydrationAuthority | None = None
+    if config.content_store.hydration_enabled and WORKER_REGISTRY is not None:
+        CONTENT_AUTHORITY = ContentHydrationAuthority(
+            ContentHolderDirectory(
+                REDIS_CLIENT, record_ttl_sec=config.content_store.holder_record_ttl_sec
+            ),
+            WORKER_REGISTRY,
+            authorizes=RUNTIME.content_binding_authorizes,
+            grant_ttl_sec=config.content_store.grant_ttl_sec,
+            sessions=ContentTransferSessions(
+                REDIS_CLIENT, ttl_sec=config.content_store.grant_ttl_sec * 10
+            ),
+            logger=logger,
+        )
+
     EVENT_MONITOR = EventMonitor(
         redis_client=REDIS_CLIENT.sync,
         logger=logger,
@@ -399,6 +465,7 @@ if IS_ROOT_NODE:
         on_node_removed=(
             NETWORK_PLANE.forget_node if NETWORK_PLANE is not None else None
         ),
+        content_authority=CONTENT_AUTHORITY,
     )
     # The runtime settles terminals the task-event stream never carries, so it tells
     # the monitor's finalizer when a workflow may have ended; the finalizer decides.
@@ -584,13 +651,25 @@ async def _lifespan(_: FastAPI):
 
         # --- Root-only startup ---
         if IS_ROOT_NODE:
+            if (
+                config.content_store.enabled
+                and config.object_store.backend == BACKEND_S3
+            ):
+                # Off the loop and off import: reaching the store can block for as long
+                # as its own timeouts allow, and a store that is slow or unreachable
+                # must not hold up the process that would report it.
+                await asyncio.to_thread(ensure_bucket, config.object_store, logger)
             await rehydrate_root_state(
                 RUNTIME, RESIDENT_CONTROL, RESIDENT_REGISTRY, GATED_SERVE
             )
             if RESIDENT_BRIDGE is not None and NODE_REGISTRY is not None:
                 edge_ids = (SERVE_EDGE_STREAM_ID,) if GATED_SERVE is not None else ()
-                app.state.resident_bridge_task = start_resident_bridge_pump(
+                app.state.resident_bridge_task = start_relay_bridge_pump(
                     RESIDENT_BRIDGE, NODE_REGISTRY, logger, edge_ids
+                )
+            if CONTENT_BRIDGE is not None and NODE_REGISTRY is not None:
+                app.state.content_bridge_task = start_relay_bridge_pump(
+                    CONTENT_BRIDGE, NODE_REGISTRY, logger
                 )
             if GATED_SERVE is not None:
                 GATED_SERVE.relay.start(asyncio.get_running_loop())
@@ -644,8 +723,12 @@ async def _lifespan(_: FastAPI):
 
             # --- Root-only shutdown ---
             _stop_background()
-            _bridge_task = app.state.resident_bridge_task
-            if _bridge_task is not None:
+            for _bridge_task in (
+                app.state.resident_bridge_task,
+                app.state.content_bridge_task,
+            ):
+                if _bridge_task is None:
+                    continue
                 _bridge_task.cancel()
                 try:
                     await _bridge_task
@@ -699,10 +782,12 @@ app.state.resident_control = RESIDENT_CONTROL
 app.state.gated_serve = GATED_SERVE
 app.state.serve_bindings = SERVE_BINDINGS
 app.state.network_plane = NETWORK_PLANE
-app.state.content_store = CONTENT_STORE
+app.state.finalization_index = FINALIZATION_INDEX
 app.state.telemetry_store = TELEMETRY_STORE
 # Started in lifespan on the root node when the resident relay bridge is enabled.
 app.state.resident_bridge_task = None
+# Likewise for the content plane's own relay bridge.
+app.state.content_bridge_task = None
 
 # Routers — shared
 app.include_router(health.router)

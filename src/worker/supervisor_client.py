@@ -5,7 +5,7 @@ import logging
 import queue
 import threading
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -641,6 +641,35 @@ class SupervisorClient:
             payload={"frame": frame},
         )
         self._event_queue.put(serialize_event(event))
+
+    def push_content_frame(self, frame: dict[str, Any]) -> None:
+        """Send one content transfer frame up for the supervisor to bridge onward."""
+        self._push_event("CONTENT_FRAME", {"frame": frame})
+
+    def push_content_holding(self, held: Sequence[tuple[str, str]]) -> None:
+        """Report the objects this worker holds, so control can resolve them."""
+        self._push_event(
+            "CONTENT_HOLDING", {"held": [[scope, digest] for scope, digest in held]}
+        )
+
+    def push_content_hydration_request(
+        self, reference: dict[str, Any], task_id: str
+    ) -> None:
+        """Ask control to authorize hydrating one object for one task."""
+        self._push_event(
+            "CONTENT_HYDRATION_REQUEST", {"reference": reference, "task_id": task_id}
+        )
+
+    def _push_event(self, event_type: str, payload: dict[str, Any]) -> None:
+        if self._stub is None:
+            raise RuntimeError("Supervisor gRPC client not started")
+        if not self._event_ready.wait():
+            raise RuntimeError("Supervisor event stream not ready")
+        self._event_queue.put(
+            serialize_event(
+                WorkerEvent(type=event_type, worker_id=self.worker_id, payload=payload)
+            )
+        )
 
     def push_resident_ack(self, ack: ResidentBootstrapAck) -> None:
         """Report the resident bootstrap acknowledgement to control."""

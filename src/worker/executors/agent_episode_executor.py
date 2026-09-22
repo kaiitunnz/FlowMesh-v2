@@ -102,7 +102,7 @@ class AgentEpisodeExecutor(Executor):
             else None
         )
         outcomes = hydrate_delivered_outcomes(
-            self._config.server_base_url, dispatch.delivered_outcomes
+            self._lifecycle, task.task_id, dispatch.delivered_outcomes
         )
         for outcome in outcomes:
             _LOG.info(

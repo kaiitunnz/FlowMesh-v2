@@ -97,7 +97,7 @@ class _Harness:
             audience=lambda: (_WORKER, _GEN),
             egresses=(self.egress,),
             outcome_sink=self.reports.put,
-            content_store=store,
+            content_store_for=lambda task_id: store,
         )
 
     def stash(self) -> None:
@@ -207,7 +207,7 @@ def test_redrive_after_materialize_recovers_the_prior_outcome() -> None:
     h.sidecar.submit_permit(_permit())
     second = h.report()
     assert second.outcome_ref is not None
-    assert second.outcome_ref.content_digest == first.outcome_ref.content_digest
+    assert second.outcome_ref.content == first.outcome_ref.content
     assert h.egress.calls == egressed
     h.stop()
 

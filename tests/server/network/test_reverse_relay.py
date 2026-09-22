@@ -9,6 +9,7 @@ import asyncio
 
 from server.clients.redis import resident_relay_down_key
 from server.network.reverse_relay import (
+    RESIDENT_RELAY_KEYSPACE,
     RelayDirection,
     RelayFrame,
     RelayFrameKind,
@@ -25,8 +26,8 @@ def test_frame_codec_round_trips_a_raw_binary_payload() -> None:
     frame = RelayFrame(
         kind=RelayFrameKind.DATA,
         session_id="rly-9",
-        invocation_id="inv-9",
-        idm="idm-9",
+        correlation_id="inv-9",
+        operation_id="idm-9",
         direction=RelayDirection.ORIGIN_TO_TARGET,
         seq=3,
         ack=2,
@@ -39,7 +40,7 @@ def test_frame_codec_round_trips_a_raw_binary_payload() -> None:
 
 def test_cursor_read_returns_only_entries_after_the_stored_id() -> None:
     async def run() -> None:
-        streams = RelayStreamStore(FakeBinaryRedis())
+        streams = RelayStreamStore(FakeBinaryRedis(), RESIDENT_RELAY_KEYSPACE)
         first = await streams.publish_down(
             "nde-t", relay_frame(RelayFrameKind.DATA, seq=1)
         )
@@ -56,7 +57,7 @@ def test_cursor_read_returns_only_entries_after_the_stored_id() -> None:
 def test_an_undecodable_frame_is_skipped_and_the_cursor_still_advances() -> None:
     async def run() -> None:
         redis = FakeBinaryRedis()
-        streams = RelayStreamStore(redis)
+        streams = RelayStreamStore(redis, RESIDENT_RELAY_KEYSPACE)
         await streams.publish_down("nde-t", relay_frame(RelayFrameKind.DATA, seq=1))
         # A frame with an unknown kind (a realistic rolling-upgrade mix) cannot decode.
         # It is the last entry, so the cursor must still advance past it.
@@ -66,8 +67,8 @@ def test_an_undecodable_frame_is_skipped_and_the_cursor_still_advances() -> None
                 {
                     b"k": b"bogus",
                     b"s": b"rly-1",
-                    b"i": b"inv",
-                    b"m": b"idm",
+                    b"c": b"inv",
+                    b"o": b"idm",
                     b"d": b"t2o",
                     b"q": b"2",
                     b"a": b"0",
@@ -87,7 +88,7 @@ def test_an_undecodable_frame_is_skipped_and_the_cursor_still_advances() -> None
 
 def test_trim_never_discards_an_unacknowledged_frame() -> None:
     async def run() -> None:
-        streams = RelayStreamStore(FakeBinaryRedis())
+        streams = RelayStreamStore(FakeBinaryRedis(), RESIDENT_RELAY_KEYSPACE)
         acked = await streams.publish_down(
             "nde-t", relay_frame(RelayFrameKind.DATA, seq=1)
         )
@@ -104,7 +105,7 @@ def test_trim_never_discards_an_unacknowledged_frame() -> None:
 def test_lease_hands_over_atomically_and_fences_the_lapsed_owner() -> None:
     async def run() -> None:
         redis = FakeBinaryRedis()
-        lease = RelayLease(redis, ttl_ms=1000)
+        lease = RelayLease(redis, RESIDENT_RELAY_KEYSPACE, ttl_ms=1000)
         # A wins the leg; a competitor B cannot acquire while A's lease is live.
         assert await lease.acquire("rly-1", "t2o", "consumer-A")
         assert not await lease.acquire("rly-1", "t2o", "consumer-B")
@@ -124,7 +125,7 @@ def test_lease_hands_over_atomically_and_fences_the_lapsed_owner() -> None:
 
 def test_session_record_round_trips_the_durable_cursor() -> None:
     async def run() -> None:
-        sessions = RelaySessionStore(FakeBinaryRedis())
+        sessions = RelaySessionStore(FakeBinaryRedis(), RESIDENT_RELAY_KEYSPACE)
         await sessions.update("rly-1", t2o_last_acked=7, t2o_cursor="12-0")
         record = await sessions.load("rly-1")
         assert record["t2o_last_acked"] == "7"

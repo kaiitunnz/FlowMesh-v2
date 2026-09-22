@@ -24,7 +24,7 @@ from ...clients.redis import (
     SyncRedisClient,
     worker_key,
 )
-from ...resident.worker_bridge import ResidentWorkerBridge
+from ...network.worker_bridge import RelayWorkerBridge
 from ..adapters.base import WorkerAdapter, WorkerTokenType
 from ..registry import WorkerRegistry
 from ..schemas import WorkerStatus
@@ -99,7 +99,8 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
         task_listener: TaskListener,
         relay_service: RelayService,
         logger: logging.Logger,
-        resident_bridge: ResidentWorkerBridge | None = None,
+        resident_bridge: RelayWorkerBridge | None = None,
+        content_bridge: RelayWorkerBridge | None = None,
     ) -> None:
         self._registry = registry
         self._task_listener = task_listener
@@ -108,6 +109,7 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
         self._node_id = node_id
         self._node_alias = node_alias
         self._resident_bridge = resident_bridge
+        self._content_bridge = content_bridge
         self._logger = logger
         # Guards _node_id and the registry-vs-rehome window against concurrent
         # RegisterWorker (grpc loop thread) and rebind_node (heartbeat thread).
@@ -254,6 +256,11 @@ class SupervisorServicer(supervisor_pb2_grpc.SupervisorServicer):
                     frame = RelayFrame.from_wire(payload["payload"]["frame"])
                     await self._resident_bridge.publish_up(frame)
                     continue
+                case "CONTENT_FRAME" if self._content_bridge is not None:
+                    # A content transfer frame rides the same way, on its own namespace.
+                    frame = RelayFrame.from_wire(payload["payload"]["frame"])
+                    await self._content_bridge.publish_up(frame)
+                    continue
             self._relay_service.add_event(payload)
         self._logger.info("Event stream closed for worker %s", worker_id)
         if registered and not unregistered:
@@ -314,7 +321,8 @@ class GrpcServer:
         task_listener: TaskListener,
         relay_service: RelayService,
         logger: logging.Logger,
-        resident_bridge: ResidentWorkerBridge | None = None,
+        resident_bridge: RelayWorkerBridge | None = None,
+        content_bridge: RelayWorkerBridge | None = None,
     ) -> None:
         self._logger = logger
         self._server: grpc.aio.Server | None = None
@@ -327,6 +335,7 @@ class GrpcServer:
             relay_service,
             logger,
             resident_bridge=resident_bridge,
+            content_bridge=content_bridge,
         )
         self._listen_addr = f"{host}:{port}"
 

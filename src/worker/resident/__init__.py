@@ -6,8 +6,8 @@ claim gate. Both own the windowed relay session end to end; the servers relay it
 opaquely and never read its cursor or window.
 """
 
-from shared.resident.session import ResidentRelaySession, ResidentSessionRole
-from shared.resident.transport import ResidentFrameSink
+from shared.network.frame_stream import FrameSink
+from shared.network.session import FramedRelaySession, RelaySessionRole
 
 from .capture import capture_resident_request
 from .engine import EngineOpen, EngineResponse, HttpEngineDelivery
@@ -21,12 +21,12 @@ __all__ = [
     "EngineResponse",
     "HttpEngineDelivery",
     "capture_resident_request",
-    "ResidentFrameSink",
+    "FrameSink",
     "ResidentLaneHost",
     "ResidentOriginDriver",
     "ResidentOriginRequest",
-    "ResidentRelaySession",
+    "FramedRelaySession",
     "ResidentReplicaSidecar",
     "ResidentRequestStore",
-    "ResidentSessionRole",
+    "RelaySessionRole",
 ]

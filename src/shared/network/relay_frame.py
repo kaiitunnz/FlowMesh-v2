@@ -33,16 +33,20 @@ _CONTROL_KINDS = frozenset({RelayFrameKind.WINDOW, RelayFrameKind.CANCEL})
 
 @dataclass(frozen=True)
 class RelayFrame:
-    """One relay frame. ``payload`` is opaque bytes the servers never read (the resident
-    fence and body ride inside it); the rest are routing and flow-control metadata they
-    may read. ``seq`` orders a direction's data for receiver dedup; ``ack`` carries a
-    grant's cumulative byte credit."""
+    """One relay frame. ``payload`` is opaque bytes the servers never read (a protocol's
+    own fence and body ride inside it); the rest are routing and flow-control metadata
+    they may read. ``correlation_id`` and ``operation_id`` name whatever the protocol
+    over this session correlates by — a resident invocation and its idempotency key, a
+    content transfer's hydration grant — and the transport only carries them, so a
+    protocol that needs one of them leaves the other empty. ``seq`` orders a
+    direction's data for receiver dedup; ``ack`` carries a grant's cumulative byte
+    credit."""
 
     kind: RelayFrameKind
     session_id: str
-    invocation_id: str
-    idm: str
     direction: RelayDirection
+    correlation_id: str = ""
+    operation_id: str = ""
     seq: int = 0
     ack: int = 0
     payload: bytes = b""
@@ -56,8 +60,8 @@ class RelayFrame:
         fields: dict[bytes, bytes] = {
             b"k": self.kind.value.encode(),
             b"s": self.session_id.encode(),
-            b"i": self.invocation_id.encode(),
-            b"m": self.idm.encode(),
+            b"c": self.correlation_id.encode(),
+            b"o": self.operation_id.encode(),
             b"d": self.direction.value.encode(),
             b"q": str(self.seq).encode(),
             b"a": str(self.ack).encode(),
@@ -73,8 +77,8 @@ class RelayFrame:
         return RelayFrame(
             kind=RelayFrameKind(fields[b"k"].decode()),
             session_id=fields[b"s"].decode(),
-            invocation_id=fields[b"i"].decode(),
-            idm=fields[b"m"].decode(),
+            correlation_id=fields[b"c"].decode(),
+            operation_id=fields[b"o"].decode(),
             direction=RelayDirection(fields[b"d"].decode()),
             seq=int(fields[b"q"]),
             ack=int(fields[b"a"]),
@@ -87,8 +91,8 @@ class RelayFrame:
         wire: dict[str, Any] = {
             "kind": self.kind.value,
             "session_id": self.session_id,
-            "invocation_id": self.invocation_id,
-            "idm": self.idm,
+            "correlation_id": self.correlation_id,
+            "operation_id": self.operation_id,
             "direction": self.direction.value,
             "seq": self.seq,
             "ack": self.ack,
@@ -104,8 +108,8 @@ class RelayFrame:
         return RelayFrame(
             kind=RelayFrameKind(data["kind"]),
             session_id=str(data["session_id"]),
-            invocation_id=str(data["invocation_id"]),
-            idm=str(data["idm"]),
+            correlation_id=str(data["correlation_id"]),
+            operation_id=str(data["operation_id"]),
             direction=RelayDirection(data["direction"]),
             seq=int(data.get("seq", 0)),
             ack=int(data.get("ack", 0)),

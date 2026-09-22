@@ -38,13 +38,13 @@ async def rehydrate_root_state(
         resident_control.start()
 
 
-def start_resident_bridge_pump(
+def start_relay_bridge_pump(
     bridge: RootRendezvousBridge,
     nodes: NodeRegistry,
     logger: logging.Logger,
     extra_node_ids: tuple[str, ...] = (),
 ) -> asyncio.Task[None]:
-    """Start the root bridge's pump loop.
+    """Start one root bridge's pump loop over its own namespace.
 
     Sweeps every attached node — plus any ``extra_node_ids`` such as the gated serve
     edge's dedicated stream, which is not a worker node — on a short non-blocking
@@ -61,7 +61,7 @@ def start_resident_bridge_pump(
             except asyncio.CancelledError:
                 return
             except Exception:
-                logger.exception("resident relay bridge pump failed")
+                logger.exception("relay bridge pump failed")
             await asyncio.sleep(0.05)
 
     return asyncio.create_task(_pump())

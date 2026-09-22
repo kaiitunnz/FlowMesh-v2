@@ -11,9 +11,7 @@ import threading
 from collections.abc import AsyncIterator
 from typing import Any
 
-from shared.content import content_digest
 from shared.network.relay_frame import RelayDirection, RelayFrame, RelayFrameKind
-from shared.outcome import FabricContentStore, OutcomeManifest
 from shared.resident.carriage import ResidentCarriagePlan
 from shared.resident.contracts import (
     AdmissionHandoff,
@@ -26,43 +24,11 @@ from shared.resident.reports import (
     ResidentOpOutcome,
     ResidentStreamStatus,
 )
+from tests.shared.outcome_helpers import InMemoryContentStore
 from worker.resident.engine import EngineResponse
 from worker.resident.lane_host import ResidentLaneHost
 
 _COMPLETION = "a resident completion streamed across two lane hosts in pieces"
-
-
-class _MemStore(FabricContentStore):
-    def __init__(self) -> None:
-        self._by_idem: dict[str, OutcomeManifest] = {}
-        self._by_digest: dict[str, bytes] = {}
-
-    def put_object(self, data: bytes) -> str:
-        digest = content_digest(data)
-        self._by_digest[digest] = data
-        return digest
-
-    def find(self, idempotency_key: str) -> OutcomeManifest | None:
-        return self._by_idem.get(idempotency_key)
-
-    def materialize(
-        self, idempotency_key: str, data: bytes, *, media_type: str
-    ) -> OutcomeManifest:
-        if idempotency_key in self._by_idem:
-            return self._by_idem[idempotency_key]
-        digest = content_digest(data)
-        self._by_digest[digest] = data
-        manifest = OutcomeManifest(
-            content_digest=digest,
-            size_bytes=len(data),
-            media_type=media_type,
-            idempotency_key=idempotency_key,
-        )
-        self._by_idem[idempotency_key] = manifest
-        return manifest
-
-    def read(self, digest: str) -> bytes:
-        return self._by_digest[digest]
 
 
 async def _fake_engine(
@@ -113,8 +79,8 @@ def test_wire_round_trip() -> None:
     frame = RelayFrame(
         kind=RelayFrameKind.DATA,
         session_id="s1",
-        invocation_id="inv-1",
-        idm="idm-1",
+        correlation_id="inv-1",
+        operation_id="idm-1",
         direction=RelayDirection.ORIGIN_TO_TARGET,
         seq=3,
         ack=0,
@@ -125,7 +91,7 @@ def test_wire_round_trip() -> None:
 
 
 def test_two_hosts_complete_a_resident_invocation() -> None:
-    store = _MemStore()
+    store = InMemoryContentStore()
     outcomes: list[ResidentOpOutcome] = []
     done = threading.Event()
 
@@ -163,7 +129,7 @@ def test_two_hosts_complete_a_resident_invocation() -> None:
         push_frame=origin_pushes,
         report_ack=on_ack,
         report_outcome=on_outcome,
-        content_store=store,
+        content_store_for=lambda task_id: store,
         peek_request=peek,
         delete_request=lambda t, c: deleted.append((t, c)),
     )
@@ -171,7 +137,7 @@ def test_two_hosts_complete_a_resident_invocation() -> None:
         push_frame=replica_pushes,
         report_ack=noop_ack,
         report_outcome=noop_outcome,
-        content_store=None,
+        content_store_for=lambda task_id: None,
         peek_request=lambda _t, _c: None,
         delete_request=lambda _t, _c: None,
         engine_open=_fake_engine,
@@ -210,7 +176,7 @@ def test_two_hosts_complete_a_resident_invocation() -> None:
         outcome = outcomes[0]
         assert outcome.status is ResidentStreamStatus.SUCCESS
         assert outcome.manifest is not None
-        assert store.hydrate(outcome.manifest).decode() == _COMPLETION
+        assert store.hydrate(outcome.manifest.content).decode() == _COMPLETION
 
         # The fenced-terminal reap drops the worker-private raw request so it does not
         # outlive the invocation (the leak the delete hook closes).
@@ -239,7 +205,7 @@ def test_bind_frame_threads_the_serve_task_fence_to_the_sidecar() -> None:
         push_frame=lambda _f: None,
         report_ack=lambda _a: None,
         report_outcome=lambda _o: None,
-        content_store=None,
+        content_store_for=lambda task_id: None,
         peek_request=lambda _t, _c: None,
         delete_request=lambda _t, _c: None,
     )

@@ -11,13 +11,12 @@ from typing import Any
 
 import requests
 
-from shared.content import ContentStoreError
+from shared.content import ContentReference, ContentStoreError, FabricObjectStore
 from shared.inference import (
     CanonicalInferenceRequest,
     InputResolutionError,
     ResolvedCanonicalInferenceRequest,
     ResolvedInputMaterialization,
-    ResolvedInputReference,
     canonical_result,
     hydrate_resolved_input,
     write_resolved_input,
@@ -97,7 +96,6 @@ class Runner:
         web_search_api_key: str | None = None,
         model_api_key: str | None = None,
         model_egress_timeout_sec: float = 120.0,
-        content_store: FabricContentStore | None = None,
         peer_enabled: bool = False,
         peer_material: MutualTlsMaterial | None = None,
         peer_listener_sock: socket.socket | None = None,
@@ -148,7 +146,6 @@ class Runner:
         self._web_search_api_key = web_search_api_key
         self._model_api_key = model_api_key
         self._model_egress_timeout_sec = model_egress_timeout_sec
-        self._content_store = content_store
         # The worker-local mediated-egress sidecar, built on the first permit relayed
         # over the attachment (once the worker id and incarnation are known).
         self._mediated_sidecar: MediatedEgressSidecar | None = None
@@ -225,7 +222,7 @@ class Runner:
                 ModelEgress(self._model_api_key, self.logger),
             ),
             outcome_sink=client.push_mediated_outcome,
-            content_store=self._content_store,
+            content_store_for=self._outcome_store,
             logger=self.logger,
         )
         return self._mediated_sidecar
@@ -276,7 +273,7 @@ class Runner:
             report_ack=client.push_resident_ack,
             report_outcome=client.push_resident_outcome,
             report_observation=client.push_resident_route_observation,
-            content_store=self._content_store,
+            content_store_for=self._outcome_store,
             peek_request=self.lifecycle.resident_requests.peek,
             delete_request=self.lifecycle.resident_requests.delete,
             peer_enabled=self._peer_enabled,
@@ -292,6 +289,10 @@ class Runner:
         if frame_kind.startswith("resident_"):
             if (host := self._ensure_resident_host()) is not None:
                 host.route(frame_kind, frame)
+            return
+        if frame_kind.startswith("content_"):
+            if (plane := self.lifecycle.content_plane) is not None:
+                plane.route(frame_kind, frame)
             return
         if frame_kind == "deny":
             # A held model turn's denial: only a facade waiter consumes it.
@@ -330,6 +331,18 @@ class Runner:
             return
         self.logger.warning("Unknown mediated-op frame kind: %s", frame_kind)
 
+    def _object_store(self, task_id: str) -> FabricObjectStore | None:
+        """The content surface this task reads and writes through."""
+        if (plane := self.lifecycle.content_plane) is None:
+            return None
+        return plane.for_task(task_id)
+
+    def _outcome_store(self, task_id: str) -> FabricContentStore | None:
+        """Where this task's outcomes materialize and deduplicate."""
+        if (plane := self.lifecycle.content_plane) is None:
+            return None
+        return plane.outcome_store(task_id)
+
     def _prepare_inputs(self, msg: WorkerTaskMessage) -> ResolvedInputMaterialization:
         """Resolve a task's declared contract and store the request it materialized.
 
@@ -337,7 +350,8 @@ class Runner:
         anywhere here leaves an object no resolution claims rather than a resolution
         pointing at nothing.
         """
-        if self._content_store is None:
+        store = self._object_store(msg.task_id)
+        if store is None:
             raise ExecutionError(
                 f"task {msg.task_id} prepares its inputs, and this worker reaches no "
                 "fabric content store to store the request in",
@@ -350,7 +364,7 @@ class Runner:
                 "contract to resolve",
                 retryable=False,
             )
-        reference = write_resolved_input(self._content_store, resolved)
+        reference = write_resolved_input(store, msg.content_scope, resolved)
         return ResolvedInputMaterialization(
             binding=resolved.binding, reference=reference
         )
@@ -399,7 +413,7 @@ class Runner:
         )
 
     def _hydrate_prepared_request(
-        self, msg: WorkerTaskMessage, reference: ResolvedInputReference
+        self, msg: WorkerTaskMessage, reference: ContentReference
     ) -> ResolvedCanonicalInferenceRequest:
         """Fetch the prepared request this task runs, failing closed on anything else.
 
@@ -407,14 +421,21 @@ class Runner:
         missing, out of the task's scope, or not the bytes its digest names fails the
         task before any model I/O and before any admission.
         """
-        if self._content_store is None:
+        store = self._object_store(msg.task_id)
+        if store is None:
             raise ExecutionError(
                 f"task {msg.task_id} runs a prepared request and this worker reaches "
                 "no fabric content store to hydrate it from",
                 retryable=True,
             )
+        if reference.authorization_scope != msg.content_scope:
+            raise ExecutionError(
+                f"task {msg.task_id} runs in scope {msg.content_scope} and the request "
+                f"it recorded is in {reference.authorization_scope}",
+                retryable=False,
+            )
         try:
-            hydrated = hydrate_resolved_input(self._content_store, reference)
+            hydrated = hydrate_resolved_input(store, reference)
         except ContentStoreError as exc:
             raise ExecutionError(
                 f"task {msg.task_id} cannot hydrate the request its preparation "

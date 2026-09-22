@@ -1,67 +1,65 @@
-"""One resident invocation's windowed relay session, owned by its endpoint.
+"""One exchange's windowed relay session, owned by its endpoint.
 
-Each side of an invocation runs one session: the origin — a caller worker's origin
-driver or the gated serve edge in the root — that drives it, and the replica worker that
-serves it. A session sends its role's data direction and reads the other, bounding its
-in-flight bytes with a sender-side window and granting the peer only as fast as it
-drains, so a slow consumer backpressures a fast producer end to end. The servers relay
-the frames opaquely: the session owns the cursor, window, and the protocol, and the
-supervisors never read them.
+Each side of an exchange runs one session: the origin that drives it — a caller worker's
+origin driver, the gated serve edge in the root, a worker hydrating content — and the
+target that answers it. A session sends its role's data direction and reads the other,
+bounding its in-flight bytes with a sender-side window and granting the peer only as
+fast as it drains, so a slow consumer backpressures a fast producer end to end. The
+servers relay the frames opaquely: the session owns the cursor, window, and the protocol
+above it, and the supervisors never read them.
 """
 
 import asyncio
 from enum import Enum
 from typing import Any
 
-from shared.network.relay_frame import (
+from shared.telemetry.propagation import ambient_traceparent
+
+from .frame_stream import FrameSink
+from .message import decode_body_msg, decode_msg, encode_body_msg, encode_msg
+from .relay_frame import (
     DirectionWindow,
     RelayDirection,
     RelayFrame,
     RelayFrameKind,
 )
-from shared.resident.wire import (
-    decode_body_msg,
-    decode_msg,
-    encode_body_msg,
-    encode_msg,
-)
-from shared.telemetry.propagation import ambient_traceparent
-
-from .transport import ResidentFrameSink
 
 
-class ResidentSessionRole(Enum):
-    """Which end of the invocation this session drives."""
+class RelaySessionRole(Enum):
+    """Which end of the exchange this session drives."""
 
     ORIGIN = "origin"
-    REPLICA = "replica"
+    TARGET = "target"
 
 
-class ResidentRelaySession:
-    """A worker's end of one invocation's reverse-relay data session.
+class FramedRelaySession:
+    """An endpoint's end of one exchange's reverse-relay data session.
 
-    The origin role sends origin-to-target and receives target-to-origin; the replica
+    The origin role sends origin-to-target and receives target-to-origin; the target
     role is the mirror. A received window frame advances this side's send window; a
     drained data frame emits a cumulative window grant so the peer never holds more than
     its window in flight. Cancellation wakes a blocked receiver so a phase returns.
+
+    ``correlation_id`` and ``operation_id`` are the identities the protocol above this
+    session correlates its frames by; the session only stamps them.
     """
 
     def __init__(
         self,
         *,
         session_id: str,
-        invocation_id: str,
-        idm: str,
-        role: ResidentSessionRole,
-        sink: ResidentFrameSink,
+        role: RelaySessionRole,
+        sink: FrameSink,
+        correlation_id: str = "",
+        operation_id: str = "",
         window_bytes: int = 65536,
     ) -> None:
         self._session_id = session_id
-        self._invocation_id = invocation_id
-        self._idm = idm
+        self._correlation_id = correlation_id
+        self._operation_id = operation_id
         self._send_dir = (
             RelayDirection.ORIGIN_TO_TARGET
-            if role is ResidentSessionRole.ORIGIN
+            if role is RelaySessionRole.ORIGIN
             else RelayDirection.TARGET_TO_ORIGIN
         )
         self._sink = sink
@@ -95,8 +93,8 @@ class ResidentRelaySession:
             RelayFrame(
                 kind=RelayFrameKind.DATA,
                 session_id=self._session_id,
-                invocation_id=self._invocation_id,
-                idm=self._idm,
+                correlation_id=self._correlation_id,
+                operation_id=self._operation_id,
                 direction=self._send_dir,
                 seq=self._send_seq,
                 tp=ambient_traceparent(),
@@ -163,8 +161,8 @@ class ResidentRelaySession:
             RelayFrame(
                 kind=RelayFrameKind.CANCEL,
                 session_id=self._session_id,
-                invocation_id=self._invocation_id,
-                idm=self._idm,
+                correlation_id=self._correlation_id,
+                operation_id=self._operation_id,
                 direction=self._send_dir,
                 tp=ambient_traceparent(),
             )
@@ -175,8 +173,8 @@ class ResidentRelaySession:
             RelayFrame(
                 kind=RelayFrameKind.WINDOW,
                 session_id=self._session_id,
-                invocation_id=self._invocation_id,
-                idm=self._idm,
+                correlation_id=self._correlation_id,
+                operation_id=self._operation_id,
                 direction=self._send_dir,
                 ack=self._recv_consumed,
                 tp=ambient_traceparent(),

@@ -1,17 +1,57 @@
-"""Immutable, content-addressed objects the fabric stores on a principal's behalf."""
+"""Immutable, content-addressed objects the fabric stores within one scope."""
 
+from .access import (
+    ContentOperationKind,
+    ContentStoreAccess,
+    ContentStoreAccessGrant,
+    ScopedContentCredential,
+)
+from .config import BACKEND_FILESYSTEM, BACKEND_S3, ObjectStoreConfig
+from .filesystem import FilesystemObjectBacking
+from .grant import (
+    ContentHydrationGrant,
+    ContentOperation,
+    GrantRejection,
+    HolderGrantGate,
+)
+from .reference import (
+    CONTENT_ENCODING_IDENTITY,
+    OCTET_STREAM,
+    ContentReference,
+    DigestAlgorithm,
+)
 from .store import (
     ContentHydrationError,
     ContentStoreError,
     FabricObjectStore,
-    ObjectWriteAck,
+    ScopedObjectStore,
     content_digest,
+    reference_for,
+    verify_content,
 )
 
 __all__ = [
+    "BACKEND_FILESYSTEM",
+    "BACKEND_S3",
+    "ObjectStoreConfig",
+    "CONTENT_ENCODING_IDENTITY",
+    "OCTET_STREAM",
     "ContentHydrationError",
+    "ContentHydrationGrant",
+    "ContentOperation",
+    "ContentOperationKind",
+    "ContentReference",
+    "ContentStoreAccess",
+    "ContentStoreAccessGrant",
     "ContentStoreError",
+    "DigestAlgorithm",
     "FabricObjectStore",
-    "ObjectWriteAck",
+    "FilesystemObjectBacking",
+    "ScopedContentCredential",
+    "ScopedObjectStore",
+    "GrantRejection",
+    "HolderGrantGate",
     "content_digest",
+    "reference_for",
+    "verify_content",
 ]

@@ -188,6 +188,40 @@ def resident_relay_down_cursor_key(node_id: str) -> str:
 RESIDENT_RELAY_ROOT_CURSOR_KEY = "rr:root:up_cursor"
 
 
+# Content-relay namespace (ct:*): the same reverse-attachment shape for content
+# hydration transfers, disjoint from the resident streams so neither shares a stream,
+# session record, lease, or cursor with the other.
+def content_relay_up_key(node_id: str) -> str:
+    return f"ct:node:{node_id}:up"
+
+
+def content_relay_down_key(node_id: str) -> str:
+    return f"ct:node:{node_id}:down"
+
+
+def content_relay_session_key(session_id: str) -> str:
+    return f"ct:sess:{session_id}"
+
+
+def content_relay_down_cursor_key(node_id: str) -> str:
+    return f"ct:node:{node_id}:down_cursor"
+
+
+CONTENT_RELAY_ROOT_CURSOR_KEY = "ct:root:up_cursor"
+
+
+def content_holders_key(scope: str, digest: str) -> str:
+    return f"ct:holders:{scope}:{digest}"
+
+
+def content_finalization_key(scope: str, idempotency_key: str) -> str:
+    return f"ct:finalization:{scope}:{idempotency_key}"
+
+
+def content_finalization_scope_key(idempotency_key: str) -> str:
+    return f"ct:finalization-scope:{idempotency_key}"
+
+
 def ssh_connection_key(connection_id: str) -> str:
     return f"ssh:connection:{connection_id}"
 
@@ -374,6 +408,9 @@ class SyncRedisClient:
     def set_value(self, key: str, value: str) -> None:
         self._control.set(key, value)
 
+    def set_value_if_absent(self, key: str, value: str) -> bool:
+        return bool(self._control.set(key, value, nx=True))
+
     def set_value_telemetry(self, key: str, value: str) -> None:
         self._telemetry.set(key, value)
 
@@ -398,6 +435,10 @@ class SyncRedisClient:
 
     def hash_set(self, key: str, mapping: dict[str, Any]) -> None:
         self._control.hset(key, mapping=mapping)
+
+    def hash_delete(self, key: str, *fields: str) -> None:
+        if fields:
+            self._control.hdel(key, *fields)
 
     # ---- Set helpers ----
     def set_members(self, key: str) -> set[str]:
@@ -580,6 +621,9 @@ class AsyncRedisClient:
     async def set_value(self, key: str, value: str) -> None:
         await _awaitable(self._control.set(key, value))
 
+    async def set_value_if_absent(self, key: str, value: str) -> bool:
+        return bool(await _awaitable(self._control.set(key, value, nx=True)))
+
     async def set_value_telemetry(self, key: str, value: str) -> None:
         await _awaitable(self._telemetry.set(key, value))
 
@@ -604,6 +648,10 @@ class AsyncRedisClient:
 
     async def hash_set(self, key: str, mapping: dict[str, Any]) -> None:
         await _awaitable(self._control.hset(key, mapping=mapping))
+
+    async def hash_delete(self, key: str, *fields: str) -> None:
+        if fields:
+            await _awaitable(self._control.hdel(key, *fields))
 
     # ---- Set helpers ----
     async def set_members(self, key: str) -> set[str]:

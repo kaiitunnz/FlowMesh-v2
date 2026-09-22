@@ -16,6 +16,7 @@ import threading
 from collections.abc import Callable, Coroutine
 from typing import Any
 
+from shared.network.frame_stream import FrameSink, WireFrameSink
 from shared.network.mtls import MutualTlsMaterial, client_context
 from shared.network.relay_frame import RelayDirection, RelayFrame
 from shared.outcome import FabricContentStore
@@ -36,7 +37,6 @@ from shared.resident.reports import (
     ResidentOpOutcome,
     ResidentRouteObservation,
 )
-from shared.resident.transport import ResidentFrameSink
 from shared.schemas.network import RouteObservationOutcome, Transport
 
 from .engine import EngineOpen, HttpEngineDelivery, RawEngineOpen, RawHttpEngineDelivery
@@ -51,16 +51,8 @@ RequestDelete = Callable[[str, str], None]
 AckSink = Callable[[ResidentBootstrapAck], None]
 OutcomeSink = Callable[[ResidentOpOutcome], None]
 ObservationReport = Callable[[ResidentRouteObservation], None]
-
-
-class _EventFrameSink:
-    """Sends each produced relay frame up as a ``RESIDENT_FRAME`` attachment event."""
-
-    def __init__(self, push_frame: Callable[[dict[str, Any]], None]) -> None:
-        self._push_frame = push_frame
-
-    async def send(self, frame: RelayFrame) -> None:
-        self._push_frame(frame.to_wire())
+# Resolves where one task's outcomes materialize, or None when it can finalize none.
+OutcomeStoreFor = Callable[[str], FabricContentStore | None]
 
 
 class ResidentLaneHost:
@@ -72,7 +64,7 @@ class ResidentLaneHost:
         push_frame: Callable[[dict[str, Any]], None],
         report_ack: AckSink,
         report_outcome: OutcomeSink,
-        content_store: FabricContentStore | None,
+        content_store_for: OutcomeStoreFor,
         peek_request: RequestLookup,
         delete_request: RequestDelete,
         engine_open: EngineOpen | None = None,
@@ -88,7 +80,7 @@ class ResidentLaneHost:
         self._push_frame = push_frame
         self._report_ack = report_ack
         self._report_outcome = report_outcome
-        self._content_store = content_store
+        self._content_store_for = content_store_for
         self._peek_request = peek_request
         self._delete_request = delete_request
         self._engine_open = engine_open or HttpEngineDelivery(
@@ -117,11 +109,11 @@ class ResidentLaneHost:
         self._call(self._build).result()
 
     async def _build(self) -> None:
-        sink: ResidentFrameSink = _EventFrameSink(self._push_frame)
+        sink: FrameSink = WireFrameSink(self._push_frame)
         carriage = self._carriage(sink)
         self._origin = ResidentOriginDriver(
             carriage=carriage,
-            content_store=self._content_store,
+            content_store_for=self._content_store_for,
             report_ack=self._report_ack,
             report_outcome=self._report_outcome,
             logger=self._logger,
@@ -149,7 +141,7 @@ class ResidentLaneHost:
         await listener.start()
         self._peer_listener = listener
 
-    def _carriage(self, sink: ResidentFrameSink) -> ClaimGatedServiceCarriage:
+    def _carriage(self, sink: FrameSink) -> ClaimGatedServiceCarriage:
         """The carriage this worker's origin attempts take their frame sink from.
 
         A deployment that admits no peer transport carries every attempt over the one

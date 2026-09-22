@@ -13,9 +13,8 @@ import socket
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from typing import Any
 
-from shared.content import content_digest
 from shared.network.relay_frame import RelayFrame
-from shared.outcome import FabricContentStore, OutcomeManifest
+from shared.network.session import FramedRelaySession  # noqa: F401 - re-export check
 from shared.resident.carriage import ControlRelayCarriage, ResidentCarriagePlan
 from shared.resident.contracts import (
     AdmissionHandoff,
@@ -29,48 +28,13 @@ from shared.resident.reports import (
     ResidentOpOutcome,
     ResidentStreamStatus,
 )
-from shared.resident.session import ResidentRelaySession  # noqa: F401 - re-export check
+from tests.shared.outcome_helpers import InMemoryContentStore
 from worker.resident.engine import EngineResponse
 from worker.resident.origin_driver import ResidentOriginDriver, ResidentOriginRequest
 from worker.resident.peer_listener import ResidentPeerListener
 from worker.resident.replica_sidecar import ResidentReplicaSidecar
 
 _COMPLETION = "the resident model reply, streamed in pieces"
-
-
-class _MemStore(FabricContentStore):
-    """An in-memory content-addressed store: find-or-commit by idempotency key."""
-
-    def __init__(self) -> None:
-        self._by_idem: dict[str, OutcomeManifest] = {}
-        self._by_digest: dict[str, bytes] = {}
-
-    def put_object(self, data: bytes) -> str:
-        digest = content_digest(data)
-        self._by_digest[digest] = data
-        return digest
-
-    def find(self, idempotency_key: str) -> OutcomeManifest | None:
-        return self._by_idem.get(idempotency_key)
-
-    def materialize(
-        self, idempotency_key: str, data: bytes, *, media_type: str
-    ) -> OutcomeManifest:
-        if idempotency_key in self._by_idem:
-            return self._by_idem[idempotency_key]
-        digest = content_digest(data)
-        self._by_digest[digest] = data
-        manifest = OutcomeManifest(
-            content_digest=digest,
-            size_bytes=len(data),
-            media_type=media_type,
-            idempotency_key=idempotency_key,
-        )
-        self._by_idem[idempotency_key] = manifest
-        return manifest
-
-    def read(self, digest: str) -> bytes:
-        return self._by_digest[digest]
 
 
 class _ToPeer:
@@ -145,7 +109,7 @@ def _auth() -> RouteAuthorization:
 
 class _Harness:
     def __init__(self, observe: Callable[[RelayFrame], None] | None = None) -> None:
-        self.store = _MemStore()
+        self.store = InMemoryContentStore()
         self.engine_calls: list[int] = []
         self.acks: list[ResidentBootstrapAck] = []
         self.outcomes: list[ResidentOpOutcome] = []
@@ -163,7 +127,7 @@ class _Harness:
         )
         self.origin = ResidentOriginDriver(
             carriage=ControlRelayCarriage(origin_sink),
-            content_store=self.store,
+            content_store_for=lambda task_id: self.store,
             report_ack=self._on_ack,
             report_outcome=self._on_outcome,
         )
@@ -209,7 +173,7 @@ def test_origin_and_replica_complete_by_reference() -> None:
         assert outcome.status is ResidentStreamStatus.SUCCESS
         assert outcome.manifest is not None
         # The completion materialized by reference; it never crossed as an inline value.
-        assert h.store.hydrate(outcome.manifest).decode() == _COMPLETION
+        assert h.store.hydrate(outcome.manifest.content).decode() == _COMPLETION
         assert h.engine_calls == [1]
         await h.sidecar.aclose()
 
@@ -251,7 +215,7 @@ def test_post_manifest_redrive_reuses_the_reference() -> None:
         second = h.outcomes[-1]
         assert second.status is ResidentStreamStatus.SUCCESS
         assert second.manifest is not None
-        assert second.manifest.content_digest == first.manifest.content_digest
+        assert second.manifest.content == first.manifest.content
         assert h.engine_calls == [1]  # the engine ran once, not twice
         await h.sidecar.aclose()
 
@@ -262,7 +226,7 @@ class _DialedHarness:
     """The two lanes over a real dialed socket, as a trusted peer carries them."""
 
     def __init__(self, sock, port: int) -> None:
-        self.store = _MemStore()
+        self.store = InMemoryContentStore()
         self.engine_calls: list[int] = []
         self.outcomes: list[ResidentOpOutcome] = []
         self.done = asyncio.Event()
@@ -288,7 +252,7 @@ class _DialedHarness:
         )
         self.origin = ResidentOriginDriver(
             carriage=self.carriage,
-            content_store=self.store,
+            content_store_for=lambda task_id: self.store,
             report_ack=self._on_ack,
             report_outcome=self._on_outcome,
         )

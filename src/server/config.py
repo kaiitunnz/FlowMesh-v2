@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
+from shared.content import ObjectStoreConfig
 from shared.tasks.specs import ModelBindingMode
 from shared.telemetry.config import TelemetryConfig
 from shared.utils.parsing import parse_bool_env, parse_float_env, parse_int_env
@@ -538,25 +539,30 @@ class WebSearchConfig:
 
 @dataclass
 class ContentStoreConfig:
-    """The reference-backed outcome content store's local root.
+    """What the control plane does about fabric content.
 
-    ``root`` is the server-hosted content-addressed object root a worker writes and
-    hydrates over the content router. Every provider result materializes by reference
-    regardless of size; only a bounded worker-produced control datum is carried inline.
+    Content itself lives in the shared durable store the workers read and write;
+    ``enabled`` is whether this node serves the outcome-finalization index binding an
+    idempotency key to the reference it materialized. ``hydration_enabled`` turns on the
+    worker content cache, where a worker keeps what it wrote and another reads it over a
+    control-granted transfer instead of going to the shared store.
     """
 
     enabled: bool = True
-    root: Path = Path("./content")
+    hydration_enabled: bool = False
+    grant_ttl_sec: float = 60.0
+    holder_record_ttl_sec: float = 300.0
+    access_grant_ttl_sec: float = 900.0
 
     @classmethod
-    def from_env(cls, results_dir: Path) -> "ContentStoreConfig":
-        override = _env_or_none("CONTENT_STORE_ROOT")
-        root = (
-            Path(override).expanduser().resolve()
-            if override
-            else results_dir.parent / "content"
+    def from_env(cls) -> "ContentStoreConfig":
+        return cls(
+            enabled=parse_bool_env("CONTENT_STORE_ENABLED", True),
+            hydration_enabled=parse_bool_env("CONTENT_HYDRATION_ENABLED", False),
+            grant_ttl_sec=parse_float_env("CONTENT_HYDRATION_GRANT_TTL_SEC", 60.0),
+            holder_record_ttl_sec=parse_float_env("CONTENT_HOLDER_TTL_SEC", 300.0),
+            access_grant_ttl_sec=parse_float_env("CONTENT_ACCESS_TTL_SEC", 900.0),
         )
-        return cls(enabled=parse_bool_env("CONTENT_STORE_ENABLED", True), root=root)
 
 
 @dataclass
@@ -766,6 +772,7 @@ class ServerConfig:
     log_stream: LogStreamConfig
     orchestration: OrchestrationConfig
     content_store: ContentStoreConfig = field(default_factory=ContentStoreConfig)
+    object_store: ObjectStoreConfig = field(default_factory=ObjectStoreConfig)
     telemetry_store: TelemetryStoreConfig = field(default_factory=TelemetryStoreConfig)
     results_dir: Path = Path("./results")
     plugins: list[str] = field(default_factory=list)
@@ -796,7 +803,8 @@ class ServerConfig:
             worker_management=WorkerManagementConfig.from_env(),
             log_stream=LogStreamConfig.from_env(),
             orchestration=OrchestrationConfig.from_env(),
-            content_store=ContentStoreConfig.from_env(results_dir),
+            content_store=ContentStoreConfig.from_env(),
+            object_store=ObjectStoreConfig.from_env(results_dir),
             telemetry_store=TelemetryStoreConfig.from_env(),
             results_dir=results_dir,
             plugins=plugins,

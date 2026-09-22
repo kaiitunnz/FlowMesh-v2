@@ -44,6 +44,7 @@ class MediatedOperationPermit(BaseModel):
     request payload: the raw request stays in worker-private state, looked up by
     ``(agent_task_id, call_correlation)``.
 
+    ``content_scope`` is the authorization scope the operation's result materializes in;
     ``request_digest`` binds request integrity; ``target_id`` / ``target_generation``
     bind the audience to the agent's worker incarnation; ``permit_id`` is a one-use,
     unguessable grant a fresh same-``idempotency_key`` re-drive re-mints;
@@ -69,6 +70,7 @@ class MediatedOperationPermit(BaseModel):
     invocation_id: str
     idempotency_key: str | None
     request_digest: str
+    content_scope: str = ""
     target_id: str
     target_generation: int
     policy_class: str = "default"

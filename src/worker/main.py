@@ -6,6 +6,7 @@ from collections.abc import Mapping
 
 from shared._version import FLOWMESH_RELEASE_VERSION
 from shared.network.mtls import MutualTlsMaterial, MutualTlsMaterialError
+from shared.outcome import FinalizationIndexClient
 from shared.schemas.worker import WorkerCapabilities
 from shared.tasks.task_type import TaskType
 from shared.tasks.worker_message import WorkerHardware
@@ -20,7 +21,12 @@ from shared.telemetry.semconv import (
 )
 
 from .config import WorkerConfig
-from .content_store import build_content_store
+from .content import (
+    ContentAccessRegistry,
+    ContentLaneHost,
+    WorkerContentCache,
+    WorkerContentPlane,
+)
 from .executors import EXECUTOR_REGISTRY, IMPORT_ERRORS, get_executor_class_name
 from .executors.base_executor import Executor
 from .executors.mp_executor import MPExecutor
@@ -252,6 +258,51 @@ def _bind_peer_listener(cfg: WorkerConfig) -> socket.socket | None:
     return sock
 
 
+def _build_content_plane(
+    cfg: WorkerConfig, client: SupervisorClient, logger: logging.Logger
+) -> WorkerContentPlane | None:
+    """The worker's content plane: the shared store, and a cache over it if one runs.
+
+    Content lives in the shared store, so a worker always reaches it — every object it
+    writes and every reference it reads resolves there. The cache is the optional half:
+    a deployment that enables it also gets a local copy of what this worker wrote and
+    can serve a peer from it, and one that does not goes to the store every time.
+    """
+    access = ContentAccessRegistry(cfg.object_store, logger)
+    lane: ContentLaneHost | None = None
+    if cfg.content_hydration_enabled:
+        lane = ContentLaneHost(
+            store=WorkerContentCache(
+                cfg.content_dir,
+                retain_sec=cfg.content_cache_ttl_sec,
+                max_bytes=cfg.content_cache_max_bytes,
+            ),
+            push_frame=client.push_content_frame,
+            request_grant=(
+                lambda reference, task_id: client.push_content_hydration_request(
+                    reference.model_dump(mode="json"), task_id
+                )
+            ),
+            worker_id=client.worker_id,
+            generation=client.incarnation,
+            transfer_timeout_sec=cfg.content_transfer_timeout_sec,
+            announce=client.push_content_holding,
+            holder_report_ttl_sec=cfg.content_holder_ttl_sec,
+            logger=logger,
+        )
+    return WorkerContentPlane(
+        lane,
+        access,
+        announce=client.push_content_holding if lane is not None else None,
+        finalizations=(
+            FinalizationIndexClient(cfg.server_base_url)
+            if cfg.server_base_url
+            else None
+        ),
+        logger=logger,
+    )
+
+
 def main() -> None:
     args = _parse_args()
     if args.collect_hw:
@@ -347,6 +398,8 @@ def main() -> None:
     )
     gpu_sampler.start()
 
+    lifecycle.start_content_plane(_build_content_plane(cfg, supervisor_client, logger))
+
     task_stream = supervisor_client.iter_tasks()
     runner = Runner(
         lifecycle,
@@ -362,7 +415,6 @@ def main() -> None:
         web_search_api_key=cfg.web_search_api_key,
         model_api_key=cfg.model_api_key,
         model_egress_timeout_sec=cfg.model_egress_timeout_sec,
-        content_store=build_content_store(cfg.server_base_url),
         peer_enabled=cfg.peer_enabled,
         peer_material=_peer_material(cfg, logger),
         peer_listener_sock=peer_sock,

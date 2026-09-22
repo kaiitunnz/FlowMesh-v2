@@ -166,3 +166,10 @@ cursor, and lease mechanics — over a distinct claim-free session namespace and
 control-issued nonresident sidecar target, without any resident contract: it mints no
 `ServiceClaim` or `RouteAuthorization`, reuses no resident relay session, and carries only
 the opaque tool operation and its result. See [`EXECUTORS.md`](EXECUTORS.md).
+
+Content hydration reuses it the same way, on a keyspace of its own: a transfer's streams,
+routing record, lease, and cursors are disjoint from the resident ones, and its frames are
+correlated by the `chg-*` grant that authorized the read rather than by an invocation. The
+bridge treats them as any other opaque frames — it never holds, assembles, or resolves the
+object — and the transfer mints no claim, credit, or route authorization. See
+[`ARCHITECTURE.md`](ARCHITECTURE.md).

@@ -23,6 +23,7 @@ from typing import Any
 from opentelemetry.trace import Span
 
 from shared.network.relay_frame import RelayFrame
+from shared.network.session import FramedRelaySession, RelaySessionRole
 from shared.outcome import FabricContentStore, OutcomeManifest
 from shared.resident.carriage import (
     CarriageUnavailable,
@@ -37,7 +38,6 @@ from shared.resident.reports import (
     ResidentOpOutcome,
     ResidentStreamStatus,
 )
-from shared.resident.session import ResidentRelaySession, ResidentSessionRole
 from shared.resident.wire import (
     KIND_ACK,
     KIND_BOOTSTRAP,
@@ -57,6 +57,10 @@ from ..telemetry import otel
 
 AckSink = Callable[[ResidentBootstrapAck], None]
 OutcomeSink = Callable[[ResidentOpOutcome], None]
+
+
+# Resolves where one task's outcomes materialize, or None when it can finalize none.
+OutcomeStoreFor = Callable[[str], FabricContentStore | None]
 
 
 @dataclass(frozen=True)
@@ -81,7 +85,7 @@ class ResidentOriginRequest:
 @dataclass
 class _Origin:
     request: ResidentOriginRequest
-    session: ResidentRelaySession
+    session: FramedRelaySession
     authorization: "asyncio.Future[RouteAuthorization]"
     task: "asyncio.Task[None] | None" = None
 
@@ -93,7 +97,7 @@ class ResidentOriginDriver:
         self,
         *,
         carriage: ClaimGatedServiceCarriage,
-        content_store: FabricContentStore | None,
+        content_store_for: OutcomeStoreFor,
         report_ack: AckSink,
         report_outcome: OutcomeSink,
         window_bytes: int = 65536,
@@ -102,7 +106,7 @@ class ResidentOriginDriver:
         logger: logging.Logger | None = None,
     ) -> None:
         self._carriage = carriage
-        self._content_store = content_store
+        self._content_store_for = content_store_for
         self._report_ack = report_ack
         self._report_outcome = report_outcome
         self._window_bytes = window_bytes
@@ -124,11 +128,11 @@ class ResidentOriginDriver:
                 self._uncertain(request, f"no carriage for transport {exc}")
             )
             return
-        session = ResidentRelaySession(
+        session = FramedRelaySession(
             session_id=request.session_id,
-            invocation_id=request.handoff.invocation_id,
-            idm=request.handoff.idempotency_key or "",
-            role=ResidentSessionRole.ORIGIN,
+            correlation_id=request.handoff.invocation_id,
+            operation_id=request.handoff.idempotency_key or "",
+            role=RelaySessionRole.ORIGIN,
             sink=sink,
             window_bytes=self._window_bytes,
         )
@@ -198,7 +202,7 @@ class ResidentOriginDriver:
         self, origin: _Origin, req: ResidentOriginRequest, idm: str | None
     ) -> None:
         try:
-            if (prior := self._prior_manifest(idm)) is not None:
+            if (prior := self._prior_manifest(req, idm)) is not None:
                 # A post-manifest re-drive: the outcome already committed, so re-report
                 # the recorded reference rather than re-running the engine.
                 self._report_outcome(
@@ -306,7 +310,8 @@ class ResidentOriginDriver:
         assembled into the single JSON document the boundary's contract declares.
         """
         idm = req.handoff.idempotency_key
-        if self._content_store is None or idm is None:
+        store = self._content_store_for(req.task_id)
+        if store is None or idm is None:
             self._report_outcome(
                 self._outcome(
                     req,
@@ -320,18 +325,24 @@ class ResidentOriginDriver:
             if is_batch_request(req.request_payload)
             else "text/plain"
         )
-        manifest = self._content_store.materialize(
-            idm, completion.encode(), media_type=media_type
+        manifest = store.materialize(
+            req.handoff.tenant or "",
+            idm,
+            completion.encode(),
+            media_type=media_type,
         )
         self._report_outcome(
             self._outcome(req, ResidentStreamStatus.SUCCESS, manifest=manifest)
         )
 
-    def _prior_manifest(self, idm: str | None) -> OutcomeManifest | None:
-        if self._content_store is None or idm is None:
+    def _prior_manifest(
+        self, req: ResidentOriginRequest, idm: str | None
+    ) -> OutcomeManifest | None:
+        store = self._content_store_for(req.task_id)
+        if store is None or idm is None:
             return None
         with contextlib.suppress(Exception):
-            return self._content_store.find(idm)
+            return store.find(req.handoff.tenant or "", idm)
         return None
 
     @staticmethod

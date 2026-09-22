@@ -9,12 +9,12 @@ from pydantic import (
     model_validator,
 )
 
+from shared.content import ContentReference
 from shared.harness import AgentEpisodeDispatch, ServiceLeafEpisodeDispatch
 from shared.inference import (
     CanonicalInferenceContract,
     CanonicalInferenceRequest,
     InputResolutionBinding,
-    ResolvedInputReference,
 )
 from shared.schemas.worker import WorkerStatus
 from shared.tasks import (
@@ -32,6 +32,10 @@ class WorkerTaskMessage(BaseModel):
     task_id: str = Field(description="Dispatched task identifier.")
     workflow_id: str = Field(description="Workflow identifier owning the task.")
     owner_id: str = Field(description="Owner principal identifier.")
+    content_scope: str = Field(
+        default="",
+        description="Authorization scope for this task's content, assigned by control.",
+    )
     task: TaskEnvelopeStrict = Field(description="Task payload.")
     task_type: str | None = Field(default=None, description="Task type hint.")
     assigned_worker: str = Field(description="Worker ID selected for execution.")
@@ -78,7 +82,7 @@ class WorkerTaskMessage(BaseModel):
             "reports the request it materialized, running no model and no executor."
         ),
     )
-    recorded_input: ResolvedInputReference | None = Field(
+    recorded_input: ContentReference | None = Field(
         default=None,
         description=(
             "The prepared request this task runs, when a preparation committed one: "

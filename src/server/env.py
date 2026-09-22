@@ -127,6 +127,25 @@ WORKER_RESULTS_DIR: str = (
     os.getenv("WORKER_RESULTS_DIR", "").strip() or "flowmesh_results"
 )
 WORKER_PRIVATE_STATE_DIR: str = os.getenv("WORKER_PRIVATE_STATE_DIR", "").strip()
+WORKER_CONTENT_DIR: str = os.getenv("WORKER_CONTENT_DIR", "").strip()
+CONTENT_HYDRATION_ENABLED: bool = parse_bool_env("CONTENT_HYDRATION_ENABLED", False)
+CONTENT_CACHE_TTL_SEC: float = parse_float_env("CONTENT_CACHE_TTL_SEC", 0.0)
+CONTENT_CACHE_MAX_BYTES: int = parse_int_env("CONTENT_CACHE_MAX_BYTES", 0)
+CONTENT_HOLDER_TTL_SEC: float = parse_float_env("CONTENT_HOLDER_TTL_SEC", 300.0)
+CONTENT_STORE_BACKEND: str = os.getenv("CONTENT_STORE_BACKEND", "s3").strip()
+CONTENT_STORE_ENDPOINT_URL: str = os.getenv("CONTENT_STORE_ENDPOINT_URL", "").strip()
+CONTENT_STORE_PORT: str = os.getenv("CONTENT_STORE_PORT", "").strip()
+CONTENT_STORE_BUCKET: str = os.getenv("CONTENT_STORE_BUCKET", "").strip()
+CONTENT_STORE_PREFIX: str = os.getenv("CONTENT_STORE_PREFIX", "").strip()
+CONTENT_STORE_REGION: str = os.getenv("CONTENT_STORE_REGION", "").strip()
+CONTENT_STORE_ACCESS_KEY: str = os.getenv("CONTENT_STORE_ACCESS_KEY", "").strip()
+CONTENT_STORE_SECRET_KEY: str = os.getenv("CONTENT_STORE_SECRET_KEY", "").strip()
+CONTENT_STORE_FILESYSTEM_ROOT: str = os.getenv(
+    "CONTENT_STORE_FILESYSTEM_ROOT", ""
+).strip()
+CONTENT_TRANSFER_TIMEOUT_SEC: float = parse_float_env(
+    "CONTENT_TRANSFER_TIMEOUT_SEC", 60.0
+)
 HF_CACHE_DIR: str | None = os.getenv("HF_CACHE_DIR") or None
 PREDOWNLOAD_MODEL_LIST: str = os.getenv("PREDOWNLOAD_MODEL_LIST", "")
 WORKER_TAGS: str = os.getenv("WORKER_TAGS", "")

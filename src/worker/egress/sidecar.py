@@ -50,6 +50,8 @@ from .request_store import CapturedRequest, PendingEgressRequestStore
 
 # Resolves this worker's id and incarnation once it is registered.
 AudienceFn = Callable[[], tuple[str, int]]
+# Resolves where one task's outcomes materialize, or None when it can finalize none.
+OutcomeStoreFor = Callable[[str], FabricContentStore | None]
 # A sink the lane calls to report one fenced terminal fact over the attachment.
 OutcomeSink = Callable[[MediatedOperationOutcome], None]
 
@@ -104,14 +106,14 @@ class MediatedEgressSidecar:
         audience: AudienceFn,
         egresses: Sequence[EgressInterface],
         outcome_sink: OutcomeSink,
-        content_store: FabricContentStore | None = None,
+        content_store_for: OutcomeStoreFor | None = None,
         policy_class: str = "default",
         max_workers: int = 4,
         logger: logging.Logger | None = None,
     ) -> None:
         self._pending = pending_requests
         self._audience = audience
-        self._content_store = content_store
+        self._content_store_for = content_store_for
         self._policy_class = policy_class
         self._egresses = {egress.interface: egress for egress in egresses}
         self._interfaces = frozenset(self._egresses)
@@ -229,8 +231,9 @@ class MediatedEgressSidecar:
         outcome = self._egress(permit, request, egress)
         materialized = materialize_tool_outcome(
             outcome,
+            scope=permit.content_scope,
             idempotency_key=permit.idempotency_key,
-            content_store=self._content_store,
+            content_store=self._outcome_store(permit.agent_task_id),
         )
         if isinstance(materialized, OutcomeManifest):
             return self._report(permit, outcome_ref=materialized)
@@ -320,12 +323,16 @@ class MediatedEgressSidecar:
             expected_policy_class=None,
         )
 
+    def _outcome_store(self, task_id: str) -> FabricContentStore | None:
+        return self._content_store_for(task_id) if self._content_store_for else None
+
     def _prior_manifest(
         self, permit: MediatedOperationPermit
     ) -> OutcomeManifest | None:
-        if self._content_store is None or permit.idempotency_key is None:
+        store = self._outcome_store(permit.agent_task_id)
+        if store is None or permit.idempotency_key is None:
             return None
-        return self._content_store.find(permit.idempotency_key)
+        return store.find(permit.content_scope, permit.idempotency_key)
 
     def _consume_permit(self, permit_id: str, deadline_epoch: float) -> bool:
         """Atomically consume a one-use permit id; ``False`` on an exact replay."""

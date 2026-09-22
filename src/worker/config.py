@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from shared.content.config import ObjectStoreConfig
 from shared.schemas.worker import SSHLimits
 from shared.telemetry.config import TelemetryConfig
 from shared.tools.search.schema import DEFAULT_SEARCH_PROVIDER
@@ -33,6 +34,13 @@ class WorkerConfig:
     supervisor_grpc_tls_ca_b64: str | None
     results_dir: Path
     private_state_dir: Path
+    content_dir: Path
+    content_hydration_enabled: bool
+    content_cache_ttl_sec: float
+    content_cache_max_bytes: int
+    content_holder_ttl_sec: float
+    object_store: ObjectStoreConfig
+    content_transfer_timeout_sec: float
     results_mount_source: str | None
     hb_interval_sec: int
     hb_ttl_sec: int
@@ -117,16 +125,22 @@ class WorkerConfig:
             or (results_dir / "private_state")
         ).absolute()
 
+        content_dir = Path(
+            os.getenv("WORKER_CONTENT_DIR", "").strip() or (results_dir / "content")
+        ).absolute()
+
         hb_interval, hb_ttl, hb_file = get_hb_config()
 
-        namespace = os.getenv("WORKER_NAMESPACE", "flowmesh").strip()
-        cluster = os.getenv("WORKER_CLUSTER", "cluster").strip()
+        # A relayed variable the node never set arrives set-but-empty, so every default
+        # here is taken on an empty value as well as on a missing one.
+        namespace = os.getenv("WORKER_NAMESPACE", "").strip() or "flowmesh"
+        cluster = os.getenv("WORKER_CLUSTER", "").strip() or "cluster"
         container_name = os.getenv("WORKER_CONTAINER_NAME", "").strip() or None
         ssh_network_name = os.getenv("SSH_NETWORK_NAME", "").strip() or None
         alias = os.getenv("WORKER_ALIAS", "").strip() or os.urandom(8).hex()
         tags = [t.strip() for t in os.getenv("WORKER_TAGS", "").split(",") if t.strip()]
 
-        log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+        log_level = (os.getenv("LOG_LEVEL", "").strip() or "INFO").upper()
 
         cost_per_hour = parse_float_env("WORKER_COST_PER_HOUR", 1.0)
         if cost_per_hour < 0:
@@ -215,6 +229,17 @@ class WorkerConfig:
             peer_tls_key_b64=peer_tls_key_b64,
             results_dir=results_dir,
             private_state_dir=private_state_dir,
+            content_dir=content_dir,
+            content_hydration_enabled=parse_bool_env(
+                "CONTENT_HYDRATION_ENABLED", False
+            ),
+            content_cache_ttl_sec=parse_float_env("CONTENT_CACHE_TTL_SEC", 0.0),
+            content_cache_max_bytes=parse_int_env("CONTENT_CACHE_MAX_BYTES", 0),
+            content_holder_ttl_sec=parse_float_env("CONTENT_HOLDER_TTL_SEC", 300.0),
+            object_store=ObjectStoreConfig.from_env(results_dir),
+            content_transfer_timeout_sec=parse_float_env(
+                "CONTENT_TRANSFER_TIMEOUT_SEC", 60.0
+            ),
             results_mount_source=results_mount_source,
             hb_interval_sec=hb_interval,
             hb_ttl_sec=hb_ttl,

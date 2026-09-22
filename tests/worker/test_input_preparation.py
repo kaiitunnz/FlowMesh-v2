@@ -1,14 +1,14 @@
 """Tests for the worker leg of preparing an inference leaf's inputs."""
 
-from typing import Any
+from typing import Any, cast
 from unittest import mock
 
 import pytest
 
+from shared.content import ContentReference
 from shared.inference import (
     RESOLVED_INPUT_MEDIA_TYPE,
     ResolvedInputMaterialization,
-    ResolvedInputReference,
     canonical_contract,
     hydrate_resolved_input,
 )
@@ -55,11 +55,23 @@ def _task(
     )
 
 
+class _Plane:
+    """A content plane whose every task reads and writes one in-memory store."""
+
+    def __init__(self, store: InMemoryContentStore) -> None:
+        self._store = store
+
+    def for_task(self, task_id: str) -> InMemoryContentStore:
+        return self._store
+
+
 def _runner(store: InMemoryContentStore | None) -> Runner:
     """A runner with only what resolving and storing a request reads."""
     runner = object.__new__(Runner)
-    runner._content_store = store
     runner.lifecycle = mock.Mock()
+    runner.lifecycle.content_plane = (
+        cast(Any, _Plane(store)) if store is not None else None
+    )
     return runner
 
 
@@ -146,8 +158,11 @@ class TestHydration:
     def test_a_missing_object_fails_before_any_model_reaches_it(self) -> None:
         store = InMemoryContentStore()
         msg = _task(
-            recorded_input=ResolvedInputReference(
-                content_digest="0" * 64, size_bytes=16
+            recorded_input=ContentReference(
+                authorization_scope="local",
+                content_digest="0" * 64,
+                size_bytes=16,
+                media_type=RESOLVED_INPUT_MEDIA_TYPE,
             )
         )
         with pytest.raises(ExecutionError) as excinfo:
@@ -159,10 +174,13 @@ class TestHydration:
     def test_content_that_is_not_the_digest_names_fails_closed(self) -> None:
         store = InMemoryContentStore()
         prepared = _prepare(store, _task())
-        store._objects[prepared.reference.content_digest] = b"{}"
+        reference = prepared.reference
+        store._objects[(reference.authorization_scope, reference.content_digest)] = (
+            b"{}"
+        )
 
         with pytest.raises(ExecutionError) as excinfo:
-            _materialize(store, _task(recorded_input=prepared.reference))
+            _materialize(store, _task(recorded_input=reference))
         assert excinfo.value.retryable is False
 
     def test_an_object_recording_another_resolution_fails_closed(self) -> None:

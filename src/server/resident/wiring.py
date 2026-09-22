@@ -45,6 +45,7 @@ def build_resident_capacity(
     registry: ResidentRegistry,
     logger: logging.Logger,
     control: ControlPlaneTracer | None = None,
+    content_scope_authority: Callable[[str, str], None] | None = None,
 ) -> ResidentCapacityControl:
     """Wire and return resident-capacity control for the enabled resident config."""
     cfg = orchestration.resident
@@ -117,6 +118,8 @@ def build_resident_capacity(
         limits=limits,
         dependency_resolver=runtime.resolve_service_dependency,
         input_resolution_resolver=runtime.input_resolution_binding,
+        content_scope_resolver=runtime.content_scope,
+        content_scope_authority=content_scope_authority,
         settle_cb=runtime.settle_episode_invocation,
         redispatch_cb=runtime.redispatch_episode_invocation,
         endpoint_probe=endpoint,

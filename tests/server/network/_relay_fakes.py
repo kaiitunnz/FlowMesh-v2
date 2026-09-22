@@ -125,8 +125,8 @@ def relay_frame(
     return RelayFrame(
         kind=kind,
         session_id=session_id,
-        invocation_id="inv-1",
-        idm="idm-1",
+        correlation_id="inv-1",
+        operation_id="idm-1",
         direction=direction,
         seq=seq,
         ack=ack,

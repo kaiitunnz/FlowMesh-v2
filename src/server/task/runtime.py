@@ -17,6 +17,7 @@ from server.telemetry.tracing import (
     ControlPlaneTracer,
     format_traceparent,
 )
+from shared.content import ContentReference
 from shared.harness import (
     AgentEpisodeDispatch,
     BoundaryEventKind,
@@ -35,7 +36,6 @@ from shared.inference import (
     InferenceSourceKind,
     InputResolutionBinding,
     ResolvedInputMaterialization,
-    ResolvedInputReference,
     canonical_contract,
 )
 from shared.outcome import OutcomeManifest
@@ -294,6 +294,7 @@ class TaskRuntime:
         control: ControlPlaneTracer | None = None,
         tracer: Tracer | None = None,
         telemetry: TelemetryConfig | None = None,
+        content_scope_authority: Callable[[str, str], None] | None = None,
     ) -> None:
         self._workflow_registry = workflow_registry
         self._worker_registry = worker_registry
@@ -302,6 +303,7 @@ class TaskRuntime:
         self._feasibility_check = feasibility_check
         self._policy_surface = surface if surface is not None else PolicySurface()
         self._secret_vault = secret_vault
+        self._content_scope_authority = content_scope_authority
         self._control = control if control is not None else NULL_CONTROL_TRACER
         self._tracer = tracer
         self._telemetry = telemetry
@@ -526,6 +528,7 @@ class TaskRuntime:
                     task_id=task_id,
                     workflow_id=workflow_id,
                     owner_id=owner_id,
+                    org_id=org_id,
                     raw_yaml=yaml_text,
                     task=task,
                     local_name=entry.local_name,
@@ -1684,24 +1687,38 @@ class TaskRuntime:
         secret = self._secret_vault.resolve(agent.workflow_id, binding.secret_ref)
         return secret.get_secret_value() if secret is not None else None
 
-    def _stamped_permit_payload(
-        self, permit: MediatedOperationPermit, workflow_id: str
-    ) -> dict[str, Any]:
-        """The permit's wire payload, carrying a ``traceparent`` stamp when enabled.
+    def _assign_content_scope(
+        self, permit: MediatedOperationPermit, agent: TaskRecord
+    ) -> str:
+        """Assign the scope this permit's outcome materializes in, and record it.
 
-        Stamped post-mint: the boundary span id derives from the permit's own
+        The scope is the task's owner, so a result materializes in the tenant's
+        namespace rather than the egressing worker's. Recording it against the permit's
+        idempotency key is what lets the finalization this outcome later reports be
+        checked against the scope control assigned, rather than one the reporting
+        worker names for itself.
+        """
+        if self._content_scope_authority is not None and permit.idempotency_key:
+            self._content_scope_authority(permit.idempotency_key, agent.org_id)
+        return agent.org_id
+
+    def _stamped_permit_payload(
+        self, permit: MediatedOperationPermit, agent: TaskRecord
+    ) -> dict[str, Any]:
+        """The permit's wire payload, carrying what only the dispatching record knows.
+
+        The trace stamp is post-mint: the boundary span id derives from the permit's own
         ``invocation_id``, which does not exist as an object until minting returns.
         """
+        stamp: dict[str, Any] = {
+            "content_scope": self._assign_content_scope(permit, agent)
+        }
         if self._control.enabled:
-            permit = permit.model_copy(
-                update={
-                    "traceparent": format_traceparent(
-                        workflow_to_trace_id_int(workflow_id),
-                        derived_span_id(SpanIdKind.INVOCATION, permit.invocation_id),
-                    )
-                }
+            stamp["traceparent"] = format_traceparent(
+                workflow_to_trace_id_int(agent.workflow_id),
+                derived_span_id(SpanIdKind.INVOCATION, permit.invocation_id),
             )
-        return permit.model_dump(mode="json")
+        return permit.model_copy(update=stamp).model_dump(mode="json")
 
     def _dispatch_worker_originated_op(self, env: ToolInvocationEnvelope) -> None:
         """Mint a permit and relay a boundary's egress operation to its origin worker.
@@ -1764,7 +1781,7 @@ class TaskRuntime:
             MediatedOpMessage(
                 worker_id=worker_id,
                 frame_kind="permit",
-                payload=self._stamped_permit_payload(permit, agent.workflow_id),
+                payload=self._stamped_permit_payload(permit, agent),
             ),
         )
 
@@ -1829,7 +1846,7 @@ class TaskRuntime:
                 MediatedOpMessage(
                     worker_id=worker_id,
                     frame_kind="permit",
-                    payload=self._stamped_permit_payload(permit, agent.workflow_id),
+                    payload=self._stamped_permit_payload(permit, agent),
                 ),
             )
 
@@ -2422,7 +2439,44 @@ class TaskRuntime:
             resolution = self._input_resolution_locked(task_id)
         return resolution.binding if resolution is not None else None
 
-    def recorded_input_reference(self, task_id: str) -> ResolvedInputReference | None:
+    def content_scope(self, task_id: str) -> str:
+        """The authorization scope a task's content is written under.
+
+        Control assigns it from the task's own owner, so every write this task makes —
+        its dispatch's and the resident completion its invocation materializes — lands
+        in one scope rather than each path deriving its own.
+        """
+        with self._lock:
+            record = self._tasks.get(task_id)
+        return record.org_id if record is not None else ""
+
+    def content_binding_authorizes(
+        self, task_id: str, worker_id: str, reference: ContentReference
+    ) -> bool:
+        """Whether a task's own binding entitles its worker to read this object.
+
+        Read-only evidence for the content authority: the worker must be the one
+        running the task, and the task must already be bound to exactly this reference
+        — the request it was prepared with, or an outcome the engine delivered into its
+        episode. Naming an object it merely knows of authorizes nothing.
+        """
+        with self._lock:
+            record = self._tasks.get(task_id)
+            if record is None or record.assigned_worker != worker_id:
+                return False
+            resolution = self._input_resolution_locked(task_id)
+            if resolution is not None and resolution.reference == reference:
+                return True
+            engine = self._engines.get(record.workflow_id)
+            if engine is None:
+                return False
+            _, outcomes = engine.episode_context(task_id)
+        return any(
+            outcome.outcome_ref is not None and outcome.outcome_ref.content == reference
+            for outcome in outcomes
+        )
+
+    def recorded_input_reference(self, task_id: str) -> ContentReference | None:
         """Where a task's prepared request is, for the run that hydrates it."""
         with self._lock:
             resolution = self._input_resolution_locked(task_id)

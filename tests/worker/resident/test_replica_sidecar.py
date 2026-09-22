@@ -11,13 +11,13 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 import httpx
 
 from shared.network.relay_frame import RelayFrame
+from shared.network.session import FramedRelaySession, RelaySessionRole
 from shared.resident.contracts import (
     AdmissionHandoff,
     ReplicaEndpoint,
     RouteAuthorization,
 )
 from shared.resident.envelope import ServeRequestEnvelope, freeze_request_envelope
-from shared.resident.session import ResidentRelaySession, ResidentSessionRole
 from shared.resident.wire import (
     KIND_ACK,
     KIND_CHUNK,
@@ -142,7 +142,7 @@ def _auth() -> dict:
 
 def _harness(
     engine=_fake_engine,
-) -> tuple[ResidentRelaySession, ResidentReplicaSidecar]:
+) -> tuple[FramedRelaySession, ResidentReplicaSidecar]:
     origin_sink, replica_sink = _ToPeer(), _ToPeer()
     sidecar = ResidentReplicaSidecar(sink=replica_sink, engine_open=engine)
     sidecar.bind(
@@ -151,11 +151,11 @@ def _harness(
         listener_generation=1,
         endpoint=ReplicaEndpoint(base_url="http://engine/v1", model="m"),
     )
-    origin = ResidentRelaySession(
+    origin = FramedRelaySession(
         session_id="s1",
-        invocation_id="inv-1",
-        idm="idm-1",
-        role=ResidentSessionRole.ORIGIN,
+        correlation_id="inv-1",
+        operation_id="idm-1",
+        role=RelaySessionRole.ORIGIN,
         sink=origin_sink,
     )
     origin_sink.on_peer = sidecar.on_frame
@@ -263,7 +263,7 @@ def _serve_auth() -> dict:
 
 def _serve_harness(
     engine_open_raw: Callable[..., Awaitable[RawEngineResponse]],
-) -> tuple[ResidentRelaySession, ResidentReplicaSidecar]:
+) -> tuple[FramedRelaySession, ResidentReplicaSidecar]:
     origin_sink, replica_sink = _ToPeer(), _ToPeer()
     sidecar = ResidentReplicaSidecar(
         sink=replica_sink, engine_open=_fake_engine, engine_open_raw=engine_open_raw
@@ -276,11 +276,11 @@ def _serve_harness(
         serve_task_id=_SERVE_TASK,
         binding_generation=0,
     )
-    origin = ResidentRelaySession(
+    origin = FramedRelaySession(
         session_id="s1",
-        invocation_id="inv-1",
-        idm="idm-1",
-        role=ResidentSessionRole.ORIGIN,
+        correlation_id="inv-1",
+        operation_id="idm-1",
+        role=RelaySessionRole.ORIGIN,
         sink=origin_sink,
     )
     origin_sink.on_peer = sidecar.on_frame
@@ -512,11 +512,11 @@ def test_serve_bootstrap_is_refused_when_the_replica_serves_another_task() -> No
             serve_task_id="tsk-other",
             binding_generation=0,
         )
-        origin = ResidentRelaySession(
+        origin = FramedRelaySession(
             session_id="s1",
-            invocation_id="inv-1",
-            idm="idm-1",
-            role=ResidentSessionRole.ORIGIN,
+            correlation_id="inv-1",
+            operation_id="idm-1",
+            role=RelaySessionRole.ORIGIN,
             sink=origin_sink,
         )
         origin_sink.on_peer = sidecar.on_frame
@@ -541,11 +541,11 @@ def test_not_yet_bound_signals_a_transient_loss_not_a_definite_reject() -> None:
         origin_sink, replica_sink = _ToPeer(), _ToPeer()
         # No bind for rpl-1: the bind frame has not arrived yet (a cold-start race).
         sidecar = ResidentReplicaSidecar(sink=replica_sink, engine_open=_fake_engine)
-        origin = ResidentRelaySession(
+        origin = FramedRelaySession(
             session_id="s1",
-            invocation_id="inv-1",
-            idm="idm-1",
-            role=ResidentSessionRole.ORIGIN,
+            correlation_id="inv-1",
+            operation_id="idm-1",
+            role=RelaySessionRole.ORIGIN,
             sink=origin_sink,
         )
         origin_sink.on_peer = sidecar.on_frame

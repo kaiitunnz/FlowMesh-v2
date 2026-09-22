@@ -25,6 +25,19 @@ def _require_network_plane_for_resident(
         )
 
 
+def _require_network_plane_for_content(
+    env: dict[str, str], errors: list[str], warnings: list[str]
+) -> None:
+    """Worker-to-worker content hydration is carried by the network plane."""
+    if parse_bool(env.get("CONTENT_HYDRATION_ENABLED", "")) and not parse_bool(
+        env.get("NETWORK_PLANE_ENABLED", "")
+    ):
+        errors.append(
+            "CONTENT_HYDRATION_ENABLED requires NETWORK_PLANE_ENABLED: a content "
+            "transfer is carried by the network plane's relay"
+        )
+
+
 def _require_peer_trust(
     env: dict[str, str], errors: list[str], warnings: list[str]
 ) -> None:
@@ -94,7 +107,11 @@ STACK_ENV_SCHEMA = EnvSchema(
                 EnvVar(
                     "COMPOSE_PROFILES",
                     "",
-                    description="Optional compose profiles to deploy (e.g. telemetry).",
+                    description=(
+                        "Extra compose profiles to deploy (e.g. telemetry); a root "
+                        "node adds the content profile unless an endpoint names "
+                        "another store."
+                    ),
                 ),
             ],
         ),
@@ -620,18 +637,144 @@ STACK_ENV_SCHEMA = EnvSchema(
             ],
         ),
         EnvSection(
-            title="Reference-backed outcomes",
+            title="Content plane",
             vars=[
                 EnvVar(
                     "CONTENT_STORE_ENABLED",
                     "true",
-                    description="Serve the outcome content store.",
+                    description="Serve the outcome finalization index.",
                     var_type=EnvVarType.BOOL,
                 ),
                 EnvVar(
-                    "CONTENT_STORE_ROOT",
+                    "CONTENT_STORE_BACKEND",
+                    "s3",
+                    description="Shared content store backend.",
+                    choices=["s3", "filesystem"],
+                ),
+                EnvVar(
+                    "CONTENT_STORE_ENDPOINT_URL",
                     "",
-                    description="Content-store root; under the data dir if empty.",
+                    description=(
+                        "S3-compatible endpoint; the co-located store if empty."
+                    ),
+                ),
+                EnvVar(
+                    "CONTENT_STORE_PORT",
+                    "9800",
+                    description="Co-located content store port.",
+                    var_type=EnvVarType.INT,
+                    min_value=1,
+                ),
+                EnvVar(
+                    "CONTENT_STORE_CONSOLE_PORT",
+                    "9801",
+                    description="Co-located content store console port.",
+                    var_type=EnvVarType.INT,
+                    min_value=1,
+                ),
+                EnvVar(
+                    "CONTENT_STORE_BUCKET",
+                    "flowmesh-content",
+                    description="Bucket holding fabric content.",
+                ),
+                EnvVar(
+                    "CONTENT_STORE_PREFIX",
+                    "",
+                    description="Key prefix within the bucket.",
+                ),
+                EnvVar(
+                    "CONTENT_STORE_REGION",
+                    "us-east-1",
+                    description="Region the store is addressed in.",
+                ),
+                EnvVar(
+                    "CONTENT_STORE_ACCESS_KEY",
+                    "flowmesh",
+                    description=(
+                        "Co-located store key the control plane cuts access"
+                        " from; set for external storage."
+                    ),
+                ),
+                EnvVar(
+                    "CONTENT_STORE_SECRET_KEY",
+                    "flowmeshcontent",
+                    description=(
+                        "Co-located store secret the control plane cuts access"
+                        " from; set for external storage."
+                    ),
+                ),
+                EnvVar(
+                    "CONTENT_STORE_FILESYSTEM_ROOT",
+                    "",
+                    description="Shared filesystem root; under the data dir if empty.",
+                    var_type=EnvVarType.DIR_PATH,
+                ),
+                EnvVar(
+                    "CONTENT_STORE_SCOPED_CREDENTIALS",
+                    "true",
+                    description=(
+                        "Cut per-scope store access instead of sharing one key."
+                    ),
+                    var_type=EnvVarType.BOOL,
+                ),
+                EnvVar(
+                    "CONTENT_ACCESS_TTL_SEC",
+                    "900",
+                    description="Store-access grant lifetime (seconds).",
+                    var_type=EnvVarType.FLOAT,
+                    min_value=0,
+                    min_inclusive=False,
+                ),
+                EnvVar(
+                    "CONTENT_HYDRATION_ENABLED",
+                    "false",
+                    description="Cache content on workers and hydrate it between them.",
+                    var_type=EnvVarType.BOOL,
+                ),
+                EnvVar(
+                    "CONTENT_HYDRATION_GRANT_TTL_SEC",
+                    "60",
+                    description="Hydration grant lifetime (seconds).",
+                    var_type=EnvVarType.FLOAT,
+                    min_value=0,
+                    min_inclusive=False,
+                ),
+                EnvVar(
+                    "CONTENT_HOLDER_TTL_SEC",
+                    "300",
+                    description="Holder report lifetime (seconds).",
+                    var_type=EnvVarType.FLOAT,
+                    min_value=0,
+                    min_inclusive=False,
+                ),
+                EnvVar(
+                    "CONTENT_CACHE_TTL_SEC",
+                    "0",
+                    description=(
+                        "How long a worker keeps an unused cached copy (seconds, "
+                        "0 = indefinitely)."
+                    ),
+                    var_type=EnvVarType.FLOAT,
+                    min_value=0,
+                ),
+                EnvVar(
+                    "CONTENT_CACHE_MAX_BYTES",
+                    "0",
+                    description=(
+                        "Disk budget for a worker's cached copies (0 = unbounded)."
+                    ),
+                    var_type=EnvVarType.INT,
+                    min_value=0,
+                ),
+                EnvVar(
+                    "CONTENT_TRANSFER_TIMEOUT_SEC",
+                    "60",
+                    description=(
+                        "Longest a content transfer may go without progress (seconds)."
+                    ),
+                    var_type=EnvVarType.FLOAT,
+                    min_value=0,
+                    min_inclusive=False,
                 ),
             ],
         ),
@@ -1197,6 +1340,14 @@ STACK_ENV_SCHEMA = EnvSchema(
                     ],
                 ),
                 EnvVar(
+                    "WORKER_CONTENT_DIR",
+                    var_type=EnvVarType.DIR_PATH,
+                    description=[
+                        "Defaults to a content subdirectory of the results volume "
+                        "when empty."
+                    ],
+                ),
+                EnvVar(
                     "WORKER_PRIVATE_STATE_DIR",
                     var_type=EnvVarType.DIR_PATH,
                     description=[
@@ -1395,6 +1546,7 @@ STACK_ENV_SCHEMA = EnvSchema(
         ),
         _require_peer_trust,
         _require_network_plane_for_resident,
+        _require_network_plane_for_content,
     ],
 )
 

@@ -6,9 +6,9 @@ root rendezvous, which bridges opaque framed data between their per-node streams
 module is the transport primitives — frame codec, per-node stream cursor reads, the
 durable per-session record, and the ownership lease that hands a leg's single receiver
 over on restart. It is deliberately free of any resident, claim, or admission concept:
-a frame carries an opaque payload (the resident fence and body ride inside it) and is
-keyed only by the relay session, invocation, and idempotency identifiers used for
-routing and dedupe.
+a frame carries an opaque payload (a protocol's own fence and body ride inside it) and
+is keyed only by the relay session and the correlation identifiers its protocol routes
+and dedupes by.
 
 Durability follows a cursor lease, not a consumer group: each leg has one logical
 receiver that reads its node stream from a durable stored cursor, and a restart reclaims
@@ -28,7 +28,12 @@ from shared.network.relay_frame import (
 )
 
 from ..clients.redis import (
+    CONTENT_RELAY_ROOT_CURSOR_KEY,
     RESIDENT_RELAY_ROOT_CURSOR_KEY,
+    content_relay_down_cursor_key,
+    content_relay_down_key,
+    content_relay_session_key,
+    content_relay_up_key,
     resident_relay_down_cursor_key,
     resident_relay_down_key,
     resident_relay_session_key,
@@ -68,6 +73,14 @@ RESIDENT_RELAY_KEYSPACE = RelayKeyspace(
     down_cursor=resident_relay_down_cursor_key,
 )
 
+CONTENT_RELAY_KEYSPACE = RelayKeyspace(
+    up=content_relay_up_key,
+    down=content_relay_down_key,
+    session=content_relay_session_key,
+    root_cursor=CONTENT_RELAY_ROOT_CURSOR_KEY,
+    down_cursor=content_relay_down_cursor_key,
+)
+
 
 class BinaryRedis(Protocol):
     """The binary-safe async Redis surface the substrate uses (no decoded responses)."""
@@ -97,9 +110,7 @@ class StreamEntry:
 class RelayStreamStore:
     """Cursor reads and acked-bounded trims over the per-node up/down streams."""
 
-    def __init__(
-        self, redis: BinaryRedis, keyspace: RelayKeyspace = RESIDENT_RELAY_KEYSPACE
-    ) -> None:
+    def __init__(self, redis: BinaryRedis, keyspace: RelayKeyspace) -> None:
         self._redis = redis
         self._ks = keyspace
 
@@ -162,9 +173,7 @@ class RelayStreamStore:
 class RelaySessionStore:
     """The durable per-session routing record: origin/target nodes and sidecar route."""
 
-    def __init__(
-        self, redis: BinaryRedis, keyspace: RelayKeyspace = RESIDENT_RELAY_KEYSPACE
-    ) -> None:
+    def __init__(self, redis: BinaryRedis, keyspace: RelayKeyspace) -> None:
         self._redis = redis
         self._ks = keyspace
 
@@ -209,8 +218,8 @@ class RelayLease:
     def __init__(
         self,
         redis: BinaryRedis,
+        keyspace: RelayKeyspace,
         ttl_ms: int = 15000,
-        keyspace: RelayKeyspace = RESIDENT_RELAY_KEYSPACE,
     ) -> None:
         self._redis = redis
         self._ttl = ttl_ms
@@ -240,6 +249,7 @@ class RelayLease:
 
 
 __all__ = [
+    "CONTENT_RELAY_KEYSPACE",
     "RESIDENT_RELAY_KEYSPACE",
     "BinaryRedis",
     "RelayDirection",

@@ -32,6 +32,7 @@ import ssl
 from collections.abc import Awaitable, Callable
 
 from shared.network.frame_stream import (
+    FrameSink,
     FrameStreamError,
     read_relay_frame,
     split_host_port,
@@ -41,7 +42,6 @@ from shared.network.relay_frame import RelayFrame
 from shared.schemas.network import RouteObservationOutcome, Transport
 
 from .carriage import CONTROL_RELAY, CarriageUnavailable, ResidentCarriagePlan
-from .transport import ResidentFrameSink
 
 # Delivers one frame the target returned into the origin's own session.
 InboundSink = Callable[[RelayFrame], Awaitable[None]]
@@ -65,7 +65,7 @@ def _classify(exc: BaseException) -> RouteObservationOutcome:
     return RouteObservationOutcome.ROUTE_FAILURE
 
 
-class _PeerSink(ResidentFrameSink):
+class _PeerSink(FrameSink):
     """One attempt's dialed socket, falling back to the relay base before delivery."""
 
     def __init__(
@@ -180,7 +180,7 @@ class PeerCarriage:
     def __init__(
         self,
         *,
-        base: ResidentFrameSink,
+        base: FrameSink,
         deliver: InboundSink,
         observe: ObservationSink,
         ssl_context: ssl.SSLContext | None,
@@ -195,7 +195,7 @@ class PeerCarriage:
         self.log = logger or logging.getLogger("peer-carriage")
         self._sinks: dict[str, _PeerSink] = {}
 
-    def select(self, plan: ResidentCarriagePlan) -> ResidentFrameSink:
+    def select(self, plan: ResidentCarriagePlan) -> FrameSink:
         """The sink for this attempt.
 
         A plan naming the relay carries the base sink. A plan naming a peer this

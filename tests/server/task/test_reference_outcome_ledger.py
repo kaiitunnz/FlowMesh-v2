@@ -10,8 +10,9 @@ import asyncio
 
 from server.orchestration import WorkItemStatus
 from server.orchestration.state import LedgerSnapshot
+from shared.content import reference_for
 from shared.harness import BoundaryEventKind
-from shared.outcome import OutcomeManifest, content_digest
+from shared.outcome import OutcomeManifest
 from shared.private_state import OwnerFence
 from tests.server.task.test_v2_orchestration import FakeRegistry, _register, _runtime
 from worker.executors.harness.scripted import ScriptedHarnessAdapter, ScriptedStep
@@ -37,11 +38,8 @@ spec:
 
 def _manifest() -> OutcomeManifest:
     return OutcomeManifest(
-        content_digest=content_digest(b"draft-result"),
-        size_bytes=12,
-        media_type="application/json",
+        content=reference_for("local", b"draft-result", media_type="application/json"),
         idempotency_key="idm-1",
-        tenant="local",
     )
 
 

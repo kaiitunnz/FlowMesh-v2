@@ -61,8 +61,10 @@ ledger adds `act-` activations, `scp-` scopes, `wki-` work items, `att-`
 attempts, `inv-` invocations, `agr-` authority grants, and `idm-` idempotency
 keys (the fabric-assigned dedupe authority for a mediated boundary). Resident-capacity
 control adds `scl-` service claims, `rpl-` replica incarnations, and `lse-` allocation
-leases. `msk-` is an unguessable ref for a workflow's vaulted model credential and `hnd-`
-an unguessable claim-bound admission handoff token. Activation-private state adds
+leases. `msk-` is an unguessable ref for a workflow's vaulted model credential, `hnd-`
+an unguessable claim-bound admission handoff token, `chg-` an unguessable
+cache-to-cache content-hydration grant, and `csg-` an unguessable content-store
+access grant. Activation-private state adds
 `aps-` state references, `sbm-` sealed-generation manifests, and `psa-` attachments.
 The network plane adds `rog-` route
 origins and `rly-` relay sessions. Worker-originated mediated boundaries add `mop-`
@@ -414,6 +416,58 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   other. The mediated-egress-sidecar tool path and the worker-materialized resident
   completion settle by reference; the model gateway settles inline. See
   [`EXECUTORS.md`](EXECUTORS.md).
+- **Content references.** Every value the fabric stores immutably is named by one
+  `ContentReference`: the authorization scope isolating it together with the digest and
+  size a reader verifies it by, and nothing that says where it is or what it means. The
+  control plane assigns the scope — a task's dispatch and a minted permit each carry the
+  one their work writes under — so a worker carries a scope rather than asserting one. An
+  outcome finalization, a prepared inference request, and any later consumer each keep
+  their own binding to a reference, so an object is never a name for what a consumer
+  calls it, and identical bytes in two scopes are two objects.
+- **The shared content store.** Every content object lives in one shared durable store —
+  an S3-compatible service such as the MinIO a default deployment co-locates on the root
+  node, cloud S3, or a filesystem every node mounts — reached through the same
+  `FabricObjectStore` contract and selected with `CONTENT_STORE_BACKEND`. A deployment
+  that names no store runs the co-located one and points at it, so a fresh cluster stores
+  content without being configured; naming `CONTENT_STORE_ENDPOINT_URL` moves the fabric
+  onto real object storage and leaves the co-located store unstarted, which is the shape
+  a production deployment takes. The root provisions the bucket it is pointed at where
+  its credential allows, since the scoped session a worker reaches content under covers
+  one scope's prefix rather than the bucket. It is a service
+  beside the fabric, never the root process: the root and its supervisors hold no
+  payload. A worker writes an object there before it reports the reference naming it, so
+  a reference that reaches any binding names bytes that already outlive their producer,
+  and a worker's death loses nothing. The outcome-finalization index lives on the control
+  plane, binding an `idm-*` to a reference so a re-drive re-reports the first
+  materialization rather than re-running a sampled producer; the store holds only bytes
+  and never treats an idempotency key as a name. The scope that binding lands in is the
+  one control assigned the work when it authorized the key, so the producer reporting a
+  finalization is held to it rather than naming a scope of its own.
+- **Store access.** A worker reaches the store only under a `csg-`
+  `ContentStoreAccessGrant` the control plane mints for one dispatched task in one
+  authorization scope, bound to the worker incarnation running it and expiring shortly
+  after. The grant records what access was given and is not itself secret; the material
+  that opens the backend travels beside it, relayed to that worker as a control message
+  and delivered over its authenticated attachment, and is kept nowhere — no ledger,
+  control store, manifest, frame, or log. A scope is the widest a task can reach, cut as a
+  short-lived session over that scope's prefix, and the grant carries no list, delete, or
+  binding operation — which references a task may use is still decided by the consumer
+  bindings control checks. A fresh dispatch or recovery gets fresh access; expiry or a
+  policy rotation fences what came before.
+- **Worker content cache and granted hydration.** What a worker holds is a cache over that
+  store, so a copy may be dropped at any time: a deployment can bound the cache by how
+  long a copy goes unused and by disk, least recently used first, and leaves both
+  unbounded by default. A read tries the local copy, then another worker's copy, then the
+  store itself. For a peer's copy the control plane checks that the requesting worker is
+  running the task and that the task is already bound to exactly that reference, resolves
+  a live holder, and mints one short-lived `chg-` `ContentHydrationGrant` it hands to both
+  ends: the holder serves only a grant it was handed, once, for that exact object, and the
+  requester verifies the digest and size before anything reads the bytes. That transfer
+  runs over the network plane's relay under its own namespace, so the root bridges opaque
+  frames and never holds, assembles, or resolves the payload. A refused, expired, or
+  replayed grant, an evicted copy, or a holder that is gone costs a read from the shared
+  store rather than a failure. Enable the cache and its transfers with
+  `CONTENT_HYDRATION_ENABLED=true` (which requires `NETWORK_PLANE_ENABLED=true`).
 - **Task merging.** Compatible adjacent tasks in a DAG (same `taskType`,
   model, hardware shape, and merge key) coalesce into a single dispatch.
   Merged children ride on `WorkerTaskMessage.merged_children`; the worker

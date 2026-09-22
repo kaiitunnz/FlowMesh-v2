@@ -11,6 +11,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from shared.content import ContentReference
 from shared.resident.reports import (
     ResidentBootstrapAck,
     ResidentOpOutcome,
@@ -69,6 +70,7 @@ from .port_forward import PortForwardService
 from .watchdog import WorkerWatchdog
 
 if TYPE_CHECKING:
+    from ..content import ContentHydrationAuthority
     from ..serve import GatedServe
 
 # Model-serving task types adopted as standing resident allocations: the GPU vLLM serve
@@ -133,6 +135,7 @@ class EventMonitor:
         server_base_url: str = "http://localhost:8000",
         on_node_removed: Callable[[str], None] | None = None,
         workflow_span_emitter: WorkflowSpanEmitter | None = None,
+        content_authority: "ContentHydrationAuthority | None" = None,
     ) -> None:
         self._redis_client = redis_client
         self._on_node_removed = on_node_removed
@@ -150,6 +153,7 @@ class EventMonitor:
         self._results_dir = Path(results_dir)
         self._log_stream_ttl_sec = max(0, int(log_stream_ttl_sec))
         self._server_base_url = self._validate_server_base_url(server_base_url)
+        self._content_authority = content_authority
         self._finalizer = WorkflowFinalizer(
             redis_client=redis_client,
             runtime=runtime,
@@ -801,6 +805,20 @@ class EventMonitor:
             case "RESIDENT_OP_OUTCOME":
                 self._runtime.on_resident_outcome(
                     ResidentOpOutcome.model_validate(event.payload["outcome"])
+                )
+            case "CONTENT_HOLDING" if self._content_authority is not None:
+                self._content_authority.record_holding(
+                    (event.worker_id or "").strip(),
+                    [
+                        (str(scope), str(digest))
+                        for scope, digest in event.payload["held"]
+                    ],
+                )
+            case "CONTENT_HYDRATION_REQUEST" if self._content_authority is not None:
+                self._content_authority.authorize(
+                    (event.worker_id or "").strip(),
+                    str(event.payload["task_id"]),
+                    ContentReference.model_validate(event.payload["reference"]),
                 )
             case "RESIDENT_ROUTE_OBSERVATION":
                 self._runtime.on_resident_route_observation(

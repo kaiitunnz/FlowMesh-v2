@@ -11,6 +11,7 @@ and the caller closes the connection: a stream whose framing is lost cannot resy
 
 import asyncio
 import json
+from collections.abc import Callable
 from typing import Any, Protocol
 
 from .relay_frame import RelayDirection, RelayFrame, RelayFrameKind
@@ -38,6 +39,20 @@ class FrameSink(Protocol):
     async def send(self, frame: RelayFrame) -> None: ...
 
 
+class WireFrameSink:
+    """Hands each produced frame to a transport that carries it as a wire dict.
+
+    A worker's lane sends through this: the frame leaves as an attachment event, and the
+    supervisor bridges it onward without reading it.
+    """
+
+    def __init__(self, push_frame: Callable[[dict[str, Any]], None]) -> None:
+        self._push_frame = push_frame
+
+    async def send(self, frame: RelayFrame) -> None:
+        self._push_frame(frame.to_wire())
+
+
 def split_host_port(endpoint: str) -> tuple[str, int]:
     """Split a ``host:port`` endpoint, defaulting the host to loopback."""
     host, _, port = endpoint.rpartition(":")
@@ -48,8 +63,8 @@ def _meta(frame: RelayFrame) -> bytes:
     meta: dict[str, Any] = {
         "kind": frame.kind.value,
         "session_id": frame.session_id,
-        "invocation_id": frame.invocation_id,
-        "idm": frame.idm,
+        "correlation_id": frame.correlation_id,
+        "operation_id": frame.operation_id,
         "direction": frame.direction.value,
         "seq": frame.seq,
         "ack": frame.ack,
@@ -88,8 +103,8 @@ async def read_relay_frame(reader: asyncio.StreamReader) -> RelayFrame:
         return RelayFrame(
             kind=RelayFrameKind(meta["kind"]),
             session_id=str(meta["session_id"]),
-            invocation_id=str(meta["invocation_id"]),
-            idm=str(meta["idm"]),
+            correlation_id=str(meta["correlation_id"]),
+            operation_id=str(meta["operation_id"]),
             direction=RelayDirection(meta["direction"]),
             seq=int(meta.get("seq", 0)),
             ack=int(meta.get("ack", 0)),
@@ -106,6 +121,7 @@ __all__ = [
     "FrameSink",
     "FrameStreamError",
     "FrameWriter",
+    "WireFrameSink",
     "read_relay_frame",
     "split_host_port",
     "write_relay_frame",

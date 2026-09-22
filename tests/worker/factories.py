@@ -18,7 +18,7 @@ from shared.tasks.worker_message import (
     WorkerTaskMessage,
 )
 from shared.telemetry.config import TelemetryConfig, TelemetryLevel
-from worker.config import WorkerConfig
+from worker.config import ObjectStoreConfig, WorkerConfig
 
 DEFAULT_WORKER_CONFIG: Final[WorkerConfig] = WorkerConfig(
     owner_principal=PrincipalContext(
@@ -30,6 +30,13 @@ DEFAULT_WORKER_CONFIG: Final[WorkerConfig] = WorkerConfig(
     ).model_dump(),
     worker_token="test",
     private_state_dir=Path("/tmp/test-private-state"),
+    content_dir=Path("/tmp/test-content"),
+    content_hydration_enabled=False,
+    content_cache_ttl_sec=0.0,
+    content_cache_max_bytes=0,
+    content_holder_ttl_sec=300.0,
+    object_store=ObjectStoreConfig.from_env(Path("/tmp/test-results")),
+    content_transfer_timeout_sec=60.0,
     server_base_url=None,
     supervisor_grpc_target="localhost:50051",
     supervisor_grpc_tls_ca_b64=None,
@@ -102,6 +109,7 @@ def make_worker_task_message(
     task_id: str = "tsk-test",
     workflow_id: str = "wfl-test",
     owner_id: str = "usr-test",
+    content_scope: str = "local",
     assigned_worker: str = "wrk-test",
     dispatched_at: str = "2026-04-28T00:00:00Z",
     api_version: str = "flowmesh/v1",
@@ -113,6 +121,7 @@ def make_worker_task_message(
         task_id=task_id,
         workflow_id=workflow_id,
         owner_id=owner_id,
+        content_scope=content_scope,
         assigned_worker=assigned_worker,
         dispatched_at=dispatched_at,
         task_type=task_type,
