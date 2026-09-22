@@ -87,7 +87,7 @@ async def test_a_result_outside_the_task_scope_is_not_bound(payload: str) -> Non
     runtime.mark_dispatched(a, cast(Any, _worker()))
     runtime.mark_succeeded(a, "wkr-1", foreign, _TS)
 
-    assert runtime._tasks[a].status is TaskStatus.DONE
+    assert runtime._tasks[a].status == TaskStatus.DONE
     assert runtime.result_binding(a) is None
 
 
@@ -151,13 +151,13 @@ async def test_a_replayed_skip_republishes_as_explicit_empty(
 
 
 @pytest.mark.anyio
-async def test_merged_children_bind_their_own_or_their_parent_result() -> None:
+async def test_a_merged_child_binds_only_its_own_result() -> None:
     runtime = _runtime(FakeRegistry())
     _, ids = await _register(runtime, V1_LINEAR)
-    parent, own, clone = ids["a"], ids["b"], "tsk-clone"
-    record = runtime._tasks[own].model_copy(update={"task_id": clone})
-    runtime._tasks[clone] = record
-    runtime._merge_children_map[parent] = [own, clone]
+    parent, own, unreported = ids["a"], ids["b"], "tsk-unreported"
+    record = runtime._tasks[own].model_copy(update={"task_id": unreported})
+    runtime._tasks[unreported] = record
+    runtime._merge_children_map[parent] = [own, unreported]
     payload = _stored(runtime, parent, "parent")
     payload["child_result_references"] = {
         own: _stored(runtime, own, "own")["result_reference"]
@@ -166,7 +166,8 @@ async def test_merged_children_bind_their_own_or_their_parent_result() -> None:
     runtime.mark_succeeded(parent, "wkr-1", payload, _TS)
 
     assert _value(runtime, own) == "own"
-    assert _value(runtime, clone) == "parent"
+    assert runtime._tasks[unreported].status != TaskStatus.DONE
+    assert runtime.result_binding(unreported) is None
 
 
 @pytest.mark.anyio

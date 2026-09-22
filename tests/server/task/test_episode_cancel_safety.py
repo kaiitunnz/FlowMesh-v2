@@ -327,14 +327,14 @@ def test_a_failure_racing_a_cancel_settles_cancelled() -> None:
         _run_step(runtime, adapter, writer)
         runtime.cancel_workflow(workflow_id)
 
-        impacted, merged, usages = runtime.mark_failed(
+        impacted, usages = runtime.mark_failed(
             writer, "wkr-1", dict(_USAGE_PAYLOAD), _TS, error="worker blew up"
         )
 
         record = runtime._tasks[writer]
         assert record.status == TaskStatus.CANCELLED
         assert record.error == "cancelled"
-        assert (impacted, merged) == ([], [])
+        assert impacted == []
         assert [usage.status for _, usage in usages] == [TaskStatus.CANCELLED]
         assert registry.remaining_of(workflow_id) == set()
 

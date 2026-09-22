@@ -500,8 +500,8 @@ class Runner:
 
         Every result lands in the shared store before the success that reports it, so a
         reference control binds always names bytes that outlive this worker. A child
-        the executor produced no result for reports none, and control binds it to its
-        merged parent's.
+        the executor produced no result for reports none, and control runs it again on
+        its own.
         """
         if result is None:
             return {}

@@ -884,7 +884,7 @@ async def test_terminal_failure_cascades_to_dependents() -> None:
 
     runtime.next_ready(stop, timeout=0.01)
     runtime.mark_dispatched(a, cast(Any, _worker()))
-    impacted, _, _ = runtime.mark_failed(
+    impacted, _ = runtime.mark_failed(
         a, "wkr-1", {}, "2026-06-01T00:00:00Z", error="boom"
     )
 

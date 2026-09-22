@@ -524,7 +524,9 @@ class EventMonitor:
                 # tally several times for one task.
                 if self._runtime.success_settles_task(event.task_id, payload):
                     self._metrics.record_task_event(event)
-                merged_children = self._runtime.get_merged_children(event.task_id)
+                merged_children = self._runtime.merged_children_settled_by(
+                    event.task_id, payload
+                )
                 if merged_children:
                     self.mirror_task_results(event.task_id, merged_children)
                 usages = self._runtime.mark_succeeded(
@@ -546,21 +548,20 @@ class EventMonitor:
                         "DONE UNKNOWN, TOTAL UNKNOWN"
                     )
                 self._logger.info("Task %s completed; %s", event.task_id, summary)
-                if merged_children:
-                    for child_id in merged_children:
-                        child_payload = dict(payload)
-                        child_payload["parent_task_id"] = event.task_id
-                        child_payload["is_child_task"] = True
-                        child_event = TaskEvent(
-                            type="TASK_SUCCEEDED",
-                            task_id=child_id,
-                            worker_id=event.worker_id,
-                            payload=child_payload,
-                            ts=event.ts,
-                        )
-                        self._metrics.record_task_event(child_event, is_child=True)
-                        self._close_task_log_stream(child_id)
-                        self._finalizer.close_task_workflow(child_id)
+                for child_id in merged_children:
+                    child_payload = dict(payload)
+                    child_payload["parent_task_id"] = event.task_id
+                    child_payload["is_child_task"] = True
+                    child_event = TaskEvent(
+                        type="TASK_SUCCEEDED",
+                        task_id=child_id,
+                        worker_id=event.worker_id,
+                        payload=child_payload,
+                        ts=event.ts,
+                    )
+                    self._metrics.record_task_event(child_event, is_child=True)
+                    self._close_task_log_stream(child_id)
+                    self._finalizer.close_task_workflow(child_id)
                 if event.worker_id:
                     try:
                         record = self._runtime.get_record(event.task_id)
@@ -626,7 +627,7 @@ class EventMonitor:
                 self._unregister_port_forward(event.task_id)
                 self._maybe_drain_serve(event.task_id)
                 self._metrics.record_task_event(event)
-                impacted, merged_children, usages = self._runtime.mark_failed(
+                impacted, usages = self._runtime.mark_failed(
                     event.task_id,
                     event.worker_id,
                     payload,
@@ -647,22 +648,6 @@ class EventMonitor:
                     self._metrics.finalize_task_failure(task_id)
                     self._close_task_log_stream(task_id)
                     self._finalizer.close_task_workflow(task_id)
-                for child_id in merged_children:
-                    child_payload = dict(payload)
-                    child_payload["parent_task_id"] = event.task_id
-                    child_payload["dependency_failure"] = event.task_id
-                    child_payload["is_child_task"] = True
-                    child_event = TaskEvent(
-                        type="TASK_FAILED",
-                        task_id=child_id,
-                        worker_id=event.worker_id,
-                        error=event.error or "parent_failed",
-                        payload=child_payload,
-                    )
-                    self._metrics.record_task_event(child_event, is_child=True)
-                    self._metrics.finalize_task_failure(child_id)
-                    self._close_task_log_stream(child_id)
-                    self._finalizer.close_task_workflow(child_id)
                 self._finalizer.close_task_workflow(event.task_id)
             case "TASK_CANCELLED":
                 self._unregister_port_forward(event.task_id)

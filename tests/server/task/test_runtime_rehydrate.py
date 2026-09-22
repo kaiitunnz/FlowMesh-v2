@@ -466,7 +466,7 @@ async def test_mark_failed_applies_cascade_atomically_when_persist_raises(
 
     # Replay is a no-op via the idempotency guard (task already terminal).
     monkeypatch.setattr(registry, "commit_transition", lambda *args, **kwargs: None)
-    impacted, _, _ = runtime.mark_failed(a, "wkr-1", {}, "2026-06-01T00:00:00Z")
+    impacted, _ = runtime.mark_failed(a, "wkr-1", {}, "2026-06-01T00:00:00Z")
     assert impacted == []
 
 
@@ -507,7 +507,7 @@ async def test_replayed_terminal_event_repersists_after_failed_write(
 
     # Replay of the same TASK_FAILED: the guard heals by re-persisting the
     # workflow's terminal records (the whole cascade, not just the primary).
-    impacted, _, _ = runtime.mark_failed(a, "wkr-1", {}, "2026-06-01T00:00:00Z")
+    impacted, _ = runtime.mark_failed(a, "wkr-1", {}, "2026-06-01T00:00:00Z")
     assert impacted == []
     assert persisted_status(a) == TaskStatus.FAILED
     assert persisted_status(b) == TaskStatus.FAILED

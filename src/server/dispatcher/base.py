@@ -970,7 +970,7 @@ class Dispatcher:
         failure_payload = payload.copy() if isinstance(payload, dict) else {}
         if error_message and "error" not in failure_payload:
             failure_payload["error"] = error_message
-        impacted, merged_children, _ = self._runtime.mark_failed(
+        impacted, _ = self._runtime.mark_failed(
             task_id,
             worker_id,
             failure_payload,
@@ -992,18 +992,6 @@ class Dispatcher:
                 payload=dependent_payload,
                 error=reason,
             )
-        for child_id in merged_children:
-            child_payload = failure_payload.copy()
-            child_payload["parent_task_id"] = task_id
-            child_payload["dependency_failure"] = task_id
-            child_payload["is_child_task"] = True
-            self._emit_task_event(
-                "TASK_FAILED",
-                child_id,
-                payload=child_payload,
-                error=error_message or "parent_failed",
-                is_child=True,
-            )
 
     def _emit_task_event(
         self,
@@ -1013,7 +1001,6 @@ class Dispatcher:
         worker_id: str | None = None,
         payload: dict[str, Any] | None = None,
         error: str | None = None,
-        is_child: bool = False,
     ) -> None:
         if not self._metrics:
             return
@@ -1025,7 +1012,7 @@ class Dispatcher:
             error=error,
             ts=now_iso(),
         )
-        self._metrics.record_task_event(event, is_child=is_child)
+        self._metrics.record_task_event(event)
         if event_type == "TASK_FAILED":
             self._metrics.finalize_task_failure(task_id)
 
