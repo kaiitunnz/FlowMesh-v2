@@ -24,7 +24,6 @@ import logging
 from collections import OrderedDict, deque
 
 from .reverse_relay import (
-    RESIDENT_RELAY_KEYSPACE,
     BinaryRedis,
     RelayDirection,
     RelayKeyspace,
@@ -37,9 +36,7 @@ from .reverse_relay import (
 class RootCursorStore:
     """The bridge's durable read position per attached node up stream."""
 
-    def __init__(
-        self, redis: BinaryRedis, keyspace: RelayKeyspace = RESIDENT_RELAY_KEYSPACE
-    ) -> None:
+    def __init__(self, redis: BinaryRedis, keyspace: RelayKeyspace) -> None:
         self._redis = redis
         self._key = keyspace.root_cursor
 

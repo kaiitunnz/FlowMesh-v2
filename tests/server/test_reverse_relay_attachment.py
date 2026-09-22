@@ -6,6 +6,7 @@ lease owner consume so a restart hands the leg over rather than double-consuming
 import asyncio
 
 from server.network.reverse_relay import (
+    RESIDENT_RELAY_KEYSPACE,
     RelayDirection,
     RelayFrame,
     RelayFrameKind,
@@ -34,7 +35,9 @@ def _attachment(
 ) -> tuple[ReverseRelayAttachment, _RecordingDelivery]:
     delivery = delivery or _RecordingDelivery()
     return (
-        ReverseRelayAttachment(redis, "nde-t", delivery, owner=owner),
+        ReverseRelayAttachment(
+            redis, "nde-t", delivery, owner=owner, keyspace=RESIDENT_RELAY_KEYSPACE
+        ),
         delivery,
     )
 
@@ -42,7 +45,7 @@ def _attachment(
 def test_dispatches_down_frames_and_resumes_from_the_cursor() -> None:
     async def run() -> None:
         redis = FakeBinaryRedis()
-        streams = RelayStreamStore(redis)
+        streams = RelayStreamStore(redis, RESIDENT_RELAY_KEYSPACE)
         attachment, delivery = _attachment(redis, "owner-1")
         await streams.publish_down("nde-t", relay_frame(RelayFrameKind.DATA, seq=1))
         await streams.publish_down("nde-t", relay_frame(RelayFrameKind.DATA, seq=2))
@@ -70,7 +73,7 @@ def test_the_down_read_is_a_bounded_long_poll_not_block_forever() -> None:
 def test_send_up_publishes_a_response_to_the_up_stream() -> None:
     async def run() -> None:
         redis = FakeBinaryRedis()
-        streams = RelayStreamStore(redis)
+        streams = RelayStreamStore(redis, RESIDENT_RELAY_KEYSPACE)
         attachment, _ = _attachment(redis, "owner-1")
         await attachment.send_up(
             relay_frame(RelayFrameKind.DATA, direction=RelayDirection.TARGET_TO_ORIGIN)
@@ -84,7 +87,7 @@ def test_send_up_publishes_a_response_to_the_up_stream() -> None:
 def test_a_lease_that_lapses_mid_delivery_does_not_advance_the_cursor() -> None:
     async def run() -> None:
         redis = FakeBinaryRedis()
-        streams = RelayStreamStore(redis)
+        streams = RelayStreamStore(redis, RESIDENT_RELAY_KEYSPACE)
         await streams.publish_down("nde-t", relay_frame(RelayFrameKind.DATA, seq=1))
 
         class _LapsingDelivery(LocalDelivery):
@@ -97,7 +100,13 @@ def test_a_lease_that_lapses_mid_delivery_does_not_advance_the_cursor() -> None:
                 self.frames.append(f"{frame.session_id}:{frame.seq}")
 
         delivery = _LapsingDelivery()
-        attachment = ReverseRelayAttachment(redis, "nde-t", delivery, owner="owner-1")
+        attachment = ReverseRelayAttachment(
+            redis,
+            "nde-t",
+            delivery,
+            owner="owner-1",
+            keyspace=RESIDENT_RELAY_KEYSPACE,
+        )
         assert await attachment.pump_once() == 1
         assert delivery.frames == ["rly-1:1"]
         # The lease lapsed during delivery, so the owner must not advance the shared
@@ -113,7 +122,7 @@ def test_a_lease_that_lapses_mid_delivery_does_not_advance_the_cursor() -> None:
 def test_only_the_lease_owner_consumes_the_down_stream() -> None:
     async def run() -> None:
         redis = FakeBinaryRedis()
-        streams = RelayStreamStore(redis)
+        streams = RelayStreamStore(redis, RESIDENT_RELAY_KEYSPACE)
         await streams.publish_down("nde-t", relay_frame(RelayFrameKind.DATA, seq=1))
         first, first_delivery = _attachment(redis, "owner-1")
         second, second_delivery = _attachment(redis, "owner-2")
@@ -133,7 +142,7 @@ def test_only_the_lease_owner_consumes_the_down_stream() -> None:
 def test_a_poison_frame_does_not_stall_the_node_or_re_deliver() -> None:
     async def run() -> None:
         redis = FakeBinaryRedis()
-        streams = RelayStreamStore(redis)
+        streams = RelayStreamStore(redis, RESIDENT_RELAY_KEYSPACE)
         # The middle frame's delivery raises (its sidecar is not bound); it must not
         # stall the node's multiplexed stream or force a batch re-deliver.
         for seq in (1, 2, 3):
@@ -155,7 +164,7 @@ def test_a_poison_frame_does_not_stall_the_node_or_re_deliver() -> None:
 def test_pump_trims_the_consumed_down_prefix() -> None:
     async def run() -> None:
         redis = FakeBinaryRedis()
-        streams = RelayStreamStore(redis)
+        streams = RelayStreamStore(redis, RESIDENT_RELAY_KEYSPACE)
         for seq in (1, 2, 3):
             await streams.publish_down(
                 "nde-t", relay_frame(RelayFrameKind.DATA, seq=seq)
@@ -173,7 +182,7 @@ def test_pump_trims_the_consumed_down_prefix() -> None:
 def test_a_reclaimed_lease_resumes_mid_stream_without_re_delivering() -> None:
     async def run() -> None:
         redis = FakeBinaryRedis()
-        streams = RelayStreamStore(redis)
+        streams = RelayStreamStore(redis, RESIDENT_RELAY_KEYSPACE)
         await streams.publish_down("nde-t", relay_frame(RelayFrameKind.DATA, seq=1))
         await streams.publish_down("nde-t", relay_frame(RelayFrameKind.DATA, seq=2))
         a, a_delivery = _attachment(redis, "owner-a")

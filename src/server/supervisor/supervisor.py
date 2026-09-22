@@ -341,7 +341,11 @@ def _run_supervisor(
     from ..clients import RedisClient
     from ..clients.redis import resident_relay_client
     from ..network.listeners import NetworkPlaneListeners
-    from ..network.reverse_relay import CONTENT_RELAY_KEYSPACE, BinaryRedis
+    from ..network.reverse_relay import (
+        CONTENT_RELAY_KEYSPACE,
+        RESIDENT_RELAY_KEYSPACE,
+        BinaryRedis,
+    )
     from ..network.worker_bridge import RelayWorkerBridge
     from ..registries.node import NodeRegistry
     from ..utils.logging import get_logger as _get_logger
@@ -462,6 +466,7 @@ def _run_supervisor(
             relay_redis,
             node_id,
             task_listener.enqueue_local,
+            keyspace=RESIDENT_RELAY_KEYSPACE,
             logger=logger,
         )
         resident_attachment = ReverseRelayAttachment(
@@ -469,6 +474,7 @@ def _run_supervisor(
             node_id,
             resident_bridge,
             owner=f"{node_id}:{os.getpid()}",
+            keyspace=RESIDENT_RELAY_KEYSPACE,
             logger=logger,
         )
         if content_cfg.hydration_enabled:

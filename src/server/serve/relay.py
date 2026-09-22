@@ -23,7 +23,11 @@ from shared.resident.contracts import AdmissionHandoff, RouteAuthorization
 from shared.resident.envelope import ServeRequestEnvelope
 from shared.resident.serve_drive import ServeControl, ServeOriginDrive
 
-from ..network.reverse_relay import BinaryRedis, RelayStreamStore
+from ..network.reverse_relay import (
+    RESIDENT_RELAY_KEYSPACE,
+    BinaryRedis,
+    RelayStreamStore,
+)
 from ..supervisor.services.reverse_relay_attachment import ReverseRelayAttachment
 
 # The gated serve edge rides one dedicated reverse-relay stream id — not a worker node —
@@ -60,10 +64,14 @@ class ServeRelayExecutor:
         auth_deadline_sec: float = 60.0,
         logger: logging.Logger | None = None,
     ) -> None:
-        self._streams = RelayStreamStore(relay_redis)
+        self._streams = RelayStreamStore(relay_redis, RESIDENT_RELAY_KEYSPACE)
         self._edge_id = edge_id
         self._attachment = ReverseRelayAttachment(
-            relay_redis, edge_id, self, owner=f"serve-edge:{os.getpid()}"
+            relay_redis,
+            edge_id,
+            self,
+            owner=f"serve-edge:{os.getpid()}",
+            keyspace=RESIDENT_RELAY_KEYSPACE,
         )
         # The root cannot dial a worker, so its frames always ride control_relay over
         # the internal rendezvous attachment; the carriage realizes that one transport.

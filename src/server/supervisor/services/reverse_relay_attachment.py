@@ -17,7 +17,6 @@ import logging
 from typing import Protocol
 
 from ...network.reverse_relay import (
-    RESIDENT_RELAY_KEYSPACE,
     BinaryRedis,
     RelayDirection,
     RelayFrame,
@@ -63,7 +62,7 @@ class ReverseRelayAttachment:
         delivery: LocalDelivery,
         *,
         owner: str,
-        keyspace: RelayKeyspace = RESIDENT_RELAY_KEYSPACE,
+        keyspace: RelayKeyspace,
         batch: int = 64,
         poll_ms: int = 1000,
         lease_ttl_ms: int = 15000,

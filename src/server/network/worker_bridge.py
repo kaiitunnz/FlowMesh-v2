@@ -18,7 +18,6 @@ from shared.network.frame_stream import FrameSink
 from shared.network.relay_frame import RelayDirection, RelayFrame
 
 from .reverse_relay import (
-    RESIDENT_RELAY_KEYSPACE,
     BinaryRedis,
     RelayKeyspace,
     RelaySessionStore,
@@ -38,7 +37,7 @@ class RelayWorkerBridge:
         node_id: str,
         enqueue_local: LocalEnqueue,
         *,
-        keyspace: RelayKeyspace = RESIDENT_RELAY_KEYSPACE,
+        keyspace: RelayKeyspace,
         frame_kind: str = "resident_frame",
         logger: logging.Logger | None = None,
     ) -> None:

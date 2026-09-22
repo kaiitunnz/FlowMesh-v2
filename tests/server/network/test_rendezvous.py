@@ -7,6 +7,7 @@ import asyncio
 
 from server.network.rendezvous import RootCursorStore, RootRendezvousBridge
 from server.network.reverse_relay import (
+    RESIDENT_RELAY_KEYSPACE,
     RelayDirection,
     RelayFrameKind,
     RelaySessionStore,
@@ -19,9 +20,11 @@ from ._relay_fakes import FakeBinaryRedis, relay_frame
 async def _bridge(
     redis: FakeBinaryRedis,
 ) -> tuple[RootRendezvousBridge, RelayStreamStore, RelaySessionStore]:
-    streams = RelayStreamStore(redis)
-    sessions = RelaySessionStore(redis)
-    bridge = RootRendezvousBridge(streams, sessions, RootCursorStore(redis))
+    streams = RelayStreamStore(redis, RESIDENT_RELAY_KEYSPACE)
+    sessions = RelaySessionStore(redis, RESIDENT_RELAY_KEYSPACE)
+    bridge = RootRendezvousBridge(
+        streams, sessions, RootCursorStore(redis, RESIDENT_RELAY_KEYSPACE)
+    )
     return bridge, streams, sessions
 
 

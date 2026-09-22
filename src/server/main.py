@@ -55,6 +55,7 @@ from .hooks import register
 from .network.rendezvous import RootCursorStore, RootRendezvousBridge
 from .network.reverse_relay import (
     CONTENT_RELAY_KEYSPACE,
+    RESIDENT_RELAY_KEYSPACE,
     BinaryRedis,
     RelaySessionStore,
     RelayStreamStore,
@@ -303,9 +304,9 @@ if IS_ROOT_NODE:
             ),
         )
         RESIDENT_BRIDGE = RootRendezvousBridge(
-            RelayStreamStore(_relay_redis),
-            RelaySessionStore(_relay_redis),
-            RootCursorStore(_relay_redis),
+            RelayStreamStore(_relay_redis, RESIDENT_RELAY_KEYSPACE),
+            RelaySessionStore(_relay_redis, RESIDENT_RELAY_KEYSPACE),
+            RootCursorStore(_relay_redis, RESIDENT_RELAY_KEYSPACE),
             logger=logger,
         )
         if config.content_store.hydration_enabled:
@@ -345,7 +346,7 @@ if IS_ROOT_NODE:
             network=NETWORK_PLANE,
             worker_registry=WORKER_REGISTRY,
             runtime=RUNTIME,
-            sessions=RelaySessionStore(_relay_redis),
+            sessions=RelaySessionStore(_relay_redis, RESIDENT_RELAY_KEYSPACE),
             resident_cfg=config.orchestration.resident,
             root_node_id=lambda: ROOT_NODE_ID,
             edge_id=SERVE_EDGE_STREAM_ID,

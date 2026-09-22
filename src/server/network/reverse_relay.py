@@ -110,9 +110,7 @@ class StreamEntry:
 class RelayStreamStore:
     """Cursor reads and acked-bounded trims over the per-node up/down streams."""
 
-    def __init__(
-        self, redis: BinaryRedis, keyspace: RelayKeyspace = RESIDENT_RELAY_KEYSPACE
-    ) -> None:
+    def __init__(self, redis: BinaryRedis, keyspace: RelayKeyspace) -> None:
         self._redis = redis
         self._ks = keyspace
 
@@ -175,9 +173,7 @@ class RelayStreamStore:
 class RelaySessionStore:
     """The durable per-session routing record: origin/target nodes and sidecar route."""
 
-    def __init__(
-        self, redis: BinaryRedis, keyspace: RelayKeyspace = RESIDENT_RELAY_KEYSPACE
-    ) -> None:
+    def __init__(self, redis: BinaryRedis, keyspace: RelayKeyspace) -> None:
         self._redis = redis
         self._ks = keyspace
 
@@ -222,8 +218,8 @@ class RelayLease:
     def __init__(
         self,
         redis: BinaryRedis,
+        keyspace: RelayKeyspace,
         ttl_ms: int = 15000,
-        keyspace: RelayKeyspace = RESIDENT_RELAY_KEYSPACE,
     ) -> None:
         self._redis = redis
         self._ttl = ttl_ms
