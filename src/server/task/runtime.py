@@ -3706,8 +3706,6 @@ class TaskRuntime:
                         finished_ts,
                         started_ts,
                         usage,
-                        # A child the executor produced no result of its own for is a
-                        # clone of its merged parent and reads as the parent's result.
                         child_references.get(merged_child, reference),
                     )
                 )
