@@ -81,7 +81,7 @@ listed here is in `.env.example`.
 | `CONTENT_HOLDER_TTL_SEC` | `300` | Holder report lifetime (seconds) |
 | `CONTENT_CACHE_TTL_SEC` | `0` | How long a worker keeps an unused cached copy (seconds, 0 = indefinitely) |
 | `CONTENT_CACHE_MAX_BYTES` | `0` | Disk budget for a worker's cached copies (0 = unbounded) |
-| `CONTENT_TRANSFER_TIMEOUT_SEC` | `120` | Longest a content transfer may go without progress (seconds) |
+| `CONTENT_TRANSFER_TIMEOUT_SEC` | `60` | Longest a content transfer may go without progress (seconds) |
 | `RESIDENT_CAPACITY_ENABLED` | `false` | Serve resident model bindings via admission |
 | `RESIDENT_INFERENCE_SUBSTRATE` | `serve` | Resident replica substrate (`serve` or `dev_model`) |
 | `RESIDENT_ADMISSION_SLOTS` | `8` | Conservative safe admission slots per replica |

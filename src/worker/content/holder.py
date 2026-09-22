@@ -44,7 +44,7 @@ _GRANT_ARRIVAL_WAIT_SEC = 2.0
 # blocked forever, holding its task, the object's bytes, and the digest against
 # eviction. A serve that makes no progress for this long is given up, so a peer that
 # goes quiet costs one transfer, while one that keeps reading runs as long as it needs.
-_STALL_TIMEOUT_SEC = 120.0
+_STALL_TIMEOUT_SEC = 60.0
 
 
 class ContentHolder:

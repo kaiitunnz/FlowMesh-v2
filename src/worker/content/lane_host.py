@@ -42,7 +42,7 @@ class ContentLaneHost:
         request_grant: RequestGrant,
         worker_id: str,
         generation: int,
-        transfer_timeout_sec: float = 120.0,
+        transfer_timeout_sec: float = 60.0,
         announce: AnnounceHolding | None = None,
         holder_report_ttl_sec: float = 300.0,
         logger: logging.Logger | None = None,

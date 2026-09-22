@@ -238,7 +238,7 @@ class WorkerConfig:
             content_holder_ttl_sec=parse_float_env("CONTENT_HOLDER_TTL_SEC", 300.0),
             object_store=ObjectStoreConfig.from_env(results_dir),
             content_transfer_timeout_sec=parse_float_env(
-                "CONTENT_TRANSFER_TIMEOUT_SEC", 120.0
+                "CONTENT_TRANSFER_TIMEOUT_SEC", 60.0
             ),
             results_mount_source=results_mount_source,
             hb_interval_sec=hb_interval,

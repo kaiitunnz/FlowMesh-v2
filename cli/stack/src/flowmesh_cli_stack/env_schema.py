@@ -768,7 +768,7 @@ STACK_ENV_SCHEMA = EnvSchema(
                 ),
                 EnvVar(
                     "CONTENT_TRANSFER_TIMEOUT_SEC",
-                    "120",
+                    "60",
                     description=(
                         "Longest a content transfer may go without progress (seconds)."
                     ),
