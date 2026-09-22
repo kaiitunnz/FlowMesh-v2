@@ -79,6 +79,8 @@ class Executor(ABC):
     """Human-readable identifier for logging/telemetry"""
     supported_task_types: ClassVar[frozenset[TaskType]] = frozenset()
     """Types of tasks this executor can service"""
+    batches_merged_children: ClassVar[bool] = False
+    """Whether a run returns a result of its own for each merged child"""
 
     def __init__(
         self,

@@ -59,6 +59,7 @@ from shared.sandbox import (
 from shared.schemas.command import InterruptMessage, MediatedOpMessage
 from shared.schemas.result import ResultEnvelope
 from shared.tasks import TaskEnvelopeTemplate
+from shared.tasks.executor_key import resolve_executor_key
 from shared.tasks.specs import (
     InferenceEmbodimentKind,
     InferenceSpecStrict,
@@ -319,10 +320,12 @@ def _compute_merge_key(task: TaskEnvelopeTemplate) -> str | None:
     task_type = str(task.spec.taskType or "").strip().lower()
     if task_type not in {"inference", "rag", "diffusion"}:
         return None
+    if (executor := resolve_executor_key(task.spec)) is None:
+        return None
     try:
         spec = task.spec.model_dump(mode="python", exclude_none=True)
         sanitized = _sanitize_merge_spec(spec)
-        return json.dumps(sanitized, ensure_ascii=False, sort_keys=True)
+        return f"{executor}:{json.dumps(sanitized, ensure_ascii=False, sort_keys=True)}"
     except Exception:
         return None
 
@@ -3266,20 +3269,31 @@ class TaskRuntime:
         return [(task_id, reason) for task_id in failed]
 
     def plan_merge(
-        self, task_id: str, max_batch_size: int, assigned_worker: str
+        self, task_id: str, max_batch_size: int, worker: Worker
     ) -> list[str]:
+        """Merge ready siblings into a task's dispatch to ``worker``.
+
+        A task merges only onto a worker whose executor for it returns a result of its
+        own for each merged child.
+        """
         if max_batch_size <= 1:
             return []
         with self._cv:
-            return self._plan_merge_locked(task_id, max_batch_size, assigned_worker)
+            return self._plan_merge_locked(task_id, max_batch_size, worker)
 
     def _plan_merge_locked(
-        self, task_id: str, max_batch_size: int, assigned_worker: str
+        self, task_id: str, max_batch_size: int, worker: Worker
     ) -> list[str]:
+        assigned_worker = worker.id
         record = self._tasks.get(task_id)
         if not record or record.status != TaskStatus.PENDING:
             return []
         if record.merge_key is None:
+            return []
+        if (
+            resolve_executor_key(record.task.spec)
+            not in worker.capabilities.merge_batching_executors
+        ):
             return []
         if self._merge_children_map.get(task_id):
             return []

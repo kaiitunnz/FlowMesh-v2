@@ -8,6 +8,7 @@ from shared._version import FLOWMESH_RELEASE_VERSION
 from shared.network.mtls import MutualTlsMaterial, MutualTlsMaterialError
 from shared.outcome import FinalizationIndexClient
 from shared.schemas.worker import WorkerCapabilities
+from shared.tasks.executor_key import ExecutorKey
 from shared.tasks.task_type import TaskType
 from shared.tasks.worker_message import WorkerHardware
 from shared.telemetry.config import TelemetryLevel
@@ -39,18 +40,18 @@ from .supervisor_client import SupervisorClient
 from .utils.logging import get_logger
 
 _EXECUTORS_TO_WRAP = {
-    "default",
-    "vllm",
-    "vllm_lora",
-    "vllm_embedding",
-    "sft",
-    "lora_sft",
-    "image_classification_training",
-    "ppo",
-    "dpo",
-    "data_profiling",
-    "data_retrieval",
-    "diffusers",
+    ExecutorKey.DEFAULT,
+    ExecutorKey.VLLM,
+    ExecutorKey.VLLM_LORA,
+    ExecutorKey.VLLM_EMBEDDING,
+    ExecutorKey.SFT,
+    ExecutorKey.LORA_SFT,
+    ExecutorKey.IMAGE_CLASSIFICATION_TRAINING,
+    ExecutorKey.PPO,
+    ExecutorKey.DPO,
+    ExecutorKey.DATA_PROFILING,
+    ExecutorKey.DATA_RETRIEVAL,
+    ExecutorKey.DIFFUSERS,
 }
 
 
@@ -106,7 +107,7 @@ def initialize_executors(
 
     configured_wrapped = _EXECUTORS_TO_WRAP if enable_mp_executors else set()
 
-    def init_executor(key: str, *, gpu_required: bool = False):
+    def init_executor(key: ExecutorKey, *, gpu_required: bool = False):
         cls = registry.get(key)
         if cls is None:
             reason = import_errors.get(
@@ -132,40 +133,40 @@ def initialize_executors(
             return None
 
     executors: dict[str, Executor] = {}
-    default_executor = init_executor("default")
+    default_executor = init_executor(ExecutorKey.DEFAULT)
     if default_executor:
-        executors["default"] = default_executor
+        executors[ExecutorKey.DEFAULT] = default_executor
 
     for key in [
-        "echo",
-        "rag",
-        "agent_episode",
-        "service_leaf",
-        "dev_model",
-        "sft",
-        "lora_sft",
-        "image_classification_training",
-        "data_profiling",
-        "data_retrieval",
-        "diffusers",
-        "api",
-        "ssh",
+        ExecutorKey.ECHO,
+        ExecutorKey.RAG,
+        ExecutorKey.AGENT_EPISODE,
+        ExecutorKey.SERVICE_LEAF,
+        ExecutorKey.DEV_MODEL,
+        ExecutorKey.SFT,
+        ExecutorKey.LORA_SFT,
+        ExecutorKey.IMAGE_CLASSIFICATION_TRAINING,
+        ExecutorKey.DATA_PROFILING,
+        ExecutorKey.DATA_RETRIEVAL,
+        ExecutorKey.DIFFUSERS,
+        ExecutorKey.API,
+        ExecutorKey.SSH,
     ]:
         inst = init_executor(key)
         if inst:
             executors[key] = inst
 
     for key in [
-        "vllm",
-        "vllm_lora",
-        "vllm_embedding",
-        "vllm_serve",
-        "ppo",
-        "dpo",
-        "omni_text2image",
-        "omni_text2speech",
-        "omni_text2audio",
-        "omni_text2general",
+        ExecutorKey.VLLM,
+        ExecutorKey.VLLM_LORA,
+        ExecutorKey.VLLM_EMBEDDING,
+        ExecutorKey.VLLM_SERVE,
+        ExecutorKey.PPO,
+        ExecutorKey.DPO,
+        ExecutorKey.OMNI_TEXT2IMAGE,
+        ExecutorKey.OMNI_TEXT2SPEECH,
+        ExecutorKey.OMNI_TEXT2AUDIO,
+        ExecutorKey.OMNI_TEXT2GENERAL,
     ]:
         inst = init_executor(key, gpu_required=True)
         if inst:
@@ -177,7 +178,9 @@ def initialize_executors(
         )
 
     if not default_executor:
-        default_executor = executors.get("echo") or executors.get("api")
+        default_executor = executors.get(ExecutorKey.ECHO) or executors.get(
+            ExecutorKey.API
+        )
         if default_executor is None:
             raise SystemExit(
                 "No suitable default executor available. "
@@ -197,11 +200,16 @@ def build_capabilities(
     resident_listener_port: int = 0,
 ) -> WorkerCapabilities:
     registry = registry or EXECUTOR_REGISTRY
-    supported_task_types = frozenset[TaskType]().union(
-        *(cls.supported_task_types for key in executors if (cls := registry.get(key)))
-    )
+    classes = {key: cls for key in executors if (cls := registry.get(key))}
     return WorkerCapabilities(
-        supported_task_types=supported_task_types,
+        supported_task_types=frozenset[TaskType]().union(
+            *(cls.supported_task_types for cls in classes.values())
+        ),
+        merge_batching_executors=frozenset(
+            ExecutorKey(key)
+            for key, cls in classes.items()
+            if cls.batches_merged_children
+        ),
         resident_listener_port=resident_listener_port,
     )
 

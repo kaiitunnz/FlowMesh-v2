@@ -22,12 +22,8 @@ from shared.inference import (
 from shared.network.mtls import MutualTlsMaterial
 from shared.outcome import FabricContentStore
 from shared.schemas.result import RESULT_MEDIA_TYPE, BaseExecutorResult
-from shared.tasks.specs import (
-    EmbeddingSpecStrict,
-    InferenceBackend,
-    InferenceSpecStrict,
-    TaskSpecStrictBase,
-)
+from shared.tasks.executor_key import ExecutorKey, resolve_executor_key
+from shared.tasks.specs import TaskSpecStrictBase
 from shared.tasks.worker_message import HardwareUsage, WorkerHardware, WorkerTaskMessage
 from shared.telemetry.config import (
     DISABLED_TELEMETRY_CONFIG,
@@ -128,7 +124,7 @@ class Runner:
 
         # Track a single active executor instance for reuse and its metadata
         self._active_executor: Executor | None = None
-        self._active_executor_key: str | None = None
+        self._active_executor_key: ExecutorKey | None = None
         self._active_executor_last_used_at: float | None = None
         # Lock to protect concurrent access to active executor state
         self._active_executor_lock = threading.Lock()
@@ -572,18 +568,6 @@ class Runner:
                 f"task {task_id} could not store its result: {exc}", retryable=True
             ) from exc
 
-    def _select_inference_executor_key(self, spec: InferenceSpecStrict) -> str:
-        if spec.backend() is InferenceBackend.TRANSFORMERS:
-            return "default"
-        if (model_cfg := spec.model) and model_cfg.adapters:
-            return "vllm_lora"
-        return "vllm"
-
-    def _select_embedding_executor_key(self, spec: EmbeddingSpecStrict) -> str:
-        if (model_cfg := spec.model) and model_cfg.vllm is not None:
-            return "vllm_embedding"
-        return "default"
-
     def _maybe_expire_active_executor(self) -> None:
         """Expire the active executor if it has been idle past the configured
         timeout.
@@ -819,17 +803,7 @@ class Runner:
                         # A resident service-backed leaf runs the service-episode path
                         # (capture the model request, yield a resident boundary, resume
                         # on the settled completion) rather than loading a local model.
-                        desired_key = "service_leaf"
-                    elif task_type == "inference":
-                        assert isinstance(spec, InferenceSpecStrict)
-                        desired_key = self._select_inference_executor_key(spec)
-                    elif task_type == "diffusion":
-                        desired_key = "diffusers"
-                    elif task_type == "embedding":
-                        assert isinstance(spec, EmbeddingSpecStrict)
-                        desired_key = self._select_embedding_executor_key(spec)
-                    elif task_type == "serve":
-                        desired_key = "vllm_serve"
+                        desired_key = ExecutorKey.SERVICE_LEAF
                     elif task_type == "agent":
                         if msg.agent_episode is None:
                             raise ExecutionError(
@@ -840,9 +814,9 @@ class Runner:
                         # A held backend runs its model turns through the worker-local
                         # facade; build it before the executor binds an adapter.
                         self._ensure_responses_facade()
-                        desired_key = "agent_episode"
+                        desired_key = ExecutorKey.AGENT_EPISODE
                     else:
-                        desired_key = "default" if task_type is None else task_type
+                        desired_key = resolve_executor_key(spec) or ExecutorKey.DEFAULT
                     # Acquire lock before accessing/modifying active executor
                     with self._active_executor_lock:
                         if (
@@ -861,8 +835,8 @@ class Runner:
 
                         if not self._active_executor:
                             if (
-                                desired_key == "service_leaf"
-                                and "service_leaf" not in self.executors
+                                desired_key == ExecutorKey.SERVICE_LEAF
+                                and ExecutorKey.SERVICE_LEAF not in self.executors
                             ):
                                 # A resident leaf must run the service-episode path;
                                 # never fall back to a local model executor, which would

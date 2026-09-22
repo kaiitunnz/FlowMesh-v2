@@ -40,6 +40,7 @@ class VLLMEmbeddingExecutor(VLLMExecutor):
 
     name = "vllm_embedding"
     supported_task_types = frozenset({TaskType.EMBEDDING})
+    batches_merged_children = False
 
     _EMBEDDINGS_ARTIFACT = "embeddings.safetensors"
 

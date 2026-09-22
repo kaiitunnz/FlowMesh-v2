@@ -601,7 +601,7 @@ class Dispatcher:
             and not preparing
         ):
             merged_children = self._runtime.plan_merge(
-                task_id, self._task_merge_max_batch_size, worker.id
+                task_id, self._task_merge_max_batch_size, worker
             )
             if merged_children:
                 self._logger.debug(

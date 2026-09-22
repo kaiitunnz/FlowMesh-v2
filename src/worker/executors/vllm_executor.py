@@ -134,6 +134,7 @@ class VLLMExecutor(InferenceMixin, Executor):
 
     name = "vllm"
     supported_task_types = frozenset({TaskType.INFERENCE})
+    batches_merged_children = True
 
     summarization_template = """Summarize the following document concisely in 2-3 \
 sentences. Focus on the main topic and key information.

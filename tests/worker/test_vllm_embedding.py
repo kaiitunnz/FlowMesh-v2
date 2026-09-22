@@ -27,7 +27,6 @@ from shared.tasks.task_type import TaskType
 from tests.worker.factories import DEFAULT_WORKER_CONFIG, make_worker_task_message
 from worker.executors.base_executor import ExecutionError
 from worker.executors.vllm_embedding_executor import VLLMEmbeddingExecutor
-from worker.runner import Runner
 
 
 class _FakeEmbeddingLLM:
@@ -215,19 +214,3 @@ def test_embedding_rejects_inconsistent_dimensions(tmp_path: Path) -> None:
 
 def test_embedding_executor_advertises_embedding_task() -> None:
     assert TaskType.EMBEDDING in VLLMEmbeddingExecutor.supported_task_types
-
-
-def test_embedding_executor_routing_prefers_vllm_when_configured() -> None:
-    runner = cast(Runner, object.__new__(Runner))
-
-    vllm_spec = EmbeddingSpecStrict(
-        taskType=TaskType.EMBEDDING,
-        model=ModelConfig(source=ModelSource(identifier="org/embed"), vllm={}),
-    )
-    transformers_spec = EmbeddingSpecStrict(
-        taskType=TaskType.EMBEDDING,
-        model=ModelConfig(source=ModelSource(identifier="org/embed")),
-    )
-
-    assert runner._select_embedding_executor_key(vllm_spec) == "vllm_embedding"
-    assert runner._select_embedding_executor_key(transformers_spec) == "default"

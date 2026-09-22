@@ -8,6 +8,8 @@ import pytest
 
 import worker.executors as executors_pkg
 from shared.schemas.result import BaseExecutorResult
+from shared.schemas.worker import WorkerCapabilities
+from shared.tasks.executor_key import ExecutorKey
 from shared.tasks.task_type import TaskType
 from tests.worker.factories import make_worker_config
 from worker.executors import EXECUTOR_MODULES, EXECUTOR_REGISTRY, IMPORT_ERRORS
@@ -152,3 +154,18 @@ class TestBuildCapabilities:
 
     def test_empty_is_safe(self) -> None:
         assert build_capabilities({}, {}).supported_task_types == frozenset()
+
+    def test_advertises_the_executors_that_batch_merged_children(self) -> None:
+        caps = build_capabilities(
+            self._executors("vllm", "vllm_lora", "vllm_embedding", "default")
+        )
+        assert caps.merge_batching_executors == {
+            ExecutorKey.VLLM,
+            ExecutorKey.VLLM_LORA,
+        }
+
+    def test_a_worker_advertising_nothing_batches_nothing(self) -> None:
+        caps = WorkerCapabilities.model_validate(
+            {"supported_task_types": [TaskType.INFERENCE]}
+        )
+        assert caps.merge_batching_executors == frozenset()
