@@ -289,3 +289,19 @@ def test_a_copy_the_cache_cannot_keep_is_never_announced(tmp_path) -> None:
     assert registry.store_for("tsk-1", "tenant-a").hydrate(reference) == (
         b"larger than the budget"
     )
+
+
+def test_a_renewal_request_that_cannot_be_sent_fails_closed(tmp_path) -> None:
+    def unreachable(task_id: str) -> None:
+        raise RuntimeError("Supervisor event stream not ready")
+
+    cfg = ObjectStoreConfig(
+        backend=BACKEND_FILESYSTEM, filesystem_root=tmp_path / "shared"
+    )
+    registry = ContentAccessRegistry(
+        cfg, request_access=unreachable, arrival_wait_sec=0.1, renewal_wait_sec=5.0
+    )
+    started = time.monotonic()
+    with pytest.raises(ContentAccessDenied):
+        registry.store_for("tsk-1", "tenant-a")
+    assert time.monotonic() - started < 1.0

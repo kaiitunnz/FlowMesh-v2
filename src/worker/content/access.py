@@ -87,9 +87,17 @@ class ContentAccessRegistry:
             wait = 0.0 if key in self._granted else self._arrival_wait_sec
             access = self._await_live(key, wait)
         if access is None and self._request_access is not None:
-            self._request_access(task_id)
-            with self._arrived:
-                access = self._await_live(key, self._renewal_wait_sec)
+            try:
+                self._request_access(task_id)
+            except Exception:
+                self._logger.warning(
+                    "could not ask to renew content store access for %s",
+                    task_id,
+                    exc_info=True,
+                )
+            else:
+                with self._arrived:
+                    access = self._await_live(key, self._renewal_wait_sec)
         if access is None:
             raise ContentAccessDenied(
                 f"task {task_id} holds no live content store access in scope {scope}"
