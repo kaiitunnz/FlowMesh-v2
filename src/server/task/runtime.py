@@ -326,7 +326,12 @@ _OP_PERMIT_SLACK_SEC = 60.0
 _MODEL_PERMIT_RESULT_CHAR_CAP = 1_000_000
 
 
-def _compute_merge_key(task: TaskEnvelopeTemplate) -> str | None:
+def _compute_merge_key(task: TaskEnvelopeTemplate, scope: str) -> str | None:
+    """The key siblings merge under, or None for a task that never merges.
+
+    Only tasks in one authorization ``scope`` share a key, since a merged dispatch
+    stores every result under its parent's scope.
+    """
     task_type = str(task.spec.taskType or "").strip().lower()
     if task_type not in {"inference", "rag", "diffusion"}:
         return None
@@ -335,7 +340,8 @@ def _compute_merge_key(task: TaskEnvelopeTemplate) -> str | None:
     try:
         spec = task.spec.model_dump(mode="python", exclude_none=True)
         sanitized = _sanitize_merge_spec(spec)
-        return f"{executor}:{json.dumps(sanitized, ensure_ascii=False, sort_keys=True)}"
+        keyed = {"scope": scope, "spec": sanitized}
+        return f"{executor}:{json.dumps(keyed, ensure_ascii=False, sort_keys=True)}"
     except Exception:
         return None
 
@@ -617,7 +623,7 @@ class TaskRuntime:
                 task_records.append(record)
                 record.last_queue_ts = record.submitted_ts
                 if v2_engine is None:
-                    merge_key = _compute_merge_key(task)
+                    merge_key = _compute_merge_key(task, org_id)
                     record.merge_key = merge_key
                     selected_worker_hint = (
                         record.selected_worker[0]
@@ -3422,11 +3428,19 @@ class TaskRuntime:
     def _partition_merged_children_locked(
         self, child_ids: list[str], child_references: dict[str, ContentReference]
     ) -> tuple[list[str], list[str]]:
-        """Split merged children into those with a result of their own and the rest."""
-        settled = [child_id for child_id in child_ids if child_id in child_references]
-        unsettled = [
-            child_id for child_id in child_ids if child_id not in child_references
-        ]
+        """Split merged children into those with a result of their own and the rest.
+
+        A child's result counts as its own only in the scope control gave the child.
+        """
+        settled: list[str] = []
+        unsettled: list[str] = []
+        for child_id in child_ids:
+            record = self._tasks.get(child_id)
+            reference = child_references.get(child_id)
+            if record is not None and self._accepted_reference(record, reference):
+                settled.append(child_id)
+            else:
+                unsettled.append(child_id)
         return settled, unsettled
 
     def _settle_workflows_locked(self, record: TaskRecord) -> list[str]:

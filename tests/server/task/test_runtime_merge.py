@@ -47,21 +47,25 @@ class TestComputeMergeKey:
             model={"source": {"identifier": "llama"}},
             inference={"temperature": 0.7},
         )
-        k1 = _compute_merge_key(t)
-        k2 = _compute_merge_key(t)
+        k1 = _compute_merge_key(t, "org")
+        k2 = _compute_merge_key(t, "org")
         assert k1 is not None
         assert k1 == k2
 
     def test_different_specs_different_keys(self) -> None:
         t1 = self._make_task("inference", model={"source": {"identifier": "llama"}})
         t2 = self._make_task("inference", model={"source": {"identifier": "gpt-4"}})
-        k1 = _compute_merge_key(t1)
-        k2 = _compute_merge_key(t2)
+        k1 = _compute_merge_key(t1, "org")
+        k2 = _compute_merge_key(t2, "org")
         assert k1 != k2
+
+    def test_different_scopes_different_keys(self) -> None:
+        t = self._make_task("inference", model={"source": {"identifier": "llama"}})
+        assert _compute_merge_key(t, "org-x") != _compute_merge_key(t, "org-y")
 
     def test_non_mergeable_type_returns_none(self) -> None:
         t = self._make_task("echo")
-        assert _compute_merge_key(t) is None
+        assert _compute_merge_key(t, "org") is None
 
     def test_ignores_data_field(self) -> None:
         """Two tasks with same model but different prompts should merge."""
@@ -75,7 +79,7 @@ class TestComputeMergeKey:
             model={"source": {"identifier": "llama"}},
             data={"messages": [{"role": "user", "content": "goodbye"}]},
         )
-        k1 = _compute_merge_key(t1)
-        k2 = _compute_merge_key(t2)
+        k1 = _compute_merge_key(t1, "org")
+        k2 = _compute_merge_key(t2, "org")
         assert k1 is not None
         assert k1 == k2

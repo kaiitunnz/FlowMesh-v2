@@ -135,9 +135,11 @@ def _worker(*batching: ExecutorKey) -> Any:
 _VLLM_WORKER = _worker(ExecutorKey.VLLM)
 
 
-async def _register(runtime: TaskRuntime, payload: str) -> tuple[str, dict[str, str]]:
+async def _register(
+    runtime: TaskRuntime, payload: str, org: str = "org"
+) -> tuple[str, dict[str, str]]:
     workflow_id, results = await runtime.register(
-        "owner", "org", payload, format="native"
+        "owner", org, payload, format="native"
     )
     return workflow_id, {str(r.graph_node_name): r.task_id for r in results}
 
@@ -275,6 +277,35 @@ async def test_a_template_that_leaves_its_executor_undecided_never_merges() -> N
     _, ids = await _register(runtime, _siblings(enforce_cpu="${cpu}"))
 
     assert all(runtime._tasks[task].merge_key is None for task in ids.values())
+
+
+@pytest.mark.anyio
+async def test_tasks_of_different_orgs_never_merge() -> None:
+    runtime = _runtime(_Registry())
+    _, x = await _register(runtime, _siblings(names=["a"]), org="org-x")
+    _, y = await _register(runtime, _siblings(names=["b"]), org="org-y")
+    parent = _next(runtime)
+    assert parent == x["a"]
+
+    assert runtime.plan_merge(parent, 8, _VLLM_WORKER) == []
+    assert runtime._tasks[y["b"]].status == TaskStatus.PENDING
+
+
+@pytest.mark.anyio
+async def test_a_child_result_outside_its_scope_runs_the_child_again() -> None:
+    registry = _Registry()
+    runtime = _runtime(registry)
+    ids = await _dispatch_merged(runtime)
+    a, b, c = ids["a"], ids["b"], ids["c"]
+    payload = _merged_success(runtime, a, b)
+    payload["child_result_references"][c] = store_result(
+        runtime._results, c, {"value": c}, "another-org"
+    ).model_dump(mode="json")
+
+    settled, _ = runtime.mark_succeeded(a, "wkr-1", payload, _TS)
+
+    assert settled == [b]
+    _assert_returned(runtime, registry, c)
 
 
 @pytest.mark.anyio
