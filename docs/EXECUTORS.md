@@ -32,8 +32,8 @@ Every executor's `run()` returns an exact per-task-type subclass of
 `BaseExecutorResult`, all defined in the shared `src/shared/schemas/result`
 package. The base class carries two cross-cutting fields:
 
-- `children: dict[str, BaseExecutorResult]` — per-child results when
-  merged tasks share a dispatch.
+- `children: dict[str, BaseExecutorResult]` — each merged child's own result,
+  from an executor that declares `batches_merged_children`.
 - `artifacts: ArtifactContext | None` (wire key `_artifacts`) —
   resolution context for relative artifact refs.
 
