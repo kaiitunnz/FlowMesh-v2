@@ -42,6 +42,7 @@ class ScopedCredentialMinter(Protocol):
     @property
     def policy_version(self) -> str:
         """The backend policy generation this minter cuts against."""
+        ...
 
 
 # How long a scope whose session the store refused is left alone before control asks
