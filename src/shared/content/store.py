@@ -9,6 +9,7 @@ becoming a name for the other.
 
 import hashlib
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from typing import Protocol
 
 from .reference import (
@@ -19,9 +20,22 @@ from .reference import (
 )
 
 
-def content_digest(data: bytes) -> str:
-    """The immutable content identity: a hex sha256 over the bytes."""
+def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+# The digest algorithms this build can name content by and verify it against, each as
+# the hex digest it computes over an object's bytes.
+_DIGESTS: dict[DigestAlgorithm, Callable[[bytes], str]] = {
+    DigestAlgorithm.SHA256: _sha256,
+}
+
+
+def content_digest(
+    data: bytes, algorithm: DigestAlgorithm = DigestAlgorithm.SHA256
+) -> str:
+    """The immutable content identity: a hex digest over the bytes."""
+    return _DIGESTS[algorithm](data)
 
 
 class ContentStoreError(RuntimeError):
@@ -38,7 +52,7 @@ def verify_content(reference: ContentReference, data: bytes) -> bytes:
     Size is checked with the digest because a reader sized its buffers from it, and an
     encoding or algorithm this build cannot verify is refused rather than trusted.
     """
-    if reference.digest_algorithm is not DigestAlgorithm.SHA256:
+    if (digest := _DIGESTS.get(reference.digest_algorithm)) is None:
         raise ContentHydrationError(
             f"unsupported digest algorithm {reference.digest_algorithm}"
         )
@@ -51,7 +65,7 @@ def verify_content(reference: ContentReference, data: bytes) -> bytes:
             f"hydrated content is {len(data)} bytes for a reference naming "
             f"{reference.size_bytes}"
         )
-    if content_digest(data) != reference.content_digest:
+    if digest(data) != reference.content_digest:
         raise ContentHydrationError(
             f"hydrated content digest mismatch for {reference.content_digest}"
         )
