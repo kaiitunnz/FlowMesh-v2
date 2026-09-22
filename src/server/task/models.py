@@ -160,7 +160,11 @@ class TaskRecord(BaseModel):
         default=None, description="Selected worker identifiers."
     )
     merged_children: list[str] | None = Field(
-        default=None, description="Merged child task identifiers."
+        default=None,
+        description=(
+            "Tasks merged into this task's dispatch; once it succeeds, the ones it "
+            "settled with results of their own."
+        ),
     )
     merged_parent_id: str | None = Field(
         default=None, description="Merged parent task identifier."

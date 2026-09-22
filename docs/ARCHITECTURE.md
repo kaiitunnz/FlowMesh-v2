@@ -498,10 +498,11 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   than `WORKER_CACHE_TTL_SEC` are ignored.
 - **Worker capabilities.** Beyond hardware fit, each worker advertises the task
   types it can service and the executors that run merged children; the dispatcher
-  routes a task only to workers that advertise its type. A worker advertises a type only when its executor came
-  up — e.g. SSH requires a reachable Docker daemon, and training or omni types
-  require their (often GPU-only) dependencies — so a worker missing that executor
-  isn't a candidate, rather than being handed a task it would fail.
+  routes a task only to workers that advertise its type. A worker advertises a type
+  only when its executor came up — e.g. SSH requires a reachable Docker daemon, and
+  training or omni types require their (often GPU-only) dependencies — so a worker
+  missing that executor isn't a candidate, rather than being handed a task it would
+  fail.
 - **Cursor pagination.** List endpoints accept `limit` and `before` /
   `after` cursors. The cursor is an opaque base64 of `(timestamp, id)`;
   do not parse client-side.
