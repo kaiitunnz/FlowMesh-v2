@@ -66,8 +66,8 @@ def test_an_undecodable_frame_is_skipped_and_the_cursor_still_advances() -> None
                 {
                     b"k": b"bogus",
                     b"s": b"rly-1",
-                    b"i": b"inv",
-                    b"m": b"idm",
+                    b"c": b"inv",
+                    b"o": b"idm",
                     b"d": b"t2o",
                     b"q": b"2",
                     b"a": b"0",

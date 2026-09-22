@@ -57,14 +57,11 @@ class RelayFrame:
         return self.kind in _CONTROL_KINDS
 
     def to_fields(self) -> dict[bytes, bytes]:
-        # The stream field keys are short and positional rather than named, so renaming
-        # what they carry leaves them alone. The JSON framing below is named and did
-        # change, so a frame written by one version is not readable by the other.
         fields: dict[bytes, bytes] = {
             b"k": self.kind.value.encode(),
             b"s": self.session_id.encode(),
-            b"i": self.correlation_id.encode(),
-            b"m": self.operation_id.encode(),
+            b"c": self.correlation_id.encode(),
+            b"o": self.operation_id.encode(),
             b"d": self.direction.value.encode(),
             b"q": str(self.seq).encode(),
             b"a": str(self.ack).encode(),
@@ -80,8 +77,8 @@ class RelayFrame:
         return RelayFrame(
             kind=RelayFrameKind(fields[b"k"].decode()),
             session_id=fields[b"s"].decode(),
-            correlation_id=fields[b"i"].decode(),
-            operation_id=fields[b"m"].decode(),
+            correlation_id=fields[b"c"].decode(),
+            operation_id=fields[b"o"].decode(),
             direction=RelayDirection(fields[b"d"].decode()),
             seq=int(fields[b"q"]),
             ack=int(fields[b"a"]),
