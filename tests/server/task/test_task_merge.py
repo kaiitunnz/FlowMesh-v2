@@ -2,7 +2,7 @@
 
 import logging
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
@@ -18,6 +18,7 @@ from server.task.runtime import TaskRuntime
 from shared.schemas.event import TaskEvent
 from shared.schemas.worker import WorkerCapabilities
 from shared.tasks.executor_key import ExecutorKey
+from shared.tasks.specs.common import ConditionSpec
 from tests.server.result_store import make_result_reader, result_payload, store_result
 from tests.server.task.test_v2_orchestration import (
     _TS,
@@ -185,6 +186,28 @@ async def _dispatch_merged(
     if dispatch:
         runtime.mark_dispatched(parent, _VLLM_WORKER)
     return ids
+
+
+def _render(
+    runtime: TaskRuntime,
+    parent: str,
+    resolve: Callable[[str, Any, Any], Any],
+    condition_actual: Callable[[Any, Any], Any] | None = None,
+) -> list[str]:
+    """Render a parent's merged children as the dispatcher does before publishing."""
+    dispatcher = cast(
+        Dispatcher,
+        SimpleNamespace(
+            _runtime=runtime,
+            _logger=logging.getLogger("task-merge"),
+            _resolve_stage_references=resolve,
+            _condition_actual=condition_actual,
+        ),
+    )
+    rendered = Dispatcher._render_merged_children(
+        dispatcher, parent, runtime._tasks[parent]
+    )
+    return [child.task_id for child in rendered or []]
 
 
 def _assert_returned(runtime: TaskRuntime, registry: _Registry, task_id: str) -> None:
@@ -487,18 +510,45 @@ async def test_a_child_the_dispatch_cannot_render_leaves_the_merge() -> None:
             raise ValueError("bad child input")
         return task
 
-    dispatcher = cast(
-        Dispatcher,
-        SimpleNamespace(
-            _runtime=runtime,
-            _logger=logging.getLogger("task-merge"),
-            _resolve_stage_references=_resolve,
-        ),
-    )
-    rendered = Dispatcher._render_merged_children(dispatcher, a, runtime._tasks[a])
-
-    assert [child.task_id for child in rendered or []] == [b]
+    assert _render(runtime, a, _resolve) == [b]
     assert runtime._tasks[a].merged_children == [b]
+    _assert_returned(runtime, registry, c)
+
+
+@pytest.mark.anyio
+async def test_a_child_whose_condition_is_not_met_leaves_the_merge() -> None:
+    registry = _Registry()
+    runtime = _runtime(registry)
+    ids = await _dispatch_merged(runtime, dispatch=False)
+    a, b, c = ids["a"], ids["b"], ids["c"]
+    condition = ConditionSpec(node="gate", field="value", equals="go")
+
+    def _resolve(task_id: str, task: Any, record: Any) -> Any:
+        spec = task.spec.model_copy(update={"condition": condition})
+        return task.model_copy(update={"spec": spec})
+
+    def _actual(record: Any, _condition: Any) -> str:
+        return "stop" if record.task_id == c else "go"
+
+    assert _render(runtime, a, _resolve, _actual) == [b]
+    _assert_returned(runtime, registry, c)
+
+
+@pytest.mark.anyio
+async def test_a_child_whose_spec_cannot_dispatch_leaves_the_merge() -> None:
+    registry = _Registry()
+    runtime = _runtime(registry)
+    ids = await _dispatch_merged(runtime, dispatch=False)
+    a, b, c = ids["a"], ids["b"], ids["c"]
+
+    def _resolve(task_id: str, task: Any, record: Any) -> Any:
+        if task_id != c:
+            return task
+        model = task.spec.model.model_copy(update={"vllm": {"dtype": "auto"}})
+        spec = task.spec.model_copy(update={"model": model, "enforce_cpu": True})
+        return task.model_copy(update={"spec": spec})
+
+    assert _render(runtime, a, _resolve) == [b]
     _assert_returned(runtime, registry, c)
 
 

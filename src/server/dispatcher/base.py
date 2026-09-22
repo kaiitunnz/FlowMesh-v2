@@ -827,9 +827,10 @@ class Dispatcher:
     ) -> list[MergedChildTaskStrict] | None:
         """Render the children merged into a dispatch.
 
-        A child that cannot be rendered leaves the merge rather than failing the
-        dispatch: one that is not ready yet returns to the queue still mergeable, and
-        one whose own input is at fault returns to run alone and settle its own error.
+        A child that cannot run in this dispatch leaves the merge rather than failing
+        it: one that is not ready yet returns to the queue still mergeable, and one
+        whose own input is at fault or whose condition is not met returns to run alone
+        and settle its own outcome.
         """
         rendered: list[MergedChildTaskStrict] = []
         for child_id in list(record.merged_children or []):
@@ -846,6 +847,13 @@ class Dispatcher:
                 resolved = self._resolve_stage_references(
                     child_id, child_record.task, child_record
                 )
+                resolved.spec.validate_dispatchable()
+                if (condition := resolved.spec.condition) is not None and str(
+                    self._condition_actual(child_record, condition)
+                ) != condition.equals:
+                    # The child's own dispatch settles its skip.
+                    self._runtime.release_merged_child(task_id, child_id, unmerge=True)
+                    continue
                 rendered.append(
                     MergedChildTaskStrict(
                         task_id=child_id,
@@ -1372,6 +1380,23 @@ class Dispatcher:
             return None
         return current
 
+    def _condition_actual(self, record: TaskRecord, condition: ConditionSpec) -> Any:
+        """The upstream value a task's condition compares against."""
+        stage_context = self._build_stage_context(record)
+        upstream_record = stage_context.get(condition.node)
+        if upstream_record is None:
+            raise ValueError(
+                f"Condition references unknown node '{condition.node}'; "
+                f"known nodes: {list(stage_context.keys())}"
+            )
+        if upstream_record.status != TaskStatus.DONE:
+            raise StageReferenceNotReady(
+                f"Condition upstream node '{condition.node}' not yet DONE "
+                f"(status={upstream_record.status})"
+            )
+        upstream_result = self._load_stage_result(upstream_record.task_id)
+        return self._dig_result_path(upstream_result.result, condition.field.split("."))
+
     def _evaluate_condition_skip(
         self,
         task_id: str,
@@ -1388,22 +1413,7 @@ class Dispatcher:
             return False
 
         try:
-            stage_context = self._build_stage_context(record)
-            upstream_record = stage_context.get(condition.node)
-            if upstream_record is None:
-                raise ValueError(
-                    f"Condition references unknown node '{condition.node}'; "
-                    f"known nodes: {list(stage_context.keys())}"
-                )
-            if upstream_record.status != TaskStatus.DONE:
-                raise StageReferenceNotReady(
-                    f"Condition upstream node '{condition.node}' not yet DONE "
-                    f"(status={upstream_record.status})"
-                )
-            upstream_result = self._load_stage_result(upstream_record.task_id)
-            actual_value = self._dig_result_path(
-                upstream_result.result, condition.field.split(".")
-            )
+            actual_value = self._condition_actual(record, condition)
             if str(actual_value) == condition.equals:
                 return False  # Condition met — proceed with dispatch
 
