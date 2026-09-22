@@ -461,6 +461,7 @@ if IS_ROOT_NODE:
             NETWORK_PLANE.forget_node if NETWORK_PLANE is not None else None
         ),
         content_authority=CONTENT_AUTHORITY,
+        content_access=CONTENT_ACCESS,
     )
     # The runtime settles terminals the task-event stream never carries, so it tells
     # the monitor's finalizer when a workflow may have ended; the finalizer decides.

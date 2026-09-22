@@ -70,7 +70,7 @@ from .port_forward import PortForwardService
 from .watchdog import WorkerWatchdog
 
 if TYPE_CHECKING:
-    from ..content import ContentHydrationAuthority
+    from ..content import ContentAccessBroker, ContentHydrationAuthority
     from ..serve import GatedServe
 
 # Model-serving task types adopted as standing resident allocations: the GPU vLLM serve
@@ -136,6 +136,7 @@ class EventMonitor:
         on_node_removed: Callable[[str], None] | None = None,
         workflow_span_emitter: WorkflowSpanEmitter | None = None,
         content_authority: "ContentHydrationAuthority | None" = None,
+        content_access: "ContentAccessBroker | None" = None,
     ) -> None:
         self._redis_client = redis_client
         self._on_node_removed = on_node_removed
@@ -154,6 +155,7 @@ class EventMonitor:
         self._log_stream_ttl_sec = max(0, int(log_stream_ttl_sec))
         self._server_base_url = self._validate_server_base_url(server_base_url)
         self._content_authority = content_authority
+        self._content_access = content_access
         self._finalizer = WorkflowFinalizer(
             redis_client=redis_client,
             runtime=runtime,
@@ -814,6 +816,19 @@ class EventMonitor:
                         for scope, digest in event.payload["held"]
                     ],
                 )
+            case "CONTENT_ACCESS_REQUEST" if self._content_access is not None:
+                worker_id = (event.worker_id or "").strip()
+                task_id = str(event.payload["task_id"])
+                if (
+                    scope := self._runtime.renewable_content_scope(task_id, worker_id)
+                ) is None:
+                    self._logger.warning(
+                        "Refusing to renew content store access for %s on %s",
+                        task_id,
+                        worker_id,
+                    )
+                else:
+                    self._content_access.issue(worker_id, task_id, scope)
             case "CONTENT_HYDRATION_REQUEST" if self._content_authority is not None:
                 self._content_authority.authorize(
                     (event.worker_id or "").strip(),

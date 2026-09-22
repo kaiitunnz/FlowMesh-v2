@@ -148,3 +148,17 @@ def test_a_backend_that_cuts_no_session_relays_no_access() -> None:
     registry = _dispatch(_RecordingMinter(fails=True))
     assert _relayed_access(registry) is None
     assert registry.publish_task.called
+
+
+def test_only_a_running_task_on_the_asking_worker_renews_its_access() -> None:
+    runtime = _runtime()
+    _workflow_id, results = asyncio.run(
+        runtime.register("owner", _ORG, _ECHO_WORKFLOW, format="native")
+    )
+    task_id = results[0].task_id
+    runtime.mark_dispatched(task_id, cast(Any, _worker()))
+
+    assert runtime.renewable_content_scope(task_id, "wkr-1") == _ORG
+    assert runtime.renewable_content_scope(task_id, "wkr-other") is None
+    runtime.mark_succeeded(task_id, "wkr-1", {}, "2026-06-01T00:00:00Z")
+    assert runtime.renewable_content_scope(task_id, "wkr-1") is None

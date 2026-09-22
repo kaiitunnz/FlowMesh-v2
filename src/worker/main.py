@@ -268,7 +268,9 @@ def _build_content_plane(
     a deployment that enables it also gets a local copy of what this worker wrote and
     can serve a peer from it, and one that does not goes to the store every time.
     """
-    access = ContentAccessRegistry(cfg.object_store, logger)
+    access = ContentAccessRegistry(
+        cfg.object_store, logger, request_access=client.push_content_access_request
+    )
     lane: ContentLaneHost | None = None
     if cfg.content_hydration_enabled:
         lane = ContentLaneHost(

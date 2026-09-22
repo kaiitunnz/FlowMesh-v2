@@ -660,6 +660,10 @@ class SupervisorClient:
             "CONTENT_HYDRATION_REQUEST", {"reference": reference, "task_id": task_id}
         )
 
+    def push_content_access_request(self, task_id: str) -> None:
+        """Ask control to renew one task's access to the shared content store."""
+        self._push_event("CONTENT_ACCESS_REQUEST", {"task_id": task_id})
+
     def _push_event(self, event_type: str, payload: dict[str, Any]) -> None:
         if self._stub is None:
             raise RuntimeError("Supervisor gRPC client not started")

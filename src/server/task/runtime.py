@@ -2482,6 +2482,23 @@ class TaskRuntime:
             record = self._tasks.get(task_id)
         return record.org_id if record is not None else ""
 
+    def renewable_content_scope(self, task_id: str, worker_id: str) -> str | None:
+        """The scope a task's store access renews in, or None when it may not renew.
+
+        Renewal serves a task still running on the worker asking for it; a task that
+        has settled or moved to another worker is given nothing, so a superseded
+        attempt's late write fails rather than landing under fresh access.
+        """
+        with self._lock:
+            record = self._tasks.get(task_id)
+            if (
+                record is None
+                or record.status in TERMINAL_TASK_STATUSES
+                or record.assigned_worker != worker_id
+            ):
+                return None
+            return record.org_id
+
     def content_binding_authorizes(
         self, task_id: str, worker_id: str, reference: ContentReference
     ) -> bool:

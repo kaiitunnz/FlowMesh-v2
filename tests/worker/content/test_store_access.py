@@ -88,6 +88,46 @@ def test_expired_access_is_refused_and_dropped(tmp_path) -> None:
         registry.store_for("tsk-1", "tenant-a")
 
 
+def test_expired_access_is_renewed_on_request(tmp_path) -> None:
+    requested: list[str] = []
+    cfg = ObjectStoreConfig(
+        backend=BACKEND_FILESYSTEM, filesystem_root=tmp_path / "shared"
+    )
+    registry: ContentAccessRegistry
+
+    def renew(task_id: str) -> None:
+        requested.append(task_id)
+        registry.accept(_access(task_id))
+
+    registry = ContentAccessRegistry(
+        cfg, request_access=renew, arrival_wait_sec=0.1, renewal_wait_sec=1.0
+    )
+    registry.accept(_access("tsk-1", ttl=0.05))
+    time.sleep(0.1)
+
+    store = registry.store_for("tsk-1", "tenant-a")
+    assert requested == ["tsk-1"]
+    assert store.fetch(store.write("tenant-a", b"body")) == b"body"
+
+
+def test_a_renewal_control_refuses_fails_closed(tmp_path) -> None:
+    requested: list[str] = []
+    cfg = ObjectStoreConfig(
+        backend=BACKEND_FILESYSTEM, filesystem_root=tmp_path / "shared"
+    )
+    registry = ContentAccessRegistry(
+        cfg, request_access=requested.append, arrival_wait_sec=0.1, renewal_wait_sec=0.1
+    )
+    registry.accept(_access("tsk-1", ttl=0.05))
+    time.sleep(0.1)
+
+    started = time.monotonic()
+    with pytest.raises(ContentAccessDenied):
+        registry.store_for("tsk-1", "tenant-a")
+    assert requested == ["tsk-1"]
+    assert time.monotonic() - started < 1.0
+
+
 def test_a_read_waits_for_access_control_is_still_relaying(tmp_path) -> None:
     """A task reaches its first write before its access lands, and still runs.
 
