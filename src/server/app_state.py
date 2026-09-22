@@ -12,7 +12,6 @@ from .registries import NodeRegistry, WorkerRegistry, WorkflowRegistry
 from .resident.service import ResidentCapacityControl
 from .serve import GatedServe, ServeBindingStore
 from .services.metrics import MetricsRecorder
-from .services.monitoring import EventMonitor
 from .services.port_forward import PortForwardService
 from .services.ssh_audit import SshAuditService
 from .services.watchdog import WorkerWatchdog
@@ -51,10 +50,6 @@ def get_metrics(conn: HTTPConnection) -> MetricsRecorder:
 
 def get_watchdog(conn: HTTPConnection) -> WorkerWatchdog:
     return conn.app.state.watchdog
-
-
-def get_event_monitor(conn: HTTPConnection) -> EventMonitor:
-    return conn.app.state.event_monitor
 
 
 def get_results_dir(conn: HTTPConnection) -> Path:

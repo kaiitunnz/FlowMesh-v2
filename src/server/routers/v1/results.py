@@ -23,7 +23,6 @@ from shared.schemas.result import RESULT_MEDIA_TYPE, AnyExecutorResult, result_f
 from shared.utils.manifest import ARTIFACTS_DIR, LOGS_DIR, RESULTS_NAME, sync_manifest
 
 from ...app_state import (
-    get_event_monitor,
     get_logger,
     get_results_dir,
     get_runtime,
@@ -35,7 +34,6 @@ from ...auth.security import (
 )
 from ...hooks import ResourceAction, ResourceKind
 from ...schemas.common import PathResponse
-from ...services.monitoring import EventMonitor
 from ...task.models import TERMINAL_TASK_STATUSES
 from ...task.results import ResultUnavailable, ResultUnreadable
 from ...task.runtime import TaskRuntime
@@ -105,7 +103,6 @@ async def upload_result_file(
     task_id: str,
     file: UploadFile = File(...),
     runtime: TaskRuntime = Depends(get_runtime),
-    event_monitor: EventMonitor = Depends(get_event_monitor),
     principal: PrincipalContext = Depends(authenticate_connection),
     results_dir: Path = Depends(get_results_dir),
     logger: logging.Logger = Depends(get_logger),
@@ -139,8 +136,6 @@ async def upload_result_file(
     if record:
         expected_artifacts = record.task.spec.get_artifacts()
     sync_manifest(base_dir, task_id, expected_artifacts)
-    if pending_children := event_monitor.pop_pending_clones(task_id):
-        event_monitor.mirror_task_results(task_id, pending_children)
     return PathResponse(ok=True, path=str(target_path))
 
 

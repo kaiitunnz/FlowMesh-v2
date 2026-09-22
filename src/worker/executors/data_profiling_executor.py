@@ -29,21 +29,7 @@ class DataProfilingExecutor(DataMixin, Executor):
 
     def run(self, task: ExecutorTask, out_dir: Path) -> DataProfilingResult:
         spec = self.require_spec(task, DataProfilingSpecStrict)
-        task_id = task.task_id
-        merge_children = task.merged_children or []
-
-        result = self._run_single_profile(spec, task_id)
-
-        for child in merge_children:
-            child_id = child.task_id
-            child_spec = child.spec
-            if not isinstance(child_spec, DataProfilingSpecStrict):
-                raise ExecutionError(
-                    "Merged child spec must be data_profiling for merged profiling"
-                )
-            result.children[child_id] = self._run_single_profile(child_spec, child_id)
-
-        return result
+        return self._run_single_profile(spec, task.task_id)
 
     def _run_single_profile(
         self, spec: DataProfilingSpecStrict, task_id: str

@@ -444,7 +444,6 @@ if IS_ROOT_NODE:
         ssh_proxy_enabled=config.port_forward.ssh_proxy_enabled,
         gated_serve=GATED_SERVE,
         port_forward=PORT_FORWARD_SERVICE,
-        results_dir=RESULTS_DIR,
         log_stream_ttl_sec=config.log_stream.ttl_sec,
         server_base_url=config.identity.base_url,
         workflow_span_emitter=build_workflow_span_emitter(
@@ -760,7 +759,6 @@ app.state.dispatcher = DISPATCHER
 app.state.workflow_registry = WORKFLOW_REGISTRY
 app.state.worker_registry = WORKER_REGISTRY
 app.state.watchdog = WATCHDOG
-app.state.event_monitor = EVENT_MONITOR
 app.state.port_forward = PORT_FORWARD_SERVICE
 app.state.ssh_audit = SSH_AUDIT_SERVICE
 app.state.ssh_proxy_enabled = config.port_forward.ssh_proxy_enabled and IS_ROOT_NODE
