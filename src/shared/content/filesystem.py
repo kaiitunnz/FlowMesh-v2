@@ -46,10 +46,7 @@ class FilesystemObjectBacking:
         )
 
     def scope_path(self, scope: str | None, *segments: str) -> Path:
-        path = self._root / safe_segment(scope)
-        for segment in segments:
-            path = path / safe_segment(segment)
-        return path
+        return Path(self._root, safe_segment(scope), *map(safe_segment, segments))
 
     def write(
         self, scope: str, data: bytes, *, media_type: str = OCTET_STREAM
