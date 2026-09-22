@@ -53,6 +53,13 @@ class PersistedTask(BaseModel):
         # ``failed_workers`` is excluded from TaskRecord's dump but routes retries, so
         # it must survive a restart.
         data["record"]["failed_workers"] = self.record.failed_workers.copy()
+        # Likewise the result binding and skip detail: internal to the task's result
+        # read, and what that read resolves from after a restart.
+        reference = self.record.result_reference
+        data["record"]["result_reference"] = (
+            reference.model_dump(mode="json") if reference is not None else None
+        )
+        data["record"]["result_skip"] = self.record.result_skip
         return data
 
 

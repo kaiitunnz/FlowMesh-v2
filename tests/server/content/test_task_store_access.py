@@ -7,9 +7,7 @@ dispatcher's doing, so both are asserted where the dispatch happens.
 
 import asyncio
 import logging
-import tempfile
 import time
-from pathlib import Path
 from typing import Any, cast
 from unittest import mock
 
@@ -24,6 +22,7 @@ from shared.content import (
 )
 from shared.tasks.worker_message import WorkerTaskMessage
 from tests.server.dispatcher.helpers import CapturingDispatcher
+from tests.server.result_store import make_result_reader
 from tests.server.task.test_v2_orchestration import FakeRegistry, _NoopSecretVault
 
 _ORG = "org-acme"
@@ -81,7 +80,7 @@ def _runtime() -> TaskRuntime:
         cast(Any, FakeRegistry()),
         cast(Any, mock.Mock()),
         OrchestrationConfig(),
-        Path(tempfile.gettempdir()),
+        make_result_reader(),
         logging.getLogger("content-scope-test"),
         secret_vault=cast(Any, _NoopSecretVault()),
     )
@@ -102,7 +101,6 @@ def _dispatch(minter: _RecordingMinter) -> mock.Mock:
     CapturingDispatcher(
         runtime=runtime,
         worker_registry=registry,
-        results_dir=Path(tempfile.gettempdir()),
         logger=logging.getLogger("content-scope-dispatch"),
         content_access=broker,
     ).dispatch_once(results[0].task_id)
@@ -150,3 +148,17 @@ def test_a_backend_that_cuts_no_session_relays_no_access() -> None:
     registry = _dispatch(_RecordingMinter(fails=True))
     assert _relayed_access(registry) is None
     assert registry.publish_task.called
+
+
+def test_only_a_running_task_on_the_asking_worker_renews_its_access() -> None:
+    runtime = _runtime()
+    _workflow_id, results = asyncio.run(
+        runtime.register("owner", _ORG, _ECHO_WORKFLOW, format="native")
+    )
+    task_id = results[0].task_id
+    runtime.mark_dispatched(task_id, cast(Any, _worker()))
+
+    assert runtime.renewable_content_scope(task_id, "wkr-1") == _ORG
+    assert runtime.renewable_content_scope(task_id, "wkr-other") is None
+    runtime.mark_succeeded(task_id, "wkr-1", {}, "2026-06-01T00:00:00Z")
+    assert runtime.renewable_content_scope(task_id, "wkr-1") is None

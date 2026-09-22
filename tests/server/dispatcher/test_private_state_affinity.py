@@ -2,8 +2,6 @@
 
 import asyncio
 import logging
-import tempfile
-from pathlib import Path
 from typing import Any, cast
 from unittest import mock
 
@@ -12,6 +10,7 @@ from server.registries.worker import Worker
 from server.task.runtime import TaskRuntime
 from shared.private_state import OwnerFence, PrivateStateUnavailableReason
 from tests.server.dispatcher.helpers import CapturingDispatcher, WorkflowRegistryStub
+from tests.server.result_store import make_result_reader
 from tests.server.task.test_v2_orchestration import _NoopSecretVault
 
 _OWNER = OwnerFence(worker_id="wkr-owner", incarnation=7)
@@ -41,7 +40,7 @@ def _dispatcher(
         cast(Any, WorkflowRegistryStub()),
         cast(Any, mock.Mock()),
         OrchestrationConfig(),
-        Path(tempfile.gettempdir()),
+        make_result_reader(),
         logging.getLogger("private-state-affinity-test"),
         secret_vault=cast(Any, _NoopSecretVault()),
     )
@@ -60,7 +59,6 @@ def _dispatcher(
     dispatcher = CapturingDispatcher(
         runtime=runtime,
         worker_registry=registry,
-        results_dir=Path(tempfile.gettempdir()),
         logger=logging.getLogger("private-state-affinity-test"),
         no_worker_grace_sec=0,
     )

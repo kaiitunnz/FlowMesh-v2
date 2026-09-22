@@ -14,23 +14,25 @@ from typing import Any, cast
 import pytest
 
 from server.config import OrchestrationConfig
+from server.orchestration import Advance
 from server.task.runtime import TaskRuntime
 from shared.telemetry.config import TelemetryLevel
+from tests.server.result_store import make_result_reader
 from tests.server.task.test_v2_orchestration import (
     _TS,
     AUTORESEARCH,
     FakeRegistry,
     _NoopSecretVault,
+    _planned,
     _register,
     _worker,
     _WorkerRegistryStub,
-    _write_result,
 )
 from tests.server.telemetry_helpers import recording_control_tracer, recording_tracer
 
 
 def _runtime(
-    registry: FakeRegistry, results_dir: Any, name: str
+    registry: FakeRegistry, reader: Any, name: str
 ) -> tuple[TaskRuntime, Any, Any]:
     control, control_exporter = recording_control_tracer(TelemetryLevel.FULL)
     tracer, span_exporter, config = recording_tracer(TelemetryLevel.FULL)
@@ -38,7 +40,7 @@ def _runtime(
         cast(Any, registry),
         cast(Any, _WorkerRegistryStub()),
         OrchestrationConfig(),
-        results_dir,
+        reader,
         logging.getLogger(name),
         secret_vault=cast(Any, _NoopSecretVault()),
         control=control,
@@ -46,6 +48,24 @@ def _runtime(
         telemetry=config,
     )
     return runtime, control_exporter, span_exporter
+
+
+async def _crashed_before_fan_out(
+    registry: FakeRegistry, reader: Any, monkeypatch: pytest.MonkeyPatch
+) -> str:
+    """A workflow whose planner settled, bound, and crashed before its fan-out."""
+    runtime, _, _ = _runtime(registry, reader, "live")
+    workflow_id, ids = await _register(runtime, AUTORESEARCH)
+    planner = ids["planner"]
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            runtime, "_fan_out_children_locked", lambda *_args, **_kw: Advance()
+        )
+        runtime.mark_dispatched(planner, cast(Any, _worker()))
+        runtime.mark_succeeded(
+            planner, "wkr-1", _planned(runtime, planner, ["h1", "h2", "h3"]), _TS
+        )
+    return workflow_id
 
 
 def _control_span_names(exporter: Any) -> set[str]:
@@ -57,9 +77,9 @@ def _control_span_names(exporter: Any) -> set[str]:
 
 
 @pytest.mark.anyio
-async def test_a_submitted_workflow_records_control_stages(tmp_path: Any) -> None:
+async def test_a_submitted_workflow_records_control_stages() -> None:
     registry = FakeRegistry()
-    runtime, control_exporter, _ = _runtime(registry, tmp_path, "submit")
+    runtime, control_exporter, _ = _runtime(registry, make_result_reader(), "submit")
 
     _, ids = await _register(runtime, AUTORESEARCH)
     runtime.mark_dispatched(ids["planner"], cast(Any, _worker()))
@@ -70,17 +90,15 @@ async def test_a_submitted_workflow_records_control_stages(tmp_path: Any) -> Non
 
 @pytest.mark.anyio
 async def test_a_rehydrated_workflow_still_records_control_stages(
-    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     registry = FakeRegistry()
-    runtime, _, _ = _runtime(registry, tmp_path, "live")
-    workflow_id, ids = await _register(runtime, AUTORESEARCH)
-    planner = ids["planner"]
-    runtime.mark_dispatched(planner, cast(Any, _worker()))
-    runtime.mark_succeeded(planner, "wkr-1", {}, _TS)
-    _write_result(tmp_path, planner, ["h1", "h2", "h3"])
+    reader = make_result_reader()
+    workflow_id = await _crashed_before_fan_out(registry, reader, monkeypatch)
 
-    restored, control_exporter, _ = _runtime(registry, tmp_path, "rehydrate")
+    restored, control_exporter, _ = _runtime(
+        registry, make_result_reader(reader.store), "rehydrate"
+    )
     assert await restored.rehydrate() == 1
     engine = restored.orchestration_engine(workflow_id)
     assert engine is not None
@@ -92,16 +110,16 @@ async def test_a_rehydrated_workflow_still_records_control_stages(
 
 
 @pytest.mark.anyio
-async def test_a_rehydrated_workflow_still_emits_ledger_spans(tmp_path: Any) -> None:
+async def test_a_rehydrated_workflow_still_emits_ledger_spans(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     registry = FakeRegistry()
-    runtime, _, _ = _runtime(registry, tmp_path, "live")
-    workflow_id, ids = await _register(runtime, AUTORESEARCH)
-    planner = ids["planner"]
-    runtime.mark_dispatched(planner, cast(Any, _worker()))
-    runtime.mark_succeeded(planner, "wkr-1", {}, _TS)
-    _write_result(tmp_path, planner, ["h1", "h2", "h3"])
+    reader = make_result_reader()
+    workflow_id = await _crashed_before_fan_out(registry, reader, monkeypatch)
 
-    restored, _, span_exporter = _runtime(registry, tmp_path, "rehydrate")
+    restored, _, span_exporter = _runtime(
+        registry, make_result_reader(reader.store), "rehydrate"
+    )
     assert await restored.rehydrate() == 1
     assert restored.orchestration_engine(workflow_id) is not None
 
@@ -114,19 +132,15 @@ async def test_a_rehydrated_workflow_still_emits_ledger_spans(tmp_path: Any) -> 
 
 @pytest.mark.anyio
 async def test_a_rehydrated_workflow_dispatches_with_a_traceparent(
-    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A rehydrated workflow's dispatches still name their episode, so a worker picked
     up after a restart joins the workflow's trace rather than rooting its own."""
     registry = FakeRegistry()
-    runtime, _, _ = _runtime(registry, tmp_path, "live")
-    workflow_id, ids = await _register(runtime, AUTORESEARCH)
-    planner = ids["planner"]
-    runtime.mark_dispatched(planner, cast(Any, _worker()))
-    runtime.mark_succeeded(planner, "wkr-1", {}, _TS)
-    _write_result(tmp_path, planner, ["h1", "h2", "h3"])
+    reader = make_result_reader()
+    workflow_id = await _crashed_before_fan_out(registry, reader, monkeypatch)
 
-    restored, _, _ = _runtime(registry, tmp_path, "rehydrate")
+    restored, _, _ = _runtime(registry, make_result_reader(reader.store), "rehydrate")
     assert await restored.rehydrate() == 1
     assert restored.orchestration_engine(workflow_id) is not None
 

@@ -88,7 +88,7 @@ class TestMirrorTaskResults:
 
     def test_defers_when_parent_dir_missing(self, tmp_path: Path) -> None:
         """Mirror is queued on ``_pending_result_clones`` if the parent
-        hasn't landed yet — ``ingest_result`` drains the queue."""
+        hasn't landed yet — ``upload_result_file`` drains the queue."""
         monitor = _make_monitor(tmp_path)
 
         monitor.mirror_task_results("tsk-parent", ["tsk-child"])

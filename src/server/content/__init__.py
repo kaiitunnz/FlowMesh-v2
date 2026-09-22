@@ -8,6 +8,7 @@ from .credentials import (
     StsScopedCredentialMinter,
     build_sts_client,
     ensure_bucket,
+    open_deployment_store,
 )
 from .directory import ContentHolderDirectory, ContentHolderRecord
 from .finalizations import FinalizationIndex
@@ -26,5 +27,6 @@ __all__ = [
     "StsScopedCredentialMinter",
     "build_sts_client",
     "ensure_bucket",
+    "open_deployment_store",
     "HydrationDenial",
 ]

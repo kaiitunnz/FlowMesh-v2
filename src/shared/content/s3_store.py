@@ -15,13 +15,19 @@ object, so a re-drive rewrites rather than conflicts.
 
 from typing import Any, Protocol
 
+from botocore.exceptions import ClientError
+
 from .reference import OCTET_STREAM, ContentReference
 from .store import (
     ContentHydrationError,
     ContentStoreError,
+    ContentUnavailable,
     FabricObjectStore,
     reference_for,
 )
+
+# The error codes an S3-compatible store answers with when the object is not there.
+_MISSING_CODES = frozenset({"NoSuchKey", "404", "NotFound"})
 
 
 class S3Client(Protocol):
@@ -65,16 +71,34 @@ class S3ObjectStore(FabricObjectStore):
             response: dict[str, Any] = self._client.get_object(
                 Bucket=self._bucket, Key=self._key(reference)
             )
+            body = response["Body"]
+            try:
+                return bytes(body.read())
+            finally:
+                body.close()
         except Exception as exc:
-            raise ContentHydrationError(
-                f"no content for {reference.content_digest} in scope "
+            if _is_missing(exc):
+                raise ContentHydrationError(
+                    f"no content for {reference.content_digest} in scope "
+                    f"{reference.authorization_scope}: {exc}"
+                ) from exc
+            raise ContentUnavailable(
+                f"could not read {reference.content_digest} in scope "
                 f"{reference.authorization_scope}: {exc}"
             ) from exc
-        body = response["Body"]
-        try:
-            return bytes(body.read())
-        finally:
-            body.close()
+
+
+def _is_missing(exc: Exception) -> bool:
+    """Whether a read failed because the store answered that the object is absent.
+
+    Anything else — a timeout, a dropped connection, a throttle, a server error, a
+    refused credential — leaves the object where it was, so the read may be retried.
+    """
+    if not isinstance(exc, ClientError):
+        return False
+    error = exc.response.get("Error", {})
+    status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+    return error.get("Code") in _MISSING_CODES or status == 404
 
 
 __all__ = ["S3Client", "S3ObjectStore"]

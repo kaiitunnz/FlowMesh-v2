@@ -7,8 +7,6 @@ run can parent on its episode span.
 
 import asyncio
 import logging
-import tempfile
-from pathlib import Path
 from typing import Any, cast
 from unittest import mock
 
@@ -18,6 +16,7 @@ from server.task.runtime import TaskRuntime
 from shared.tasks.worker_message import WorkerTaskMessage
 from shared.telemetry.ids import SpanIdKind, derived_span_id, workflow_to_trace_id_int
 from tests.server.dispatcher.helpers import CapturingDispatcher
+from tests.server.result_store import make_result_reader
 from tests.server.task.test_v2_orchestration import FakeRegistry, _NoopSecretVault
 from tests.server.telemetry_helpers import recording_control_tracer
 
@@ -58,7 +57,7 @@ def _runtime(control: Any = None) -> TaskRuntime:
         cast(Any, FakeRegistry()),
         cast(Any, mock.Mock()),
         OrchestrationConfig(),
-        Path(tempfile.gettempdir()),
+        make_result_reader(),
         logging.getLogger("dispatch-traceparent-test"),
         secret_vault=cast(Any, _NoopSecretVault()),
         control=control,
@@ -88,7 +87,6 @@ def _dispatch(runtime: TaskRuntime, task_id: str, control: Any = None) -> mock.M
     disp = CapturingDispatcher(
         runtime=runtime,
         worker_registry=registry,
-        results_dir=Path(tempfile.gettempdir()),
         logger=logging.getLogger("dispatch-traceparent-dispatch"),
         control=control,
     )

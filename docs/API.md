@@ -44,8 +44,7 @@ self-authenticate the same way, sending `FLOWMESH_API_KEY` as the bearer.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/api/v1/results` | Submit task result (worker → server). |
-| GET | `/api/v1/results/{task_id}` | Get task result JSON. |
+| GET | `/api/v1/results/{task_id}` | Get task result JSON, read from the shared content store. |
 | GET | `/api/v1/results/{task_id}/bundle` | Download tar.gz bundle (`?include=results,artifacts,logs,all`). |
 | POST | `/api/v1/results/{task_id}/files` | Upload artifact (multipart). |
 | GET | `/api/v1/results/{task_id}/files/{filename}` | Download artifact. |

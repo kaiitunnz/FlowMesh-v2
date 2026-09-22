@@ -1,10 +1,8 @@
 """Durable persistence and restart rehydration of TaskRuntime."""
 
 import logging
-import tempfile
 import threading
 from collections.abc import Sequence
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -14,6 +12,7 @@ from server.config import OrchestrationConfig
 from server.registries.workflow import PersistedTask, WorkflowSched
 from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime
+from tests.server.result_store import make_result_reader
 from tests.server.task.test_v2_orchestration import _NoopSecretVault
 
 
@@ -172,7 +171,7 @@ def _runtime(registry: FakeWorkflowRegistry) -> TaskRuntime:
         cast(Any, registry),
         cast(Any, _WorkerRegistryStub()),
         OrchestrationConfig(),
-        Path(tempfile.gettempdir()),
+        make_result_reader(),
         logging.getLogger("rehydrate-test"),
         secret_vault=cast(Any, _NoopSecretVault()),
     )

@@ -9,8 +9,6 @@ truncating.
 """
 
 import logging
-import tempfile
-from pathlib import Path
 from typing import Any, cast
 
 from server.config import OrchestrationConfig
@@ -26,6 +24,7 @@ from server.orchestration.state import (
     AuthorityDecisionKind,
     ValueRef,
 )
+from server.task.results import ResultBinding
 from server.task.runtime import TaskRuntime
 from server.task.v2.compiler.bindings import leaf_profile
 from server.task.v2.representations.operators import (
@@ -39,8 +38,8 @@ from server.task.v2.representations.operators import (
     SpawnRegion,
 )
 from server.task.v2.representations.template import TemplateEdge
-from shared.schemas.result import ResultEnvelope, result_file_path
 from shared.tasks import TaskType
+from tests.server.result_store import make_result_reader, store_result
 from tests.server.task.test_v2_agent_harness import _bundle, _decl, _engine, _leaf
 from tests.server.task.test_v2_orchestration import (
     FakeRegistry,
@@ -337,21 +336,18 @@ def _runtime(budget: int | None = None) -> TaskRuntime:
         cast(Any, FakeRegistry()),
         cast(Any, _WorkerRegistryStub()),
         config,
-        Path(tempfile.mkdtemp()),
+        make_result_reader(),
         logging.getLogger("dataflow-test"),
         secret_vault=cast(Any, _NoopSecretVault()),
     )
 
 
 def _write_result(runtime: TaskRuntime, task_id: str, payload: dict[str, Any]) -> None:
-    path = result_file_path(runtime._results_dir, task_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        ResultEnvelope.model_validate(
-            {"task_id": task_id, "task_type": "echo", "result": payload}
-        ).model_dump_json(),
-        "utf-8",
-    )
+    """Bind a task's stored result the way its settled success would."""
+    reference = store_result(runtime._results, task_id, payload)
+    bound = runtime.__dict__.setdefault("_test_bindings", {})
+    bound[task_id] = ResultBinding(task_id=task_id, reference=reference)
+    runtime._result_binding_locked = bound.get  # type: ignore[method-assign]
 
 
 def test_frozen_resolver_reads_inline_element_and_producer_value() -> None:
@@ -431,7 +427,31 @@ def test_oversized_input_fails_the_agent_rather_than_truncating() -> None:
     )
     engine.on_succeeded("P")
     _write_result(runtime, "P", {"taskType": "agent", "value": "x" * 5000})
-    runtime._resolve_agent_inputs_locked(engine, Advance())
+    runtime._resolve_agent_inputs_locked("wfl-test", engine, Advance())
     wi = engine.work_item("M")
     assert wi.status in (WorkItemStatus.SETTLED, WorkItemStatus.CANCELLED)
+    assert wi.outcome is PublicationOutcome.DECLARED_FAILURE
+
+
+def test_an_unreadable_input_fails_the_agent_rather_than_deferring() -> None:
+    runtime = _runtime()
+    merge = _input_agent("M", ("reviews",))
+    engine = _engine(
+        _bundle(
+            [_leaf("P"), merge],
+            [TemplateEdge(from_op="P", to_op="M", to_port="reviews")],
+            (_decl("out:M", "M"),),
+        ),
+        granted=frozenset({"model"}),
+    )
+    engine.on_succeeded("P")
+    _write_result(runtime, "P", {"taskType": "agent", "value": "grounded"})
+    bound = runtime._test_bindings["P"]  # type: ignore[attr-defined]
+    assert bound.reference is not None
+    runtime._test_bindings["P"] = ResultBinding(  # type: ignore[attr-defined]
+        task_id="P",
+        reference=bound.reference.model_copy(update={"content_digest": "0" * 64}),
+    )
+    runtime._resolve_agent_inputs_locked("wfl-test", engine, Advance())
+    wi = engine.work_item("M")
     assert wi.outcome is PublicationOutcome.DECLARED_FAILURE

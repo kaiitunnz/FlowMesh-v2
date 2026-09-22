@@ -1,6 +1,5 @@
 import logging
 import pathlib
-import tempfile
 from typing import Any, cast
 
 import pytest
@@ -18,6 +17,7 @@ from server.task.v2 import (
 from server.task.v2.compiler.agent_binding import AgentBindingDefaults
 from server.task.v2.compiler.bindings import BindingClass, binding_class
 from shared.tasks import TaskType
+from tests.server.result_store import make_result_reader
 from tests.server.task.test_v2_orchestration import _NoopSecretVault
 
 # Legacy example agents declare no harness; a lowering test supplies a deployment
@@ -191,7 +191,7 @@ def _runtime() -> TaskRuntime:
         cast(Any, _CapturingRegistry()),
         cast(Any, worker_stub),
         OrchestrationConfig(),
-        pathlib.Path(tempfile.gettempdir()),
+        make_result_reader(),
         logging.getLogger("v2-compiler-test"),
         secret_vault=cast(Any, _NoopSecretVault()),
     )

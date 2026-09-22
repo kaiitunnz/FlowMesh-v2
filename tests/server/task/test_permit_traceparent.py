@@ -8,14 +8,13 @@ Both stamps are post-mint: the boundary span id derives from the minted permit's
 
 import asyncio
 import logging
-import tempfile
-from pathlib import Path
 from typing import Any, cast
 
 from server.config import OrchestrationConfig
 from shared.telemetry.config import TelemetryLevel
 from shared.telemetry.ids import SpanIdKind, derived_span_id, workflow_to_trace_id_int
 from shared.tools.contract import AgentModelTurnProposal, MediatedOperationPermit
+from tests.server.result_store import make_result_reader
 from tests.server.task.test_v2_orchestration import (
     FakeRegistry,
     _NoopSecretVault,
@@ -39,7 +38,7 @@ def _runtime(control: Any = None) -> Any:
         cast(Any, FakeRegistry()),
         cast(Any, _WorkerStub()),
         OrchestrationConfig(),
-        Path(tempfile.gettempdir()),
+        make_result_reader(),
         logging.getLogger("permit-traceparent-test"),
         secret_vault=cast(Any, _NoopSecretVault()),
         control=control,

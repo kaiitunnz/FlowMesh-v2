@@ -10,7 +10,8 @@ exactly what it was not given — so its first read or write fails rather than q
 running under whatever credential the process happens to have. Control relays the
 access on its own path, so a task can reach its first content operation while its
 access is still in flight; a read waits a bounded moment for the one it was sent before
-deciding it has none.
+deciding it has none. A task that outlives its access asks control to renew it, which
+control does only while the task is still this worker's to run.
 
 The material never leaves here. It opens a backend client and is held only for as long
 as the grant it came with; nothing writes it down, reports it, or renders it.
@@ -19,6 +20,7 @@ as the grant it came with; nothing writes it down, reports it, or renders it.
 import logging
 import threading
 import time
+from collections.abc import Callable
 
 import boto3
 from botocore.client import Config
@@ -31,10 +33,9 @@ from shared.content import (
     FabricObjectStore,
     ObjectStoreConfig,
     ScopedContentCredential,
+    SharedFilesystemObjectStore,
 )
 from shared.content.s3_store import S3ObjectStore
-
-from .cas import SharedFilesystemObjectStore
 
 _AccessKey = tuple[str, str]
 
@@ -51,11 +52,15 @@ class ContentAccessRegistry:
         cfg: ObjectStoreConfig,
         logger: logging.Logger | None = None,
         *,
+        request_access: Callable[[str], None] | None = None,
         arrival_wait_sec: float = 5.0,
+        renewal_wait_sec: float = 15.0,
     ) -> None:
         self._cfg = cfg
         self._logger = logger or logging.getLogger("content-access")
+        self._request_access = request_access
         self._arrival_wait_sec = arrival_wait_sec
+        self._renewal_wait_sec = renewal_wait_sec
         self._arrived = threading.Condition()
         self._granted: dict[_AccessKey, ContentStoreAccess] = {}
         self._stores: dict[_AccessKey, FabricObjectStore] = {}
@@ -70,32 +75,53 @@ class ContentAccessRegistry:
             self._arrived.notify_all()
 
     def store_for(self, task_id: str, scope: str) -> FabricObjectStore:
-        """The store this task opens for a scope, or a refusal if it holds none."""
+        """The store this task opens for a scope, or a refusal if it holds none.
+
+        Access that has run out is renewed on request, and a renewal control refuses or
+        never relays ends in the same refusal as having none, after a bounded wait.
+        """
         key = (task_id, scope)
         with self._arrived:
-            access = self._await_access(key)
-            if access is None:
-                raise ContentAccessDenied(
-                    f"task {task_id} holds no content store access in scope {scope}"
+            # An access that has expired is not one still in flight, so only a task
+            # that never had one waits out the relay.
+            access = (
+                self._live(key)
+                if key in self._granted
+                else self._await_live(key, self._arrival_wait_sec)
+            )
+        if access is None and self._request_access is not None:
+            try:
+                self._request_access(task_id)
+            except Exception:
+                self._logger.warning(
+                    "could not ask to renew content store access for %s",
+                    task_id,
+                    exc_info=True,
                 )
-            if access.grant.expired():
-                self._forget(key)
-                raise ContentAccessDenied(
-                    f"the content store access for task {task_id} has expired"
-                )
+            else:
+                with self._arrived:
+                    access = self._await_live(key, self._renewal_wait_sec)
+        if access is None:
+            raise ContentAccessDenied(
+                f"task {task_id} holds no live content store access in scope {scope}"
+            )
+        with self._arrived:
             if (store := self._stores.get(key)) is None:
                 store = self._open(access.credential)
                 self._stores[key] = store
             return store
 
-    def _await_access(self, key: _AccessKey) -> ContentStoreAccess | None:
-        """This task's access, waiting out a relay that has not landed yet."""
-        if (access := self._granted.get(key)) is not None:
+    def _await_live(self, key: _AccessKey, timeout: float) -> ContentStoreAccess | None:
+        """This task's unexpired access, waiting up to ``timeout`` for one to land."""
+        self._arrived.wait_for(lambda: self._live(key) is not None, timeout=timeout)
+        return self._live(key)
+
+    def _live(self, key: _AccessKey) -> ContentStoreAccess | None:
+        access = self._granted.get(key)
+        if access is None or not access.grant.expired():
             return access
-        self._arrived.wait_for(
-            lambda: key in self._granted, timeout=self._arrival_wait_sec
-        )
-        return self._granted.get(key)
+        self._forget(key)
+        return None
 
     def _open(self, credential: ScopedContentCredential) -> FabricObjectStore:
         match self._cfg.backend:

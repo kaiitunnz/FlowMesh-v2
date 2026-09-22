@@ -1,10 +1,8 @@
 """Durable orchestration ledger (`DS`) over the acyclic compatibility plan."""
 
 import logging
-import tempfile
 import threading
 from collections.abc import Sequence
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -12,6 +10,7 @@ import pytest
 
 from server.config import OrchestrationConfig
 from server.orchestration import (
+    Advance,
     BoundaryEvent,
     InvocationState,
     OrchestrationEngine,
@@ -37,6 +36,8 @@ from server.task.v2.representations.operators import (
     EffectClass,
     EffectReplayContract,
 )
+from shared.content import ContentReference
+from tests.server.result_store import make_result_reader, result_payload
 
 # --------------------------------------------------------------------------- #
 # Durable store double
@@ -207,7 +208,7 @@ def _runtime(registry: FakeRegistry) -> TaskRuntime:
         cast(Any, registry),
         cast(Any, _WorkerRegistryStub()),
         OrchestrationConfig(),
-        Path(tempfile.gettempdir()),
+        make_result_reader(),
         logging.getLogger("v2-test"),
         secret_vault=cast(Any, _NoopSecretVault()),
     )
@@ -314,15 +315,25 @@ def _pop_ready(runtime: TaskRuntime) -> list[str]:
     return ready
 
 
-def _write_result(results_dir: Any, task_id: str, items: list[str]) -> None:
-    from shared.schemas.result import ResultEnvelope, result_file_path
-
-    envelope = ResultEnvelope.model_validate(
-        {"task_id": task_id, "result": {"ok": True, "items": items}}
+def _planned(runtime: TaskRuntime, task_id: str, items: list[str]) -> dict[str, Any]:
+    """The success metadata of a planner whose stored result fans out ``items``."""
+    scope = runtime._tasks[task_id].org_id
+    return result_payload(
+        runtime._results, task_id, {"ok": True, "items": items}, scope
     )
-    path = result_file_path(results_dir, task_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(envelope.model_dump_json(), encoding="utf-8")
+
+
+def _live_runtime(
+    registry: FakeRegistry, name: str = "live", reader: Any = None
+) -> TaskRuntime:
+    return TaskRuntime(
+        cast(Any, registry),
+        cast(Any, _WorkerRegistryStub()),
+        OrchestrationConfig(),
+        reader or make_result_reader(),
+        logging.getLogger(name),
+        secret_vault=cast(Any, _NoopSecretVault()),
+    )
 
 
 AUTORESEARCH = """
@@ -346,16 +357,9 @@ spec:
 
 
 @pytest.mark.anyio
-async def test_live_spawn_fans_out_children_to_real_dispatch(tmp_path: Any) -> None:
+async def test_live_spawn_fans_out_children_to_real_dispatch() -> None:
     registry = FakeRegistry()
-    runtime = TaskRuntime(
-        cast(Any, registry),
-        cast(Any, _WorkerRegistryStub()),
-        OrchestrationConfig(),
-        tmp_path,
-        logging.getLogger("live"),
-        secret_vault=cast(Any, _NoopSecretVault()),
-    )
+    runtime = _live_runtime(registry)
     workflow_id, ids = await _register(runtime, AUTORESEARCH)
     planner = ids["planner"]
     engine = runtime.orchestration_engine(workflow_id)
@@ -363,11 +367,12 @@ async def test_live_spawn_fans_out_children_to_real_dispatch(tmp_path: Any) -> N
     # The child template is excluded from eager dispatch: only the planner is ready.
     assert runtime.ready_queue_length() == 1
 
-    # The planner's result carries a three-element fan-out collection.
-    _write_result(tmp_path, planner, ["h1", "h2", "h3"])
+    # The planner's stored result carries a three-element fan-out collection.
     runtime.mark_dispatched(planner, cast(Any, _worker()))
     runtime.mark_started(planner, "wkr-1", {}, _TS)
-    runtime.mark_succeeded(planner, "wkr-1", {}, _TS)
+    runtime.mark_succeeded(
+        planner, "wkr-1", _planned(runtime, planner, ["h1", "h2", "h3"]), _TS
+    )
 
     children = _pop_ready(runtime)
     assert len(children) == 3
@@ -396,113 +401,73 @@ def _child_count(engine: Any) -> int:
 
 
 @pytest.mark.anyio
-async def test_fan_out_is_idempotent_across_a_producer_replay(tmp_path: Any) -> None:
+async def test_fan_out_is_idempotent_across_a_producer_replay() -> None:
     registry = FakeRegistry()
-    runtime = TaskRuntime(
-        cast(Any, registry),
-        cast(Any, _WorkerRegistryStub()),
-        OrchestrationConfig(),
-        tmp_path,
-        logging.getLogger("live"),
-        secret_vault=cast(Any, _NoopSecretVault()),
-    )
+    runtime = _live_runtime(registry)
     workflow_id, ids = await _register(runtime, AUTORESEARCH)
     planner = ids["planner"]
-    _write_result(tmp_path, planner, ["h1", "h2", "h3"])
+    payload = _planned(runtime, planner, ["h1", "h2", "h3"])
     runtime.mark_dispatched(planner, cast(Any, _worker()))
-    runtime.mark_succeeded(planner, "wkr-1", {}, _TS)
+    runtime.mark_succeeded(planner, "wkr-1", payload, _TS)
     first = _pop_ready(runtime)
     engine = runtime.orchestration_engine(workflow_id)
     assert engine is not None and len(first) == 3 and _child_count(engine) == 3
     # Replaying the producer's terminal event re-drives the fan-out as a no-op: the
     # sealed spawn admits no new child.
-    runtime.mark_succeeded(planner, "wkr-1", {}, _TS)
+    runtime.mark_succeeded(planner, "wkr-1", payload, _TS)
     assert _pop_ready(runtime) == [] and _child_count(engine) == 3
 
 
 @pytest.mark.anyio
-async def test_deferred_fan_out_recovers_on_replay_when_result_lands(
-    tmp_path: Any,
-) -> None:
+async def test_a_producer_with_no_bound_result_fails_the_workflow() -> None:
     registry = FakeRegistry()
-    runtime = TaskRuntime(
-        cast(Any, registry),
-        cast(Any, _WorkerRegistryStub()),
-        OrchestrationConfig(),
-        tmp_path,
-        logging.getLogger("live"),
-        secret_vault=cast(Any, _NoopSecretVault()),
-    )
+    runtime = _live_runtime(registry)
     workflow_id, ids = await _register(runtime, AUTORESEARCH)
     planner = ids["planner"]
-    # The producer settles before its result is on this node: the fan-out defers,
-    # sealing no spurious zero-child spawn.
     runtime.mark_dispatched(planner, cast(Any, _worker()))
     runtime.mark_succeeded(planner, "wkr-1", {}, _TS)
+    engine = runtime.orchestration_engine(workflow_id)
+    assert engine is not None
+    # Never a spurious zero-child seal: the join stays open and the workflow fails.
+    assert _pop_ready(runtime) == [] and _child_count(engine) == 0
+    assert not engine.region_closed("collect")
+    assert runtime._tasks[ids["trial"]].status is TaskStatus.FAILED
+    assert "has no bound result" in (runtime._tasks[ids["trial"]].error or "")
+
+
+@pytest.mark.anyio
+async def test_an_unreadable_producer_result_fails_the_workflow() -> None:
+    registry = FakeRegistry()
+    runtime = _live_runtime(registry)
+    workflow_id, ids = await _register(runtime, AUTORESEARCH)
+    planner = ids["planner"]
+    payload = _planned(runtime, planner, ["h1"])
+    reference = ContentReference.model_validate(payload["result_reference"])
+    corrupted = reference.model_copy(update={"content_digest": "0" * 64})
+    runtime.mark_dispatched(planner, cast(Any, _worker()))
+    runtime.mark_succeeded(
+        planner,
+        "wkr-1",
+        {"result_reference": corrupted.model_dump(mode="json")},
+        _TS,
+    )
     engine = runtime.orchestration_engine(workflow_id)
     assert engine is not None
     assert _pop_ready(runtime) == [] and _child_count(engine) == 0
     assert not engine.region_closed("collect")
-    # The result lands; a replay of the producer's terminal event recovers the fan-out.
-    _write_result(tmp_path, planner, ["h1", "h2", "h3"])
-    runtime.mark_succeeded(planner, "wkr-1", {}, _TS)
-    assert len(_pop_ready(runtime)) == 3 and _child_count(engine) == 3
+    assert "result is unreadable" in (runtime._tasks[ids["trial"]].error or "")
 
 
 @pytest.mark.anyio
-async def test_deferred_fan_out_recovers_on_result_ingest_without_a_second_event(
-    tmp_path: Any,
-) -> None:
+async def test_zero_element_fan_out_seals_and_closes_the_join_empty() -> None:
     registry = FakeRegistry()
-    runtime = TaskRuntime(
-        cast(Any, registry),
-        cast(Any, _WorkerRegistryStub()),
-        OrchestrationConfig(),
-        tmp_path,
-        logging.getLogger("live"),
-        secret_vault=cast(Any, _NoopSecretVault()),
-    )
-    workflow_id, ids = await _register(runtime, AUTORESEARCH)
-    planner = ids["planner"]
-    runtime.mark_dispatched(planner, cast(Any, _worker()))
-    runtime.mark_succeeded(planner, "wkr-1", {}, _TS)
-    engine = runtime.orchestration_engine(workflow_id)
-    assert engine is not None
-    assert _pop_ready(runtime) == [] and _child_count(engine) == 0
-
-    # In a multi-node deployment the result reaches this node out of band through
-    # result ingest, unordered against the single terminal event; the ingest nudge
-    # re-drives the fan-out with no second terminal event to lean on.
-    _write_result(tmp_path, planner, ["h1", "h2", "h3"])
-    runtime.retry_deferred_fanout(planner)
-    children = _pop_ready(runtime)
-    assert len(children) == 3 and _child_count(engine) == 3
-    for child in children:
-        runtime.mark_dispatched(child, cast(Any, _worker()))
-        runtime.mark_succeeded(child, "wkr-1", {}, _TS)
-    assert engine.region_closed("collect")
-
-
-@pytest.mark.anyio
-async def test_zero_element_fan_out_seals_and_closes_the_join_empty(
-    tmp_path: Any,
-) -> None:
-    registry = FakeRegistry()
-    runtime = TaskRuntime(
-        cast(Any, registry),
-        cast(Any, _WorkerRegistryStub()),
-        OrchestrationConfig(),
-        tmp_path,
-        logging.getLogger("live"),
-        secret_vault=cast(Any, _NoopSecretVault()),
-    )
+    runtime = _live_runtime(registry)
     workflow_id, ids = await _register(runtime, AUTORESEARCH)
     planner = ids["planner"]
     # A present-but-empty collection seals the spawn with zero children — an explicit
     # seal, not an observed-empty inference — and the all-settled join closes empty.
-    _write_result(tmp_path, planner, [])
     runtime.mark_dispatched(planner, cast(Any, _worker()))
-    runtime.mark_succeeded(planner, "wkr-1", {}, _TS)
+    runtime.mark_succeeded(planner, "wkr-1", _planned(runtime, planner, []), _TS)
     engine = runtime.orchestration_engine(workflow_id)
     assert engine is not None
     assert _pop_ready(runtime) == [] and _child_count(engine) == 0
@@ -512,35 +477,22 @@ async def test_zero_element_fan_out_seals_and_closes_the_join_empty(
 
 
 @pytest.mark.anyio
-async def test_child_template_holds_completion_until_the_spawn_seals(
-    tmp_path: Any,
-) -> None:
+async def test_child_template_holds_completion_until_the_spawn_seals() -> None:
     registry = FakeRegistry()
-    runtime = TaskRuntime(
-        cast(Any, registry),
-        cast(Any, _WorkerRegistryStub()),
-        OrchestrationConfig(),
-        tmp_path,
-        logging.getLogger("live"),
-        secret_vault=cast(Any, _NoopSecretVault()),
-    )
+    runtime = _live_runtime(registry)
     workflow_id, ids = await _register(runtime, AUTORESEARCH)
     planner, trial = ids["planner"], ids["trial"]
     # The child template is in the remaining set at registration; it only runs as a
     # materialized child but represents the unsealed spawn until then.
     assert registry.remaining_of(workflow_id) == {planner, trial}
 
-    # The producer settles before its result is on the node: the fan-out defers. The
-    # template keeps the workflow open — remaining is not empty — so a fan-out-terminal
-    # workflow never reads as done while its children do not yet exist.
+    # The spawn seals as the producer settles: the children replace the retired
+    # template in the remaining set atomically, and the workflow completes once they
+    # settle.
     runtime.mark_dispatched(planner, cast(Any, _worker()))
-    runtime.mark_succeeded(planner, "wkr-1", {}, _TS)
-    assert registry.remaining_of(workflow_id) == {trial}
-
-    # The result lands and the spawn seals: the children replace the retired template
-    # in the remaining set atomically, and the workflow completes once they settle.
-    _write_result(tmp_path, planner, ["h1", "h2", "h3"])
-    runtime.retry_deferred_fanout(planner)
+    runtime.mark_succeeded(
+        planner, "wkr-1", _planned(runtime, planner, ["h1", "h2", "h3"]), _TS
+    )
     rem = registry.remaining_of(workflow_id)
     assert trial not in rem and len(rem) == 3
     for child in _pop_ready(runtime):
@@ -550,34 +502,28 @@ async def test_child_template_holds_completion_until_the_spawn_seals(
 
 
 @pytest.mark.anyio
-async def test_rehydration_re_drives_a_deferred_fan_out(tmp_path: Any) -> None:
+async def test_rehydration_re_drives_an_unsealed_fan_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     registry = FakeRegistry()
-    runtime = TaskRuntime(
-        cast(Any, registry),
-        cast(Any, _WorkerRegistryStub()),
-        OrchestrationConfig(),
-        tmp_path,
-        logging.getLogger("live"),
-        secret_vault=cast(Any, _NoopSecretVault()),
-    )
+    reader = make_result_reader()
+    runtime = _live_runtime(registry, reader=reader)
     workflow_id, ids = await _register(runtime, AUTORESEARCH)
     planner = ids["planner"]
-    # The producer settles before its result is on the node: the persisted snapshot
-    # holds it DONE with the spawn unsealed and no children committed — the
-    # crash-between state.
+    # A crash between the producer's terminal persist and its children leaves it DONE
+    # with its result bound and the spawn unsealed.
+    monkeypatch.setattr(
+        runtime, "_fan_out_children_locked", lambda *_args, **_kw: Advance()
+    )
     runtime.mark_dispatched(planner, cast(Any, _worker()))
-    runtime.mark_succeeded(planner, "wkr-1", {}, _TS)
+    runtime.mark_succeeded(
+        planner, "wkr-1", _planned(runtime, planner, ["h1", "h2", "h3"]), _TS
+    )
     assert registry.dynamic_task_ids.get(workflow_id, set()) == set()
 
-    # The result lands, then the process restarts: rehydration re-drives the fan-out.
-    _write_result(tmp_path, planner, ["h1", "h2", "h3"])
-    restored = TaskRuntime(
-        cast(Any, registry),
-        cast(Any, _WorkerRegistryStub()),
-        OrchestrationConfig(),
-        tmp_path,
-        logging.getLogger("rehydrate"),
-        secret_vault=cast(Any, _NoopSecretVault()),
+    # On restart, rehydration re-reads the bound result and re-drives the fan-out.
+    restored = _live_runtime(
+        registry, "rehydrate", reader=make_result_reader(reader.store)
     )
     assert await restored.rehydrate() == 1
     engine = restored.orchestration_engine(workflow_id)
@@ -608,7 +554,7 @@ async def test_scheduler_rejects_an_infeasible_episode_alternative() -> None:
         cast(Any, registry),
         cast(Any, _WorkerRegistryStub()),
         OrchestrationConfig(episode_lowering=True),
-        Path(tempfile.gettempdir()),
+        make_result_reader(),
         logging.getLogger("feas"),
         feasibility_check=lambda spec: spec.boundary
         is not EpisodeBoundaryKind.SERVICE_ISSUE,
@@ -809,7 +755,7 @@ async def test_conditional_skip_publishes_explicit_empty() -> None:
     runtime.mark_dispatched(a, cast(Any, _worker()))
     # A conditional skip settles the declared output as explicit-empty, yet still
     # releases the successor (matching the v1 skip-as-success behavior).
-    runtime.mark_succeeded(a, None, {}, "2026-06-01T00:00:00Z", empty=True)
+    runtime.mark_succeeded(a, None, {}, "2026-06-01T00:00:00Z", skip={"skipped": True})
     pub = runtime.resolve_v2_legacy_result(workflow_id, a)
     assert pub is not None and pub.outcome is PublicationOutcome.EXPLICIT_EMPTY
     assert pub.value_ref is not None and pub.value_ref.kind == "empty"
@@ -1279,3 +1225,39 @@ spec:
     assert denied and denied[0].work_item_id
     pub = led.resolve_legacy_task(caller)
     assert pub is not None and pub.outcome is PublicationOutcome.DECLARED_FAILURE
+
+
+@pytest.mark.anyio
+async def test_a_fan_out_reads_its_collection_before_taking_the_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = FakeRegistry()
+    runtime = _live_runtime(registry)
+    workflow_id, ids = await _register(runtime, AUTORESEARCH)
+    planner = ids["planner"]
+
+    def _locked_read(*_args: Any) -> Any:
+        raise AssertionError("the collection was read under the runtime lock")
+
+    monkeypatch.setattr(runtime, "_read_fanout_locked", _locked_read)
+    runtime.mark_dispatched(planner, cast(Any, _worker()))
+    runtime.mark_succeeded(
+        planner, "wkr-1", _planned(runtime, planner, ["h1", "h2", "h3"]), _TS
+    )
+    engine = runtime.orchestration_engine(workflow_id)
+    assert engine is not None
+    assert len(_pop_ready(runtime)) == 3 and _child_count(engine) == 3
+
+
+@pytest.mark.anyio
+async def test_a_skipped_producer_fans_out_to_no_children() -> None:
+    registry = FakeRegistry()
+    runtime = _live_runtime(registry)
+    workflow_id, ids = await _register(runtime, AUTORESEARCH)
+    planner = ids["planner"]
+    runtime.mark_dispatched(planner, cast(Any, _worker()))
+    runtime.mark_succeeded(planner, None, {}, _TS, skip={"skipped": True})
+    engine = runtime.orchestration_engine(workflow_id)
+    assert engine is not None
+    assert _child_count(engine) == 0 and engine.region_closed("collect")
+    assert registry.remaining_of(workflow_id) == set()

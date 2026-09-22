@@ -8,8 +8,6 @@ entering the ledger. If the origin worker is lost the boundary fails clean.
 
 import asyncio
 import logging
-import tempfile
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -41,6 +39,7 @@ from shared.tools.facade import (
     FacadeCompletionMode,
     FacadeTurnGroup,
 )
+from tests.server.result_store import make_result_reader
 from tests.server.task.test_v2_orchestration import (
     FakeRegistry,
     _NoopSecretVault,
@@ -152,7 +151,7 @@ def _runtime(
         cast(Any, FakeRegistry()),
         cast(Any, _WorkerStub()),
         OrchestrationConfig(),
-        Path(tempfile.gettempdir()),
+        make_result_reader(),
         logging.getLogger("wo-test"),
         secret_vault=cast(Any, vault or _NoopSecretVault()),
         content_scope_authority=(

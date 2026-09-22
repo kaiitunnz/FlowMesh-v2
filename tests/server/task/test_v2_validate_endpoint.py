@@ -1,6 +1,4 @@
 import logging
-import tempfile
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -13,6 +11,7 @@ from server.auth.security import authenticate_connection
 from server.config import OrchestrationConfig
 from server.routers.v1 import workflows as workflows_router
 from server.task.runtime import TaskRuntime
+from tests.server.result_store import make_result_reader
 from tests.server.task.test_v2_orchestration import _NoopSecretVault
 
 _V1_WF = """
@@ -86,7 +85,7 @@ def _runtime() -> TaskRuntime:
         cast(Any, registry),
         cast(Any, worker_stub),
         OrchestrationConfig(),
-        Path(tempfile.gettempdir()),
+        make_result_reader(),
         logging.getLogger("v2-endpoint-test"),
         secret_vault=cast(Any, _NoopSecretVault()),
     )

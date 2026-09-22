@@ -7,7 +7,7 @@ from .access import (
     ScopedContentCredential,
 )
 from .config import BACKEND_FILESYSTEM, BACKEND_S3, ObjectStoreConfig
-from .filesystem import FilesystemObjectBacking
+from .filesystem import FilesystemObjectBacking, SharedFilesystemObjectStore
 from .grant import (
     ContentHydrationGrant,
     ContentOperation,
@@ -23,6 +23,7 @@ from .reference import (
 from .store import (
     ContentHydrationError,
     ContentStoreError,
+    ContentUnavailable,
     FabricObjectStore,
     ScopedObjectStore,
     content_digest,
@@ -44,10 +45,12 @@ __all__ = [
     "ContentStoreAccess",
     "ContentStoreAccessGrant",
     "ContentStoreError",
+    "ContentUnavailable",
     "DigestAlgorithm",
     "FabricObjectStore",
     "FilesystemObjectBacking",
     "ScopedContentCredential",
+    "SharedFilesystemObjectStore",
     "ScopedObjectStore",
     "GrantRejection",
     "HolderGrantGate",

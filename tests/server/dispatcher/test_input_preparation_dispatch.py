@@ -1,8 +1,6 @@
 """Tests for how the dispatch loop handles a leaf whose inputs are prepared first."""
 
 import logging
-import tempfile
-from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -22,6 +20,7 @@ from tests.server.dispatcher.helpers import (
     CapturingDispatcher,
     make_capturing_dispatcher,
 )
+from tests.server.result_store import make_result_reader
 from tests.server.task.test_v2_embodiment_fence import (
     _NoopSecretVault,
     _upstream_task,
@@ -35,7 +34,7 @@ def _runtime() -> TaskRuntime:
         cast(Any, FakeRegistry()),
         cast(Any, _WorkerRegistryStub()),
         OrchestrationConfig(),
-        Path(tempfile.gettempdir()),
+        make_result_reader(),
         logging.getLogger("preparation-dispatch-test"),
         secret_vault=cast(Any, _NoopSecretVault()),
     )

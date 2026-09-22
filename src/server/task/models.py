@@ -3,6 +3,7 @@ from typing import Any, NamedTuple
 
 from pydantic import BaseModel, Field, computed_field
 
+from shared.content import ContentReference
 from shared.tasks import TaskEnvelopeTemplate
 from shared.tasks.worker_message import HardwareUsage
 
@@ -170,6 +171,17 @@ class TaskRecord(BaseModel):
     merge_key: str | None = Field(default=None, description="Merge grouping key.")
     latest_update: dict[str, Any] | None = Field(
         default=None, description="Latest mid-task update payload."
+    )
+    result_reference: ContentReference | None = Field(
+        default=None,
+        description="The stored result envelope this task's success is bound to; "
+        "set once, at success.",
+        exclude=True,
+    )
+    result_skip: dict[str, Any] | None = Field(
+        default=None,
+        description="Why a conditional task settled without running, when it did.",
+        exclude=True,
     )
     pending_facade_group: FacadeTurnGroup | None = Field(
         default=None,

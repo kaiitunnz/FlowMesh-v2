@@ -2,16 +2,15 @@
 
 import asyncio
 import logging
-import tempfile
 import threading
 from collections.abc import Sequence
-from pathlib import Path
 from typing import Any, cast
 
 from server.config import OrchestrationConfig
 from server.registries.workflow import PersistedTask, WorkflowSched
 from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime
+from tests.server.result_store import make_result_reader
 from tests.server.task.test_v2_orchestration import _NoopSecretVault
 
 
@@ -65,7 +64,7 @@ def _runtime(worker_registry: Any = None) -> TaskRuntime:
         cast(Any, _WorkflowRegistryStub()),
         cast(Any, worker_registry or _WorkerRegistryStub()),
         OrchestrationConfig(),
-        Path(tempfile.gettempdir()),
+        make_result_reader(),
         logging.getLogger("runtime-test"),
         secret_vault=cast(Any, _NoopSecretVault()),
     )

@@ -1,11 +1,10 @@
 """SSH result mounting's parser and dispatch helper tests."""
 
-import json
 import logging
 import textwrap
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -14,6 +13,7 @@ from server.registries.worker import WorkerRegistry
 from server.task.models import TaskRecord, TaskStatus
 from server.task.parser import parse_workflow
 from server.task.runtime import TaskRuntime
+from shared.schemas.result import ResultEnvelope
 from shared.tasks import TaskEnvelopeTemplate, TaskType
 from shared.tasks.specs import SSHSpecStrict
 
@@ -23,9 +23,15 @@ class _DummyRuntime:
         self,
         tasks: dict[str, TaskRecord],
         depends_on: dict[str, list[str]] | None = None,
+        results: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         self.tasks = tasks
         self._depends_on = depends_on or {}
+        self._results = results or {}
+
+    def read_result(self, task_id: str) -> ResultEnvelope | None:
+        envelope = self._results.get(task_id)
+        return ResultEnvelope.model_validate(envelope) if envelope else None
 
     def get_record(self, task_id: str) -> TaskRecord | None:
         return self.tasks.get(task_id)
@@ -107,7 +113,6 @@ def test_dispatcher_resolves_ssh_input_stage_names_from_local_stage_names() -> N
             ),
         ),
         worker_registry=cast(WorkerRegistry, object()),
-        results_dir=Path("/tmp"),
         logger=logging.getLogger("test-ssh-phase2"),
     )
 
@@ -147,7 +152,6 @@ def test_dispatcher_requeues_when_ssh_input_stage_not_done() -> None:
             ),
         ),
         worker_registry=cast(WorkerRegistry, object()),
-        results_dir=Path("/tmp"),
         logger=logging.getLogger("test-ssh-phase2"),
     )
     spec = SSHSpecStrict.model_validate(current.task.spec.model_dump())
@@ -217,7 +221,6 @@ def test_build_stage_context_includes_only_transitive_dependencies() -> None:
             ),
         ),
         worker_registry=cast(WorkerRegistry, object()),
-        results_dir=Path("/tmp"),
         logger=logging.getLogger("test-stage-context"),
     )
 
@@ -229,25 +232,16 @@ def test_build_stage_context_includes_only_transitive_dependencies() -> None:
 def test_collect_upstream_results_excludes_unrelated_completed_stages(
     tmp_path: Path,
 ) -> None:
-    pre_dir = tmp_path / "task-pre"
-    pre_dir.mkdir()
-    (pre_dir / "results.json").write_text(
-        json.dumps(
-            {"task_id": "task-pre", "result": {"responses": [{"output": "pre"}]}}
-        ),
-        encoding="utf-8",
-    )
-    other_dir = tmp_path / "task-other"
-    other_dir.mkdir()
-    (other_dir / "results.json").write_text(
-        json.dumps(
-            {
-                "task_id": "task-other",
-                "result": {"responses": [{"output": "other"}]},
-            }
-        ),
-        encoding="utf-8",
-    )
+    results = {
+        "task-pre": {
+            "task_id": "task-pre",
+            "result": {"responses": [{"output": "pre"}]},
+        },
+        "task-other": {
+            "task_id": "task-other",
+            "result": {"responses": [{"output": "other"}]},
+        },
+    }
 
     upstream = TaskRecord(
         task_id="task-pre",
@@ -293,10 +287,10 @@ def test_collect_upstream_results_excludes_unrelated_completed_stages(
                     current.task_id: current,
                 },
                 depends_on={current.task_id: [upstream.task_id]},
+                results=results,
             ),
         ),
         worker_registry=cast(WorkerRegistry, object()),
-        results_dir=tmp_path,
         logger=logging.getLogger("test-stage-results"),
     )
 
@@ -312,42 +306,29 @@ def test_stage_reference_uses_payload_root_for_local_and_http_results(
     tmp_path: Path,
 ) -> None:
     local_dir = tmp_path / "task-local"
-    local_dir.mkdir()
-    (local_dir / "results.json").write_text(
-        json.dumps(
-            {
-                "task_id": "task-local",
-                "result": {
-                    "final_lora_archive": {"path": "final_lora.tar.gz"},
-                    "_artifacts": {
-                        "base_dir": local_dir.as_posix(),
-                        "base_url": None,
-                    },
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
     http_dir = tmp_path / "task-http"
-    http_dir.mkdir()
-    (http_dir / "results.json").write_text(
-        json.dumps(
-            {
-                "task_id": "task-http",
-                "worker_id": "worker-1",
-                "metadata": None,
-                "received_at": "2026-05-10T00:00:00+00:00",
-                "result": {
-                    "final_lora_archive": {"path": "final_lora.tar.gz"},
-                    "_artifacts": {
-                        "base_dir": http_dir.as_posix(),
-                        "base_url": "http://flowmesh.example",
-                    },
+    results: dict[str, dict[str, Any]] = {
+        "task-local": {
+            "task_id": "task-local",
+            "result": {
+                "final_lora_archive": {"path": "final_lora.tar.gz"},
+                "_artifacts": {"base_dir": local_dir.as_posix(), "base_url": None},
+            },
+        },
+        "task-http": {
+            "task_id": "task-http",
+            "worker_id": "worker-1",
+            "metadata": None,
+            "received_at": "2026-05-10T00:00:00+00:00",
+            "result": {
+                "final_lora_archive": {"path": "final_lora.tar.gz"},
+                "_artifacts": {
+                    "base_dir": http_dir.as_posix(),
+                    "base_url": "http://flowmesh.example",
                 },
-            }
-        ),
-        encoding="utf-8",
-    )
+            },
+        },
+    }
 
     local_record = TaskRecord(
         task_id="task-local",
@@ -370,9 +351,8 @@ def test_stage_reference_uses_payload_root_for_local_and_http_results(
         local_name="http",
     )
     dispatcher = Dispatcher(
-        runtime=cast(TaskRuntime, _DummyRuntime({})),
+        runtime=cast(TaskRuntime, _DummyRuntime({}, results=results)),
         worker_registry=cast(WorkerRegistry, object()),
-        results_dir=tmp_path,
         logger=logging.getLogger("test-stage-reference-root"),
     )
 

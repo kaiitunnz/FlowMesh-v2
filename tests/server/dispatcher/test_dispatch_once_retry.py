@@ -2,8 +2,6 @@
 
 import asyncio
 import logging
-import tempfile
-from pathlib import Path
 from typing import Any, cast
 from unittest import mock
 
@@ -14,6 +12,7 @@ from tests.server.dispatcher.helpers import (
     WorkflowRegistryStub,
     make_capturing_dispatcher,
 )
+from tests.server.result_store import make_result_reader
 from tests.server.task.test_v2_orchestration import _NoopSecretVault
 
 _ECHO_WORKFLOW = """
@@ -39,7 +38,7 @@ def _setup(
         cast(Any, WorkflowRegistryStub()),
         cast(Any, mock.Mock()),
         OrchestrationConfig(),
-        Path(tempfile.gettempdir()),
+        make_result_reader(),
         logging.getLogger("test_dispatch_once_retry"),
         secret_vault=cast(Any, _NoopSecretVault()),
     )

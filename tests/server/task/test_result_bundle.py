@@ -16,10 +16,12 @@ from server.routers.v1.results import (
 def _populate_task_dir(task_dir: Path) -> None:
     (task_dir / "artifacts" / "images").mkdir(parents=True)
     (task_dir / "logs").mkdir(parents=True)
-    (task_dir / "results.json").write_text("{}", encoding="utf-8")
     (task_dir / "manifest.json").write_text('{"ok": true}', encoding="utf-8")
     (task_dir / "artifacts" / "images" / "a.png").write_bytes(b"aaa")
     (task_dir / "logs" / "logs.jsonl").write_text("line\n", encoding="utf-8")
+
+
+_RESULT = b'{"task_id": "task-1", "result": {}}'
 
 
 def _members(bundle_path: Path) -> set[str]:
@@ -35,7 +37,7 @@ def test_default_bundle_contains_result_and_artifacts_not_logs(
     _populate_task_dir(task_dir)
 
     bundle_path = _create_result_bundle_archive(
-        "task-1", task_dir, sections=_BUNDLE_SECTIONS_DEFAULT
+        "task-1", task_dir, _RESULT, sections=_BUNDLE_SECTIONS_DEFAULT
     )
     try:
         names = _members(bundle_path)
@@ -54,7 +56,7 @@ def test_result_only_bundle_has_single_file(tmp_path: Path) -> None:
     _populate_task_dir(task_dir)
 
     bundle_path = _create_result_bundle_archive(
-        "task-1", task_dir, sections=("results",)
+        "task-1", task_dir, _RESULT, sections=("results",)
     )
     try:
         names = _members(bundle_path)
@@ -69,7 +71,7 @@ def test_all_bundle_includes_every_concrete_section(tmp_path: Path) -> None:
     _populate_task_dir(task_dir)
 
     bundle_path = _create_result_bundle_archive(
-        "task-1", task_dir, sections=("results", "artifacts", "logs")
+        "task-1", task_dir, _RESULT, sections=("results", "artifacts", "logs")
     )
     try:
         names = _members(bundle_path)
@@ -101,3 +103,35 @@ def test_resolve_bundle_sections_rejects_unknown() -> None:
     with pytest.raises(HTTPException) as exc_info:
         _resolve_bundle_sections(["artifacts", "bogus"])
     assert exc_info.value.status_code == 400
+
+
+def test_bundle_results_entry_is_the_stored_envelope(tmp_path: Path) -> None:
+    task_dir = tmp_path / "task-1"
+    _populate_task_dir(task_dir)
+
+    bundle_path = _create_result_bundle_archive(
+        "task-1", task_dir, _RESULT, sections=("results",)
+    )
+    try:
+        with tarfile.open(bundle_path, mode="r:*") as archive:
+            member = archive.extractfile("task-1/results.json")
+            assert member is not None
+            assert member.read() == _RESULT
+    finally:
+        bundle_path.unlink(missing_ok=True)
+
+
+def test_bundle_without_a_result_omits_the_results_entry(tmp_path: Path) -> None:
+    task_dir = tmp_path / "task-1"
+    _populate_task_dir(task_dir)
+
+    bundle_path = _create_result_bundle_archive(
+        "task-1", task_dir, None, sections=("results", "artifacts")
+    )
+    try:
+        names = _members(bundle_path)
+    finally:
+        bundle_path.unlink(missing_ok=True)
+
+    assert "task-1/results.json" not in names
+    assert "task-1/artifacts/images/a.png" in names

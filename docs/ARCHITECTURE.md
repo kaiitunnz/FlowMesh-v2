@@ -421,9 +421,9 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   size a reader verifies it by, and nothing that says where it is or what it means. The
   control plane assigns the scope — a task's dispatch and a minted permit each carry the
   one their work writes under — so a worker carries a scope rather than asserting one. An
-  outcome finalization, a prepared inference request, and any later consumer each keep
-  their own binding to a reference, so an object is never a name for what a consumer
-  calls it, and identical bytes in two scopes are two objects.
+  outcome finalization, a prepared inference request, a task result, and any later
+  consumer each keep their own binding to a reference, so an object is never a name for
+  what a consumer calls it, and identical bytes in two scopes are two objects.
 - **The shared content store.** Every content object lives in one shared durable store —
   an S3-compatible service such as the MinIO a default deployment co-locates on the root
   node, cloud S3, or a filesystem every node mounts — reached through the same
@@ -468,6 +468,17 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   replayed grant, an evicted copy, or a holder that is gone costs a read from the shared
   store rather than a failure. Enable the cache and its transfers with
   `CONTENT_HYDRATION_ENABLED=true` (which requires `NETWORK_PLANE_ENABLED=true`).
+- **Task results.** A task's result lives in the shared content store: its worker
+  writes the result envelope there under the task's store access before it reports
+  success, and the success binds that reference once, at the commit that settles the
+  task, so a retry, relocation, or duplicate success converges on the result already
+  bound. A v2 task binds it into the ledger — its induced output slot, or for a spawned
+  child or later loop iteration the value its work item settled with — and a v1 task onto
+  its record. Every result the control plane reads — the result and bundle routes, stage
+  references, conditions, fan-out, and an agent's accepted inputs — resolves that binding
+  and reads the verified envelope from the store, holding no copy of its own; the results
+  directory keeps only a task's logs and artifacts. A task that outlives its store access
+  has it renewed while it still runs on the worker asking.
 - **Task merging.** Compatible adjacent tasks in a DAG (same `taskType`,
   model, hardware shape, and merge key) coalesce into a single dispatch.
   Merged children ride on `WorkerTaskMessage.merged_children`; the worker

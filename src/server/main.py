@@ -49,6 +49,7 @@ from .content import (
     StsScopedCredentialMinter,
     build_sts_client,
     ensure_bucket,
+    open_deployment_store,
 )
 from .dispatcher.factory import create_dispatcher
 from .hooks import register
@@ -87,6 +88,7 @@ from .startup import (
     start_relay_bridge_pump,
 )
 from .supervisor import WorkerSupervisor
+from .task.results import ResultReader
 from .task.runtime import TaskRuntime
 from .task.v2.policy import build_policy_surface
 from .telemetry import build_telemetry_store
@@ -136,19 +138,6 @@ REDIS_CLIENT = RedisClient(
 
 NODE_REGISTRY = NodeRegistry(REDIS_CLIENT, logger)
 
-FINALIZATION_INDEX = (
-    FinalizationIndex(REDIS_CLIENT)
-    if IS_ROOT_NODE and config.content_store.enabled
-    else None
-)
-
-# Control assigns the scope a unit of work materializes content under, and records it
-# against the key that work settles, so the finalization the producing worker later
-# reports binds in the scope control gave it rather than one the worker names.
-CONTENT_SCOPE_AUTHORITY = (
-    FINALIZATION_INDEX.assign_scope if FINALIZATION_INDEX is not None else None
-)
-
 METRICS_RECORDER = MetricsRecorder(
     METRICS_DIR,
     logger,
@@ -175,6 +164,7 @@ if config.worker_management.enabled:
 
 WORKFLOW_REGISTRY = None
 WORKER_REGISTRY = None
+FINALIZATION_INDEX: FinalizationIndex | None = None
 RUNTIME = None
 DISPATCHER = None
 SSH_AUDIT_SERVICE = None
@@ -203,6 +193,7 @@ ROOT_NODE_ID: str | None = None
 if IS_ROOT_NODE:
     WORKFLOW_REGISTRY = WorkflowRegistry(REDIS_CLIENT)
     WORKER_REGISTRY = WorkerRegistry(REDIS_CLIENT)
+    FINALIZATION_INDEX = FinalizationIndex(REDIS_CLIENT)
     MODEL_SECRET_VAULT = ModelSecretVault(
         REDIS_CLIENT, config.orchestration.model_secret_vault.ttl_sec, logger
     )
@@ -228,14 +219,14 @@ if IS_ROOT_NODE:
         WORKFLOW_REGISTRY,
         WORKER_REGISTRY,
         config.orchestration,
-        RESULTS_DIR,
+        ResultReader(open_deployment_store(config.object_store)),
         logger,
         secret_vault=MODEL_SECRET_VAULT,
         surface=POLICY_SURFACE,
         control=CONTROL_TRACER,
         tracer=SERVER_TRACER,
         telemetry=config.telemetry,
-        content_scope_authority=CONTENT_SCOPE_AUTHORITY,
+        content_scope_authority=FINALIZATION_INDEX.assign_scope,
     )
     TELEMETRY_STORE = build_telemetry_store(config.telemetry_store)
     AGENT_MODEL_GATEWAY = AgentModelGateway(
@@ -277,7 +268,7 @@ if IS_ROOT_NODE:
             registry=RESIDENT_REGISTRY,
             logger=logger,
             control=CONTROL_TRACER,
-            content_scope_authority=CONTENT_SCOPE_AUTHORITY,
+            content_scope_authority=FINALIZATION_INDEX.assign_scope,
         )
         RUNTIME.set_resident_terminal_hook(RESIDENT_CONTROL.on_invocation_terminal)
         RUNTIME.set_resident_handlers(
@@ -368,29 +359,26 @@ if IS_ROOT_NODE:
         SERVE_FORWARD_INGRESS = _serve_wiring.forward_ingress
         SERVE_BINDINGS = _serve_wiring.bindings
 
-    CONTENT_ACCESS: ContentAccessBroker | None = None
     # Reaching the store is not the cache's business: every dispatched task needs access
     # to write what it produces, whether or not this deployment caches anything.
-    if config.content_store.enabled:
-        _store_cfg = config.object_store
-        if _store_cfg.scoped_credentials and _store_cfg.backend == BACKEND_S3:
-            _minter: ScopedCredentialMinter = StsScopedCredentialMinter(
-                _store_cfg, build_sts_client(_store_cfg)
-            )
-        else:
-            _minter = DeploymentCredentialMinter(_store_cfg, logger)
-        CONTENT_ACCESS = ContentAccessBroker(
-            WORKER_REGISTRY,
-            _minter,
-            grant_ttl_sec=config.content_store.access_grant_ttl_sec,
-            logger=logger,
+    _store_cfg = config.object_store
+    if _store_cfg.scoped_credentials and _store_cfg.backend == BACKEND_S3:
+        _minter: ScopedCredentialMinter = StsScopedCredentialMinter(
+            _store_cfg, build_sts_client(_store_cfg)
         )
+    else:
+        _minter = DeploymentCredentialMinter(_store_cfg, logger)
+    CONTENT_ACCESS = ContentAccessBroker(
+        WORKER_REGISTRY,
+        _minter,
+        grant_ttl_sec=config.content_store.access_grant_ttl_sec,
+        logger=logger,
+    )
 
     DISPATCHER = create_dispatcher(
         config.dispatch,
         RUNTIME,
         WORKER_REGISTRY,
-        RESULTS_DIR,
         logger=logger,
         metrics_recorder=METRICS_RECORDER,
         resident_capacity_enabled=config.orchestration.resident.enabled,
@@ -466,6 +454,7 @@ if IS_ROOT_NODE:
             NETWORK_PLANE.forget_node if NETWORK_PLANE is not None else None
         ),
         content_authority=CONTENT_AUTHORITY,
+        content_access=CONTENT_ACCESS,
     )
     # The runtime settles terminals the task-event stream never carries, so it tells
     # the monitor's finalizer when a workflow may have ended; the finalizer decides.
@@ -651,10 +640,7 @@ async def _lifespan(_: FastAPI):
 
         # --- Root-only startup ---
         if IS_ROOT_NODE:
-            if (
-                config.content_store.enabled
-                and config.object_store.backend == BACKEND_S3
-            ):
+            if config.object_store.backend == BACKEND_S3:
                 # Off the loop and off import: reaching the store can block for as long
                 # as its own timeouts allow, and a store that is slow or unreachable
                 # must not hold up the process that would report it.

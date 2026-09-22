@@ -15,7 +15,13 @@ from pathlib import Path
 from shared.utils.atomic import atomic_write_bytes
 
 from .reference import OCTET_STREAM, ContentReference
-from .store import ContentHydrationError, ContentStoreError, reference_for
+from .store import (
+    ContentHydrationError,
+    ContentStoreError,
+    ContentUnavailable,
+    FabricObjectStore,
+    reference_for,
+)
 
 _SAFE = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
 
@@ -58,7 +64,12 @@ class FilesystemObjectBacking:
         path = self.object_path(scope, digest)
         if not path.exists():
             raise ContentHydrationError(f"no content for {digest} in scope {scope}")
-        return path.read_bytes()
+        try:
+            return path.read_bytes()
+        except OSError as exc:
+            raise ContentUnavailable(
+                f"could not read {digest} in scope {scope}: {exc}"
+            ) from exc
 
     def holds(self, scope: str, digest: str) -> bool:
         return self.object_path(scope, digest).exists()
@@ -90,3 +101,25 @@ class FilesystemObjectBacking:
                 for entry in shard.iterdir():
                     if entry.is_file():
                         yield scope_dir.name, entry.name
+
+
+class SharedFilesystemObjectStore(FabricObjectStore):
+    """The shared durable store on a filesystem every node mounts at the same path.
+
+    Isolation here is the filesystem's: a deployment gets per-scope separation only
+    where projected identities, mounts, or ACLs enforce it, because a directory name
+    under one shared identity does not.
+    """
+
+    def __init__(self, root: Path) -> None:
+        self._objects = FilesystemObjectBacking(root)
+
+    def write(
+        self, scope: str, data: bytes, *, media_type: str = OCTET_STREAM
+    ) -> ContentReference:
+        return self._objects.write(scope, data, media_type=media_type)
+
+    def fetch(self, reference: ContentReference) -> bytes:
+        return self._objects.read(
+            reference.authorization_scope, reference.content_digest
+        )

@@ -1,8 +1,6 @@
 """Versioned v2 plan-time representations and the compatibility gate."""
 
 import logging
-import tempfile
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -32,6 +30,7 @@ from server.task.v2.compiler.agent_binding import AgentBindingDefaults
 from server.task.v2.compiler.bindings import leaf_profile as _leaf_profile
 from server.task.v2.representations.operators import EqualityRelationKind
 from shared.tasks import TaskType
+from tests.server.result_store import make_result_reader
 from tests.server.task.test_v2_orchestration import _NoopSecretVault
 
 _BINDINGS = AgentBindingDefaults(default_backend="codex")
@@ -113,7 +112,7 @@ def _runtime(registry: _CapturingRegistry) -> TaskRuntime:
         cast(Any, registry),
         cast(Any, _WorkerRegistryStub()),
         OrchestrationConfig(),
-        Path(tempfile.gettempdir()),
+        make_result_reader(),
         logging.getLogger("v2-test"),
         secret_vault=cast(Any, _NoopSecretVault()),
     )

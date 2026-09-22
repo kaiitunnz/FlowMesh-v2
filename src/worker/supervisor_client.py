@@ -660,10 +660,30 @@ class SupervisorClient:
             "CONTENT_HYDRATION_REQUEST", {"reference": reference, "task_id": task_id}
         )
 
-    def _push_event(self, event_type: str, payload: dict[str, Any]) -> None:
+    def push_content_access_request(
+        self, task_id: str, ready_timeout_sec: float = 5.0
+    ) -> None:
+        """Ask control to renew one task's access to the shared content store.
+
+        It runs on a result write, so a stream that is not ready fails the request
+        rather than holding the write.
+        """
+        self._push_event(
+            "CONTENT_ACCESS_REQUEST",
+            {"task_id": task_id},
+            ready_timeout_sec=ready_timeout_sec,
+        )
+
+    def _push_event(
+        self,
+        event_type: str,
+        payload: dict[str, Any],
+        *,
+        ready_timeout_sec: float | None = None,
+    ) -> None:
         if self._stub is None:
             raise RuntimeError("Supervisor gRPC client not started")
-        if not self._event_ready.wait():
+        if not self._event_ready.wait(ready_timeout_sec):
             raise RuntimeError("Supervisor event stream not ready")
         self._event_queue.put(
             serialize_event(

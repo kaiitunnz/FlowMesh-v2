@@ -63,7 +63,6 @@ listed here is in `.env.example`.
 | `WEB_SEARCH_TIMEOUT_SEC` | `20` | Search request timeout (seconds) |
 | `WEB_SEARCH_RESULT_CHAR_CAP` | `6000` | Injected result size cap |
 | `WEB_SEARCH_MAX_PARALLEL_CALLS_PER_TURN` | `4` | Parallel searches per turn |
-| `CONTENT_STORE_ENABLED` | `true` | Serve the outcome finalization index |
 | `CONTENT_STORE_BACKEND` | `s3` | Shared content store backend (`s3` or `filesystem`) |
 | `CONTENT_STORE_ENDPOINT_URL` | – | S3-compatible endpoint; the co-located store if empty |
 | `CONTENT_STORE_BUCKET` | `flowmesh-content` | Bucket holding fabric content |
@@ -161,12 +160,9 @@ listed here is in `.env.example`.
 **Notes:**
 - In Docker deployments, `SERVER_RESULTS_DIR` and `WORKER_RESULTS_DIR`
 are the host directories or Docker volumes mounted into the server and
-worker containers for storing and reading task results. For workflows
-with a local output destination (`spec.output.destination.type="local"`)
-that have downstream tasks, both variables must point to the same shared
-directory or volume so the server can access the worker's task results.
-Otherwise, downstream tasks that depend on upstream outputs will stall
-in the dispatching loop indefinitely.
+worker containers for task logs and artifacts. Task results live in the
+shared content store, so a downstream task reads its upstream's result
+wherever that task ran.
 - When multiple deployments share one host, you can set `FLOWMESH_STACK_SUFFIX`
 in `.env` to differentiate the deployments so that FlowMesh stack CLI does
 not interfere with each other.
@@ -185,7 +181,7 @@ Spark), set `DOCKER_GPU_RUNTIME=` in the stack env.
 | `WORKER_PRIVATE_STATE_DIR` | – | Root for activation-private harness state; defaults to a private subdirectory of `RESULTS_DIR` |
 | `WORKER_TAGS` | `` | Scheduler hints |
 | `WORKER_COST_PER_HOUR` | `1.0` | Cost metadata |
-| `WORKER_UPLOAD_RESULTS` | `false` | Upload results when no destination set |
+| `WORKER_UPLOAD_RESULTS` | `false` | Upload artifacts when no destination set |
 | `WORKER_EXECUTOR_IDLE_CLEANUP_SEC` | `60` | Seconds a worker waits before unloading an idle executor to release the resources it holds; higher values avoid reload thrash between tasks but keep those resources reserved while idle |
 | `HF_CACHE_DIR` | – | Shared HuggingFace cache mount |
 | `HEARTBEAT_INTERVAL_SEC` | `30` | Heartbeat cadence |

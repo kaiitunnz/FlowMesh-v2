@@ -1,8 +1,6 @@
 """Tests for preparing an undeclared-envelope leaf's inputs before it is selected."""
 
 import logging
-import tempfile
-from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -17,6 +15,7 @@ from shared.inference import (
     ResolvedInputMaterialization,
 )
 from shared.utils.time import now_iso
+from tests.server.result_store import make_result_reader
 from tests.server.task.test_v2_embodiment_fence import (
     _NoopSecretVault,
     _upstream_task,
@@ -34,7 +33,7 @@ def _runtime(
         cast(Any, registry or FakeRegistry()),
         cast(Any, _WorkerRegistryStub()),
         OrchestrationConfig(max_prepared_input_bytes=max_prepared_input_bytes),
-        Path(tempfile.gettempdir()),
+        make_result_reader(),
         logging.getLogger("input-preparation-test"),
         secret_vault=cast(Any, _NoopSecretVault()),
     )
