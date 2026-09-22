@@ -34,10 +34,7 @@ class WorkerTaskMessage(BaseModel):
     owner_id: str = Field(description="Owner principal identifier.")
     content_scope: str = Field(
         default="",
-        description=(
-            "The authorization scope content this task writes is isolated in, assigned "
-            "by the control plane from the task's owner."
-        ),
+        description="Authorization scope for this task's content, assigned by control.",
     )
     task: TaskEnvelopeStrict = Field(description="Task payload.")
     task_type: str | None = Field(default=None, description="Task type hint.")
