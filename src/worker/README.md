@@ -1,11 +1,11 @@
 # FlowMesh Worker
 
-FlowMesh workers communicate with a per-node **supervisor** that relays tasks,
-telemetry, and results to the central server. Each worker opens a gRPC
-connection to its supervisor, receives assignments, executes them via the
-appropriate executor (Transformers, TRL, vLLM, RAG, agents, etc.), and
-persists results plus optional artifacts to either shared storage or the
-server via HTTP callbacks.
+FlowMesh workers communicate with a per-node **supervisor** that relays tasks
+and telemetry to the central server. Each worker opens a gRPC connection to its
+supervisor, receives assignments, executes them via the appropriate executor
+(Transformers, TRL, vLLM, RAG, agents, etc.), stores each result in the shared
+content store, and keeps optional artifacts in shared storage or uploads them to
+the server over HTTP.
 
 ## Quick Start (local)
 ### 1. Install dependencies with uv
@@ -62,9 +62,9 @@ At startup the worker:
 | `MODEL_ARCHIVE_PIGZ_THREADS` | – | Force a specific thread count for `pigz`; defaults to all CPUs. |
 | `MODEL_ARCHIVE_PIGZ_BIN` | `pigz` | Path to the `pigz` binary. |
 | `MODEL_ARCHIVE_TAR_BIN` | `tar` | Tar executable used before compression. |
-| `WORKER_NETWORK_BANDWIDTH_BYTES_PER_SEC` | empty | Throttle HTTP uploads to emulate limited bandwidth. |
+| `WORKER_NETWORK_BANDWIDTH_BYTES_PER_SEC` | empty | Network bandwidth the worker advertises. |
 | `WORKER_HB_FILE` | – | Full path to the worker heartbeat file. |
-| `WORKER_UPLOAD_RESULTS` | `false` | Whether the worker should always upload results to the server if spec.output.destination is unspecified. |
+| `WORKER_UPLOAD_RESULTS` | `false` | Whether the worker should always upload artifacts to the server if spec.output.destination is unspecified. |
 | `WORKER_EXECUTOR_IDLE_CLEANUP_SEC` | `60` | Seconds a worker waits before unloading an idle executor to release the resources it holds; higher values avoid reload thrash between tasks but keep those resources reserved while idle. |
 
 > The heartbeat TTL is computed automatically as `max(HEARTBEAT_INTERVAL_SEC * 4, 120)`.
@@ -75,7 +75,9 @@ At startup the worker:
 
 ## Output directories
 - Every task receives a dedicated subdirectory under `RESULTS_DIR`.
-- Executors write their JSON summary to `<task_id>/results.json`.
+- Executors write their JSON summary to `<task_id>/results.json`; the worker also
+  stores it in the shared content store before reporting the task done, and that
+  stored copy is what the server serves.
 - Training executors produce checkpoints and, when HTTP uploads are enabled,
   create `final_model.tar.gz` or `final_lora.tar.gz`.
 
@@ -145,6 +147,5 @@ Relevant env vars for SSH tasks:
   sets `tensor_parallel_size`, and PPO/DPO/SFT executors launch distributed jobs
   via `torchrun`. Override `training.allow_multi_gpu=false` or
   `training.nproc_per_node` to constrain world size.
-- **Bandwidth throttling**: set `WORKER_NETWORK_BANDWIDTH_BYTES_PER_SEC` to
-  simulate limited HTTP throughput; the worker reports the value and delays
-  callbacks accordingly.
+- **Advertised bandwidth**: set `WORKER_NETWORK_BANDWIDTH_BYTES_PER_SEC` to
+  report the worker's network bandwidth to the scheduler.

@@ -25,8 +25,6 @@ spec:
       - - role: user
           content: What is the capital of France?
   inference: { max_tokens: 64, temperature: 0.0 }
-  output:
-    destination: { type: http }
 ```
 
 ## Multi-stage DAG
