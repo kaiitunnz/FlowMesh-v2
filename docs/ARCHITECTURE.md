@@ -479,14 +479,12 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   and reads the verified envelope from the store, holding no copy of its own; the results
   directory keeps only a task's logs and artifacts. A task that outlives its store access
   has it renewed while it still runs on the worker asking.
-- **Task merging.** Ready v1 tasks whose specs differ only in their inputs
-  (`data`, and an inference task's `system_prompt`) coalesce into a single
-  dispatch when the selected worker's executor for them runs every merged child
-  and returns each one's own result — vLLM inference, with or without LoRA
-  adapters. Each worker advertises those executors beside its task types.
-  Merged children ride on `WorkerTaskMessage.merged_children` and come back in
-  `result.children`. A merged task settles only with its own outcome: a child
-  the dispatch returned no result for, or whose parent failed or was cancelled,
+- **Task merging.** Ready v1 tasks of one org whose specs differ only in their
+  inputs (`data`, and an inference task's `system_prompt`) coalesce into one
+  dispatch on a worker whose executor returns each merged child's own result —
+  vLLM inference, with or without LoRA adapters. Merged children ride on
+  `WorkerTaskMessage.merged_children` and come back in `result.children`. A child
+  the dispatch returns no result for, or whose parent fails or is cancelled,
   returns to the queue and runs alone without spending an attempt. Disable with
   `ENABLE_TASK_MERGE=false`.
 - **Stage stickiness** (`ENABLE_STAGE_WEIGHT_STICKINESS=true`) — the
@@ -498,9 +496,9 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   `WorkerHardware`. The dispatcher's `_cached_worker_candidates` filters
   to workers whose cache covers the task's references; entries older
   than `WORKER_CACHE_TTL_SEC` are ignored.
-- **Worker capabilities.** Beyond hardware fit, each worker advertises the set
-  of task types it can service, and the dispatcher routes a task only to workers
-  that advertise its type. A worker advertises a type only when its executor came
+- **Worker capabilities.** Beyond hardware fit, each worker advertises the task
+  types it can service and the executors that run merged children; the dispatcher
+  routes a task only to workers that advertise its type. A worker advertises a type only when its executor came
   up — e.g. SSH requires a reachable Docker daemon, and training or omni types
   require their (often GPU-only) dependencies — so a worker missing that executor
   isn't a candidate, rather than being handed a task it would fail.

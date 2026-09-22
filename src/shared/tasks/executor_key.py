@@ -49,11 +49,7 @@ _EXECUTOR_BY_TASK_TYPE: dict[TaskType, ExecutorKey] = {
 def resolve_executor_key(
     spec: TaskSpecStrict | TaskSpecTemplate,
 ) -> ExecutorKey | None:
-    """The executor a task's spec runs on, or None while an unresolved template field
-    still decides it.
-
-    A worker without that executor runs the task on its default executor.
-    """
+    """The executor a spec runs on, or None when a template placeholder decides it."""
     match spec:
         case InferenceSpecStrict() | InferenceSpecTemplate():
             if isinstance(spec.enforce_cpu, str):

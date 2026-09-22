@@ -1,7 +1,8 @@
 # Task types and executor registry
 
-The worker resolves `spec.taskType` against an executor registry in
-`src/worker/runner.py`. Built-in executors:
+The worker runs each task on the executor its spec resolves to
+(`resolve_executor_key` in `src/shared/tasks/executor_key.py`), looked up in the
+registry in `src/worker/executors/__init__.py`. Built-in executors:
 
 | `taskType` | Executor | Use case |
 |-----------|----------|----------|
