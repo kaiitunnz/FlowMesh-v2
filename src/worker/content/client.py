@@ -13,6 +13,7 @@ is a typed hydration failure and the consumer's own recovery decides what follow
 import asyncio
 import contextlib
 import logging
+import time
 from collections import deque
 from collections.abc import Callable, Sequence
 
@@ -58,20 +59,33 @@ class ContentHydrationClient:
         *,
         sink: FrameSink,
         request_grant: RequestGrant,
-        transfer_timeout_sec: float = 60.0,
+        transfer_timeout_sec: float = 120.0,
         window_bytes: int = 65536,
         logger: logging.Logger | None = None,
     ) -> None:
         self._sink = sink
         self._request_grant = request_grant
+        # Every wait here is bounded by how long a transfer may go without progress,
+        # never by how long it takes: a large object over a slow link runs as long as
+        # its frames keep arriving.
         self._timeout = transfer_timeout_sec
+        self._last_progress = time.monotonic()
         self._window_bytes = window_bytes
         self._logger = logger or logging.getLogger("content-hydration")
         self._waiters: dict[_WaitKey, deque[_Answer]] = {}
         self._sessions: dict[str, FramedRelaySession] = {}
 
+    @property
+    def last_progress(self) -> float:
+        """When a transfer here last moved, on the monotonic clock."""
+        return self._last_progress
+
+    def _progressed(self) -> None:
+        self._last_progress = time.monotonic()
+
     async def hydrate(self, reference: ContentReference, task_id: str) -> bytes:
         """Fetch and verify one object from whichever holder control resolves."""
+        self._progressed()
         grant = await self._grant_for(reference, task_id)
         session = FramedRelaySession(
             session_id=grant.transfer_session_id,
@@ -163,6 +177,7 @@ class ContentHydrationClient:
 
     def deliver_grant(self, grant: ContentHydrationGrant) -> None:
         """Hand a control-minted grant to the request waiting for its object."""
+        self._progressed()
         self._settle(
             (
                 grant.reference.authorization_scope,
@@ -173,6 +188,7 @@ class ContentHydrationClient:
 
     def deliver_denial(self, reference: ContentReference, reason: str) -> None:
         """Fail the request waiting on this object with control's typed reason."""
+        self._progressed()
         self._settle((reference.authorization_scope, reference.content_digest), reason)
 
     def _settle(self, key: _WaitKey, answer: ContentHydrationGrant | str) -> None:
@@ -199,4 +215,5 @@ class ContentHydrationClient:
         """Route one inbound frame into the transfer waiting for it."""
         session = self._sessions.get(frame.session_id)
         if session is not None:
+            self._progressed()
             await session.on_frame(frame)

@@ -13,6 +13,7 @@ import concurrent.futures
 import contextlib
 import logging
 import threading
+import time
 from collections.abc import Callable, Coroutine
 from typing import Any
 
@@ -41,7 +42,7 @@ class ContentLaneHost:
         request_grant: RequestGrant,
         worker_id: str,
         generation: int,
-        transfer_timeout_sec: float = 60.0,
+        transfer_timeout_sec: float = 120.0,
         announce: AnnounceHolding | None = None,
         holder_report_ttl_sec: float = 300.0,
         logger: logging.Logger | None = None,
@@ -78,6 +79,7 @@ class ContentLaneHost:
             sink=sink,
             holder_id=self._worker_id,
             generation=self._generation,
+            stall_timeout_sec=self._transfer_timeout_sec,
             logger=self._logger,
         )
         self._client = ContentHydrationClient(
@@ -99,19 +101,25 @@ class ContentLaneHost:
             raise RuntimeError("content lane is not started")
         client = self._client
         transfer = self._call(lambda: client.hydrate(reference, task_id))
-        try:
-            # The client bounds its own wait; this is the backstop for a transfer that
-            # never returns at all, and it fails the read the same typed way.
-            data = transfer.result(timeout=self._transfer_timeout_sec * 2)
+        # The client bounds each wait by the stall timeout, so a transfer that keeps
+        # making progress runs as long as it needs. This is the backstop for a lane
+        # that stops making any progress at all, and it fails the read the same typed
+        # way.
+        while True:
+            try:
+                data = transfer.result(timeout=self._transfer_timeout_sec)
+            except concurrent.futures.TimeoutError as exc:
+                idle = time.monotonic() - client.last_progress
+                if idle < self._transfer_timeout_sec * 2:
+                    continue
+                transfer.cancel()
+                raise ContentHydrationError(
+                    f"hydrating {reference.content_digest} stopped making progress"
+                ) from exc
             self._logger.info(
                 "content %s read from a peer cache", reference.content_digest
             )
             return data
-        except concurrent.futures.TimeoutError as exc:
-            transfer.cancel()
-            raise ContentHydrationError(
-                f"hydrating {reference.content_digest} did not complete in time"
-            ) from exc
 
     def keep(
         self, scope: str, data: bytes, *, media_type: str = OCTET_STREAM

@@ -768,8 +768,10 @@ STACK_ENV_SCHEMA = EnvSchema(
                 ),
                 EnvVar(
                     "CONTENT_TRANSFER_TIMEOUT_SEC",
-                    "60",
-                    description="Content transfer deadline (seconds).",
+                    "120",
+                    description=(
+                        "Longest a content transfer may go without progress (seconds)."
+                    ),
                     var_type=EnvVarType.FLOAT,
                     min_value=0,
                     min_inclusive=False,

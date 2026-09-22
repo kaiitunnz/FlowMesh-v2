@@ -13,7 +13,7 @@ from shared.content import (
     ContentReference,
     reference_for,
 )
-from shared.content.wire import KIND_FETCH, KIND_REJECT
+from shared.content.wire import CHUNK_BYTES, KIND_FETCH, KIND_REJECT
 from shared.network.relay_frame import RelayFrame, RelayFrameKind
 from shared.network.session import FramedRelaySession, RelaySessionRole
 from shared.utils.ids import new_hydration_grant_id, new_relay_session_id
@@ -369,3 +369,110 @@ async def test_an_abandoned_transfer_releases_the_holder(tmp_path) -> None:
     assert pair.holder.in_transfer == frozenset()
     full = WorkerContentCache(pair.store_root, max_bytes=1)
     assert full.evict(in_transfer=pair.holder.in_transfer) == 1
+
+
+class _PacedToPeer(_ToPeer):
+    """A sink that holds each window grant back, so a transfer crawls but moves."""
+
+    def __init__(self, pace_sec: float) -> None:
+        super().__init__()
+        self._pace_sec = pace_sec
+
+    async def send(self, frame: RelayFrame) -> None:
+        if frame.kind is RelayFrameKind.WINDOW:
+            await asyncio.sleep(self._pace_sec)
+        await super().send(frame)
+
+
+class _SilentToPeer(_ToPeer):
+    """A sink that drops every window grant, as a requester that stopped reading."""
+
+    async def send(self, frame: RelayFrame) -> None:
+        if frame.kind is RelayFrameKind.WINDOW:
+            self.frames.append(frame)
+            return
+        await super().send(frame)
+
+
+@pytest.mark.asyncio
+async def test_a_slow_transfer_runs_as_long_as_it_keeps_progressing(tmp_path) -> None:
+    """The timeout bounds a stall, not a transfer: slow-but-moving bytes all arrive.
+
+    Every window grant is held back, and a chunk frees room for the next only once two
+    grants have landed, so each chunk waits half the stall timeout: the whole transfer
+    takes several times that timeout while never going that long without progress.
+    """
+    stall = 0.3
+    body = b"x" * (CHUNK_BYTES * 10)
+    store = WorkerContentCache(tmp_path / "held")
+    reference = store.write("local", body)
+    to_requester, to_holder = _ToPeer(), _PacedToPeer(pace_sec=stall / 4)
+    holder = ContentHolder(
+        store=store,
+        sink=to_requester,
+        holder_id="wkr-1",
+        generation=1,
+        window_bytes=CHUNK_BYTES + 1024,
+        stall_timeout_sec=stall,
+    )
+    client = ContentHydrationClient(
+        sink=to_holder,
+        request_grant=lambda reference, task_id: None,
+        transfer_timeout_sec=stall,
+        window_bytes=CHUNK_BYTES + 1024,
+    )
+    to_requester.peer = client.on_frame
+    to_holder.peer = holder.on_frame
+    grant = _grant(reference)
+    holder.accept_grant(grant)
+
+    started = time.monotonic()
+    hydration = asyncio.ensure_future(client.hydrate(reference, "tsk-1"))
+    await asyncio.sleep(0)
+    client.deliver_grant(grant)
+
+    assert await hydration == body
+    assert time.monotonic() - started > stall * 2
+
+
+@pytest.mark.asyncio
+async def test_a_holder_gives_up_a_requester_that_stops_reading(tmp_path) -> None:
+    """A requester that goes silent costs the holder one stall timeout, not forever."""
+    stall = 0.2
+    body = b"x" * (CHUNK_BYTES * 3)
+    store = WorkerContentCache(tmp_path / "held")
+    reference = store.write("local", body)
+    to_requester, to_holder = _ToPeer(), _SilentToPeer()
+    holder = ContentHolder(
+        store=store,
+        sink=to_requester,
+        holder_id="wkr-1",
+        generation=1,
+        window_bytes=CHUNK_BYTES + 1024,
+        stall_timeout_sec=stall,
+    )
+    client = ContentHydrationClient(
+        sink=to_holder,
+        request_grant=lambda reference, task_id: None,
+        transfer_timeout_sec=30.0,
+        window_bytes=CHUNK_BYTES + 1024,
+    )
+    to_requester.peer = client.on_frame
+    to_holder.peer = holder.on_frame
+    grant = _grant(reference)
+    holder.accept_grant(grant)
+
+    hydration = asyncio.ensure_future(client.hydrate(reference, "tsk-1"))
+    await asyncio.sleep(0)
+    client.deliver_grant(grant)
+    for _ in range(50):
+        await asyncio.sleep(0.02)
+        if reference.content_digest in holder.in_transfer:
+            break
+    assert reference.content_digest in holder.in_transfer
+
+    await asyncio.sleep(stall * 3)
+    assert holder.in_transfer == frozenset()
+    hydration.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await hydration

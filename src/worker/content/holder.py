@@ -42,8 +42,9 @@ _GRANT_ARRIVAL_WAIT_SEC = 2.0
 # A transfer only advances as the requester drains and grants window, so a requester
 # that stops — a timeout, a crash, a killed worker — would otherwise leave this serve
 # blocked forever, holding its task, the object's bytes, and the digest against
-# eviction. The serve is bounded so a peer that goes quiet costs one transfer.
-_SERVE_TIMEOUT_SEC = 60.0
+# eviction. A serve that makes no progress for this long is given up, so a peer that
+# goes quiet costs one transfer, while one that keeps reading runs as long as it needs.
+_STALL_TIMEOUT_SEC = 120.0
 
 
 class ContentHolder:
@@ -58,7 +59,7 @@ class ContentHolder:
         generation: int,
         window_bytes: int = 65536,
         grant_arrival_wait_sec: float = _GRANT_ARRIVAL_WAIT_SEC,
-        serve_timeout_sec: float = _SERVE_TIMEOUT_SEC,
+        stall_timeout_sec: float = _STALL_TIMEOUT_SEC,
         logger: logging.Logger | None = None,
     ) -> None:
         self._store = store
@@ -66,7 +67,7 @@ class ContentHolder:
         self._gate = HolderGrantGate(holder_id=holder_id, generation=generation)
         self._window_bytes = window_bytes
         self._grant_arrival_wait_sec = grant_arrival_wait_sec
-        self._serve_timeout_sec = serve_timeout_sec
+        self._stall_timeout_sec = stall_timeout_sec
         self._logger = logger or logging.getLogger("content-holder")
         self._sessions: dict[str, FramedRelaySession] = {}
         self._serves: dict[str, asyncio.Task[None]] = {}
@@ -169,12 +170,15 @@ class ContentHolder:
             self._logger.warning("holder cannot serve %s: %s", session_id, exc)
             await session.send_wire(KIND_REJECT, reason="unavailable")
             return
-        async with asyncio.timeout(self._serve_timeout_sec):
+        loop = asyncio.get_running_loop()
+        async with asyncio.timeout(self._stall_timeout_sec) as stall:
             await session.send_wire(KIND_HEAD, size_bytes=len(data))
             for start in range(0, len(data), CHUNK_BYTES):
+                stall.reschedule(loop.time() + self._stall_timeout_sec)
                 await session.send_body_wire(
                     KIND_CHUNK, data[start : start + CHUNK_BYTES]
                 )
+            stall.reschedule(loop.time() + self._stall_timeout_sec)
             await session.send_wire(KIND_DONE)
 
     async def _await_grant(self, grant_id: str) -> bool:
