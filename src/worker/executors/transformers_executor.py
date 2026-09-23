@@ -391,6 +391,26 @@ class HFTransformersExecutor(InferenceMixin, Executor):
 
         return GenerationConfig(**config_kwargs)
 
+    def _eos_ids(self) -> set[int]:
+        eos_token_id = self._tok.eos_token_id if self._tok is not None else None
+        return (
+            {eos_token_id} if isinstance(eos_token_id, int) else set(eos_token_id or [])
+        )
+
+    def _own_generation(self, generated: "torch.Tensor") -> "torch.Tensor":
+        """A batch row's own generated tokens: through its first EOS, without the pads
+        that fill it to the batch's longest generation."""
+        eos_ids = self._eos_ids()
+        tokens = [int(token) for token in generated]
+        for index, token in enumerate(tokens):
+            if token in eos_ids:
+                return generated[: index + 1]
+        pad_token_id = self._tok.pad_token_id if self._tok is not None else None
+        end = len(tokens)
+        while end and tokens[end - 1] == pad_token_id:
+            end -= 1
+        return generated[:end]
+
     def _detect_finish_reason(
         self,
         raw_text: str,
@@ -401,10 +421,7 @@ class HFTransformersExecutor(InferenceMixin, Executor):
     ) -> str | None:
         if stop_strings and raw_text != final_text:
             return "stop"
-        eos_token_id = self._tok.eos_token_id if self._tok is not None else None
-        eos_ids = (
-            {eos_token_id} if isinstance(eos_token_id, int) else set(eos_token_id or [])
-        )
+        eos_ids = self._eos_ids()
         if eos_ids and len(gen_ids) > 0 and int(gen_ids[-1]) in eos_ids:
             return "stop"
         if len(gen_ids) >= max_new_tokens:
@@ -543,7 +560,11 @@ class HFTransformersExecutor(InferenceMixin, Executor):
                 )
                 if not child_entry.prompts:
                     raise ExecutionError("No prompts prepared.")
-            except ExecutionError as exc:
+                if child_entry.applied_chat_template != prepared.applied_chat_template:
+                    raise ExecutionError(
+                        "its prompts are templated differently from the batch's"
+                    )
+            except Exception as exc:
                 logger.warning(
                     "Leaving merged child %s out of the batch: %s", child.task_id, exc
                 )
@@ -613,12 +634,18 @@ class HFTransformersExecutor(InferenceMixin, Executor):
         # For each sequence in the batch, split prompt vs generated part
         input_ids = enc["input_ids"]
         max_new_tokens = gen_cfg.max_new_tokens
-        for owner, inp_ids, seq, prompt_text, metadata_entry in zip(
-            owners, input_ids, outputs, self._prompts, self._metadata, strict=True
+        for owner, inp_ids, mask, seq, prompt_text, metadata_entry in zip(
+            owners,
+            input_ids,
+            enc["attention_mask"],
+            outputs,
+            self._prompts,
+            self._metadata,
+            strict=True,
         ):
             i = len(items[owner])
-            input_len = int(inp_ids.shape[0])
-            gen_part = seq[input_len:]
+            input_len = int(mask.sum())
+            gen_part = self._own_generation(seq[int(inp_ids.shape[0]) :])
             raw_text = self._tok.decode(
                 gen_part, skip_special_tokens=skip_special_tokens
             )
@@ -687,13 +714,24 @@ class HFTransformersExecutor(InferenceMixin, Executor):
         for (owner_id, owner_spec, owner_dir), owner_items in zip(
             batch, export_items, strict=True
         ):
-            if isinstance(owner_spec, InferenceSpecStrict):
+            if not isinstance(owner_spec, InferenceSpecStrict):
+                continue
+            try:
                 self._maybe_export_jsonl(owner_spec, owner_id, owner_items, owner_dir)
+            except ExecutionError as exc:
+                if owner_id == task_id:
+                    raise
+                logger.warning(
+                    "Leaving merged child %s out of the result: %s", owner_id, exc
+                )
+                del result.children[owner_id]
+                del dependencies_by_task[owner_id]
 
         self._dump_to_governance(
             task_id=task_id,
             result=result,
             dependencies_by_task=dependencies_by_task,
+            owners={child.task_id: child.owner_id for child in merged_children},
         )
 
         return result
