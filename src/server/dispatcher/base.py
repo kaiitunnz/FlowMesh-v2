@@ -864,6 +864,7 @@ class Dispatcher:
                     )
                     self._runtime.release_merged_child(task_id, child_id, key)
                     continue
+                # Rendering runs off the runtime lock; the child may have left since.
                 if self._runtime.merged_child_record(task_id, child_id) is None:
                     continue
                 rendered.append(

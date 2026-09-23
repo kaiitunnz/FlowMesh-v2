@@ -160,18 +160,14 @@ class TaskRecord(BaseModel):
         default=None, description="Selected worker identifiers."
     )
     merged_children: list[str] | None = Field(
-        default=None,
-        description=(
-            "Tasks merged into this task's dispatch; once it succeeds, the ones it "
-            "settled with results of their own."
-        ),
+        default=None, description="Merged child task identifiers."
     )
     merged_parent_id: str | None = Field(
         default=None, description="Merged parent task identifier."
     )
     merged_dispatch_worker: str | None = Field(
         default=None,
-        description="Worker the task's current merged dispatch was sent to.",
+        description="Worker the task's last merged dispatch went to.",
         exclude=True,
     )
     merge_slice: dict[str, int] | None = Field(
