@@ -915,7 +915,12 @@ async def test_a_cancelled_merge_parent_returns_another_workflows_children() -> 
 
     assert settled == []
     for child in other_ids.values():
-        _assert_returned(runtime, registry, child)
+        _assert_returned(runtime, registry, child, runtime._tasks[parent].merge_key)
+    next_parent = _next(runtime)
+    assert next_parent is not None and next_parent in other_ids.values()
+    assert sorted(runtime.plan_merge(next_parent, 8, _WORKER.id)) == sorted(
+        set(other_ids.values()) - {next_parent}
+    )
 
 
 @pytest.mark.anyio

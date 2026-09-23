@@ -4111,7 +4111,7 @@ class TaskRuntime:
         self._merge_bucket_remove(task_id)
         self._merge_key_by_task.pop(task_id, None)
         return self._return_merged_children_locked(
-            self._merge_children_map.pop(task_id, []), unmerge=True
+            self._merge_children_map.pop(task_id, [])
         )
 
     def mark_cancelled(
