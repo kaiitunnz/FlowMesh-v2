@@ -107,7 +107,8 @@ class _InterruptRecorder(_WorkerRegistryStub):
     def __init__(self) -> None:
         self.interrupted: list[str] = []
 
-    def publish_interrupt(self, worker: Any, interrupt: Any) -> int:
+    def publish_interrupt(self, *args: Any) -> int:
+        _, interrupt = args
         self.interrupted.append(interrupt.task_id)
         return 1
 
@@ -141,10 +142,12 @@ async def _register(
     return workflow_id, {str(r.graph_node_name): r.task_id for r in results}
 
 
-def _next(runtime: TaskRuntime) -> str | None:
-    """The next ready task, or None when nothing is ready."""
+def _next(runtime: TaskRuntime) -> str:
+    """The next ready task."""
     with runtime._cv:
-        return runtime._pop_ready_locked()
+        task_id = runtime._pop_ready_locked()
+    assert task_id is not None
+    return task_id
 
 
 def _value(runtime: TaskRuntime, task_id: str) -> Any:
@@ -550,7 +553,6 @@ async def test_a_merge_across_workflows_is_dispatched_in_each_workflow() -> None
     first, a = await _register(runtime, _siblings(names=["a1"]))
     other, b = await _register(runtime, _siblings(names=["b1"]))
     parent = _next(runtime)
-    assert parent is not None
 
     runtime.plan_merge(parent, 8, _WORKER.id)
 
@@ -630,7 +632,6 @@ async def test_a_merge_planned_while_the_store_is_down_returns_its_siblings() ->
     runtime = _runtime(registry)
     _, t = await _register(runtime, _siblings())
     parent = _next(runtime)
-    assert parent is not None
 
     registry.down = True
     with pytest.raises(ConnectionError):
@@ -803,7 +804,6 @@ async def test_a_restored_task_merges_under_its_current_key() -> None:
 
     assert restored._tasks[x["a"]].merge_key != restored._tasks[y["b"]].merge_key
     parent = _next(restored)
-    assert parent is not None
     assert restored.plan_merge(parent, 8, _WORKER.id) == []
 
 
@@ -903,7 +903,6 @@ async def test_a_cancelled_merge_parent_returns_another_workflows_children() -> 
     first, _ = await _register(runtime, _siblings())
     _, other_ids = await _register(runtime, _siblings())
     parent = _next(runtime)
-    assert parent is not None
     merged = runtime.plan_merge(parent, 8, _WORKER.id)
     runtime.mark_dispatched(parent, _WORKER)
     assert set(other_ids.values()) <= set(merged)
@@ -917,7 +916,7 @@ async def test_a_cancelled_merge_parent_returns_another_workflows_children() -> 
     for child in other_ids.values():
         _assert_returned(runtime, registry, child, runtime._tasks[parent].merge_key)
     next_parent = _next(runtime)
-    assert next_parent is not None and next_parent in other_ids.values()
+    assert next_parent in other_ids.values()
     assert sorted(runtime.plan_merge(next_parent, 8, _WORKER.id)) == sorted(
         set(other_ids.values()) - {next_parent}
     )
@@ -929,7 +928,6 @@ async def test_a_merged_child_of_a_cancelled_workflow_stays_cancelled() -> None:
     _, first_ids = await _register(runtime, _siblings())
     other, other_ids = await _register(runtime, _siblings())
     parent = _next(runtime)
-    assert parent is not None
     merged = runtime.plan_merge(parent, 8, _WORKER.id)
     runtime.mark_dispatched(parent, _WORKER)
 

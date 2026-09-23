@@ -405,9 +405,9 @@ class HFTransformersExecutor(InferenceMixin, Executor):
             if len(eos_at := torch.isin(generated, eos).nonzero()):
                 return generated[: int(eos_at[0]) + 1]
         pad_token_id = self._tok.pad_token_id if self._tok is not None else None
-        if pad_token_id is None:
+        if not isinstance(pad_token_id, int):
             return generated
-        kept = (generated != pad_token_id).nonzero()
+        kept = generated.ne(pad_token_id).nonzero()
         return generated[: int(kept[-1]) + 1 if len(kept) else 0]
 
     def _detect_finish_reason(
