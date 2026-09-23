@@ -527,7 +527,7 @@ class EventMonitor:
                         pass
                 self._finalizer.close_task_workflow(event.task_id)
             case "TASK_FAILED":
-                if self._runtime.return_failed_merge(event.task_id):
+                if self._runtime.return_failed_merge(event.task_id, event.worker_id):
                     self._logger.warning(
                         "Merged dispatch of task %s failed on worker %s; its tasks run "
                         "alone: %s",
@@ -813,7 +813,9 @@ class EventMonitor:
                                 ", ".join(to_requeue),
                             )
                             for task_id in to_requeue:
-                                if self._runtime.return_failed_merge(task_id):
+                                if self._runtime.return_failed_merge(
+                                    task_id, worker_id
+                                ):
                                     continue
                                 self._dispatcher.requeue_task(
                                     task_id,

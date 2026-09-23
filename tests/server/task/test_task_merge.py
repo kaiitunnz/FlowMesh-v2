@@ -129,9 +129,9 @@ def _runtime(
     )
 
 
-def _worker(*batching: ExecutorKey) -> Any:
+def _worker(*batching: ExecutorKey, worker_id: str = "wkr-1") -> Any:
     return SimpleNamespace(
-        id="wkr-1",
+        id=worker_id,
         node_id="nde-1",
         capabilities=WorkerCapabilities(merge_batching_executors=frozenset(batching)),
     )
@@ -267,11 +267,13 @@ def _monitor(runtime: TaskRuntime, dispatcher: Any = None) -> EventMonitor:
     )
 
 
-def _failed(task_id: str, error: str, retryable: bool | None) -> TaskEvent:
+def _failed(
+    task_id: str, error: str, retryable: bool | None, worker_id: str = "wkr-1"
+) -> TaskEvent:
     return TaskEvent(
         type="TASK_FAILED",
         task_id=task_id,
-        worker_id="wkr-1",
+        worker_id=worker_id,
         error=error,
         retryable=retryable,
         payload={},
@@ -321,13 +323,88 @@ async def test_a_task_that_fails_alone_after_its_merge_failed_is_charged() -> No
     monitor = _monitor(runtime)
     monitor._handle_task_event(_failed(a, "batch rejected", retryable=False))
     assert _next(runtime) is not None
-    runtime.mark_dispatched(a, _VLLM_WORKER)
+    runtime.mark_dispatched(a, _worker(ExecutorKey.VLLM, worker_id="wkr-2"))
 
-    monitor._handle_task_event(_failed(a, "own input", retryable=False))
+    monitor._handle_task_event(
+        _failed(a, "own input", retryable=False, worker_id="wkr-2")
+    )
 
     record = runtime._tasks[a]
     assert record.status == TaskStatus.FAILED
-    assert "wkr-1" in record.failed_workers
+    assert "wkr-2" in record.failed_workers
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("retryable", [True, False])
+async def test_a_replayed_merged_failure_is_absorbed(retryable: bool) -> None:
+    registry = _Registry()
+    runtime = _runtime(registry)
+    ids = await _dispatch_merged(runtime)
+    monitor = _monitor(runtime)
+    event = _failed(ids["a"], "batch rejected", retryable=retryable)
+
+    registry.fail_next = True
+    with pytest.raises(ConnectionError):
+        monitor._handle_task_event(event)
+    monitor._handle_task_event(event)
+
+    for task_id in ids.values():
+        _assert_run_alone(runtime, registry, task_id)
+        assert registry.durable_status(task_id) == TaskStatus.PENDING
+
+
+@pytest.mark.anyio
+async def test_the_same_loss_reported_twice_is_absorbed() -> None:
+    registry = _Registry()
+    runtime = _runtime(registry)
+    ids = await _dispatch_merged(runtime)
+    monitor = _monitor(runtime)
+
+    monitor._handle_worker_event(WorkerEvent(type="UNREGISTER", worker_id="wkr-1"))
+    monitor._handle_task_event(_failed(ids["a"], "worker lost", retryable=True))
+
+    for task_id in ids.values():
+        _assert_run_alone(runtime, registry, task_id)
+
+
+@pytest.mark.anyio
+async def test_a_failed_batch_whose_children_were_all_cancelled_is_not_charged() -> (
+    None
+):
+    registry = _Registry()
+    runtime = _runtime(registry, _InterruptRecorder())
+    _, a = await _register(runtime, _siblings(names=["a1"]))
+    other, b = await _register(runtime, _siblings(names=["b1"]))
+    parent = _next(runtime)
+    assert parent == a["a1"]
+    assert runtime.plan_merge(parent, 8, _VLLM_WORKER) == [b["b1"]]
+    runtime.mark_dispatched(parent, _VLLM_WORKER)
+    runtime.cancel_workflow(other)
+
+    _monitor(runtime)._handle_task_event(
+        _failed(parent, "batch rejected", retryable=False)
+    )
+
+    _assert_run_alone(runtime, registry, parent)
+    assert runtime._tasks[b["b1"]].status == TaskStatus.CANCELLED
+
+
+@pytest.mark.anyio
+async def test_a_returned_parent_keeps_nothing_of_its_dispatch() -> None:
+    runtime = _runtime(_Registry())
+    ids = await _dispatch_merged(runtime)
+    assert runtime._tasks[ids["a"]].topic == "tasks"
+
+    _monitor(runtime)._handle_task_event(
+        _failed(ids["a"], "batch rejected", retryable=True)
+    )
+
+    record = runtime._tasks[ids["a"]]
+    assert (record.topic, record.assigned_worker, record.dispatched_ts) == (
+        None,
+        None,
+        None,
+    )
 
 
 @pytest.mark.anyio

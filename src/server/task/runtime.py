@@ -283,6 +283,17 @@ def _reported_reference(raw: Any) -> ContentReference | None:
         return None
 
 
+def _reset_to_pending(record: TaskRecord) -> None:
+    """Clear what a task's last dispatch left on it, returning it to PENDING."""
+    record.status = TaskStatus.PENDING
+    record.assigned_worker = None
+    record.topic = None
+    record.dispatched_ts = None
+    record.started_ts = None
+    record.finished_ts = None
+    record.error = None
+
+
 def _reported_child_references(payload: dict[str, Any]) -> dict[str, ContentReference]:
     """The result references a merged dispatch reported for its children, by child."""
     return {
@@ -417,6 +428,9 @@ class TaskRuntime:
         self._merge_buckets: dict[tuple[str, str | None], list[str]] = defaultdict(list)
         self._merge_children_map: dict[str, list[str]] = defaultdict(list)
         self._merge_parent_map: dict[str, str] = {}
+        # A merged dispatch returned after a failure, until its parent's next dispatch:
+        # a replay of that failure re-commits what the return moved.
+        self._returned_merges: dict[str, list[str]] = {}
         self._workflow_epoch_tasks: dict[str, deque[set[str]]] = {}
         self._workflow_epoch_frontier: dict[str, int] = {}
         self._workflow_in_epoch_order: dict[str, bool] = {}
@@ -1354,13 +1368,7 @@ class TaskRuntime:
                 # A requeue never returns cancelled work to the queue, and never clears
                 # the cancellation a settle path is still waiting to apply.
                 return
-            record.status = TaskStatus.PENDING
-            record.assigned_worker = None
-            record.topic = None
-            record.dispatched_ts = None
-            record.started_ts = None
-            record.finished_ts = None
-            record.error = None
+            _reset_to_pending(record)
             if increment_retry:
                 try:
                     if record.max_attempts is not None and record.max_attempts >= 0:
@@ -3393,28 +3401,33 @@ class TaskRuntime:
         with self._cv:
             self._release_merge_locked(task_id)
 
-    def return_failed_merge(self, task_id: str) -> bool:
-        """Return a merged dispatch that failed or lost its worker, if it is one.
+    def return_failed_merge(self, task_id: str, worker_id: str | None) -> bool:
+        """Return a merged dispatch that failed or lost ``worker_id``, if it is one.
 
         Such a failure belongs to no single task in the batch, so the parent and every
-        child go back to the head of the queue to run alone, spending no attempt.
-        Returns whether ``task_id`` was a merged dispatch.
+        child still merged into it go back to the head of the queue to run alone,
+        spending no attempt. A second report of the same loss, or a replay of it, finds
+        the parent already returned and is absorbed. Returns whether the report was for
+        a merged dispatch to ``worker_id``.
         """
         with self._cv:
             record = self._tasks.get(task_id)
             if (
                 record is None
-                or record.status != TaskStatus.DISPATCHED
-                or not self._merge_children_map.get(task_id)
+                or worker_id is None
+                or record.merged_dispatch_worker != worker_id
             ):
+                return False
+            if record.status == TaskStatus.PENDING:
+                self._commit_locked(*self._returned_merges.get(task_id, [task_id]))
+                return True
+            if record.status != TaskStatus.DISPATCHED:
                 return False
             record.merged_children = None
             returned = self._return_merged_children_locked(
-                [task_id, *self._merge_children_map.pop(task_id)], unmerge=True
+                [task_id, *self._merge_children_map.pop(task_id, [])], unmerge=True
             )
-            record.assigned_worker = None
-            record.dispatched_ts = None
-            record.started_ts = None
+            self._returned_merges[task_id] = returned
             self._commit_locked(*returned)
             return True
 
@@ -3476,7 +3489,7 @@ class TaskRuntime:
             child_record = self._tasks.get(child_id)
             if not child_record or child_record.status in TERMINAL_TASK_STATUSES:
                 continue
-            child_record.status = TaskStatus.PENDING
+            _reset_to_pending(child_record)
             child_record.merged_parent_id = None
             child_record.merge_slice = None
             if unmerge:
@@ -3590,6 +3603,10 @@ class TaskRuntime:
                 return
             record.status = TaskStatus.DISPATCHED
             record.assigned_worker = worker.id
+            record.merged_dispatch_worker = (
+                worker.id if self._merge_children_map.get(task_id) else None
+            )
+            self._returned_merges.pop(task_id, None)
             record.topic = "tasks"
             record.dispatched_ts = time.time()
             record.next_retry_at = None
@@ -3781,6 +3798,8 @@ class TaskRuntime:
                 if worker_id:
                     record.assigned_worker = worker_id
                 record.merged_children = None
+                record.merged_dispatch_worker = None
+                self._returned_merges.pop(task_id, None)
                 self._bind_result_locked(record, reference, skip)
                 if usage is not None:
                     record.usages.append(usage)
@@ -3922,6 +3941,8 @@ class TaskRuntime:
                 if worker_id:
                     record.assigned_worker = worker_id
                 record.merged_children = None
+                record.merged_dispatch_worker = None
+                self._returned_merges.pop(task_id, None)
                 if usage is not None:
                     record.usages.append(usage)
 
@@ -4115,6 +4136,8 @@ class TaskRuntime:
         record.finished_ts = finished_ts
         record.assigned_worker = None
         record.merged_children = None
+        record.merged_dispatch_worker = None
+        self._returned_merges.pop(task_id, None)
         record.merged_parent_id = None
         # TODO(kaiitunnz): Handle usages for cancelled tasks
         self._completed.discard(task_id)

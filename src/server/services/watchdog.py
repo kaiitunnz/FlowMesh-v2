@@ -181,7 +181,7 @@ class WorkerWatchdog:
                     exc,
                 )
                 try:
-                    if self._runtime.return_failed_merge(task_id):
+                    if self._runtime.return_failed_merge(task_id, worker_id):
                         continue
                     self._dispatcher.requeue_task(
                         task_id,
