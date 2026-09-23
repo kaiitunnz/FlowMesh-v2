@@ -1,4 +1,3 @@
-import copy
 import heapq
 import json
 import logging
@@ -59,7 +58,7 @@ from shared.sandbox import (
 )
 from shared.schemas.command import InterruptMessage, MediatedOpMessage
 from shared.schemas.result import ResultEnvelope
-from shared.tasks import TaskEnvelopeTemplate, TaskSpecStrict
+from shared.tasks import TaskEnvelopeTemplate
 from shared.tasks.specs import (
     InferenceEmbodimentKind,
     InferenceSpecStrict,
@@ -319,23 +318,6 @@ def _binding_defaults(
     )
 
 
-def _sanitize_merge_spec(spec: dict[str, Any]) -> dict[str, Any]:
-    clone = copy.deepcopy(spec)
-    if isinstance(clone.get("inference"), dict):
-        inference_cfg = clone["inference"]
-        inference_cfg.pop("system_prompt", None)
-    clone.pop("data", None)
-    clone.pop("upstreamResults", None)
-    return clone
-
-
-def renders_as_merged(parent: TaskSpecStrict, child: TaskSpecStrict) -> bool:
-    """Whether a rendered child differs from its rendered parent only in its inputs."""
-    return _sanitize_merge_spec(
-        parent.model_dump(mode="python", exclude_none=True)
-    ) == _sanitize_merge_spec(child.model_dump(mode="python", exclude_none=True))
-
-
 # Extra lifetime a worker-originated operation permit gets beyond the request timeout,
 # to cover dispatch and queue latency before the origin worker validates it.
 _OP_PERMIT_SLACK_SEC = 60.0
@@ -345,21 +327,11 @@ _MODEL_PERMIT_RESULT_CHAR_CAP = 1_000_000
 
 
 def _compute_merge_key(task: TaskEnvelopeTemplate, scope: str) -> str | None:
-    """The key siblings merge under, or None for a task that never merges.
-
-    Only tasks in one authorization ``scope`` share a key, since a merged dispatch
-    stores every result under its parent's scope.
-    """
-    task_type = str(task.spec.taskType or "").strip().lower()
-    if task_type != "inference":
+    """The spec's merge key within one authorization ``scope``, since a merged dispatch
+    stores every result under its parent's scope."""
+    if (key := task.spec.merge_key()) is None:
         return None
-    try:
-        spec = task.spec.model_dump(mode="python", exclude_none=True)
-        sanitized = _sanitize_merge_spec(spec)
-        keyed = {"scope": scope, "spec": sanitized}
-        return json.dumps(keyed, ensure_ascii=False, sort_keys=True)
-    except Exception:
-        return None
+    return json.dumps([scope, key], ensure_ascii=False)
 
 
 def _in_flight_usage(

@@ -1,37 +1,9 @@
-"""Tests for task merge key computation and spec sanitization."""
+"""Tests for the org-scoped task merge key."""
 
 import pytest
 
-from server.task.runtime import _compute_merge_key, _sanitize_merge_spec
+from server.task.runtime import _compute_merge_key
 from shared.tasks import TaskEnvelopeTemplate
-
-
-class TestSanitizeMergeSpec:
-    def test_strips_system_prompt(self) -> None:
-        spec = {
-            "taskType": "inference",
-            "inference": {"system_prompt": "secret", "temperature": 0.7},
-            "data": {"messages": [{"role": "user", "content": "hi"}]},
-        }
-        result = _sanitize_merge_spec(spec)
-        assert "system_prompt" not in result.get("inference", {})
-        assert "data" not in result  # data is stripped too
-
-    def test_preserves_other_fields(self) -> None:
-        spec = {
-            "taskType": "inference",
-            "inference": {"temperature": 0.7, "max_tokens": 100},
-            "model": {"source": {"identifier": "llama"}},
-        }
-        result = _sanitize_merge_spec(spec)
-        assert result["inference"]["temperature"] == 0.7
-        assert result["model"]["source"]["identifier"] == "llama"
-
-    def test_no_inference_key(self) -> None:
-        spec = {"taskType": "echo", "data": {"items": ["x"]}}
-        result = _sanitize_merge_spec(spec)
-        assert "data" not in result
-        assert result["taskType"] == "echo"
 
 
 class TestComputeMergeKey:
@@ -64,6 +36,16 @@ class TestComputeMergeKey:
     def test_different_scopes_different_keys(self) -> None:
         t = self._make_task("inference", model={"source": {"identifier": "llama"}})
         assert _compute_merge_key(t, "org-x") != _compute_merge_key(t, "org-y")
+
+    def test_visual_embedding_inference_returns_none(self) -> None:
+        t = self._make_task(
+            "inference",
+            model={
+                "source": {"identifier": "llava"},
+                "transformers": {"mode": "visual-embedding"},
+            },
+        )
+        assert _compute_merge_key(t, "org") is None
 
     @pytest.mark.parametrize("task_type", ["echo", "rag", "diffusion"])
     def test_non_inference_type_returns_none(self, task_type: str) -> None:

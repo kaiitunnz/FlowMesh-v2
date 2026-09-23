@@ -39,7 +39,7 @@ from ..services.metrics import MetricsRecorder
 from ..task.metadata import extract_model_dataset_names
 from ..task.models import TaskRecord, TaskStatus
 from ..task.results import ResultUnavailable, ResultUnreadable
-from ..task.runtime import TaskRuntime, renders_as_merged
+from ..task.runtime import TaskRuntime
 from ..task.v2.representations.plan import InferenceEmbodimentMenu
 from ..utils.time import now_iso
 from .embodiment import (
@@ -854,7 +854,9 @@ class Dispatcher:
                     # The child's own dispatch settles its skip.
                     self._runtime.release_merged_child(task_id, child_id, unmerge=True)
                     continue
-                if not renders_as_merged(parent_spec, resolved.spec):
+                if (key := resolved.spec.merge_key()) is None or (
+                    key != parent_spec.merge_key()
+                ):
                     self._logger.info(
                         "Merged child %s of %s renders a different spec; it runs alone",
                         child_id,

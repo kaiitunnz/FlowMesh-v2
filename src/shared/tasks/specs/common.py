@@ -190,6 +190,10 @@ class TaskSpecStrictBase(StrictBaseModel):
         """
         return None
 
+    def merge_key(self) -> str | None:
+        """The key a task merges with its siblings under, or None if it never merges."""
+        return None
+
 
 class TaskSpecTemplateBase(TemplateBaseModel):
     resources: ResourcesSpec | None = None
@@ -223,6 +227,10 @@ class TaskSpecTemplateBase(TemplateBaseModel):
         placeholder-dependent checks and raise ``ValueError`` for genuine
         misconfigurations.
         """
+        return None
+
+    def merge_key(self) -> str | None:
+        """The key a task merges with its siblings under, or None if it never merges."""
         return None
 
 

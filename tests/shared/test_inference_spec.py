@@ -173,3 +173,53 @@ class TestLocalEligibleBinding:
         )
         with pytest.raises(ValueError, match="only a resident service binding"):
             spec.validate_dispatchable()
+
+
+class TestMergeKey:
+    _MODEL = {"source": {"identifier": "m"}}
+
+    def test_inputs_do_not_change_the_key(self) -> None:
+        one = _spec(
+            model=self._MODEL,
+            data={"type": "list", "items": ["a"]},
+            inference={"system_prompt": "x", "temperature": 0.1},
+        )
+        two = _spec(
+            model=self._MODEL,
+            data={"type": "list", "items": ["b"]},
+            inference={"system_prompt": "y", "temperature": 0.1},
+            _upstreamResults={"up": {"value": 1}},
+        )
+        assert one.merge_key() is not None
+        assert one.merge_key() == two.merge_key()
+
+    @pytest.mark.parametrize(
+        "fields",
+        [
+            {"model": {"source": {"identifier": "other"}}},
+            {"model": _MODEL, "inference": {"temperature": 0.9}},
+            {
+                "model": {
+                    **_MODEL,
+                    "adapters": [{"type": "lora", "path": "/other"}],
+                }
+            },
+        ],
+    )
+    def test_the_model_sampling_or_adapters_change_the_key(
+        self, fields: dict[str, Any]
+    ) -> None:
+        base = _spec(model=self._MODEL, inference={"temperature": 0.1})
+        assert _spec(**fields).merge_key() != base.merge_key()
+
+    def test_a_visual_embedding_task_never_merges(self) -> None:
+        spec = _spec(
+            model={**self._MODEL, "transformers": {"mode": "visual-embedding"}}
+        )
+        assert spec.merge_key() is None
+
+    def test_another_task_type_never_merges(self) -> None:
+        spec = EmbeddingSpecStrict.model_validate(
+            {"taskType": "embedding", "model": self._MODEL}
+        )
+        assert spec.merge_key() is None
