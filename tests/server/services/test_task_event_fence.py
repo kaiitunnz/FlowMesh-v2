@@ -700,3 +700,68 @@ async def test_a_v2_failure_handled_again_after_its_commit_failed_retries_once()
     assert work_item is not None and work_item.status is WorkItemStatus.READY
     assert registry.ledger_blobs[workflow_id] == engine.to_snapshot().model_dump_json()
     assert runtime._tasks[task_id].attempts == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("cancel_first", "report", "retryable", "settled"),
+    [
+        (False, "TASK_SUCCEEDED", None, TaskStatus.DONE),
+        (False, "TASK_FAILED", False, TaskStatus.FAILED),
+        (False, "TASK_FAILED", True, TaskStatus.PENDING),
+        (True, "TASK_CANCELLED", None, TaskStatus.CANCELLED),
+        (True, "TASK_FAILED", True, TaskStatus.CANCELLED),
+    ],
+)
+async def test_a_report_handled_again_after_its_commit_failed_counts_once(
+    cancel_first: bool, report: str, retryable: bool | None, settled: str
+) -> None:
+    registry = _Registry()
+    runtime = _runtime(registry, _InterruptRecorder())
+    monitor = _monitor(runtime)
+    monitor._metrics = mock.MagicMock()
+    workflow_id, task_id = await _solo(runtime)
+    record_dispatch(runtime, task_id, "wkr-1", "dsp-1")
+    if cancel_first:
+        runtime.cancel_workflow(workflow_id)
+    event = _event(report, runtime, task_id, "wkr-1", "dsp-1")
+    event = event.model_copy(update={"retryable": retryable})
+
+    with (
+        mock.patch.object(monitor, "_unregister_port_forward") as unregister,
+        mock.patch.object(monitor, "_close_task_log_stream") as close_log,
+    ):
+        registry.fail_next = True
+        with pytest.raises(ConnectionError):
+            monitor._handle_task_event(event)
+        monitor._handle_task_event(event)
+        monitor._handle_task_event(event)
+
+    assert runtime._tasks[task_id].status == settled
+    assert registry.durable_status(task_id) == settled
+    assert monitor._metrics.record_task_event.call_count == 1
+    assert unregister.call_count == 1
+    assert close_log.call_count == (0 if settled == TaskStatus.PENDING else 1)
+
+
+@pytest.mark.anyio
+async def test_a_v2_success_handled_again_after_its_commit_failed_settles_it() -> None:
+    registry = _Registry()
+    runtime = _runtime(registry)
+    monitor = _monitor(runtime)
+    workflow_id, _ = await _register(runtime, _ECHO_V2)
+    task_id = _next(runtime)
+    record_dispatch(runtime, task_id, "wkr-1", "dsp-1")
+    success = _event("TASK_SUCCEEDED", runtime, task_id, "wkr-1", "dsp-1")
+
+    registry.fail_next = True
+    with pytest.raises(ConnectionError):
+        monitor._handle_task_event(success)
+    monitor._handle_task_event(success)
+
+    engine = runtime.orchestration_engine(workflow_id)
+    assert engine is not None
+    work_item = engine.work_item(task_id)
+    assert work_item is not None and work_item.status is WorkItemStatus.SETTLED
+    assert registry.ledger_blobs[workflow_id] == engine.to_snapshot().model_dump_json()
+    assert runtime.workflow_settlement(workflow_id).settled

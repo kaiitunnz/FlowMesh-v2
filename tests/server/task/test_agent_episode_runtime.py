@@ -10,6 +10,8 @@ ledger and re-readies or suspends the lane.
 import asyncio
 from typing import Any
 
+import pytest
+
 from server.orchestration import ProgressAxis, WorkItemStatus
 from server.orchestration.tool_dispatch import (
     FacadeCallMember,
@@ -32,6 +34,7 @@ from shared.harness import (
 )
 from shared.private_state import OwnerFence
 from tests.server.dispatch_helpers import record_dispatch
+from tests.server.task.test_task_merge import _Registry
 from tests.server.task.test_v2_orchestration import FakeRegistry, _register, _runtime
 from worker.executors.harness.scripted import ScriptedHarnessAdapter, ScriptedStep
 
@@ -874,5 +877,42 @@ def test_a_step_that_suspends_before_its_dispatch_is_recorded_resumes() -> None:
             envelope.task_id, envelope.call_correlation, "model:draft"
         )
         assert runtime._tasks[writer].status == TaskStatus.PENDING
+
+    asyncio.run(run())
+
+
+def test_a_first_report_handled_again_after_its_record_failed_opens_the_attempt() -> (
+    None
+):
+    async def run() -> None:
+        registry = _Registry()
+        runtime = _runtime(registry)
+        workflow_id, ids = await _register(runtime, _AGENT_WF)
+        writer = ids["writer"]
+        adapter = ScriptedHarnessAdapter(
+            [ScriptedStep(op="complete", value="done")], "v1"
+        )
+        with runtime._cv:
+            assert runtime._pop_ready_locked() == writer
+        dispatch = runtime.agent_episode_dispatch(writer, _HOLDER)
+        assert dispatch is not None
+        runtime.begin_publish(writer, _WORKER, "dsp-1")
+
+        registry.fail_next = True
+        with pytest.raises(ConnectionError):
+            runtime.mark_started(writer, "wkr-1", {}, _TS, "dsp-1")
+        assert runtime.mark_started(writer, "wkr-1", {}, _TS, "dsp-1") is (
+            EventEffect.APPLIED
+        )
+        assert runtime.mark_dispatched(writer, _WORKER, "dsp-1")
+        result = adapter.start(
+            writer, capsule=None, outcomes=dispatch.delivered_outcomes
+        )
+        step = {"agent_episode": result.model_dump(mode="json")}
+        outcome = runtime.mark_succeeded(writer, "wkr-1", step, _TS, "dsp-1")
+
+        assert outcome.effect is EventEffect.APPLIED
+        assert runtime._tasks[writer].status == TaskStatus.DONE
+        assert runtime.workflow_settlement(workflow_id).settled
 
     asyncio.run(run())
