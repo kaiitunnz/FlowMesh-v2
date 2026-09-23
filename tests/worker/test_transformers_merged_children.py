@@ -224,6 +224,34 @@ def test_a_child_whose_own_export_fails_is_left_out(tmp_path: Path) -> None:
     assert not (tmp_path / "tsk-b" / "logs" / "assets.jsonl").exists()
 
 
+_UNREACHABLE = {
+    "destination": {"type": "http", "url": "http://127.0.0.1:9/api/v1/results"}
+}
+
+
+def test_a_child_whose_own_upload_fails_is_left_out(tmp_path: Path) -> None:
+    result, _ = _run(
+        _spec("alpha"),
+        [
+            _child("tsk-b", _spec("bravo", output=_UNREACHABLE)),
+            _child("tsk-c", _spec("charlie")),
+        ],
+        tmp_path,
+    )
+
+    assert [item.output for item in result.items] == ["out-alpha"]
+    assert _outputs(result) == {"tsk-c": ["out-charlie"]}
+
+
+def test_the_parents_own_upload_failure_fails_the_dispatch(tmp_path: Path) -> None:
+    with pytest.raises(ExecutionError, match="upload failed"):
+        _run(
+            _spec("alpha", output=_UNREACHABLE),
+            [_child("tsk-b", _spec("bravo"))],
+            tmp_path,
+        )
+
+
 def test_a_child_whose_own_input_fails_is_left_out(tmp_path: Path) -> None:
     missing = _spec("x") | {"data": {"type": "list", "items": []}}
     result, model = _run(
