@@ -354,6 +354,22 @@ async def test_a_replayed_merged_failure_is_absorbed(retryable: bool) -> None:
 
 
 @pytest.mark.anyio
+async def test_a_merged_dispatch_failing_after_a_restart_runs_each_task_alone() -> None:
+    registry = _Registry()
+    runtime = _runtime(registry)
+    ids = await _dispatch_merged(runtime)
+    restored = _runtime(registry)
+    await restored.rehydrate()
+
+    _monitor(restored)._handle_task_event(
+        _failed(ids["a"], "batch rejected", retryable=False)
+    )
+
+    for task_id in ids.values():
+        _assert_run_alone(restored, registry, task_id)
+
+
+@pytest.mark.anyio
 async def test_the_same_loss_reported_twice_is_absorbed() -> None:
     registry = _Registry()
     runtime = _runtime(registry)

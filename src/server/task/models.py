@@ -172,6 +172,7 @@ class TaskRecord(BaseModel):
     merged_dispatch_worker: str | None = Field(
         default=None,
         description="Worker the task's current merged dispatch was sent to.",
+        exclude=True,
     )
     merge_slice: dict[str, int] | None = Field(
         default=None, description="Merge slice information."
