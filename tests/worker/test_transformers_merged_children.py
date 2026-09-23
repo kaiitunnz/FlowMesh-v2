@@ -163,6 +163,27 @@ def test_a_merged_task_gets_what_it_would_alone(
     )
 
 
+@pytest.mark.parametrize(
+    ("generated", "pad", "own"),
+    [
+        ([5, _EOS, 6, _PAD], _PAD, [5, _EOS]),
+        ([5, 6, _PAD, _PAD], _PAD, [5, 6]),
+        ([_PAD, _PAD], _PAD, []),
+        ([5, 6, _PAD], None, [5, 6, _PAD]),
+    ],
+    ids=["through-eos", "trailing-pads", "all-pads", "no-pad-token"],
+)
+def test_a_rows_own_generation(
+    generated: list[int], pad: int | None, own: list[int]
+) -> None:
+    executor = HFTransformersExecutor(DEFAULT_WORKER_CONFIG)
+    tokenizer = _Tokenizer()
+    tokenizer.pad_token_id = pad  # type: ignore[assignment]
+    executor._tok = tokenizer  # type: ignore[assignment]
+
+    assert executor._own_generation(torch.tensor(generated)).tolist() == own
+
+
 def test_each_task_writes_its_own_export_and_lineage(tmp_path: Path) -> None:
     _run(
         _spec("alpha", postprocess=_EXPORT),

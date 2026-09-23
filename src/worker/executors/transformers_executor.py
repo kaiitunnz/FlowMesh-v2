@@ -400,16 +400,15 @@ class HFTransformersExecutor(InferenceMixin, Executor):
     def _own_generation(self, generated: "torch.Tensor") -> "torch.Tensor":
         """A batch row's own generated tokens: through its first EOS, without the pads
         that fill it to the batch's longest generation."""
-        eos_ids = self._eos_ids()
-        tokens = [int(token) for token in generated]
-        for index, token in enumerate(tokens):
-            if token in eos_ids:
-                return generated[: index + 1]
+        if eos_ids := self._eos_ids():
+            eos = torch.tensor(sorted(eos_ids), device=generated.device)
+            if len(eos_at := torch.isin(generated, eos).nonzero()):
+                return generated[: int(eos_at[0]) + 1]
         pad_token_id = self._tok.pad_token_id if self._tok is not None else None
-        end = len(tokens)
-        while end and tokens[end - 1] == pad_token_id:
-            end -= 1
-        return generated[:end]
+        if pad_token_id is None:
+            return generated
+        kept = (generated != pad_token_id).nonzero()
+        return generated[: int(kept[-1]) + 1 if len(kept) else 0]
 
     def _detect_finish_reason(
         self,
