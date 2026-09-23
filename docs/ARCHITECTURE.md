@@ -56,8 +56,8 @@ The runtime is two top-level processes:
 ## Object IDs
 
 3-char prefixes: `wfl-` workflows, `tsk-` tasks, `ssn-` SSH sessions,
-`scn-` SSH connection rows, `cmd-` supervisor commands. The v2 orchestration
-ledger adds `act-` activations, `scp-` scopes, `wki-` work items, `att-`
+`scn-` SSH connection rows, `cmd-` supervisor commands, `dsp-` task
+dispatches. The v2 orchestration ledger adds `act-` activations, `scp-` scopes, `wki-` work items, `att-`
 attempts, `inv-` invocations, `agr-` authority grants, and `idm-` idempotency
 keys (the fabric-assigned dedupe authority for a mediated boundary). Resident-capacity
 control adds `scl-` service claims, `rpl-` replica incarnations, and `lse-` allocation
@@ -83,6 +83,13 @@ stop once every eligible worker has been tried or `max_attempts` is
 reached; the terminal error is the executor's own message. Controlled
 executor errors are not retried. A task that no worker can satisfy fails
 after `TASK_NO_WORKER_GRACE_SEC`.
+
+Each dispatch carries a `dsp-` id that the worker names on every event it
+reports for the task. An event changes the task only while its dispatch holds
+it, so a report from a dispatch that was returned, lost, or superseded changes
+nothing and a loss reported more than once spends one attempt. An event naming
+no dispatch is matched by its worker. A cancelling task settles `CANCELLED`
+whatever ends its dispatch.
 
 ## Directory map
 

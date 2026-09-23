@@ -32,7 +32,7 @@
 
 ## Object IDs
 
-3-char prefixes: `wfl-`, `tsk-`, `ssn-`, `scn-`, `cmd-`, the v2
+3-char prefixes: `wfl-`, `tsk-`, `ssn-`, `scn-`, `cmd-`, `dsp-`, the v2
 orchestration-ledger `act-`, `scp-`, `wki-`, `att-`, `inv-`, `agr-`, `idm-`, the
 resident-capacity `scl-` (service claim), `rpl-` (replica incarnation), `lse-`
 (allocation lease), `hnd-` (claim-bound admission handoff), `msk-` (a vaulted
