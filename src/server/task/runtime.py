@@ -3711,13 +3711,20 @@ class TaskRuntime:
         dispatch_id: str,
         *,
         input_preparation: bool = False,
-    ) -> None:
-        """Mark a dispatch as being published, so its worker's earliest events apply."""
+    ) -> bool:
+        """Mark a dispatch as being published, so its worker's earliest events apply.
+
+        Returns whether the task is still pending and may be published.
+        """
         publish = _Publish(
             worker.id, dispatch_id, _supplier_id(worker), input_preparation
         )
         with self._cv:
+            record = self._tasks.get(task_id)
+            if record is None or record.status != TaskStatus.PENDING:
+                return False
             self._publishing[task_id] = publish
+            return True
 
     def abandon_publish(self, task_id: str) -> bool:
         """Drop the mark of a dispatch whose publish failed.

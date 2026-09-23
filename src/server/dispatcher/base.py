@@ -712,12 +712,13 @@ class Dispatcher:
         )
 
         # 8. Give the task what it reads and writes its content under, then publish it
-        if self._content_access is not None:
-            self._content_access.issue(worker.id, task_id, record.org_id)
-        self._runtime.begin_publish(
+        if not self._runtime.begin_publish(
             task_id, worker, dispatch_id, input_preparation=preparing
-        )
+        ):
+            return True
         try:
+            if self._content_access is not None:
+                self._content_access.issue(worker.id, task_id, record.org_id)
             receivers = self._worker_registry.publish_task(worker, message)
         except Exception as exc:
             if not self._runtime.abandon_publish(task_id):

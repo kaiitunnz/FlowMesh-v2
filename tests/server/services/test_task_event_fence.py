@@ -765,3 +765,22 @@ async def test_a_v2_success_handled_again_after_its_commit_failed_settles_it() -
     assert work_item is not None and work_item.status is WorkItemStatus.SETTLED
     assert registry.ledger_blobs[workflow_id] == engine.to_snapshot().model_dump_json()
     assert runtime.workflow_settlement(workflow_id).settled
+
+
+@pytest.mark.anyio
+async def test_a_cancel_before_the_publish_begins_publishes_nothing() -> None:
+    runtime = _runtime(_Registry(), _InterruptRecorder())
+    workflow_id, task_id = await _solo(runtime)
+    dispatcher, worker_registry = _fast_worker_dispatcher(runtime, _monitor(runtime))
+    traceparent = runtime.dispatch_traceparent
+
+    def cancel_while_building(tid: str) -> str | None:
+        runtime.cancel_workflow(workflow_id)
+        return traceparent(tid)
+
+    with mock.patch.object(runtime, "dispatch_traceparent", cancel_while_building):
+        dispatcher.dispatch_once(task_id)
+
+    assert runtime._tasks[task_id].status == TaskStatus.CANCELLED
+    assert worker_registry.publish_task.call_count == 0
+    assert task_id not in runtime._publishing
