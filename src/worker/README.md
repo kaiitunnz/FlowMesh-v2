@@ -138,12 +138,11 @@ Relevant env vars for SSH tasks:
 | `ENABLE_SSH_BY_DEFAULT` | `false` | Accept SSH tasks even without an explicit image in the spec |
 
 ## Task Merge & Multi-GPU
-- **Task merge** coalesces sibling tasks that differ only in their inputs into
-  one dispatch, onto a worker whose executor declares `batches_merged_children`
-  (vLLM inference, with or without LoRA adapters). The worker receives a parent
-  payload with `merged_children`, the executor returns each child's result under
-  `result.children`, and the runner stores each child's result on its own.
-  Disabled with `ENABLE_TASK_MERGE=false` on the server.
+- **Task merge** coalesces sibling inference tasks that differ only in their
+  inputs into one dispatch. The worker receives a parent payload with
+  `merged_children`, the vLLM or HF transformers executor returns each child's
+  result under `result.children`, and the runner stores each child's result on its
+  own. Disabled with `ENABLE_TASK_MERGE=false` on the server.
 - **Multi-GPU execution**: when multiple GPUs are available, vLLM automatically
   sets `tensor_parallel_size`, and PPO/DPO/SFT executors launch distributed jobs
   via `torchrun`. Override `training.allow_multi_gpu=false` or

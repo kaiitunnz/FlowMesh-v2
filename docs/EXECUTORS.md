@@ -1,8 +1,7 @@
 # Task types and executor registry
 
-The worker runs each task on the executor its spec resolves to
-(`resolve_executor_key` in `src/shared/tasks/executor_key.py`), looked up in the
-registry in `src/worker/executors/__init__.py`. Built-in executors:
+The worker resolves `spec.taskType` against an executor registry in
+`src/worker/runner.py`. Built-in executors:
 
 | `taskType` | Executor | Use case |
 |-----------|----------|----------|
@@ -34,7 +33,7 @@ Every executor's `run()` returns an exact per-task-type subclass of
 package. The base class carries two cross-cutting fields:
 
 - `children: dict[str, BaseExecutorResult]` — each merged child's own result,
-  from an executor that declares `batches_merged_children`.
+  from the vLLM and HF transformers inference executors.
 - `artifacts: ArtifactContext | None` (wire key `_artifacts`) —
   resolution context for relative artifact refs.
 
