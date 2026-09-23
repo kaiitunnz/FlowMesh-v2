@@ -11,10 +11,12 @@ import torch
 from PIL import Image
 
 from shared.schemas.governance import SpanType
+from shared.schemas.result import BaseExecutorResult
 from shared.tasks.specs import InferenceSpecStrict
 from shared.utils.json import to_json_serializable
 
-from ..base_executor import ExecutionError
+from ..base_executor import ExecutionError, ExecutorTask
+from ..utils.checkpoints import maybe_upload_artifacts, maybe_upload_traces
 from .data import DataMixin, InferenceEntry, PromptInput
 
 logger = logging.getLogger(__name__)
@@ -223,6 +225,27 @@ class InferenceMixin(DataMixin):
         if value is None and "default" in cfg:
             value = cfg.get("default")
         return value
+
+    def _upload_outputs(
+        self, task: ExecutorTask, result: BaseExecutorResult, out_dir: Path
+    ) -> None:
+        """Upload the artifacts and traces of the task and of each merged child it
+        returned a result for, each from its own output directory. A child whose own
+        upload fails is left out of the result."""
+        maybe_upload_artifacts(task, out_dir, logger=logger)
+        maybe_upload_traces(task, out_dir, logger=logger)
+        for child in task.merged_children or []:
+            if child.task_id not in result.children:
+                continue
+            child_dir = out_dir.parent / child.task_id
+            try:
+                maybe_upload_artifacts(child, child_dir, logger=logger)
+                maybe_upload_traces(child, child_dir, logger=logger)
+            except ExecutionError as exc:
+                logger.warning(
+                    "Leaving merged child %s out of the result: %s", child.task_id, exc
+                )
+                del result.children[child.task_id]
 
     def _maybe_export_jsonl(
         self,

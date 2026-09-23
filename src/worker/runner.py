@@ -503,13 +503,14 @@ class Runner:
         """Store a task's result and each merged child's, returning their references.
 
         Every result lands in the shared store before the success that reports it, so a
-        reference control binds always names bytes that outlive this worker. A child
-        the executor produced no result for reports none, and control binds it to its
-        merged parent's.
+        reference control binds always names bytes that outlive this worker. The
+        task's own result carries none of its children's. A child the executor produced
+        no result for reports none, and control runs it again on its own.
         """
         if result is None:
             return {}
-        declared = _declared_result(result, msg.resolved_contract) or result
+        own = result.model_copy(update={"children": {}})
+        declared = _declared_result(own, msg.resolved_contract) or own
         reference = self._write_single_result(
             msg, msg.task_id, msg.spec, out_dir, declared
         )

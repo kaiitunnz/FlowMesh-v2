@@ -328,7 +328,7 @@ async def test_mark_succeeded_is_idempotent_under_replay() -> None:
     runtime.mark_dispatched(a, cast(Any, worker))
     runtime.mark_succeeded(a, "wkr-1", {}, "2026-06-01T00:00:00Z")
     # A replayed completion must not re-apply.
-    assert runtime.mark_succeeded(a, "wkr-1", {}, "2026-06-01T00:00:00Z") == []
+    assert runtime.mark_succeeded(a, "wkr-1", {}, "2026-06-01T00:00:00Z") == ([], [])
 
     # b is enqueued exactly once despite the replay.
     assert runtime.ready_queue_length() == 1
@@ -438,7 +438,7 @@ async def test_mark_succeeded_applies_in_memory_atomically_when_persist_raises(
 
     # The at-least-once replay re-runs and is a no-op via the idempotency guard.
     monkeypatch.setattr(registry, "commit_transition", lambda *args, **kwargs: None)
-    assert runtime.mark_succeeded(a, "wkr-1", {}, "2026-06-01T00:00:00Z") == []
+    assert runtime.mark_succeeded(a, "wkr-1", {}, "2026-06-01T00:00:00Z") == ([], [])
 
 
 @pytest.mark.anyio
@@ -466,7 +466,7 @@ async def test_mark_failed_applies_cascade_atomically_when_persist_raises(
 
     # Replay is a no-op via the idempotency guard (task already terminal).
     monkeypatch.setattr(registry, "commit_transition", lambda *args, **kwargs: None)
-    impacted, _, _ = runtime.mark_failed(a, "wkr-1", {}, "2026-06-01T00:00:00Z")
+    impacted, _ = runtime.mark_failed(a, "wkr-1", {}, "2026-06-01T00:00:00Z")
     assert impacted == []
 
 
@@ -507,7 +507,7 @@ async def test_replayed_terminal_event_repersists_after_failed_write(
 
     # Replay of the same TASK_FAILED: the guard heals by re-persisting the
     # workflow's terminal records (the whole cascade, not just the primary).
-    impacted, _, _ = runtime.mark_failed(a, "wkr-1", {}, "2026-06-01T00:00:00Z")
+    impacted, _ = runtime.mark_failed(a, "wkr-1", {}, "2026-06-01T00:00:00Z")
     assert impacted == []
     assert persisted_status(a) == TaskStatus.FAILED
     assert persisted_status(b) == TaskStatus.FAILED

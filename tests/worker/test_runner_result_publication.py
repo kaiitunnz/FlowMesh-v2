@@ -1,5 +1,6 @@
 """The runner stores a task's result in the shared store before reporting success."""
 
+import json
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -145,3 +146,39 @@ def test_merged_children_store_under_the_parent_task(tmp_path: Path) -> None:
     child_bytes = store.hydrate(ContentReference.model_validate(children["tsk-c"]))
     assert child_bytes == (tmp_path / "out" / "tsk-c" / "results.json").read_bytes()
     assert set(plane.tasks) == {"tsk-1"}
+
+
+def test_a_merged_parent_stores_only_its_own_result(tmp_path: Path) -> None:
+    def _stored(out: Path, children: dict[str, BaseExecutorResult]) -> dict[str, Any]:
+        store = SharedFilesystemObjectStore(out / "cas")
+        result = BaseExecutorResult.model_validate({"value": "parent"})
+        result.children = children
+        child = MergedChildTaskStrict(
+            task_id="tsk-c",
+            owner_id="usr-other",
+            workflow_id="wfl-other",
+            spec=make_worker_task_message(
+                {"taskType": "echo"}, task_type=TaskType.ECHO
+            ).spec,
+        )
+        lifecycle, _ = _run(out, result, store, merged_children=[child])
+        metadata = _metadata(lifecycle)
+        stored = {
+            task_id: json.loads(store.hydrate(ContentReference.model_validate(ref)))
+            for task_id, ref in {
+                "tsk-1": metadata["result_reference"],
+                **metadata.get("child_result_references", {}),
+            }.items()
+        }
+        for envelope in stored.values():
+            envelope["result"].pop("_artifacts", None)
+        return stored
+
+    merged = _stored(
+        tmp_path / "merged",
+        {"tsk-c": BaseExecutorResult.model_validate({"value": "child"})},
+    )
+    alone = _stored(tmp_path / "alone", {})
+
+    assert merged["tsk-1"]["result"] == alone["tsk-1"]["result"]
+    assert merged["tsk-c"]["result"]["value"] == "child"

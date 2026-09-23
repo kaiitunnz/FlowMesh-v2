@@ -1,3 +1,4 @@
+import json
 from enum import StrEnum
 from typing import Any
 
@@ -156,6 +157,12 @@ def _validate_condition_depends_on[T: "TaskSpecStrictBase | TaskSpecTemplateBase
     return spec
 
 
+def _merge_key_in(key: str | None, context: dict[str, Any]) -> str | None:
+    if key is None:
+        return None
+    return json.dumps([key, context], ensure_ascii=False, sort_keys=True)
+
+
 class TaskSpecStrictBase(StrictBaseModel):
     resources: ResourcesSpec | None = None
     output: OutputSpec | None = None
@@ -188,6 +195,15 @@ class TaskSpecStrictBase(StrictBaseModel):
         Called at submit and again before dispatch. Overrides must raise ``ValueError``
         for misconfigurations.
         """
+        return None
+
+    def merge_key(self, **context: Any) -> str | None:
+        """The key a task merges with its siblings under within ``context``, or None if
+        it never merges."""
+        return _merge_key_in(self._merge_key(), context)
+
+    def _merge_key(self) -> str | None:
+        """What the spec merges on, or None if it never merges."""
         return None
 
 
@@ -223,6 +239,15 @@ class TaskSpecTemplateBase(TemplateBaseModel):
         placeholder-dependent checks and raise ``ValueError`` for genuine
         misconfigurations.
         """
+        return None
+
+    def merge_key(self, **context: Any) -> str | None:
+        """The key a task merges with its siblings under within ``context``, or None if
+        it never merges."""
+        return _merge_key_in(self._merge_key(), context)
+
+    def _merge_key(self) -> str | None:
+        """What the spec merges on, or None if it never merges."""
         return None
 
 

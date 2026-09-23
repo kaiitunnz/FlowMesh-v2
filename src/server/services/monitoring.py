@@ -1,14 +1,12 @@
 import asyncio
 import json
 import logging
-import shutil
 import threading
 import time
 from collections.abc import Callable, Iterable, Mapping
 from concurrent.futures import Future
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from shared.content import ContentReference
@@ -24,11 +22,9 @@ from shared.schemas.event import (
     WorkerEvent,
     parse_event,
 )
-from shared.schemas.result import result_file_path
 from shared.schemas.worker import WorkerStatus
 from shared.tasks import TaskType
 from shared.tools.contract import AgentModelTurnProposal, MediatedOperationOutcome
-from shared.utils.manifest import RESULTS_NAME, sync_manifest
 
 from ..auth import default_principal, deregister_resource, register_resource
 from ..clients.redis import (
@@ -130,7 +126,6 @@ class EventMonitor:
         ssh_proxy_enabled: bool = False,
         gated_serve: "GatedServe | None" = None,
         port_forward: PortForwardService | None = None,
-        results_dir: Path | str = ".",
         log_stream_ttl_sec: int = 0,
         server_base_url: str = "http://localhost:8000",
         on_node_removed: Callable[[str], None] | None = None,
@@ -151,7 +146,6 @@ class EventMonitor:
         self._ssh_proxy_enabled = ssh_proxy_enabled
         self._gated_serve = gated_serve
         self._port_forward = port_forward
-        self._results_dir = Path(results_dir)
         self._log_stream_ttl_sec = max(0, int(log_stream_ttl_sec))
         self._server_base_url = self._validate_server_base_url(server_base_url)
         self._content_authority = content_authority
@@ -167,9 +161,6 @@ class EventMonitor:
             ),
             log_stream_ttl_sec=self._log_stream_ttl_sec,
         )
-
-        self._pending_result_clones: dict[str, list[str]] = {}
-        self._pending_lock = threading.RLock()
 
         # Per-entry handler-failure counts backing the consumer's retry budget.
         self._event_handler_attempts: dict[str, int] = {}
@@ -290,52 +281,6 @@ class EventMonitor:
                 len(pending),
                 coro_timeout,
             )
-
-    def mirror_task_results(self, parent_task_id: str, child_ids: list[str]) -> None:
-        if not child_ids:
-            return
-        parent_dir = result_file_path(self._results_dir, parent_task_id).parent
-        if not parent_dir.exists():
-            with self._pending_lock:
-                pending = self._pending_result_clones.setdefault(parent_task_id, [])
-                for child in child_ids:
-                    if child not in pending:
-                        pending.append(child)
-            self._logger.debug(
-                "Deferring result mirroring for %s (waiting for artifacts)",
-                parent_task_id,
-            )
-            return
-
-        for child_id in child_ids:
-            if child_id == parent_task_id:
-                continue
-            dst_dir = result_file_path(self._results_dir, child_id).parent
-            if dst_dir.exists() and (dst_dir / RESULTS_NAME).exists():
-                continue
-            try:
-                if dst_dir.exists():
-                    shutil.rmtree(dst_dir, ignore_errors=True)
-                shutil.copytree(parent_dir, dst_dir)
-                record = self._runtime.get_record(child_id)
-                expected_artifacts: list[str] = []
-                if record:
-                    expected_artifacts = record.task.spec.get_artifacts()
-                sync_manifest(dst_dir, child_id, expected_artifacts)
-            except Exception as exc:
-                self._logger.debug(
-                    "Failed to mirror results from %s to %s: %s",
-                    parent_task_id,
-                    child_id,
-                    exc,
-                )
-
-        with self._pending_lock:
-            self._pending_result_clones.pop(parent_task_id, None)
-
-    def pop_pending_clones(self, task_id: str) -> list[str]:
-        with self._pending_lock:
-            return self._pending_result_clones.pop(task_id, [])
 
     # ------------------------------------------------------------------ # Task event
     # handling ------------------------------------------------------------------ #
@@ -524,10 +469,7 @@ class EventMonitor:
                 # tally several times for one task.
                 if self._runtime.success_settles_task(event.task_id, payload):
                     self._metrics.record_task_event(event)
-                merged_children = self._runtime.get_merged_children(event.task_id)
-                if merged_children:
-                    self.mirror_task_results(event.task_id, merged_children)
-                usages = self._runtime.mark_succeeded(
+                merged_children, usages = self._runtime.mark_succeeded(
                     event.task_id, event.worker_id, payload, event.ts
                 )
                 self._schedule_emit_usage(usages)
@@ -546,21 +488,20 @@ class EventMonitor:
                         "DONE UNKNOWN, TOTAL UNKNOWN"
                     )
                 self._logger.info("Task %s completed; %s", event.task_id, summary)
-                if merged_children:
-                    for child_id in merged_children:
-                        child_payload = dict(payload)
-                        child_payload["parent_task_id"] = event.task_id
-                        child_payload["is_child_task"] = True
-                        child_event = TaskEvent(
-                            type="TASK_SUCCEEDED",
-                            task_id=child_id,
-                            worker_id=event.worker_id,
-                            payload=child_payload,
-                            ts=event.ts,
-                        )
-                        self._metrics.record_task_event(child_event, is_child=True)
-                        self._close_task_log_stream(child_id)
-                        self._finalizer.close_task_workflow(child_id)
+                for child_id in merged_children:
+                    child_payload = dict(payload)
+                    child_payload["parent_task_id"] = event.task_id
+                    child_payload["is_child_task"] = True
+                    child_event = TaskEvent(
+                        type="TASK_SUCCEEDED",
+                        task_id=child_id,
+                        worker_id=event.worker_id,
+                        payload=child_payload,
+                        ts=event.ts,
+                    )
+                    self._metrics.record_task_event(child_event)
+                    self._close_task_log_stream(child_id)
+                    self._finalizer.close_task_workflow(child_id)
                 if event.worker_id:
                     try:
                         record = self._runtime.get_record(event.task_id)
@@ -586,6 +527,15 @@ class EventMonitor:
                         pass
                 self._finalizer.close_task_workflow(event.task_id)
             case "TASK_FAILED":
+                if self._runtime.return_failed_merge(event.task_id, event.worker_id):
+                    self._logger.warning(
+                        "Merged dispatch of task %s failed on worker %s; its tasks run "
+                        "alone: %s",
+                        event.task_id,
+                        event.worker_id,
+                        event.error,
+                    )
+                    return
                 record = self._runtime.get_record(event.task_id)
                 if record:
                     if event.worker_id and event.worker_id not in record.failed_workers:
@@ -626,7 +576,7 @@ class EventMonitor:
                 self._unregister_port_forward(event.task_id)
                 self._maybe_drain_serve(event.task_id)
                 self._metrics.record_task_event(event)
-                impacted, merged_children, usages = self._runtime.mark_failed(
+                impacted, usages = self._runtime.mark_failed(
                     event.task_id,
                     event.worker_id,
                     payload,
@@ -647,22 +597,6 @@ class EventMonitor:
                     self._metrics.finalize_task_failure(task_id)
                     self._close_task_log_stream(task_id)
                     self._finalizer.close_task_workflow(task_id)
-                for child_id in merged_children:
-                    child_payload = dict(payload)
-                    child_payload["parent_task_id"] = event.task_id
-                    child_payload["dependency_failure"] = event.task_id
-                    child_payload["is_child_task"] = True
-                    child_event = TaskEvent(
-                        type="TASK_FAILED",
-                        task_id=child_id,
-                        worker_id=event.worker_id,
-                        error=event.error or "parent_failed",
-                        payload=child_payload,
-                    )
-                    self._metrics.record_task_event(child_event, is_child=True)
-                    self._metrics.finalize_task_failure(child_id)
-                    self._close_task_log_stream(child_id)
-                    self._finalizer.close_task_workflow(child_id)
                 self._finalizer.close_task_workflow(event.task_id)
             case "TASK_CANCELLED":
                 self._unregister_port_forward(event.task_id)
@@ -866,7 +800,9 @@ class EventMonitor:
                             self._unregister_port_forward(task_id)
                             record = self._runtime.get_record(task_id)
                             if record and record.status == TaskStatus.CANCELLING:
-                                self._runtime.mark_cancelled(task_id, worker_id, {}, ts)
+                                self._runtime.mark_cancelled(
+                                    task_id, worker_id, {}, ts, unmerge=True
+                                )
                                 self._close_task_log_stream(task_id)
                                 self._finalizer.close_task_workflow(task_id)
                             else:
@@ -879,6 +815,10 @@ class EventMonitor:
                                 ", ".join(to_requeue),
                             )
                             for task_id in to_requeue:
+                                if self._runtime.return_failed_merge(
+                                    task_id, worker_id
+                                ):
+                                    continue
                                 self._dispatcher.requeue_task(
                                     task_id,
                                     reason="worker_unregistered",

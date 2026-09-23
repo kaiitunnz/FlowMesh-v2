@@ -1,3 +1,4 @@
+import json
 from enum import StrEnum
 from typing import Literal
 
@@ -36,6 +37,9 @@ class InferenceSpecStrict(ModelInferSpecStrict):
     def validate_dispatchable(self) -> None:
         _validate_inference_dispatchable(self)
 
+    def _merge_key(self) -> str | None:
+        return _inference_merge_key(self)
+
 
 class InferenceSpecTemplate(ModelInferSpecTemplate):
     taskType: Literal[TaskType.INFERENCE]
@@ -50,6 +54,9 @@ class InferenceSpecTemplate(ModelInferSpecTemplate):
 
     def validate_dispatchable(self) -> None:
         _validate_inference_dispatchable(self)
+
+    def _merge_key(self) -> str | None:
+        return _inference_merge_key(self)
 
 
 def _inference_backend(
@@ -72,6 +79,33 @@ def _inference_backend(
     if model.transformers:
         return InferenceBackend.TRANSFORMERS
     return InferenceBackend.AUTO
+
+
+def _inference_merge_key(
+    spec: InferenceSpecStrict | InferenceSpecTemplate,
+) -> str | None:
+    """The spec apart from what each task keeps its own: its inputs (``data``,
+    ``system_prompt`` and the injected upstream results), its place in the workflow
+    (``dependsOn`` and ``condition``) and its outputs (``output`` and ``postprocess``).
+    A visual-embedding task never merges."""
+    if (model := spec.model) and (model.transformers or {}).get(
+        "mode"
+    ) == "visual-embedding":
+        return None
+    keyed = spec.model_dump(
+        mode="json",
+        exclude_none=True,
+        exclude={
+            "data": True,
+            "upstreamResults": True,
+            "dependsOn": True,
+            "condition": True,
+            "output": True,
+            "postprocess": True,
+            "inference": {"system_prompt"},
+        },
+    )
+    return json.dumps(keyed, ensure_ascii=False, sort_keys=True)
 
 
 def _validate_inference_dispatchable(

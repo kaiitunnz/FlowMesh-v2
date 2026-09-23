@@ -479,12 +479,17 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   and reads the verified envelope from the store, holding no copy of its own; the results
   directory keeps only a task's logs and artifacts. A task that outlives its store access
   has it renewed while it still runs on the worker asking.
-- **Task merging.** Compatible adjacent tasks in a DAG (same `taskType`,
-  model, hardware shape, and merge key) coalesce into a single dispatch.
-  Merged children ride on `WorkerTaskMessage.merged_children`; the worker
-  writes per-child results into `result.children`; the dispatcher fans
-  out synthetic `TASK_SUCCEEDED` / `TASK_FAILED` events. Disable with
-  `ENABLE_TASK_MERGE=false`.
+- **Task merging.** Ready v1 tasks of one org whose specs share a merge key coalesce
+  into one dispatch, whose executor runs every task at once and returns each merged
+  child's own result; a task's spec defines its merge key. Merged children ride on
+  `WorkerTaskMessage.merged_children` and come back in `result.children`. A child
+  whose rendered merge key differs from its parent's leaves the merge and merges
+  under its rendered key. A child the dispatch returns no result for returns to the
+  queue and runs alone without spending an attempt, and a merged dispatch that fails
+  or loses its worker returns its parent and every child still in it the same way.
+  A batch the dispatcher releases before sending it, or whose parent is cancelled,
+  returns its children still mergeable.
+  Disable with `ENABLE_TASK_MERGE=false`.
 - **Stage stickiness** (`ENABLE_STAGE_WEIGHT_STICKINESS=true`) — the
   dispatcher pins stages that reference an upstream stage's checkpoint
   to the worker that produced it, falling back to normal selection when

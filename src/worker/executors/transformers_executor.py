@@ -64,6 +64,7 @@ from shared.schemas.result import (
     InferenceItem,
     InferenceResult,
 )
+from shared.tasks import MergedChildTaskStrict
 from shared.tasks.specs import (
     EmbeddingSpecStrict,
     InferenceSpecStrict,
@@ -73,8 +74,7 @@ from shared.tasks.task_type import TaskType
 from ..utils.logging import configure_hf_library_logging
 from .base_executor import ExecutionError, Executor, ExecutorTask
 from .mixins.data import InferenceEntry
-from .mixins.inference import InferenceMixin
-from .utils.checkpoints import maybe_upload_artifacts, maybe_upload_traces
+from .mixins.inference import InferenceMixin, PreparedInferenceEntry
 
 try:
     import torch
@@ -391,6 +391,25 @@ class HFTransformersExecutor(InferenceMixin, Executor):
 
         return GenerationConfig(**config_kwargs)
 
+    def _eos_ids(self) -> set[int]:
+        eos_token_id = self._tok.eos_token_id if self._tok is not None else None
+        if isinstance(eos_token_id, int):
+            return {eos_token_id}
+        return {token for token in eos_token_id or [] if isinstance(token, int)}
+
+    def _own_generation(self, generated: "torch.Tensor") -> "torch.Tensor":
+        """A batch row's own generated tokens: through its first EOS, without the pads
+        that fill it to the batch's longest generation."""
+        if eos_ids := self._eos_ids():
+            eos = torch.tensor(sorted(eos_ids), device=generated.device)
+            if len(eos_at := torch.isin(generated, eos).nonzero()):
+                return generated[: int(eos_at[0]) + 1]
+        pad_token_id = self._tok.pad_token_id if self._tok is not None else None
+        if not isinstance(pad_token_id, int):
+            return generated
+        kept = generated.ne(pad_token_id).nonzero()
+        return generated[: int(kept[-1]) + 1 if len(kept) else 0]
+
     def _detect_finish_reason(
         self,
         raw_text: str,
@@ -401,10 +420,7 @@ class HFTransformersExecutor(InferenceMixin, Executor):
     ) -> str | None:
         if stop_strings and raw_text != final_text:
             return "stop"
-        eos_token_id = self._tok.eos_token_id if self._tok is not None else None
-        eos_ids = (
-            {eos_token_id} if isinstance(eos_token_id, int) else set(eos_token_id or [])
-        )
+        eos_ids = self._eos_ids()
         if eos_ids and len(gen_ids) > 0 and int(gen_ids[-1]) in eos_ids:
             return "stop"
         if len(gen_ids) >= max_new_tokens:
@@ -425,9 +441,8 @@ class HFTransformersExecutor(InferenceMixin, Executor):
         with self._task_span(
             task_id, task.workflow_id, out_dir, owner_id=task.owner_id
         ):
-            result = self._run_inner(spec, task_id, out_dir)
-        maybe_upload_artifacts(task, out_dir, logger=logger)
-        maybe_upload_traces(task, out_dir, logger=logger)
+            result = self._run_inner(spec, task_id, out_dir, task.merged_children or [])
+        self._upload_outputs(task, result, out_dir)
         return result
 
     def _run_inner(
@@ -435,6 +450,7 @@ class HFTransformersExecutor(InferenceMixin, Executor):
         spec: "InferenceSpecStrict | EmbeddingSpecStrict",
         task_id: str,
         out_dir: Path,
+        merged_children: Sequence[MergedChildTaskStrict] = (),
     ) -> InferenceResult | EmbeddingResult:
         with self._span("model load", span_type=SpanType.COMPUTE):
             self._ensure_model(spec)
@@ -527,8 +543,39 @@ class HFTransformersExecutor(InferenceMixin, Executor):
 
         assert self._tok is not None
         prepared = self._prepare_inference_entry(raw_entry)
-        self._prompts = prepared.prompts
-        self._metadata = prepared.metadata
+        batch: list[tuple[str, InferenceSpecStrict | EmbeddingSpecStrict, Path]] = [
+            (task_id, spec, out_dir)
+        ]
+        entries: list[PreparedInferenceEntry] = [prepared]
+        for child in merged_children:
+            if not isinstance(child.spec, InferenceSpecStrict):
+                raise ExecutionError(
+                    "Merged child spec must be inference for merged transformers "
+                    "execution"
+                )
+            try:
+                child_entry = self._prepare_inference_entry(
+                    self._collect_prompts_for_spec(child.spec, task_id=child.task_id)
+                )
+                if not child_entry.prompts:
+                    raise ExecutionError("No prompts prepared.")
+                if child_entry.applied_chat_template != prepared.applied_chat_template:
+                    raise ExecutionError(
+                        "its prompts are templated differently from the batch's"
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "Leaving merged child %s out of the batch: %s", child.task_id, exc
+                )
+                continue
+            batch.append((child.task_id, child.spec, out_dir.parent / child.task_id))
+            entries.append(child_entry)
+            dependencies_by_task[child.task_id] = self._extract_source_data_ids(
+                child.spec
+            )
+        self._prompts = [prompt for entry in entries for prompt in entry.prompts]
+        self._metadata = [meta for entry in entries for meta in entry.metadata]
+        owners = [index for index, entry in enumerate(entries) for _ in entry.prompts]
         self._applied_chat_template = prepared.applied_chat_template
         self._inf = (
             spec.inference or {} if isinstance(spec, InferenceSpecStrict) else {}
@@ -538,7 +585,7 @@ class HFTransformersExecutor(InferenceMixin, Executor):
         skip_special_tokens = bool(self._inf.get("skip_special_tokens", True))
         gen_cfg = self._build_generation_config(self._inf, stop_strings=stops)
 
-        if not self._prompts:
+        if not prepared.prompts:
             raise ExecutionError("No prompts prepared. Check spec.data configuration.")
 
         # Tokenize batch
@@ -546,6 +593,7 @@ class HFTransformersExecutor(InferenceMixin, Executor):
             self._prompts,
             return_tensors="pt",
             padding=True,
+            padding_side="left",
             truncation=False,
             add_special_tokens=not self._applied_chat_template,
         )
@@ -577,19 +625,26 @@ class HFTransformersExecutor(InferenceMixin, Executor):
                     )
         latency = time.time() - t0
 
-        items: list[InferenceItem] = []
-        export_items: list[dict[str, Any]] = []
-        prompt_tokens = 0
-        completion_tokens = 0
+        items: list[list[InferenceItem]] = [[] for _ in entries]
+        export_items: list[list[dict[str, Any]]] = [[] for _ in entries]
+        prompt_tokens = [0] * len(entries)
+        completion_tokens = [0] * len(entries)
 
         # For each sequence in the batch, split prompt vs generated part
         input_ids = enc["input_ids"]
         max_new_tokens = gen_cfg.max_new_tokens
-        for i, (inp_ids, seq, prompt_text, metadata_entry) in enumerate(
-            zip(input_ids, outputs, self._prompts, self._metadata, strict=True)
+        for owner, inp_ids, mask, seq, prompt_text, metadata_entry in zip(
+            owners,
+            input_ids,
+            enc["attention_mask"],
+            outputs,
+            self._prompts,
+            self._metadata,
+            strict=True,
         ):
-            input_len = int(inp_ids.shape[0])
-            gen_part = seq[input_len:]
+            i = len(items[owner])
+            input_len = int(mask.sum())
+            gen_part = self._own_generation(seq[int(inp_ids.shape[0]) :])
             raw_text = self._tok.decode(
                 gen_part, skip_special_tokens=skip_special_tokens
             )
@@ -612,7 +667,7 @@ class HFTransformersExecutor(InferenceMixin, Executor):
                 max_new_tokens=max_new_tokens,
                 stop_strings=stops,
             )
-            items.append(
+            items[owner].append(
                 InferenceItem(
                     index=i,
                     prompt=prompt_text,
@@ -629,29 +684,53 @@ class HFTransformersExecutor(InferenceMixin, Executor):
             }
             if metadata_entry:
                 payload["metadata"] = metadata_entry
-            export_items.append(payload)
-            prompt_tokens += input_len
-            completion_tokens += int(gen_part.shape[0])
+            export_items[owner].append(payload)
+            prompt_tokens[owner] += input_len
+            completion_tokens[owner] += int(gen_part.shape[0])
 
-        result = InferenceResult(
-            model=self._model_name,
-            items=items,
-            usage=GenerationUsage(
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                total_tokens=prompt_tokens + completion_tokens,
-                num_requests=len(self._prompts),
-                latency_sec=latency,
-            ),
-        )
+        results = [
+            InferenceResult(
+                model=self._model_name,
+                items=items[owner],
+                usage=GenerationUsage(
+                    prompt_tokens=prompt_tokens[owner],
+                    completion_tokens=completion_tokens[owner],
+                    total_tokens=prompt_tokens[owner] + completion_tokens[owner],
+                    num_requests=len(entry.prompts),
+                    latency_sec=latency,
+                ),
+            )
+            for owner, entry in enumerate(entries)
+        ]
+        result = results[0]
+        result.children = {
+            child_id: child_result
+            for (child_id, _, _), child_result in zip(
+                batch[1:], results[1:], strict=True
+            )
+        }
 
-        if isinstance(spec, InferenceSpecStrict):
-            self._maybe_export_jsonl(spec, task_id, export_items, out_dir)
+        for (owner_id, owner_spec, owner_dir), owner_items in zip(
+            batch, export_items, strict=True
+        ):
+            if not isinstance(owner_spec, InferenceSpecStrict):
+                continue
+            try:
+                self._maybe_export_jsonl(owner_spec, owner_id, owner_items, owner_dir)
+            except ExecutionError as exc:
+                if owner_id == task_id:
+                    raise
+                logger.warning(
+                    "Leaving merged child %s out of the result: %s", owner_id, exc
+                )
+                del result.children[owner_id]
+                del dependencies_by_task[owner_id]
 
         self._dump_to_governance(
             task_id=task_id,
             result=result,
             dependencies_by_task=dependencies_by_task,
+            owners={child.task_id: child.owner_id for child in merged_children},
         )
 
         return result

@@ -74,6 +74,7 @@ from shared.schemas.result import (
     InferenceItem,
     InferenceResult,
 )
+from shared.tasks import MergedChildTaskStrict
 from shared.tasks.specs import InferenceSpecStrict
 from shared.tasks.specs.common import ModelSpecStrict
 from shared.tasks.task_type import TaskType
@@ -81,11 +82,7 @@ from shared.tasks.task_type import TaskType
 from .base_executor import ExecutionError, Executor, ExecutorTask
 from .mixins.data import InferenceEntry
 from .mixins.inference import InferenceMixin, PreparedInferenceEntry
-from .utils.checkpoints import (
-    maybe_upload_artifacts,
-    maybe_upload_traces,
-    resolve_checkpoint_load,
-)
+from .utils.checkpoints import resolve_checkpoint_load
 
 logger = logging.getLogger(__name__)
 
@@ -929,9 +926,25 @@ Summary:"""
             task_id, task.workflow_id, out_dir, owner_id=task.owner_id
         ):
             result = self._run_inner(task, out_dir)
-        maybe_upload_artifacts(task, out_dir, logger=logger)
-        maybe_upload_traces(task, out_dir, logger=logger)
+        self._upload_outputs(task, result, out_dir)
         return result
+
+    @staticmethod
+    def _validate_entry(entry: PreparedInferenceEntry) -> None:
+        """Check that a task's prepared per-prompt inputs line up with its prompts."""
+        prompts = entry.prompts
+        if (embedding := entry.image_embedding) is not None and len(embedding) != len(
+            prompts
+        ):
+            raise ExecutionError(
+                f"spec.data.image_embedding length mismatch for task {entry.task_id}: "
+                f"{len(embedding)} (image_embedding) vs {len(prompts)} (prompts)"
+            )
+        if (metadata := entry.metadata) and len(metadata) != len(prompts):
+            raise ExecutionError(
+                f"spec.data.metadata length mismatch for task {entry.task_id}: "
+                f"{len(metadata)} (metadata) vs {len(prompts)} (prompts)"
+            )
 
     def _run_inner(
         self,
@@ -1009,21 +1022,44 @@ Summary:"""
                 except Exception as exc:
                     if job["is_parent"]:
                         raise
-                    raise ExecutionError(
-                        f"Failed to prepare merged child task {job_task_id}: {exc}"
-                    ) from exc
+                    logger.warning(
+                        "Leaving merged child %s out of the batch: %s", job_task_id, exc
+                    )
 
         parent_entry, parent_deps = results[task_id]
+        self._validate_entry(parent_entry)
+        self._base_inference = copy.deepcopy(parent_entry.inference_cfg)
+        base_sampling_cfg = self._normalize_inference_for_sampling(self._base_inference)
         entries.append(parent_entry)
         dependencies_by_task[task_id] = parent_deps
         entry_by_task_id: dict[str, PreparedInferenceEntry] = {task_id: parent_entry}
-        child_entry: PreparedInferenceEntry | None
+        batched_children: list[MergedChildTaskStrict] = []
         for child in merge_children:
             child_id = child.task_id
-            child_entry, child_deps = results[child_id]
+            if (prepared := results.get(child_id)) is None:
+                continue
+            child_entry, child_deps = prepared
+            try:
+                self._validate_entry(child_entry)
+                child_cfg = self._normalize_inference_for_sampling(
+                    child_entry.inference_cfg
+                )
+                if child_cfg != base_sampling_cfg:
+                    raise ExecutionError(
+                        "merged tasks must share inference parameters (excluding "
+                        "system_prompt)"
+                    )
+            except ExecutionError as exc:
+                logger.warning(
+                    "Leaving merged child %s out of the batch: %s", child_id, exc
+                )
+                continue
+            batched_children.append(child)
             entries.append(child_entry)
             dependencies_by_task[child_id] = child_deps
             entry_by_task_id[child_id] = child_entry
+        merge_children = batched_children
+        task_ids = [task_id] + [child.task_id for child in merge_children]
 
         self._batched_inputs = []
         self._prompt_owners = []
@@ -1032,20 +1068,7 @@ Summary:"""
             owner = entry.task_id
             prompts_for_owner: list[str] = entry.prompts
             image_embedding: torch.Tensor | None = entry.image_embedding
-            if image_embedding is not None:
-                if len(image_embedding) != len(prompts_for_owner):
-                    raise ExecutionError(
-                        f"spec.data.image_embedding length mismatch for task {owner}: "
-                        f"{len(image_embedding)} (image_embedding) vs "
-                        f"{len(prompts_for_owner)} (prompts)"
-                    )
             metadata_for_owner = entry.metadata
-            if metadata_for_owner and len(metadata_for_owner) != len(prompts_for_owner):
-                raise ExecutionError(
-                    f"spec.data.metadata length mismatch for task {owner}: "
-                    f"{len(metadata_for_owner)} (metadata) vs {len(prompts_for_owner)} "
-                    "(prompts)"
-                )
             image_embedding_list = (
                 torch.split(image_embedding, 1) if image_embedding is not None else None
             )
@@ -1067,16 +1090,6 @@ Summary:"""
 
         if not self._batched_inputs:
             raise ExecutionError("No prompts prepared. Check spec.data configuration.")
-
-        self._base_inference = copy.deepcopy(parent_entry.inference_cfg)
-        base_sampling_cfg = self._normalize_inference_for_sampling(self._base_inference)
-        for entry in entries[1:]:
-            other_cfg = self._normalize_inference_for_sampling(entry.inference_cfg)
-            if other_cfg != base_sampling_cfg:
-                raise ExecutionError(
-                    "Merged tasks must share inference parameters (excluding "
-                    "system_prompt)."
-                )
 
         template_param_schema = self._construct_template_param_schema(
             self._base_inference
@@ -1126,9 +1139,6 @@ Summary:"""
             per_task_items: dict[str, list[dict[str, Any]]] = {}
             usage_by_task: dict[str, dict[str, int | float]] = {}
             counts_by_task: dict[str, int] = {}
-
-            total_prompt_tokens = 0
-            total_completion_tokens = 0
 
             for idx, out in enumerate(outputs):
                 owner = (
@@ -1198,9 +1208,6 @@ Summary:"""
                 prompt_len = len(prompt_token_ids)
                 completion_len = len(best_token_ids)
 
-                total_prompt_tokens += prompt_len
-                total_completion_tokens += completion_len
-
                 usage_entry = usage_by_task.setdefault(
                     owner, {"prompt_tokens": 0, "completion_tokens": 0}
                 )
@@ -1238,28 +1245,23 @@ Summary:"""
                 usage["latency_sec"] = latency
                 usage["num_requests"] = counts_by_task.get(owner, 0)
 
-            parent_usage = {
-                "prompt_tokens": total_prompt_tokens,
-                "completion_tokens": total_completion_tokens,
-                "total_tokens": total_prompt_tokens + total_completion_tokens,
-                "latency_sec": latency,
-                "num_requests": len(self._batched_inputs),
-            }
-
             items = per_task_items.get(task_id, [])
             if parent_tables := parent_entry.tables:
                 items = self._populate_table(items, parent_tables)
 
             child_results: dict[str, BaseExecutorResult] = {}
+            child_exports: list[tuple[InferenceSpecStrict, str, list[Any]]] = []
             for child in merge_children:
                 child_id = child.task_id.strip()
                 if not child_id:
                     continue
                 child_items = per_task_items.get(child_id, [])
-                if (child_entry := entry_by_task_id.get(child_id)) and (
-                    child_tables := child_entry.tables
+                if (batched_entry := entry_by_task_id.get(child_id)) and (
+                    child_tables := batched_entry.tables
                 ):
                     child_items = self._populate_table(child_items, child_tables)
+                if isinstance(child.spec, InferenceSpecStrict):
+                    child_exports.append((child.spec, child_id, child_items))
                 maybe_usage = usage_by_task.get(child_id)
                 child_results[child_id] = InferenceResult(
                     model=self._model_name,
@@ -1275,7 +1277,7 @@ Summary:"""
             children=child_results,
             model=self._model_name,
             items=[InferenceItem.model_validate(it) for it in items],
-            usage=GenerationUsage.model_validate(parent_usage),
+            usage=GenerationUsage.model_validate(usage_by_task[task_id]),
         )
 
         with self._span(
@@ -1284,9 +1286,23 @@ Summary:"""
             attributes={"task_ids": task_ids},
         ):
             self._maybe_export_jsonl(spec, task_id, items, out_dir)
+            for child_spec, child_id, child_items in child_exports:
+                try:
+                    self._maybe_export_jsonl(
+                        child_spec, child_id, child_items, out_dir.parent / child_id
+                    )
+                except ExecutionError as exc:
+                    logger.warning(
+                        "Leaving merged child %s out of the result: %s", child_id, exc
+                    )
+                    del result.children[child_id]
+                    del dependencies_by_task[child_id]
 
         self._dump_to_governance(
-            task_id=task_id, result=result, dependencies_by_task=dependencies_by_task
+            task_id=task_id,
+            result=result,
+            dependencies_by_task=dependencies_by_task,
+            owners={child.task_id: child.owner_id for child in merge_children},
         )
 
         return result

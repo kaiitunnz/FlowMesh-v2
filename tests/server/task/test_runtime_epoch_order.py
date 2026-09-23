@@ -213,7 +213,7 @@ spec:
     ready = runtime.next_ready(stop_event, timeout=0.01)
     assert ready == node_ids["a"]
 
-    impacted, _, _ = runtime.mark_failed(
+    impacted, _ = runtime.mark_failed(
         node_ids["a"],
         None,
         {"error": "boom"},
@@ -265,7 +265,7 @@ spec:
     assert interrupt.worker_id == "wkr-1"
 
 
-def test_cancel_workflow_skips_interruptive_cancellation_for_merged_tasks() -> None:
+def test_cancel_workflow_cancels_each_task_of_a_merged_batch() -> None:
     worker_registry = _WorkerRegistryStub()
     runtime = _runtime(worker_registry)
     payload = """
@@ -308,9 +308,9 @@ spec:
     updated_child = runtime.get_record(child_id)
     assert updated_parent is not None
     assert updated_child is not None
-    assert cancelled == []
-    assert updated_parent.status == TaskStatus.DISPATCHED
-    assert updated_child.status == TaskStatus.DISPATCHED
-    assert updated_parent.merged_children == [child_id]
-    assert updated_child.merged_parent_id == parent_id
-    assert len(worker_registry.published_interrupts) == 0
+    assert sorted(cancelled) == sorted([parent_id, child_id])
+    assert updated_parent.status == TaskStatus.CANCELLING
+    assert updated_child.status == TaskStatus.CANCELLED
+    assert updated_child.merged_parent_id is None
+    assert runtime._merge_children_map[parent_id] == []
+    assert len(worker_registry.published_interrupts) == 1

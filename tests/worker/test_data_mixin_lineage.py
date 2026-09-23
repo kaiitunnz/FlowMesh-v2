@@ -100,7 +100,7 @@ def test_record_output_emits_dump_span_and_rows(tmp_path: Path) -> None:
 
 def test_dump_to_governance_with_merged_children(tmp_path: Path) -> None:
     mixin = _Mixin()
-    out_dir = tmp_path / "task"
+    out_dir = tmp_path / "tsk-parent"
     with mixin._task_span("tsk-parent", "wfl-1", out_dir, owner_id="alice"):
         result = BaseExecutorResult.model_validate(
             {
@@ -121,24 +121,21 @@ def test_dump_to_governance_with_merged_children(tmp_path: Path) -> None:
             task_id="tsk-parent",
             result=result,
             dependencies_by_task=deps,
+            owners={"tsk-c1": "bob", "tsk-c2": "carol"},
         )
 
-    base = out_dir / "logs"
-    assets = _read_jsonl(base / "assets.jsonl")
-    assert {row["data_id"] for row in assets} == {
-        "tsk-parent",
-        "tsk-c1",
-        "tsk-c2",
-    }
-    assert all(row["user_id"] == "alice" for row in assets)
-
-    lineage = _read_jsonl(base / "lineage.jsonl")
-    edges = {(row["data_id"], row["source_data_id"]) for row in lineage}
-    assert edges == {
-        ("tsk-parent", "tsk-up-a"),
-        ("tsk-c1", "tsk-up-b"),
-        ("tsk-c2", "tsk-up-c"),
-    }
+    for task, upstream, owner in (
+        ("tsk-parent", "tsk-up-a", "alice"),
+        ("tsk-c1", "tsk-up-b", "bob"),
+        ("tsk-c2", "tsk-up-c", "carol"),
+    ):
+        base = tmp_path / task / "logs"
+        assets = _read_jsonl(base / "assets.jsonl")
+        assert [(row["data_id"], row["user_id"]) for row in assets] == [(task, owner)]
+        lineage = _read_jsonl(base / "lineage.jsonl")
+        assert [(row["data_id"], row["source_data_id"]) for row in lineage] == [
+            (task, upstream)
+        ]
 
 
 def test_extract_source_data_ids_from_upstream_artifacts(tmp_path: Path) -> None:

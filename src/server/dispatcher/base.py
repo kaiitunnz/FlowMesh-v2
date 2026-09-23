@@ -659,86 +659,9 @@ class Dispatcher:
         if self._evaluate_condition_skip(task_id, rendered_task, record):
             return True
 
-        # Resolve merged-child rendered payloads
-        rendered_children: list[MergedChildTaskStrict] | None = None
-        if record.merged_children:
-            rendered_children = []
-            for child_id in record.merged_children:
-                if not child_id:
-                    self._runtime.release_merge(task_id)
-                    self.fail_task(
-                        task_id,
-                        "merged_child_missing_task_id",
-                        payload={"error": "Merged child entry missing task_id"},
-                    )
-                    return True
-                child_record = self._runtime.get_record(child_id)
-                if not child_record:
-                    self._runtime.release_merge(task_id)
-                    self.fail_task(
-                        task_id,
-                        "merged_child_missing_record",
-                        payload={"error": f"Merged child record missing: {child_id}"},
-                    )
-                    return True
-                try:
-                    resolved_child_task = self._resolve_stage_references(
-                        child_id, child_record.task, child_record
-                    )
-                except StageReferenceNotReady as exc:
-                    self._logger.debug(
-                        "Merged child %s waiting on stage artifacts: %s",
-                        child_id,
-                        exc,
-                    )
-                    self._runtime.release_merge(task_id)
-                    self.requeue_task(
-                        task_id, reason="stage_reference_pending", count_retry=False
-                    )
-                    return False
-                except ResultUnavailable as exc:
-                    self._logger.warning(
-                        "Merged child %s cannot reach a referenced stage result "
-                        "yet: %s",
-                        child_id,
-                        exc,
-                    )
-                    self._runtime.release_merge(task_id)
-                    self.requeue_task(
-                        task_id, reason="stage_result_unavailable", count_retry=False
-                    )
-                    return False
-                except Exception as exc:
-                    self._logger.error(
-                        "Failed to resolve stage references for merged child %s: %s",
-                        child_id,
-                        exc,
-                    )
-                    self._runtime.release_merge(task_id)
-                    self.fail_task(
-                        task_id,
-                        f"Failed to resolve merged child {child_id}: {exc}",
-                        payload={"error": str(exc)},
-                    )
-                    return True
-                try:
-                    rendered_children.append(
-                        MergedChildTaskStrict(
-                            task_id=child_id,
-                            owner_id=child_record.owner_id,
-                            workflow_id=child_record.workflow_id,
-                            spec=resolved_child_task.spec,
-                            metadata=resolved_child_task.metadata,
-                        )
-                    )
-                except ValidationError as exc:
-                    self._runtime.release_merge(task_id)
-                    self.fail_task(
-                        task_id,
-                        "merged_child_schema_validation_failed",
-                        payload={"error": str(exc), "child_task_id": child_id},
-                    )
-                    return True
+        rendered_children = self._render_merged_children(
+            task_id, record, rendered_task.spec
+        )
 
         # 7. Build WorkerTaskMessage
         try:
@@ -826,16 +749,13 @@ class Dispatcher:
         # 9. Mark dispatched
         record.no_dispatch_since = None
         self._runtime.mark_dispatched(task_id, worker, input_preparation=preparing)
-        if merged_children:
-            try:
-                self._logger.info(
-                    "[TaskMerge] parent=%s merged_children=%d -> %s",
-                    task_id,
-                    len(merged_children),
-                    ", ".join(merged_children),
-                )
-            except Exception:
-                pass
+        if rendered_children:
+            self._logger.info(
+                "[TaskMerge] parent=%s merged_children=%d -> %s",
+                task_id,
+                len(rendered_children),
+                ", ".join(child.task_id for child in rendered_children),
+            )
         try:
             self._worker_registry.update_worker_status(worker.id, WorkerStatus.BUSY)
         except Exception as exc:
@@ -906,6 +826,73 @@ class Dispatcher:
             except Exception:
                 self._logger.exception("In-memory requeue of %s failed", task_id)
 
+    def _render_merged_children(
+        self, task_id: str, record: TaskRecord, parent_spec: TaskSpecStrict
+    ) -> list[MergedChildTaskStrict] | None:
+        """Render the children merged into a dispatch.
+
+        A child that cannot run in this dispatch leaves the merge rather than failing
+        it: one that is not ready yet returns to the queue still mergeable, one whose
+        rendered merge key differs from the parent's returns to merge under its rendered
+        key, and one whose own input is at fault or whose condition is not met returns
+        to run alone and settle its own outcome.
+        """
+        rendered: list[MergedChildTaskStrict] = []
+        for child_id in list(record.merged_children or []):
+            child_record = self._runtime.merged_child_record(task_id, child_id)
+            if child_record is None:
+                self._runtime.release_merged_child(task_id, child_id, None)
+                continue
+            try:
+                resolved = self._resolve_stage_references(
+                    child_id, child_record.task, child_record
+                )
+                resolved.spec.validate_dispatchable()
+                if (condition := resolved.spec.condition) is not None and str(
+                    self._condition_actual(child_record, condition)
+                ) != condition.equals:
+                    # The child's own dispatch settles its skip.
+                    self._runtime.release_merged_child(task_id, child_id, None)
+                    continue
+                key = resolved.spec.merge_key(scope=child_record.org_id)
+                if key is None or key != parent_spec.merge_key(scope=record.org_id):
+                    self._logger.info(
+                        "Merged child %s of %s renders a different merge key; it "
+                        "leaves the merge",
+                        child_id,
+                        task_id,
+                    )
+                    self._runtime.release_merged_child(task_id, child_id, key)
+                    continue
+                # Rendering runs off the runtime lock; the child may have left since.
+                if self._runtime.merged_child_record(task_id, child_id) is None:
+                    continue
+                rendered.append(
+                    MergedChildTaskStrict(
+                        task_id=child_id,
+                        owner_id=child_record.owner_id,
+                        workflow_id=child_record.workflow_id,
+                        spec=resolved.spec,
+                        metadata=resolved.metadata,
+                    )
+                )
+            except (StageReferenceNotReady, ResultUnavailable) as exc:
+                self._logger.debug(
+                    "Merged child %s of %s is not ready yet: %s", child_id, task_id, exc
+                )
+                self._runtime.release_merged_child(
+                    task_id, child_id, child_record.merge_key
+                )
+            except Exception as exc:
+                self._logger.warning(
+                    "Merged child %s of %s cannot be rendered; it runs alone: %s",
+                    child_id,
+                    task_id,
+                    exc,
+                )
+                self._runtime.release_merged_child(task_id, child_id, None)
+        return rendered or None
+
     def requeue_task(
         self,
         task_id: str,
@@ -970,7 +957,7 @@ class Dispatcher:
         failure_payload = payload.copy() if isinstance(payload, dict) else {}
         if error_message and "error" not in failure_payload:
             failure_payload["error"] = error_message
-        impacted, merged_children, _ = self._runtime.mark_failed(
+        impacted, _ = self._runtime.mark_failed(
             task_id,
             worker_id,
             failure_payload,
@@ -992,18 +979,6 @@ class Dispatcher:
                 payload=dependent_payload,
                 error=reason,
             )
-        for child_id in merged_children:
-            child_payload = failure_payload.copy()
-            child_payload["parent_task_id"] = task_id
-            child_payload["dependency_failure"] = task_id
-            child_payload["is_child_task"] = True
-            self._emit_task_event(
-                "TASK_FAILED",
-                child_id,
-                payload=child_payload,
-                error=error_message or "parent_failed",
-                is_child=True,
-            )
 
     def _emit_task_event(
         self,
@@ -1013,7 +988,6 @@ class Dispatcher:
         worker_id: str | None = None,
         payload: dict[str, Any] | None = None,
         error: str | None = None,
-        is_child: bool = False,
     ) -> None:
         if not self._metrics:
             return
@@ -1025,7 +999,7 @@ class Dispatcher:
             error=error,
             ts=now_iso(),
         )
-        self._metrics.record_task_event(event, is_child=is_child)
+        self._metrics.record_task_event(event)
         if event_type == "TASK_FAILED":
             self._metrics.finalize_task_failure(task_id)
 
@@ -1420,6 +1394,23 @@ class Dispatcher:
             return None
         return current
 
+    def _condition_actual(self, record: TaskRecord, condition: ConditionSpec) -> Any:
+        """The upstream value a task's condition compares against."""
+        stage_context = self._build_stage_context(record)
+        upstream_record = stage_context.get(condition.node)
+        if upstream_record is None:
+            raise ValueError(
+                f"Condition references unknown node '{condition.node}'; "
+                f"known nodes: {list(stage_context.keys())}"
+            )
+        if upstream_record.status != TaskStatus.DONE:
+            raise StageReferenceNotReady(
+                f"Condition upstream node '{condition.node}' not yet DONE "
+                f"(status={upstream_record.status})"
+            )
+        upstream_result = self._load_stage_result(upstream_record.task_id)
+        return self._dig_result_path(upstream_result.result, condition.field.split("."))
+
     def _evaluate_condition_skip(
         self,
         task_id: str,
@@ -1436,22 +1427,7 @@ class Dispatcher:
             return False
 
         try:
-            stage_context = self._build_stage_context(record)
-            upstream_record = stage_context.get(condition.node)
-            if upstream_record is None:
-                raise ValueError(
-                    f"Condition references unknown node '{condition.node}'; "
-                    f"known nodes: {list(stage_context.keys())}"
-                )
-            if upstream_record.status != TaskStatus.DONE:
-                raise StageReferenceNotReady(
-                    f"Condition upstream node '{condition.node}' not yet DONE "
-                    f"(status={upstream_record.status})"
-                )
-            upstream_result = self._load_stage_result(upstream_record.task_id)
-            actual_value = self._dig_result_path(
-                upstream_result.result, condition.field.split(".")
-            )
+            actual_value = self._condition_actual(record, condition)
             if str(actual_value) == condition.equals:
                 return False  # Condition met — proceed with dispatch
 
