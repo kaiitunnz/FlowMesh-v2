@@ -800,7 +800,9 @@ class EventMonitor:
                             self._unregister_port_forward(task_id)
                             record = self._runtime.get_record(task_id)
                             if record and record.status == TaskStatus.CANCELLING:
-                                self._runtime.mark_cancelled(task_id, worker_id, {}, ts)
+                                self._runtime.mark_cancelled(
+                                    task_id, worker_id, {}, ts, unmerge=True
+                                )
                                 self._close_task_log_stream(task_id)
                                 self._finalizer.close_task_workflow(task_id)
                             else:

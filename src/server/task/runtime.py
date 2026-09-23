@@ -3890,7 +3890,7 @@ class TaskRuntime:
                     return (
                         [],
                         self._settle_cancelled_usage_locked(
-                            record, payload, finished_ts, started_ts
+                            record, payload, finished_ts, started_ts, unmerge=True
                         ),
                     )
                 record.status = TaskStatus.FAILED
@@ -4083,9 +4083,13 @@ class TaskRuntime:
         return self._mark_cancelled_locked(record, time.time())
 
     def _mark_cancelled_locked(
-        self, record: TaskRecord, finished_ts: float
+        self, record: TaskRecord, finished_ts: float, *, unmerge: bool = False
     ) -> list[str]:
-        """Move a task to CANCELLED in memory, returning the children merged into it."""
+        """Move a task to CANCELLED in memory, returning the children merged into it.
+
+        The children stay mergeable, unless ``unmerge`` says the task's merged dispatch
+        failed or was lost, which runs each of them alone.
+        """
         task_id = record.task_id
         if (parent_id := self._merge_parent_map.pop(task_id, None)) is not None:
             if (siblings := self._merge_children_map.get(parent_id)) and (
@@ -4111,11 +4115,17 @@ class TaskRuntime:
         self._merge_bucket_remove(task_id)
         self._merge_key_by_task.pop(task_id, None)
         return self._return_merged_children_locked(
-            self._merge_children_map.pop(task_id, [])
+            self._merge_children_map.pop(task_id, []), unmerge
         )
 
     def mark_cancelled(
-        self, task_id: str, worker_id: str | None, payload: dict[str, Any], ts: str
+        self,
+        task_id: str,
+        worker_id: str | None,
+        payload: dict[str, Any],
+        ts: str,
+        *,
+        unmerge: bool = False,
     ) -> list[tuple[str, TaskUsage]]:
         finished_ts = parse_iso_ts(str(payload.get("finished_at") or ts))
         maybe_started = payload.get("started_at")
@@ -4143,7 +4153,7 @@ class TaskRuntime:
                 )
                 return usages
             self._settle_cancelled_locked(
-                record, finished_ts, started_ts=started_ts, usage=usage
+                record, finished_ts, started_ts=started_ts, usage=usage, unmerge=unmerge
             )
             return usages
 
@@ -4153,6 +4163,8 @@ class TaskRuntime:
         payload: dict[str, Any],
         finished_ts: float,
         started_ts: float | None,
+        *,
+        unmerge: bool = False,
     ) -> list[tuple[str, TaskUsage]]:
         """Settle a cancellation a completion or failure raced, billing its dispatch.
 
@@ -4161,7 +4173,7 @@ class TaskRuntime:
         """
         usage = TaskUsage.from_payload(payload, TaskStatus.CANCELLED)
         self._settle_cancelled_locked(
-            record, finished_ts, started_ts=started_ts, usage=usage
+            record, finished_ts, started_ts=started_ts, usage=usage, unmerge=unmerge
         )
         return [(record.task_id, usage)] if usage is not None else []
 
@@ -4172,6 +4184,7 @@ class TaskRuntime:
         *,
         started_ts: float | None = None,
         usage: TaskUsage | None = None,
+        unmerge: bool = False,
     ) -> None:
         """Settle a task CANCELLED and mirror the cancellation into the ledger.
 
@@ -4190,7 +4203,7 @@ class TaskRuntime:
             record.started_ts = started_ts
         if usage is not None:
             record.usages.append(usage)
-        returned = self._mark_cancelled_locked(record, finished_ts)
+        returned = self._mark_cancelled_locked(record, finished_ts, unmerge=unmerge)
         # Persist the task terminal record first, then mirror the cancellation
         # into the ledger and snapshot last, so the ledger never leads task state.
         self._commit_locked(task_id, *returned, sched=False)

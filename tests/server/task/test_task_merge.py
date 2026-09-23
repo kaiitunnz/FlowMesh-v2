@@ -923,6 +923,33 @@ async def test_a_cancelled_merge_parent_returns_another_workflows_children() -> 
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("loss", ["failed", "unregistered"])
+async def test_a_cancelling_parents_failed_or_lost_batch_runs_its_children_alone(
+    loss: str,
+) -> None:
+    registry = _Registry()
+    runtime = _runtime(registry, _InterruptRecorder())
+    first, a = await _register(runtime, _siblings(names=["a1"]))
+    _, b = await _register(runtime, _siblings(names=["b1", "b2"]))
+    parent = _next(runtime)
+    assert parent == a["a1"]
+    assert runtime.plan_merge(parent, 8, _WORKER.id) == [b["b1"], b["b2"]]
+    runtime.mark_dispatched(parent, _WORKER)
+    runtime.cancel_workflow(first)
+    monitor = _monitor(runtime)
+
+    if loss == "failed":
+        monitor._handle_task_event(_failed(parent, "batch rejected", retryable=False))
+    else:
+        monitor._handle_worker_event(WorkerEvent(type="UNREGISTER", worker_id="wkr-1"))
+
+    assert runtime._tasks[parent].status == TaskStatus.CANCELLED
+    for child in b.values():
+        _assert_returned(runtime, registry, child)
+    assert runtime.plan_merge(_next(runtime), 8, _WORKER.id) == []
+
+
+@pytest.mark.anyio
 async def test_a_merged_child_of_a_cancelled_workflow_stays_cancelled() -> None:
     runtime = _runtime(_Registry(), _InterruptRecorder())
     _, first_ids = await _register(runtime, _siblings())
