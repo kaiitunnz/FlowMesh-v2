@@ -181,6 +181,8 @@ class WorkerWatchdog:
                     exc,
                 )
                 try:
+                    if self._runtime.return_failed_merge(task_id):
+                        continue
                     self._dispatcher.requeue_task(
                         task_id,
                         reason="worker_heartbeat_expired",

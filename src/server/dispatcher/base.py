@@ -882,13 +882,12 @@ class Dispatcher:
         reason: str,
         front: bool = False,
         release_merge: bool = True,
-        unmerge_children: bool = False,
         mark_pending: bool = True,
         count_retry: bool = True,
         extra_payload: dict[str, Any] | None = None,
     ) -> None:
         if release_merge:
-            self._runtime.release_merge(task_id, unmerge_children)
+            self._runtime.release_merge(task_id)
 
         if mark_pending:
             self._runtime.mark_pending(task_id, increment_retry=count_retry)

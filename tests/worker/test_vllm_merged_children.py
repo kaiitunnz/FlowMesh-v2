@@ -123,24 +123,13 @@ def test_the_parents_own_input_still_fails_the_dispatch(tmp_path: Path) -> None:
         _run(unpreparable, [_child("tsk-ok", _spec("ok"))], tmp_path)
 
 
-def test_a_batch_a_child_aborts_runs_the_parent_alone(tmp_path: Path) -> None:
-    result, llm = _run(
-        _spec("parent"),
-        [_child("tsk-ok", _spec("ok")), _child("tsk-long", _spec("too-long"))],
-        tmp_path,
-        rejected="too-long",
-    )
-
-    assert [item.prompt for item in result.items] == ["parent"]
-    assert result.children == {}
-    assert llm.generate.call_args.args[0] == ["parent"]
-
-
-def test_a_batch_the_parent_aborts_fails_the_parent(tmp_path: Path) -> None:
+def test_a_batch_the_engine_rejects_fails_the_dispatch(tmp_path: Path) -> None:
+    # The dispatch fails rather than running again on an engine the failure may have
+    # left unusable; the root decides whose failure it was.
     with pytest.raises(ValueError):
         _run(
-            _spec("too-long"),
-            [_child("tsk-ok", _spec("ok"))],
+            _spec("parent"),
+            [_child("tsk-ok", _spec("ok")), _child("tsk-long", _spec("too-long"))],
             tmp_path,
             rejected="too-long",
         )

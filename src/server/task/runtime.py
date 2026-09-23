@@ -3389,21 +3389,40 @@ class TaskRuntime:
         self._commit_locked(task_id, *siblings)
         return siblings
 
-    def release_merge(self, task_id: str, unmerge_children: bool = False) -> None:
-        """Return the children merged into a task to the ready queue.
+    def release_merge(self, task_id: str) -> None:
+        with self._cv:
+            self._release_merge_locked(task_id)
 
-        ``unmerge_children`` runs each alone next, for a merged dispatch that failed.
+    def return_failed_merge(self, task_id: str) -> bool:
+        """Return a merged dispatch that failed or lost its worker, if it is one.
+
+        Such a failure belongs to no single task in the batch, so the parent and every
+        child go back to the head of the queue to run alone, spending no attempt.
+        Returns whether ``task_id`` was a merged dispatch.
         """
         with self._cv:
-            self._release_merge_locked(task_id, unmerge_children)
+            record = self._tasks.get(task_id)
+            if (
+                record is None
+                or record.status != TaskStatus.DISPATCHED
+                or not self._merge_children_map.get(task_id)
+            ):
+                return False
+            record.merged_children = None
+            returned = self._return_merged_children_locked(
+                [task_id, *self._merge_children_map.pop(task_id)], unmerge=True
+            )
+            record.assigned_worker = None
+            record.dispatched_ts = None
+            record.started_ts = None
+            self._commit_locked(*returned)
+            return True
 
-    def _release_merge_locked(
-        self, task_id: str, unmerge_children: bool = False
-    ) -> None:
+    def _release_merge_locked(self, task_id: str) -> None:
         if parent := self._tasks.get(task_id):
             parent.merged_children = None
         returned = self._return_merged_children_locked(
-            self._merge_children_map.pop(task_id, []), unmerge_children
+            self._merge_children_map.pop(task_id, [])
         )
         self._commit_locked(task_id, *returned)
 

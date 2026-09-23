@@ -15,7 +15,7 @@ from server.registries.workflow import PersistedTask, WorkflowSched
 from server.services.monitoring import EventMonitor
 from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime
-from shared.schemas.event import TaskEvent
+from shared.schemas.event import TaskEvent, WorkerEvent
 from shared.schemas.worker import WorkerCapabilities
 from shared.tasks.executor_key import ExecutorKey
 from shared.tasks.specs.common import ConditionSpec
@@ -252,44 +252,82 @@ async def test_a_failed_parent_returns_its_merged_children_to_the_queue() -> Non
         assert runtime._tasks[child].error is None
 
 
-@pytest.mark.anyio
-async def test_a_merged_dispatch_that_fails_for_a_retry_runs_its_children_alone() -> (
-    None
-):
-    registry = _Registry()
-    runtime = _runtime(registry)
-    ids = await _dispatch_merged(runtime)
-    a = ids["a"]
-    runtime._tasks[a].max_attempts = 3
-    dispatcher = MagicMock()
-    dispatcher.requeue_task.side_effect = lambda task_id, **kw: runtime.release_merge(
-        task_id, kw.get("unmerge_children", False)
-    )
-    monitor = EventMonitor(
+def _monitor(runtime: TaskRuntime, dispatcher: Any = None) -> EventMonitor:
+    watchdog = MagicMock()
+    watchdog.enabled = False
+    return EventMonitor(
         redis_client=MagicMock(),
         logger=logging.getLogger("task-merge"),
         runtime=runtime,
-        dispatcher=dispatcher,
+        dispatcher=dispatcher or MagicMock(),
         worker_registry=MagicMock(),
         node_registry=MagicMock(),
         metrics_recorder=MagicMock(),
-        watchdog=MagicMock(),
+        watchdog=watchdog,
     )
 
-    monitor._handle_task_event(
-        TaskEvent(
-            type="TASK_FAILED",
-            task_id=a,
-            worker_id="wkr-1",
-            error="batch rejected",
-            retryable=True,
-            payload={},
-            ts=_TS,
-        )
+
+def _failed(task_id: str, error: str, retryable: bool | None) -> TaskEvent:
+    return TaskEvent(
+        type="TASK_FAILED",
+        task_id=task_id,
+        worker_id="wkr-1",
+        error=error,
+        retryable=retryable,
+        payload={},
+        ts=_TS,
     )
 
-    for child in (ids["b"], ids["c"]):
-        _assert_returned(runtime, registry, child)
+
+def _assert_run_alone(runtime: TaskRuntime, registry: _Registry, task_id: str) -> None:
+    _assert_returned(runtime, registry, task_id)
+    assert "wkr-1" not in runtime._tasks[task_id].failed_workers
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("error", "retryable"),
+    [
+        ("batch rejected", True),
+        ("batch rejected", False),
+        ("worker_heartbeat_expired", None),
+        (None, None),
+    ],
+    ids=["retryable", "non-retryable", "heartbeat-expired", "unregistered"],
+)
+async def test_a_failed_or_lost_merged_dispatch_runs_each_task_alone(
+    error: str | None, retryable: bool | None
+) -> None:
+    registry = _Registry()
+    runtime = _runtime(registry)
+    ids = await _dispatch_merged(runtime)
+    monitor = _monitor(runtime)
+    if error:
+        monitor._handle_task_event(_failed(ids["a"], error, retryable))
+    else:
+        monitor._handle_worker_event(WorkerEvent(type="UNREGISTER", worker_id="wkr-1"))
+
+    for task_id in ids.values():
+        _assert_run_alone(runtime, registry, task_id)
+    assert runtime._tasks[ids["a"]].merged_children is None
+
+
+@pytest.mark.anyio
+async def test_a_task_that_fails_alone_after_its_merge_failed_is_charged() -> None:
+    runtime = _runtime(_Registry())
+    ids = await _dispatch_merged(runtime)
+    a = ids["a"]
+    runtime._tasks[a].max_attempts = 1
+    monitor = _monitor(runtime)
+    monitor._handle_task_event(_failed(a, "batch rejected", retryable=False))
+    assert _next(runtime) is not None
+    runtime.mark_dispatched(a, _VLLM_WORKER)
+
+    monitor._handle_task_event(_failed(a, "own input", retryable=False))
+
+    record = runtime._tasks[a]
+    assert record.status == TaskStatus.FAILED
+    assert "wkr-1" in record.failed_workers
 
 
 @pytest.mark.anyio
