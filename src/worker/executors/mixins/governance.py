@@ -118,17 +118,20 @@ class GovernanceMixin:
     # ------------------------------------------------------------------ #
     # Asset / lineage rows — keep their own JSONL files                  #
     # ------------------------------------------------------------------ #
-    def _lineage_dir(self) -> Path:
-        """Per-task ``logs/`` directory; requires an active ``_task_span``."""
+    def _lineage_dir(self, task_id: str | None = None) -> Path:
+        """A task's ``logs/`` directory, the running task's by default; a merged child's
+        sits beside it. Requires an active ``_task_span``."""
         if self._task_out_dir is None:
             raise ExecutionError(
                 "Lineage directory accessed before _task_span entered; "
                 "wrap executor work in `with self._task_span(...)`."
             )
-        return self._task_out_dir / "logs"
+        if task_id is None or task_id == self._task_id:
+            return self._task_out_dir / "logs"
+        return self._task_out_dir.parent / task_id / "logs"
 
     def _append_jsonl(self, filename: str, row: dict[str, Any]) -> None:
-        target_dir = self._lineage_dir()
+        target_dir = self._lineage_dir(row["data_id"])
         target_dir.mkdir(parents=True, exist_ok=True)
         line = json.dumps(row, ensure_ascii=False, default=str)
         path = target_dir / filename

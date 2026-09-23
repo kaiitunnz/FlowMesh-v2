@@ -81,11 +81,7 @@ from shared.tasks.task_type import TaskType
 from .base_executor import ExecutionError, Executor, ExecutorTask
 from .mixins.data import InferenceEntry
 from .mixins.inference import InferenceMixin, PreparedInferenceEntry
-from .utils.checkpoints import (
-    maybe_upload_artifacts,
-    maybe_upload_traces,
-    resolve_checkpoint_load,
-)
+from .utils.checkpoints import resolve_checkpoint_load
 
 logger = logging.getLogger(__name__)
 
@@ -929,8 +925,7 @@ Summary:"""
             task_id, task.workflow_id, out_dir, owner_id=task.owner_id
         ):
             result = self._run_inner(task, out_dir)
-        maybe_upload_artifacts(task, out_dir, logger=logger)
-        maybe_upload_traces(task, out_dir, logger=logger)
+        self._upload_outputs(task, result, out_dir)
         return result
 
     @staticmethod
@@ -1268,6 +1263,7 @@ Summary:"""
                 items = self._populate_table(items, parent_tables)
 
             child_results: dict[str, BaseExecutorResult] = {}
+            child_exports: list[tuple[InferenceSpecStrict, str, list[Any]]] = []
             for child in merge_children:
                 child_id = child.task_id.strip()
                 if not child_id:
@@ -1277,6 +1273,8 @@ Summary:"""
                     child_tables := batched_entry.tables
                 ):
                     child_items = self._populate_table(child_items, child_tables)
+                if isinstance(child.spec, InferenceSpecStrict):
+                    child_exports.append((child.spec, child_id, child_items))
                 maybe_usage = usage_by_task.get(child_id)
                 child_results[child_id] = InferenceResult(
                     model=self._model_name,
@@ -1301,6 +1299,10 @@ Summary:"""
             attributes={"task_ids": task_ids},
         ):
             self._maybe_export_jsonl(spec, task_id, items, out_dir)
+            for child_spec, child_id, child_items in child_exports:
+                self._maybe_export_jsonl(
+                    child_spec, child_id, child_items, out_dir.parent / child_id
+                )
 
         self._dump_to_governance(
             task_id=task_id, result=result, dependencies_by_task=dependencies_by_task

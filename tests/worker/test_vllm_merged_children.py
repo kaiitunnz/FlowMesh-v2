@@ -1,5 +1,6 @@
 """A merged vLLM dispatch returns a result for each child it can run, and only those."""
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -133,3 +134,18 @@ def test_a_batch_the_engine_rejects_fails_the_dispatch(tmp_path: Path) -> None:
             tmp_path,
             rejected="too-long",
         )
+
+
+def test_each_task_writes_its_own_export_and_lineage(tmp_path: Path) -> None:
+    export = {"jsonl_export": {"path": "rows.jsonl", "fields": {"answer": "output"}}}
+    _run(
+        _spec("parent", postprocess=export),
+        [_child("tsk-b", _spec("bravo", postprocess=export))],
+        tmp_path / "tsk-test",
+    )
+
+    for task, prompt in (("tsk-test", "parent"), ("tsk-b", "bravo")):
+        rows = (tmp_path / task / "artifacts" / "rows.jsonl").read_text().splitlines()
+        assert [json.loads(row) for row in rows] == [{"answer": f"out-{prompt}"}]
+        assets = (tmp_path / task / "logs" / "assets.jsonl").read_text()
+        assert [json.loads(row)["data_id"] for row in assets.splitlines()] == [task]
