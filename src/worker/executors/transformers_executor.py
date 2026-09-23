@@ -393,9 +393,9 @@ class HFTransformersExecutor(InferenceMixin, Executor):
 
     def _eos_ids(self) -> set[int]:
         eos_token_id = self._tok.eos_token_id if self._tok is not None else None
-        return (
-            {eos_token_id} if isinstance(eos_token_id, int) else set(eos_token_id or [])
-        )
+        if isinstance(eos_token_id, int):
+            return {eos_token_id}
+        return {token for token in eos_token_id or [] if isinstance(token, int)}
 
     def _own_generation(self, generated: "torch.Tensor") -> "torch.Tensor":
         """A batch row's own generated tokens: through its first EOS, without the pads
