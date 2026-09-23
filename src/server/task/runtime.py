@@ -59,7 +59,7 @@ from shared.sandbox import (
 )
 from shared.schemas.command import InterruptMessage, MediatedOpMessage
 from shared.schemas.result import ResultEnvelope
-from shared.tasks import TaskEnvelopeTemplate
+from shared.tasks import TaskEnvelopeTemplate, TaskSpecStrict
 from shared.tasks.specs import (
     InferenceEmbodimentKind,
     InferenceSpecStrict,
@@ -325,7 +325,15 @@ def _sanitize_merge_spec(spec: dict[str, Any]) -> dict[str, Any]:
         inference_cfg = clone["inference"]
         inference_cfg.pop("system_prompt", None)
     clone.pop("data", None)
+    clone.pop("upstreamResults", None)
     return clone
+
+
+def renders_as_merged(parent: TaskSpecStrict, child: TaskSpecStrict) -> bool:
+    """Whether a rendered child differs from its rendered parent only in its inputs."""
+    return _sanitize_merge_spec(
+        parent.model_dump(mode="python", exclude_none=True)
+    ) == _sanitize_merge_spec(child.model_dump(mode="python", exclude_none=True))
 
 
 # Extra lifetime a worker-originated operation permit gets beyond the request timeout,

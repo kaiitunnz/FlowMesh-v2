@@ -39,7 +39,7 @@ from ..services.metrics import MetricsRecorder
 from ..task.metadata import extract_model_dataset_names
 from ..task.models import TaskRecord, TaskStatus
 from ..task.results import ResultUnavailable, ResultUnreadable
-from ..task.runtime import TaskRuntime
+from ..task.runtime import TaskRuntime, renders_as_merged
 from ..task.v2.representations.plan import InferenceEmbodimentMenu
 from ..utils.time import now_iso
 from .embodiment import (
@@ -659,7 +659,9 @@ class Dispatcher:
         if self._evaluate_condition_skip(task_id, rendered_task, record):
             return True
 
-        rendered_children = self._render_merged_children(task_id, record)
+        rendered_children = self._render_merged_children(
+            task_id, record, rendered_task.spec
+        )
 
         # 7. Build WorkerTaskMessage
         try:
@@ -825,14 +827,15 @@ class Dispatcher:
                 self._logger.exception("In-memory requeue of %s failed", task_id)
 
     def _render_merged_children(
-        self, task_id: str, record: TaskRecord
+        self, task_id: str, record: TaskRecord, parent_spec: TaskSpecStrict
     ) -> list[MergedChildTaskStrict] | None:
         """Render the children merged into a dispatch.
 
         A child that cannot run in this dispatch leaves the merge rather than failing
         it: one that is not ready yet returns to the queue still mergeable, and one
-        whose own input is at fault or whose condition is not met returns to run alone
-        and settle its own outcome.
+        whose own input is at fault, whose condition is not met, or whose rendered spec
+        differs from the parent's beyond its inputs returns to run alone and settle its
+        own outcome.
         """
         rendered: list[MergedChildTaskStrict] = []
         for child_id in list(record.merged_children or []):
@@ -849,6 +852,14 @@ class Dispatcher:
                     self._condition_actual(child_record, condition)
                 ) != condition.equals:
                     # The child's own dispatch settles its skip.
+                    self._runtime.release_merged_child(task_id, child_id, unmerge=True)
+                    continue
+                if not renders_as_merged(parent_spec, resolved.spec):
+                    self._logger.info(
+                        "Merged child %s of %s renders a different spec; it runs alone",
+                        child_id,
+                        task_id,
+                    )
                     self._runtime.release_merged_child(task_id, child_id, unmerge=True)
                     continue
                 if self._runtime.merged_child_record(task_id, child_id) is None:

@@ -196,8 +196,10 @@ def _render(
             _condition_actual=condition_actual,
         ),
     )
+    record = runtime._tasks[parent]
+    parent_spec = resolve(parent, record.task, record).spec
     rendered = Dispatcher._render_merged_children(
-        dispatcher, parent, runtime._tasks[parent]
+        dispatcher, parent, record, parent_spec
     )
     return [child.task_id for child in rendered or []]
 
@@ -642,6 +644,30 @@ async def test_a_child_whose_spec_cannot_dispatch_leaves_the_merge() -> None:
             return task
         model = task.spec.model.model_copy(update={"vllm": {"dtype": "auto"}})
         spec = task.spec.model_copy(update={"model": model, "enforce_cpu": True})
+        return task.model_copy(update={"spec": spec})
+
+    assert _render(runtime, a, _resolve) == [b]
+    _assert_returned(runtime, registry, c)
+
+
+@pytest.mark.anyio
+async def test_a_child_that_renders_a_different_spec_leaves_the_merge() -> None:
+    registry = _Registry()
+    runtime = _runtime(registry)
+    ids = await _dispatch_merged(runtime, dispatch=False)
+    a, b, c = ids["a"], ids["b"], ids["c"]
+
+    def _resolve(task_id: str, task: Any, record: Any) -> Any:
+        spec = task.spec.model_copy(
+            update={
+                "upstreamResults": {"up": {"value": task_id}},
+                "inference": {"system_prompt": task_id},
+            }
+        )
+        if task_id == c:
+            source = spec.model.source.model_copy(update={"identifier": "m-other"})
+            model = spec.model.model_copy(update={"source": source})
+            spec = spec.model_copy(update={"model": model})
         return task.model_copy(update={"spec": spec})
 
     assert _render(runtime, a, _resolve) == [b]
