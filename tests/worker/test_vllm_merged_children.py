@@ -32,10 +32,12 @@ def _spec(prompt: str, **fields: Any) -> dict[str, Any]:
     }
 
 
-def _child(task_id: str, spec: dict[str, Any]) -> MergedChildTaskStrict:
+def _child(
+    task_id: str, spec: dict[str, Any], owner_id: str = "usr-test"
+) -> MergedChildTaskStrict:
     return MergedChildTaskStrict(
         task_id=task_id,
-        owner_id="usr-test",
+        owner_id=owner_id,
         workflow_id="wfl-test",
         spec=TypeAdapter(TaskSpecStrict).validate_python(spec),
     )
@@ -140,12 +142,56 @@ def test_each_task_writes_its_own_export_and_lineage(tmp_path: Path) -> None:
     export = {"jsonl_export": {"path": "rows.jsonl", "fields": {"answer": "output"}}}
     _run(
         _spec("parent", postprocess=export),
-        [_child("tsk-b", _spec("bravo", postprocess=export))],
+        [_child("tsk-b", _spec("bravo", postprocess=export), owner_id="usr-b")],
         tmp_path / "tsk-test",
     )
 
-    for task, prompt in (("tsk-test", "parent"), ("tsk-b", "bravo")):
+    for task, prompt, owner in (
+        ("tsk-test", "parent", "usr-test"),
+        ("tsk-b", "bravo", "usr-b"),
+    ):
         rows = (tmp_path / task / "artifacts" / "rows.jsonl").read_text().splitlines()
         assert [json.loads(row) for row in rows] == [{"answer": f"out-{prompt}"}]
         assets = (tmp_path / task / "logs" / "assets.jsonl").read_text()
-        assert [json.loads(row)["data_id"] for row in assets.splitlines()] == [task]
+        assert [
+            (json.loads(row)["data_id"], json.loads(row)["user_id"])
+            for row in assets.splitlines()
+        ] == [(task, owner)]
+
+
+def test_a_child_whose_own_export_fails_is_left_out(tmp_path: Path) -> None:
+    export = {
+        "jsonl_export": {
+            "path": "rows.jsonl",
+            "fields": {"answer": "output", "tag": "metadata.tag"},
+            "required_fields": ["tag"],
+        }
+    }
+    parent = _spec("parent", postprocess=export)
+    parent["data"]["metadata"] = [{"tag": "x"}]
+
+    result, _ = _run(
+        parent, [_child("tsk-b", _spec("bravo", postprocess=export))], tmp_path
+    )
+
+    assert result.children == {}
+    assert (tmp_path / "artifacts" / "rows.jsonl").is_file()
+
+
+def test_the_parent_reports_only_its_own_usage(tmp_path: Path) -> None:
+    result, _ = _run(
+        _spec("parent"),
+        [_child("tsk-b", _spec("bravo")), _child("tsk-c", _spec("charlie"))],
+        tmp_path,
+    )
+
+    for task_result in (result, *result.children.values()):
+        assert isinstance(task_result, InferenceResult)
+        assert task_result.usage is not None
+        assert task_result.usage.model_dump(
+            include={"prompt_tokens", "completion_tokens", "num_requests"}
+        ) == {
+            "prompt_tokens": 2,
+            "completion_tokens": 1,
+            "num_requests": 1,
+        }

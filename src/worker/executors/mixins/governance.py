@@ -5,7 +5,7 @@ import json
 import logging
 import threading
 import uuid
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from pathlib import Path
@@ -178,6 +178,7 @@ class GovernanceMixin:
         data_id: str,
         data: Any,
         source_data_ids: list[str],
+        user_id: str | None = None,
     ) -> None:
         """Emit asset + lineage rows; ``data`` is only serialized to size the
         ``"dump to storage"`` span (runtime does not upload payloads)."""
@@ -201,7 +202,7 @@ class GovernanceMixin:
                 data_id=data_id,
                 asset_guid=asset_guid,
                 version=1,
-                user_id=self._task_owner_id,
+                user_id=self._task_owner_id if user_id is None else user_id,
             )
             if source_data_ids:
                 self._record_lineage(data_id=data_id, source_data_ids=source_data_ids)
@@ -244,14 +245,17 @@ class GovernanceMixin:
         task_id: str,
         result: BaseExecutorResult,
         dependencies_by_task: dict[str, list[str]],
+        owners: Mapping[str, str] | None = None,
     ) -> None:
-        """Write parent + merged-child results and emit asset/lineage rows."""
+        """Write parent + merged-child results and emit asset/lineage rows, each child's
+        under its owner in ``owners``."""
         parent_deps = dependencies_by_task.get(task_id, [])
         collection_jobs: list[dict[str, Any]] = [
             {
                 "task_id": task_id,
                 "result": result.model_dump(),
                 "deps": parent_deps,
+                "owner": None,
                 "is_parent": True,
             }
         ]
@@ -262,6 +266,7 @@ class GovernanceMixin:
                     "task_id": child_id,
                     "result": child_result.model_dump(),
                     "deps": child_deps,
+                    "owner": (owners or {}).get(child_id),
                     "is_parent": False,
                 }
             )
@@ -284,6 +289,7 @@ class GovernanceMixin:
                     data_id=job["task_id"],
                     data=job["result"],
                     source_data_ids=job["deps"],
+                    user_id=job["owner"],
                 ): job
                 for job in collection_jobs
             }

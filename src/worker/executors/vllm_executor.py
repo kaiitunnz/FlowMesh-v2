@@ -1139,9 +1139,6 @@ Summary:"""
             usage_by_task: dict[str, dict[str, int | float]] = {}
             counts_by_task: dict[str, int] = {}
 
-            total_prompt_tokens = 0
-            total_completion_tokens = 0
-
             for idx, out in enumerate(outputs):
                 owner = (
                     self._prompt_owners[idx]
@@ -1210,9 +1207,6 @@ Summary:"""
                 prompt_len = len(prompt_token_ids)
                 completion_len = len(best_token_ids)
 
-                total_prompt_tokens += prompt_len
-                total_completion_tokens += completion_len
-
                 usage_entry = usage_by_task.setdefault(
                     owner, {"prompt_tokens": 0, "completion_tokens": 0}
                 )
@@ -1250,14 +1244,6 @@ Summary:"""
                 usage["latency_sec"] = latency
                 usage["num_requests"] = counts_by_task.get(owner, 0)
 
-            parent_usage = {
-                "prompt_tokens": total_prompt_tokens,
-                "completion_tokens": total_completion_tokens,
-                "total_tokens": total_prompt_tokens + total_completion_tokens,
-                "latency_sec": latency,
-                "num_requests": len(self._batched_inputs),
-            }
-
             items = per_task_items.get(task_id, [])
             if parent_tables := parent_entry.tables:
                 items = self._populate_table(items, parent_tables)
@@ -1290,7 +1276,7 @@ Summary:"""
             children=child_results,
             model=self._model_name,
             items=[InferenceItem.model_validate(it) for it in items],
-            usage=GenerationUsage.model_validate(parent_usage),
+            usage=GenerationUsage.model_validate(usage_by_task[task_id]),
         )
 
         with self._span(
@@ -1300,12 +1286,22 @@ Summary:"""
         ):
             self._maybe_export_jsonl(spec, task_id, items, out_dir)
             for child_spec, child_id, child_items in child_exports:
-                self._maybe_export_jsonl(
-                    child_spec, child_id, child_items, out_dir.parent / child_id
-                )
+                try:
+                    self._maybe_export_jsonl(
+                        child_spec, child_id, child_items, out_dir.parent / child_id
+                    )
+                except ExecutionError as exc:
+                    logger.warning(
+                        "Leaving merged child %s out of the result: %s", child_id, exc
+                    )
+                    del result.children[child_id]
+                    del dependencies_by_task[child_id]
 
         self._dump_to_governance(
-            task_id=task_id, result=result, dependencies_by_task=dependencies_by_task
+            task_id=task_id,
+            result=result,
+            dependencies_by_task=dependencies_by_task,
+            owners={child.task_id: child.owner_id for child in merge_children},
         )
 
         return result
