@@ -409,7 +409,6 @@ if IS_ROOT_NODE:
         REDIS_CLIENT.sync,
         WORKER_REGISTRY,
         RUNTIME,
-        DISPATCHER,
         logger,
         enabled=config.watchdog.enabled,
         check_interval=config.watchdog.check_interval,

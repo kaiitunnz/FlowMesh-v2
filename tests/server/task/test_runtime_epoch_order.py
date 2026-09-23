@@ -10,6 +10,7 @@ from server.config import OrchestrationConfig
 from server.registries.workflow import PersistedTask, WorkflowSched
 from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime
+from tests.server.dispatch import record_dispatch
 from tests.server.result_store import make_result_reader
 from tests.server.task.test_v2_orchestration import _NoopSecretVault
 
@@ -250,7 +251,7 @@ spec:
 """
     workflow_id, _ = _register(runtime, payload)
     task_id = next(iter(runtime.tasks))
-    runtime.mark_started(task_id, "wkr-1", {}, "2026-02-19T00:00:00Z")
+    record_dispatch(runtime, task_id)
 
     cancelled = runtime.cancel_workflow(workflow_id)
 

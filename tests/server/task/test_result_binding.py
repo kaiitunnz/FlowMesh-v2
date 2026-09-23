@@ -72,7 +72,7 @@ async def test_a_retried_success_never_re_points_the_bound_result(
     runtime.mark_dispatched(a, cast(Any, _worker()))
     runtime.mark_succeeded(a, "wkr-1", _stored(runtime, a, "first"), _TS)
     # A duplicate or speculative success converges on the result already bound.
-    runtime.mark_succeeded(a, "wkr-2", _stored(runtime, a, "second"), _TS)
+    runtime.mark_succeeded(a, "wkr-1", _stored(runtime, a, "second"), _TS)
 
     assert _value(runtime, a) == "first"
 

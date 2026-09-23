@@ -58,7 +58,7 @@ from ..schemas.logs import LogEvent
 from ..serve import ServeAccessMode, is_public_base_url
 from ..task.finalizer import WorkflowFinalizer
 from ..task.metadata import extract_model_dataset_names
-from ..task.models import TaskRecord, TaskStatus, TaskUsage
+from ..task.models import DispatchEnd, TaskRecord, TaskStatus, TaskUsage
 from ..task.runtime import TaskRuntime
 from ..utils.logging import log_node_event, log_worker_event
 from ..utils.time import now_iso
@@ -95,19 +95,6 @@ def _serve_forward_port(record: TaskRecord) -> int | None:
     """The public forward port a serve task requested, or None to auto-allocate."""
     requested = getattr(record.task.spec, "forwardPort", None)
     return int(requested) if requested is not None else None
-
-
-def failed_task_can_retry(record: TaskRecord | None, retryable: bool | None) -> bool:
-    """Whether a failed task may be requeued: retryable and within the attempt
-    budget."""
-    if record is None:
-        return False
-    if record.status in (TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.DONE):
-        return False
-    if retryable is False:
-        return False
-    max_attempts = record.max_attempts
-    return max_attempts is None or max_attempts < 0 or record.attempts < max_attempts
 
 
 class EventMonitor:
@@ -161,6 +148,8 @@ class EventMonitor:
             ),
             log_stream_ttl_sec=self._log_stream_ttl_sec,
         )
+
+        watchdog.set_event_fallback(self._handle_task_event)
 
         # Per-entry handler-failure counts backing the consumer's retry budget.
         self._event_handler_attempts: dict[str, int] = {}
@@ -429,7 +418,7 @@ class EventMonitor:
             return None
 
     def _handle_input_resolution(
-        self, task_id: str, payload: dict[str, Any]
+        self, event: TaskEvent, payload: dict[str, Any]
     ) -> dict[str, Any]:
         """Record a reported input resolution and keep it out of the task's updates.
 
@@ -438,41 +427,68 @@ class EventMonitor:
         """
         if (binding := payload.get("input_resolution")) is None:
             return payload
-        self._runtime.record_input_resolution(task_id, binding)
+        self._runtime.record_input_resolution(
+            event.task_id, event.worker_id, binding, event.dispatch_id
+        )
         return {
             key: value for key, value in payload.items() if key != "input_resolution"
         }
 
     def _handle_task_event(self, event: TaskEvent) -> None:
+        worker_id = event.worker_id
+        if not worker_id:
+            self._logger.info(
+                "Ignoring %s for task %s: it names no worker", event.type, event.task_id
+            )
+            return
         payload = event.payload or {}
         event_type = event.type
         match event_type:
             case "TASK_STARTED":
+                if not self._runtime.mark_started(
+                    event.task_id, worker_id, payload, event.ts, event.dispatch_id
+                ):
+                    self._log_stale(event)
+                    return
                 self._metrics.record_task_event(event)
-                self._runtime.mark_started(
-                    event.task_id, event.worker_id, payload, event.ts
-                )
             case "TASK_UPDATE":
-                payload = self._handle_input_resolution(event.task_id, payload)
+                if not self._runtime.holds_dispatch(
+                    event.task_id, worker_id, event.dispatch_id
+                ):
+                    self._log_stale(event)
+                    return
+                payload = self._handle_input_resolution(event, payload)
                 payload = self._handle_ssh_task_update(
-                    event.task_id, event.worker_id, payload
+                    event.task_id, worker_id, payload
                 )
                 payload = self._handle_serve_task_update(
-                    event.task_id, event.worker_id, payload
+                    event.task_id, worker_id, payload
                 )
-                self._runtime.mark_updated(event.task_id, payload)
+                if not self._runtime.mark_updated(
+                    event.task_id, worker_id, payload, event.dispatch_id
+                ):
+                    self._log_stale(event)
+                    return
                 self._maybe_adopt_serve(event.task_id)
             case "TASK_SUCCEEDED":
-                self._unregister_port_forward(event.task_id)
-                self._maybe_drain_serve(event.task_id)
                 # Count only a settling success; one that yields the lane back would
                 # tally several times for one task.
-                if self._runtime.success_settles_task(event.task_id, payload):
-                    self._metrics.record_task_event(event)
-                merged_children, usages = self._runtime.mark_succeeded(
-                    event.task_id, event.worker_id, payload, event.ts
+                settles = self._runtime.success_settles_task(event.task_id, payload)
+                success = self._runtime.mark_succeeded(
+                    event.task_id, worker_id, payload, event.ts, event.dispatch_id
                 )
-                self._schedule_emit_usage(usages)
+                if success is None:
+                    self._log_stale(event)
+                    return
+                if success.status == TaskStatus.CANCELLED:
+                    self._record_cancellation(event, success.usages)
+                    self._mark_worker_idle(worker_id)
+                    return
+                self._unregister_port_forward(event.task_id)
+                self._maybe_drain_serve(event.task_id)
+                if settles:
+                    self._metrics.record_task_event(event)
+                self._schedule_emit_usage(success.usages)
                 self._close_task_log_stream(event.task_id)
                 try:
                     queueing, dispatched, pending, done, total = (
@@ -488,105 +504,110 @@ class EventMonitor:
                         "DONE UNKNOWN, TOTAL UNKNOWN"
                     )
                 self._logger.info("Task %s completed; %s", event.task_id, summary)
-                for child_id in merged_children:
+                for child_id in success.merged_children:
                     child_payload = dict(payload)
                     child_payload["parent_task_id"] = event.task_id
                     child_payload["is_child_task"] = True
                     child_event = TaskEvent(
                         type="TASK_SUCCEEDED",
                         task_id=child_id,
-                        worker_id=event.worker_id,
+                        worker_id=worker_id,
                         payload=child_payload,
                         ts=event.ts,
                     )
                     self._metrics.record_task_event(child_event)
                     self._close_task_log_stream(child_id)
                     self._finalizer.close_task_workflow(child_id)
-                if event.worker_id:
-                    try:
-                        record = self._runtime.get_record(event.task_id)
-                        if record:
-                            models, datasets = extract_model_dataset_names(record.task)
-                            if models or datasets:
-                                self._worker_registry.record_worker_cache(
-                                    event.worker_id,
-                                    models=models,
-                                    datasets=datasets,
-                                )
-                    except Exception as exc:
-                        self._logger.debug(
-                            "Failed to update cache metadata for worker %s: %s",
-                            event.worker_id,
-                            exc,
-                        )
-                    try:
-                        self._worker_registry.update_worker_status(
-                            event.worker_id, WorkerStatus.IDLE
-                        )
-                    except Exception:
-                        pass
+                try:
+                    record = self._runtime.get_record(event.task_id)
+                    if record:
+                        models, datasets = extract_model_dataset_names(record.task)
+                        if models or datasets:
+                            self._worker_registry.record_worker_cache(
+                                worker_id,
+                                models=models,
+                                datasets=datasets,
+                            )
+                except Exception as exc:
+                    self._logger.debug(
+                        "Failed to update cache metadata for worker %s: %s",
+                        worker_id,
+                        exc,
+                    )
+                self._mark_worker_idle(worker_id)
                 self._finalizer.close_task_workflow(event.task_id)
             case "TASK_FAILED":
-                if self._runtime.return_failed_merge(event.task_id, event.worker_id):
-                    self._logger.warning(
-                        "Merged dispatch of task %s failed on worker %s; its tasks run "
-                        "alone: %s",
-                        event.task_id,
-                        event.worker_id,
-                        event.error,
-                    )
+                self._handle_task_failed(event, worker_id, payload)
+            case "TASK_CANCELLED":
+                usages = self._runtime.mark_cancelled(
+                    event.task_id, worker_id, payload, event.ts, event.dispatch_id
+                )
+                if usages is None:
+                    self._log_stale(event)
                     return
-                record = self._runtime.get_record(event.task_id)
-                if record:
-                    if event.worker_id and event.worker_id not in record.failed_workers:
-                        record.failed_workers.append(event.worker_id)
-                    if event.error:
-                        record.last_error = event.error
-                    attempts = record.attempts
-                    max_attempts: int | None = record.max_attempts
-                else:
-                    attempts = 0
-                    max_attempts = None
+                self._record_cancellation(event, usages)
+                self._mark_worker_idle(worker_id)
+            case _:
+                self._logger.debug(
+                    "Ignoring task event type=%s payload=%s", event_type, payload
+                )
 
-                if failed_task_can_retry(record, event.retryable):
-                    self._unregister_port_forward(event.task_id)
-                    limit_display = (
-                        "∞"
-                        if max_attempts is None or max_attempts < 0
-                        else max_attempts
-                    )
-                    self._logger.warning(
-                        "Retrying task %s after failure (%d/%s)",
-                        event.task_id,
-                        attempts + 1,
-                        limit_display,
-                    )
-                    self._dispatcher.requeue_task(
-                        event.task_id,
-                        reason="worker_failed",
-                        front=True,
-                        extra_payload={
+    def _handle_task_failed(
+        self, event: TaskEvent, worker_id: str, payload: dict[str, Any]
+    ) -> None:
+        failure = self._runtime.fail_dispatch(
+            event.task_id,
+            worker_id,
+            payload,
+            event.ts,
+            event.dispatch_id,
+            error=event.error,
+            retryable=event.retryable,
+        )
+        match failure.end:
+            case DispatchEnd.STALE:
+                self._log_stale(event)
+            case DispatchEnd.MERGE_RETURNED:
+                self._logger.warning(
+                    "Merged dispatch of task %s failed on worker %s; its tasks run "
+                    "alone: %s",
+                    event.task_id,
+                    worker_id,
+                    event.error,
+                )
+            case DispatchEnd.RETURNED:
+                self._unregister_port_forward(event.task_id)
+                record = self._runtime.get_record(event.task_id)
+                attempt = record.attempts if record else None
+                max_attempts = record.max_attempts if record else None
+                self._logger.warning(
+                    "Retrying task %s after failure (%s/%s)",
+                    event.task_id,
+                    attempt,
+                    "∞" if max_attempts is None or max_attempts < 0 else max_attempts,
+                )
+                self._metrics.record_task_event(
+                    TaskEvent(
+                        type="TASK_REQUEUED",
+                        task_id=event.task_id,
+                        payload={
+                            "reason": "worker_failed",
                             "error": event.error,
-                            "attempt": attempts + 1,
+                            "attempt": attempt,
                             "max_attempts": max_attempts,
                         },
                     )
-                    return
-
+                )
+            case DispatchEnd.CANCELLED:
+                self._record_cancellation(event, failure.usages)
+            case DispatchEnd.FAILED:
                 self._unregister_port_forward(event.task_id)
                 self._maybe_drain_serve(event.task_id)
                 self._metrics.record_task_event(event)
-                impacted, usages = self._runtime.mark_failed(
-                    event.task_id,
-                    event.worker_id,
-                    payload,
-                    event.ts,
-                    error=(record.last_error if record else None) or event.error,
-                )
-                self._schedule_emit_usage(usages)
+                self._schedule_emit_usage(failure.usages)
                 self._metrics.finalize_task_failure(event.task_id)
                 self._close_task_log_stream(event.task_id)
-                for task_id, reason in impacted:
+                for task_id, reason in failure.impacted:
                     derived = TaskEvent(
                         type="TASK_FAILED",
                         task_id=task_id,
@@ -598,31 +619,37 @@ class EventMonitor:
                     self._close_task_log_stream(task_id)
                     self._finalizer.close_task_workflow(task_id)
                 self._finalizer.close_task_workflow(event.task_id)
-            case "TASK_CANCELLED":
-                self._unregister_port_forward(event.task_id)
-                self._maybe_drain_serve(event.task_id)
-                self._metrics.record_task_event(event)
-                usages = self._runtime.mark_cancelled(
-                    event.task_id,
-                    event.worker_id,
-                    payload,
-                    event.ts,
-                )
-                self._schedule_emit_usage(usages)
-                self._metrics.finalize_task_cancellation(event.task_id)
-                self._close_task_log_stream(event.task_id)
-                if event.worker_id:
-                    try:
-                        self._worker_registry.update_worker_status(
-                            event.worker_id, WorkerStatus.IDLE
-                        )
-                    except Exception:
-                        pass
-                self._finalizer.close_task_workflow(event.task_id)
-            case _:
-                self._logger.debug(
-                    "Ignoring task event type=%s payload=%s", event_type, payload
-                )
+
+    def _record_cancellation(
+        self, event: TaskEvent, usages: list[tuple[str, TaskUsage]]
+    ) -> None:
+        """Apply the side effects of a task that settled CANCELLED, whatever the event
+        that settled it reported."""
+        self._unregister_port_forward(event.task_id)
+        self._maybe_drain_serve(event.task_id)
+        self._metrics.record_task_event(
+            event.model_copy(update={"type": "TASK_CANCELLED", "error": None})
+        )
+        self._schedule_emit_usage(usages)
+        self._metrics.finalize_task_cancellation(event.task_id)
+        self._close_task_log_stream(event.task_id)
+        self._finalizer.close_task_workflow(event.task_id)
+
+    def _mark_worker_idle(self, worker_id: str) -> None:
+        try:
+            self._worker_registry.update_worker_status(worker_id, WorkerStatus.IDLE)
+        except Exception:
+            pass
+
+    def _log_stale(self, event: TaskEvent) -> None:
+        self._logger.info(
+            "Ignoring %s for task %s from worker %s (dispatch %s): it does not hold "
+            "the task",
+            event.type,
+            event.task_id,
+            event.worker_id,
+            event.dispatch_id,
+        )
 
     # ------------------------------------------------------------------ # Node event
     # handling ------------------------------------------------------------------ #
@@ -792,43 +819,46 @@ class EventMonitor:
                         )
                         self._watchdog.clear_dead_mark(worker_id)
                         return
-                    recovered = self._runtime.recover_tasks_for_worker(worker_id)
-                    if recovered:
-                        to_requeue: list[str] = []
-                        ts = now_iso()
-                        for task_id in recovered:
-                            self._unregister_port_forward(task_id)
-                            record = self._runtime.get_record(task_id)
-                            if record and record.status == TaskStatus.CANCELLING:
-                                self._runtime.mark_cancelled(
-                                    task_id, worker_id, {}, ts, unmerge=True
-                                )
-                                self._close_task_log_stream(task_id)
-                                self._finalizer.close_task_workflow(task_id)
-                            else:
-                                to_requeue.append(task_id)
-                        if to_requeue:
-                            self._logger.info(
-                                "Requeued %d task(s) after worker %s unregistered: %s",
-                                len(to_requeue),
-                                worker_id,
-                                ", ".join(to_requeue),
-                            )
-                            for task_id in to_requeue:
-                                if self._runtime.return_failed_merge(
-                                    task_id, worker_id
-                                ):
-                                    continue
-                                self._dispatcher.requeue_task(
-                                    task_id,
-                                    reason="worker_unregistered",
-                                    front=True,
-                                    extra_payload={"worker": worker_id},
-                                )
+                    self._return_lost_tasks(worker_id)
             case _:
                 self._logger.debug(
                     "Ignoring task event type=%s payload=%s", event_type, event.payload
                 )
+
+    def _return_lost_tasks(self, worker_id: str) -> None:
+        """Return the tasks a departed worker held, settling any being cancelled."""
+        requeued: list[str] = []
+        ts = now_iso()
+        for task_id in self._runtime.recover_tasks_for_worker(worker_id):
+            end = self._dispatcher.requeue_task(
+                task_id,
+                reason="worker_unregistered",
+                front=True,
+                holder=worker_id,
+                extra_payload={"worker": worker_id},
+            )
+            if end is DispatchEnd.CANCELLED:
+                self._record_cancellation(
+                    TaskEvent(
+                        type="TASK_CANCELLED",
+                        task_id=task_id,
+                        worker_id=worker_id,
+                        ts=ts,
+                    ),
+                    [],
+                )
+                continue
+            if end is not DispatchEnd.STALE:
+                self._unregister_port_forward(task_id)
+            if end is DispatchEnd.RETURNED:
+                requeued.append(task_id)
+        if requeued:
+            self._logger.info(
+                "Requeued %d task(s) after worker %s unregistered: %s",
+                len(requeued),
+                worker_id,
+                ", ".join(requeued),
+            )
 
     # ------------------------------------------------------------------ # SSH / serve
     # forward task handling
@@ -919,7 +949,7 @@ class EventMonitor:
         if not isinstance(payload, dict):
             return
         self._runtime.mark_updated(
-            task_id, self._handle_serve_task_update(task_id, None, payload)
+            task_id, None, self._handle_serve_task_update(task_id, None, payload)
         )
 
     def _serve_url(self, task_id: str) -> str | None:

@@ -230,7 +230,9 @@ async def test_a_merged_child_without_its_own_result_runs_again_on_its_own() -> 
     ids = await _dispatch_merged(runtime)
     a, b, c = ids["a"], ids["b"], ids["c"]
 
-    settled, _ = runtime.mark_succeeded(a, "wkr-1", _merged_success(runtime, a, b), _TS)
+    success = runtime.mark_succeeded(a, "wkr-1", _merged_success(runtime, a, b), _TS)
+    assert success is not None
+    settled = success.merged_children
 
     assert settled == [b]
     assert (_value(runtime, a), _value(runtime, b)) == (a, b)
@@ -261,7 +263,8 @@ def _monitor(runtime: TaskRuntime, dispatcher: Any = None) -> EventMonitor:
         redis_client=MagicMock(),
         logger=logging.getLogger("task-merge"),
         runtime=runtime,
-        dispatcher=dispatcher or MagicMock(),
+        dispatcher=dispatcher
+        or Dispatcher(runtime, MagicMock(), logging.getLogger("task-merge")),
         worker_registry=MagicMock(),
         node_registry=MagicMock(),
         metrics_recorder=MagicMock(),
@@ -520,7 +523,9 @@ async def test_a_child_result_outside_its_scope_runs_the_child_again() -> None:
         runtime._results, c, {"value": c}, "another-org"
     ).model_dump(mode="json")
 
-    settled, _ = runtime.mark_succeeded(a, "wkr-1", payload, _TS)
+    success = runtime.mark_succeeded(a, "wkr-1", payload, _TS)
+    assert success is not None
+    settled = success.merged_children
 
     assert settled == [b]
     _assert_returned(runtime, registry, c)
@@ -908,9 +913,11 @@ async def test_a_cancelled_merge_parent_returns_another_workflows_children() -> 
     assert set(other_ids.values()) <= set(merged)
 
     runtime.cancel_workflow(first)
-    settled, _ = runtime.mark_succeeded(
+    success = runtime.mark_succeeded(
         parent, "wkr-1", _merged_success(runtime, parent, *merged), _TS
     )
+    assert success is not None
+    settled = success.merged_children
 
     assert settled == []
     for child in other_ids.values():

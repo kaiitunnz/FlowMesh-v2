@@ -15,6 +15,7 @@ from shared.inference import (
     ResolvedInputMaterialization,
 )
 from shared.utils.time import now_iso
+from tests.server.dispatch import record_dispatch
 from tests.server.result_store import make_result_reader
 from tests.server.task.test_v2_embodiment_fence import (
     _NoopSecretVault,
@@ -60,6 +61,7 @@ def _materialization(
 
 
 def _report(runtime: TaskRuntime, task_id: str, **kwargs: Any) -> None:
+    record_dispatch(runtime, task_id, input_preparation=True)
     runtime.mark_succeeded(
         task_id,
         "wkr-1",
@@ -187,6 +189,7 @@ async def test_a_preparation_success_does_not_revive_a_cancelled_task() -> None:
     # work and leave a PENDING record contradicting a cancelled work item.
     runtime = _runtime()
     task_id = await _upstream_task(runtime, max_items=None)
+    record_dispatch(runtime, task_id, input_preparation=True)
     record = runtime.get_record(task_id)
     assert record is not None
     record.status = TaskStatus.CANCELLED
@@ -205,6 +208,7 @@ async def test_a_preparation_success_settles_a_cancelling_task() -> None:
     registry = FakeRegistry()
     runtime = _runtime(registry=registry)
     task_id = await _upstream_task(runtime, max_items=None)
+    record_dispatch(runtime, task_id, input_preparation=True)
     record = runtime.get_record(task_id)
     assert record is not None
     record.status = TaskStatus.CANCELLING
@@ -272,6 +276,7 @@ async def test_a_request_inside_the_aggregate_limit_commits() -> None:
 async def test_an_unreadable_materialization_commits_nothing() -> None:
     runtime = _runtime()
     task_id = await _upstream_task(runtime, max_items=None)
+    record_dispatch(runtime, task_id, input_preparation=True)
     runtime.mark_succeeded(
         task_id, "wkr-1", {"input_materialization": {"binding": "?"}}, now_iso()
     )

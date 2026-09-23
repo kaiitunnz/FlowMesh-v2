@@ -16,6 +16,7 @@ from server.services.monitoring import EventMonitor
 from server.task.models import TaskStatus
 from shared.schemas.event import TaskEvent
 from shared.utils.time import ts_to_iso
+from tests.server.dispatch import record_dispatch
 from tests.server.task.test_v2_orchestration import (
     FakeRegistry,
     _register,
@@ -176,10 +177,8 @@ async def test_an_unreadable_submission_time_does_not_strand_the_log_stream(
 async def test_an_already_terminal_task_event_still_closes_the_workflow() -> None:
     """A task settled before its event is handled still closes the workflow.
 
-    The dispatcher settles a no-eligible-worker task in the runtime itself, so an
-    event for it arrives describing a task that is already terminal. The finalizer
-    handles that correctly -- but note the dispatcher does not in fact deliver such
-    an event today, so this guards the finalizer rather than describing that path.
+    A replay of the failure that settled a task finds the task already terminal, and
+    handling it still closes the workflow.
     """
     registry = FakeRegistry()
     runtime = _runtime(registry)
@@ -191,22 +190,15 @@ async def test_an_already_terminal_task_event_still_closes_the_workflow() -> Non
     emitter = _RecordingWorkflowSpanEmitter()
     monitor = _monitor(runtime, redis, emitter)
 
-    # Dispatcher.fail_task settles in the runtime first; this then delivers the
-    # event it builds, which is the step that does not happen in production.
-    runtime.mark_failed(
-        head,
-        None,
-        {"reason": "no_eligible_worker"},
-        _TS,
-        error="No worker satisfies the task requirements",
-    )
+    record_dispatch(runtime, head)
+    runtime.mark_failed(head, "wkr-1", {}, _TS, error="bad input")
     monitor._handle_task_event(
         TaskEvent(
             type="TASK_FAILED",
             task_id=head,
-            error="No worker satisfies the task requirements",
+            worker_id="wkr-1",
+            error="bad input",
             retryable=False,
-            payload={"reason": "no_eligible_worker"},
             ts=_TS,
         )
     )

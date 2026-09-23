@@ -16,6 +16,7 @@ from shared.inference import (
 )
 from shared.tasks.specs import InferenceEmbodimentKind
 from shared.utils.time import now_iso
+from tests.server.dispatch import record_dispatch
 from tests.server.dispatcher.helpers import (
     CapturingDispatcher,
     make_capturing_dispatcher,
@@ -66,6 +67,7 @@ def _commit(runtime: TaskRuntime, task_id: str, cardinality: int) -> None:
             media_type=RESOLVED_INPUT_MEDIA_TYPE,
         ),
     )
+    record_dispatch(runtime, task_id, input_preparation=True)
     runtime.mark_succeeded(
         task_id,
         "wkr-1",

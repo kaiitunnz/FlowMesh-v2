@@ -111,6 +111,9 @@ from ..utils.time import now_iso, parse_iso_ts, ts_to_iso
 from .models import (
     SETTLING_TASK_STATUSES,
     TERMINAL_TASK_STATUSES,
+    DispatchEnd,
+    FailureOutcome,
+    SuccessOutcome,
     TaskInfo,
     TaskParsingResult,
     TaskRecord,
@@ -284,11 +287,33 @@ def _reset_to_pending(record: TaskRecord) -> None:
     """Clear what a task's last dispatch left on it, returning it to PENDING."""
     record.status = TaskStatus.PENDING
     record.assigned_worker = None
+    record.dispatch_id = None
     record.topic = None
     record.dispatched_ts = None
     record.started_ts = None
     record.finished_ts = None
     record.error = None
+
+
+def failed_task_can_retry(record: TaskRecord, retryable: bool | None) -> bool:
+    """Whether a failed task may be requeued: retryable, within the attempt budget,
+    and not being cancelled."""
+    if record.status in SETTLING_TASK_STATUSES:
+        return False
+    if retryable is False:
+        return False
+    max_attempts = record.max_attempts
+    return max_attempts is None or max_attempts < 0 or record.attempts < max_attempts
+
+
+def _success_outcome(
+    record: TaskRecord | None,
+    merged_children: list[str],
+    usages: list[tuple[str, TaskUsage]],
+) -> SuccessOutcome:
+    return SuccessOutcome(
+        record.status if record is not None else None, merged_children, usages
+    )
 
 
 def _reported_child_references(payload: dict[str, Any]) -> dict[str, ContentReference]:
@@ -396,9 +421,12 @@ class TaskRuntime:
         self._merge_buckets: dict[tuple[str, str | None], list[str]] = defaultdict(list)
         self._merge_children_map: dict[str, list[str]] = defaultdict(list)
         self._merge_parent_map: dict[str, str] = {}
-        # A merged dispatch returned after a failure, until its parent's next dispatch:
-        # a replay of that failure re-commits what the return moved.
-        self._returned_merges: dict[str, list[str]] = {}
+        # A dispatch published to a worker and not yet recorded, by task: its worker and
+        # dispatch id, or None once an event from that worker ended it first.
+        self._publishing: dict[str, tuple[str, str | None] | None] = {}
+        # The last dispatch of each task that ended by returning it to the queue: its
+        # worker and dispatch id, and the tasks the return moved.
+        self._returned_dispatches: dict[str, tuple[str, str | None, list[str]]] = {}
         self._workflow_epoch_tasks: dict[str, deque[set[str]]] = {}
         self._workflow_epoch_frontier: dict[str, int] = {}
         self._workflow_in_epoch_order: dict[str, bool] = {}
@@ -1339,6 +1367,7 @@ class TaskRuntime:
                 # the cancellation a settle path is still waiting to apply.
                 return
             _reset_to_pending(record)
+            self._end_publish_locked(task_id)
             if increment_retry:
                 try:
                     if record.max_attempts is not None and record.max_attempts >= 0:
@@ -1585,8 +1614,10 @@ class TaskRuntime:
         """
         record.status = TaskStatus.PENDING
         record.assigned_worker = None
+        record.dispatch_id = None
         record.dispatched_ts = None
         record.started_ts = None
+        self._end_publish_locked(record.task_id)
         self._enqueue_ready_locked(record.task_id, front=True)
         self._persist_locked(record.task_id)
 
@@ -2484,7 +2515,13 @@ class TaskRuntime:
                     return None
             return contract
 
-    def record_input_resolution(self, task_id: str, binding_payload: Any) -> None:
+    def record_input_resolution(
+        self,
+        task_id: str,
+        worker_id: str | None,
+        binding_payload: Any,
+        dispatch_id: str | None = None,
+    ) -> None:
         """Record how a task's inputs resolved on its origin worker.
 
         The worker reports this before either embodiment reaches a model, so the
@@ -2500,8 +2537,11 @@ class TaskRuntime:
             return
         with self._lock:
             record = self._tasks.get(task_id)
-            engine = self._engines.get(record.workflow_id) if record else None
-            if engine is not None:
+            if record is None or not self._accepts_event_locked(
+                record, worker_id, dispatch_id
+            ):
+                return
+            if (engine := self._engines.get(record.workflow_id)) is not None:
                 engine.record_input_resolution(task_id, binding)
 
     def input_resolution_binding(self, task_id: str) -> InputResolutionBinding | None:
@@ -3360,35 +3400,28 @@ class TaskRuntime:
         with self._cv:
             self._release_merge_locked(task_id)
 
-    def return_failed_merge(self, task_id: str, worker_id: str | None) -> bool:
+    def _return_failed_merge_locked(self, record: TaskRecord, worker_id: str) -> bool:
         """Return a merged dispatch that failed or lost ``worker_id``, if it is one.
 
         Such a failure belongs to no single task in the batch, so the parent and every
         child still merged into it go back to the head of the queue to run alone,
-        spending no attempt. A second report of the same loss, or a replay of it, finds
-        the parent already returned and is absorbed. Returns whether the report was for
-        a merged dispatch to ``worker_id``.
+        spending no attempt. Returns whether the report was for a merged dispatch to
+        ``worker_id``.
         """
-        with self._cv:
-            record = self._tasks.get(task_id)
-            if (
-                record is None
-                or worker_id is None
-                or record.merged_dispatch_worker != worker_id
-            ):
-                return False
-            if record.status == TaskStatus.PENDING:
-                self._commit_locked(*self._returned_merges.get(task_id, [task_id]))
-                return True
-            if record.status != TaskStatus.DISPATCHED:
-                return False
-            record.merged_children = None
-            returned = self._return_merged_children_locked(
-                [task_id, *self._merge_children_map.pop(task_id, [])], unmerge=True
-            )
-            self._returned_merges[task_id] = returned
-            self._commit_locked(*returned)
-            return True
+        if (
+            record.merged_dispatch_worker != worker_id
+            or record.status != TaskStatus.DISPATCHED
+        ):
+            return False
+        task_id = record.task_id
+        held = self._held_dispatch_locked(record)
+        record.merged_children = None
+        moved = self._return_merged_children_locked(
+            [task_id, *self._merge_children_map.pop(task_id, [])], unmerge=True
+        )
+        self._record_returned_locked(task_id, held, moved)
+        self._commit_locked(*moved)
+        return True
 
     def _release_merge_locked(self, task_id: str) -> None:
         if parent := self._tasks.get(task_id):
@@ -3454,6 +3487,7 @@ class TaskRuntime:
             if not child_record or child_record.status in TERMINAL_TASK_STATUSES:
                 continue
             _reset_to_pending(child_record)
+            self._end_publish_locked(child_id)
             child_record.merged_parent_id = None
             child_record.merge_slice = None
             if unmerge:
@@ -3549,8 +3583,70 @@ class TaskRuntime:
     # State updates (dispatch & events)
     # ------------------------------------------------------------------ #
 
+    def _holds_dispatch_locked(
+        self, record: TaskRecord, worker_id: str | None, dispatch_id: str | None
+    ) -> bool:
+        """Whether an event from ``worker_id`` belongs to the dispatch holding a task.
+
+        The task is held by the dispatch recorded on it, or by one still being
+        published before that record lands. An event naming no dispatch is matched by
+        its worker alone; a root-internal transition names no worker and is not
+        fenced.
+        """
+        if worker_id is None:
+            return True
+        held = [(record.assigned_worker, record.dispatch_id)]
+        if (publishing := self._publishing.get(record.task_id)) is not None:
+            held.append(publishing)
+        return any(
+            worker_id == held_worker
+            and (dispatch_id is None or dispatch_id == held_dispatch)
+            for held_worker, held_dispatch in held
+        )
+
+    def _accepts_event_locked(
+        self, record: TaskRecord, worker_id: str | None, dispatch_id: str | None
+    ) -> bool:
+        """Whether an event belongs to the dispatch holding a task, recording on the
+        task a dispatch the event reports on before its publish was recorded."""
+        if not self._holds_dispatch_locked(record, worker_id, dispatch_id):
+            return False
+        if worker_id is not None and record.assigned_worker is None:
+            if (publishing := self._publishing.get(record.task_id)) is not None:
+                record.assigned_worker, record.dispatch_id = publishing
+        return True
+
+    def holds_dispatch(
+        self, task_id: str, worker_id: str, dispatch_id: str | None
+    ) -> bool:
+        """Whether an event from ``worker_id`` belongs to the task's dispatch."""
+        with self._lock:
+            record = self._tasks.get(task_id)
+            return record is not None and self._holds_dispatch_locked(
+                record, worker_id, dispatch_id
+            )
+
+    def begin_publish(self, task_id: str, worker_id: str, dispatch_id: str) -> None:
+        """Mark a dispatch as being published, so its worker's earliest events apply."""
+        with self._cv:
+            self._publishing[task_id] = (worker_id, dispatch_id)
+
+    def abandon_publish(self, task_id: str) -> None:
+        """Drop the mark of a dispatch whose publish failed."""
+        with self._cv:
+            self._publishing.pop(task_id, None)
+
+    def _end_publish_locked(self, task_id: str) -> None:
+        if task_id in self._publishing:
+            self._publishing[task_id] = None
+
     def mark_dispatched(
-        self, task_id: str, worker: Worker, *, input_preparation: bool = False
+        self,
+        task_id: str,
+        worker: Worker,
+        dispatch_id: str | None = None,
+        *,
+        input_preparation: bool = False,
     ) -> None:
         supplier_id = ""
         for resolver in SUPPLIER_RESOLVERS:
@@ -3559,18 +3655,23 @@ class TaskRuntime:
                 break
 
         with self._cv:
+            published = self._publishing.pop(task_id, (worker.id, dispatch_id))
+            self._returned_dispatches.pop(task_id, None)
             record = self._tasks.get(task_id)
             if not record:
                 return
             if record.status in SETTLING_TASK_STATUSES:
                 # A replayed or late dispatch must not regress a settling task.
                 return
+            if published != (worker.id, dispatch_id):
+                # An event from the worker ended this dispatch before it was recorded.
+                return
             record.status = TaskStatus.DISPATCHED
             record.assigned_worker = worker.id
+            record.dispatch_id = dispatch_id
             record.merged_dispatch_worker = (
                 worker.id if self._merge_children_map.get(task_id) else None
             )
-            self._returned_merges.pop(task_id, None)
             record.topic = "tasks"
             record.dispatched_ts = time.time()
             record.next_retry_at = None
@@ -3595,19 +3696,21 @@ class TaskRuntime:
         worker_id: str | None,
         payload: dict[str, Any],
         ts: str,
-    ) -> None:
+        dispatch_id: str | None = None,
+    ) -> bool:
+        """Record that a task's worker started it; returns whether the event applied."""
         started_ts = parse_iso_ts(str(payload.get("started_at") or ts))
         with self._cv:
             record = self._tasks.get(task_id)
-            if not record:
-                return
+            if not record or not self._accepts_event_locked(
+                record, worker_id, dispatch_id
+            ):
+                return False
             if record.status in SETTLING_TASK_STATUSES:
                 # A replayed or late start must not regress a settling task.
-                return
+                return True
             record.status = TaskStatus.DISPATCHED
             record.started_ts = started_ts
-            if worker_id:
-                record.assigned_worker = worker_id
             self._workflow_registry.commit_transition(
                 record.workflow_id,
                 records=self._records_locked(task_id),
@@ -3616,15 +3719,28 @@ class TaskRuntime:
             if engine := self._engines.get(record.workflow_id):
                 engine.on_started(task_id)
                 self._save_ledger_locked(record.workflow_id)
+            return True
 
-    def mark_updated(self, task_id: str, payload: dict[str, Any]) -> None:
+    def mark_updated(
+        self,
+        task_id: str,
+        worker_id: str | None,
+        payload: dict[str, Any],
+        dispatch_id: str | None = None,
+    ) -> bool:
+        """Store a task's latest progress update; returns whether the event applied."""
         with self._lock:
             record = self._tasks.get(task_id)
-            if record is None or record.status in TERMINAL_TASK_STATUSES:
+            if record is None or not self._accepts_event_locked(
+                record, worker_id, dispatch_id
+            ):
+                return False
+            if record.status in TERMINAL_TASK_STATUSES:
                 # A replayed or late progress update must not touch a terminal task.
-                return
+                return True
             record.latest_update = payload
             self._persist_locked(task_id)
+            return True
 
     def mark_succeeded(
         self,
@@ -3632,15 +3748,17 @@ class TaskRuntime:
         worker_id: str | None,
         payload: dict[str, Any],
         ts: str,
+        dispatch_id: str | None = None,
         *,
         skip: dict[str, Any] | None = None,
-    ) -> tuple[list[str], list[tuple[str, TaskUsage]]]:
+    ) -> SuccessOutcome | None:
         """
         Mark a task as completed and enqueue any dependents that have become ready.
-        Returns the merged children it settled and the per-task usage rows produced by
-        the completion. ``skip`` records a
-        conditional-skip settlement and why, which resolves a v2 output to an
-        explicit-empty publication.
+        Returns the status the task is left in, the merged children it settled, and the
+        per-task usage rows produced by the completion, or None when the report is not
+        from the dispatch holding the task. ``skip`` records a conditional-skip
+        settlement and why, which resolves a v2 output to an explicit-empty
+        publication.
 
         The success binds the result reference it reports, once, at the commit that
         makes the task DONE; a success that does not settle the task binds nothing.
@@ -3659,12 +3777,16 @@ class TaskRuntime:
 
         with self._cv:
             record = self._tasks.get(task_id)
+            if record is not None and not self._accepts_event_locked(
+                record, worker_id, dispatch_id
+            ):
+                return None
             if (prepared := payload.get("input_materialization")) is not None:
                 # A preparation resolved the task's inputs and ran nothing else, so it
                 # commits what it materialized and the task goes back to the queue for
                 # the dispatch that chooses an embodiment and runs it.
                 self._apply_input_materialization_locked(task_id, prepared)
-                return [], []
+                return _success_outcome(record, [], [])
             episode_step = payload.get("agent_episode")
             if episode_step is not None and record is not None:
                 harness_result = HarnessResult.model_validate(episode_step)
@@ -3691,12 +3813,18 @@ class TaskRuntime:
                     # A non-terminal episode step routes its boundary and re-dispatches;
                     # a completion falls through to the terminal path below.
                     self._apply_episode_step_locked(task_id, harness_result)
-                    return [], _in_flight_usage(task_id, payload)
+                    return _success_outcome(
+                        record, [], _in_flight_usage(task_id, payload)
+                    )
                 if record.status == TaskStatus.CANCELLING:
                     # A completion racing the cancel settles it before routing a
                     # captured facade group or consulting the reroute guard.
-                    return [], self._settle_cancelled_usage_locked(
-                        record, payload, finished_ts, started_ts
+                    return _success_outcome(
+                        record,
+                        [],
+                        self._settle_cancelled_usage_locked(
+                            record, payload, finished_ts, started_ts
+                        ),
                     )
                 if group is not None:
                     # The gateway captured a turn-scoped facade group: the clean
@@ -3707,7 +3835,9 @@ class TaskRuntime:
                     self._route_and_dispatch_facade_group_locked(
                         task_id, group, harness_result.capsule
                     )
-                    return [], _in_flight_usage(task_id, payload)
+                    return _success_outcome(
+                        record, [], _in_flight_usage(task_id, payload)
+                    )
                 engine = self._engines.get(record.workflow_id)
                 if (
                     engine is not None
@@ -3719,10 +3849,10 @@ class TaskRuntime:
                     # publish the episode with a stale intermediate result. A post-DONE
                     # terminal replay is excluded so it still reaches the idempotent
                     # done-branch below (its fan-out / re-persist heal must survive).
-                    return [], usages
+                    return _success_outcome(record, [], usages)
             if record:
                 if record.status == TaskStatus.CANCELLED:
-                    return [], usages
+                    return _success_outcome(record, [], usages)
                 if record.status == TaskStatus.DONE:
                     # Idempotent: a replayed TASK_SUCCEEDED must not re-apply, but
                     # re-persist in case the original completion's write failed
@@ -3738,21 +3868,25 @@ class TaskRuntime:
                         )
                         if self._apply_advance_locked(record.workflow_id, advance):
                             self._cv.notify_all()
-                    return [], []
+                    return _success_outcome(record, [], [])
                 if record.status == TaskStatus.FAILED:
                     self._logger.warning(
                         "Ignoring TASK_SUCCEEDED for task %s in terminal status FAILED",
                         task_id,
                     )
-                    return [], []
+                    return _success_outcome(record, [], [])
                 if record.status == TaskStatus.CANCELLING:
                     # The cancel already resolved this task's declared output to its
                     # cancellation outcome and withheld the dispatch that would have
                     # carried a terminal back, so its completion settles the
                     # cancellation rather than reporting a success the ledger does
                     # not publish.
-                    return [], self._settle_cancelled_usage_locked(
-                        record, payload, finished_ts, started_ts
+                    return _success_outcome(
+                        record,
+                        [],
+                        self._settle_cancelled_usage_locked(
+                            record, payload, finished_ts, started_ts
+                        ),
                     )
                 record.status = TaskStatus.DONE
                 record.error = None
@@ -3763,7 +3897,6 @@ class TaskRuntime:
                     record.assigned_worker = worker_id
                 record.merged_children = None
                 record.merged_dispatch_worker = None
-                self._returned_merges.pop(task_id, None)
                 self._bind_result_locked(record, reference, skip)
                 if usage is not None:
                     record.usages.append(usage)
@@ -3838,7 +3971,155 @@ class TaskRuntime:
             if notify:
                 self._cv.notify_all()
 
-            return settled_children, usages
+            return _success_outcome(record, settled_children, usages)
+
+    def fail_dispatch(
+        self,
+        task_id: str,
+        worker_id: str,
+        payload: dict[str, Any],
+        ts: str,
+        dispatch_id: str | None = None,
+        *,
+        error: str | None = None,
+        retryable: bool | None = None,
+    ) -> FailureOutcome:
+        """Apply a worker's report that its dispatch of a task failed.
+
+        A report from the dispatch holding the task returns a merged dispatch to run
+        its tasks alone, or charges the failure to the worker and either returns the
+        task to the head of the queue for another attempt or settles it: FAILED, or
+        CANCELLED when a cancel is already under way. Any other report changes nothing.
+        """
+        with self._cv:
+            record = self._tasks.get(task_id)
+            if record is None or not self._accepts_event_locked(
+                record, worker_id, dispatch_id
+            ):
+                self._heal_returned_locked(task_id, worker_id, dispatch_id)
+                return FailureOutcome(DispatchEnd.STALE, [], [])
+            if self._return_failed_merge_locked(record, worker_id):
+                return FailureOutcome(DispatchEnd.MERGE_RETURNED, [], [])
+            if worker_id not in record.failed_workers:
+                record.failed_workers.append(worker_id)
+            if error:
+                record.last_error = error
+            if (
+                failed_task_can_retry(record, retryable)
+                and self._return_dispatch_locked(record, increment_retry=True)
+                is DispatchEnd.RETURNED
+            ):
+                return FailureOutcome(DispatchEnd.RETURNED, [], [])
+            impacted, usages = self.mark_failed(
+                task_id, worker_id, payload, ts, error=record.last_error or error
+            )
+            end = (
+                DispatchEnd.CANCELLED
+                if record.status == TaskStatus.CANCELLED
+                else DispatchEnd.FAILED
+            )
+            return FailureOutcome(end, impacted, usages)
+
+    def return_dispatch(
+        self,
+        task_id: str,
+        holder: str | None,
+        *,
+        release_merge: bool = True,
+        increment_retry: bool = False,
+        front: bool = False,
+    ) -> DispatchEnd:
+        """Return a task whose dispatch ended without a result to the ready queue.
+
+        ``holder`` names the worker whose dispatch ended, when the caller knows it; a
+        task that worker no longer holds is left alone. A lost merged dispatch returns
+        its tasks to run alone, and a task being cancelled settles CANCELLED instead,
+        its merged children returning to run alone. A task whose last attempt this
+        would spend is left for the caller to fail.
+        """
+        with self._cv:
+            record = self._tasks.get(task_id)
+            if record is None or not self._holds_dispatch_locked(record, holder, None):
+                if holder is not None:
+                    self._heal_returned_locked(task_id, holder, None)
+                return DispatchEnd.STALE
+            if record.status == TaskStatus.CANCELLING:
+                self._settle_cancelled_locked(record, time.time(), unmerge=True)
+                return DispatchEnd.CANCELLED
+            if holder is not None and self._return_failed_merge_locked(record, holder):
+                return DispatchEnd.MERGE_RETURNED
+            return self._return_dispatch_locked(
+                record,
+                release_merge=release_merge,
+                increment_retry=increment_retry,
+                front=front,
+            )
+
+    def _return_dispatch_locked(
+        self,
+        record: TaskRecord,
+        *,
+        release_merge: bool = True,
+        increment_retry: bool = False,
+        front: bool = True,
+    ) -> DispatchEnd:
+        """Return a task to the ready queue, its merged children still mergeable.
+
+        The return is complete in memory, queue included, before it commits, so a
+        report handled again after a failed commit only has to commit it again.
+        """
+        task_id = record.task_id
+        if increment_retry:
+            record.attempts += 1
+            if 0 <= record.max_attempts <= record.attempts:
+                record.attempts = record.max_attempts
+                return DispatchEnd.EXHAUSTED
+        held = self._held_dispatch_locked(record)
+        moved = [task_id]
+        if release_merge:
+            record.merged_children = None
+            moved += self._return_merged_children_locked(
+                self._merge_children_map.pop(task_id, [])
+            )
+        _reset_to_pending(record)
+        self._end_publish_locked(task_id)
+        if self._enqueue_ready_locked(task_id, front=front):
+            self._cv.notify_all()
+        self._record_returned_locked(task_id, held, moved)
+        self._commit_locked(*moved)
+        if increment_retry and (engine := self._engines.get(record.workflow_id)):
+            # A retry reuses the work item and its invocation; the engine records the
+            # failed attempt and readies the work item for a fresh one.
+            engine.on_failed(
+                task_id, record.last_error or "task failed", retryable=True
+            )
+            self._save_ledger_locked(record.workflow_id)
+        return DispatchEnd.RETURNED
+
+    def _held_dispatch_locked(
+        self, record: TaskRecord
+    ) -> tuple[str, str | None] | None:
+        """The worker and dispatch id of the dispatch holding a task, if any."""
+        if record.assigned_worker is not None:
+            return record.assigned_worker, record.dispatch_id
+        return self._publishing.get(record.task_id)
+
+    def _record_returned_locked(
+        self, task_id: str, held: tuple[str, str | None] | None, moved: list[str]
+    ) -> None:
+        if held is not None:
+            self._returned_dispatches[task_id] = (*held, moved)
+
+    def _heal_returned_locked(
+        self, task_id: str, worker_id: str, dispatch_id: str | None
+    ) -> None:
+        """Commit again what the return of a dispatch moved, when the report is that
+        dispatch's own and so may be a retry after the return's commit failed."""
+        if (returned := self._returned_dispatches.get(task_id)) is None:
+            return
+        held_worker, held_dispatch, moved = returned
+        if worker_id == held_worker and dispatch_id in (None, held_dispatch):
+            self._commit_locked(*moved)
 
     def mark_failed(
         self,
@@ -3906,7 +4187,6 @@ class TaskRuntime:
                     record.assigned_worker = worker_id
                 record.merged_children = None
                 record.merged_dispatch_worker = None
-                self._returned_merges.pop(task_id, None)
                 if usage is not None:
                     record.usages.append(usage)
 
@@ -4102,10 +4382,8 @@ class TaskRuntime:
                 ] or None
         record.status = TaskStatus.CANCELLED
         record.finished_ts = finished_ts
-        record.assigned_worker = None
         record.merged_children = None
         record.merged_dispatch_worker = None
-        self._returned_merges.pop(task_id, None)
         record.merged_parent_id = None
         # TODO(kaiitunnz): Handle usages for cancelled tasks
         self._completed.discard(task_id)
@@ -4124,9 +4402,13 @@ class TaskRuntime:
         worker_id: str | None,
         payload: dict[str, Any],
         ts: str,
-        *,
-        unmerge: bool = False,
-    ) -> list[tuple[str, TaskUsage]]:
+        dispatch_id: str | None = None,
+    ) -> list[tuple[str, TaskUsage]] | None:
+        """Settle a task CANCELLED on its worker's confirmation.
+
+        Returns the usage rows it produced, or None when the confirmation is not from
+        the dispatch holding the task.
+        """
         finished_ts = parse_iso_ts(str(payload.get("finished_at") or ts))
         maybe_started = payload.get("started_at")
         started_ts = parse_iso_ts(str(maybe_started)) if maybe_started else None
@@ -4139,6 +4421,8 @@ class TaskRuntime:
             record = self._tasks.get(task_id)
             if record is None:
                 return usages
+            if not self._accepts_event_locked(record, worker_id, dispatch_id):
+                return None
             if record.status == TaskStatus.CANCELLED:
                 # Idempotent: a replayed cancellation must not re-apply, but
                 # re-persist in case the original cancellation's write failed
@@ -4153,7 +4437,7 @@ class TaskRuntime:
                 )
                 return usages
             self._settle_cancelled_locked(
-                record, finished_ts, started_ts=started_ts, usage=usage, unmerge=unmerge
+                record, finished_ts, started_ts=started_ts, usage=usage
             )
             return usages
 

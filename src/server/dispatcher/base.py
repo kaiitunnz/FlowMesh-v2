@@ -31,13 +31,14 @@ from shared.tasks.specs import (
 )
 from shared.tasks.worker_message import WorkerStatus, WorkerTaskMessage
 from shared.telemetry.semconv import ControlPlaneStage, ControlPlaneWindow
+from shared.utils.ids import new_dispatch_id
 
 from ..clients.redis import REDIS_CONN_ERRORS
 from ..content import ContentAccessBroker
 from ..registries.worker import Worker, WorkerRegistry
 from ..services.metrics import MetricsRecorder
 from ..task.metadata import extract_model_dataset_names
-from ..task.models import TaskRecord, TaskStatus
+from ..task.models import DispatchEnd, TaskRecord, TaskStatus
 from ..task.results import ResultUnavailable, ResultUnreadable
 from ..task.runtime import TaskRuntime
 from ..task.v2.representations.plan import InferenceEmbodimentMenu
@@ -683,8 +684,10 @@ class Dispatcher:
                 task_id, f"input_unreadable: {exc}", payload={"error": str(exc)}
             )
             return True
+        dispatch_id = new_dispatch_id()
         message = WorkerTaskMessage(
             task_id=task_id,
+            dispatch_id=dispatch_id,
             workflow_id=record.workflow_id,
             owner_id=record.owner_id,
             content_scope=record.org_id,
@@ -711,9 +714,11 @@ class Dispatcher:
         # 8. Give the task what it reads and writes its content under, then publish it
         if self._content_access is not None:
             self._content_access.issue(worker.id, task_id, record.org_id)
+        self._runtime.begin_publish(task_id, worker.id, dispatch_id)
         try:
             receivers = self._worker_registry.publish_task(worker, message)
         except Exception as exc:
+            self._runtime.abandon_publish(task_id)
             self._logger.warning(
                 "Failed to publish task %s to worker %s: %s", task_id, worker.id, exc
             )
@@ -726,6 +731,7 @@ class Dispatcher:
             )
 
         if receivers <= 0:
+            self._runtime.abandon_publish(task_id)
             self._logger.info(
                 "Node %s dispatch channel has no subscriber; delaying task %s "
                 "(worker %s)",
@@ -748,7 +754,9 @@ class Dispatcher:
 
         # 9. Mark dispatched
         record.no_dispatch_since = None
-        self._runtime.mark_dispatched(task_id, worker, input_preparation=preparing)
+        self._runtime.mark_dispatched(
+            task_id, worker, dispatch_id, input_preparation=preparing
+        )
         if rendered_children:
             self._logger.info(
                 "[TaskMerge] parent=%s merged_children=%d -> %s",
@@ -899,52 +907,40 @@ class Dispatcher:
         *,
         reason: str,
         front: bool = False,
-        release_merge: bool = True,
-        mark_pending: bool = True,
+        holder: str | None = None,
         count_retry: bool = True,
         extra_payload: dict[str, Any] | None = None,
-    ) -> None:
-        if release_merge:
-            self._runtime.release_merge(task_id)
+    ) -> DispatchEnd:
+        """Return a task to the ready queue, spending an attempt when ``count_retry``.
 
-        if mark_pending:
-            self._runtime.mark_pending(task_id, increment_retry=count_retry)
-
-        record = self._runtime.get_record(task_id)
-        if count_retry and record:
-            attempts = record.attempts
-            max_attempts = record.max_attempts
-            if (
-                max_attempts is not None
-                and max_attempts >= 0
-                and attempts >= max_attempts
-            ):
-                self.fail_task(
-                    task_id,
-                    record.last_error or "max_attempts_exceeded",
-                    payload={
-                        "reason": "max_attempts_exceeded",
-                        "requeue_reason": reason,
-                        "attempts": attempts,
-                        "max_attempts": max_attempts,
-                    },
-                    worker_id=record.last_failed_worker or record.assigned_worker,
-                )
-                return
-
-        added = self._runtime.requeue(task_id, front=front)
-        if not added:
-            self._logger.warning(
-                "Task %s could not be re-added to ready queue after requeue "
-                "(reason=%s); task may remain stuck in PENDING",
+        A task being cancelled settles instead, one that ``holder`` no longer holds is
+        left alone, and one whose last attempt this spends fails. Returns where the
+        task ended up.
+        """
+        end = self._runtime.return_dispatch(
+            task_id, holder, increment_retry=count_retry, front=front
+        )
+        if end is DispatchEnd.EXHAUSTED:
+            record = self._runtime.get_record(task_id)
+            assert record is not None
+            self.fail_task(
                 task_id,
-                reason,
+                record.last_error or "max_attempts_exceeded",
+                payload={
+                    "reason": "max_attempts_exceeded",
+                    "requeue_reason": reason,
+                    "attempts": record.attempts,
+                    "max_attempts": record.max_attempts,
+                },
+                worker_id=record.last_failed_worker or record.assigned_worker,
             )
-        if count_retry:
+            return DispatchEnd.FAILED
+        if end is DispatchEnd.RETURNED and count_retry:
             payload = {"reason": reason}
             if extra_payload:
                 payload.update(extra_payload)
             self._emit_task_event("TASK_REQUEUED", task_id, payload=payload)
+        return end
 
     def fail_task(
         self,

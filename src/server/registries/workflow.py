@@ -63,6 +63,8 @@ class PersistedTask(BaseModel):
         # And which worker a merged dispatch went to, which tells a later report of
         # that worker's failure apart from the task's own.
         data["record"]["merged_dispatch_worker"] = self.record.merged_dispatch_worker
+        # And the dispatch holding the task, which fences its worker's events.
+        data["record"]["dispatch_id"] = self.record.dispatch_id
         return data
 
 

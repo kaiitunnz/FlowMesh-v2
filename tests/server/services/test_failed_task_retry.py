@@ -3,8 +3,8 @@
 from types import SimpleNamespace
 from typing import Any, cast
 
-from server.services.monitoring import failed_task_can_retry
 from server.task.models import TaskRecord, TaskStatus
+from server.task.runtime import failed_task_can_retry
 
 
 def _record(
@@ -16,8 +16,10 @@ def _record(
     return cast(TaskRecord, cast(Any, rec))
 
 
-def test_no_record_is_not_retryable() -> None:
-    assert failed_task_can_retry(None, True) is False
+def test_cancelling_record_does_not_retry() -> None:
+    # The cancel is the outcome a failure of a cancelling task settles into.
+    assert failed_task_can_retry(_record(status=TaskStatus.CANCELLING), True) is False
+    assert failed_task_can_retry(_record(status=TaskStatus.CANCELLING), None) is False
 
 
 def test_non_retryable_failure_never_retries() -> None:

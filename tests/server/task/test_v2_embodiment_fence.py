@@ -232,7 +232,7 @@ async def test_a_reported_input_resolution_is_recorded_against_its_work_item() -
     task_id, _primary = await _menu_task(runtime)
     assert runtime.input_resolution_binding(task_id) is None
 
-    runtime.record_input_resolution(task_id, _binding().model_dump(mode="json"))
+    runtime.record_input_resolution(task_id, None, _binding().model_dump(mode="json"))
     recorded = runtime.input_resolution_binding(task_id)
     assert recorded is not None
     assert recorded.request_digest == "req"
@@ -246,9 +246,11 @@ async def test_a_recorded_resolution_is_kept_across_a_re_drive() -> None:
     # report never replaces the recorded one.
     runtime = _runtime(FakeRegistry())
     task_id, _primary = await _menu_task(runtime)
-    runtime.record_input_resolution(task_id, _binding().model_dump(mode="json"))
+    runtime.record_input_resolution(task_id, None, _binding().model_dump(mode="json"))
     runtime.record_input_resolution(
-        task_id, _binding(request_digest="other", cardinality=9).model_dump(mode="json")
+        task_id,
+        None,
+        _binding(request_digest="other", cardinality=9).model_dump(mode="json"),
     )
     recorded = runtime.input_resolution_binding(task_id)
     assert recorded is not None
@@ -259,7 +261,7 @@ async def test_a_recorded_resolution_is_kept_across_a_re_drive() -> None:
 async def test_an_unreadable_resolution_report_records_nothing() -> None:
     runtime = _runtime(FakeRegistry())
     task_id, _primary = await _menu_task(runtime)
-    runtime.record_input_resolution(task_id, {"cardinality": "many"})
+    runtime.record_input_resolution(task_id, None, {"cardinality": "many"})
     assert runtime.input_resolution_binding(task_id) is None
 
 

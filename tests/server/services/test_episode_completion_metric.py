@@ -18,6 +18,7 @@ from server.services.monitoring import EventMonitor
 from server.task.models import TaskStatus
 from shared.harness import BoundaryEventKind, HarnessResult, HarnessResultKind
 from shared.schemas.event import TaskEvent
+from tests.server.dispatch import record_dispatch
 from tests.server.task.test_v2_orchestration import FakeRegistry, _register, _runtime
 
 _TS = "2026-09-16T00:00:00Z"
@@ -85,6 +86,7 @@ def _search_group(activation: str) -> FacadeTurnGroup:
 def _episode_task() -> tuple:
     runtime = _runtime(FakeRegistry())
     _, ids = asyncio.run(_register(runtime, _AGENT_WF))
+    record_dispatch(runtime, ids["writer"])
     return runtime, ids["writer"]
 
 
@@ -98,6 +100,7 @@ def test_a_multi_step_episode_counts_one_completion() -> None:
         HarnessResult(kind=HarnessResultKind.COMPLETION, value="done"),
     ]
     for step in steps:
+        record_dispatch(runtime, task_id)
         monitor._handle_task_event(_succeeded(task_id, step))
     assert metrics.record_task_event.call_count == 1
 
@@ -141,7 +144,7 @@ def test_a_rerouted_facade_turn_bills_its_dispatch_as_in_flight() -> None:
     runtime.originate_facade_turn_group(task_id, _search_group(task_id))
     completion = HarnessResult(kind=HarnessResultKind.COMPLETION, value=None)
 
-    _, usages = runtime.mark_succeeded(
+    success = runtime.mark_succeeded(
         task_id,
         "wkr-1",
         {
@@ -157,6 +160,8 @@ def test_a_rerouted_facade_turn_bills_its_dispatch_as_in_flight() -> None:
         },
         _TS,
     )
+    assert success is not None
+    usages = success.usages
 
     assert [usage.status for _, usage in usages] == [TaskStatus.DISPATCHED]
 
