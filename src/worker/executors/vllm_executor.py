@@ -74,6 +74,7 @@ from shared.schemas.result import (
     InferenceItem,
     InferenceResult,
 )
+from shared.tasks import MergedChildTaskStrict
 from shared.tasks.specs import InferenceSpecStrict
 from shared.tasks.specs.common import ModelSpecStrict
 from shared.tasks.task_type import TaskType
@@ -1032,7 +1033,7 @@ Summary:"""
         entries.append(parent_entry)
         dependencies_by_task[task_id] = parent_deps
         entry_by_task_id: dict[str, PreparedInferenceEntry] = {task_id: parent_entry}
-        batched_children = []
+        batched_children: list[MergedChildTaskStrict] = []
         for child in merge_children:
             child_id = child.task_id
             if (prepared := results.get(child_id)) is None:
