@@ -445,6 +445,51 @@ async def test_inference_siblings_merge_on_any_inference_executor(model: str) ->
 
 
 @pytest.mark.anyio
+async def test_parallel_branches_of_one_workflow_merge_once_both_are_ready() -> None:
+    runtime = _runtime(_Registry())
+    _, ids = await _register(
+        runtime,
+        """
+apiVersion: flowmesh/v1
+kind: Workflow
+metadata:
+  name: branches
+spec:
+  graph:
+    nodes:
+      - name: u1
+        spec: {taskType: inference, model: {source: {identifier: x}}}
+      - name: u2
+        spec: {taskType: inference, model: {source: {identifier: y}}}
+      - name: b
+        spec:
+          taskType: inference
+          model: {source: {identifier: m}}
+          dependsOn: [u1]
+          data: {type: list, items: [b]}
+      - name: c
+        spec:
+          taskType: inference
+          model: {source: {identifier: m}}
+          dependsOn: [u2]
+          data: {type: list, items: [c]}
+""",
+    )
+    for _ in range(2):
+        upstream = _next(runtime)
+        assert upstream in (ids["u1"], ids["u2"])
+        runtime.mark_dispatched(upstream, _WORKER)
+        runtime.mark_succeeded(
+            upstream, "wkr-1", _merged_success(runtime, upstream), _TS
+        )
+
+    parent = _next(runtime)
+    assert parent in (ids["b"], ids["c"])
+    other = ids["c"] if parent == ids["b"] else ids["b"]
+    assert runtime.plan_merge(parent, 8, _WORKER.id) == [other]
+
+
+@pytest.mark.anyio
 async def test_tasks_of_different_orgs_never_merge() -> None:
     runtime = _runtime(_Registry())
     _, x = await _register(runtime, _siblings(names=["a"]), org="org-x")

@@ -84,8 +84,10 @@ def _inference_backend(
 def _inference_merge_key(
     spec: InferenceSpecStrict | InferenceSpecTemplate,
 ) -> str | None:
-    """The spec apart from its per-task inputs: ``data``, ``system_prompt`` and the
-    injected upstream results. A visual-embedding task never merges."""
+    """The spec apart from what each task keeps its own: its inputs (``data``,
+    ``system_prompt`` and the injected upstream results), its place in the workflow
+    (``dependsOn`` and ``condition``) and its outputs (``output`` and ``postprocess``).
+    A visual-embedding task never merges."""
     if (model := spec.model) and (model.transformers or {}).get(
         "mode"
     ) == "visual-embedding":
@@ -93,7 +95,15 @@ def _inference_merge_key(
     keyed = spec.model_dump(
         mode="json",
         exclude_none=True,
-        exclude={"data": True, "upstreamResults": True, "inference": {"system_prompt"}},
+        exclude={
+            "data": True,
+            "upstreamResults": True,
+            "dependsOn": True,
+            "condition": True,
+            "output": True,
+            "postprocess": True,
+            "inference": {"system_prompt"},
+        },
     )
     return json.dumps(keyed, ensure_ascii=False, sort_keys=True)
 

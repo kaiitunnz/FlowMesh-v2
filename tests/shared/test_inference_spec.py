@@ -197,6 +197,28 @@ class TestMergeKey:
     @pytest.mark.parametrize(
         "fields",
         [
+            {"dependsOn": ["up"]},
+            {
+                "dependsOn": ["up"],
+                "condition": {"node": "up", "field": "output", "equals": "yes"},
+            },
+            {"output": {"artifacts": ["rows.jsonl"]}},
+            {
+                "postprocess": {
+                    "jsonl_export": {"path": "rows.jsonl", "fields": {"a": "output"}}
+                }
+            },
+        ],
+    )
+    def test_a_tasks_place_and_outputs_do_not_change_the_key(
+        self, fields: dict[str, Any]
+    ) -> None:
+        base = _spec(model=self._MODEL)
+        assert _spec(model=self._MODEL, **fields).merge_key() == base.merge_key()
+
+    @pytest.mark.parametrize(
+        "fields",
+        [
             {"model": {"source": {"identifier": "other"}}},
             {"model": _MODEL, "inference": {"temperature": 0.9}},
             {
@@ -205,9 +227,11 @@ class TestMergeKey:
                     "adapters": [{"type": "lora", "path": "/other"}],
                 }
             },
+            {"model": _MODEL, "shard": {"index": 0, "total": 2}},
+            {"model": _MODEL, "resources": {"hardware": {"gpu": {"count": 2}}}},
         ],
     )
-    def test_the_model_sampling_or_adapters_change_the_key(
+    def test_the_model_sampling_adapters_shard_or_resources_change_the_key(
         self, fields: dict[str, Any]
     ) -> None:
         base = _spec(model=self._MODEL, inference={"temperature": 0.1})
