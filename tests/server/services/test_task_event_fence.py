@@ -27,7 +27,7 @@ from tests.server.task.test_task_merge import (
     _runtime,
     _siblings,
 )
-from tests.server.task.test_v2_orchestration import _TS
+from tests.server.task.test_v2_orchestration import _TS, AUTORESEARCH, _planned
 
 _ECHO = """
 apiVersion: mloc/v1
@@ -784,3 +784,116 @@ async def test_a_cancel_before_the_publish_begins_publishes_nothing() -> None:
     assert runtime._tasks[task_id].status == TaskStatus.CANCELLED
     assert worker_registry.publish_task.call_count == 0
     assert task_id not in runtime._publishing
+
+
+class _FlakyWrites(_Registry):
+    """Fails its Nth ledger save from now, or its next spawned-children commit, once."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.ledger_saves_to_failure = 0
+        self.fail_children_next = False
+
+    def save_ledger_snapshot(self, workflow_id: str, snapshot: Any) -> None:
+        if self.ledger_saves_to_failure:
+            self.ledger_saves_to_failure -= 1
+            if not self.ledger_saves_to_failure:
+                raise ConnectionError("ledger write failed")
+        super().save_ledger_snapshot(workflow_id, snapshot)
+
+    def commit_dynamic_tasks(self, workflow_id: str, *args: Any, **kwargs: Any) -> None:
+        if self.fail_children_next:
+            self.fail_children_next = False
+            raise ConnectionError("children commit failed")
+        super().commit_dynamic_tasks(workflow_id, *args, **kwargs)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "failures",
+    [[(False, 1)], [(True, 0), (False, 2)]],
+    ids=["ledger", "commit-then-replayed-ledger"],
+)
+async def test_a_v2_success_whose_writes_fail_counts_once(
+    failures: list[tuple[bool, int]],
+) -> None:
+    registry = _FlakyWrites()
+    runtime = _runtime(registry)
+    monitor = _monitor(runtime)
+    monitor._metrics = mock.MagicMock()
+    workflow_id, _ = await _register(runtime, _ECHO_V2)
+    task_id = _next(runtime)
+    record_dispatch(runtime, task_id, "wkr-1", "dsp-1")
+    success = _event("TASK_SUCCEEDED", runtime, task_id, "wkr-1", "dsp-1")
+
+    for commit_fails, ledger_save_fails in failures:
+        registry.fail_next = commit_fails
+        registry.ledger_saves_to_failure = ledger_save_fails
+        with pytest.raises(ConnectionError):
+            monitor._handle_task_event(success)
+    monitor._handle_task_event(success)
+    monitor._handle_task_event(success)
+
+    engine = runtime.orchestration_engine(workflow_id)
+    assert engine is not None
+    assert registry.durable_status(task_id) == TaskStatus.DONE
+    assert registry.ledger_blobs[workflow_id] == engine.to_snapshot().model_dump_json()
+    assert monitor._metrics.record_task_event.call_count == 1
+
+
+@pytest.mark.anyio
+async def test_a_retry_redispatched_before_its_failure_replays_counts_once() -> None:
+    registry = _Registry()
+    runtime = _runtime(registry)
+    monitor = _monitor(runtime)
+    monitor._metrics = mock.MagicMock()
+    _, task_id = await _solo(runtime)
+    record_dispatch(runtime, task_id, "wkr-1", "dsp-1")
+    failure = _event("TASK_FAILED", runtime, task_id, "wkr-1", "dsp-1")
+
+    registry.fail_next = True
+    with pytest.raises(ConnectionError):
+        monitor._handle_task_event(failure)
+    assert _next(runtime) == task_id
+    record_dispatch(runtime, task_id, "wkr-2", "dsp-2")
+    monitor._handle_task_event(failure)
+    monitor._handle_task_event(failure)
+
+    requeued = [
+        call.args[0]
+        for call in monitor._metrics.record_task_event.call_args_list
+        if call.args[0].type == "TASK_REQUEUED"
+    ]
+    assert len(requeued) == 1
+    _assert_held_by(runtime, task_id, "wkr-2")
+
+
+@pytest.mark.anyio
+async def test_a_fan_out_replayed_after_its_children_commit_failed_commits_them() -> (
+    None
+):
+    registry = _FlakyWrites()
+    runtime = _runtime(registry)
+    monitor = _monitor(runtime)
+    monitor._metrics = mock.MagicMock()
+    workflow_id, ids = await _register(runtime, AUTORESEARCH)
+    planner = ids["planner"]
+    assert _next(runtime) == planner
+    record_dispatch(runtime, planner, "wkr-1", "dsp-1")
+    success = TaskEvent(
+        type="TASK_SUCCEEDED",
+        task_id=planner,
+        worker_id="wkr-1",
+        dispatch_id="dsp-1",
+        payload=_planned(runtime, planner, ["h1", "h2", "h3"]),
+        ts=_TS,
+    )
+
+    registry.fail_children_next = True
+    with pytest.raises(ConnectionError):
+        monitor._handle_task_event(success)
+    monitor._handle_task_event(success)
+
+    assert registry.durable_status(planner) == TaskStatus.DONE
+    assert len(registry.dynamic_task_ids[workflow_id]) == 3
+    assert monitor._metrics.record_task_event.call_count == 1

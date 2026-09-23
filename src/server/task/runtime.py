@@ -333,9 +333,13 @@ class _Publish:
 
 @dataclass
 class _HeldWrites:
-    """The commits a report's transition holds back once one of them fails."""
+    """The durable writes a report's transition holds back once one of them fails:
+    the tasks to commit, the spawned children to commit, and the workflows whose
+    ledger to save and credentials to reclaim."""
 
     task_ids: list[str] = field(default_factory=list)
+    children: list[tuple[str, list[str], list[str]]] = field(default_factory=list)
+    workflow_ids: list[str] = field(default_factory=list)
     error: Exception | None = None
 
 
@@ -345,13 +349,13 @@ class _ReportWrites(threading.local):
 
 @dataclass
 class _Unacknowledged:
-    """A report whose transition completed in memory and failed to commit: what it
-    did to the task, and the tasks its commit covers."""
+    """A report whose transition completed in memory and failed a durable write: what
+    it did to the task, and the writes it held back."""
 
     report: str
     worker_id: str
     dispatch_id: str | None
-    task_ids: list[str]
+    held: _HeldWrites
     outcome: SettleOutcome | FailureOutcome
 
 
@@ -1107,18 +1111,16 @@ class TaskRuntime:
         ordered tasks carry ``position_in_epoch`` (so the ready-queue helpers never hit
         their guards).
 
-        Within a worker's report, a failed commit holds back itself and every later
-        commit, which the report makes when it is handled again.
+        Within a worker's report, a failed commit is held back with every later write.
         """
-        held = self._report_writes.held
-        if held is not None and held.error is not None:
-            held.task_ids.extend(task_ids)
-            return
-        moves: dict[str, dict[str, list[str]]] = defaultdict(lambda: defaultdict(list))
-        for task_id in dict.fromkeys(task_ids):
-            if (record := self._tasks.get(task_id)) is not None:
-                moves[record.workflow_id][record.status].append(task_id)
-        try:
+
+        def commit() -> None:
+            moves: dict[str, dict[str, list[str]]] = defaultdict(
+                lambda: defaultdict(list)
+            )
+            for task_id in dict.fromkeys(task_ids):
+                if (record := self._tasks.get(task_id)) is not None:
+                    moves[record.workflow_id][record.status].append(task_id)
             for workflow_id, by_status in moves.items():
                 self._workflow_registry.commit_transition(
                     workflow_id,
@@ -1134,27 +1136,47 @@ class TaskRuntime:
                 )
                 if any(by_status[status] for status in TERMINAL_TASK_STATUSES):
                     self._notify_terminal_transition(workflow_id)
+
+        self._write_locked(commit, lambda held: held.task_ids.extend(task_ids))
+
+    def _write_locked(
+        self, write: Callable[[], None], hold: Callable[[_HeldWrites], None]
+    ) -> None:
+        """Make one durable write, or hold it back within a worker's report once this
+        or an earlier write of the report fails."""
+        held = self._report_writes.held
+        if held is not None and held.error is not None:
+            hold(held)
+            return
+        try:
+            write()
         except Exception as exc:
             if held is None:
                 raise
             held.error = exc
-            held.task_ids.extend(task_ids)
+            hold(held)
 
     def _writes_held(self) -> bool:
-        """Whether a commit of the report being handled failed."""
+        """Whether a durable write of the report being handled failed."""
         held = self._report_writes.held
         return held is not None and held.error is not None
 
-    def _recommit_locked(self, *task_ids: str) -> None:
-        """Commit tasks again, then save each one's ledger and reclaim its settled
-        workflow's credentials."""
-        self._commit_locked(*task_ids)
+    def _recommit_locked(self, held: _HeldWrites) -> None:
+        """Make the durable writes a report held back: its tasks, then its spawned
+        children, then each touched workflow's ledger and credential reclaim."""
+        self._commit_locked(*held.task_ids)
+        for workflow_id, child_task_ids, retire in held.children:
+            if (engine := self._engines.get(workflow_id)) is not None:
+                self._commit_new_children_locked(
+                    workflow_id, engine, child_task_ids, retire
+                )
         workflow_ids = [
             record.workflow_id
-            for task_id in task_ids
+            for task_id in held.task_ids
             if (record := self._tasks.get(task_id)) is not None
         ]
-        for workflow_id in dict.fromkeys(workflow_ids):
+        workflow_ids += [workflow_id for workflow_id, _, _ in held.children]
+        for workflow_id in dict.fromkeys([*workflow_ids, *held.workflow_ids]):
             self._save_ledger_locked(workflow_id)
             self._reclaim_vault_if_settled_locked(workflow_id)
 
@@ -1207,10 +1229,11 @@ class TaskRuntime:
         Called after an event's advance materializes any new children, so a producer
         that fans out is not reclaimed while its children are still pending.
         """
-        if self._writes_held():
-            return
-        if self._workflow_settlement_locked(workflow_id).settled:
-            self._secret_vault.purge(workflow_id)
+        if self._writes_held() or self._workflow_settlement_locked(workflow_id).settled:
+            self._write_locked(
+                lambda: self._secret_vault.purge(workflow_id),
+                lambda held: held.workflow_ids.append(workflow_id),
+            )
 
     def _workflow_settlement_locked(self, workflow_id: str) -> WorkflowSettlement:
         # A retired task -- a sealed spawn's child template, replaced by the children it
@@ -2442,11 +2465,16 @@ class TaskRuntime:
         which the workflow reads as complete.
         """
         if child_task_ids or retire:
-            self._workflow_registry.commit_dynamic_tasks(
-                workflow_id,
-                self._records_locked(*child_task_ids),
-                engine.to_snapshot(),
-                retire=retire,
+            self._write_locked(
+                lambda: self._workflow_registry.commit_dynamic_tasks(
+                    workflow_id,
+                    self._records_locked(*child_task_ids),
+                    engine.to_snapshot(),
+                    retire=retire,
+                ),
+                lambda held: held.children.append(
+                    (workflow_id, list(child_task_ids), list(retire))
+                ),
             )
             if retire:
                 self._retired_region_templates.setdefault(workflow_id, set()).update(
@@ -2457,7 +2485,8 @@ class TaskRuntime:
                 # workflow complete with no task terminal behind it. The two drains --
                 # a terminal commit and a retire -- each notify, and they are the only
                 # two, so no completion escapes the finalizer.
-                self._notify_terminal_transition(workflow_id)
+                if not self._writes_held():
+                    self._notify_terminal_transition(workflow_id)
 
     def _retire_sealed_region_templates_locked(
         self, workflow_id: str, engine: OrchestrationEngine
@@ -2863,13 +2892,16 @@ class TaskRuntime:
         return advance
 
     def _save_ledger_locked(self, workflow_id: str) -> None:
-        if self._writes_held():
+        if (engine := self._engines.get(workflow_id)) is None:
             return
-        if (engine := self._engines.get(workflow_id)) is not None:
+
+        def save() -> None:
             with self._control.ledger_snapshot(workflow_id):
                 self._workflow_registry.save_ledger_snapshot(
                     workflow_id, engine.to_snapshot()
                 )
+
+        self._write_locked(save, lambda held: held.workflow_ids.append(workflow_id))
 
     def _apply_advance_locked(self, workflow_id: str, advance: Advance) -> bool:
         # A ready/settle advance never carries a retry; the failure path drives those.
@@ -3672,9 +3704,10 @@ class TaskRuntime:
     ) -> O:
         """Apply a worker's report to its task through ``transition``.
 
-        A transition whose commit fails completes in memory, holds back its later
-        durable writes, and raises. The report handled again commits what was held
-        back, heals as a replay does, and returns what the first handling did.
+        A transition whose durable write fails completes in memory, holds back its
+        later writes, and raises. The report handled again makes what was held back,
+        heals as a replay does, and returns what the first handling did; it keeps
+        doing so until one handling completes.
         """
         if worker_id is None or self._report_writes.held is not None:
             return transition()
@@ -3687,20 +3720,27 @@ class TaskRuntime:
             ):
                 pending = None
             if pending is not None:
-                self._recommit_locked(*pending.task_ids)
-                del self._unacknowledged[task_id]
+                self._recommit_locked(pending.held)
         held = self._report_writes.held = _HeldWrites()
         try:
             outcome = transition()
+        except Exception:
+            if pending is not None and held.error is not None:
+                with self._lock:
+                    pending.held = held
+            raise
         finally:
             self._report_writes.held = None
         if pending is not None:
             outcome = cast(O, pending.outcome)
-        if held.error is not None:
-            with self._lock:
+        with self._lock:
+            if held.error is not None:
                 self._unacknowledged[task_id] = _Unacknowledged(
-                    report, worker_id, dispatch_id, held.task_ids, outcome
+                    report, worker_id, dispatch_id, held, outcome
                 )
+            elif pending is not None:
+                del self._unacknowledged[task_id]
+        if held.error is not None:
             raise held.error
         return outcome
 
@@ -3787,7 +3827,10 @@ class TaskRuntime:
         task_id = record.task_id
         publish.recorded = True
         self._returned_dispatches.pop(task_id, None)
-        self._unacknowledged.pop(task_id, None)
+        if (stash := self._unacknowledged.get(task_id)) and stash.dispatch_id is None:
+            # A report naming no dispatch matches on its worker alone, which the next
+            # dispatch may share.
+            del self._unacknowledged[task_id]
         record.status = TaskStatus.DISPATCHED
         record.assigned_worker = publish.worker_id
         record.dispatch_id = publish.dispatch_id
@@ -4290,7 +4333,7 @@ class TaskRuntime:
             return
         held_worker, held_dispatch, moved = returned
         if worker_id == held_worker and dispatch_id in (None, held_dispatch):
-            self._recommit_locked(*moved)
+            self._recommit_locked(_HeldWrites(list(moved)))
 
     def mark_failed(
         self,
