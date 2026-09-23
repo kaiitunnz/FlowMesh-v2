@@ -479,10 +479,11 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   and reads the verified envelope from the store, holding no copy of its own; the results
   directory keeps only a task's logs and artifacts. A task that outlives its store access
   has it renewed while it still runs on the worker asking.
-- **Task merging.** Ready v1 inference tasks of one org whose specs differ only in
-  their inputs (`data` and `system_prompt`) coalesce into one dispatch, and each
-  inference executor returns every merged child's own result. Merged children ride
-  on `WorkerTaskMessage.merged_children` and come back in `result.children`. A child
+- **Task merging.** Ready v1 text-generation inference tasks of one org whose specs
+  differ only in their inputs (`data` and `system_prompt`) coalesce into one
+  dispatch, whose vLLM or HF transformers executor generates for every task at once
+  and returns each merged child's own result. Merged children ride on
+  `WorkerTaskMessage.merged_children` and come back in `result.children`. A child
   whose rendered spec differs from its parent's beyond its inputs leaves the merge
   and runs alone. A child the dispatch returns no result for, or whose parent is
   cancelled, returns to the queue and runs alone without spending an attempt, and a

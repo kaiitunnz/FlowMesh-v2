@@ -33,7 +33,7 @@ Every executor's `run()` returns an exact per-task-type subclass of
 package. The base class carries two cross-cutting fields:
 
 - `children: dict[str, BaseExecutorResult]` — each merged child's own result,
-  from the vLLM and HF transformers inference executors.
+  from the vLLM and HF transformers text-generation executors.
 - `artifacts: ArtifactContext | None` (wire key `_artifacts`) —
   resolution context for relative artifact refs.
 
