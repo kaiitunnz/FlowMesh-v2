@@ -484,9 +484,11 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   dispatch on a worker whose executor returns each merged child's own result —
   vLLM inference, with or without LoRA adapters. Merged children ride on
   `WorkerTaskMessage.merged_children` and come back in `result.children`. A child
-  the dispatch returns no result for, or whose parent fails or is cancelled,
-  returns to the queue and runs alone without spending an attempt. Disable with
-  `ENABLE_TASK_MERGE=false`.
+  the dispatch returns no result for, or whose parent is cancelled, returns to the
+  queue and runs alone without spending an attempt, and a merged dispatch that
+  fails or loses its worker returns its parent and every child the same way. A
+  batch the dispatcher releases before sending it keeps its children mergeable.
+  Disable with `ENABLE_TASK_MERGE=false`.
 - **Stage stickiness** (`ENABLE_STAGE_WEIGHT_STICKINESS=true`) — the
   dispatcher pins stages that reference an upstream stage's checkpoint
   to the worker that produced it, falling back to normal selection when
