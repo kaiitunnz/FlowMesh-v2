@@ -13,7 +13,6 @@ from typing import Any
 import pytest
 
 from shared.schemas.result import BaseExecutorResult
-from shared.tasks.executor_key import ExecutorKey
 from tests.worker.factories import make_live_worker_config, make_worker_hardware
 from worker.executors import ssh_executor as ssh_mod
 from worker.executors.base_executor import Executor, ExecutorTask
@@ -52,10 +51,7 @@ class TestInitializeExecutorsHardware:
             hardware=hw,
             logger=logging.getLogger("test"),
             lifecycle=None,  # type: ignore[arg-type]
-            registry={
-                ExecutorKey.ECHO: _PassthroughExecutor,
-                ExecutorKey.DEFAULT: _PassthroughExecutor,
-            },
+            registry={"echo": _PassthroughExecutor, "default": _PassthroughExecutor},
             import_errors={},
             cuda_available=False,
             enable_mp_executors=False,
@@ -77,8 +73,8 @@ class TestInitializeExecutorsAvailability:
             logger=logging.getLogger("test"),
             lifecycle=None,  # type: ignore[arg-type]
             registry={
-                ExecutorKey.DEFAULT: _PassthroughExecutor,
-                ExecutorKey.ECHO: _UnavailableExecutor,
+                "default": _PassthroughExecutor,
+                "echo": _UnavailableExecutor,
             },
             import_errors={},
             cuda_available=False,

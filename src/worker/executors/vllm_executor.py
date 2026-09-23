@@ -134,7 +134,6 @@ class VLLMExecutor(InferenceMixin, Executor):
 
     name = "vllm"
     supported_task_types = frozenset({TaskType.INFERENCE})
-    batches_merged_children = True
 
     summarization_template = """Summarize the following document concisely in 2-3 \
 sentences. Focus on the main topic and key information.
@@ -969,11 +968,9 @@ Summary:"""
             child_id = child.task_id
             child_spec = child.spec
             if not isinstance(child_spec, InferenceSpecStrict):
-                logger.warning(
-                    "Leaving merged child %s out of the batch: not an inference task",
-                    child_id,
+                raise ExecutionError(
+                    "Merged child spec must be inference for merged vLLM execution"
                 )
-                continue
             self._log_event("queuing for execution", data_id=child_id)
             collection_jobs.append(
                 {"task_id": child_id, "spec": child_spec, "is_parent": False}

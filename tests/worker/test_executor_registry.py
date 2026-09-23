@@ -8,7 +8,6 @@ import pytest
 
 import worker.executors as executors_pkg
 from shared.schemas.result import BaseExecutorResult
-from shared.tasks.executor_key import ExecutorKey
 from shared.tasks.task_type import TaskType
 from tests.worker.factories import make_worker_config
 from worker.executors import EXECUTOR_MODULES, EXECUTOR_REGISTRY, IMPORT_ERRORS
@@ -17,8 +16,34 @@ from worker.main import build_capabilities
 
 
 class TestExecutorRegistry:
-    def test_every_executor_key_names_a_registered_executor(self) -> None:
-        assert set(EXECUTOR_MODULES) == set(ExecutorKey)
+    def test_registry_has_expected_keys(self) -> None:
+        expected = {
+            "vllm",
+            "vllm_lora",
+            "vllm_embedding",
+            "vllm_serve",
+            "dev_model",
+            "ppo",
+            "dpo",
+            "sft",
+            "lora_sft",
+            "image_classification_training",
+            "default",
+            "rag",
+            "agent_episode",
+            "service_leaf",
+            "echo",
+            "data_profiling",
+            "data_retrieval",
+            "diffusers",
+            "api",
+            "ssh",
+            "omni_text2image",
+            "omni_text2speech",
+            "omni_text2audio",
+            "omni_text2general",
+        }
+        assert set(EXECUTOR_REGISTRY.keys()) == expected
 
     def test_unavailable_executors_tracked(self) -> None:
         """Executors that failed to import have their errors recorded."""
@@ -33,8 +58,8 @@ class TestExecutorRegistry:
         by the worker), guarding against registry/worker drift."""
         from worker.main import _EXECUTORS_TO_WRAP
 
-        assert ExecutorKey.IMAGE_CLASSIFICATION_TRAINING in _EXECUTORS_TO_WRAP
-        assert ExecutorKey.IMAGE_CLASSIFICATION_TRAINING in EXECUTOR_REGISTRY
+        assert "image_classification_training" in _EXECUTORS_TO_WRAP
+        assert "image_classification_training" in EXECUTOR_REGISTRY
 
     def test_import_executor_does_not_crash(self) -> None:
         """The registry should load without raising, even when deps are missing."""
@@ -79,11 +104,11 @@ class TestSupportedTaskTypes:
         # service_leaf is selected by the service-episode dispatch signal, not by
         # task-type capability, so it deliberately advertises none.
         for key, cls in EXECUTOR_REGISTRY.items():
-            if cls is not None and key != ExecutorKey.SERVICE_LEAF:
+            if cls is not None and key != "service_leaf":
                 assert cls.supported_task_types, f"{key} declares no task types"
 
     def test_default_executor_serves_inference_and_embedding(self) -> None:
-        cls = EXECUTOR_REGISTRY[ExecutorKey.DEFAULT]
+        cls = EXECUTOR_REGISTRY["default"]
         assert cls is not None
         assert {TaskType.INFERENCE, TaskType.EMBEDDING} <= cls.supported_task_types
 
@@ -97,7 +122,7 @@ class _EmptyCaps(Executor):
 
 class TestBuildCapabilities:
     @staticmethod
-    def _executors(*keys: ExecutorKey) -> dict[ExecutorKey, Executor]:
+    def _executors(*keys: str) -> dict[str, Executor]:
         # Values report empty supported_task_types, mirroring MPExecutor wrappers
         # which do not forward it; build_capabilities must read the registry class
         # by key instead, or wrapped executors would advertise nothing (the
@@ -106,13 +131,11 @@ class TestBuildCapabilities:
         return {key: inst for key in keys}
 
     def test_unions_from_registry_class_not_instance(self) -> None:
-        registry: dict[ExecutorKey, type[Executor] | None] = {
-            ExecutorKey.ECHO: _StubEcho,
-            ExecutorKey.DEFAULT: _StubInference,
+        registry: dict[str, type[Executor] | None] = {
+            "echo": _StubEcho,
+            "inference": _StubInference,
         }
-        caps = build_capabilities(
-            self._executors(ExecutorKey.ECHO, ExecutorKey.DEFAULT), registry
-        )
+        caps = build_capabilities(self._executors("echo", "inference"), registry)
         assert caps.supported_task_types == {
             TaskType.ECHO,
             TaskType.INFERENCE,
@@ -120,35 +143,12 @@ class TestBuildCapabilities:
         }
 
     def test_skips_unknown_and_unavailable_keys(self) -> None:
-        registry: dict[ExecutorKey, type[Executor] | None] = {
-            ExecutorKey.ECHO: _StubEcho,
-            ExecutorKey.RAG: None,
+        registry: dict[str, type[Executor] | None] = {
+            "echo": _StubEcho,
+            "missing": None,
         }
-        caps = build_capabilities(
-            self._executors(ExecutorKey.ECHO, ExecutorKey.RAG, ExecutorKey.SSH),
-            registry,
-        )
+        caps = build_capabilities(self._executors("echo", "missing", "ghost"), registry)
         assert caps.supported_task_types == frozenset({TaskType.ECHO})
 
     def test_empty_is_safe(self) -> None:
         assert build_capabilities({}, {}).supported_task_types == frozenset()
-
-    def test_advertises_the_executors_that_batch_merged_children(self) -> None:
-        caps = build_capabilities(
-            self._executors(
-                ExecutorKey.VLLM,
-                ExecutorKey.VLLM_LORA,
-                ExecutorKey.VLLM_EMBEDDING,
-                ExecutorKey.DEFAULT,
-            )
-        )
-        assert caps.merge_batching_executors == {
-            ExecutorKey.VLLM,
-            ExecutorKey.VLLM_LORA,
-        }
-
-    def test_a_worker_without_a_batching_executor_advertises_none(self) -> None:
-        caps = build_capabilities(
-            self._executors(ExecutorKey.DEFAULT, ExecutorKey.RAG, ExecutorKey.DIFFUSERS)
-        )
-        assert caps.merge_batching_executors == frozenset()

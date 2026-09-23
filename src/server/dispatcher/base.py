@@ -594,19 +594,21 @@ class Dispatcher:
             return False
 
         # Plan task merge: coalesce sibling merge candidates onto this worker
+        merged_children: list[str] = []
         if (
             self._task_merge_enabled
             and self._task_merge_max_batch_size > 1
             and not preparing
-            and (
-                merged := self._runtime.plan_merge(
-                    task_id, self._task_merge_max_batch_size, worker
-                )
-            )
         ):
-            self._logger.debug(
-                "Coalesced task %s with siblings %s", task_id, ", ".join(merged)
+            merged_children = self._runtime.plan_merge(
+                task_id, self._task_merge_max_batch_size, worker.id
             )
+            if merged_children:
+                self._logger.debug(
+                    "Coalesced task %s with siblings %s",
+                    task_id,
+                    ", ".join(merged_children),
+                )
 
         # 6. Resolve stage references
         try:

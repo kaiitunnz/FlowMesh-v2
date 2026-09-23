@@ -8,7 +8,6 @@ from shared._version import FLOWMESH_RELEASE_VERSION
 from shared.network.mtls import MutualTlsMaterial, MutualTlsMaterialError
 from shared.outcome import FinalizationIndexClient
 from shared.schemas.worker import WorkerCapabilities
-from shared.tasks.executor_key import ExecutorKey
 from shared.tasks.task_type import TaskType
 from shared.tasks.worker_message import WorkerHardware
 from shared.telemetry.config import TelemetryLevel
@@ -40,18 +39,18 @@ from .supervisor_client import SupervisorClient
 from .utils.logging import get_logger
 
 _EXECUTORS_TO_WRAP = {
-    ExecutorKey.DEFAULT,
-    ExecutorKey.VLLM,
-    ExecutorKey.VLLM_LORA,
-    ExecutorKey.VLLM_EMBEDDING,
-    ExecutorKey.SFT,
-    ExecutorKey.LORA_SFT,
-    ExecutorKey.IMAGE_CLASSIFICATION_TRAINING,
-    ExecutorKey.PPO,
-    ExecutorKey.DPO,
-    ExecutorKey.DATA_PROFILING,
-    ExecutorKey.DATA_RETRIEVAL,
-    ExecutorKey.DIFFUSERS,
+    "default",
+    "vllm",
+    "vllm_lora",
+    "vllm_embedding",
+    "sft",
+    "lora_sft",
+    "image_classification_training",
+    "ppo",
+    "dpo",
+    "data_profiling",
+    "data_retrieval",
+    "diffusers",
 }
 
 
@@ -82,7 +81,7 @@ def initialize_executors(
     hardware: WorkerHardware,
     logger: logging.Logger,
     lifecycle: Lifecycle,
-    registry: Mapping[ExecutorKey, type[Executor] | None] | None = None,
+    registry: Mapping[str, type[Executor] | None] | None = None,
     import_errors: dict[str, str] | None = None,
     cuda_available: bool | None = None,
     enable_mp_executors: bool = True,
@@ -107,7 +106,7 @@ def initialize_executors(
 
     configured_wrapped = _EXECUTORS_TO_WRAP if enable_mp_executors else set()
 
-    def init_executor(key: ExecutorKey, *, gpu_required: bool = False):
+    def init_executor(key: str, *, gpu_required: bool = False):
         cls = registry.get(key)
         if cls is None:
             reason = import_errors.get(
@@ -132,41 +131,41 @@ def initialize_executors(
             logger.warning("Failed to initialize executor %s: %s", key, exc)
             return None
 
-    executors: dict[ExecutorKey, Executor] = {}
-    default_executor = init_executor(ExecutorKey.DEFAULT)
+    executors: dict[str, Executor] = {}
+    default_executor = init_executor("default")
     if default_executor:
-        executors[ExecutorKey.DEFAULT] = default_executor
+        executors["default"] = default_executor
 
     for key in [
-        ExecutorKey.ECHO,
-        ExecutorKey.RAG,
-        ExecutorKey.AGENT_EPISODE,
-        ExecutorKey.SERVICE_LEAF,
-        ExecutorKey.DEV_MODEL,
-        ExecutorKey.SFT,
-        ExecutorKey.LORA_SFT,
-        ExecutorKey.IMAGE_CLASSIFICATION_TRAINING,
-        ExecutorKey.DATA_PROFILING,
-        ExecutorKey.DATA_RETRIEVAL,
-        ExecutorKey.DIFFUSERS,
-        ExecutorKey.API,
-        ExecutorKey.SSH,
+        "echo",
+        "rag",
+        "agent_episode",
+        "service_leaf",
+        "dev_model",
+        "sft",
+        "lora_sft",
+        "image_classification_training",
+        "data_profiling",
+        "data_retrieval",
+        "diffusers",
+        "api",
+        "ssh",
     ]:
         inst = init_executor(key)
         if inst:
             executors[key] = inst
 
     for key in [
-        ExecutorKey.VLLM,
-        ExecutorKey.VLLM_LORA,
-        ExecutorKey.VLLM_EMBEDDING,
-        ExecutorKey.VLLM_SERVE,
-        ExecutorKey.PPO,
-        ExecutorKey.DPO,
-        ExecutorKey.OMNI_TEXT2IMAGE,
-        ExecutorKey.OMNI_TEXT2SPEECH,
-        ExecutorKey.OMNI_TEXT2AUDIO,
-        ExecutorKey.OMNI_TEXT2GENERAL,
+        "vllm",
+        "vllm_lora",
+        "vllm_embedding",
+        "vllm_serve",
+        "ppo",
+        "dpo",
+        "omni_text2image",
+        "omni_text2speech",
+        "omni_text2audio",
+        "omni_text2general",
     ]:
         inst = init_executor(key, gpu_required=True)
         if inst:
@@ -178,9 +177,7 @@ def initialize_executors(
         )
 
     if not default_executor:
-        default_executor = executors.get(ExecutorKey.ECHO) or executors.get(
-            ExecutorKey.API
-        )
+        default_executor = executors.get("echo") or executors.get("api")
         if default_executor is None:
             raise SystemExit(
                 "No suitable default executor available. "
@@ -195,19 +192,16 @@ def initialize_executors(
 
 
 def build_capabilities(
-    executors: dict[ExecutorKey, Executor],
-    registry: Mapping[ExecutorKey, type[Executor] | None] | None = None,
+    executors: dict[str, Executor],
+    registry: Mapping[str, type[Executor] | None] | None = None,
     resident_listener_port: int = 0,
 ) -> WorkerCapabilities:
     registry = registry or EXECUTOR_REGISTRY
-    classes = {key: cls for key in executors if (cls := registry.get(key))}
+    supported_task_types = frozenset[TaskType]().union(
+        *(cls.supported_task_types for key in executors if (cls := registry.get(key)))
+    )
     return WorkerCapabilities(
-        supported_task_types=frozenset[TaskType]().union(
-            *(cls.supported_task_types for cls in classes.values())
-        ),
-        merge_batching_executors=frozenset(
-            key for key, cls in classes.items() if cls.batches_merged_children
-        ),
+        supported_task_types=supported_task_types,
         resident_listener_port=resident_listener_port,
     )
 

@@ -4,7 +4,7 @@ A permit relayed over the attachment routes to a held facade's rendezvous when o
 armed; otherwise a non-model permit drives the async sidecar while a waiterless model
 permit is dropped as stale. A deny frame only ever wakes a held facade.
 ``_route_mediated_op`` does not use the rest of the Runner, so it is driven directly
-with a lightweight stub self.
+with a lightweight stub self, mirroring ``_select_inference_executor_key``.
 """
 
 import logging

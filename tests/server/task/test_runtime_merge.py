@@ -1,5 +1,7 @@
 """Tests for task merge key computation and spec sanitization."""
 
+import pytest
+
 from server.task.runtime import _compute_merge_key, _sanitize_merge_spec
 from shared.tasks import TaskEnvelopeTemplate
 
@@ -63,8 +65,9 @@ class TestComputeMergeKey:
         t = self._make_task("inference", model={"source": {"identifier": "llama"}})
         assert _compute_merge_key(t, "org-x") != _compute_merge_key(t, "org-y")
 
-    def test_non_mergeable_type_returns_none(self) -> None:
-        t = self._make_task("echo")
+    @pytest.mark.parametrize("task_type", ["echo", "rag", "diffusion"])
+    def test_non_inference_type_returns_none(self, task_type: str) -> None:
+        t = self._make_task(task_type)
         assert _compute_merge_key(t, "org") is None
 
     def test_ignores_data_field(self) -> None:

@@ -15,7 +15,6 @@ import pytest
 from shared.harness import BoundaryEventKind, HarnessResultKind
 from shared.inference import CanonicalInferenceRequest
 from shared.schemas.result import BaseExecutorResult
-from shared.tasks.executor_key import ExecutorKey
 from shared.tasks.task_type import TaskType
 from shared.tools.model.schema import MODEL_INTERFACE
 from tests.worker.factories import make_worker_config, make_worker_task_message
@@ -157,7 +156,7 @@ def _embedding_msg(spec_data: dict, **episode: object):
 
 def test_service_leaf_key_is_registered() -> None:
     assert "service_leaf" in EXECUTOR_REGISTRY
-    cls = EXECUTOR_REGISTRY.get(ExecutorKey.SERVICE_LEAF)
+    cls = EXECUTOR_REGISTRY.get("service_leaf")
     # It advertises no task-type capability: the dispatch signal selects it.
     assert cls is not None and cls.supported_task_types == frozenset()
 

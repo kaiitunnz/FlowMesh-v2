@@ -2,7 +2,6 @@ from enum import StrEnum
 
 from pydantic import BaseModel, Field
 
-from shared.tasks.executor_key import ExecutorKey
 from shared.tasks.task_type import TaskType
 
 
@@ -39,10 +38,6 @@ class WorkerCapabilities(BaseModel):
     supported_task_types: frozenset[TaskType] = Field(
         default_factory=frozenset,
         description="Types of tasks this worker can service.",
-    )
-    merge_batching_executors: frozenset[ExecutorKey] = Field(
-        default_factory=frozenset,
-        description="Executors on this worker that run a merged dispatch's children.",
     )
     resident_listener_port: int = Field(
         default=0,
