@@ -58,7 +58,6 @@ from shared.sandbox import (
 )
 from shared.schemas.command import InterruptMessage, MediatedOpMessage
 from shared.schemas.result import ResultEnvelope
-from shared.tasks import TaskEnvelopeTemplate
 from shared.tasks.specs import (
     InferenceEmbodimentKind,
     InferenceSpecStrict,
@@ -324,14 +323,6 @@ _OP_PERMIT_SLACK_SEC = 60.0
 # A generous bound on a materialized external-model completion; a larger response
 # settles by reference under the reference-backed outcome contract.
 _MODEL_PERMIT_RESULT_CHAR_CAP = 1_000_000
-
-
-def _compute_merge_key(task: TaskEnvelopeTemplate, scope: str) -> str | None:
-    """The spec's merge key within one authorization ``scope``, since a merged dispatch
-    stores every result under its parent's scope."""
-    if (key := task.spec.merge_key()) is None:
-        return None
-    return json.dumps([scope, key], ensure_ascii=False)
 
 
 def _in_flight_usage(
@@ -614,7 +605,9 @@ class TaskRuntime:
                 task_records.append(record)
                 record.last_queue_ts = record.submitted_ts
                 if v2_engine is None:
-                    merge_key = _compute_merge_key(task, org_id)
+                    # A merged dispatch stores every result under its parent's
+                    # authorization scope, so only tasks of one scope merge.
+                    merge_key = task.spec.merge_key(scope=org_id)
                     record.merge_key = merge_key
                     selected_worker_hint = (
                         record.selected_worker[0]
@@ -851,7 +844,7 @@ class TaskRuntime:
             if record.merge_key is not None:
                 # A key persisted under an earlier rule may omit what now keeps two
                 # tasks apart, so a restored task's key comes from the task itself.
-                record.merge_key = _compute_merge_key(record.task, record.org_id)
+                record.merge_key = record.task.spec.merge_key(scope=record.org_id)
             self._merge_key_by_task[task_id] = (record.merge_key, selected_worker_hint)
             if persisted.epoch_index is not None:
                 self._task_epoch_index[task_id] = persisted.epoch_index

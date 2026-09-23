@@ -37,7 +37,7 @@ class InferenceSpecStrict(ModelInferSpecStrict):
     def validate_dispatchable(self) -> None:
         _validate_inference_dispatchable(self)
 
-    def merge_key(self) -> str | None:
+    def _merge_key(self) -> str | None:
         return _inference_merge_key(self)
 
 
@@ -55,7 +55,7 @@ class InferenceSpecTemplate(ModelInferSpecTemplate):
     def validate_dispatchable(self) -> None:
         _validate_inference_dispatchable(self)
 
-    def merge_key(self) -> str | None:
+    def _merge_key(self) -> str | None:
         return _inference_merge_key(self)
 
 

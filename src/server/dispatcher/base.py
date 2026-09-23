@@ -854,9 +854,9 @@ class Dispatcher:
                     # The child's own dispatch settles its skip.
                     self._runtime.release_merged_child(task_id, child_id, unmerge=True)
                     continue
-                if (key := resolved.spec.merge_key()) is None or (
-                    key != parent_spec.merge_key()
-                ):
+                if (
+                    key := resolved.spec.merge_key(scope=child_record.org_id)
+                ) is None or (key != parent_spec.merge_key(scope=record.org_id)):
                     self._logger.info(
                         "Merged child %s of %s renders a different spec; it runs alone",
                         child_id,

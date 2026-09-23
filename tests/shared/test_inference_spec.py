@@ -4,6 +4,7 @@ from typing import Any
 
 import pytest
 
+from shared.tasks import TaskEnvelopeTemplate
 from shared.tasks.specs import (
     EmbeddingSpecStrict,
     InferenceBackend,
@@ -212,6 +213,17 @@ class TestMergeKey:
         base = _spec(model=self._MODEL, inference={"temperature": 0.1})
         assert _spec(**fields).merge_key() != base.merge_key()
 
+    def test_the_key_is_deterministic_within_its_context(self) -> None:
+        spec = _spec(model=self._MODEL, inference={"temperature": 0.1})
+        assert spec.merge_key(scope="org") is not None
+        assert spec.merge_key(scope="org") == _spec(**spec.model_dump()).merge_key(
+            scope="org"
+        )
+
+    def test_the_scope_separates_keys(self) -> None:
+        spec = _spec(model=self._MODEL)
+        assert spec.merge_key(scope="org-x") != spec.merge_key(scope="org-y")
+
     def test_a_visual_embedding_task_never_merges(self) -> None:
         spec = _spec(
             model={**self._MODEL, "transformers": {"mode": "visual-embedding"}}
@@ -222,4 +234,20 @@ class TestMergeKey:
         spec = EmbeddingSpecStrict.model_validate(
             {"taskType": "embedding", "model": self._MODEL}
         )
-        assert spec.merge_key() is None
+        assert spec.merge_key(scope="org") is None
+
+    @pytest.mark.parametrize("task_type", ["echo", "rag", "diffusion"])
+    def test_a_template_of_another_task_type_never_merges(self, task_type: str) -> None:
+        task = TaskEnvelopeTemplate.model_validate(
+            {"apiVersion": "mloc/v1", "kind": "Task", "spec": {"taskType": task_type}}
+        )
+        assert task.spec.merge_key(scope="org") is None
+
+    def test_a_template_keys_like_its_strict_spec(self) -> None:
+        fields = {"taskType": "inference", "model": self._MODEL}
+        task = TaskEnvelopeTemplate.model_validate(
+            {"apiVersion": "mloc/v1", "kind": "Task", "spec": fields}
+        )
+        assert task.spec.merge_key(scope="org") == _spec(**fields).merge_key(
+            scope="org"
+        )
