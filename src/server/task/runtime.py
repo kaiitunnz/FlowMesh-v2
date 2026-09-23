@@ -3410,12 +3410,11 @@ class TaskRuntime:
                 return None
             return record
 
-    def release_merged_child(self, task_id: str, child_id: str, unmerge: bool) -> None:
-        """Take one child out of a task's merge and return it to the ready queue.
-
-        ``unmerge`` runs it alone next, for a child whose own input is at fault; a child
-        that is only not ready yet stays mergeable.
-        """
+    def release_merged_child(
+        self, task_id: str, child_id: str, merge_key: str | None
+    ) -> None:
+        """Take one child out of a task's merge and return it to the ready queue, to
+        merge next under ``merge_key``, or to run alone when it is None."""
         with self._cv:
             if parent := self._tasks.get(task_id):
                 parent.merged_children = [
@@ -3427,10 +3426,16 @@ class TaskRuntime:
                 child_id in siblings
             ):
                 siblings.remove(child_id)
-            merged = self._merge_parent_map.get(child_id) == task_id
-            returned = self._return_merged_children_locked(
-                [child_id] if merged else [], unmerge
-            )
+            returned: list[str] = []
+            if self._merge_parent_map.get(child_id) == task_id and (
+                child := self._tasks.get(child_id)
+            ):
+                child.merge_key = merge_key
+                _, selected_worker_hint = self._merge_key_by_task.get(
+                    child_id, (None, None)
+                )
+                self._merge_key_by_task[child_id] = (merge_key, selected_worker_hint)
+                returned = self._return_merged_children_locked([child_id])
             self._commit_locked(task_id, *returned)
 
     def _return_merged_children_locked(

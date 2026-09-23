@@ -204,12 +204,17 @@ def _render(
     return [child.task_id for child in rendered or []]
 
 
-def _assert_returned(runtime: TaskRuntime, registry: _Registry, task_id: str) -> None:
+def _assert_returned(
+    runtime: TaskRuntime,
+    registry: _Registry,
+    task_id: str,
+    merge_key: str | None = None,
+) -> None:
     record = runtime._tasks[task_id]
     assert record.status == TaskStatus.PENDING
     assert record.attempts == 0
     assert record.merged_parent_id is None
-    assert record.merge_key is None
+    assert record.merge_key == merge_key
     assert runtime.result_binding(task_id) is None
     assert task_id in runtime._ready_index
     assert not registry.is_dispatched(task_id)
@@ -695,12 +700,8 @@ async def test_a_child_whose_spec_cannot_dispatch_leaves_the_merge() -> None:
     _assert_returned(runtime, registry, c)
 
 
-@pytest.mark.anyio
-async def test_a_child_that_renders_a_different_spec_leaves_the_merge() -> None:
-    registry = _Registry()
-    runtime = _runtime(registry)
-    ids = await _dispatch_merged(runtime, dispatch=False)
-    a, b, c = ids["a"], ids["b"], ids["c"]
+def _rendering_other_model(*task_ids: str) -> Callable[[str, Any, Any], Any]:
+    """Renders each task with its own inputs, and ``task_ids`` with another model."""
 
     def _resolve(task_id: str, task: Any, record: Any) -> Any:
         spec = task.spec.model_copy(
@@ -709,14 +710,42 @@ async def test_a_child_that_renders_a_different_spec_leaves_the_merge() -> None:
                 "inference": {"system_prompt": task_id},
             }
         )
-        if task_id == c:
+        if task_id in task_ids:
             source = spec.model.source.model_copy(update={"identifier": "m-other"})
             model = spec.model.model_copy(update={"source": source})
             spec = spec.model_copy(update={"model": model})
         return task.model_copy(update={"spec": spec})
 
-    assert _render(runtime, a, _resolve) == [b]
-    _assert_returned(runtime, registry, c)
+    return _resolve
+
+
+@pytest.mark.anyio
+async def test_a_child_that_renders_a_different_key_merges_under_it() -> None:
+    registry = _Registry()
+    runtime = _runtime(registry)
+    ids = await _dispatch_merged(runtime, dispatch=False)
+    a, b, c = ids["a"], ids["b"], ids["c"]
+    resolve = _rendering_other_model(c)
+    rendered_key = resolve(c, runtime._tasks[c].task, None).spec.merge_key(scope="org")
+
+    assert _render(runtime, a, resolve) == [b]
+
+    _assert_returned(runtime, registry, c, rendered_key)
+    assert _next(runtime) == c
+    assert runtime.plan_merge(c, 8, _WORKER.id) == []
+
+
+@pytest.mark.anyio
+async def test_children_that_render_alike_merge_together_once_they_leave() -> None:
+    runtime = _runtime(_Registry())
+    ids = await _dispatch_merged(runtime, dispatch=False)
+    a, b, c = ids["a"], ids["b"], ids["c"]
+
+    assert _render(runtime, a, _rendering_other_model(b, c)) == []
+
+    parent = _next(runtime)
+    assert parent in (b, c)
+    assert runtime.plan_merge(parent, 8, _WORKER.id) == [c if parent == b else b]
 
 
 @pytest.mark.anyio
@@ -783,7 +812,7 @@ async def test_a_child_not_ready_yet_leaves_the_merge_still_mergeable() -> None:
     runtime = _runtime(_Registry())
     ids = await _dispatch_merged(runtime, dispatch=False)
 
-    runtime.release_merged_child(ids["a"], ids["c"], unmerge=False)
+    runtime.release_merged_child(ids["a"], ids["c"], runtime._tasks[ids["c"]].merge_key)
 
     record = runtime._tasks[ids["c"]]
     assert record.status == TaskStatus.PENDING
@@ -795,11 +824,11 @@ async def test_a_child_not_ready_yet_leaves_the_merge_still_mergeable() -> None:
 async def test_releasing_a_child_no_longer_merged_leaves_it_alone() -> None:
     runtime = _runtime(_Registry())
     ids = await _dispatch_merged(runtime, dispatch=False)
-    runtime.release_merged_child(ids["a"], ids["c"], unmerge=True)
+    runtime.release_merged_child(ids["a"], ids["c"], None)
     assert _next(runtime) == ids["c"]
     runtime.mark_dispatched(ids["c"], _WORKER)
 
-    runtime.release_merged_child(ids["a"], ids["c"], unmerge=True)
+    runtime.release_merged_child(ids["a"], ids["c"], None)
 
     assert runtime._tasks[ids["c"]].status == TaskStatus.DISPATCHED
 

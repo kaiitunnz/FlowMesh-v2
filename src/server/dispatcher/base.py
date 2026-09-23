@@ -832,16 +832,16 @@ class Dispatcher:
         """Render the children merged into a dispatch.
 
         A child that cannot run in this dispatch leaves the merge rather than failing
-        it: one that is not ready yet returns to the queue still mergeable, and one
-        whose own input is at fault, whose condition is not met, or whose rendered spec
-        differs from the parent's beyond its inputs returns to run alone and settle its
-        own outcome.
+        it: one that is not ready yet returns to the queue still mergeable, one whose
+        rendered merge key differs from the parent's returns to merge under its rendered
+        key, and one whose own input is at fault or whose condition is not met returns
+        to run alone and settle its own outcome.
         """
         rendered: list[MergedChildTaskStrict] = []
         for child_id in list(record.merged_children or []):
             child_record = self._runtime.merged_child_record(task_id, child_id)
             if child_record is None:
-                self._runtime.release_merged_child(task_id, child_id, unmerge=True)
+                self._runtime.release_merged_child(task_id, child_id, None)
                 continue
             try:
                 resolved = self._resolve_stage_references(
@@ -852,17 +852,17 @@ class Dispatcher:
                     self._condition_actual(child_record, condition)
                 ) != condition.equals:
                     # The child's own dispatch settles its skip.
-                    self._runtime.release_merged_child(task_id, child_id, unmerge=True)
+                    self._runtime.release_merged_child(task_id, child_id, None)
                     continue
-                if (
-                    key := resolved.spec.merge_key(scope=child_record.org_id)
-                ) is None or (key != parent_spec.merge_key(scope=record.org_id)):
+                key = resolved.spec.merge_key(scope=child_record.org_id)
+                if key is None or key != parent_spec.merge_key(scope=record.org_id):
                     self._logger.info(
-                        "Merged child %s of %s renders a different spec; it runs alone",
+                        "Merged child %s of %s renders a different merge key; it "
+                        "leaves the merge",
                         child_id,
                         task_id,
                     )
-                    self._runtime.release_merged_child(task_id, child_id, unmerge=True)
+                    self._runtime.release_merged_child(task_id, child_id, key)
                     continue
                 if self._runtime.merged_child_record(task_id, child_id) is None:
                     continue
@@ -879,7 +879,9 @@ class Dispatcher:
                 self._logger.debug(
                     "Merged child %s of %s is not ready yet: %s", child_id, task_id, exc
                 )
-                self._runtime.release_merged_child(task_id, child_id, unmerge=False)
+                self._runtime.release_merged_child(
+                    task_id, child_id, child_record.merge_key
+                )
             except Exception as exc:
                 self._logger.warning(
                     "Merged child %s of %s cannot be rendered; it runs alone: %s",
@@ -887,7 +889,7 @@ class Dispatcher:
                     task_id,
                     exc,
                 )
-                self._runtime.release_merged_child(task_id, child_id, unmerge=True)
+                self._runtime.release_merged_child(task_id, child_id, None)
         return rendered or None
 
     def requeue_task(
