@@ -3760,7 +3760,7 @@ class TaskRuntime:
     ) -> bool:
         """Mark a dispatch as being published, so its worker's earliest events apply.
 
-        Returns whether the task is still pending and may be published.
+        Returns whether the task is pending and may be published.
         """
         publish = _Publish(
             worker.id, dispatch_id, _supplier_id(worker), input_preparation
