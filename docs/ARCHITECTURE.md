@@ -486,8 +486,9 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   `WorkerTaskMessage.merged_children` and come back in `result.children`. A child
   the dispatch returns no result for, or whose parent is cancelled, returns to the
   queue and runs alone without spending an attempt, and a merged dispatch that
-  fails or loses its worker returns its parent and every child the same way. A
-  batch the dispatcher releases before sending it keeps its children mergeable.
+  fails or loses its worker returns its parent and every child still in it the
+  same way. A batch the dispatcher releases before sending it keeps its children
+  mergeable.
   Disable with `ENABLE_TASK_MERGE=false`.
 - **Stage stickiness** (`ENABLE_STAGE_WEIGHT_STICKINESS=true`) — the
   dispatcher pins stages that reference an upstream stage's checkpoint
