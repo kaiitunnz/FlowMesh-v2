@@ -31,7 +31,7 @@ from server.orchestration.tool_dispatch import (
 )
 from server.task.runtime import TaskRuntime
 from shared.harness import HarnessResult, HarnessResultKind
-from tests.server.dispatch import record_dispatch
+from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader
 from tests.server.task.test_v2_agent_harness import (
     _agent,

@@ -14,7 +14,7 @@ from shared.content import reference_for
 from shared.harness import BoundaryEventKind
 from shared.outcome import OutcomeManifest
 from shared.private_state import OwnerFence
-from tests.server.dispatch import record_dispatch
+from tests.server.dispatch_helpers import record_dispatch
 from tests.server.task.test_v2_orchestration import FakeRegistry, _register, _runtime
 from worker.executors.harness.scripted import ScriptedHarnessAdapter, ScriptedStep
 

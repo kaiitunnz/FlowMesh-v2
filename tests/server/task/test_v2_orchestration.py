@@ -831,8 +831,9 @@ async def test_retry_creates_new_attempt_same_work_item_and_invocation() -> None
     invocation_id = engine.invocation_for_task(a).invocation_id  # type: ignore[union-attr]
 
     # A retryable failure requeues the SAME task as a fresh attempt.
-    runtime.mark_pending(a, increment_retry=True)
-    runtime.requeue(a, front=True)
+    runtime.fail_dispatch(
+        a, "wkr-1", {}, "2026-06-01T00:00:00Z", error="boom", retryable=True
+    )
     assert runtime.next_ready(stop, timeout=0.01) == a
     runtime.mark_dispatched(a, cast(Any, _worker("wkr-2")))
     runtime.mark_succeeded(a, "wkr-2", {}, "2026-06-01T00:00:00Z")
@@ -857,8 +858,9 @@ async def test_declared_output_one_publication_across_retries() -> None:
 
     runtime.next_ready(stop, timeout=0.01)
     runtime.mark_dispatched(a, cast(Any, _worker()))
-    runtime.mark_pending(a, increment_retry=True)
-    runtime.requeue(a, front=True)
+    runtime.fail_dispatch(
+        a, "wkr-1", {}, "2026-06-01T00:00:00Z", error="boom", retryable=True
+    )
     runtime.next_ready(stop, timeout=0.01)
     runtime.mark_dispatched(a, cast(Any, _worker("wkr-2")))
     runtime.mark_succeeded(a, "wkr-2", {}, "2026-06-01T00:00:00Z")
@@ -1033,7 +1035,9 @@ async def test_rehydration_readmits_task_orphaned_by_a_mid_retry_crash() -> None
     # A retry persists a's record PENDING and readies the ledger work item, but
     # simulate a crash before that ledger snapshot committed: the durable snapshot
     # still shows the work item DISPATCHED while the task record is PENDING.
-    runtime.mark_pending(a, increment_retry=True)
+    runtime.fail_dispatch(
+        a, "wkr-1", {}, "2026-06-01T00:00:00Z", error="boom", retryable=True
+    )
     registry.ledger_blobs[workflow_id] = dispatched_ledger
 
     restored = _runtime(registry)

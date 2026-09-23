@@ -39,10 +39,7 @@ class WorkerTaskMessage(BaseModel):
     task: TaskEnvelopeStrict = Field(description="Task payload.")
     task_type: str | None = Field(default=None, description="Task type hint.")
     assigned_worker: str = Field(description="Worker ID selected for execution.")
-    dispatch_id: str | None = Field(
-        default=None,
-        description="Identifier of this dispatch, echoed on the task's events.",
-    )
+    dispatch_id: str | None = Field(default=None, description="Dispatch ID.")
     dispatched_at: str = Field(description="Dispatch timestamp (ISO8601).")
     parent_task_id: str | None = Field(
         default=None, description="Parent task ID (merge/shard)."

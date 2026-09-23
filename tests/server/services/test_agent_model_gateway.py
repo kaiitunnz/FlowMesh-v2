@@ -14,7 +14,7 @@ from server.orchestration import WorkItemStatus
 from server.services.agent_model_gateway import AgentModelGateway
 from shared.harness import BoundaryEventKind, HarnessCapsule
 from shared.private_state import OwnerFence
-from tests.server.dispatch import record_dispatch
+from tests.server.dispatch_helpers import record_dispatch
 from tests.server.task.test_v2_orchestration import FakeRegistry, _register, _runtime
 from worker.executors.harness.scripted import ScriptedHarnessAdapter, ScriptedStep
 

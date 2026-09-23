@@ -5,9 +5,10 @@ from unittest import mock
 
 import pytest
 
+from server.dispatcher.base import Dispatcher
 from server.services.monitoring import EventMonitor
 from server.services.watchdog import WorkerWatchdog
-from server.task.models import TaskStatus
+from server.task.models import DispatchEnd, TaskStatus
 from server.task.runtime import TaskRuntime
 from shared.schemas.event import TaskEvent
 from tests.server.task.test_task_merge import (
@@ -90,7 +91,7 @@ async def test_an_unpublished_synthetic_failure_settles_a_cancelling_task() -> N
         grace_seconds=0,
     )
     metrics = mock.MagicMock()
-    EventMonitor(
+    monitor = EventMonitor(
         redis_client=mock.MagicMock(),
         logger=logging.getLogger("cancelling"),
         runtime=runtime,
@@ -100,6 +101,7 @@ async def test_an_unpublished_synthetic_failure_settles_a_cancelling_task() -> N
         metrics_recorder=metrics,
         watchdog=watchdog,
     )
+    watchdog.set_failure_fallback(monitor._handle_task_event)
 
     watchdog._handle_worker_expired(_WORKER.id)
 
@@ -111,7 +113,9 @@ async def test_a_returned_cancelling_task_settles_rather_than_waiting() -> None:
     registry = _Registry()
     runtime, task_id = await _cancelling(registry)
 
-    assert runtime.return_dispatch(task_id, None, increment_retry=True) == "cancelled"
+    end = runtime.return_dispatch(task_id, None, increment_retry=True, front=False)
+
+    assert end is DispatchEnd.CANCELLED
 
     assert runtime._tasks[task_id].status == TaskStatus.CANCELLED
     assert task_id not in runtime._ready_index
@@ -140,3 +144,27 @@ async def test_a_retried_failure_of_a_cancelling_merged_parent_runs_its_children
         assert record.status == TaskStatus.PENDING
         assert record.merge_key is None
         assert child in runtime._ready_index
+
+
+@pytest.mark.anyio
+async def test_a_task_cancelled_while_the_dispatcher_holds_it_stays_cancelled() -> None:
+    registry = _Registry()
+    runtime = _runtime(registry, _InterruptRecorder())
+    workflow_id, _ = await _register(runtime, _siblings(names=["a"]))
+    task_id = _next(runtime)
+    worker_registry = mock.MagicMock()
+
+    def cancel_then_find_no_worker(_task: object) -> list[object]:
+        runtime.cancel_workflow(workflow_id)
+        return []
+
+    worker_registry.idle_satisfying_pool.side_effect = cancel_then_find_no_worker
+    worker_registry.satisfying_workers.return_value = [_WORKER]
+    Dispatcher(runtime, worker_registry, logging.getLogger("cancelling")).dispatch_once(
+        task_id
+    )
+
+    assert runtime._tasks[task_id].status == TaskStatus.CANCELLED
+    assert runtime._tasks[task_id].attempts == 0
+    assert task_id not in runtime._ready_index
+    assert registry.durable_status(task_id) == TaskStatus.CANCELLED

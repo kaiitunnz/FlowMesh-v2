@@ -32,7 +32,7 @@ class WorkerWatchdog:
         self._redis = redis_client
         self._worker_registry = worker_registry
         self._runtime = runtime
-        self._apply_event: Callable[[TaskEvent], None] | None = None
+        self._apply_failure: Callable[[TaskEvent], None] | None = None
         self._logger = logger
         self._enabled = enabled
         self._check_interval = max(1, check_interval)
@@ -42,9 +42,10 @@ class WorkerWatchdog:
         self._dead_marks: set[str] = set()
         self._thread: threading.Thread | None = None
 
-    def set_event_fallback(self, apply_event: Callable[[TaskEvent], None]) -> None:
-        """Install what applies a synthetic failure the task-event stream refused."""
-        self._apply_event = apply_event
+    def set_failure_fallback(self, apply_failure: Callable[[TaskEvent], None]) -> None:
+        """Set the handler that applies a synthetic failure directly when its publish
+        fails."""
+        self._apply_failure = apply_failure
 
     @property
     def enabled(self) -> bool:
@@ -184,10 +185,10 @@ class WorkerWatchdog:
                     worker_id,
                     exc,
                 )
-                if self._apply_event is None:
+                if self._apply_failure is None:
                     continue
                 try:
-                    self._apply_event(event)
+                    self._apply_failure(event)
                 except Exception as apply_exc:
                     self._logger.error(
                         "Failed to apply synthetic TASK_FAILED for %s directly: %s",

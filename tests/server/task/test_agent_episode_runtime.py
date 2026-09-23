@@ -19,7 +19,8 @@ from server.orchestration.tool_dispatch import (
     ToolOutcome,
     ToolOutcomeStatus,
 )
-from server.task.models import TaskStatus
+from server.registries.worker import Worker
+from server.task.models import EventEffect, TaskStatus
 from shared.harness import (
     BoundaryEventKind,
     HarnessAdapter,
@@ -30,11 +31,19 @@ from shared.harness import (
     OutcomeKind,
 )
 from shared.private_state import OwnerFence
-from tests.server.dispatch import record_dispatch
+from tests.server.dispatch_helpers import record_dispatch
 from tests.server.task.test_v2_orchestration import FakeRegistry, _register, _runtime
 from worker.executors.harness.scripted import ScriptedHarnessAdapter, ScriptedStep
 
 _HOLDER = OwnerFence(worker_id="wkr-1", incarnation=1)
+_WORKER = Worker(
+    id="wkr-1",
+    namespace="ns",
+    cluster="c",
+    node_id="nde-1",
+    node_alias="node",
+    incarnation=1,
+)
 
 _TS = "2026-08-29T00:00:00Z"
 
@@ -815,12 +824,55 @@ def test_a_replayed_step_leaves_the_next_step_on_the_same_holder() -> None:
             assert runtime._pop_ready_locked() == writer
         record_dispatch(runtime, writer, "wkr-1", "dsp-2")
 
-        assert runtime.mark_succeeded(writer, "wkr-1", step, _TS, "dsp-1") is None
+        replay = runtime.mark_succeeded(writer, "wkr-1", step, _TS, "dsp-1")
+
+        assert replay.effect is EventEffect.STALE
 
         record = runtime._tasks[writer]
         assert record.status == TaskStatus.DISPATCHED
         assert record.dispatch_id == "dsp-2"
         assert writer not in runtime._ready_index
         assert len(engine.to_snapshot().work_items) == children
+
+    asyncio.run(run())
+
+
+def test_a_step_that_suspends_before_its_dispatch_is_recorded_resumes() -> None:
+    async def run() -> None:
+        runtime = _runtime(FakeRegistry())
+        held: list[ToolInvocationEnvelope] = []
+        runtime.set_model_settler(held.append)
+        _, ids = await _register(runtime, _AGENT_WF)
+        writer = ids["writer"]
+        adapter = ScriptedHarnessAdapter(
+            [
+                ScriptedStep(
+                    op="boundary",
+                    kind=BoundaryEventKind.INVOCATION,
+                    call="m0",
+                    interface="model",
+                    payload="draft",
+                ),
+                ScriptedStep(op="complete", value_from="m0"),
+            ],
+            "v1",
+        )
+        with runtime._cv:
+            assert runtime._pop_ready_locked() == writer
+        dispatch = runtime.agent_episode_dispatch(writer, _HOLDER)
+        assert dispatch is not None
+        runtime.begin_publish(writer, _WORKER, "dsp-1")
+        result = adapter.start(
+            writer, capsule=None, outcomes=dispatch.delivered_outcomes
+        )
+        step = {"agent_episode": result.model_dump(mode="json")}
+        runtime.mark_succeeded(writer, "wkr-1", step, _TS, "dsp-1")
+        runtime.mark_dispatched(writer, _WORKER, "dsp-1")
+
+        (envelope,) = held
+        assert runtime.settle_episode_invocation(
+            envelope.task_id, envelope.call_correlation, "model:draft"
+        )
+        assert runtime._tasks[writer].status == TaskStatus.PENDING
 
     asyncio.run(run())

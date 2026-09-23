@@ -10,7 +10,7 @@ from server.task.runtime import TaskRuntime
 from server.task.v2 import PersistedV2Workflow
 from shared.harness import HarnessCapsule
 from shared.private_state import OwnerFence
-from tests.server.dispatch import record_dispatch
+from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader
 from tests.server.task.test_v2_orchestration import FakeRegistry, _WorkerRegistryStub
 from worker.executors.harness.scripted import ScriptedHarnessAdapter, ScriptedStep

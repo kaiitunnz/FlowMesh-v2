@@ -642,8 +642,7 @@ async def test_a_merge_planned_while_the_store_is_down_returns_its_siblings() ->
     with pytest.raises(ConnectionError):
         runtime.plan_merge(parent, 8, _WORKER.id)
     with pytest.raises(ConnectionError):
-        runtime.release_merge(parent)
-    runtime.requeue(parent, front=True)
+        runtime.return_dispatch(parent, None, increment_retry=False, front=True)
     registry.down = False
 
     for child in (t["b"], t["c"]):

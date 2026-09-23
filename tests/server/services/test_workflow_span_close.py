@@ -16,7 +16,7 @@ from server.services.monitoring import EventMonitor
 from server.task.models import TaskStatus
 from shared.schemas.event import TaskEvent
 from shared.utils.time import ts_to_iso
-from tests.server.dispatch import record_dispatch
+from tests.server.dispatch_helpers import record_dispatch
 from tests.server.task.test_v2_orchestration import (
     FakeRegistry,
     _register,

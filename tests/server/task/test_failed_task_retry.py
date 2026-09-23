@@ -17,7 +17,6 @@ def _record(
 
 
 def test_cancelling_record_does_not_retry() -> None:
-    # The cancel is the outcome a failure of a cancelling task settles into.
     assert failed_task_can_retry(_record(status=TaskStatus.CANCELLING), True) is False
     assert failed_task_can_retry(_record(status=TaskStatus.CANCELLING), None) is False
 

@@ -7,6 +7,7 @@ task, so the completion metric follows the success that settles the task.
 
 import asyncio
 import logging
+from typing import Any
 from unittest.mock import MagicMock
 
 from server.orchestration.tool_dispatch import (
@@ -18,7 +19,7 @@ from server.services.monitoring import EventMonitor
 from server.task.models import TaskStatus
 from shared.harness import BoundaryEventKind, HarnessResult, HarnessResultKind
 from shared.schemas.event import TaskEvent
-from tests.server.dispatch import record_dispatch
+from tests.server.dispatch_helpers import record_dispatch
 from tests.server.task.test_v2_orchestration import FakeRegistry, _register, _runtime
 
 _TS = "2026-09-16T00:00:00Z"
@@ -83,6 +84,12 @@ def _search_group(activation: str) -> FacadeTurnGroup:
     )
 
 
+def _routed_group(runtime: Any, task_id: str) -> bool:
+    engine = runtime.orchestration_engine(runtime.get_record(task_id).workflow_id)
+    work_item = engine.work_item(task_id)
+    return work_item is not None and work_item.pending_outcome_group is not None
+
+
 def _episode_task() -> tuple:
     runtime = _runtime(FakeRegistry())
     _, ids = asyncio.run(_register(runtime, _AGENT_WF))
@@ -100,8 +107,8 @@ def test_a_multi_step_episode_counts_one_completion() -> None:
         HarnessResult(kind=HarnessResultKind.COMPLETION, value="done"),
     ]
     for step in steps:
-        record_dispatch(runtime, task_id)
         monitor._handle_task_event(_succeeded(task_id, step))
+        record_dispatch(runtime, task_id)
     assert metrics.record_task_event.call_count == 1
 
 
@@ -121,6 +128,7 @@ def test_a_turn_completion_carrying_a_facade_group_counts_no_completion() -> Non
     # The turn reroutes its group and the episode runs on, so nothing settled here.
     assert metrics.record_task_event.call_count == 0
     assert runtime.get_record(task_id).status != TaskStatus.DONE
+    assert _routed_group(runtime, task_id)
 
 
 def test_a_turn_completion_resuming_a_stashed_facade_group_counts_no_completion() -> (
@@ -137,6 +145,7 @@ def test_a_turn_completion_resuming_a_stashed_facade_group_counts_no_completion(
 
     assert metrics.record_task_event.call_count == 0
     assert runtime.get_record(task_id).status != TaskStatus.DONE
+    assert _routed_group(runtime, task_id)
 
 
 def test_a_rerouted_facade_turn_bills_its_dispatch_as_in_flight() -> None:

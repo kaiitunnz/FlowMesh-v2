@@ -15,10 +15,10 @@ from server.orchestration.tool_dispatch import (
     FacadeCompletionMode,
     FacadeTurnGroup,
 )
-from server.task.models import TaskStatus
+from server.task.models import DispatchEnd, TaskStatus
 from shared.harness import BoundaryEventKind, HarnessCapsule, HarnessResult
 from shared.private_state import OwnerFence
-from tests.server.dispatch import record_dispatch
+from tests.server.dispatch_helpers import record_dispatch
 from tests.server.task.test_v2_orchestration import (
     FakeRegistry,
     _register,
@@ -264,7 +264,7 @@ def test_a_racing_dispatch_does_not_erase_a_cancellation() -> None:
     asyncio.run(run())
 
 
-def test_a_requeue_does_not_erase_a_cancellation() -> None:
+def test_a_return_settles_a_cancelling_episode() -> None:
     async def run() -> None:
         runtime = _runtime(FakeRegistry())
         workflow_id, ids = await _register(runtime, _AGENT_WF)
@@ -273,14 +273,11 @@ def test_a_requeue_does_not_erase_a_cancellation() -> None:
 
         _run_step(runtime, adapter, writer)
         runtime.cancel_workflow(workflow_id)
-        runtime.mark_pending(writer)
+        end = runtime.return_dispatch(writer, None, increment_retry=False, front=True)
 
-        record = runtime._tasks[writer]
-        assert record.status == TaskStatus.CANCELLING
-        assert record.error == "cancelled"
-        # The requeue that follows a mark_pending finds nothing to re-queue, so the
-        # cancelled episode is never handed back to the dispatcher.
-        assert runtime.requeue(writer, front=True) is False
+        assert end is DispatchEnd.CANCELLED
+        assert runtime._tasks[writer].status == TaskStatus.CANCELLED
+        assert writer not in runtime._ready_index
 
     asyncio.run(run())
 

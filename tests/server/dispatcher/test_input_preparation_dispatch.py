@@ -16,7 +16,7 @@ from shared.inference import (
 )
 from shared.tasks.specs import InferenceEmbodimentKind
 from shared.utils.time import now_iso
-from tests.server.dispatch import record_dispatch
+from tests.server.dispatch_helpers import record_dispatch
 from tests.server.dispatcher.helpers import (
     CapturingDispatcher,
     make_capturing_dispatcher,

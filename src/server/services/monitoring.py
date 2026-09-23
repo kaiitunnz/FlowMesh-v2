@@ -58,7 +58,13 @@ from ..schemas.logs import LogEvent
 from ..serve import ServeAccessMode, is_public_base_url
 from ..task.finalizer import WorkflowFinalizer
 from ..task.metadata import extract_model_dataset_names
-from ..task.models import DispatchEnd, TaskRecord, TaskStatus, TaskUsage
+from ..task.models import (
+    DispatchEnd,
+    EventEffect,
+    TaskRecord,
+    TaskStatus,
+    TaskUsage,
+)
 from ..task.runtime import TaskRuntime
 from ..utils.logging import log_node_event, log_worker_event
 from ..utils.time import now_iso
@@ -148,8 +154,6 @@ class EventMonitor:
             ),
             log_stream_ttl_sec=self._log_stream_ttl_sec,
         )
-
-        watchdog.set_event_fallback(self._handle_task_event)
 
         # Per-entry handler-failure counts backing the consumer's retry budget.
         self._event_handler_attempts: dict[str, int] = {}
@@ -445,17 +449,17 @@ class EventMonitor:
         event_type = event.type
         match event_type:
             case "TASK_STARTED":
-                if not self._runtime.mark_started(
+                effect = self._runtime.mark_started(
                     event.task_id, worker_id, payload, event.ts, event.dispatch_id
-                ):
-                    self._log_stale(event)
+                )
+                if self._unapplied(event, effect):
                     return
                 self._metrics.record_task_event(event)
             case "TASK_UPDATE":
                 if not self._runtime.holds_dispatch(
                     event.task_id, worker_id, event.dispatch_id
                 ):
-                    self._log_stale(event)
+                    self._unapplied(event, EventEffect.STALE)
                     return
                 payload = self._handle_input_resolution(event, payload)
                 payload = self._handle_ssh_task_update(
@@ -464,10 +468,10 @@ class EventMonitor:
                 payload = self._handle_serve_task_update(
                     event.task_id, worker_id, payload
                 )
-                if not self._runtime.mark_updated(
+                effect = self._runtime.mark_updated(
                     event.task_id, worker_id, payload, event.dispatch_id
-                ):
-                    self._log_stale(event)
+                )
+                if self._unapplied(event, effect):
                     return
                 self._maybe_adopt_serve(event.task_id)
             case "TASK_SUCCEEDED":
@@ -477,8 +481,7 @@ class EventMonitor:
                 success = self._runtime.mark_succeeded(
                     event.task_id, worker_id, payload, event.ts, event.dispatch_id
                 )
-                if success is None:
-                    self._log_stale(event)
+                if self._unapplied(event, success.effect):
                     return
                 if success.status == TaskStatus.CANCELLED:
                     self._record_cancellation(event, success.usages)
@@ -539,13 +542,12 @@ class EventMonitor:
             case "TASK_FAILED":
                 self._handle_task_failed(event, worker_id, payload)
             case "TASK_CANCELLED":
-                usages = self._runtime.mark_cancelled(
+                cancellation = self._runtime.mark_cancelled(
                     event.task_id, worker_id, payload, event.ts, event.dispatch_id
                 )
-                if usages is None:
-                    self._log_stale(event)
+                if self._unapplied(event, cancellation.effect):
                     return
-                self._record_cancellation(event, usages)
+                self._record_cancellation(event, cancellation.usages)
                 self._mark_worker_idle(worker_id)
             case _:
                 self._logger.debug(
@@ -566,7 +568,9 @@ class EventMonitor:
         )
         match failure.end:
             case DispatchEnd.STALE:
-                self._log_stale(event)
+                self._unapplied(event, EventEffect.STALE)
+            case DispatchEnd.SETTLED:
+                self._unapplied(event, EventEffect.SETTLED)
             case DispatchEnd.MERGE_RETURNED:
                 self._logger.warning(
                     "Merged dispatch of task %s failed on worker %s; its tasks run "
@@ -577,14 +581,10 @@ class EventMonitor:
                 )
             case DispatchEnd.RETURNED:
                 self._unregister_port_forward(event.task_id)
-                record = self._runtime.get_record(event.task_id)
-                attempt = record.attempts if record else None
-                max_attempts = record.max_attempts if record else None
                 self._logger.warning(
-                    "Retrying task %s after failure (%s/%s)",
+                    "Retrying task %s after failure (attempt %d)",
                     event.task_id,
-                    attempt,
-                    "∞" if max_attempts is None or max_attempts < 0 else max_attempts,
+                    failure.attempts,
                 )
                 self._metrics.record_task_event(
                     TaskEvent(
@@ -593,8 +593,7 @@ class EventMonitor:
                         payload={
                             "reason": "worker_failed",
                             "error": event.error,
-                            "attempt": attempt,
-                            "max_attempts": max_attempts,
+                            "attempt": failure.attempts,
                         },
                     )
                 )
@@ -641,15 +640,23 @@ class EventMonitor:
         except Exception:
             pass
 
-    def _log_stale(self, event: TaskEvent) -> None:
-        self._logger.info(
-            "Ignoring %s for task %s from worker %s (dispatch %s): it does not hold "
-            "the task",
-            event.type,
-            event.task_id,
-            event.worker_id,
-            event.dispatch_id,
-        )
+    def _unapplied(self, event: TaskEvent, effect: EventEffect) -> bool:
+        """Whether an event left its task as it was, logging a stale one and closing
+        the workflow of a task it found settled."""
+        match effect:
+            case EventEffect.APPLIED:
+                return False
+            case EventEffect.STALE:
+                self._logger.info(
+                    "Ignoring stale %s for task %s from worker %s (dispatch %s)",
+                    event.type,
+                    event.task_id,
+                    event.worker_id,
+                    event.dispatch_id,
+                )
+            case EventEffect.SETTLED:
+                self._finalizer.close_task_workflow(event.task_id)
+        return True
 
     # ------------------------------------------------------------------ # Node event
     # handling ------------------------------------------------------------------ #
@@ -848,7 +855,7 @@ class EventMonitor:
                     [],
                 )
                 continue
-            if end is not DispatchEnd.STALE:
+            if end not in (DispatchEnd.STALE, DispatchEnd.SETTLED):
                 self._unregister_port_forward(task_id)
             if end is DispatchEnd.RETURNED:
                 requeued.append(task_id)

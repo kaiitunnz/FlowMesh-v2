@@ -8,19 +8,24 @@ from unittest import mock
 import pytest
 
 from server.dispatcher.base import Dispatcher
+from server.orchestration import WorkItemStatus
 from server.registries.worker import Worker
 from server.services.monitoring import EventMonitor
 from server.services.watchdog import WorkerWatchdog
-from server.task.models import TaskStatus
+from server.task.models import DispatchEnd, EventEffect, TaskStatus
 from server.task.runtime import TaskRuntime
 from shared.schemas.event import TaskEvent, WorkerEvent, parse_event
+from shared.tasks.worker_message import WorkerStatus, WorkerTaskMessage
+from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import result_payload
 from tests.server.task.test_task_merge import (
+    _InterruptRecorder,
     _monitor,
     _next,
     _register,
     _Registry,
     _runtime,
+    _siblings,
 )
 from tests.server.task.test_v2_orchestration import _TS
 
@@ -33,6 +38,17 @@ spec:
     nodes:
       - name: a
         spec: {taskType: echo}
+"""
+
+_ECHO_V2 = """
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {name: fence-v2}
+spec:
+  graph:
+    nodes:
+      - name: a
+        spec: {taskType: echo, data: {type: list, items: [x]}}
 """
 
 _EVENT_TYPES = [
@@ -53,15 +69,6 @@ def _worker(worker_id: str) -> Worker:
         node_alias="node",
         incarnation=1,
     )
-
-
-def _dispatch(
-    runtime: TaskRuntime, task_id: str, worker_id: str, dispatch_id: str | None = None
-) -> None:
-    if dispatch_id is None:
-        runtime.mark_dispatched(task_id, _worker(worker_id))
-    else:
-        runtime.mark_dispatched(task_id, _worker(worker_id), dispatch_id)
 
 
 def _event(
@@ -112,10 +119,10 @@ async def _requeued_to_another_worker(
     runtime: TaskRuntime, monitor: EventMonitor, dispatch_id: str | None
 ) -> str:
     _, task_id = await _solo(runtime)
-    _dispatch(runtime, task_id, "wkr-1", dispatch_id)
+    record_dispatch(runtime, task_id, "wkr-1", dispatch_id)
     monitor._handle_worker_event(WorkerEvent(type="UNREGISTER", worker_id="wkr-1"))
     assert _next(runtime) == task_id
-    _dispatch(runtime, task_id, "wkr-2", dispatch_id and "dsp-2")
+    record_dispatch(runtime, task_id, "wkr-2", dispatch_id and "dsp-2")
     return task_id
 
 
@@ -148,7 +155,7 @@ async def test_a_late_start_after_its_worker_left_does_not_re_dispatch_the_task(
     runtime = _runtime(_Registry())
     monitor = _monitor(runtime)
     _, task_id = await _solo(runtime)
-    _dispatch(runtime, task_id, "wkr-1")
+    record_dispatch(runtime, task_id, "wkr-1")
 
     monitor._handle_worker_event(WorkerEvent(type="UNREGISTER", worker_id="wkr-1"))
     monitor._handle_task_event(_event("TASK_STARTED", runtime, task_id, "wkr-1"))
@@ -167,12 +174,12 @@ async def test_an_earlier_dispatch_to_the_same_worker_changes_nothing(
     runtime = _runtime(_Registry())
     monitor = _monitor(runtime)
     _, task_id = await _solo(runtime)
-    _dispatch(runtime, task_id, "wkr-1", "dsp-1")
+    record_dispatch(runtime, task_id, "wkr-1", "dsp-1")
     monitor._handle_task_event(
         _event("TASK_FAILED", runtime, task_id, "wkr-1", "dsp-1")
     )
     assert _next(runtime) == task_id
-    _dispatch(runtime, task_id, "wkr-1", "dsp-2")
+    record_dispatch(runtime, task_id, "wkr-1", "dsp-2")
 
     monitor._handle_task_event(_event(event_type, runtime, task_id, "wkr-1", "dsp-1"))
 
@@ -185,7 +192,7 @@ async def test_an_event_naming_no_dispatch_is_matched_by_its_worker() -> None:
     runtime = _runtime(_Registry())
     monitor = _monitor(runtime)
     _, task_id = await _solo(runtime)
-    _dispatch(runtime, task_id, "wkr-1", "dsp-1")
+    record_dispatch(runtime, task_id, "wkr-1", "dsp-1")
 
     monitor._handle_task_event(_event("TASK_SUCCEEDED", runtime, task_id, "wkr-2"))
     assert runtime._tasks[task_id].status == TaskStatus.DISPATCHED
@@ -224,7 +231,7 @@ async def test_a_loss_the_watchdog_and_the_worker_both_report_spends_one_attempt
     runtime = _runtime(_Registry())
     monitor = _monitor(runtime)
     _, task_id = await _solo(runtime)
-    _dispatch(runtime, task_id, "wkr-1", dispatch_id)
+    record_dispatch(runtime, task_id, "wkr-1", dispatch_id)
     watchdog, redis = _watchdog(runtime)
 
     watchdog._handle_worker_expired("wkr-1")
@@ -248,7 +255,7 @@ async def test_a_loss_reported_by_unregister_and_the_worker_spends_one_attempt()
     runtime = _runtime(_Registry())
     monitor = _monitor(runtime)
     _, task_id = await _solo(runtime)
-    _dispatch(runtime, task_id, "wkr-1")
+    record_dispatch(runtime, task_id, "wkr-1")
 
     monitor._handle_worker_event(WorkerEvent(type="UNREGISTER", worker_id="wkr-1"))
     monitor._handle_task_event(_event("TASK_FAILED", runtime, task_id, "wkr-1"))
@@ -264,14 +271,14 @@ async def test_an_unregister_after_the_task_moved_on_leaves_its_new_dispatch() -
     runtime = _runtime(_Registry())
     monitor = _monitor(runtime)
     _, task_id = await _solo(runtime)
-    _dispatch(runtime, task_id, "wkr-1")
+    record_dispatch(runtime, task_id, "wkr-1")
     monitor._handle_task_event(_event("TASK_FAILED", runtime, task_id, "wkr-1"))
     assert _next(runtime) == task_id
-    _dispatch(runtime, task_id, "wkr-2")
+    record_dispatch(runtime, task_id, "wkr-2")
 
-    returned = runtime.return_dispatch(task_id, "wkr-1", increment_retry=True)
+    end = runtime.return_dispatch(task_id, "wkr-1", increment_retry=True, front=True)
 
-    assert returned == "stale"
+    assert end is DispatchEnd.STALE
     _assert_held_by(runtime, task_id, "wkr-2")
 
 
@@ -283,7 +290,7 @@ async def test_a_failure_replayed_after_a_restart_spends_one_attempt(
     registry = _Registry()
     runtime = _runtime(registry)
     _, task_id = await _solo(runtime)
-    _dispatch(runtime, task_id, "wkr-1", dispatch_id)
+    record_dispatch(runtime, task_id, "wkr-1", dispatch_id)
     failure = _event("TASK_FAILED", runtime, task_id, "wkr-1", dispatch_id)
     _monitor(runtime)._handle_task_event(failure)
 
@@ -305,7 +312,7 @@ async def test_a_failure_handled_again_after_its_commit_failed_is_committed_once
     runtime = _runtime(registry)
     monitor = _monitor(runtime)
     _, task_id = await _solo(runtime)
-    _dispatch(runtime, task_id, "wkr-1", "dsp-1")
+    record_dispatch(runtime, task_id, "wkr-1", "dsp-1")
     failure = _event("TASK_FAILED", runtime, task_id, "wkr-1", "dsp-1")
 
     registry.fail_next = True
@@ -328,7 +335,7 @@ def _fast_worker_dispatcher(
     registry.idle_satisfying_pool.return_value = [_worker("wkr-1")]
     registry.satisfying_workers.return_value = [_worker("wkr-1")]
 
-    def publish(_worker: Worker, message: Any) -> int:
+    def publish(_worker: Worker, message: WorkerTaskMessage) -> int:
         for event_type in event_types:
             monitor._handle_task_event(
                 _event(
@@ -336,7 +343,7 @@ def _fast_worker_dispatcher(
                     runtime,
                     message.task_id,
                     "wkr-1",
-                    getattr(message, "dispatch_id", None),
+                    message.dispatch_id,
                 )
             )
         return 1
@@ -405,7 +412,7 @@ async def test_a_dispatch_lost_before_it_was_recorded_runs_again() -> None:
     with mock.patch.object(runtime, "mark_dispatched", side_effect=_Crash):
         with pytest.raises(_Crash):
             dispatcher.dispatch_once(task_id)
-    message = worker_registry.publish_task.call_args.args[1]
+    message: WorkerTaskMessage = worker_registry.publish_task.call_args.args[1]
     restored = _runtime(registry)
     await restored.rehydrate()
     _monitor(restored)._handle_task_event(
@@ -414,7 +421,7 @@ async def test_a_dispatch_lost_before_it_was_recorded_runs_again() -> None:
             restored,
             task_id,
             "wkr-1",
-            getattr(message, "dispatch_id", None),
+            message.dispatch_id,
         )
     )
 
@@ -432,7 +439,7 @@ async def test_a_success_reported_before_its_dispatch_was_recorded_replays() -> 
         runtime, monitor, "TASK_SUCCEEDED"
     )
     dispatcher.dispatch_once(task_id)
-    message = worker_registry.publish_task.call_args.args[1]
+    message: WorkerTaskMessage = worker_registry.publish_task.call_args.args[1]
 
     replay = runtime.mark_succeeded(
         task_id,
@@ -442,7 +449,7 @@ async def test_a_success_reported_before_its_dispatch_was_recorded_replays() -> 
         message.dispatch_id,
     )
 
-    assert replay is not None and replay.status == TaskStatus.DONE
+    assert (replay.effect, replay.status) == (EventEffect.SETTLED, TaskStatus.DONE)
     assert runtime._tasks[task_id].dispatch_id == message.dispatch_id
 
 
@@ -456,7 +463,7 @@ async def test_a_worker_lost_before_its_dispatch_was_recorded_runs_the_task_else
     _, task_id = await _solo(runtime)
     dispatcher, worker_registry = _fast_worker_dispatcher(runtime, monitor)
 
-    def lose_the_worker(_worker: Worker, _message: Any) -> int:
+    def lose_the_worker(_worker: Worker, _message: WorkerTaskMessage) -> int:
         if loss == "unregistered":
             monitor._handle_worker_event(
                 WorkerEvent(type="UNREGISTER", worker_id="wkr-1")
@@ -475,7 +482,221 @@ async def test_a_worker_lost_before_its_dispatch_was_recorded_runs_the_task_else
     assert record.status == TaskStatus.PENDING
     assert record.attempts == 0
     assert _next(runtime) == task_id
-    _dispatch(runtime, task_id, "wkr-2")
+    record_dispatch(runtime, task_id, "wkr-2")
     monitor._handle_task_event(_event("TASK_SUCCEEDED", runtime, task_id, "wkr-2"))
     assert record.status == TaskStatus.DONE
     assert record.assigned_worker == "wkr-2"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "event_types",
+    [("TASK_STARTED", "TASK_SUCCEEDED"), ("TASK_STARTED", "TASK_FAILED")],
+    ids=["succeeded", "failed"],
+)
+async def test_a_dispatch_its_worker_ended_first_leaves_the_worker_idle(
+    event_types: tuple[str, ...],
+) -> None:
+    runtime = _runtime(_Registry())
+    monitor = _monitor(runtime)
+    _, task_id = await _solo(runtime)
+    dispatcher, worker_registry = _fast_worker_dispatcher(
+        runtime, monitor, *event_types
+    )
+
+    dispatcher.dispatch_once(task_id)
+
+    writes = [call.args for call in worker_registry.update_worker_status.call_args_list]
+    assert ("wkr-1", WorkerStatus.BUSY) not in writes
+
+
+@pytest.mark.anyio
+async def test_a_start_before_a_retry_is_recorded_starts_the_retry() -> None:
+    runtime = _runtime(_Registry())
+    monitor = _monitor(runtime)
+    workflow_id, _ = await _register(runtime, _ECHO_V2)
+    task_id = _next(runtime)
+    record_dispatch(runtime, task_id, "wkr-2", "dsp-1")
+    monitor._handle_task_event(
+        _event("TASK_FAILED", runtime, task_id, "wkr-2", "dsp-1")
+    )
+    assert _next(runtime) == task_id
+    dispatcher, _ = _fast_worker_dispatcher(runtime, monitor, "TASK_STARTED")
+
+    dispatcher.dispatch_once(task_id)
+
+    engine = runtime.orchestration_engine(workflow_id)
+    assert engine is not None
+    work_item = engine.work_item(task_id)
+    assert work_item is not None
+    attempts = [
+        attempt.status.value
+        for attempt in engine.to_snapshot().attempts
+        if attempt.work_item_id == work_item.work_item_id
+    ]
+    assert attempts == ["failed", "running"]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("retryable", [True, False])
+async def test_a_merged_batch_failing_before_it_is_recorded_runs_each_task_alone(
+    retryable: bool,
+) -> None:
+    runtime = _runtime(_Registry())
+    monitor = _monitor(runtime)
+    _, ids = await _register(runtime, _siblings())
+    parent = _next(runtime)
+    worker_registry = mock.Mock()
+    worker_registry.idle_satisfying_pool.return_value = [_worker("wkr-1")]
+    worker_registry.satisfying_workers.return_value = [_worker("wkr-1")]
+
+    def publish(_worker: Worker, message: WorkerTaskMessage) -> int:
+        assert message.merged_children
+        failure = _event("TASK_FAILED", runtime, parent, "wkr-1", message.dispatch_id)
+        monitor._handle_task_event(failure.model_copy(update={"retryable": retryable}))
+        return 1
+
+    worker_registry.publish_task.side_effect = publish
+    Dispatcher(runtime, worker_registry, logging.getLogger("fence")).dispatch_once(
+        parent
+    )
+
+    for task_id in ids.values():
+        record = runtime._tasks[task_id]
+        assert record.status == TaskStatus.PENDING
+        assert record.attempts == 0
+        assert record.failed_workers == []
+        assert record.merge_key is None
+
+
+@pytest.mark.anyio
+async def test_a_cancel_while_a_dispatch_is_published_interrupts_its_worker() -> None:
+    interrupts = _InterruptRecorder()
+    runtime = _runtime(_Registry(), interrupts)
+    workflow_id, task_id = await _solo(runtime)
+    dispatcher, worker_registry = _fast_worker_dispatcher(runtime, _monitor(runtime))
+    worker_registry.publish_task.side_effect = lambda *_: (
+        runtime.cancel_workflow(workflow_id) and 1
+    )
+
+    dispatcher.dispatch_once(task_id)
+
+    assert runtime._tasks[task_id].status == TaskStatus.CANCELLING
+    assert interrupts.interrupted == [task_id]
+
+
+@pytest.mark.anyio
+async def test_a_dispatch_a_cancel_recorded_but_never_delivered_settles_cancelled() -> (
+    None
+):
+    runtime = _runtime(_Registry(), _InterruptRecorder())
+    workflow_id, task_id = await _solo(runtime)
+    dispatcher, worker_registry = _fast_worker_dispatcher(runtime, _monitor(runtime))
+
+    def cancel_then_fail(*_: Any) -> int:
+        runtime.cancel_workflow(workflow_id)
+        raise ConnectionError("publish failed")
+
+    worker_registry.publish_task.side_effect = cancel_then_fail
+
+    dispatcher.dispatch_once(task_id)
+
+    assert runtime._tasks[task_id].status == TaskStatus.CANCELLED
+    assert task_id not in runtime._ready_index
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("cancel_first", "terminal", "settled"),
+    [
+        (False, "TASK_SUCCEEDED", TaskStatus.DONE),
+        (False, "TASK_FAILED", TaskStatus.FAILED),
+        (True, "TASK_CANCELLED", TaskStatus.CANCELLED),
+        (True, "TASK_SUCCEEDED", TaskStatus.CANCELLED),
+    ],
+)
+async def test_a_terminal_landing_while_its_worker_unregisters_stays_settled(
+    cancel_first: bool, terminal: str, settled: str
+) -> None:
+    runtime = _runtime(_Registry(), _InterruptRecorder())
+    monitor = _monitor(runtime)
+    workflow_id, task_id = await _solo(runtime)
+    record_dispatch(runtime, task_id, "wkr-1", "dsp-1")
+    if cancel_first:
+        runtime.cancel_workflow(workflow_id)
+    event = _event(terminal, runtime, task_id, "wkr-1", "dsp-1")
+    event = event.model_copy(update={"retryable": False})
+    listed = runtime.recover_tasks_for_worker
+
+    def listed_then_settled(worker_id: str) -> list[str]:
+        tasks = listed(worker_id)
+        monitor._handle_task_event(event)
+        return tasks
+
+    with mock.patch.object(runtime, "recover_tasks_for_worker", listed_then_settled):
+        monitor._handle_worker_event(WorkerEvent(type="UNREGISTER", worker_id="wkr-1"))
+
+    record = runtime._tasks[task_id]
+    assert record.status == settled
+    assert record.attempts == 0
+    assert task_id not in runtime._ready_index
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("settle", "report"),
+    [
+        ("TASK_SUCCEEDED", "TASK_FAILED"),
+        ("TASK_CANCELLED", "TASK_CANCELLED"),
+        ("TASK_CANCELLED", "TASK_SUCCEEDED"),
+        ("TASK_CANCELLED", "TASK_FAILED"),
+    ],
+)
+async def test_a_late_report_on_a_settled_task_records_nothing(
+    settle: str, report: str
+) -> None:
+    runtime = _runtime(_Registry(), _InterruptRecorder())
+    monitor = _monitor(runtime)
+    workflow_id, task_id = await _solo(runtime)
+    record_dispatch(runtime, task_id, "wkr-1", "dsp-1")
+    if settle == "TASK_CANCELLED":
+        runtime.cancel_workflow(workflow_id)
+    monitor._handle_task_event(_event(settle, runtime, task_id, "wkr-1", "dsp-1"))
+    settled = runtime._tasks[task_id].status
+    metrics = mock.MagicMock()
+    monitor._metrics = metrics
+
+    monitor._handle_task_event(_event(report, runtime, task_id, "wkr-1", "dsp-1"))
+
+    record = runtime._tasks[task_id]
+    assert record.status == settled
+    assert record.failed_workers == []
+    assert record.last_error is None
+    assert metrics.record_task_event.call_count == 0
+    assert metrics.finalize_task_failure.call_count == 0
+    assert metrics.finalize_task_cancellation.call_count == 0
+
+
+@pytest.mark.anyio
+async def test_a_v2_failure_handled_again_after_its_commit_failed_retries_once() -> (
+    None
+):
+    registry = _Registry()
+    runtime = _runtime(registry)
+    monitor = _monitor(runtime)
+    workflow_id, _ = await _register(runtime, _ECHO_V2)
+    task_id = _next(runtime)
+    record_dispatch(runtime, task_id, "wkr-1", "dsp-1")
+    failure = _event("TASK_FAILED", runtime, task_id, "wkr-1", "dsp-1")
+
+    registry.fail_next = True
+    with pytest.raises(ConnectionError):
+        monitor._handle_task_event(failure)
+    monitor._handle_task_event(failure)
+
+    engine = runtime.orchestration_engine(workflow_id)
+    assert engine is not None
+    work_item = engine.work_item(task_id)
+    assert work_item is not None and work_item.status is WorkItemStatus.READY
+    assert registry.ledger_blobs[workflow_id] == engine.to_snapshot().model_dump_json()
+    assert runtime._tasks[task_id].attempts == 1

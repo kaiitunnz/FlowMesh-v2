@@ -714,11 +714,14 @@ class Dispatcher:
         # 8. Give the task what it reads and writes its content under, then publish it
         if self._content_access is not None:
             self._content_access.issue(worker.id, task_id, record.org_id)
-        self._runtime.begin_publish(task_id, worker.id, dispatch_id)
+        self._runtime.begin_publish(
+            task_id, worker, dispatch_id, input_preparation=preparing
+        )
         try:
             receivers = self._worker_registry.publish_task(worker, message)
         except Exception as exc:
-            self._runtime.abandon_publish(task_id)
+            if not self._runtime.abandon_publish(task_id):
+                return True
             self._logger.warning(
                 "Failed to publish task %s to worker %s: %s", task_id, worker.id, exc
             )
@@ -731,7 +734,8 @@ class Dispatcher:
             )
 
         if receivers <= 0:
-            self._runtime.abandon_publish(task_id)
+            if not self._runtime.abandon_publish(task_id):
+                return True
             self._logger.info(
                 "Node %s dispatch channel has no subscriber; delaying task %s "
                 "(worker %s)",
@@ -754,7 +758,7 @@ class Dispatcher:
 
         # 9. Mark dispatched
         record.no_dispatch_since = None
-        self._runtime.mark_dispatched(
+        live = self._runtime.mark_dispatched(
             task_id, worker, dispatch_id, input_preparation=preparing
         )
         if rendered_children:
@@ -764,10 +768,13 @@ class Dispatcher:
                 len(rendered_children),
                 ", ".join(child.task_id for child in rendered_children),
             )
-        try:
-            self._worker_registry.update_worker_status(worker.id, WorkerStatus.BUSY)
-        except Exception as exc:
-            self._logger.debug("Failed to update worker %s status: %s", worker.id, exc)
+        if live:
+            try:
+                self._worker_registry.update_worker_status(worker.id, WorkerStatus.BUSY)
+            except Exception as exc:
+                self._logger.debug(
+                    "Failed to update worker %s status: %s", worker.id, exc
+                )
 
         try:
             chosen_score = selection_info.get("chosen_metrics", {}).get("score")
@@ -816,23 +823,16 @@ class Dispatcher:
     def _safe_requeue(self, task_id: str) -> None:
         """Requeue a task without letting a Redis outage kill the dispatch loop.
 
-        ``requeue_task`` persists the PENDING transition before re-adding the task to
-        the in-memory ready queue, so a persist failure mid-outage would drop the task
-        from the scheduler entirely. On a Redis error, we therefore still re-enqueue in
-        memory; the durable state re-persists on the task's next successful transition.
+        The task is back in the in-memory ready queue before its return persists, so a
+        persist that fails mid-outage leaves it queued; its durable state catches up at
+        its next transition.
         """
         try:
             self.requeue_task(task_id, reason="dispatch_exception", front=True)
         except REDIS_CONN_ERRORS as exc:
             self._logger.warning(
-                "Requeue persist for %s failed (Redis down: %s); re-queuing in memory",
-                task_id,
-                exc,
+                "Requeue persist for %s failed (Redis down: %s)", task_id, exc
             )
-            try:
-                self._runtime.requeue(task_id, front=True)
-            except Exception:
-                self._logger.exception("In-memory requeue of %s failed", task_id)
 
     def _render_merged_children(
         self, task_id: str, record: TaskRecord, parent_spec: TaskSpecStrict
@@ -913,9 +913,9 @@ class Dispatcher:
     ) -> DispatchEnd:
         """Return a task to the ready queue, spending an attempt when ``count_retry``.
 
-        A task being cancelled settles instead, one that ``holder`` no longer holds is
-        left alone, and one whose last attempt this spends fails. Returns where the
-        task ended up.
+        Only a task ``holder`` holds is returned, and a settled one stays as it is. A
+        task being cancelled settles CANCELLED, and one whose last attempt this spends
+        fails. Returns what the return did to the task.
         """
         end = self._runtime.return_dispatch(
             task_id, holder, increment_retry=count_retry, front=front

@@ -7,7 +7,7 @@ import pytest
 
 from server.config import OrchestrationConfig
 from server.orchestration import PublicationOutcome, ValueRef
-from server.task.models import TaskStatus
+from server.task.models import EventEffect, TaskStatus
 from server.task.results import ResultUnreadable
 from server.task.runtime import TaskRuntime
 from shared.schemas.result import BaseExecutorResult
@@ -72,7 +72,9 @@ async def test_a_retried_success_never_re_points_the_bound_result(
     runtime.mark_dispatched(a, cast(Any, _worker()))
     runtime.mark_succeeded(a, "wkr-1", _stored(runtime, a, "first"), _TS)
     # A duplicate or speculative success converges on the result already bound.
-    runtime.mark_succeeded(a, "wkr-1", _stored(runtime, a, "second"), _TS)
+    duplicate = runtime.mark_succeeded(a, "wkr-1", _stored(runtime, a, "second"), _TS)
+
+    assert duplicate.effect is EventEffect.SETTLED
 
     assert _value(runtime, a) == "first"
 
