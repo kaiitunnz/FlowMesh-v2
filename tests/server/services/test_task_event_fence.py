@@ -18,6 +18,7 @@ from shared.schemas.event import TaskEvent, WorkerEvent, parse_event
 from shared.tasks.worker_message import WorkerStatus, WorkerTaskMessage
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import result_payload
+from tests.server.task.test_agent_episode_runtime import _AGENT_WF, _HOLDER, _SCRIPT
 from tests.server.task.test_task_merge import (
     _InterruptRecorder,
     _monitor,
@@ -28,6 +29,7 @@ from tests.server.task.test_task_merge import (
     _siblings,
 )
 from tests.server.task.test_v2_orchestration import _TS, AUTORESEARCH, _planned
+from worker.executors.harness.scripted import ScriptedHarnessAdapter
 
 _ECHO = """
 apiVersion: mloc/v1
@@ -897,3 +899,65 @@ async def test_a_fan_out_replayed_after_its_children_commit_failed_commits_them(
     assert registry.durable_status(planner) == TaskStatus.DONE
     assert len(registry.dynamic_task_ids[workflow_id]) == 3
     assert monitor._metrics.record_task_event.call_count == 1
+
+
+@pytest.mark.anyio
+async def test_a_spawn_replayed_after_its_children_were_cancelled_closes() -> None:
+    registry = _FlakyWrites()
+    runtime = _runtime(registry)
+    monitor = _monitor(runtime)
+    monitor._metrics = mock.MagicMock()
+    workflow_id, ids = await _register(runtime, _AGENT_WF)
+    writer = ids["writer"]
+    assert _next(runtime) == writer
+    dispatch = runtime.agent_episode_dispatch(writer, _HOLDER)
+    assert dispatch is not None
+    record_dispatch(runtime, writer, "wkr-1", "dsp-1")
+    step = ScriptedHarnessAdapter(_SCRIPT, "v1").start(
+        writer, capsule=None, outcomes=dispatch.delivered_outcomes
+    )
+    spawn = TaskEvent(
+        type="TASK_SUCCEEDED",
+        task_id=writer,
+        worker_id="wkr-1",
+        dispatch_id="dsp-1",
+        payload={"agent_episode": step.model_dump(mode="json")},
+        ts=_TS,
+    )
+
+    registry.fail_children_next = True
+    with pytest.raises(ConnectionError):
+        monitor._handle_task_event(spawn)
+    runtime.cancel_workflow(workflow_id)
+    monitor._handle_task_event(spawn)
+
+    (child,) = registry.dynamic_task_ids[workflow_id]
+    assert registry.durable_status(child) == TaskStatus.CANCELLED
+    assert runtime.workflow_settlement(workflow_id).settled
+    assert registry.remaining_of(workflow_id) == set()
+
+
+@pytest.mark.anyio
+async def test_a_tokenless_replay_that_records_a_new_publish_counts_once() -> None:
+    registry = _Registry()
+    runtime = _runtime(registry)
+    monitor = _monitor(runtime)
+    monitor._metrics = mock.MagicMock()
+    _, task_id = await _solo(runtime)
+    record_dispatch(runtime, task_id, "wkr-1")
+    failure = _event("TASK_FAILED", runtime, task_id, "wkr-1")
+
+    registry.fail_next = True
+    with pytest.raises(ConnectionError):
+        monitor._handle_task_event(failure)
+    assert _next(runtime) == task_id
+    assert runtime.begin_publish(task_id, _worker("wkr-1"), "dsp-2")
+    monitor._handle_task_event(failure)
+
+    requeued = [
+        call.args[0]
+        for call in monitor._metrics.record_task_event.call_args_list
+        if call.args[0].type == "TASK_REQUEUED"
+    ]
+    assert len(requeued) == 1
+    assert task_id not in runtime._unacknowledged

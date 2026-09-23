@@ -1163,13 +1163,18 @@ class TaskRuntime:
 
     def _recommit_locked(self, held: _HeldWrites) -> None:
         """Make the durable writes a report held back: its tasks, then its spawned
-        children, then each touched workflow's ledger and credential reclaim."""
+        children, then each touched workflow's ledger and credential reclaim.
+
+        The children are committed again after they are added, so each one's
+        membership follows its current status.
+        """
         self._commit_locked(*held.task_ids)
         for workflow_id, child_task_ids, retire in held.children:
             if (engine := self._engines.get(workflow_id)) is not None:
                 self._commit_new_children_locked(
                     workflow_id, engine, child_task_ids, retire
                 )
+        self._commit_locked(*chain.from_iterable(ids for _, ids, _ in held.children))
         workflow_ids = [
             record.workflow_id
             for task_id in held.task_ids
@@ -3738,10 +3743,11 @@ class TaskRuntime:
                 self._unacknowledged[task_id] = _Unacknowledged(
                     report, worker_id, dispatch_id, held, outcome
                 )
-            elif pending is not None:
+            elif pending is not None and self._unacknowledged.get(task_id) is pending:
                 del self._unacknowledged[task_id]
-        if held.error is not None:
-            raise held.error
+        if (error := held.error) is not None:
+            held.error = None
+            raise error
         return outcome
 
     def begin_publish(
