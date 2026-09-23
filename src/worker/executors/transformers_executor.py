@@ -64,6 +64,7 @@ from shared.schemas.result import (
     InferenceItem,
     InferenceResult,
 )
+from shared.tasks import MergedChildTaskStrict
 from shared.tasks.specs import (
     EmbeddingSpecStrict,
     InferenceSpecStrict,
@@ -415,6 +416,24 @@ class HFTransformersExecutor(InferenceMixin, Executor):
         self, task: ExecutorTask, out_dir: Path
     ) -> InferenceResult | EmbeddingResult:
         configure_hf_library_logging()
+        result = self._run_task(task, out_dir)
+        if isinstance(result, InferenceResult):
+            for child in task.merged_children or []:
+                try:
+                    result.children[child.task_id] = self._run_task(
+                        child, out_dir.parent / child.task_id
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Leaving merged child %s out of the dispatch: %s",
+                        child.task_id,
+                        exc,
+                    )
+        return result
+
+    def _run_task(
+        self, task: ExecutorTask | MergedChildTaskStrict, out_dir: Path
+    ) -> InferenceResult | EmbeddingResult:
         spec = task.spec
         if not isinstance(spec, (InferenceSpecStrict, EmbeddingSpecStrict)):
             raise ExecutionError(
