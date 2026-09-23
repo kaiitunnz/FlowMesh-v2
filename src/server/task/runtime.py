@@ -2590,7 +2590,11 @@ class TaskRuntime:
         """
         with self._lock:
             record = self._tasks.get(task_id)
-            if record is None or record.assigned_worker != worker_id:
+            if (
+                record is None
+                or record.status in TERMINAL_TASK_STATUSES
+                or not self._holds_dispatch_locked(record, worker_id, None)
+            ):
                 return False
             resolution = self._input_resolution_locked(task_id)
             if resolution is not None and resolution.reference == reference:
@@ -4549,13 +4553,19 @@ class TaskRuntime:
         return self._tasks
 
     def recover_tasks_for_worker(self, worker_id: str) -> list[str]:
-        """
-        Move DISPATCHED tasks assigned to a departed worker back to the ready queue.
-        Returns affected task_ids.
+        """The tasks a departed worker held, for the caller to return or settle.
+
+        A task whose dispatch to the worker was published but not yet recorded goes
+        back to the ready queue here, spending no attempt, and the dispatch it was
+        published under is never recorded.
         """
         recovered: list[str] = []
         with self._cv:
             for task_id, record in list(self._tasks.items()):
+                publishing = self._publishing.get(task_id)
+                if publishing is not None and publishing[0] == worker_id:
+                    self._return_dispatch_locked(record)
+                    continue
                 if record.assigned_worker != worker_id:
                     continue
                 if record.status not in (TaskStatus.DISPATCHED, TaskStatus.CANCELLING):

@@ -444,3 +444,38 @@ async def test_a_success_reported_before_its_dispatch_was_recorded_replays() -> 
 
     assert replay is not None and replay.status == TaskStatus.DONE
     assert runtime._tasks[task_id].dispatch_id == message.dispatch_id
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("loss", ["unregistered", "expired"])
+async def test_a_worker_lost_before_its_dispatch_was_recorded_runs_the_task_elsewhere(
+    loss: str,
+) -> None:
+    runtime = _runtime(_Registry())
+    monitor = _monitor(runtime)
+    _, task_id = await _solo(runtime)
+    dispatcher, worker_registry = _fast_worker_dispatcher(runtime, monitor)
+
+    def lose_the_worker(_worker: Worker, _message: Any) -> int:
+        if loss == "unregistered":
+            monitor._handle_worker_event(
+                WorkerEvent(type="UNREGISTER", worker_id="wkr-1")
+            )
+        else:
+            watchdog, redis = _watchdog(runtime)
+            watchdog._handle_worker_expired("wkr-1")
+            for event in _published(redis):
+                monitor._handle_task_event(event)
+        return 1
+
+    worker_registry.publish_task.side_effect = lose_the_worker
+    dispatcher.dispatch_once(task_id)
+
+    record = runtime._tasks[task_id]
+    assert record.status == TaskStatus.PENDING
+    assert record.attempts == 0
+    assert _next(runtime) == task_id
+    _dispatch(runtime, task_id, "wkr-2")
+    monitor._handle_task_event(_event("TASK_SUCCEEDED", runtime, task_id, "wkr-2"))
+    assert record.status == TaskStatus.DONE
+    assert record.assigned_worker == "wkr-2"
