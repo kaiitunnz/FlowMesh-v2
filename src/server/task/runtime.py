@@ -3725,20 +3725,32 @@ class TaskRuntime:
         return failed_now
 
     def _fail_workflow_locked(self, workflow_id: str, reason: str) -> None:
-        """Fail a workflow in its ledger and every non-terminal task of it, and persist
-        the terminal facts."""
-        self._redrive.settle(workflow_id)
-        if (engine := self._engines.get(workflow_id)) is not None:
-            engine.fail_instance(reason)
+        """Fail a workflow in its ledger and every non-terminal task of it, persist the
+        terminal facts, and release what its work held."""
+        interrupts = [
+            InterruptMessage(
+                task_id=task_id, worker_id=record.assigned_worker, reason=reason
+            )
+            for task_id, record in self._tasks.items()
+            if record.workflow_id == workflow_id
+            and record.status == TaskStatus.DISPATCHED
+            and record.assigned_worker
+        ]
+        resident_invocation_ids = self._terminate_workflow_locked(
+            workflow_id, failure=reason
+        )
         non_terminal = [
             task_id
             for task_id, record in self._tasks.items()
             if record.workflow_id == workflow_id
             and record.status not in TERMINAL_TASK_STATUSES
         ]
-        if self._fail_v2_records_locked(non_terminal, reason, persist=True):
+        self._fail_v2_records_locked(non_terminal, reason, persist=True)
+        if workflow_id in self._engines:
             self._save_ledger_locked(workflow_id)
-            self._cv.notify_all()
+        self._reclaim_vault_if_settled_locked(workflow_id)
+        self._cv.notify_all()
+        self._release_terminated_work(resident_invocation_ids, interrupts)
 
     def _fail_v2_cascade_locked(
         self, primary: str, cascade: list[str]
@@ -4856,7 +4868,6 @@ class TaskRuntime:
     # ------------------------------------------------------------------ #
 
     def cancel_workflow(self, workflow_id: str, reason: str = "cancelled") -> list[str]:
-        self._redrive.settle(workflow_id)
         cancelled: list[str] = []
         cancelling: list[str] = []
         touched: list[str] = []
@@ -4907,15 +4918,9 @@ class TaskRuntime:
                     case _:
                         continue
 
-            # Reap the cancelled agents' pending mediated egress so the worker drops the
-            # operation and its custody.
-            self._reap_ops_for_agents_locked([task_id for task_id, _ in workflow_tasks])
-
-            self._workflow_epoch_tasks.pop(workflow_id, None)
-            self._workflow_epoch_frontier.pop(workflow_id, None)
-            self._workflow_in_epoch_order.pop(workflow_id, None)
-            for task_id, _ in workflow_tasks:
-                self._task_epoch_index.pop(task_id, None)
+            resident_invocation_ids = self._terminate_workflow_locked(
+                workflow_id, failure=None
+            )
             self._workflow_registry.commit_transition(
                 workflow_id,
                 records=self._records_locked(*touched),
@@ -4929,15 +4934,10 @@ class TaskRuntime:
                     if self._tasks[child_id].workflow_id != workflow_id
                 )
             )
-            # Mirror the cancellation into the orchestration ledger so a v2 workflow's
-            # work items settle CANCELLED in lockstep with its task records; the
-            # snapshot follows the committed task state so the ledger never leads it.
+            # The ledger snapshot follows the committed task state so it never leads
+            # it.
             if workflow_id in self._engines:
                 engine = self._engines[workflow_id]
-                engine.cancel_instance()
-                resident_invocation_ids = (
-                    engine.cancel_outstanding_boundary_invocations()
-                )
                 # A suspended-boundary episode has no dispatch to interrupt and
                 # returns no terminal, so the cancel settles it here.
                 for suspended in engine.suspended_boundary_tasks():
@@ -4952,11 +4952,52 @@ class TaskRuntime:
             # for their own terminals.
             self._notify_terminal_transition(workflow_id)
 
-        # A cancelled in-flight resident invocation releases its credit from this fenced
-        # cancellation terminal, so a lost or draining replica is not held forever.
+        self._release_terminated_work(resident_invocation_ids, interrupts)
+        self._secret_vault.purge(workflow_id)
+        return touched
+
+    def _terminate_workflow_locked(
+        self, workflow_id: str, failure: str | None
+    ) -> list[str]:
+        """Settle a workflow's ledger terminally and drop what waits on its work.
+
+        A cancel (``failure`` None) resolves its unpublished outputs as cancelled and a
+        control failure as declared failures. Either way the workflow's pending re-drive
+        and held input checks are dropped, its agents' mediated operations are reaped,
+        and every unsettled boundary invocation is terminalized. Returns those
+        invocations, whose resident credits ``_release_terminated_work`` releases.
+        """
+        self._redrive.settle(workflow_id)
+        task_ids = [
+            task_id
+            for task_id, record in self._tasks.items()
+            if record.workflow_id == workflow_id
+        ]
+        for task_id in task_ids:
+            self._input_checks.pop(task_id, None)
+            self._task_epoch_index.pop(task_id, None)
+        # The worker drops a reaped operation and its custody.
+        self._reap_ops_for_agents_locked(task_ids)
+        self._workflow_epoch_tasks.pop(workflow_id, None)
+        self._workflow_epoch_frontier.pop(workflow_id, None)
+        self._workflow_in_epoch_order.pop(workflow_id, None)
+        if (engine := self._engines.get(workflow_id)) is None:
+            return []
+        if failure is None:
+            engine.cancel_instance()
+        else:
+            engine.fail_instance(failure)
+        return engine.cancel_outstanding_boundary_invocations()
+
+    def _release_terminated_work(
+        self, resident_invocation_ids: list[str], interrupts: list[InterruptMessage]
+    ) -> None:
+        """Release a terminated workflow's resident credits and interrupt its
+        workers."""
+        # The fenced terminal releases each in-flight resident invocation's credit, so a
+        # lost or draining replica is not held forever.
         for invocation_id in resident_invocation_ids:
             self._release_resident_credit(invocation_id, failed=True)
-
         for interrupt in interrupts:
             worker = self._worker_registry.get_worker(interrupt.worker_id)
             if worker is None:
@@ -4967,8 +5008,6 @@ class TaskRuntime:
                 )
             else:
                 self._worker_registry.publish_interrupt(worker, interrupt)
-        self._secret_vault.purge(workflow_id)
-        return touched
 
     def _cancel_in_place_locked(self, record: TaskRecord, reason: str) -> list[str]:
         """Cancel a pending task or a merged child in place.

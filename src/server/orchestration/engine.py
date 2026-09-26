@@ -163,6 +163,7 @@ _DEDUP_CAPABLE = frozenset(
 _EARLY_JOINS = frozenset(
     {JoinCompletion.ANY, JoinCompletion.FIRST_K, JoinCompletion.PREDICATE}
 )
+_OPEN_ATTEMPT_STATUSES = frozenset({AttemptStatus.ISSUED, AttemptStatus.RUNNING})
 
 
 class RegionError(ValueError):
@@ -803,6 +804,11 @@ class OrchestrationEngine:
                 operator_id=wi.operator_id,
             )
             return Advance(retry=[wi.legacy_task_id])
+        return self._settle_failed_wi(wi)
+
+    def _settle_failed_wi(self, wi: WorkItem) -> Advance:
+        """Settle a work item as a declared failure: a child drains its scope, anything
+        else cascades over its static successors."""
         activation = self._activations[wi.activation_id]
         released = self._agent_terminal_regions(wi.operator_id, wi.activation_id)
         if activation.kind == "child":
@@ -2445,23 +2451,33 @@ class OrchestrationEngine:
         """Cancel the whole workflow instance: the root scope and every descendant."""
         return self.on_cancelled(self._root_scope.scope_id)
 
-    @_ds_drive(ControlPlaneWindow.POST_START)
     def fail_instance(self, reason: str) -> Advance:
         """Fail the whole workflow instance as a recorded terminal event.
 
         No scope admits another child, every unsettled leaf or agent settles as a
-        declared failure, and every unpublished declared output resolves to one.
+        declared failure, and every unpublished declared output resolves to one. Only an
+        attempt still in flight closes as failed; one already closed keeps its outcome.
         """
+        return self._fail_scope_tree(self._root_scope.scope_id, reason)
+
+    @_ds_drive(ControlPlaneWindow.POST_START)
+    def _fail_scope_tree(self, scope_id: str, reason: str) -> Advance:
         self._emit("instance_failed", detail={"reason": reason})
-        for scope_id in self._scope_subtree(self._root_scope.scope_id):
-            self._revoke_progress(scope_id)
+        for sid in self._scope_subtree(scope_id):
+            self._revoke_progress(sid)
         advance = Advance()
         for wi in list(self._work_items.values()):
             if wi.status in TERMINAL_WORK_ITEM_STATUSES or self._kind(
                 wi.operator_id
             ) not in (OperatorKind.LEAF, OperatorKind.AGENT):
                 continue
-            advance.extend(self.on_failed(wi.legacy_task_id, reason, retryable=False))
+            attempt = self._latest_attempt(wi)
+            if attempt is not None and attempt.status in _OPEN_ATTEMPT_STATUSES:
+                attempt.status = AttemptStatus.FAILED
+                attempt.finished_at = now_iso()
+                attempt.error = reason
+                self._emitter.emit_attempt(attempt)
+            advance.extend(self._settle_failed_wi(wi))
         for slot in list(self._slots.values()):
             self._write_publication(slot, PublicationOutcome.DECLARED_FAILURE, None)
         return advance
