@@ -3712,9 +3712,13 @@ class TaskRuntime:
         heals as a replay does, and returns what the first handling did; it keeps
         doing so until one handling completes.
         """
+        # A report naming no worker has nothing to replay against, and a nested one
+        # runs under the outer report's hold.
         if worker_id is None or self._report_writes.held is not None:
             return transition()
         with self._lock:
+            # A stash matches only the same report from the same worker, naming its
+            # dispatch or none.
             pending = self._unacknowledged.get(task_id)
             if pending is not None and (
                 pending.report != report
@@ -3723,26 +3727,37 @@ class TaskRuntime:
             ):
                 pending = None
             if pending is not None:
+                # Make the writes the first handling held back, before the replay
+                # writes anything after them.
                 self._recommit_locked(pending.held)
+        # A fresh hold collects every write that fails from here on, so the transition
+        # completes in memory and its writes stay ordered.
         held = self._report_writes.held = _HeldWrites()
         try:
             outcome = transition()
         except Exception:
+            # A replay that raises keeps its stash, now holding the replay's writes.
             if pending is not None and held.error is not None:
                 with self._lock:
                     pending.held = held
             raise
         finally:
             self._report_writes.held = None
+        # A replay sees its own event as stale, so it answers with what the first
+        # handling did.
         if pending is not None:
             outcome = cast(O, pending.outcome)
         with self._lock:
+            # A failed write stashes the report for its next handling; a clean replay
+            # clears the stash unless a newer handling replaced it.
             if held.error is not None:
                 self._unacknowledged[task_id] = _Unacknowledged(
                     report, worker_id, dispatch_id, held, outcome
                 )
             elif pending is not None and self._unacknowledged.get(task_id) is pending:
                 del self._unacknowledged[task_id]
+        # The caller sees the failure so the report is delivered again; a stashed hold
+        # never raises it twice.
         if (error := held.error) is not None:
             held.error = None
             raise error
