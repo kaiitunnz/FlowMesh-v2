@@ -11,6 +11,7 @@ from server.services.watchdog import WorkerWatchdog
 from server.task.models import DispatchEnd, TaskStatus
 from server.task.runtime import TaskRuntime
 from shared.schemas.event import TaskEvent
+from tests.server.dispatch_helpers import record_dispatch
 from tests.server.task.test_task_merge import (
     _WORKER,
     _InterruptRecorder,
@@ -39,7 +40,7 @@ async def _cancelling(registry: _Registry) -> tuple[TaskRuntime, str]:
     runtime = _runtime(registry, _InterruptRecorder())
     workflow_id, _ = await _register(runtime, _siblings(names=["a"]))
     task_id = _next(runtime)
-    runtime.mark_dispatched(task_id, _WORKER)
+    record_dispatch(runtime, task_id, _WORKER)
     runtime.cancel_workflow(workflow_id)
     assert runtime._tasks[task_id].status == TaskStatus.CANCELLING
     return runtime, task_id
@@ -133,7 +134,7 @@ async def test_a_retried_failure_of_a_cancelling_merged_parent_runs_its_children
     parent = _next(runtime)
     assert parent == a["a1"]
     assert runtime.plan_merge(parent, 8, _WORKER.id) == [b["b1"], b["b2"]]
-    runtime.mark_dispatched(parent, _WORKER)
+    record_dispatch(runtime, parent, _WORKER)
     runtime.cancel_workflow(first)
 
     _monitor(runtime)._handle_task_event(_failed(parent, retryable))

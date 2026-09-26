@@ -572,6 +572,20 @@ async def test_a_merged_batch_failing_before_it_is_recorded_runs_each_task_alone
 
 
 @pytest.mark.anyio
+async def test_a_dispatch_whose_publish_never_began_records_nothing() -> None:
+    registry = _Registry()
+    runtime = _runtime(registry)
+    workflow_id, task_id = await _solo(runtime)
+
+    assert runtime.mark_dispatched(task_id) is False
+
+    record = runtime._tasks[task_id]
+    assert record.status == TaskStatus.PENDING
+    assert record.assigned_worker is None
+    assert registry.dispatched[workflow_id] == set()
+
+
+@pytest.mark.anyio
 async def test_a_late_report_of_a_returned_merged_batch_commits_its_return() -> None:
     registry = _Registry()
     runtime = _runtime(registry)

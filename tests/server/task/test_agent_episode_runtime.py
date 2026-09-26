@@ -870,7 +870,7 @@ def test_a_step_that_suspends_before_its_dispatch_is_recorded_resumes() -> None:
         )
         step = {"agent_episode": result.model_dump(mode="json")}
         runtime.mark_succeeded(writer, "wkr-1", step, _TS, "dsp-1")
-        runtime.mark_dispatched(writer, _WORKER, "dsp-1")
+        record_dispatch(runtime, writer, _WORKER, "dsp-1")
 
         (envelope,) = held
         assert runtime.settle_episode_invocation(
@@ -904,7 +904,7 @@ def test_a_first_report_handled_again_after_its_record_failed_opens_the_attempt(
         assert runtime.mark_started(writer, "wkr-1", {}, _TS, "dsp-1") is (
             EventEffect.APPLIED
         )
-        assert runtime.mark_dispatched(writer, _WORKER, "dsp-1")
+        assert record_dispatch(runtime, writer, _WORKER, "dsp-1")
         result = adapter.start(
             writer, capsule=None, outcomes=dispatch.delivered_outcomes
         )

@@ -50,6 +50,7 @@ from server.task.models import TaskRecord
 from server.task.runtime import TaskRuntime
 from shared.tasks import TaskEnvelopeTemplate
 from shared.tasks.worker_message import WorkerStatus
+from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader
 from tests.server.task.test_v2_orchestration import _NoopSecretVault
 
@@ -595,13 +596,13 @@ class TestSupplierResolverWiring:
         )
 
         runtime, record = _make_runtime_with_record("tsk-1")
-        runtime.mark_dispatched("tsk-1", _make_worker())
+        record_dispatch(runtime, "tsk-1", _make_worker())
 
         assert record.supplier_id == "sup-cloud-1"
 
     def test_no_resolvers_leaves_supplier_id_empty(self) -> None:
         runtime, record = _make_runtime_with_record("tsk-2")
-        runtime.mark_dispatched("tsk-2", _make_worker())
+        record_dispatch(runtime, "tsk-2", _make_worker())
 
         assert record.supplier_id == ""
 

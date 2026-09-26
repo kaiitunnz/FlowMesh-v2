@@ -3767,7 +3767,7 @@ class TaskRuntime:
         self,
         task_id: str,
         worker: Worker,
-        dispatch_id: str,
+        dispatch_id: str | None,
         *,
         input_preparation: bool = False,
     ) -> bool:
@@ -3805,37 +3805,23 @@ class TaskRuntime:
                 self._settle_cancelled_locked(record, time.time())
             return False
 
-    def mark_dispatched(
-        self,
-        task_id: str,
-        worker: Worker,
-        dispatch_id: str | None = None,
-        *,
-        input_preparation: bool = False,
-    ) -> bool:
-        """Record a published dispatch; returns whether it still holds the task.
+    def mark_dispatched(self, task_id: str) -> bool:
+        """Record the publish `begin_publish` marked; returns whether it holds the task.
 
         A dispatch an event of its worker recorded first is not recorded again, and one
         that ended before its record, or whose task already settles, records nothing.
         """
-        publish = _Publish(
-            worker.id, dispatch_id, _supplier_id(worker), input_preparation
-        )
         with self._cv:
-            if task_id in self._publishing:
-                published = self._publishing.pop(task_id)
-                if published is None:
-                    return False
-                if published.recorded:
-                    record = self._tasks.get(task_id)
-                    return (
-                        record is not None
-                        and record.dispatch_id == published.dispatch_id
-                        and record.status
-                        in (TaskStatus.DISPATCHED, TaskStatus.CANCELLING)
-                    )
-                publish = published
+            publish = self._publishing.pop(task_id, None)
+            if publish is None:
+                return False
             record = self._tasks.get(task_id)
+            if publish.recorded:
+                return (
+                    record is not None
+                    and record.dispatch_id == publish.dispatch_id
+                    and record.status in (TaskStatus.DISPATCHED, TaskStatus.CANCELLING)
+                )
             if not record or record.status in SETTLING_TASK_STATUSES:
                 # A replayed or late dispatch must not regress a settling task.
                 return False

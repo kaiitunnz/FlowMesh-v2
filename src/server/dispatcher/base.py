@@ -759,9 +759,7 @@ class Dispatcher:
 
         # 9. Mark dispatched
         record.no_dispatch_since = None
-        live = self._runtime.mark_dispatched(
-            task_id, worker, dispatch_id, input_preparation=preparing
-        )
+        live = self._runtime.mark_dispatched(task_id)
         if rendered_children:
             self._logger.info(
                 "[TaskMerge] parent=%s merged_children=%d -> %s",

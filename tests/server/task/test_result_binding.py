@@ -11,6 +11,7 @@ from server.task.models import EventEffect, TaskStatus
 from server.task.results import ResultUnreadable
 from server.task.runtime import TaskRuntime
 from shared.schemas.result import BaseExecutorResult
+from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader, result_payload
 from tests.server.task.test_v2_orchestration import (
     _TS,
@@ -69,7 +70,7 @@ async def test_a_retried_success_never_re_points_the_bound_result(
     runtime = _runtime(FakeRegistry())
     _, ids = await _register(runtime, payload)
     a = ids["a"]
-    runtime.mark_dispatched(a, cast(Any, _worker()))
+    record_dispatch(runtime, a, cast(Any, _worker()))
     runtime.mark_succeeded(a, "wkr-1", _stored(runtime, a, "first"), _TS)
     # A duplicate or speculative success converges on the result already bound.
     duplicate = runtime.mark_succeeded(a, "wkr-1", _stored(runtime, a, "second"), _TS)
@@ -86,7 +87,7 @@ async def test_a_result_outside_the_task_scope_is_not_bound(payload: str) -> Non
     _, ids = await _register(runtime, payload)
     a = ids["a"]
     foreign = result_payload(runtime._results, a, {"value": "x"}, "another-org")
-    runtime.mark_dispatched(a, cast(Any, _worker()))
+    record_dispatch(runtime, a, cast(Any, _worker()))
     runtime.mark_succeeded(a, "wkr-1", foreign, _TS)
 
     assert runtime._tasks[a].status == TaskStatus.DONE
@@ -101,7 +102,7 @@ async def test_a_bound_result_survives_a_restart(payload: str) -> None:
     runtime = _runtime(registry, reader)
     _, ids = await _register(runtime, payload)
     a = ids["a"]
-    runtime.mark_dispatched(a, cast(Any, _worker()))
+    record_dispatch(runtime, a, cast(Any, _worker()))
     runtime.mark_succeeded(a, "wkr-1", _stored(runtime, a, "kept"), _TS)
 
     restored = _runtime(registry, make_result_reader(reader.store))
@@ -116,10 +117,10 @@ async def test_a_spawned_child_reads_as_the_value_it_settled_with() -> None:
     runtime = _runtime(registry, reader)
     _, ids = await _register(runtime, AUTORESEARCH)
     planner = ids["planner"]
-    runtime.mark_dispatched(planner, cast(Any, _worker()))
+    record_dispatch(runtime, planner, cast(Any, _worker()))
     runtime.mark_succeeded(planner, "wkr-1", _planned(runtime, planner, ["h1"]), _TS)
     (child,) = _pop_ready(runtime)
-    runtime.mark_dispatched(child, cast(Any, _worker()))
+    record_dispatch(runtime, child, cast(Any, _worker()))
     runtime.mark_succeeded(child, "wkr-1", _stored(runtime, child, "child"), _TS)
 
     assert _value(runtime, child) == "child"
@@ -140,7 +141,7 @@ async def test_a_replayed_skip_republishes_as_explicit_empty(
     # A crash after the task's terminal persist and before the ledger save leaves the
     # skip only on the record; the restart replays it from there.
     monkeypatch.setattr(runtime, "_save_ledger_locked", lambda _workflow_id: None)
-    runtime.mark_dispatched(a, cast(Any, _worker()))
+    record_dispatch(runtime, a, cast(Any, _worker()))
     runtime.mark_succeeded(a, None, {}, _TS, skip=skip)
 
     restored = _runtime(registry)
@@ -164,7 +165,7 @@ async def test_a_merged_child_binds_only_its_own_result() -> None:
     payload["child_result_references"] = {
         own: _stored(runtime, own, "own")["result_reference"]
     }
-    runtime.mark_dispatched(parent, cast(Any, _worker()))
+    record_dispatch(runtime, parent, cast(Any, _worker()))
     runtime.mark_succeeded(parent, "wkr-1", payload, _TS)
 
     assert _value(runtime, own) == "own"
@@ -180,7 +181,7 @@ async def test_a_success_with_nothing_bound_is_unreadable_to_its_consumers() -> 
     value_ref = ValueRef(kind="legacy_task_result", legacy_task_id=a)
     # Unsettled: a consumer defers rather than failing.
     assert runtime._resolve_value_ref(value_ref) is None
-    runtime.mark_dispatched(a, cast(Any, _worker()))
+    record_dispatch(runtime, a, cast(Any, _worker()))
     runtime.mark_succeeded(a, "wkr-1", {}, _TS)
 
     with pytest.raises(ResultUnreadable):

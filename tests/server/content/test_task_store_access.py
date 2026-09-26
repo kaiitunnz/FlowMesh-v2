@@ -21,6 +21,7 @@ from shared.content import (
     ScopedContentCredential,
 )
 from shared.tasks.worker_message import WorkerTaskMessage
+from tests.server.dispatch_helpers import record_dispatch
 from tests.server.dispatcher.helpers import CapturingDispatcher
 from tests.server.result_store import make_result_reader
 from tests.server.task.test_v2_orchestration import FakeRegistry, _NoopSecretVault
@@ -156,7 +157,7 @@ def test_only_a_running_task_on_the_asking_worker_renews_its_access() -> None:
         runtime.register("owner", _ORG, _ECHO_WORKFLOW, format="native")
     )
     task_id = results[0].task_id
-    runtime.mark_dispatched(task_id, cast(Any, _worker()))
+    record_dispatch(runtime, task_id, cast(Any, _worker()))
 
     assert runtime.renewable_content_scope(task_id, "wkr-1") == _ORG
     assert runtime.renewable_content_scope(task_id, "wkr-other") is None

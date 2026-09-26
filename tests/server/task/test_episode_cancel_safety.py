@@ -246,7 +246,7 @@ def test_a_racing_dispatch_does_not_erase_a_cancellation() -> None:
 
         result = _run_step(runtime, adapter, writer)
         runtime.cancel_workflow(workflow_id)
-        runtime.mark_dispatched(writer, cast(Any, _worker("wkr-2")))
+        record_dispatch(runtime, writer, cast(Any, _worker("wkr-2")))
         assert runtime._tasks[writer].status == TaskStatus.CANCELLING
         assert runtime._tasks[writer].assigned_worker != "wkr-2"
 

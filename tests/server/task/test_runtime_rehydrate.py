@@ -259,7 +259,7 @@ async def test_rehydrate_restores_completed_and_ready_state() -> None:
     a, b = ids["a"], ids["b"]
 
     worker = SimpleNamespace(id="wkr-1", node_id="nde-1")
-    runtime.mark_dispatched(a, cast(Any, worker))
+    record_dispatch(runtime, a, cast(Any, worker))
     runtime.mark_succeeded(a, "wkr-1", {}, "2026-06-01T00:00:00Z")
 
     restored = _runtime(registry)
@@ -287,7 +287,7 @@ async def test_rehydrate_keeps_in_flight_task_dispatched() -> None:
     a = ids["a"]
 
     worker = SimpleNamespace(id="wkr-9", node_id="nde-1")
-    runtime.mark_dispatched(a, cast(Any, worker))
+    record_dispatch(runtime, a, cast(Any, worker))
 
     restored = _runtime(registry)
     await restored.rehydrate()
@@ -326,7 +326,7 @@ async def test_mark_succeeded_is_idempotent_under_replay() -> None:
     a, b = ids["a"], ids["b"]
 
     worker = SimpleNamespace(id="wkr-1", node_id="nde-1")
-    runtime.mark_dispatched(a, cast(Any, worker))
+    record_dispatch(runtime, a, cast(Any, worker))
     runtime.mark_succeeded(a, "wkr-1", {}, "2026-06-01T00:00:00Z")
     # A replayed completion must not re-apply.
     replay = runtime.mark_succeeded(a, "wkr-1", {}, "2026-06-01T00:00:00Z")
@@ -347,7 +347,7 @@ async def test_rehydrated_in_flight_task_is_protected_then_released() -> None:
     a = ids["a"]
 
     worker = SimpleNamespace(id="wkr-7", node_id="nde-1")
-    runtime.mark_dispatched(a, cast(Any, worker))
+    record_dispatch(runtime, a, cast(Any, worker))
 
     restored = _runtime(registry)
     await restored.rehydrate()
@@ -367,7 +367,7 @@ async def test_rehydrated_protection_clears_on_completion() -> None:
     a = ids["a"]
 
     worker = SimpleNamespace(id="wkr-7", node_id="nde-1")
-    runtime.mark_dispatched(a, cast(Any, worker))
+    record_dispatch(runtime, a, cast(Any, worker))
 
     restored = _runtime(registry)
     await restored.rehydrate()
@@ -385,7 +385,7 @@ async def test_recover_clears_rehydrated_protection() -> None:
     a = ids["a"]
 
     worker = SimpleNamespace(id="wkr-7", node_id="nde-1")
-    runtime.mark_dispatched(a, cast(Any, worker))
+    record_dispatch(runtime, a, cast(Any, worker))
 
     restored = _runtime(registry)
     await restored.rehydrate()
@@ -401,12 +401,12 @@ async def test_terminal_task_does_not_regress_on_replayed_dispatch_or_start() ->
     a = ids["a"]
 
     worker = SimpleNamespace(id="wkr-1", node_id="nde-1")
-    runtime.mark_dispatched(a, cast(Any, worker))
+    record_dispatch(runtime, a, cast(Any, worker))
     runtime.mark_succeeded(a, "wkr-1", {}, "2026-06-01T00:00:00Z")
 
     # A replayed dispatch / start / progress update must not move a's status
     # back to DISPATCHED.
-    runtime.mark_dispatched(a, cast(Any, worker))
+    record_dispatch(runtime, a, cast(Any, worker))
     runtime.mark_started(a, "wkr-1", {}, "2026-06-01T00:00:01Z")
     runtime.mark_updated(a, "wkr-1", {"note": "stale"})
 

@@ -37,6 +37,7 @@ from server.task.v2.representations.operators import (
     EffectReplayContract,
 )
 from shared.content import ContentReference
+from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader, result_payload
 
 # --------------------------------------------------------------------------- #
@@ -297,7 +298,7 @@ def _drain(runtime: TaskRuntime, worker_id: str = "wkr-1") -> list[str]:
         if task_id is None:
             break
         order.append(task_id)
-        runtime.mark_dispatched(task_id, cast(Any, _worker(worker_id)))
+        record_dispatch(runtime, task_id, cast(Any, _worker(worker_id)))
         runtime.mark_started(task_id, worker_id, {}, _TS)
         runtime.mark_succeeded(task_id, worker_id, {}, _TS)
     return order
@@ -368,7 +369,7 @@ async def test_live_spawn_fans_out_children_to_real_dispatch() -> None:
     assert runtime.ready_queue_length() == 1
 
     # The planner's stored result carries a three-element fan-out collection.
-    runtime.mark_dispatched(planner, cast(Any, _worker()))
+    record_dispatch(runtime, planner, cast(Any, _worker()))
     runtime.mark_started(planner, "wkr-1", {}, _TS)
     runtime.mark_succeeded(
         planner, "wkr-1", _planned(runtime, planner, ["h1", "h2", "h3"]), _TS
@@ -389,7 +390,7 @@ async def test_live_spawn_fans_out_children_to_real_dispatch() -> None:
     assert sorted(items for (items,) in injected) == ["h1", "h2", "h3"]
 
     for child in children:
-        runtime.mark_dispatched(child, cast(Any, _worker()))
+        record_dispatch(runtime, child, cast(Any, _worker()))
         runtime.mark_started(child, "wkr-1", {}, _TS)
         runtime.mark_succeeded(child, "wkr-1", {}, _TS)
     # The join closes over the drained child-init account, not an observed set.
@@ -407,7 +408,7 @@ async def test_fan_out_is_idempotent_across_a_producer_replay() -> None:
     workflow_id, ids = await _register(runtime, AUTORESEARCH)
     planner = ids["planner"]
     payload = _planned(runtime, planner, ["h1", "h2", "h3"])
-    runtime.mark_dispatched(planner, cast(Any, _worker()))
+    record_dispatch(runtime, planner, cast(Any, _worker()))
     runtime.mark_succeeded(planner, "wkr-1", payload, _TS)
     first = _pop_ready(runtime)
     engine = runtime.orchestration_engine(workflow_id)
@@ -424,7 +425,7 @@ async def test_a_producer_with_no_bound_result_fails_the_workflow() -> None:
     runtime = _live_runtime(registry)
     workflow_id, ids = await _register(runtime, AUTORESEARCH)
     planner = ids["planner"]
-    runtime.mark_dispatched(planner, cast(Any, _worker()))
+    record_dispatch(runtime, planner, cast(Any, _worker()))
     runtime.mark_succeeded(planner, "wkr-1", {}, _TS)
     engine = runtime.orchestration_engine(workflow_id)
     assert engine is not None
@@ -444,7 +445,7 @@ async def test_an_unreadable_producer_result_fails_the_workflow() -> None:
     payload = _planned(runtime, planner, ["h1"])
     reference = ContentReference.model_validate(payload["result_reference"])
     corrupted = reference.model_copy(update={"content_digest": "0" * 64})
-    runtime.mark_dispatched(planner, cast(Any, _worker()))
+    record_dispatch(runtime, planner, cast(Any, _worker()))
     runtime.mark_succeeded(
         planner,
         "wkr-1",
@@ -466,7 +467,7 @@ async def test_zero_element_fan_out_seals_and_closes_the_join_empty() -> None:
     planner = ids["planner"]
     # A present-but-empty collection seals the spawn with zero children — an explicit
     # seal, not an observed-empty inference — and the all-settled join closes empty.
-    runtime.mark_dispatched(planner, cast(Any, _worker()))
+    record_dispatch(runtime, planner, cast(Any, _worker()))
     runtime.mark_succeeded(planner, "wkr-1", _planned(runtime, planner, []), _TS)
     engine = runtime.orchestration_engine(workflow_id)
     assert engine is not None
@@ -489,14 +490,14 @@ async def test_child_template_holds_completion_until_the_spawn_seals() -> None:
     # The spawn seals as the producer settles: the children replace the retired
     # template in the remaining set atomically, and the workflow completes once they
     # settle.
-    runtime.mark_dispatched(planner, cast(Any, _worker()))
+    record_dispatch(runtime, planner, cast(Any, _worker()))
     runtime.mark_succeeded(
         planner, "wkr-1", _planned(runtime, planner, ["h1", "h2", "h3"]), _TS
     )
     rem = registry.remaining_of(workflow_id)
     assert trial not in rem and len(rem) == 3
     for child in _pop_ready(runtime):
-        runtime.mark_dispatched(child, cast(Any, _worker()))
+        record_dispatch(runtime, child, cast(Any, _worker()))
         runtime.mark_succeeded(child, "wkr-1", {}, _TS)
     assert registry.remaining_of(workflow_id) == set()
 
@@ -515,7 +516,7 @@ async def test_rehydration_re_drives_an_unsealed_fan_out(
     monkeypatch.setattr(
         runtime, "_fan_out_children_locked", lambda *_args, **_kw: Advance()
     )
-    runtime.mark_dispatched(planner, cast(Any, _worker()))
+    record_dispatch(runtime, planner, cast(Any, _worker()))
     runtime.mark_succeeded(
         planner, "wkr-1", _planned(runtime, planner, ["h1", "h2", "h3"]), _TS
     )
@@ -574,7 +575,7 @@ async def test_boundary_event_carries_into_the_ledger_and_persists() -> None:
     runtime = _runtime(registry)
     workflow_id, ids = await _register(runtime, LINEAR)
     a = ids["a"]
-    runtime.mark_dispatched(a, cast(Any, _worker()))
+    record_dispatch(runtime, a, cast(Any, _worker()))
     runtime.mark_started(a, "wkr-1", {}, _TS)
     engine = runtime.orchestration_engine(workflow_id)
     assert engine is not None
@@ -752,7 +753,7 @@ async def test_conditional_skip_publishes_explicit_empty() -> None:
     stop = threading.Event()
 
     runtime.next_ready(stop, timeout=0.01)
-    runtime.mark_dispatched(a, cast(Any, _worker()))
+    record_dispatch(runtime, a, cast(Any, _worker()))
     # A conditional skip settles the declared output as explicit-empty, yet still
     # releases the successor (matching the v1 skip-as-success behavior).
     runtime.mark_succeeded(a, None, {}, "2026-06-01T00:00:00Z", skip={"skipped": True})
@@ -771,7 +772,7 @@ async def test_diamond_dag_joins_on_both_predecessors() -> None:
     stop = threading.Event()
     # a is the only root.
     assert runtime.next_ready(stop, timeout=0.01) == ids["a"]
-    runtime.mark_dispatched(ids["a"], cast(Any, _worker()))
+    record_dispatch(runtime, ids["a"], cast(Any, _worker()))
     runtime.mark_succeeded(ids["a"], "wkr-1", {}, "2026-06-01T00:00:00Z")
 
     # a frees b and c, but not d.
@@ -782,7 +783,7 @@ async def test_diamond_dag_joins_on_both_predecessors() -> None:
     }
     assert freed == {ids["b"], ids["c"]}
     for name in ("b", "c"):
-        runtime.mark_dispatched(ids[name], cast(Any, _worker()))
+        record_dispatch(runtime, ids[name], cast(Any, _worker()))
     # d stays blocked until BOTH b and c settle.
     runtime.mark_succeeded(ids["b"], "wkr-1", {}, "2026-06-01T00:00:00Z")
     assert runtime.ready_queue_length() == 0
@@ -800,7 +801,7 @@ async def test_scheduler_placement_does_not_change_readiness() -> None:
 
     assert runtime.next_ready(stop, timeout=0.01) == ids["a"]
     # Placing a on any worker never readies b; only a's settlement does.
-    runtime.mark_dispatched(ids["a"], cast(Any, _worker("wkr-A")))
+    record_dispatch(runtime, ids["a"], cast(Any, _worker("wkr-A")))
     assert runtime.ready_queue_length() == 0
     runtime.mark_started(ids["a"], "wkr-A", {}, "2026-06-01T00:00:00Z")
     assert runtime.ready_queue_length() == 0
@@ -822,7 +823,7 @@ async def test_retry_creates_new_attempt_same_work_item_and_invocation() -> None
     stop = threading.Event()
 
     assert runtime.next_ready(stop, timeout=0.01) == a
-    runtime.mark_dispatched(a, cast(Any, _worker()))
+    record_dispatch(runtime, a, cast(Any, _worker()))
     engine = runtime.orchestration_engine(workflow_id)
     assert engine is not None
     wi = engine.work_item(a)
@@ -835,7 +836,7 @@ async def test_retry_creates_new_attempt_same_work_item_and_invocation() -> None
         a, "wkr-1", {}, "2026-06-01T00:00:00Z", error="boom", retryable=True
     )
     assert runtime.next_ready(stop, timeout=0.01) == a
-    runtime.mark_dispatched(a, cast(Any, _worker("wkr-2")))
+    record_dispatch(runtime, a, cast(Any, _worker("wkr-2")))
     runtime.mark_succeeded(a, "wkr-2", {}, "2026-06-01T00:00:00Z")
 
     snap = engine.to_snapshot()
@@ -857,12 +858,12 @@ async def test_declared_output_one_publication_across_retries() -> None:
     stop = threading.Event()
 
     runtime.next_ready(stop, timeout=0.01)
-    runtime.mark_dispatched(a, cast(Any, _worker()))
+    record_dispatch(runtime, a, cast(Any, _worker()))
     runtime.fail_dispatch(
         a, "wkr-1", {}, "2026-06-01T00:00:00Z", error="boom", retryable=True
     )
     runtime.next_ready(stop, timeout=0.01)
-    runtime.mark_dispatched(a, cast(Any, _worker("wkr-2")))
+    record_dispatch(runtime, a, cast(Any, _worker("wkr-2")))
     runtime.mark_succeeded(a, "wkr-2", {}, "2026-06-01T00:00:00Z")
 
     snap = runtime.orchestration_engine(workflow_id).to_snapshot()  # type: ignore[union-attr]
@@ -885,7 +886,7 @@ async def test_terminal_failure_cascades_to_dependents() -> None:
     stop = threading.Event()
 
     runtime.next_ready(stop, timeout=0.01)
-    runtime.mark_dispatched(a, cast(Any, _worker()))
+    record_dispatch(runtime, a, cast(Any, _worker()))
     impacted, _ = runtime.mark_failed(
         a, "wkr-1", {}, "2026-06-01T00:00:00Z", error="boom"
     )
@@ -913,7 +914,7 @@ async def test_lost_ack_replayable_retried_through_stable_invocation() -> None:
     stop = threading.Event()
 
     runtime.next_ready(stop, timeout=0.01)
-    runtime.mark_dispatched(a, cast(Any, _worker()))
+    record_dispatch(runtime, a, cast(Any, _worker()))
     engine = runtime.orchestration_engine(workflow_id)
     invocation_id = engine.invocation_for_task(a).invocation_id  # type: ignore[union-attr]
 
@@ -923,7 +924,7 @@ async def test_lost_ack_replayable_retried_through_stable_invocation() -> None:
     assert advance.retry == [a]
     assert runtime.resolve_v2_legacy_result(workflow_id, a) is None  # not published
     assert runtime.next_ready(stop, timeout=0.01) == a
-    runtime.mark_dispatched(a, cast(Any, _worker("wkr-2")))
+    record_dispatch(runtime, a, cast(Any, _worker("wkr-2")))
     assert engine.invocation_for_task(a).invocation_id == invocation_id  # type: ignore[union-attr]
 
 
@@ -936,7 +937,7 @@ async def test_worker_loss_recovery_routes_through_uncertainty_fsm() -> None:
     stop = threading.Event()
 
     runtime.next_ready(stop, timeout=0.01)
-    runtime.mark_dispatched(a, cast(Any, _worker("wkr-dead")))
+    record_dispatch(runtime, a, cast(Any, _worker("wkr-dead")))
     engine = runtime.orchestration_engine(workflow_id)
     invocation_id = engine.invocation_for_task(a).invocation_id  # type: ignore[union-attr]
 
@@ -945,7 +946,7 @@ async def test_worker_loss_recovery_routes_through_uncertainty_fsm() -> None:
     assert runtime.recover_tasks_for_worker("wkr-dead") == []
     assert runtime.get_record(a).status == TaskStatus.PENDING  # type: ignore[union-attr]
     assert runtime.next_ready(stop, timeout=0.01) == a
-    runtime.mark_dispatched(a, cast(Any, _worker("wkr-2")))
+    record_dispatch(runtime, a, cast(Any, _worker("wkr-2")))
     assert engine.invocation_for_task(a).invocation_id == invocation_id  # type: ignore[union-attr]
 
 
@@ -965,7 +966,7 @@ async def test_rehydration_heals_when_ledger_snapshot_lags_terminal_records() ->
     stop = threading.Event()
 
     runtime.next_ready(stop, timeout=0.01)
-    runtime.mark_dispatched(a, cast(Any, _worker()))
+    record_dispatch(runtime, a, cast(Any, _worker()))
     runtime.mark_failed(a, "wkr-1", {}, "2026-06-01T00:00:00Z", error="boom")
     # Simulate a crash after the terminal task records committed but before the ledger
     # snapshot: the ledger lags durable task state (never ahead, per the write order).
@@ -998,7 +999,7 @@ async def test_rehydration_replays_a_cancel_left_mid_flight() -> None:
     stop = threading.Event()
 
     runtime.next_ready(stop, timeout=0.01)
-    runtime.mark_dispatched(solo, cast(Any, _worker()))
+    record_dispatch(runtime, solo, cast(Any, _worker()))
     runtime.cancel_workflow(workflow_id)
     assert runtime.get_record(solo).status == TaskStatus.CANCELLING  # type: ignore[union-attr]
     # Simulate a crash after the cancelling task records committed but before the
@@ -1029,7 +1030,7 @@ async def test_rehydration_readmits_task_orphaned_by_a_mid_retry_crash() -> None
     stop = threading.Event()
 
     runtime.next_ready(stop, timeout=0.01)
-    runtime.mark_dispatched(a, cast(Any, _worker()))
+    record_dispatch(runtime, a, cast(Any, _worker()))
     # Snapshot the ledger while a's work item is in flight (DISPATCHED).
     dispatched_ledger = registry.ledger_blobs[workflow_id]
     # A retry persists a's record PENDING and readies the ledger work item, but
@@ -1047,7 +1048,7 @@ async def test_rehydration_readmits_task_orphaned_by_a_mid_retry_crash() -> None
     assert restored.ready_queue_length() == 1
     assert restored.next_ready(stop, timeout=0.01) == a
     # The workflow makes progress from there.
-    restored.mark_dispatched(a, cast(Any, _worker("wkr-2")))
+    record_dispatch(restored, a, cast(Any, _worker("wkr-2")))
     restored.mark_succeeded(a, "wkr-2", {}, "2026-06-01T00:00:00Z")
     assert restored.next_ready(stop, timeout=0.01) == b
 
@@ -1061,7 +1062,7 @@ async def test_rehydration_preserves_publications_without_duplication() -> None:
     stop = threading.Event()
 
     runtime.next_ready(stop, timeout=0.01)
-    runtime.mark_dispatched(a, cast(Any, _worker()))
+    record_dispatch(runtime, a, cast(Any, _worker()))
     runtime.mark_succeeded(a, "wkr-1", {}, "2026-06-01T00:00:00Z")
 
     restored = _runtime(registry)
@@ -1133,7 +1134,7 @@ async def test_cancel_after_partial_completion_preserves_settled_output() -> Non
 
     # a completes; b and c are still pending behind it, then the workflow is cancelled.
     assert runtime.next_ready(stop, timeout=0.01) == a
-    runtime.mark_dispatched(a, cast(Any, _worker()))
+    record_dispatch(runtime, a, cast(Any, _worker()))
     runtime.mark_succeeded(a, "wkr-1", {}, "2026-06-01T00:00:00Z")
     runtime.cancel_workflow(workflow_id, reason="user cancelled")
 
@@ -1244,7 +1245,7 @@ async def test_a_fan_out_reads_its_collection_before_taking_the_lock(
         raise AssertionError("the collection was read under the runtime lock")
 
     monkeypatch.setattr(runtime, "_read_fanout_locked", _locked_read)
-    runtime.mark_dispatched(planner, cast(Any, _worker()))
+    record_dispatch(runtime, planner, cast(Any, _worker()))
     runtime.mark_succeeded(
         planner, "wkr-1", _planned(runtime, planner, ["h1", "h2", "h3"]), _TS
     )
@@ -1259,7 +1260,7 @@ async def test_a_skipped_producer_fans_out_to_no_children() -> None:
     runtime = _live_runtime(registry)
     workflow_id, ids = await _register(runtime, AUTORESEARCH)
     planner = ids["planner"]
-    runtime.mark_dispatched(planner, cast(Any, _worker()))
+    record_dispatch(runtime, planner, cast(Any, _worker()))
     runtime.mark_succeeded(planner, None, {}, _TS, skip={"skipped": True})
     engine = runtime.orchestration_engine(workflow_id)
     assert engine is not None
