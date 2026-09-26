@@ -791,11 +791,7 @@ class OrchestrationEngine:
         wi = self._work_item_for_task(task_id)
         if wi is None or wi.status in TERMINAL_WORK_ITEM_STATUSES:
             return Advance()
-        if attempt := self._latest_attempt(wi):
-            attempt.status = AttemptStatus.FAILED
-            attempt.finished_at = now_iso()
-            attempt.error = error
-            self._emitter.emit_attempt(attempt)
+        self._fail_open_attempt(wi, error)
         if retryable:
             wi.status = WorkItemStatus.READY
             self._emit(
@@ -805,6 +801,17 @@ class OrchestrationEngine:
             )
             return Advance(retry=[wi.legacy_task_id])
         return self._settle_failed_wi(wi)
+
+    def _fail_open_attempt(self, wi: WorkItem, error: str) -> None:
+        """Close the work item's attempt as failed while it is still in flight; one
+        already closed keeps its outcome."""
+        attempt = self._latest_attempt(wi)
+        if attempt is None or attempt.status not in _OPEN_ATTEMPT_STATUSES:
+            return
+        attempt.status = AttemptStatus.FAILED
+        attempt.finished_at = now_iso()
+        attempt.error = error
+        self._emitter.emit_attempt(attempt)
 
     def _settle_failed_wi(self, wi: WorkItem) -> Advance:
         """Settle a work item as a declared failure: a child drains its scope, anything
@@ -2457,8 +2464,7 @@ class OrchestrationEngine:
         """Fail the whole workflow instance as a recorded terminal event.
 
         No scope admits another child, every unsettled leaf or agent settles as a
-        declared failure, and every unpublished declared output resolves to one. Only an
-        attempt still in flight closes as failed; one already closed keeps its outcome.
+        declared failure, and every unpublished declared output resolves to one.
         """
         return self._fail_scope_tree(self._root_scope.scope_id, reason)
 
@@ -2473,12 +2479,7 @@ class OrchestrationEngine:
                 wi.operator_id
             ) not in (OperatorKind.LEAF, OperatorKind.AGENT):
                 continue
-            attempt = self._latest_attempt(wi)
-            if attempt is not None and attempt.status in _OPEN_ATTEMPT_STATUSES:
-                attempt.status = AttemptStatus.FAILED
-                attempt.finished_at = now_iso()
-                attempt.error = reason
-                self._emitter.emit_attempt(attempt)
+            self._fail_open_attempt(wi, reason)
             advance.extend(self._settle_failed_wi(wi))
         for slot in list(self._slots.values()):
             self._write_publication(slot, PublicationOutcome.DECLARED_FAILURE, None)

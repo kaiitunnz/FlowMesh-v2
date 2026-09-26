@@ -242,7 +242,7 @@ class _Attributing:
     """A runtime whose reads of held inputs answer through a probe, reporting its
     failures through an event monitor as the server wires it."""
 
-    def __init__(self) -> None:
+    def __init__(self, registry: Any = None) -> None:
         schedulers: list[StoreRedriveScheduler] = []
 
         def _scheduler(fire: Any, logger: logging.Logger) -> StoreRedriveScheduler:
@@ -256,7 +256,7 @@ class _Attributing:
         self.probe = _Probe()
         reader.verify = self.probe  # type: ignore[method-assign]
         self.runtime = TaskRuntime(
-            cast(Any, _Registry()),
+            cast(Any, registry or _Registry()),
             cast(Any, _WorkerRegistryStub()),
             OrchestrationConfig(),
             reader,
@@ -336,6 +336,26 @@ async def test_input_missing_at_control_fails_the_task_as_a_reported_failure() -
         c.args[0] for c in fixture.metrics.finalize_task_failure.call_args_list
     ]
     assert finalized == [task_id, dependent]
+
+
+@pytest.mark.anyio
+async def test_a_v2_input_missing_at_control_keeps_the_returned_attempt() -> None:
+    fixture = _Attributing(FakeRegistry())
+    runtime = fixture.runtime
+    workflow_id, task_id, reference = await _v2_consumer(runtime)
+    fixture.probe.error = ResultUnreadable("no content")
+
+    fixture.report(_unavailable(task_id, [reference]))
+    fixture.scheduler.run_due()
+
+    assert runtime._tasks[task_id].status == TaskStatus.FAILED
+    engine = runtime._engines[workflow_id]
+    work_item = engine.work_item(task_id)
+    assert work_item is not None
+    assert work_item.status is WorkItemStatus.SETTLED
+    assert [engine._attempts[a].status for a in work_item.attempt_ids] == [
+        AttemptStatus.RETURNED
+    ]
 
 
 @pytest.mark.anyio
