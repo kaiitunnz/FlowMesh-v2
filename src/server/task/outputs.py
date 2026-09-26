@@ -54,7 +54,7 @@ class PublishedOutputs:
 
     org_id: str
     members: list[OutputMember]
-    # Whether the workflow can still publish, so a last page is not yet final.
+    # Whether the workflow can publish more; a last page is final only when it cannot.
     open: bool
 
 

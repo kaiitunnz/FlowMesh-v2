@@ -401,3 +401,29 @@ def test_extract_result_bundle_rejects_path_traversal(tmp_path: Path) -> None:
 
     with pytest.raises(Exception, match="Unsafe path"):
         SSHExecutor._extract_result_bundle(bundle, tmp_path / "dest")  # noqa: SLF001
+
+
+def test_an_upstream_with_nothing_bound_still_stages_its_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = _task_message()
+    task.upstream_task_ids = None
+    task.upstream_results = {"preprocess": ResultBinding(task_id="task-pre")}
+    cfg = SSHConfig.from_spec(cast(SSHSpecStrict, task.spec), DEFAULT_WORKER_CONFIG)
+    executor = SSHExecutor(_worker_config(tmp_path, results_mount_source=None))
+    monkeypatch.setenv("RESULTS_DIR", str(tmp_path / "results"))
+    resolved_inputs = executor._resolve_inputs(task, cfg)  # noqa: SLF001
+    includes: list[bool] = []
+
+    def _download(task_id: str, destination_dir: Path, include_results: bool) -> None:
+        includes.append(include_results)
+        (destination_dir / task_id / "artifacts").mkdir(parents=True)
+
+    monkeypatch.setattr(executor, "_download_result_bundle", _download)
+
+    staging_dir = executor._stage_inputs_locally(  # noqa: SLF001
+        resolved_inputs, "session-empty"
+    )
+
+    assert includes == [True]
+    assert (staging_dir / "task-pre" / "artifacts").is_dir()

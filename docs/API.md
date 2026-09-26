@@ -38,7 +38,7 @@ self-authenticate the same way, sending `FLOWMESH_API_KEY` as the bearer.
 An output is named by the node it is published on. A leaf's output has one member; a
 spawn region's output has one member per child, selected by `scope` and `key` (the child
 index), which a fetch requires. Members list in the order of name, scope, and key, and
-the page's `open` field is `false` once the workflow can no longer publish. A member
+the page's `open` field is `false` once the workflow can publish nothing more. A member
 reports `outcome`: `pending`, `success` (with its `value`), `explicit_empty`, or
 `declared_failure`.
 
@@ -48,7 +48,7 @@ looking anything up. Errors carry `detail.code`:
 | Status | `code` | Meaning |
 |--------|--------|---------|
 | 400 | `invalid_request`, `invalid_cursor` | A collection fetched without `scope` and `key`, or a malformed cursor. |
-| 404 | `output_not_found` | No published output by that name. |
+| 404 | `output_not_found` | No published output by that name, or no such member once `open` is `false`. |
 | 409 | `output_pending` | The member has not settled. |
 | 503 | `content_unavailable` | The content store cannot be reached; retry. |
 | 500 | `output_unreadable` | The member's bound content is missing or corrupt. |

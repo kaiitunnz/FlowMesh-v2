@@ -146,7 +146,7 @@ def test_agent_episode_spawns_seals_and_settles_after_the_child() -> None:
         assert closed is not None and closed.closed
         writer_wi = engine.work_item(writer)
         assert writer_wi is not None and writer_wi.status is WorkItemStatus.SETTLED
-        pub = engine.resolve_output(f"legacy:{writer}")
+        pub = engine.output_publication(f"legacy:{writer}")
         assert pub is not None and pub.outcome.value == "success"
 
     asyncio.run(run())
@@ -213,7 +213,7 @@ def test_model_boundary_settle_returns_the_record_to_pending() -> None:
         runtime.mark_succeeded(child[0], "wkr-1", {}, _TS)
         writer_wi = engine.work_item(writer)
         assert writer_wi is not None and writer_wi.status is WorkItemStatus.SETTLED
-        pub = engine.resolve_output(f"legacy:{writer}")
+        pub = engine.output_publication(f"legacy:{writer}")
         assert pub is not None and pub.outcome.value == "success"
 
     asyncio.run(run())
@@ -455,7 +455,7 @@ def test_gateway_originated_spawn_reroutes_a_clean_completion() -> None:
         runtime.mark_succeeded(child, "wkr-1", {}, _TS)
         closed = engine.capability(region_scope, ProgressAxis.CHILD_INIT)
         assert closed is not None and closed.closed
-        pub = engine.resolve_output(f"legacy:{writer}")
+        pub = engine.output_publication(f"legacy:{writer}")
         assert pub is not None and pub.outcome.value == "success"
 
     asyncio.run(run())
@@ -546,7 +546,7 @@ def test_a_post_reroute_completion_replay_is_a_noop() -> None:
         runtime.mark_succeeded(writer, "wkr-1", payload, _TS)
         assert str(record.status) != "DONE"
         # The episode is not published with the intermediate dispatch placeholder.
-        assert engine.resolve_output(f"legacy:{writer}") is None
+        assert engine.output_publication(f"legacy:{writer}") is None
 
     asyncio.run(run())
 

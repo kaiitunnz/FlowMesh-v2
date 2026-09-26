@@ -264,16 +264,17 @@ def _ds_drive(
 def _rekeyed_publications(
     slots: Iterable[ResultSlot], publications: Iterable[ResultPublication]
 ) -> dict[str, ResultPublication]:
-    """Index publications by slot identity, carrying any recorded under the legacy key.
+    """Index publications by slot identity, re-keying any that name the legacy key.
 
-    A publication written before slot identities carried a scope names its slot by the
-    legacy key; each is re-keyed to the identity of the slot that key names.
+    A publication in the unscoped key format is re-keyed to the identity of the slot
+    that key names.
     """
     current = {slot.legacy_slot_key: slot.slot_key for slot in slots}
+    identities = set(current.values())
     indexed: dict[str, ResultPublication] = {}
     for publication in publications:
         key = publication.slot_key
-        if key in current.values():
+        if key in identities:
             indexed[key] = publication
         elif (rekeyed := current.get(key)) is not None:
             indexed[rekeyed] = publication.model_copy(update={"slot_key": rekeyed})
@@ -3256,10 +3257,6 @@ class OrchestrationEngine:
     # Queries
     # ------------------------------------------------------------------ #
 
-    def resolve_output(self, output_id: str) -> ResultPublication | None:
-        """Resolve a singleton logical output to its terminal publication, if any."""
-        return self.output_publication(output_id)
-
     def output_publication(
         self,
         output_id: str,
@@ -3288,7 +3285,7 @@ class OrchestrationEngine:
 
     def resolve_legacy_task(self, task_id: str) -> ResultPublication | None:
         """Resolve a legacy task id's induced output slot (compatibility adapter)."""
-        return self.resolve_output(f"legacy:{task_id}")
+        return self.output_publication(f"legacy:{task_id}")
 
     def legacy_task_value(
         self, task_id: str
@@ -3733,14 +3730,18 @@ class OrchestrationEngine:
         Returns whether the work item is ready to admit. A work item the snapshot still
         shows in flight — a crash after a retry persisted the PENDING record but before
         the ledger caught up — is reset to ready with its lost attempt marked, so the
-        retry is not orphaned; a work item whose predecessors have not all settled stays
-        blocked.
+        retry is not orphaned; a work item whose predecessors have not all settled, or
+        whose declared inputs have not all been accepted, stays blocked.
         """
         wi = self._work_item_for_task(task_id)
         if wi is None or wi.status in TERMINAL_WORK_ITEM_STATUSES:
             return False
         cont = self._continuations.get(wi.work_item_id)
-        if cont is not None and cont.waiting_on:
+        if cont is not None and (
+            cont.waiting_on
+            or not cont.required_ports
+            <= {a.target_port for a in self.accepted_inputs_for(wi.activation_id)}
+        ):
             wi.status = WorkItemStatus.BLOCKED
             return False
         if wi.status is WorkItemStatus.DISPATCHED:

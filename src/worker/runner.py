@@ -804,9 +804,7 @@ class Runner:
                             f"Task {task_id} was cancelled before execution"
                         )
                     self._current_task_id = task_id
-                    TaskInputHydrator(
-                        self.lifecycle.content_plane, self.logger
-                    ).hydrate(msg)
+                    TaskInputHydrator(self.lifecycle.content_plane).hydrate(msg)
                     if msg.input_preparation:
                         self.lifecycle.notify_task_started(
                             task_id,

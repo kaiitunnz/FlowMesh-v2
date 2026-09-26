@@ -125,21 +125,23 @@ def test_a_drive_now_fires_at_once_and_keeps_the_backoff() -> None:
     scheduler.drive_now("wfl-1")
     assert scheduler.run_due() == ["wfl-1"]
     # The first drive found the store away: its backoff starts at the base delay.
-    assert scheduler.run_due() == []
     scheduler.drive_now("wfl-1")
+    assert scheduler.run_due() == []
+    clock.now = 1.0
     assert scheduler.run_due() == ["wfl-1"]
     assert fired == ["wfl-1", "wfl-1"]
     assert not scheduler.pending("wfl-1")
+    scheduler.drive_now("wfl-1")
+    assert scheduler.run_due() == ["wfl-1"]
 
 
-def test_a_drive_now_moves_a_waiting_re_drive_up() -> None:
+def test_a_drive_now_keeps_a_waiting_re_drive_backing_off() -> None:
     clock = _Clock()
     fired: list[str] = []
     scheduler = _scheduler(fired.append, clock)
     scheduler.schedule("wfl-1")
-    assert scheduler.run_due() == []
     scheduler.drive_now("wfl-1")
-    assert scheduler.run_due() == ["wfl-1"]
-    clock.now = 5.0
     assert scheduler.run_due() == []
+    clock.now = 1.0
+    assert scheduler.run_due() == ["wfl-1"]
     assert fired == ["wfl-1"]

@@ -127,7 +127,8 @@ class ResolvedSSHInput:
     # The upstream's stored result envelope, hydrated from its reference; None when the
     # dispatch named the upstream by task id only and its bundle carries the result.
     results: bytes | None = None
-    # Whether the upstream ran, so the root may hold artifacts for it.
+    # Whether the upstream ran (a skipped one never did), so the root may hold
+    # artifacts for it.
     has_artifacts: bool = True
 
 
@@ -1110,7 +1111,7 @@ class SSHExecutor(Executor):
                         field_name=f"inputs[{stage}].mountPath",
                     ),
                     results=task.upstream_envelope(stage) if binding else None,
-                    has_artifacts=binding is None or binding.reference is not None,
+                    has_artifacts=binding is None or binding.skip is None,
                 )
             )
         return resolved

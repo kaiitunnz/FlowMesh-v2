@@ -1072,10 +1072,11 @@ class TaskRuntime:
             ):
                 self._enqueue_ready_locked(record.task_id)
 
-        # Re-drive fan-out for any DONE producer whose spawn never sealed before a
-        # crash: its terminal event will not replay, so nothing else materializes the
-        # children. The re-drive reads the collection off the lock.
-        if any(
+        # Re-drive any DONE producer whose spawn never sealed, and any agent waiting
+        # on its bound inputs, before a crash: their terminal events will not
+        # replay, so nothing else materializes the children or records the inputs. The
+        # re-drive reads the stored results off the lock.
+        if engine.blocked_input_agents() or any(
             persisted.record.status == TaskStatus.DONE
             and (spawn_op := engine.spawn_successor(persisted.record.task_id))
             is not None
@@ -2758,7 +2759,7 @@ class TaskRuntime:
     def input_element(self, task_id: str) -> ResultValueRef | None:
         """The producer element a leaf fan-out child runs on, for its worker to hydrate.
 
-        An agent child receives its element through its accepted input instead.
+        An agent child receives its element through its accepted input.
         """
         with self._lock:
             record = self._tasks.get(task_id)
@@ -3101,7 +3102,7 @@ class TaskRuntime:
             )
             return advance
         if read is None:
-            # Nothing read the collection ahead of the lock: read it off the lock now.
+            # Nothing read the collection ahead of the lock: read it off the lock.
             self._redrive.drive_now(workflow_id)
             return advance
         if read.unavailable:
@@ -3168,7 +3169,7 @@ class TaskRuntime:
         Every settled producer whose spawn has yet to fan out has its collection read,
         and every blocked agent whose bound inputs need reading has them read, all off
         the lock. The results apply under it: an agent's inputs record only while the
-        snapshot they were read for still holds, and are read again otherwise. A read
+        snapshot they were read for holds, and are read again otherwise. A read
         that cannot reach the store schedules the next re-drive.
         """
         with self._lock:
@@ -3327,7 +3328,7 @@ class TaskRuntime:
     def _agent_input_snapshot_locked(
         self, engine: OrchestrationEngine, task_id: str
     ) -> "_AgentInputSnapshot | None":
-        """What an agent's pending input ports resolve from, as of now.
+        """What an agent's pending input ports resolve from, as the ledger stands.
 
         Each member of a port whose producers are all bound is frozen to the result its
         producer settled with. A port with a member whose producer has nothing bound yet
@@ -3405,8 +3406,8 @@ class TaskRuntime:
     ) -> None:
         """Record an agent's accepted inputs from their read values, then re-admit.
 
-        The budget counts the bytes of the resolved member strings, so an input cone
-        over it fails the agent as a typed declared failure rather than truncating.
+        The budget counts the bytes of the resolved member strings; an input cone over
+        it fails the agent as a typed declared failure, with nothing truncated.
         """
         task_id = snapshot.task_id
         if snapshot.unreadable is not None:

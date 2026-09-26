@@ -105,6 +105,6 @@ def test_a_publication_recorded_under_the_legacy_key_is_found_after_restart() ->
         _fanout_bundle(),
     )
 
-    published = restored.resolve_output("summary")
+    published = restored.output_publication("summary")
     assert published is not None and published.value_ref == _value("summary")
     assert published.slot_key == summary.slot_key

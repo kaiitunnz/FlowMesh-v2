@@ -8,8 +8,8 @@ once the store answers. Nothing else re-fires those advances — the producer ha
 settled — so this keeps one pending drive per workflow, backing off while the store
 stays away.
 
-A re-drive is not durable and does not need to be: a restart re-drives every settled
-producer's unsealed spawn and re-resolves agent inputs on the advances it applies.
+A re-drive is not durable and does not need to be: a restart re-drives every workflow
+with a settled producer's unsealed spawn or an agent waiting on its inputs.
 """
 
 import heapq
@@ -82,17 +82,16 @@ class StoreRedriveScheduler:
             self._cv.notify_all()
 
     def drive_now(self, workflow_id: str) -> None:
-        """Drive a workflow as soon as the re-drive thread is free, keeping its backoff.
+        """Drive a workflow as soon as the re-drive thread is free.
 
-        A workflow already waiting moves up to now; its streak is unchanged, since this
-        is new work to read rather than another try at a store that stayed away.
+        A workflow already waiting keeps its slot and its backoff: the drive it is
+        waiting for reads everything the workflow waits on, and a backoff means the
+        store is away for this read as much as for the last.
         """
         with self._cv:
-            if self._stopped:
+            if self._stopped or workflow_id in self._due:
                 return
             due = self._clock()
-            if (current := self._due.get(workflow_id)) is not None and current <= due:
-                return
             self._due[workflow_id] = due
             heapq.heappush(self._heap, (due, workflow_id))
             self._ensure_thread()

@@ -388,8 +388,8 @@ def element_contract(
 ) -> CanonicalInferenceContract:
     """The contract of a fan-out child that runs on one element of a producer's result.
 
-    The element is named rather than carried, so the contract is proven from the spec's
-    model and sampling and resolves to exactly one prompt.
+    The contract names the element by its producer and index, is proven from the spec's
+    model and sampling, and resolves to exactly one prompt.
     """
     model = (spec.model_name or "").strip()
     if not model:

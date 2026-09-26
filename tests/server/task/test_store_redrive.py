@@ -182,6 +182,8 @@ def test_an_agent_input_waits_out_an_unreachable_store() -> None:
     assert engine.work_item("M").outcome is None
     assert not engine.accepted_inputs_for_task("M")
     assert scheduler.pending("wfl-agent")
+    # The waiting agent does not undo the backoff: nothing fires until it elapses.
+    assert scheduler.run_due() == []
 
     flaky.error = None
     clock.now += 1.0
@@ -200,3 +202,63 @@ def test_a_missing_agent_input_fails_the_agent() -> None:
     scheduler.run_due()
     assert engine.work_item("M").outcome is PublicationOutcome.DECLARED_FAILURE
     assert not scheduler.pending("wfl-agent")
+
+
+_AGENT_INPUT_WF = """
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {name: agent-input}
+spec:
+  graph:
+    nodes:
+      - name: p
+        spec: {taskType: echo, data: {type: list, items: [grounded]}}
+      - name: m
+        spec:
+          taskType: agent
+          task: merge the reviews
+          v2:
+            inputs: [{name: reviews, from: p}]
+            authority: {invoke: [model], delegate: []}
+            tools: [{name: model}]
+            boundary: [invocation, yield]
+          harness: {backend: scripted, version: v1, params: {script: []}}
+"""
+
+
+@pytest.mark.anyio
+async def test_a_restart_records_the_inputs_a_crash_left_unread() -> None:
+    registry = FakeRegistry()
+    runtime, _flaky, (scheduler,), _clock = _runtime(registry)
+    workflow_id, ids = await _register(runtime, _AGENT_INPUT_WF)
+    producer, agent = ids["p"], ids["m"]
+    record_dispatch(runtime, producer, cast(Any, _worker()))
+    runtime.mark_succeeded(
+        producer,
+        "wkr-1",
+        {
+            "result_reference": store_result(
+                runtime._results,
+                producer,
+                {"value": "grounded"},
+                runtime._tasks[producer].org_id,
+            ).model_dump(mode="json")
+        },
+        _TS,
+    )
+    # The server stops before the drive that reads the agent's input runs.
+    assert scheduler.pending(workflow_id)
+    engine = runtime.orchestration_engine(workflow_id)
+    assert engine is not None and not engine.accepted_inputs_for_task(agent)
+
+    restored, _flaky2, (rescheduler,), _clock2 = _runtime(registry)
+    restored._results = runtime._results
+    assert await restored.rehydrate() == 1
+    # The agent waits, blocked on its inputs.
+    assert agent not in _pop_ready(restored)
+    assert rescheduler.pending(workflow_id)
+    rescheduler.run_due()
+    restored_engine = restored.orchestration_engine(workflow_id)
+    assert restored_engine is not None
+    assert restored_engine.accepted_inputs_for_task(agent)
+    assert agent in _pop_ready(restored)

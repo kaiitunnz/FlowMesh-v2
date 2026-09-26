@@ -760,7 +760,7 @@ async def test_linear_dag_runs_via_v2_path_with_same_dependency_semantics() -> N
         assert pub.value_ref.legacy_task_id == ids[name]
 
     # The internal logical-output query resolves by declared output id too.
-    by_output = engine.resolve_output(f"legacy:{ids['a']}")
+    by_output = engine.output_publication(f"legacy:{ids['a']}")
     assert by_output is not None and by_output.outcome is PublicationOutcome.SUCCESS
 
     # The contract-relevant trace records the semantic seams for inspection.

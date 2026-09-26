@@ -2,8 +2,7 @@
 Executor base class and a minimal example implementation.
 
 Usage:
-    from shared.schemas.event import TaskFailureKind
-from shared.schemas.result import BaseExecutorResult
+    from shared.schemas.result import BaseExecutorResult
     from worker.executors.base_executor import Executor, ExecutionError
 
     class MyResult(BaseExecutorResult):

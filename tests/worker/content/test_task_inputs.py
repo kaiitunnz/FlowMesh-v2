@@ -5,7 +5,6 @@ values inline, delivered over the same wire — and the message it dispatches no
 references, and checks the hydrated task equals the inline one.
 """
 
-import logging
 import tempfile
 from pathlib import Path
 from typing import Any, cast
@@ -107,9 +106,7 @@ def _message(spec: dict[str, Any], **fields: Any) -> WorkerTaskMessage:
 
 def _hydrate(plane: _Plane, message: WorkerTaskMessage) -> WorkerTaskMessage:
     delivered = _deliver(message)
-    TaskInputHydrator(
-        cast(Any, plane), logging.getLogger("inputs"), backoff_sec=0.0
-    ).hydrate(delivered)
+    TaskInputHydrator(cast(Any, plane), backoff_sec=0.0).hydrate(delivered)
     return delivered
 
 
@@ -397,3 +394,29 @@ def test_an_element_that_is_not_a_prompt_fails_before_any_model(plane: _Plane) -
 
     with pytest.raises(InputResolutionError):
         resolve_task_contract(_hydrate(plane, message))
+
+
+def test_an_upstream_with_nothing_bound_is_left_out(plane: _Plane) -> None:
+    producer = _store(plane, "tsk-p", _PRODUCED)
+    spec = {"taskType": "echo", "data": {"type": "list", "items": ["x"]}}
+
+    hydrated = _hydrate(
+        plane,
+        _message(
+            spec,
+            upstream_results={"p": producer, "e": ResultBinding(task_id="tsk-e")},
+        ),
+    )
+    inline = _deliver(
+        _message(
+            {
+                **spec,
+                "_upstreamResults": {
+                    "p": _read(plane, producer).result.model_dump(mode="json")
+                },
+            }
+        )
+    )
+
+    assert hydrated.task == inline.task
+    assert hydrated.upstream_envelope("e") is None

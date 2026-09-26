@@ -12,7 +12,6 @@ unavailable and control runs it again without spending an attempt. Content that 
 missing, corrupt, out of the task's scope, or not a result envelope fails the task.
 """
 
-import logging
 import time
 from typing import Any
 
@@ -58,12 +57,10 @@ class TaskInputHydrator:
     def __init__(
         self,
         plane: WorkerContentPlane | None,
-        logger: logging.Logger | None = None,
         *,
         backoff_sec: float = _READ_BACKOFF_SEC,
     ) -> None:
         self._plane = plane
-        self._logger = logger or logging.getLogger("task-inputs")
         self._backoff_sec = backoff_sec
 
     def hydrate(self, msg: WorkerTaskMessage) -> None:
@@ -83,7 +80,7 @@ class TaskInputHydrator:
         reader = _TaskReader(self, msg)
         envelopes: dict[str, bytes] = {}
         upstream: dict[str, ResultEnvelope] = {}
-        for stage, binding in (msg.upstream_results or {}).items():
+        for stage, binding in _bound(msg.upstream_results):
             envelopes[stage] = reader.envelope_bytes(binding)
             upstream[stage] = reader.envelope(binding)
         element: tuple[Any] | None = None
@@ -109,7 +106,7 @@ class TaskInputHydrator:
             return child
         upstream = {
             stage: reader.envelope(binding)
-            for stage, binding in child.upstream_results.items()
+            for stage, binding in _bound(child.upstream_results)
         }
         hydrated = child.model_copy(
             update={"spec": _with_upstream_spec(child.spec, upstream)}
@@ -186,6 +183,17 @@ class _TaskReader:
         if reference is not None:
             self._envelopes[reference] = envelope
         return envelope
+
+
+def _bound(
+    upstream: dict[str, ResultBinding] | None,
+) -> list[tuple[str, ResultBinding]]:
+    """The upstream stages that settled with a result or a skip to read."""
+    return [
+        (stage, binding)
+        for stage, binding in (upstream or {}).items()
+        if binding.reference is not None or binding.skip is not None
+    ]
 
 
 def _sourced_members(agent: AgentEpisodeDispatch) -> bool:

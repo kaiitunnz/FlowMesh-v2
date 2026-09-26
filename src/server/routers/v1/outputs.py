@@ -165,7 +165,8 @@ async def get_output(
         (m for m in named if (m.scope_id, m.key, m.sequence) == (scope, key, sequence)),
         None,
     )
-    if member is None and not named[0].keyed:
+    if member is None and (not named[0].keyed or not outputs.open):
+        # A settled workflow publishes nothing more, so a missing member never comes.
         raise _error(
             status.HTTP_404_NOT_FOUND,
             "output_not_found",

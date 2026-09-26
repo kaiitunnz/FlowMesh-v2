@@ -40,8 +40,8 @@ def result_collection(payload: dict[str, Any]) -> list[Any] | None:
 def collection_elements(envelope: ResultEnvelope) -> list[Any]:
     """A result's collection with each element's carried value unwrapped.
 
-    An echo item is ``{output: v}``, so an element is its ``output`` when it has one and
-    a child input rather than the producer's own item shape. A result with no collection
+    An echo item is ``{output: v}``, so an element is its ``output`` when it has one,
+    which is a valid child input. A result with no collection
     has no elements.
     """
     collection = result_collection(envelope.result.model_dump()) or []

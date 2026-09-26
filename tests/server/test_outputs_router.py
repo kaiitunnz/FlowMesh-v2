@@ -218,6 +218,11 @@ async def test_a_cursor_holds_its_place_as_members_settle() -> None:
     assert not (await _list(wf)).open
     fetched = await _get(wf, "summarize")
     assert fetched.value.model_dump(mode="json")["items"] == ["summary"]
+    scope = rest_after.entries[0].scope
+    assert await _status(_get(wf, "fanout", scope=scope, key="99")) == (
+        404,
+        "output_not_found",
+    )
 
 
 @pytest.mark.anyio

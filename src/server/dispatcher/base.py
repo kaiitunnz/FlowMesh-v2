@@ -616,7 +616,6 @@ class Dispatcher:
             rendered_task, upstream_results = self._resolve_stage_references(
                 task_id, task, record
             )
-            self._validate_ssh_inputs(record, rendered_task.spec)
         except StageReferenceNotReady as exc:
             self._logger.debug("Task %s waiting on stage artifacts: %s", task_id, exc)
             self.requeue_task(
@@ -661,6 +660,19 @@ class Dispatcher:
 
         # Conditional execution: skip dispatch if condition not met
         if self._evaluate_condition_skip(task_id, rendered_task, record):
+            return True
+
+        try:
+            self._validate_ssh_inputs(record, rendered_task.spec)
+        except StageReferenceNotReady as exc:
+            self._logger.debug("Task %s waiting on SSH input stages: %s", task_id, exc)
+            self.requeue_task(
+                task_id, reason="stage_reference_pending", count_retry=False
+            )
+            return False
+        except ValueError as exc:
+            self._runtime.release_merge(task_id)
+            self.fail_task(task_id, str(exc), payload={"error": str(exc)})
             return True
 
         rendered_children = self._render_merged_children(
@@ -1289,6 +1301,8 @@ class Dispatcher:
                 continue
             binding = self._runtime.result_binding(record.task_id)
             if binding is None:
+                # Named with nothing bound, so the stage's task id reaches the worker
+                # for the artifacts an SSH input stages.
                 self._logger.warning(
                     "Task %s receives no upstream result for %s: task %s has no bound "
                     "result",
@@ -1296,7 +1310,7 @@ class Dispatcher:
                     name,
                     record.task_id,
                 )
-                continue
+                binding = ResultBinding(task_id=record.task_id)
             bindings[name] = binding
         return bindings
 

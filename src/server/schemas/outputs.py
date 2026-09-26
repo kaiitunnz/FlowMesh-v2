@@ -41,7 +41,7 @@ class WorkflowOutputPage(BaseModel):
         default=None, description="Cursor of the first entry."
     )
     open: bool = Field(
-        description="Whether the workflow can still publish; a last page is final "
+        description="Whether the workflow can publish more; a last page is final "
         "only when this is false."
     )
 

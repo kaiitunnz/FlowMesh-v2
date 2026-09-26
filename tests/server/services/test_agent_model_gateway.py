@@ -106,7 +106,7 @@ def test_model_boundary_settles_and_resumes_with_the_result() -> None:
         )
         settled = engine.work_item(solver)
         assert settled is not None and settled.status is WorkItemStatus.SETTLED
-        pub = engine.resolve_output(f"legacy:{solver}")
+        pub = engine.output_publication(f"legacy:{solver}")
         assert pub is not None and pub.outcome.value == "success"
 
     asyncio.run(run())

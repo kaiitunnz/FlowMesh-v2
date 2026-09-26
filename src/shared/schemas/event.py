@@ -29,8 +29,8 @@ class BaseEvent(BaseModel):
 class TaskFailureKind(StrEnum):
     """Why a task's dispatch failed, where the reason decides how control handles it."""
 
-    # The task's inputs are in a content store that could not be reached; they are
-    # still there, so the task runs again without spending an attempt.
+    # The task's inputs are in a content store that could not be reached; the store
+    # holds them, so the task runs again without spending an attempt.
     INPUT_UNAVAILABLE = "input_unavailable"
 
 
