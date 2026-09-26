@@ -157,3 +157,26 @@ def test_two_published_outputs_sharing_a_name_are_an_error() -> None:
     )
     codes = [d.code for d in _check_result_declarations(clashing, {})]
     assert "result.duplicate-name" in codes
+
+
+@pytest.mark.parametrize(
+    "region",
+    [
+        "{kind: spawn, child: reviewer}",
+        "{kind: spawn, child: reviewer, result: {visibility: published}}",
+        "{kind: call, child: reviewer}",
+    ],
+)
+def test_a_published_leaf_cannot_run_as_a_region_child(region: str) -> None:
+    text = _WF.replace("REGION", region).replace(
+        "spec: {taskType: echo, data: {type: list, items: [tmpl]}}",
+        "spec: {taskType: echo, data: {type: list, items: [tmpl]}, "
+        "v2: {result: {visibility: published}}}",
+    )
+    parsed = parse_workflow(text, "native")
+    source = FrontendWorkflowSource.capture(text, "native", name="wf")
+    with pytest.raises(CompileError) as caught:
+        compile_workflow("wfl-test", parsed, source, bindings=_BINDINGS)
+    assert [diag.code for diag in caught.value.diagnostics] == [
+        "result.published-child"
+    ]

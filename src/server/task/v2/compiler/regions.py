@@ -92,6 +92,33 @@ def lower_frontend_v2(parsed: ParsedWorkflow, acc: LoweringAccumulator) -> None:
     _lower_regions(parsed, acc)
     _lower_feedback(parsed, acc)
     normalize_agent_child_regions(acc)
+    _reject_published_children(parsed, acc)
+
+
+def _reject_published_children(
+    parsed: ParsedWorkflow, acc: LoweringAccumulator
+) -> None:
+    """Refuse a published leaf that runs as a region's child template.
+
+    A child settles into its region rather than into the template's own slot, so such
+    a leaf would never publish; a spawn publishes its children through region.result.
+    """
+    op_to_name = {op_id: name for name, op_id in build_name_map(parsed).items()}
+    children = {
+        op.child_template_ref
+        for op in acc.operators
+        if isinstance(op, SpawnRegion) and op.child_template_ref is not None
+    }
+    for decl in acc.result_declarations:
+        if decl.visibility is Visibility.PUBLISHED and decl.source_ref in children:
+            name = op_to_name.get(decl.source_ref, decl.source_ref)
+            raise compile_error(
+                "result.published-child",
+                f"{name!r} runs as a region's child and publishes nothing of its own; "
+                "publish its results through the spawn's region.result",
+                name,
+                source_kind="task",
+            )
 
 
 def normalize_agent_child_regions(acc: LoweringAccumulator) -> None:
