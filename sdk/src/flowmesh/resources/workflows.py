@@ -6,6 +6,7 @@ import time
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import quote
 
 import yaml
 
@@ -17,6 +18,8 @@ from ..models.common import (
 )
 from ..models.workflows import (
     Workflow,
+    WorkflowOutputPage,
+    WorkflowOutputValue,
     WorkflowSubmitResponse,
     WorkflowValidateResponse,
 )
@@ -38,6 +41,42 @@ def _serialize_workflow(
 
 def _workflow_content_type(workflow_format: WorkflowFormat) -> str:
     return "application/json" if workflow_format == "n8n" else "text/plain"
+
+
+def _output_path(workflow_id: str, name: str) -> str:
+    return f"/workflows/{workflow_id}/outputs/{quote(name, safe='')}"
+
+
+def _output_page_params(
+    limit: int,
+    before: str | None,
+    after: str | None,
+    output: str | None,
+    scope: str | None,
+) -> dict[str, str]:
+    params = {"limit": str(limit)}
+    for name, value in (
+        ("before", before),
+        ("after", after),
+        ("output", output),
+        ("scope", scope),
+    ):
+        if value is not None:
+            params[name] = value
+    return params
+
+
+def _output_member_params(
+    scope: str | None, key: str | None, sequence: int | None
+) -> dict[str, str]:
+    params: dict[str, str] = {}
+    if scope is not None:
+        params["scope"] = scope
+    if key is not None:
+        params["key"] = key
+    if sequence is not None:
+        params["sequence"] = str(sequence)
+    return params
 
 
 class Workflows(SyncResource):
@@ -124,6 +163,39 @@ class Workflows(SyncResource):
             "GET", f"/workflows/{workflow_id}/logs", params=params
         )
         return LogQueryResponse.model_validate(data)
+
+    def list_outputs(
+        self,
+        workflow_id: str,
+        limit: int = 100,
+        before: str | None = None,
+        after: str | None = None,
+        output: str | None = None,
+        scope: str | None = None,
+    ) -> WorkflowOutputPage:
+        """List a workflow's published output members with cursor pagination."""
+        data = self._client._request(
+            "GET",
+            f"/workflows/{workflow_id}/outputs",
+            params=_output_page_params(limit, before, after, output, scope),
+        )
+        return WorkflowOutputPage.model_validate(data)
+
+    def get_output(
+        self,
+        workflow_id: str,
+        name: str,
+        scope: str | None = None,
+        key: str | None = None,
+        sequence: int | None = None,
+    ) -> WorkflowOutputValue:
+        """Get one published output member; a collection member needs scope and key."""
+        data = self._client._request(
+            "GET",
+            _output_path(workflow_id, name),
+            params=_output_member_params(scope, key, sequence),
+        )
+        return WorkflowOutputValue.model_validate(data)
 
     def stream_logs(
         self, workflow_id: str, cursor: str | None = None
@@ -238,6 +310,39 @@ class AsyncWorkflows(AsyncResource):
             "GET", f"/workflows/{workflow_id}/logs", params=params
         )
         return LogQueryResponse.model_validate(data)
+
+    async def list_outputs(
+        self,
+        workflow_id: str,
+        limit: int = 100,
+        before: str | None = None,
+        after: str | None = None,
+        output: str | None = None,
+        scope: str | None = None,
+    ) -> WorkflowOutputPage:
+        """List a workflow's published output members with cursor pagination."""
+        data = await self._client._request(
+            "GET",
+            f"/workflows/{workflow_id}/outputs",
+            params=_output_page_params(limit, before, after, output, scope),
+        )
+        return WorkflowOutputPage.model_validate(data)
+
+    async def get_output(
+        self,
+        workflow_id: str,
+        name: str,
+        scope: str | None = None,
+        key: str | None = None,
+        sequence: int | None = None,
+    ) -> WorkflowOutputValue:
+        """Get one published output member; a collection member needs scope and key."""
+        data = await self._client._request(
+            "GET",
+            _output_path(workflow_id, name),
+            params=_output_member_params(scope, key, sequence),
+        )
+        return WorkflowOutputValue.model_validate(data)
 
     async def stream_logs(
         self, workflow_id: str, cursor: str | None = None

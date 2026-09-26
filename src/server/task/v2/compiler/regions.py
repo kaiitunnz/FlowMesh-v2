@@ -26,7 +26,12 @@ from ..representations.operators import (
     SpawnRegion,
 )
 from ..representations.plan import PhysicalNode
-from ..representations.results import Visibility
+from ..representations.results import (
+    CardinalityKind,
+    ReleaseConditionKind,
+    ResultDeclaration,
+    Visibility,
+)
 from ..representations.template import (
     ResourceDeclaration,
     SourceMapEntry,
@@ -421,13 +426,23 @@ def _lower_region(
     kind = str(region.region.get("kind", "")).strip()
     name = region.name
     has_input = bool(region.depends_on)
+    if (result := region.region.get("result")) is not None and kind != "spawn":
+        raise compile_error(
+            "region.result-unsupported",
+            f"a {kind or 'region'} region publishes no result; only a spawn region "
+            "declares result.visibility",
+            name,
+        )
 
     if kind == "branch":
         _add_operator(_branch(region, has_input), region, acc)
     elif kind == "merge":
         _add_operator(_merge(region, has_input), region, acc)
     elif kind == "spawn":
-        _add_operator(_spawn(region, name_to_op, has_input), region, acc)
+        spawn = _spawn(region, name_to_op, has_input)
+        _add_operator(spawn, region, acc)
+        if result is not None:
+            _publish_spawn(result, spawn, region.name, acc)
     elif kind == "join":
         _add_operator(_join(region, has_input), region, acc)
     elif kind == "loop":
@@ -507,6 +522,72 @@ def _spawn(
         outputs=(Port(name="children"),),
         child_template_ref=child_ref,
         authority=_authority(region.region.get("authority"), region.name),
+    )
+
+
+# A published spawn's collection: one member per child, keyed by its index within the
+# scope that spawned it, released as that child settles.
+_SPAWN_RESULT_FIXED = {
+    "cardinality": CardinalityKind.KEYED_COLLECTION.value,
+    "keying": "child_index",
+    "release": ReleaseConditionKind.SOURCE_SETTLED.value,
+}
+
+
+def _publish_spawn(
+    result: Any, spawn: SpawnRegion, name: str, acc: LoweringAccumulator
+) -> None:
+    """Declare the keyed collection a spawn region publishes from its children."""
+    if not isinstance(result, dict):
+        raise compile_error(
+            "region.result-invalid", "region.result must be a mapping", name
+        )
+    if unknown := sorted(set(result) - {"visibility", *_SPAWN_RESULT_FIXED}):
+        raise compile_error(
+            "region.result-unknown-field",
+            f"region.result declares unknown field(s) {', '.join(unknown)}",
+            name,
+        )
+    if result.get("visibility") != Visibility.PUBLISHED.value:
+        raise compile_error(
+            "region.result-conflict",
+            "a spawn region's result declares visibility: published",
+            name,
+        )
+    for field, fixed in _SPAWN_RESULT_FIXED.items():
+        if field in result and result[field] != fixed:
+            raise compile_error(
+                "region.result-conflict",
+                f"a published spawn is a {_SPAWN_RESULT_FIXED['cardinality']} keyed "
+                f"by child_index and released as each child settles; region.result."
+                f"{field} must be {fixed!r}",
+                name,
+            )
+    child_type = next(
+        (
+            decl.value_type
+            for decl in acc.result_declarations
+            if decl.source_ref == spawn.child_template_ref and decl.value_type
+        ),
+        None,
+    )
+    if child_type is None:
+        raise compile_error(
+            "region.result-unresolved-child",
+            f"spawn child {spawn.child_template_ref!r} is not a leaf with a declared "
+            "result type, so its collection cannot be published",
+            name,
+        )
+    acc.result_declarations.append(
+        ResultDeclaration(
+            output_id=f"collection:{spawn.operator_id}",
+            source_ref=spawn.operator_id,
+            cardinality=CardinalityKind.KEYED_COLLECTION,
+            release=ReleaseConditionKind.SOURCE_SETTLED,
+            visibility=Visibility.PUBLISHED,
+            keying=_SPAWN_RESULT_FIXED["keying"],
+            value_type=child_type,
+        )
     )
 
 

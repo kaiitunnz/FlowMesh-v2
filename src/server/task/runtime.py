@@ -128,6 +128,7 @@ from .models import (
     WorkflowSettlement,
     categorize_task_type,
 )
+from .outputs import OutputMember, PublishedOutputs, published_members
 from .parser import ParsedWorkflow, parse_workflow
 from .redrive import StoreRedriveScheduler
 from .results import ResultReader, ResultUnavailable, ResultUnreadable
@@ -2865,13 +2866,30 @@ class TaskRuntime:
             self._cv.notify_all()
         self._save_ledger_locked(record.workflow_id)
 
-    def resolve_v2_output(
-        self, workflow_id: str, output_id: str
-    ) -> ResultPublication | None:
-        """Resolve a declared logical output to its terminal publication."""
+    def published_outputs(self, workflow_id: str) -> PublishedOutputs | None:
+        """A workflow's published outputs, or None for a workflow with no ledger."""
         with self._lock:
             engine = self._engines.get(workflow_id)
-            return engine.resolve_output(output_id) if engine else None
+            if engine is None:
+                return None
+            return PublishedOutputs(
+                org_id=engine.org_id,
+                members=published_members(engine),
+                open=not self._workflow_settlement_locked(workflow_id).settled,
+            )
+
+    def read_output(self, member: OutputMember) -> ResultEnvelope:
+        """The stored result a published member settled with, read off the lock.
+
+        Raises ``ResultUnavailable`` while the store cannot be reached and
+        ``ResultUnreadable`` for bound content that is missing or corrupt.
+        """
+        value_ref = member.publication.value_ref if member.publication else None
+        if value_ref is None or value_ref.content is None:
+            raise ResultUnreadable(f"output {member.name} has no bound result")
+        return self._results.read(
+            ResultBinding(task_id=member.name, reference=value_ref.content)
+        )
 
     def resolve_v2_legacy_result(
         self, workflow_id: str, task_id: str

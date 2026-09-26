@@ -30,6 +30,7 @@ from flowmesh.models import (
     NodeRole,
     NodeWorkerInfo,
     OkResponse,
+    OutputOutcome,
     ResultEnvelope,
     SourceLocation,
     SSHLimits,
@@ -49,6 +50,10 @@ from flowmesh.models import (
     WorkerRegisterResponse,
     WorkerStatus,
     Workflow,
+    WorkflowOutputEntry,
+    WorkflowOutputMember,
+    WorkflowOutputPage,
+    WorkflowOutputValue,
     WorkflowStatus,
     WorkflowSubmitResponse,
     WorkflowSubmitTaskEntry,
@@ -83,6 +88,11 @@ from server.schemas.node import NodeWorkerInfo as SrvNodeWorkerInfo
 from server.schemas.node import StorageInfo as SrvStorageInfo
 from server.schemas.node import WorkerHardware as SrvWorkerHardware
 from server.schemas.node import WorkerRegisterResponse as SrvWorkerRegisterResponse
+from server.schemas.outputs import OutputOutcome as SrvOutputOutcome
+from server.schemas.outputs import WorkflowOutputEntry as SrvWorkflowOutputEntry
+from server.schemas.outputs import WorkflowOutputMember as SrvWorkflowOutputMember
+from server.schemas.outputs import WorkflowOutputPage as SrvWorkflowOutputPage
+from server.schemas.outputs import WorkflowOutputValue as SrvWorkflowOutputValue
 from server.schemas.traces import TraceAggregate as SrvTraceAggregate
 from server.schemas.traces import TraceAggregateBucket as SrvTraceAggregateBucket
 from server.schemas.traces import TraceSpanNode as SrvTraceSpanNode
@@ -190,6 +200,11 @@ MODEL_PAIRS = [
     # Task models (last_queue_ts is server-internal scheduling field)
     (SrvTaskUsage, TaskUsage),
     (SrvTaskInputElement, TaskInputElement),
+    # Published outputs
+    (SrvWorkflowOutputMember, WorkflowOutputMember),
+    (SrvWorkflowOutputEntry, WorkflowOutputEntry),
+    (SrvWorkflowOutputPage, WorkflowOutputPage),
+    (SrvWorkflowOutputValue, WorkflowOutputValue),
     # Worker models
     (SrvWorker, Worker),
     (SrvWorkerInfo, WorkerInfo),
@@ -288,6 +303,7 @@ ENUM_PAIRS = [
     (SrvLogLevel, LogLevel),
     (SrvLogStream, LogStream),
     (SrvNodeRole, NodeRole),
+    (SrvOutputOutcome, OutputOutcome),
 ]
 
 

@@ -43,6 +43,18 @@ class ValidationError(APIError):
     """Raised on 400/422 responses."""
 
 
+class OutputPendingError(APIError):
+    """Raised when a published output has not settled yet (409)."""
+
+
+class ContentUnavailableError(APIError):
+    """Raised when the store holding a value cannot be reached; a retry may succeed."""
+
+
+class OutputUnreadableError(APIError):
+    """Raised when a published output's bound content is missing or corrupt."""
+
+
 class FlowMeshConnectionError(FlowMeshError):
     """Raised when the SDK cannot connect to the FlowMesh server."""
 

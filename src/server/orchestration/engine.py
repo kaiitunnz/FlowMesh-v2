@@ -17,7 +17,7 @@ physical decision that never changes what the engine considers ready.
 import contextlib
 import functools
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from typing import Any, Self
@@ -66,7 +66,7 @@ from ..task.v2.representations.operators import (
     operator_service_dependency,
 )
 from ..task.v2.representations.plan import EpisodeSpec, InferenceEmbodimentMenu
-from ..task.v2.representations.results import CardinalityKind
+from ..task.v2.representations.results import CardinalityKind, ResultDeclaration
 from ..utils.time import now_iso
 from .guardrails import ScopeBudget
 from .outcomes import (
@@ -118,6 +118,7 @@ from .state import (
     WorkflowInstance,
     WorkItem,
     WorkItemStatus,
+    slot_identity,
 )
 from .telemetry import NULL_SPAN_EMITTER, TelemetrySpanEmitter
 from .tool_dispatch import (
@@ -260,6 +261,27 @@ def _ds_drive(
     return decorator
 
 
+def _rekeyed_publications(
+    slots: Iterable[ResultSlot], publications: Iterable[ResultPublication]
+) -> dict[str, ResultPublication]:
+    """Index publications by slot identity, carrying any recorded under the legacy key.
+
+    A publication written before slot identities carried a scope names its slot by the
+    legacy key; each is re-keyed to the identity of the slot that key names.
+    """
+    current = {slot.legacy_slot_key: slot.slot_key for slot in slots}
+    indexed: dict[str, ResultPublication] = {}
+    for publication in publications:
+        key = publication.slot_key
+        if key in current.values():
+            indexed[key] = publication
+        elif (rekeyed := current.get(key)) is not None:
+            indexed[rekeyed] = publication.model_copy(update={"slot_key": rekeyed})
+        else:
+            indexed[key] = publication
+    return indexed
+
+
 class OrchestrationEngine:
     """Drives one workflow instance's semantic readiness over its durable ledger."""
 
@@ -316,7 +338,9 @@ class OrchestrationEngine:
             (c.scope_id, c.axis): c for c in snapshot.progress_capabilities
         }
         self._slots = {s.slot_key: s for s in snapshot.result_slots}
-        self._publications = {p.slot_key: p for p in snapshot.result_publications}
+        self._publications = _rekeyed_publications(
+            self._slots.values(), snapshot.result_publications
+        )
         self._trace = list(snapshot.trace)
         self._private_state = PrivateStateLedger(snapshot.private_state)
 
@@ -3233,11 +3257,34 @@ class OrchestrationEngine:
     # ------------------------------------------------------------------ #
 
     def resolve_output(self, output_id: str) -> ResultPublication | None:
-        """Resolve a declared logical output to its terminal publication, if any."""
-        for slot in self._slots.values():
-            if slot.output_id == output_id:
-                return self._publications.get(slot.slot_key)
-        return None
+        """Resolve a singleton logical output to its terminal publication, if any."""
+        return self.output_publication(output_id)
+
+    def output_publication(
+        self,
+        output_id: str,
+        scope_id: str | None = None,
+        logical_key: str | None = None,
+        sequence: int | None = None,
+    ) -> ResultPublication | None:
+        """The terminal publication of exactly one slot, if it has one."""
+        return self._publications.get(
+            slot_identity(
+                self._instance.instance_id, output_id, scope_id, logical_key, sequence
+            )
+        )
+
+    def output_slots(self, output_id: str) -> list[ResultSlot]:
+        """Every slot a declared output holds so far, pending or published."""
+        return [slot for slot in self._slots.values() if slot.output_id == output_id]
+
+    @property
+    def org_id(self) -> str:
+        return self._instance.org_id
+
+    def published_outputs(self) -> list[tuple[str, ResultDeclaration]]:
+        """Each published declaration with the public name it was authored under."""
+        return self._bundle.template.published_outputs()
 
     def resolve_legacy_task(self, task_id: str) -> ResultPublication | None:
         """Resolve a legacy task id's induced output slot (compatibility adapter)."""
