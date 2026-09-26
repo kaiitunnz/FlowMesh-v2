@@ -60,7 +60,7 @@ class _Engine:
         return self._accepted if task_id == "tsk-1" else ()
 
 
-def _record(task_id: str, status: str, **fields: Any) -> SimpleNamespace:
+def _record(task_id: str, status: str, **fields: Any) -> Any:
     return SimpleNamespace(
         task_id=task_id,
         assigned_worker=fields.pop("assigned", None),
@@ -223,6 +223,7 @@ def test_the_upstream_of_a_task_merged_into_the_dispatch_may_be_read() -> None:
         deps={"tsk-child": {"tsk-dep"}},
         merged_children=["tsk-child"],
     )
+    runtime._tasks["tsk-child"] = _record("tsk-child", TaskStatus.PENDING)
     assert runtime.content_binding_authorizes("tsk-1", "wkr-2", _UPSTREAM)
 
 
@@ -270,3 +271,43 @@ def test_the_producer_result_an_accepted_input_is_frozen_to_may_be_read() -> Non
     runtime = _runtime(assigned="wkr-2", accepted=(accepted,))
     assert runtime.content_binding_authorizes("tsk-1", "wkr-2", _UPSTREAM)
     assert not runtime.content_binding_authorizes("tsk-1", "wkr-9", _UPSTREAM)
+
+
+def test_an_accepted_input_frozen_before_it_carried_its_reference_may_be_read() -> None:
+    accepted = AcceptedInput(
+        activation_id="act-1",
+        target_port="in",
+        members=(
+            AcceptedInputMember(
+                source_operator_id="producer",
+                source_activation_id="act-0",
+                outcome=PublicationOutcome.SUCCESS,
+                value_ref=ValueRef(
+                    kind="legacy_task_result", legacy_task_id="producer"
+                ),
+            ),
+        ),
+    )
+    runtime = _runtime(
+        assigned="wkr-2",
+        accepted=(accepted,),
+        upstream={"producer": (TaskStatus.DONE, _UPSTREAM)},
+    )
+    assert runtime.content_binding_authorizes("tsk-1", "wkr-2", _UPSTREAM)
+
+
+def test_a_merged_child_from_another_workflow_reads_its_own_upstream() -> None:
+    runtime = _runtime(assigned="wkr-2", merged_children=["tsk-child"])
+    runtime._tasks["tsk-child"] = _record(
+        "tsk-child", TaskStatus.PENDING, workflow_id="wfl-2"
+    )
+    runtime._tasks["tsk-dep"] = _record(
+        "tsk-dep",
+        TaskStatus.DONE,
+        workflow_id="wfl-2",
+        result_reference=_UPSTREAM,
+        finished_ts=None,
+    )
+    runtime._original_deps = {"tsk-child": {"tsk-dep"}}
+
+    assert runtime.content_binding_authorizes("tsk-1", "wkr-2", _UPSTREAM)

@@ -319,10 +319,14 @@ def _member_text(
     envelope = values.get(value_ref.content)
     if not isinstance(envelope, ResultEnvelope):
         return None
-    element = (
+    return value_text(envelope, _element_of(value_ref))
+
+
+def _element_of(value_ref: ValueRef) -> int | None:
+    """The collection member a value reference selects, or None for the whole result."""
+    return (
         int(value_ref.collection_key) if value_ref.collection_key is not None else None
     )
-    return value_text(envelope, element)
 
 
 def _settled_at(record: TaskRecord) -> str | None:
@@ -2740,24 +2744,36 @@ class TaskRuntime:
             for outcome in outcomes
         )
 
+    def upstream_task_ids(self, task_id: str) -> set[str]:
+        """Every task a task depends on, directly or transitively."""
+        with self._lock:
+            return self._upstream_task_ids_locked(task_id)
+
+    def _upstream_task_ids_locked(self, task_id: str) -> set[str]:
+        pending = list(self._original_deps.get(task_id, ()))
+        visited: set[str] = set()
+        while pending:
+            dep_id = pending.pop()
+            if dep_id in visited:
+                continue
+            visited.add(dep_id)
+            pending.extend(self._original_deps.get(dep_id, ()))
+        return visited
+
     def _upstream_result_is_locked(
         self, record: TaskRecord, reference: ContentReference
     ) -> bool:
         """Whether a settled upstream of the task, or of one merged into its dispatch,
         is bound to exactly this result."""
-        pending = [record.task_id, *(record.merged_children or [])]
-        visited: set[str] = set()
-        while pending:
-            current = pending.pop()
-            for dep_id in self._original_deps.get(current, ()):
-                if dep_id in visited:
-                    continue
-                visited.add(dep_id)
-                pending.append(dep_id)
+        for member_id in (record.task_id, *(record.merged_children or [])):
+            member = self._tasks.get(member_id)
+            if member is None:
+                continue
+            for dep_id in self._upstream_task_ids_locked(member_id):
                 upstream = self._tasks.get(dep_id)
                 if (
                     upstream is None
-                    or upstream.workflow_id != record.workflow_id
+                    or upstream.workflow_id != member.workflow_id
                     or upstream.status != TaskStatus.DONE
                 ):
                     continue
@@ -2766,9 +2782,8 @@ class TaskRuntime:
                     return True
         return False
 
-    @staticmethod
     def _frozen_input_is_locked(
-        engine: OrchestrationEngine, task_id: str, reference: ContentReference
+        self, engine: OrchestrationEngine, task_id: str, reference: ContentReference
     ) -> bool:
         """Whether an accepted input of the task, or its fan-out element, is frozen
         to exactly this producer result."""
@@ -2776,7 +2791,8 @@ class TaskRuntime:
         if child_input is not None and child_input.content == reference:
             return True
         return any(
-            member.value_ref is not None and member.value_ref.content == reference
+            (source := self._member_source_locked(member.value_ref)) is not None
+            and source.reference == reference
             for accepted in engine.accepted_inputs_for_task(task_id)
             for member in accepted.members
         )
@@ -3613,14 +3629,7 @@ class TaskRuntime:
             reference = binding.reference if binding is not None else None
         if reference is None:
             return None
-        return ResultValueRef(
-            reference=reference,
-            element=(
-                int(value_ref.collection_key)
-                if value_ref.collection_key is not None
-                else None
-            ),
-        )
+        return ResultValueRef(reference=reference, element=_element_of(value_ref))
 
     def _synthesize_child_record(
         self, template: TaskRecord, child_task_id: str

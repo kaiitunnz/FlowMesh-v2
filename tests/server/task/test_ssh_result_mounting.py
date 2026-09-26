@@ -49,6 +49,15 @@ class _DummyRuntime:
     def get_record(self, task_id: str) -> TaskRecord | None:
         return self.tasks.get(task_id)
 
+    def upstream_task_ids(self, task_id: str) -> set[str]:
+        pending = list(self._depends_on.get(task_id, []))
+        visited: set[str] = set()
+        while pending:
+            if (dep_id := pending.pop()) not in visited:
+                visited.add(dep_id)
+                pending.extend(self._depends_on.get(dep_id, []))
+        return visited
+
     def describe_task(self, task_id: str) -> SimpleNamespace | None:
         record = self.tasks.get(task_id)
         if record is None:

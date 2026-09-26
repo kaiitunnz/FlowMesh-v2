@@ -1194,7 +1194,7 @@ class Dispatcher:
             return {}
 
         context: dict[str, TaskRecord] = {}
-        for dep_id in self._dependency_task_ids(record.task_id):
+        for dep_id in self._runtime.upstream_task_ids(record.task_id):
             other = self._runtime.get_record(dep_id)
             if other is None:
                 continue
@@ -1209,26 +1209,6 @@ class Dispatcher:
             return True
         spec = record.task.spec
         return isinstance(spec, (SSHSpecStrict, SSHSpecTemplate)) and bool(spec.inputs)
-
-    def _dependency_task_ids(self, task_id: str) -> set[str]:
-        pending = self._task_dependencies(task_id)
-        visited: set[str] = set()
-        # Walk the upstream dependency graph to collect all dependency tasks
-        while pending:
-            dep_id = pending.pop()
-            if dep_id in visited:
-                continue
-            visited.add(dep_id)
-            pending.extend(
-                upstream_id
-                for upstream_id in self._task_dependencies(dep_id)
-                if upstream_id not in visited
-            )
-        return visited
-
-    def _task_dependencies(self, task_id: str) -> list[str]:
-        info = self._runtime.describe_task(task_id)
-        return [] if info is None else info.depends_on.copy()
 
     @staticmethod
     def _stage_context_keys(record: TaskRecord) -> tuple[str, ...]:

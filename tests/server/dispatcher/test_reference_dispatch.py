@@ -132,6 +132,20 @@ def test_a_dispatch_names_every_transitive_upstream_and_carries_none() -> None:
     assert _PAYLOAD not in wf.runtime._tasks[c].model_dump_json()
 
 
+def test_every_reference_a_dispatch_names_is_one_its_worker_may_read() -> None:
+    wf = _Workflow(_CHAIN)
+    a, b, c = wf.ids
+    wf.settle(a)
+    wf.settle(b)
+
+    message = wf.dispatch(c)
+
+    assert message.upstream_results
+    for binding in message.upstream_results.values():
+        assert binding.reference is not None
+        assert wf.runtime.content_binding_authorizes(c, "wkr-1", binding.reference)
+
+
 def test_an_ssh_input_is_named_by_its_upstream_binding() -> None:
     wf = _Workflow(_SSH)
     preprocess, annotate = wf.ids
