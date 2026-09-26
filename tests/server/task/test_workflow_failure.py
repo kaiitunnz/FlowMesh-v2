@@ -183,7 +183,7 @@ async def test_a_held_input_check_is_dropped() -> None:
     runtime = _live_runtime(FakeRegistry())
     workflow_id, ids = await _register(runtime, _PARALLEL)
     reference = reference_for("org", b"input", media_type="application/json")
-    runtime._input_checks[ids["side"]] = _InputCheck("wkr-1", (reference,))
+    runtime._input_checks[ids["side"]] = _InputCheck("wkr-1", "dsp-s", (reference,))
 
     _fail(runtime, workflow_id)
 

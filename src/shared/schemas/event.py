@@ -33,6 +33,9 @@ class TaskFailureKind(StrEnum):
     # The task's inputs are in a content store that could not be reached; the store
     # holds them, so the task runs again without spending an attempt.
     INPUT_UNAVAILABLE = "input_unavailable"
+    # Control read the task's input and found it missing or corrupt, so the task fails
+    # without blaming the worker that reported it.
+    INPUT_UNREADABLE = "input_unreadable"
 
 
 class TaskEvent(BaseEvent):

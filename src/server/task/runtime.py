@@ -57,7 +57,7 @@ from shared.sandbox import (
     SandboxEgressMode,
 )
 from shared.schemas.command import InterruptMessage, MediatedOpMessage
-from shared.schemas.event import TaskFailureKind
+from shared.schemas.event import TaskEvent, TaskFailureKind
 from shared.schemas.result import ResultEnvelope
 from shared.schemas.result.binding import collection_elements, value_text
 from shared.tasks.result_binding import (
@@ -262,9 +262,11 @@ class _InputCheck:
     """A task held while control checks the inputs its worker could not read."""
 
     worker_id: str
+    dispatch_id: str | None
     references: tuple[ContentReference, ...]
-    # Control could not reach the store either, so the worker is not at fault.
-    shared_outage: bool = False
+    # Why control found an input unreadable, once it has; the task then fails as a
+    # report of the dispatch that could not read it.
+    unreadable: str | None = None
 
 
 @dataclass(frozen=True)
@@ -558,6 +560,7 @@ class TaskRuntime:
         self._model_settler: Callable[[ToolInvocationEnvelope], None] | None = None
         self._tool_broker: Callable[[ToolInvocationEnvelope], None] | None = None
         self._resident_terminal_hook: Callable[[str, bool], None] | None = None
+        self._failure_reporter: Callable[[TaskEvent], None] | None = None
         # The worker-originated resident path: originate admits and relays the handoff
         # to the origin worker; the ack and outcome handlers consume the worker's fenced
         # transition reports. Set when resident-capacity control is enabled.
@@ -2726,24 +2729,29 @@ class TaskRuntime:
         """
         with self._lock:
             record = self._tasks.get(task_id)
-            if (
-                record is None
-                or record.status in TERMINAL_TASK_STATUSES
-                or not self._holds_dispatch_locked(record, worker_id, None)
-                or reference.authorization_scope != record.org_id
-            ):
-                return False
-            resolution = self._input_resolution_locked(task_id)
-            if resolution is not None and resolution.reference == reference:
-                return True
-            if self._upstream_result_is_locked(record, reference):
-                return True
-            engine = self._engines.get(record.workflow_id)
-            if engine is None:
-                return False
-            if self._frozen_input_is_locked(engine, task_id, reference):
-                return True
-            _, outcomes = engine.episode_context(task_id)
+            return (
+                record is not None
+                and record.status not in TERMINAL_TASK_STATUSES
+                and self._holds_dispatch_locked(record, worker_id, None)
+                and self._consumes_locked(record, reference)
+            )
+
+    def _consumes_locked(self, record: TaskRecord, reference: ContentReference) -> bool:
+        """Whether a task is bound to exactly this object as one of its inputs."""
+        if reference.authorization_scope != record.org_id:
+            return False
+        task_id = record.task_id
+        resolution = self._input_resolution_locked(task_id)
+        if resolution is not None and resolution.reference == reference:
+            return True
+        if self._upstream_result_is_locked(record, reference):
+            return True
+        engine = self._engines.get(record.workflow_id)
+        if engine is None:
+            return False
+        if self._frozen_input_is_locked(engine, task_id, reference):
+            return True
+        _, outcomes = engine.episode_context(task_id)
         return any(
             outcome.outcome_ref is not None and outcome.outcome_ref.content == reference
             for outcome in outcomes
@@ -3239,16 +3247,24 @@ class TaskRuntime:
         return advance
 
     def _drive_workflow(self, workflow_id: str) -> None:
-        self._check_unavailable_inputs(workflow_id)
+        try:
+            self._check_unavailable_inputs(workflow_id)
+        except Exception:
+            # A check that stopped partway leaves its tasks held, so it runs again.
+            self._logger.exception(
+                "Checking the held inputs of workflow %s failed", workflow_id
+            )
+            self._redrive.schedule(workflow_id)
         self._redrive_workflow(workflow_id)
 
     def _check_unavailable_inputs(self, workflow_id: str) -> None:
-        """Attribute each held task's unreadable inputs by reading them from here.
+        """Read each held task's unreadable inputs from here, off the lock.
 
-        The reads run off the lock with control's own store access. Content missing or
-        corrupt here fails the task; a store control cannot reach either holds it until
-        the store answers, blaming no one; content control reads fine means the worker's
-        own path to the store failed, so the task runs again elsewhere.
+        Content missing or corrupt here fails the task as a report of the dispatch that
+        could not read it. A store control cannot reach either, or any other error
+        reading it, holds the task until a later re-drive. Content control reads fine
+        returns the task to the queue without blaming its worker: one later read with
+        control's own access says nothing about the path the worker read through.
         """
         with self._lock:
             checks = {
@@ -3263,6 +3279,7 @@ class TaskRuntime:
             task_id: self._verify_inputs(check.references)
             for task_id, check in checks.items()
         }
+        failures: list[TaskEvent] = []
         with self._cv:
             for task_id, verdict in verdicts.items():
                 check = checks[task_id]
@@ -3270,57 +3287,80 @@ class TaskRuntime:
                     continue
                 record = self._tasks.get(task_id)
                 if record is None or record.status != TaskStatus.PENDING:
-                    self._input_checks.pop(task_id, None)
+                    del self._input_checks[task_id]
                     continue
-                if isinstance(verdict, ResultUnavailable):
-                    self._logger.warning(
-                        "Task %s waits: control cannot reach its inputs either: %s",
-                        task_id,
-                        verdict,
-                    )
-                    self._input_checks[task_id] = replace(check, shared_outage=True)
-                    self._redrive.schedule(workflow_id)
-                    continue
-                del self._input_checks[task_id]
                 if isinstance(verdict, ResultUnreadable):
                     self._logger.warning(
                         "Task %s input is unreadable at control: %s", task_id, verdict
                     )
-                    self.mark_failed(
-                        task_id,
-                        check.worker_id,
-                        {},
-                        now_iso(),
-                        error=f"input_unreadable: {verdict}",
+                    self._input_checks[task_id] = replace(
+                        check, unreadable=str(verdict)
+                    )
+                    failures.append(
+                        TaskEvent(
+                            type="TASK_FAILED",
+                            task_id=task_id,
+                            worker_id=check.worker_id,
+                            dispatch_id=check.dispatch_id,
+                            error=f"input_unreadable: {verdict}",
+                            retryable=False,
+                            failure_kind=TaskFailureKind.INPUT_UNREADABLE,
+                        )
                     )
                     continue
-                if not check.shared_outage and (
-                    check.worker_id not in record.failed_workers
-                ):
+                if verdict is not None:
                     self._logger.warning(
-                        "Task %s runs again away from %s, which could not reach its "
-                        "inputs",
+                        "Task %s waits: control cannot read its inputs either: %s",
                         task_id,
-                        check.worker_id,
+                        verdict,
                     )
-                    record.failed_workers.append(check.worker_id)
+                    self._redrive.schedule(workflow_id)
+                    continue
+                self._logger.info(
+                    "Task %s runs again: control reads the inputs its worker could not",
+                    task_id,
+                )
                 if self._enqueue_ready_locked(task_id, front=False):
                     self._cv.notify_all()
                 self._commit_locked(task_id)
+                del self._input_checks[task_id]
+        for event in failures:
+            self._report_failure(event)
 
     def _verify_inputs(
         self, references: tuple[ContentReference, ...]
-    ) -> ResultUnavailable | ResultUnreadable | None:
+    ) -> ResultUnreadable | Exception | None:
         """Why control cannot read these objects either, or None when it reads them."""
-        unavailable: ResultUnavailable | None = None
+        pending: Exception | None = None
         for reference in references:
             try:
                 self._results.verify(reference)
             except ResultUnreadable as exc:
                 return exc
-            except ResultUnavailable as exc:
-                unavailable = exc
-        return unavailable
+            except Exception as exc:
+                # Unreachable, or an error that says nothing about the content itself.
+                pending = exc
+        return pending
+
+    def set_failure_reporter(self, report: Callable[[TaskEvent], None]) -> None:
+        """Install the handler a failure control decides on is reported through, so it
+        runs the side effects of a worker's failure report."""
+        self._failure_reporter = report
+
+    def _report_failure(self, event: TaskEvent) -> None:
+        if self._failure_reporter is not None:
+            self._failure_reporter(event)
+            return
+        self.fail_dispatch(
+            event.task_id,
+            event.worker_id or "",
+            {},
+            event.ts,
+            event.dispatch_id,
+            error=event.error,
+            retryable=event.retryable,
+            failure_kind=event.failure_kind,
+        )
 
     def _redrive_workflow(self, workflow_id: str) -> None:
         """Drive the advances of a workflow that wait on a read of stored results.
@@ -4548,8 +4588,8 @@ class TaskRuntime:
 
         A report from the dispatch holding a running task returns a merged dispatch to
         run its tasks alone. A task whose inputs were in a store its worker could not
-        reach returns without spending an attempt; when the report names those inputs
-        the task is held until control has read them itself.
+        reach returns without spending an attempt and is held until control has read
+        them itself; a report naming no input the task consumes is an ordinary failure.
         Otherwise the failure is charged to the worker and the task either returns to
         the head of the queue for another attempt or settles: FAILED, or CANCELLED when
         a cancel is already under way. A report on a settled task persists its
@@ -4587,6 +4627,17 @@ class TaskRuntime:
     ) -> FailureOutcome:
         with self._cv:
             record = self._tasks.get(task_id)
+            if record is not None and self._is_input_verdict_locked(
+                record, worker_id, dispatch_id, failure_kind
+            ):
+                del self._input_checks[task_id]
+                record.last_error = error
+                impacted, usages = self.mark_failed(
+                    task_id, worker_id, payload, ts, error=error
+                )
+                return FailureOutcome(
+                    DispatchEnd.FAILED, record.attempts, impacted, usages
+                )
             if record is None or not self._accepts_event_locked(
                 record, worker_id, dispatch_id
             ):
@@ -4605,14 +4656,23 @@ class TaskRuntime:
                 failure_kind is TaskFailureKind.INPUT_UNAVAILABLE
                 and record.status != TaskStatus.CANCELLING
             ):
-                end = self._return_dispatch_locked(
-                    record, increment_retry=False, front=False
-                )
-                if unavailable_inputs:
-                    self._hold_for_input_check_locked(
-                        record, worker_id, tuple(unavailable_inputs)
+                if consumed := self._consumed_inputs_locked(
+                    record, unavailable_inputs or ()
+                ):
+                    held_dispatch = record.dispatch_id
+                    end = self._return_dispatch_locked(
+                        record, increment_retry=False, front=False
                     )
-                return FailureOutcome(end, record.attempts, [], [])
+                    self._hold_for_input_check_locked(
+                        record, worker_id, held_dispatch, consumed
+                    )
+                    return FailureOutcome(end, record.attempts, [], [])
+                self._logger.warning(
+                    "Task %s: worker %s reported unreachable inputs the task does not "
+                    "consume; charging the failure to it",
+                    task_id,
+                    worker_id,
+                )
             if worker_id not in record.failed_workers:
                 record.failed_workers.append(worker_id)
             if _failed_task_can_retry(record, retryable):
@@ -4631,16 +4691,51 @@ class TaskRuntime:
             )
             return FailureOutcome(end, record.attempts, impacted, usages)
 
+    def _consumed_inputs_locked(
+        self, record: TaskRecord, references: Sequence[ContentReference]
+    ) -> tuple[ContentReference, ...]:
+        """The named objects the task consumes, each once."""
+        return tuple(
+            reference
+            for reference in dict.fromkeys(references)
+            if self._consumes_locked(record, reference)
+        )
+
     def _hold_for_input_check_locked(
         self,
         record: TaskRecord,
         worker_id: str,
+        dispatch_id: str | None,
         references: tuple[ContentReference, ...],
     ) -> None:
-        """Keep a returned task out of the queue until its inputs are attributed."""
+        """Keep a returned task out of the queue until control has read its inputs."""
         self._remove_from_ready_locked(record.task_id)
-        self._input_checks[record.task_id] = _InputCheck(worker_id, references)
+        self._input_checks[record.task_id] = _InputCheck(
+            worker_id, dispatch_id, references
+        )
         self._redrive.drive_now(record.workflow_id)
+
+    def _is_input_verdict_locked(
+        self,
+        record: TaskRecord,
+        worker_id: str,
+        dispatch_id: str | None,
+        failure_kind: TaskFailureKind | None,
+    ) -> bool:
+        """Whether a failure is control's verdict that a held task's input is
+        unreadable.
+
+        The held check stands in for the dispatch the task returned from, so the verdict
+        reports as that dispatch.
+        """
+        check = self._input_checks.get(record.task_id)
+        return (
+            failure_kind is TaskFailureKind.INPUT_UNREADABLE
+            and check is not None
+            and check.unreadable is not None
+            and record.status == TaskStatus.PENDING
+            and (check.worker_id, check.dispatch_id) == (worker_id, dispatch_id)
+        )
 
     def return_dispatch(
         self,

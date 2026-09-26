@@ -453,6 +453,7 @@ if IS_ROOT_NODE:
     # the monitor's finalizer when a workflow may have ended; the finalizer decides.
     RUNTIME.set_completion_notifier(EVENT_MONITOR.finalizer.request)
     WATCHDOG.set_failure_fallback(EVENT_MONITOR.handle_task_event)
+    RUNTIME.set_failure_reporter(EVENT_MONITOR.handle_task_event)
 
     if GATED_SERVE is not None:
         # A forward exposure goes live off the request path (its listener binds after
