@@ -294,6 +294,34 @@ def resident_relay_client(
     )
 
 
+def resident_relay_sync_client(
+    url: str,
+    *,
+    acl_enabled: bool = False,
+    username: str = "admin",
+    password: str = "",
+    tls_ca_file: str | None = None,
+) -> redis.Redis:
+    """A blocking client on the relay's Redis, for control-plane writes made off-loop.
+
+    A relay session's routing record has to land where the bridges that route its
+    frames read it, which is the relay's Redis rather than the control store.
+    """
+    authed = _with_redis_auth(
+        url, acl_enabled=acl_enabled, username=username, password=password
+    )
+    ssl_kwargs: dict[str, Any] = {}
+    if tls_ca_file:
+        ssl_kwargs = {
+            "connection_class": SyncSSLConnection,
+            "ssl_cert_reqs": ssl.CERT_REQUIRED,
+            "ssl_ca_certs": tls_ca_file,
+        }
+    return redis.from_url(
+        authed, decode_responses=True, **_keepalive_kwargs(), **ssl_kwargs
+    )
+
+
 def _sync[T](value: Awaitable[T] | T) -> T:
     return value  # type: ignore[return-value]
 
