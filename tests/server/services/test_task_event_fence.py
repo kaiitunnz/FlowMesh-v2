@@ -572,6 +572,30 @@ async def test_a_merged_batch_failing_before_it_is_recorded_runs_each_task_alone
 
 
 @pytest.mark.anyio
+async def test_a_late_report_of_a_returned_merged_batch_commits_its_return() -> None:
+    registry = _Registry()
+    runtime = _runtime(registry)
+    monitor = _monitor(runtime)
+    _, ids = await _register(runtime, _siblings())
+    parent = _next(runtime)
+    assert runtime.plan_merge(parent, 8, "wkr-1")
+    record_dispatch(runtime, parent, "wkr-1", "dsp-1")
+
+    registry.fail_next = True
+    with pytest.raises(ConnectionError):
+        monitor._handle_task_event(
+            _event("TASK_FAILED", runtime, parent, "wkr-1", "dsp-1")
+        )
+    monitor._handle_task_event(
+        _event("TASK_SUCCEEDED", runtime, parent, "wkr-1", "dsp-1")
+    )
+
+    for task_id in ids.values():
+        assert runtime._tasks[task_id].status == TaskStatus.PENDING
+        assert registry.durable_status(task_id) == TaskStatus.PENDING
+
+
+@pytest.mark.anyio
 async def test_a_cancel_while_a_dispatch_is_published_interrupts_its_worker() -> None:
     interrupts = _InterruptRecorder()
     runtime = _runtime(_Registry(), interrupts)

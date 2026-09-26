@@ -3483,15 +3483,13 @@ class TaskRuntime:
         ):
             return False
         task_id = record.task_id
-        self._returned_dispatches[task_id] = (
-            worker_id,
-            record.dispatch_id,
-            self._return_merged_children_locked(
-                [task_id, *self._merge_children_map.pop(task_id, [])], unmerge=True
-            ),
+        dispatch_id = record.dispatch_id
+        moved = self._return_merged_children_locked(
+            [task_id, *self._merge_children_map.pop(task_id, [])], unmerge=True
         )
+        self._returned_dispatches[task_id] = (worker_id, dispatch_id, moved)
         record.merged_children = None
-        self._commit_locked(*self._returned_dispatches[task_id][2])
+        self._commit_locked(*moved)
         return True
 
     def _release_merge_locked(self, task_id: str) -> None:
