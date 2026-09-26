@@ -1181,7 +1181,7 @@ class TaskRuntime:
             if (record := self._tasks.get(task_id)) is not None
         ]
         workflow_ids += [workflow_id for workflow_id, _, _ in held.children]
-        for workflow_id in dict.fromkeys([*workflow_ids, *held.workflow_ids]):
+        for workflow_id in dict.fromkeys(workflow_ids + held.workflow_ids):
             self._save_ledger_locked(workflow_id)
             self._reclaim_vault_if_settled_locked(workflow_id)
 
