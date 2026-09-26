@@ -2966,9 +2966,7 @@ class TaskRuntime:
         value_ref = member.publication.value_ref if member.publication else None
         if value_ref is None or value_ref.content is None:
             raise ResultUnreadable(f"output {member.name} has no bound result")
-        return self._results.read(
-            ResultBinding(task_id=member.name, reference=value_ref.content)
-        )
+        return self._results.read_reference(value_ref.content)
 
     def resolve_v2_legacy_result(
         self, workflow_id: str, task_id: str
@@ -3533,13 +3531,11 @@ class TaskRuntime:
         """Read every result the snapshots' inputs are frozen to, off the lock."""
         values: dict[ContentReference, ResultEnvelope | Exception] = {}
         for snapshot in snapshots:
-            for producer, reference in snapshot.references.items():
+            for reference in snapshot.references.values():
                 if reference in values:
                     continue
                 try:
-                    values[reference] = self._results.read(
-                        ResultBinding(task_id=producer, reference=reference)
-                    )
+                    values[reference] = self._results.read_reference(reference)
                 except (ResultUnavailable, ResultUnreadable) as exc:
                     values[reference] = exc
         return values

@@ -398,13 +398,13 @@ def test_an_input_is_not_read_under_the_runtime_lock() -> None:
     engine = _merge_engine()
     _write_result(runtime, "P", {"taskType": "agent", "value": "grounded"})
     reads: list[bool] = []
-    read = runtime._results.read
+    read = runtime._results.read_reference
 
-    def _recording_read(binding: Any) -> Any:
+    def _recording_read(reference: Any) -> Any:
         reads.append(runtime._lock._is_owned())  # type: ignore[attr-defined]
-        return read(binding)
+        return read(reference)
 
-    runtime._results.read = _recording_read  # type: ignore[method-assign]
+    runtime._results.read_reference = _recording_read  # type: ignore[method-assign]
     runtime._engines["wfl-test"] = engine
     with runtime._lock:
         runtime._stage_agent_inputs_locked("wfl-test", engine, Advance())
@@ -420,17 +420,17 @@ def test_an_input_read_for_a_superseded_snapshot_is_read_again() -> None:
     _write_result(runtime, "P", {"taskType": "agent", "value": "first"})
     runtime._engines["wfl-test"] = engine
     runtime._stage_agent_inputs_locked("wfl-test", engine, Advance())
-    read = runtime._results.read
+    read = runtime._results.read_reference
     rebound: list[bool] = []
 
-    def _read_then_rebind(binding: Any) -> Any:
-        envelope = read(binding)
+    def _read_then_rebind(reference: Any) -> Any:
+        envelope = read(reference)
         if not rebound:
             rebound.append(True)
             _write_result(runtime, "P", {"taskType": "agent", "value": "second"})
         return envelope
 
-    runtime._results.read = _read_then_rebind  # type: ignore[method-assign]
+    runtime._results.read_reference = _read_then_rebind  # type: ignore[method-assign]
     runtime._redrive.run_due()
     assert not engine.accepted_inputs_for_task("M")
     runtime._redrive.run_due()

@@ -15,14 +15,14 @@ missing, corrupt, out of the task's scope, or not a result envelope fails the ta
 import time
 from typing import Any
 
-from pydantic import ValidationError
-
 from shared.content import ContentReference, ContentStoreError, ContentUnavailable
 from shared.harness import AgentEpisodeDispatch, InputBinding
 from shared.schemas.event import TaskFailureKind
 from shared.schemas.result import ResultEnvelope
 from shared.schemas.result.binding import (
+    NotAResultEnvelope,
     collection_element,
+    result_envelope,
     skip_envelope_bytes,
     value_text,
 )
@@ -133,7 +133,7 @@ class TaskInputHydrator:
             upstream[stage] = reader.envelope(binding)
         element: tuple[Any] | None = None
         if (ref := msg.input_element) is not None:
-            source = reader.envelope(ResultBinding(task_id="", reference=ref.reference))
+            source = reader.reference_envelope(ref.reference)
             try:
                 element = (collection_element(source, ref.element),)
             except IndexError as exc:
@@ -181,30 +181,36 @@ class _TaskReader:
             if binding.skip is None:
                 raise input_unreadable(f"task {binding.task_id} has no bound result")
             return skip_envelope_bytes(binding)
-        reference = binding.reference
+        return self.reference_bytes(binding.reference)
+
+    def reference_bytes(self, reference: ContentReference) -> bytes:
         if (data := self._bytes.get(reference)) is None:
             data = self._hydrator.read(self._task_id, self._scope, reference)
             self._bytes[reference] = data
         return data
 
     def envelope(self, binding: ResultBinding) -> ResultEnvelope:
-        reference = binding.reference
-        if (
-            reference is not None
-            and (cached := self._envelopes.get(reference)) is not None
-        ):
-            return cached
-        data = self.envelope_bytes(binding)
-        try:
-            envelope = ResultEnvelope.model_validate_json(data)
-        except ValidationError as exc:
-            raise input_unreadable(
-                f"the stored result of task {binding.task_id or '?'} is not a result "
-                f"envelope: {exc}"
-            ) from exc
-        if reference is not None:
-            self._envelopes[reference] = envelope
-        return envelope
+        if binding.reference is not None:
+            return self.reference_envelope(binding.reference)
+        return _parsed(
+            self.envelope_bytes(binding), f"the stored result of task {binding.task_id}"
+        )
+
+    def reference_envelope(self, reference: ContentReference) -> ResultEnvelope:
+        if (cached := self._envelopes.get(reference)) is None:
+            cached = _parsed(
+                self.reference_bytes(reference),
+                f"the stored result {reference.content_digest}",
+            )
+            self._envelopes[reference] = cached
+        return cached
+
+
+def _parsed(data: bytes, source: str) -> ResultEnvelope:
+    try:
+        return result_envelope(data, source)
+    except NotAResultEnvelope as exc:
+        raise input_unreadable(str(exc)) from exc
 
 
 def _bound(
@@ -236,11 +242,7 @@ def _with_member_values(
             if (source := member.source) is None:
                 members.append(member)
                 continue
-            envelope = reader.envelope(
-                ResultBinding(
-                    task_id=member.source_operator_id, reference=source.reference
-                )
-            )
+            envelope = reader.reference_envelope(source.reference)
             members.append(
                 member.model_copy(
                     update={

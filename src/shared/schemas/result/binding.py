@@ -8,6 +8,8 @@ reads the same wherever it is read.
 import json
 from typing import Any
 
+from pydantic import ValidationError
+
 from shared.tasks.result_binding import ResultBinding
 
 from ._base import BaseExecutorResult
@@ -29,7 +31,19 @@ def skip_envelope_bytes(binding: ResultBinding) -> bytes:
     return skip_envelope(binding).model_dump_json(indent=2).encode("utf-8")
 
 
-def result_collection(payload: dict[str, Any]) -> list[Any] | None:
+class NotAResultEnvelope(ValueError):
+    """Stored bytes that do not parse as a result envelope."""
+
+
+def result_envelope(data: bytes, source: str) -> ResultEnvelope:
+    """The result envelope stored bytes hold, naming ``source`` when they hold none."""
+    try:
+        return ResultEnvelope.model_validate_json(data)
+    except ValidationError as exc:
+        raise NotAResultEnvelope(f"{source} is not a result envelope: {exc}") from exc
+
+
+def _result_collection(payload: dict[str, Any]) -> list[Any] | None:
     """A result's collection: its ``fanout`` list, else its ``items`` list."""
     collection = payload.get("fanout")
     if not isinstance(collection, list):
@@ -40,11 +54,10 @@ def result_collection(payload: dict[str, Any]) -> list[Any] | None:
 def collection_elements(envelope: ResultEnvelope) -> list[Any]:
     """A result's collection with each element's carried value unwrapped.
 
-    An echo item is ``{output: v}``, so an element is its ``output`` when it has one,
-    which is a valid child input. A result with no collection
-    has no elements.
+    An echo item is ``{output: v}``, so an element is its ``output`` when it has one. A
+    result with no collection has no elements.
     """
-    collection = result_collection(envelope.result.model_dump()) or []
+    collection = _result_collection(envelope.result.model_dump()) or []
     return [_unwrapped(item) for item in collection]
 
 
@@ -65,12 +78,12 @@ def value_text(envelope: ResultEnvelope, element: int | None) -> str | None:
     An element is one collection member; otherwise the value is the result's ``value``,
     or the whole result when it declares none.
     """
-    payload = envelope.result.model_dump()
     if element is not None:
-        collection = result_collection(payload)
-        if collection is None or element < 0 or element >= len(collection):
+        try:
+            return _stringify(collection_element(envelope, element))
+        except IndexError:
             return None
-        return _stringify(_unwrapped(collection[element]))
+    payload = envelope.result.model_dump()
     value = payload.get("value")
     return _stringify(value if value is not None else payload)
 
@@ -84,9 +97,10 @@ def _stringify(value: Any) -> str:
 
 
 __all__ = [
+    "NotAResultEnvelope",
     "collection_element",
     "collection_elements",
-    "result_collection",
+    "result_envelope",
     "skip_envelope",
     "skip_envelope_bytes",
     "value_text",

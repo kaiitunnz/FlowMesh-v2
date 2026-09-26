@@ -12,8 +12,6 @@ immutable reference makes safe to reuse.
 import threading
 from collections import OrderedDict
 
-from pydantic import ValidationError
-
 from shared.content import (
     ContentReference,
     ContentStoreError,
@@ -21,7 +19,12 @@ from shared.content import (
     FabricObjectStore,
 )
 from shared.schemas.result import ResultEnvelope
-from shared.schemas.result.binding import skip_envelope, skip_envelope_bytes
+from shared.schemas.result.binding import (
+    NotAResultEnvelope,
+    result_envelope,
+    skip_envelope,
+    skip_envelope_bytes,
+)
 from shared.tasks.result_binding import ResultBinding
 
 _CACHE_MAX_BYTES = 64 * 1024 * 1024
@@ -59,14 +62,15 @@ class ResultReader:
         """The envelope a binding reads as, validated as a result envelope."""
         if binding.reference is None and binding.skip is not None:
             return skip_envelope(binding)
-        data = self.read_bytes(binding)
-        try:
-            return ResultEnvelope.model_validate_json(data)
-        except ValidationError as exc:
-            raise ResultUnreadable(
-                f"the stored result of task {binding.task_id} is not a result "
-                f"envelope: {exc}"
-            ) from exc
+        return _envelope(
+            self.read_bytes(binding), f"the stored result of task {binding.task_id}"
+        )
+
+    def read_reference(self, reference: ContentReference) -> ResultEnvelope:
+        """The envelope a stored result reads as, validated as a result envelope."""
+        return _envelope(
+            self._hydrate(reference), f"the stored result {reference.content_digest}"
+        )
 
     def verify(self, reference: ContentReference) -> None:
         """Read one object from the store itself, bypassing the cache, and verify it.
@@ -107,6 +111,13 @@ class ResultReader:
             while self._cached_bytes > self._cache_max_bytes:
                 _, evicted = self._cache.popitem(last=False)
                 self._cached_bytes -= len(evicted)
+
+
+def _envelope(data: bytes, source: str) -> ResultEnvelope:
+    try:
+        return result_envelope(data, source)
+    except NotAResultEnvelope as exc:
+        raise ResultUnreadable(str(exc)) from exc
 
 
 __all__ = ["ResultReader", "ResultUnavailable", "ResultUnreadable"]
