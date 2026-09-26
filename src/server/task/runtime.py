@@ -296,7 +296,7 @@ def _reset_to_pending(record: TaskRecord) -> None:
     record.error = None
 
 
-def failed_task_can_retry(record: TaskRecord, retryable: bool | None) -> bool:
+def _failed_task_can_retry(record: TaskRecord, retryable: bool | None) -> bool:
     """Whether a failed task may be requeued: retryable, within the attempt budget,
     and not settling."""
     if record.status in SETTLING_TASK_STATUSES or retryable is False:
@@ -4230,7 +4230,7 @@ class TaskRuntime:
                 record.failed_workers.append(worker_id)
             if error:
                 record.last_error = error
-            if failed_task_can_retry(record, retryable):
+            if _failed_task_can_retry(record, retryable):
                 end = self._return_dispatch_locked(
                     record, increment_retry=True, front=True
                 )
