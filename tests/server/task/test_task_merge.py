@@ -197,6 +197,7 @@ def _render(
             _runtime=runtime,
             _logger=logging.getLogger("task-merge"),
             _resolve_stage_references=lambda *args: (resolve(*args), None),
+            _build_stage_context=lambda record: record,
             _condition_actual=condition_actual,
         ),
     )

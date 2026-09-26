@@ -17,7 +17,14 @@ import json
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    model_serializer,
+    model_validator,
+)
 
 # The projection grammar a source is resolved under. A contract records the version it
 # was proven against, and a resolver refuses one it does not implement.
@@ -47,6 +54,7 @@ class CanonicalInferenceInputSource(BaseModel):
 
     kind: InferenceSourceKind
     items: tuple[str, ...] = ()
+    # A path source's upstream node name, or an element source's producer task id.
     node: str | None = None
     path: str | None = None
     element: int | None = Field(default=None, ge=0)
@@ -83,7 +91,7 @@ class CanonicalInferenceInputSource(BaseModel):
         return self
 
     @model_serializer(mode="wrap")
-    def _omit_unset_element(self, serializer: Any) -> Any:
+    def _omit_unset_element(self, serializer: SerializerFunctionWrapHandler) -> Any:
         # A path or literal source serializes, and so digests, without the element key.
         dumped = serializer(self)
         if isinstance(dumped, dict) and dumped.get("element") is None:

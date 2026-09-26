@@ -227,18 +227,26 @@ class SSHConfig:
         )
 
 
-def _results_archive(results: dict[str, bytes]) -> bytes:
-    """A tar placing each upstream task's result envelope under the hydrated root."""
+def _tar(files: dict[str, tuple[bytes, int]]) -> bytes:
+    """A tar of each file's bytes and mode at its absolute container path."""
     stream = io.BytesIO()
     with tarfile.open(fileobj=stream, mode="w") as tar:
-        for task_id, data in results.items():
-            info = tarfile.TarInfo(
-                name=f"{_HYDRATED_RESULTS_ROOT.lstrip('/')}/{task_id}/{RESULTS_NAME}"
-            )
+        for path, (data, mode) in files.items():
+            info = tarfile.TarInfo(name=path.lstrip("/"))
             info.size = len(data)
-            info.mode = 0o644
+            info.mode = mode
             tar.addfile(info, io.BytesIO(data))
     return stream.getvalue()
+
+
+def _results_archive(results: dict[str, bytes]) -> bytes:
+    """A tar placing each upstream task's result envelope under the hydrated root."""
+    return _tar(
+        {
+            f"{_HYDRATED_RESULTS_ROOT}/{task_id}/{RESULTS_NAME}": (data, 0o644)
+            for task_id, data in results.items()
+        }
+    )
 
 
 def _resolve_resource_limits(
@@ -1189,14 +1197,9 @@ class SSHExecutor(Executor):
         )
 
     def _build_ssh_run_archive(self) -> bytes:
-        script_bytes = _SSH_RUN_SCRIPT_SOURCE.read_bytes()
-        stream = io.BytesIO()
-        with tarfile.open(fileobj=stream, mode="w") as tar:
-            info = tarfile.TarInfo(name=_SSH_RUN_ENTRYPOINT_PATH.lstrip("/"))
-            info.size = len(script_bytes)
-            info.mode = 0o755
-            tar.addfile(info, io.BytesIO(script_bytes))
-        return stream.getvalue()
+        return _tar(
+            {_SSH_RUN_ENTRYPOINT_PATH: (_SSH_RUN_SCRIPT_SOURCE.read_bytes(), 0o755)}
+        )
 
     def _stage_inputs_locally(
         self, resolved_inputs: list[ResolvedSSHInput], session_id: str

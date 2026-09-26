@@ -375,11 +375,10 @@ def _positive_int(data: dict[str, Any], key: str) -> int | None:
 
 def canonical_contract(spec: InferenceSpec) -> CanonicalInferenceContract:
     """The contract a leaf's embodiments resolve and run, proven from the spec alone."""
-    model = (spec.model_name or "").strip()
-    if not model:
-        raise CanonicalProjectionError("the leaf declares no model source")
     return CanonicalInferenceContract(
-        model=model, source=canonical_source(spec), params=canonical_sampling(spec)
+        model=_declared_model(spec),
+        source=canonical_source(spec),
+        params=canonical_sampling(spec),
     )
 
 
@@ -391,11 +390,8 @@ def element_contract(
     The contract names the element by its producer and index, is proven from the spec's
     model and sampling, and resolves to exactly one prompt.
     """
-    model = (spec.model_name or "").strip()
-    if not model:
-        raise CanonicalProjectionError("the leaf declares no model source")
     return CanonicalInferenceContract(
-        model=model,
+        model=_declared_model(spec),
         source=CanonicalInferenceInputSource(
             kind=InferenceSourceKind.UPSTREAM,
             node=producer_task_id,
@@ -404,6 +400,12 @@ def element_contract(
         ),
         params=canonical_sampling(spec),
     )
+
+
+def _declared_model(spec: InferenceSpec) -> str:
+    if not (model := (spec.model_name or "").strip()):
+        raise CanonicalProjectionError("the leaf declares no model source")
+    return model
 
 
 def canonical_result(

@@ -47,36 +47,9 @@ def _output_path(workflow_id: str, name: str) -> str:
     return f"/workflows/{workflow_id}/outputs/{quote(name, safe='')}"
 
 
-def _output_page_params(
-    limit: int,
-    before: str | None,
-    after: str | None,
-    output: str | None,
-    scope: str | None,
-) -> dict[str, str]:
-    params = {"limit": str(limit)}
-    for name, value in (
-        ("before", before),
-        ("after", after),
-        ("output", output),
-        ("scope", scope),
-    ):
-        if value is not None:
-            params[name] = value
-    return params
-
-
-def _output_member_params(
-    scope: str | None, key: str | None, sequence: int | None
-) -> dict[str, str]:
-    params: dict[str, str] = {}
-    if scope is not None:
-        params["scope"] = scope
-    if key is not None:
-        params["key"] = key
-    if sequence is not None:
-        params["sequence"] = str(sequence)
-    return params
+def _query(**params: str | int | None) -> dict[str, str]:
+    """Query parameters with each unset one left out."""
+    return {name: str(value) for name, value in params.items() if value is not None}
 
 
 class Workflows(SyncResource):
@@ -177,7 +150,9 @@ class Workflows(SyncResource):
         data = self._client._request(
             "GET",
             f"/workflows/{workflow_id}/outputs",
-            params=_output_page_params(limit, before, after, output, scope),
+            params=_query(
+                limit=limit, before=before, after=after, output=output, scope=scope
+            ),
         )
         return WorkflowOutputPage.model_validate(data)
 
@@ -193,7 +168,7 @@ class Workflows(SyncResource):
         data = self._client._request(
             "GET",
             _output_path(workflow_id, name),
-            params=_output_member_params(scope, key, sequence),
+            params=_query(scope=scope, key=key, sequence=sequence),
         )
         return WorkflowOutputValue.model_validate(data)
 
@@ -324,7 +299,9 @@ class AsyncWorkflows(AsyncResource):
         data = await self._client._request(
             "GET",
             f"/workflows/{workflow_id}/outputs",
-            params=_output_page_params(limit, before, after, output, scope),
+            params=_query(
+                limit=limit, before=before, after=after, output=output, scope=scope
+            ),
         )
         return WorkflowOutputPage.model_validate(data)
 
@@ -340,7 +317,7 @@ class AsyncWorkflows(AsyncResource):
         data = await self._client._request(
             "GET",
             _output_path(workflow_id, name),
-            params=_output_member_params(scope, key, sequence),
+            params=_query(scope=scope, key=key, sequence=sequence),
         )
         return WorkflowOutputValue.model_validate(data)
 

@@ -612,9 +612,10 @@ class Dispatcher:
                 )
 
         # 6. Resolve stage references
+        context = self._build_stage_context(record)
         try:
             rendered_task, upstream_results = self._resolve_stage_references(
-                task_id, task, record
+                task_id, task, context
             )
         except StageReferenceNotReady as exc:
             self._logger.debug("Task %s waiting on stage artifacts: %s", task_id, exc)
@@ -663,7 +664,7 @@ class Dispatcher:
             return True
 
         try:
-            self._validate_ssh_inputs(record, rendered_task.spec)
+            self._validate_ssh_inputs(record, rendered_task.spec, context)
         except StageReferenceNotReady as exc:
             self._logger.debug("Task %s waiting on SSH input stages: %s", task_id, exc)
             self.requeue_task(
@@ -850,7 +851,9 @@ class Dispatcher:
                 continue
             try:
                 resolved, child_upstream = self._resolve_stage_references(
-                    child_id, child_record.task, child_record
+                    child_id,
+                    child_record.task,
+                    self._build_stage_context(child_record),
                 )
                 resolved.spec.validate_dispatchable()
                 if (condition := resolved.spec.condition) is not None and str(
@@ -1141,14 +1144,16 @@ class Dispatcher:
     # ------------------------------------------------------------------ #
 
     def _resolve_stage_references(
-        self, task_id: str, task: TaskEnvelopeTemplate, record: TaskRecord
+        self,
+        task_id: str,
+        task: TaskEnvelopeTemplate,
+        context: dict[str, TaskRecord],
     ) -> tuple[TaskEnvelopeStrict, dict[str, ResultBinding] | None]:
         """Render a task's placeholders and name each upstream result it receives.
 
         Placeholders render here, against the upstream values they name; the upstream
         results themselves travel as bindings the worker hydrates.
         """
-        context = self._build_stage_context(record)
         resolved_task: TaskEnvelopeTemplate = task
         if context and task.has_placeholder():
             resolved_task = self._resolve_placeholders(task, context)
@@ -1294,11 +1299,12 @@ class Dispatcher:
             bindings[name] = binding
         return bindings
 
-    def _validate_ssh_inputs(self, record: TaskRecord, spec: TaskSpecStrict) -> None:
+    def _validate_ssh_inputs(
+        self, record: TaskRecord, spec: TaskSpecStrict, context: dict[str, TaskRecord]
+    ) -> None:
         """Check that each SSH input names a settled upstream stage of the task."""
         if not isinstance(spec, SSHSpecStrict) or not spec.inputs:
             return
-        context = self._build_stage_context(record)
         for entry in spec.inputs:
             stage_name = entry.stage.strip()
             if not stage_name:

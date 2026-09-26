@@ -3526,7 +3526,7 @@ class TaskRuntime:
         )
 
     def _read_input_values(
-        self, snapshots: list["_AgentInputSnapshot"]
+        self, snapshots: list[_AgentInputSnapshot]
     ) -> dict[ContentReference, ResultEnvelope | Exception]:
         """Read every result the snapshots' inputs are frozen to, off the lock."""
         values: dict[ContentReference, ResultEnvelope | Exception] = {}
@@ -3544,7 +3544,7 @@ class TaskRuntime:
         self,
         workflow_id: str,
         engine: OrchestrationEngine,
-        snapshot: "_AgentInputSnapshot",
+        snapshot: _AgentInputSnapshot,
         values: dict[ContentReference, ResultEnvelope | Exception],
         advance: Advance,
     ) -> None:
@@ -4574,12 +4574,12 @@ class TaskRuntime:
                 return FailureOutcome(
                     DispatchEnd.MERGE_RETURNED, record.attempts, [], []
                 )
+            if error:
+                record.last_error = error
             if (
                 failure_kind is TaskFailureKind.INPUT_UNAVAILABLE
                 and record.status != TaskStatus.CANCELLING
             ):
-                if error:
-                    record.last_error = error
                 end = self._return_dispatch_locked(
                     record, increment_retry=False, front=False
                 )
@@ -4590,8 +4590,6 @@ class TaskRuntime:
                 return FailureOutcome(end, record.attempts, [], [])
             if worker_id not in record.failed_workers:
                 record.failed_workers.append(worker_id)
-            if error:
-                record.last_error = error
             if _failed_task_can_retry(record, retryable):
                 end = self._return_dispatch_locked(
                     record, increment_retry=True, front=True

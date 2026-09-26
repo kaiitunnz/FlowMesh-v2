@@ -139,9 +139,10 @@ def test_dispatcher_resolves_ssh_input_stage_names_from_local_stage_names() -> N
     )
 
     spec = SSHSpecStrict.model_validate(current.task.spec.model_dump())
-    dispatcher._validate_ssh_inputs(current, spec)  # noqa: SLF001
-    _, upstream_results = dispatcher._resolve_stage_references(  # noqa: SLF001
-        current.task_id, current.task, current
+    context = dispatcher._build_stage_context(current)
+    dispatcher._validate_ssh_inputs(current, spec, context)
+    _, upstream_results = dispatcher._resolve_stage_references(
+        current.task_id, current.task, context
     )
 
     assert upstream_results is not None
@@ -184,7 +185,9 @@ def test_dispatcher_requeues_when_ssh_input_stage_not_done() -> None:
     spec = SSHSpecStrict.model_validate(current.task.spec.model_dump())
 
     with pytest.raises(StageReferenceNotReady):
-        dispatcher._validate_ssh_inputs(current, spec)  # noqa: SLF001
+        dispatcher._validate_ssh_inputs(
+            current, spec, dispatcher._build_stage_context(current)
+        )
 
 
 def test_build_stage_context_includes_only_transitive_dependencies() -> None:
@@ -322,9 +325,7 @@ def test_upstream_bindings_exclude_unrelated_completed_stages(
     )
 
     context = dispatcher._build_stage_context(current)  # noqa: SLF001
-    upstream_results = dispatcher._upstream_bindings(  # noqa: SLF001
-        context, current.task_id
-    )
+    upstream_results = dispatcher._upstream_bindings(context, current.task_id)
 
     assert set(upstream_results) == {"preprocess"}
 

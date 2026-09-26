@@ -15,6 +15,8 @@ missing, corrupt, out of the task's scope, or not a result envelope fails the ta
 import time
 from typing import Any
 
+from pydantic import BaseModel
+
 from shared.content import ContentReference, ContentStoreError, ContentUnavailable
 from shared.harness import AgentEpisodeDispatch, InputBinding
 from shared.schemas.event import TaskFailureKind
@@ -156,11 +158,9 @@ class TaskInputHydrator:
             stage: reader.envelope(binding)
             for stage, binding in _bound(child.upstream_results)
         }
-        hydrated = child.model_copy(
-            update={"spec": _with_upstream_spec(child.spec, upstream)}
+        return _as_dispatched(
+            child.model_copy(update={"spec": _with_upstream_spec(child.spec, upstream)})
         )
-        wire = hydrated.model_dump(mode="json", exclude_none=True, by_alias=True)
-        return MergedChildTaskStrict.model_validate(normalize_numbers(wire))
 
     def read(self, task_id: str, scope: str, reference: ContentReference) -> bytes:
         return read_input(self._plane, task_id, scope, reference, self._backoff_sec)
@@ -276,10 +276,10 @@ def _with_upstream_spec[S: TaskSpecStrictBase](
     return spec.model_copy(update={"upstreamResults": merged})
 
 
-def _as_dispatched(task: TaskEnvelopeStrict) -> TaskEnvelopeStrict:
-    """The envelope as an inline dispatch would have delivered it to this worker."""
-    wire = task.model_dump(mode="json", exclude_none=True, by_alias=True)
-    return TaskEnvelopeStrict.model_validate(normalize_numbers(wire))
+def _as_dispatched[M: BaseModel](model: M) -> M:
+    """The model as an inline dispatch delivers it to this worker."""
+    wire = model.model_dump(mode="json", exclude_none=True, by_alias=True)
+    return type(model).model_validate(normalize_numbers(wire))
 
 
 __all__ = ["TaskInputHydrator", "input_unavailable", "input_unreadable", "read_input"]
