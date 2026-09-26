@@ -435,7 +435,8 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   onto real object storage and leaves the co-located store unstarted, which is the shape
   a production deployment takes. The root provisions the bucket it is pointed at where
   its credential allows, since the scoped session a worker reaches content under covers
-  one scope's prefix rather than the bucket. It is a service
+  one scope's prefix rather than the bucket. Its credential also needs list access on the
+  bucket for a missing object to read as missing. It is a service
   beside the fabric, never the root process: the root and its supervisors hold no
   payload. A worker writes an object there before it reports the reference naming it, so
   a reference that reaches any binding names bytes that already outlive their producer,
