@@ -817,6 +817,24 @@ class OrchestrationEngine:
         return Advance(failed=self._settle_failure(wi.work_item_id)).extend(released)
 
     @_ds_drive(ControlPlaneWindow.POST_START)
+    def on_returned(self, task_id: str) -> None:
+        """Close an in-flight attempt handed back without an outcome, and re-ready it.
+
+        The attempt is not charged: the work item runs again under its invocation.
+        """
+        wi = self._work_item_for_task(task_id)
+        if wi is None or wi.status is not WorkItemStatus.DISPATCHED:
+            return
+        if attempt := self._latest_attempt(wi):
+            attempt.status = AttemptStatus.RETURNED
+            attempt.finished_at = now_iso()
+            self._emitter.emit_attempt(attempt)
+        wi.status = WorkItemStatus.READY
+        self._emit(
+            "attempt_returned", work_item_id=wi.work_item_id, operator_id=wi.operator_id
+        )
+
+    @_ds_drive(ControlPlaneWindow.POST_START)
     def on_uncertain(self, task_id: str) -> Advance:
         """Resolve a lost acknowledgement or route loss for an in-flight work item."""
         wi = self._work_item_for_task(task_id)

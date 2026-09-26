@@ -4527,13 +4527,16 @@ class TaskRuntime:
                 self._merge_children_map.pop(task_id, [])
             ),
         ]
-        engine = self._engines.get(record.workflow_id) if increment_retry else None
+        engine = self._engines.get(record.workflow_id)
         if engine is not None:
             # A retry reuses the work item and its invocation; the engine records the
-            # failed attempt and readies the work item for a fresh one.
-            engine.on_failed(
-                task_id, record.last_error or "task failed", retryable=True
-            )
+            # failed attempt, or closes an uncharged one, and readies the work item.
+            if increment_retry:
+                engine.on_failed(
+                    task_id, record.last_error or "task failed", retryable=True
+                )
+            else:
+                engine.on_returned(task_id)
         self._release_dispatch_locked(record, moved, front=front)
         if engine is not None:
             self._save_ledger_locked(record.workflow_id)

@@ -58,6 +58,7 @@ class AttemptStatus(StrEnum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     LOST = "lost"  # worker/route loss without a terminal receipt
+    RETURNED = "returned"  # handed back without an outcome, not charged as an attempt
 
 
 class InvocationState(StrEnum):

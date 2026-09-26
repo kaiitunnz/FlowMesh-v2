@@ -4,10 +4,11 @@ Its inputs are in the store, so the report spends no attempt and does not count
 against the worker; it still has to come from the dispatch holding the task.
 """
 
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
+from server.orchestration.state import AttemptStatus, WorkItemStatus
 from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime
 from shared.schemas.event import TaskEvent, TaskFailureKind
@@ -19,7 +20,16 @@ from tests.server.task.test_task_merge import (
     _Registry,
     _runtime,
 )
-from tests.server.task.test_v2_orchestration import _TS
+from tests.server.task.test_v2_orchestration import (
+    _TS,
+    FakeRegistry,
+    _live_runtime,
+    _pop_ready,
+)
+from tests.server.task.test_v2_orchestration import _register as _register_v2
+from tests.server.task.test_v2_orchestration import (
+    _worker,
+)
 
 _ECHO = """
 apiVersion: mloc/v1
@@ -117,3 +127,54 @@ async def test_a_cancelling_task_settles_cancelled() -> None:
     )
 
     assert runtime._tasks[task_id].status == TaskStatus.CANCELLED
+
+
+_V2 = """
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {name: v2-unavailable}
+spec:
+  graph:
+    nodes:
+      - name: a
+        spec: {taskType: echo, data: {type: list, items: [x]}}
+"""
+
+
+@pytest.mark.anyio
+async def test_a_v2_return_closes_its_attempt_without_charging_it() -> None:
+    runtime = _live_runtime(FakeRegistry())
+    workflow_id, ids = await _register_v2(runtime, _V2)
+    task_id = ids["a"]
+    assert _pop_ready(runtime) == [task_id]
+    record_dispatch(runtime, task_id, cast(Any, _worker("wkr-1")), "dsp-1")
+    runtime.mark_started(task_id, "wkr-1", {}, _TS, dispatch_id="dsp-1")
+
+    runtime.fail_dispatch(
+        task_id,
+        "wkr-1",
+        {},
+        _TS,
+        "dsp-1",
+        error="task cannot reach input",
+        retryable=True,
+        failure_kind=TaskFailureKind.INPUT_UNAVAILABLE,
+    )
+
+    engine = runtime._engines[workflow_id]
+    work_item = engine.work_item(task_id)
+    assert work_item is not None
+    assert work_item.status is WorkItemStatus.READY
+    assert [engine._attempts[a].status for a in work_item.attempt_ids] == [
+        AttemptStatus.RETURNED
+    ]
+    assert runtime._tasks[task_id].attempts == 0
+
+    assert _pop_ready(runtime) == [task_id]
+    record_dispatch(runtime, task_id, cast(Any, _worker("wkr-2")), "dsp-2")
+    runtime.mark_started(task_id, "wkr-2", {}, _TS, dispatch_id="dsp-2")
+    runtime.mark_succeeded(task_id, "wkr-2", {}, _TS, dispatch_id="dsp-2")
+    assert [engine._attempts[a].status for a in work_item.attempt_ids] == [
+        AttemptStatus.RETURNED,
+        AttemptStatus.SUCCEEDED,
+    ]
