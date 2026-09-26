@@ -566,6 +566,7 @@ class EventMonitor:
             error=event.error,
             retryable=event.retryable,
             failure_kind=event.failure_kind,
+            unavailable_inputs=event.unavailable_inputs,
         )
         match failure.end:
             case DispatchEnd.STALE:

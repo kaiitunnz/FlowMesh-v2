@@ -4,7 +4,7 @@ import threading
 import time
 from collections import defaultdict, deque
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from itertools import chain
 from typing import Any, cast
 
@@ -252,6 +252,16 @@ class _FanoutRead:
 
 
 @dataclass(frozen=True)
+class _InputCheck:
+    """A task held while control checks the inputs its worker could not read."""
+
+    worker_id: str
+    references: tuple[ContentReference, ...]
+    # Control could not reach the store either, so the worker is not at fault.
+    shared_outage: bool = False
+
+
+@dataclass(frozen=True)
 class _InputElement:
     """The producer element a leaf fan-out child runs on."""
 
@@ -478,7 +488,7 @@ class TaskRuntime:
         self._worker_registry = worker_registry
         self._logger = logger
         self._results = results
-        self._redrive = redrive(self._redrive_workflow, logger)
+        self._redrive = redrive(self._drive_workflow, logger)
         self._feasibility_check = feasibility_check
         self._policy_surface = surface if surface is not None else PolicySurface()
         self._secret_vault = secret_vault
@@ -522,6 +532,7 @@ class TaskRuntime:
         # The last dispatch of each task that ended by returning it to the queue: its
         # worker and dispatch id, and the tasks the return moved.
         self._returned_dispatches: dict[str, tuple[str, str | None, list[str]]] = {}
+        self._input_checks: dict[str, _InputCheck] = {}
         self._report_writes = _ReportWrites()
         self._unacknowledged: dict[str, _Unacknowledged] = {}
         self._workflow_epoch_tasks: dict[str, deque[set[str]]] = {}
@@ -3180,6 +3191,76 @@ class TaskRuntime:
         )
         return advance
 
+    def _drive_workflow(self, workflow_id: str) -> None:
+        self._check_unavailable_inputs(workflow_id)
+        self._redrive_workflow(workflow_id)
+
+    def _check_unavailable_inputs(self, workflow_id: str) -> None:
+        """Attribute each held task's unreadable inputs by reading them from here.
+
+        The reads run off the lock with control's own store access. Content missing or
+        corrupt here fails the task; a store control cannot reach either holds it until
+        the store answers, blaming no one; content control reads fine means the worker's
+        own path to the store failed, so the task runs again elsewhere.
+        """
+        with self._lock:
+            checks = {
+                task_id: check
+                for task_id, check in self._input_checks.items()
+                if (record := self._tasks.get(task_id)) is not None
+                and record.workflow_id == workflow_id
+            }
+        if not checks:
+            return
+        verdicts = {
+            task_id: self._verify_inputs(check.references)
+            for task_id, check in checks.items()
+        }
+        with self._cv:
+            for task_id, verdict in verdicts.items():
+                check = checks[task_id]
+                if self._input_checks.get(task_id) is not check:
+                    continue
+                record = self._tasks.get(task_id)
+                if record is None or record.status != TaskStatus.PENDING:
+                    self._input_checks.pop(task_id, None)
+                    continue
+                if isinstance(verdict, ResultUnavailable):
+                    self._input_checks[task_id] = replace(check, shared_outage=True)
+                    self._redrive.schedule(workflow_id)
+                    continue
+                del self._input_checks[task_id]
+                if isinstance(verdict, ResultUnreadable):
+                    self.mark_failed(
+                        task_id,
+                        check.worker_id,
+                        {},
+                        now_iso(),
+                        error=f"input_unreadable: {verdict}",
+                    )
+                    continue
+                if not check.shared_outage and (
+                    check.worker_id not in record.failed_workers
+                ):
+                    record.failed_workers.append(check.worker_id)
+                if self._enqueue_ready_locked(task_id, front=False):
+                    self._cv.notify_all()
+                self._commit_locked(task_id)
+
+    def _verify_inputs(
+        self, references: tuple[ContentReference, ...]
+    ) -> ResultUnavailable | ResultUnreadable | None:
+        """Why control cannot read these objects either, or None when it reads them."""
+        unavailable: ResultUnavailable | None = None
+        for reference in references:
+            try:
+                self._results.verify(reference)
+            except ResultUnreadable as exc:
+                return exc
+            except ResultUnavailable as exc:
+                unavailable = exc
+        return unavailable
+
     def _redrive_workflow(self, workflow_id: str) -> None:
         """Drive the advances of a workflow that wait on a read of stored results.
 
@@ -4394,12 +4475,14 @@ class TaskRuntime:
         error: str | None = None,
         retryable: bool | None = None,
         failure_kind: TaskFailureKind | None = None,
+        unavailable_inputs: Sequence[ContentReference] | None = None,
     ) -> FailureOutcome:
         """Apply a worker's report that its dispatch of a task failed.
 
         A report from the dispatch holding a running task returns a merged dispatch to
         run its tasks alone. A task whose inputs were in a store its worker could not
-        reach returns to the queue without spending an attempt or blaming the worker.
+        reach returns without spending an attempt; when the report names those inputs
+        the task is held until control has read them itself.
         Otherwise the failure is charged to the worker and the task either returns to
         the head of the queue for another attempt or settles: FAILED, or CANCELLED when
         a cancel is already under way. A report on a settled task persists its
@@ -4419,6 +4502,7 @@ class TaskRuntime:
                 error,
                 retryable,
                 failure_kind,
+                unavailable_inputs,
             ),
         )
 
@@ -4432,6 +4516,7 @@ class TaskRuntime:
         error: str | None,
         retryable: bool | None,
         failure_kind: TaskFailureKind | None,
+        unavailable_inputs: Sequence[ContentReference] | None,
     ) -> FailureOutcome:
         with self._cv:
             record = self._tasks.get(task_id)
@@ -4456,6 +4541,10 @@ class TaskRuntime:
                 end = self._return_dispatch_locked(
                     record, increment_retry=False, front=False
                 )
+                if unavailable_inputs:
+                    self._hold_for_input_check_locked(
+                        record, worker_id, tuple(unavailable_inputs)
+                    )
                 return FailureOutcome(end, record.attempts, [], [])
             if worker_id not in record.failed_workers:
                 record.failed_workers.append(worker_id)
@@ -4476,6 +4565,17 @@ class TaskRuntime:
                 else DispatchEnd.FAILED
             )
             return FailureOutcome(end, record.attempts, impacted, usages)
+
+    def _hold_for_input_check_locked(
+        self,
+        record: TaskRecord,
+        worker_id: str,
+        references: tuple[ContentReference, ...],
+    ) -> None:
+        """Keep a returned task out of the queue until its inputs are attributed."""
+        self._remove_from_ready_locked(record.task_id)
+        self._input_checks[record.task_id] = _InputCheck(worker_id, references)
+        self._redrive.drive_now(record.workflow_id)
 
     def return_dispatch(
         self,

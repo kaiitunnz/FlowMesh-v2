@@ -68,6 +68,19 @@ class ResultReader:
                 f"envelope: {exc}"
             ) from exc
 
+    def verify(self, reference: ContentReference) -> None:
+        """Read one object from the store itself, bypassing the cache, and verify it.
+
+        Raises ``ResultUnavailable`` while the store cannot be reached and
+        ``ResultUnreadable`` for an object that is missing or corrupt.
+        """
+        try:
+            self._store.hydrate(reference)
+        except ContentUnavailable as exc:
+            raise ResultUnavailable(str(exc)) from exc
+        except ContentStoreError as exc:
+            raise ResultUnreadable(str(exc)) from exc
+
     def _hydrate(self, reference: ContentReference) -> bytes:
         key = reference
         with self._lock:
