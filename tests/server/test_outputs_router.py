@@ -139,9 +139,9 @@ async def _get(wf: _Workflow, name: str, **params: Any) -> Any:
 async def _status(call: Any) -> tuple[int, str]:
     with pytest.raises(HTTPException) as caught:
         await call
-    detail = caught.value.detail
+    detail: Any = caught.value.detail
     return caught.value.status_code, (
-        detail["code"] if isinstance(detail, dict) else str(detail)
+        str(detail["code"]) if isinstance(detail, dict) else str(detail)
     )
 
 
