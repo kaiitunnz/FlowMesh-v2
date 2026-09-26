@@ -1287,9 +1287,17 @@ class SSHExecutor(Executor):
     def _run_staging_container(
         client: DockerClient, create_kwargs: dict[str, Any], hydrated: dict[str, bytes]
     ) -> None:
-        """Run the staging container with each hydrated result placed in it first."""
+        """Run the staging container with each hydrated result placed in it first.
+
+        A staging failure is retryable: it is a download or a copy that may succeed on
+        another attempt.
+        """
+        image = create_kwargs["image"]
+        try:
+            client.images.get(image)
+        except Exception:
+            client.images.pull(image)
         container = client.containers.create(**create_kwargs)
-        assert isinstance(container, Container)
         try:
             if hydrated:
                 container.put_archive("/", _results_archive(hydrated))
@@ -1298,7 +1306,8 @@ class SSHExecutor(Executor):
             if (code := status.get("StatusCode", 1)) != 0:
                 logs = container.logs().decode("utf-8", errors="replace")
                 raise ExecutionError(
-                    f"Staging SSH inputs failed with exit code {code}: {logs.strip()}"
+                    f"Staging SSH inputs failed with exit code {code}: {logs.strip()}",
+                    retryable=True,
                 )
         finally:
             try:

@@ -7,6 +7,7 @@ from typing import cast
 from unittest.mock import MagicMock
 
 import pytest
+from docker import DockerClient
 from docker.models.containers import Container
 
 from shared.content import reference_for
@@ -15,6 +16,7 @@ from shared.tasks.specs import SSHSpecStrict
 from shared.tasks.worker_message import WorkerTaskMessage
 from tests.worker.factories import DEFAULT_WORKER_CONFIG, make_live_worker_config
 from worker.config import WorkerConfig
+from worker.executors.base_executor import ExecutionError
 from worker.executors.ssh_executor import ResolvedSSHInput, SSHConfig, SSHExecutor
 
 
@@ -280,40 +282,47 @@ class _FakeVolumes:
         return _FakeVolume()
 
 
-class _FakeContainer(Container):
-    def __init__(self) -> None:
-        self.archives: list[tuple[str, bytes]] = []
-        self.started = False
-        self.removed = False
-
-    def put_archive(self, path: str, data: bytes) -> bool:  # type: ignore[override]
-        self.archives.append((path, data))
-        return True
-
-    def start(self, **kwargs: object) -> None:  # type: ignore[override]
-        self.started = True
-
-    def wait(self, **kwargs: object) -> dict[str, int]:  # type: ignore[override]
-        return {"StatusCode": 0}
-
-    def remove(self, **kwargs: object) -> None:  # type: ignore[override]
-        self.removed = True
+def _container(status_code: int = 0, logs: bytes = b"") -> MagicMock:
+    container = MagicMock(spec=Container)
+    container.wait.return_value = {"StatusCode": status_code}
+    container.logs.return_value = logs
+    return container
 
 
 class _FakeContainers:
     def __init__(self) -> None:
         self.kwargs: dict[str, object] | None = None
-        self.container = _FakeContainer()
+        self.container = _container()
 
-    def create(self, **kwargs: object) -> _FakeContainer:
+    def create(self, **kwargs: object) -> MagicMock:
         self.kwargs = kwargs
         return self.container
+
+
+class _FakeImages:
+    def __init__(self, present: bool = True) -> None:
+        self.present = present
+        self.pulled: list[str] = []
+
+    def get(self, name: str) -> object:
+        if not self.present:
+            raise RuntimeError(f"No such image: {name}")
+        return object()
+
+    def pull(self, name: str) -> object:
+        self.pulled.append(name)
+        return object()
 
 
 class _FakeClient:
     def __init__(self) -> None:
         self.volumes = _FakeVolumes()
         self.containers = _FakeContainers()
+        self.images = _FakeImages()
+
+
+def _archives(container: MagicMock) -> list[tuple[str, bytes]]:
+    return [call.args for call in container.put_archive.call_args_list]
 
 
 def _stage_in_volume(
@@ -353,8 +362,8 @@ def _stage_in_volume(
     kwargs = fake_client.containers.kwargs
     assert kwargs is not None
     assert kwargs["network_mode"] == "container:flowmesh-worker-1"
-    assert fake_client.containers.container.started
-    assert fake_client.containers.container.removed
+    fake_client.containers.container.start.assert_called_once()
+    fake_client.containers.container.remove.assert_called_once()
     return fake_client, cast(list[str], kwargs["command"])[2]
 
 
@@ -369,7 +378,7 @@ def test_stage_inputs_in_volume_downloads_missing_upstream_results(
         "'http://flowmesh.example/api/v1/results/task-remote/bundle"
         "?include=results&include=artifacts' | tar -xz -C /dst" in command
     )
-    assert fake_client.containers.container.archives == []
+    assert _archives(fake_client.containers.container) == []
 
 
 def test_stage_inputs_in_volume_places_hydrated_results(
@@ -385,11 +394,55 @@ def test_stage_inputs_in_volume_places_hydrated_results(
         "cp /flowmesh-hydrated/task-remote/results.json "
         "/dst/task-remote/results.json" in command
     )
-    ((path, data),) = fake_client.containers.container.archives
+    ((path, data),) = _archives(fake_client.containers.container)
     assert path == "/"
     with tarfile.open(fileobj=io.BytesIO(data)) as archive:
         member = archive.extractfile("flowmesh-hydrated/task-remote/results.json")
         assert member is not None and member.read() == _ENVELOPE
+
+
+def _stage_remote(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_client: _FakeClient
+) -> str:
+    monkeypatch.setenv("FLOWMESH_BASE_URL", "http://flowmesh.example")
+    executor = SSHExecutor(_worker_config(tmp_path))
+    return executor._stage_inputs_in_volume(  # noqa: SLF001
+        cast(DockerClient, fake_client),
+        [
+            ResolvedSSHInput(
+                stage="remote",
+                task_id="task-remote",
+                source_path=tmp_path / "results" / "task-remote",
+                mount_path="/mnt/flowmesh/inputs/remote",
+            )
+        ],
+        "flowmesh-results",
+        "session-x",
+    )
+
+
+def test_a_failed_staging_container_is_retryable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_client = _FakeClient()
+    fake_client.containers.container = _container(1, b"wget: download timed out")
+
+    with pytest.raises(ExecutionError) as caught:
+        _stage_remote(tmp_path, monkeypatch, fake_client)
+
+    assert caught.value.retryable is True
+    assert "download timed out" in str(caught.value)
+
+
+def test_a_missing_staging_image_is_pulled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_client = _FakeClient()
+    fake_client.images = _FakeImages(present=False)
+
+    _stage_remote(tmp_path, monkeypatch, fake_client)
+
+    assert fake_client.images.pulled == ["busybox:1.36.1"]
 
 
 def test_extract_result_bundle_rejects_path_traversal(tmp_path: Path) -> None:
