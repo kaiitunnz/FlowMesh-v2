@@ -1,5 +1,6 @@
 """The runner hydrates a task's referenced inputs before anything reads them."""
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -27,11 +28,14 @@ class _Plane:
     def __init__(self, store: FabricObjectStore) -> None:
         self.store = store
         self.error: Exception | None = None
+        self.on_read: Callable[[], None] | None = None
 
     def for_task(self, task_id: str) -> FabricObjectStore:
         return self.store
 
     def hydrate(self, task_id: str, reference: ContentReference) -> bytes:
+        if self.on_read is not None:
+            self.on_read()
         if self.error is not None:
             raise self.error
         return self.store.hydrate(reference)
@@ -66,7 +70,9 @@ def _stored(plane: _Plane, task_id: str, result: Any) -> ResultBinding:
     return ResultBinding(task_id=task_id, reference=reference)
 
 
-def _run(tmp_path: Path, plane: _Plane, spec: dict[str, Any], **message: Any) -> Any:
+def _runner(
+    tmp_path: Path, plane: _Plane, spec: dict[str, Any], **message: Any
+) -> tuple[Runner, MagicMock, "_Recording"]:
     lifecycle = MagicMock()
     lifecycle.worker_id = "wrk-test"
     lifecycle.cost_per_hour = 1.0
@@ -78,7 +84,7 @@ def _run(tmp_path: Path, plane: _Plane, spec: dict[str, Any], **message: Any) ->
         spec, task_id="tsk-1", content_scope="org-a", **message
     )
     executor = _Recording()
-    Runner(
+    runner = Runner(
         lifecycle=lifecycle,
         task_stream=[msg],
         results_dir=tmp_path / "out",
@@ -86,7 +92,13 @@ def _run(tmp_path: Path, plane: _Plane, spec: dict[str, Any], **message: Any) ->
         executors={"echo": executor, "default": executor},
         default_executor=executor,
         logger=MagicMock(),
-    ).start()
+    )
+    return runner, lifecycle, executor
+
+
+def _run(tmp_path: Path, plane: _Plane, spec: dict[str, Any], **message: Any) -> Any:
+    runner, lifecycle, executor = _runner(tmp_path, plane, spec, **message)
+    runner.start()
     return lifecycle, executor
 
 
@@ -123,6 +135,29 @@ def test_an_unreachable_store_reports_the_inputs_unavailable(tmp_path: Path) -> 
     kwargs = lifecycle.set_failed.call_args.kwargs
     assert kwargs["retryable"] is True
     assert kwargs["failure_kind"] is TaskFailureKind.INPUT_UNAVAILABLE
+    assert kwargs["unavailable_inputs"] == (upstream.reference,)
+
+
+def test_a_cancel_landing_during_hydration_stops_before_execution(
+    tmp_path: Path,
+) -> None:
+    plane = _Plane(SharedFilesystemObjectStore(tmp_path / "cas"))
+    upstream = _stored(plane, "tsk-p", {"items": ["alpha"]})
+    runner, lifecycle, executor = _runner(
+        tmp_path,
+        plane,
+        {"taskType": "echo"},
+        task_type=TaskType.ECHO,
+        upstream_results={"p": upstream},
+    )
+    plane.on_read = lambda: runner._pending_cancels.add("tsk-1")
+
+    runner.start()
+
+    assert executor.seen == []
+    lifecycle.set_cancelled.assert_called_once()
+    lifecycle.set_failed.assert_not_called()
+    assert "tsk-1" not in runner._pending_cancels
 
 
 def test_a_preparation_resolves_its_hydrated_upstream(tmp_path: Path) -> None:

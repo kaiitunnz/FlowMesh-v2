@@ -12,6 +12,7 @@ from typing import Any, cast
 import pytest
 from google.protobuf.json_format import MessageToDict, ParseDict
 from google.protobuf.struct_pb2 import Struct
+from pydantic import ValidationError
 
 from server.task.results import ResultReader
 from shared.content import (
@@ -33,9 +34,14 @@ from shared.schemas.event import TaskFailureKind
 from shared.schemas.result import RESULT_MEDIA_TYPE, ResultEnvelope
 from shared.schemas.result.binding import collection_elements, value_text
 from shared.tasks import MergedChildTaskStrict
-from shared.tasks.result_binding import ResultBinding, ResultValueRef
+from shared.tasks.result_binding import (
+    ResultBinding,
+    ResultElementRef,
+    ResultValueRef,
+)
 from shared.tasks.worker_message import WorkerTaskMessage
 from shared.utils.json import normalize_numbers
+from worker.content.access import ContentBackendUnsupported
 from worker.content.inputs import TaskInputHydrator
 from worker.executors.base_executor import ExecutionError
 from worker.executors.inference.resolution import resolve_task_contract
@@ -217,7 +223,7 @@ def test_a_fan_out_element_hydrates_to_the_inline_data(
         plane,
         _message(
             spec,
-            input_element=ResultValueRef(reference=producer.reference, element=index),
+            input_element=ResultElementRef(reference=producer.reference, element=index),
         ),
     )
     inline = _deliver(_message({**spec, "data": {"type": "list", "items": [element]}}))
@@ -292,7 +298,35 @@ def test_an_unreachable_store_reports_the_inputs_unavailable(plane: _Plane) -> N
 
     assert caught.value.retryable
     assert caught.value.failure_kind is TaskFailureKind.INPUT_UNAVAILABLE
+    assert caught.value.unavailable_inputs == (producer.reference,)
     assert len(plane.reads) == 3
+
+
+def test_a_worker_that_cannot_open_its_store_fails_as_its_own_fault(
+    plane: _Plane,
+) -> None:
+    producer = _store(plane, "tsk-p", _PRODUCED)
+    plane.error = ContentBackendUnsupported("unknown content store backend nfs")
+
+    with pytest.raises(ExecutionError) as caught:
+        _hydrate(
+            plane, _message({"taskType": "echo"}, upstream_results={"p": producer})
+        )
+
+    assert caught.value.retryable
+    assert caught.value.failure_kind is None
+    assert len(plane.reads) == 1
+
+
+def test_an_element_names_its_index(plane: _Plane) -> None:
+    reference = _store(plane, "tsk-p", _PRODUCED).reference
+    assert reference is not None
+
+    with pytest.raises(ValidationError):
+        _message(
+            {"taskType": "echo"},
+            input_element={"reference": reference.model_dump(mode="json")},
+        )
 
 
 def test_missing_content_fails_the_task(plane: _Plane) -> None:
@@ -342,7 +376,7 @@ def test_an_element_past_the_collection_fails_the_task(plane: _Plane) -> None:
             plane,
             _message(
                 {"taskType": "echo"},
-                input_element=ResultValueRef(reference=producer.reference, element=9),
+                input_element=ResultElementRef(reference=producer.reference, element=9),
             ),
         )
     assert not caught.value.retryable
@@ -359,7 +393,7 @@ def test_a_fan_out_child_contract_resolves_its_hydrated_element(plane: _Plane) -
     )
     message = _message(
         {"taskType": "inference", "data": {"type": "list", "items": ["template"]}},
-        input_element=ResultValueRef(reference=producer.reference, element=1),
+        input_element=ResultElementRef(reference=producer.reference, element=1),
         declared_contract=contract.model_dump(mode="json"),
     )
 
@@ -388,7 +422,7 @@ def test_an_element_that_is_not_a_prompt_fails_before_any_model(plane: _Plane) -
     )
     message = _message(
         {"taskType": "inference"},
-        input_element=ResultValueRef(reference=producer.reference, element=2),
+        input_element=ResultElementRef(reference=producer.reference, element=2),
         declared_contract=contract.model_dump(mode="json"),
     )
 

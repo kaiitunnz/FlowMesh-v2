@@ -24,7 +24,7 @@ from shared.tasks import (
 )
 from shared.tasks.components import TaskMetadata
 from shared.tasks.merged import MergedChildTaskStrict
-from shared.tasks.result_binding import ResultBinding, ResultValueRef
+from shared.tasks.result_binding import ResultBinding, ResultElementRef
 from shared.utils.json import dedup_json, restore_json
 
 
@@ -62,7 +62,7 @@ class WorkerTaskMessage(BaseModel):
             "hydrates them into the spec's upstream results before the task runs."
         ),
     )
-    input_element: ResultValueRef | None = Field(
+    input_element: ResultElementRef | None = Field(
         default=None,
         description=(
             "The producer collection element a fan-out child runs on: the worker "

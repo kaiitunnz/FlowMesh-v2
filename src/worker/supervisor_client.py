@@ -15,6 +15,7 @@ from google.protobuf.json_format import MessageToDict
 from google.protobuf.struct_pb2 import Struct
 
 from shared._version import FLOWMESH_RELEASE_VERSION
+from shared.content import ContentReference
 from shared.grpc.supervisor.v1 import supervisor_pb2, supervisor_pb2_grpc
 from shared.resident.reports import (
     ResidentBootstrapAck,
@@ -289,6 +290,7 @@ class SupervisorClient:
         metadata: dict[str, Any] | None = None,
         retryable: bool = True,
         failure_kind: TaskFailureKind | None = None,
+        unavailable_inputs: tuple[ContentReference, ...] = (),
     ) -> None:
         event = TaskEvent(
             type="TASK_FAILED",
@@ -298,6 +300,7 @@ class SupervisorClient:
             error=error,
             retryable=retryable,
             failure_kind=failure_kind,
+            unavailable_inputs=list(unavailable_inputs) or None,
             payload=metadata or {},
         )
         self._send_event(event)

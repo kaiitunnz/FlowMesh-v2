@@ -60,7 +60,11 @@ from shared.schemas.command import InterruptMessage, MediatedOpMessage
 from shared.schemas.event import TaskFailureKind
 from shared.schemas.result import ResultEnvelope
 from shared.schemas.result.binding import collection_elements, value_text
-from shared.tasks.result_binding import ResultBinding, ResultValueRef
+from shared.tasks.result_binding import (
+    ResultBinding,
+    ResultElementRef,
+    ResultValueRef,
+)
 from shared.tasks.specs import (
     InferenceEmbodimentKind,
     InferenceSpecStrict,
@@ -245,6 +249,14 @@ class _FanoutRead:
     error: str | None = None
     # The store could not be reached; the collection is still there to read later.
     unavailable: bool = False
+
+
+@dataclass(frozen=True)
+class _InputElement:
+    """The producer element a leaf fan-out child runs on."""
+
+    producer_task_id: str
+    ref: ResultElementRef
 
 
 @dataclass(frozen=True)
@@ -2595,8 +2607,10 @@ class TaskRuntime:
             element = self._input_element_locked(task_id)
             try:
                 contract = (
-                    element_contract(spec, element[0], element[1].element)
-                    if element is not None and element[1].element is not None
+                    element_contract(
+                        spec, element.producer_task_id, element.ref.element
+                    )
+                    if element is not None
                     else canonical_contract(spec)
                 )
             except CanonicalProjectionError:
@@ -2756,7 +2770,7 @@ class TaskRuntime:
             for member in accepted.members
         )
 
-    def input_element(self, task_id: str) -> ResultValueRef | None:
+    def input_element(self, task_id: str) -> ResultElementRef | None:
         """The producer element a leaf fan-out child runs on, for its worker to hydrate.
 
         An agent child receives its element through its accepted input.
@@ -2767,9 +2781,9 @@ class TaskRuntime:
             if engine is None or engine.agent_operator(task_id) is not None:
                 return None
             element = self._input_element_locked(task_id)
-        return element[1] if element is not None else None
+        return element.ref if element is not None else None
 
-    def _input_element_locked(self, task_id: str) -> tuple[str, ResultValueRef] | None:
+    def _input_element_locked(self, task_id: str) -> _InputElement | None:
         record = self._tasks.get(task_id)
         engine = self._engines.get(record.workflow_id) if record else None
         if engine is None:
@@ -2782,8 +2796,11 @@ class TaskRuntime:
             or child_input.legacy_task_id is None
         ):
             return None
-        return child_input.legacy_task_id, ResultValueRef(
-            reference=child_input.content, element=int(child_input.collection_key)
+        return _InputElement(
+            child_input.legacy_task_id,
+            ResultElementRef(
+                reference=child_input.content, element=int(child_input.collection_key)
+            ),
         )
 
     def recorded_input_reference(self, task_id: str) -> ContentReference | None:
@@ -5136,8 +5153,10 @@ class TaskRuntime:
             completed=task_id in self._completed,
             failed=task_id in self._failed,
             input_element=(
-                TaskInputElement(producer_task_id=element[0], index=element[1].element)
-                if element is not None and element[1].element is not None
+                TaskInputElement(
+                    producer_task_id=element.producer_task_id, index=element.ref.element
+                )
+                if element is not None
                 else None
             ),
         )

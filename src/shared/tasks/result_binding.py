@@ -36,4 +36,13 @@ class ResultValueRef(BaseModel):
     element: int | None = None
 
 
-__all__ = ["ResultBinding", "ResultValueRef"]
+class ResultElementRef(BaseModel):
+    """One member of a producer's stored collection."""
+
+    model_config = ConfigDict(frozen=True)
+
+    reference: ContentReference
+    element: int
+
+
+__all__ = ["ResultBinding", "ResultElementRef", "ResultValueRef"]

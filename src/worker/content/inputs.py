@@ -33,7 +33,7 @@ from shared.tasks.worker_message import WorkerTaskMessage
 from shared.utils.json import normalize_numbers
 
 from ..executors.base_executor import ExecutionError
-from .access import ContentAccessDenied
+from .access import ContentAccessDenied, ContentBackendUnsupported
 from .plane import WorkerContentPlane
 
 # A read that cannot reach the store retries briefly before the task reports it.
@@ -41,14 +41,63 @@ _READ_ATTEMPTS = 3
 _READ_BACKOFF_SEC = 0.2
 
 
-def input_unavailable(message: str) -> ExecutionError:
+def input_unavailable(message: str, reference: ContentReference) -> ExecutionError:
     return ExecutionError(
-        message, retryable=True, failure_kind=TaskFailureKind.INPUT_UNAVAILABLE
+        message,
+        retryable=True,
+        failure_kind=TaskFailureKind.INPUT_UNAVAILABLE,
+        unavailable_inputs=(reference,),
     )
 
 
 def input_unreadable(message: str) -> ExecutionError:
     return ExecutionError(f"input_unreadable: {message}", retryable=False)
+
+
+def read_input(
+    plane: WorkerContentPlane | None,
+    task_id: str,
+    scope: str,
+    reference: ContentReference,
+    backoff_sec: float = _READ_BACKOFF_SEC,
+) -> bytes:
+    """One verified input object, classified by what kept it from being read.
+
+    A store that cannot be reached, or access that has not arrived, retries briefly and
+    then reports the input unavailable, naming the reference so control can tell a
+    shared outage from this worker's own path to the store. A worker that reaches no
+    store, or one it cannot open, fails as its own fault. Content that is missing,
+    corrupt, or outside the task's scope fails the task.
+    """
+    if plane is None:
+        raise ExecutionError(
+            f"task {task_id} reads its inputs by reference and this worker reaches "
+            "no fabric content store",
+            retryable=True,
+        )
+    if reference.authorization_scope != scope:
+        raise input_unreadable(
+            f"task {task_id} runs in scope {scope} and an input it names is in "
+            f"{reference.authorization_scope}"
+        )
+    for attempt in range(_READ_ATTEMPTS):
+        try:
+            return plane.hydrate(task_id, reference)
+        except ContentBackendUnsupported as exc:
+            raise ExecutionError(str(exc), retryable=True) from exc
+        except (ContentUnavailable, ContentAccessDenied) as exc:
+            if attempt + 1 == _READ_ATTEMPTS:
+                raise input_unavailable(
+                    f"task {task_id} cannot reach input "
+                    f"{reference.content_digest}: {exc}",
+                    reference,
+                ) from exc
+            time.sleep(backoff_sec)
+        except ContentStoreError as exc:
+            raise input_unreadable(
+                f"task {task_id} input {reference.content_digest}: {exc}"
+            ) from exc
+    raise AssertionError("unreachable")
 
 
 class TaskInputHydrator:
@@ -57,7 +106,6 @@ class TaskInputHydrator:
     def __init__(
         self,
         plane: WorkerContentPlane | None,
-        *,
         backoff_sec: float = _READ_BACKOFF_SEC,
     ) -> None:
         self._plane = plane
@@ -84,7 +132,7 @@ class TaskInputHydrator:
             envelopes[stage] = reader.envelope_bytes(binding)
             upstream[stage] = reader.envelope(binding)
         element: tuple[Any] | None = None
-        if (ref := msg.input_element) is not None and ref.element is not None:
+        if (ref := msg.input_element) is not None:
             source = reader.envelope(ResultBinding(task_id="", reference=ref.reference))
             try:
                 element = (collection_element(source, ref.element),)
@@ -115,33 +163,7 @@ class TaskInputHydrator:
         return MergedChildTaskStrict.model_validate(normalize_numbers(wire))
 
     def read(self, task_id: str, scope: str, reference: ContentReference) -> bytes:
-        """One verified object, retrying a store that is briefly away."""
-        if self._plane is None:
-            raise ExecutionError(
-                f"task {task_id} reads its inputs by reference and this worker reaches "
-                "no fabric content store",
-                retryable=True,
-            )
-        if reference.authorization_scope != scope:
-            raise input_unreadable(
-                f"task {task_id} runs in scope {scope} and an input it names is in "
-                f"{reference.authorization_scope}"
-            )
-        for attempt in range(_READ_ATTEMPTS):
-            try:
-                return self._plane.hydrate(task_id, reference)
-            except (ContentUnavailable, ContentAccessDenied) as exc:
-                if attempt + 1 == _READ_ATTEMPTS:
-                    raise input_unavailable(
-                        f"task {task_id} cannot reach input "
-                        f"{reference.content_digest}: {exc}"
-                    ) from exc
-                time.sleep(self._backoff_sec)
-            except ContentStoreError as exc:
-                raise input_unreadable(
-                    f"task {task_id} input {reference.content_digest}: {exc}"
-                ) from exc
-        raise AssertionError("unreachable")
+        return read_input(self._plane, task_id, scope, reference, self._backoff_sec)
 
 
 class _TaskReader:
@@ -258,4 +280,4 @@ def _as_dispatched(task: TaskEnvelopeStrict) -> TaskEnvelopeStrict:
     return TaskEnvelopeStrict.model_validate(normalize_numbers(wire))
 
 
-__all__ = ["TaskInputHydrator", "input_unavailable", "input_unreadable"]
+__all__ = ["TaskInputHydrator", "input_unavailable", "input_unreadable", "read_input"]

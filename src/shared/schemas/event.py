@@ -3,6 +3,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from shared.content import ContentReference
 from shared.utils.json import normalize_numbers
 from shared.utils.time import now_iso
 
@@ -53,6 +54,10 @@ class TaskEvent(BaseEvent):
     )
     failure_kind: TaskFailureKind | None = Field(
         default=None, description="Why a failed dispatch failed, when that is typed."
+    )
+    unavailable_inputs: list[ContentReference] | None = Field(
+        default=None,
+        description="The input references an input_unavailable failure could not read.",
     )
     payload: dict[str, Any] = Field(
         default_factory=dict, description="Additional event payload."

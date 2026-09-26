@@ -11,7 +11,6 @@ from typing import Any
 from shared.content import (
     ContentReference,
     ContentStoreError,
-    ContentUnavailable,
     FabricObjectStore,
 )
 from shared.harness.adapter import HarnessResultKind
@@ -21,7 +20,7 @@ from shared.inference import (
     ResolvedCanonicalInferenceRequest,
     ResolvedInputMaterialization,
     canonical_result,
-    hydrate_resolved_input,
+    parse_resolved_input,
     write_resolved_input,
 )
 from shared.network.mtls import MutualTlsMaterial
@@ -53,8 +52,7 @@ from shared.tools.search.schema import DEFAULT_SEARCH_PROVIDER
 from shared.utils.manifest import prepare_output_dir, sync_manifest
 from shared.utils.time import now_iso
 
-from .content.access import ContentAccessDenied
-from .content.inputs import TaskInputHydrator, input_unavailable, input_unreadable
+from .content.inputs import TaskInputHydrator, input_unreadable, read_input
 from .egress import MediatedEgressSidecar, ModelEgress, SearchEgress
 from .executors.base_executor import ExecutionError, Executor, TaskCancelledError
 from .executors.episode_support import EpisodeStepResult
@@ -434,26 +432,11 @@ class Runner:
         missing, out of the task's scope, or not the bytes its digest names fails the
         task before any model I/O and before any admission.
         """
-        store = self._object_store(msg.task_id)
-        if store is None:
-            raise ExecutionError(
-                f"task {msg.task_id} runs a prepared request and this worker reaches "
-                "no fabric content store to hydrate it from",
-                retryable=True,
-            )
-        if reference.authorization_scope != msg.content_scope:
-            raise ExecutionError(
-                f"task {msg.task_id} runs in scope {msg.content_scope} and the request "
-                f"it recorded is in {reference.authorization_scope}",
-                retryable=False,
-            )
+        data = read_input(
+            self.lifecycle.content_plane, msg.task_id, msg.content_scope, reference
+        )
         try:
-            hydrated = hydrate_resolved_input(store, reference)
-        except (ContentUnavailable, ContentAccessDenied) as exc:
-            raise input_unavailable(
-                f"task {msg.task_id} cannot reach the request its preparation "
-                f"recorded: {exc}"
-            ) from exc
+            hydrated = parse_resolved_input(reference, data)
         except ContentStoreError as exc:
             raise input_unreadable(
                 f"task {msg.task_id} cannot hydrate the request its preparation "
@@ -805,6 +788,14 @@ class Runner:
                         )
                     self._current_task_id = task_id
                     TaskInputHydrator(self.lifecycle.content_plane).hydrate(msg)
+                    # Hydration can wait on the store, so a cancel may land during it.
+                    with self._cancel_lock:
+                        cancelled_while_hydrating = task_id in self._pending_cancels
+                        self._pending_cancels.discard(task_id)
+                    if cancelled_while_hydrating:
+                        raise TaskCancelledError(
+                            f"Task {task_id} was cancelled before execution"
+                        )
                     if msg.input_preparation:
                         self.lifecycle.notify_task_started(
                             task_id,
@@ -980,14 +971,15 @@ class Runner:
                         shard_index=shard_index,
                         shard_total=shard_total,
                     )
-                    retryable = not isinstance(e, ExecutionError) or e.retryable
+                    controlled = e if isinstance(e, ExecutionError) else None
                     self.lifecycle.set_failed(
                         task_id,
                         str(e),
                         metadata=metadata,
-                        retryable=retryable,
-                        failure_kind=(
-                            e.failure_kind if isinstance(e, ExecutionError) else None
+                        retryable=controlled is None or controlled.retryable,
+                        failure_kind=controlled.failure_kind if controlled else None,
+                        unavailable_inputs=(
+                            controlled.unavailable_inputs if controlled else ()
                         ),
                     )
                     if isinstance(e, ExecutionError):
