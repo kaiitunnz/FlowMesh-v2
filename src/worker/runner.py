@@ -391,6 +391,15 @@ class Runner:
         except InputResolutionError as exc:
             raise ExecutionError(str(exc), retryable=False) from exc
 
+    def _raise_if_cancel_pending(self, task_id: str) -> None:
+        """Honor a cancel that landed while the task read its inputs, which can wait on
+        the store."""
+        with self._cancel_lock:
+            cancelled = task_id in self._pending_cancels
+            self._pending_cancels.discard(task_id)
+        if cancelled:
+            raise TaskCancelledError(f"Task {task_id} was cancelled before execution")
+
     def _materialize_contract(self, msg: WorkerTaskMessage) -> None:
         """Settle the one request a task runs, before its embodiment reaches a model.
 
@@ -788,15 +797,8 @@ class Runner:
                         )
                     self._current_task_id = task_id
                     TaskInputHydrator(self.lifecycle.content_plane).hydrate(msg)
-                    # Hydration can wait on the store, so a cancel may land during it.
-                    with self._cancel_lock:
-                        cancelled_while_hydrating = task_id in self._pending_cancels
-                        self._pending_cancels.discard(task_id)
-                    if cancelled_while_hydrating:
-                        raise TaskCancelledError(
-                            f"Task {task_id} was cancelled before execution"
-                        )
                     if msg.input_preparation:
+                        self._raise_if_cancel_pending(task_id)
                         self.lifecycle.notify_task_started(
                             task_id,
                             task_type=task_type,
@@ -900,6 +902,7 @@ class Runner:
                         notified_task_started = True
 
                         self._materialize_contract(msg)
+                        self._raise_if_cancel_pending(task_id)
 
                         # Disable idle checker during execution
                         self._active_executor_last_used_at = None

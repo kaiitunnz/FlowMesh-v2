@@ -64,6 +64,7 @@ from .base_executor import (
 
 try:
     from docker import DockerClient
+    from docker.errors import ImageNotFound
     from docker.models.containers import Container
     from docker.types import DeviceRequest
 
@@ -72,6 +73,7 @@ except Exception:
     _HAS_DOCKER = False
     if TYPE_CHECKING:
         from docker import DockerClient
+        from docker.errors import ImageNotFound
         from docker.models.containers import Container
         from docker.types import DeviceRequest
     else:
@@ -1298,7 +1300,7 @@ class SSHExecutor(Executor):
         image = create_kwargs["image"]
         try:
             client.images.get(image)
-        except Exception:
+        except ImageNotFound:
             client.images.pull(image)
         container = client.containers.create(**create_kwargs)
         try:

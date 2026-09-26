@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from docker import DockerClient
+from docker.errors import APIError, ImageNotFound
 from docker.models.containers import Container
 
 from shared.content import reference_for
@@ -299,7 +300,7 @@ class _FakeImages:
 
     def get(self, name: str) -> object:
         if not self.present:
-            raise RuntimeError(f"No such image: {name}")
+            raise ImageNotFound(f"No such image: {name}")
         return object()
 
     def pull(self, name: str) -> object:
@@ -436,6 +437,21 @@ def test_a_missing_staging_image_is_pulled(
     _stage_remote(tmp_path, monkeypatch, fake_client)
 
     assert fake_client.images.pulled == ["busybox:1.36.1"]
+
+
+def test_a_failing_image_lookup_is_not_taken_for_a_missing_image(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _Down(_FakeImages):
+        def get(self, name: str) -> object:
+            raise APIError("daemon unavailable")
+
+    fake_client = _FakeClient()
+    fake_client.images = _Down()
+
+    with pytest.raises(APIError):
+        _stage_remote(tmp_path, monkeypatch, fake_client)
+    assert fake_client.images.pulled == []
 
 
 def test_extract_result_bundle_rejects_path_traversal(tmp_path: Path) -> None:

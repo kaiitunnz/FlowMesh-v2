@@ -8,7 +8,7 @@ from shared.content import (
     ContentUnavailable,
     SharedFilesystemObjectStore,
 )
-from shared.inference import canonical_contract
+from shared.inference import ResolvedInputMaterialization, canonical_contract
 from shared.schemas.event import TaskFailureKind
 from shared.schemas.result import RESULT_MEDIA_TYPE, BaseExecutorResult, ResultEnvelope
 from shared.schemas.result.catalog import InferenceResult
@@ -173,3 +173,50 @@ def test_a_preparation_resolves_its_hydrated_upstream(tmp_path: Path) -> None:
     lifecycle.set_failed.assert_not_called()
     metadata = lifecycle.set_succeeded.call_args.kwargs["metadata"]
     assert metadata["input_materialization"]["binding"]["cardinality"] == 1
+
+
+def test_a_cancel_landing_during_the_prepared_request_read_stops_execution(
+    tmp_path: Path,
+) -> None:
+    plane = FakeContentPlane(SharedFilesystemObjectStore(tmp_path / "cas"))
+    produced = InferenceResult(
+        model="up/model",
+        items=[InferenceItem(index=0, prompt="p", output="from upstream")],
+    )
+    upstream = _stored(plane, "tsk-up", produced.model_dump(mode="json"))
+    spec = InferenceSpecStrict.model_validate(
+        {
+            "taskType": "inference",
+            "model": {"source": {"identifier": "Qwen/Qwen3-4B"}},
+            "data": {"type": "list", "expr": "up.items.output"},
+        }
+    )
+    body = spec.model_dump(by_alias=True)
+    contract = canonical_contract(spec)
+    preparing, _ = _run(
+        tmp_path,
+        plane,
+        body,
+        upstream_results={"up": upstream},
+        declared_contract=contract,
+        input_preparation=True,
+    )
+    prepared = ResolvedInputMaterialization.model_validate(
+        preparing.set_succeeded.call_args.kwargs["metadata"]["input_materialization"]
+    )
+    runner, lifecycle, executor = _runner(
+        tmp_path,
+        plane,
+        body,
+        declared_contract=contract,
+        recorded_input=prepared.reference,
+        recorded_resolution=prepared.binding,
+    )
+    plane.on_read = lambda: runner._pending_cancels.add("tsk-1")
+
+    runner.start()
+
+    assert executor.seen == []
+    lifecycle.set_cancelled.assert_called_once()
+    lifecycle.set_failed.assert_not_called()
+    assert "tsk-1" not in runner._pending_cancels
