@@ -1,14 +1,11 @@
 """The runner hydrates a task's referenced inputs before anything reads them."""
 
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
 from shared.content import (
-    ContentReference,
     ContentUnavailable,
-    FabricObjectStore,
     SharedFilesystemObjectStore,
 )
 from shared.inference import canonical_contract
@@ -19,32 +16,19 @@ from shared.schemas.result.payloads import InferenceItem
 from shared.tasks.result_binding import ResultBinding
 from shared.tasks.specs import InferenceSpecStrict
 from shared.tasks.task_type import TaskType
-from tests.worker.factories import make_worker_hardware, make_worker_task_message
+from tests.worker.factories import (
+    FakeContentPlane,
+    make_worker_hardware,
+    make_worker_task_message,
+)
 from worker.executors.base_executor import Executor
 from worker.runner import Runner
-
-
-class _Plane:
-    def __init__(self, store: FabricObjectStore) -> None:
-        self.store = store
-        self.error: Exception | None = None
-        self.on_read: Callable[[], None] | None = None
-
-    def for_task(self, task_id: str) -> FabricObjectStore:
-        return self.store
-
-    def hydrate(self, task_id: str, reference: ContentReference) -> bytes:
-        if self.on_read is not None:
-            self.on_read()
-        if self.error is not None:
-            raise self.error
-        return self.store.hydrate(reference)
 
 
 class _Recording(Executor):
     name = "echo"
 
-    def __init__(self) -> None:  # noqa: D107
+    def __init__(self) -> None:
         self.seen: list[dict[str, Any]] = []
 
     def run(self, task: Any, out_dir: Path) -> BaseExecutorResult:
@@ -60,7 +44,7 @@ class _Recording(Executor):
         return None
 
 
-def _stored(plane: _Plane, task_id: str, result: Any) -> ResultBinding:
+def _stored(plane: FakeContentPlane, task_id: str, result: Any) -> ResultBinding:
     envelope = ResultEnvelope.model_validate({"task_id": task_id, "result": result})
     reference = plane.store.write(
         "org-a",
@@ -71,7 +55,7 @@ def _stored(plane: _Plane, task_id: str, result: Any) -> ResultBinding:
 
 
 def _runner(
-    tmp_path: Path, plane: _Plane, spec: dict[str, Any], **message: Any
+    tmp_path: Path, plane: FakeContentPlane, spec: dict[str, Any], **message: Any
 ) -> tuple[Runner, MagicMock, "_Recording"]:
     lifecycle = MagicMock()
     lifecycle.worker_id = "wrk-test"
@@ -96,14 +80,16 @@ def _runner(
     return runner, lifecycle, executor
 
 
-def _run(tmp_path: Path, plane: _Plane, spec: dict[str, Any], **message: Any) -> Any:
+def _run(
+    tmp_path: Path, plane: FakeContentPlane, spec: dict[str, Any], **message: Any
+) -> Any:
     runner, lifecycle, executor = _runner(tmp_path, plane, spec, **message)
     runner.start()
     return lifecycle, executor
 
 
 def test_the_executor_sees_the_hydrated_upstream_results(tmp_path: Path) -> None:
-    plane = _Plane(SharedFilesystemObjectStore(tmp_path / "cas"))
+    plane = FakeContentPlane(SharedFilesystemObjectStore(tmp_path / "cas"))
     upstream = _stored(plane, "tsk-p", {"items": ["alpha"]})
 
     lifecycle, executor = _run(
@@ -119,7 +105,7 @@ def test_the_executor_sees_the_hydrated_upstream_results(tmp_path: Path) -> None
 
 
 def test_an_unreachable_store_reports_the_inputs_unavailable(tmp_path: Path) -> None:
-    plane = _Plane(SharedFilesystemObjectStore(tmp_path / "cas"))
+    plane = FakeContentPlane(SharedFilesystemObjectStore(tmp_path / "cas"))
     upstream = _stored(plane, "tsk-p", {"items": ["alpha"]})
     plane.error = ContentUnavailable("store down")
 
@@ -141,7 +127,7 @@ def test_an_unreachable_store_reports_the_inputs_unavailable(tmp_path: Path) -> 
 def test_a_cancel_landing_during_hydration_stops_before_execution(
     tmp_path: Path,
 ) -> None:
-    plane = _Plane(SharedFilesystemObjectStore(tmp_path / "cas"))
+    plane = FakeContentPlane(SharedFilesystemObjectStore(tmp_path / "cas"))
     upstream = _stored(plane, "tsk-p", {"items": ["alpha"]})
     runner, lifecycle, executor = _runner(
         tmp_path,
@@ -161,7 +147,7 @@ def test_a_cancel_landing_during_hydration_stops_before_execution(
 
 
 def test_a_preparation_resolves_its_hydrated_upstream(tmp_path: Path) -> None:
-    plane = _Plane(SharedFilesystemObjectStore(tmp_path / "cas"))
+    plane = FakeContentPlane(SharedFilesystemObjectStore(tmp_path / "cas"))
     produced = InferenceResult(
         model="up/model",
         items=[InferenceItem(index=0, prompt="p", output="from upstream")],

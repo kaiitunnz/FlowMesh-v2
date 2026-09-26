@@ -9,6 +9,7 @@ truncating.
 """
 
 import logging
+from types import SimpleNamespace
 from typing import Any, cast
 
 from server.config import OrchestrationConfig
@@ -24,6 +25,7 @@ from server.orchestration.state import (
     AuthorityDecisionKind,
     ValueRef,
 )
+from server.task.models import TaskStatus
 from server.task.redrive import StoreRedriveScheduler
 from server.task.runtime import TaskRuntime
 from server.task.v2.compiler.bindings import leaf_profile
@@ -478,6 +480,29 @@ def test_an_input_at_the_budget_is_accepted() -> None:
     _drive_inputs(runtime, engine, "wfl-test")
     assert engine.work_item("M").outcome is None
     assert engine.accepted_inputs_for_task("M")
+
+
+def test_a_producer_that_settled_with_nothing_bound_fails_the_agent() -> None:
+    runtime = _runtime()
+    engine = _merge_engine()
+
+    def _unbound(task_id: str) -> ResultBinding | None:
+        return None
+
+    runtime._result_binding_locked = _unbound  # type: ignore[method-assign]
+    runtime._tasks["P"] = cast(
+        Any,
+        SimpleNamespace(
+            workflow_id="wfl-test",
+            status=TaskStatus.DONE,
+            result_skip=None,
+            result_reference=None,
+        ),
+    )
+
+    _drive_inputs(runtime, engine, "wfl-test")
+
+    assert engine.work_item("M").outcome is PublicationOutcome.DECLARED_FAILURE
 
 
 def test_an_unreadable_input_fails_the_agent_rather_than_deferring() -> None:

@@ -170,17 +170,3 @@ async def test_a_merged_child_binds_only_its_own_result() -> None:
     assert _value(runtime, own) == "own"
     assert runtime._tasks[unreported].status != TaskStatus.DONE
     assert runtime.result_binding(unreported) is None
-
-
-@pytest.mark.anyio
-async def test_a_success_with_nothing_bound_is_unreadable_to_its_consumers() -> None:
-    runtime = _runtime(FakeRegistry())
-    _, ids = await _register(runtime, V1_LINEAR)
-    a = ids["a"]
-    # Unsettled: a consumer defers rather than failing.
-    assert not runtime._settled_unbound_locked(a)
-    record_dispatch(runtime, a, cast(Any, _worker()))
-    runtime.mark_succeeded(a, "wkr-1", {}, _TS)
-
-    assert runtime.result_binding(a) is None
-    assert runtime._settled_unbound_locked(a)

@@ -39,7 +39,7 @@ def _task_message(**spec_updates: object) -> WorkerTaskMessage:
         "owner_id": "owner",
         "assigned_worker": "worker-1",
         "dispatched_at": "2026-03-22T00:00:00Z",
-        "upstream_task_ids": {"preprocess": "task-pre"},
+        "upstream_results": {"preprocess": {"task_id": "task-pre"}},
         "task": {
             "apiVersion": "mloc/v1",
             "kind": "Task",
@@ -79,7 +79,7 @@ def test_build_mount_plan_uses_worker_volume_view_in_container(
     fake_docker = MagicMock()
     monkeypatch.setattr(executor, "_get_docker_client", lambda: fake_docker)
 
-    resolved_inputs = executor._resolve_inputs(task, cfg)  # noqa: SLF001
+    resolved_inputs = executor._resolve_inputs(task, cfg)
     plan = executor._build_mount_plan(
         executor._get_docker_client(), out_dir, resolved_inputs, cfg, "session-1234"
     )  # noqa: SLF001
@@ -121,7 +121,7 @@ def test_build_mount_plan_uses_direct_binds_outside_container(
     fake_docker = MagicMock()
     monkeypatch.setattr(executor, "_get_docker_client", lambda: fake_docker)
 
-    resolved_inputs = executor._resolve_inputs(task, cfg)  # noqa: SLF001
+    resolved_inputs = executor._resolve_inputs(task, cfg)
     plan = executor._build_mount_plan(
         executor._get_docker_client(), out_dir, resolved_inputs, cfg, "session-1234"
     )  # noqa: SLF001
@@ -158,12 +158,15 @@ def test_resolve_inputs_rejects_unsafe_mount_path(
 def test_stage_inputs_locally_downloads_missing_upstream_results(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # An older root names an upstream by its task id alone.
     task = _task_message()
+    task.upstream_results = None
+    task.upstream_task_ids = {"preprocess": "task-pre"}
     cfg = SSHConfig.from_spec(cast(SSHSpecStrict, task.spec), DEFAULT_WORKER_CONFIG)
     executor = SSHExecutor(_worker_config(tmp_path, results_mount_source=None))
 
     monkeypatch.setenv("RESULTS_DIR", str(tmp_path / "results"))
-    resolved_inputs = executor._resolve_inputs(task, cfg)  # noqa: SLF001
+    resolved_inputs = executor._resolve_inputs(task, cfg)
 
     includes: list[bool] = []
 
@@ -175,9 +178,7 @@ def test_stage_inputs_locally_downloads_missing_upstream_results(
 
     monkeypatch.setattr(executor, "_download_result_bundle", _download)
 
-    staging_dir = executor._stage_inputs_locally(  # noqa: SLF001
-        resolved_inputs, "session-remote"
-    )
+    staging_dir = executor._stage_inputs_locally(resolved_inputs, "session-remote")
 
     # A dispatch naming its upstream by task id only takes the result from the bundle.
     assert includes == [True]
@@ -189,7 +190,6 @@ _ENVELOPE = b'{"task_id": "task-pre", "result": {"items": ["pre"]}}'
 
 def _hydrated_message(**spec_updates: object) -> WorkerTaskMessage:
     task = _task_message(**spec_updates)
-    task.upstream_task_ids = None
     task.upstream_results = {
         "preprocess": ResultBinding(
             task_id="task-pre",
@@ -207,7 +207,7 @@ def test_a_hydrated_result_is_staged_and_the_bundle_brings_only_artifacts(
     cfg = SSHConfig.from_spec(cast(SSHSpecStrict, task.spec), DEFAULT_WORKER_CONFIG)
     executor = SSHExecutor(_worker_config(tmp_path, results_mount_source=None))
     monkeypatch.setenv("RESULTS_DIR", str(tmp_path / "results"))
-    resolved_inputs = executor._resolve_inputs(task, cfg)  # noqa: SLF001
+    resolved_inputs = executor._resolve_inputs(task, cfg)
     includes: list[bool] = []
 
     def _download(task_id: str, destination_dir: Path, include_results: bool) -> None:
@@ -216,9 +216,7 @@ def test_a_hydrated_result_is_staged_and_the_bundle_brings_only_artifacts(
 
     monkeypatch.setattr(executor, "_download_result_bundle", _download)
 
-    staging_dir = executor._stage_inputs_locally(  # noqa: SLF001
-        resolved_inputs, "session-remote"
-    )
+    staging_dir = executor._stage_inputs_locally(resolved_inputs, "session-remote")
 
     assert includes == [False]
     assert (staging_dir / "task-pre" / "results.json").read_bytes() == _ENVELOPE
@@ -235,11 +233,9 @@ def test_a_hydrated_result_replaces_a_local_copy(
     cfg = SSHConfig.from_spec(cast(SSHSpecStrict, task.spec), DEFAULT_WORKER_CONFIG)
     executor = SSHExecutor(_worker_config(tmp_path, results_mount_source=None))
     monkeypatch.setenv("RESULTS_DIR", str(tmp_path / "results"))
-    resolved_inputs = executor._resolve_inputs(task, cfg)  # noqa: SLF001
+    resolved_inputs = executor._resolve_inputs(task, cfg)
 
-    staging_dir = executor._stage_inputs_locally(  # noqa: SLF001
-        resolved_inputs, "session-local"
-    )
+    staging_dir = executor._stage_inputs_locally(resolved_inputs, "session-local")
 
     assert (staging_dir / "task-pre" / "results.json").read_bytes() == _ENVELOPE
 
@@ -248,7 +244,6 @@ def test_a_skipped_upstream_is_staged_without_a_bundle(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     task = _task_message()
-    task.upstream_task_ids = None
     task.upstream_results = {
         "preprocess": ResultBinding(task_id="task-pre", skip={"skipped": True})
     }
@@ -256,16 +251,14 @@ def test_a_skipped_upstream_is_staged_without_a_bundle(
     cfg = SSHConfig.from_spec(cast(SSHSpecStrict, task.spec), DEFAULT_WORKER_CONFIG)
     executor = SSHExecutor(_worker_config(tmp_path, results_mount_source=None))
     monkeypatch.setenv("RESULTS_DIR", str(tmp_path / "results"))
-    resolved_inputs = executor._resolve_inputs(task, cfg)  # noqa: SLF001
+    resolved_inputs = executor._resolve_inputs(task, cfg)
 
     def _download(*_args: object, **_kwargs: object) -> None:
         raise AssertionError("a skipped upstream has no bundle to fetch")
 
     monkeypatch.setattr(executor, "_download_result_bundle", _download)
 
-    staging_dir = executor._stage_inputs_locally(  # noqa: SLF001
-        resolved_inputs, "session-skip"
-    )
+    staging_dir = executor._stage_inputs_locally(resolved_inputs, "session-skip")
 
     assert (staging_dir / "task-pre" / "results.json").read_bytes() == b"{}"
 
@@ -352,7 +345,7 @@ def _stage_in_volume(
     ]
     fake_client = _FakeClient()
     monkeypatch.setattr(executor, "_get_docker_client", lambda: fake_client)
-    volume_name = executor._stage_inputs_in_volume(  # noqa: SLF001
+    volume_name = executor._stage_inputs_in_volume(
         executor._get_docker_client(),
         resolved_inputs,
         "flowmesh-results",
@@ -406,7 +399,7 @@ def _stage_remote(
 ) -> str:
     monkeypatch.setenv("FLOWMESH_BASE_URL", "http://flowmesh.example")
     executor = SSHExecutor(_worker_config(tmp_path))
-    return executor._stage_inputs_in_volume(  # noqa: SLF001
+    return executor._stage_inputs_in_volume(
         cast(DockerClient, fake_client),
         [
             ResolvedSSHInput(
@@ -460,12 +453,11 @@ def test_an_upstream_with_nothing_bound_still_stages_its_artifacts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     task = _task_message()
-    task.upstream_task_ids = None
     task.upstream_results = {"preprocess": ResultBinding(task_id="task-pre")}
     cfg = SSHConfig.from_spec(cast(SSHSpecStrict, task.spec), DEFAULT_WORKER_CONFIG)
     executor = SSHExecutor(_worker_config(tmp_path, results_mount_source=None))
     monkeypatch.setenv("RESULTS_DIR", str(tmp_path / "results"))
-    resolved_inputs = executor._resolve_inputs(task, cfg)  # noqa: SLF001
+    resolved_inputs = executor._resolve_inputs(task, cfg)
     includes: list[bool] = []
 
     def _download(task_id: str, destination_dir: Path, include_results: bool) -> None:
@@ -474,9 +466,7 @@ def test_an_upstream_with_nothing_bound_still_stages_its_artifacts(
 
     monkeypatch.setattr(executor, "_download_result_bundle", _download)
 
-    staging_dir = executor._stage_inputs_locally(  # noqa: SLF001
-        resolved_inputs, "session-empty"
-    )
+    staging_dir = executor._stage_inputs_locally(resolved_inputs, "session-empty")
 
     assert includes == [True]
     assert (staging_dir / "task-pre" / "artifacts").is_dir()

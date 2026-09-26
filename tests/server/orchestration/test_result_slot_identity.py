@@ -35,7 +35,7 @@ def _value(label: str) -> ValueRef:
 def test_two_scopes_publishing_one_index_are_two_members() -> None:
     eng = _engine()
     for scope_id in ("scp-a", "scp-b"):
-        eng._publish_keyed(  # noqa: SLF001
+        eng._publish_keyed(
             "exp", _child(scope_id, 0), PublicationOutcome.SUCCESS, _value(scope_id)
         )
 

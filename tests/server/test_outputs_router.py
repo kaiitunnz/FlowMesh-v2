@@ -88,7 +88,7 @@ async def _workflow() -> _Workflow:
     by_index = {}
     for child in children:
         element = runtime.input_element(child)
-        assert element is not None and element.element is not None
+        assert element is not None
         by_index[element.element] = child
     for index, child in sorted(by_index.items()):
         if index == 10:

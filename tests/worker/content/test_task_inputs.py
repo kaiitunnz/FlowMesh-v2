@@ -17,7 +17,6 @@ from pydantic import ValidationError
 from server.task.results import ResultReader
 from shared.content import (
     ContentHydrationError,
-    ContentReference,
     ContentUnavailable,
     SharedFilesystemObjectStore,
 )
@@ -41,6 +40,7 @@ from shared.tasks.result_binding import (
 )
 from shared.tasks.worker_message import WorkerTaskMessage
 from shared.utils.json import normalize_numbers
+from tests.worker.factories import FakeContentPlane
 from worker.content.access import ContentBackendUnsupported
 from worker.content.inputs import TaskInputHydrator
 from worker.executors.base_executor import ExecutionError
@@ -53,27 +53,16 @@ _PRODUCED = {
 }
 
 
-class _Plane:
-    """A content plane reading one shared store, failing reads while told to."""
-
-    def __init__(self, store: SharedFilesystemObjectStore) -> None:
-        self.store = store
-        self.error: Exception | None = None
-        self.reads: list[ContentReference] = []
-
-    def hydrate(self, task_id: str, reference: ContentReference) -> bytes:
-        self.reads.append(reference)
-        if self.error is not None:
-            raise self.error
-        return self.store.hydrate(reference)
-
-
 @pytest.fixture
-def plane() -> _Plane:
-    return _Plane(SharedFilesystemObjectStore(Path(tempfile.mkdtemp()) / "content"))
+def plane() -> FakeContentPlane:
+    return FakeContentPlane(
+        SharedFilesystemObjectStore(Path(tempfile.mkdtemp()) / "content")
+    )
 
 
-def _store(plane: _Plane, task_id: str, result: dict[str, Any]) -> ResultBinding:
+def _store(
+    plane: FakeContentPlane, task_id: str, result: dict[str, Any]
+) -> ResultBinding:
     envelope = ResultEnvelope.model_validate({"task_id": task_id, "result": result})
     reference = plane.store.write(
         _SCOPE,
@@ -110,17 +99,17 @@ def _message(spec: dict[str, Any], **fields: Any) -> WorkerTaskMessage:
     )
 
 
-def _hydrate(plane: _Plane, message: WorkerTaskMessage) -> WorkerTaskMessage:
+def _hydrate(plane: FakeContentPlane, message: WorkerTaskMessage) -> WorkerTaskMessage:
     delivered = _deliver(message)
     TaskInputHydrator(cast(Any, plane), backoff_sec=0.0).hydrate(delivered)
     return delivered
 
 
-def _read(plane: _Plane, binding: ResultBinding) -> ResultEnvelope:
+def _read(plane: FakeContentPlane, binding: ResultBinding) -> ResultEnvelope:
     return ResultReader(plane.store).read(binding)
 
 
-def test_upstream_results_hydrate_to_the_inline_map(plane: _Plane) -> None:
+def test_upstream_results_hydrate_to_the_inline_map(plane: FakeContentPlane) -> None:
     producer = _store(plane, "tsk-p", _PRODUCED)
     other = _store(plane, "tsk-q", {"taskType": "echo", "items": ["q"]})
     authored = {"_upstreamResults": {"p": {"stale": True}, "kept": {"x": 1}}}
@@ -146,7 +135,9 @@ def test_upstream_results_hydrate_to_the_inline_map(plane: _Plane) -> None:
     assert set(hydrated.spec.upstreamResults or {}) == {"p", "kept", "q"}
 
 
-def test_a_skipped_upstream_hydrates_to_its_skip_envelope(plane: _Plane) -> None:
+def test_a_skipped_upstream_hydrates_to_its_skip_envelope(
+    plane: FakeContentPlane,
+) -> None:
     skipped = ResultBinding(
         task_id="tsk-s", skip={"skipped": True}, settled_at="2026-09-27T00:00:00Z"
     )
@@ -166,7 +157,7 @@ def test_a_skipped_upstream_hydrates_to_its_skip_envelope(plane: _Plane) -> None
     assert plane.reads == []
 
 
-def test_the_envelope_bytes_are_the_stored_bytes(plane: _Plane) -> None:
+def test_the_envelope_bytes_are_the_stored_bytes(plane: FakeContentPlane) -> None:
     producer = _store(plane, "tsk-p", _PRODUCED)
     assert producer.reference is not None
     hydrated = _hydrate(
@@ -176,7 +167,7 @@ def test_the_envelope_bytes_are_the_stored_bytes(plane: _Plane) -> None:
     assert hydrated.upstream_envelope("p") == plane.store.hydrate(producer.reference)
 
 
-def test_a_merged_child_hydrates_its_own_upstream(plane: _Plane) -> None:
+def test_a_merged_child_hydrates_its_own_upstream(plane: FakeContentPlane) -> None:
     producer = _store(plane, "tsk-p", _PRODUCED)
     child_spec = {"taskType": "echo", "data": {"type": "list", "items": ["y"]}}
     child = MergedChildTaskStrict.model_validate(
@@ -212,7 +203,7 @@ def test_a_merged_child_hydrates_its_own_upstream(plane: _Plane) -> None:
 
 @pytest.mark.parametrize("index", [0, 1, 2])
 def test_a_fan_out_element_hydrates_to_the_inline_data(
-    plane: _Plane, index: int
+    plane: FakeContentPlane, index: int
 ) -> None:
     producer = _store(plane, "tsk-p", _PRODUCED)
     assert producer.reference is not None
@@ -250,7 +241,7 @@ def _member(**fields: Any) -> InputBindingMember:
     )
 
 
-def test_agent_inputs_hydrate_to_the_projected_strings(plane: _Plane) -> None:
+def test_agent_inputs_hydrate_to_the_projected_strings(plane: FakeContentPlane) -> None:
     collection = _store(plane, "tsk-p", _PRODUCED)
     whole = _store(plane, "tsk-r", {"taskType": "agent", "value": "grounded"})
     assert collection.reference is not None and whole.reference is not None
@@ -277,7 +268,7 @@ def test_agent_inputs_hydrate_to_the_projected_strings(plane: _Plane) -> None:
     assert all(m.source is None for m in binding.members)
 
 
-def test_a_message_naming_nothing_is_left_as_delivered(plane: _Plane) -> None:
+def test_a_message_naming_nothing_is_left_as_delivered(plane: FakeContentPlane) -> None:
     inline = _message(
         {"taskType": "echo", "_upstreamResults": {"p": {"items": ["x"]}}},
         upstream_task_ids={"p": "tsk-p"},
@@ -287,7 +278,9 @@ def test_a_message_naming_nothing_is_left_as_delivered(plane: _Plane) -> None:
     assert delivered == _deliver(inline)
 
 
-def test_an_unreachable_store_reports_the_inputs_unavailable(plane: _Plane) -> None:
+def test_an_unreachable_store_reports_the_inputs_unavailable(
+    plane: FakeContentPlane,
+) -> None:
     producer = _store(plane, "tsk-p", _PRODUCED)
     plane.error = ContentUnavailable("store down")
 
@@ -303,7 +296,7 @@ def test_an_unreachable_store_reports_the_inputs_unavailable(plane: _Plane) -> N
 
 
 def test_a_worker_that_cannot_open_its_store_fails_as_its_own_fault(
-    plane: _Plane,
+    plane: FakeContentPlane,
 ) -> None:
     producer = _store(plane, "tsk-p", _PRODUCED)
     plane.error = ContentBackendUnsupported("unknown content store backend nfs")
@@ -318,7 +311,7 @@ def test_a_worker_that_cannot_open_its_store_fails_as_its_own_fault(
     assert len(plane.reads) == 1
 
 
-def test_an_element_names_its_index(plane: _Plane) -> None:
+def test_an_element_names_its_index(plane: FakeContentPlane) -> None:
     reference = _store(plane, "tsk-p", _PRODUCED).reference
     assert reference is not None
 
@@ -329,7 +322,7 @@ def test_an_element_names_its_index(plane: _Plane) -> None:
         )
 
 
-def test_missing_content_fails_the_task(plane: _Plane) -> None:
+def test_missing_content_fails_the_task(plane: FakeContentPlane) -> None:
     producer = _store(plane, "tsk-p", _PRODUCED)
     plane.error = ContentHydrationError("no such object")
 
@@ -343,7 +336,9 @@ def test_missing_content_fails_the_task(plane: _Plane) -> None:
     assert str(caught.value).startswith("input_unreadable:")
 
 
-def test_content_that_is_not_an_envelope_fails_the_task(plane: _Plane) -> None:
+def test_content_that_is_not_an_envelope_fails_the_task(
+    plane: FakeContentPlane,
+) -> None:
     reference = plane.store.write(_SCOPE, b"not json", media_type=RESULT_MEDIA_TYPE)
     binding = ResultBinding(task_id="tsk-p", reference=reference)
 
@@ -354,7 +349,7 @@ def test_content_that_is_not_an_envelope_fails_the_task(plane: _Plane) -> None:
     assert str(caught.value).startswith("input_unreadable:")
 
 
-def test_a_reference_outside_the_task_scope_is_refused(plane: _Plane) -> None:
+def test_a_reference_outside_the_task_scope_is_refused(plane: FakeContentPlane) -> None:
     envelope = ResultEnvelope.model_validate({"task_id": "tsk-p", "result": _PRODUCED})
     reference = plane.store.write(
         "another-org", envelope.model_dump_json().encode(), media_type=RESULT_MEDIA_TYPE
@@ -368,7 +363,7 @@ def test_a_reference_outside_the_task_scope_is_refused(plane: _Plane) -> None:
     assert plane.reads == []
 
 
-def test_an_element_past_the_collection_fails_the_task(plane: _Plane) -> None:
+def test_an_element_past_the_collection_fails_the_task(plane: FakeContentPlane) -> None:
     producer = _store(plane, "tsk-p", _PRODUCED)
     assert producer.reference is not None
     with pytest.raises(ExecutionError) as caught:
@@ -382,7 +377,9 @@ def test_an_element_past_the_collection_fails_the_task(plane: _Plane) -> None:
     assert not caught.value.retryable
 
 
-def test_a_fan_out_child_contract_resolves_its_hydrated_element(plane: _Plane) -> None:
+def test_a_fan_out_child_contract_resolves_its_hydrated_element(
+    plane: FakeContentPlane,
+) -> None:
     producer = _store(plane, "tsk-p", _PRODUCED)
     assert producer.reference is not None
     contract = CanonicalInferenceContract(
@@ -411,7 +408,9 @@ def test_a_fan_out_child_contract_resolves_its_hydrated_element(plane: _Plane) -
     assert again.binding.matches(resolved.binding)
 
 
-def test_an_element_that_is_not_a_prompt_fails_before_any_model(plane: _Plane) -> None:
+def test_an_element_that_is_not_a_prompt_fails_before_any_model(
+    plane: FakeContentPlane,
+) -> None:
     producer = _store(plane, "tsk-p", _PRODUCED)
     assert producer.reference is not None
     contract = CanonicalInferenceContract(
@@ -430,7 +429,7 @@ def test_an_element_that_is_not_a_prompt_fails_before_any_model(plane: _Plane) -
         resolve_task_contract(_hydrate(plane, message))
 
 
-def test_an_upstream_with_nothing_bound_is_left_out(plane: _Plane) -> None:
+def test_an_upstream_with_nothing_bound_is_left_out(plane: FakeContentPlane) -> None:
     producer = _store(plane, "tsk-p", _PRODUCED)
     spec = {"taskType": "echo", "data": {"type": "list", "items": ["x"]}}
 
