@@ -407,6 +407,7 @@ class WorkItem(BaseModel):
     status: WorkItemStatus = WorkItemStatus.BLOCKED
     outcome: PublicationOutcome | None = None
     value_ref: ValueRef | None = None  # the value this work item settled with
+    child_input: ValueRef | None = None  # the child-init input a spawned child runs on
     invocation_id: str | None = None
     effect_class: EffectClass = EffectClass.PURE
     recovery: RecoveryClass = RecoveryClass.RECOMPUTE

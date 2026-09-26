@@ -21,7 +21,13 @@ from shared.resident.reports import (
     ResidentOpOutcome,
     ResidentRouteObservation,
 )
-from shared.schemas.event import Event, TaskEvent, WorkerEvent, serialize_event
+from shared.schemas.event import (
+    Event,
+    TaskEvent,
+    TaskFailureKind,
+    WorkerEvent,
+    serialize_event,
+)
 from shared.schemas.worker import SSHLimits, WorkerCapabilities
 from shared.tasks.worker_message import (
     WorkerHardware,
@@ -282,6 +288,7 @@ class SupervisorClient:
         error: str | None,
         metadata: dict[str, Any] | None = None,
         retryable: bool = True,
+        failure_kind: TaskFailureKind | None = None,
     ) -> None:
         event = TaskEvent(
             type="TASK_FAILED",
@@ -290,6 +297,7 @@ class SupervisorClient:
             dispatch_id=self._dispatch_id(task_id),
             error=error,
             retryable=retryable,
+            failure_kind=failure_kind,
             payload=metadata or {},
         )
         self._send_event(event)

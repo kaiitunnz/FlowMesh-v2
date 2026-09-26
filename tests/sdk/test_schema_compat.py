@@ -35,6 +35,7 @@ from flowmesh.models import (
     SSHLimits,
     StorageInfo,
     TaskInfo,
+    TaskInputElement,
     TaskType,
     TaskUsage,
     TraceAggregate,
@@ -97,6 +98,7 @@ from server.schemas.workflow import (
     WorkflowValidateTaskEntry as SrvWorkflowValidateTaskEntry,
 )
 from server.task.models import TaskInfo as SrvTaskInfo
+from server.task.models import TaskInputElement as SrvTaskInputElement
 from server.task.models import TaskUsage as SrvTaskUsage
 from server.task.v2 import Diagnostic as SrvDiagnostic
 from server.task.v2 import InspectionReport as SrvInspectionReport
@@ -187,6 +189,7 @@ MODEL_PAIRS = [
     (SrvWorkflow, Workflow),
     # Task models (last_queue_ts is server-internal scheduling field)
     (SrvTaskUsage, TaskUsage),
+    (SrvTaskInputElement, TaskInputElement),
     # Worker models
     (SrvWorker, Worker),
     (SrvWorkerInfo, WorkerInfo),

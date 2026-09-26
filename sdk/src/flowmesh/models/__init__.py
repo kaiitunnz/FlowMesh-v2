@@ -69,7 +69,7 @@ from .result import (
     SFTResult,
     SSHResult,
 )
-from .tasks import HardwareUsage, TaskInfo, TaskUsage
+from .tasks import HardwareUsage, TaskInfo, TaskInputElement, TaskUsage
 from .traces import (
     ActiveWaitBreakdown,
     AssetSummary,
@@ -188,6 +188,7 @@ __all__ = [
     "SourceLocation",
     "StorageInfo",
     "TaskInfo",
+    "TaskInputElement",
     "TaskStatus",
     "TaskTiming",
     "TaskType",

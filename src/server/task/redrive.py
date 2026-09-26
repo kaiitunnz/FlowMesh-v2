@@ -1,11 +1,12 @@
-"""Re-driving a workflow's advance after the content store could not be reached.
+"""Driving a workflow's advances that wait on a read of stored results.
 
-A settled producer's result is in the shared store before its success is reported, so
-a read that cannot reach the store is a pause, not a loss: the spawn it would have
-fanned out, or the agent input it would have delivered, waits and is driven again once
-the store answers. Nothing else re-fires those advances — the producer has already
-settled — so this schedules one re-drive per waiting workflow, backing off while the
-store stays away.
+A spawn's fan-out and an agent's bound inputs are read from the shared store, and a read
+never runs under the runtime lock, so those advances are driven here, off it. A settled
+producer's result is in the store before its success is reported, so a read that
+cannot reach the store is a pause, not a loss: the advance waits and is driven again
+once the store answers. Nothing else re-fires those advances — the producer has already
+settled — so this keeps one pending drive per workflow, backing off while the store
+stays away.
 
 A re-drive is not durable and does not need to be: a restart re-drives every settled
 producer's unsealed spawn and re-resolves agent inputs on the advances it applies.
@@ -77,6 +78,23 @@ class StoreRedriveScheduler:
                     streak,
                     delay,
                 )
+            self._ensure_thread()
+            self._cv.notify_all()
+
+    def drive_now(self, workflow_id: str) -> None:
+        """Drive a workflow as soon as the re-drive thread is free, keeping its backoff.
+
+        A workflow already waiting moves up to now; its streak is unchanged, since this
+        is new work to read rather than another try at a store that stayed away.
+        """
+        with self._cv:
+            if self._stopped:
+                return
+            due = self._clock()
+            if (current := self._due.get(workflow_id)) is not None and current <= due:
+                return
+            self._due[workflow_id] = due
+            heapq.heappush(self._heap, (due, workflow_id))
             self._ensure_thread()
             self._cv.notify_all()
 

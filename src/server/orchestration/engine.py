@@ -1832,18 +1832,13 @@ class OrchestrationEngine:
         self._admit(wi.work_item_id, advance)
         return advance
 
-    def create_fanout_child(self, spawn: str, producer_task_id: str, index: int) -> str:
+    def create_fanout_child(self, spawn: str, value_ref: ValueRef) -> str:
         """Create one producer-fanout child (unadmitted) and return its task id.
 
-        The child carries a frozen reference to element ``index`` of the producer's
-        collection as its child-init input. It stays blocked on its input manifest until
-        the runtime resolves and records the child-entry accepted input.
+        The child carries ``value_ref``, a frozen reference to one element of the
+        producer's collection, as its child-init input. It stays blocked on its input
+        manifest until the runtime records the child-entry accepted input.
         """
-        value_ref = ValueRef(
-            kind="legacy_task_result",
-            legacy_task_id=producer_task_id,
-            collection_key=str(index),
-        )
         activation, wi = self._create_child(
             spawn, None, dispatchable=True, value_ref=value_ref
         )
@@ -2129,6 +2124,7 @@ class OrchestrationEngine:
             operator_id=body_ref,
             legacy_task_id=activation.activation_id if dispatchable else "",
             value_ref=value_ref,
+            child_input=value_ref,
             effect_class=effect,
             recovery=recovery,
             replay_contract=self._replay.get(body_ref),
@@ -3536,6 +3532,11 @@ class OrchestrationEngine:
 
     def work_item(self, task_id: str) -> WorkItem | None:
         return self._work_item_for_task(task_id)
+
+    def child_input(self, task_id: str) -> ValueRef | None:
+        """The child-init input a spawned child task runs on, if it has one."""
+        wi = self._work_item_for_task(task_id)
+        return wi.child_input if wi is not None else None
 
     def agent_operator(self, task_id: str) -> AgentOperator | None:
         """The agent operator a dispatched task realizes, resolving its work item."""

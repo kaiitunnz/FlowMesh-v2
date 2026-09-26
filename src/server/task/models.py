@@ -244,6 +244,13 @@ class TaskRecord(BaseModel):
         return self.failed_workers[-1] if self.failed_workers else None
 
 
+class TaskInputElement(BaseModel):
+    """The producer collection element a fan-out child runs on."""
+
+    producer_task_id: str = Field(description="Task whose result holds the element.")
+    index: int = Field(description="Position of the element in that collection.")
+
+
 class TaskInfo(TaskRecord):
     depends_on: list[str] = Field(description="Dependency task IDs.")
     pending_dependencies: list[str] = Field(
@@ -252,6 +259,9 @@ class TaskInfo(TaskRecord):
     dependents: list[str] = Field(description="Dependent task IDs.")
     completed: bool = Field(description="Whether the task completed successfully.")
     failed: bool = Field(description="Whether the task failed.")
+    input_element: TaskInputElement | None = Field(
+        default=None, description="The producer element a fan-out child runs on."
+    )
 
 
 class TaskParsingResult(BaseModel):

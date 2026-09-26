@@ -4,6 +4,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    PrivateAttr,
     SerializationInfo,
     model_serializer,
     model_validator,
@@ -23,6 +24,7 @@ from shared.tasks import (
 )
 from shared.tasks.components import TaskMetadata
 from shared.tasks.merged import MergedChildTaskStrict
+from shared.tasks.result_binding import ResultBinding, ResultValueRef
 from shared.utils.json import dedup_json, restore_json
 
 
@@ -52,6 +54,20 @@ class WorkerTaskMessage(BaseModel):
     upstream_task_ids: dict[str, str] | None = Field(
         default=None,
         description="Optional mapping from upstream stage name to resolved task ID.",
+    )
+    upstream_results: dict[str, ResultBinding] | None = Field(
+        default=None,
+        description=(
+            "Where each upstream stage's settled result is, by stage name: the worker "
+            "hydrates them into the spec's upstream results before the task runs."
+        ),
+    )
+    input_element: ResultValueRef | None = Field(
+        default=None,
+        description=(
+            "The producer collection element a fan-out child runs on: the worker "
+            "hydrates it into the spec's data before the task runs."
+        ),
     )
     agent_episode: AgentEpisodeDispatch | None = Field(
         default=None,
@@ -107,9 +123,29 @@ class WorkerTaskMessage(BaseModel):
         ),
     )
 
+    # What the worker hydrated from the references above: each upstream stage's stored
+    # envelope bytes, and the fan-out element as a one-item tuple.
+    _upstream_envelopes: dict[str, bytes] = PrivateAttr(default_factory=dict)
+    _element: tuple[Any] | None = PrivateAttr(default=None)
+
     @property
     def spec(self) -> TaskSpecStrict:
         return self.task.spec
+
+    def record_hydration(
+        self, envelopes: dict[str, bytes], element: tuple[Any] | None
+    ) -> None:
+        """Keep what the worker hydrated for the consumers that read it raw."""
+        self._upstream_envelopes = dict(envelopes)
+        self._element = element
+
+    def upstream_envelope(self, stage: str) -> bytes | None:
+        """The stored envelope bytes of an upstream stage, once hydrated."""
+        return self._upstream_envelopes.get(stage)
+
+    def hydrated_element(self) -> tuple[Any] | None:
+        """The fan-out element this task runs on, once hydrated, as a one-item tuple."""
+        return self._element
 
     @property
     def metadata(self) -> TaskMetadata | None:

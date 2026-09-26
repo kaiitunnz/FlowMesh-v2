@@ -17,7 +17,7 @@ import json
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
 
 # The projection grammar a source is resolved under. A contract records the version it
 # was proven against, and a resolver refuses one it does not implement.
@@ -39,7 +39,8 @@ class CanonicalInferenceInputSource(BaseModel):
     A literal source carries its items and resolves to exactly them. An upstream source
     names one declared direct upstream input by node and the path projecting it into a
     prompt vector; ``data.expr`` and ``data.node`` plus ``data.path`` normalize to this
-    same form.
+    same form. An element source names one element of a producer's collection by the
+    producer's task and the element's index, and resolves to that one prompt.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -48,6 +49,7 @@ class CanonicalInferenceInputSource(BaseModel):
     items: tuple[str, ...] = ()
     node: str | None = None
     path: str | None = None
+    element: int | None = Field(default=None, ge=0)
     resolver_version: str = INPUT_RESOLVER_VERSION
     # The most prompts a resolution of this source may yield. A literal source resolves
     # to its own items, so it is their count. An upstream source declares it to be
@@ -70,9 +72,23 @@ class CanonicalInferenceInputSource(BaseModel):
         else:
             if self.items:
                 raise ValueError("an upstream source carries no literal items")
-            if not self.node or not self.path:
-                raise ValueError("an upstream source names both a node and a path")
+            if not self.node:
+                raise ValueError("an upstream source names a node")
+            if self.element is None and not self.path:
+                raise ValueError("an upstream source names a path or an element")
+            if self.element is not None and (self.path or self.max_items != 1):
+                raise ValueError(
+                    "an element source names no path and resolves to exactly one item"
+                )
         return self
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_element(self, serializer: Any) -> Any:
+        # A path or literal source serializes, and so digests, without the element key.
+        dumped = serializer(self)
+        if isinstance(dumped, dict) and dumped.get("element") is None:
+            dumped.pop("element", None)
+        return dumped
 
     @property
     def prepared_before_selection(self) -> bool:
@@ -85,9 +101,11 @@ class CanonicalInferenceInputSource(BaseModel):
 
     @property
     def expression(self) -> str:
-        """The dotted projection an upstream source resolves."""
+        """The projection an upstream source resolves."""
         if self.kind is not InferenceSourceKind.UPSTREAM:
             raise InputResolutionError("a literal source has no upstream expression")
+        if self.element is not None:
+            return f"{self.node}[{self.element}]"
         return f"{self.node}.{self.path}"
 
     def digest(self) -> str:

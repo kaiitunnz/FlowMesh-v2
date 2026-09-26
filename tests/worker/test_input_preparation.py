@@ -5,13 +5,14 @@ from unittest import mock
 
 import pytest
 
-from shared.content import ContentReference
+from shared.content import ContentReference, ContentUnavailable
 from shared.inference import (
     RESOLVED_INPUT_MEDIA_TYPE,
     ResolvedInputMaterialization,
     canonical_contract,
     hydrate_resolved_input,
 )
+from shared.schemas.event import TaskFailureKind
 from shared.schemas.result.catalog import InferenceResult
 from shared.schemas.result.payloads import InferenceItem
 from shared.tasks.specs import InferenceSpecStrict
@@ -170,6 +171,19 @@ class TestHydration:
 
         assert excinfo.value.retryable is False
         assert msg.resolved_contract is None
+
+    def test_an_unreachable_store_reports_the_request_unavailable(self) -> None:
+        store = InMemoryContentStore()
+        prepared = _prepare(store, _task())
+
+        class _Away(InMemoryContentStore):
+            def fetch(self, reference: ContentReference) -> bytes:
+                raise ContentUnavailable("store down")
+
+        with pytest.raises(ExecutionError) as excinfo:
+            _materialize(_Away(), _task(recorded_input=prepared.reference))
+        assert excinfo.value.retryable is True
+        assert excinfo.value.failure_kind is TaskFailureKind.INPUT_UNAVAILABLE
 
     def test_content_that_is_not_the_digest_names_fails_closed(self) -> None:
         store = InMemoryContentStore()

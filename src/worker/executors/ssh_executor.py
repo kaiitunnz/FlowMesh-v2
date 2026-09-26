@@ -46,7 +46,7 @@ from shared.utils.hardware import (
     unified_gpu_memory_satisfies,
 )
 from shared.utils.http import auth_headers
-from shared.utils.manifest import ARTIFACTS_DIR, prepare_output_dir
+from shared.utils.manifest import ARTIFACTS_DIR, RESULTS_NAME, prepare_output_dir
 from worker.config import WorkerConfig
 from worker.executors.utils.checkpoints import maybe_upload_artifacts
 from worker.executors.utils.docker import (
@@ -106,6 +106,8 @@ _DEFAULT_INPUTS_ROOT = "/mnt/flowmesh/inputs"
 _DEFAULT_OUTPUT_PATH = "/mnt/flowmesh/output"
 _SAFE_MOUNT_ROOT = PurePosixPath("/mnt/flowmesh")
 _CONTAINER_RESULTS_SOURCE_ROOT = "/root/.flowmesh/results-source"
+# Where the staging container finds each input's hydrated result envelope.
+_HYDRATED_RESULTS_ROOT = "/flowmesh-hydrated"
 _RESULT_BUNDLE_TIMEOUT_SEC = 300.0
 _FINISH_SENTINEL_PATH = PurePosixPath("/", "tmp", ".flowmesh_finish").as_posix()
 _SSH_RUN_ENTRYPOINT_PATH = "/flowmesh-ssh-run.sh"
@@ -122,6 +124,11 @@ class ResolvedSSHInput:
     task_id: str
     source_path: Path
     mount_path: str
+    # The upstream's stored result envelope, hydrated from its reference; None when the
+    # dispatch named the upstream by task id only and its bundle carries the result.
+    results: bytes | None = None
+    # Whether the upstream ran, so the root may hold artifacts for it.
+    has_artifacts: bool = True
 
 
 @dataclass(slots=True)
@@ -217,6 +224,20 @@ class SSHConfig:
             pids_limit=pids_limit,
             gpu_device_ids=gpu_device_ids,
         )
+
+
+def _results_archive(results: dict[str, bytes]) -> bytes:
+    """A tar placing each upstream task's result envelope under the hydrated root."""
+    stream = io.BytesIO()
+    with tarfile.open(fileobj=stream, mode="w") as tar:
+        for task_id, data in results.items():
+            info = tarfile.TarInfo(
+                name=f"{_HYDRATED_RESULTS_ROOT.lstrip('/')}/{task_id}/{RESULTS_NAME}"
+            )
+            info.size = len(data)
+            info.mode = 0o644
+            tar.addfile(info, io.BytesIO(data))
+    return stream.getvalue()
 
 
 def _resolve_resource_limits(
@@ -1067,26 +1088,29 @@ class SSHExecutor(Executor):
 
         results_root = self._config.results_dir
         resolved: list[ResolvedSSHInput] = []
+        upstream_results = task.upstream_results or {}
         upstream_task_ids = task.upstream_task_ids or {}
         for entry in cfg.inputs:
             stage = entry.stage.strip()
             if not stage:
                 raise ExecutionError("SSH input stage names must be non-empty")
-            task_id = upstream_task_ids.get(stage)
+            binding = upstream_results.get(stage)
+            task_id = binding.task_id if binding else upstream_task_ids.get(stage)
             if not task_id:
                 raise ExecutionError(
                     f"Missing resolved upstream task ID for SSH input stage '{stage}'"
                 )
-            source_path = results_root / task_id
             resolved.append(
                 ResolvedSSHInput(
                     stage=stage,
                     task_id=task_id,
-                    source_path=source_path,
+                    source_path=results_root / task_id,
                     mount_path=self._normalize_mount_path(
                         entry.mountPath or f"{_DEFAULT_INPUTS_ROOT}/{stage}",
                         field_name=f"inputs[{stage}].mountPath",
                     ),
+                    results=task.upstream_envelope(stage) if binding else None,
+                    has_artifacts=binding is None or binding.reference is not None,
                 )
             )
         return resolved
@@ -1183,13 +1207,20 @@ class SSHExecutor(Executor):
             destination = staging_dir / resolved.task_id
             if resolved.source_path.exists():
                 shutil.copytree(resolved.source_path, destination, dirs_exist_ok=True)
-                continue
-            self._download_result_bundle(resolved.task_id, staging_dir)
-            if not destination.exists():
-                raise ExecutionError(
-                    "Downloaded SSH input bundle did not create expected directory "
-                    f"{destination} for upstream task {resolved.task_id}"
+            elif resolved.has_artifacts:
+                self._download_result_bundle(
+                    resolved.task_id,
+                    staging_dir,
+                    include_results=resolved.results is None,
                 )
+                if not destination.exists():
+                    raise ExecutionError(
+                        "Downloaded SSH input bundle did not create expected directory "
+                        f"{destination} for upstream task {resolved.task_id}"
+                    )
+            if resolved.results is not None:
+                destination.mkdir(parents=True, exist_ok=True)
+                (destination / RESULTS_NAME).write_bytes(resolved.results)
         return staging_dir
 
     def _stage_inputs_in_volume(
@@ -1209,28 +1240,36 @@ class SSHExecutor(Executor):
             },
         )
         commands = ["set -e"]
+        hydrated: dict[str, bytes] = {}
         for resolved in resolved_inputs:
+            dst = shlex.quote(f"/dst/{resolved.task_id}")
+            commands.append(f"mkdir -p {dst}")
             if resolved.source_path.exists():
                 src = shlex.quote(f"/src/{resolved.task_id}")
-                dst = shlex.quote(f"/dst/{resolved.task_id}")
-                commands.append(f"mkdir -p {dst}")
                 commands.append(f"cp -a {src}/. {dst}/")
-                continue
-            commands.append(self._build_remote_stage_command(resolved.task_id))
+            elif resolved.has_artifacts:
+                commands.append(
+                    self._build_remote_stage_command(
+                        resolved.task_id, include_results=resolved.results is None
+                    )
+                )
+            if resolved.results is not None:
+                hydrated[resolved.task_id] = resolved.results
+                src = shlex.quote(f"{_HYDRATED_RESULTS_ROOT}/{resolved.task_id}")
+                commands.append(f"cp {src}/{RESULTS_NAME} {dst}/{RESULTS_NAME}")
         command = " && ".join(commands)
         try:
-            run_kwargs: dict[str, Any] = {
+            create_kwargs: dict[str, Any] = {
                 "image": "busybox:1.36.1",
                 "command": ["sh", "-lc", command],
                 "volumes": [
                     f"{results_source}:/src:ro",
                     f"{volume_name}:/dst:rw",
                 ],
-                "remove": True,
             }
             if self._config.network_mode:
-                run_kwargs["network_mode"] = self._config.network_mode
-            client.containers.run(**run_kwargs)
+                create_kwargs["network_mode"] = self._config.network_mode
+            self._run_staging_container(client, create_kwargs, hydrated)
         except Exception:
             try:
                 volume.remove(force=True)
@@ -1243,8 +1282,33 @@ class SSHExecutor(Executor):
             raise
         return volume_name
 
-    def _build_remote_stage_command(self, task_id: str) -> str:
-        url = shlex.quote(self._result_bundle_url(task_id))
+    @staticmethod
+    def _run_staging_container(
+        client: DockerClient, create_kwargs: dict[str, Any], hydrated: dict[str, bytes]
+    ) -> None:
+        """Run the staging container with each hydrated result placed in it first."""
+        container = client.containers.create(**create_kwargs)
+        assert isinstance(container, Container)
+        try:
+            if hydrated:
+                container.put_archive("/", _results_archive(hydrated))
+            container.start()
+            status = container.wait()
+            if (code := status.get("StatusCode", 1)) != 0:
+                logs = container.logs().decode("utf-8", errors="replace")
+                raise ExecutionError(
+                    f"Staging SSH inputs failed with exit code {code}: {logs.strip()}"
+                )
+        finally:
+            try:
+                container.remove(force=True)
+            except Exception:
+                logger.debug(
+                    "Failed to remove SSH input staging container", exc_info=True
+                )
+
+    def _build_remote_stage_command(self, task_id: str, include_results: bool) -> str:
+        url = shlex.quote(self._result_bundle_url(task_id, include_results))
         header_parts = [
             f"--header {shlex.quote(f'{k}: {v}')}" for k, v in auth_headers().items()
         ]
@@ -1252,7 +1316,7 @@ class SSHExecutor(Executor):
         timeout = int(_RESULT_BUNDLE_TIMEOUT_SEC)
         return f"wget -qO- -T {timeout} -t 1 {header_prefix}{url} | tar -xz -C /dst"
 
-    def _result_bundle_url(self, task_id: str) -> str:
+    def _result_bundle_url(self, task_id: str, include_results: bool) -> str:
         base_url = os.getenv("FLOWMESH_BASE_URL", "").strip()
         if not base_url:
             raise ExecutionError(
@@ -1260,17 +1324,20 @@ class SSHExecutor(Executor):
                 "upstream results are not available locally"
             )
         return (
-            f"{base_url.rstrip('/')}/api/v1/results/{task_id}/bundle"
-            "?include=results&include=artifacts"
+            f"{base_url.rstrip('/')}/api/v1/results/{task_id}/bundle?"
+            + ("include=results&" if include_results else "")
+            + "include=artifacts"
         )
 
-    def _download_result_bundle(self, task_id: str, destination_dir: Path) -> None:
+    def _download_result_bundle(
+        self, task_id: str, destination_dir: Path, include_results: bool
+    ) -> None:
         tmp_fd, tmp_str = tempfile.mkstemp(prefix="ssh_bundle_", suffix=".tar.gz")
         os.close(tmp_fd)
         tmp_path = Path(tmp_str)
         try:
             with requests.get(
-                self._result_bundle_url(task_id),
+                self._result_bundle_url(task_id, include_results),
                 headers=auth_headers(),
                 stream=True,
                 timeout=_RESULT_BUNDLE_TIMEOUT_SEC,

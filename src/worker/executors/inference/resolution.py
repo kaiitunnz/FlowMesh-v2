@@ -30,7 +30,30 @@ def resolve_task_contract(
         return None
     if contract.source.kind is InferenceSourceKind.LITERAL:
         return resolve_contract(contract, None)
+    if contract.source.element is not None:
+        return _resolve_element(task, contract)
     return _resolve_upstream(task, contract)
+
+
+def _resolve_element(
+    task: ExecutorTask, contract: CanonicalInferenceContract
+) -> ResolvedCanonicalInferenceRequest:
+    """Resolve the one prompt a fan-out child's element names.
+
+    Its provenance is the producer result the element was hydrated from, so a re-drive
+    reading any other result resolves to a different binding.
+    """
+    source = contract.source
+    element = task.hydrated_element()
+    reference = task.input_element
+    if element is None or reference is None:
+        raise InputResolutionError(
+            f"{source.expression} names a producer element this task was not given"
+        )
+    provenance = UpstreamProvenance(
+        node=source.node or "", content_digest=reference.reference.content_digest
+    )
+    return resolve_contract(contract, [element[0]], (provenance,))
 
 
 def _resolve_upstream(

@@ -11,8 +11,6 @@ immutable reference makes safe to reuse.
 
 import threading
 from collections import OrderedDict
-from dataclasses import dataclass
-from typing import Any
 
 from pydantic import ValidationError
 
@@ -22,7 +20,9 @@ from shared.content import (
     ContentUnavailable,
     FabricObjectStore,
 )
-from shared.schemas.result import BaseExecutorResult, ResultEnvelope
+from shared.schemas.result import ResultEnvelope
+from shared.schemas.result.binding import skip_envelope, skip_envelope_bytes
+from shared.tasks.result_binding import ResultBinding
 
 _CACHE_MAX_BYTES = 64 * 1024 * 1024
 
@@ -33,26 +33,6 @@ class ResultUnreadable(RuntimeError):
 
 class ResultUnavailable(RuntimeError):
     """The store holding a bound result could not be reached; a retry may succeed."""
-
-
-@dataclass(frozen=True)
-class ResultBinding:
-    """What a settled task's result resolves to: a stored envelope or a skip."""
-
-    task_id: str
-    reference: ContentReference | None = None
-    skip: dict[str, Any] | None = None
-    settled_at: str | None = None
-
-
-def skip_envelope(binding: ResultBinding) -> ResultEnvelope:
-    """The envelope a task that settled without running reads as."""
-    envelope = ResultEnvelope(
-        task_id=binding.task_id, result=BaseExecutorResult(), metadata=binding.skip
-    )
-    if binding.settled_at is not None:
-        envelope.received_at = binding.settled_at
-    return envelope
 
 
 class ResultReader:
@@ -72,7 +52,7 @@ class ResultReader:
         if binding.reference is None:
             if binding.skip is None:
                 raise ResultUnreadable(f"task {binding.task_id} has no bound result")
-            return skip_envelope(binding).model_dump_json(indent=2).encode("utf-8")
+            return skip_envelope_bytes(binding)
         return self._hydrate(binding.reference)
 
     def read(self, binding: ResultBinding) -> ResultEnvelope:
@@ -116,10 +96,4 @@ class ResultReader:
                 self._cached_bytes -= len(evicted)
 
 
-__all__ = [
-    "ResultBinding",
-    "ResultReader",
-    "ResultUnavailable",
-    "ResultUnreadable",
-    "skip_envelope",
-]
+__all__ = ["ResultReader", "ResultUnavailable", "ResultUnreadable"]

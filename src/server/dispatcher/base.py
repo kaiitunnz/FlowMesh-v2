@@ -1,4 +1,3 @@
-import copy
 import datetime
 import logging
 import time
@@ -23,6 +22,7 @@ from shared.tasks import (
     TaskSpecStrict,
 )
 from shared.tasks.placeholders import PLACEHOLDER_PATTERN
+from shared.tasks.result_binding import ResultBinding
 from shared.tasks.specs import (
     ConditionSpec,
     InferenceEmbodimentKind,
@@ -39,7 +39,7 @@ from ..registries.worker import Worker, WorkerRegistry
 from ..services.metrics import MetricsRecorder
 from ..task.metadata import extract_model_dataset_names
 from ..task.models import DispatchEnd, TaskRecord, TaskStatus
-from ..task.results import ResultUnavailable, ResultUnreadable
+from ..task.results import ResultUnavailable
 from ..task.runtime import TaskRuntime
 from ..task.v2.representations.plan import InferenceEmbodimentMenu
 from ..utils.time import now_iso
@@ -613,7 +613,10 @@ class Dispatcher:
 
         # 6. Resolve stage references
         try:
-            rendered_task = self._resolve_stage_references(task_id, task, record)
+            rendered_task, upstream_results = self._resolve_stage_references(
+                task_id, task, record
+            )
+            self._validate_ssh_inputs(record, rendered_task.spec)
         except StageReferenceNotReady as exc:
             self._logger.debug("Task %s waiting on stage artifacts: %s", task_id, exc)
             self.requeue_task(
@@ -665,25 +668,9 @@ class Dispatcher:
         )
 
         # 7. Build WorkerTaskMessage
-        try:
-            agent_episode = self._runtime.agent_episode_dispatch(
-                task_id,
-                OwnerFence(worker_id=worker.id, incarnation=worker.incarnation),
-            )
-        except ResultUnavailable as exc:
-            self._logger.warning(
-                "Task %s cannot reach an accepted input result yet: %s", task_id, exc
-            )
-            self.requeue_task(
-                task_id, reason="agent_input_unavailable", count_retry=False
-            )
-            return False
-        except ResultUnreadable as exc:
-            self._runtime.release_merge(task_id)
-            self.fail_task(
-                task_id, f"input_unreadable: {exc}", payload={"error": str(exc)}
-            )
-            return True
+        agent_episode = self._runtime.agent_episode_dispatch(
+            task_id, OwnerFence(worker_id=worker.id, incarnation=worker.incarnation)
+        )
         dispatch_id = new_dispatch_id()
         message = WorkerTaskMessage(
             task_id=task_id,
@@ -699,9 +686,8 @@ class Dispatcher:
             shard_index=record.shard_index,
             shard_total=record.shard_total,
             merged_children=rendered_children,
-            upstream_task_ids=self._resolve_upstream_task_ids(
-                record, rendered_task.spec
-            ),
+            upstream_results=upstream_results,
+            input_element=self._runtime.input_element(task_id),
             agent_episode=agent_episode,
             service_episode=self._runtime.service_episode_dispatch(task_id),
             declared_contract=self._runtime.declared_contract(task_id),
@@ -851,7 +837,7 @@ class Dispatcher:
                 self._runtime.release_merged_child(task_id, child_id, None)
                 continue
             try:
-                resolved = self._resolve_stage_references(
+                resolved, child_upstream = self._resolve_stage_references(
                     child_id, child_record.task, child_record
                 )
                 resolved.spec.validate_dispatchable()
@@ -881,6 +867,7 @@ class Dispatcher:
                         workflow_id=child_record.workflow_id,
                         spec=resolved.spec,
                         metadata=resolved.metadata,
+                        upstream_results=child_upstream,
                     )
                 )
             except (StageReferenceNotReady, ResultUnavailable) as exc:
@@ -1143,30 +1130,18 @@ class Dispatcher:
 
     def _resolve_stage_references(
         self, task_id: str, task: TaskEnvelopeTemplate, record: TaskRecord
-    ) -> TaskEnvelopeStrict:
+    ) -> tuple[TaskEnvelopeStrict, dict[str, ResultBinding] | None]:
+        """Render a task's placeholders and name each upstream result it receives.
+
+        Placeholders render here, against the upstream values they name; the upstream
+        results themselves travel as bindings the worker hydrates.
+        """
         context = self._build_stage_context(record)
         resolved_task: TaskEnvelopeTemplate = task
         if context and task.has_placeholder():
             resolved_task = self._resolve_placeholders(task, context)
-
-        upstream_results = (
-            self._collect_upstream_results(context, task_id) if context else {}
-        )
-        if upstream_results:
-            existing = resolved_task.spec.upstreamResults or {}
-            merged: dict[str, BaseExecutorResult] = {}
-            if isinstance(existing, dict):
-                merged.update(copy.deepcopy(existing))
-            merged.update(upstream_results)
-            resolved_task = resolved_task.model_copy(
-                update={
-                    "spec": resolved_task.spec.model_copy(
-                        update={"upstreamResults": merged}
-                    )
-                }
-            )
-
-        return TaskEnvelopeStrict.model_validate(resolved_task)
+        upstream = self._upstream_bindings(context, task_id) if context else {}
+        return TaskEnvelopeStrict.model_validate(resolved_task), upstream or None
 
     def _resolve_placeholders(self, value: Any, context: dict[str, TaskRecord]) -> Any:
         if isinstance(value, str):
@@ -1303,36 +1278,33 @@ class Dispatcher:
             return (Path(base_dir) / "artifacts" / path_value).as_posix()
         return None
 
-    def _collect_upstream_results(
+    def _upstream_bindings(
         self, context: dict[str, TaskRecord], current_task_id: str
-    ) -> dict[str, BaseExecutorResult]:
-        results: dict[str, BaseExecutorResult] = {}
+    ) -> dict[str, ResultBinding]:
+        bindings: dict[str, ResultBinding] = {}
         for name, record in context.items():
             if not record or record.task_id == current_task_id:
                 continue
             if record.status != TaskStatus.DONE:
                 continue
-            try:
-                envelope = self._load_stage_result(record.task_id)
-            except StageResultMissing as exc:
+            binding = self._runtime.result_binding(record.task_id)
+            if binding is None:
                 self._logger.warning(
-                    "Task %s receives no upstream result for %s: %s",
+                    "Task %s receives no upstream result for %s: task %s has no bound "
+                    "result",
                     current_task_id,
                     name,
-                    exc,
+                    record.task_id,
                 )
                 continue
-            results[name] = envelope.result
-        return results
+            bindings[name] = binding
+        return bindings
 
-    def _resolve_upstream_task_ids(
-        self, record: TaskRecord, spec: TaskSpecStrict
-    ) -> dict[str, str] | None:
+    def _validate_ssh_inputs(self, record: TaskRecord, spec: TaskSpecStrict) -> None:
+        """Check that each SSH input names a settled upstream stage of the task."""
         if not isinstance(spec, SSHSpecStrict) or not spec.inputs:
-            return None
-
+            return
         context = self._build_stage_context(record)
-        resolved: dict[str, str] = {}
         for entry in spec.inputs:
             stage_name = entry.stage.strip()
             if not stage_name:
@@ -1350,8 +1322,6 @@ class Dispatcher:
                 raise StageReferenceNotReady(
                     f"Stage '{stage_name}' has not completed for SSH input mount"
                 )
-            resolved[stage_name] = upstream.task_id
-        return resolved or None
 
     def _load_stage_result(self, stage_task_id: str) -> ResultEnvelope:
         envelope = self._runtime.read_result(stage_task_id)

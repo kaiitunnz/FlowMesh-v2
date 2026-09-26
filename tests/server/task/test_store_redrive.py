@@ -14,7 +14,6 @@ from server.config import OrchestrationConfig
 from server.orchestration import Advance, PublicationOutcome
 from server.task import runtime as runtime_module
 from server.task.redrive import StoreRedriveScheduler
-from server.task.results import ResultBinding
 from server.task.runtime import TaskRuntime
 from server.task.v2.representations.template import TemplateEdge
 from shared.content import (
@@ -24,6 +23,7 @@ from shared.content import (
     ContentUnavailable,
     FabricObjectStore,
 )
+from shared.tasks.result_binding import ResultBinding
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader, store_result
 from tests.server.task.test_agent_dataflow import (
@@ -172,24 +172,31 @@ def _agent_consuming(runtime: TaskRuntime) -> Any:
 
 
 def test_an_agent_input_waits_out_an_unreachable_store() -> None:
-    runtime, flaky, (scheduler,), _clock = _runtime(FakeRegistry())
+    runtime, flaky, (scheduler,), clock = _runtime(FakeRegistry())
     engine = _agent_consuming(runtime)
+    runtime._engines["wfl-agent"] = engine
 
     flaky.error = ContentUnavailable("store down")
-    runtime._resolve_agent_inputs_locked("wfl-agent", engine, Advance())
+    runtime._stage_agent_inputs_locked("wfl-agent", engine, Advance())
+    assert scheduler.run_due() == ["wfl-agent"]
     assert engine.work_item("M").outcome is None
+    assert not engine.accepted_inputs_for_task("M")
     assert scheduler.pending("wfl-agent")
 
     flaky.error = None
-    runtime._resolve_agent_inputs_locked("wfl-agent", engine, Advance())
+    clock.now += 1.0
+    assert scheduler.run_due() == ["wfl-agent"]
     assert engine.accepted_inputs_for_task("M")
+    assert not scheduler.pending("wfl-agent")
 
 
 def test_a_missing_agent_input_fails_the_agent() -> None:
     runtime, flaky, (scheduler,), _clock = _runtime(FakeRegistry())
     engine = _agent_consuming(runtime)
+    runtime._engines["wfl-agent"] = engine
 
     flaky.error = ContentHydrationError("no such object")
-    runtime._resolve_agent_inputs_locked("wfl-agent", engine, Advance())
+    runtime._stage_agent_inputs_locked("wfl-agent", engine, Advance())
+    scheduler.run_due()
     assert engine.work_item("M").outcome is PublicationOutcome.DECLARED_FAILURE
     assert not scheduler.pending("wfl-agent")
