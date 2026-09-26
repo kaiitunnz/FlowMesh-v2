@@ -6,30 +6,38 @@ Redis error so the dispatcher thread keeps running (the connection pool
 reconnects on the next command and the watchdog re-surfaces the task).
 """
 
+import logging
 from typing import Any
 from unittest import mock
 
 import pytest
-import redis.exceptions
 
+from server.dispatcher.base import Dispatcher
 from tests.server.dispatcher.helpers import make_capturing_dispatcher
+from tests.server.task.test_task_merge import (
+    _next,
+    _register,
+    _Registry,
+    _runtime,
+    _siblings,
+)
 
 
-def test_safe_requeue_reenqueues_in_memory_when_persist_fails(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    runtime = mock.Mock()
-    dispatcher = make_capturing_dispatcher(runtime=runtime)
+@pytest.mark.anyio
+async def test_safe_requeue_leaves_the_task_queued_when_its_persist_fails() -> None:
+    registry = _Registry()
+    runtime = _runtime(registry)
+    _, _ids = await _register(runtime, _siblings(names=["a"]))
+    task_id = _next(runtime)
+    registry.down = True
 
-    def _boom(task_id: str, **kwargs: Any) -> None:
-        raise redis.exceptions.ConnectionError("control redis down")
+    # Must not raise (a requeue that also hits the outage cannot kill the loop), and
+    # the task must stay queued: nothing else re-surfaces it while the server stays up.
+    Dispatcher(runtime, mock.Mock(), logging.getLogger("resilience"))._safe_requeue(
+        task_id
+    )
 
-    monkeypatch.setattr(dispatcher, "requeue_task", _boom)
-    # Must not raise (a requeue that also hits the outage cannot kill the loop),
-    # AND the task must still be re-enqueued in memory so it isn't orphaned:
-    # nothing else re-surfaces a PENDING task while the server stays up.
-    dispatcher._safe_requeue("tsk-1")
-    runtime.requeue.assert_called_once_with("tsk-1", front=True)
+    assert task_id in runtime._ready_index
 
 
 def test_safe_requeue_propagates_non_redis_error(

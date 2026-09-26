@@ -21,6 +21,7 @@ from shared.content import (
     ContentUnavailable,
     FabricObjectStore,
 )
+from tests.server.dispatch_helpers import record_dispatch
 from tests.server.dispatcher.helpers import CapturingDispatcher
 from tests.server.result_store import make_result_reader, result_payload
 from tests.server.task.test_v2_orchestration import FakeRegistry, _NoopSecretVault
@@ -85,7 +86,7 @@ def _dispatch_downstream(error: Exception) -> CapturingDispatcher:
     )
     _wf, results = asyncio.run(runtime.register("owner", "org", _DAG, format="native"))
     a, b = (r.task_id for r in results)
-    runtime.mark_dispatched(a, cast(Any, _worker()))
+    record_dispatch(runtime, a, cast(Any, _worker()))
     runtime.mark_succeeded(
         a,
         "wkr-1",

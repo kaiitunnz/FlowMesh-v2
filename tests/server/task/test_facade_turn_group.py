@@ -31,6 +31,7 @@ from server.orchestration.tool_dispatch import (
 )
 from server.task.runtime import TaskRuntime
 from shared.harness import HarnessResult, HarnessResultKind
+from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader
 from tests.server.task.test_v2_agent_harness import (
     _agent,
@@ -350,7 +351,7 @@ def test_an_oversized_search_group_settles_overflow_as_quota() -> None:
         task = ids["searcher"]
         engine = runtime.orchestration_engine(workflow_id)
         assert engine is not None
-        engine.on_dispatched(task, "w1")
+        record_dispatch(runtime, task, "w1")
         members = tuple(
             FacadeCallMember(
                 ordinal=i,
@@ -418,7 +419,7 @@ def test_a_crash_after_route_does_not_resurrect_a_stale_group() -> None:
         task = ids["searcher"]
         engine = runtime.orchestration_engine(workflow_id)
         assert engine is not None
-        engine.on_dispatched(task, "w1")
+        record_dispatch(runtime, task, "w1")
         group = FacadeTurnGroup(
             group_id=f"{task}:0",
             activation_id=task,

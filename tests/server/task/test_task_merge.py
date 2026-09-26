@@ -17,6 +17,7 @@ from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime
 from shared.schemas.event import TaskEvent, WorkerEvent
 from shared.tasks.specs.common import ConditionSpec
+from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader, result_payload, store_result
 from tests.server.task.test_v2_orchestration import (
     _TS,
@@ -179,7 +180,7 @@ async def _dispatch_merged(
     assert parent == ids["a"]
     assert runtime.plan_merge(parent, 8, _WORKER.id) == [ids["b"], ids["c"]]
     if dispatch:
-        runtime.mark_dispatched(parent, _WORKER)
+        record_dispatch(runtime, parent, _WORKER)
     return ids
 
 
@@ -230,7 +231,9 @@ async def test_a_merged_child_without_its_own_result_runs_again_on_its_own() -> 
     ids = await _dispatch_merged(runtime)
     a, b, c = ids["a"], ids["b"], ids["c"]
 
-    settled, _ = runtime.mark_succeeded(a, "wkr-1", _merged_success(runtime, a, b), _TS)
+    success = runtime.mark_succeeded(a, "wkr-1", _merged_success(runtime, a, b), _TS)
+    assert success is not None
+    settled = success.merged_children
 
     assert settled == [b]
     assert (_value(runtime, a), _value(runtime, b)) == (a, b)
@@ -261,7 +264,8 @@ def _monitor(runtime: TaskRuntime, dispatcher: Any = None) -> EventMonitor:
         redis_client=MagicMock(),
         logger=logging.getLogger("task-merge"),
         runtime=runtime,
-        dispatcher=dispatcher or MagicMock(),
+        dispatcher=dispatcher
+        or Dispatcher(runtime, MagicMock(), logging.getLogger("task-merge")),
         worker_registry=MagicMock(),
         node_registry=MagicMock(),
         metrics_recorder=MagicMock(),
@@ -307,7 +311,7 @@ async def test_a_failed_or_lost_merged_dispatch_runs_each_task_alone(
     ids = await _dispatch_merged(runtime)
     monitor = _monitor(runtime)
     if error:
-        monitor._handle_task_event(_failed(ids["a"], error, retryable))
+        monitor.handle_task_event(_failed(ids["a"], error, retryable))
     else:
         monitor._handle_worker_event(WorkerEvent(type="UNREGISTER", worker_id="wkr-1"))
 
@@ -323,11 +327,11 @@ async def test_a_task_that_fails_alone_after_its_merge_failed_is_charged() -> No
     a = ids["a"]
     runtime._tasks[a].max_attempts = 1
     monitor = _monitor(runtime)
-    monitor._handle_task_event(_failed(a, "batch rejected", retryable=False))
+    monitor.handle_task_event(_failed(a, "batch rejected", retryable=False))
     assert _next(runtime) is not None
-    runtime.mark_dispatched(a, _worker("wkr-2"))
+    record_dispatch(runtime, a, _worker("wkr-2"))
 
-    monitor._handle_task_event(
+    monitor.handle_task_event(
         _failed(a, "own input", retryable=False, worker_id="wkr-2")
     )
 
@@ -347,8 +351,8 @@ async def test_a_replayed_merged_failure_is_absorbed(retryable: bool) -> None:
 
     registry.fail_next = True
     with pytest.raises(ConnectionError):
-        monitor._handle_task_event(event)
-    monitor._handle_task_event(event)
+        monitor.handle_task_event(event)
+    monitor.handle_task_event(event)
 
     for task_id in ids.values():
         _assert_run_alone(runtime, registry, task_id)
@@ -363,7 +367,7 @@ async def test_a_merged_dispatch_failing_after_a_restart_runs_each_task_alone() 
     restored = _runtime(registry)
     await restored.rehydrate()
 
-    _monitor(restored)._handle_task_event(
+    _monitor(restored).handle_task_event(
         _failed(ids["a"], "batch rejected", retryable=False)
     )
 
@@ -379,7 +383,7 @@ async def test_the_same_loss_reported_twice_is_absorbed() -> None:
     monitor = _monitor(runtime)
 
     monitor._handle_worker_event(WorkerEvent(type="UNREGISTER", worker_id="wkr-1"))
-    monitor._handle_task_event(_failed(ids["a"], "worker lost", retryable=True))
+    monitor.handle_task_event(_failed(ids["a"], "worker lost", retryable=True))
 
     for task_id in ids.values():
         _assert_run_alone(runtime, registry, task_id)
@@ -396,10 +400,10 @@ async def test_a_failed_batch_whose_children_were_all_cancelled_is_not_charged()
     parent = _next(runtime)
     assert parent == a["a1"]
     assert runtime.plan_merge(parent, 8, _WORKER.id) == [b["b1"]]
-    runtime.mark_dispatched(parent, _WORKER)
+    record_dispatch(runtime, parent, _WORKER)
     runtime.cancel_workflow(other)
 
-    _monitor(runtime)._handle_task_event(
+    _monitor(runtime).handle_task_event(
         _failed(parent, "batch rejected", retryable=False)
     )
 
@@ -413,7 +417,7 @@ async def test_a_returned_parent_keeps_nothing_of_its_dispatch() -> None:
     ids = await _dispatch_merged(runtime)
     assert runtime._tasks[ids["a"]].topic == "tasks"
 
-    _monitor(runtime)._handle_task_event(
+    _monitor(runtime).handle_task_event(
         _failed(ids["a"], "batch rejected", retryable=True)
     )
 
@@ -486,7 +490,7 @@ spec:
     for _ in range(2):
         upstream = _next(runtime)
         assert upstream in (ids["u1"], ids["u2"])
-        runtime.mark_dispatched(upstream, _WORKER)
+        record_dispatch(runtime, upstream, _WORKER)
         runtime.mark_succeeded(
             upstream, "wkr-1", _merged_success(runtime, upstream), _TS
         )
@@ -520,7 +524,9 @@ async def test_a_child_result_outside_its_scope_runs_the_child_again() -> None:
         runtime._results, c, {"value": c}, "another-org"
     ).model_dump(mode="json")
 
-    settled, _ = runtime.mark_succeeded(a, "wkr-1", payload, _TS)
+    success = runtime.mark_succeeded(a, "wkr-1", payload, _TS)
+    assert success is not None
+    settled = success.merged_children
 
     assert settled == [b]
     _assert_returned(runtime, registry, c)
@@ -536,7 +542,7 @@ async def test_a_merged_child_advances_its_own_workflows_epochs() -> None:
     parent = _next(runtime)
     assert parent == a["a1"]
     assert runtime.plan_merge(parent, 8, _WORKER.id) == [b["b1"]]
-    runtime.mark_dispatched(parent, _WORKER)
+    record_dispatch(runtime, parent, _WORKER)
 
     runtime.mark_succeeded(
         parent, "wkr-1", _merged_success(runtime, parent, b["b1"]), _TS
@@ -569,7 +575,7 @@ async def test_a_replayed_success_heals_a_merged_childs_other_workflow() -> None
     parent = _next(runtime)
     assert parent == a["a1"]
     runtime.plan_merge(parent, 8, _WORKER.id)
-    runtime.mark_dispatched(parent, _WORKER)
+    record_dispatch(runtime, parent, _WORKER)
     payload = _merged_success(runtime, parent, b["b1"])
 
     registry.fail_next = True
@@ -592,7 +598,7 @@ async def test_a_failed_commit_leaves_a_parent_failure_whole_for_its_replay() ->
     parent = _next(runtime)
     assert parent == t["a1"]
     assert runtime.plan_merge(parent, 8, _WORKER.id) == [t["a2"], t["a3"]]
-    runtime.mark_dispatched(parent, _WORKER)
+    record_dispatch(runtime, parent, _WORKER)
 
     registry.fail_next = True
     with pytest.raises(ConnectionError):
@@ -615,7 +621,7 @@ async def test_a_failed_commit_leaves_a_parent_success_whole_for_its_replay() ->
     parent = _next(runtime)
     assert parent == a["a1"]
     assert runtime.plan_merge(parent, 8, _WORKER.id) == [b["b1"]]
-    runtime.mark_dispatched(parent, _WORKER)
+    record_dispatch(runtime, parent, _WORKER)
     payload = _merged_success(runtime, parent)
 
     registry.fail_next = True
@@ -637,8 +643,7 @@ async def test_a_merge_planned_while_the_store_is_down_returns_its_siblings() ->
     with pytest.raises(ConnectionError):
         runtime.plan_merge(parent, 8, _WORKER.id)
     with pytest.raises(ConnectionError):
-        runtime.release_merge(parent)
-    runtime.requeue(parent, front=True)
+        runtime.return_dispatch(parent, None, increment_retry=False, front=True)
     registry.down = False
 
     for child in (t["b"], t["c"]):
@@ -826,7 +831,7 @@ async def test_releasing_a_child_no_longer_merged_leaves_it_alone() -> None:
     ids = await _dispatch_merged(runtime, dispatch=False)
     runtime.release_merged_child(ids["a"], ids["c"], None)
     assert _next(runtime) == ids["c"]
-    runtime.mark_dispatched(ids["c"], _WORKER)
+    record_dispatch(runtime, ids["c"], _WORKER)
 
     runtime.release_merged_child(ids["a"], ids["c"], None)
 
@@ -904,13 +909,15 @@ async def test_a_cancelled_merge_parent_returns_another_workflows_children() -> 
     _, other_ids = await _register(runtime, _siblings())
     parent = _next(runtime)
     merged = runtime.plan_merge(parent, 8, _WORKER.id)
-    runtime.mark_dispatched(parent, _WORKER)
+    record_dispatch(runtime, parent, _WORKER)
     assert set(other_ids.values()) <= set(merged)
 
     runtime.cancel_workflow(first)
-    settled, _ = runtime.mark_succeeded(
+    success = runtime.mark_succeeded(
         parent, "wkr-1", _merged_success(runtime, parent, *merged), _TS
     )
+    assert success is not None
+    settled = success.merged_children
 
     assert settled == []
     for child in other_ids.values():
@@ -934,12 +941,12 @@ async def test_a_cancelling_parents_failed_or_lost_batch_runs_its_children_alone
     parent = _next(runtime)
     assert parent == a["a1"]
     assert runtime.plan_merge(parent, 8, _WORKER.id) == [b["b1"], b["b2"]]
-    runtime.mark_dispatched(parent, _WORKER)
+    record_dispatch(runtime, parent, _WORKER)
     runtime.cancel_workflow(first)
     monitor = _monitor(runtime)
 
     if loss == "failed":
-        monitor._handle_task_event(_failed(parent, "batch rejected", retryable=False))
+        monitor.handle_task_event(_failed(parent, "batch rejected", retryable=False))
     else:
         monitor._handle_worker_event(WorkerEvent(type="UNREGISTER", worker_id="wkr-1"))
 
@@ -956,7 +963,7 @@ async def test_a_merged_child_of_a_cancelled_workflow_stays_cancelled() -> None:
     other, other_ids = await _register(runtime, _siblings())
     parent = _next(runtime)
     merged = runtime.plan_merge(parent, 8, _WORKER.id)
-    runtime.mark_dispatched(parent, _WORKER)
+    record_dispatch(runtime, parent, _WORKER)
 
     runtime.cancel_workflow(other)
     assert not set(other_ids.values()) & set(

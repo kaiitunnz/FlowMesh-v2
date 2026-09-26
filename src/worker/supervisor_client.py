@@ -77,6 +77,9 @@ class SupervisorClient:
         self._event_ready = threading.Event()
         self._task_ready = threading.Event()
         self._task_queue: queue.Queue[WorkerTaskMessage | object] = queue.Queue()
+        # The task being run and its dispatch id: tasks run one at a time, in the order
+        # this client yields them, so the task's events name the dispatch running it.
+        self._running_dispatch: tuple[str, str] | None = None
         self._interrupt_queue: queue.Queue[tuple[str, str]] = queue.Queue()
         self._stop_queue: queue.Queue[tuple[str, str]] = queue.Queue()
         self._mediated_op_queue: queue.Queue[tuple[str, dict[str, Any]]] = queue.Queue()
@@ -268,6 +271,7 @@ class SupervisorClient:
             type="TASK_UPDATE",
             worker_id=self.worker_id,
             task_id=task_id,
+            dispatch_id=self._dispatch_id(task_id),
             payload=payload,
         )
         self._send_event(event)
@@ -283,6 +287,7 @@ class SupervisorClient:
             type="TASK_FAILED",
             worker_id=self.worker_id,
             task_id=task_id,
+            dispatch_id=self._dispatch_id(task_id),
             error=error,
             retryable=retryable,
             payload=metadata or {},
@@ -296,6 +301,7 @@ class SupervisorClient:
             type="TASK_SUCCEEDED",
             worker_id=self.worker_id,
             task_id=task_id,
+            dispatch_id=self._dispatch_id(task_id),
             payload=metadata or {},
         )
         self._send_event(event)
@@ -318,6 +324,7 @@ class SupervisorClient:
             type="TASK_STARTED",
             worker_id=self.worker_id,
             task_id=task_id,
+            dispatch_id=self._dispatch_id(task_id),
             payload=payload,
         )
         self._send_event(event)
@@ -329,6 +336,7 @@ class SupervisorClient:
             type="TASK_CANCELLED",
             worker_id=self.worker_id,
             task_id=task_id,
+            dispatch_id=self._dispatch_id(task_id),
             payload=metadata or {},
         )
         self._send_event(event)
@@ -370,7 +378,14 @@ class SupervisorClient:
             if item is self._TASK_SENTINEL:
                 break
             assert isinstance(item, WorkerTaskMessage)
+            self._running_dispatch = (
+                (item.task_id, item.dispatch_id) if item.dispatch_id else None
+            )
             yield item
+
+    def _dispatch_id(self, task_id: str) -> str | None:
+        running = self._running_dispatch
+        return running[1] if running is not None and running[0] == task_id else None
 
     def iter_interrupts(self) -> Iterable[tuple[str, str]]:
         while True:

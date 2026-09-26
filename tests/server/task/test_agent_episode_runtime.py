@@ -10,6 +10,8 @@ ledger and re-readies or suspends the lane.
 import asyncio
 from typing import Any
 
+import pytest
+
 from server.orchestration import ProgressAxis, WorkItemStatus
 from server.orchestration.tool_dispatch import (
     FacadeCallMember,
@@ -19,7 +21,8 @@ from server.orchestration.tool_dispatch import (
     ToolOutcome,
     ToolOutcomeStatus,
 )
-from server.task.models import TaskStatus
+from server.registries.worker import Worker
+from server.task.models import EventEffect, TaskStatus
 from shared.harness import (
     BoundaryEventKind,
     HarnessAdapter,
@@ -30,10 +33,20 @@ from shared.harness import (
     OutcomeKind,
 )
 from shared.private_state import OwnerFence
+from tests.server.dispatch_helpers import record_dispatch
+from tests.server.task.test_task_merge import _Registry
 from tests.server.task.test_v2_orchestration import FakeRegistry, _register, _runtime
 from worker.executors.harness.scripted import ScriptedHarnessAdapter, ScriptedStep
 
 _HOLDER = OwnerFence(worker_id="wkr-1", incarnation=1)
+_WORKER = Worker(
+    id="wkr-1",
+    namespace="ns",
+    cluster="c",
+    node_id="nde-1",
+    node_alias="node",
+    incarnation=1,
+)
 
 _TS = "2026-08-29T00:00:00Z"
 
@@ -81,7 +94,7 @@ def _step(runtime, adapter, task_id: str, worker: str = "wkr-1") -> None:
         if dispatch.capsule_blob is not None
         else None
     )
-    engine.on_dispatched(task_id, worker)
+    record_dispatch(runtime, task_id, worker)
     result = adapter.start(
         task_id, capsule=capsule, outcomes=dispatch.delivered_outcomes
     )
@@ -127,7 +140,7 @@ def test_agent_episode_spawns_seals_and_settles_after_the_child() -> None:
         assert child_cap is not None and not child_cap.closed
 
         # The child settles: only now does the region drain and the workflow complete.
-        engine.on_dispatched(child, "wkr-1")
+        record_dispatch(runtime, child, "wkr-1")
         runtime.mark_succeeded(child, "wkr-1", {}, _TS)
         closed = engine.capability(region_scope, ProgressAxis.CHILD_INIT)
         assert closed is not None and closed.closed
@@ -196,7 +209,7 @@ def test_model_boundary_settle_returns_the_record_to_pending() -> None:
         assert len(child) == 1
         _step(runtime, adapter, writer)  # spawn seal
         _step(runtime, adapter, writer)  # completion carries the injected model result
-        engine.on_dispatched(child[0], "wkr-1")
+        record_dispatch(runtime, child[0], "wkr-1")
         runtime.mark_succeeded(child[0], "wkr-1", {}, _TS)
         writer_wi = engine.work_item(writer)
         assert writer_wi is not None and writer_wi.status is WorkItemStatus.SETTLED
@@ -371,14 +384,13 @@ def _complete(
     worker: str = "wkr-1",
 ) -> None:
     """Drive one clean-completing turn, optionally originating a facade group first."""
-    engine = runtime.orchestration_engine(runtime._tasks[task_id].workflow_id)
     dispatch = runtime.agent_episode_dispatch(task_id, _HOLDER)
     capsule = (
         HarnessCapsule(backend=dispatch.backend, blob=dispatch.capsule_blob)
         if dispatch.capsule_blob is not None
         else None
     )
-    engine.on_dispatched(task_id, worker)
+    record_dispatch(runtime, task_id, worker)
     result = adapter.start(
         task_id, capsule=capsule, outcomes=dispatch.delivered_outcomes
     )
@@ -439,7 +451,7 @@ def test_gateway_originated_spawn_reroutes_a_clean_completion() -> None:
         assert not cap.closed
 
         # The child settles: only now does the region drain and the workflow complete.
-        engine.on_dispatched(child, "wkr-1")
+        record_dispatch(runtime, child, "wkr-1")
         runtime.mark_succeeded(child, "wkr-1", {}, _TS)
         closed = engine.capability(region_scope, ProgressAxis.CHILD_INIT)
         assert closed is not None and closed.closed
@@ -464,7 +476,7 @@ def test_gateway_origination_survives_a_restart_replay() -> None:
 
         dispatch = runtime.agent_episode_dispatch(writer, _HOLDER)
         assert dispatch is not None
-        engine.on_dispatched(writer, "wkr-1")
+        record_dispatch(runtime, writer, "wkr-1")
         result = adapter.start(
             writer, capsule=None, outcomes=dispatch.delivered_outcomes
         )
@@ -509,7 +521,7 @@ def test_a_post_reroute_completion_replay_is_a_noop() -> None:
         # Turn 1: dispatch, run, originate, and reroute into the spawn.
         dispatch = runtime.agent_episode_dispatch(writer, _HOLDER)
         assert dispatch is not None
-        engine.on_dispatched(writer, "wkr-1")
+        record_dispatch(runtime, writer, "wkr-1")
         result = adapter.start(
             writer, capsule=None, outcomes=dispatch.delivered_outcomes
         )
@@ -553,7 +565,7 @@ def test_a_post_done_agent_completion_replay_reaches_the_done_heal() -> None:
 
         dispatch = runtime.agent_episode_dispatch(writer, _HOLDER)
         assert dispatch is not None
-        engine.on_dispatched(writer, "wkr-1")
+        record_dispatch(runtime, writer, "wkr-1")
         result = adapter.start(
             writer, capsule=None, outcomes=dispatch.delivered_outcomes
         )
@@ -787,5 +799,120 @@ def test_a_dispatch_after_cancel_takes_back_no_private_state_write() -> None:
         assert engine.grant_private_state(writer, "wkr-1", 1) is None
         dispatch = runtime.agent_episode_dispatch(writer, _HOLDER)
         assert dispatch is not None and dispatch.private_state_attachment is None
+
+    asyncio.run(run())
+
+
+def test_a_replayed_step_leaves_the_next_step_on_the_same_holder() -> None:
+    # The holder runs every step of the episode, so a step replayed after the next
+    # one was dispatched comes from the same worker and only its dispatch tells the
+    # two apart.
+    async def run() -> None:
+        runtime = _runtime(FakeRegistry())
+        workflow_id, ids = await _register(runtime, _AGENT_WF)
+        writer = ids["writer"]
+        adapter = _adapter()
+        engine = runtime.orchestration_engine(workflow_id)
+        assert engine is not None
+        dispatch = runtime.agent_episode_dispatch(writer, _HOLDER)
+        assert dispatch is not None
+        record_dispatch(runtime, writer, "wkr-1", "dsp-1")
+        result = adapter.start(
+            writer, capsule=None, outcomes=dispatch.delivered_outcomes
+        )
+        step = {"agent_episode": result.model_dump(mode="json")}
+        runtime.mark_succeeded(writer, "wkr-1", step, _TS, "dsp-1")
+        children = len(engine.to_snapshot().work_items)
+        with runtime._cv:
+            assert runtime._pop_ready_locked() == writer
+        record_dispatch(runtime, writer, "wkr-1", "dsp-2")
+
+        replay = runtime.mark_succeeded(writer, "wkr-1", step, _TS, "dsp-1")
+
+        assert replay.effect is EventEffect.STALE
+
+        record = runtime._tasks[writer]
+        assert record.status == TaskStatus.DISPATCHED
+        assert record.dispatch_id == "dsp-2"
+        assert writer not in runtime._ready_index
+        assert len(engine.to_snapshot().work_items) == children
+
+    asyncio.run(run())
+
+
+def test_a_step_that_suspends_before_its_dispatch_is_recorded_resumes() -> None:
+    async def run() -> None:
+        runtime = _runtime(FakeRegistry())
+        held: list[ToolInvocationEnvelope] = []
+        runtime.set_model_settler(held.append)
+        _, ids = await _register(runtime, _AGENT_WF)
+        writer = ids["writer"]
+        adapter = ScriptedHarnessAdapter(
+            [
+                ScriptedStep(
+                    op="boundary",
+                    kind=BoundaryEventKind.INVOCATION,
+                    call="m0",
+                    interface="model",
+                    payload="draft",
+                ),
+                ScriptedStep(op="complete", value_from="m0"),
+            ],
+            "v1",
+        )
+        with runtime._cv:
+            assert runtime._pop_ready_locked() == writer
+        dispatch = runtime.agent_episode_dispatch(writer, _HOLDER)
+        assert dispatch is not None
+        runtime.begin_publish(writer, _WORKER, "dsp-1")
+        result = adapter.start(
+            writer, capsule=None, outcomes=dispatch.delivered_outcomes
+        )
+        step = {"agent_episode": result.model_dump(mode="json")}
+        runtime.mark_succeeded(writer, "wkr-1", step, _TS, "dsp-1")
+        record_dispatch(runtime, writer, _WORKER, "dsp-1")
+
+        (envelope,) = held
+        assert runtime.settle_episode_invocation(
+            envelope.task_id, envelope.call_correlation, "model:draft"
+        )
+        assert runtime._tasks[writer].status == TaskStatus.PENDING
+
+    asyncio.run(run())
+
+
+def test_a_first_report_handled_again_after_its_record_failed_opens_the_attempt() -> (
+    None
+):
+    async def run() -> None:
+        registry = _Registry()
+        runtime = _runtime(registry)
+        workflow_id, ids = await _register(runtime, _AGENT_WF)
+        writer = ids["writer"]
+        adapter = ScriptedHarnessAdapter(
+            [ScriptedStep(op="complete", value="done")], "v1"
+        )
+        with runtime._cv:
+            assert runtime._pop_ready_locked() == writer
+        dispatch = runtime.agent_episode_dispatch(writer, _HOLDER)
+        assert dispatch is not None
+        runtime.begin_publish(writer, _WORKER, "dsp-1")
+
+        registry.fail_next = True
+        with pytest.raises(ConnectionError):
+            runtime.mark_started(writer, "wkr-1", {}, _TS, "dsp-1")
+        assert runtime.mark_started(writer, "wkr-1", {}, _TS, "dsp-1") is (
+            EventEffect.APPLIED
+        )
+        assert record_dispatch(runtime, writer, _WORKER, "dsp-1")
+        result = adapter.start(
+            writer, capsule=None, outcomes=dispatch.delivered_outcomes
+        )
+        step = {"agent_episode": result.model_dump(mode="json")}
+        outcome = runtime.mark_succeeded(writer, "wkr-1", step, _TS, "dsp-1")
+
+        assert outcome.effect is EventEffect.APPLIED
+        assert runtime._tasks[writer].status == TaskStatus.DONE
+        assert runtime.workflow_settlement(workflow_id).settled
 
     asyncio.run(run())

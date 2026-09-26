@@ -55,34 +55,36 @@ The runtime is two top-level processes:
 
 ## Object IDs
 
-3-char prefixes: `wfl-` workflows, `tsk-` tasks, `ssn-` SSH sessions,
-`scn-` SSH connection rows, `cmd-` supervisor commands. The v2 orchestration
-ledger adds `act-` activations, `scp-` scopes, `wki-` work items, `att-`
-attempts, `inv-` invocations, `agr-` authority grants, and `idm-` idempotency
-keys (the fabric-assigned dedupe authority for a mediated boundary). Resident-capacity
-control adds `scl-` service claims, `rpl-` replica incarnations, and `lse-` allocation
-leases. `msk-` is an unguessable ref for a workflow's vaulted model credential, `hnd-`
-an unguessable claim-bound admission handoff token, `chg-` an unguessable
-cache-to-cache content-hydration grant, and `csg-` an unguessable content-store
-access grant. Activation-private state adds
-`aps-` state references, `sbm-` sealed-generation manifests, and `psa-` attachments.
-The network plane adds `rog-` route
-origins and `rly-` relay sessions. Worker-originated mediated boundaries add `mop-`
-one-use mediated-operation permits.
-Always use `new_*_id()`
-helpers in `src/shared/utils/ids.py`. Never use `uuid4()` or `secrets.token_hex`
-for IDs.
+3-char prefixes: `wfl-` workflows, `tsk-` tasks, `ssn-` SSH sessions, `scn-` SSH
+connection rows, `cmd-` supervisor commands, `dsp-` task dispatches. The v2
+orchestration ledger adds `act-` activations, `scp-` scopes, `wki-` work items,
+`att-` attempts, `inv-` invocations, `agr-` authority grants, and `idm-`
+idempotency keys (the fabric-assigned dedupe authority for a mediated boundary).
+Resident-capacity control adds `scl-` service claims, `rpl-` replica
+incarnations, and `lse-` allocation leases. `msk-` is an unguessable ref for a
+workflow's vaulted model credential, `hnd-` an unguessable claim-bound admission
+handoff token, `chg-` an unguessable cache-to-cache content-hydration grant, and
+`csg-` an unguessable content-store access grant. Activation-private state adds
+`aps-` state references, `sbm-` sealed-generation manifests, and `psa-`
+attachments. The network plane adds `rog-` route origins and `rly-` relay
+sessions. Worker-originated mediated boundaries add `mop-` one-use
+mediated-operation permits. Always use `new_*_id()` helpers in
+`src/shared/utils/ids.py`. Never use `uuid4()` or `secrets.token_hex` for IDs.
 
 ## Task state machine
 
-`PENDING → DISPATCHED → (DONE | FAILED | CANCELLED)`. Retried tasks
-cycle back to `PENDING` until exhausted.
+`PENDING → DISPATCHED [→ CANCELLING] → (DONE | FAILED | CANCELLED)`. Retried
+tasks cycle back to `PENDING` until exhausted.
 
 Retries are routed to a worker that has not already failed the task and
 stop once every eligible worker has been tried or `max_attempts` is
 reached; the terminal error is the executor's own message. Controlled
 executor errors are not retried. A task that no worker can satisfy fails
 after `TASK_NO_WORKER_GRACE_SEC`.
+
+Each dispatch carries a `dsp-` id that the worker echoes on the task's events;
+an event applies only while its dispatch holds the task. A cancelling task
+settles `CANCELLED` however its dispatch ends.
 
 ## Directory map
 

@@ -17,6 +17,7 @@ from server.config import OrchestrationConfig
 from server.orchestration import Advance
 from server.task.runtime import TaskRuntime
 from shared.telemetry.config import TelemetryLevel
+from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader
 from tests.server.task.test_v2_orchestration import (
     _TS,
@@ -61,7 +62,7 @@ async def _crashed_before_fan_out(
         patch.setattr(
             runtime, "_fan_out_children_locked", lambda *_args, **_kw: Advance()
         )
-        runtime.mark_dispatched(planner, cast(Any, _worker()))
+        record_dispatch(runtime, planner, cast(Any, _worker()))
         runtime.mark_succeeded(
             planner, "wkr-1", _planned(runtime, planner, ["h1", "h2", "h3"]), _TS
         )
@@ -82,7 +83,7 @@ async def test_a_submitted_workflow_records_control_stages() -> None:
     runtime, control_exporter, _ = _runtime(registry, make_result_reader(), "submit")
 
     _, ids = await _register(runtime, AUTORESEARCH)
-    runtime.mark_dispatched(ids["planner"], cast(Any, _worker()))
+    record_dispatch(runtime, ids["planner"], cast(Any, _worker()))
     runtime.mark_succeeded(ids["planner"], "wkr-1", {}, _TS)
 
     assert _control_span_names(control_exporter)

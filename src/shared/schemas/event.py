@@ -30,6 +30,9 @@ class TaskEvent(BaseEvent):
         default=None, description="Associated worker identifier."
     )
     task_id: str = Field(..., description="Associated task identifier.")
+    dispatch_id: str | None = Field(
+        default=None, description="Dispatch the event reports on."
+    )
     status: str | None = Field(default=None, description="Task status.")
     error: str | None = Field(default=None, description="Error message if any.")
     retryable: bool | None = Field(

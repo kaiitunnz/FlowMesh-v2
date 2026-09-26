@@ -15,6 +15,7 @@ from server.dispatcher.embodiment import (
 from server.task.runtime import TaskRuntime
 from server.task.v2.representations.plan import InferenceEmbodimentMenu
 from shared.tasks.specs import InferenceEmbodimentKind
+from tests.server.dispatch_helpers import record_dispatch
 from tests.server.dispatcher.helpers import (
     CapturingDispatcher,
     make_capturing_dispatcher,
@@ -162,7 +163,7 @@ async def test_a_delivered_embodiment_is_pinned(
         embodiment_selector=_ForcedSelector(kind)
     )
     assert _resolve(dispatcher, runtime, task_id) is True
-    runtime.mark_dispatched(task_id, _worker())
+    record_dispatch(runtime, task_id, _worker())
     assert runtime.embodiment_pinned(task_id) is True
 
     other = next(k for k in InferenceEmbodimentKind if k is not kind)

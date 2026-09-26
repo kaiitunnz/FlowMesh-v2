@@ -9,6 +9,7 @@ from server.config import OrchestrationConfig
 from server.task.runtime import TaskRuntime
 from shared.inference import InputResolutionBinding, UpstreamProvenance
 from shared.tasks.specs import InferenceEmbodimentKind
+from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader
 
 from .test_v2_orchestration import (
@@ -118,7 +119,7 @@ async def test_the_attempt_records_the_embodiment_it_ran() -> None:
     runtime = _runtime(FakeRegistry())
     task_id, primary = await _menu_task(runtime)
     runtime.record_embodiment_selection(task_id, primary, "primary", "e")
-    runtime.mark_dispatched(task_id, _worker())
+    record_dispatch(runtime, task_id, _worker())
 
     engine = runtime.orchestration_engine(_workflow_of(runtime, task_id))
     assert engine is not None
@@ -141,7 +142,7 @@ async def test_an_issued_embodiment_is_pinned_against_re_resolution() -> None:
     assert runtime.record_embodiment_selection(task_id, other, "test", "e") == other
 
     runtime.record_embodiment_selection(task_id, primary, "primary", "e")
-    runtime.mark_dispatched(task_id, _worker())
+    record_dispatch(runtime, task_id, _worker())
     # The dispatch issued the work item's invocation, so the embodiment is committed.
     assert runtime.record_embodiment_selection(task_id, other, "test", "e") == primary
     pinned = runtime.resolved_embodiment(task_id)
@@ -154,7 +155,7 @@ async def test_a_restart_resumes_the_recorded_embodiment() -> None:
     runtime = _runtime(registry)
     task_id, primary = await _menu_task(runtime)
     runtime.record_embodiment_selection(task_id, primary, "primary", "e")
-    runtime.mark_dispatched(task_id, _worker())
+    record_dispatch(runtime, task_id, _worker())
 
     restored = _runtime(registry)
     await restored.rehydrate()
@@ -232,7 +233,7 @@ async def test_a_reported_input_resolution_is_recorded_against_its_work_item() -
     task_id, _primary = await _menu_task(runtime)
     assert runtime.input_resolution_binding(task_id) is None
 
-    runtime.record_input_resolution(task_id, _binding().model_dump(mode="json"))
+    runtime.record_input_resolution(task_id, None, _binding().model_dump(mode="json"))
     recorded = runtime.input_resolution_binding(task_id)
     assert recorded is not None
     assert recorded.request_digest == "req"
@@ -246,9 +247,11 @@ async def test_a_recorded_resolution_is_kept_across_a_re_drive() -> None:
     # report never replaces the recorded one.
     runtime = _runtime(FakeRegistry())
     task_id, _primary = await _menu_task(runtime)
-    runtime.record_input_resolution(task_id, _binding().model_dump(mode="json"))
+    runtime.record_input_resolution(task_id, None, _binding().model_dump(mode="json"))
     runtime.record_input_resolution(
-        task_id, _binding(request_digest="other", cardinality=9).model_dump(mode="json")
+        task_id,
+        None,
+        _binding(request_digest="other", cardinality=9).model_dump(mode="json"),
     )
     recorded = runtime.input_resolution_binding(task_id)
     assert recorded is not None
@@ -259,7 +262,7 @@ async def test_a_recorded_resolution_is_kept_across_a_re_drive() -> None:
 async def test_an_unreadable_resolution_report_records_nothing() -> None:
     runtime = _runtime(FakeRegistry())
     task_id, _primary = await _menu_task(runtime)
-    runtime.record_input_resolution(task_id, {"cardinality": "many"})
+    runtime.record_input_resolution(task_id, None, {"cardinality": "many"})
     assert runtime.input_resolution_binding(task_id) is None
 
 

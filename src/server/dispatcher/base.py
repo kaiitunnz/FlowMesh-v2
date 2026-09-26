@@ -31,13 +31,14 @@ from shared.tasks.specs import (
 )
 from shared.tasks.worker_message import WorkerStatus, WorkerTaskMessage
 from shared.telemetry.semconv import ControlPlaneStage, ControlPlaneWindow
+from shared.utils.ids import new_dispatch_id
 
 from ..clients.redis import REDIS_CONN_ERRORS
 from ..content import ContentAccessBroker
 from ..registries.worker import Worker, WorkerRegistry
 from ..services.metrics import MetricsRecorder
 from ..task.metadata import extract_model_dataset_names
-from ..task.models import TaskRecord, TaskStatus
+from ..task.models import DispatchEnd, TaskRecord, TaskStatus
 from ..task.results import ResultUnavailable, ResultUnreadable
 from ..task.runtime import TaskRuntime
 from ..task.v2.representations.plan import InferenceEmbodimentMenu
@@ -683,8 +684,10 @@ class Dispatcher:
                 task_id, f"input_unreadable: {exc}", payload={"error": str(exc)}
             )
             return True
+        dispatch_id = new_dispatch_id()
         message = WorkerTaskMessage(
             task_id=task_id,
+            dispatch_id=dispatch_id,
             workflow_id=record.workflow_id,
             owner_id=record.owner_id,
             content_scope=record.org_id,
@@ -709,11 +712,17 @@ class Dispatcher:
         )
 
         # 8. Give the task what it reads and writes its content under, then publish it
-        if self._content_access is not None:
-            self._content_access.issue(worker.id, task_id, record.org_id)
+        if not self._runtime.begin_publish(
+            task_id, worker, dispatch_id, input_preparation=preparing
+        ):
+            return True
         try:
+            if self._content_access is not None:
+                self._content_access.issue(worker.id, task_id, record.org_id)
             receivers = self._worker_registry.publish_task(worker, message)
         except Exception as exc:
+            if not self._runtime.abandon_publish(task_id):
+                return True
             self._logger.warning(
                 "Failed to publish task %s to worker %s: %s", task_id, worker.id, exc
             )
@@ -726,6 +735,8 @@ class Dispatcher:
             )
 
         if receivers <= 0:
+            if not self._runtime.abandon_publish(task_id):
+                return True
             self._logger.info(
                 "Node %s dispatch channel has no subscriber; delaying task %s "
                 "(worker %s)",
@@ -748,7 +759,7 @@ class Dispatcher:
 
         # 9. Mark dispatched
         record.no_dispatch_since = None
-        self._runtime.mark_dispatched(task_id, worker, input_preparation=preparing)
+        live = self._runtime.mark_dispatched(task_id)
         if rendered_children:
             self._logger.info(
                 "[TaskMerge] parent=%s merged_children=%d -> %s",
@@ -756,10 +767,13 @@ class Dispatcher:
                 len(rendered_children),
                 ", ".join(child.task_id for child in rendered_children),
             )
-        try:
-            self._worker_registry.update_worker_status(worker.id, WorkerStatus.BUSY)
-        except Exception as exc:
-            self._logger.debug("Failed to update worker %s status: %s", worker.id, exc)
+        if live:
+            try:
+                self._worker_registry.update_worker_status(worker.id, WorkerStatus.BUSY)
+            except Exception as exc:
+                self._logger.debug(
+                    "Failed to update worker %s status: %s", worker.id, exc
+                )
 
         try:
             chosen_score = selection_info.get("chosen_metrics", {}).get("score")
@@ -808,23 +822,16 @@ class Dispatcher:
     def _safe_requeue(self, task_id: str) -> None:
         """Requeue a task without letting a Redis outage kill the dispatch loop.
 
-        ``requeue_task`` persists the PENDING transition before re-adding the task to
-        the in-memory ready queue, so a persist failure mid-outage would drop the task
-        from the scheduler entirely. On a Redis error, we therefore still re-enqueue in
-        memory; the durable state re-persists on the task's next successful transition.
+        The task is back in the in-memory ready queue before its return persists, so a
+        persist that fails mid-outage leaves it queued; its durable state catches up at
+        its next transition.
         """
         try:
             self.requeue_task(task_id, reason="dispatch_exception", front=True)
         except REDIS_CONN_ERRORS as exc:
             self._logger.warning(
-                "Requeue persist for %s failed (Redis down: %s); re-queuing in memory",
-                task_id,
-                exc,
+                "Requeue persist for %s failed (Redis down: %s)", task_id, exc
             )
-            try:
-                self._runtime.requeue(task_id, front=True)
-            except Exception:
-                self._logger.exception("In-memory requeue of %s failed", task_id)
 
     def _render_merged_children(
         self, task_id: str, record: TaskRecord, parent_spec: TaskSpecStrict
@@ -899,52 +906,40 @@ class Dispatcher:
         *,
         reason: str,
         front: bool = False,
-        release_merge: bool = True,
-        mark_pending: bool = True,
+        holder: str | None = None,
         count_retry: bool = True,
         extra_payload: dict[str, Any] | None = None,
-    ) -> None:
-        if release_merge:
-            self._runtime.release_merge(task_id)
+    ) -> DispatchEnd:
+        """Return a task to the ready queue, spending an attempt when ``count_retry``.
 
-        if mark_pending:
-            self._runtime.mark_pending(task_id, increment_retry=count_retry)
-
-        record = self._runtime.get_record(task_id)
-        if count_retry and record:
-            attempts = record.attempts
-            max_attempts = record.max_attempts
-            if (
-                max_attempts is not None
-                and max_attempts >= 0
-                and attempts >= max_attempts
-            ):
-                self.fail_task(
-                    task_id,
-                    record.last_error or "max_attempts_exceeded",
-                    payload={
-                        "reason": "max_attempts_exceeded",
-                        "requeue_reason": reason,
-                        "attempts": attempts,
-                        "max_attempts": max_attempts,
-                    },
-                    worker_id=record.last_failed_worker or record.assigned_worker,
-                )
-                return
-
-        added = self._runtime.requeue(task_id, front=front)
-        if not added:
-            self._logger.warning(
-                "Task %s could not be re-added to ready queue after requeue "
-                "(reason=%s); task may remain stuck in PENDING",
+        Only a task ``holder`` holds is returned, and a settled one stays as it is. A
+        task being cancelled settles CANCELLED, and one whose last attempt this spends
+        fails. Returns what the return did to the task.
+        """
+        end = self._runtime.return_dispatch(
+            task_id, holder, increment_retry=count_retry, front=front
+        )
+        if end is DispatchEnd.EXHAUSTED:
+            record = self._runtime.get_record(task_id)
+            assert record is not None
+            self.fail_task(
                 task_id,
-                reason,
+                record.last_error or "max_attempts_exceeded",
+                payload={
+                    "reason": "max_attempts_exceeded",
+                    "requeue_reason": reason,
+                    "attempts": record.attempts,
+                    "max_attempts": record.max_attempts,
+                },
+                worker_id=record.last_failed_worker or record.assigned_worker,
             )
-        if count_retry:
+            return DispatchEnd.FAILED
+        if end is DispatchEnd.RETURNED and count_retry:
             payload = {"reason": reason}
             if extra_payload:
                 payload.update(extra_payload)
             self._emit_task_event("TASK_REQUEUED", task_id, payload=payload)
+        return end
 
     def fail_task(
         self,

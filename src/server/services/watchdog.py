@@ -2,6 +2,7 @@ import json
 import logging
 import threading
 import time
+from collections.abc import Callable
 
 from shared.schemas.event import TaskEvent, serialize_event
 
@@ -10,7 +11,6 @@ from ..clients.redis import (
     TASK_EVENT_STREAM_MAXLEN,
     SyncRedisClient,
 )
-from ..dispatcher import Dispatcher
 from ..registries.worker import WorkerRegistry
 from ..task.runtime import TaskRuntime
 
@@ -23,7 +23,6 @@ class WorkerWatchdog:
         redis_client: SyncRedisClient,
         worker_registry: WorkerRegistry,
         runtime: TaskRuntime,
-        dispatcher: Dispatcher,
         logger: logging.Logger,
         enabled: bool,
         check_interval: int,
@@ -33,7 +32,7 @@ class WorkerWatchdog:
         self._redis = redis_client
         self._worker_registry = worker_registry
         self._runtime = runtime
-        self._dispatcher = dispatcher
+        self._apply_failure: Callable[[TaskEvent], None] | None = None
         self._logger = logger
         self._enabled = enabled
         self._check_interval = max(1, check_interval)
@@ -42,6 +41,11 @@ class WorkerWatchdog:
         self._lock = threading.RLock()
         self._dead_marks: set[str] = set()
         self._thread: threading.Thread | None = None
+
+    def set_failure_fallback(self, apply_failure: Callable[[TaskEvent], None]) -> None:
+        """Set the handler that applies a synthetic failure directly when its publish
+        fails."""
+        self._apply_failure = apply_failure
 
     @property
     def enabled(self) -> bool:
@@ -162,6 +166,7 @@ class WorkerWatchdog:
                 type="TASK_FAILED",
                 task_id=task_id,
                 worker_id=worker_id,
+                dispatch_id=record.dispatch_id if record is not None else None,
                 error="worker_heartbeat_expired",
                 payload=payload,
             )
@@ -180,20 +185,15 @@ class WorkerWatchdog:
                     worker_id,
                     exc,
                 )
+                if self._apply_failure is None:
+                    continue
                 try:
-                    if self._runtime.return_failed_merge(task_id, worker_id):
-                        continue
-                    self._dispatcher.requeue_task(
-                        task_id,
-                        reason="worker_heartbeat_expired",
-                        front=True,
-                        extra_payload=payload,
-                    )
-                except Exception as requeue_exc:
+                    self._apply_failure(event)
+                except Exception as apply_exc:
                     self._logger.error(
-                        "Failed to directly requeue %s after publish failure: %s",
+                        "Failed to apply synthetic TASK_FAILED for %s directly: %s",
                         task_id,
-                        requeue_exc,
+                        apply_exc,
                     )
 
     def _mark_dead(self, worker_id: str) -> None:

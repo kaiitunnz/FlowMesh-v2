@@ -14,6 +14,7 @@ from server.orchestration import WorkItemStatus
 from server.services.agent_model_gateway import AgentModelGateway
 from shared.harness import BoundaryEventKind, HarnessCapsule
 from shared.private_state import OwnerFence
+from tests.server.dispatch_helpers import record_dispatch
 from tests.server.task.test_v2_orchestration import FakeRegistry, _register, _runtime
 from worker.executors.harness.scripted import ScriptedHarnessAdapter, ScriptedStep
 
@@ -81,7 +82,7 @@ def test_model_boundary_settles_and_resumes_with_the_result() -> None:
 
         # Step 1: the model boundary suspends the lane; the canned settle (synchronous
         # here) re-readies it with the injected result.
-        engine.on_dispatched(solver, "wkr-1")
+        record_dispatch(runtime, solver, "wkr-1")
         first = adapter.start(solver, capsule=None, outcomes=[])
         runtime.mark_succeeded(
             solver, "wkr-1", {"agent_episode": first.model_dump(mode="json")}, _TS
@@ -95,7 +96,7 @@ def test_model_boundary_settles_and_resumes_with_the_result() -> None:
         capsule = HarnessCapsule(
             backend=dispatch.backend, blob=dispatch.capsule_blob or ""
         )
-        engine.on_dispatched(solver, "wkr-1")
+        record_dispatch(runtime, solver, "wkr-1")
         done = adapter.start(
             solver, capsule=capsule, outcomes=dispatch.delivered_outcomes
         )
@@ -129,7 +130,7 @@ def test_upstream_failure_fails_the_boundary_not_an_empty_success() -> None:
         engine = runtime.orchestration_engine(workflow_id)
         assert engine is not None
 
-        engine.on_dispatched(solver, "wkr-1")
+        record_dispatch(runtime, solver, "wkr-1")
         first = adapter.start(solver, capsule=None, outcomes=[])
         runtime.mark_succeeded(
             solver, "wkr-1", {"agent_episode": first.model_dump(mode="json")}, _TS

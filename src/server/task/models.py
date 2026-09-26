@@ -1,4 +1,5 @@
 import time
+from enum import StrEnum
 from typing import Any, NamedTuple
 
 from pydantic import BaseModel, Field, computed_field
@@ -82,6 +83,44 @@ class TaskUsage(BaseModel):
             return None
 
 
+class EventEffect(StrEnum):
+    """What a worker's task event did to its task."""
+
+    STALE = "stale"
+    SETTLED = "settled"
+    APPLIED = "applied"
+
+
+class DispatchEnd(StrEnum):
+    """What ending a dispatch without a result did to its task."""
+
+    STALE = "stale"
+    SETTLED = "settled"
+    RETURNED = "returned"
+    EXHAUSTED = "exhausted"
+    MERGE_RETURNED = "merge_returned"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class SettleOutcome(NamedTuple):
+    """What a worker's success or cancellation report did to its task."""
+
+    effect: EventEffect
+    status: str | None
+    usages: list[tuple[str, TaskUsage]]
+    merged_children: list[str]
+
+
+class FailureOutcome(NamedTuple):
+    """What a worker's failure report did to its task."""
+
+    end: DispatchEnd
+    attempts: int
+    impacted: list[tuple[str, str]]
+    usages: list[tuple[str, TaskUsage]]
+
+
 class TaskRecord(BaseModel):
     task_id: str = Field(description="Task identifier.")
     workflow_id: str = Field(description="Workflow identifier.")
@@ -99,6 +138,9 @@ class TaskRecord(BaseModel):
     )
     assigned_worker: str | None = Field(
         default=None, description="Assigned worker identifier."
+    )
+    dispatch_id: str | None = Field(
+        default=None, description="Dispatch holding the task.", exclude=True
     )
     topic: str | None = Field(default=None, description="Dispatch topic.")
     submitted_at: str = Field(

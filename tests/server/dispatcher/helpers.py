@@ -8,6 +8,7 @@ from unittest import mock
 
 from server.dispatcher import Dispatcher
 from server.registries.workflow import PersistedTask, WorkflowSched
+from server.task.models import DispatchEnd
 
 
 class CapturingDispatcher(Dispatcher):
@@ -21,8 +22,9 @@ class CapturingDispatcher(Dispatcher):
     def fail_task(self, task_id: str, error_message: str, **kwargs: Any) -> None:
         self.failed.append((task_id, error_message, kwargs))
 
-    def requeue_task(self, task_id: str, **kwargs: Any) -> None:
+    def requeue_task(self, task_id: str, **kwargs: Any) -> DispatchEnd:
         self.requeued.append((task_id, kwargs))
+        return DispatchEnd.RETURNED
 
 
 class WorkflowRegistryStub:

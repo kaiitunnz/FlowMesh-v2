@@ -6,7 +6,7 @@ from typing import Any, cast
 import pytest
 
 from server.config import OrchestrationConfig
-from server.task.models import TaskStatus
+from server.task.models import EventEffect, SettleOutcome, TaskStatus
 from server.task.runtime import TaskRuntime
 from shared.content import ContentReference
 from shared.inference import (
@@ -15,6 +15,7 @@ from shared.inference import (
     ResolvedInputMaterialization,
 )
 from shared.utils.time import now_iso
+from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader
 from tests.server.task.test_v2_embodiment_fence import (
     _NoopSecretVault,
@@ -59,8 +60,9 @@ def _materialization(
     )
 
 
-def _report(runtime: TaskRuntime, task_id: str, **kwargs: Any) -> None:
-    runtime.mark_succeeded(
+def _report(runtime: TaskRuntime, task_id: str, **kwargs: Any) -> SettleOutcome:
+    record_dispatch(runtime, task_id, input_preparation=True)
+    return runtime.mark_succeeded(
         task_id,
         "wkr-1",
         {"input_materialization": _materialization(**kwargs).model_dump(mode="json")},
@@ -187,12 +189,12 @@ async def test_a_preparation_success_does_not_revive_a_cancelled_task() -> None:
     # work and leave a PENDING record contradicting a cancelled work item.
     runtime = _runtime()
     task_id = await _upstream_task(runtime, max_items=None)
+    record_dispatch(runtime, task_id, input_preparation=True)
     record = runtime.get_record(task_id)
     assert record is not None
     record.status = TaskStatus.CANCELLED
 
-    _report(runtime, task_id)
-
+    assert _report(runtime, task_id).effect is EventEffect.SETTLED
     assert record.status == TaskStatus.CANCELLED
     assert runtime.recorded_input_reference(task_id) is None
 
@@ -205,6 +207,7 @@ async def test_a_preparation_success_settles_a_cancelling_task() -> None:
     registry = FakeRegistry()
     runtime = _runtime(registry=registry)
     task_id = await _upstream_task(runtime, max_items=None)
+    record_dispatch(runtime, task_id, input_preparation=True)
     record = runtime.get_record(task_id)
     assert record is not None
     record.status = TaskStatus.CANCELLING
@@ -272,9 +275,42 @@ async def test_a_request_inside_the_aggregate_limit_commits() -> None:
 async def test_an_unreadable_materialization_commits_nothing() -> None:
     runtime = _runtime()
     task_id = await _upstream_task(runtime, max_items=None)
+    record_dispatch(runtime, task_id, input_preparation=True)
     runtime.mark_succeeded(
         task_id, "wkr-1", {"input_materialization": {"binding": "?"}}, now_iso()
     )
 
     assert runtime.input_resolution_binding(task_id) is None
     assert runtime.recorded_input_reference(task_id) is None
+
+
+class _FlakyLedger(FakeRegistry):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail_ledger = False
+
+    def save_ledger_snapshot(self, *args: Any, **kwargs: Any) -> None:
+        if self.fail_ledger:
+            self.fail_ledger = False
+            raise ConnectionError("control redis unavailable")
+        super().save_ledger_snapshot(*args, **kwargs)
+
+
+@pytest.mark.anyio
+async def test_a_preparation_handled_again_after_its_save_failed_readies_the_leaf() -> (
+    None
+):
+    registry = _FlakyLedger()
+    runtime = _runtime(registry=registry)
+    task_id = await _upstream_task(runtime, max_items=None)
+    record_dispatch(runtime, task_id, "wkr-1", "dsp-prep", input_preparation=True)
+    payload = {"input_materialization": _materialization().model_dump(mode="json")}
+
+    registry.fail_ledger = True
+    with pytest.raises(ConnectionError):
+        runtime.mark_succeeded(task_id, "wkr-1", payload, now_iso(), "dsp-prep")
+    runtime.mark_succeeded(task_id, "wkr-1", payload, now_iso(), "dsp-prep")
+
+    assert runtime._tasks[task_id].status == TaskStatus.PENDING
+    assert task_id in runtime._ready_index
+    assert runtime.recorded_input_reference(task_id) is not None

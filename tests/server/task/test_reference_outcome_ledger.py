@@ -14,6 +14,7 @@ from shared.content import reference_for
 from shared.harness import BoundaryEventKind
 from shared.outcome import OutcomeManifest
 from shared.private_state import OwnerFence
+from tests.server.dispatch_helpers import record_dispatch
 from tests.server.task.test_v2_orchestration import FakeRegistry, _register, _runtime
 from worker.executors.harness.scripted import ScriptedHarnessAdapter, ScriptedStep
 
@@ -97,7 +98,7 @@ def _one_step(runtime, adapter, task_id: str, worker: str = "wkr-1") -> None:
     engine = runtime.orchestration_engine(runtime._tasks[task_id].workflow_id)
     dispatch = runtime.agent_episode_dispatch(task_id, _HOLDER)
     assert engine is not None and dispatch is not None
-    engine.on_dispatched(task_id, worker)
+    record_dispatch(runtime, task_id, worker)
     result = adapter.start(task_id, capsule=None, outcomes=dispatch.delivered_outcomes)
     runtime.mark_succeeded(
         task_id,

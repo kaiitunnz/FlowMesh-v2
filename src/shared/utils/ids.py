@@ -14,6 +14,7 @@ PREFIX_NODE = "nde"
 PREFIX_SSH_CONNECTION = "scn"
 PREFIX_SSH_SESSION = "ssn"
 PREFIX_SUPERVISOR_COMMAND = "cmd"
+PREFIX_DISPATCH = "dsp"
 PREFIX_ACTIVATION = "act"
 PREFIX_SCOPE = "scp"
 PREFIX_WORK_ITEM = "wki"
@@ -70,6 +71,10 @@ def new_ssh_session_id() -> str:
 
 def new_supervisor_command_id() -> str:
     return f"{PREFIX_SUPERVISOR_COMMAND}-{_uuid_hex()}"
+
+
+def new_dispatch_id() -> str:
+    return f"{PREFIX_DISPATCH}-{_uuid_hex()}"
 
 
 def new_activation_id() -> str:
@@ -158,6 +163,7 @@ __all__ = [
     "PREFIX_ALLOCATION_LEASE",
     "PREFIX_ATTEMPT",
     "PREFIX_AUTHORITY_GRANT",
+    "PREFIX_DISPATCH",
     "PREFIX_HYDRATION_GRANT",
     "PREFIX_IDEMPOTENCY_KEY",
     "PREFIX_INVOCATION",
@@ -185,6 +191,7 @@ __all__ = [
     "new_allocation_lease_id",
     "new_attempt_id",
     "new_authority_grant_id",
+    "new_dispatch_id",
     "new_hydration_grant_id",
     "new_idempotency_key",
     "new_invocation_id",

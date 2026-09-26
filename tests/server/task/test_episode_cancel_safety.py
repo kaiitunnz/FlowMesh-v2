@@ -15,9 +15,10 @@ from server.orchestration.tool_dispatch import (
     FacadeCompletionMode,
     FacadeTurnGroup,
 )
-from server.task.models import TaskStatus
+from server.task.models import DispatchEnd, TaskStatus
 from shared.harness import BoundaryEventKind, HarnessCapsule, HarnessResult
 from shared.private_state import OwnerFence
+from tests.server.dispatch_helpers import record_dispatch
 from tests.server.task.test_v2_orchestration import (
     FakeRegistry,
     _register,
@@ -78,7 +79,7 @@ def _run_step(runtime, adapter, task_id: str, worker: str = "wkr-1") -> HarnessR
         if dispatch.capsule_blob is not None
         else None
     )
-    engine.on_dispatched(task_id, worker)
+    record_dispatch(runtime, task_id, worker)
     runtime.mark_started(task_id, worker, {}, _TS)
     return adapter.start(task_id, capsule=capsule, outcomes=dispatch.delivered_outcomes)
 
@@ -96,16 +97,17 @@ def test_a_step_success_racing_a_cancel_does_not_re_admit_the_episode() -> None:
         runtime.cancel_workflow(workflow_id)
         assert runtime._tasks[writer].status == TaskStatus.CANCELLING
 
-        _, usages = runtime.mark_succeeded(
+        success = runtime.mark_succeeded(
             writer,
             "wkr-1",
             {"agent_episode": result.model_dump(mode="json"), **_USAGE_PAYLOAD},
             _TS,
         )
+        assert success is not None
+        usages = success.usages
 
         record = runtime._tasks[writer]
         assert record.status == TaskStatus.CANCELLED
-        assert record.assigned_worker is None
         assert writer not in runtime._ready_index
         engine = runtime.orchestration_engine(workflow_id)
         assert engine is not None
@@ -190,12 +192,14 @@ def test_a_live_episode_step_bills_its_dispatch_as_in_flight() -> None:
         adapter = ScriptedHarnessAdapter(_SCRIPT, "v1")
 
         result = _run_step(runtime, adapter, writer)
-        _, usages = runtime.mark_succeeded(
+        success = runtime.mark_succeeded(
             writer,
             "wkr-1",
             {"agent_episode": result.model_dump(mode="json"), **_USAGE_PAYLOAD},
             _TS,
         )
+        assert success is not None
+        usages = success.usages
 
         assert runtime._tasks[writer].status == TaskStatus.PENDING
         assert [usage.status for _, usage in usages] == [TaskStatus.DISPATCHED]
@@ -242,7 +246,7 @@ def test_a_racing_dispatch_does_not_erase_a_cancellation() -> None:
 
         result = _run_step(runtime, adapter, writer)
         runtime.cancel_workflow(workflow_id)
-        runtime.mark_dispatched(writer, cast(Any, _worker("wkr-2")))
+        record_dispatch(runtime, writer, cast(Any, _worker("wkr-2")))
         assert runtime._tasks[writer].status == TaskStatus.CANCELLING
         assert runtime._tasks[writer].assigned_worker != "wkr-2"
 
@@ -260,7 +264,7 @@ def test_a_racing_dispatch_does_not_erase_a_cancellation() -> None:
     asyncio.run(run())
 
 
-def test_a_requeue_does_not_erase_a_cancellation() -> None:
+def test_a_return_settles_a_cancelling_episode() -> None:
     async def run() -> None:
         runtime = _runtime(FakeRegistry())
         workflow_id, ids = await _register(runtime, _AGENT_WF)
@@ -269,14 +273,11 @@ def test_a_requeue_does_not_erase_a_cancellation() -> None:
 
         _run_step(runtime, adapter, writer)
         runtime.cancel_workflow(workflow_id)
-        runtime.mark_pending(writer)
+        end = runtime.return_dispatch(writer, None, increment_retry=False, front=True)
 
-        record = runtime._tasks[writer]
-        assert record.status == TaskStatus.CANCELLING
-        assert record.error == "cancelled"
-        # The requeue that follows a mark_pending finds nothing to re-queue, so the
-        # cancelled episode is never handed back to the dispatcher.
-        assert runtime.requeue(writer, front=True) is False
+        assert end is DispatchEnd.CANCELLED
+        assert runtime._tasks[writer].status == TaskStatus.CANCELLED
+        assert writer not in runtime._ready_index
 
     asyncio.run(run())
 
@@ -296,12 +297,14 @@ def test_a_completion_racing_a_cancel_settles_cancelled() -> None:
         runtime.cancel_workflow(workflow_id)
         assert runtime._tasks[writer].status == TaskStatus.CANCELLING
 
-        _, usages = runtime.mark_succeeded(
+        success = runtime.mark_succeeded(
             writer,
             "wkr-1",
             {"agent_episode": result.model_dump(mode="json"), **_USAGE_PAYLOAD},
             _TS,
         )
+        assert success is not None
+        usages = success.usages
 
         record = runtime._tasks[writer]
         assert record.status == TaskStatus.CANCELLED
@@ -375,12 +378,14 @@ def test_a_completion_with_a_facade_group_racing_a_cancel_settles_cancelled() ->
         runtime.cancel_workflow(workflow_id)
         assert runtime._tasks[writer].status == TaskStatus.CANCELLING
 
-        _, usages = runtime.mark_succeeded(
+        success = runtime.mark_succeeded(
             writer,
             "wkr-1",
             {"agent_episode": result.model_dump(mode="json"), **_USAGE_PAYLOAD},
             _TS,
         )
+        assert success is not None
+        usages = success.usages
 
         record = runtime._tasks[writer]
         assert record.status == TaskStatus.CANCELLED

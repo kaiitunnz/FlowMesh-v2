@@ -10,6 +10,7 @@ from server.task.runtime import TaskRuntime
 from server.task.v2 import PersistedV2Workflow
 from shared.harness import HarnessCapsule
 from shared.private_state import OwnerFence
+from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader
 from tests.server.task.test_v2_orchestration import FakeRegistry, _WorkerRegistryStub
 from worker.executors.harness.scripted import ScriptedHarnessAdapter, ScriptedStep
@@ -127,7 +128,7 @@ def _drive_agent_to_done(runtime: TaskRuntime, task_id: str) -> None:
         if dispatch.capsule_blob is not None
         else None
     )
-    engine.on_dispatched(task_id, "wkr-1")
+    record_dispatch(runtime, task_id, "wkr-1")
     result = adapter.start(
         task_id, capsule=capsule, outcomes=dispatch.delivered_outcomes
     )

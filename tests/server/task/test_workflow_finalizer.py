@@ -21,6 +21,7 @@ from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime
 from shared.harness import BoundaryEventKind
 from shared.utils.time import ts_to_iso
+from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader
 from tests.server.services.test_workflow_span_close import (
     _RecordingWorkflowSpanEmitter,
@@ -246,7 +247,7 @@ def test_a_workflow_with_work_left_is_not_closed() -> None:
         head, tail = ids["head"], ids["tail"]
         finalizer, redis, emitter = _wired(runtime, registry, workflow_id)
 
-        runtime.mark_dispatched(head, cast(Any, _worker()))
+        record_dispatch(runtime, head, cast(Any, _worker()))
         runtime.mark_succeeded(head, "wkr-1", {}, _TS)
         finalizer.drain()
 
@@ -354,11 +355,11 @@ def test_the_vault_still_purges_when_the_last_task_settles() -> None:
         workflow_id, ids = await _register(runtime, _CHAIN)
         head, tail = ids["head"], ids["tail"]
 
-        runtime.mark_dispatched(head, cast(Any, _worker()))
+        record_dispatch(runtime, head, cast(Any, _worker()))
         runtime.mark_succeeded(head, "wkr-1", {}, _TS)
         assert purged == []
 
-        runtime.mark_dispatched(tail, cast(Any, _worker()))
+        record_dispatch(runtime, tail, cast(Any, _worker()))
         runtime.mark_succeeded(tail, "wkr-1", {}, _TS)
         assert purged == [workflow_id]
 
@@ -433,7 +434,7 @@ def test_a_workflow_with_a_spawn_region_closes() -> None:
                 and task_id.startswith("act-")
                 and child_record.status not in _TERMINAL
             ]:
-                runtime.mark_dispatched(child, cast(Any, _worker()))
+                record_dispatch(runtime, child, cast(Any, _worker()))
                 runtime.mark_succeeded(child, "wkr-1", {}, _TS)
             if runtime.workflow_settlement(workflow_id).settled:
                 break
@@ -502,7 +503,7 @@ def test_a_spawn_that_seals_with_no_children_closes_the_workflow() -> None:
         planner = ids["planner"]
         finalizer, redis, emitter = _wired(runtime, registry, workflow_id)
 
-        runtime.mark_dispatched(planner, cast(Any, _worker()))
+        record_dispatch(runtime, planner, cast(Any, _worker()))
         runtime.mark_succeeded(planner, "wkr-1", _planned(runtime, planner, []), _TS)
         finalizer.drain()
 

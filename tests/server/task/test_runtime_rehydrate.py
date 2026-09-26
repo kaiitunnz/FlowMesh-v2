@@ -12,6 +12,7 @@ from server.config import OrchestrationConfig
 from server.registries.workflow import PersistedTask, WorkflowSched
 from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime
+from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader
 from tests.server.task.test_v2_orchestration import _NoopSecretVault
 
@@ -258,7 +259,7 @@ async def test_rehydrate_restores_completed_and_ready_state() -> None:
     a, b = ids["a"], ids["b"]
 
     worker = SimpleNamespace(id="wkr-1", node_id="nde-1")
-    runtime.mark_dispatched(a, cast(Any, worker))
+    record_dispatch(runtime, a, cast(Any, worker))
     runtime.mark_succeeded(a, "wkr-1", {}, "2026-06-01T00:00:00Z")
 
     restored = _runtime(registry)
@@ -286,7 +287,7 @@ async def test_rehydrate_keeps_in_flight_task_dispatched() -> None:
     a = ids["a"]
 
     worker = SimpleNamespace(id="wkr-9", node_id="nde-1")
-    runtime.mark_dispatched(a, cast(Any, worker))
+    record_dispatch(runtime, a, cast(Any, worker))
 
     restored = _runtime(registry)
     await restored.rehydrate()
@@ -325,10 +326,11 @@ async def test_mark_succeeded_is_idempotent_under_replay() -> None:
     a, b = ids["a"], ids["b"]
 
     worker = SimpleNamespace(id="wkr-1", node_id="nde-1")
-    runtime.mark_dispatched(a, cast(Any, worker))
+    record_dispatch(runtime, a, cast(Any, worker))
     runtime.mark_succeeded(a, "wkr-1", {}, "2026-06-01T00:00:00Z")
     # A replayed completion must not re-apply.
-    assert runtime.mark_succeeded(a, "wkr-1", {}, "2026-06-01T00:00:00Z") == ([], [])
+    replay = runtime.mark_succeeded(a, "wkr-1", {}, "2026-06-01T00:00:00Z")
+    assert replay is not None and (replay.merged_children, replay.usages) == ([], [])
 
     # b is enqueued exactly once despite the replay.
     assert runtime.ready_queue_length() == 1
@@ -345,7 +347,7 @@ async def test_rehydrated_in_flight_task_is_protected_then_released() -> None:
     a = ids["a"]
 
     worker = SimpleNamespace(id="wkr-7", node_id="nde-1")
-    runtime.mark_dispatched(a, cast(Any, worker))
+    record_dispatch(runtime, a, cast(Any, worker))
 
     restored = _runtime(registry)
     await restored.rehydrate()
@@ -365,7 +367,7 @@ async def test_rehydrated_protection_clears_on_completion() -> None:
     a = ids["a"]
 
     worker = SimpleNamespace(id="wkr-7", node_id="nde-1")
-    runtime.mark_dispatched(a, cast(Any, worker))
+    record_dispatch(runtime, a, cast(Any, worker))
 
     restored = _runtime(registry)
     await restored.rehydrate()
@@ -383,7 +385,7 @@ async def test_recover_clears_rehydrated_protection() -> None:
     a = ids["a"]
 
     worker = SimpleNamespace(id="wkr-7", node_id="nde-1")
-    runtime.mark_dispatched(a, cast(Any, worker))
+    record_dispatch(runtime, a, cast(Any, worker))
 
     restored = _runtime(registry)
     await restored.rehydrate()
@@ -399,14 +401,14 @@ async def test_terminal_task_does_not_regress_on_replayed_dispatch_or_start() ->
     a = ids["a"]
 
     worker = SimpleNamespace(id="wkr-1", node_id="nde-1")
-    runtime.mark_dispatched(a, cast(Any, worker))
+    record_dispatch(runtime, a, cast(Any, worker))
     runtime.mark_succeeded(a, "wkr-1", {}, "2026-06-01T00:00:00Z")
 
     # A replayed dispatch / start / progress update must not move a's status
     # back to DISPATCHED.
-    runtime.mark_dispatched(a, cast(Any, worker))
+    record_dispatch(runtime, a, cast(Any, worker))
     runtime.mark_started(a, "wkr-1", {}, "2026-06-01T00:00:01Z")
-    runtime.mark_updated(a, {"note": "stale"})
+    runtime.mark_updated(a, "wkr-1", {"note": "stale"})
 
     record = runtime.get_record(a)
     assert record is not None
@@ -422,6 +424,7 @@ async def test_mark_succeeded_applies_in_memory_atomically_when_persist_raises(
     runtime = _runtime(registry)
     _, ids = await _register(runtime, GRAPH)
     a, b = ids["a"], ids["b"]
+    record_dispatch(runtime, a)
 
     def boom(*args: Any, **kwargs: Any) -> None:
         raise RuntimeError("redis down")
@@ -438,7 +441,8 @@ async def test_mark_succeeded_applies_in_memory_atomically_when_persist_raises(
 
     # The at-least-once replay re-runs and is a no-op via the idempotency guard.
     monkeypatch.setattr(registry, "commit_transition", lambda *args, **kwargs: None)
-    assert runtime.mark_succeeded(a, "wkr-1", {}, "2026-06-01T00:00:00Z") == ([], [])
+    replay = runtime.mark_succeeded(a, "wkr-1", {}, "2026-06-01T00:00:00Z")
+    assert replay is not None and (replay.merged_children, replay.usages) == ([], [])
 
 
 @pytest.mark.anyio
@@ -521,6 +525,7 @@ async def test_mark_cancelled_applies_in_memory_atomically_when_persist_raises(
     runtime = _runtime(registry)
     _, ids = await _register(runtime, GRAPH)
     a = ids["a"]
+    record_dispatch(runtime, a)
 
     def boom(*args: Any, **kwargs: Any) -> None:
         raise RuntimeError("redis down")
@@ -548,6 +553,7 @@ async def test_mark_cancelled_repersists_on_replay_after_failed_write(
     runtime = _runtime(registry)
     _, ids = await _register(runtime, GRAPH)
     a = ids["a"]
+    record_dispatch(runtime, a)
 
     real_commit = registry.commit_transition
     calls = {"n": 0}
@@ -568,7 +574,7 @@ async def test_mark_cancelled_repersists_on_replay_after_failed_write(
     # Attempt 1: cancellation applies in memory, but the durable write fails.
     with pytest.raises(RuntimeError):
         runtime.mark_cancelled(a, "wkr-1", {}, "2026-06-01T00:00:00Z")
-    assert persisted_status(a) == TaskStatus.PENDING
+    assert persisted_status(a) == TaskStatus.DISPATCHED
 
     # Replay of the same cancellation: the guard heals by re-persisting.
     runtime.mark_cancelled(a, "wkr-1", {}, "2026-06-01T00:00:00Z")
