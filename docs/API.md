@@ -35,15 +35,12 @@ self-authenticate the same way, sending `FLOWMESH_API_KEY` as the bearer.
 
 ### Published outputs
 
-An output is named by the node it is published on. A leaf's output has one member; a
-spawn region's output has one member per child, selected by `scope` and `key` (the child
-index), which a fetch requires. Members list in the order of name, scope, and key, and
-the page's `open` field is `false` once the workflow can publish nothing more. A member
-reports `outcome`: `pending`, `success` (with its `value`), `explicit_empty`, or
-`declared_failure`.
-
-Both routes check `WORKFLOW` read on the workflow and a kind-level `RESULT` read before
-looking anything up. Errors carry `detail.code`:
+An output is named by the node it is published on; a spawn's output has one member per
+child, which a fetch selects by `scope` and `key`. Members list by name, scope, and key;
+while `open` is true a re-list from the start picks up newly settled members. A member's
+`outcome` is `pending`, `success` (with its `value`), `explicit_empty`, or
+`declared_failure`. Both routes check `WORKFLOW` and `RESULT` read. Errors carry
+`detail.code`:
 
 | Status | `code` | Meaning |
 |--------|--------|---------|
@@ -163,6 +160,5 @@ resident traffic. See [`NETWORK_PLANE.md`](NETWORK_PLANE.md).
 ## Cursor pagination
 
 List endpoints (`/api/v1/workflows`, `/api/v1/tasks`, log queries,
-published outputs) accept `limit` and `before` / `after` cursors. The
-cursor is an opaque base64 of a stable identity — `(timestamp, id)`, or
-an output member's name, scope, and key; do not parse client-side.
+published outputs) accept `limit` and `before` / `after` cursors.
+Cursors are opaque; do not parse them client-side.

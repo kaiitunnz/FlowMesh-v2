@@ -264,11 +264,8 @@ def _ds_drive(
 def _rekeyed_publications(
     slots: Iterable[ResultSlot], publications: Iterable[ResultPublication]
 ) -> dict[str, ResultPublication]:
-    """Index publications by slot identity, re-keying any that name the legacy key.
-
-    A publication in the unscoped key format is re-keyed to the identity of the slot
-    that key names.
-    """
+    """Index publications by slot identity, re-keying any stored under the unscoped
+    key format."""
     current = {slot.legacy_slot_key: slot.slot_key for slot in slots}
     identities = set(current.values())
     indexed: dict[str, ResultPublication] = {}
@@ -2453,7 +2450,7 @@ class OrchestrationEngine:
         """Fail the whole workflow instance as a recorded terminal event.
 
         No scope admits another child, every unsettled leaf or agent settles as a
-        declared failure, and every declared output still unpublished resolves to one.
+        declared failure, and every unpublished declared output resolves to one.
         """
         self._emit("instance_failed", detail={"reason": reason})
         for scope_id in self._scope_subtree(self._root_scope.scope_id):

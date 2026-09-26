@@ -44,7 +44,7 @@ class ValidationError(APIError):
 
 
 class OutputPendingError(APIError):
-    """Raised when a published output has not settled yet (409)."""
+    """Raised when a published output has not settled (409)."""
 
 
 class ContentUnavailableError(APIError):

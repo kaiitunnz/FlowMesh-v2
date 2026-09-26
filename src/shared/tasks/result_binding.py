@@ -1,8 +1,7 @@
 """Where a settled task's result is, and which value of it a consumer reads.
 
-A result is named, never carried: a binding says where a settled task's envelope is — or
-that the task settled without running — and a value reference selects what a consumer
-reads out of it.
+A binding says where a settled task's envelope is, or that the task settled without
+running; a value reference selects what a consumer reads out of it.
 """
 
 from typing import Any

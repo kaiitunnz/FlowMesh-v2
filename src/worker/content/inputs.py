@@ -4,12 +4,12 @@ Control names what a task reads — each upstream stage's settled result, the co
 element a fan-out child runs on, the producer results an agent's first-turn inputs are
 frozen to — and this worker reads them through its content plane: its own cache, then an
 authorized peer's copy, then the shared store. Every read is verified against its
-reference. The values are installed exactly as the executor would have received them
-inline, before anything validates or runs the task.
+reference, and the values are installed exactly as an inline dispatch delivers them,
+before anything validates or runs the task.
 
-A store that cannot be reached is a pause, not a loss: the task reports its inputs
-unavailable and control runs it again without spending an attempt. Content that is
-missing, corrupt, out of the task's scope, or not a result envelope fails the task.
+A task whose store cannot be reached reports the inputs it could not read, and control
+decides whose fault that is. Content that is missing, corrupt, out of the task's scope,
+or not a result envelope fails the task.
 """
 
 import time

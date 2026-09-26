@@ -84,9 +84,7 @@ class StoreRedriveScheduler:
     def drive_now(self, workflow_id: str) -> None:
         """Drive a workflow as soon as the re-drive thread is free.
 
-        A workflow already waiting keeps its slot and its backoff: the drive it is
-        waiting for reads everything the workflow waits on, and a backoff means the
-        store is away for this read as much as for the last.
+        A workflow already waiting keeps its slot and its backoff.
         """
         with self._cv:
             if self._stopped or workflow_id in self._due:

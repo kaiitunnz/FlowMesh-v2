@@ -1105,10 +1105,9 @@ class TaskRuntime:
             ):
                 self._enqueue_ready_locked(record.task_id)
 
-        # Re-drive any DONE producer whose spawn never sealed, and any agent waiting
-        # on its bound inputs, before a crash: their terminal events will not
-        # replay, so nothing else materializes the children or records the inputs. The
-        # re-drive reads the stored results off the lock.
+        # Re-drive any DONE producer whose spawn never sealed and any agent waiting on
+        # its bound inputs: their terminal events do not replay, so nothing else
+        # materializes the children or records the inputs.
         if engine.blocked_input_agents() or any(
             persisted.record.status == TaskStatus.DONE
             and (spawn_op := engine.spawn_successor(persisted.record.task_id))
@@ -3473,11 +3472,11 @@ class TaskRuntime:
 
     def _agent_input_snapshot_locked(
         self, engine: OrchestrationEngine, task_id: str
-    ) -> "_AgentInputSnapshot | None":
+    ) -> _AgentInputSnapshot | None:
         """What an agent's pending input ports resolve from, as the ledger stands.
 
         Each member of a port whose producers are all bound is frozen to the result its
-        producer settled with. A port with a member whose producer has nothing bound yet
+        producer settled with. A port with a member whose producer has nothing bound
         waits for a later advance; a producer that settled with nothing bound makes the
         whole input unreadable.
         """
@@ -3550,8 +3549,8 @@ class TaskRuntime:
     ) -> None:
         """Record an agent's accepted inputs from their read values, then re-admit.
 
-        The budget counts the bytes of the resolved member strings; an input cone over
-        it fails the agent as a typed declared failure, with nothing truncated.
+        The budget counts the bytes of the resolved member strings; inputs over it fail
+        the agent as a declared failure.
         """
         task_id = snapshot.task_id
         if snapshot.unreadable is not None:

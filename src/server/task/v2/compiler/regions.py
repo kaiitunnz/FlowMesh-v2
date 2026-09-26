@@ -100,8 +100,8 @@ def _reject_published_children(
 ) -> None:
     """Refuse a published leaf that runs as a region's child template.
 
-    A child settles into its region rather than into the template's own slot, so such
-    a leaf would never publish; a spawn publishes its children through region.result.
+    A child settles into its region, so such a leaf's own slot never publishes; a spawn
+    publishes its children through region.result.
     """
     op_to_name = {op_id: name for name, op_id in build_name_map(parsed).items()}
     children = {
@@ -552,8 +552,7 @@ def _spawn(
     )
 
 
-# A published spawn's collection: one member per child, keyed by its index within the
-# scope that spawned it, released as that child settles.
+# The fixed shape of a published spawn's collection.
 _SPAWN_RESULT_FIXED = {
     "cardinality": CardinalityKind.KEYED_COLLECTION.value,
     "keying": "child_index",

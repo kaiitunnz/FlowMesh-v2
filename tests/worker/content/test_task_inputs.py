@@ -1,8 +1,7 @@
-"""A worker hydrates exactly the values an inline dispatch would have delivered.
+"""A worker hydrates exactly the values an inline dispatch delivers.
 
-Each case builds the message control dispatched before its values moved to the worker —
-values inline, delivered over the same wire — and the message it dispatches now, with
-references, and checks the hydrated task equals the inline one.
+Each case builds a message with its values inline and one naming them by reference,
+both delivered over the same wire, and checks the hydrated task equals the inline one.
 """
 
 import tempfile

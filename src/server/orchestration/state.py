@@ -566,8 +566,8 @@ class ResultSlot(BaseModel):
 
     @property
     def legacy_slot_key(self) -> str:
-        """The unscoped key format an older publication names its slot by, read
-        only to re-key that publication."""
+        """The unscoped key format, read only to re-key a publication stored under
+        it."""
         key = "" if self.logical_key is None else f":{self.logical_key}"
         seq = "" if self.sequence is None else f"#{self.sequence}"
         return f"{self.instance_id}:{self.output_id}{key}{seq}"

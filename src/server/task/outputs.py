@@ -3,8 +3,7 @@
 A published output is named by the node its author declared it on. A per-node output
 is one member; a published spawn is a family of keyed collections, one per scope that
 spawns, whose members are keyed by child index within their scope. Members order by
-that stable identity — never by when they settled — so a cursor names a position that
-does not move.
+that stable identity, so a cursor names a fixed position.
 """
 
 import base64

@@ -1,8 +1,8 @@
 """A result slot's identity is unambiguous and carries its scope.
 
 A keyed collection publishes one slot per child of each scope that spawns, so two
-scopes publishing the same child index are two slots, and a slot recorded before its
-identity carried a scope is still found after a restart.
+scopes publishing the same child index are two slots, and a publication stored under
+the unscoped key is found after a restart.
 """
 
 from server.orchestration import OrchestrationEngine, PublicationOutcome

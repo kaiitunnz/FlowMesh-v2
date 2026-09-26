@@ -53,7 +53,10 @@ class WorkerTaskMessage(BaseModel):
     )
     upstream_task_ids: dict[str, str] | None = Field(
         default=None,
-        description="Optional mapping from upstream stage name to resolved task ID.",
+        description=(
+            "Upstream stage name to task ID, for an SSH stage whose upstream has no "
+            "bound result."
+        ),
     )
     upstream_results: dict[str, ResultBinding] | None = Field(
         default=None,
