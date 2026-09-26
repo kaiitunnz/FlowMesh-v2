@@ -286,13 +286,7 @@ if IS_ROOT_NODE:
         )
         _relay_redis = cast(
             BinaryRedis,
-            resident_relay_client(
-                config.redis.resident_relay_url,
-                acl_enabled=config.redis.acl_enabled,
-                username=config.redis.username,
-                password=config.redis.password,
-                tls_ca_file=config.redis.tls_ca_file,
-            ),
+            resident_relay_client(config.redis),
         )
         RESIDENT_BRIDGE = RootRendezvousBridge(
             RelayStreamStore(_relay_redis, RESIDENT_RELAY_KEYSPACE),
@@ -426,13 +420,7 @@ if IS_ROOT_NODE:
             authorizes=RUNTIME.content_binding_authorizes,
             grant_ttl_sec=config.content_store.grant_ttl_sec,
             sessions=ContentTransferSessions(
-                resident_relay_sync_client(
-                    config.redis.resident_relay_url,
-                    acl_enabled=config.redis.acl_enabled,
-                    username=config.redis.username,
-                    password=config.redis.password,
-                    tls_ca_file=config.redis.tls_ca_file,
-                ),
+                resident_relay_sync_client(config.redis),
                 ttl_sec=config.content_store.grant_ttl_sec * 10,
             ),
             logger=logger,

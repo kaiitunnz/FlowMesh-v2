@@ -15,6 +15,8 @@ from redis.client import Pipeline, PubSub
 from redis.connection import SSLConnection as SyncSSLConnection
 from redis.typing import EncodableT
 
+from ..config import RedisConfig
+
 # redis-py wraps dropped sockets in its own ConnectionError/TimeoutError, which
 # do NOT subclass the builtins; OSError covers raw socket failures. Loops that
 # read Redis must catch these to reconnect instead of dying.
@@ -266,60 +268,48 @@ def iter_pubsub_messages(pubsub: PubSub, poll_timeout: float = 1.0) -> Iterable[
         return
 
 
-def resident_relay_client(
-    url: str,
-    *,
-    acl_enabled: bool = False,
-    username: str = "admin",
-    password: str = "",
-    tls_ca_file: str | None = None,
-) -> async_redis.Redis:
+def resident_relay_client(cfg: RedisConfig) -> async_redis.Redis:
     """A binary-safe async Redis client for the resident relay's frame payloads.
 
     Unlike the control and telemetry clients this does not decode responses, so a
     frame's raw-bytes payload rides a stream field verbatim, not through a text codec.
     """
-    authed = _with_redis_auth(
-        url, acl_enabled=acl_enabled, username=username, password=password
-    )
-    ssl_kwargs: dict[str, Any] = {}
-    if tls_ca_file:
-        ssl_kwargs = {
-            "connection_class": AsyncSSLConnection,
-            "ssl_cert_reqs": ssl.CERT_REQUIRED,
-            "ssl_ca_certs": tls_ca_file,
-        }
+    url, ssl_kwargs = _relay_connection(cfg, AsyncSSLConnection)
     return async_redis.from_url(
-        authed, decode_responses=False, **_keepalive_kwargs(), **ssl_kwargs
+        url, decode_responses=False, **_keepalive_kwargs(), **ssl_kwargs
     )
 
 
-def resident_relay_sync_client(
-    url: str,
-    *,
-    acl_enabled: bool = False,
-    username: str = "admin",
-    password: str = "",
-    tls_ca_file: str | None = None,
-) -> redis.Redis:
+def resident_relay_sync_client(cfg: RedisConfig) -> redis.Redis:
     """A blocking client on the relay's Redis, for control-plane writes made off-loop.
 
-    A relay session's routing record has to land where the bridges that route its
-    frames read it, which is the relay's Redis rather than the control store.
+    A relay session's routing record lands where the bridges that route its frames
+    read it.
     """
-    authed = _with_redis_auth(
-        url, acl_enabled=acl_enabled, username=username, password=password
-    )
-    ssl_kwargs: dict[str, Any] = {}
-    if tls_ca_file:
-        ssl_kwargs = {
-            "connection_class": SyncSSLConnection,
-            "ssl_cert_reqs": ssl.CERT_REQUIRED,
-            "ssl_ca_certs": tls_ca_file,
-        }
+    url, ssl_kwargs = _relay_connection(cfg, SyncSSLConnection)
     return redis.from_url(
-        authed, decode_responses=True, **_keepalive_kwargs(), **ssl_kwargs
+        url, decode_responses=True, **_keepalive_kwargs(), **ssl_kwargs
     )
+
+
+def _relay_connection(
+    cfg: RedisConfig, connection_class: type[Any]
+) -> tuple[str, dict[str, Any]]:
+    """The relay Redis URL with its credentials, and the TLS arguments it connects
+    with."""
+    url = _with_redis_auth(
+        cfg.resident_relay_url,
+        acl_enabled=cfg.acl_enabled,
+        username=cfg.username,
+        password=cfg.password,
+    )
+    if not cfg.tls_ca_file:
+        return url, {}
+    return url, {
+        "connection_class": connection_class,
+        "ssl_cert_reqs": ssl.CERT_REQUIRED,
+        "ssl_ca_certs": cfg.tls_ca_file,
+    }
 
 
 def _sync[T](value: Awaitable[T] | T) -> T:

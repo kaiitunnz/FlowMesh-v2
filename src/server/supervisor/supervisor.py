@@ -454,13 +454,7 @@ def _run_supervisor(
     if network_cfg.enabled:
         relay_redis = cast(
             BinaryRedis,
-            resident_relay_client(
-                redis_cfg.resident_relay_url,
-                acl_enabled=redis_cfg.acl_enabled,
-                username=redis_cfg.username,
-                password=redis_cfg.password,
-                tls_ca_file=redis_cfg.tls_ca_file,
-            ),
+            resident_relay_client(redis_cfg),
         )
         resident_bridge = RelayWorkerBridge(
             relay_redis,
