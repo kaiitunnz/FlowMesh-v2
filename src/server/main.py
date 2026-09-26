@@ -457,13 +457,13 @@ if IS_ROOT_NODE:
     # The runtime settles terminals the task-event stream never carries, so it tells
     # the monitor's finalizer when a workflow may have ended; the finalizer decides.
     RUNTIME.set_completion_notifier(EVENT_MONITOR.finalizer.request)
-    WATCHDOG.set_failure_fallback(EVENT_MONITOR._handle_task_event)
+    WATCHDOG.set_failure_fallback(EVENT_MONITOR.handle_task_event)
 
     if GATED_SERVE is not None:
         # A forward exposure goes live off the request path (its listener binds after
         # the adopting endpoint update), so republish the task's url through the monitor
         # when it commits, surfacing the port without waiting for another report.
-        GATED_SERVE.set_advertise_route(EVENT_MONITOR._advertise_serve_route_for)
+        GATED_SERVE.set_advertise_route(EVENT_MONITOR.advertise_serve_route_for)
 
     LOG_ARCHIVER = TaskLogArchiver(
         redis=REDIS_CLIENT.sync,

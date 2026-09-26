@@ -70,7 +70,7 @@ async def test_a_failure_of_a_cancelling_task_settles_it_cancelled(
     metrics = mock.MagicMock()
     monitor._metrics = metrics
 
-    monitor._handle_task_event(_failed(task_id, retryable))
+    monitor.handle_task_event(_failed(task_id, retryable))
 
     _assert_cancelled(registry, runtime, metrics, task_id)
     assert runtime.workflow_settlement(runtime._tasks[task_id].workflow_id).settled
@@ -102,7 +102,7 @@ async def test_an_unpublished_synthetic_failure_settles_a_cancelling_task() -> N
         metrics_recorder=metrics,
         watchdog=watchdog,
     )
-    watchdog.set_failure_fallback(monitor._handle_task_event)
+    watchdog.set_failure_fallback(monitor.handle_task_event)
 
     watchdog._handle_worker_expired(_WORKER.id)
 
@@ -137,7 +137,7 @@ async def test_a_retried_failure_of_a_cancelling_merged_parent_runs_its_children
     record_dispatch(runtime, parent, _WORKER)
     runtime.cancel_workflow(first)
 
-    _monitor(runtime)._handle_task_event(_failed(parent, retryable))
+    _monitor(runtime).handle_task_event(_failed(parent, retryable))
 
     assert runtime._tasks[parent].status == TaskStatus.CANCELLED
     for child in b.values():

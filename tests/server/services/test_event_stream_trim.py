@@ -104,7 +104,7 @@ class _ConsumerMonitor(EventMonitor):
             raise ValueError(f"malformed {task_id}")
         return TaskEvent(type="TASK_STARTED", task_id=task_id)
 
-    def _handle_task_event(self, event: TaskEvent) -> None:
+    def handle_task_event(self, event: TaskEvent) -> None:
         seen = self._handle_calls.get(event.task_id, 0) + 1
         self._handle_calls[event.task_id] = seen
         if event.task_id in self._conn_error_on:

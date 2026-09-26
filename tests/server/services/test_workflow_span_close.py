@@ -116,7 +116,7 @@ async def test_a_cascade_failure_still_closes_the_workflow_span() -> None:
     record_dispatch(runtime, head, cast(Any, _worker()))
     # The head's failure cascades to the tail: both settle under this one event, and
     # no further task event follows it.
-    monitor._handle_task_event(
+    monitor.handle_task_event(
         TaskEvent(
             type="TASK_FAILED",
             task_id=head,
@@ -159,7 +159,7 @@ async def test_an_unreadable_submission_time_does_not_strand_the_log_stream(
     monitor = _monitor(runtime, redis, _RecordingWorkflowSpanEmitter())
 
     record_dispatch(runtime, head, cast(Any, _worker()))
-    monitor._handle_task_event(
+    monitor.handle_task_event(
         TaskEvent(
             type="TASK_FAILED",
             task_id=head,
@@ -192,7 +192,7 @@ async def test_an_already_terminal_task_event_still_closes_the_workflow() -> Non
 
     record_dispatch(runtime, head)
     runtime.mark_failed(head, "wkr-1", {}, _TS, error="bad input")
-    monitor._handle_task_event(
+    monitor.handle_task_event(
         TaskEvent(
             type="TASK_FAILED",
             task_id=head,
@@ -228,7 +228,7 @@ async def test_the_workflow_span_ends_at_the_last_tasks_recorded_finish() -> Non
     monitor = _monitor(runtime, redis, emitter)
 
     record_dispatch(runtime, head, cast(Any, _worker()))
-    monitor._handle_task_event(
+    monitor.handle_task_event(
         TaskEvent(
             type="TASK_FAILED",
             task_id=head,

@@ -311,7 +311,7 @@ async def test_a_failed_or_lost_merged_dispatch_runs_each_task_alone(
     ids = await _dispatch_merged(runtime)
     monitor = _monitor(runtime)
     if error:
-        monitor._handle_task_event(_failed(ids["a"], error, retryable))
+        monitor.handle_task_event(_failed(ids["a"], error, retryable))
     else:
         monitor._handle_worker_event(WorkerEvent(type="UNREGISTER", worker_id="wkr-1"))
 
@@ -327,11 +327,11 @@ async def test_a_task_that_fails_alone_after_its_merge_failed_is_charged() -> No
     a = ids["a"]
     runtime._tasks[a].max_attempts = 1
     monitor = _monitor(runtime)
-    monitor._handle_task_event(_failed(a, "batch rejected", retryable=False))
+    monitor.handle_task_event(_failed(a, "batch rejected", retryable=False))
     assert _next(runtime) is not None
     record_dispatch(runtime, a, _worker("wkr-2"))
 
-    monitor._handle_task_event(
+    monitor.handle_task_event(
         _failed(a, "own input", retryable=False, worker_id="wkr-2")
     )
 
@@ -351,8 +351,8 @@ async def test_a_replayed_merged_failure_is_absorbed(retryable: bool) -> None:
 
     registry.fail_next = True
     with pytest.raises(ConnectionError):
-        monitor._handle_task_event(event)
-    monitor._handle_task_event(event)
+        monitor.handle_task_event(event)
+    monitor.handle_task_event(event)
 
     for task_id in ids.values():
         _assert_run_alone(runtime, registry, task_id)
@@ -367,7 +367,7 @@ async def test_a_merged_dispatch_failing_after_a_restart_runs_each_task_alone() 
     restored = _runtime(registry)
     await restored.rehydrate()
 
-    _monitor(restored)._handle_task_event(
+    _monitor(restored).handle_task_event(
         _failed(ids["a"], "batch rejected", retryable=False)
     )
 
@@ -383,7 +383,7 @@ async def test_the_same_loss_reported_twice_is_absorbed() -> None:
     monitor = _monitor(runtime)
 
     monitor._handle_worker_event(WorkerEvent(type="UNREGISTER", worker_id="wkr-1"))
-    monitor._handle_task_event(_failed(ids["a"], "worker lost", retryable=True))
+    monitor.handle_task_event(_failed(ids["a"], "worker lost", retryable=True))
 
     for task_id in ids.values():
         _assert_run_alone(runtime, registry, task_id)
@@ -403,7 +403,7 @@ async def test_a_failed_batch_whose_children_were_all_cancelled_is_not_charged()
     record_dispatch(runtime, parent, _WORKER)
     runtime.cancel_workflow(other)
 
-    _monitor(runtime)._handle_task_event(
+    _monitor(runtime).handle_task_event(
         _failed(parent, "batch rejected", retryable=False)
     )
 
@@ -417,7 +417,7 @@ async def test_a_returned_parent_keeps_nothing_of_its_dispatch() -> None:
     ids = await _dispatch_merged(runtime)
     assert runtime._tasks[ids["a"]].topic == "tasks"
 
-    _monitor(runtime)._handle_task_event(
+    _monitor(runtime).handle_task_event(
         _failed(ids["a"], "batch rejected", retryable=True)
     )
 
@@ -946,7 +946,7 @@ async def test_a_cancelling_parents_failed_or_lost_batch_runs_its_children_alone
     monitor = _monitor(runtime)
 
     if loss == "failed":
-        monitor._handle_task_event(_failed(parent, "batch rejected", retryable=False))
+        monitor.handle_task_event(_failed(parent, "batch rejected", retryable=False))
     else:
         monitor._handle_worker_event(WorkerEvent(type="UNREGISTER", worker_id="wkr-1"))
 

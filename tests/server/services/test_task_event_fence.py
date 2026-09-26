@@ -140,7 +140,7 @@ async def test_an_event_from_a_superseded_worker_changes_nothing(
     metrics = mock.MagicMock()
     monitor._metrics = metrics
 
-    monitor._handle_task_event(
+    monitor.handle_task_event(
         _event(event_type, runtime, task_id, "wkr-1", dispatch_id)
     )
 
@@ -160,7 +160,7 @@ async def test_a_late_start_after_its_worker_left_does_not_re_dispatch_the_task(
     record_dispatch(runtime, task_id, "wkr-1")
 
     monitor._handle_worker_event(WorkerEvent(type="UNREGISTER", worker_id="wkr-1"))
-    monitor._handle_task_event(_event("TASK_STARTED", runtime, task_id, "wkr-1"))
+    monitor.handle_task_event(_event("TASK_STARTED", runtime, task_id, "wkr-1"))
 
     record = runtime._tasks[task_id]
     assert record.status == TaskStatus.PENDING
@@ -177,13 +177,11 @@ async def test_an_earlier_dispatch_to_the_same_worker_changes_nothing(
     monitor = _monitor(runtime)
     _, task_id = await _solo(runtime)
     record_dispatch(runtime, task_id, "wkr-1", "dsp-1")
-    monitor._handle_task_event(
-        _event("TASK_FAILED", runtime, task_id, "wkr-1", "dsp-1")
-    )
+    monitor.handle_task_event(_event("TASK_FAILED", runtime, task_id, "wkr-1", "dsp-1"))
     assert _next(runtime) == task_id
     record_dispatch(runtime, task_id, "wkr-1", "dsp-2")
 
-    monitor._handle_task_event(_event(event_type, runtime, task_id, "wkr-1", "dsp-1"))
+    monitor.handle_task_event(_event(event_type, runtime, task_id, "wkr-1", "dsp-1"))
 
     _assert_held_by(runtime, task_id, "wkr-1")
     assert runtime._tasks[task_id].dispatch_id == "dsp-2"
@@ -196,9 +194,9 @@ async def test_an_event_naming_no_dispatch_is_matched_by_its_worker() -> None:
     _, task_id = await _solo(runtime)
     record_dispatch(runtime, task_id, "wkr-1", "dsp-1")
 
-    monitor._handle_task_event(_event("TASK_SUCCEEDED", runtime, task_id, "wkr-2"))
+    monitor.handle_task_event(_event("TASK_SUCCEEDED", runtime, task_id, "wkr-2"))
     assert runtime._tasks[task_id].status == TaskStatus.DISPATCHED
-    monitor._handle_task_event(_event("TASK_SUCCEEDED", runtime, task_id, "wkr-1"))
+    monitor.handle_task_event(_event("TASK_SUCCEEDED", runtime, task_id, "wkr-1"))
     assert runtime._tasks[task_id].status == TaskStatus.DONE
 
 
@@ -239,8 +237,8 @@ async def test_a_loss_the_watchdog_and_the_worker_both_report_spends_one_attempt
     watchdog._handle_worker_expired("wkr-1")
     (synthetic,) = _published(redis)
     assert synthetic.dispatch_id == dispatch_id
-    monitor._handle_task_event(synthetic)
-    monitor._handle_task_event(
+    monitor.handle_task_event(synthetic)
+    monitor.handle_task_event(
         _event("TASK_FAILED", runtime, task_id, "wkr-1", dispatch_id)
     )
 
@@ -260,7 +258,7 @@ async def test_a_loss_reported_by_unregister_and_the_worker_spends_one_attempt()
     record_dispatch(runtime, task_id, "wkr-1")
 
     monitor._handle_worker_event(WorkerEvent(type="UNREGISTER", worker_id="wkr-1"))
-    monitor._handle_task_event(_event("TASK_FAILED", runtime, task_id, "wkr-1"))
+    monitor.handle_task_event(_event("TASK_FAILED", runtime, task_id, "wkr-1"))
 
     record = runtime._tasks[task_id]
     assert record.status == TaskStatus.PENDING
@@ -274,7 +272,7 @@ async def test_an_unregister_after_the_task_moved_on_leaves_its_new_dispatch() -
     monitor = _monitor(runtime)
     _, task_id = await _solo(runtime)
     record_dispatch(runtime, task_id, "wkr-1")
-    monitor._handle_task_event(_event("TASK_FAILED", runtime, task_id, "wkr-1"))
+    monitor.handle_task_event(_event("TASK_FAILED", runtime, task_id, "wkr-1"))
     assert _next(runtime) == task_id
     record_dispatch(runtime, task_id, "wkr-2")
 
@@ -294,11 +292,11 @@ async def test_a_failure_replayed_after_a_restart_spends_one_attempt(
     _, task_id = await _solo(runtime)
     record_dispatch(runtime, task_id, "wkr-1", dispatch_id)
     failure = _event("TASK_FAILED", runtime, task_id, "wkr-1", dispatch_id)
-    _monitor(runtime)._handle_task_event(failure)
+    _monitor(runtime).handle_task_event(failure)
 
     restored = _runtime(registry)
     await restored.rehydrate()
-    _monitor(restored)._handle_task_event(failure)
+    _monitor(restored).handle_task_event(failure)
 
     record = restored._tasks[task_id]
     assert record.status == TaskStatus.PENDING
@@ -319,8 +317,8 @@ async def test_a_failure_handled_again_after_its_commit_failed_is_committed_once
 
     registry.fail_next = True
     with pytest.raises(ConnectionError):
-        monitor._handle_task_event(failure)
-    monitor._handle_task_event(failure)
+        monitor.handle_task_event(failure)
+    monitor.handle_task_event(failure)
 
     record = runtime._tasks[task_id]
     assert record.attempts == 1
@@ -339,7 +337,7 @@ def _fast_worker_dispatcher(
 
     def publish(_worker: Worker, message: WorkerTaskMessage) -> int:
         for event_type in event_types:
-            monitor._handle_task_event(
+            monitor.handle_task_event(
                 _event(
                     event_type,
                     runtime,
@@ -417,7 +415,7 @@ async def test_a_dispatch_lost_before_it_was_recorded_runs_again() -> None:
     message: WorkerTaskMessage = worker_registry.publish_task.call_args.args[1]
     restored = _runtime(registry)
     await restored.rehydrate()
-    _monitor(restored)._handle_task_event(
+    _monitor(restored).handle_task_event(
         _event(
             "TASK_STARTED",
             restored,
@@ -474,7 +472,7 @@ async def test_a_worker_lost_before_its_dispatch_was_recorded_runs_the_task_else
             watchdog, redis = _watchdog(runtime)
             watchdog._handle_worker_expired("wkr-1")
             for event in _published(redis):
-                monitor._handle_task_event(event)
+                monitor.handle_task_event(event)
         return 1
 
     worker_registry.publish_task.side_effect = lose_the_worker
@@ -485,7 +483,7 @@ async def test_a_worker_lost_before_its_dispatch_was_recorded_runs_the_task_else
     assert record.attempts == 0
     assert _next(runtime) == task_id
     record_dispatch(runtime, task_id, "wkr-2")
-    monitor._handle_task_event(_event("TASK_SUCCEEDED", runtime, task_id, "wkr-2"))
+    monitor.handle_task_event(_event("TASK_SUCCEEDED", runtime, task_id, "wkr-2"))
     assert record.status == TaskStatus.DONE
     assert record.assigned_worker == "wkr-2"
 
@@ -519,9 +517,7 @@ async def test_a_start_before_a_retry_is_recorded_starts_the_retry() -> None:
     workflow_id, _ = await _register(runtime, _ECHO_V2)
     task_id = _next(runtime)
     record_dispatch(runtime, task_id, "wkr-2", "dsp-1")
-    monitor._handle_task_event(
-        _event("TASK_FAILED", runtime, task_id, "wkr-2", "dsp-1")
-    )
+    monitor.handle_task_event(_event("TASK_FAILED", runtime, task_id, "wkr-2", "dsp-1"))
     assert _next(runtime) == task_id
     dispatcher, _ = _fast_worker_dispatcher(runtime, monitor, "TASK_STARTED")
 
@@ -555,7 +551,7 @@ async def test_a_merged_batch_failing_before_it_is_recorded_runs_each_task_alone
     def publish(_worker: Worker, message: WorkerTaskMessage) -> int:
         assert message.merged_children
         failure = _event("TASK_FAILED", runtime, parent, "wkr-1", message.dispatch_id)
-        monitor._handle_task_event(failure.model_copy(update={"retryable": retryable}))
+        monitor.handle_task_event(failure.model_copy(update={"retryable": retryable}))
         return 1
 
     worker_registry.publish_task.side_effect = publish
@@ -597,10 +593,10 @@ async def test_a_late_report_of_a_returned_merged_batch_commits_its_return() -> 
 
     registry.fail_next = True
     with pytest.raises(ConnectionError):
-        monitor._handle_task_event(
+        monitor.handle_task_event(
             _event("TASK_FAILED", runtime, parent, "wkr-1", "dsp-1")
         )
-    monitor._handle_task_event(
+    monitor.handle_task_event(
         _event("TASK_SUCCEEDED", runtime, parent, "wkr-1", "dsp-1")
     )
 
@@ -670,7 +666,7 @@ async def test_a_terminal_landing_while_its_worker_unregisters_stays_settled(
 
     def listed_then_settled(worker_id: str) -> list[str]:
         tasks = listed(worker_id)
-        monitor._handle_task_event(event)
+        monitor.handle_task_event(event)
         return tasks
 
     with mock.patch.object(runtime, "recover_tasks_for_worker", listed_then_settled):
@@ -701,12 +697,12 @@ async def test_a_late_report_on_a_settled_task_records_nothing(
     record_dispatch(runtime, task_id, "wkr-1", "dsp-1")
     if settle == "TASK_CANCELLED":
         runtime.cancel_workflow(workflow_id)
-    monitor._handle_task_event(_event(settle, runtime, task_id, "wkr-1", "dsp-1"))
+    monitor.handle_task_event(_event(settle, runtime, task_id, "wkr-1", "dsp-1"))
     settled = runtime._tasks[task_id].status
     metrics = mock.MagicMock()
     monitor._metrics = metrics
 
-    monitor._handle_task_event(_event(report, runtime, task_id, "wkr-1", "dsp-1"))
+    monitor.handle_task_event(_event(report, runtime, task_id, "wkr-1", "dsp-1"))
 
     record = runtime._tasks[task_id]
     assert record.status == settled
@@ -731,8 +727,8 @@ async def test_a_v2_failure_handled_again_after_its_commit_failed_retries_once()
 
     registry.fail_next = True
     with pytest.raises(ConnectionError):
-        monitor._handle_task_event(failure)
-    monitor._handle_task_event(failure)
+        monitor.handle_task_event(failure)
+    monitor.handle_task_event(failure)
 
     engine = runtime.orchestration_engine(workflow_id)
     assert engine is not None
@@ -773,9 +769,9 @@ async def test_a_report_handled_again_after_its_commit_failed_counts_once(
     ):
         registry.fail_next = True
         with pytest.raises(ConnectionError):
-            monitor._handle_task_event(event)
-        monitor._handle_task_event(event)
-        monitor._handle_task_event(event)
+            monitor.handle_task_event(event)
+        monitor.handle_task_event(event)
+        monitor.handle_task_event(event)
 
     assert runtime._tasks[task_id].status == settled
     assert registry.durable_status(task_id) == settled
@@ -796,8 +792,8 @@ async def test_a_v2_success_handled_again_after_its_commit_failed_settles_it() -
 
     registry.fail_next = True
     with pytest.raises(ConnectionError):
-        monitor._handle_task_event(success)
-    monitor._handle_task_event(success)
+        monitor.handle_task_event(success)
+    monitor.handle_task_event(success)
 
     engine = runtime.orchestration_engine(workflow_id)
     assert engine is not None
@@ -870,9 +866,9 @@ async def test_a_v2_success_whose_writes_fail_counts_once(
         registry.fail_next = commit_fails
         registry.ledger_saves_to_failure = ledger_save_fails
         with pytest.raises(ConnectionError):
-            monitor._handle_task_event(success)
-    monitor._handle_task_event(success)
-    monitor._handle_task_event(success)
+            monitor.handle_task_event(success)
+    monitor.handle_task_event(success)
+    monitor.handle_task_event(success)
 
     engine = runtime.orchestration_engine(workflow_id)
     assert engine is not None
@@ -893,11 +889,11 @@ async def test_a_retry_redispatched_before_its_failure_replays_counts_once() -> 
 
     registry.fail_next = True
     with pytest.raises(ConnectionError):
-        monitor._handle_task_event(failure)
+        monitor.handle_task_event(failure)
     assert _next(runtime) == task_id
     record_dispatch(runtime, task_id, "wkr-2", "dsp-2")
-    monitor._handle_task_event(failure)
-    monitor._handle_task_event(failure)
+    monitor.handle_task_event(failure)
+    monitor.handle_task_event(failure)
 
     requeued = [
         call.args[0]
@@ -931,8 +927,8 @@ async def test_a_fan_out_replayed_after_its_children_commit_failed_commits_them(
 
     registry.fail_children_next = True
     with pytest.raises(ConnectionError):
-        monitor._handle_task_event(success)
-    monitor._handle_task_event(success)
+        monitor.handle_task_event(success)
+    monitor.handle_task_event(success)
 
     assert registry.durable_status(planner) == TaskStatus.DONE
     assert len(registry.dynamic_task_ids[workflow_id]) == 3
@@ -965,9 +961,9 @@ async def test_a_spawn_replayed_after_its_children_were_cancelled_closes() -> No
 
     registry.fail_children_next = True
     with pytest.raises(ConnectionError):
-        monitor._handle_task_event(spawn)
+        monitor.handle_task_event(spawn)
     runtime.cancel_workflow(workflow_id)
-    monitor._handle_task_event(spawn)
+    monitor.handle_task_event(spawn)
 
     (child,) = registry.dynamic_task_ids[workflow_id]
     assert registry.durable_status(child) == TaskStatus.CANCELLED
@@ -987,10 +983,10 @@ async def test_a_tokenless_replay_that_records_a_new_publish_counts_once() -> No
 
     registry.fail_next = True
     with pytest.raises(ConnectionError):
-        monitor._handle_task_event(failure)
+        monitor.handle_task_event(failure)
     assert _next(runtime) == task_id
     assert runtime.begin_publish(task_id, _worker("wkr-1"), "dsp-2")
-    monitor._handle_task_event(failure)
+    monitor.handle_task_event(failure)
 
     requeued = [
         call.args[0]

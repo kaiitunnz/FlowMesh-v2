@@ -345,7 +345,7 @@ class EventMonitor:
 
             if isinstance(event, TaskEvent):
                 try:
-                    self._handle_task_event(event)
+                    self.handle_task_event(event)
                 except REDIS_CONN_ERRORS:
                     # Propagate so the loop backs off and replays from this cursor.
                     raise
@@ -438,7 +438,7 @@ class EventMonitor:
             key: value for key, value in payload.items() if key != "input_resolution"
         }
 
-    def _handle_task_event(self, event: TaskEvent) -> None:
+    def handle_task_event(self, event: TaskEvent) -> None:
         worker_id = event.worker_id
         if not worker_id:
             self._logger.info(
@@ -943,7 +943,7 @@ class EventMonitor:
         payload["serve"] = inner
         return payload
 
-    def _advertise_serve_route_for(self, task_id: str) -> None:
+    def advertise_serve_route_for(self, task_id: str) -> None:
         """Republish a serve task's url from its now-current pinned ingress.
 
         A forward task's url resolves only once its port exposure goes live, which the

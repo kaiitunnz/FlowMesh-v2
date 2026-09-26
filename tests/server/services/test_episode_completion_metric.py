@@ -107,7 +107,7 @@ def test_a_multi_step_episode_counts_one_completion() -> None:
         HarnessResult(kind=HarnessResultKind.COMPLETION, value="done"),
     ]
     for step in steps:
-        monitor._handle_task_event(_succeeded(task_id, step))
+        monitor.handle_task_event(_succeeded(task_id, step))
         record_dispatch(runtime, task_id)
     assert metrics.record_task_event.call_count == 1
 
@@ -123,7 +123,7 @@ def test_a_turn_completion_carrying_a_facade_group_counts_no_completion() -> Non
         agent_episode_facade_group=_search_group(task_id).model_dump(mode="json"),
     )
 
-    monitor._handle_task_event(event)
+    monitor.handle_task_event(event)
 
     # The turn reroutes its group and the episode runs on, so nothing settled here.
     assert metrics.record_task_event.call_count == 0
@@ -141,7 +141,7 @@ def test_a_turn_completion_resuming_a_stashed_facade_group_counts_no_completion(
     completion = HarnessResult(kind=HarnessResultKind.COMPLETION, value=None)
 
     # The gateway stashed this group, so it rides no payload: only the runtime knows.
-    monitor._handle_task_event(_succeeded(task_id, completion))
+    monitor.handle_task_event(_succeeded(task_id, completion))
 
     assert metrics.record_task_event.call_count == 0
     assert runtime.get_record(task_id).status != TaskStatus.DONE
@@ -179,7 +179,7 @@ def test_an_ordinary_success_counts_one_completion() -> None:
     runtime, _ = _episode_task()
     metrics = MagicMock()
     monitor = _monitor(runtime, metrics)
-    monitor._handle_task_event(
+    monitor.handle_task_event(
         TaskEvent(
             type="TASK_SUCCEEDED",
             task_id="tsk-unknown",
