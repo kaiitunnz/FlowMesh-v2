@@ -2447,6 +2447,27 @@ class OrchestrationEngine:
         return self.on_cancelled(self._root_scope.scope_id)
 
     @_ds_drive(ControlPlaneWindow.POST_START)
+    def fail_instance(self, reason: str) -> Advance:
+        """Fail the whole workflow instance as a recorded terminal event.
+
+        No scope admits another child, every unsettled leaf or agent settles as a
+        declared failure, and every declared output still unpublished resolves to one.
+        """
+        self._emit("instance_failed", detail={"reason": reason})
+        for scope_id in self._scope_subtree(self._root_scope.scope_id):
+            self._revoke_progress(scope_id)
+        advance = Advance()
+        for wi in list(self._work_items.values()):
+            if wi.status in TERMINAL_WORK_ITEM_STATUSES or self._kind(
+                wi.operator_id
+            ) not in (OperatorKind.LEAF, OperatorKind.AGENT):
+                continue
+            advance.extend(self.on_failed(wi.legacy_task_id, reason, retryable=False))
+        for slot in list(self._slots.values()):
+            self._write_publication(slot, PublicationOutcome.DECLARED_FAILURE, None)
+        return advance
+
+    @_ds_drive(ControlPlaneWindow.POST_START)
     def on_cancelled(self, scope_or_task: str) -> Advance:
         """Cancel a scope subtree as a durable, recorded-before-terminal event.
 
@@ -2467,21 +2488,9 @@ class OrchestrationEngine:
         return advance
 
     def _cancel_scope(self, scope_id: str) -> Advance:
-        scope = self._scopes[scope_id]
         self._emit("scope_cancelled", detail={"scope": scope_id})
-        for axis in (ProgressAxis.CHILD_INIT, ProgressAxis.LOOP_TIME):
-            cap = self._capabilities.get((scope_id, axis))
-            if cap is not None and cap.status is CapabilityStatus.OPEN:
-                cap.status = CapabilityStatus.REVOKED
-                self._emit(
-                    (
-                        "child_init_revoked"
-                        if axis is ProgressAxis.CHILD_INIT
-                        else "loop_revoked"
-                    ),
-                    operator_id=scope.owner_operator_id,
-                    detail={"scope": scope_id},
-                )
+        self._revoke_progress(scope_id)
+        scope = self._scopes[scope_id]
         self._apply_cancellation_residual(scope_id)
         for wi in self._scope_work_items(scope_id, kinds=("leaf", "agent")):
             if wi.status not in TERMINAL_WORK_ITEM_STATUSES:
@@ -2498,6 +2507,23 @@ class OrchestrationEngine:
                     detail={"scope": scope_id},
                 )
         return self._resolve_cancelled_outputs(scope_id)
+
+    def _revoke_progress(self, scope_id: str) -> None:
+        """Revoke a scope's open child-init and loop-time capabilities."""
+        scope = self._scopes[scope_id]
+        for axis in (ProgressAxis.CHILD_INIT, ProgressAxis.LOOP_TIME):
+            cap = self._capabilities.get((scope_id, axis))
+            if cap is not None and cap.status is CapabilityStatus.OPEN:
+                cap.status = CapabilityStatus.REVOKED
+                self._emit(
+                    (
+                        "child_init_revoked"
+                        if axis is ProgressAxis.CHILD_INIT
+                        else "loop_revoked"
+                    ),
+                    operator_id=scope.owner_operator_id,
+                    detail={"scope": scope_id},
+                )
 
     def _apply_cancellation_residual(self, scope_id: str) -> None:
         """Apply a cancelled scope's join residual policy to its materialized children.

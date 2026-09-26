@@ -11,6 +11,7 @@ from lumid_hooks import PrincipalContext, ResourceRef
 from server.hooks import PERMISSION_CHECKERS
 from server.routers.v1 import outputs as outputs_router
 from server.schemas.outputs import OutputOutcome, WorkflowOutputPage
+from server.task.results import ResultUnreadable
 from server.task.runtime import TaskRuntime
 from shared.content import ContentReference, ContentUnavailable
 from tests.server.dispatch_helpers import record_dispatch
@@ -402,3 +403,48 @@ async def test_both_checks_run_for_an_allowed_caller(
     await _list(wf)
     assert ("workflow", wf.workflow_id) in denying.checked
     assert ("result", None) in denying.checked
+
+
+async def _failed_workflow(registry: FakeRegistry) -> _Workflow:
+    """A workflow failed by control: its spawn producer's result cannot be read."""
+    runtime = _live_runtime(registry)
+    workflow_id, ids = await _register(runtime, _WF)
+    planner = ids["planner"]
+    record_dispatch(runtime, planner, cast(Any, _worker()))
+    payload = _planned(runtime, planner, ["a", "b"])
+
+    def _corrupt(binding: Any) -> Any:
+        raise ResultUnreadable("corrupt")
+
+    read = runtime._results.read
+    runtime._results.read = _corrupt  # type: ignore[method-assign]
+    runtime.mark_succeeded(planner, "wkr-1", payload, _TS)
+    runtime._results.read = read  # type: ignore[method-assign]
+    return _Workflow(runtime, workflow_id, ids)
+
+
+@pytest.mark.anyio
+async def test_a_failed_workflow_answers_its_outputs_as_failures() -> None:
+    wf = await _failed_workflow(FakeRegistry())
+
+    listed = await _list(wf)
+    summary = await _get(wf, "summarize")
+
+    assert not listed.open
+    assert all(e.outcome is not OutputOutcome.PENDING for e in listed.entries)
+    assert summary.outcome is OutputOutcome.DECLARED_FAILURE and summary.value is None
+
+
+@pytest.mark.anyio
+async def test_a_failed_workflow_stays_failed_across_a_restart() -> None:
+    registry = FakeRegistry()
+    wf = await _failed_workflow(registry)
+
+    restored = _live_runtime(registry, "restored", reader=wf.runtime._results)
+    await restored.rehydrate()
+    again = _Workflow(restored, wf.workflow_id, wf.ids)
+
+    assert _pop_ready(restored) == []
+    listed = await _list(again)
+    assert not listed.open
+    assert (await _get(again, "summarize")).outcome is OutputOutcome.DECLARED_FAILURE

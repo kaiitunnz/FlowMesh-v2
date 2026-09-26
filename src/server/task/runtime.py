@@ -3682,8 +3682,11 @@ class TaskRuntime:
         return failed_now
 
     def _fail_workflow_locked(self, workflow_id: str, reason: str) -> None:
-        """Fail every non-terminal task of a workflow and persist the terminal facts."""
+        """Fail a workflow in its ledger and every non-terminal task of it, and persist
+        the terminal facts."""
         self._redrive.settle(workflow_id)
+        if (engine := self._engines.get(workflow_id)) is not None:
+            engine.fail_instance(reason)
         non_terminal = [
             task_id
             for task_id, record in self._tasks.items()
