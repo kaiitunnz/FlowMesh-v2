@@ -4337,7 +4337,7 @@ class TaskRuntime:
             return
         held_worker, held_dispatch, moved = returned
         if worker_id == held_worker and dispatch_id in (None, held_dispatch):
-            self._recommit_locked(_HeldWrites(list(moved)))
+            self._recommit_locked(_HeldWrites(moved.copy()))
 
     def mark_failed(
         self,
