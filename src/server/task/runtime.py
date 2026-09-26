@@ -3273,11 +3273,19 @@ class TaskRuntime:
                     self._input_checks.pop(task_id, None)
                     continue
                 if isinstance(verdict, ResultUnavailable):
+                    self._logger.warning(
+                        "Task %s waits: control cannot reach its inputs either: %s",
+                        task_id,
+                        verdict,
+                    )
                     self._input_checks[task_id] = replace(check, shared_outage=True)
                     self._redrive.schedule(workflow_id)
                     continue
                 del self._input_checks[task_id]
                 if isinstance(verdict, ResultUnreadable):
+                    self._logger.warning(
+                        "Task %s input is unreadable at control: %s", task_id, verdict
+                    )
                     self.mark_failed(
                         task_id,
                         check.worker_id,
@@ -3289,6 +3297,12 @@ class TaskRuntime:
                 if not check.shared_outage and (
                     check.worker_id not in record.failed_workers
                 ):
+                    self._logger.warning(
+                        "Task %s runs again away from %s, which could not reach its "
+                        "inputs",
+                        task_id,
+                        check.worker_id,
+                    )
                     record.failed_workers.append(check.worker_id)
                 if self._enqueue_ready_locked(task_id, front=False):
                     self._cv.notify_all()
