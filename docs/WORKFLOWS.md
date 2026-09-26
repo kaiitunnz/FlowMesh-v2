@@ -103,7 +103,14 @@ keys untouched:
 `authority`, `tools`, and `boundary` apply to `agent` leaves. Any leaf may
 declare `provenance` (`pinned` | `live`) and `determinism` / `effect` /
 `recovery` overrides, and a `result: { visibility: published }` to publish its
-induced output.
+induced output. A spawn region publishes its children's results as a keyed
+collection, one member per child keyed by its index within the scope that spawned
+it; its child must be a leaf. Clients read a published output by the node's name:
+
+```yaml
+- name: fanout
+  region: { kind: spawn, child: reviewer, result: { visibility: published } }
+```
 
 An agent that runs code declares `sandbox.execute` in its invoke face, which
 needs no `tools` entry — the fabric provides the interface. `spec.sandbox`

@@ -49,6 +49,12 @@ async with AsyncFlowMesh(base_url="...", api_key="...") as client:
 - **Stream logs** — `client.workflows.stream_logs(wf_id)` and
   `client.tasks.stream_logs(task_id)` yield server-sent events; the
   iterator stops when the source closes.
+- **Read published outputs** — `client.workflows.list_outputs(wf_id,
+  output=..., after=cursor)` returns a `WorkflowOutputPage` of members
+  named by the nodes they are published on;
+  `client.workflows.get_output(wf_id, name, scope=..., key=...)` returns
+  one member and its value, and a collection member needs its `scope`
+  and `key`.
 - **Pull artifacts** — `client.results.get(task_id)` for the result
   payload, `client.results.download_bundle(task_id, include="all")`
   for the tar.gz.
@@ -74,4 +80,7 @@ them.
 
 The SDK raises `flowmesh.FlowMeshError` (and a small set of subclasses
 for auth / not-found / rate-limit) instead of returning HTTP error
-shapes. Wrap your calls accordingly.
+shapes. Wrap your calls accordingly. Reading a published output raises
+`OutputPendingError` for a member that has not settled,
+`ContentUnavailableError` while the content store cannot be reached, and
+`OutputUnreadableError` for bound content that is missing or corrupt.
