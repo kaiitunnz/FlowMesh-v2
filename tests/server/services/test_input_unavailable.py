@@ -205,6 +205,26 @@ async def test_a_v2_return_closes_its_attempt_without_charging_it() -> None:
     ]
 
 
+@pytest.mark.anyio
+async def test_returning_an_undispatched_task_saves_no_ledger() -> None:
+    registry = FakeRegistry()
+    runtime = _live_runtime(registry)
+    _, ids = await _register_v2(runtime, _V2)
+    saves: list[str] = []
+    save = registry.save_ledger_snapshot
+
+    def _counted(workflow_id: str, snapshot: Any) -> Any:
+        saves.append(workflow_id)
+        return save(workflow_id, snapshot)
+
+    registry.save_ledger_snapshot = _counted  # type: ignore[method-assign]
+    for _ in range(3):
+        assert _pop_ready(runtime) == [ids["a"]]
+        runtime.return_dispatch(ids["a"], None, increment_retry=False, front=False)
+
+    assert saves == []
+
+
 class _Probe:
     """Control's own read of a stored object, answering as told."""
 

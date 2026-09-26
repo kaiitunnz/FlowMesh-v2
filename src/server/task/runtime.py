@@ -4788,6 +4788,7 @@ class TaskRuntime:
             ),
         ]
         engine = self._engines.get(record.workflow_id)
+        changed = False
         if engine is not None:
             # A retry reuses the work item and its invocation; the engine records the
             # failed attempt, or closes an uncharged one, and readies the work item.
@@ -4795,10 +4796,11 @@ class TaskRuntime:
                 engine.on_failed(
                     task_id, record.last_error or "task failed", retryable=True
                 )
+                changed = True
             else:
-                engine.on_returned(task_id)
+                changed = engine.on_returned(task_id)
         self._release_dispatch_locked(record, moved, front=front)
-        if engine is not None:
+        if engine is not None and changed:
             self._save_ledger_locked(record.workflow_id)
         return DispatchEnd.RETURNED
 
