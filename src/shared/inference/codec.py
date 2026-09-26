@@ -383,6 +383,29 @@ def canonical_contract(spec: InferenceSpec) -> CanonicalInferenceContract:
     )
 
 
+def element_contract(
+    spec: InferenceSpec, producer_task_id: str, index: int
+) -> CanonicalInferenceContract:
+    """The contract of a fan-out child that runs on one element of a producer's result.
+
+    The contract names the element by its producer and index, is proven from the spec's
+    model and sampling, and resolves to exactly one prompt.
+    """
+    model = (spec.model_name or "").strip()
+    if not model:
+        raise CanonicalProjectionError("the leaf declares no model source")
+    return CanonicalInferenceContract(
+        model=model,
+        source=CanonicalInferenceInputSource(
+            kind=InferenceSourceKind.UPSTREAM,
+            node=producer_task_id,
+            element=index,
+            max_items=1,
+        ),
+        params=canonical_sampling(spec),
+    )
+
+
 def canonical_result(
     request: CanonicalInferenceRequest, outputs: Sequence[str]
 ) -> InferenceResult:

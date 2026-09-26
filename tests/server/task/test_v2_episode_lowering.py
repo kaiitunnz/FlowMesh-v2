@@ -121,7 +121,7 @@ def _run(bundle: PersistedV2Workflow) -> dict[str, PublicationOutcome]:
         pending.extend(adv.ready)
     outcomes: dict[str, PublicationOutcome] = {}
     for decl in bundle.template.result_declarations:
-        pub = eng.resolve_output(decl.output_id)
+        pub = eng.output_publication(decl.output_id)
         if pub is not None:
             outcomes[decl.output_id] = pub.outcome
     return outcomes

@@ -582,6 +582,17 @@ def _check_result_declarations(
                     location=loc.get(decl.source_ref),
                 )
             )
+    seen: set[str] = set()
+    for name, decl in template.published_outputs():
+        if name in seen:
+            diags.append(
+                Diagnostic(
+                    code="result.duplicate-name",
+                    message=f"more than one published output is named {name!r}",
+                    location=loc.get(decl.source_ref),
+                )
+            )
+        seen.add(name)
     return diags
 
 

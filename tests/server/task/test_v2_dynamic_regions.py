@@ -192,7 +192,7 @@ def test_zero_child_spawn_closes_only_after_seal() -> None:
     assert not eng.region_closed("J")
     eng.seal_spawn("S")
     assert eng.region_closed("J")
-    pub = eng.resolve_output("out:J")
+    pub = eng.output_publication("out:J")
     assert pub is not None and pub.outcome is PublicationOutcome.EXPLICIT_EMPTY
     assert {"child_init_sealed", "join_released", "frontier_closed"} <= _kinds(eng)
 
@@ -228,7 +228,7 @@ def test_all_settled_join_releases_success_over_children() -> None:
     assert not eng.region_closed("J")
     eng.seal_spawn("S")
     assert eng.region_closed("J")
-    pub = eng.resolve_output("out:J")
+    pub = eng.output_publication("out:J")
     assert pub is not None and pub.outcome is PublicationOutcome.SUCCESS
 
 
@@ -239,7 +239,7 @@ def test_all_succeed_join_fails_on_a_child_failure() -> None:
     eng.settle_child(a, outcome=PublicationOutcome.SUCCESS)
     eng.settle_child(b, outcome=PublicationOutcome.DECLARED_FAILURE)
     eng.seal_spawn("S")
-    pub = eng.resolve_output("out:J")
+    pub = eng.output_publication("out:J")
     assert pub is not None and pub.outcome is PublicationOutcome.DECLARED_FAILURE
 
 
@@ -391,7 +391,7 @@ def test_loop_closes_under_delayed_completion_with_carried_model_ref() -> None:
     eng.settle_iteration(rounds[2])
     assert eng.region_closed("L")
     # Egress carries the latest loop-time ModelRef version.
-    pub = eng.resolve_output("out:L")
+    pub = eng.output_publication("out:L")
     assert pub is not None and pub.value_ref is not None
     assert pub.value_ref.model_ref is not None
     assert pub.value_ref.model_ref.version == "v3"
@@ -419,7 +419,7 @@ def test_branch_routes_selected_port_and_empties_the_rest() -> None:
     adv = eng.route_branch("B", "p1")
     assert adv.ready == ["x"]  # the selected port readies its successor
     assert eng.work_item("x").status.value == "ready"  # type: ignore[union-attr]
-    ypub = eng.resolve_output("legacy:y")
+    ypub = eng.output_publication("legacy:y")
     assert ypub is not None and ypub.outcome is PublicationOutcome.EXPLICIT_EMPTY
 
 
@@ -558,7 +558,7 @@ def test_autoresearch_controller_fans_out_experiments() -> None:
         eng.settle_child(child)
     eng.seal_spawn("exp")
     assert eng.region_closed("collect")
-    summary = eng.resolve_output("summary")
+    summary = eng.output_publication("summary")
     assert summary is not None and summary.outcome is PublicationOutcome.SUCCESS
     # Each experiment publishes into the keyed collection under its own logical key.
     keyed = [p for k, p in _collection_publications(eng, "results")]
@@ -585,7 +585,7 @@ def test_rlvr_loop_pins_model_version_per_round() -> None:
         eng.settle_iteration(rounds[idx])
     eng.loop_seal("L")
     assert eng.region_closed("L")
-    pub = eng.resolve_output("out:L")
+    pub = eng.output_publication("out:L")
     assert pub is not None and pub.value_ref is not None
     assert (
         pub.value_ref.model_ref is not None and pub.value_ref.model_ref.version == "p4"
@@ -705,7 +705,7 @@ def test_mid_loop_snapshot_rehydrates_and_egresses() -> None:
     restored.settle_iteration(second)
     restored.loop_seal("L")
     assert restored.region_closed("L")
-    pub = restored.resolve_output("out:L")
+    pub = restored.output_publication("out:L")
     assert pub is not None and pub.value_ref is not None
     assert (
         pub.value_ref.model_ref is not None and pub.value_ref.model_ref.version == "v2"
@@ -782,12 +782,12 @@ def test_any_join_releases_on_first_qualifier_and_ignores_residual() -> None:
     eng.settle_child(a, value_ref=_value("a"))
     # An early join releases before the producer seals, on the first qualifier.
     assert eng.region_closed("J")
-    pub = eng.resolve_output("out:J")
+    pub = eng.output_publication("out:J")
     assert pub is not None and pub.outcome is PublicationOutcome.SUCCESS
     assert pub.value_ref is not None and pub.value_ref.legacy_task_id == "a"
     # A residual child keeps settling into the ledger but never becomes the output.
     eng.settle_child(b, value_ref=_value("b"))
-    again = eng.resolve_output("out:J")
+    again = eng.output_publication("out:J")
     assert again is not None and again.value_ref is not None
     assert again.value_ref.legacy_task_id == "a"
 
@@ -801,7 +801,7 @@ def test_first_k_releases_at_threshold_with_lowest_index_winner() -> None:
     assert not eng.region_closed("J")  # one qualifier, threshold is two
     eng.settle_child(b, value_ref=_value("b"))
     assert eng.region_closed("J")
-    pub = eng.resolve_output("out:J")
+    pub = eng.output_publication("out:J")
     # Winner is the lowest child_index among the qualifiers {b: 1, c: 2}.
     assert pub is not None and pub.value_ref is not None
     assert pub.value_ref.legacy_task_id == "b"
@@ -840,7 +840,7 @@ def test_predicate_non_monotone_waits_for_frontier_closure() -> None:
     assert not eng.region_closed("J")
     eng.seal_spawn("S")
     assert eng.region_closed("J")  # evaluated once at frontier closure
-    pub = eng.resolve_output("out:J")
+    pub = eng.output_publication("out:J")
     assert pub is not None and pub.outcome is PublicationOutcome.SUCCESS
 
 
@@ -851,7 +851,7 @@ def test_early_join_no_winner_is_explicit_empty() -> None:
     assert not eng.region_closed("J")  # a failed child is not a qualifier
     eng.seal_spawn("S")
     assert eng.region_closed("J")
-    pub = eng.resolve_output("out:J")
+    pub = eng.output_publication("out:J")
     assert pub is not None and pub.outcome is PublicationOutcome.EXPLICIT_EMPTY
 
 
@@ -862,7 +862,7 @@ def test_early_join_no_winner_declared_failure_when_opted_in() -> None:
     a = eng.spawn_child("S")
     eng.settle_child(a, outcome=PublicationOutcome.DECLARED_FAILURE)
     eng.seal_spawn("S")
-    pub = eng.resolve_output("out:J")
+    pub = eng.output_publication("out:J")
     assert pub is not None and pub.outcome is PublicationOutcome.DECLARED_FAILURE
 
 
@@ -874,7 +874,7 @@ def test_residual_continue_leaves_child_init_open() -> None:
     assert cap is not None and cap.status is CapabilityStatus.OPEN
     late = eng.spawn_child("S")  # a late child is still legal under continue
     eng.settle_child(late, value_ref=_value("late"))
-    pub = eng.resolve_output("out:J")
+    pub = eng.output_publication("out:J")
     assert pub is not None and pub.value_ref is not None
     assert pub.value_ref.legacy_task_id == "a"  # residual never overtakes the winner
 
@@ -1047,7 +1047,7 @@ def test_cancellation_recorded_before_join_release() -> None:
     eng.on_cancelled("S")
     kinds = [k for k, _ in eng.contract_trace()]
     assert kinds.index("scope_cancelled") < kinds.index("join_released")
-    pub = eng.resolve_output("out:J")
+    pub = eng.output_publication("out:J")
     assert pub is not None and pub.outcome is PublicationOutcome.EXPLICIT_EMPTY
 
 
@@ -1069,7 +1069,7 @@ def test_inner_scope_cancel_resolves_join_and_readies_downstream() -> None:
     eng.spawn_child("S")
     advance = eng.on_cancelled("S")
     assert eng.region_closed("J")
-    pub = eng.resolve_output("out:J")
+    pub = eng.output_publication("out:J")
     assert pub is not None and pub.outcome is PublicationOutcome.EXPLICIT_EMPTY
     # The join's no-winner record readies the downstream leaf: the outer flow continues.
     assert advance.ready == ["D"]

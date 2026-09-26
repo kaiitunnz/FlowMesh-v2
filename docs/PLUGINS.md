@@ -57,8 +57,11 @@ The hooks:
   startup, falling back to the synthetic admin when no providers are
   registered. Plugins use these to seed their own ACL / ownership
   tables so subsequent `PermissionChecker` calls have data to decide
-  on. `RESULT` ownership is inferred from the owning task; `RESULT`
-  permission checks are always paired with a `task_id`, and
+  on. `RESULT` ownership is inferred from the owning task. A `RESULT`
+  permission check names one task's result by its `task_id`, or names
+  no id to gate result values as a whole: reading a workflow's
+  published outputs checks `WORKFLOW` for that workflow and a
+  kind-level `RESULT` before anything is looked up. Other
   workflow-level operations check `WORKFLOW`. At startup the server
   runs a reconcile sweep — after plugins load, the system principal
   resolves, and the supervisor handshake completes — enumerating

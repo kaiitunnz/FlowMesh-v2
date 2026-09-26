@@ -1,14 +1,15 @@
-"""Re-driving a workflow's advance after the content store could not be reached.
+"""Driving a workflow's advances that wait on a read of stored results.
 
-A settled producer's result is in the shared store before its success is reported, so
-a read that cannot reach the store is a pause, not a loss: the spawn it would have
-fanned out, or the agent input it would have delivered, waits and is driven again once
-the store answers. Nothing else re-fires those advances — the producer has already
-settled — so this schedules one re-drive per waiting workflow, backing off while the
-store stays away.
+A spawn's fan-out and an agent's bound inputs are read from the shared store, and a read
+never runs under the runtime lock, so those advances are driven here, off it. A settled
+producer's result is in the store before its success is reported, so a read that
+cannot reach the store is a pause, not a loss: the advance waits and is driven again
+once the store answers. Nothing else re-fires those advances — the producer has already
+settled — so this keeps one pending drive per workflow, backing off while the store
+stays away.
 
-A re-drive is not durable and does not need to be: a restart re-drives every settled
-producer's unsealed spawn and re-resolves agent inputs on the advances it applies.
+A re-drive is not durable and does not need to be: a restart re-drives every workflow
+with a settled producer's unsealed spawn or an agent waiting on its inputs.
 """
 
 import heapq
@@ -77,6 +78,22 @@ class StoreRedriveScheduler:
                     streak,
                     delay,
                 )
+            self._ensure_thread()
+            self._cv.notify_all()
+
+    def drive_now(self, workflow_id: str) -> None:
+        """Drive a workflow as soon as the re-drive thread is free.
+
+        A workflow already waiting keeps its slot and its backoff: the drive it is
+        waiting for reads everything the workflow waits on, and a backoff means the
+        store is away for this read as much as for the last.
+        """
+        with self._cv:
+            if self._stopped or workflow_id in self._due:
+                return
+            due = self._clock()
+            self._due[workflow_id] = due
+            heapq.heappush(self._heap, (due, workflow_id))
             self._ensure_thread()
             self._cv.notify_all()
 

@@ -12,8 +12,9 @@ from enum import StrEnum
 class ResourceKind(StrEnum):
     """Resource kinds in FlowMesh's permission contract.
 
-    `RESULT` checks are always paired with a `task_id`; workflow-level
-    operations (logs, queries) check `WORKFLOW`.
+    A `RESULT` check names one task's result by its `task_id`, or names no id
+    to gate result values as a whole; workflow-level operations (logs,
+    queries) check `WORKFLOW`.
     """
 
     WORKFLOW = "workflow"

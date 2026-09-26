@@ -49,6 +49,8 @@ Pull results / artifacts:
 ```bash
 flowmesh result fetch <tsk-id>                                  # JSON result
 flowmesh result download <tsk-id> --include all -o bundle.tgz   # tar.gz bundle
+flowmesh workflow outputs <wfl-id> --output <name>              # published members
+flowmesh workflow output <wfl-id> <name> --scope <scope> --key 0  # one member's value
 ```
 
 Fetch or analyze workflow traces:

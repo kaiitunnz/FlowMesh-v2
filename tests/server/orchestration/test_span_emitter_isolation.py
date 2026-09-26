@@ -48,14 +48,16 @@ def test_a_failing_emit_still_publishes_the_slot_and_releases_successors(
 
     wi = eng.work_item("A")
     assert wi is not None and wi.status is WorkItemStatus.SETTLED
-    assert eng.resolve_output("out:A") is not None, "the result slot must be published"
+    assert (
+        eng.output_publication("out:A") is not None
+    ), "the result slot must be published"
     assert advance.ready == ["B"], "the successor must be released"
 
     # The released successor is really runnable: driving it to its own settle closes
     # the workflow's remaining output.
     eng.on_dispatched("B", "w1")
     eng.on_succeeded("B")
-    assert eng.resolve_output("out:B") is not None
+    assert eng.output_publication("out:B") is not None
 
 
 def test_a_failing_emit_leaves_the_ledger_identical_to_no_telemetry(
@@ -67,7 +69,7 @@ def test_a_failing_emit_leaves_the_ledger_identical_to_no_telemetry(
         eng.on_succeeded("A")
         eng.on_dispatched("B", "w1")
         eng.on_succeeded("B")
-        published = eng.resolve_output("out:B")
+        published = eng.output_publication("out:B")
         assert published is not None
         return (
             [kind for kind, _ in eng.contract_trace()],
@@ -101,7 +103,7 @@ def test_a_failing_export_does_not_break_a_settle(
     advance = eng.on_succeeded("A")
 
     assert advance.ready == ["B"]
-    assert eng.resolve_output("out:A") is not None
+    assert eng.output_publication("out:A") is not None
 
 
 def test_an_unclassifiable_activation_drops_its_span_instead_of_wedging_the_settle(
@@ -124,7 +126,7 @@ def test_an_unclassifiable_activation_drops_its_span_instead_of_wedging_the_sett
     advance = eng.on_succeeded("A")
 
     assert advance.ready == ["B"]
-    assert eng.resolve_output("out:A") is not None
+    assert eng.output_publication("out:A") is not None
     assert not [
         s for s in exporter.get_finished_spans() if s.name == "flowmesh.operator"
     ], "the unclassifiable activation's span is dropped, not guessed"
@@ -166,4 +168,4 @@ def test_a_failing_attach_still_builds_a_restartable_engine(
     assert restarted.region_closed("worker:spawn:join")
     restarted.on_dispatched("A", "w1")
     restarted.on_succeeded("A")
-    assert restarted.resolve_output("out:A") is not None
+    assert restarted.output_publication("out:A") is not None

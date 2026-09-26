@@ -15,6 +15,7 @@ import pytest
 
 from server.config import OrchestrationConfig
 from server.orchestration import Advance
+from server.task.redrive import StoreRedriveScheduler
 from server.task.runtime import TaskRuntime
 from shared.telemetry.config import TelemetryLevel
 from tests.server.dispatch_helpers import record_dispatch
@@ -47,6 +48,9 @@ def _runtime(
         control=control,
         tracer=tracer,
         telemetry=config,
+        redrive=lambda fire, logger: StoreRedriveScheduler(
+            fire, logger, run_thread=False
+        ),
     )
     return runtime, control_exporter, span_exporter
 
@@ -144,6 +148,7 @@ async def test_a_rehydrated_workflow_dispatches_with_a_traceparent(
     restored, _, _ = _runtime(registry, make_result_reader(reader.store), "rehydrate")
     assert await restored.rehydrate() == 1
     assert restored.orchestration_engine(workflow_id) is not None
+    restored._redrive.run_due()
 
     children = [
         task_id

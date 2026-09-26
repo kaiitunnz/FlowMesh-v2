@@ -176,8 +176,8 @@ def test_live_fanout_closes_join_over_dispatched_children() -> None:
     eng.on_dispatched(children[-1], "w1")
     adv = eng.on_succeeded(children[-1])
     assert eng.region_closed("collect")  # closes on capability drain
-    assert "collect" in adv.ready or eng.resolve_output("summary") is not None
-    summary = eng.resolve_output("summary")
+    assert "collect" in adv.ready or eng.output_publication("summary") is not None
+    summary = eng.output_publication("summary")
     assert summary is not None and summary.outcome is PublicationOutcome.SUCCESS
     keyed = [
         p
@@ -268,6 +268,6 @@ def test_child_failure_fails_all_succeed_join_without_static_cascade() -> None:
     adv = eng.on_failed(children[1], "trial crashed", retryable=False)
     assert children[1] in adv.failed
     assert eng.region_closed("collect")
-    summary = eng.resolve_output("summary")
+    summary = eng.output_publication("summary")
     assert summary is not None
     assert summary.outcome is PublicationOutcome.DECLARED_FAILURE

@@ -17,7 +17,7 @@ physical decision that never changes what the engine considers ready.
 import contextlib
 import functools
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from typing import Any, Self
@@ -66,7 +66,7 @@ from ..task.v2.representations.operators import (
     operator_service_dependency,
 )
 from ..task.v2.representations.plan import EpisodeSpec, InferenceEmbodimentMenu
-from ..task.v2.representations.results import CardinalityKind
+from ..task.v2.representations.results import CardinalityKind, ResultDeclaration
 from ..utils.time import now_iso
 from .guardrails import ScopeBudget
 from .outcomes import (
@@ -118,6 +118,7 @@ from .state import (
     WorkflowInstance,
     WorkItem,
     WorkItemStatus,
+    slot_identity,
 )
 from .telemetry import NULL_SPAN_EMITTER, TelemetrySpanEmitter
 from .tool_dispatch import (
@@ -260,6 +261,28 @@ def _ds_drive(
     return decorator
 
 
+def _rekeyed_publications(
+    slots: Iterable[ResultSlot], publications: Iterable[ResultPublication]
+) -> dict[str, ResultPublication]:
+    """Index publications by slot identity, re-keying any that name the legacy key.
+
+    A publication in the unscoped key format is re-keyed to the identity of the slot
+    that key names.
+    """
+    current = {slot.legacy_slot_key: slot.slot_key for slot in slots}
+    identities = set(current.values())
+    indexed: dict[str, ResultPublication] = {}
+    for publication in publications:
+        key = publication.slot_key
+        if key in identities:
+            indexed[key] = publication
+        elif (rekeyed := current.get(key)) is not None:
+            indexed[rekeyed] = publication.model_copy(update={"slot_key": rekeyed})
+        else:
+            indexed[key] = publication
+    return indexed
+
+
 class OrchestrationEngine:
     """Drives one workflow instance's semantic readiness over its durable ledger."""
 
@@ -316,7 +339,9 @@ class OrchestrationEngine:
             (c.scope_id, c.axis): c for c in snapshot.progress_capabilities
         }
         self._slots = {s.slot_key: s for s in snapshot.result_slots}
-        self._publications = {p.slot_key: p for p in snapshot.result_publications}
+        self._publications = _rekeyed_publications(
+            self._slots.values(), snapshot.result_publications
+        )
         self._trace = list(snapshot.trace)
         self._private_state = PrivateStateLedger(snapshot.private_state)
 
@@ -1832,18 +1857,13 @@ class OrchestrationEngine:
         self._admit(wi.work_item_id, advance)
         return advance
 
-    def create_fanout_child(self, spawn: str, producer_task_id: str, index: int) -> str:
+    def create_fanout_child(self, spawn: str, value_ref: ValueRef) -> str:
         """Create one producer-fanout child (unadmitted) and return its task id.
 
-        The child carries a frozen reference to element ``index`` of the producer's
-        collection as its child-init input. It stays blocked on its input manifest until
-        the runtime resolves and records the child-entry accepted input.
+        The child carries ``value_ref``, a frozen reference to one element of the
+        producer's collection, as its child-init input. It stays blocked on its input
+        manifest until the runtime records the child-entry accepted input.
         """
-        value_ref = ValueRef(
-            kind="legacy_task_result",
-            legacy_task_id=producer_task_id,
-            collection_key=str(index),
-        )
         activation, wi = self._create_child(
             spawn, None, dispatchable=True, value_ref=value_ref
         )
@@ -2129,6 +2149,7 @@ class OrchestrationEngine:
             operator_id=body_ref,
             legacy_task_id=activation.activation_id if dispatchable else "",
             value_ref=value_ref,
+            child_input=value_ref,
             effect_class=effect,
             recovery=recovery,
             replay_contract=self._replay.get(body_ref),
@@ -3236,16 +3257,35 @@ class OrchestrationEngine:
     # Queries
     # ------------------------------------------------------------------ #
 
-    def resolve_output(self, output_id: str) -> ResultPublication | None:
-        """Resolve a declared logical output to its terminal publication, if any."""
-        for slot in self._slots.values():
-            if slot.output_id == output_id:
-                return self._publications.get(slot.slot_key)
-        return None
+    def output_publication(
+        self,
+        output_id: str,
+        scope_id: str | None = None,
+        logical_key: str | None = None,
+        sequence: int | None = None,
+    ) -> ResultPublication | None:
+        """The terminal publication of exactly one slot, if it has one."""
+        return self._publications.get(
+            slot_identity(
+                self._instance.instance_id, output_id, scope_id, logical_key, sequence
+            )
+        )
+
+    def output_slots(self, output_id: str) -> list[ResultSlot]:
+        """Every slot a declared output holds so far, pending or published."""
+        return [slot for slot in self._slots.values() if slot.output_id == output_id]
+
+    @property
+    def org_id(self) -> str:
+        return self._instance.org_id
+
+    def published_outputs(self) -> list[tuple[str, ResultDeclaration]]:
+        """Each published declaration with the public name it was authored under."""
+        return self._bundle.template.published_outputs()
 
     def resolve_legacy_task(self, task_id: str) -> ResultPublication | None:
         """Resolve a legacy task id's induced output slot (compatibility adapter)."""
-        return self.resolve_output(f"legacy:{task_id}")
+        return self.output_publication(f"legacy:{task_id}")
 
     def legacy_task_value(
         self, task_id: str
@@ -3537,6 +3577,11 @@ class OrchestrationEngine:
     def work_item(self, task_id: str) -> WorkItem | None:
         return self._work_item_for_task(task_id)
 
+    def child_input(self, task_id: str) -> ValueRef | None:
+        """The child-init input a spawned child task runs on, if it has one."""
+        wi = self._work_item_for_task(task_id)
+        return wi.child_input if wi is not None else None
+
     def agent_operator(self, task_id: str) -> AgentOperator | None:
         """The agent operator a dispatched task realizes, resolving its work item."""
         wi = self._work_item_for_task(task_id)
@@ -3685,14 +3730,18 @@ class OrchestrationEngine:
         Returns whether the work item is ready to admit. A work item the snapshot still
         shows in flight — a crash after a retry persisted the PENDING record but before
         the ledger caught up — is reset to ready with its lost attempt marked, so the
-        retry is not orphaned; a work item whose predecessors have not all settled stays
-        blocked.
+        retry is not orphaned; a work item whose predecessors have not all settled, or
+        whose declared inputs have not all been accepted, stays blocked.
         """
         wi = self._work_item_for_task(task_id)
         if wi is None or wi.status in TERMINAL_WORK_ITEM_STATUSES:
             return False
         cont = self._continuations.get(wi.work_item_id)
-        if cont is not None and cont.waiting_on:
+        if cont is not None and (
+            cont.waiting_on
+            or not cont.required_ports
+            <= {a.target_port for a in self.accepted_inputs_for(wi.activation_id)}
+        ):
             wi.status = WorkItemStatus.BLOCKED
             return False
         if wi.status is WorkItemStatus.DISPATCHED:

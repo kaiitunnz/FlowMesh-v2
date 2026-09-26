@@ -786,6 +786,7 @@ if IS_ROOT_NODE:
     app.include_router(v1.nodes.router, prefix=v1_prefix)
     app.include_router(v1.tasks.router, prefix=v1_prefix)
     app.include_router(v1.results.router, prefix=v1_prefix)
+    app.include_router(v1.outputs.router, prefix=v1_prefix)
     app.include_router(v1.content.router, prefix=v1_prefix)
     app.include_router(v1.ssh.router, prefix=v1_prefix)
     app.include_router(v1.serve.router, prefix=v1_prefix)

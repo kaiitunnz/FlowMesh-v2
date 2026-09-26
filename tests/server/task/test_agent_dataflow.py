@@ -24,7 +24,7 @@ from server.orchestration.state import (
     AuthorityDecisionKind,
     ValueRef,
 )
-from server.task.results import ResultBinding
+from server.task.redrive import StoreRedriveScheduler
 from server.task.runtime import TaskRuntime
 from server.task.v2.compiler.bindings import leaf_profile
 from server.task.v2.representations.operators import (
@@ -39,6 +39,7 @@ from server.task.v2.representations.operators import (
 )
 from server.task.v2.representations.template import TemplateEdge
 from shared.tasks import TaskType
+from shared.tasks.result_binding import ResultBinding
 from tests.server.result_store import make_result_reader, store_result
 from tests.server.task.test_v2_agent_harness import _bundle, _decl, _engine, _leaf
 from tests.server.task.test_v2_orchestration import (
@@ -339,6 +340,9 @@ def _runtime(budget: int | None = None) -> TaskRuntime:
         make_result_reader(),
         logging.getLogger("dataflow-test"),
         secret_vault=cast(Any, _NoopSecretVault()),
+        redrive=lambda fire, logger: StoreRedriveScheduler(
+            fire, logger, run_thread=False
+        ),
     )
 
 
@@ -350,47 +354,90 @@ def _write_result(runtime: TaskRuntime, task_id: str, payload: dict[str, Any]) -
     runtime._result_binding_locked = bound.get  # type: ignore[method-assign]
 
 
-def test_frozen_resolver_reads_inline_element_and_producer_value() -> None:
+def _drive_inputs(runtime: TaskRuntime, engine: Any, workflow_id: str) -> None:
+    """Advance an engine's blocked agents as an applied advance does, then drive."""
+    runtime._engines[workflow_id] = engine
+    runtime._stage_agent_inputs_locked(workflow_id, engine, Advance())
+    runtime._redrive.run_due()
+
+
+def _merge_engine() -> Any:
+    engine = _engine(
+        _bundle(
+            [_leaf("P"), _input_agent("M", ("reviews",))],
+            [TemplateEdge(from_op="P", to_op="M", to_port="reviews")],
+            (_decl("out:M", "M"),),
+        ),
+        granted=frozenset({"model"}),
+    )
+    engine.on_succeeded("P")
+    return engine
+
+
+def test_an_input_records_the_producer_result_it_was_read_from() -> None:
     runtime = _runtime()
-    assert (
-        runtime._resolve_value_ref(ValueRef(kind="inline", literal="the facet"))
-        == "the facet"
-    )
-    _write_result(
-        runtime,
-        "tsk-p",
-        {"taskType": "echo", "items": [{"output": "facet-a"}, "facet-b"]},
-    )
-    assert (
-        runtime._resolve_value_ref(
-            ValueRef(
-                kind="legacy_task_result", legacy_task_id="tsk-p", collection_key="0"
-            )
-        )
-        == "facet-a"
-    )
-    assert (
-        runtime._resolve_value_ref(
-            ValueRef(
-                kind="legacy_task_result", legacy_task_id="tsk-p", collection_key="1"
-            )
-        )
-        == "facet-b"
-    )
-    _write_result(runtime, "tsk-r", {"taskType": "agent", "value": "grounded findings"})
-    assert (
-        runtime._resolve_value_ref(
-            ValueRef(kind="legacy_task_result", legacy_task_id="tsk-r")
-        )
-        == "grounded findings"
-    )
-    # A not-yet-readable result defers rather than fabricating a value.
-    assert (
-        runtime._resolve_value_ref(
-            ValueRef(kind="legacy_task_result", legacy_task_id="tsk-missing")
-        )
-        is None
-    )
+    engine = _merge_engine()
+    _write_result(runtime, "P", {"taskType": "agent", "value": "grounded"})
+
+    _drive_inputs(runtime, engine, "wfl-test")
+
+    (accepted,) = engine.accepted_inputs_for_task("M")
+    (member,) = accepted.members
+    assert member.value_ref is not None
+    bound = runtime._test_bindings["P"]  # type: ignore[attr-defined]
+    assert member.value_ref.content == bound.reference
+    (binding,) = runtime._agent_input_bindings(engine, "M")
+    (delivered,) = binding.members
+    assert delivered.value is None
+    assert delivered.source is not None
+    assert delivered.source.reference == member.value_ref.content
+
+
+def test_an_input_is_not_read_under_the_runtime_lock() -> None:
+    runtime = _runtime()
+    engine = _merge_engine()
+    _write_result(runtime, "P", {"taskType": "agent", "value": "grounded"})
+    reads: list[bool] = []
+    read = runtime._results.read
+
+    def _recording_read(binding: Any) -> Any:
+        reads.append(runtime._lock._is_owned())  # type: ignore[attr-defined]
+        return read(binding)
+
+    runtime._results.read = _recording_read  # type: ignore[method-assign]
+    runtime._engines["wfl-test"] = engine
+    with runtime._lock:
+        runtime._stage_agent_inputs_locked("wfl-test", engine, Advance())
+    assert not reads and not engine.accepted_inputs_for_task("M")
+    runtime._redrive.run_due()
+    assert reads == [False]
+    assert engine.accepted_inputs_for_task("M")
+
+
+def test_an_input_read_for_a_superseded_snapshot_is_read_again() -> None:
+    runtime = _runtime()
+    engine = _merge_engine()
+    _write_result(runtime, "P", {"taskType": "agent", "value": "first"})
+    runtime._engines["wfl-test"] = engine
+    runtime._stage_agent_inputs_locked("wfl-test", engine, Advance())
+    read = runtime._results.read
+    rebound: list[bool] = []
+
+    def _read_then_rebind(binding: Any) -> Any:
+        envelope = read(binding)
+        if not rebound:
+            rebound.append(True)
+            _write_result(runtime, "P", {"taskType": "agent", "value": "second"})
+        return envelope
+
+    runtime._results.read = _read_then_rebind  # type: ignore[method-assign]
+    runtime._redrive.run_due()
+    assert not engine.accepted_inputs_for_task("M")
+    runtime._redrive.run_due()
+    (accepted,) = engine.accepted_inputs_for_task("M")
+    latest = runtime._test_bindings["P"]  # type: ignore[attr-defined]
+    assert accepted.members[0].value_ref is not None
+    assert accepted.members[0].value_ref.content == latest.reference
 
 
 def test_input_bindings_projection_is_deterministic() -> None:
@@ -416,35 +463,26 @@ def test_input_bindings_projection_is_deterministic() -> None:
 
 def test_oversized_input_fails_the_agent_rather_than_truncating() -> None:
     runtime = _runtime(budget=64)
-    merge = _input_agent("M", ("reviews",))
-    engine = _engine(
-        _bundle(
-            [_leaf("P"), merge],
-            [TemplateEdge(from_op="P", to_op="M", to_port="reviews")],
-            (_decl("out:M", "M"),),
-        ),
-        granted=frozenset({"model"}),
-    )
-    engine.on_succeeded("P")
+    engine = _merge_engine()
     _write_result(runtime, "P", {"taskType": "agent", "value": "x" * 5000})
-    runtime._resolve_agent_inputs_locked("wfl-test", engine, Advance())
+    _drive_inputs(runtime, engine, "wfl-test")
     wi = engine.work_item("M")
     assert wi.status in (WorkItemStatus.SETTLED, WorkItemStatus.CANCELLED)
     assert wi.outcome is PublicationOutcome.DECLARED_FAILURE
 
 
+def test_an_input_at_the_budget_is_accepted() -> None:
+    runtime = _runtime(budget=64)
+    engine = _merge_engine()
+    _write_result(runtime, "P", {"taskType": "agent", "value": "x" * 64})
+    _drive_inputs(runtime, engine, "wfl-test")
+    assert engine.work_item("M").outcome is None
+    assert engine.accepted_inputs_for_task("M")
+
+
 def test_an_unreadable_input_fails_the_agent_rather_than_deferring() -> None:
     runtime = _runtime()
-    merge = _input_agent("M", ("reviews",))
-    engine = _engine(
-        _bundle(
-            [_leaf("P"), merge],
-            [TemplateEdge(from_op="P", to_op="M", to_port="reviews")],
-            (_decl("out:M", "M"),),
-        ),
-        granted=frozenset({"model"}),
-    )
-    engine.on_succeeded("P")
+    engine = _merge_engine()
     _write_result(runtime, "P", {"taskType": "agent", "value": "grounded"})
     bound = runtime._test_bindings["P"]  # type: ignore[attr-defined]
     assert bound.reference is not None
@@ -452,6 +490,6 @@ def test_an_unreadable_input_fails_the_agent_rather_than_deferring() -> None:
         task_id="P",
         reference=bound.reference.model_copy(update={"content_digest": "0" * 64}),
     )
-    runtime._resolve_agent_inputs_locked("wfl-test", engine, Advance())
+    _drive_inputs(runtime, engine, "wfl-test")
     wi = engine.work_item("M")
     assert wi.outcome is PublicationOutcome.DECLARED_FAILURE

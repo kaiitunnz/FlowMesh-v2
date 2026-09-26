@@ -352,7 +352,7 @@ def test_only_the_durable_outcome_re_readies_a_suspended_episode() -> None:
     eng.on_succeeded("A")
     wi = eng.work_item("A")
     assert wi is not None and wi.status is WorkItemStatus.SETTLED
-    pub = eng.resolve_output("out:A")
+    pub = eng.output_publication("out:A")
     assert pub is not None and pub.outcome.value == "success"
 
 
@@ -712,7 +712,7 @@ def test_multiple_role_regions_each_spawn_and_settle_with_the_agent() -> None:
         eng.on_succeeded(child)
     eng.on_succeeded("A")  # terminal completion settles every still-open region
     # Observable end-to-end outcome: the agent's declared output resolves SUCCESS ...
-    pub = eng.resolve_output("out:A")
+    pub = eng.output_publication("out:A")
     assert pub is not None and pub.outcome.value == "success"
     # ... and each role region's child-init progress closes independently.
     for role in ("researcher", "reviewer"):

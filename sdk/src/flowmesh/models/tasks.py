@@ -21,6 +21,11 @@ class TaskUsage(BaseModel):
     status: TaskStatus
 
 
+class TaskInputElement(BaseModel):
+    producer_task_id: str
+    index: int
+
+
 class TaskInfo(BaseModel):
     task_id: str
     workflow_id: str
@@ -64,3 +69,4 @@ class TaskInfo(BaseModel):
     dependents: list[str]
     completed: bool
     failed: bool
+    input_element: TaskInputElement | None = None

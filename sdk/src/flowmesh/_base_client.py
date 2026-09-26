@@ -15,8 +15,11 @@ from .exceptions import (
     APIError,
     AuthenticationError,
     ConfigNotFoundError,
+    ContentUnavailableError,
     FlowMeshConnectionError,
     NotFoundError,
+    OutputPendingError,
+    OutputUnreadableError,
     ValidationError,
 )
 
@@ -35,6 +38,14 @@ def _make_url(base_url: str, path: str) -> str:
     return base_url.rstrip("/") + API_VERSION_PREFIX + "/" + path.lstrip("/")
 
 
+# Errors a response names by code, whatever its status.
+_CODED_ERRORS: dict[str, type[APIError]] = {
+    "output_pending": OutputPendingError,
+    "content_unavailable": ContentUnavailableError,
+    "output_unreadable": OutputUnreadableError,
+}
+
+
 def _raise_for_status(response: httpx.Response, method: str) -> None:
     if response.status_code < 400:
         return
@@ -44,8 +55,13 @@ def _raise_for_status(response: httpx.Response, method: str) -> None:
         body = response.text
 
     message = ""
+    code: str | None = None
     if isinstance(body, dict):
-        message = body.get("detail", "") or body.get("message", "")
+        detail = body.get("detail", "")
+        if isinstance(detail, dict):
+            code = detail.get("code")
+            detail = detail.get("message", "")
+        message = detail or body.get("message", "")
     if not message:
         message = str(body)
 
@@ -56,6 +72,8 @@ def _raise_for_status(response: httpx.Response, method: str) -> None:
         url=str(response.url),
         body=body,
     )
+    if (typed := _CODED_ERRORS.get(code or "")) is not None:
+        raise typed(message, **kwargs)
     if status in (401, 403):
         raise AuthenticationError(message, **kwargs)
     if status == 404:

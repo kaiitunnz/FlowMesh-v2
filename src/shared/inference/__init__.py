@@ -12,6 +12,7 @@ from .codec import (
     canonical_source,
     declared_sampling,
     declares_multiple_prompts,
+    element_contract,
     resolve_contract,
     unforwarded_inference_keys,
 )
@@ -55,6 +56,7 @@ __all__ = [
     "content_version",
     "declared_sampling",
     "declares_multiple_prompts",
+    "element_contract",
     "hydrate_resolved_input",
     "request_digest",
     "resolve_contract",

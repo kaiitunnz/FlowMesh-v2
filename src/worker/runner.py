@@ -8,7 +8,12 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from shared.content import ContentReference, ContentStoreError, FabricObjectStore
+from shared.content import (
+    ContentReference,
+    ContentStoreError,
+    ContentUnavailable,
+    FabricObjectStore,
+)
 from shared.harness.adapter import HarnessResultKind
 from shared.inference import (
     CanonicalInferenceRequest,
@@ -48,6 +53,8 @@ from shared.tools.search.schema import DEFAULT_SEARCH_PROVIDER
 from shared.utils.manifest import prepare_output_dir, sync_manifest
 from shared.utils.time import now_iso
 
+from .content.access import ContentAccessDenied
+from .content.inputs import TaskInputHydrator, input_unavailable, input_unreadable
 from .egress import MediatedEgressSidecar, ModelEgress, SearchEgress
 from .executors.base_executor import ExecutionError, Executor, TaskCancelledError
 from .executors.episode_support import EpisodeStepResult
@@ -442,11 +449,15 @@ class Runner:
             )
         try:
             hydrated = hydrate_resolved_input(store, reference)
+        except (ContentUnavailable, ContentAccessDenied) as exc:
+            raise input_unavailable(
+                f"task {msg.task_id} cannot reach the request its preparation "
+                f"recorded: {exc}"
+            ) from exc
         except ContentStoreError as exc:
-            raise ExecutionError(
+            raise input_unreadable(
                 f"task {msg.task_id} cannot hydrate the request its preparation "
-                f"recorded: {exc}",
-                retryable=False,
+                f"recorded: {exc}"
             ) from exc
         committed = msg.recorded_resolution
         if committed is not None and not committed.matches(hydrated.binding):
@@ -793,6 +804,7 @@ class Runner:
                             f"Task {task_id} was cancelled before execution"
                         )
                     self._current_task_id = task_id
+                    TaskInputHydrator(self.lifecycle.content_plane).hydrate(msg)
                     if msg.input_preparation:
                         self.lifecycle.notify_task_started(
                             task_id,
@@ -974,6 +986,9 @@ class Runner:
                         str(e),
                         metadata=metadata,
                         retryable=retryable,
+                        failure_kind=(
+                            e.failure_kind if isinstance(e, ExecutionError) else None
+                        ),
                     )
                     if isinstance(e, ExecutionError):
                         self.logger.error("Task %s failed: %s", task_id, e)
