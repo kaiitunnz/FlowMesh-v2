@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
@@ -17,9 +18,10 @@ from ...schemas.outputs import (
     WorkflowOutputPage,
     WorkflowOutputValue,
 )
-from ...task.outputs import InvalidCursor, OutputMember, PublishedOutputs, page
+from ...task.outputs import InvalidCursor, OutputMember, page
 from ...task.results import ResultUnavailable, ResultUnreadable
 from ...task.runtime import TaskRuntime
+from ...task.v2.representations.results import CardinalityKind
 
 router = APIRouter(prefix="/workflows", tags=["Outputs"])
 
@@ -28,38 +30,38 @@ def _error(status_code: int, code: str, message: str) -> HTTPException:
     return HTTPException(status_code, detail={"code": code, "message": message})
 
 
-async def _published(
-    workflow_id: str,
-    principal: PrincipalContext,
-    runtime: TaskRuntime,
-    logger: logging.Logger,
-) -> PublishedOutputs:
-    """A workflow's published outputs, once the caller may read the workflow's results.
-
-    Both checks run before anything about the outputs is looked up, so a caller who may
-    not read them learns nothing about which exist.
-    """
+async def _authorize(
+    workflow_id: str, principal: PrincipalContext, logger: logging.Logger
+) -> None:
+    """Both checks run before anything about the outputs is looked up, so a caller who
+    may not read them learns nothing about which exist."""
     await require_permission(
         principal, ResourceKind.WORKFLOW, workflow_id, ResourceAction.READ, logger
     )
     await require_permission(
         principal, ResourceKind.RESULT, None, ResourceAction.READ, logger
     )
-    outputs = runtime.published_outputs(workflow_id)
-    if outputs is None or (
-        outputs.org_id != principal.org_id and "*" not in principal.scopes
-    ):
-        raise _error(
-            status.HTTP_404_NOT_FOUND,
-            "output_not_found",
-            f"workflow {workflow_id} has no published outputs",
-        )
-    return outputs
 
 
-def _member(member: OutputMember) -> WorkflowOutputMember:
+def _visible(org_id: str | None, principal: PrincipalContext) -> bool:
+    return org_id is not None and (
+        org_id == principal.org_id or "*" in principal.scopes
+    )
+
+
+def _no_outputs(workflow_id: str) -> HTTPException:
+    return _error(
+        status.HTTP_404_NOT_FOUND,
+        "output_not_found",
+        f"workflow {workflow_id} has no published outputs",
+    )
+
+
+def _present[M: WorkflowOutputMember](
+    model: type[M], member: OutputMember, **extra: Any
+) -> M:
     publication = member.publication
-    return WorkflowOutputMember(
+    return model(
         name=member.name,
         cardinality=member.declaration.cardinality.value,
         value_type=member.declaration.value_type,
@@ -71,6 +73,7 @@ def _member(member: OutputMember) -> WorkflowOutputMember:
             if publication is not None
             else OutputOutcome.PENDING
         ),
+        **extra,
     )
 
 
@@ -104,19 +107,17 @@ async def list_outputs(
             "invalid_request",
             "only one of before/after may be set",
         )
-    outputs = await _published(workflow_id, principal, runtime, logger)
-    members = [
-        member
-        for member in outputs.members
-        if (output is None or member.name == output)
-        and (scope is None or member.scope_id == scope)
-    ]
+    await _authorize(workflow_id, principal, logger)
+    outputs = runtime.published_outputs(workflow_id, output)
+    if outputs is None or not _visible(outputs.org_id, principal):
+        raise _no_outputs(workflow_id)
+    members = [m for m in outputs.members if scope is None or m.scope_id == scope]
     try:
         selected = page(members, limit, after=after, before=before)
     except InvalidCursor as exc:
         raise _error(status.HTTP_400_BAD_REQUEST, "invalid_cursor", str(exc)) from exc
     entries = [
-        WorkflowOutputEntry(cursor=member.cursor, **dict(_member(member)))
+        _present(WorkflowOutputEntry, member, cursor=member.cursor)
         for member in selected
     ]
     return WorkflowOutputPage(
@@ -131,8 +132,8 @@ async def list_outputs(
     "/{workflow_id}/outputs/{output_name}",
     summary="Get a published output",
     description=(
-        "Get the value of one published output member. A collection member is "
-        "selected by its scope and key."
+        "Get the value of one published output member. A singleton is selected by "
+        "its name alone, a collection member by its scope and key."
     ),
     response_description="The published output member and its value",
 )
@@ -146,41 +147,39 @@ async def get_output(
     runtime: TaskRuntime = Depends(get_runtime),
     logger: logging.Logger = Depends(get_logger),
 ) -> WorkflowOutputValue:
-    name = output_name
-    outputs = await _published(workflow_id, principal, runtime, logger)
-    named = [member for member in outputs.members if member.name == name]
-    if not named:
+    await _authorize(workflow_id, principal, logger)
+    found = runtime.published_output(workflow_id, output_name, scope, key, sequence)
+    if found is None or not _visible(found.org_id, principal):
+        raise _no_outputs(workflow_id)
+    if (declaration := found.declaration) is None:
         raise _error(
             status.HTTP_404_NOT_FOUND,
             "output_not_found",
-            f"workflow {workflow_id} publishes no output named {name!r}",
+            f"workflow {workflow_id} publishes no output named {output_name!r}",
         )
-    if named[0].keyed and (scope is None or key is None):
+    keyed = declaration.cardinality is CardinalityKind.KEYED_COLLECTION
+    if keyed and (scope is None or key is None):
         raise _error(
             status.HTTP_400_BAD_REQUEST,
             "invalid_request",
-            f"output {name!r} is a collection; select a member by scope and key",
+            f"output {output_name!r} is a collection; select a member by scope and key",
         )
-    member = next(
-        (m for m in named if (m.scope_id, m.key, m.sequence) == (scope, key, sequence)),
-        None,
-    )
-    if member is None and (not named[0].keyed or not outputs.open):
+    member = found.member
+    if member is None and (not keyed or not found.open):
         # A settled workflow publishes nothing more, so a missing member never comes.
         raise _error(
             status.HTTP_404_NOT_FOUND,
             "output_not_found",
-            f"output {name!r} has no member at the given selectors",
+            f"output {output_name!r} has no member at the given selectors",
         )
     if member is None or member.publication is None:
         raise _error(
             status.HTTP_409_CONFLICT,
             "output_pending",
-            f"output {name!r} has not settled at the given selectors",
+            f"output {output_name!r} has not settled at the given selectors",
         )
-    presented = _member(member)
     if member.publication.outcome.value != OutputOutcome.SUCCESS:
-        return WorkflowOutputValue(**dict(presented))
+        return _present(WorkflowOutputValue, member)
     try:
         envelope = await asyncio.to_thread(runtime.read_output, member)
     except ResultUnavailable as exc:
@@ -191,4 +190,4 @@ async def get_output(
         raise _error(
             status.HTTP_500_INTERNAL_SERVER_ERROR, "output_unreadable", str(exc)
         ) from exc
-    return WorkflowOutputValue(value=envelope.result, **dict(presented))
+    return _present(WorkflowOutputValue, member, value=envelope.result)

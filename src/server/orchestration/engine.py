@@ -402,10 +402,12 @@ class OrchestrationEngine:
             w.activation_id: w.work_item_id for w in self._work_items.values()
         }
         self._slots_by_operator: dict[str, list[str]] = {}
+        self._slots_by_output: dict[str, list[str]] = {}
         for slot in self._slots.values():
             self._slots_by_operator.setdefault(slot.source_operator_id, []).append(
                 slot.slot_key
             )
+            self._slots_by_output.setdefault(slot.output_id, []).append(slot.slot_key)
 
         self._forward = self._build_topology()
         # Scope ownership is keyed on the opener activation, so one operator can own a
@@ -3263,6 +3265,8 @@ class OrchestrationEngine:
     ) -> None:
         if slot.slot_key in self._publications:
             return
+        if slot.slot_key not in self._slots:
+            self._slots_by_output.setdefault(slot.output_id, []).append(slot.slot_key)
         self._slots[slot.slot_key] = slot.model_copy(update={"published": True})
         self._publications[slot.slot_key] = ResultPublication(
             slot_key=slot.slot_key,
@@ -3317,11 +3321,21 @@ class OrchestrationEngine:
 
     def output_slots(self, output_id: str) -> list[ResultSlot]:
         """Every slot a declared output holds so far, pending or published."""
-        return [slot for slot in self._slots.values() if slot.output_id == output_id]
+        return [self._slots[key] for key in self._slots_by_output.get(output_id, ())]
 
-    @property
-    def org_id(self) -> str:
-        return self._instance.org_id
+    def output_slot(
+        self,
+        output_id: str,
+        scope_id: str | None = None,
+        logical_key: str | None = None,
+        sequence: int | None = None,
+    ) -> ResultSlot | None:
+        """Exactly one slot of a declared output, if it holds one."""
+        return self._slots.get(
+            slot_identity(
+                self._instance.instance_id, output_id, scope_id, logical_key, sequence
+            )
+        )
 
     def published_outputs(self) -> list[tuple[str, ResultDeclaration]]:
         """Each published declaration with the public name it was authored under."""

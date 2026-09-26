@@ -132,7 +132,13 @@ from .models import (
     WorkflowSettlement,
     categorize_task_type,
 )
-from .outputs import OutputMember, PublishedOutputs, published_members
+from .outputs import (
+    OutputMember,
+    PublishedOutput,
+    PublishedOutputs,
+    published_member,
+    published_members,
+)
 from .parser import ParsedWorkflow, parse_workflow
 from .redrive import StoreRedriveScheduler
 from .results import ResultReader, ResultUnavailable, ResultUnreadable
@@ -2911,15 +2917,43 @@ class TaskRuntime:
             self._cv.notify_all()
         self._save_ledger_locked(record.workflow_id)
 
-    def published_outputs(self, workflow_id: str) -> PublishedOutputs | None:
-        """A workflow's published outputs, or None for a workflow with no ledger."""
+    def published_outputs(
+        self, workflow_id: str, name: str | None = None
+    ) -> PublishedOutputs | None:
+        """A workflow's published outputs, or one output's, in no particular order.
+
+        None for a workflow with no ledger.
+        """
         with self._lock:
             engine = self._engines.get(workflow_id)
             if engine is None:
                 return None
             return PublishedOutputs(
-                org_id=engine.org_id,
-                members=published_members(engine),
+                org_id=engine.instance.org_id,
+                members=published_members(engine, name),
+                open=not self._workflow_settlement_locked(workflow_id).settled,
+            )
+
+    def published_output(
+        self,
+        workflow_id: str,
+        name: str,
+        scope_id: str | None,
+        key: str | None,
+        sequence: int | None,
+    ) -> PublishedOutput | None:
+        """One published output's member at the selectors, or None with no ledger."""
+        with self._lock:
+            engine = self._engines.get(workflow_id)
+            if engine is None:
+                return None
+            declaration, member = published_member(
+                engine, name, scope_id, key, sequence
+            )
+            return PublishedOutput(
+                org_id=engine.instance.org_id,
+                declaration=declaration,
+                member=member,
                 open=not self._workflow_settlement_locked(workflow_id).settled,
             )
 

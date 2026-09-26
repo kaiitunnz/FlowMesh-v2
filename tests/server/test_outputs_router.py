@@ -381,13 +381,20 @@ async def test_a_forbidden_caller_learns_nothing(
 ) -> None:
     wf = await _workflow()
     reads: list[str] = []
-    published = wf.runtime.published_outputs
 
-    def _recorded(workflow_id: str) -> Any:
-        reads.append(workflow_id)
-        return published(workflow_id)
+    def _recording(lookup: Any) -> Any:
+        def _recorded(workflow_id: str, *args: Any) -> Any:
+            reads.append(workflow_id)
+            return lookup(workflow_id, *args)
 
-    wf.runtime.published_outputs = _recorded  # type: ignore[method-assign]
+        return _recorded
+
+    wf.runtime.published_outputs = _recording(  # type: ignore[method-assign]
+        wf.runtime.published_outputs
+    )
+    wf.runtime.published_output = _recording(  # type: ignore[method-assign]
+        wf.runtime.published_output
+    )
     denied = _principal("p-2")
 
     assert (await _status(_get(wf, name, principal=denied)))[0] == 403

@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..orchestration import OrchestrationEngine
-from ..orchestration.state import ResultPublication
+from ..orchestration.state import ResultPublication, ResultSlot
 from .v2.representations.results import CardinalityKind, ResultDeclaration
 
 
@@ -58,23 +58,41 @@ class PublishedOutputs:
     open: bool
 
 
-def published_members(engine: OrchestrationEngine) -> list[OutputMember]:
-    """Every member a workflow's published outputs hold so far, in cursor order."""
-    members = [
-        OutputMember(
-            name=name,
-            declaration=decl,
-            scope_id=slot.scope_id,
-            key=slot.logical_key,
-            sequence=slot.sequence,
-            publication=engine.output_publication(
-                decl.output_id, slot.scope_id, slot.logical_key, slot.sequence
-            ),
-        )
-        for name, decl in engine.published_outputs()
+@dataclass(frozen=True)
+class PublishedOutput:
+    """One named published output and, when it holds one, the member selected."""
+
+    org_id: str
+    declaration: ResultDeclaration | None
+    member: OutputMember | None
+    open: bool
+
+
+def published_members(
+    engine: OrchestrationEngine, name: str | None = None
+) -> list[OutputMember]:
+    """Every member a workflow's published outputs hold so far, or one output's."""
+    return [
+        _member(engine, published, decl, slot)
+        for published, decl in engine.published_outputs()
+        if name is None or published == name
         for slot in engine.output_slots(decl.output_id)
     ]
-    return sorted(members, key=lambda member: member.order)
+
+
+def published_member(
+    engine: OrchestrationEngine,
+    name: str,
+    scope_id: str | None,
+    key: str | None,
+    sequence: int | None,
+) -> tuple[ResultDeclaration | None, OutputMember | None]:
+    """The declaration a public name refers to, and its member at the selectors."""
+    decl = next((d for n, d in engine.published_outputs() if n == name), None)
+    if decl is None:
+        return None, None
+    slot = engine.output_slot(decl.output_id, scope_id, key, sequence)
+    return decl, _member(engine, name, decl, slot) if slot is not None else None
 
 
 def page(
@@ -84,16 +102,32 @@ def page(
     before: str | None = None,
 ) -> list[OutputMember]:
     """The ``limit`` members strictly after, or strictly before, a cursor."""
+    ordered = sorted(members, key=lambda member: member.order)
     if after is not None:
-        bound = decode_cursor(after)
-        return [m for m in members if m.order > bound][:limit]
+        bound = _decode_cursor(after)
+        return [m for m in ordered if m.order > bound][:limit]
     if before is not None:
-        bound = decode_cursor(before)
-        return [m for m in members if m.order < bound][-limit:]
-    return members[:limit]
+        bound = _decode_cursor(before)
+        return [m for m in ordered if m.order < bound][-limit:]
+    return ordered[:limit]
 
 
-def decode_cursor(cursor: str) -> tuple[Any, ...]:
+def _member(
+    engine: OrchestrationEngine, name: str, decl: ResultDeclaration, slot: ResultSlot
+) -> OutputMember:
+    return OutputMember(
+        name=name,
+        declaration=decl,
+        scope_id=slot.scope_id,
+        key=slot.logical_key,
+        sequence=slot.sequence,
+        publication=engine.output_publication(
+            decl.output_id, slot.scope_id, slot.logical_key, slot.sequence
+        ),
+    )
+
+
+def _decode_cursor(cursor: str) -> tuple[Any, ...]:
     try:
         identity = json.loads(base64.urlsafe_b64decode(cursor.encode("ascii")))
         name, scope_id, key, sequence = identity
@@ -120,8 +154,9 @@ def _order(
 __all__ = [
     "InvalidCursor",
     "OutputMember",
+    "PublishedOutput",
     "PublishedOutputs",
-    "decode_cursor",
     "page",
+    "published_member",
     "published_members",
 ]

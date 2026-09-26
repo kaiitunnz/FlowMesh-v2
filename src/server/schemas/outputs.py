@@ -25,7 +25,7 @@ class WorkflowOutputMember(BaseModel):
         default=None, description="Collection member key (the child index)."
     )
     sequence: int | None = Field(default=None, description="Member sequence number.")
-    outcome: OutputOutcome = Field(description="Where the member stands.")
+    outcome: OutputOutcome = Field(description="Settlement outcome of the member.")
 
 
 class WorkflowOutputEntry(WorkflowOutputMember):
