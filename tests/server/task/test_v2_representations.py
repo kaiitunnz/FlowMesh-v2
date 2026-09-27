@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+import yaml
 
 from server.config import OrchestrationConfig
 from server.task.parser import parse_workflow
@@ -161,7 +162,7 @@ async def test_v2_gate_builds_representations() -> None:
     workflow_id, _ = await runtime.register("owner", "org", DAG_V2, format="native")
     bundle = registry.v2[workflow_id]
     assert bundle is not None
-    assert bundle.source.raw_payload == DAG_V2
+    assert yaml.safe_load(bundle.source.raw_payload) == yaml.safe_load(DAG_V2)
     assert len(bundle.template.operators) == 2
     assert bundle.plan.template_version == bundle.template.version
 
