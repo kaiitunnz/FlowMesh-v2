@@ -294,12 +294,12 @@ def test_a_failed_agents_region_opener_emits_once_its_children_drain() -> None:
     assert opener_span not in {sid for _, sid in _span_ids(exporter)}
     eng.on_succeeded(child)
 
-    spans = exporter.get_finished_spans()
-    assert opener_span in {s.context.span_id for s in spans}
-    known = {s.context.span_id for s in spans}
+    known = {sid for _, sid in _span_ids(exporter)}
+    assert opener_span in known
     workflow_span = derived_span_id(SpanIdKind.WORKFLOW, _WORKFLOW_ID)
     assert all(
-        s.parent is None or s.parent.span_id in known | {workflow_span} for s in spans
+        s.parent is None or s.parent.span_id in known | {workflow_span}
+        for s in exporter.get_finished_spans()
     )
 
 
