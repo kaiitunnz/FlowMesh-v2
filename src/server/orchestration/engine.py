@@ -272,12 +272,9 @@ def _rekeyed_publications(
     indexed: dict[str, ResultPublication] = {}
     for publication in publications:
         key = publication.slot_key
-        if key in identities:
-            indexed[key] = publication
-        elif (rekeyed := current.get(key)) is not None:
-            indexed[rekeyed] = publication.model_copy(update={"slot_key": rekeyed})
-        else:
-            indexed[key] = publication
+        if key not in identities and (rekeyed := current.get(key)) is not None:
+            publication = publication.model_copy(update={"slot_key": rekeyed})
+        indexed[publication.slot_key] = publication
     return indexed
 
 
