@@ -1,8 +1,8 @@
 import pytest
 
+from shared.tasks.specs.misc import _looks_credential
 from shared.utils.redact import (
     REDACTED,
-    find_credential_key,
     is_credential_key,
     redact_credential_fields,
 )
@@ -77,6 +77,26 @@ def test_redaction_masks_credential_values_at_any_depth() -> None:
     }
 
 
-def test_find_credential_key_reports_the_first_nested_one() -> None:
-    assert find_credential_key({"a": [{"b": {"x-api-key": 1}}]}) == "x-api-key"
-    assert find_credential_key({"max_tokens": 1, "cache_key": 2}) is None
+@pytest.mark.parametrize(
+    "name",
+    [
+        "api_key",
+        "OPENAI_API_KEY",
+        "apiKey",
+        "secretive",
+        "passwordless",
+        "credentialed",
+        "authorization",
+        "aws_access_key_id",
+        "auth_token",
+        "bearer_token",
+        "session_token",
+        "refresh_token",
+        "auth",
+        "auth_mode",
+        "x auth",
+    ],
+)
+def test_redaction_covers_every_rejected_harness_param(name: str) -> None:
+    assert _looks_credential(name)
+    assert is_credential_key(name)

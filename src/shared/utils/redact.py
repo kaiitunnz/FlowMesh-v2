@@ -57,21 +57,6 @@ def is_credential_key(name: str) -> bool:
     return any(sub in lowered for sub in _CREDENTIAL_SUBSTRINGS)
 
 
-def find_credential_key(value: Any) -> str | None:
-    """The first credential-looking key anywhere in a nested structure."""
-    if isinstance(value, dict):
-        for key, nested in value.items():
-            if is_credential_key(str(key)):
-                return str(key)
-            if (found := find_credential_key(nested)) is not None:
-                return found
-    elif isinstance(value, list):
-        for item in value:
-            if (found := find_credential_key(item)) is not None:
-                return found
-    return None
-
-
 def redact_credential_fields(value: Any) -> Any:
     """A copy of ``value`` with every credential-keyed value replaced, at any depth.
 
@@ -93,7 +78,6 @@ def redact_credential_fields(value: Any) -> Any:
 
 __all__ = [
     "REDACTED",
-    "find_credential_key",
     "is_credential_key",
     "redact_credential_fields",
 ]
