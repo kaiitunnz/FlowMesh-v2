@@ -169,7 +169,7 @@ def test_a_replaced_stash_keeps_the_release_it_carries() -> None:
 def test_a_save_under_a_held_report_keeps_its_release_held() -> None:
     scenario = _Scenario()
     runtime = scenario.runtime
-    termination = _Termination([], [], [], resident_invocation_ids=["inv-x"])
+    termination = _Termination([], [], resident_invocation_ids=["inv-x"])
     current = runtime._report_writes.held = _HeldWrites(error=RuntimeError("down"))
     try:
         with runtime._cv:
@@ -189,7 +189,7 @@ def test_a_replayed_cancel_report_releases_what_its_stash_held() -> None:
     released: list[str] = []
     runtime.set_resident_terminal_hook(lambda inv, _failed: released.append(inv))
     planner = scenario.ids["planner"]
-    termination = _Termination([], [], [], resident_invocation_ids=["inv-x"])
+    termination = _Termination([], [], resident_invocation_ids=["inv-x"])
     with runtime._cv:
         runtime._hold_termination_locked(scenario.workflow_id, termination)
     runtime._unacknowledged[planner] = _Unacknowledged(
@@ -223,7 +223,7 @@ def _lock_probe(runtime: TaskRuntime) -> list[bool]:
         thread.join()
 
     runtime._release_terminated_work = release  # type: ignore[method-assign]
-    runtime._pending_terminations.append(_Termination([], [], []))
+    runtime._pending_terminations.append(_Termination([], []))
     return owned
 
 

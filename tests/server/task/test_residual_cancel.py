@@ -356,3 +356,23 @@ def test_a_residual_cancel_reaches_a_cancelled_agents_own_children(state: str) -
         assert runtime.workflow_settlement(workflow_id).settled
 
     asyncio.run(run())
+
+
+@pytest.mark.anyio
+async def test_a_committed_cancelling_task_stays_in_the_dispatched_set() -> None:
+    registry = FakeRegistry()
+    runtime, _, _, (_, loser) = await _fanned_out(registry, 2)
+    record_dispatch(runtime, loser, cast(Any, _worker("wkr-2")))
+    dispatched: list[str] = []
+    commit = registry.commit_transition
+
+    def spy(workflow_id: str, **kwargs: Any) -> None:
+        dispatched.extend(kwargs.get("dispatched", ()))
+        commit(workflow_id, **kwargs)
+
+    registry.commit_transition = spy  # type: ignore[method-assign]
+    with runtime._cv:
+        runtime._tasks[loser].status = TaskStatus.CANCELLING
+        runtime._commit_locked(loser)
+
+    assert dispatched == [loser]

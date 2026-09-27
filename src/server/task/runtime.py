@@ -296,8 +296,6 @@ class _Termination:
     interrupts: list[InterruptMessage]
     # Each pending mediated operation's worker, agent task, and call.
     reaps: list[tuple[str, str, str]]
-    # Tasks whose published dispatch the termination recorded in memory.
-    recorded: list[str]
     resident_invocation_ids: list[str] = field(default_factory=list)
 
 
@@ -396,9 +394,11 @@ def _reset_to_pending(record: TaskRecord) -> None:
 
 
 def _membership(record: TaskRecord) -> str:
-    """The status set a task's record commits into. A child its region's residual
-    policy cancelled settles its workflow as a finished task does, never as a
-    cancelled one."""
+    """The status set a task's record commits into. A task being cancelled still runs
+    on its worker. A child its region's residual policy cancelled settles its workflow
+    as a finished task does, never as a cancelled one."""
+    if record.status == TaskStatus.CANCELLING:
+        return TaskStatus.DISPATCHED
     if record.status == TaskStatus.CANCELLED and record.residual_cancel:
         return TaskStatus.DONE
     return record.status
@@ -3326,7 +3326,7 @@ class TaskRuntime:
             if invocation_ids := engine.terminalize_unsettled_invocations([task_id]):
                 self._hold_termination_locked(
                     record.workflow_id,
-                    _Termination([], [], [], resident_invocation_ids=invocation_ids),
+                    _Termination([], [], resident_invocation_ids=invocation_ids),
                 )
         self._save_ledger_locked(record.workflow_id)
         return advance
@@ -5343,9 +5343,7 @@ class TaskRuntime:
                     continue
                 returned += moved
                 touched.append(task_id)
-            self._commit_cancelled_locked(
-                workflow_id, touched, termination.recorded, returned
-            )
+            self._commit_cancelled_locked(workflow_id, touched, returned)
             # The ledger snapshot follows the committed task state so it never leads
             # it.
             if workflow_id in self._engines:
@@ -5407,13 +5405,11 @@ class TaskRuntime:
         the held input checks are dropped. It writes nothing.
         """
         interrupts: list[InterruptMessage] = []
-        recorded: list[str] = []
         for record in records:
             publish = self._publishing.get(record.task_id)
             if publish and not publish.recorded and record.status == TaskStatus.PENDING:
                 # The worker may already be running the task.
                 self._take_dispatch_locked(record, publish)
-                recorded.append(record.task_id)
             if record.status == TaskStatus.DISPATCHED and (
                 interrupt := self._interrupt_for(record, reason)
             ):
@@ -5421,7 +5417,7 @@ class TaskRuntime:
             self._input_checks.pop(record.task_id, None)
             self._task_epoch_index.pop(record.task_id, None)
         reaps = self._take_ops_for_agents_locked([r.task_id for r in records])
-        return _Termination(interrupts, reaps, recorded)
+        return _Termination(interrupts, reaps)
 
     @staticmethod
     def _interrupt_for(record: TaskRecord, reason: str) -> InterruptMessage | None:
@@ -5443,7 +5439,7 @@ class TaskRuntime:
             and (interrupt := self._interrupt_for(record, record.error or "cancelled"))
         ]
         if interrupts:
-            self._pending_terminations.append(_Termination(interrupts, [], []))
+            self._pending_terminations.append(_Termination(interrupts, []))
 
     def _release_terminated_work(self, termination: _Termination) -> None:
         """Release what a terminated workflow's work held, best effort: each resident
@@ -5491,14 +5487,10 @@ class TaskRuntime:
             self._release_terminated_work(termination)
 
     def _commit_cancelled_locked(
-        self,
-        workflow_id: str,
-        touched: list[str],
-        recorded: list[str],
-        returned: list[str],
+        self, workflow_id: str, touched: list[str], returned: list[str]
     ) -> None:
-        """Commit the tasks a cancel moved, a published dispatch it recorded joining the
-        dispatched tasks, then the merged children it returned to the queue."""
+        """Commit the tasks a cancel moved, then the merged children it returned to the
+        queue."""
 
         def commit() -> None:
             self._workflow_registry.commit_transition(
@@ -5506,8 +5498,8 @@ class TaskRuntime:
                 records=self._records_locked(*touched),
                 dispatched=[
                     task_id
-                    for task_id in recorded
-                    if self._tasks[task_id].status == TaskStatus.CANCELLING
+                    for task_id in touched
+                    if _membership(self._tasks[task_id]) == TaskStatus.DISPATCHED
                 ],
                 done=[
                     task_id
@@ -5563,9 +5555,7 @@ class TaskRuntime:
             record.residual_cancel = True
             touched.append(record.task_id)
             returned += moved
-        self._commit_cancelled_locked(
-            workflow_id, touched, termination.recorded, returned
-        )
+        self._commit_cancelled_locked(workflow_id, touched, returned)
         if not self._writes_held():
             self._notify_terminal_transition(workflow_id)
         self._settle_suspended_cancels_locked(engine)
