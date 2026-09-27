@@ -36,6 +36,18 @@ from shared.utils.redact import (
         "authToken",
         "auth",
         "bearer",
+        "connection_string",
+        "cert_data",
+        "certificate",
+        "passphrase",
+        "ssh_key",
+        "subscription_key",
+        "authorized_keys",
+        "authorizedKeys",
+        "hf_token",
+        "lumid_data_token",
+        "aws_secret_access_key",
+        "aws_access_key_id",
     ],
 )
 def test_credential_keys_match(name: str) -> None:
@@ -66,15 +78,33 @@ def test_redaction_masks_credential_values_at_any_depth() -> None:
     value = {
         "headers": {"Authorization": "Bearer s", "Accept": "json"},
         "items": [{"password": "p", "name": "n"}],
+        "authorizedKeys": ["ssh-ed25519 AAA"],
         "api_key": None,
         "max_tokens": 4,
     }
     assert redact_credential_fields(value) == {
         "headers": {"Authorization": REDACTED, "Accept": "json"},
         "items": [{"password": REDACTED, "name": "n"}],
+        "authorizedKeys": [REDACTED],
         "api_key": None,
         "max_tokens": 4,
     }
+
+
+def test_redaction_masks_the_value_of_a_name_value_pair_naming_a_credential() -> None:
+    params = [
+        {"name": "Authorization", "value": "Bearer s"},
+        {"name": "limit", "value": "10"},
+    ]
+    assert redact_credential_fields(params) == [
+        {"name": "Authorization", "value": REDACTED},
+        {"name": "limit", "value": "10"},
+    ]
+
+
+def test_redaction_masks_ordered_pairs_and_returns_lists() -> None:
+    pairs = [("api_key", "s"), ("model", "m")]
+    assert redact_credential_fields(pairs) == [["api_key", REDACTED], ["model", "m"]]
 
 
 @pytest.mark.parametrize(

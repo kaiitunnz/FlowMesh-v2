@@ -29,23 +29,22 @@ def pop_inline_model_secrets(parsed: ParsedWorkflow) -> dict[str, SecretStr]:
 
 
 def redact_source_text(raw_payload: str, format: str) -> str:
-    """Return the submitted source with every credential-keyed value masked.
+    """Return the submitted source with every credential value masked.
 
     Redaction is structural: the payload is parsed with its submission format's parser,
-    every credential-looking field is masked, and the document is re-serialized in that
-    format, so a credential never survives in the captured source however it was quoted
-    or escaped. A payload with no credential field is returned unchanged, and one that
-    does not parse is replaced by a marker rather than kept verbatim.
+    every credential value is masked, and the document is re-serialized in that format,
+    so a credential never survives in the captured source however it was quoted,
+    escaped, duplicated, or commented out. The re-serialized source keeps no comments or
+    formatting. A payload that does not parse or re-serialize is replaced by
+    ``REDACTED``.
     """
     try:
-        doc = (
-            json.loads(raw_payload) if format == "n8n" else yaml.safe_load(raw_payload)
+        if format == "n8n":
+            return json.dumps(
+                redact_credential_fields(json.loads(raw_payload)), indent=2
+            )
+        return yaml.safe_dump(
+            redact_credential_fields(yaml.safe_load(raw_payload)), sort_keys=False
         )
-    except (json.JSONDecodeError, yaml.YAMLError):
+    except (ValueError, TypeError, yaml.YAMLError):
         return REDACTED
-    redacted = redact_credential_fields(doc)
-    if redacted == doc:
-        return raw_payload
-    if format == "n8n":
-        return json.dumps(redacted, indent=2)
-    return yaml.safe_dump(redacted, sort_keys=False)

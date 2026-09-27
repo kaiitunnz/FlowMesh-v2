@@ -1,31 +1,35 @@
-"""Credential-key detection and key-based redaction of nested values.
-
-A key names a credential when its name looks like one (see ``is_credential_key``);
-redaction replaces the value under every such key with a fixed marker, at any depth.
-"""
+"""Credential-key detection and key-based redaction of nested values."""
 
 import re
 from typing import Any
 
 REDACTED = "[REDACTED]"
 
-# Matched against both the lowercased name and its segmented form, so ``apiKey``,
-# ``API_KEY``, ``x-api-key`` and ``apikey`` all hit ``api_key``/``apikey``. A bare
-# ``_key`` suffix is not a credential shape: ``cache_key`` and ``sort_key`` are not.
+# Matched against the name split at separators and at camelCase boundaries, so
+# ``apiKey``, ``API_KEY``, ``x-api-key`` and ``apikey`` all hit ``api_key``/``apikey``.
+# A bare ``_key`` suffix is not a credential shape: ``cache_key`` and ``sort_key`` are
+# not.
 _CREDENTIAL_SUBSTRINGS = (
     "api_key",
     "apikey",
     "secret",
     "password",
     "passwd",
+    "passphrase",
     "credential",
     "authorization",
     "cookie",
     "bearer",
     "access_key",
     "private_key",
-    "secret_key",
     "signing_key",
+    "ssh_key",
+    "subscription_key",
+    "authorized_keys",
+    "authorizedkeys",
+    "connection_string",
+    "cert_data",
+    "certificate",
     "auth_token",
     "access_token",
     "session_token",
@@ -54,30 +58,51 @@ def is_credential_key(name: str) -> bool:
             return True
         if segments and segments[-1] in _CREDENTIAL_LAST_SEGMENTS:
             return True
-    return any(sub in lowered for sub in _CREDENTIAL_SUBSTRINGS)
+    return False
+
+
+def _masked(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)):
+        return [REDACTED]
+    return REDACTED
+
+
+def _names_credential(value: dict[Any, Any]) -> bool:
+    """Whether a mapping is a ``{name, value}`` pair naming a credential."""
+    name = value.get("name")
+    return "value" in value and isinstance(name, str) and is_credential_key(name)
 
 
 def redact_credential_fields(value: Any) -> Any:
-    """A copy of ``value`` with every credential-keyed value replaced, at any depth.
+    """A copy of ``value`` with every credential value replaced, at any depth.
 
-    A ``None`` value stays ``None`` so an omitted credential still reads as omitted.
+    A credential value is one under a credential-looking key, or the ``value`` of a
+    ``{name, value}`` pair whose ``name`` is one. A ``None`` value is kept, so an
+    omitted credential reads as omitted; tuples come back as lists.
     """
     if isinstance(value, dict):
-        return {
+        redacted = {
             key: (
-                (None if val is None else REDACTED)
+                _masked(val)
                 if is_credential_key(str(key))
                 else redact_credential_fields(val)
             )
             for key, val in value.items()
         }
-    if isinstance(value, list):
+        if _names_credential(value):
+            redacted["value"] = _masked(value["value"])
+        return redacted
+    if (
+        isinstance(value, tuple)
+        and len(value) == 2
+        and is_credential_key(str(value[0]))
+    ):
+        return [value[0], _masked(value[1])]
+    if isinstance(value, (list, tuple)):
         return [redact_credential_fields(item) for item in value]
     return value
 
 
-__all__ = [
-    "REDACTED",
-    "is_credential_key",
-    "redact_credential_fields",
-]
+__all__ = ["REDACTED", "is_credential_key", "redact_credential_fields"]
