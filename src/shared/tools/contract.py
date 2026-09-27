@@ -89,7 +89,10 @@ class MediatedOperationPermit(BaseModel):
     @model_validator(mode="after")
     def _one_credential_source(self) -> Self:
         if self.credential is not None and self.deployment_credential:
-            raise ValueError("a permit carries a credential or grants the deployment's")
+            raise ValueError(
+                "a permit carries its own credential or the deployment-key grant, "
+                "not both"
+            )
         return self
 
 

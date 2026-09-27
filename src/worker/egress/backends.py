@@ -81,9 +81,9 @@ class ModelEgress:
 
     interface = MODEL_INTERFACE
 
-    def __init__(self, env_api_key: str | None, logger: logging.Logger) -> None:
+    def __init__(self, deployment_api_key: str | None, logger: logging.Logger) -> None:
         self._sidecar = ExternalModelSidecar(logger)
-        self._env_api_key = env_api_key
+        self._deployment_api_key = deployment_api_key
 
     def digest(self, request: CapturedRequest) -> str:
         assert isinstance(request, ModelRequest)
@@ -111,7 +111,7 @@ class ModelEgress:
     def _key(self, permit: MediatedOperationPermit) -> str | None:
         if permit.credential is not None:
             return permit.credential
-        return self._env_api_key if permit.deployment_credential else None
+        return self._deployment_api_key if permit.deployment_credential else None
 
 
 __all__ = ["ModelEgress", "SearchEgress"]

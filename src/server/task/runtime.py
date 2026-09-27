@@ -6,7 +6,7 @@ from collections import defaultdict, deque
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from itertools import chain
-from typing import Any, NamedTuple, cast
+from typing import Any, cast
 
 from opentelemetry.trace import Tracer
 from pydantic import ValidationError
@@ -488,14 +488,19 @@ def _binding_defaults(
     )
 
 
-class OpCredential(NamedTuple):
+@dataclass(frozen=True)
+class _OpCredential:
     """The provider credential authority one mediated-operation permit carries."""
 
-    credential: str | None = None
+    credential: str | None = field(default=None, repr=False)
     deployment_credential: bool = False
 
 
-_CREDENTIAL_UNAVAILABLE = "model credential unavailable"
+@dataclass(frozen=True)
+class _MissingCredential:
+    """A pinned model credential missing from the vault: the operation is denied."""
+
+    reason: str = "model credential unavailable"
 
 
 def _is_default_url(url: str | None, default_url: str | None) -> bool:
@@ -1967,26 +1972,33 @@ class TaskRuntime:
 
     def _resolve_op_credential(
         self, agent: TaskRecord, interface: str
-    ) -> OpCredential | None:
-        """The provider credential authority a permit carries, or None when it is gone.
+    ) -> _OpCredential | _MissingCredential:
+        """The provider credential authority a permit for this interface carries.
 
-        A model binding that pins its own key resolves it from the vault so it rides the
-        one-use permit down to the egressing worker; a pinned key the vault no longer
-        holds denies the operation. A binding without one may use the worker's
-        deployment key only when its url is the deployment's current default model url.
-        Other interfaces read their provider key locally.
+        Other interfaces than the model read their provider key locally.
         """
         if interface != MODEL_INTERFACE:
-            return OpCredential()
-        binding = self.resolve_model_binding(agent.task_id)
+            return _OpCredential()
+        return self._model_credential(agent, self.resolve_model_binding(agent.task_id))
+
+    def _model_credential(
+        self, agent: TaskRecord, binding: AgentModelGatewayBinding | None
+    ) -> _OpCredential | _MissingCredential:
+        """The credential authority a model permit carries for an agent's binding.
+
+        A binding that pins its own key resolves it from the vault so it rides the
+        one-use permit down to the egressing worker, and a pinned key missing from the
+        vault denies the operation. A binding without one may use the worker's
+        deployment key only when its URL is the deployment's current default model URL.
+        """
         if binding is None:
-            return OpCredential()
+            return _OpCredential()
         if binding.secret_ref is not None:
             secret = self._secret_vault.resolve(agent.workflow_id, binding.secret_ref)
             if secret is None:
-                return None
-            return OpCredential(credential=secret.get_secret_value())
-        return OpCredential(
+                return _MissingCredential()
+            return _OpCredential(credential=secret.get_secret_value())
+        return _OpCredential(
             deployment_credential=_is_default_url(
                 binding.url, self._agent_binding_defaults.default_url
             )
@@ -2051,9 +2063,9 @@ class TaskRuntime:
             )
             return
         op_credential = self._resolve_op_credential(agent, env.interface)
-        if op_credential is None:
+        if isinstance(op_credential, _MissingCredential):
             self.settle_episode_invocation(
-                env.task_id, env.call_correlation, error=_CREDENTIAL_UNAVAILABLE
+                env.task_id, env.call_correlation, error=op_credential.reason
             )
             self._reap_mediated_op(worker_id, env.task_id, env.call_correlation)
             return
@@ -2123,26 +2135,29 @@ class TaskRuntime:
                 # its own permit deadline.
                 return
             binding = self.resolve_model_binding(proposal.agent_task_id)
-            external = binding is not None and binding.mode is ModelBindingMode.OPENAI
-            op_credential = self._resolve_op_credential(agent, MODEL_INTERFACE)
             permit = None
-            if external and op_credential is not None:
-                _, timeout_sec, result_char_cap = self._op_permit_budget(
-                    MODEL_INTERFACE
-                )
-                deadline = time.time() + timeout_sec + _OP_PERMIT_SLACK_SEC
-                permit = engine.authorize_model_turn(
-                    proposal.agent_task_id,
-                    proposal.call_correlation,
-                    proposal.request_digest,
-                    target_id=worker_id,
-                    target_generation=worker.incarnation,
-                    timeout_sec=timeout_sec,
-                    result_char_cap=result_char_cap,
-                    deadline_epoch=deadline,
-                    credential=op_credential.credential,
-                    deployment_credential=op_credential.deployment_credential,
-                )
+            reason = "model turn egress denied"
+            if binding is not None and binding.mode is ModelBindingMode.OPENAI:
+                op_credential = self._model_credential(agent, binding)
+                if isinstance(op_credential, _MissingCredential):
+                    reason = op_credential.reason
+                else:
+                    _, timeout_sec, result_char_cap = self._op_permit_budget(
+                        MODEL_INTERFACE
+                    )
+                    deadline = time.time() + timeout_sec + _OP_PERMIT_SLACK_SEC
+                    permit = engine.authorize_model_turn(
+                        proposal.agent_task_id,
+                        proposal.call_correlation,
+                        proposal.request_digest,
+                        target_id=worker_id,
+                        target_generation=worker.incarnation,
+                        timeout_sec=timeout_sec,
+                        result_char_cap=result_char_cap,
+                        deadline_epoch=deadline,
+                        credential=op_credential.credential,
+                        deployment_credential=op_credential.deployment_credential,
+                    )
             if permit is None:
                 self._worker_registry.publish_mediated_op(
                     worker,
@@ -2152,11 +2167,7 @@ class TaskRuntime:
                         payload={
                             "agent_task_id": proposal.agent_task_id,
                             "call_correlation": proposal.call_correlation,
-                            "reason": (
-                                "model turn egress denied"
-                                if op_credential is not None
-                                else _CREDENTIAL_UNAVAILABLE
-                            ),
+                            "reason": reason,
                         },
                     ),
                 )

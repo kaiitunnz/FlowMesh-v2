@@ -18,7 +18,7 @@ from server.config import AgentBindingConfig, OrchestrationConfig
 from server.orchestration.state import WorkItemStatus
 from server.orchestration.tool_dispatch import MODEL_INTERFACE, SEARCH_INTERFACE
 from server.task.models import TaskStatus
-from server.task.runtime import TaskRuntime
+from server.task.runtime import TaskRuntime, _is_default_url, _OpCredential
 from shared.harness import (
     BoundaryEventKind,
     HarnessBackendKey,
@@ -145,14 +145,19 @@ class _StubVault:
     def purge(self, workflow_id: str) -> None:
         return None
 
+    def expire_all(self) -> None:
+        self._store.clear()
+
 
 def _runtime(
-    vault: Any | None = None, assigned: list[tuple[str, str]] | None = None
+    vault: Any | None = None,
+    assigned: list[tuple[str, str]] | None = None,
+    config: OrchestrationConfig | None = None,
 ) -> TaskRuntime:
     return TaskRuntime(
         cast(Any, FakeRegistry()),
         cast(Any, _WorkerStub()),
-        OrchestrationConfig(),
+        config or OrchestrationConfig(),
         make_result_reader(),
         logging.getLogger("wo-test"),
         secret_vault=cast(Any, vault or _NoopSecretVault()),
@@ -452,6 +457,7 @@ def test_held_model_turn_denied_relays_a_deny_frame() -> None:
         assert len(denies) == 1
         assert denies[0]["agent_task_id"] == writer
         assert denies[0]["call_correlation"] == "t0"
+        assert denies[0]["reason"] == "model turn egress denied"
 
     asyncio.run(run())
 
@@ -688,21 +694,13 @@ def test_control_records_the_scope_the_boundary_finalizes_under() -> None:
 _DEFAULT_URL = "http://gateway/v1"
 
 
-def _default_url_runtime(vault: Any | None = None) -> TaskRuntime:
-    return TaskRuntime(
-        cast(Any, FakeRegistry()),
-        cast(Any, _WorkerStub()),
-        OrchestrationConfig(
-            agent_binding=AgentBindingConfig(
-                default_mode=ModelBindingMode.OPENAI,
-                default_url=_DEFAULT_URL,
-                default_model="qwen",
-            )
-        ),
-        make_result_reader(),
-        logging.getLogger("wo-test"),
-        secret_vault=cast(Any, vault or _NoopSecretVault()),
+_DEFAULT_URL_CONFIG = OrchestrationConfig(
+    agent_binding=AgentBindingConfig(
+        default_mode=ModelBindingMode.OPENAI,
+        default_url=_DEFAULT_URL,
+        default_model="q",
     )
+)
 
 
 def _model_wf(binding: str) -> str:
@@ -738,7 +736,7 @@ def test_only_the_deployment_model_url_is_granted_the_deployment_key(
     """The deployment key is granted on the permit only for the current default url."""
 
     async def run() -> None:
-        runtime = _default_url_runtime()
+        runtime = _runtime(_StubVault(), config=_DEFAULT_URL_CONFIG)
         _, ids = await _register(runtime, _model_wf(binding))
         writer = ids["writer"]
 
@@ -761,15 +759,25 @@ def test_only_the_deployment_model_url_is_granted_the_deployment_key(
     asyncio.run(run())
 
 
-def test_an_unset_default_url_never_grants_the_deployment_key() -> None:
-    async def run() -> None:
-        runtime = _runtime()
-        _, ids = await _register(runtime, _MODEL_WF)
-        _dispatch_agent(runtime, ids["writer"], script=_MODEL_SCRIPT)
-        permit = MediatedOperationPermit.model_validate(_permit_frames(runtime)[0])
-        assert permit.deployment_credential is False
+@pytest.mark.parametrize(
+    ("url", "default_url", "granted"),
+    [
+        ("http://gateway/v1", "http://gateway/v1/", True),
+        ("http://gateway/v1", None, False),
+        ("http://gateway/v1", "", False),
+        (None, "http://gateway/v1", False),
+        ("", "", False),
+        ("http://gateway/v1", "http://gateway/v2", False),
+    ],
+)
+def test_only_a_set_matching_default_url_is_the_default(
+    url: str | None, default_url: str | None, granted: bool
+) -> None:
+    assert _is_default_url(url, default_url) is granted
 
-    asyncio.run(run())
+
+def test_a_resolved_credential_hides_its_value_from_repr() -> None:
+    assert "sk-secret" not in repr(_OpCredential(credential="sk-secret"))
 
 
 _GONE_KEY_WF = _model_wf(
@@ -779,13 +787,15 @@ _GONE_KEY_WF = _model_wf(
 
 
 def test_a_gone_vaulted_key_fails_the_boundary_without_a_permit() -> None:
-    """A pinned key the vault no longer holds fails the boundary, even on the default
-    url: the deployment key is never substituted and nothing egresses."""
+    """A pinned key missing from the vault fails the boundary, even on the default URL:
+    the deployment key is never substituted and nothing egresses."""
 
     async def run() -> None:
-        runtime = _default_url_runtime()
+        vault = _StubVault()
+        runtime = _runtime(vault, config=_DEFAULT_URL_CONFIG)
         _, ids = await _register(runtime, _GONE_KEY_WF)
         writer = ids["writer"]
+        vault.expire_all()
 
         _dispatch_agent(runtime, writer, script=_MODEL_SCRIPT)
 
@@ -804,9 +814,11 @@ def test_a_gone_vaulted_key_fails_the_boundary_without_a_permit() -> None:
 
 def test_a_gone_vaulted_key_denies_the_held_model_turn() -> None:
     async def run() -> None:
-        runtime = _default_url_runtime()
+        vault = _StubVault()
+        runtime = _runtime(vault, config=_DEFAULT_URL_CONFIG)
         _, ids = await _register(runtime, _GONE_KEY_WF)
         writer = ids["writer"]
+        vault.expire_all()
 
         _hold_dispatch(runtime, writer)
         runtime.authorize_model_turn(

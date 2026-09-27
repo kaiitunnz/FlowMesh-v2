@@ -1,5 +1,8 @@
 """The worker-originated mediated-operation permit contract and its id."""
 
+import pytest
+from pydantic import ValidationError
+
 from shared.tools.contract import MediatedOperationPermit
 from shared.tools.search.schema import SEARCH_INTERFACE, tool_request_digest
 from shared.utils.ids import PREFIX_MEDIATED_PERMIT, new_mediated_permit_id
@@ -46,3 +49,8 @@ def test_permit_binds_the_canonical_request_digest() -> None:
     permit = _permit()
     assert permit.request_digest == tool_request_digest(SEARCH_INTERFACE, "weather", 5)
     assert permit.request_digest != tool_request_digest(SEARCH_INTERFACE, "weather", 6)
+
+
+def test_a_permit_cannot_carry_both_credential_sources() -> None:
+    with pytest.raises(ValidationError, match="not both"):
+        _permit(credential="sk-workflow", deployment_credential=True)

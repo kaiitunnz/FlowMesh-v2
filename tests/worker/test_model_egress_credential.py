@@ -129,8 +129,3 @@ def test_a_pinned_credential_is_sent_instead_of_the_deployment_key(
     egress = ModelEgress(_DEPLOYMENT_KEY, logging.getLogger("test"))
     egress_call(egress, _request(capture), _permit(credential="sk-workflow"))
     assert capture.authorizations == ["Bearer sk-workflow"]
-
-
-def test_a_permit_cannot_carry_both_credential_sources() -> None:
-    with pytest.raises(ValueError, match="credential"):
-        _permit(credential="sk-workflow", deployment_credential=True)
