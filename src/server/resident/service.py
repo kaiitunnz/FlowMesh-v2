@@ -993,7 +993,7 @@ class ResidentCapacityControl:
         A crash between a ledger terminal and its credit release leaves the claim
         credit-bearing with nothing left to settle it. ``completed`` reads the restored
         ledger by (workflow id, invocation id): a terminal settles the claim through the
-        same FSM, and a claim without one keeps its credit.
+        claim FSM, and a claim without one keeps its credit.
         """
         for claim in self._stores.claims.all():
             request = self._stores.invocations.get(claim.invocation_id)

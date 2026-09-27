@@ -164,7 +164,8 @@ class Workflows(SyncResource):
         key: str | None = None,
         sequence: int | None = None,
     ) -> WorkflowOutputValue:
-        """Get one published output member; a collection member needs scope and key."""
+        """Get one published output member; a collection member needs scope and key,
+        except the one failed member of a spawn whose input failed."""
         data = self._client._request(
             "GET",
             _output_path(workflow_id, name),
@@ -313,7 +314,8 @@ class AsyncWorkflows(AsyncResource):
         key: str | None = None,
         sequence: int | None = None,
     ) -> WorkflowOutputValue:
-        """Get one published output member; a collection member needs scope and key."""
+        """Get one published output member; a collection member needs scope and key,
+        except the one failed member of a spawn whose input failed."""
         data = await self._client._request(
             "GET",
             _output_path(workflow_id, name),

@@ -36,8 +36,8 @@ self-authenticate the same way, sending `FLOWMESH_API_KEY` as the bearer.
 ### Published outputs
 
 An output is named by the node it is published on, and a fetch selects a spawn's member
-by `scope` and `key`. A spawn that fails before it creates a child publishes one failed
-member with no scope or key, fetched by name alone. Errors carry `detail.code`:
+by `scope` and `key`. A spawn whose input failed publishes one failed member with no
+scope or key, fetched by name alone. Errors carry `detail.code`:
 
 | Status | `code` | Meaning |
 |--------|--------|---------|

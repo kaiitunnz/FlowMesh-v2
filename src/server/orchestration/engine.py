@@ -306,8 +306,7 @@ class OrchestrationEngine:
         self._scopes = {s.scope_id: s for s in snapshot.scopes}
         self._scopes.setdefault(self._root_scope.scope_id, self._root_scope)
         self._activations: dict[str, Activation] = {}
-        # Per-scope and dynamic activation counts, kept as activations are added so a
-        # fan-out numbers and budgets each child without rescanning every activation.
+        # Per-scope and dynamic activation counts that number and budget each child.
         self._scope_population: Counter[str] = Counter()
         self._scope_children: Counter[str] = Counter()
         self._dynamic_activations = 0
@@ -444,8 +443,8 @@ class OrchestrationEngine:
         # than re-derived from records: a recursive region's levels share one join/loop
         # operator, so a record could not attribute a release to the right level.
         self._released_scopes: set[str] = set(snapshot.released_scopes)
-        # Control operators settled as a declared failure. A failed input never
-        # delivers, so none fires, and a late record from another input never does.
+        # Control operators settled as a declared failure; a late record from another
+        # input never fires one.
         self._failed_regions: set[str] = set(snapshot.failed_regions)
         # Child-init scopes of a failed agent instance: its join never releases.
         self._failed_scopes: set[str] = set(snapshot.failed_scopes)

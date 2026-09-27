@@ -904,8 +904,9 @@ class TaskRuntime:
                     )
                 if advance_applied:
                     new_ready = True
-                # After the initial advance has persisted any authority-denied roots,
-                # so the ledger never leads durable task state.
+                # Saved under the lock after the initial advance persists any
+                # authority-denied roots, so the ledger never leads durable task state
+                # and no later save lands before it.
                 self._save_ledger_locked(workflow_id)
             for task_id in candidate_ready:
                 maybe_record = self._tasks.get(task_id)
@@ -3984,7 +3985,8 @@ class TaskRuntime:
 
         What its work held is released once the caller leaves the lock, through
         ``_release_pending_terminations``, and only once the terminal ledger is
-        durable: a report whose writes are held carries it until they are made.
+        durable: a report whose writes are held carries it until its replay commits
+        them.
         """
         termination = self._terminate_workflow_locked(workflow_id, reason, reason)
         non_terminal = [

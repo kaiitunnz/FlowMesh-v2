@@ -154,7 +154,9 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   each child dispatches to a worker like any other task. A failed input fails a region
   and everything downstream of it, as a failed dependency fails a task: a spawn whose
   producer failed creates no child, and its join fails whatever its completion rule. A
-  join that resolves as a failure fails everything downstream of it too.
+  failed agent fails the regions it declares the same way; children it already spawned
+  follow their region's residual policy. A join that resolves as a failure fails
+  everything downstream of it too.
 - **Cancellation.** A `flowmesh/v2` workflow cancels through the orchestration engine as
   a durable semantic event, so the ledger stays consistent with the task records and a
   cancelled workflow survives a restart without re-admitting cancelled work. A worker
@@ -496,7 +498,7 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
 - **Published outputs.** A leaf declares `result: {visibility: published}` to publish its
   value, and a spawn region declares it to publish its children's results as a
   collection keyed by child index within each spawning scope. A spawn whose input
-  failed publishes one failed member instead. Clients list and fetch published outputs
+  failed publishes one failed member. Clients list and fetch published outputs
   by the node names they were declared on.
 - **Task merging.** Ready v1 tasks of one org whose specs share a merge key coalesce
   into one dispatch, whose executor runs every task at once and returns each merged

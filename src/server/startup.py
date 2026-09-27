@@ -24,8 +24,8 @@ async def rehydrate_root_state(
     an empty store and strand (or re-admit a second) credit. External serve terminals
     replay after the claim store loads so a claim left UNCERTAIN by a crash between its
     terminal fact and its release settles, before the runtime rehydrate re-drives.
-    Workflow terminals replay once the runtime has restored each ledger, so a claim a
-    crash left holding its credit after its ledger terminal releases.
+    Workflow terminals replay once the runtime has restored each ledger, releasing a
+    claim whose credit a crash kept past its ledger terminal.
     """
     if resident_control is not None and resident_registry is not None:
         resident_control.bind_loop(asyncio.get_running_loop())
