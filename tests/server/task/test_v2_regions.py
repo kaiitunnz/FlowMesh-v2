@@ -101,6 +101,45 @@ def test_call_normalizes_to_spawn_then_join() -> None:
     )
 
 
+def test_every_reference_to_a_call_names_its_join() -> None:
+    text = """
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {name: t}
+spec:
+  graph:
+    nodes:
+      - name: kid
+        spec: {taskType: echo, data: {type: list, items: [k]}}
+      - name: c
+        region: {kind: call, child: kid, returns: [out]}
+      - name: after
+        dependsOn: [c]
+        spec: {taskType: echo, data: {type: list, items: [z]}}
+      - name: fan
+        dependsOn: [c]
+        region: {kind: spawn, child: kid}
+      - name: reader
+        dependsOn: [c]
+        spec:
+          taskType: agent
+          task: read
+          v2: {inputs: [{name: verdict, from: c}]}
+"""
+    parsed = parse_workflow(text, "native")
+    source = FrontendWorkflowSource.capture(text, "native", name="wf")
+    template, _ = compile_workflow("wfl-test", parsed, source, bindings=_BINDINGS)
+    ids = {t.graph_node_name: t.task_id for t in parsed.tasks}
+    from_call = {(e.to_op, e.to_port) for e in template.edges if e.from_op == "c:join"}
+    assert from_call == {
+        (ids["after"], None),
+        ("fan", None),
+        (ids["reader"], None),
+        (ids["reader"], "verdict"),
+    }
+    assert {e.to_op for e in template.edges if e.from_op == "c"} == {"c:join"}
+
+
 def test_tool_interface_and_published_result() -> None:
     template = _compile(REGIONS_WF)
     assert any(t.name == "web_search" for t in template.tool_declarations)

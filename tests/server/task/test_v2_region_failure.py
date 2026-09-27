@@ -139,6 +139,21 @@ def test_a_failed_input_fails_the_region_and_closes_the_workflow(body: str) -> N
 
 
 @pytest.mark.anyio
+async def test_a_successful_call_delivers_downstream_and_closes_the_workflow() -> None:
+    runtime = _live_runtime(FakeRegistry())
+    workflow_id, ids = await _register(runtime, _HEAD + _CALL)
+    record_dispatch(runtime, ids["a"], cast(Any, _worker()))
+    runtime.mark_succeeded(ids["a"], "wkr-1", _planned(runtime, ids["a"], ["x"]), _TS)
+
+    order = _drain(runtime)
+
+    assert order[-1] == ids["after"]
+    record = runtime.get_record(ids["after"])
+    assert record is not None and record.status == TaskStatus.DONE
+    assert runtime.workflow_settlement(workflow_id).settled
+
+
+@pytest.mark.anyio
 async def test_a_failed_producer_is_not_an_empty_spawn() -> None:
     runtime = _live_runtime(FakeRegistry())
     workflow_id, ids = await _register(runtime, _HEAD + _spawn_join(_JOINS["any"]))

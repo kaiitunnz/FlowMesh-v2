@@ -35,7 +35,7 @@ from ..representations.template import (
     ToolDeclaration,
 )
 from .diagnostics import compile_error
-from .project import LoweringAccumulator, build_name_map
+from .project import LoweringAccumulator, build_name_map, call_join_id
 
 # Friendly aliases for the two provenance values authors write in spec.v2.
 _PROVENANCE = {
@@ -474,7 +474,7 @@ def _lower_region(
         )
 
     for dep in region.depends_on:
-        acc.edges.append(TemplateEdge(from_op=dep, to_op=name))
+        acc.edges.append(TemplateEdge(from_op=name_to_op.get(dep, dep), to_op=name))
 
 
 def _add_operator(
@@ -637,7 +637,7 @@ def _lower_call(
     child_ref = name_to_op.get(str(child), str(child)) if child else None
     returns = _str_list(region.region.get("returns"), region.name)
     spawn_id = region.name
-    join_id = f"{region.name}:join"
+    join_id = call_join_id(region.name)
     spawn = SpawnRegion(
         operator_id=spawn_id,
         source_ref=region.name,
@@ -657,4 +657,4 @@ def _lower_call(
     _add_operator(join, region, acc)
     acc.edges.append(TemplateEdge(from_op=spawn_id, to_op=join_id))
     for dep in region.depends_on:
-        acc.edges.append(TemplateEdge(from_op=dep, to_op=spawn_id))
+        acc.edges.append(TemplateEdge(from_op=name_to_op.get(dep, dep), to_op=spawn_id))
