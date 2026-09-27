@@ -40,10 +40,7 @@ class WorkflowOutputPage(BaseModel):
     prev_cursor: str | None = Field(
         default=None, description="Cursor of the first entry."
     )
-    open: bool = Field(
-        description="Whether the workflow can publish more; a last page is final "
-        "only when this is false."
-    )
+    open: bool = Field(description="Whether the workflow can still publish members.")
 
 
 class WorkflowOutputValue(WorkflowOutputMember):

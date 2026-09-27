@@ -53,24 +53,15 @@ class WorkerTaskMessage(BaseModel):
     )
     upstream_task_ids: dict[str, str] | None = Field(
         default=None,
-        description=(
-            "Upstream stage name to task ID, for an SSH stage whose upstream has no "
-            "bound result."
-        ),
+        description="Upstream task IDs by stage name.",
     )
     upstream_results: dict[str, ResultBinding] | None = Field(
         default=None,
-        description=(
-            "Where each upstream stage's settled result is, by stage name: the worker "
-            "hydrates them into the spec's upstream results before the task runs."
-        ),
+        description="Upstream stage results by stage name.",
     )
     input_element: ResultElementRef | None = Field(
         default=None,
-        description=(
-            "The producer collection element a fan-out child runs on: the worker "
-            "hydrates it into the spec's data before the task runs."
-        ),
+        description="Collection element a fan-out child runs on.",
     )
     agent_episode: AgentEpisodeDispatch | None = Field(
         default=None,

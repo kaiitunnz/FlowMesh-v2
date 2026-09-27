@@ -60,7 +60,7 @@ class TaskEvent(BaseEvent):
     )
     unavailable_inputs: list[ContentReference] | None = Field(
         default=None,
-        description="The input references an input_unavailable failure could not read.",
+        description="Inputs an input_unavailable failure could not read.",
     )
     payload: dict[str, Any] = Field(
         default_factory=dict, description="Additional event payload."
