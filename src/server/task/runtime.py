@@ -3239,9 +3239,7 @@ class TaskRuntime:
         if advance.retry:
             self._release_dispatch_locked(record, [task_id], front=True)
         elif advance.failed:
-            self._fail_v2_advance_locked(
-                engine, advance.failed, "ambiguity-terminal effect"
-            )
+            self._fail_v2_advance_locked(engine, advance.failed)
             self._reap_ops_for_agents_locked(advance.failed)
         self._save_ledger_locked(record.workflow_id)
         return advance
@@ -3275,16 +3273,13 @@ class TaskRuntime:
         return changed
 
     def _fail_v2_advance_locked(
-        self,
-        engine: OrchestrationEngine | None,
-        failed: list[str],
-        reason: str | None = None,
+        self, engine: OrchestrationEngine | None, failed: list[str]
     ) -> None:
         """Fail and persist the tasks an advance settled failed.
 
         The engine lists each failure before the tasks it cascaded into, so a task
         with a reason of its own opens a cascade, and each task after it fails as its
-        dependent. ``reason`` stands for a first failure with none of its own.
+        dependent.
         """
         primary: str | None = None
         changed: list[str] = []
@@ -3292,7 +3287,7 @@ class TaskRuntime:
             own = engine.failure_reason(task_id) if engine is not None else None
             if primary is None or own is not None:
                 primary = task_id
-                text = own or reason or "declared-failure obligation"
+                text = own or "declared-failure obligation"
             else:
                 text = _dependency_failed(primary)
             changed += self._fail_v2_records_locked([task_id], text, persist=False)

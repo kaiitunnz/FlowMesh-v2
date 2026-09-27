@@ -7,9 +7,10 @@ from typing import Any, cast
 import pytest
 
 from server.orchestration import OrchestrationEngine, PublicationOutcome
-from server.orchestration.state import ProgressAxis
+from server.orchestration.state import BoundaryEvent, ProgressAxis
 from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime
+from server.task.v2.representations.operators import BoundaryEventKind
 from shared.harness.adapter import HarnessResult, HarnessResultKind
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.task.test_v2_orchestration import (
@@ -657,3 +658,55 @@ def test_a_failed_agent_fails_its_region_and_closes_the_workflow(path: str) -> N
         assert f"workflow:{workflow_id}:logs:closed" in redis.keys
 
     asyncio.run(run())
+
+
+_SOLO_AGENT = """
+      - name: solo
+        spec:
+          taskType: agent
+          v2:
+            authority: {invoke: [model], delegate: []}
+            tools: [{name: model}]
+          harness: {backend: scripted, version: v1, params: {script: []}}
+      - name: after
+        dependsOn: [solo]
+        spec: {taskType: echo, data: {type: list, items: [z]}}
+"""
+
+
+@pytest.mark.anyio
+async def test_a_survived_denial_never_names_a_later_ambiguity_failure() -> None:
+    runtime = _live_runtime(FakeRegistry())
+    workflow_id, ids = await _register(runtime, _HEAD + _SOLO_AGENT)
+    solo = ids["solo"]
+    _pop_ready(runtime)
+    record_dispatch(runtime, solo, cast(Any, _worker()))
+    engine = _engine(runtime, workflow_id)
+    # A boundary outside the declared face is denied, and the agent carries on past it.
+    runtime.apply_boundary_event(
+        solo,
+        BoundaryEvent(
+            kind=BoundaryEventKind.INVOCATION, call_correlation="c0", interface="search"
+        ),
+    )
+    engine.mark_pending_outcome(solo, "c0")
+    engine.deliver_boundary_outcome(solo, "c0")
+    with runtime._cv:
+        runtime._reenqueue_episode_locked(solo)
+    _pop_ready(runtime)
+    record_dispatch(runtime, solo, cast(Any, _worker()))
+    runtime.apply_boundary_event(
+        solo,
+        BoundaryEvent(
+            kind=BoundaryEventKind.INVOCATION,
+            call_correlation="c1",
+            interface="model",
+            request_digest="sha256:abc",
+        ),
+    )
+
+    runtime.mark_v2_uncertain(solo)
+
+    record = runtime.get_record(solo)
+    assert record is not None and record.error == "ambiguity-terminal effect"
+    _assert_failed_downstream(runtime, ids, "solo", "after")

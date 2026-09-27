@@ -164,6 +164,7 @@ _DEDUP_CAPABLE = frozenset(
 _EARLY_JOINS = frozenset(
     {JoinCompletion.ANY, JoinCompletion.FIRST_K, JoinCompletion.PREDICATE}
 )
+_AMBIGUITY_TERMINAL_REASON = "ambiguity-terminal effect"
 _OPEN_ATTEMPT_STATUSES = frozenset({AttemptStatus.ISSUED, AttemptStatus.RUNNING})
 _TERMINAL_INVOCATION_STATES = frozenset(
     {
@@ -895,6 +896,7 @@ class OrchestrationEngine:
                 invocation_id=wi.invocation_id,
             )
             self._emitter.emit_boundary(self._invocations[wi.invocation_id])
+            wi.failure_reason = _AMBIGUITY_TERMINAL_REASON
             return self._settle_failed_wi(wi)
         invocation = self._invocations[wi.invocation_id]
         invocation.state = next_on_uncertain(
@@ -924,6 +926,7 @@ class OrchestrationEngine:
             work_item_id=wi.work_item_id,
             invocation_id=wi.invocation_id,
         )
+        wi.failure_reason = _AMBIGUITY_TERMINAL_REASON
         return self._settle_failed_wi(wi)
 
     def route_boundary_event(self, task_id: str, event: BoundaryEvent) -> Advance:
@@ -3208,6 +3211,7 @@ class OrchestrationEngine:
                 return
         interface = self._requested_interface(wi.operator_id)
         if interface is not None and interface not in self._root_grant.invoke:
+            reason = f"interface {interface!r} outside root grant invoke face"
             self._decisions.append(
                 AuthorityDecision(
                     work_item_id=work_item_id,
@@ -3215,9 +3219,10 @@ class OrchestrationEngine:
                     interface=interface,
                     kind=AuthorityDecisionKind.DENIED,
                     denial_kind=DenialKind.AUTHORITY,
-                    reason=f"interface {interface!r} outside root grant invoke face",
+                    reason=reason,
                 )
             )
+            wi.failure_reason = f"authority denied: {reason}"
             self._emit(
                 "authority_denied",
                 work_item_id=work_item_id,
@@ -3579,21 +3584,10 @@ class OrchestrationEngine:
         return wi.outcome, wi.value_ref
 
     def failure_reason(self, task_id: str) -> str | None:
-        """Why a task's work item settled failed: the reason its non-retryable failure
-        recorded, else its authority denial."""
-        wi_id = self._wi_by_task.get(task_id)
-        if wi_id is None:
-            return None
-        wi = self._work_items.get(wi_id)
-        if wi is not None and wi.failure_reason is not None:
-            return wi.failure_reason
-        for decision in reversed(self._decisions):
-            if (
-                decision.work_item_id == wi_id
-                and decision.kind is AuthorityDecisionKind.DENIED
-            ):
-                return f"authority denied: {decision.reason or decision.interface}"
-        return None
+        """Why a task's own work item settled failed, or None for one failed as another
+        failure's dependent."""
+        wi = self._work_item_for_task(task_id)
+        return wi.failure_reason if wi is not None else None
 
     def recovery_disposition(self, task_id: str) -> RecoveryDisposition | None:
         """Whether the task's operation may be recomputed or must be restored."""
