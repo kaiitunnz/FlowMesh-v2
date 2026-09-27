@@ -2740,7 +2740,7 @@ class TaskRuntime:
         which the workflow reads as complete.
         """
         if child_task_ids or retire:
-            self._persist_declared_failures_locked(engine)
+            self._persist_declared_failures_locked(engine, child_task_ids)
             self._write_locked(
                 lambda: self._workflow_registry.commit_dynamic_tasks(
                     workflow_id,
@@ -3353,13 +3353,20 @@ class TaskRuntime:
             return
         self._write_locked(save, lambda held: held.workflow_ids.append(workflow_id))
 
-    def _persist_declared_failures_locked(self, engine: OrchestrationEngine) -> None:
+    def _persist_declared_failures_locked(
+        self, engine: OrchestrationEngine, new: Sequence[str] = ()
+    ) -> None:
         """Fail and persist each task the engine settled as a declared failure whose
-        record has not settled, ahead of a ledger write that reflects it."""
+        record has not settled, ahead of a ledger write that reflects it. ``new`` are
+        records the write itself creates."""
         failed: list[str] = []
         for task_id, reason in engine.declared_failures().items():
             record = self._tasks.get(task_id)
-            if record is None or record.status in SETTLING_TASK_STATUSES:
+            if (
+                record is None
+                or record.status in SETTLING_TASK_STATUSES
+                or task_id in new
+            ):
                 continue
             self._fail_record_locked(record, reason)
             failed.append(task_id)
