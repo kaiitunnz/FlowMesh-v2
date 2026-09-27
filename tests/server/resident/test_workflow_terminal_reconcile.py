@@ -30,7 +30,7 @@ def _admit(workflow_id: str, invocation_id: str) -> ResidentSnapshot:
     """A resident control holding one credit for a workflow's boundary invocation."""
     svc, stores, _settled, _delivery = _build()
     binding = _admission().model_copy(update={"workflow_id": workflow_id})
-    svc._resolve_dependency = lambda _task_id: binding  # type: ignore[method-assign]
+    svc._resolve_dependency = lambda _task_id: binding
     asyncio.run(svc._originate(_env(invocation_id)))
     (claim,) = stores.claims.by_invocation(invocation_id)
     assert claim.holds_credit
@@ -85,7 +85,7 @@ def test_a_restart_releases_a_credit_the_ledger_settled(
 
 def test_a_restart_holds_a_credit_whose_invocation_is_still_open() -> None:
     registry = FakeRegistry()
-    _runtime_, workflow_id, env = _held(registry)
+    _, workflow_id, env = _held(registry)
     snapshot = _admit(workflow_id, env.invocation_id)
 
     stores = _restart(registry, snapshot)

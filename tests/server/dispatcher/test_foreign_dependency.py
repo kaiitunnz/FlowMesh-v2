@@ -100,7 +100,8 @@ def test_a_stored_foreign_dependency_never_renders_its_result() -> None:
     runtime = _runtime(registry, reader)
     extract = _produce(runtime, reader)
     summarize = _register(runtime, "org-b", _CONSUMER)
-    # A record stored before submission refused a dependency outside its workflow.
+    # A stored record whose dependency lies outside its workflow, which submission
+    # refuses.
     stored = PersistedTask.model_validate_json(registry.task_blobs[summarize])
     registry.task_blobs[summarize] = stored.model_copy(
         update={"depends_on": {extract}}

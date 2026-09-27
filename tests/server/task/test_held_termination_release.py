@@ -86,7 +86,7 @@ class _Scenario:
         def unreadable(_binding: Any) -> Any:
             raise ResultUnreadable("corrupt")
 
-        self.runtime._results.read = unreadable  # type: ignore[assignment]
+        self.runtime._results.read = unreadable  # type: ignore[method-assign,assignment]
         self._commit = self.registry.commit_transition
         self.writes = 0
 

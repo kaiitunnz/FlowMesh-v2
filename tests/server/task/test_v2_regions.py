@@ -304,13 +304,13 @@ spec:
 
 
 @pytest.mark.anyio
-async def test_a_stored_branch_bearing_workflow_still_rehydrates() -> None:
+async def test_a_stored_branch_bearing_workflow_rehydrates() -> None:
     registry = FakeRegistry()
     runtime = _live_runtime(registry)
     workflow_id, _ = await runtime.register(
         "owner", "org", _MERGE_ONLY, format="native"
     )
-    # A bundle stored before branch regions were refused at compile.
+    # A stored bundle carrying a branch region, which compile refuses.
     bundle = json.loads(registry.v2_blobs[workflow_id])
     route = next(
         op for op in bundle["template"]["operators"] if op["operator_id"] == "route"

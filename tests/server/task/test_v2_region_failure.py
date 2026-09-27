@@ -325,10 +325,10 @@ async def test_a_crash_before_the_ledger_save_converges_on_restart() -> None:
     assert restored.workflow_settlement(workflow_id).settled
 
 
-async def _pre_upgrade_hang(
+async def _stored_hang(
     registry: FakeRegistry, monkeypatch: pytest.MonkeyPatch
 ) -> tuple[TaskRuntime, str, dict[str, str]]:
-    """A workflow stored by a release whose failures stopped at a control region."""
+    """A stored workflow whose failure stopped at a control region."""
     runtime = _live_runtime(registry)
     workflow_id, ids = await _register(
         runtime, _HEAD + _spawn_join(_JOINS["all_settled"])
@@ -350,7 +350,7 @@ def test_a_restart_closes_a_workflow_stored_hung_behind_a_failed_region(
     async def run() -> None:
         registry = FakeRegistry()
         registry.submitted_at = _TS
-        runtime, workflow_id, ids = await _pre_upgrade_hang(registry, monkeypatch)
+        runtime, workflow_id, ids = await _stored_hang(registry, monkeypatch)
 
         restored = _live_runtime(registry, "restored", reader=runtime._results)
         finalizer, redis, emitter = _wired(restored, registry, workflow_id)
@@ -377,7 +377,7 @@ async def test_a_restart_leaves_a_cancelled_hung_workflow_cancelled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     registry = FakeRegistry()
-    runtime, workflow_id, ids = await _pre_upgrade_hang(registry, monkeypatch)
+    runtime, workflow_id, ids = await _stored_hang(registry, monkeypatch)
     runtime.cancel_workflow(workflow_id)
 
     restored = _live_runtime(registry, "restored", reader=runtime._results)

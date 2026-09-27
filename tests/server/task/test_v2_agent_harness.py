@@ -11,6 +11,7 @@ agent's finite declared child regions, creating one child attenuated from that r
 entry, sealed per region, with recursive agent children reusing the declared region.
 """
 
+import sys
 from typing import Any
 
 import pytest
@@ -22,7 +23,12 @@ from server.orchestration import (
     ScopeBudget,
     WorkItemStatus,
 )
-from server.orchestration.state import BoundaryEvent, DenialKind, InvocationState
+from server.orchestration.state import (
+    BoundaryEvent,
+    DenialKind,
+    InvocationState,
+    WorkItem,
+)
 from server.task.v2 import FrontendWorkflowSource, PersistedV2Workflow
 from server.task.v2.compiler.bindings import leaf_profile
 from server.task.v2.representations.operators import (
@@ -941,7 +947,7 @@ def test_terminal_failure_cancels_an_entered_region_under_a_cancel_residual() ->
 
     cap = eng.capability(eng.region_scope_for(act, "worker"), ProgressAxis.CHILD_INIT)
     assert cap is not None and cap.status.value == "revoked"
-    assert eng.work_item(child).status is WorkItemStatus.CANCELLED  # type: ignore[union-attr]
+    assert _work_item(eng, child).status is WorkItemStatus.CANCELLED
     assert "join_released" not in {kind for kind, _ in eng.contract_trace()}
 
 
@@ -955,7 +961,7 @@ def test_a_failed_agent_instance_fails_only_its_own_region_scope() -> None:
         eng.on_dispatched(instance, "w1")
     grandchild = _spawn_in(eng, failing, "c0", "self")
     eng.on_dispatched(grandchild, "w1")
-    failing_act = eng.work_item(failing).activation_id  # type: ignore[union-attr]
+    failing_act = _work_item(eng, failing).activation_id
 
     eng.on_failed(failing, "boom", retryable=False)
     eng.on_succeeded(grandchild)
@@ -970,12 +976,18 @@ def test_a_failed_agent_instance_fails_only_its_own_region_scope() -> None:
     eng.on_dispatched(nephew, "w1")
     eng.on_succeeded(nephew)
     eng.on_succeeded(sibling)
-    sibling_act = eng.work_item(sibling).activation_id  # type: ignore[union-attr]
+    sibling_act = _work_item(eng, sibling).activation_id
     assert eng.region_scope_for(sibling_act, "self") in (
         eng.to_snapshot().released_scopes
     )
     restored = OrchestrationEngine(eng.to_snapshot(), bundle)
     assert restored.to_snapshot().failed_scopes == [failed_scope]
+
+
+def _work_item(eng: OrchestrationEngine, task: str) -> WorkItem:
+    wi = eng.work_item(task)
+    assert wi is not None
+    return wi
 
 
 def _spawn_in(eng: OrchestrationEngine, task: str, call: str, role: str) -> str:
@@ -1010,7 +1022,7 @@ def test_a_child_index_counts_every_activation_in_its_scope_across_a_restart() -
     assert activations[second].child_index == 2
     assert _numbered_by_scope_order(eng)
 
-    restored = OrchestrationEngine(eng.to_snapshot(), eng._bundle)  # type: ignore[attr-defined]
+    restored = OrchestrationEngine(eng.to_snapshot(), eng._bundle)
     third = _spawn_in(restored, "A", "c2", "worker")
     activations = {a.activation_id: a for a in restored.to_snapshot().activations}
     assert activations[third].child_index == 3
@@ -1024,28 +1036,35 @@ def test_the_activation_budget_holds_across_a_restart() -> None:
     _dispatch_agent(eng)
     _spawn_in(eng, "A", "c0", "worker")
     restored = OrchestrationEngine(
-        eng.to_snapshot(), eng._bundle, budget=ScopeBudget(max_activations=2)  # type: ignore[attr-defined]
+        eng.to_snapshot(), eng._bundle, budget=ScopeBudget(max_activations=2)
     )
     _spawn_in(restored, "A", "c1", "worker")
     with pytest.raises(RegionError):
         _spawn_in(restored, "A", "c2", "worker")
 
 
-class _ScanCountingDict(dict[str, Any]):
-    scans = 0
-
-    def values(self) -> Any:
-        type(self).scans += 1
-        return super().values()
-
-
 def test_spawning_a_child_never_rescans_every_activation() -> None:
     eng = _engine(_spawning_agent(child=_leaf("child")))
     _dispatch_agent(eng)
-    eng._activations = _ScanCountingDict(eng._activations)  # type: ignore[attr-defined]
-    for i in range(8):
-        _spawn_in(eng, "A", f"c{i}", "worker")
-    assert _ScanCountingDict.scans == 0
+    activations = eng._activations
+    scans = 0
+
+    def count(_frame: Any, event: str, arg: Any) -> None:
+        nonlocal scans
+        if (
+            event == "c_call"
+            and getattr(arg, "__self__", None) is activations
+            and arg.__name__ == "values"
+        ):
+            scans += 1
+
+    sys.setprofile(count)
+    try:
+        for i in range(8):
+            _spawn_in(eng, "A", f"c{i}", "worker")
+    finally:
+        sys.setprofile(None)
+    assert scans == 0
 
 
 def test_a_restart_restores_only_the_spawn_site_denials() -> None:
@@ -1058,7 +1077,7 @@ def test_a_restart_restores_only_the_spawn_site_denials() -> None:
         ),
     )
     eng.deny_spawn("worker:spawn", "x")
-    live = set(eng._denied_spawns)  # type: ignore[attr-defined]
+    live = set(eng._denied_spawns)
 
-    restored = OrchestrationEngine(eng.to_snapshot(), eng._bundle)  # type: ignore[attr-defined]
-    assert restored._denied_spawns == live == {"worker:spawn"}  # type: ignore[attr-defined]
+    restored = OrchestrationEngine(eng.to_snapshot(), eng._bundle)
+    assert restored._denied_spawns == live == {"worker:spawn"}

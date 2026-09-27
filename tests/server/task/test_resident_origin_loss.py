@@ -1,13 +1,13 @@
 """Losing the origin worker of a resident boundary releases the credit it holds."""
 
 import asyncio
-from typing import Any
+from typing import Any, cast
 
-from server.orchestration.state import InvocationState
+from server.orchestration.state import InvocationState, LedgerSnapshot
 from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime
 from shared.harness import HarnessCapsule
-from tests.server.task.test_v2_orchestration import _TS, _register
+from tests.server.task.test_v2_orchestration import _TS, FakeRegistry, _register
 from tests.server.task.test_worker_originated_boundary import (
     _HOLDER,
     _MODEL_SCRIPT,
@@ -63,7 +63,7 @@ def test_losing_the_origin_worker_releases_the_resident_credit_once_durable() ->
     async def run() -> None:
         runtime = _runtime()
         originated: list[Any] = []
-        runtime._resident_originate = originated.append  # type: ignore[assignment]
+        runtime._resident_originate = originated.append
         releases: list[tuple[str, bool]] = []
         runtime.set_resident_terminal_hook(
             lambda inv, failed: releases.append((inv, failed))
@@ -79,13 +79,10 @@ def test_losing_the_origin_worker_releases_the_resident_credit_once_durable() ->
         record = runtime.get_record(writer)
         assert record is not None and record.status == TaskStatus.FAILED
         assert releases == [(env.invocation_id, True)]
-        snapshot = runtime._workflow_registry.ledger_blobs[workflow_id]  # type: ignore[attr-defined]
+        registry = cast(FakeRegistry, runtime._workflow_registry)
+        stored = LedgerSnapshot.model_validate_json(registry.ledger_blobs[workflow_id])
         durable = next(
-            i.state
-            for i in type(runtime.orchestration_engine(workflow_id).to_snapshot())  # type: ignore[union-attr]
-            .model_validate_json(snapshot)
-            .invocations
-            if i.invocation_id == env.invocation_id
+            i.state for i in stored.invocations if i.invocation_id == env.invocation_id
         )
         assert durable is InvocationState.TERMINAL
         assert (
