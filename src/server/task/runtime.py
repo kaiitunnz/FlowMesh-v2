@@ -488,6 +488,27 @@ def _binding_defaults(
     )
 
 
+@dataclass(frozen=True)
+class _OpCredential:
+    """The provider credential authority one mediated-operation permit carries."""
+
+    credential: str | None = field(default=None, repr=False)
+    deployment_credential: bool = False
+
+
+@dataclass(frozen=True)
+class _MissingCredential:
+    """A pinned model credential missing from the vault: the operation is denied."""
+
+    reason: str = "model credential unavailable"
+
+
+def _is_default_url(url: str | None, default_url: str | None) -> bool:
+    if not url or not default_url:
+        return False
+    return url.rstrip("/") == default_url.rstrip("/")
+
+
 # Extra lifetime a worker-originated operation permit gets beyond the request timeout,
 # to cover dispatch and queue latency before the origin worker validates it.
 _OP_PERMIT_SLACK_SEC = 60.0
@@ -1810,9 +1831,7 @@ class TaskRuntime:
                 return False
             if error is not None:
                 advance = engine.on_failed(
-                    task_id,
-                    f"agent-model gateway upstream failed: {error}",
-                    retryable=False,
+                    task_id, f"agent boundary failed: {error}", retryable=False
                 )
                 invocation_id = engine.terminalize_boundary_invocation(
                     task_id, call_correlation
@@ -1951,20 +1970,39 @@ class TaskRuntime:
         cfg = self._web_search
         return cfg.max_results, cfg.timeout_sec, cfg.result_char_cap
 
-    def _resolve_op_credential(self, agent: TaskRecord, interface: str) -> str | None:
-        """The per-call provider credential a model permit carries, or None.
+    def _resolve_op_credential(
+        self, agent: TaskRecord, interface: str
+    ) -> _OpCredential | _MissingCredential:
+        """The provider credential authority a permit for this interface carries.
 
-        A model binding that pins its own key resolves it from the vault here so it
-        rides the one-use permit down to the egressing worker; a worker without one uses
-        its local environment key. Other interfaces read their provider key locally.
+        Other interfaces than the model read their provider key locally.
         """
         if interface != MODEL_INTERFACE:
-            return None
-        binding = self.resolve_model_binding(agent.task_id)
-        if binding is None or binding.secret_ref is None:
-            return None
-        secret = self._secret_vault.resolve(agent.workflow_id, binding.secret_ref)
-        return secret.get_secret_value() if secret is not None else None
+            return _OpCredential()
+        return self._model_credential(agent, self.resolve_model_binding(agent.task_id))
+
+    def _model_credential(
+        self, agent: TaskRecord, binding: AgentModelGatewayBinding | None
+    ) -> _OpCredential | _MissingCredential:
+        """The credential authority a model permit carries for an agent's binding.
+
+        A binding that pins its own key resolves it from the vault so it rides the
+        one-use permit down to the egressing worker, and a pinned key missing from the
+        vault denies the operation. A binding without one may use the worker's
+        deployment key only when its URL is the deployment's current default model URL.
+        """
+        if binding is None:
+            return _OpCredential()
+        if binding.secret_ref is not None:
+            secret = self._secret_vault.resolve(agent.workflow_id, binding.secret_ref)
+            if secret is None:
+                return _MissingCredential()
+            return _OpCredential(credential=secret.get_secret_value())
+        return _OpCredential(
+            deployment_credential=_is_default_url(
+                binding.url, self._agent_binding_defaults.default_url
+            )
+        )
 
     def _assign_content_scope(
         self, permit: MediatedOperationPermit, agent: TaskRecord
@@ -2024,6 +2062,13 @@ class TaskRuntime:
                 env.task_id, env.call_correlation, error="origin worker unavailable"
             )
             return
+        op_credential = self._resolve_op_credential(agent, env.interface)
+        if isinstance(op_credential, _MissingCredential):
+            self.settle_episode_invocation(
+                env.task_id, env.call_correlation, error=op_credential.reason
+            )
+            self._reap_mediated_op(worker_id, env.task_id, env.call_correlation)
+            return
         max_results, timeout_sec, result_char_cap = self._op_permit_budget(
             env.interface
         )
@@ -2037,12 +2082,14 @@ class TaskRuntime:
             timeout_sec=timeout_sec,
             result_char_cap=result_char_cap,
             deadline_epoch=deadline,
-            credential=self._resolve_op_credential(agent, env.interface),
+            credential=op_credential.credential,
+            deployment_credential=op_credential.deployment_credential,
         )
         if permit is None:
             self.settle_episode_invocation(
                 env.task_id, env.call_correlation, error="could not mint a permit"
             )
+            self._reap_mediated_op(worker_id, env.task_id, env.call_correlation)
             return
         # A re-drive re-mints under a fresh permit id; keep at most one pending op per
         # occurrence.
@@ -2088,24 +2135,29 @@ class TaskRuntime:
                 # its own permit deadline.
                 return
             binding = self.resolve_model_binding(proposal.agent_task_id)
-            external = binding is not None and binding.mode is ModelBindingMode.OPENAI
             permit = None
-            if external:
-                _, timeout_sec, result_char_cap = self._op_permit_budget(
-                    MODEL_INTERFACE
-                )
-                deadline = time.time() + timeout_sec + _OP_PERMIT_SLACK_SEC
-                permit = engine.authorize_model_turn(
-                    proposal.agent_task_id,
-                    proposal.call_correlation,
-                    proposal.request_digest,
-                    target_id=worker_id,
-                    target_generation=worker.incarnation,
-                    timeout_sec=timeout_sec,
-                    result_char_cap=result_char_cap,
-                    deadline_epoch=deadline,
-                    credential=self._resolve_op_credential(agent, MODEL_INTERFACE),
-                )
+            reason = "model turn egress denied"
+            if binding is not None and binding.mode is ModelBindingMode.OPENAI:
+                op_credential = self._model_credential(agent, binding)
+                if isinstance(op_credential, _MissingCredential):
+                    reason = op_credential.reason
+                else:
+                    _, timeout_sec, result_char_cap = self._op_permit_budget(
+                        MODEL_INTERFACE
+                    )
+                    deadline = time.time() + timeout_sec + _OP_PERMIT_SLACK_SEC
+                    permit = engine.authorize_model_turn(
+                        proposal.agent_task_id,
+                        proposal.call_correlation,
+                        proposal.request_digest,
+                        target_id=worker_id,
+                        target_generation=worker.incarnation,
+                        timeout_sec=timeout_sec,
+                        result_char_cap=result_char_cap,
+                        deadline_epoch=deadline,
+                        credential=op_credential.credential,
+                        deployment_credential=op_credential.deployment_credential,
+                    )
             if permit is None:
                 self._worker_registry.publish_mediated_op(
                     worker,
@@ -2115,7 +2167,7 @@ class TaskRuntime:
                         payload={
                             "agent_task_id": proposal.agent_task_id,
                             "call_correlation": proposal.call_correlation,
-                            "reason": "model turn egress denied",
+                            "reason": reason,
                         },
                     ),
                 )

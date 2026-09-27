@@ -13,7 +13,9 @@ class FrontendWorkflowSource(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    raw_payload: str = Field(description="Verbatim submitted workflow text.")
+    raw_payload: str = Field(
+        description="Submitted workflow text, with credentials redacted."
+    )
     format: str = Field(default="native", description="Submission format.")
     name: str | None = Field(default=None, description="Author-declared name.")
     digest: str = Field(description="Content digest of the submitted payload.")

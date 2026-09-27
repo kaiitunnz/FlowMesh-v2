@@ -260,6 +260,9 @@ async def test_a_configured_aggregate_limit_fails_an_oversized_request() -> None
     assert engine is not None
     work_item = engine.work_item(task_id)
     assert work_item is not None and work_item.invocation_id is None
+    record = runtime.get_record(task_id)
+    assert record is not None
+    assert record.error is not None and "admits at most 1024" in record.error
 
 
 @pytest.mark.anyio

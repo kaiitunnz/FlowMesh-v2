@@ -69,7 +69,7 @@ class EgressInterface(Protocol):
         self,
         envelope: ToolOperationEnvelope,
         request: CapturedRequest,
-        credential: str | None,
+        permit: MediatedOperationPermit,
     ) -> ToolOutcome: ...
 
 
@@ -85,7 +85,7 @@ class SyncModelEgress(Protocol):
         self,
         envelope: ToolOperationEnvelope,
         request: CapturedRequest,
-        credential: str | None,
+        permit: MediatedOperationPermit,
     ) -> ModelCompletion: ...
 
 
@@ -260,7 +260,7 @@ class MediatedEgressSidecar:
             permit.target_id,
             permit.interface,
         )
-        return egress.execute(self._envelope(permit), request, permit.credential)
+        return egress.execute(self._envelope(permit), request, permit)
 
     def egress_now(
         self, permit: MediatedOperationPermit
@@ -301,7 +301,7 @@ class MediatedEgressSidecar:
             permit.interface,
         )
         try:
-            return egress.complete(self._envelope(permit), request, permit.credential)
+            return egress.complete(self._envelope(permit), request, permit)
         except ModelEgressError as exc:
             return HeldEgressReject(reason=str(exc))
 

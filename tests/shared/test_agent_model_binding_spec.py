@@ -65,12 +65,12 @@ def test_unknown_field_is_rejected():
     ["api_key", "apiKey", "auth_token", "access_key", "SECRET", "password", "auth"],
 )
 def test_credential_harness_params_are_rejected(key):
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError, match="looks credential-bearing"):
         AgentHarnessSpec(backend="codex", params={key: "sk-secret"})
 
 
 def test_nested_credential_harness_params_are_rejected():
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError, match="looks credential-bearing"):
         AgentHarnessSpec(backend="codex", params={"auth": {"token": "sk-secret"}})
 
 

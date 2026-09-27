@@ -1019,6 +1019,37 @@ async def test_rehydration_heals_when_ledger_snapshot_lags_terminal_records() ->
     assert restored.ready_queue_length() == 0
 
 
+_MCP_TOKEN_AGENT = """
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {name: mcp-token-agent}
+spec:
+  graph:
+    nodes:
+      - name: writer
+        spec:
+          taskType: agent
+          v2: {authority: {invoke: [], delegate: []}}
+          harness:
+            backend: scripted
+            version: v1
+            params:
+              script: []
+              mcp_servers: {github: {env: {GITHUB_TOKEN: ghp-x, HF_TOKEN: hf-x}}}
+"""
+
+
+@pytest.mark.anyio
+async def test_rehydration_restores_an_agent_with_tool_tokens_in_params() -> None:
+    registry = FakeRegistry()
+    workflow_id, ids = await _register(_runtime(registry), _MCP_TOKEN_AGENT)
+
+    restored = _runtime(registry)
+    await restored.rehydrate()
+    assert restored.get_record(ids["writer"]) is not None
+    assert restored.orchestration_engine(workflow_id) is not None
+
+
 @pytest.mark.anyio
 async def test_rehydration_replays_a_cancel_left_mid_flight() -> None:
     registry = FakeRegistry()
@@ -1261,6 +1292,10 @@ spec:
     assert denied and denied[0].work_item_id
     pub = led.resolve_legacy_task(caller)
     assert pub is not None and pub.outcome is PublicationOutcome.DECLARED_FAILURE
+    assert led.failure_reason(caller) == (
+        f"authority denied: interface {denied[0].interface!r} outside root grant"
+        " invoke face"
+    )
 
 
 @pytest.mark.anyio

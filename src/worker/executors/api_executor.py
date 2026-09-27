@@ -1,6 +1,7 @@
 import logging
 import os
 import threading
+from http.cookiejar import CookieJar, DefaultCookiePolicy
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -9,6 +10,7 @@ import httpx
 from shared.schemas.result import APIResult
 from shared.tasks.specs import ApiSpecStrict
 from shared.tasks.task_type import TaskType
+from shared.utils.redact import is_credential_key
 
 from .base_executor import ExecutionError, Executor, ExecutorTask
 
@@ -19,12 +21,12 @@ _ClientKey = tuple[str, float, bool, bool]
 
 
 class APIExecutor(Executor):
-    """Executor that performs a single HTTP request defined by task YAML.
+    """Performs a single HTTP request defined by task YAML.
 
-    Uses a class-level connection pool keyed by (base_url, timeout, verify_tls,
-    follow_redirects) so that repeated calls to the same endpoint (e.g. a trading
-    bot hitting QuantArena every few seconds) reuse the underlying TCP/TLS
-    connection instead of paying the handshake cost on every request.
+    Without ``spec.api.url`` it calls ``NEBULA_API_BASE_URL`` with ``NEBULA_API_TOKEN``,
+    unless ``spec.api.headers`` carries a credential header of its own. A
+    ``spec.api.url`` is called with its own headers alone; the Nebula token is never
+    sent to it.
     """
 
     name = "api"
@@ -62,10 +64,13 @@ class APIExecutor(Executor):
             if client is not None and not client.is_closed:
                 return client
             # Create a new client for this combination
+            # A pooled client serves many tasks and tenants; a stored cookie would ride
+            # into the next task's request to the same host.
             client = httpx.Client(
                 timeout=timeout,
                 verify=verify_tls,
                 follow_redirects=follow_redirects,
+                cookies=CookieJar(policy=DefaultCookiePolicy(allowed_domains=[])),
             )
             cls._clients[key] = client
             logger.debug(
@@ -99,20 +104,25 @@ class APIExecutor(Executor):
             raise ExecutionError("spec.api must be a mapping")
 
         url = api_cfg.get("url")
+        method = str(api_cfg.get("method", "POST")).upper()
+        headers = api_cfg.get("headers", {})
+        if not isinstance(headers, dict):
+            raise ExecutionError("spec.api.headers must be a mapping")
+
         if url is None:
             url = os.getenv("NEBULA_API_BASE_URL")
             if not url:
                 raise ExecutionError("spec.api.url or NEBULA_API_BASE_URL is required")
             url = url.rstrip("/") + "/v1/chat/completions"
 
-        method = str(api_cfg.get("method", "POST")).upper()
-        headers = api_cfg.get("headers", {})
-        if not isinstance(headers, dict):
-            raise ExecutionError("spec.api.headers must be a mapping")
-
-        token = os.getenv("NEBULA_API_TOKEN")
-        if token and not any(k.lower() == "authorization" for k in headers):
-            headers["Authorization"] = f"Bearer {token}"
+            if not any(is_credential_key(k) for k in headers):
+                token = os.getenv("NEBULA_API_TOKEN")
+                if not token:
+                    raise ExecutionError(
+                        "no credential configured: set a credential header or "
+                        "NEBULA_API_TOKEN"
+                    )
+                headers["Authorization"] = f"Bearer {token}"
 
         params = api_cfg.get("params")
         if params is not None and not isinstance(params, dict):

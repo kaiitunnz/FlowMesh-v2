@@ -50,6 +50,22 @@ class TestTranslateN8nWorkflow:
         with pytest.raises(ValueError, match="Invalid JSON"):
             parse_workflow("not json at all {{{", format="n8n")
 
+    def test_a_credentialed_node_carries_its_key_only_in_the_header(self) -> None:
+        nodes = [
+            {
+                "name": "Chat",
+                "type": "@n8n/n8n-nodes-langchain.openAi",
+                "parameters": {
+                    "modelId": {"value": "gpt-4"},
+                    "responses": {"values": [{"content": "hi"}]},
+                },
+                "credentials": {"openAiApi": {"data": {"apiKey": "sk-n8n"}}},
+            }
+        ]
+        api = translate_n8n_workflow({"nodes": nodes, "connections": {}})["spec"]["api"]
+        assert api["headers"]["Authorization"] == "Bearer sk-n8n"
+        assert "key" not in api
+
 
 class TestDecodeSecretPart:
     def test_hex_decode(self) -> None:

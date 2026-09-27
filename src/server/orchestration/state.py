@@ -420,6 +420,8 @@ class WorkItem(BaseModel):
     pending_outcome_call: str | None = None
     # the settled facade group whose ordered outcome vector the next resume injects
     pending_outcome_group: str | None = None
+    # why a non-retryable failure settled this work item
+    failure_reason: str | None = None
     attempt_ids: list[str] = Field(default_factory=list)
 
 

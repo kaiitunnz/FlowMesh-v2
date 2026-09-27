@@ -2,8 +2,8 @@
 
 It egresses only within a server-issued ``ToolOperationEnvelope``, refusing an interface
 it does not serve, and maps a provider fault to a typed ``ToolOutcome``. It runs in the
-worker's mediated-egress sidecar, the process that actually egresses, and reads the
-provider credential only from its local worker environment.
+worker's mediated-egress sidecar, the process that actually egresses, and takes the
+provider credential per call.
 """
 
 import logging
@@ -25,7 +25,8 @@ class ExternalModelSidecar:
     """The surface that performs external-model egress under an envelope.
 
     The credential is supplied per call — the workflow's own pinned key carried on the
-    permit, or the worker's deployment-global fallback — never held on the surface.
+    permit, or the worker's deployment key where the permit grants it — never held on
+    the surface.
     ``execute`` renders a text outcome for a deferred boundary; ``complete`` returns the
     model's whole message for a held turn that must surface its tool calls.
     """
@@ -51,8 +52,7 @@ class ExternalModelSidecar:
         except (requests.RequestException, KeyError, IndexError, ValueError) as exc:
             self._log.warning("external-model egress failed: %s", exc)
             return ToolOutcome(
-                status=ToolOutcomeStatus.UNAVAILABLE,
-                value="the model provider was unreachable",
+                status=ToolOutcomeStatus.UNAVAILABLE, value=_failure_text(exc)
             )
         return ToolOutcome(
             status=ToolOutcomeStatus.SUCCESS, value=content[: envelope.result_char_cap]
@@ -79,7 +79,7 @@ class ExternalModelSidecar:
             raise ModelEgressError("the model request timed out") from exc
         except (requests.RequestException, KeyError, IndexError, ValueError) as exc:
             self._log.warning("external-model egress failed: %s", exc)
-            raise ModelEgressError("the model provider was unreachable") from exc
+            raise ModelEgressError(_failure_text(exc)) from exc
         content = message.get("content")
         return ModelCompletion(
             content=str(content) if content is not None else "",
@@ -108,6 +108,19 @@ class ExternalModelSidecar:
         )
         response.raise_for_status()
         return dict(response.json())
+
+
+_REFUSAL_TEXT = {
+    401: "the model provider rejected the request's credential",
+    403: "the model provider refused the request",
+}
+
+
+def _failure_text(exc: Exception) -> str:
+    if isinstance(exc, requests.HTTPError) and exc.response is not None:
+        if (text := _REFUSAL_TEXT.get(exc.response.status_code)) is not None:
+            return text
+    return "the model provider was unreachable"
 
 
 def _parse_tool_calls(raw: Any) -> tuple[ModelToolCall, ...]:

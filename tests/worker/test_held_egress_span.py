@@ -48,7 +48,7 @@ class _StubSyncEgress:
         self,
         envelope: ToolOperationEnvelope,
         request: Any,
-        credential: str | None,
+        permit: MediatedOperationPermit,
     ) -> ToolOutcome:
         raise AssertionError("a held turn never takes the asynchronous egress path")
 
@@ -56,7 +56,7 @@ class _StubSyncEgress:
         self,
         envelope: ToolOperationEnvelope,
         request: Any,
-        credential: str | None,
+        permit: MediatedOperationPermit,
     ) -> ModelCompletion:
         return ModelCompletion(content="a reply")
 

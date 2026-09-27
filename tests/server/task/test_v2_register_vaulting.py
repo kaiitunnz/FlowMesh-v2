@@ -99,7 +99,7 @@ async def test_inline_key_is_vaulted_and_absent_from_every_persisted_surface():
     # The captured source is structurally redacted.
     bundle = PersistedV2Workflow.model_validate_json(registry.v2_blobs[workflow_id])
     assert _RAW_KEY not in bundle.source.raw_payload
-    assert "***redacted***" in bundle.source.raw_payload
+    assert "[REDACTED]" in bundle.source.raw_payload
 
 
 def test_inspect_does_not_echo_the_raw_inline_key():

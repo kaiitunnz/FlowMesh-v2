@@ -180,8 +180,8 @@ class EpisodeModelBinding(BaseModel):
 
     The worker captures an ``openai`` model boundary as a worker-originated egress and
     builds its request from ``url``/``model``; a ``canned``/``echo``/``resident`` mode
-    settles on the control plane and is not captured. The credential is read at the
-    worker from its local environment, never carried here.
+    settles on the control plane and is not captured. The credential is decided by the
+    one-use permit, never carried here.
     """
 
     model_config = ConfigDict(frozen=True)

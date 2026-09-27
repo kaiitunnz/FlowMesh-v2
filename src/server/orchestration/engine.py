@@ -797,6 +797,7 @@ class OrchestrationEngine:
                 operator_id=wi.operator_id,
             )
             return Advance(retry=[wi.legacy_task_id])
+        wi.failure_reason = error
         return self._settle_failed_wi(wi)
 
     def _fail_open_attempt(self, wi: WorkItem, error: str) -> None:
@@ -1359,6 +1360,7 @@ class OrchestrationEngine:
         result_char_cap: int,
         deadline_epoch: float,
         credential: str | None = None,
+        deployment_credential: bool = False,
     ) -> MediatedOperationPermit | None:
         """A one-use permit for a recorded worker-originated boundary, or None.
 
@@ -1366,7 +1368,9 @@ class OrchestrationEngine:
         idempotency key, request digest, interface, subject, and the policy epoch the
         boundary was admitted under. The caller supplies the audience (the agent's
         worker and its generation), the policy-bounded budget the operation runs in, and
-        an optional per-call ``credential`` resolved for a workflow's pinned model key.
+        the provider credential authority: an optional per-call ``credential`` resolved
+        for a workflow's pinned model key, or ``deployment_credential``, which grants
+        the egressing worker its deployment key.
         Returns None for a boundary that carries no digest — i.e. one the worker did not
         originate — so a re-mint never fabricates authorization the boundary lacks.
         """
@@ -1397,6 +1401,7 @@ class OrchestrationEngine:
             timeout_sec=timeout_sec,
             result_char_cap=result_char_cap,
             credential=credential,
+            deployment_credential=deployment_credential,
         )
 
     def authorize_model_turn(
@@ -1411,6 +1416,7 @@ class OrchestrationEngine:
         result_char_cap: int,
         deadline_epoch: float,
         credential: str | None = None,
+        deployment_credential: bool = False,
     ) -> MediatedOperationPermit | None:
         """A one-use permit for a held agent's in-turn model egress, or None on denial.
 
@@ -1449,6 +1455,7 @@ class OrchestrationEngine:
             timeout_sec=timeout_sec,
             result_char_cap=result_char_cap,
             credential=credential,
+            deployment_credential=deployment_credential,
         )
 
     def boundary_settleable(self, task_id: str, call_correlation: str) -> bool:
@@ -3376,10 +3383,14 @@ class OrchestrationEngine:
         return wi.outcome, wi.value_ref
 
     def failure_reason(self, task_id: str) -> str | None:
-        """The recorded authority-denial reason for a task, when one settled it."""
+        """Why a task's work item settled failed: the reason its non-retryable failure
+        recorded, else its authority denial."""
         wi_id = self._wi_by_task.get(task_id)
         if wi_id is None:
             return None
+        wi = self._work_items.get(wi_id)
+        if wi is not None and wi.failure_reason is not None:
+            return wi.failure_reason
         for decision in reversed(self._decisions):
             if (
                 decision.work_item_id == wi_id
