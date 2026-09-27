@@ -1838,7 +1838,7 @@ class TaskRuntime:
                     status=ToolOutcomeStatus.QUOTA,
                     value=f"web search parallel cap ({cap}) exceeded this turn",
                 )
-                self.settle_episode_invocation(
+                self._settle_episode_invocation(
                     task_id, envelope.call_correlation, overflow.model_dump_json()
                 )
         # A spawn-only group settled at admission (the lane never suspended): re-enqueue
@@ -1898,10 +1898,10 @@ class TaskRuntime:
         self,
         task_id: str,
         call_correlation: str,
-        value: str | None,
+        value: str | None = None,
         *,
-        error: str | None,
-        ref: OutcomeManifest | None,
+        error: str | None = None,
+        ref: OutcomeManifest | None = None,
     ) -> bool:
         with self._cv:
             record = self._tasks.get(task_id)
@@ -2010,7 +2010,7 @@ class TaskRuntime:
             status=ToolOutcomeStatus.UNAVAILABLE,
             value=f"no fabric handler for interface {env.interface!r}",
         )
-        self.settle_episode_invocation(
+        self._settle_episode_invocation(
             env.task_id, env.call_correlation, outcome.model_dump_json()
         )
 
@@ -2028,7 +2028,7 @@ class TaskRuntime:
         if self._resident_originate is not None:
             self._resident_originate(env)
         else:
-            self.settle_episode_invocation(
+            self._settle_episode_invocation(
                 env.task_id,
                 env.call_correlation,
                 error="resident-capacity control is not enabled",
@@ -2146,13 +2146,13 @@ class TaskRuntime:
                 "failing the boundary clean",
                 env.task_id,
             )
-            self.settle_episode_invocation(
+            self._settle_episode_invocation(
                 env.task_id, env.call_correlation, error="origin worker unavailable"
             )
             return
         op_credential = self._resolve_op_credential(agent, env.interface)
         if isinstance(op_credential, _MissingCredential):
-            self.settle_episode_invocation(
+            self._settle_episode_invocation(
                 env.task_id, env.call_correlation, error=op_credential.reason
             )
             self._reap_mediated_op(worker_id, env.task_id, env.call_correlation)
@@ -2174,7 +2174,7 @@ class TaskRuntime:
             deployment_credential=op_credential.deployment_credential,
         )
         if permit is None:
-            self.settle_episode_invocation(
+            self._settle_episode_invocation(
                 env.task_id, env.call_correlation, error="could not mint a permit"
             )
             self._reap_mediated_op(worker_id, env.task_id, env.call_correlation)
@@ -2278,6 +2278,12 @@ class TaskRuntime:
         lost report leaves the boundary pending for a same-idempotency-key re-drive. A
         duplicate or late report is absorbing at the boundary.
         """
+        try:
+            self._settle_mediated_operation(outcome)
+        finally:
+            self._release_pending_terminations()
+
+    def _settle_mediated_operation(self, outcome: MediatedOperationOutcome) -> None:
         with self._cv:
             pending = self._pending_ops.pop(outcome.permit_id, None)
             worker_id = (
@@ -2288,19 +2294,19 @@ class TaskRuntime:
             agent_task_id = outcome.agent_task_id
             call = outcome.call_correlation
             if outcome.error is not None:
-                self.settle_episode_invocation(
+                self._settle_episode_invocation(
                     agent_task_id, call, error=f"tool operation failed: {outcome.error}"
                 )
             elif outcome.outcome_ref is not None:
-                self.settle_episode_invocation(
+                self._settle_episode_invocation(
                     agent_task_id, call, ref=outcome.outcome_ref
                 )
             elif outcome.outcome is not None:
-                self.settle_episode_invocation(
+                self._settle_episode_invocation(
                     agent_task_id, call, value=outcome.outcome.model_dump_json()
                 )
             else:
-                self.settle_episode_invocation(
+                self._settle_episode_invocation(
                     agent_task_id, call, error="tool operation returned no outcome"
                 )
             self._reap_mediated_op(worker_id, agent_task_id, call)

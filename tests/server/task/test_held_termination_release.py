@@ -8,14 +8,18 @@ ledger that still shows the invocation open.
 """
 
 import asyncio
-from typing import Any
+import threading
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
 from server.orchestration.state import InvocationState, LedgerSnapshot
+from server.orchestration.tool_dispatch import ToolInvocationEnvelope
 from server.task.models import EventEffect, SettleOutcome
 from server.task.results import ResultUnreadable
 from server.task.runtime import TaskRuntime, _HeldWrites, _Termination, _Unacknowledged
+from shared.tools.contract import MediatedOperationOutcome
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import result_payload
 from tests.server.task.test_agent_episode_runtime import _MODEL_HELD_SCRIPT, _step
@@ -200,3 +204,55 @@ def test_a_replayed_cancel_report_releases_what_its_stash_held() -> None:
 
     assert released == ["inv-x"]
     assert runtime._pending_terminations == []
+
+
+def _lock_probe(runtime: TaskRuntime) -> list[bool]:
+    """Queue a pending termination; records whether each release held the lock."""
+    owned: list[bool] = []
+
+    def release(termination: _Termination) -> None:
+        # A reentrant acquire succeeds on the owning thread, so probe from another.
+        def probe() -> None:
+            free = runtime._lock.acquire(blocking=False)
+            if free:
+                runtime._lock.release()
+            owned.append(not free)
+
+        thread = threading.Thread(target=probe)
+        thread.start()
+        thread.join()
+
+    runtime._release_terminated_work = release  # type: ignore[method-assign]
+    runtime._pending_terminations.append(_Termination([], [], []))
+    return owned
+
+
+def test_a_mediated_outcome_releases_off_the_lock() -> None:
+    runtime = _runtime(FakeRegistry())
+    runtime._reap_mediated_op = lambda *_: None  # type: ignore[method-assign]
+    owned = _lock_probe(runtime)
+
+    runtime.settle_mediated_operation(
+        MediatedOperationOutcome(
+            permit_id="mop-x",
+            agent_task_id="tsk-x",
+            call_correlation="c0",
+            invocation_id="inv-x",
+            idempotency_key=None,
+            error="boom",
+        )
+    )
+
+    assert owned == [False]
+
+
+def test_a_boundary_settled_under_the_lock_leaves_its_release_pending() -> None:
+    runtime = _runtime(FakeRegistry())
+    owned = _lock_probe(runtime)
+    env = SimpleNamespace(task_id="tsk-x", call_correlation="c0")
+
+    with runtime._cv:
+        runtime._dispatch_resident_op(cast(ToolInvocationEnvelope, env))
+
+    assert owned == []
+    assert runtime._pending_terminations
