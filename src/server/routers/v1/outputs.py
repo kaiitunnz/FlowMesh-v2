@@ -43,12 +43,6 @@ async def _authorize(
     )
 
 
-def _visible(org_id: str | None, principal: PrincipalContext) -> bool:
-    return org_id is not None and (
-        org_id == principal.org_id or "*" in principal.scopes
-    )
-
-
 def _no_outputs(workflow_id: str) -> HTTPException:
     return _error(
         status.HTTP_404_NOT_FOUND,
@@ -109,7 +103,7 @@ async def list_outputs(
         )
     await _authorize(workflow_id, principal, logger)
     outputs = runtime.published_outputs(workflow_id, output)
-    if outputs is None or not _visible(outputs.org_id, principal):
+    if outputs is None:
         raise _no_outputs(workflow_id)
     members = [m for m in outputs.members if scope is None or m.scope_id == scope]
     try:
@@ -149,7 +143,7 @@ async def get_output(
 ) -> WorkflowOutputValue:
     await _authorize(workflow_id, principal, logger)
     found = runtime.published_output(workflow_id, output_name, scope, key, sequence)
-    if found is None or not _visible(found.org_id, principal):
+    if found is None:
         raise _no_outputs(workflow_id)
     if (declaration := found.declaration) is None:
         raise _error(

@@ -2978,7 +2978,6 @@ class TaskRuntime:
             if engine is None:
                 return None
             return PublishedOutputs(
-                org_id=engine.instance.org_id,
                 members=published_members(engine, name),
                 open=not self._workflow_settlement_locked(workflow_id).settled,
             )
@@ -3000,7 +2999,6 @@ class TaskRuntime:
                 engine, name, scope_id, key, sequence
             )
             return PublishedOutput(
-                org_id=engine.instance.org_id,
                 declaration=declaration,
                 member=member,
                 open=not self._workflow_settlement_locked(workflow_id).settled,

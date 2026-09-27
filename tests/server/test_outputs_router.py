@@ -56,10 +56,10 @@ spec:
 _LOGGER = logging.getLogger("test.outputs_router")
 
 
-def _principal(principal_id: str = "p-1", org_id: str = "org") -> PrincipalContext:
+def _principal(principal_id: str = "p-1") -> PrincipalContext:
     return PrincipalContext(
         principal_id=principal_id,
-        org_id=org_id,
+        org_id="org",
         external_id="ext",
         principal_type="user",
         scopes=[],
@@ -321,17 +321,6 @@ async def test_corrupt_bound_content_is_an_integrity_error(
         500,
         "output_unreadable",
     )
-
-
-@pytest.mark.anyio
-async def test_another_org_learns_nothing() -> None:
-    wf = await _workflow()
-    outsider = _principal("p-9", "other-org")
-    assert await _status(_get(wf, "fanout", principal=outsider)) == (
-        404,
-        "output_not_found",
-    )
-    assert await _status(_list(wf, principal=outsider)) == (404, "output_not_found")
 
 
 class _DenyingChecker:

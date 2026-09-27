@@ -51,7 +51,6 @@ class OutputMember:
 class PublishedOutputs:
     """A workflow's published outputs as of one look at its ledger."""
 
-    org_id: str
     members: list[OutputMember]
     # Whether the workflow can publish more; a last page is final only when it cannot.
     open: bool
@@ -61,7 +60,6 @@ class PublishedOutputs:
 class PublishedOutput:
     """One named published output and, when it holds one, the member selected."""
 
-    org_id: str
     declaration: ResultDeclaration | None
     member: OutputMember | None
     open: bool
