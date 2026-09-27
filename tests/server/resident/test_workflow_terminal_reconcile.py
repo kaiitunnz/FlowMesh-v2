@@ -14,6 +14,7 @@ from server.startup import rehydrate_root_state
 from server.task.runtime import TaskRuntime
 from tests.server.resident.test_service import _admission, _build, _env
 from tests.server.task.test_agent_episode_runtime import _held_boundary
+from tests.server.task.test_held_termination_release import _Scenario
 from tests.server.task.test_v2_orchestration import FakeRegistry, _runtime
 
 
@@ -91,3 +92,39 @@ def test_a_restart_holds_a_credit_whose_invocation_is_still_open() -> None:
     (claim,) = stores.claims.by_invocation(env.invocation_id)
     assert claim.state is ClaimState.UNCERTAIN
     assert stores.credit_ledger.held(claim.replica_id) == 1
+
+
+def _crash_before_ledger_save(registry: FakeRegistry) -> None:
+    def crash(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("root crashed")
+
+    registry.save_ledger_snapshot = crash  # type: ignore[method-assign]
+
+
+def test_a_restart_releases_a_credit_whose_cancel_only_its_records_hold() -> None:
+    registry = FakeRegistry()
+    runtime, workflow_id, env = _held(registry)
+    snapshot = _admit(workflow_id, env.invocation_id)
+    _crash_before_ledger_save(registry)
+    with pytest.raises(RuntimeError):
+        runtime.cancel_workflow(workflow_id)
+    del registry.save_ledger_snapshot
+
+    stores = _restart(registry, snapshot)
+    (claim,) = stores.claims.by_invocation(env.invocation_id)
+    assert claim.state is ClaimState.TERMINAL
+    assert claim.terminal_reason is ClaimTerminalReason.FAILED
+    assert stores.credit_ledger.held(claim.replica_id) == 0
+
+
+def test_a_restart_releases_a_credit_whose_failure_only_its_records_hold() -> None:
+    scenario = _Scenario()
+    snapshot = _admit(scenario.workflow_id, scenario.invocation_id)
+    _crash_before_ledger_save(scenario.registry)
+    assert scenario.report_success() is not None
+    del scenario.registry.save_ledger_snapshot
+
+    stores = _restart(scenario.registry, snapshot)
+    (claim,) = stores.claims.by_invocation(scenario.invocation_id)
+    assert claim.state is ClaimState.TERMINAL
+    assert stores.credit_ledger.held(claim.replica_id) == 0

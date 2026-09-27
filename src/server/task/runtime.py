@@ -1168,6 +1168,14 @@ class TaskRuntime:
             engine.cancel_instance()
         else:
             self._reconcile_failures_locked(engine, tasks)
+        # A boundary invocation of a durably settled task is terminal, even when a crash
+        # beat the ledger save that recorded it: the save below makes it durable, and
+        # the startup reconcile then releases the credit it holds.
+        engine.terminalize_unsettled_invocations(
+            persisted.record.task_id
+            for persisted in tasks
+            if persisted.record.status in SETTLING_TASK_STATUSES
+        )
 
         # Re-derive readiness for every PENDING task from the engine rather than
         # trusting the cached work-item status: a crash mid-retry can leave a task
@@ -5304,9 +5312,7 @@ class TaskRuntime:
             engine.cancel_instance()
         else:
             engine.fail_instance(failure)
-        termination.resident_invocation_ids = (
-            engine.cancel_outstanding_boundary_invocations()
-        )
+        termination.resident_invocation_ids = engine.terminalize_unsettled_invocations()
         return termination
 
     def _release_terminated_work(self, termination: _Termination) -> None:

@@ -1576,15 +1576,29 @@ class OrchestrationEngine:
             for env in self._boundary_events.values()
         )
 
-    def cancel_outstanding_boundary_invocations(self) -> list[str]:
-        """Terminalize every unsettled mediated boundary invocation on cancellation.
+    def terminalize_unsettled_invocations(
+        self, task_ids: Iterable[str] | None = None
+    ) -> list[str]:
+        """Terminalize the unsettled mediated boundary invocations of the given tasks'
+        activations, or of every activation.
 
         Returns their durable ``invocation_id``s so a control-plane consumer bound to
         them — a resident-capacity admission credit — releases from this fenced
-        cancellation terminal rather than being stranded.
+        terminal rather than being stranded.
         """
+        activations = (
+            None
+            if task_ids is None
+            else {
+                wi.activation_id
+                for task_id in task_ids
+                if (wi := self._work_item_for_task(task_id)) is not None
+            }
+        )
         ids: list[str] = []
-        for _, invocation_id in self._unsettled_invocation_boundaries():
+        for activation, invocation_id in self._unsettled_invocation_boundaries():
+            if activations is not None and activation not in activations:
+                continue
             if (invocation := self._invocations.get(invocation_id)) is not None:
                 invocation.state = next_on_terminal(invocation.state)
                 self._emitter.emit_boundary(invocation)
