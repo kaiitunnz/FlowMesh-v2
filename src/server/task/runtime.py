@@ -6,7 +6,7 @@ from collections import defaultdict, deque
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from itertools import chain
-from typing import Any, cast
+from typing import Any, Self, cast
 
 from opentelemetry.trace import Tracer
 from pydantic import ValidationError
@@ -441,8 +441,15 @@ class _HeldWrites:
     task_ids: list[str] = field(default_factory=list)
     children: list[tuple[str, list[str], list[str]]] = field(default_factory=list)
     workflow_ids: list[str] = field(default_factory=list)
-    terminations: list["_Termination"] = field(default_factory=list)
+    terminations: list[_Termination] = field(default_factory=list)
     error: Exception | None = None
+
+    def follow(self, earlier: Self) -> None:
+        """Hold another report's held writes ahead of this one's."""
+        self.task_ids[:0] = earlier.task_ids
+        self.children[:0] = earlier.children
+        self.workflow_ids[:0] = earlier.workflow_ids
+        self.terminations[:0] = earlier.terminations
 
 
 class _ReportWrites(threading.local):
@@ -4368,6 +4375,10 @@ class TaskRuntime:
             # A failed write stashes the report for its next handling; a clean replay
             # clears the stash unless a newer handling replaced it.
             if held.error is not None:
+                # A stash of another report is replaced, but what it held stays held.
+                replaced = self._unacknowledged.get(task_id)
+                if replaced is not None and replaced is not pending:
+                    held.follow(replaced.held)
                 self._unacknowledged[task_id] = _Unacknowledged(
                     report, worker_id, dispatch_id, held, outcome
                 )

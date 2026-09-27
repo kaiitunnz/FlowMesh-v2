@@ -10,6 +10,8 @@ ledger that still shows the invocation open.
 import asyncio
 from typing import Any
 
+import pytest
+
 from server.orchestration.state import InvocationState, LedgerSnapshot
 from server.task.results import ResultUnreadable
 from server.task.runtime import TaskRuntime
@@ -141,4 +143,19 @@ def test_the_replayed_report_releases_once_after_the_ledger_is_durable() -> None
 def test_an_unheld_failure_releases_once_after_the_ledger_is_durable() -> None:
     scenario = _Scenario()
     assert scenario.report_success() is None
+    assert scenario.releases == [(scenario.invocation_id, InvocationState.TERMINAL)]
+
+
+def test_a_replaced_stash_keeps_the_release_it_carries() -> None:
+    scenario = _Scenario()
+    planner = scenario.ids["planner"]
+    scenario.fail_writes_after(1)
+    assert scenario.report_success() is not None
+    # A failure report of the same dispatch replaces the stash while writes still fail.
+    with pytest.raises(RuntimeError):
+        scenario.runtime.fail_dispatch(planner, "wkr-1", {}, _TS, "dsp-p", error="late")
+    scenario.heal_writes()
+
+    scenario.runtime.fail_dispatch(planner, "wkr-1", {}, _TS, "dsp-p", error="late")
+
     assert scenario.releases == [(scenario.invocation_id, InvocationState.TERMINAL)]
