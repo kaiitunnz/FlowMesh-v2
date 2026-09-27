@@ -431,11 +431,13 @@ class _Publish:
 class _HeldWrites:
     """The durable writes a report's transition holds back once one of them fails:
     the tasks to commit, the spawned children to commit, and the workflows whose
-    ledger to save and credentials to reclaim."""
+    ledger to save and credentials to reclaim, with the workflow terminations whose
+    held work releases only once that ledger is durable."""
 
     task_ids: list[str] = field(default_factory=list)
     children: list[tuple[str, list[str], list[str]]] = field(default_factory=list)
     workflow_ids: list[str] = field(default_factory=list)
+    terminations: list["_Termination"] = field(default_factory=list)
     error: Exception | None = None
 
 
@@ -1320,6 +1322,9 @@ class TaskRuntime:
         for workflow_id in dict.fromkeys(workflow_ids + held.workflow_ids):
             self._save_ledger_locked(workflow_id)
             self._reclaim_vault_if_settled_locked(workflow_id)
+        # The ledgers are durable now, so what their terminations hold may release.
+        self._pending_terminations += held.terminations
+        held.terminations = []
 
     def _notify_terminal_transition(self, workflow_id: str) -> None:
         """Tell the completion finalizer a workflow may have reached its end.
@@ -3914,7 +3919,8 @@ class TaskRuntime:
         the terminal facts.
 
         What its work held is released once the caller leaves the lock, through
-        ``_release_pending_terminations``.
+        ``_release_pending_terminations``, and only once the terminal ledger is
+        durable: a report whose writes are held carries it until they are made.
         """
         termination = self._terminate_workflow_locked(workflow_id, reason, reason)
         non_terminal = [
@@ -3928,7 +3934,10 @@ class TaskRuntime:
             self._save_ledger_locked(workflow_id)
         self._reclaim_vault_if_settled_locked(workflow_id)
         self._cv.notify_all()
-        self._pending_terminations.append(termination)
+        if (held := self._report_writes.held) is not None and held.error is not None:
+            held.terminations.append(termination)
+        else:
+            self._pending_terminations.append(termination)
 
     def _fail_v2_cascade_locked(
         self, primary: str, cascade: list[str]
@@ -4748,23 +4757,27 @@ class TaskRuntime:
             if failure_kind is TaskFailureKind.INPUT_UNREADABLE
             else "TASK_FAILED"
         )
-        return self._reported(
-            report,
-            task_id,
-            worker_id,
-            dispatch_id,
-            lambda: self._apply_failure(
+        try:
+            return self._reported(
+                report,
                 task_id,
                 worker_id,
-                payload,
-                ts,
                 dispatch_id,
-                error,
-                retryable,
-                failure_kind,
-                unavailable_inputs,
-            ),
-        )
+                lambda: self._apply_failure(
+                    task_id,
+                    worker_id,
+                    payload,
+                    ts,
+                    dispatch_id,
+                    error,
+                    retryable,
+                    failure_kind,
+                    unavailable_inputs,
+                ),
+            )
+        finally:
+            # A replayed report's recommit makes a held terminal ledger durable.
+            self._release_pending_terminations()
 
     def _apply_failure(
         self,
