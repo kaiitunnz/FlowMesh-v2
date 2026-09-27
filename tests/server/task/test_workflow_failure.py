@@ -8,13 +8,13 @@ import pytest
 
 from server.orchestration.state import AttemptStatus, WorkItemStatus
 from server.task.models import TaskStatus
-from server.task.results import ResultUnreadable
+from server.task.results import ResultUnavailable, ResultUnreadable
 from server.task.runtime import TaskRuntime, _InputCheck
 from shared.content import reference_for
 from shared.schemas.event import TaskEvent, TaskFailureKind
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.task.test_agent_episode_runtime import _held_boundary
-from tests.server.task.test_task_merge import _monitor
+from tests.server.task.test_task_merge import _monitor, _Registry
 from tests.server.task.test_v2_orchestration import (
     _TS,
     FakeRegistry,
@@ -258,3 +258,106 @@ async def test_a_release_error_stays_out_of_the_report_that_failed_the_workflow(
     assert attempted == [side]
     assert runtime._tasks[side].status == TaskStatus.FAILED
     assert runtime._pending_terminations == []
+
+
+class _RefusesDispatchedWrite(FakeRegistry):
+    """Refuses, once armed, any commit that records a task as dispatched."""
+
+    armed = False
+
+    def commit_transition(self, workflow_id: str, **kwargs: Any) -> None:
+        if self.armed and kwargs.get("dispatched"):
+            raise ConnectionError("control redis unavailable")
+        super().commit_transition(workflow_id, **kwargs)
+
+
+async def _publishing_when_failed(
+    registry: FakeRegistry,
+) -> tuple[TaskRuntime, dict[str, str], list[str]]:
+    interrupts: list[str] = []
+
+    class _Workers(_WorkerRegistryStub):
+        def publish_interrupt(self, *args: Any) -> int:
+            interrupts.append(args[1].task_id)
+            return 1
+
+    runtime = _live_runtime(registry)
+    runtime._worker_registry = cast(Any, _Workers())
+    _, ids = await _register(runtime, _PARALLEL)
+    _pop_ready(runtime)
+    record_dispatch(runtime, ids["planner"], cast(Any, _worker()), "dsp-p")
+    assert runtime.begin_publish(ids["side"], cast(Any, _worker("wkr-2")), "dsp-s")
+    if isinstance(registry, _RefusesDispatchedWrite):
+        registry.armed = True
+    return runtime, ids, interrupts
+
+
+def _corrupt_reads(runtime: TaskRuntime) -> None:
+    def _corrupt(binding: Any) -> Any:
+        raise ResultUnreadable("corrupt")
+
+    runtime._results.read = _corrupt  # type: ignore[method-assign]
+
+
+@pytest.mark.anyio
+async def test_failing_a_workflow_writes_nothing_before_its_terminal_commit() -> None:
+    registry = _RefusesDispatchedWrite()
+    runtime, ids, interrupts = await _publishing_when_failed(registry)
+    monitor = _monitor(runtime)
+    payload = _planned(runtime, ids["planner"], ["a"])
+    _corrupt_reads(runtime)
+
+    monitor.handle_task_event(
+        TaskEvent(
+            type="TASK_SUCCEEDED",
+            task_id=ids["planner"],
+            worker_id="wkr-1",
+            dispatch_id="dsp-p",
+            payload=payload,
+            ts=_TS,
+        )
+    )
+
+    metrics = cast(MagicMock, monitor._metrics)
+    assert [c.args[0].type for c in metrics.record_task_event.call_args_list] == [
+        "TASK_SUCCEEDED"
+    ]
+    side = ids["side"]
+    assert interrupts == [side]
+    state = registry.load_task_states(side)[0]
+    assert state is not None and state.record.status == TaskStatus.FAILED
+
+
+@pytest.mark.anyio
+async def test_a_re_drive_that_fails_a_workflow_completes_its_failure() -> None:
+    registry = _RefusesDispatchedWrite()
+    runtime, ids, interrupts = await _publishing_when_failed(registry)
+    workflow_id = runtime._tasks[ids["planner"]].workflow_id
+    payload = _planned(runtime, ids["planner"], ["a"])
+
+    def _away(binding: Any) -> Any:
+        raise ResultUnavailable("store away")
+
+    runtime._results.read = _away  # type: ignore[method-assign]
+    runtime.mark_succeeded(ids["planner"], "wkr-1", payload, _TS, dispatch_id="dsp-p")
+    assert runtime._redrive.pending(workflow_id)
+    _corrupt_reads(runtime)
+    runtime._redrive._clock = lambda: 1e12
+    runtime._redrive.run_due()
+
+    assert runtime._tasks[ids["side"]].status == TaskStatus.FAILED
+    assert interrupts == [ids["side"]]
+    assert runtime.mark_dispatched(ids["side"]) is False
+
+
+@pytest.mark.anyio
+async def test_a_cancel_persists_a_dispatch_it_recorded_as_in_flight() -> None:
+    registry = _Registry()
+    runtime, ids, interrupts = await _publishing_when_failed(registry)
+    side = ids["side"]
+
+    runtime.cancel_workflow(runtime._tasks[side].workflow_id)
+
+    assert side in interrupts
+    assert registry.durable_status(side) == TaskStatus.CANCELLING
+    assert registry.is_dispatched(side)

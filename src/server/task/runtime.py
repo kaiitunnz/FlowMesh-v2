@@ -293,6 +293,8 @@ class _Termination:
     interrupts: list[InterruptMessage]
     # Each pending mediated operation's worker, agent task, and call.
     reaps: list[tuple[str, str, str]]
+    # Tasks whose published dispatch the termination recorded in memory.
+    recorded: list[str]
     resident_invocation_ids: list[str] = field(default_factory=list)
 
 
@@ -4279,6 +4281,16 @@ class TaskRuntime:
             return True
 
     def _record_dispatch_locked(self, record: TaskRecord, publish: _Publish) -> None:
+        self._take_dispatch_locked(record, publish)
+        self._workflow_registry.commit_transition(
+            record.workflow_id,
+            records=self._records_locked(record.task_id),
+            dispatched=[record.task_id],
+        )
+        self._save_ledger_locked(record.workflow_id)
+
+    def _take_dispatch_locked(self, record: TaskRecord, publish: _Publish) -> None:
+        """Record a published dispatch as the one holding its task, in memory."""
         task_id = record.task_id
         publish.recorded = True
         self._returned_dispatches.pop(task_id, None)
@@ -4303,12 +4315,6 @@ class TaskRuntime:
                 engine.on_input_preparation_dispatched(task_id, publish.worker_id)
             else:
                 engine.on_dispatched(task_id, publish.worker_id)
-        self._workflow_registry.commit_transition(
-            record.workflow_id,
-            records=self._records_locked(task_id),
-            dispatched=[task_id],
-        )
-        self._save_ledger_locked(record.workflow_id)
 
     def mark_started(
         self,
@@ -5062,6 +5068,11 @@ class TaskRuntime:
             self._workflow_registry.commit_transition(
                 workflow_id,
                 records=self._records_locked(*touched),
+                dispatched=[
+                    task_id
+                    for task_id in termination.recorded
+                    if self._tasks[task_id].status == TaskStatus.CANCELLING
+                ],
                 cancelled=cancelled,
                 sched=self._sched_locked(workflow_id),
             )
@@ -5104,8 +5115,9 @@ class TaskRuntime:
         failures. Either way a dispatch being published is recorded so its worker is
         interrupted with every other running task, the agents' mediated operations are
         taken for reaping, the pending re-drive and held input checks are dropped, and
-        every unsettled boundary invocation is terminalized. Returns what
-        ``_release_terminated_work`` releases once the terminal is committed.
+        every unsettled boundary invocation is terminalized. It writes nothing: the
+        caller's terminal commit persists it, and ``_release_terminated_work`` releases
+        what it returns once that commit is made.
         """
         self._redrive.settle(workflow_id)
         records = [
@@ -5114,11 +5126,13 @@ class TaskRuntime:
             if record.workflow_id == workflow_id
         ]
         interrupts: list[InterruptMessage] = []
+        recorded: list[str] = []
         for record in records:
             publish = self._publishing.get(record.task_id)
             if publish and not publish.recorded and record.status == TaskStatus.PENDING:
                 # The worker may already be running the task.
-                self._record_dispatch_locked(record, publish)
+                self._take_dispatch_locked(record, publish)
+                recorded.append(record.task_id)
             # A merged child's batch keeps running for siblings from other workflows.
             if (
                 record.status == TaskStatus.DISPATCHED
@@ -5138,7 +5152,7 @@ class TaskRuntime:
         self._workflow_epoch_tasks.pop(workflow_id, None)
         self._workflow_epoch_frontier.pop(workflow_id, None)
         self._workflow_in_epoch_order.pop(workflow_id, None)
-        termination = _Termination(interrupts, reaps)
+        termination = _Termination(interrupts, reaps, recorded)
         if (engine := self._engines.get(workflow_id)) is None:
             return termination
         if failure is None:
