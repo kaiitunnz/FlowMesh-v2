@@ -3265,7 +3265,10 @@ class TaskRuntime:
         if advance.retry:
             self._release_dispatch_locked(record, [task_id], front=True)
         elif advance.failed:
-            self._fail_v2_advance_locked(engine, advance.failed)
+            # A lost child's failure can release its scope's join, readying what
+            # follows.
+            if self._apply_advance_locked(record.workflow_id, advance):
+                self._cv.notify_all()
             self._reap_ops_for_agents_locked(advance.failed)
             invocation_ids = engine.terminalize_unsettled_invocations([task_id])
         self._save_ledger_locked(record.workflow_id)

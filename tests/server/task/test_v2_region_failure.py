@@ -471,6 +471,60 @@ async def test_a_join_released_by_a_failed_last_child_readies_its_downstream() -
     assert runtime.workflow_settlement(workflow_id).settled
 
 
+_LOST_CHILD = """
+      - name: planner
+        spec: {taskType: echo, data: {type: list, items: [seed]}}
+      - name: kid
+        spec:
+          taskType: ssh
+          interactive: false
+          image: alpine:3
+          command: ["sh", "-c", "exit 3"]
+      - name: fan
+        dependsOn: [planner]
+        region: {kind: spawn, child: kid}
+      - name: collect
+        dependsOn: [fan]
+        region: {kind: join, completion: all_settled}
+      - name: after
+        dependsOn: [collect]
+        spec: {taskType: echo, data: {type: list, items: [z]}}
+"""
+
+
+@pytest.mark.parametrize("via", ["worker_lost", "uncertain"])
+def test_a_join_released_by_a_lost_last_child_readies_its_downstream(
+    via: str,
+) -> None:
+    async def run() -> None:
+        runtime = _live_runtime(FakeRegistry())
+        workflow_id, ids = await _register(runtime, _HEAD + _LOST_CHILD)
+        planner = ids["planner"]
+        record_dispatch(runtime, planner, cast(Any, _worker()))
+        runtime.mark_succeeded(
+            planner, "wkr-1", _planned(runtime, planner, ["h1", "h2"]), _TS
+        )
+        first, last = _pop_ready(runtime)
+        record_dispatch(runtime, first, cast(Any, _worker()))
+        runtime.mark_succeeded(first, "wkr-1", {}, _TS)
+        record_dispatch(runtime, last, cast(Any, _worker()))
+
+        # An ssh child's effect is not replayable, so losing it fails it.
+        if via == "worker_lost":
+            runtime.recover_tasks_for_worker("wkr-1")
+        else:
+            runtime.mark_v2_uncertain(last)
+
+        record = runtime.get_record(last)
+        assert record is not None and record.status == TaskStatus.FAILED
+        assert _pop_ready(runtime) == [ids["after"]]
+        record_dispatch(runtime, ids["after"], cast(Any, _worker()))
+        runtime.mark_succeeded(ids["after"], "wkr-1", {}, _TS)
+        assert runtime.workflow_settlement(workflow_id).settled
+
+    asyncio.run(run())
+
+
 _NESTED = """
       - name: a
         spec: {taskType: echo, data: {type: list, items: [x]}}
