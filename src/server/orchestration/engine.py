@@ -434,6 +434,9 @@ class OrchestrationEngine:
         # than re-derived from records: a recursive region's levels share one join/loop
         # operator, so a record could not attribute a release to the right level.
         self._released_scopes: set[str] = set(snapshot.released_scopes)
+        # Control operators settled as a declared failure. A failed input never
+        # delivers, so each stays unfired, and a late record never fires it.
+        self._failed_regions: set[str] = set(snapshot.failed_regions)
         self._denied_spawns = {
             d.operator_id
             for d in self._decisions
@@ -2670,7 +2673,7 @@ class OrchestrationEngine:
         """Deliver a record to one successor: fire a control op, or admit a leaf."""
         if self._is_control(successor):
             cont = self._continuations.get(_control_key(successor))
-            if cont is None:
+            if cont is None or successor in self._failed_regions:
                 return
             cont.waiting_on.discard(from_op)
             if not cont.waiting_on:
@@ -2749,7 +2752,11 @@ class OrchestrationEngine:
         if scope is None or scope.owner_operator_id is None:
             return Advance()
         join_op = self._join_for_spawn(scope.owner_operator_id)
-        if join_op is None or scope_id in self._released_scopes:
+        if (
+            join_op is None
+            or scope_id in self._released_scopes
+            or join_op in self._failed_regions
+        ):
             return Advance()
         cap = self._capabilities.get((scope_id, ProgressAxis.CHILD_INIT))
         if cap is None:
@@ -3232,22 +3239,92 @@ class OrchestrationEngine:
             self._settle_empty_successor(successor, visited)
 
     def _settle_failure(self, work_item_id: str) -> list[str]:
+        """Settle a work item as a declared failure and fail everything downstream of
+        it, returning the legacy task ids failed."""
+        cascade: list[str] = []
+        self._fail_work_item(work_item_id, cascade, set())
+        return cascade
+
+    def _fail_work_item(
+        self, work_item_id: str, cascade: list[str], visited: set[str]
+    ) -> None:
         wi = self._work_items[work_item_id]
         if wi.status in TERMINAL_WORK_ITEM_STATUSES:
-            return []
+            return
         wi.status = WorkItemStatus.SETTLED
         wi.outcome = PublicationOutcome.DECLARED_FAILURE
         self._emitter.emit_work_item(wi)
         self._emitter.emit_activation(wi.activation_id)
         self._private_state.release(wi.activation_id)
         self._publish(wi.operator_id, PublicationOutcome.DECLARED_FAILURE, None)
-        cascade = [wi.legacy_task_id]
-        for successor in sorted(self._forward.get(wi.operator_id, ())):
+        cascade.append(wi.legacy_task_id)
+        self._fail_downstream(wi.operator_id, cascade, visited)
+
+    def _fail_downstream(
+        self, operator_id: str, cascade: list[str], visited: set[str]
+    ) -> None:
+        for successor in sorted(self._forward.get(operator_id, ())):
             if self._is_control(successor):
-                continue
-            if succ_wi := self._wi_by_operator.get(successor):
-                cascade.extend(self._settle_failure(succ_wi))
-        return cascade
+                self._fail_region(successor, cascade, visited)
+            elif succ_wi := self._wi_by_operator.get(successor):
+                self._fail_work_item(succ_wi, cascade, visited)
+
+    def _fail_region(
+        self, operator_id: str, cascade: list[str], visited: set[str]
+    ) -> None:
+        """Settle a control operator a failed input feeds as a declared failure.
+
+        The region never fires. A failed spawn opens no scope and creates no child: it
+        fails its child template and its join, and each collection it publishes holds
+        one failed member. A join fails whatever its completion rule, unless its scope
+        already released.
+        """
+        if operator_id in visited or operator_id in self._failed_regions:
+            return
+        visited.add(operator_id)
+        kind = self._kind(operator_id)
+        if kind is OperatorKind.JOIN and self.region_closed(operator_id):
+            return
+        self._failed_regions.add(operator_id)
+        self._emit("region_failed", operator_id=operator_id)
+        self._publish(operator_id, PublicationOutcome.DECLARED_FAILURE, None)
+        if kind is OperatorKind.SPAWN:
+            self._fail_spawn_template(operator_id, cascade)
+            self._publish_collection_failure(operator_id)
+            if (join_op := self._join_for_spawn(operator_id)) is not None:
+                self._fail_region(join_op, cascade, visited)
+        self._fail_downstream(operator_id, cascade, visited)
+
+    def _fail_spawn_template(self, spawn_op: str, cascade: list[str]) -> None:
+        """Fail a failed spawn's child template once no live spawn instantiates it."""
+        template = self.child_template_of(spawn_op)
+        if template is None or template in self._wi_by_operator:
+            return
+        if any(
+            isinstance(op, SpawnRegion)
+            and op.child_template_ref == template
+            and op.operator_id not in self._failed_regions
+            for op in self._operators.values()
+        ):
+            return
+        self._publish(template, PublicationOutcome.DECLARED_FAILURE, None)
+        cascade.append(template)
+
+    def _publish_collection_failure(self, spawn_op: str) -> None:
+        for decl in self._bundle.template.result_declarations:
+            if (
+                decl.source_ref == spawn_op
+                and decl.cardinality is CardinalityKind.KEYED_COLLECTION
+            ):
+                self._write_publication(
+                    ResultSlot(
+                        instance_id=self._instance.instance_id,
+                        output_id=decl.output_id,
+                        source_operator_id=spawn_op,
+                    ),
+                    PublicationOutcome.DECLARED_FAILURE,
+                    None,
+                )
 
     def _publish(
         self, operator_id: str, outcome: PublicationOutcome, value_ref: ValueRef | None
@@ -3447,6 +3524,8 @@ class OrchestrationEngine:
         return self._grants.get(grant_id) if grant_id else None
 
     def region_closed(self, region_op: str) -> bool:
+        if region_op in self._failed_regions:
+            return True
         scope_id = (
             self._scope_for_join(region_op)
             if self._kind(region_op) is OperatorKind.JOIN
@@ -3493,7 +3572,12 @@ class OrchestrationEngine:
         return frozenset(sealed)
 
     def spawn_awaits_children(self, spawn_op: str) -> bool:
-        """Whether a spawn has yet to fan out: unopened, or open and not sealed."""
+        """Whether a spawn has yet to fan out: unopened, or open and not sealed.
+
+        A failed spawn never fans out.
+        """
+        if spawn_op in self._failed_regions:
+            return False
         scope_id = self._scope_id_for(spawn_op)
         if scope_id is None:
             return True
@@ -3803,6 +3887,7 @@ class OrchestrationEngine:
             trace=list(self._trace),
             private_state=self._private_state.lineages(),
             released_scopes=sorted(self._released_scopes),
+            failed_regions=sorted(self._failed_regions),
             next_seq=self._next_seq,
         )
 

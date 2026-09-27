@@ -151,7 +151,9 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   early join may release before full closure per its declared rule, with a residual
   policy governing children still running. Scope, loop, and activation budgets bound
   recursion. A spawn fans out to one child per element of its producer's result, and
-  each child dispatches to a worker like any other task.
+  each child dispatches to a worker like any other task. A failed input fails a region
+  and everything downstream of it, as a failed dependency fails a task: a spawn whose
+  producer failed creates no child, and its join fails whatever its completion rule.
 - **Cancellation.** A `flowmesh/v2` workflow cancels through the orchestration engine as
   a durable semantic event, so the ledger stays consistent with the task records and a
   cancelled workflow survives a restart without re-admitting cancelled work. A worker
@@ -492,8 +494,9 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   without spending an attempt or blaming the worker.
 - **Published outputs.** A leaf declares `result: {visibility: published}` to publish its
   value, and a spawn region declares it to publish its children's results as a
-  collection keyed by child index within each spawning scope. Clients list and fetch
-  published outputs by the node names they were declared on.
+  collection keyed by child index within each spawning scope. A spawn whose input
+  failed publishes one failed member instead. Clients list and fetch published outputs
+  by the node names they were declared on.
 - **Task merging.** Ready v1 tasks of one org whose specs share a merge key coalesce
   into one dispatch, whose executor runs every task at once and returns each merged
   child's own result; a task's spec defines its merge key. Merged children ride on

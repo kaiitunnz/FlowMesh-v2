@@ -643,4 +643,5 @@ class LedgerSnapshot(BaseModel):
     trace: list[OrchestrationEvent] = Field(default_factory=list)
     private_state: list[PrivateStateLineage] = Field(default_factory=list)
     released_scopes: list[str] = Field(default_factory=list)
+    failed_regions: list[str] = Field(default_factory=list)
     next_seq: int = 0
