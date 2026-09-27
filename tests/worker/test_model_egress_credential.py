@@ -5,7 +5,7 @@ import logging
 import threading
 from collections.abc import Callable, Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -22,10 +22,9 @@ class _CaptureServer(ThreadingHTTPServer):
 
 
 class _CaptureHandler(BaseHTTPRequestHandler):
-    server: _CaptureServer
-
     def do_POST(self) -> None:
-        self.server.authorizations.append(self.headers.get("Authorization"))
+        server = cast(_CaptureServer, self.server)
+        server.authorizations.append(self.headers.get("Authorization"))
         self.rfile.read(int(self.headers.get("Content-Length", "0")))
         body = json.dumps({"choices": [{"message": {"content": "ok"}}]}).encode()
         self.send_response(200)
