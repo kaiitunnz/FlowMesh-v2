@@ -3236,20 +3236,31 @@ class TaskRuntime:
         attempt; a non-replayable one becomes ambiguity-terminal and never silently
         retries or reports success.
         """
-        with self._cv:
-            return self._resolve_uncertain_locked(task_id)
+        try:
+            with self._cv:
+                return self._resolve_uncertain_locked(task_id)
+        finally:
+            self._release_pending_terminations()
 
     def _resolve_uncertain_locked(self, task_id: str) -> Advance:
+        """Resolve an in-flight work item's uncertainty; a failure terminalizes the
+        boundary invocations it held, whose credits release once the ledger saved."""
         record = self._tasks.get(task_id)
         if record is None or (engine := self._engines.get(record.workflow_id)) is None:
             return Advance()
         advance = engine.on_uncertain(task_id)
+        invocation_ids: list[str] = []
         if advance.retry:
             self._release_dispatch_locked(record, [task_id], front=True)
         elif advance.failed:
             self._fail_v2_advance_locked(engine, advance.failed)
             self._reap_ops_for_agents_locked(advance.failed)
+            invocation_ids = engine.terminalize_unsettled_invocations([task_id])
         self._save_ledger_locked(record.workflow_id)
+        if invocation_ids:
+            self._carry_termination_locked(
+                _Termination([], [], [], resident_invocation_ids=invocation_ids)
+            )
         return advance
 
     def _save_ledger_locked(self, workflow_id: str) -> None:
@@ -3971,10 +3982,15 @@ class TaskRuntime:
             self._save_ledger_locked(workflow_id)
         self._reclaim_vault_if_settled_locked(workflow_id)
         self._cv.notify_all()
-        if (held := self._report_writes.held) is not None and held.error is not None:
-            held.terminations.append(termination)
-        else:
-            self._pending_terminations.append(termination)
+        self._carry_termination_locked(termination)
+
+    def _carry_termination_locked(self, termination: _Termination) -> None:
+        """Queue what a termination releases for after the lock, or hold it with a
+        report whose writes are held until its replay commits them."""
+        self._write_locked(
+            lambda: self._pending_terminations.append(termination),
+            lambda held: held.terminations.append(termination),
+        )
 
     def _fail_v1_dependents_locked(self, primary: str) -> list[tuple[str, str]]:
         """Fail every pending task downstream of a failed v1 task, however deep."""
@@ -5576,6 +5592,12 @@ class TaskRuntime:
         tasks go back to the head of the queue, a merged batch's to run alone, spending
         no attempt, and the dispatch is never recorded.
         """
+        try:
+            return self._recover_tasks_for_worker(worker_id)
+        finally:
+            self._release_pending_terminations()
+
+    def _recover_tasks_for_worker(self, worker_id: str) -> list[str]:
         recovered: list[str] = []
         with self._cv:
             for task_id, record in list(self._tasks.items()):
