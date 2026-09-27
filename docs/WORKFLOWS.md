@@ -56,7 +56,8 @@ spec:
 ```
 
 `spec.stages[].dependsOn` declares the DAG edges; the dispatcher
-schedules each stage once all of its dependencies are `DONE`.
+schedules each stage once all of its dependencies are `DONE`. A
+`dependsOn` entry names a stage or node of the same workflow.
 Substitutions like `{{extract.output}}` are resolved against the
 upstream stage's result.
 

@@ -2867,16 +2867,23 @@ class TaskRuntime:
         )
 
     def upstream_task_ids(self, task_id: str) -> set[str]:
-        """Every task a task depends on, directly or transitively."""
+        """Every task of its workflow a task depends on, directly or transitively."""
         with self._lock:
             return self._upstream_task_ids_locked(task_id)
 
     def _upstream_task_ids_locked(self, task_id: str) -> set[str]:
+        # A record stored with a dependency outside its workflow never reaches it: a
+        # stage name resolves only within the workflow that declared it.
+        record = self._tasks.get(task_id)
+        workflow_id = record.workflow_id if record else None
         pending = list(self._original_deps.get(task_id, ()))
         visited: set[str] = set()
         while pending:
             dep_id = pending.pop()
-            if dep_id in visited:
+            upstream = self._tasks.get(dep_id)
+            if dep_id in visited or upstream is None:
+                continue
+            if upstream.workflow_id != workflow_id:
                 continue
             visited.add(dep_id)
             pending.extend(self._original_deps.get(dep_id, ()))

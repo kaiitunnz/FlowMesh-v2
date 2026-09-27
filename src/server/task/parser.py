@@ -146,12 +146,23 @@ def _build_workflow(
             resolved["to"] = local_ids.get(to, to)
         return resolved
 
+    def _resolve_depends_on(depends_on: list[str], owner: str) -> list[str]:
+        resolved: list[str] = []
+        for dep in depends_on:
+            if not (name := dep.strip()):
+                continue
+            if (dep_id := local_ids.get(name)) is None:
+                raise ValueError(
+                    f"{owner}: dependsOn '{name}' names no node or stage of this "
+                    "workflow"
+                )
+            resolved.append(dep_id)
+        return resolved
+
     for spec in specs:
         _validate_condition_depends_on(spec)
         task_id = new_task_id()
-        depends_on = [
-            local_ids.get(s, s) for dep in spec.depends_on if dep and (s := dep.strip())
-        ]
+        depends_on = _resolve_depends_on(spec.depends_on, spec.local_name or "task")
         results.append(
             ParsedTask(
                 task_id=task_id,
@@ -174,11 +185,7 @@ def _build_workflow(
         ParsedRegion(
             name=region_spec.name,
             region=region_spec.region,
-            depends_on=[
-                local_ids.get(s, s)
-                for dep in region_spec.depends_on
-                if dep and (s := dep.strip())
-            ],
+            depends_on=_resolve_depends_on(region_spec.depends_on, region_spec.name),
             feedback=_resolve_feedback(region_spec.feedback),
         )
         for region_spec in region_specs
