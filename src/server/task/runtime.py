@@ -5143,6 +5143,11 @@ class TaskRuntime:
             if record is not None and (engine := self._engines.get(record.workflow_id)):
                 advance = engine.on_failed(task_id, message, retryable=False)
                 impacted.extend(self._fail_v2_cascade_locked(task_id, advance.failed))
+                # A child's failure can release its scope's join, readying what follows.
+                if self._apply_advance_locked(
+                    record.workflow_id, Advance(ready=advance.ready)
+                ):
+                    self._cv.notify_all()
 
             returned = self._return_merged_children_locked(
                 merged_children_ids, unmerge=True

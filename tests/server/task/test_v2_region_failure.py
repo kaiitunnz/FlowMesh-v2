@@ -421,3 +421,48 @@ async def test_an_ambiguous_producer_fails_its_region_downstream_as_dependents()
     assert record is not None and record.error == "ambiguity-terminal effect"
     _assert_failed_downstream(runtime, ids, "a", "kid", "after")
     assert runtime.workflow_settlement(workflow_id).settled
+
+
+def _last_child_fails(completion: str) -> str:
+    return f"""
+      - name: planner
+        spec: {{taskType: echo, data: {{type: list, items: [seed]}}}}
+      - name: kid
+        spec: {{taskType: echo, data: {{type: list, items: [k]}}}}
+      - name: fan
+        dependsOn: [planner]
+        region: {{kind: spawn, child: kid}}
+      - name: collect
+        dependsOn: [fan]
+        region: {{kind: join, completion: {completion}}}
+      - name: after
+        dependsOn: [collect]
+        spec: {{taskType: echo, data: {{type: list, items: [z]}}}}
+"""
+
+
+async def _fail_the_last_child(
+    completion: str,
+) -> tuple[TaskRuntime, str, dict[str, str], str]:
+    runtime = _live_runtime(FakeRegistry())
+    workflow_id, ids = await _register(runtime, _HEAD + _last_child_fails(completion))
+    planner = ids["planner"]
+    record_dispatch(runtime, planner, cast(Any, _worker()))
+    runtime.mark_succeeded(
+        planner, "wkr-1", _planned(runtime, planner, ["h1", "h2"]), _TS
+    )
+    first, last = _pop_ready(runtime)
+    record_dispatch(runtime, first, cast(Any, _worker()))
+    runtime.mark_succeeded(first, "wkr-1", {}, _TS)
+    _fail(runtime, last)
+    return runtime, workflow_id, ids, last
+
+
+@pytest.mark.anyio
+async def test_a_join_released_by_a_failed_last_child_readies_its_downstream() -> None:
+    runtime, workflow_id, ids, _ = await _fail_the_last_child("all_settled")
+
+    assert _pop_ready(runtime) == [ids["after"]]
+    record_dispatch(runtime, ids["after"], cast(Any, _worker()))
+    runtime.mark_succeeded(ids["after"], "wkr-1", {}, _TS)
+    assert runtime.workflow_settlement(workflow_id).settled
