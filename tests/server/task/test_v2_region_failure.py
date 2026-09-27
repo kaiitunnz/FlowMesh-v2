@@ -373,6 +373,34 @@ def test_a_restart_closes_a_workflow_stored_hung_behind_a_failed_region(
     asyncio.run(run())
 
 
+def test_a_restart_fails_the_regions_of_a_stored_cascade_failed_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        registry = FakeRegistry()
+        registry.submitted_at = _TS
+        runtime = _live_runtime(registry)
+        workflow_id, ids = await _register(runtime, _HEAD + _AGENT_REGION)
+        # A stored workflow whose failure cascaded into an agent and stopped there.
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                _engine(runtime, workflow_id), "_fail_agent_regions", lambda *_: None
+            )
+            _fail(runtime, ids["a"])
+        assert not runtime.workflow_settlement(workflow_id).settled
+
+        restored = _live_runtime(registry, "restored", reader=runtime._results)
+        finalizer, redis, _ = _wired(restored, registry, workflow_id)
+        await restored.rehydrate()
+        finalizer.drain()
+
+        _assert_failed_downstream(restored, ids, "lead", "reviewer", "merge")
+        assert registry.remaining_of(workflow_id) == set()
+        assert f"workflow:{workflow_id}:logs:closed" in redis.keys
+
+    asyncio.run(run())
+
+
 @pytest.mark.anyio
 async def test_a_restart_leaves_a_cancelled_hung_workflow_cancelled(
     monkeypatch: pytest.MonkeyPatch,

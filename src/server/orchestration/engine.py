@@ -4058,7 +4058,9 @@ class OrchestrationEngine:
         ):
             return []
         cascade: list[str] = []
-        self._fail_downstream(wi.operator_id, cascade, set())
+        visited: set[str] = set()
+        self._fail_agent_regions(wi, cascade, visited)
+        self._fail_downstream(wi.operator_id, cascade, visited)
         return cascade
 
     def reconcile_pending(self, task_id: str) -> bool:
