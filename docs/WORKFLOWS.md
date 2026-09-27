@@ -164,36 +164,22 @@ through `dependsOn` like tasks:
 spec:
   graph:
     nodes:
-      - name: classify
+      - name: plan
         spec: { taskType: inference, ... }
-      - name: route
-        dependsOn: [classify]
-        region: { kind: branch, selection: "{{classify.output.label}}", ports: [accept, revise] }
       - name: fanout
-        dependsOn: [route]
+        dependsOn: [plan]
         region: { kind: spawn, child: worker, authority: { invoke: [search] } }
       - name: collect
         dependsOn: [fanout]
         region: { kind: join, completion: all_settled, residual: cancel }
-      - name: refine
+      - name: report
         dependsOn: [collect]
-        region:
-          kind: loop
-          coordinate: refine
-          carried:
-            - name: model
-              kind: model_ref
-              modelRef: { architecture: llama, version: base }
-      - name: train
-        dependsOn: [refine]
-        spec: { taskType: lora_sft, ... }
-        feedback: { to: refine, port: model }
+        spec: { taskType: echo, ... }
 ```
 
-Region kinds are `branch`, `merge`, `spawn`, `join`, `loop`, and `call`
-(`call` normalizes to a `spawn`/`join` pair). A `feedback` edge is a structured
-back-edge into a `loop` region; it is excluded from acyclic-topology checks, so
-an unstructured `dependsOn` cycle is still rejected.
+Region kinds are `merge`, `spawn`, `join`, and `call` (`call` normalizes to a
+`spawn`/`join` pair). A failed input fails the region and everything downstream
+of it, as a failed dependency fails a task.
 
 A `join` `completion` is `all_settled`, `all_succeed`, `any`, `first_k` (with
 `k`), or `predicate` (with `predicate: { min_qualifiers, monotone }`). An early

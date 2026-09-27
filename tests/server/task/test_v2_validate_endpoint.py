@@ -47,7 +47,7 @@ spec:
   graph:
     nodes:
       - name: gate
-        region: {kind: branch, selection: "x", ports: [p, q]}
+        region: {kind: merge}
       - name: gated
         dependsOn: [gate]
         spec:
@@ -67,7 +67,23 @@ spec:
         spec: {taskType: echo, data: {type: list, items: [x]}}
       - name: route
         dependsOn: [a]
-        region: {kind: branch, selection: "x", ports: [p, q]}
+        region: {kind: merge}
+"""
+
+
+def _region(region: str) -> str:
+    return f"""
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {{name: t}}
+spec:
+  graph:
+    nodes:
+      - name: a
+        spec: {{taskType: echo, data: {{type: list, items: [x]}}}}
+      - name: route
+        dependsOn: [a]
+        region: {region}
 """
 
 
@@ -148,3 +164,16 @@ def test_v2_guard_on_region_returns_422_with_location(client: TestClient) -> Non
     assert any(
         "guard.unknown-node" in d and "graph node 'gated'" in d for d in diagnostics
     )
+
+
+@pytest.mark.parametrize(
+    "region",
+    ['{kind: branch, selection: "x", ports: [p, q]}', "{kind: loop, coordinate: t}"],
+)
+def test_v2_unsupported_region_kind_returns_422(
+    client: TestClient, region: str
+) -> None:
+    resp = _post(client, _region(region))
+    assert resp.status_code == 422
+    diagnostics = resp.json()["detail"]["diagnostics"]
+    assert any("region.unknown-kind" in d for d in diagnostics)

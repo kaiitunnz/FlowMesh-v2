@@ -6,7 +6,6 @@ from shared.tasks.specs import ModelBindingMode
 from ..representations.operators import (
     AgentOperator,
     AuthorityCeiling,
-    BranchRegion,
     DeterminismClass,
     EffectClass,
     InputProvenanceKind,
@@ -14,7 +13,6 @@ from ..representations.operators import (
     JoinRegion,
     LeafOperator,
     LogicalOperator,
-    LoopContextRegion,
     MergeRegion,
     RecoveryClass,
     ResidualPolicy,
@@ -205,24 +203,7 @@ def _check_region(
 ) -> list[Diagnostic]:
     diags: list[Diagnostic] = []
     location = loc.get(op.operator_id)
-    if isinstance(op, BranchRegion):
-        if not op.outputs:
-            diags.append(
-                Diagnostic(
-                    code="region.branch-no-ports",
-                    message="branch region declares no output ports",
-                    location=location,
-                )
-            )
-        if not op.selection:
-            diags.append(
-                Diagnostic(
-                    code="region.branch-no-selection",
-                    message="branch region declares no selection rule",
-                    location=location,
-                )
-            )
-    elif isinstance(op, MergeRegion):
+    if isinstance(op, MergeRegion):
         if not op.inputs:
             diags.append(
                 Diagnostic(
@@ -277,15 +258,6 @@ def _check_region(
                 Diagnostic(
                     code="region.bad-residual",
                     message=f"unknown residual-child policy {op.residual_policy!r}",
-                    location=location,
-                )
-            )
-    elif isinstance(op, LoopContextRegion):
-        if not op.loop_coordinate:
-            diags.append(
-                Diagnostic(
-                    code="region.loop-no-coordinate",
-                    message="loop-context region declares no loop coordinate",
                     location=location,
                 )
             )

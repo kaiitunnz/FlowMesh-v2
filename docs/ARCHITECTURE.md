@@ -142,14 +142,14 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   persists at `workflow:{id}:ds` and `TaskRuntime.rehydrate` rebuilds it on restart; a v1
   submission keeps the static-DAG path.
 - **Structured dynamic regions.** The engine executes the compiler's semi-static
-  regions: control operators (`Branch`/`Merge`/`Spawn`/`Join`/`LoopContext`) settle
-  in-ledger and never dispatch, while spawn children and loop iterations materialize
-  incrementally by activation identity. A region closes on its child-init and loop-time
-  capability account — sealed or revoked and drained — never on an observed-empty set.
+  regions: control operators (`Merge`/`Spawn`/`Join`) settle in-ledger and never
+  dispatch, while spawn children materialize incrementally by activation identity. A
+  region closes on its child-init capability account — sealed or revoked and drained —
+  never on an observed-empty set.
   Every spawn site mints a monotonically attenuated `DelegatedAuthorityGrant`, and a
   denial records a durable `AuthorityDenied`/`PolicyDenied` that creates no child. An
   early join may release before full closure per its declared rule, with a residual
-  policy governing children still running. Scope, loop, and activation budgets bound
+  policy governing children still running. Scope and activation budgets bound
   recursion. A spawn fans out to one child per element of its producer's result, and
   each child dispatches to a worker like any other task. A failed input fails a region
   and everything downstream of it, as a failed dependency fails a task: a spawn whose
@@ -479,8 +479,7 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   success, and the success binds that reference once, at the commit that settles the
   task, so a retry, relocation, or duplicate success converges on the result already
   bound. A v2 task binds it into the ledger — its induced output slot, or for a spawned
-  child or later loop iteration the value its work item settled with — and a v1 task onto
-  its record. Every result the control plane reads — the result, bundle, and output
+  child the value its work item settled with — and a v1 task onto its record. Every result the control plane reads — the result, bundle, and output
   routes, stage references, conditions, fan-out cardinality, and an agent's input budget
   — resolves that binding and reads the verified envelope from the store; the results
   directory keeps only a task's logs and artifacts. A task that outlives its store access

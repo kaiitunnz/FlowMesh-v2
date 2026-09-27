@@ -83,7 +83,7 @@ def test_spawn_child_unresolved_rejected() -> None:
 
 def test_spawn_child_non_dispatchable_rejected() -> None:
     err = _reject("""      - name: inner
-        region: {kind: branch, selection: s, ports: [p]}
+        region: {kind: merge}
       - name: s
         region: {kind: spawn, child: inner, authority: {invoke: []}}
 """)

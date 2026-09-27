@@ -7,7 +7,6 @@ from ..representations.operators import (
     AuthorityCeiling,
     BoundaryEventKind,
     BoundarySignature,
-    BranchRegion,
     ChildRegionRef,
     DeterminismClass,
     EffectClass,
@@ -19,9 +18,7 @@ from ..representations.operators import (
     LogicalOperator,
     LoopContextRegion,
     MergeRegion,
-    ModelRef,
     Port,
-    PortKind,
     RecoveryClass,
     SpawnRegion,
 )
@@ -461,9 +458,7 @@ def _lower_region(
             name,
         )
 
-    if kind == "branch":
-        _add_operator(_branch(region, has_input), region, acc)
-    elif kind == "merge":
+    if kind == "merge":
         _add_operator(_merge(region, has_input), region, acc)
     elif kind == "spawn":
         spawn = _spawn(region, name_to_op, has_input)
@@ -472,8 +467,6 @@ def _lower_region(
             _publish_spawn(result, spawn, region.name, acc)
     elif kind == "join":
         _add_operator(_join(region, has_input), region, acc)
-    elif kind == "loop":
-        _add_operator(_loop(region, has_input), region, acc)
     elif kind == "call":
         _lower_call(region, name_to_op, acc)
         return
@@ -506,17 +499,6 @@ def _add_operator(
 
 def _inputs(has_input: bool, name: str = "in") -> tuple[Port, ...]:
     return (Port(name=name),) if has_input else ()
-
-
-def _branch(region: ParsedRegion, has_input: bool) -> BranchRegion:
-    ports = _str_list(region.region.get("ports"), region.name)
-    return BranchRegion(
-        operator_id=region.name,
-        source_ref=region.name,
-        inputs=_inputs(has_input),
-        outputs=tuple(Port(name=port) for port in ports),
-        selection=(str(sel) if (sel := region.region.get("selection")) else None),
-    )
 
 
 def _merge(region: ParsedRegion, has_input: bool) -> MergeRegion:
@@ -646,51 +628,6 @@ def _join(region: ParsedRegion, has_input: bool) -> JoinRegion:
         first_k=int(k) if k is not None else None,
         predicate=predicate,
         no_winner_failure=bool(region.region.get("no_winner_failure", False)),
-    )
-
-
-def _loop(region: ParsedRegion, has_input: bool) -> LoopContextRegion:
-    coordinate = str(region.region.get("coordinate", "")).strip()
-    if not coordinate:
-        raise compile_error(
-            "region.loop-no-coordinate",
-            "loop region requires a coordinate",
-            region.name,
-        )
-    carried: list[Port] = []
-    for entry in region.region.get("carried", []) or []:
-        if not isinstance(entry, dict) or not entry.get("name"):
-            raise compile_error(
-                "region.loop-bad-carried",
-                "each carried entry needs a name",
-                region.name,
-            )
-        port_kind = str(entry.get("kind", "value"))
-        model_ref = None
-        if port_kind == PortKind.MODEL_REF.value:
-            ref = entry.get("modelRef") or {}
-            model_ref = ModelRef(
-                architecture=str(ref.get("architecture", entry["name"])),
-                version=str(v) if (v := ref.get("version")) else None,
-            )
-        carried.append(
-            Port(
-                name=str(entry["name"]),
-                kind=(
-                    PortKind(port_kind)
-                    if port_kind in {k.value for k in PortKind}
-                    else PortKind.VALUE
-                ),
-                model_ref=model_ref,
-            )
-        )
-    return LoopContextRegion(
-        operator_id=region.name,
-        source_ref=region.name,
-        inputs=_inputs(has_input, "ingress") + tuple(carried),
-        outputs=(Port(name="egress"), *carried),
-        loop_coordinate=coordinate,
-        carried=tuple(carried),
     )
 
 

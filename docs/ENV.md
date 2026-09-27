@@ -36,7 +36,6 @@ listed here is in `.env.example`.
 | `ENABLE_STAGE_WEIGHT_STICKINESS` | `false` | Pin stages to checkpoint-producing workers |
 | `TASK_NO_WORKER_GRACE_SEC` | `60` | Grace before failing a task no worker can satisfy |
 | `ORCHESTRATOR_MAX_SCOPE_DEPTH` | `64` | Max nested call/spawn/recursion depth for v2 dynamic regions |
-| `ORCHESTRATOR_MAX_LOOP_ITERATIONS` | `1000` | Max loop iterations per v2 `LoopContext` |
 | `ORCHESTRATOR_MAX_ACTIVATIONS` | `10000` | Max dynamic activations per v2 workflow instance |
 | `ORCHESTRATOR_MAX_SPAWNS_PER_TURN` | `32` | Max spawn children admitted in one facade turn group |
 | `ORCHESTRATOR_MAX_SPAWNS_PER_REGION` | `256` | Max spawn children admitted per agent child region |
