@@ -3398,7 +3398,10 @@ class TaskRuntime:
             advance.extend(child_advance)
         advance.extend(engine.seal_spawn(spawn_op))
         self._commit_new_children_locked(
-            workflow_id, engine, new_children, retire=[child_template_id]
+            workflow_id,
+            engine,
+            new_children,
+            retire=engine.template_closure(child_template_id),
         )
         return advance
 

@@ -3328,19 +3328,64 @@ class OrchestrationEngine:
         self._fail_downstream(operator_id, cascade, visited)
 
     def _fail_spawn_template(self, spawn_op: str, cascade: list[str]) -> None:
-        """Fail a failed spawn's child template once no live spawn instantiates it."""
+        """Fail a failed spawn's child template, and the templates nested under it,
+        once no live spawn instantiates them."""
         template = self.child_template_of(spawn_op)
-        if template is None or template in self._wi_by_operator:
+        if template is None:
             return
-        if any(
+        for failed in self.template_closure(template, self._instantiable_by_live):
+            self._publish(failed, PublicationOutcome.DECLARED_FAILURE, None)
+            cascade.append(failed)
+
+    def _instantiable_by_live(self, template: str, dead: list[str]) -> bool:
+        """Whether a spawn that neither failed nor belongs to a dead template can still
+        instantiate ``template``."""
+        return any(
             isinstance(op, SpawnRegion)
             and op.child_template_ref == template
             and op.operator_id not in self._failed_regions
+            and self._region_owner(op.operator_id) not in dead
             for op in self._operators.values()
-        ):
-            return
-        self._publish(template, PublicationOutcome.DECLARED_FAILURE, None)
-        cascade.append(template)
+        )
+
+    def _region_owner(self, spawn_op: str) -> str | None:
+        """The agent declaring ``spawn_op`` as one of its child regions, if any."""
+        return next(
+            (
+                op.operator_id
+                for op in self._operators.values()
+                if isinstance(op, AgentOperator)
+                and any(ref.spawn_ref == spawn_op for ref in op.child_region_refs)
+            ),
+            None,
+        )
+
+    def template_closure(
+        self,
+        template: str,
+        excluded: Callable[[str, list[str]], bool] | None = None,
+    ) -> list[str]:
+        """A child template and, under an agent template, the child templates of every
+        region it declares, however deep; a template ``excluded`` rejects is left out
+        together with what is nested under it."""
+        closure: list[str] = []
+        frontier = [template]
+        while frontier:
+            current = frontier.pop()
+            if (
+                current in closure
+                or current in self._wi_by_operator
+                or (excluded is not None and excluded(current, closure))
+            ):
+                continue
+            closure.append(current)
+            if isinstance(op := self._operators.get(current), AgentOperator):
+                frontier.extend(
+                    nested
+                    for ref in op.child_region_refs
+                    if (nested := self.child_template_of(ref.spawn_ref)) is not None
+                )
+        return closure
 
     def _publish_collection_failure(self, spawn_op: str) -> None:
         for decl in self._bundle.template.result_declarations:
@@ -3600,7 +3645,7 @@ class OrchestrationEngine:
                 CapabilityStatus.SEALED,
                 CapabilityStatus.REVOKED,
             ):
-                sealed.add(template)
+                sealed.update(self.template_closure(template))
         return frozenset(sealed)
 
     def spawn_awaits_children(self, spawn_op: str) -> bool:

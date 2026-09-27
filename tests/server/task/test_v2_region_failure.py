@@ -10,6 +10,7 @@ from server.orchestration import OrchestrationEngine, PublicationOutcome
 from server.orchestration.state import ProgressAxis
 from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime
+from shared.harness.adapter import HarnessResult, HarnessResultKind
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.task.test_v2_orchestration import (
     _TS,
@@ -465,4 +466,114 @@ async def test_a_join_released_by_a_failed_last_child_readies_its_downstream() -
     assert _pop_ready(runtime) == [ids["after"]]
     record_dispatch(runtime, ids["after"], cast(Any, _worker()))
     runtime.mark_succeeded(ids["after"], "wkr-1", {}, _TS)
+    assert runtime.workflow_settlement(workflow_id).settled
+
+
+_NESTED = """
+      - name: a
+        spec: {taskType: echo, data: {type: list, items: [x]}}
+      - name: worker
+        spec:
+          taskType: agent
+          task: research
+          v2:
+            inputs: [facet]
+            authority: {invoke: [model], delegate: [model]}
+            tools: [{name: model}]
+            boundary: [spawn, spawn_seal, yield]
+            child: [{name: sub, authority: {invoke: [model], delegate: []}}]
+          harness: {backend: scripted, version: v1, params: {script: []}}
+      - name: sub
+        spec: {taskType: echo, data: {type: list, items: [k]}}
+      - name: fan
+        dependsOn: [a]
+        region: {kind: spawn, child: worker}
+      - name: collect
+        dependsOn: [fan]
+        region: {kind: join, completion: all_settled}
+      - name: after
+        dependsOn: [collect]
+        spec: {taskType: echo, data: {type: list, items: [z]}}
+"""
+
+
+def test_a_failed_spawn_fails_the_templates_nested_under_its_child() -> None:
+    async def run() -> None:
+        registry = FakeRegistry()
+        registry.submitted_at = _TS
+        runtime = _live_runtime(registry)
+        workflow_id, ids = await _register(runtime, _HEAD + _NESTED)
+        finalizer, redis, _ = _wired(runtime, registry, workflow_id)
+
+        _fail(runtime, ids["a"])
+        _drain(runtime)
+        finalizer.drain()
+
+        _assert_failed_downstream(runtime, ids, "a", "worker", "sub", "after")
+        assert registry.remaining_of(workflow_id) == set()
+        assert f"workflow:{workflow_id}:logs:closed" in redis.keys
+
+    asyncio.run(run())
+
+
+def test_an_empty_spawn_retires_the_templates_nested_under_its_child() -> None:
+    async def run() -> None:
+        registry = FakeRegistry()
+        registry.submitted_at = _TS
+        runtime = _live_runtime(registry)
+        workflow_id, ids = await _register(runtime, _HEAD + _NESTED)
+        finalizer, redis, _ = _wired(runtime, registry, workflow_id)
+        a = ids["a"]
+        record_dispatch(runtime, a, cast(Any, _worker()))
+        runtime.mark_succeeded(a, "wkr-1", _planned(runtime, a, []), _TS)
+        _drain(runtime)
+        finalizer.drain()
+
+        assert registry.remaining_of(workflow_id) == set()
+        assert runtime.workflow_settlement(workflow_id).settled
+        assert f"workflow:{workflow_id}:logs:closed" in redis.keys
+
+    asyncio.run(run())
+
+
+_AGENT_NESTED = """
+      - name: lead
+        spec:
+          taskType: agent
+          task: spawn reviewers
+          v2:
+            authority: {invoke: [model], delegate: [model]}
+            tools: [{name: model}]
+            boundary: [spawn, spawn_seal, yield]
+            child: [{name: reviewer, authority: {invoke: [model], delegate: [model]}}]
+          harness: {backend: scripted, version: v1, params: {script: []}}
+      - name: reviewer
+        spec:
+          taskType: agent
+          task: review
+          v2:
+            authority: {invoke: [model], delegate: [model]}
+            tools: [{name: model}]
+            boundary: [spawn, spawn_seal, yield]
+            child: [{name: deep, authority: {invoke: [model], delegate: []}}]
+          harness: {backend: scripted, version: v1, params: {script: []}}
+      - name: deep
+        spec: {taskType: echo, data: {type: list, items: [k]}}
+"""
+
+
+@pytest.mark.anyio
+async def test_a_sealed_agent_region_retires_the_templates_nested_under_it() -> None:
+    registry = FakeRegistry()
+    runtime = _live_runtime(registry)
+    workflow_id, ids = await _register(runtime, _HEAD + _AGENT_NESTED)
+    lead = ids["lead"]
+    assert _pop_ready(runtime) == [lead]
+    record_dispatch(runtime, lead, cast(Any, _worker()))
+    completion = HarnessResult(kind=HarnessResultKind.COMPLETION)
+    runtime.mark_succeeded(
+        lead, "wkr-1", {"agent_episode": completion.model_dump(mode="json")}, _TS
+    )
+
+    assert registry.remaining_of(workflow_id) == set()
     assert runtime.workflow_settlement(workflow_id).settled
