@@ -3421,7 +3421,9 @@ class OrchestrationEngine:
         self._settle_region_failed(operator_id)
         if kind is OperatorKind.SPAWN:
             self._fail_spawn_template(operator_id, cascade)
-            self._publish_collection_failure(operator_id)
+            self._publish_keyed(
+                operator_id, None, PublicationOutcome.DECLARED_FAILURE, None
+            )
             if (join_op := self._join_for_spawn(operator_id)) is not None:
                 self._fail_region(join_op, cascade, visited)
         self._fail_downstream(operator_id, cascade, visited)
@@ -3491,22 +3493,6 @@ class OrchestrationEngine:
                 )
         return closure
 
-    def _publish_collection_failure(self, spawn_op: str) -> None:
-        for decl in self._bundle.template.result_declarations:
-            if (
-                decl.source_ref == spawn_op
-                and decl.cardinality is CardinalityKind.KEYED_COLLECTION
-            ):
-                self._write_publication(
-                    ResultSlot(
-                        instance_id=self._instance.instance_id,
-                        output_id=decl.output_id,
-                        source_operator_id=spawn_op,
-                    ),
-                    PublicationOutcome.DECLARED_FAILURE,
-                    None,
-                )
-
     def _publish(
         self, operator_id: str, outcome: PublicationOutcome, value_ref: ValueRef | None
     ) -> None:
@@ -3516,10 +3502,12 @@ class OrchestrationEngine:
     def _publish_keyed(
         self,
         spawn_op: str,
-        activation: Activation,
+        activation: Activation | None,
         outcome: PublicationOutcome,
         value_ref: ValueRef | None,
     ) -> None:
+        """Publish a spawn child's member of each collection the spawn declares, or,
+        with no child, the collection's one member."""
         for decl in self._bundle.template.result_declarations:
             if (
                 decl.source_ref != spawn_op
@@ -3531,8 +3519,8 @@ class OrchestrationEngine:
                     instance_id=self._instance.instance_id,
                     output_id=decl.output_id,
                     source_operator_id=spawn_op,
-                    scope_id=activation.scope_id,
-                    logical_key=str(activation.child_index),
+                    scope_id=activation.scope_id if activation else None,
+                    logical_key=str(activation.child_index) if activation else None,
                 ),
                 outcome,
                 value_ref,
