@@ -450,7 +450,7 @@ class OrchestrationEngine:
         # operator, so a record could not attribute a release to the right level.
         self._released_scopes: set[str] = set(snapshot.released_scopes)
         # Control operators settled as a declared failure. A failed input never
-        # delivers, so each stays unfired, and a late record never fires it.
+        # delivers, so none fires, and a late record from another input never does.
         self._failed_regions: set[str] = set(snapshot.failed_regions)
         # A spawn-site denial names no work item; an agent's denied boundary names one
         # and never refuses a later spawn.

@@ -1092,9 +1092,9 @@ class TaskRuntime:
     ) -> None:
         """Fail and persist what each failed task left standing downstream of it.
 
-        A ledger written before a failure crossed control regions holds a failure
-        whose downstream never settled; re-walking every failure settles it, and a
-        ledger whose downstream already failed yields nothing.
+        Every failure is walked again, so a stored ledger holding a failure whose
+        downstream never settled fails that downstream, and one whose downstream
+        already failed yields nothing.
         """
         healed: list[str] = []
         for persisted in tasks:
@@ -1322,7 +1322,7 @@ class TaskRuntime:
         for workflow_id in dict.fromkeys(workflow_ids + held.workflow_ids):
             self._save_ledger_locked(workflow_id)
             self._reclaim_vault_if_settled_locked(workflow_id)
-        # The ledgers are durable now, so what their terminations hold may release.
+        # With the ledgers durable, what their terminations hold may release.
         self._pending_terminations += held.terminations
         held.terminations = []
 

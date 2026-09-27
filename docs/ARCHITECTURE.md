@@ -479,7 +479,8 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   success, and the success binds that reference once, at the commit that settles the
   task, so a retry, relocation, or duplicate success converges on the result already
   bound. A v2 task binds it into the ledger — its induced output slot, or for a spawned
-  child the value its work item settled with — and a v1 task onto its record. Every result the control plane reads — the result, bundle, and output
+  child the value its work item settled with — and a v1 task onto its record. Every
+  result the control plane reads — the result, bundle, and output
   routes, stage references, conditions, fan-out cardinality, and an agent's input budget
   — resolves that binding and reads the verified envelope from the store; the results
   directory keeps only a task's logs and artifacts. A task that outlives its store access
