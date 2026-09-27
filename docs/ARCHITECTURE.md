@@ -319,16 +319,19 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
 - **External-model egress.** A managed external (`openai`) model turn egresses on the
   Agent's own worker through a worker-local Responses facade, bound to loopback and
   authenticated per episode so one episode drives only its own egress. Codex's model
-  provider targets the facade: the facade translates each turn between the Responses wire
-  and Chat Completions, injects the agent's pinned fabric facades, and runs the held
-  egress — it proposes the request digest to control, awaits the one-use
+  provider targets the facade: the facade translates each turn between the Responses
+  wire and Chat Completions, injects the agent's pinned fabric facades, and runs the
+  held egress — it proposes the request digest to control, awaits the one-use
   `MediatedOperationPermit` over the worker's attachment, and egresses synchronously
   through the `MediatedEgressSidecar`, returning the model's whole message inline. The
-  per-workflow model credential rides the permit to the worker; a worker without one uses
-  its deployment-global key. A fabric facade the model calls on the turn is captured into
-  a `FacadeTurnGroup` reported to control, which records the group so the episode's next
-  completion routes its members and the turn returns Codex a clean summary. The
-  credential is kept out of the ledger, the control stores, and the logs.
+  per-workflow model credential rides the permit to the worker. A binding without one
+  gets the worker's deployment key only where control grants it on the permit, for the
+  deployment's default model URL, and otherwise calls without a credential; a pinned
+  credential the vault no longer holds fails the call. A fabric facade the model calls
+  on the turn is captured into a `FacadeTurnGroup` reported to control, which records
+  the group so the episode's next completion routes its members and the turn returns
+  Codex a clean summary. The credential is kept out of the ledger, the control stores,
+  and the logs.
 - **Resident-capacity control.** A `resident` model binding is served from reusable
   physical capacity rather than an external endpoint. Two control-plane actors — an
   Admission controller and a Lifecycle & scale manager — over durable control-state

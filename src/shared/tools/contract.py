@@ -8,8 +8,9 @@ shape and provider egress — and they mint no identity and hold no credential.
 """
 
 from enum import StrEnum
+from typing import Self
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from shared.outcome import OutcomeManifest
 
@@ -57,7 +58,9 @@ class MediatedOperationPermit(BaseModel):
     ``credential`` is a per-call provider secret the control plane resolves for a
     workflow that pins its own model key; it rides only this one-use, audience-bound
     delivery down to the egressing worker, never travels up in a proposal, and is never
-    persisted or logged. A worker without one falls back to its local environment key.
+    persisted or logged. ``deployment_credential`` authorizes the worker to use its own
+    deployment key instead, which control grants only for the deployment's own model
+    endpoint. With neither, the operation egresses without a credential.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -80,7 +83,14 @@ class MediatedOperationPermit(BaseModel):
     timeout_sec: float
     result_char_cap: int
     credential: str | None = Field(default=None, repr=False)
+    deployment_credential: bool = False
     traceparent: str | None = Field(default=None, exclude_if=lambda v: v is None)
+
+    @model_validator(mode="after")
+    def _one_credential_source(self) -> Self:
+        if self.credential is not None and self.deployment_credential:
+            raise ValueError("a permit carries a credential or grants the deployment's")
+        return self
 
 
 class ToolOutcomeStatus(StrEnum):

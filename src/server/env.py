@@ -109,8 +109,8 @@ WEB_SEARCH_PROVIDER: str = (
 )
 WEB_SEARCH_API_KEY: str = os.getenv("WEB_SEARCH_API_KEY", "")
 
-# The deployment-global credential a worker uses to egress an external managed-model
-# boundary, read only in the worker that performs the egress.
+# The deployment credential a worker uses to egress an external managed-model boundary
+# to the default gateway URL, read only in the worker that performs the egress.
 AGENT_MODEL_API_KEY: str = os.getenv("AGENT_MODEL_API_KEY", "")
 
 # The bound a held model turn's worker waits for its one-use egress permit.

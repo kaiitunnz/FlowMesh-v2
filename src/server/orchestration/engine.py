@@ -1359,6 +1359,7 @@ class OrchestrationEngine:
         result_char_cap: int,
         deadline_epoch: float,
         credential: str | None = None,
+        deployment_credential: bool = False,
     ) -> MediatedOperationPermit | None:
         """A one-use permit for a recorded worker-originated boundary, or None.
 
@@ -1366,7 +1367,8 @@ class OrchestrationEngine:
         idempotency key, request digest, interface, subject, and the policy epoch the
         boundary was admitted under. The caller supplies the audience (the agent's
         worker and its generation), the policy-bounded budget the operation runs in, and
-        an optional per-call ``credential`` resolved for a workflow's pinned model key.
+        the provider credential authority: an optional per-call ``credential`` resolved
+        for a workflow's pinned model key, or ``deployment_credential``.
         Returns None for a boundary that carries no digest — i.e. one the worker did not
         originate — so a re-mint never fabricates authorization the boundary lacks.
         """
@@ -1397,6 +1399,7 @@ class OrchestrationEngine:
             timeout_sec=timeout_sec,
             result_char_cap=result_char_cap,
             credential=credential,
+            deployment_credential=deployment_credential,
         )
 
     def authorize_model_turn(
@@ -1411,6 +1414,7 @@ class OrchestrationEngine:
         result_char_cap: int,
         deadline_epoch: float,
         credential: str | None = None,
+        deployment_credential: bool = False,
     ) -> MediatedOperationPermit | None:
         """A one-use permit for a held agent's in-turn model egress, or None on denial.
 
@@ -1449,6 +1453,7 @@ class OrchestrationEngine:
             timeout_sec=timeout_sec,
             result_char_cap=result_char_cap,
             credential=credential,
+            deployment_credential=deployment_credential,
         )
 
     def boundary_settleable(self, task_id: str, call_correlation: str) -> bool:

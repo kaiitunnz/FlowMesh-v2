@@ -11,9 +11,10 @@ import logging
 from types import SimpleNamespace
 from typing import Any, cast
 
+import pytest
 from pydantic import SecretStr
 
-from server.config import OrchestrationConfig
+from server.config import AgentBindingConfig, OrchestrationConfig
 from server.orchestration.state import WorkItemStatus
 from server.orchestration.tool_dispatch import MODEL_INTERFACE, SEARCH_INTERFACE
 from server.task.models import TaskStatus
@@ -27,6 +28,7 @@ from shared.harness import (
 )
 from shared.private_state import OwnerFence
 from shared.schemas.event import parse_event
+from shared.tasks.specs import ModelBindingMode
 from shared.tools.contract import (
     AgentModelTurnProposal,
     MediatedOperationOutcome,
@@ -679,5 +681,138 @@ def test_control_records_the_scope_the_boundary_finalizes_under() -> None:
         permits = _permit_frames(runtime)
         assert len(permits) == 1
         assert assigned == [(permits[0]["idempotency_key"], "org")]
+
+    asyncio.run(run())
+
+
+_DEFAULT_URL = "http://gateway/v1"
+
+
+def _default_url_runtime(vault: Any | None = None) -> TaskRuntime:
+    return TaskRuntime(
+        cast(Any, FakeRegistry()),
+        cast(Any, _WorkerStub()),
+        OrchestrationConfig(
+            agent_binding=AgentBindingConfig(
+                default_mode=ModelBindingMode.OPENAI,
+                default_url=_DEFAULT_URL,
+                default_model="qwen",
+            )
+        ),
+        make_result_reader(),
+        logging.getLogger("wo-test"),
+        secret_vault=cast(Any, vault or _NoopSecretVault()),
+    )
+
+
+def _model_wf(binding: str) -> str:
+    return f"""
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {{name: model-agent}}
+spec:
+  graph:
+    nodes:
+      - name: writer
+        spec:
+          taskType: agent
+          v2:
+            authority: {{invoke: [model], delegate: []}}
+            tools: [{{name: model}}]
+          harness: {{backend: scripted, version: v1, params: {{script: []}}}}
+          {binding}
+"""
+
+
+@pytest.mark.parametrize(
+    ("binding", "granted"),
+    [
+        ("", True),
+        (f'model_binding: {{mode: openai, url: "{_DEFAULT_URL}/", model: q}}', True),
+        ('model_binding: {mode: openai, url: "http://author/v1", model: q}', False),
+    ],
+)
+def test_only_the_deployment_model_url_is_granted_the_deployment_key(
+    binding: str, granted: bool
+) -> None:
+    """The deployment key is granted on the permit only for the current default url."""
+
+    async def run() -> None:
+        runtime = _default_url_runtime()
+        _, ids = await _register(runtime, _model_wf(binding))
+        writer = ids["writer"]
+
+        _dispatch_agent(runtime, writer, script=_MODEL_SCRIPT)
+        _hold_dispatch(runtime, writer)
+        runtime.authorize_model_turn(
+            AgentModelTurnProposal(
+                agent_task_id=writer, call_correlation="t0", request_digest="d"
+            )
+        )
+
+        permits = [
+            MediatedOperationPermit.model_validate(p) for p in _permit_frames(runtime)
+        ]
+        assert len(permits) == 2
+        for permit in permits:
+            assert permit.credential is None
+            assert permit.deployment_credential is granted
+
+    asyncio.run(run())
+
+
+def test_an_unset_default_url_never_grants_the_deployment_key() -> None:
+    async def run() -> None:
+        runtime = _runtime()
+        _, ids = await _register(runtime, _MODEL_WF)
+        _dispatch_agent(runtime, ids["writer"], script=_MODEL_SCRIPT)
+        permit = MediatedOperationPermit.model_validate(_permit_frames(runtime)[0])
+        assert permit.deployment_credential is False
+
+    asyncio.run(run())
+
+
+_GONE_KEY_WF = _model_wf(
+    f'model_binding: {{mode: openai, url: "{_DEFAULT_URL}", model: q, '
+    "api_key: sk-byok-gone}"
+)
+
+
+def test_a_gone_vaulted_key_fails_the_boundary_without_a_permit() -> None:
+    """A pinned key the vault no longer holds fails the boundary, even on the default
+    url: the deployment key is never substituted and nothing egresses."""
+
+    async def run() -> None:
+        runtime = _default_url_runtime()
+        _, ids = await _register(runtime, _GONE_KEY_WF)
+        writer = ids["writer"]
+
+        _dispatch_agent(runtime, writer, script=_MODEL_SCRIPT)
+
+        assert not _permit_frames(runtime)
+        assert not runtime._pending_ops
+        record = runtime._tasks[writer]
+        assert record.status == TaskStatus.FAILED
+        assert record.error == "agent boundary failed: model credential unavailable"
+
+    asyncio.run(run())
+
+
+def test_a_gone_vaulted_key_denies_the_held_model_turn() -> None:
+    async def run() -> None:
+        runtime = _default_url_runtime()
+        _, ids = await _register(runtime, _GONE_KEY_WF)
+        writer = ids["writer"]
+
+        _hold_dispatch(runtime, writer)
+        runtime.authorize_model_turn(
+            AgentModelTurnProposal(
+                agent_task_id=writer, call_correlation="t0", request_digest="d"
+            )
+        )
+
+        assert not _permit_frames(runtime)
+        (deny,) = _deny_frames(runtime)
+        assert deny["reason"] == "model credential unavailable"
 
     asyncio.run(run())

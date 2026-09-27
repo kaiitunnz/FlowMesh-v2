@@ -25,7 +25,8 @@ class ExternalModelSidecar:
     """The surface that performs external-model egress under an envelope.
 
     The credential is supplied per call — the workflow's own pinned key carried on the
-    permit, or the worker's deployment-global fallback — never held on the surface.
+    permit, or the worker's deployment key where the permit grants it — never held on
+    the surface.
     ``execute`` renders a text outcome for a deferred boundary; ``complete`` returns the
     model's whole message for a held turn that must surface its tool calls.
     """

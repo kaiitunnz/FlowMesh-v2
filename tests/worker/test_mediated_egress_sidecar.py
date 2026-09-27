@@ -53,10 +53,10 @@ class _StubEgress:
         )
 
     def execute(
-        self, envelope: Any, request: Any, credential: str | None
+        self, envelope: Any, request: Any, permit: MediatedOperationPermit
     ) -> ToolOutcome:
         self.calls += 1
-        self.credential = credential
+        self.credential = permit.credential
         return self._outcome
 
 
@@ -230,14 +230,19 @@ class _StubModelEgress:
     def digest(self, request: Any) -> str:
         return model_request_digest(request.interface, request.url, request.body)
 
-    def execute(self, envelope: Any, request: Any, credential: str | None) -> Any:
+    def execute(
+        self, envelope: Any, request: Any, permit: MediatedOperationPermit
+    ) -> Any:
         raise AssertionError("a held model turn egresses through complete, not execute")
 
     def complete(
-        self, envelope: ToolOperationEnvelope, request: Any, credential: str | None
+        self,
+        envelope: ToolOperationEnvelope,
+        request: Any,
+        permit: MediatedOperationPermit,
     ) -> ModelCompletion:
         self.calls += 1
-        self.credential = credential
+        self.credential = permit.credential
         return ModelCompletion(content="a reply")
 
 

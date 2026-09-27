@@ -6,7 +6,7 @@ from collections import defaultdict, deque
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from itertools import chain
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 
 from opentelemetry.trace import Tracer
 from pydantic import ValidationError
@@ -486,6 +486,22 @@ def _binding_defaults(
         sandbox_enabled=sandbox_enabled,
         sandbox_egress_enabled=sandbox_enabled and sandbox_egress_enabled,
     )
+
+
+class OpCredential(NamedTuple):
+    """The provider credential authority one mediated-operation permit carries."""
+
+    credential: str | None = None
+    deployment_credential: bool = False
+
+
+_CREDENTIAL_UNAVAILABLE = "model credential unavailable"
+
+
+def _is_default_url(url: str | None, default_url: str | None) -> bool:
+    if not url or not default_url:
+        return False
+    return url.rstrip("/") == default_url.rstrip("/")
 
 
 # Extra lifetime a worker-originated operation permit gets beyond the request timeout,
@@ -1809,15 +1825,14 @@ class TaskRuntime:
                 # credit hook so a late success cannot win the claim's terminal reason.
                 return False
             if error is not None:
-                advance = engine.on_failed(
-                    task_id,
-                    f"agent-model gateway upstream failed: {error}",
-                    retryable=False,
-                )
+                reason = f"agent boundary failed: {error}"
+                advance = engine.on_failed(task_id, reason, retryable=False)
                 invocation_id = engine.terminalize_boundary_invocation(
                     task_id, call_correlation
                 )
-                changed = self._apply_advance_locked(record.workflow_id, advance)
+                changed = self._apply_advance_locked(
+                    record.workflow_id, advance, {task_id: reason}
+                )
                 self._save_ledger_locked(record.workflow_id)
                 # A fenced failure terminal releases the resident credit just as a
                 # completion does; nothing else may release an accepted credit.
@@ -1951,20 +1966,32 @@ class TaskRuntime:
         cfg = self._web_search
         return cfg.max_results, cfg.timeout_sec, cfg.result_char_cap
 
-    def _resolve_op_credential(self, agent: TaskRecord, interface: str) -> str | None:
-        """The per-call provider credential a model permit carries, or None.
+    def _resolve_op_credential(
+        self, agent: TaskRecord, interface: str
+    ) -> OpCredential | None:
+        """The provider credential authority a permit carries, or None when it is gone.
 
-        A model binding that pins its own key resolves it from the vault here so it
-        rides the one-use permit down to the egressing worker; a worker without one uses
-        its local environment key. Other interfaces read their provider key locally.
+        A model binding that pins its own key resolves it from the vault so it rides the
+        one-use permit down to the egressing worker; a pinned key the vault no longer
+        holds denies the operation. A binding without one may use the worker's
+        deployment key only when its url is the deployment's current default model url.
+        Other interfaces read their provider key locally.
         """
         if interface != MODEL_INTERFACE:
-            return None
+            return OpCredential()
         binding = self.resolve_model_binding(agent.task_id)
-        if binding is None or binding.secret_ref is None:
-            return None
-        secret = self._secret_vault.resolve(agent.workflow_id, binding.secret_ref)
-        return secret.get_secret_value() if secret is not None else None
+        if binding is None:
+            return OpCredential()
+        if binding.secret_ref is not None:
+            secret = self._secret_vault.resolve(agent.workflow_id, binding.secret_ref)
+            if secret is None:
+                return None
+            return OpCredential(credential=secret.get_secret_value())
+        return OpCredential(
+            deployment_credential=_is_default_url(
+                binding.url, self._agent_binding_defaults.default_url
+            )
+        )
 
     def _assign_content_scope(
         self, permit: MediatedOperationPermit, agent: TaskRecord
@@ -2024,6 +2051,12 @@ class TaskRuntime:
                 env.task_id, env.call_correlation, error="origin worker unavailable"
             )
             return
+        op_credential = self._resolve_op_credential(agent, env.interface)
+        if op_credential is None:
+            self.settle_episode_invocation(
+                env.task_id, env.call_correlation, error=_CREDENTIAL_UNAVAILABLE
+            )
+            return
         max_results, timeout_sec, result_char_cap = self._op_permit_budget(
             env.interface
         )
@@ -2037,7 +2070,8 @@ class TaskRuntime:
             timeout_sec=timeout_sec,
             result_char_cap=result_char_cap,
             deadline_epoch=deadline,
-            credential=self._resolve_op_credential(agent, env.interface),
+            credential=op_credential.credential,
+            deployment_credential=op_credential.deployment_credential,
         )
         if permit is None:
             self.settle_episode_invocation(
@@ -2089,8 +2123,9 @@ class TaskRuntime:
                 return
             binding = self.resolve_model_binding(proposal.agent_task_id)
             external = binding is not None and binding.mode is ModelBindingMode.OPENAI
+            op_credential = self._resolve_op_credential(agent, MODEL_INTERFACE)
             permit = None
-            if external:
+            if external and op_credential is not None:
                 _, timeout_sec, result_char_cap = self._op_permit_budget(
                     MODEL_INTERFACE
                 )
@@ -2104,7 +2139,8 @@ class TaskRuntime:
                     timeout_sec=timeout_sec,
                     result_char_cap=result_char_cap,
                     deadline_epoch=deadline,
-                    credential=self._resolve_op_credential(agent, MODEL_INTERFACE),
+                    credential=op_credential.credential,
+                    deployment_credential=op_credential.deployment_credential,
                 )
             if permit is None:
                 self._worker_registry.publish_mediated_op(
@@ -2115,7 +2151,11 @@ class TaskRuntime:
                         payload={
                             "agent_task_id": proposal.agent_task_id,
                             "call_correlation": proposal.call_correlation,
-                            "reason": "model turn egress denied",
+                            "reason": (
+                                "model turn egress denied"
+                                if op_credential is not None
+                                else _CREDENTIAL_UNAVAILABLE
+                            ),
                         },
                     ),
                 )
@@ -3164,7 +3204,12 @@ class TaskRuntime:
 
         self._write_locked(save, lambda held: held.workflow_ids.append(workflow_id))
 
-    def _apply_advance_locked(self, workflow_id: str, advance: Advance) -> bool:
+    def _apply_advance_locked(
+        self,
+        workflow_id: str,
+        advance: Advance,
+        reasons: dict[str, str] | None = None,
+    ) -> bool:
         # A ready/settle advance never carries a retry; the failure path drives those.
         assert not advance.retry, "retry is applied by the failure path"
         engine = self._engines.get(workflow_id)
@@ -3177,8 +3222,10 @@ class TaskRuntime:
                 changed = True
         for task_id in advance.failed:
             reason = (
-                engine and engine.failure_reason(task_id)
-            ) or "declared-failure obligation"
+                (reasons or {}).get(task_id)
+                or (engine and engine.failure_reason(task_id))
+                or "declared-failure obligation"
+            )
             self._fail_v2_records_locked([task_id], reason, persist=True)
             changed = True
         return changed

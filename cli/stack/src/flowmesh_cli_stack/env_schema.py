@@ -447,7 +447,7 @@ STACK_ENV_SCHEMA = EnvSchema(
                 EnvVar(
                     "AGENT_MODEL_API_KEY",
                     "",
-                    description="Worker credential for external managed-model egress.",
+                    description="Worker credential for the default model gateway URL.",
                 ),
                 EnvVar(
                     "AGENT_MODEL_EGRESS_TIMEOUT_SEC",

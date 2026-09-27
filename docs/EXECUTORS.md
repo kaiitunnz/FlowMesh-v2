@@ -231,8 +231,10 @@ For each turn the facade translates the Responses request into a Chat Completion
 injects the agent's pinned fabric facades, and runs the held egress: it proposes the
 request digest to control, awaits the one-use `MediatedOperationPermit` over the worker's
 attachment, and egresses synchronously through the `MediatedEgressSidecar`, returning the
-model's whole message inline. The per-workflow model credential rides the permit to the worker; a worker
-without one uses its deployment-global `AGENT_MODEL_API_KEY`. The `Authorization` header is
+model's whole message inline. The per-workflow model credential rides the permit to the worker. A
+binding without one uses the worker's `AGENT_MODEL_API_KEY` only when control grants it for the
+deployment's `AGENT_MODEL_GATEWAY_URL`, and otherwise calls without a credential; a pinned
+credential the vault no longer holds fails the turn. The `Authorization` header is
 redacted in the facade's own logs, and the credential is kept out of the ledger, the
 control stores, and the logs. A denial, a permit that never arrives within
 `AGENT_MODEL_EGRESS_TIMEOUT_SEC`, or a fence rejection is a terminal turn failure.
