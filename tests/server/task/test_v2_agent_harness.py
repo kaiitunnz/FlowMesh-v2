@@ -11,6 +11,8 @@ agent's finite declared child regions, creating one child attenuated from that r
 entry, sealed per region, with recursive agent children reusing the declared region.
 """
 
+from typing import Any
+
 import pytest
 
 from server.orchestration import (
@@ -875,3 +877,73 @@ def test_terminal_failure_settles_an_open_region() -> None:
     cap = eng.capability(eng.region_scope_for(act, "worker"), ProgressAxis.CHILD_INIT)
     assert cap is not None and cap.closed
     assert eng.region_closed("worker:spawn:join")
+
+
+def _spawn_in(eng: OrchestrationEngine, task: str, call: str, role: str) -> str:
+    return eng.route_boundary_event(
+        task,
+        BoundaryEvent(
+            kind=BoundaryEventKind.SPAWN, call_correlation=call, child_region_ref=role
+        ),
+    ).ready[0]
+
+
+def _numbered_by_scope_order(eng: OrchestrationEngine) -> bool:
+    """Each child's index counts every activation its scope held before it."""
+    seen: dict[str, int] = {}
+    for act in eng.to_snapshot().activations:
+        if act.kind == "child" and act.child_index != seen.get(act.scope_id, 0):
+            return False
+        seen[act.scope_id] = seen.get(act.scope_id, 0) + 1
+    return True
+
+
+def test_a_child_index_counts_every_activation_in_its_scope_across_a_restart() -> None:
+    eng = _engine(_recursive_agent_bundle(), budget=ScopeBudget(max_scope_depth=8))
+    _dispatch_agent(eng)
+    lvl1 = _spawn_in(eng, "A", "c0", "worker")
+    eng.on_dispatched(lvl1, "w1")
+    # The nested spawn mints lvl1's region opener inside lvl1's own scope.
+    _spawn_in(eng, lvl1, "c0", "self")
+    second = _spawn_in(eng, "A", "c1", "worker")
+
+    activations = {a.activation_id: a for a in eng.to_snapshot().activations}
+    assert activations[second].child_index == 2
+    assert _numbered_by_scope_order(eng)
+
+    restored = OrchestrationEngine(eng.to_snapshot(), eng._bundle)  # type: ignore[attr-defined]
+    third = _spawn_in(restored, "A", "c2", "worker")
+    activations = {a.activation_id: a for a in restored.to_snapshot().activations}
+    assert activations[third].child_index == 3
+    assert _numbered_by_scope_order(restored)
+
+
+def test_the_activation_budget_holds_across_a_restart() -> None:
+    eng = _engine(
+        _spawning_agent(child=_leaf("child")), budget=ScopeBudget(max_activations=2)
+    )
+    _dispatch_agent(eng)
+    _spawn_in(eng, "A", "c0", "worker")
+    restored = OrchestrationEngine(
+        eng.to_snapshot(), eng._bundle, budget=ScopeBudget(max_activations=2)  # type: ignore[attr-defined]
+    )
+    _spawn_in(restored, "A", "c1", "worker")
+    with pytest.raises(RegionError):
+        _spawn_in(restored, "A", "c2", "worker")
+
+
+class _ScanCountingDict(dict[str, Any]):
+    scans = 0
+
+    def values(self) -> Any:
+        type(self).scans += 1
+        return super().values()
+
+
+def test_spawning_a_child_never_rescans_every_activation() -> None:
+    eng = _engine(_spawning_agent(child=_leaf("child")))
+    _dispatch_agent(eng)
+    eng._activations = _ScanCountingDict(eng._activations)  # type: ignore[attr-defined]
+    for i in range(8):
+        _spawn_in(eng, "A", f"c{i}", "worker")
+    assert _ScanCountingDict.scans == 0

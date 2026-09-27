@@ -17,6 +17,7 @@ physical decision that never changes what the engine considers ready.
 import contextlib
 import functools
 import logging
+from collections import Counter
 from collections.abc import Callable, Iterable, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
@@ -302,7 +303,14 @@ class OrchestrationEngine:
 
         self._scopes = {s.scope_id: s for s in snapshot.scopes}
         self._scopes.setdefault(self._root_scope.scope_id, self._root_scope)
-        self._activations = {a.activation_id: a for a in snapshot.activations}
+        self._activations: dict[str, Activation] = {}
+        # Per-scope and dynamic activation counts, kept as activations are added so a
+        # fan-out numbers and budgets each child without rescanning every activation.
+        self._scope_population: Counter[str] = Counter()
+        self._scope_children: Counter[str] = Counter()
+        self._dynamic_activations = 0
+        for activation in snapshot.activations:
+            self._add_activation(activation)
         self._work_items = {w.work_item_id: w for w in snapshot.work_items}
         self._continuations = {c.work_item_id: c for c in snapshot.continuations}
         self._records = list(snapshot.records)
@@ -1140,11 +1148,7 @@ class OrchestrationEngine:
         opener = self._region_openers.get((agent_activation, region_op))
         if opener is None or (scope_id := self._scope_id_for(opener)) is None:
             return 0
-        return sum(
-            1
-            for a in self._activations.values()
-            if a.scope_id == scope_id and a.kind == "child"
-        )
+        return self._scope_children[scope_id]
 
     def _group_members(self, activation_id: str, group_id: str) -> list[BoundaryEvent]:
         members = [
@@ -1718,7 +1722,7 @@ class OrchestrationEngine:
             kind="region",
             parent_activation_id=agent_activation,
         )
-        self._activations[opener_act.activation_id] = opener_act
+        self._add_activation(opener_act)
         self._region_openers[key] = opener_act.activation_id
         self._open_child_init_scope(
             opener_act.activation_id,
@@ -2171,7 +2175,7 @@ class OrchestrationEngine:
         self._charge_activation()
         if body_opens_scope:
             self._check_scope_depth(scope_id)
-        index = sum(1 for a in self._activations.values() if a.scope_id == scope_id)
+        index = self._scope_population[scope_id]
         activation = Activation(
             activation_id=new_activation_id(),
             instance_id=self._instance.instance_id,
@@ -2180,7 +2184,7 @@ class OrchestrationEngine:
             kind="child",
             child_index=index,
         )
-        self._activations[activation.activation_id] = activation
+        self._add_activation(activation)
         effect, recovery = _effect_recovery(body_op)
         child_wi = WorkItem(
             work_item_id=new_work_item_id(),
@@ -2387,7 +2391,7 @@ class OrchestrationEngine:
             kind="iteration",
             loop_time=next_time,
         )
-        self._activations[activation.activation_id] = activation
+        self._add_activation(activation)
         self._records.append(
             Record(
                 operator_id=loop_op,
@@ -3039,11 +3043,16 @@ class OrchestrationEngine:
     def _frontier_closed(self, scope_id: str) -> None:
         self._emit("frontier_closed", detail={"scope": scope_id})
 
+    def _add_activation(self, activation: Activation) -> None:
+        self._activations[activation.activation_id] = activation
+        self._scope_population[activation.scope_id] += 1
+        if activation.kind == "child":
+            self._scope_children[activation.scope_id] += 1
+        if activation.kind in ("child", "iteration"):
+            self._dynamic_activations += 1
+
     def _charge_activation(self) -> None:
-        dynamic = sum(
-            1 for a in self._activations.values() if a.kind in ("child", "iteration")
-        )
-        if dynamic >= self._budget.max_activations:
+        if self._dynamic_activations >= self._budget.max_activations:
             self._exhaust_budget("activations", self._budget.max_activations)
 
     def _exhaust_budget(self, budget: str, limit: int) -> None:
