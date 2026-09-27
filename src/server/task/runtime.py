@@ -99,6 +99,7 @@ from ..orchestration import (
     ScopeBudget,
     ValueRef,
     WorkItemStatus,
+    dependency_failed,
 )
 from ..orchestration.episode import BoundaryEvent
 from ..orchestration.harness import to_boundary_event
@@ -401,10 +402,6 @@ def _membership(record: TaskRecord) -> str:
     if record.status == TaskStatus.CANCELLED and record.residual_cancel:
         return TaskStatus.DONE
     return record.status
-
-
-def _dependency_failed(task_id: str) -> str:
-    return f"Dependency {task_id} failed"
 
 
 def _failed_task_can_retry(record: TaskRecord, retryable: bool | None) -> bool:
@@ -1113,20 +1110,16 @@ class TaskRuntime:
     def _reconcile_failures_locked(
         self, engine: OrchestrationEngine, tasks: list[PersistedTask]
     ) -> None:
-        """Fail and persist what each failed task left standing downstream of it.
+        """Fail what each failed task left standing downstream of it.
 
         Every failure is walked again, so a stored ledger holding a failure whose
-        downstream never settled fails that downstream, and one whose downstream
-        already failed yields nothing.
+        downstream never settled fails that downstream in the ledger, and one whose
+        downstream already failed yields nothing. The next ledger write persists the
+        tasks it failed.
         """
-        healed: list[str] = []
         for persisted in tasks:
-            task_id = persisted.record.task_id
             if persisted.record.status == TaskStatus.FAILED:
-                cascade = engine.reconcile_failure(task_id)
-                healed += [t for t, _ in self._fail_v2_cascade_locked(task_id, cascade)]
-        if healed:
-            self._commit_locked(*healed)
+                engine.reconcile_failure(persisted.record.task_id)
 
     def _reconcile_residual_cancels_locked(
         self, engine: OrchestrationEngine, tasks: list[PersistedTask]
@@ -2738,6 +2731,7 @@ class TaskRuntime:
         which the workflow reads as complete.
         """
         if child_task_ids or retire:
+            self._persist_declared_failures_locked(engine)
             self._write_locked(
                 lambda: self._workflow_registry.commit_dynamic_tasks(
                     workflow_id,
@@ -3333,6 +3327,8 @@ class TaskRuntime:
         release once the save succeeds. A workflow with no ledger has its terminal in
         its task records, committed before."""
         engine = self._engines.get(workflow_id)
+        if engine is not None:
+            self._persist_declared_failures_locked(engine)
 
         def save() -> None:
             if engine is not None:
@@ -3347,6 +3343,19 @@ class TaskRuntime:
         if engine is None and workflow_id not in self._undurable_terminations:
             return
         self._write_locked(save, lambda held: held.workflow_ids.append(workflow_id))
+
+    def _persist_declared_failures_locked(self, engine: OrchestrationEngine) -> None:
+        """Fail and persist each task the engine settled as a declared failure whose
+        record has not settled, ahead of a ledger write that reflects it."""
+        failed: list[str] = []
+        for task_id, reason in engine.declared_failures().items():
+            record = self._tasks.get(task_id)
+            if record is None or record.status in SETTLING_TASK_STATUSES:
+                continue
+            self._fail_record_locked(record, reason)
+            failed.append(task_id)
+        if failed:
+            self._commit_locked(*failed)
 
     def _hold_termination_locked(
         self, workflow_id: str, termination: _Termination
@@ -3392,25 +3401,15 @@ class TaskRuntime:
         *,
         persist: bool = True,
     ) -> list[tuple[str, str]]:
-        """Fail the tasks an advance settled failed; returns each one changed with its
-        reason.
-
-        The engine lists each failure before the tasks it cascaded into, so a task
-        with a reason of its own, or one the advance names, opens a cascade, and each
-        task after it fails as its dependent. Persists them here when ``persist`` is
-        set.
+        """Fail the tasks an advance settled failed, each for the reason the engine
+        names; returns each one changed with its reason. Persists them here when
+        ``persist`` is set.
         """
-        primary: str | None = None
         changed: list[tuple[str, str]] = []
         for task_id in advance.failed:
-            own = (
+            text = (
                 engine.failure_reason(task_id) if engine is not None else None
-            ) or advance.reasons.get(task_id)
-            if primary is None or own is not None:
-                primary = task_id
-                text = own or "declared-failure obligation"
-            else:
-                text = _dependency_failed(primary)
+            ) or "declared-failure obligation"
             if self._fail_v2_records_locked([task_id], text, persist=False):
                 changed.append((task_id, text))
         if persist and changed:
@@ -4090,7 +4089,7 @@ class TaskRuntime:
 
     def _fail_v1_dependents_locked(self, primary: str) -> list[tuple[str, str]]:
         """Fail every pending task downstream of a failed v1 task, however deep."""
-        reason = _dependency_failed(primary)
+        reason = dependency_failed(primary)
         impacted: list[tuple[str, str]] = []
         frontier = [primary]
         while frontier:
@@ -4105,14 +4104,6 @@ class TaskRuntime:
                 impacted.append((child, reason))
                 frontier.append(child)
         return impacted
-
-    def _fail_v2_cascade_locked(
-        self, primary: str, cascade: list[str]
-    ) -> list[tuple[str, str]]:
-        reason = _dependency_failed(primary)
-        downstream = [task_id for task_id in cascade if task_id != primary]
-        failed = self._fail_v2_records_locked(downstream, reason, persist=False)
-        return [(task_id, reason) for task_id in failed]
 
     def plan_merge(
         self, task_id: str, max_batch_size: int, assigned_worker: str

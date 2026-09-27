@@ -1027,3 +1027,99 @@ async def test_a_restart_retires_a_region_template_whose_retire_a_crash_lost() -
 
     assert registry.remaining_of(workflow_id) == set()
     assert restored.workflow_settlement(workflow_id).settled
+
+
+_DENIED_CHILDREN = """
+      - name: planner
+        spec: {taskType: echo, data: {type: list, items: [seed]}}
+      - name: kid
+        spec:
+          taskType: ssh
+          interactive: false
+          image: alpine:3
+          command: ["true"]
+      - name: fan
+        dependsOn: [planner]
+        region: {kind: spawn, child: kid}
+      - name: collect
+        dependsOn: [fan]
+        region: {kind: join, completion: all_succeed}
+      - name: after
+        dependsOn: [collect]
+        spec: {taskType: echo, data: {type: list, items: [z]}}
+"""
+
+
+@pytest.mark.parametrize("shape", ["no_winner", "denied_children"])
+def test_a_fan_out_persists_what_it_failed_before_the_ledger(shape: str) -> None:
+    async def run() -> None:
+        registry = FakeRegistry()
+        runtime = _live_runtime(registry)
+        body = _NO_WINNER if shape == "no_winner" else _DENIED_CHILDREN
+        workflow_id, ids = await _register(runtime, _HEAD + body)
+        items: list[str] = []
+        if shape == "denied_children":
+            # Every child's effect falls outside the grant, so admission denies it.
+            engine = _engine(runtime, workflow_id)
+            engine._root_grant = engine._root_grant.model_copy(update={"invoke": ()})
+            items = ["h1", "h2"]
+        after = ids["after"]
+        writes: list[str] = []
+        commit, dynamic, save = (
+            registry.commit_transition,
+            registry.commit_dynamic_tasks,
+            registry.save_ledger_snapshot,
+        )
+
+        def commit_transition(workflow_id: str, **kwargs: Any) -> None:
+            if any(
+                p.record.task_id == after and p.record.status == TaskStatus.FAILED
+                for p in kwargs.get("records", ())
+            ):
+                writes.append("after failed")
+            commit(workflow_id, **kwargs)
+
+        def commit_dynamic_tasks(*args: Any, **kwargs: Any) -> None:
+            writes.append("ledger")
+            dynamic(*args, **kwargs)
+
+        def save_ledger_snapshot(workflow_id: str, snapshot: LedgerSnapshot) -> None:
+            writes.append("ledger")
+            save(workflow_id, snapshot)
+
+        planner = ids["planner"]
+        record_dispatch(runtime, planner, cast(Any, _worker()))
+        registry.commit_transition = commit_transition  # type: ignore[method-assign]
+        registry.commit_dynamic_tasks = commit_dynamic_tasks  # type: ignore[method-assign]
+        registry.save_ledger_snapshot = save_ledger_snapshot  # type: ignore[method-assign]
+        runtime.mark_succeeded(planner, "wkr-1", _planned(runtime, planner, items), _TS)
+
+        assert writes[0] == "after failed" and "ledger" in writes
+        assert runtime.workflow_settlement(workflow_id).settled
+
+    asyncio.run(run())
+
+
+@pytest.mark.anyio
+async def test_a_restart_fails_a_task_the_ledger_already_failed() -> None:
+    registry = FakeRegistry()
+    runtime = _live_runtime(registry)
+    workflow_id, ids = await _register(runtime, _HEAD + _NO_WINNER)
+    planner = ids["planner"]
+    after = ids["after"]
+    pending = registry.task_blobs[after]
+    record_dispatch(runtime, planner, cast(Any, _worker()))
+    runtime.mark_succeeded(planner, "wkr-1", _planned(runtime, planner, []), _TS)
+    # A crash kept the ledger that failed `after` and lost its FAILED record.
+    registry.task_blobs[after] = pending
+    registry.remaining.setdefault(workflow_id, set()).add(after)
+
+    restored = _live_runtime(registry, "restored", reader=runtime._results)
+    assert await restored.rehydrate() == 1
+
+    record = restored.get_record(after)
+    assert record is not None and record.status == TaskStatus.FAILED
+    assert record.error == "join collect resolved no winner"
+    persisted = registry.load_task_states(after)[0]
+    assert persisted is not None and persisted.record.status == TaskStatus.FAILED
+    assert restored.workflow_settlement(workflow_id).settled

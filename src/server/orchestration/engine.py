@@ -166,6 +166,14 @@ _EARLY_JOINS = frozenset(
     {JoinCompletion.ANY, JoinCompletion.FIRST_K, JoinCompletion.PREDICATE}
 )
 _AMBIGUITY_TERMINAL_REASON = "ambiguity-terminal effect"
+_DECLARED_FAILURE_REASON = "declared-failure obligation"
+
+
+def dependency_failed(task_id: str) -> str:
+    """The reason a task fails for when a failure it depends on cascades into it."""
+    return f"Dependency {task_id} failed"
+
+
 _OPEN_ATTEMPT_STATUSES = frozenset({AttemptStatus.ISSUED, AttemptStatus.RUNNING})
 
 
@@ -194,23 +202,20 @@ class Advance:
 
     ``ready`` work items become admissible for a new attempt, ``failed`` ones settle
     terminally and cascade, and ``retry`` reissues an existing work item as a fresh
-    attempt under its stable identity. ``reasons`` names why a failed task failed when
-    what failed is a control region rather than a task, and ``cancelled`` lists the
-    children a residual policy cancelled. Control settlement and dynamic child
-    materialization are internal and never appear here.
+    attempt under its stable identity, and ``cancelled`` lists the children a residual
+    policy cancelled. Control settlement and dynamic child materialization are internal
+    and never appear here.
     """
 
     ready: list[str] = field(default_factory=list)
     failed: list[str] = field(default_factory=list)
     retry: list[str] = field(default_factory=list)
-    reasons: dict[str, str] = field(default_factory=dict)
     cancelled: list[str] = field(default_factory=list)
 
     def extend(self, other: "Advance") -> Self:
         self.ready.extend(other.ready)
         self.failed.extend(other.failed)
         self.retry.extend(other.retry)
-        self.reasons.update(other.reasons)
         self.cancelled.extend(other.cancelled)
         return self
 
@@ -455,6 +460,14 @@ class OrchestrationEngine:
         # Child-init scopes a failed agent opened and that had not released: each
         # one's join never releases.
         self._failed_scopes: set[str] = set(snapshot.failed_scopes)
+        # Why each task settled as a declared failure: its own reason, or the failure
+        # it depends on. A ledger stored without them names each failed work item's own.
+        self._failure_reasons: dict[str, str] = dict(snapshot.failure_reasons)
+        for wi in self._work_items.values():
+            if wi.outcome is PublicationOutcome.DECLARED_FAILURE and wi.legacy_task_id:
+                self._failure_reasons.setdefault(
+                    wi.legacy_task_id, wi.failure_reason or _DECLARED_FAILURE_REASON
+                )
         # A spawn-site denial names no work item; an agent's denied boundary names one
         # and never refuses a later spawn.
         self._denied_spawns = {
@@ -852,6 +865,7 @@ class OrchestrationEngine:
         )
         cascade = Advance(failed=[wi.legacy_task_id])
         self._fail_agent_regions(wi, cascade, set())
+        self._declare_failures(wi, cascade.failed)
         advance.failed[:0] = cascade.failed
         advance.cancelled.extend(cascade.cancelled)
         return advance
@@ -2900,10 +2914,12 @@ class OrchestrationEngine:
             None,
         )
         if failed_child is not None and failed_child.legacy_task_id:
+            self._name_failures(
+                cascade.failed, dependency_failed(failed_child.legacy_task_id)
+            )
             cascade.failed.insert(0, failed_child.legacy_task_id)
             return cascade
-        reason = f"join {join_op} resolved no winner"
-        cascade.reasons.update(dict.fromkeys(cascade.failed, reason))
+        self._name_failures(cascade.failed, f"join {join_op} resolved no winner")
         return cascade
 
     def _freeze_region_aggregate(
@@ -3356,7 +3372,23 @@ class OrchestrationEngine:
         it."""
         cascade = Advance()
         self._fail_work_item(work_item_id, cascade, set())
+        self._declare_failures(self._work_items[work_item_id], cascade.failed)
         return cascade
+
+    def _declare_failures(self, primary: WorkItem, failed: list[str]) -> None:
+        """Record why a failed work item and what its failure cascaded into failed:
+        the work item for its own reason, the rest as its dependents. A task already
+        named, behind a failure settled first, keeps its reason."""
+        if not failed:
+            return
+        self._failure_reasons.setdefault(
+            primary.legacy_task_id, primary.failure_reason or _DECLARED_FAILURE_REASON
+        )
+        self._name_failures(failed, dependency_failed(primary.legacy_task_id))
+
+    def _name_failures(self, failed: list[str], reason: str) -> None:
+        for task_id in failed:
+            self._failure_reasons.setdefault(task_id, reason)
 
     def _fail_work_item(
         self, work_item_id: str, cascade: Advance, visited: set[str]
@@ -3675,10 +3707,12 @@ class OrchestrationEngine:
         return wi.outcome, wi.value_ref
 
     def failure_reason(self, task_id: str) -> str | None:
-        """Why a task's own work item settled failed, or None for one failed as another
-        failure's dependent."""
-        wi = self._work_item_for_task(task_id)
-        return wi.failure_reason if wi is not None else None
+        """Why a task settled as a declared failure, or None for one that has not."""
+        return self._failure_reasons.get(task_id)
+
+    def declared_failures(self) -> dict[str, str]:
+        """Every task settled as a declared failure, with why."""
+        return self._failure_reasons
 
     def recovery_disposition(self, task_id: str) -> RecoveryDisposition | None:
         """Whether the task's operation may be recomputed or must be restored."""
@@ -4093,6 +4127,7 @@ class OrchestrationEngine:
             released_scopes=sorted(self._released_scopes),
             failed_regions=sorted(self._failed_regions),
             failed_scopes=sorted(self._failed_scopes),
+            failure_reasons=dict(self._failure_reasons),
             next_seq=self._next_seq,
         )
 
@@ -4114,6 +4149,7 @@ class OrchestrationEngine:
         visited: set[str] = set()
         self._fail_agent_regions(wi, cascade, visited)
         self._fail_downstream(wi.operator_id, cascade, visited)
+        self._name_failures(cascade.failed, dependency_failed(task_id))
         return cascade.failed
 
     def reconcile_pending(self, task_id: str) -> bool:
