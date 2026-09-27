@@ -816,3 +816,25 @@ def test_a_gone_vaulted_key_denies_the_held_model_turn() -> None:
         assert deny["reason"] == "model credential unavailable"
 
     asyncio.run(run())
+
+
+def _failing_script(error: str) -> list[ScriptedStep]:
+    return [ScriptedStep(op="fail", error=error)]
+
+
+@pytest.mark.parametrize(
+    "error", ["boom", "held model egress rejected: model credential unavailable"]
+)
+def test_a_failed_episode_shows_its_reason_on_the_task(error: str) -> None:
+    async def run() -> None:
+        runtime = _runtime()
+        _, ids = await _register(runtime, _MODEL_WF)
+        writer = ids["writer"]
+
+        _dispatch_agent(runtime, writer, script=_failing_script(error))
+
+        record = runtime._tasks[writer]
+        assert record.status == TaskStatus.FAILED
+        assert record.error == error
+
+    asyncio.run(run())

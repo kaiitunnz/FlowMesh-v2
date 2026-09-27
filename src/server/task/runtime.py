@@ -1825,14 +1825,13 @@ class TaskRuntime:
                 # credit hook so a late success cannot win the claim's terminal reason.
                 return False
             if error is not None:
-                reason = f"agent boundary failed: {error}"
-                advance = engine.on_failed(task_id, reason, retryable=False)
+                advance = engine.on_failed(
+                    task_id, f"agent boundary failed: {error}", retryable=False
+                )
                 invocation_id = engine.terminalize_boundary_invocation(
                     task_id, call_correlation
                 )
-                changed = self._apply_advance_locked(
-                    record.workflow_id, advance, {task_id: reason}
-                )
+                changed = self._apply_advance_locked(record.workflow_id, advance)
                 self._save_ledger_locked(record.workflow_id)
                 # A fenced failure terminal releases the resident credit just as a
                 # completion does; nothing else may release an accepted credit.
@@ -3204,12 +3203,7 @@ class TaskRuntime:
 
         self._write_locked(save, lambda held: held.workflow_ids.append(workflow_id))
 
-    def _apply_advance_locked(
-        self,
-        workflow_id: str,
-        advance: Advance,
-        reasons: dict[str, str] | None = None,
-    ) -> bool:
+    def _apply_advance_locked(self, workflow_id: str, advance: Advance) -> bool:
         # A ready/settle advance never carries a retry; the failure path drives those.
         assert not advance.retry, "retry is applied by the failure path"
         engine = self._engines.get(workflow_id)
@@ -3222,10 +3216,8 @@ class TaskRuntime:
                 changed = True
         for task_id in advance.failed:
             reason = (
-                (reasons or {}).get(task_id)
-                or (engine and engine.failure_reason(task_id))
-                or "declared-failure obligation"
-            )
+                engine and engine.failure_reason(task_id)
+            ) or "declared-failure obligation"
             self._fail_v2_records_locked([task_id], reason, persist=True)
             changed = True
         return changed

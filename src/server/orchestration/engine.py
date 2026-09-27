@@ -797,6 +797,7 @@ class OrchestrationEngine:
                 operator_id=wi.operator_id,
             )
             return Advance(retry=[wi.legacy_task_id])
+        wi.failure_reason = error
         return self._settle_failed_wi(wi)
 
     def _fail_open_attempt(self, wi: WorkItem, error: str) -> None:
@@ -3381,7 +3382,8 @@ class OrchestrationEngine:
         return wi.outcome, wi.value_ref
 
     def failure_reason(self, task_id: str) -> str | None:
-        """The recorded authority-denial reason for a task, when one settled it."""
+        """Why a task's work item settled failed: its authority denial, else the
+        reason its non-retryable failure recorded."""
         wi_id = self._wi_by_task.get(task_id)
         if wi_id is None:
             return None
@@ -3391,7 +3393,8 @@ class OrchestrationEngine:
                 and decision.kind is AuthorityDecisionKind.DENIED
             ):
                 return f"authority denied: {decision.reason or decision.interface}"
-        return None
+        wi = self._work_items.get(wi_id)
+        return wi.failure_reason if wi is not None else None
 
     def recovery_disposition(self, task_id: str) -> RecoveryDisposition | None:
         """Whether the task's operation may be recomputed or must be restored."""
