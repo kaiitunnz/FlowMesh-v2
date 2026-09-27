@@ -132,11 +132,6 @@ class FakeRegistry:
     def save_ledger_snapshot(self, workflow_id: str, snapshot: LedgerSnapshot) -> None:
         self.ledger_blobs[workflow_id] = snapshot.model_dump_json()
 
-    async def save_ledger_snapshot_async(
-        self, workflow_id: str, snapshot: LedgerSnapshot
-    ) -> None:
-        self.save_ledger_snapshot(workflow_id, snapshot)
-
     async def load_ledger_snapshot_async(
         self, workflow_id: str
     ) -> LedgerSnapshot | None:
@@ -1330,3 +1325,49 @@ async def test_a_skipped_producer_fans_out_to_no_children() -> None:
     assert engine is not None
     assert _child_count(engine) == 0 and engine.region_closed("collect")
     assert registry.remaining_of(workflow_id) == set()
+
+
+class _InterleavingRegistry(FakeRegistry):
+    """Lands a locked ledger save between the submit path's snapshot and its write."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.interleave: Any = None
+
+    async def save_ledger_snapshot_async(
+        self, workflow_id: str, snapshot: LedgerSnapshot
+    ) -> None:
+        if self.interleave is not None:
+            self.interleave()
+        self.save_ledger_snapshot(workflow_id, snapshot)
+
+
+@pytest.mark.anyio
+async def test_the_submit_ledger_save_never_rolls_back_a_later_save() -> None:
+    registry = _InterleavingRegistry()
+    runtime = _runtime(registry)
+
+    def settle_root() -> None:
+        registry.interleave = None
+        _drain(runtime)
+
+    registry.interleave = settle_root
+    workflow_id, ids = await _register(runtime, LINEAR)
+    if registry.interleave is not None:
+        # Submission wrote its ledger under the lock; the root settles after it.
+        settle_root()
+
+    stored = LedgerSnapshot.model_validate_json(registry.ledger_blobs[workflow_id])
+    statuses = {w.legacy_task_id: w.status for w in stored.work_items}
+    live = runtime.orchestration_engine(workflow_id)
+    assert live is not None
+    assert statuses == {
+        w.legacy_task_id: w.status for w in live.to_snapshot().work_items
+    }
+    assert statuses[ids["a"]] is WorkItemStatus.SETTLED
+    # The submit-time capture shares live objects but not the collections new facts
+    # are appended to, so a write of it drops the root's attempt and record.
+    assert [a.attempt_id for a in stored.attempts] == [
+        a.attempt_id for a in live.to_snapshot().attempts
+    ]
+    assert len(stored.records) == len(live.to_snapshot().records) > 0

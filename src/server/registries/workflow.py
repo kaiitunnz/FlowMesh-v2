@@ -451,13 +451,6 @@ class WorkflowRegistry:
             workflow_ds_key(workflow_id), snapshot.model_dump_json()
         )
 
-    async def save_ledger_snapshot_async(
-        self, workflow_id: str, snapshot: LedgerSnapshot
-    ) -> None:
-        await self._rds.asyncio.set_value(
-            workflow_ds_key(workflow_id), snapshot.model_dump_json()
-        )
-
     def load_ledger_snapshot(self, workflow_id: str) -> LedgerSnapshot | None:
         blob = self._rds.sync.get(workflow_ds_key(workflow_id))
         return LedgerSnapshot.model_validate_json(blob) if blob else None

@@ -48,9 +48,6 @@ class FakeWorkflowRegistry:
     def save_ledger_snapshot(self, workflow_id: str, snapshot: Any) -> None:
         self.ledger_blobs[workflow_id] = snapshot.model_dump_json()
 
-    async def save_ledger_snapshot_async(self, workflow_id: str, snapshot: Any) -> None:
-        self.save_ledger_snapshot(workflow_id, snapshot)
-
     def load_ledger_snapshot(self, workflow_id: str) -> Any:
         from server.orchestration import LedgerSnapshot
 

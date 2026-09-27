@@ -891,6 +891,9 @@ class TaskRuntime:
                     )
                 if advance_applied:
                     new_ready = True
+                # After the initial advance has persisted any authority-denied roots,
+                # so the ledger never leads durable task state.
+                self._save_ledger_locked(workflow_id)
             for task_id in candidate_ready:
                 maybe_record = self._tasks.get(task_id)
                 if not maybe_record or maybe_record.status != TaskStatus.PENDING:
@@ -901,14 +904,6 @@ class TaskRuntime:
                     new_ready = True
             if new_ready:
                 self._cv.notify_all()
-
-        # Snapshot last, after the initial advance has persisted any authority-denied
-        # roots, so the ledger never leads durable task state.
-        if v2_engine is not None:
-            with self._control.ledger_snapshot(workflow_id):
-                await self._workflow_registry.save_ledger_snapshot_async(
-                    workflow_id, v2_engine.to_snapshot()
-                )
 
         return workflow_id, results
 

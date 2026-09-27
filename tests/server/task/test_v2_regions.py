@@ -199,7 +199,7 @@ class _CapturingRegistry:
     ) -> None:
         return None
 
-    async def save_ledger_snapshot_async(self, workflow_id: str, snapshot: Any) -> None:
+    def save_ledger_snapshot(self, workflow_id: str, snapshot: Any) -> None:
         return None
 
 
