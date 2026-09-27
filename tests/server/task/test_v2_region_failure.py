@@ -710,3 +710,111 @@ async def test_a_survived_denial_never_names_a_later_ambiguity_failure() -> None
     record = runtime.get_record(solo)
     assert record is not None and record.error == "ambiguity-terminal effect"
     _assert_failed_downstream(runtime, ids, "solo", "after")
+
+
+@pytest.mark.anyio
+async def test_a_failed_child_fails_an_all_succeed_join_downstream() -> None:
+    runtime, workflow_id, ids, last = await _fail_the_last_child("all_succeed")
+
+    assert _pop_ready(runtime) == []
+    _assert_failed_downstream_of(runtime, ids, last, "after")
+    engine = _engine(runtime, workflow_id)
+    assert "collect" in engine.to_snapshot().failed_regions
+    assert "join_released" not in {kind for kind, _ in engine.contract_trace()}
+    assert runtime.workflow_settlement(workflow_id).settled
+
+
+@pytest.mark.anyio
+async def test_the_first_failed_child_names_an_all_succeed_join_failure() -> None:
+    runtime = _live_runtime(FakeRegistry())
+    workflow_id, ids = await _register(
+        runtime, _HEAD + _last_child_fails("all_succeed")
+    )
+    planner = ids["planner"]
+    record_dispatch(runtime, planner, cast(Any, _worker()))
+    runtime.mark_succeeded(
+        planner, "wkr-1", _planned(runtime, planner, ["h1", "h2"]), _TS
+    )
+    first, last = _pop_ready(runtime)
+    _fail(runtime, first)
+    record_dispatch(runtime, last, cast(Any, _worker()))
+    runtime.mark_succeeded(last, "wkr-1", {}, _TS)
+
+    _assert_failed_downstream_of(runtime, ids, first, "after")
+    assert runtime.workflow_settlement(workflow_id).settled
+
+
+_NO_WINNER = """
+      - name: planner
+        spec: {taskType: echo, data: {type: list, items: [seed]}}
+      - name: kid
+        spec: {taskType: echo, data: {type: list, items: [k]}}
+      - name: fan
+        dependsOn: [planner]
+        region: {kind: spawn, child: kid}
+      - name: collect
+        dependsOn: [fan]
+        region: {kind: join, completion: any, residual: cancel, no_winner_failure: true}
+      - name: after
+        dependsOn: [collect]
+        spec: {taskType: echo, data: {type: list, items: [z]}}
+"""
+
+
+@pytest.mark.anyio
+async def test_a_join_with_no_winner_fails_its_downstream() -> None:
+    runtime = _live_runtime(FakeRegistry())
+    workflow_id, ids = await _register(runtime, _HEAD + _NO_WINNER)
+    planner = ids["planner"]
+    record_dispatch(runtime, planner, cast(Any, _worker()))
+    runtime.mark_succeeded(planner, "wkr-1", _planned(runtime, planner, []), _TS)
+    _drain(runtime)
+
+    assert _pop_ready(runtime) == []
+    record = runtime.get_record(ids["after"])
+    assert record is not None and record.status == TaskStatus.FAILED
+    assert record.error == "join collect resolved no winner"
+    assert runtime.workflow_settlement(workflow_id).settled
+
+
+@pytest.mark.anyio
+async def test_a_failed_join_stays_failed_across_a_crash_before_its_ledger_save() -> (
+    None
+):
+    registry = FakeRegistry()
+    runtime = _live_runtime(registry)
+    workflow_id, ids = await _register(
+        runtime, _HEAD + _last_child_fails("all_succeed")
+    )
+    planner = ids["planner"]
+    record_dispatch(runtime, planner, cast(Any, _worker()))
+    runtime.mark_succeeded(
+        planner, "wkr-1", _planned(runtime, planner, ["h1", "h2"]), _TS
+    )
+    first, last = _pop_ready(runtime)
+    record_dispatch(runtime, first, cast(Any, _worker()))
+    runtime.mark_succeeded(first, "wkr-1", {}, _TS)
+    save = registry.save_ledger_snapshot
+
+    def crash(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("root crashed")
+
+    record_dispatch(runtime, last, cast(Any, _worker()))
+    registry.save_ledger_snapshot = crash  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError):
+        runtime.mark_failed(last, "wkr-1", {}, _TS, error="boom")
+    registry.save_ledger_snapshot = save  # type: ignore[method-assign]
+
+    restored = _live_runtime(registry, "restored", reader=runtime._results)
+    assert await restored.rehydrate() == 1
+    _assert_failed_downstream_of(restored, ids, last, "after")
+    assert restored.workflow_settlement(workflow_id).settled
+
+
+def _assert_failed_downstream_of(
+    runtime: TaskRuntime, ids: dict[str, str], failed: str, *names: str
+) -> None:
+    for name in names:
+        record = runtime.get_record(ids[name])
+        assert record is not None and record.status == TaskStatus.FAILED, name
+        assert record.error == f"Dependency {failed} failed", name

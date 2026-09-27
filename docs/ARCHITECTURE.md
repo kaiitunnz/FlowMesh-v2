@@ -153,7 +153,8 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   recursion. A spawn fans out to one child per element of its producer's result, and
   each child dispatches to a worker like any other task. A failed input fails a region
   and everything downstream of it, as a failed dependency fails a task: a spawn whose
-  producer failed creates no child, and its join fails whatever its completion rule.
+  producer failed creates no child, and its join fails whatever its completion rule. A
+  join that resolves as a failure fails everything downstream of it too.
 - **Cancellation.** A `flowmesh/v2` workflow cancels through the orchestration engine as
   a durable semantic event, so the ledger stays consistent with the task records and a
   cancelled workflow survives a restart without re-admitting cancelled work. A worker

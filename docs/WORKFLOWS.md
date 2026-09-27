@@ -187,7 +187,9 @@ A `join` `completion` is `all_settled`, `all_succeed`, `any`, `first_k` (with
 completion (`any`/`first_k`/`predicate`) declares a `residual` policy
 (`continue`, `drain`, `cancel`) for children still running when it releases, and
 may set `no_winner_failure: true` to resolve a no-winner join as a failure rather
-than empty. The winner is the lowest-`child_index` child that qualifies.
+than empty. The winner is the lowest-`child_index` child that qualifies. An
+`all_succeed` join with a failed child, or a no-winner join under
+`no_winner_failure`, resolves as a failure and fails everything downstream of it.
 
 ### Dry-run inspection
 

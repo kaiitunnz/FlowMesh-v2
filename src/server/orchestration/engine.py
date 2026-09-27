@@ -2844,6 +2844,10 @@ class OrchestrationEngine:
         outcome, value_ref = self._join_result(join, scope_id)
         children = self._materialized_children(scope_id)
         self._freeze_region_aggregate(join, join_op, scope_id)
+        if outcome is PublicationOutcome.DECLARED_FAILURE:
+            self._frontier_closed(scope_id)
+            self._apply_residual_policy(join, scope_id)
+            return self._fail_resolved_join(join_op, scope_id, children)
         self._emit(
             "join_released",
             operator_id=join_op,
@@ -2855,6 +2859,42 @@ class OrchestrationEngine:
         return self._deliver_record(
             join_op, self._control_activation(join_op), value_ref
         )
+
+    def _fail_resolved_join(
+        self, join_op: str, scope_id: str, children: list[Activation]
+    ) -> Advance:
+        """Settle a join that resolved as a declared failure as a failed region.
+
+        It delivers no record, and everything downstream of it fails as the dependent
+        of its first failed child, or of the join itself when no child failed. A join
+        of a scope nested under a spawned child fails only that scope, since sibling
+        scopes share its operator.
+        """
+        if self._scopes[scope_id].parent_scope_id != self._root_scope.scope_id:
+            self._failed_scopes.add(scope_id)
+            self._emit("region_failed", operator_id=join_op, detail={"scope": scope_id})
+            return Advance()
+        cascade: list[str] = []
+        self._settle_region_failed(join_op)
+        self._fail_downstream(join_op, cascade, {join_op})
+        failed_child = next(
+            (
+                wi
+                for child in children
+                if (
+                    wi := self._work_items[self._wi_by_activation[child.activation_id]]
+                ).outcome
+                is PublicationOutcome.DECLARED_FAILURE
+            ),
+            None,
+        )
+        if failed_child is not None and failed_child.legacy_task_id:
+            return Advance(failed=[failed_child.legacy_task_id, *cascade])
+        reason = f"join {join_op} resolved no winner"
+        for task_id in cascade:
+            if (dependent := self._work_item_for_task(task_id)) is not None:
+                dependent.failure_reason = reason
+        return Advance(failed=cascade)
 
     def _freeze_region_aggregate(
         self, join: JoinRegion, join_op: str, scope_id: str
@@ -3378,15 +3418,18 @@ class OrchestrationEngine:
         kind = self._kind(operator_id)
         if kind is OperatorKind.JOIN and self.region_closed(operator_id):
             return
-        self._failed_regions.add(operator_id)
-        self._emit("region_failed", operator_id=operator_id)
-        self._publish(operator_id, PublicationOutcome.DECLARED_FAILURE, None)
+        self._settle_region_failed(operator_id)
         if kind is OperatorKind.SPAWN:
             self._fail_spawn_template(operator_id, cascade)
             self._publish_collection_failure(operator_id)
             if (join_op := self._join_for_spawn(operator_id)) is not None:
                 self._fail_region(join_op, cascade, visited)
         self._fail_downstream(operator_id, cascade, visited)
+
+    def _settle_region_failed(self, operator_id: str) -> None:
+        self._failed_regions.add(operator_id)
+        self._emit("region_failed", operator_id=operator_id)
+        self._publish(operator_id, PublicationOutcome.DECLARED_FAILURE, None)
 
     def _fail_spawn_template(self, spawn_op: str, cascade: list[str]) -> None:
         """Fail a failed spawn's child template, and the templates nested under it,

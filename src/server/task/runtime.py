@@ -3301,16 +3301,21 @@ class TaskRuntime:
         return changed
 
     def _fail_v2_advance_locked(
-        self, engine: OrchestrationEngine | None, failed: list[str]
-    ) -> None:
-        """Fail and persist the tasks an advance settled failed.
+        self,
+        engine: OrchestrationEngine | None,
+        failed: list[str],
+        *,
+        persist: bool = True,
+    ) -> list[tuple[str, str]]:
+        """Fail the tasks an advance settled failed; returns each one changed with its
+        reason.
 
         The engine lists each failure before the tasks it cascaded into, so a task
         with a reason of its own opens a cascade, and each task after it fails as its
-        dependent.
+        dependent. Persists them here when ``persist`` is set.
         """
         primary: str | None = None
-        changed: list[str] = []
+        changed: list[tuple[str, str]] = []
         for task_id in failed:
             own = engine.failure_reason(task_id) if engine is not None else None
             if primary is None or own is not None:
@@ -3318,9 +3323,11 @@ class TaskRuntime:
                 text = own or "declared-failure obligation"
             else:
                 text = _dependency_failed(primary)
-            changed += self._fail_v2_records_locked([task_id], text, persist=False)
-        if changed:
-            self._commit_locked(*changed)
+            if self._fail_v2_records_locked([task_id], text, persist=False):
+                changed.append((task_id, text))
+        if persist and changed:
+            self._commit_locked(*(task_id for task_id, _ in changed))
+        return changed
 
     def _fan_out_children_locked(
         self,
@@ -5177,7 +5184,9 @@ class TaskRuntime:
 
             if record is not None and (engine := self._engines.get(record.workflow_id)):
                 advance = engine.on_failed(task_id, message, retryable=False)
-                impacted.extend(self._fail_v2_cascade_locked(task_id, advance.failed))
+                impacted.extend(
+                    self._fail_v2_advance_locked(engine, advance.failed, persist=False)
+                )
                 # A child's failure can release its scope's join, readying what follows.
                 if self._apply_advance_locked(
                     record.workflow_id, Advance(ready=advance.ready)
