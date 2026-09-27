@@ -102,6 +102,7 @@ from ..orchestration import (
 )
 from ..orchestration.episode import BoundaryEvent
 from ..orchestration.harness import to_boundary_event
+from ..orchestration.state import TERMINAL_WORK_ITEM_STATUSES
 from ..orchestration.telemetry import build_span_emitter
 from ..orchestration.tool_dispatch import (
     MODEL_INTERFACE,
@@ -270,6 +271,7 @@ class _InputCheck:
 
 
 _INPUT_VERDICT_REPORT = "TASK_FAILED:input_unreadable"
+_RESIDUAL_CANCEL_REASON = "cancelled by its region's residual policy"
 
 
 def _input_verdict(task_id: str, check: _InputCheck) -> TaskEvent:
@@ -1117,6 +1119,25 @@ class TaskRuntime:
         if healed:
             self._commit_locked(*healed)
 
+    def _reconcile_residual_cancels_locked(
+        self, engine: OrchestrationEngine, tasks: list[PersistedTask]
+    ) -> None:
+        """Cancel each task a crash left behind the cancel of its work item: a pending
+        one settles CANCELLED, and a dispatched one goes CANCELLING until its worker's
+        terminal settles it."""
+        moved: list[str] = []
+        for persisted in tasks:
+            record = persisted.record
+            wi = engine.work_item(record.task_id)
+            if wi is None or wi.status is not WorkItemStatus.CANCELLED:
+                continue
+            if self._cancel_record_locked(record, _RESIDUAL_CANCEL_REASON) is None:
+                continue
+            record.residual_cancel = True
+            moved.append(record.task_id)
+        if moved:
+            self._commit_locked(*moved)
+
     def _install_rehydrated_v2_workflow_locked(
         self,
         workflow_id: str,
@@ -1165,17 +1186,22 @@ class TaskRuntime:
                 engine.on_failed(
                     record.task_id, record.error or "task failed", retryable=False
                 )
-            elif record.status in (TaskStatus.CANCELLED, TaskStatus.CANCELLING):
+            elif (
+                record.status in (TaskStatus.CANCELLED, TaskStatus.CANCELLING)
+                and not record.residual_cancel
+            ):
                 cancelled = True
         # Replay cancellation after the settled facts so a settled outcome is never
         # overwritten; a cancelled workflow is then never re-admitted below. A record
         # left CANCELLING carries the cancel just as a settled one does: a crash between
         # the cancelled task write and the ledger save would otherwise restore a
-        # workflow the cancel never reached.
+        # workflow the cancel never reached. A child its region's residual policy
+        # cancelled is no workflow cancel.
         if cancelled:
             engine.cancel_instance()
         else:
             self._reconcile_failures_locked(engine, tasks)
+            self._reconcile_residual_cancels_locked(engine, tasks)
         # A boundary invocation of a durably settled task is terminal, even when a crash
         # beat the ledger save that recorded it: the save below makes it durable, and
         # the startup reconcile then releases the credit it holds.
@@ -1674,18 +1700,23 @@ class TaskRuntime:
         child it materializes, applies the advance, and writes the ledger snapshot after
         the task records so the ledger never leads durable state.
         """
-        with self._cv:
-            record = self._tasks.get(task_id)
-            engine = self._engines.get(record.workflow_id) if record else None
-            if record is None or engine is None:
-                return False
-            advance = engine.route_boundary_event(task_id, event)
-            self._synthesize_ready_children_locked(record.workflow_id, engine, advance)
-            changed = self._apply_advance_locked(record.workflow_id, advance)
-            self._save_ledger_locked(record.workflow_id)
-            if changed:
-                self._cv.notify_all()
-            return changed
+        try:
+            with self._cv:
+                record = self._tasks.get(task_id)
+                engine = self._engines.get(record.workflow_id) if record else None
+                if record is None or engine is None:
+                    return False
+                advance = engine.route_boundary_event(task_id, event)
+                self._synthesize_ready_children_locked(
+                    record.workflow_id, engine, advance
+                )
+                changed = self._apply_advance_locked(record.workflow_id, advance)
+                self._save_ledger_locked(record.workflow_id)
+                if changed:
+                    self._cv.notify_all()
+                return changed
+        finally:
+            self._release_pending_terminations()
 
     def _apply_episode_step_locked(self, task_id: str, hr: HarnessResult) -> None:
         """Route one non-terminal agent-episode step and re-dispatch or suspend.
@@ -1859,6 +1890,22 @@ class TaskRuntime:
         boundary terminally, so a gateway failure never resumes the agent as a phantom
         empty success.
         """
+        try:
+            return self._settle_episode_invocation(
+                task_id, call_correlation, value, error=error, ref=ref
+            )
+        finally:
+            self._release_pending_terminations()
+
+    def _settle_episode_invocation(
+        self,
+        task_id: str,
+        call_correlation: str,
+        value: str | None,
+        *,
+        error: str | None,
+        ref: OutcomeManifest | None,
+    ) -> bool:
         with self._cv:
             record = self._tasks.get(task_id)
             engine = self._engines.get(record.workflow_id) if record else None
@@ -3291,18 +3338,23 @@ class TaskRuntime:
         self._write_locked(save, lambda held: held.workflow_ids.append(workflow_id))
 
     def _apply_advance_locked(self, workflow_id: str, advance: Advance) -> bool:
-        """Apply an engine advance: fail and persist what it failed, then record the
-        inputs its agents now accept, retire the region templates it sealed, and ready
-        its work. Returns whether it changed any task.
+        """Apply an engine advance: fail and persist what it failed, cancel what a
+        residual policy cancelled, then record the inputs its agents now accept, retire
+        the region templates it sealed, and ready its work. Returns whether it changed
+        any task.
 
-        The failed records persist before a retire writes the ledger, so the ledger
-        never leads them.
+        The failed and cancelled records persist before a retire writes the ledger, so
+        the ledger never leads them.
         """
         # A ready/settle advance never carries a retry; the failure path drives those.
         assert not advance.retry, "retry is applied by the failure path"
         engine = self._engines.get(workflow_id)
         changed = bool(advance.failed)
         self._fail_v2_advance_locked(engine, advance)
+        if engine is not None and advance.cancelled:
+            changed |= self._cancel_residual_locked(
+                workflow_id, engine, advance.cancelled
+            )
         if engine is not None:
             staged = Advance()
             self._stage_agent_inputs_locked(workflow_id, engine, staged)
@@ -4918,7 +4970,7 @@ class TaskRuntime:
                     self._recommit_locked(stash.held)
                     del self._unacknowledged[task_id]
                 record.last_error = error
-                impacted, usages = self.mark_failed(
+                impacted, usages = self._mark_failed(
                     task_id, worker_id, payload, ts, error=error
                 )
                 return FailureOutcome(
@@ -4967,7 +5019,7 @@ class TaskRuntime:
                 )
                 if end is DispatchEnd.RETURNED:
                     return FailureOutcome(end, record.attempts, [], [])
-            impacted, usages = self.mark_failed(
+            impacted, usages = self._mark_failed(
                 task_id, worker_id, payload, ts, error=record.last_error or error
             )
             end = (
@@ -5139,6 +5191,20 @@ class TaskRuntime:
 
         Returns (impacted_dependents, usages).
         """
+        try:
+            return self._mark_failed(task_id, worker_id, payload, ts, error=error)
+        finally:
+            self._release_pending_terminations()
+
+    def _mark_failed(
+        self,
+        task_id: str,
+        worker_id: str | None,
+        payload: dict[str, Any],
+        ts: str,
+        *,
+        error: str | None = None,
+    ) -> tuple[list[tuple[str, str]], list[tuple[str, TaskUsage]]]:
         finished_ts = parse_iso_ts(str(payload.get("finished_at") or ts))
         maybe_started = payload.get("started_at")
         started_ts = parse_iso_ts(str(maybe_started)) if maybe_started else None
@@ -5230,7 +5296,8 @@ class TaskRuntime:
             if record is not None and engine is not None:
                 # A child's failure can release its scope's join, readying what follows.
                 if self._apply_advance_locked(
-                    record.workflow_id, Advance(ready=advance.ready)
+                    record.workflow_id,
+                    Advance(ready=advance.ready, cancelled=advance.cancelled),
                 ):
                     self._cv.notify_all()
                 self._save_ledger_locked(record.workflow_id)
@@ -5244,8 +5311,6 @@ class TaskRuntime:
     # ------------------------------------------------------------------ #
 
     def cancel_workflow(self, workflow_id: str, reason: str = "cancelled") -> list[str]:
-        cancelled: list[str] = []
-        cancelling: list[str] = []
         touched: list[str] = []
         returned: list[str] = []
         with self._cv:
@@ -5258,53 +5323,17 @@ class TaskRuntime:
                 return touched  # Unknown workflow: no records to move
             termination = self._terminate_workflow_locked(workflow_id, reason, None)
             for task_id, record in workflow_tasks:
-                match record.status:
-                    case TaskStatus.PENDING:
-                        returned += self._cancel_in_place_locked(record, reason)
-                        cancelled.append(task_id)
-                        touched.append(task_id)
-                    case TaskStatus.DISPATCHED if record.merged_parent_id:
-                        # Cancel the child alone; its batch keeps running for siblings
-                        # from other workflows.
-                        returned += self._cancel_in_place_locked(record, reason)
-                        cancelled.append(task_id)
-                        touched.append(task_id)
-                    case TaskStatus.DISPATCHED if record.assigned_worker:
-                        record.status = TaskStatus.CANCELLING
-                        record.error = reason
-                        cancelling.append(task_id)
-                        touched.append(task_id)
-                    case _:
-                        continue
-
-            self._workflow_registry.commit_transition(
-                workflow_id,
-                records=self._records_locked(*touched),
-                dispatched=[
-                    task_id
-                    for task_id in termination.recorded
-                    if self._tasks[task_id].status == TaskStatus.CANCELLING
-                ],
-                cancelled=cancelled,
-                sched=self._sched_locked(workflow_id),
-            )
-            self._commit_locked(
-                *(
-                    child_id
-                    for child_id in returned
-                    if self._tasks[child_id].workflow_id != workflow_id
-                )
+                if (moved := self._cancel_record_locked(record, reason)) is None:
+                    continue
+                returned += moved
+                touched.append(task_id)
+            self._commit_cancelled_locked(
+                workflow_id, touched, termination.recorded, returned
             )
             # The ledger snapshot follows the committed task state so it never leads
             # it.
             if workflow_id in self._engines:
-                engine = self._engines[workflow_id]
-                # A suspended-boundary episode has no dispatch to interrupt and
-                # returns no terminal, so the cancel settles it here.
-                for suspended in engine.suspended_boundary_tasks():
-                    held = self._tasks.get(suspended)
-                    if held is not None and held.status == TaskStatus.CANCELLING:
-                        self._settle_cancelled_locked(held, time.time())
+                self._settle_suspended_cancels_locked(self._engines[workflow_id])
                 self._save_ledger_locked(workflow_id)
 
             # A whole-workflow cancel commits its terminals here rather than through the
@@ -5332,11 +5361,35 @@ class TaskRuntime:
         what it returns once that commit is made.
         """
         self._redrive.settle(workflow_id)
-        records = [
-            record
-            for record in self._tasks.values()
-            if record.workflow_id == workflow_id
-        ]
+        termination = self._take_task_work_locked(
+            [
+                record
+                for record in self._tasks.values()
+                if record.workflow_id == workflow_id
+            ],
+            reason,
+        )
+        self._workflow_epoch_tasks.pop(workflow_id, None)
+        self._workflow_epoch_frontier.pop(workflow_id, None)
+        self._workflow_in_epoch_order.pop(workflow_id, None)
+        if (engine := self._engines.get(workflow_id)) is None:
+            return termination
+        if failure is None:
+            engine.cancel_instance()
+        else:
+            engine.fail_instance(failure)
+        termination.resident_invocation_ids = engine.terminalize_unsettled_invocations()
+        return termination
+
+    def _take_task_work_locked(
+        self, records: list[TaskRecord], reason: str
+    ) -> _Termination:
+        """Take what the given tasks' work still holds, before a cancel moves them.
+
+        A dispatch being published is recorded so its worker is interrupted with every
+        other running task, the agents' mediated operations are taken for reaping, and
+        the held input checks are dropped. It writes nothing.
+        """
         interrupts: list[InterruptMessage] = []
         recorded: list[str] = []
         for record in records:
@@ -5361,18 +5414,7 @@ class TaskRuntime:
             self._input_checks.pop(record.task_id, None)
             self._task_epoch_index.pop(record.task_id, None)
         reaps = self._take_ops_for_agents_locked([r.task_id for r in records])
-        self._workflow_epoch_tasks.pop(workflow_id, None)
-        self._workflow_epoch_frontier.pop(workflow_id, None)
-        self._workflow_in_epoch_order.pop(workflow_id, None)
-        termination = _Termination(interrupts, reaps, recorded)
-        if (engine := self._engines.get(workflow_id)) is None:
-            return termination
-        if failure is None:
-            engine.cancel_instance()
-        else:
-            engine.fail_instance(failure)
-        termination.resident_invocation_ids = engine.terminalize_unsettled_invocations()
-        return termination
+        return _Termination(interrupts, reaps, recorded)
 
     def _release_terminated_work(self, termination: _Termination) -> None:
         """Release what a terminated workflow's work held, best effort: each resident
@@ -5418,6 +5460,108 @@ class TaskRuntime:
             pending, self._pending_terminations = self._pending_terminations, []
         for termination in pending:
             self._release_terminated_work(termination)
+
+    def _commit_cancelled_locked(
+        self,
+        workflow_id: str,
+        touched: list[str],
+        recorded: list[str],
+        returned: list[str],
+    ) -> None:
+        """Commit the tasks a cancel moved, a published dispatch it recorded joining the
+        dispatched tasks, then the merged children it returned to the queue."""
+
+        def commit() -> None:
+            self._workflow_registry.commit_transition(
+                workflow_id,
+                records=self._records_locked(*touched),
+                dispatched=[
+                    task_id
+                    for task_id in recorded
+                    if self._tasks[task_id].status == TaskStatus.CANCELLING
+                ],
+                cancelled=[
+                    task_id
+                    for task_id in touched
+                    if self._tasks[task_id].status == TaskStatus.CANCELLED
+                ],
+                sched=self._sched_locked(workflow_id),
+            )
+
+        self._write_locked(commit, lambda held: held.task_ids.extend(touched))
+        self._commit_locked(
+            *(task_id for task_id in returned if task_id not in touched)
+        )
+
+    def _settle_suspended_cancels_locked(self, engine: OrchestrationEngine) -> None:
+        """Settle each cancelled episode suspended at a mediated boundary: it has no
+        dispatch to interrupt and returns no terminal."""
+        for suspended in engine.suspended_boundary_tasks():
+            record = self._tasks.get(suspended)
+            if record is not None and record.status == TaskStatus.CANCELLING:
+                self._settle_cancelled_locked(record, time.time())
+
+    def _cancel_residual_locked(
+        self, workflow_id: str, engine: OrchestrationEngine, task_ids: list[str]
+    ) -> bool:
+        """Cancel the tasks of the children a residual policy cancelled in the ledger,
+        as a workflow cancel moves its tasks; returns whether it moved any.
+
+        What their work held -- a worker's interrupt, the agents' mediated operations,
+        and the credits of their boundary invocations -- releases once the ledger is
+        durable.
+        """
+        records = [
+            record
+            for task_id in dict.fromkeys(task_ids)
+            if (record := self._tasks.get(task_id)) is not None
+            and record.status not in SETTLING_TASK_STATUSES
+        ]
+        if not records:
+            return False
+        termination = self._take_task_work_locked(records, _RESIDUAL_CANCEL_REASON)
+        touched: list[str] = []
+        returned: list[str] = []
+        for record in records:
+            moved = self._cancel_record_locked(record, _RESIDUAL_CANCEL_REASON)
+            if moved is None:
+                continue
+            record.residual_cancel = True
+            touched.append(record.task_id)
+            returned += moved
+        self._commit_cancelled_locked(
+            workflow_id, touched, termination.recorded, returned
+        )
+        if not self._writes_held():
+            self._notify_terminal_transition(workflow_id)
+        self._settle_suspended_cancels_locked(engine)
+        termination.resident_invocation_ids = engine.terminalize_unsettled_invocations(
+            touched
+        )
+        self._carry_termination_locked(termination)
+        return bool(touched)
+
+    def _cancel_record_locked(
+        self, record: TaskRecord, reason: str
+    ) -> list[str] | None:
+        """Move a task a cancel reaches, in memory: a pending task, or a merged child
+        whose batch keeps running for its siblings, settles CANCELLED in place, and a
+        dispatched one goes CANCELLING until its worker's terminal settles it.
+
+        Returns the children merged into it that go back to the queue, or None for a
+        task a cancel leaves as it is.
+        """
+        match record.status:
+            case TaskStatus.PENDING:
+                return self._cancel_in_place_locked(record, reason)
+            case TaskStatus.DISPATCHED if record.merged_parent_id:
+                return self._cancel_in_place_locked(record, reason)
+            case TaskStatus.DISPATCHED if record.assigned_worker:
+                record.status = TaskStatus.CANCELLING
+                record.error = reason
+                return []
+            case _:
+                return None
 
     def _cancel_in_place_locked(self, record: TaskRecord, reason: str) -> list[str]:
         """Cancel a pending task or a merged child in place.
@@ -5572,7 +5716,13 @@ class TaskRuntime:
         if usage is not None:
             record.usages.append(usage)
         returned = self._mark_cancelled_locked(record, finished_ts, unmerge=unmerge)
-        if (engine := self._engines.get(record.workflow_id)) is not None:
+        # A work item a cancel already settled -- the whole instance's, or a child's
+        # its region's residual policy cancelled -- is never cancelled again, which
+        # would cancel its whole scope.
+        if (engine := self._engines.get(record.workflow_id)) is not None and (
+            (wi := engine.work_item(task_id)) is None
+            or wi.status not in TERMINAL_WORK_ITEM_STATUSES
+        ):
             advance = engine.on_cancelled(task_id)
             assert not (
                 advance.ready or advance.retry

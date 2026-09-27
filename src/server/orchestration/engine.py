@@ -195,20 +195,23 @@ class Advance:
     ``ready`` work items become admissible for a new attempt, ``failed`` ones settle
     terminally and cascade, and ``retry`` reissues an existing work item as a fresh
     attempt under its stable identity. ``reasons`` names why a failed task failed when
-    what failed is a control region rather than a task. Control settlement and dynamic
-    child materialization are internal and never appear here.
+    what failed is a control region rather than a task, and ``cancelled`` lists the
+    children a residual policy cancelled. Control settlement and dynamic child
+    materialization are internal and never appear here.
     """
 
     ready: list[str] = field(default_factory=list)
     failed: list[str] = field(default_factory=list)
     retry: list[str] = field(default_factory=list)
     reasons: dict[str, str] = field(default_factory=dict)
+    cancelled: list[str] = field(default_factory=list)
 
     def extend(self, other: "Advance") -> Self:
         self.ready.extend(other.ready)
         self.failed.extend(other.failed)
         self.retry.extend(other.retry)
         self.reasons.update(other.reasons)
+        self.cancelled.extend(other.cancelled)
         return self
 
 
@@ -839,7 +842,7 @@ class OrchestrationEngine:
         declares either way."""
         activation = self._activations[wi.activation_id]
         if activation.kind != "child":
-            return Advance(failed=self._settle_failure(wi.work_item_id))
+            return self._settle_failure(wi.work_item_id)
         if wi.status in TERMINAL_WORK_ITEM_STATUSES:
             return Advance()
         # A child's terminal failure drains its scope account and lets an all-succeed
@@ -847,9 +850,10 @@ class OrchestrationEngine:
         advance = self._settle_child_wi(
             wi, activation, PublicationOutcome.DECLARED_FAILURE, None
         )
-        cascade = [wi.legacy_task_id]
+        cascade = Advance(failed=[wi.legacy_task_id])
         self._fail_agent_regions(wi, cascade, set())
-        advance.failed[:0] = cascade
+        advance.failed[:0] = cascade.failed
+        advance.cancelled.extend(cascade.cancelled)
         return advance
 
     @_ds_drive(ControlPlaneWindow.POST_START)
@@ -2305,13 +2309,14 @@ class OrchestrationEngine:
 
     def _settle_owned_region(self, opener: str) -> Advance:
         scope_id = self._scope_by_activation.get(opener)
-        if scope_id is None or not self._close_owned_region(scope_id):
-            return Advance()
-        return self._maybe_release_join(scope_id)
+        advance = Advance()
+        if scope_id is None or not self._close_owned_region(scope_id, advance):
+            return advance
+        return advance.extend(self._maybe_release_join(scope_id))
 
-    def _close_owned_region(self, scope_id: str) -> bool:
-        """Close a terminal agent's open region under its residual policy; returns
-        whether it was open."""
+    def _close_owned_region(self, scope_id: str, advance: Advance) -> bool:
+        """Close a terminal agent's open region under its residual policy, adding the
+        children it cancels to ``advance``; returns whether it was open."""
         cap = self._capabilities.get((scope_id, ProgressAxis.CHILD_INIT))
         if cap is None or cap.status is not CapabilityStatus.OPEN:
             return False
@@ -2324,7 +2329,7 @@ class OrchestrationEngine:
                 operator_id=owner,
                 detail={"scope": scope_id, "reason": "agent_terminal"},
             )
-            self._cancel_residual_children(scope_id)
+            advance.cancelled.extend(self._cancel_residual_children(scope_id))
         else:
             cap.status = CapabilityStatus.SEALED
             self._emit(
@@ -2848,19 +2853,23 @@ class OrchestrationEngine:
         self._freeze_region_aggregate(join, join_op, scope_id)
         if outcome is PublicationOutcome.DECLARED_FAILURE:
             self._frontier_closed(scope_id)
-            self._apply_residual_policy(join, scope_id)
-            return self._fail_resolved_join(join_op, scope_id, children)
+            cancelled = self._apply_residual_policy(join, scope_id)
+            advance = self._fail_resolved_join(join_op, scope_id, children)
+            advance.cancelled.extend(cancelled)
+            return advance
         self._emit(
             "join_released",
             operator_id=join_op,
             detail={"outcome": outcome.value, "children": str(len(children))},
         )
         self._frontier_closed(scope_id)
-        self._apply_residual_policy(join, scope_id)
+        cancelled = self._apply_residual_policy(join, scope_id)
         self._publish(join_op, outcome, value_ref)
-        return self._deliver_record(
+        advance = self._deliver_record(
             join_op, self._control_activation(join_op), value_ref
         )
+        advance.cancelled.extend(cancelled)
+        return advance
 
     def _fail_resolved_join(
         self, join_op: str, scope_id: str, children: list[Activation]
@@ -2876,7 +2885,7 @@ class OrchestrationEngine:
             self._failed_scopes.add(scope_id)
             self._emit("region_failed", operator_id=join_op, detail={"scope": scope_id})
             return Advance()
-        cascade: list[str] = []
+        cascade = Advance()
         self._settle_region_failed(join_op)
         self._fail_downstream(join_op, cascade, {join_op})
         failed_child = next(
@@ -2891,9 +2900,11 @@ class OrchestrationEngine:
             None,
         )
         if failed_child is not None and failed_child.legacy_task_id:
-            return Advance(failed=[failed_child.legacy_task_id, *cascade])
+            cascade.failed.insert(0, failed_child.legacy_task_id)
+            return cascade
         reason = f"join {join_op} resolved no winner"
-        return Advance(failed=cascade, reasons=dict.fromkeys(cascade, reason))
+        cascade.reasons.update(dict.fromkeys(cascade.failed, reason))
+        return cascade
 
     def _freeze_region_aggregate(
         self, join: JoinRegion, join_op: str, scope_id: str
@@ -3021,28 +3032,33 @@ class OrchestrationEngine:
         join = self._operators.get(join_op) if join_op else None
         return join if isinstance(join, JoinRegion) else None
 
-    def _cancel_residual_children(self, scope_id: str) -> None:
+    def _cancel_residual_children(self, scope_id: str) -> list[str]:
+        """Cancel a scope's unsettled children; returns their task ids."""
         cap = self._capabilities.get((scope_id, ProgressAxis.CHILD_INIT))
+        cancelled: list[str] = []
         for child in self._materialized_children(scope_id):
             wi = self._work_items[self._wi_by_activation[child.activation_id]]
             if wi.status not in TERMINAL_WORK_ITEM_STATUSES:
                 self._cancel_work_item(wi)
+                cancelled.append(wi.legacy_task_id)
                 if cap is not None:
                     cap.outstanding = max(0, cap.outstanding - 1)
+        return cancelled
 
-    def _apply_residual_policy(self, join: JoinRegion, scope_id: str) -> None:
-        """Govern a released early join's not-yet-settled materialized children.
+    def _apply_residual_policy(self, join: JoinRegion, scope_id: str) -> list[str]:
+        """Govern a released early join's not-yet-settled materialized children;
+        returns the ones it cancelled.
 
         ``continue`` leaves child-init open; ``drain`` seals it; ``cancel`` revokes it
         and cancels the residual children. Residual settlements stay ledger-visible but
         never become the join's implicit winner output.
         """
         if join.completion not in _EARLY_JOINS:
-            return
+            return []
         policy = self._residual_policy(join, ResidualPolicy.CONTINUE)
         cap = self._capabilities.get((scope_id, ProgressAxis.CHILD_INIT))
         if policy is ResidualPolicy.CONTINUE or cap is None:
-            return
+            return []
         cancel = policy is ResidualPolicy.CANCEL
         if cap.status is CapabilityStatus.OPEN:
             cap.status = CapabilityStatus.REVOKED if cancel else CapabilityStatus.SEALED
@@ -3051,8 +3067,7 @@ class OrchestrationEngine:
                 operator_id=self._scopes[scope_id].owner_operator_id,
                 detail={"scope": scope_id, "residual": policy.value},
             )
-        if cancel:
-            self._cancel_residual_children(scope_id)
+        return self._cancel_residual_children(scope_id) if cancel else []
 
     def _maybe_egress_loop(self, scope_id: str) -> Advance:
         if not scope_id or scope_id in self._released_scopes:
@@ -3336,15 +3351,15 @@ class OrchestrationEngine:
         for successor in sorted(self._forward.get(operator_id, ())):
             self._settle_empty_successor(successor, visited)
 
-    def _settle_failure(self, work_item_id: str) -> list[str]:
+    def _settle_failure(self, work_item_id: str) -> Advance:
         """Settle a work item as a declared failure and fail everything downstream of
-        it, returning the legacy task ids failed."""
-        cascade: list[str] = []
+        it."""
+        cascade = Advance()
         self._fail_work_item(work_item_id, cascade, set())
         return cascade
 
     def _fail_work_item(
-        self, work_item_id: str, cascade: list[str], visited: set[str]
+        self, work_item_id: str, cascade: Advance, visited: set[str]
     ) -> None:
         wi = self._work_items[work_item_id]
         if wi.status in TERMINAL_WORK_ITEM_STATUSES:
@@ -3355,12 +3370,12 @@ class OrchestrationEngine:
         self._emitter.emit_activation(wi.activation_id)
         self._private_state.release(wi.activation_id)
         self._publish(wi.operator_id, PublicationOutcome.DECLARED_FAILURE, None)
-        cascade.append(wi.legacy_task_id)
+        cascade.failed.append(wi.legacy_task_id)
         self._fail_agent_regions(wi, cascade, visited)
         self._fail_downstream(wi.operator_id, cascade, visited)
 
     def _fail_agent_regions(
-        self, wi: WorkItem, cascade: list[str], visited: set[str]
+        self, wi: WorkItem, cascade: Advance, visited: set[str]
     ) -> None:
         """Fail every child region a failed agent declares.
 
@@ -3387,7 +3402,7 @@ class OrchestrationEngine:
                 self._fail_entered_region(
                     ref.spawn_ref, scope_id, instance, cascade, visited
                 )
-            self._close_owned_region(scope_id)
+            self._close_owned_region(scope_id, cascade)
             self._emit_scope_owner(scope_id)
 
     def _scope_closed(self, scope_id: str) -> bool:
@@ -3407,7 +3422,7 @@ class OrchestrationEngine:
         spawn_op: str,
         scope_id: str,
         instance: bool,
-        cascade: list[str],
+        cascade: Advance,
         visited: set[str],
     ) -> None:
         """Fail the join of one scope a failed agent opened, which has not released.
@@ -3425,7 +3440,7 @@ class OrchestrationEngine:
             self._fail_downstream(join_op, cascade, visited)
 
     def _fail_downstream(
-        self, operator_id: str, cascade: list[str], visited: set[str]
+        self, operator_id: str, cascade: Advance, visited: set[str]
     ) -> None:
         for successor in sorted(self._forward.get(operator_id, ())):
             if self._is_control(successor):
@@ -3434,7 +3449,7 @@ class OrchestrationEngine:
                 self._fail_work_item(succ_wi, cascade, visited)
 
     def _fail_region(
-        self, operator_id: str, cascade: list[str], visited: set[str]
+        self, operator_id: str, cascade: Advance, visited: set[str]
     ) -> None:
         """Settle a control operator a failed input feeds as a declared failure.
 
@@ -3464,7 +3479,7 @@ class OrchestrationEngine:
         self._emit("region_failed", operator_id=operator_id)
         self._publish(operator_id, PublicationOutcome.DECLARED_FAILURE, None)
 
-    def _fail_spawn_template(self, spawn_op: str, cascade: list[str]) -> None:
+    def _fail_spawn_template(self, spawn_op: str, cascade: Advance) -> None:
         """Fail a failed spawn's child template, and the templates nested under it,
         once no live spawn instantiates them."""
         template = self.child_template_of(spawn_op)
@@ -3472,7 +3487,7 @@ class OrchestrationEngine:
             return
         for failed in self.template_closure(template, self._instantiable_by_live):
             self._publish(failed, PublicationOutcome.DECLARED_FAILURE, None)
-            cascade.append(failed)
+            cascade.failed.append(failed)
 
     def _instantiable_by_live(self, template: str, dead: list[str]) -> bool:
         """Whether a spawn that neither failed nor belongs to a dead template can still
@@ -4095,11 +4110,11 @@ class OrchestrationEngine:
             or self._is_dynamic_activation(wi.activation_id)
         ):
             return []
-        cascade: list[str] = []
+        cascade = Advance()
         visited: set[str] = set()
         self._fail_agent_regions(wi, cascade, visited)
         self._fail_downstream(wi.operator_id, cascade, visited)
-        return cascade
+        return cascade.failed
 
     def reconcile_pending(self, task_id: str) -> bool:
         """Re-derive readiness for a task whose durable record shows PENDING.

@@ -185,7 +185,8 @@ of it, as a failed dependency fails a task.
 A `join` `completion` is `all_settled`, `all_succeed`, `any`, `first_k` (with
 `k`), or `predicate` (with `predicate: { min_qualifiers, monotone }`). An early
 completion (`any`/`first_k`/`predicate`) declares a `residual` policy
-(`continue`, `drain`, `cancel`) for children still running when it releases, and
+(`continue`, `drain`, `cancel`) for children still unsettled when it releases;
+`cancel` cancels each of their tasks and interrupts one already running. It
 may set `no_winner_failure: true` to resolve a no-winner join as a failure rather
 than empty. The winner is the lowest-`child_index` child that qualifies. An
 `all_succeed` join with a failed child, or a no-winner join under

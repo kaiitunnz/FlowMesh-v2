@@ -138,6 +138,11 @@ class TaskRecord(BaseModel):
         default=False,
         description="Server-internal: backs resident capacity; not user-settable.",
     )
+    residual_cancel: bool = Field(
+        default=False,
+        description="Server-internal: cancelled by its region's residual policy, not "
+        "by a workflow cancel.",
+    )
     assigned_worker: str | None = Field(
         default=None, description="Assigned worker identifier."
     )
