@@ -82,6 +82,7 @@ from .services.model_secret_vault import ModelSecretVault
 from .services.monitoring import EventMonitor
 from .services.port_forward import PortForwardService
 from .services.ssh_audit import SshAuditService
+from .services.task_events import TaskEventPublisher
 from .services.watchdog import WorkerWatchdog
 from .startup import (
     rehydrate_root_state,
@@ -453,7 +454,9 @@ if IS_ROOT_NODE:
     # the monitor's finalizer when a workflow may have ended; the finalizer decides.
     RUNTIME.set_completion_notifier(EVENT_MONITOR.finalizer.request)
     WATCHDOG.set_failure_fallback(EVENT_MONITOR.handle_task_event)
-    RUNTIME.set_failure_reporter(EVENT_MONITOR.handle_task_event)
+    TASK_EVENTS = TaskEventPublisher(REDIS_CLIENT.sync, logger)
+    TASK_EVENTS.set_fallback(EVENT_MONITOR.handle_task_event)
+    RUNTIME.set_failure_reporter(TASK_EVENTS.publish)
 
     if GATED_SERVE is not None:
         # A forward exposure goes live off the request path (its listener binds after

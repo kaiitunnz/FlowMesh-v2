@@ -12,6 +12,7 @@ import pytest
 
 from server.config import OrchestrationConfig
 from server.orchestration.state import AttemptStatus, WorkItemStatus
+from server.services.task_events import TaskEventPublisher
 from server.task.models import TaskStatus
 from server.task.redrive import StoreRedriveScheduler
 from server.task.results import ResultUnavailable, ResultUnreadable
@@ -327,6 +328,7 @@ async def test_input_missing_at_control_fails_the_task_as_a_reported_failure() -
     assert (record.error or "").startswith("input_unreadable:")
     assert record.attempts == 0
     assert record.failed_workers == []
+    fixture.scheduler.run_due()
     assert task_id not in runtime._input_checks
     dependent = next(
         other for other, deps in runtime._original_deps.items() if task_id in deps
@@ -484,3 +486,106 @@ async def test_a_task_cancelled_while_held_is_left_settled() -> None:
 
     assert runtime._tasks[task_id].status == TaskStatus.CANCELLED
     assert fixture.ready() is None
+
+
+class _Stream:
+    """The durable task-event stream as the monitor consumes it: in order, handing a
+    report over again until one handling of it completes."""
+
+    def __init__(self, monitor: Any) -> None:
+        self._monitor = monitor
+        self.entries: list[TaskEvent] = []
+
+    def publish(self, event: TaskEvent) -> None:
+        self.entries.append(event)
+
+    def pump(self) -> None:
+        while self.entries:
+            try:
+                self._monitor.handle_task_event(self.entries[0])
+            except ConnectionError:
+                return
+            self.entries.pop(0)
+
+
+def _streamed(registry: _Registry) -> tuple[_Attributing, _Stream]:
+    fixture = _Attributing(registry)
+    stream = _Stream(fixture.monitor)
+    fixture.runtime.set_failure_reporter(stream.publish)
+    return fixture, stream
+
+
+def _finalized(fixture: _Attributing) -> list[str]:
+    return [c.args[0] for c in fixture.metrics.finalize_task_failure.call_args_list]
+
+
+@pytest.mark.anyio
+async def test_a_verdict_whose_write_failed_is_handled_again_and_finalizes_once() -> (
+    None
+):
+    registry = _Registry()
+    fixture, stream = _streamed(registry)
+    runtime = fixture.runtime
+    task_id, reference = await _consumer(runtime)
+    fixture.report(_unavailable(task_id, [reference]))
+    fixture.probe.error = ResultUnreadable("no content")
+    fixture.scheduler.run_due()
+
+    registry.fail_next = True
+    stream.pump()
+    assert registry.durable_status(task_id) != TaskStatus.FAILED
+    assert task_id in runtime._input_checks
+    fixture.scheduler.run_due()  # control reports its verdict again
+    stream.pump()
+
+    assert registry.durable_status(task_id) == TaskStatus.FAILED
+    assert _finalized(fixture).count(task_id) == 1
+    fixture.scheduler.run_due()
+    assert task_id not in runtime._input_checks
+
+
+@pytest.mark.anyio
+async def test_a_verdict_applied_directly_after_a_failed_write_is_reported_again() -> (
+    None
+):
+    registry = _Registry()
+    fixture = _Attributing(registry)
+    runtime = fixture.runtime
+    redis = MagicMock()
+    redis.xadd_telemetry.side_effect = ConnectionError("telemetry redis down")
+    publisher = TaskEventPublisher(redis, logging.getLogger("input-unavailable"))
+    publisher.set_fallback(fixture.monitor.handle_task_event)
+    runtime.set_failure_reporter(publisher.publish)
+    task_id, reference = await _consumer(runtime)
+    fixture.report(_unavailable(task_id, [reference]))
+    fixture.probe.error = ResultUnreadable("no content")
+
+    registry.fail_next = True
+    fixture.scheduler.run_due()
+    assert registry.durable_status(task_id) != TaskStatus.FAILED
+    fixture.scheduler.run_due()
+
+    assert registry.durable_status(task_id) == TaskStatus.FAILED
+    assert _finalized(fixture).count(task_id) == 1
+
+
+@pytest.mark.anyio
+async def test_a_verdict_is_never_answered_with_the_workers_stashed_report() -> None:
+    registry = _Registry()
+    fixture, stream = _streamed(registry)
+    runtime = fixture.runtime
+    task_id, reference = await _consumer(runtime)
+    report = _unavailable(task_id, [reference])
+    registry.fail_next = True
+    with pytest.raises(ConnectionError):
+        fixture.report(report)  # the stream hands this over again later
+    fixture.probe.error = ResultUnreadable("no content")
+
+    fixture.scheduler.run_due()
+    stream.pump()  # the verdict, handled before the worker's report comes back
+
+    assert runtime._tasks[task_id].status == TaskStatus.FAILED
+    assert _finalized(fixture).count(task_id) == 1
+    fixture.report(report)
+    assert registry.durable_status(task_id) == TaskStatus.FAILED
+    assert _finalized(fixture).count(task_id) == 1

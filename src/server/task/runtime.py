@@ -269,6 +269,23 @@ class _InputCheck:
     unreadable: str | None = None
 
 
+_INPUT_VERDICT_REPORT = "TASK_FAILED:input_unreadable"
+
+
+def _input_verdict(task_id: str, check: _InputCheck) -> TaskEvent:
+    """Control's report that a held task's input is unreadable, as the dispatch that
+    could not read it."""
+    return TaskEvent(
+        type="TASK_FAILED",
+        task_id=task_id,
+        worker_id=check.worker_id,
+        dispatch_id=check.dispatch_id,
+        error=f"input_unreadable: {check.unreadable}",
+        retryable=False,
+        failure_kind=TaskFailureKind.INPUT_UNREADABLE,
+    )
+
+
 @dataclass
 class _Termination:
     """What a terminated workflow's work still holds, released after its terminal."""
@@ -3309,35 +3326,35 @@ class TaskRuntime:
         verdicts = {
             task_id: self._verify_inputs(check.references)
             for task_id, check in checks.items()
+            if check.unreadable is None
         }
         failures: list[TaskEvent] = []
         with self._cv:
-            for task_id, verdict in verdicts.items():
-                check = checks[task_id]
+            for task_id, check in checks.items():
                 if self._input_checks.get(task_id) is not check:
                     continue
                 record = self._tasks.get(task_id)
+                if check.unreadable is not None:
+                    if record is not None and (
+                        record.status == TaskStatus.PENDING
+                        or self._verdict_unacknowledged_locked(task_id)
+                    ):
+                        failures.append(_input_verdict(task_id, check))
+                    else:
+                        del self._input_checks[task_id]
+                    continue
                 if record is None or record.status != TaskStatus.PENDING:
                     del self._input_checks[task_id]
                     continue
+                verdict = verdicts[task_id]
                 if isinstance(verdict, ResultUnreadable):
                     self._logger.warning(
                         "Task %s input is unreadable at control: %s", task_id, verdict
                     )
-                    self._input_checks[task_id] = replace(
+                    check = self._input_checks[task_id] = replace(
                         check, unreadable=str(verdict)
                     )
-                    failures.append(
-                        TaskEvent(
-                            type="TASK_FAILED",
-                            task_id=task_id,
-                            worker_id=check.worker_id,
-                            dispatch_id=check.dispatch_id,
-                            error=f"input_unreadable: {verdict}",
-                            retryable=False,
-                            failure_kind=TaskFailureKind.INPUT_UNREADABLE,
-                        )
-                    )
+                    failures.append(_input_verdict(task_id, check))
                     continue
                 if verdict is not None:
                     self._logger.warning(
@@ -3355,8 +3372,18 @@ class TaskRuntime:
                     self._cv.notify_all()
                 self._commit_locked(task_id)
                 del self._input_checks[task_id]
+            if failures:
+                # A later drive drops each check whose verdict has committed, or
+                # reports it again.
+                self._redrive.schedule(workflow_id)
         for event in failures:
             self._report_failure(event)
+
+    def _verdict_unacknowledged_locked(self, task_id: str) -> bool:
+        """Whether control's verdict on a task failed a durable write and waits to be
+        handled again."""
+        pending = self._unacknowledged.get(task_id)
+        return pending is not None and pending.report == _INPUT_VERDICT_REPORT
 
     def _verify_inputs(
         self, references: tuple[ContentReference, ...]
@@ -4623,8 +4650,15 @@ class TaskRuntime:
         a cancel is already under way. A report on a settled task persists its
         settlement again, and one from any other dispatch is dropped.
         """
+        # Control's verdict on a held task's input is a report of its own, so it never
+        # replays the worker report of the same dispatch.
+        report = (
+            _INPUT_VERDICT_REPORT
+            if failure_kind is TaskFailureKind.INPUT_UNREADABLE
+            else "TASK_FAILED"
+        )
         return self._reported(
-            "TASK_FAILED",
+            report,
             task_id,
             worker_id,
             dispatch_id,
@@ -4658,7 +4692,6 @@ class TaskRuntime:
             if record is not None and self._is_input_verdict_locked(
                 record, worker_id, dispatch_id, failure_kind
             ):
-                del self._input_checks[task_id]
                 record.last_error = error
                 impacted, usages = self.mark_failed(
                     task_id, worker_id, payload, ts, error=error
