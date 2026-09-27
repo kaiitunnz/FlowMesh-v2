@@ -77,7 +77,4 @@ them.
 
 The SDK raises `flowmesh.FlowMeshError` (and a small set of subclasses
 for auth / not-found / rate-limit) instead of returning HTTP error
-shapes. Wrap your calls accordingly. Reading a published output raises
-`OutputPendingError` for a member that has not settled,
-`ContentUnavailableError` while the content store cannot be reached, and
-`OutputUnreadableError` for bound content that is missing or corrupt.
+shapes. Wrap your calls accordingly.

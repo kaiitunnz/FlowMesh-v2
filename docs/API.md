@@ -30,22 +30,18 @@ self-authenticate the same way, sending `FLOWMESH_API_KEY` as the bearer.
 | GET | `/api/v1/workflows/{id}/logs` | Query logs (`limit`, `before`/`after` cursors). |
 | GET | `/api/v1/workflows/{id}/logs/stream` | SSE log stream. |
 | POST | `/api/v1/workflows/{id}/cancel` | Cancel a workflow and all in-flight tasks. |
-| GET | `/api/v1/workflows/{id}/outputs` | List published output members (`limit`, `before`/`after` cursors, `output`, `scope`). |
-| GET | `/api/v1/workflows/{id}/outputs/{name}` | Get one published output member's value (`scope`, `key`, `sequence`). |
+| GET | `/api/v1/workflows/{id}/outputs` | List published outputs. |
+| GET | `/api/v1/workflows/{id}/outputs/{name}` | Get one published output's value. |
 
 ### Published outputs
 
-An output is named by the node it is published on; a spawn's output has one member per
-child, which a fetch selects by `scope` and `key`. Members list by name, scope, and key;
-while `open` is true a re-list from the start picks up newly settled members. A member's
-`outcome` is `pending`, `success` (with its `value`), `explicit_empty`, or
-`declared_failure`. Both routes check `WORKFLOW` and `RESULT` read. Errors carry
-`detail.code`:
+An output is named by the node it is published on, and a fetch selects a spawn's member
+by `scope` and `key`. Errors carry `detail.code`:
 
 | Status | `code` | Meaning |
 |--------|--------|---------|
 | 400 | `invalid_request`, `invalid_cursor` | A collection fetched without `scope` and `key`, or a malformed cursor. |
-| 404 | `output_not_found` | No published output by that name, or no such member once `open` is `false`. |
+| 404 | `output_not_found` | No published output by that name, or no such member in a settled workflow. |
 | 409 | `output_pending` | The member has not settled. |
 | 503 | `content_unavailable` | The content store cannot be reached; retry. |
 | 500 | `output_unreadable` | The member's bound content is missing or corrupt. |
