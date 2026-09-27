@@ -52,8 +52,7 @@ class ExternalModelSidecar:
         except (requests.RequestException, KeyError, IndexError, ValueError) as exc:
             self._log.warning("external-model egress failed: %s", exc)
             return ToolOutcome(
-                status=ToolOutcomeStatus.UNAVAILABLE,
-                value="the model provider was unreachable",
+                status=ToolOutcomeStatus.UNAVAILABLE, value=_failure_text(exc)
             )
         return ToolOutcome(
             status=ToolOutcomeStatus.SUCCESS, value=content[: envelope.result_char_cap]
@@ -80,7 +79,7 @@ class ExternalModelSidecar:
             raise ModelEgressError("the model request timed out") from exc
         except (requests.RequestException, KeyError, IndexError, ValueError) as exc:
             self._log.warning("external-model egress failed: %s", exc)
-            raise ModelEgressError("the model provider was unreachable") from exc
+            raise ModelEgressError(_failure_text(exc)) from exc
         content = message.get("content")
         return ModelCompletion(
             content=str(content) if content is not None else "",
@@ -109,6 +108,14 @@ class ExternalModelSidecar:
         )
         response.raise_for_status()
         return dict(response.json())
+
+
+def _failure_text(exc: Exception) -> str:
+    if isinstance(exc, requests.HTTPError) and (
+        exc.response is not None and exc.response.status_code in (401, 403)
+    ):
+        return "the model provider rejected the request's credential"
+    return "the model provider was unreachable"
 
 
 def _parse_tool_calls(raw: Any) -> tuple[ModelToolCall, ...]:

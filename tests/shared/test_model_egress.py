@@ -149,3 +149,27 @@ def test_complete_interface_mismatch_raises() -> None:
     envelope = _envelope().model_copy(update={"interface": "search/v1"})
     with pytest.raises(ModelEgressError):
         ExternalModelSidecar().complete(envelope, _REQUEST, "k")
+
+
+def _rejected(status: int) -> requests.Response:
+    response = requests.Response()
+    response.status_code = status
+    response.url = "http://up/v1/chat/completions"
+    return response
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_a_credential_rejection_reads_as_one(
+    monkeypatch: pytest.MonkeyPatch, status: int
+) -> None:
+    monkeypatch.setattr(requests, "post", lambda url, **kwargs: _rejected(status))
+    out = ExternalModelSidecar().execute(_envelope(), _REQUEST, None)
+    assert out.value == "the model provider rejected the request's credential"
+    with pytest.raises(ModelEgressError, match="rejected the request's credential"):
+        ExternalModelSidecar().complete(_envelope(), _REQUEST, None)
+
+
+def test_a_server_error_reads_as_unreachable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(requests, "post", lambda url, **kwargs: _rejected(500))
+    out = ExternalModelSidecar().execute(_envelope(), _REQUEST, None)
+    assert out.value == "the model provider was unreachable"
