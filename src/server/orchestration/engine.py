@@ -83,6 +83,7 @@ from .outcomes import (
 )
 from .private_state import PrivateStateLedger
 from .state import (
+    TERMINAL_INVOCATION_STATES,
     TERMINAL_WORK_ITEM_STATUSES,
     AcceptedInput,
     AcceptedInputMember,
@@ -166,13 +167,6 @@ _EARLY_JOINS = frozenset(
 )
 _AMBIGUITY_TERMINAL_REASON = "ambiguity-terminal effect"
 _OPEN_ATTEMPT_STATUSES = frozenset({AttemptStatus.ISSUED, AttemptStatus.RUNNING})
-_TERMINAL_INVOCATION_STATES = frozenset(
-    {
-        InvocationState.TERMINAL,
-        InvocationState.AMBIGUITY_TERMINAL,
-        InvocationState.COMPENSATION_REQUIRED,
-    }
-)
 
 
 class RegionError(ValueError):
@@ -1568,7 +1562,7 @@ class OrchestrationEngine:
         """Whether a terminal boundary invocation completed with an outcome; None while
         it is unknown or not terminal."""
         invocation = self._invocations.get(invocation_id)
-        if invocation is None or invocation.state not in _TERMINAL_INVOCATION_STATES:
+        if invocation is None or invocation.state not in TERMINAL_INVOCATION_STATES:
             return None
         return any(
             env.invocation_id == invocation_id

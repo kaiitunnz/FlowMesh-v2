@@ -77,6 +77,16 @@ class InvocationState(StrEnum):
     AMBIGUITY_TERMINAL = "ambiguity_terminal"
 
 
+TERMINAL_INVOCATION_STATES = frozenset(
+    {
+        InvocationState.TERMINAL,
+        InvocationState.AMBIGUITY_TERMINAL,
+        InvocationState.COMPENSATION_REQUIRED,
+    }
+)
+"""The invocation states no later transition leaves."""
+
+
 class PublicationOutcome(StrEnum):
     """Terminal outcome of a declared logical output."""
 

@@ -75,11 +75,11 @@ from shared.utils.time import iso_to_ns
 
 from ..task.v2.representations.operators import REGION_OPERATOR_KINDS
 from .state import (
+    TERMINAL_INVOCATION_STATES,
     TERMINAL_WORK_ITEM_STATUSES,
     Activation,
     Attempt,
     Invocation,
-    InvocationState,
     OrchestrationEvent,
     Scope,
     WorkItem,
@@ -114,13 +114,6 @@ _NO_EXTENT_OPERATOR_KINDS = REGION_OPERATOR_KINDS
 # merely has not settled yet.
 _NO_EXTENT_ACTIVATION_KINDS = frozenset({"iteration", "leaf", "agent"})
 
-_TERMINAL_INVOCATION = frozenset(
-    {
-        InvocationState.TERMINAL,
-        InvocationState.AMBIGUITY_TERMINAL,
-        InvocationState.COMPENSATION_REQUIRED,
-    }
-)
 
 _logger = logging.getLogger("orchestration-telemetry")
 _reported_faults: set[str] = set()
@@ -637,7 +630,7 @@ class TelemetrySpanEmitter:
     def emit_boundary(self, invocation: Invocation) -> None:
         if not self._emits(TelemetryLevel.FINE):
             return
-        if invocation.state not in _TERMINAL_INVOCATION:
+        if invocation.state not in TERMINAL_INVOCATION_STATES:
             return
         span_id = derived_span_id(SpanIdKind.INVOCATION, invocation.invocation_id)
         key = (self._trace_id, span_id)
