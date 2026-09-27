@@ -653,3 +653,39 @@ async def test_a_cascaded_dependent_reads_failed_before_and_after_a_restart() ->
     await restored.rehydrate()
     info = restored.describe_task(b)
     assert info is not None and info.failed
+
+
+_CHAIN = """
+apiVersion: mloc/v1
+kind: Workflow
+metadata: {name: chain}
+spec:
+  graph:
+    nodes:
+      - name: a
+        spec: {taskType: echo}
+      - name: b
+        dependsOn: [a]
+        spec: {taskType: echo}
+      - name: c
+        dependsOn: [b]
+        spec: {taskType: echo}
+"""
+
+
+@pytest.mark.anyio
+async def test_a_failure_cascades_through_every_level_of_dependents() -> None:
+    registry = FakeWorkflowRegistry()
+    runtime = _runtime(registry)
+    workflow_id, ids = await _register(runtime, _CHAIN)
+    a, b, c = ids["a"], ids["b"], ids["c"]
+
+    impacted, _ = runtime.mark_failed(a, "wkr-1", {}, "2026-06-01T00:00:00Z")
+
+    reason = f"Dependency {a} failed"
+    assert sorted(impacted) == sorted([(b, reason), (c, reason)])
+    for task_id in (b, c):
+        record = runtime.get_record(task_id)
+        assert record is not None and record.status == TaskStatus.FAILED
+        assert record.error == reason
+    assert runtime.workflow_settlement(workflow_id).settled

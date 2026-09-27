@@ -392,6 +392,10 @@ def _reset_to_pending(record: TaskRecord) -> None:
     record.error = None
 
 
+def _dependency_failed(task_id: str) -> str:
+    return f"Dependency {task_id} failed"
+
+
 def _failed_task_can_retry(record: TaskRecord, retryable: bool | None) -> bool:
     """Whether a failed task may be requeued: retryable, within the attempt budget,
     and not settling."""
@@ -3290,7 +3294,7 @@ class TaskRuntime:
                 primary = task_id
                 text = own or reason or "declared-failure obligation"
             else:
-                text = f"Dependency {primary} failed"
+                text = _dependency_failed(primary)
             changed += self._fail_v2_records_locked([task_id], text, persist=False)
         if changed:
             self._commit_locked(*changed)
@@ -3925,16 +3929,21 @@ class TaskRuntime:
                 # A settling task is already on its way to a terminal; failing it would
                 # overwrite the cancellation a settle path is still waiting to apply.
                 continue
-            record.status = TaskStatus.FAILED
-            record.error = reason
-            record.assigned_worker = None
-            record.finished_ts = time.time()
-            self._failed.add(task_id)
-            self._remove_from_ready_locked(task_id)
+            self._fail_record_locked(record, reason)
             failed_now.append(task_id)
         if persist and failed_now:
             self._commit_locked(*failed_now)
         return failed_now
+
+    def _fail_record_locked(self, record: TaskRecord, reason: str) -> None:
+        task_id = record.task_id
+        record.status = TaskStatus.FAILED
+        record.error = reason
+        record.assigned_worker = None
+        record.finished_ts = time.time()
+        self._failed.add(task_id)
+        self._pending_deps.pop(task_id, None)
+        self._remove_from_ready_locked(task_id)
 
     def _fail_workflow_locked(self, workflow_id: str, reason: str) -> None:
         """Fail a workflow in its ledger and every non-terminal task of it, and persist
@@ -3961,10 +3970,28 @@ class TaskRuntime:
         else:
             self._pending_terminations.append(termination)
 
+    def _fail_v1_dependents_locked(self, primary: str) -> list[tuple[str, str]]:
+        """Fail every pending task downstream of a failed v1 task, however deep."""
+        reason = _dependency_failed(primary)
+        impacted: list[tuple[str, str]] = []
+        frontier = [primary]
+        while frontier:
+            failed = frontier.pop()
+            for child in self._dependents.pop(failed, set()):
+                if (pending := self._pending_deps.get(child)) is not None:
+                    pending.discard(failed)
+                record = self._tasks.get(child)
+                if not record or record.status != TaskStatus.PENDING:
+                    continue
+                self._fail_record_locked(record, reason)
+                impacted.append((child, reason))
+                frontier.append(child)
+        return impacted
+
     def _fail_v2_cascade_locked(
         self, primary: str, cascade: list[str]
     ) -> list[tuple[str, str]]:
-        reason = f"Dependency {primary} failed"
+        reason = _dependency_failed(primary)
         downstream = [task_id for task_id in cascade if task_id != primary]
         failed = self._fail_v2_records_locked(downstream, reason, persist=False)
         return [(task_id, reason) for task_id in failed]
@@ -5111,24 +5138,7 @@ class TaskRuntime:
             merged_children_ids = self._merge_children_map.pop(task_id, [])
             self._merge_key_by_task.pop(task_id, None)
 
-            impacted: list[tuple[str, str]] = []
-            dependents = list(self._dependents.pop(task_id, set()))
-            for child in dependents:
-                pending = self._pending_deps.get(child)
-                if pending is not None:
-                    pending.discard(task_id)
-                child_record = self._tasks.get(child)
-                if not child_record or child_record.status != TaskStatus.PENDING:
-                    continue
-                reason = f"Dependency {task_id} failed"
-                child_record.status = TaskStatus.FAILED
-                child_record.error = reason
-                child_record.assigned_worker = None
-                child_record.finished_ts = time.time()
-                self._failed.add(child)
-                self._pending_deps.pop(child, None)
-                self._remove_from_ready_locked(child)
-                impacted.append((child, reason))
+            impacted = self._fail_v1_dependents_locked(task_id)
 
             if record is not None and (engine := self._engines.get(record.workflow_id)):
                 advance = engine.on_failed(task_id, message, retryable=False)
