@@ -13,7 +13,10 @@ from server.task.v2.representations.operators import JoinRegion
 from shared.harness import BoundaryEventKind
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.task.test_agent_episode_runtime import _SCRIPT, _step
-from tests.server.task.test_resident_origin_loss import _capture_resident_boundary
+from tests.server.task.test_resident_origin_loss import (
+    _capture_resident_boundary,
+    _originating,
+)
 from tests.server.task.test_v2_orchestration import (
     _TS,
     FakeRegistry,
@@ -213,8 +216,7 @@ def test_an_agents_cancel_residual_releases_a_cancelled_childs_credit() -> None:
     async def run() -> None:
         runtime = _runtime()
         registry = cast(FakeRegistry, runtime._workflow_registry)
-        originated: list[Any] = []
-        runtime._resident_originate = originated.append
+        originated = _originating(runtime)
         workflow_id, ids = await _register(runtime, _HEAD + _RESIDENT_REVIEWER)
         engine = _engine(runtime, workflow_id)
         join_op = f"{ids['lead']}:reviewer:spawn:join"

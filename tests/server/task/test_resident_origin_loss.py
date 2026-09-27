@@ -37,6 +37,18 @@ spec:
 """
 
 
+def _originating(runtime: TaskRuntime) -> list[Any]:
+    """Accept every resident origination, keeping each envelope."""
+    originated: list[Any] = []
+
+    def originate(env: Any) -> bool:
+        originated.append(env)
+        return True
+
+    runtime._resident_originate = originate
+    return originated
+
+
 def _capture_resident_boundary(runtime: TaskRuntime, task_id: str) -> None:
     """Run the agent's step as its worker does: the resident request stays on the
     worker and only its digest reaches control."""
@@ -64,8 +76,7 @@ def _capture_resident_boundary(runtime: TaskRuntime, task_id: str) -> None:
 def test_losing_the_origin_worker_releases_the_resident_credit_once_durable() -> None:
     async def run() -> None:
         runtime = _runtime()
-        originated: list[Any] = []
-        runtime._resident_originate = originated.append
+        originated = _originating(runtime)
         releases: list[tuple[str, bool]] = []
         runtime.set_resident_terminal_hook(
             lambda inv, failed: releases.append((inv, failed))
@@ -98,8 +109,7 @@ def test_losing_the_origin_worker_releases_the_resident_credit_once_durable() ->
 def test_a_failed_save_holds_the_credit_until_the_next_save_succeeds() -> None:
     async def run() -> None:
         runtime = _runtime()
-        originated: list[Any] = []
-        runtime._resident_originate = originated.append
+        originated = _originating(runtime)
         releases: list[str] = []
         runtime.set_resident_terminal_hook(lambda inv, _failed: releases.append(inv))
         workflow_id, ids = await _register(runtime, _RESIDENT_WF)

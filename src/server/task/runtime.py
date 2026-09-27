@@ -636,7 +636,7 @@ class TaskRuntime:
         # The worker-originated resident path: originate admits and relays the handoff
         # to the origin worker; the ack and outcome handlers consume the worker's fenced
         # transition reports. Set when resident-capacity control is enabled.
-        self._resident_originate: Callable[[ToolInvocationEnvelope], None] | None = None
+        self._resident_originate: Callable[[ToolInvocationEnvelope], bool] | None = None
         self._resident_ack: Callable[[ResidentBootstrapAck], None] | None = None
         self._resident_outcome: Callable[[ResidentOpOutcome], None] | None = None
         self._resident_route_observation: (
@@ -1963,18 +1963,21 @@ class TaskRuntime:
         terminalizing. A boundary that already settled, terminalized, or cancelled is a
         no-op, so a late re-drive neither re-runs the handler nor releases a credit.
         """
-        with self._cv:
-            record = self._tasks.get(task_id)
-            engine = self._engines.get(record.workflow_id) if record else None
-            if record is None or engine is None:
-                return False
-            if record.status in TERMINAL_TASK_STATUSES:
-                return False
-            envelope = engine.pending_tool_dispatch(task_id, call_correlation)
-            if envelope is None:
-                return False
-            self._dispatch_boundary(envelope)
-        return True
+        try:
+            with self._cv:
+                record = self._tasks.get(task_id)
+                engine = self._engines.get(record.workflow_id) if record else None
+                if record is None or engine is None:
+                    return False
+                if record.status in TERMINAL_TASK_STATUSES:
+                    return False
+                envelope = engine.pending_tool_dispatch(task_id, call_correlation)
+                if envelope is None:
+                    return False
+                self._dispatch_boundary(envelope)
+            return True
+        finally:
+            self._release_pending_terminations()
 
     def _dispatch_boundary(self, env: ToolInvocationEnvelope) -> None:
         """Route a recorded mediated boundary to its handler by exact (kind, interface).
@@ -2028,14 +2031,13 @@ class TaskRuntime:
 
     def _dispatch_resident_op(self, env: ToolInvocationEnvelope) -> None:
         """Originate a worker-captured resident boundary through resident admission."""
-        if self._resident_originate is not None:
-            self._resident_originate(env)
+        if self._resident_originate is None:
+            error = "resident-capacity control is not enabled"
+        elif not self._resident_originate(env):
+            error = "resident-capacity control is not running"
         else:
-            self._settle_episode_invocation(
-                env.task_id,
-                env.call_correlation,
-                error="resident-capacity control is not enabled",
-            )
+            return
+        self._settle_episode_invocation(env.task_id, env.call_correlation, error=error)
 
     def on_resident_bootstrap_ack(self, ack: ResidentBootstrapAck) -> None:
         """Consume an origin worker's resident bootstrap-phase report."""
@@ -2371,7 +2373,7 @@ class TaskRuntime:
     def set_resident_handlers(
         self,
         *,
-        originate: Callable[[ToolInvocationEnvelope], None],
+        originate: Callable[[ToolInvocationEnvelope], bool],
         on_ack: Callable[[ResidentBootstrapAck], None],
         on_outcome: Callable[[ResidentOpOutcome], None],
         on_route_observation: Callable[[ResidentRouteObservation], None],

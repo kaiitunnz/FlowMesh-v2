@@ -427,17 +427,13 @@ class ResidentCapacityControl:
         except asyncio.CancelledError:
             return
 
-    def originate(self, env: ToolInvocationEnvelope) -> None:
-        """Originate a worker-captured resident boundary through resident admission."""
+    def originate(self, env: ToolInvocationEnvelope) -> bool:
+        """Originate a worker-captured resident boundary through resident admission;
+        returns whether control is running to take it."""
         if self._loop is None:
-            self._settle(
-                env.task_id,
-                env.call_correlation,
-                None,
-                error="resident-capacity control is not running",
-            )
-            return
+            return False
         asyncio.run_coroutine_threadsafe(self._originate(env), self._loop)
+        return True
 
     def originate_serve(self, request: ServeOrigination) -> None:
         """Originate an authenticated task-addressed serve request through admission.

@@ -571,6 +571,13 @@ def test_originate_settles_an_error_when_an_internal_path_raises():
     assert settled[0][3] is not None and "resident origination error" in settled[0][3]
 
 
+def test_originate_leaves_a_boundary_to_its_caller_while_control_is_stopped():
+    svc, _stores, settled, _delivery = _build()
+
+    assert svc.originate(_env()) is False
+    assert settled == []
+
+
 def test_rehydrate_reconciles_in_flight_claim():
     svc, stores, _settled, _delivery = _build()
     asyncio.run(svc._originate(_env()))

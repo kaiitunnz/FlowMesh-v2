@@ -256,3 +256,32 @@ def test_a_boundary_settled_under_the_lock_leaves_its_release_pending() -> None:
 
     assert owned == []
     assert runtime._pending_terminations
+
+
+def test_a_redispatched_boundary_releases_off_the_lock() -> None:
+    runtime = _runtime(FakeRegistry())
+    owned = _lock_probe(runtime)
+
+    runtime.redispatch_episode_invocation("tsk-x", "c0")
+
+    assert owned == [False]
+
+
+def test_a_stopped_resident_control_fails_its_boundary_under_the_lock() -> None:
+    runtime = _runtime(FakeRegistry())
+    owned = _lock_probe(runtime)
+    settled: list[str | None] = []
+
+    def settle(*_args: Any, error: str | None = None, **_kwargs: Any) -> bool:
+        settled.append(error)
+        return True
+
+    runtime._resident_originate = lambda _env: False
+    runtime._settle_episode_invocation = settle  # type: ignore[method-assign]
+    env = SimpleNamespace(task_id="tsk-x", call_correlation="c0")
+
+    with runtime._cv:
+        runtime._dispatch_resident_op(cast(ToolInvocationEnvelope, env))
+
+    assert settled == ["resident-capacity control is not running"]
+    assert owned == []
