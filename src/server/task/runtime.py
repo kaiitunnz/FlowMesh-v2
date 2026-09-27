@@ -1341,9 +1341,11 @@ class TaskRuntime:
         for workflow_id in dict.fromkeys(workflow_ids + held.workflow_ids):
             self._save_ledger_locked(workflow_id)
             self._reclaim_vault_if_settled_locked(workflow_id)
-        # With the ledgers durable, what their terminations hold may release.
-        self._pending_terminations += held.terminations
-        held.terminations = []
+        # With the ledgers durable, what their terminations hold may release, unless
+        # a report handled now holds its own writes back.
+        terminations, held.terminations = held.terminations, []
+        for termination in terminations:
+            self._carry_termination_locked(termination)
 
     def _notify_terminal_transition(self, workflow_id: str) -> None:
         """Tell the completion finalizer a workflow may have reached its end.

@@ -14,7 +14,7 @@ import pytest
 
 from server.orchestration.state import InvocationState, LedgerSnapshot
 from server.task.results import ResultUnreadable
-from server.task.runtime import TaskRuntime
+from server.task.runtime import TaskRuntime, _HeldWrites, _Termination
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import result_payload
 from tests.server.task.test_agent_episode_runtime import _MODEL_HELD_SCRIPT, _step
@@ -159,3 +159,18 @@ def test_a_replaced_stash_keeps_the_release_it_carries() -> None:
     scenario.runtime.fail_dispatch(planner, "wkr-1", {}, _TS, "dsp-p", error="late")
 
     assert scenario.releases == [(scenario.invocation_id, InvocationState.TERMINAL)]
+
+
+def test_a_recommit_under_a_held_report_keeps_its_release_held() -> None:
+    scenario = _Scenario()
+    runtime = scenario.runtime
+    termination = _Termination([], [], [], resident_invocation_ids=["inv-x"])
+    current = runtime._report_writes.held = _HeldWrites(error=RuntimeError("down"))
+    try:
+        with runtime._cv:
+            runtime._recommit_locked(_HeldWrites(terminations=[termination]))
+    finally:
+        runtime._report_writes.held = None
+
+    assert runtime._pending_terminations == []
+    assert current.terminations == [termination]
