@@ -335,6 +335,16 @@ class OrchestrationEngine:
             )
         self._region_aggregates = list(snapshot.region_aggregates)
         self._aggregate_by_join: dict[str, RegionJoinAggregate] = {}
+        # A ledger stored while nested levels still froze an aggregate may hold one
+        # after its root level's; the root level's is the one delivered downstream.
+        for aggregate in self._region_aggregates:
+            join_op = aggregate.join_operator_id
+            if join_op not in self._aggregate_by_join or not any(
+                (act := self._activations.get(member.child_activation_id)) is not None
+                and not self._root_level(act.scope_id)
+                for member in aggregate.members
+            ):
+                self._aggregate_by_join[join_op] = aggregate
         self._invocations = {i.invocation_id: i for i in snapshot.invocations}
         self._attempts = {a.attempt_id: a for a in snapshot.attempts}
         self._embodiment_selections = {
@@ -461,16 +471,6 @@ class OrchestrationEngine:
         self._failed_scopes: set[str] = set(snapshot.failed_scopes)
         # Why each task settled as a declared failure: its own reason, or the failure
         # it depends on. A ledger stored without them names each failed work item's own.
-        # A ledger stored while nested levels still froze an aggregate may hold one
-        # after its root level's; the root level's is the one delivered downstream.
-        for aggregate in self._region_aggregates:
-            join_op = aggregate.join_operator_id
-            if join_op not in self._aggregate_by_join or not any(
-                (act := self._activations.get(member.child_activation_id)) is not None
-                and not self._root_level(act.scope_id)
-                for member in aggregate.members
-            ):
-                self._aggregate_by_join[join_op] = aggregate
         self._failure_reasons: dict[str, str] = dict(snapshot.failure_reasons)
         for wi in self._work_items.values():
             if wi.outcome is PublicationOutcome.DECLARED_FAILURE and wi.legacy_task_id:
