@@ -1,4 +1,3 @@
-import re
 from enum import StrEnum
 from typing import Any, Literal, Self
 from urllib.parse import urlsplit
@@ -13,6 +12,7 @@ from pydantic import (
 )
 
 from ...sandbox import SANDBOX_RUNTIMES, SandboxEgressMode
+from ...utils.redact import find_credential_key
 from ..task_type import TaskType
 from .common import (
     ModelSpecStrict,
@@ -23,26 +23,6 @@ from .common import (
     validate_adapters_loadable,
     validate_resident_only_binding,
 )
-
-# A harness param key is credential-bearing when it contains one of these substrings
-# or is a segment-boundary credential word (so ``max_tokens`` is allowed but
-# ``auth_token`` is not). A model credential belongs in the binding's inline ``api_key``
-# (vaulted at submission), never in an opaque harness param.
-_CREDENTIAL_SUBSTRINGS = (
-    "api_key",
-    "apikey",
-    "secret",
-    "password",
-    "credential",
-    "authorization",
-    "access_key",
-    "auth_token",
-    "access_token",
-    "bearer_token",
-    "session_token",
-    "refresh_token",
-)
-_CREDENTIAL_SEGMENTS = frozenset({"auth"})
 
 # A harness owns its own workspace, working directory, and rollout home; an author may
 # not aim one at an arbitrary filesystem path through an opaque harness param.
@@ -60,28 +40,6 @@ _FILESYSTEM_PATH_PARAM_KEYS = frozenset(
         "volumes",
     }
 )
-
-
-def _looks_credential(key: str) -> bool:
-    lowered = key.lower()
-    if any(sub in lowered for sub in _CREDENTIAL_SUBSTRINGS):
-        return True
-    return bool(_CREDENTIAL_SEGMENTS & set(re.split(r"[_\-\s]+", lowered)))
-
-
-def _find_credential_key(value: Any) -> str | None:
-    """The first credential-looking key anywhere in a nested params structure."""
-    if isinstance(value, dict):
-        for key, nested in value.items():
-            if _looks_credential(str(key)):
-                return str(key)
-            if (found := _find_credential_key(nested)) is not None:
-                return found
-    elif isinstance(value, list):
-        for item in value:
-            if (found := _find_credential_key(item)) is not None:
-                return found
-    return None
 
 
 def _find_path_override_key(value: Any) -> str | None:
@@ -173,7 +131,7 @@ class AgentHarnessSpec(BaseModel):
     @field_validator("params")
     @classmethod
     def _reject_credential_params(cls, params: dict[str, Any]) -> dict[str, Any]:
-        if (key := _find_credential_key(params)) is not None:
+        if (key := find_credential_key(params)) is not None:
             raise ValueError(
                 f"harness param {key!r} looks credential-bearing; put a model "
                 "credential in model_binding.api_key"
