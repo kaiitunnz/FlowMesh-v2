@@ -3891,6 +3891,24 @@ class OrchestrationEngine:
             next_seq=self._next_seq,
         )
 
+    def reconcile_failure(self, task_id: str) -> list[str]:
+        """Fail what a task's settled failure left standing downstream of it.
+
+        Returns the legacy task ids newly failed; empty for a task that has not failed,
+        for a spawned child, whose failure drains its scope instead, and once the
+        downstream has already failed.
+        """
+        wi = self._work_item_for_task(task_id)
+        if (
+            wi is None
+            or wi.outcome is not PublicationOutcome.DECLARED_FAILURE
+            or self._is_dynamic_activation(wi.activation_id)
+        ):
+            return []
+        cascade: list[str] = []
+        self._fail_downstream(wi.operator_id, cascade, set())
+        return cascade
+
     def reconcile_pending(self, task_id: str) -> bool:
         """Re-derive readiness for a task whose durable record shows PENDING.
 

@@ -1090,6 +1090,24 @@ class TaskRuntime:
                 continue
             self._enqueue_ready_locked(record.task_id)
 
+    def _reconcile_failures_locked(
+        self, engine: OrchestrationEngine, tasks: list[PersistedTask]
+    ) -> None:
+        """Fail and persist what each failed task left standing downstream of it.
+
+        A ledger written before a failure crossed control regions holds a failure
+        whose downstream never settled; re-walking every failure settles it, and a
+        ledger whose downstream already failed yields nothing.
+        """
+        healed: list[str] = []
+        for persisted in tasks:
+            task_id = persisted.record.task_id
+            if persisted.record.status == TaskStatus.FAILED:
+                cascade = engine.reconcile_failure(task_id)
+                healed += [t for t, _ in self._fail_v2_cascade_locked(task_id, cascade)]
+        if healed:
+            self._commit_locked(*healed)
+
     def _install_rehydrated_v2_workflow_locked(
         self,
         workflow_id: str,
@@ -1147,6 +1165,8 @@ class TaskRuntime:
         # workflow the cancel never reached.
         if cancelled:
             engine.cancel_instance()
+        else:
+            self._reconcile_failures_locked(engine, tasks)
 
         # Re-derive readiness for every PENDING task from the engine rather than
         # trusting the cached work-item status: a crash mid-retry can leave a task

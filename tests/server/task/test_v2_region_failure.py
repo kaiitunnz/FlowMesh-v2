@@ -1,6 +1,7 @@
 """A failed input fails the control region it feeds and everything downstream of it."""
 
 import asyncio
+import json
 from typing import Any, cast
 
 import pytest
@@ -320,3 +321,66 @@ async def test_a_crash_before_the_ledger_save_converges_on_restart() -> None:
     assert publication.outcome is PublicationOutcome.DECLARED_FAILURE
     _assert_failed_downstream(restored, ids, "a", "kid", "after")
     assert restored.workflow_settlement(workflow_id).settled
+
+
+async def _pre_upgrade_hang(
+    registry: FakeRegistry, monkeypatch: pytest.MonkeyPatch
+) -> tuple[TaskRuntime, str, dict[str, str]]:
+    """A workflow stored by a release whose failures stopped at a control region."""
+    runtime = _live_runtime(registry)
+    workflow_id, ids = await _register(
+        runtime, _HEAD + _spawn_join(_JOINS["all_settled"])
+    )
+    engine = _engine(runtime, workflow_id)
+    with monkeypatch.context() as patch:
+        patch.setattr(engine, "_fail_region", lambda *_args: None)
+        _fail(runtime, ids["a"])
+    blob = json.loads(registry.ledger_blobs[workflow_id])
+    del blob["failed_regions"]
+    registry.ledger_blobs[workflow_id] = json.dumps(blob)
+    assert not runtime.workflow_settlement(workflow_id).settled
+    return runtime, workflow_id, ids
+
+
+def test_a_restart_closes_a_workflow_stored_hung_behind_a_failed_region(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        registry = FakeRegistry()
+        registry.submitted_at = _TS
+        runtime, workflow_id, ids = await _pre_upgrade_hang(registry, monkeypatch)
+
+        restored = _live_runtime(registry, "restored", reader=runtime._results)
+        finalizer, redis, emitter = _wired(restored, registry, workflow_id)
+        await restored.rehydrate()
+        finalizer.drain()
+
+        _assert_failed_downstream(restored, ids, "a", "kid", "after")
+        persisted = registry.load_task_states(ids["after"])[0]
+        assert persisted is not None and persisted.record.status == TaskStatus.FAILED
+        assert registry.remaining_of(workflow_id) == set()
+        assert f"workflow:{workflow_id}:logs:closed" in redis.keys
+        assert emitter.emitted == [workflow_id]
+        publication = _engine(restored, workflow_id).output_publication(
+            "collection:fan"
+        )
+        assert publication is not None
+        assert publication.outcome is PublicationOutcome.DECLARED_FAILURE
+
+    asyncio.run(run())
+
+
+@pytest.mark.anyio
+async def test_a_restart_leaves_a_cancelled_hung_workflow_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = FakeRegistry()
+    runtime, workflow_id, ids = await _pre_upgrade_hang(registry, monkeypatch)
+    runtime.cancel_workflow(workflow_id)
+
+    restored = _live_runtime(registry, "restored", reader=runtime._results)
+    await restored.rehydrate()
+    for name in ("kid", "after"):
+        record = restored.get_record(ids[name])
+        assert record is not None and record.status == TaskStatus.CANCELLED
+    assert _engine(restored, workflow_id).to_snapshot().failed_regions == []
