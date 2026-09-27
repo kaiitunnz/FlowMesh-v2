@@ -589,3 +589,49 @@ async def test_a_verdict_is_never_answered_with_the_workers_stashed_report() -> 
     fixture.report(report)
     assert registry.durable_status(task_id) == TaskStatus.FAILED
     assert _finalized(fixture).count(task_id) == 1
+
+
+@pytest.mark.anyio
+async def test_a_verdict_applied_directly_supersedes_the_workers_stashed_report() -> (
+    None
+):
+    registry = _Registry()
+    fixture = _Attributing(registry)
+    runtime = fixture.runtime
+    redis = MagicMock()
+    redis.xadd_telemetry.side_effect = ConnectionError("telemetry redis down")
+    publisher = TaskEventPublisher(redis, logging.getLogger("input-unavailable"))
+    publisher.set_fallback(fixture.monitor.handle_task_event)
+    runtime.set_failure_reporter(publisher.publish)
+    task_id, reference = await _consumer(runtime)
+    report = _unavailable(task_id, [reference])
+    registry.fail_next = True
+    with pytest.raises(ConnectionError):
+        fixture.report(report)
+    fixture.probe.error = ResultUnreadable("no content")
+    fixture.scheduler.run_due()
+    handled = len(fixture.metrics.record_task_event.call_args_list)
+
+    fixture.report(report)  # the stream hands the worker's report over again
+
+    later = fixture.metrics.record_task_event.call_args_list[handled:]
+    assert [c.args[0].type for c in later if c.args[0].task_id == task_id] == []
+    assert registry.durable_status(task_id) == TaskStatus.FAILED
+    assert _finalized(fixture).count(task_id) == 1
+
+
+@pytest.mark.anyio
+async def test_reporting_a_verdict_again_does_not_count_toward_the_store_backoff() -> (
+    None
+):
+    fixture = _Attributing()
+    runtime = fixture.runtime
+    task_id, reference = await _consumer(runtime)
+    workflow_id = runtime._tasks[task_id].workflow_id
+    fixture.report(_unavailable(task_id, [reference]))
+    fixture.probe.error = ResultUnreadable("no content")
+
+    fixture.scheduler.run_due()
+
+    assert fixture.scheduler.pending(workflow_id)
+    assert fixture.scheduler._streak.get(workflow_id, 0) == 0

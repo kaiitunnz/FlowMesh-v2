@@ -81,6 +81,20 @@ class StoreRedriveScheduler:
             self._ensure_thread()
             self._cv.notify_all()
 
+    def recheck(self, workflow_id: str) -> None:
+        """Re-drive a workflow after the base delay, not counting toward its backoff.
+
+        A workflow already waiting keeps its slot.
+        """
+        with self._cv:
+            if self._stopped or workflow_id in self._due:
+                return
+            due = self._clock() + self._base
+            self._due[workflow_id] = due
+            heapq.heappush(self._heap, (due, workflow_id))
+            self._ensure_thread()
+            self._cv.notify_all()
+
     def drive_now(self, workflow_id: str) -> None:
         """Drive a workflow as soon as the re-drive thread is free.
 

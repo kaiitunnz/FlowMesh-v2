@@ -2163,13 +2163,13 @@ class TaskRuntime:
                 self.settle_episode_invocation(
                     agent_task_id, call, error="tool operation returned no outcome"
                 )
-            self._reap_mediated_op_locked(worker_id, agent_task_id, call)
+            self._reap_mediated_op(worker_id, agent_task_id, call)
 
     def _assigned_worker_locked(self, agent_task_id: str) -> str | None:
         record = self._tasks.get(agent_task_id)
         return record.assigned_worker if record else None
 
-    def _reap_mediated_op_locked(
+    def _reap_mediated_op(
         self, worker_id: str | None, agent_task_id: str, call: str
     ) -> None:
         """Relay a best-effort reap so the origin worker drops the request custody."""
@@ -2192,7 +2192,7 @@ class TaskRuntime:
         for worker_id, agent_task_id, call in self._take_ops_for_agents_locked(
             agent_task_ids
         ):
-            self._reap_mediated_op_locked(worker_id, agent_task_id, call)
+            self._reap_mediated_op(worker_id, agent_task_id, call)
 
     def _take_ops_for_agents_locked(
         self, agent_task_ids: Sequence[str]
@@ -3377,7 +3377,7 @@ class TaskRuntime:
             if failures:
                 # A later drive drops each check whose verdict has committed, or
                 # reports it again.
-                self._redrive.schedule(workflow_id)
+                self._redrive.recheck(workflow_id)
         for event in failures:
             self._report_failure(event)
 
@@ -4698,6 +4698,17 @@ class TaskRuntime:
             if record is not None and self._is_input_verdict_locked(
                 record, worker_id, dispatch_id, failure_kind
             ):
+                # The worker's own report of this dispatch, stashed after a failed
+                # write, is superseded: make what it held back and drop it, so its
+                # redelivery finds the task settled.
+                if (
+                    (stash := self._unacknowledged.get(task_id)) is not None
+                    and stash.report == "TASK_FAILED"
+                    and stash.worker_id == worker_id
+                    and stash.dispatch_id in (None, dispatch_id)
+                ):
+                    self._recommit_locked(stash.held)
+                    del self._unacknowledged[task_id]
                 record.last_error = error
                 impacted, usages = self.mark_failed(
                     task_id, worker_id, payload, ts, error=error
@@ -5196,7 +5207,7 @@ class TaskRuntime:
         # The worker drops a reaped operation and its custody.
         for worker_id, agent_task_id, call in termination.reaps:
             try:
-                self._reap_mediated_op_locked(worker_id, agent_task_id, call)
+                self._reap_mediated_op(worker_id, agent_task_id, call)
             except Exception:
                 self._logger.exception(
                     "Reaping the operation of %s on %s failed", agent_task_id, worker_id

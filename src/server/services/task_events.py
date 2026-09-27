@@ -28,7 +28,9 @@ class TaskEventPublisher:
         """Set the handler that applies an event directly when its publish fails."""
         self._fallback = apply
 
-    def publish(self, event: TaskEvent) -> None:
+    def publish(self, event: TaskEvent, description: str | None = None) -> None:
+        """Publish ``event``; ``description`` names it in a failure's log line."""
+        what = description or f"{event.type} for {event.task_id}"
         try:
             payload = json.dumps(serialize_event(event), ensure_ascii=False)
             self._redis.xadd_telemetry(
@@ -38,17 +40,13 @@ class TaskEventPublisher:
             )
             return
         except Exception as exc:
-            self._logger.error(
-                "Failed to publish %s for %s: %s", event.type, event.task_id, exc
-            )
+            self._logger.error("Failed to publish %s: %s", what, exc)
         if self._fallback is None:
             return
         try:
             self._fallback(event)
         except Exception as exc:
-            self._logger.error(
-                "Failed to apply %s for %s directly: %s", event.type, event.task_id, exc
-            )
+            self._logger.error("Failed to apply %s directly: %s", what, exc)
 
 
 __all__ = ["TaskEventPublisher"]

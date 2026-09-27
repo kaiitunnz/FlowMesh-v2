@@ -165,7 +165,10 @@ class WorkerWatchdog:
                 error="worker_heartbeat_expired",
                 payload=payload,
             )
-            self._events.publish(event)
+            self._events.publish(
+                event,
+                f"synthetic TASK_FAILED for {task_id} after worker {worker_id} expired",
+            )
 
     def _mark_dead(self, worker_id: str) -> None:
         if not worker_id:
