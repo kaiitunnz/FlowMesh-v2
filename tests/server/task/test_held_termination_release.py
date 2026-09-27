@@ -162,19 +162,21 @@ def test_a_replaced_stash_keeps_the_release_it_carries() -> None:
     assert scenario.releases == [(scenario.invocation_id, InvocationState.TERMINAL)]
 
 
-def test_a_recommit_under_a_held_report_keeps_its_release_held() -> None:
+def test_a_save_under_a_held_report_keeps_its_release_held() -> None:
     scenario = _Scenario()
     runtime = scenario.runtime
     termination = _Termination([], [], [], resident_invocation_ids=["inv-x"])
     current = runtime._report_writes.held = _HeldWrites(error=RuntimeError("down"))
     try:
         with runtime._cv:
-            runtime._recommit_locked(_HeldWrites(terminations=[termination]))
+            runtime._hold_termination_locked(scenario.workflow_id, termination)
+            runtime._save_ledger_locked(scenario.workflow_id)
     finally:
         runtime._report_writes.held = None
 
     assert runtime._pending_terminations == []
-    assert current.terminations == [termination]
+    assert runtime._undurable_terminations[scenario.workflow_id] == [termination]
+    assert current.workflow_ids == [scenario.workflow_id]
 
 
 def test_a_replayed_cancel_report_releases_what_its_stash_held() -> None:
@@ -184,11 +186,13 @@ def test_a_replayed_cancel_report_releases_what_its_stash_held() -> None:
     runtime.set_resident_terminal_hook(lambda inv, _failed: released.append(inv))
     planner = scenario.ids["planner"]
     termination = _Termination([], [], [], resident_invocation_ids=["inv-x"])
+    with runtime._cv:
+        runtime._hold_termination_locked(scenario.workflow_id, termination)
     runtime._unacknowledged[planner] = _Unacknowledged(
         "TASK_CANCELLED",
         "wkr-1",
         "dsp-p",
-        _HeldWrites(terminations=[termination]),
+        _HeldWrites(workflow_ids=[scenario.workflow_id]),
         SettleOutcome(EventEffect.SETTLED, "cancelled", [], []),
     )
 

@@ -3,6 +3,8 @@
 import asyncio
 from typing import Any, cast
 
+import pytest
+
 from server.orchestration.state import InvocationState, LedgerSnapshot
 from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime
@@ -89,5 +91,35 @@ def test_losing_the_origin_worker_releases_the_resident_credit_once_durable() ->
             runtime.resident_invocation_completed(workflow_id, env.invocation_id)
             is False
         )
+
+    asyncio.run(run())
+
+
+def test_a_failed_save_holds_the_credit_until_the_next_save_succeeds() -> None:
+    async def run() -> None:
+        runtime = _runtime()
+        originated: list[Any] = []
+        runtime._resident_originate = originated.append
+        releases: list[str] = []
+        runtime.set_resident_terminal_hook(lambda inv, _failed: releases.append(inv))
+        workflow_id, ids = await _register(runtime, _RESIDENT_WF)
+        _capture_resident_boundary(runtime, ids["writer"])
+        (env,) = originated
+        registry = cast(FakeRegistry, runtime._workflow_registry)
+        save = registry.save_ledger_snapshot
+
+        def down(workflow_id: str, snapshot: LedgerSnapshot) -> None:
+            raise RuntimeError("control redis unavailable")
+
+        registry.save_ledger_snapshot = down  # type: ignore[method-assign]
+        with pytest.raises(RuntimeError):
+            runtime.recover_tasks_for_worker("wkr-1")
+        assert releases == []
+
+        registry.save_ledger_snapshot = save  # type: ignore[method-assign]
+        with runtime._cv:
+            runtime._save_ledger_locked(workflow_id)
+        runtime._release_pending_terminations()
+        assert releases == [env.invocation_id]
 
     asyncio.run(run())

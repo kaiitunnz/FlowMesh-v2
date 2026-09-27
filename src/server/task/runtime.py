@@ -437,13 +437,11 @@ class _Publish:
 class _HeldWrites:
     """The durable writes a report's transition holds back once one of them fails:
     the tasks to commit, the spawned children to commit, and the workflows whose
-    ledger to save and credentials to reclaim, with the workflow terminations whose
-    held work releases only once that ledger is durable."""
+    ledger to save and credentials to reclaim."""
 
     task_ids: list[str] = field(default_factory=list)
     children: list[tuple[str, list[str], list[str]]] = field(default_factory=list)
     workflow_ids: list[str] = field(default_factory=list)
-    terminations: list[_Termination] = field(default_factory=list)
     error: Exception | None = None
 
     def follow(self, earlier: Self) -> None:
@@ -451,7 +449,6 @@ class _HeldWrites:
         self.task_ids[:0] = earlier.task_ids
         self.children[:0] = earlier.children
         self.workflow_ids[:0] = earlier.workflow_ids
-        self.terminations[:0] = earlier.terminations
 
 
 class _ReportWrites(threading.local):
@@ -627,6 +624,9 @@ class TaskRuntime:
         self._resident_terminal_hook: Callable[[str, bool], None] | None = None
         self._failure_reporter: Callable[[TaskEvent], None] | None = None
         self._pending_terminations: list[_Termination] = []
+        # Terminations whose workflow's ledger has not been saved since: each releases
+        # only after that save succeeds.
+        self._undurable_terminations: dict[str, list[_Termination]] = {}
         # The worker-originated resident path: originate admits and relays the handoff
         # to the origin worker; the ack and outcome handlers consume the worker's fenced
         # transition reports. Set when resident-capacity control is enabled.
@@ -1370,11 +1370,6 @@ class TaskRuntime:
         for workflow_id in dict.fromkeys(workflow_ids + held.workflow_ids):
             self._save_ledger_locked(workflow_id)
             self._reclaim_vault_if_settled_locked(workflow_id)
-        # With the ledgers durable, what their terminations hold may release, unless
-        # a report handled now holds its own writes back.
-        terminations, held.terminations = held.terminations, []
-        for termination in terminations:
-            self._carry_termination_locked(termination)
 
     def _notify_terminal_transition(self, workflow_id: str) -> None:
         """Tell the completion finalizer a workflow may have reached its end.
@@ -3308,7 +3303,6 @@ class TaskRuntime:
         if record is None or (engine := self._engines.get(record.workflow_id)) is None:
             return Advance()
         advance = engine.on_uncertain(task_id)
-        invocation_ids: list[str] = []
         if advance.retry:
             self._release_dispatch_locked(record, [task_id], front=True)
         elif advance.failed:
@@ -3317,25 +3311,40 @@ class TaskRuntime:
             if self._apply_advance_locked(record.workflow_id, advance):
                 self._cv.notify_all()
             self._reap_ops_for_agents_locked(advance.failed)
-            invocation_ids = engine.terminalize_unsettled_invocations([task_id])
+            if invocation_ids := engine.terminalize_unsettled_invocations([task_id]):
+                self._hold_termination_locked(
+                    record.workflow_id,
+                    _Termination([], [], [], resident_invocation_ids=invocation_ids),
+                )
         self._save_ledger_locked(record.workflow_id)
-        if invocation_ids:
-            self._carry_termination_locked(
-                _Termination([], [], [], resident_invocation_ids=invocation_ids)
-            )
         return advance
 
     def _save_ledger_locked(self, workflow_id: str) -> None:
-        if (engine := self._engines.get(workflow_id)) is None:
-            return
+        """Save a workflow's ledger, and queue each termination waiting on it for
+        release once the save succeeds. A workflow with no ledger has its terminal in
+        its task records, committed before."""
+        engine = self._engines.get(workflow_id)
 
         def save() -> None:
-            with self._control.ledger_snapshot(workflow_id):
-                self._workflow_registry.save_ledger_snapshot(
-                    workflow_id, engine.to_snapshot()
-                )
+            if engine is not None:
+                with self._control.ledger_snapshot(workflow_id):
+                    self._workflow_registry.save_ledger_snapshot(
+                        workflow_id, engine.to_snapshot()
+                    )
+            self._pending_terminations += self._undurable_terminations.pop(
+                workflow_id, []
+            )
 
+        if engine is None and workflow_id not in self._undurable_terminations:
+            return
         self._write_locked(save, lambda held: held.workflow_ids.append(workflow_id))
+
+    def _hold_termination_locked(
+        self, workflow_id: str, termination: _Termination
+    ) -> None:
+        """Hold what a termination releases until the workflow's next ledger save
+        succeeds; ``_release_pending_terminations`` releases it after the lock."""
+        self._undurable_terminations.setdefault(workflow_id, []).append(termination)
 
     def _apply_advance_locked(self, workflow_id: str, advance: Advance) -> bool:
         """Apply an engine advance: fail and persist what it failed, cancel what a
@@ -4054,8 +4063,8 @@ class TaskRuntime:
 
         What its work held is released once the caller leaves the lock, through
         ``_release_pending_terminations``, and only once the terminal ledger is
-        durable: a report whose writes are held carries it until its replay commits
-        them.
+        durable: a report whose writes are held keeps it until its replay saves the
+        ledger.
         """
         termination = self._terminate_workflow_locked(workflow_id, reason, reason)
         non_terminal = [
@@ -4065,19 +4074,10 @@ class TaskRuntime:
             and record.status not in TERMINAL_TASK_STATUSES
         ]
         self._fail_v2_records_locked(non_terminal, reason, persist=True)
-        if workflow_id in self._engines:
-            self._save_ledger_locked(workflow_id)
+        self._hold_termination_locked(workflow_id, termination)
+        self._save_ledger_locked(workflow_id)
         self._reclaim_vault_if_settled_locked(workflow_id)
         self._cv.notify_all()
-        self._carry_termination_locked(termination)
-
-    def _carry_termination_locked(self, termination: _Termination) -> None:
-        """Queue what a termination releases for after the lock, or hold it with a
-        report whose writes are held until its replay commits them."""
-        self._write_locked(
-            lambda: self._pending_terminations.append(termination),
-            lambda held: held.terminations.append(termination),
-        )
 
     def _fail_v1_dependents_locked(self, primary: str) -> list[tuple[str, str]]:
         """Fail every pending task downstream of a failed v1 task, however deep."""
@@ -5538,7 +5538,7 @@ class TaskRuntime:
         termination.resident_invocation_ids = engine.terminalize_unsettled_invocations(
             touched
         )
-        self._carry_termination_locked(termination)
+        self._hold_termination_locked(workflow_id, termination)
         return bool(touched)
 
     def _cancel_record_locked(
