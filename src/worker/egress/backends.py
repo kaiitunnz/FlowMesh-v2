@@ -2,8 +2,7 @@
 
 Each backend pairs one interface's request-integrity digest with its provider-execution
 surface. The sidecar looks a backend up by the permit's interface, recomputes the digest
-for the fence, and runs the egress. A provider credential comes from the permit or,
-where the permit grants it, the local worker environment.
+for the fence, and runs the egress.
 """
 
 import logging

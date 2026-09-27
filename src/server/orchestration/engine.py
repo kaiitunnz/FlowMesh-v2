@@ -1369,7 +1369,8 @@ class OrchestrationEngine:
         boundary was admitted under. The caller supplies the audience (the agent's
         worker and its generation), the policy-bounded budget the operation runs in, and
         the provider credential authority: an optional per-call ``credential`` resolved
-        for a workflow's pinned model key, or ``deployment_credential``.
+        for a workflow's pinned model key, or ``deployment_credential``, which grants
+        the egressing worker its deployment key.
         Returns None for a boundary that carries no digest — i.e. one the worker did not
         originate — so a re-mint never fabricates authorization the boundary lacks.
         """

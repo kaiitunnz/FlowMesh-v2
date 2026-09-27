@@ -23,7 +23,7 @@ class ModelRequest(BaseModel):
     ``url`` comes from the activation's pinned binding (credential-free). ``body`` is
     the exact chat-completions payload posted to it — the model, the messages, and any
     tools the facade injected. The credential is resolved at the worker from the permit
-    or the local environment, never here.
+    or, where the permit grants it, the local environment, never here.
     """
 
     model_config = ConfigDict(frozen=True)

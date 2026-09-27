@@ -319,19 +319,18 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
 - **External-model egress.** A managed external (`openai`) model turn egresses on the
   Agent's own worker through a worker-local Responses facade, bound to loopback and
   authenticated per episode so one episode drives only its own egress. Codex's model
-  provider targets the facade: the facade translates each turn between the Responses
-  wire and Chat Completions, injects the agent's pinned fabric facades, and runs the
-  held egress — it proposes the request digest to control, awaits the one-use
+  provider targets the facade: the facade translates each turn between the Responses wire
+  and Chat Completions, injects the agent's pinned fabric facades, and runs the held
+  egress — it proposes the request digest to control, awaits the one-use
   `MediatedOperationPermit` over the worker's attachment, and egresses synchronously
   through the `MediatedEgressSidecar`, returning the model's whole message inline. The
   per-workflow model credential rides the permit to the worker. A binding without one
-  gets the worker's deployment key only where control grants it on the permit, for the
-  deployment's default model URL, and otherwise calls without a credential; a pinned
-  credential the vault no longer holds fails the call. A fabric facade the model calls
-  on the turn is captured into a `FacadeTurnGroup` reported to control, which records
-  the group so the episode's next completion routes its members and the turn returns
-  Codex a clean summary. The credential is kept out of the ledger, the control stores,
-  and the logs.
+  uses the worker's deployment key only for the deployment's default model URL, and
+  calls any other URL without a credential; a pinned credential missing from the vault
+  fails the call. A fabric facade the model calls on the turn is captured into
+  a `FacadeTurnGroup` reported to control, which records the group so the episode's next
+  completion routes its members and the turn returns Codex a clean summary. The
+  credential is kept out of the ledger, the control stores, and the logs.
 - **Resident-capacity control.** A `resident` model binding is served from reusable
   physical capacity rather than an external endpoint. Two control-plane actors — an
   Admission controller and a Lifecycle & scale manager — over durable control-state
@@ -402,8 +401,8 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   `MediatedOperationPermit` and relays it to that worker as an ordinary control message on
   its authenticated attachment, never a dispatched task. The worker's
   `MediatedEgressSidecar` — a bounded worker-local egress lane, not a task, replica,
-  endpoint, or authority — validates the permit fence and request digest, reads the
-  provider credential only from its local environment, egresses, and reports a
+  endpoint, or authority — validates the permit fence and request digest, egresses,
+  and reports a
   permit-fenced outcome that settles the boundary before the episode resumes. It retains
   the request non-destructively until the committed outcome is acknowledged. A fence
   rejection is a declared terminal boundary failure, never a retryable provider response;

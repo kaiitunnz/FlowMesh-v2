@@ -58,9 +58,9 @@ class MediatedOperationPermit(BaseModel):
     ``credential`` is a per-call provider secret the control plane resolves for a
     workflow that pins its own model key; it rides only this one-use, audience-bound
     delivery down to the egressing worker, never travels up in a proposal, and is never
-    persisted or logged. ``deployment_credential`` authorizes the worker to use its own
-    deployment key instead, which control grants only for the deployment's own model
-    endpoint. With neither, the operation egresses without a credential.
+    persisted or logged. ``deployment_credential`` grants the worker its deployment key,
+    which control sets only for the deployment's default model URL; with neither, the
+    operation egresses without a credential.
     """
 
     model_config = ConfigDict(frozen=True)

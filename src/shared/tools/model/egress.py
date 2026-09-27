@@ -2,8 +2,8 @@
 
 It egresses only within a server-issued ``ToolOperationEnvelope``, refusing an interface
 it does not serve, and maps a provider fault to a typed ``ToolOutcome``. It runs in the
-worker's mediated-egress sidecar, the process that actually egresses, and reads the
-provider credential only from its local worker environment.
+worker's mediated-egress sidecar, the process that actually egresses, and takes the
+provider credential per call.
 """
 
 import logging

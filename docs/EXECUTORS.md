@@ -149,8 +149,7 @@ worker (see [Managed external-model egress](#managed-external-model-egress)), an
 network plane (see [`RESIDENT_CAPACITY.md`](RESIDENT_CAPACITY.md)). The model credential is the
 workflow's own inline `api_key`, vaulted server-side at submission so only a reference is
 stored, resolved within its own workflow, and carried to the egressing worker on the one-use
-permit — the raw key never persists in the source, template, ledger, or logs, and the
-deployment key serves only as a fallback. A credential embedded in a `url` or a harness
+permit — the raw key never persists in the source, template, ledger, or logs. A credential embedded in a `url` or a harness
 param is rejected. The
 `AGENT_MODEL_GATEWAY_*` defaults are in [`ENV.md`](ENV.md).
 
@@ -232,9 +231,9 @@ injects the agent's pinned fabric facades, and runs the held egress: it proposes
 request digest to control, awaits the one-use `MediatedOperationPermit` over the worker's
 attachment, and egresses synchronously through the `MediatedEgressSidecar`, returning the
 model's whole message inline. The per-workflow model credential rides the permit to the worker. A
-binding without one uses the worker's `AGENT_MODEL_API_KEY` only when control grants it for the
-deployment's `AGENT_MODEL_GATEWAY_URL`, and otherwise calls without a credential; a pinned
-credential the vault no longer holds fails the turn. The `Authorization` header is
+binding without one uses the worker's `AGENT_MODEL_API_KEY` only for the deployment's
+`AGENT_MODEL_GATEWAY_URL`, and calls any other URL without a credential; a pinned credential
+missing from the vault fails the turn. The `Authorization` header is
 redacted in the facade's own logs, and the credential is kept out of the ledger, the
 control stores, and the logs. A denial, a permit that never arrives within
 `AGENT_MODEL_EGRESS_TIMEOUT_SEC`, or a fence rejection is a terminal turn failure.
