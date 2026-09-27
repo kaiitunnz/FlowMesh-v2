@@ -472,7 +472,7 @@ class OrchestrationEngine:
             attempts=self._attempts,
             invocations=self._invocations,
             trace=self._trace,
-            released_scopes=self._released_scopes,
+            scope_closed=self._scope_closed,
         )
 
     def _build_topology(self) -> dict[str, list[str]]:
@@ -2800,10 +2800,12 @@ class OrchestrationEngine:
         if scope is None or scope.owner_operator_id is None:
             return Advance()
         join_op = self._join_for_spawn(scope.owner_operator_id)
+        if scope_id in self._failed_scopes:
+            self._emit_scope_owner(scope_id)
+            return Advance()
         if (
             join_op is None
             or scope_id in self._released_scopes
-            or scope_id in self._failed_scopes
             or join_op in self._failed_regions
         ):
             return Advance()
@@ -3383,6 +3385,19 @@ class OrchestrationEngine:
                     ref.spawn_ref, scope_id, instance, cascade, visited
                 )
             self._close_owned_region(scope_id)
+            self._emit_scope_owner(scope_id)
+
+    def _scope_closed(self, scope_id: str) -> bool:
+        """Whether a scope closed: its join released, or it failed and every child it
+        admitted has settled."""
+        if scope_id in self._released_scopes:
+            return True
+        cap = self._capabilities.get((scope_id, ProgressAxis.CHILD_INIT))
+        return scope_id in self._failed_scopes and cap is not None and cap.closed
+
+    def _emit_scope_owner(self, scope_id: str) -> None:
+        if (owner := self._scopes[scope_id].owner_activation_id) is not None:
+            self._emitter.emit_activation(owner)
 
     def _fail_entered_region(
         self,

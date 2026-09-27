@@ -263,7 +263,7 @@ class TelemetrySpanEmitter:
         self._attempts: dict[str, Attempt] = {}
         self._invocations: dict[str, Invocation] = {}
         self._trace: list[OrchestrationEvent] = []
-        self._released_scopes: set[str] = set()
+        self._scope_closed: Callable[[str], bool] = lambda _: False
         self._reset_indexes()
 
     @_absorbs_faults
@@ -276,7 +276,7 @@ class TelemetrySpanEmitter:
         attempts: dict[str, Attempt],
         invocations: dict[str, Invocation],
         trace: list[OrchestrationEvent],
-        released_scopes: set[str],
+        scope_closed: Callable[[str], bool],
     ) -> None:
         self._activations = activations
         self._scopes = scopes
@@ -284,7 +284,7 @@ class TelemetrySpanEmitter:
         self._attempts = attempts
         self._invocations = invocations
         self._trace = trace
-        self._released_scopes = released_scopes
+        self._scope_closed = scope_closed
         self._reset_indexes()
         self._rehydrate()
 
@@ -501,7 +501,7 @@ class TelemetrySpanEmitter:
     def _scope_subtree_extent(
         self, scope_id: str, memo: dict[str, tuple[int, int] | None]
     ) -> tuple[int, int] | None:
-        if scope_id not in self._released_scopes:
+        if not self._scope_closed(scope_id):
             return None
         starts: list[int] = []
         ends: list[int] = []
