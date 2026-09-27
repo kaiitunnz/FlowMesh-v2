@@ -158,15 +158,22 @@ def _rejected(status: int) -> requests.Response:
     return response
 
 
-@pytest.mark.parametrize("status", [401, 403])
-def test_a_credential_rejection_reads_as_one(
-    monkeypatch: pytest.MonkeyPatch, status: int
+@pytest.mark.parametrize(
+    ("status", "text"),
+    [
+        (401, "the model provider rejected the request's credential"),
+        (403, "the model provider refused the request"),
+    ],
+)
+def test_a_provider_refusal_reads_as_one(
+    monkeypatch: pytest.MonkeyPatch, status: int, text: str
 ) -> None:
     monkeypatch.setattr(requests, "post", lambda url, **kwargs: _rejected(status))
     out = ExternalModelSidecar().execute(_envelope(), _REQUEST, None)
-    assert out.value == "the model provider rejected the request's credential"
-    with pytest.raises(ModelEgressError, match="rejected the request's credential"):
+    assert out.value == text
+    with pytest.raises(ModelEgressError) as raised:
         ExternalModelSidecar().complete(_envelope(), _REQUEST, None)
+    assert str(raised.value) == text
 
 
 def test_a_server_error_reads_as_unreachable(monkeypatch: pytest.MonkeyPatch) -> None:

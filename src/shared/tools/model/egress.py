@@ -110,11 +110,16 @@ class ExternalModelSidecar:
         return dict(response.json())
 
 
+_REFUSAL_TEXT = {
+    401: "the model provider rejected the request's credential",
+    403: "the model provider refused the request",
+}
+
+
 def _failure_text(exc: Exception) -> str:
-    if isinstance(exc, requests.HTTPError) and (
-        exc.response is not None and exc.response.status_code in (401, 403)
-    ):
-        return "the model provider rejected the request's credential"
+    if isinstance(exc, requests.HTTPError) and exc.response is not None:
+        if (text := _REFUSAL_TEXT.get(exc.response.status_code)) is not None:
+            return text
     return "the model provider was unreachable"
 
 
