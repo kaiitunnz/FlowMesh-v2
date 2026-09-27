@@ -881,7 +881,7 @@ _BEHIND_NO_WINNER = """
       - name: kid2
         spec: {taskType: echo, data: {type: list, items: [k2]}}
       - name: fan2
-        dependsOn: [collect]
+        dependsOn: [after]
         region: {kind: spawn, child: kid2}
       - name: collect2
         dependsOn: [fan2]

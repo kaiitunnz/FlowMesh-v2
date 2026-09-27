@@ -181,9 +181,11 @@ spec:
 ```
 
 Region kinds are `merge`, `spawn`, `join`, and `call` (`call` normalizes to a
-`spawn`/`join` pair, and a node that depends on a call consumes its join). A
-spawn's dependents reach it through its join. A failed input fails the region and everything downstream
-of it, as a failed dependency fails a task.
+`spawn`/`join` pair). A spawn or call fans out over a task's result, so its
+input is a task, and a join collects a spawn's children, so one of its inputs is
+a spawn. A spawn's dependents reach it through its join, and a call's read its
+join. A failed input fails the region and everything downstream of it, as a
+failed dependency fails a task.
 
 A `join` `completion` is `all_settled`, `all_succeed`, `any`, `first_k` (with
 `k`), or `predicate` (with `predicate: { min_qualifiers, monotone }`). An early

@@ -556,6 +556,50 @@ def _check_spawn_dependents(
     ]
 
 
+def _check_region_inputs(
+    template: LogicalWorkflowTemplate, loc: dict[str, SourceLocation]
+) -> list[Diagnostic]:
+    """A spawn (a call included) fans out over a task's result, and a join releases
+    over a spawn's children: a spawn takes input only from tasks, and a join needs a
+    spawn among its inputs."""
+    op_by_id = {op.operator_id: op for op in template.operators}
+    fed_by_spawn: set[str] = set()
+    diags: list[Diagnostic] = []
+    for edge in template.edges:
+        if edge.feedback:
+            continue
+        source, target = op_by_id.get(edge.from_op), op_by_id.get(edge.to_op)
+        if isinstance(source, SpawnRegion):
+            fed_by_spawn.add(edge.to_op)
+        if isinstance(target, SpawnRegion) and not isinstance(
+            source, (LeafOperator, AgentOperator)
+        ):
+            diags.append(
+                _region_input(
+                    edge.to_op, f"takes input from {edge.from_op!r}, not a task", loc
+                )
+            )
+    diags.extend(
+        _region_input(op.operator_id, "collects no spawn's children", loc)
+        for op in template.operators
+        if isinstance(op, JoinRegion) and op.operator_id not in fed_by_spawn
+    )
+    return diags
+
+
+def _region_input(
+    operator_id: str, problem: str, loc: dict[str, SourceLocation]
+) -> Diagnostic:
+    return Diagnostic(
+        code="dataflow.region-input",
+        message=(
+            f"region {operator_id!r} {problem}; a spawn fans out over a task's "
+            "result and a join collects a spawn's children"
+        ),
+        location=loc.get(operator_id),
+    )
+
+
 def _check_result_declarations(
     template: LogicalWorkflowTemplate, loc: dict[str, SourceLocation]
 ) -> list[Diagnostic]:
@@ -753,6 +797,7 @@ def validate_compilation(
     diags.extend(_check_agent_inputs(template, loc))
     diags.extend(_check_region_outputs(template, loc))
     diags.extend(_check_spawn_dependents(template, loc))
+    diags.extend(_check_region_inputs(template, loc))
     diags.extend(_check_result_declarations(template, loc))
     diags.extend(_check_cycles(template, loc))
 

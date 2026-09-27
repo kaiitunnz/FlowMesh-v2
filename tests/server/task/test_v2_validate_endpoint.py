@@ -14,6 +14,7 @@ from server.task.runtime import TaskRuntime
 from tests.server.result_store import make_result_reader
 from tests.server.task.test_v2_orchestration import _NoopSecretVault
 from tests.server.task.test_v2_validation import (
+    _CALL,
     _FAN,
     _REGION_CONSUMER,
     _SPAWNED_WORKER,
@@ -213,3 +214,25 @@ spec:
     assert resp.status_code == 422
     diagnostics = resp.json()["detail"]["diagnostics"]
     assert any("dataflow.spawn-dependent" in d for d in diagnostics)
+
+
+def test_v2_a_region_fed_by_a_call_returns_422(client: TestClient) -> None:
+    body = (
+        """
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {name: t}
+spec:
+  graph:
+    nodes:
+"""
+        + _CALL
+        + """      - name: r
+        dependsOn: [c]
+        region: {kind: spawn, child: kid}
+"""
+    )
+    resp = _post(client, body)
+    assert resp.status_code == 422
+    diagnostics = resp.json()["detail"]["diagnostics"]
+    assert any("dataflow.region-input" in d for d in diagnostics)

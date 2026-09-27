@@ -321,3 +321,52 @@ async def test_a_node_depending_on_a_spawn_is_refused_at_submit() -> None:
     with pytest.raises(CompileError) as exc:
         await _register(runtime, _HEAD + _FAN + SPAWN_DEPENDENTS["task"])
     assert "dataflow.spawn-dependent" in {d.code for d in exc.value.diagnostics}
+
+
+_CALL = """      - name: planner
+        spec: {taskType: echo, data: {type: list, items: [seed]}}
+      - name: kid
+        spec: {taskType: echo, data: {type: list, items: [k]}}
+      - name: c
+        dependsOn: [planner]
+        region: {kind: call, child: kid}
+"""
+
+REGION_FED_REGIONS = {
+    "call_to_spawn": "{kind: spawn, child: kid}",
+    "call_to_call": "{kind: call, child: kid}",
+    "call_to_join": "{kind: join, completion: all_settled}",
+}
+
+
+@pytest.mark.parametrize("region", REGION_FED_REGIONS.values(), ids=REGION_FED_REGIONS)
+def test_a_region_fed_by_a_call_is_refused(region: str) -> None:
+    err = _reject(_CALL + f"""      - name: r
+        dependsOn: [c]
+        region: {region}
+""")
+    assert "dataflow.region-input" in {d.code for d in err.diagnostics}
+
+
+def test_a_spawn_fed_by_a_merge_is_refused() -> None:
+    err = _reject("""      - name: a
+        spec: {taskType: echo, data: {type: list, items: [a]}}
+      - name: kid
+        spec: {taskType: echo, data: {type: list, items: [k]}}
+      - name: m
+        dependsOn: [a]
+        region: {kind: merge}
+      - name: fan
+        dependsOn: [m]
+        region: {kind: spawn, child: kid}
+""")
+    assert "dataflow.region-input" in {d.code for d in err.diagnostics}
+
+
+def test_a_join_with_a_task_input_beside_its_spawn_compiles() -> None:
+    _compile(_FAN + """      - name: x
+        spec: {taskType: echo, data: {type: list, items: [x]}}
+      - name: collect
+        dependsOn: [fan, x]
+        region: {kind: join, completion: all_settled}
+""")

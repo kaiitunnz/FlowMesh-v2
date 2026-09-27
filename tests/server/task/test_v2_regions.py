@@ -51,11 +51,17 @@ spec:
         spec: {taskType: echo, data: {type: list, items: [verdict]}}
       - name: search_child
         spec: {taskType: echo, data: {type: list, items: [hit]}}
-      - name: verify
+      - name: draft
         dependsOn: [brief]
+        spec: {taskType: echo, data: {type: list, items: [draft]}}
+      - name: verify
+        dependsOn: [draft]
         region: {kind: call, child: verify_child, returns: [verdict]}
-      - name: fanout
+      - name: route
         dependsOn: [verify]
+        spec: {taskType: echo, data: {type: list, items: [route]}}
+      - name: fanout
+        dependsOn: [route]
         region:
           kind: spawn
           child: search_child
@@ -116,9 +122,9 @@ spec:
       - name: after
         dependsOn: [c]
         spec: {taskType: echo, data: {type: list, items: [z]}}
-      - name: fan
+      - name: m
         dependsOn: [c]
-        region: {kind: spawn, child: kid}
+        region: {kind: merge}
       - name: reader
         dependsOn: [c]
         spec:
@@ -133,7 +139,7 @@ spec:
     from_call = {(e.to_op, e.to_port) for e in template.edges if e.from_op == "c:join"}
     assert from_call == {
         (ids["after"], None),
-        ("fan", None),
+        ("m", None),
         (ids["reader"], None),
         (ids["reader"], "verdict"),
     }
