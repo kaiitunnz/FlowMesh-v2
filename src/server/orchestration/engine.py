@@ -3383,19 +3383,21 @@ class OrchestrationEngine:
         return wi.outcome, wi.value_ref
 
     def failure_reason(self, task_id: str) -> str | None:
-        """Why a task's work item settled failed: its authority denial, else the
-        reason its non-retryable failure recorded."""
+        """Why a task's work item settled failed: the reason its non-retryable failure
+        recorded, else its authority denial."""
         wi_id = self._wi_by_task.get(task_id)
         if wi_id is None:
             return None
+        wi = self._work_items.get(wi_id)
+        if wi is not None and wi.failure_reason is not None:
+            return wi.failure_reason
         for decision in reversed(self._decisions):
             if (
                 decision.work_item_id == wi_id
                 and decision.kind is AuthorityDecisionKind.DENIED
             ):
                 return f"authority denied: {decision.reason or decision.interface}"
-        wi = self._work_items.get(wi_id)
-        return wi.failure_reason if wi is not None else None
+        return None
 
     def recovery_disposition(self, task_id: str) -> RecoveryDisposition | None:
         """Whether the task's operation may be recomputed or must be restored."""

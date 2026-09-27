@@ -1292,6 +1292,10 @@ spec:
     assert denied and denied[0].work_item_id
     pub = led.resolve_legacy_task(caller)
     assert pub is not None and pub.outcome is PublicationOutcome.DECLARED_FAILURE
+    assert led.failure_reason(caller) == (
+        f"authority denied: interface {denied[0].interface!r} outside root grant"
+        " invoke face"
+    )
 
 
 @pytest.mark.anyio

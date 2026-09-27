@@ -856,6 +856,51 @@ def test_a_failed_episode_shows_its_reason_on_the_task(error: str) -> None:
     asyncio.run(run())
 
 
+_DENIED_SEARCH_STEP = ScriptedStep(
+    op="boundary",
+    kind=BoundaryEventKind.INVOCATION,
+    call="s0",
+    interface=SEARCH_INTERFACE,
+    payload='{"query": "q", "max_results": 1}',
+)
+
+
+def test_a_gone_key_after_a_denied_boundary_shows_the_credential_reason() -> None:
+    async def run() -> None:
+        vault = _StubVault()
+        runtime = _runtime(vault, config=_DEFAULT_URL_CONFIG)
+        _, ids = await _register(runtime, _GONE_KEY_WF)
+        writer = ids["writer"]
+        script = [_DENIED_SEARCH_STEP, *_MODEL_SCRIPT]
+
+        _dispatch_agent(runtime, writer, script=script)
+        vault.expire_all()
+        _dispatch_agent(runtime, writer, script=script)
+
+        record = runtime._tasks[writer]
+        assert record.status == TaskStatus.FAILED
+        assert record.error == "agent boundary failed: model credential unavailable"
+
+    asyncio.run(run())
+
+
+def test_a_failure_after_a_denied_boundary_shows_its_own_reason() -> None:
+    async def run() -> None:
+        runtime = _runtime()
+        _, ids = await _register(runtime, _MODEL_WF)
+        writer = ids["writer"]
+        script = [_DENIED_SEARCH_STEP, *_failing_script("boom")]
+
+        _dispatch_agent(runtime, writer, script=script)
+        _dispatch_agent(runtime, writer, script=script)
+
+        record = runtime._tasks[writer]
+        assert record.status == TaskStatus.FAILED
+        assert record.error == "boom"
+
+    asyncio.run(run())
+
+
 def test_a_permit_that_cannot_be_minted_reaps_the_captured_request() -> None:
     async def run() -> None:
         runtime = _runtime()
