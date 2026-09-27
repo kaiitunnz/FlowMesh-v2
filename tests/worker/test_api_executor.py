@@ -92,6 +92,29 @@ class TestNebulaPath:
         assert transport.request.url == "https://nebula.example.com/v1/chat/completions"
         assert transport.request.headers["Authorization"] == "Bearer custom"
 
+    def test_no_url_with_x_api_key_skips_token(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("NEBULA_API_BASE_URL", "https://nebula.example.com")
+        monkeypatch.setenv("NEBULA_API_TOKEN", "nebula-token")
+        task = _task_message(headers={"X-API-Key": "custom-key"})
+        transport = _RecordingTransport()
+        _run(APIExecutor.__new__(APIExecutor), task, transport)
+        assert transport.request is not None
+        assert "Authorization" not in transport.request.headers
+        assert transport.request.headers["X-API-Key"] == "custom-key"
+
+    def test_no_url_with_content_type_only_gets_token(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("NEBULA_API_BASE_URL", "https://nebula.example.com")
+        monkeypatch.setenv("NEBULA_API_TOKEN", "nebula-token")
+        task = _task_message(headers={"Content-Type": "application/json"})
+        transport = _RecordingTransport()
+        _run(APIExecutor.__new__(APIExecutor), task, transport)
+        assert transport.request is not None
+        assert transport.request.headers["Authorization"] == "Bearer nebula-token"
+
     def test_no_url_no_header_without_token_raises(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -115,13 +138,7 @@ class TestCustomUrl:
     def test_custom_url_without_credential_sends_no_nebula_token(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A custom endpoint may be unauthenticated, but never gets the Nebula token.
-
-        An unauthorized serving endpoint must stay usable, so a missing
-        credential is not an error. The Nebula token IS set in the environment
-        here, so the absent Authorization header proves it is withheld rather
-        than merely unavailable: a caller-chosen endpoint never receives it.
-        """
+        # The token is set, so its absence proves it is withheld, not unavailable.
         monkeypatch.setenv("NEBULA_API_TOKEN", "nebula-token")
         task = _task_message(url="https://custom.example.com/v1/chat/completions")
         transport = _RecordingTransport()
@@ -147,7 +164,6 @@ class TestCustomUrl:
     def test_custom_url_with_x_api_key_accepted(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A custom endpoint may authenticate with a non-Authorization header."""
         monkeypatch.setenv("NEBULA_API_TOKEN", "nebula-token")
         task = _task_message(
             url="https://custom.example.com/v1/chat/completions",
@@ -162,11 +178,6 @@ class TestCustomUrl:
     def test_custom_url_with_only_innocent_header_stays_unauthenticated(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A non-credential header leaves the request unauthenticated, not rejected.
-
-        Content-Type is not a credential, so nothing here authenticates the
-        request -- and the Nebula token still must not be substituted in.
-        """
         monkeypatch.setenv("NEBULA_API_TOKEN", "nebula-token")
         task = _task_message(
             url="https://custom.example.com/v1/chat/completions",

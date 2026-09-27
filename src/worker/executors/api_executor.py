@@ -23,11 +23,10 @@ _ClientKey = tuple[str, float, bool, bool]
 class APIExecutor(Executor):
     """Performs a single HTTP request defined by task YAML.
 
-    Defaults to the Nebula endpoint via ``NEBULA_API_BASE_URL`` and authenticates
-    with ``NEBULA_API_TOKEN``. ``spec.api.url`` overrides the endpoint and
-    ``spec.api.headers`` may supply a credential header (``Authorization``,
-    ``X-API-Key``, etc.) directly. A custom ``spec.api.url`` requires its own
-    credential: the Nebula token is never sent to an endpoint the caller chose.
+    Without ``spec.api.url`` it calls ``NEBULA_API_BASE_URL`` with ``NEBULA_API_TOKEN``,
+    unless ``spec.api.headers`` carries a credential header of its own. A
+    ``spec.api.url`` is called with its own headers alone; the Nebula token is never
+    sent to it.
     """
 
     name = "api"
@@ -120,7 +119,7 @@ class APIExecutor(Executor):
                 token = os.getenv("NEBULA_API_TOKEN")
                 if not token:
                     raise ExecutionError(
-                        "no credential configured: set an Authorization header or "
+                        "no credential configured: set a credential header or "
                         "NEBULA_API_TOKEN"
                     )
                 headers["Authorization"] = f"Bearer {token}"
