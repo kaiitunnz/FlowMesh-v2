@@ -494,11 +494,26 @@ def _check_region_outputs(
     """
     diags: list[Diagnostic] = []
     op_by_id = {op.operator_id: op for op in template.operators}
-    matched_joins = {
-        edge.to_op
+    spawn_of_join = {
+        edge.to_op: edge.from_op
         for edge in template.edges
         if isinstance(op_by_id.get(edge.from_op), SpawnRegion)
         and isinstance(op_by_id.get(edge.to_op), JoinRegion)
+    }
+    region_owner = {
+        ref.spawn_ref: op.operator_id
+        for op in template.operators
+        if isinstance(op, AgentOperator)
+        for ref in op.child_region_refs
+    }
+    # An agent a spawn instantiates, other than through its own recursive region, runs
+    # only as a spawned child.
+    spawned_only = {
+        op.child_template_ref
+        for op in template.operators
+        if isinstance(op, SpawnRegion)
+        and op.child_template_ref
+        and region_owner.get(op.operator_id) != op.child_template_ref
     }
     for edge in template.edges:
         if edge.feedback or edge.to_port is None:
@@ -507,7 +522,20 @@ def _check_region_outputs(
         target = op_by_id.get(edge.to_op)
         if not isinstance(source, JoinRegion) or not isinstance(target, AgentOperator):
             continue
-        if edge.from_op not in matched_joins:
+        owner = region_owner.get(spawn_of_join.get(edge.from_op, ""))
+        if owner in spawned_only:
+            diags.append(
+                Diagnostic(
+                    code="dataflow.spawned-region-output",
+                    message=(
+                        f"region-output edge into {target.operator_id!r} reads a "
+                        f"region of agent {owner!r}, which runs only as a spawned "
+                        "child; a region input names an agent that runs at the root"
+                    ),
+                    location=loc.get(edge.to_op),
+                )
+            )
+        if edge.from_op not in spawn_of_join:
             diags.append(
                 Diagnostic(
                     code="dataflow.unmatched-region-output",

@@ -13,6 +13,7 @@ from server.routers.v1 import workflows as workflows_router
 from server.task.runtime import TaskRuntime
 from tests.server.result_store import make_result_reader
 from tests.server.task.test_v2_orchestration import _NoopSecretVault
+from tests.server.task.test_v2_validation import _REGION_CONSUMER, _SPAWNED_WORKER
 
 _V1_WF = """
 apiVersion: flowmesh/v1
@@ -177,3 +178,18 @@ def test_v2_unsupported_region_kind_returns_422(
     assert resp.status_code == 422
     diagnostics = resp.json()["detail"]["diagnostics"]
     assert any("region.unknown-kind" in d for d in diagnostics)
+
+
+def test_v2_region_input_from_a_spawned_agent_returns_422(client: TestClient) -> None:
+    body = """
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {name: t}
+spec:
+  graph:
+    nodes:
+""" + _SPAWNED_WORKER + _REGION_CONSUMER % "worker"
+    resp = _post(client, body)
+    assert resp.status_code == 422
+    diagnostics = resp.json()["detail"]["diagnostics"]
+    assert any("dataflow.spawned-region-output" in d for d in diagnostics)

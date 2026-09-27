@@ -168,3 +168,54 @@ def test_unstructured_cycle_rejected() -> None:
         dependsOn: [a]
         spec: {taskType: echo, data: {type: list, items: [y]}}
 """)
+
+
+_SPAWNED_WORKER = """      - name: a
+        spec: {taskType: echo, data: {type: list, items: [x]}}
+      - name: worker
+        spec:
+          taskType: agent
+          v2:
+            inputs: [facet]
+            authority: {invoke: [model], delegate: [model]}
+            tools: [{name: model}]
+            child: [{name: sub, authority: {invoke: [model], delegate: []}}]
+          harness: {backend: scripted, version: v1, params: {script: []}}
+      - name: sub
+        spec: {taskType: echo, data: {type: list, items: [k]}}
+      - name: fan
+        dependsOn: [a]
+        region: {kind: spawn, child: worker}
+      - name: collect
+        dependsOn: [fan]
+        region: {kind: join, completion: all_settled}
+"""
+
+_REGION_CONSUMER = """      - name: merge
+        spec:
+          taskType: agent
+          v2:
+            inputs: [{name: subs, from: %s, region: sub}]
+            authority: {invoke: [model], delegate: []}
+            tools: [{name: model}]
+          harness: {backend: scripted, version: v1, params: {script: []}}
+"""
+
+
+def test_a_region_input_from_a_spawned_agent_is_refused() -> None:
+    err = _reject(_SPAWNED_WORKER + _REGION_CONSUMER % "worker")
+    assert [d.code for d in err.diagnostics] == ["dataflow.spawned-region-output"]
+
+
+def test_a_region_input_from_a_root_agent_compiles() -> None:
+    _compile("""      - name: lead
+        spec:
+          taskType: agent
+          v2:
+            authority: {invoke: [model], delegate: [model]}
+            tools: [{name: model}]
+            child: [{name: sub, authority: {invoke: [model], delegate: []}}]
+          harness: {backend: scripted, version: v1, params: {script: []}}
+      - name: sub
+        spec: {taskType: echo, data: {type: list, items: [k]}}
+""" + _REGION_CONSUMER % "lead")
