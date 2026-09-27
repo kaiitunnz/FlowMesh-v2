@@ -947,3 +947,19 @@ def test_spawning_a_child_never_rescans_every_activation() -> None:
     for i in range(8):
         _spawn_in(eng, "A", f"c{i}", "worker")
     assert _ScanCountingDict.scans == 0
+
+
+def test_a_restart_restores_only_the_spawn_site_denials() -> None:
+    eng = _engine(_spawning_agent(child=_leaf("child")))
+    _dispatch_agent(eng)
+    eng.route_boundary_event(
+        "A",
+        BoundaryEvent(
+            kind=BoundaryEventKind.INVOCATION, call_correlation="c0", interface="x"
+        ),
+    )
+    eng.deny_spawn("worker:spawn", "x")
+    live = set(eng._denied_spawns)  # type: ignore[attr-defined]
+
+    restored = OrchestrationEngine(eng.to_snapshot(), eng._bundle)  # type: ignore[attr-defined]
+    assert restored._denied_spawns == live == {"worker:spawn"}  # type: ignore[attr-defined]

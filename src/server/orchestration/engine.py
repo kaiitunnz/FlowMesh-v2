@@ -445,10 +445,14 @@ class OrchestrationEngine:
         # Control operators settled as a declared failure. A failed input never
         # delivers, so each stays unfired, and a late record never fires it.
         self._failed_regions: set[str] = set(snapshot.failed_regions)
+        # A spawn-site denial names no work item; an agent's denied boundary names one
+        # and never refuses a later spawn.
         self._denied_spawns = {
             d.operator_id
             for d in self._decisions
-            if d.kind is AuthorityDecisionKind.DENIED and d.operator_id
+            if d.kind is AuthorityDecisionKind.DENIED
+            and d.operator_id
+            and d.work_item_id is None
         }
 
         # Binds the emitter to this engine's own live collections (mutated in place,
