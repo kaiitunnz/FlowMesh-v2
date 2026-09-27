@@ -5072,6 +5072,7 @@ class TaskRuntime:
                 child_record.error = reason
                 child_record.assigned_worker = None
                 child_record.finished_ts = time.time()
+                self._failed.add(child)
                 self._pending_deps.pop(child, None)
                 self._remove_from_ready_locked(child)
                 impacted.append((child, reason))

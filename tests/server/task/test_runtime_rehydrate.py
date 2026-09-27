@@ -636,3 +636,20 @@ async def test_rehydrate_restores_cancelled_workflow() -> None:
     assert record_a is not None and record_a.status == TaskStatus.CANCELLED
     assert record_b is not None and record_b.status == TaskStatus.CANCELLED
     assert restored.ready_queue_length() == 0
+
+
+@pytest.mark.anyio
+async def test_a_cascaded_dependent_reads_failed_before_and_after_a_restart() -> None:
+    registry = FakeWorkflowRegistry()
+    runtime = _runtime(registry)
+    _, ids = await _register(runtime, GRAPH)
+    a, b = ids["a"], ids["b"]
+    runtime.mark_failed(a, "wkr-1", {}, "2026-06-01T00:00:00Z")
+
+    info = runtime.describe_task(b)
+    assert info is not None and info.failed
+
+    restored = _runtime(registry)
+    await restored.rehydrate()
+    info = restored.describe_task(b)
+    assert info is not None and info.failed
