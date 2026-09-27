@@ -910,6 +910,24 @@ def test_an_ambiguity_terminal_fails_a_never_entered_region() -> None:
     assert "reviewer:spawn:join" in eng.to_snapshot().failed_regions
 
 
+def test_terminalizing_leaves_an_already_terminal_invocation_alone() -> None:
+    eng = _engine(_multi_region_agent())
+    _dispatch_agent(eng)
+    eng.route_boundary_event(
+        "A",
+        BoundaryEvent(
+            kind=BoundaryEventKind.INVOCATION,
+            call_correlation="c0",
+            interface="model",
+            request_digest="sha256:abc",
+        ),
+    )
+    (invocation_id,) = eng.terminalize_unsettled_invocations()
+
+    assert eng.terminalize_unsettled_invocations() == []
+    assert eng.boundary_invocation_completed(invocation_id) is False
+
+
 def test_terminal_failure_fails_an_entered_region_while_its_children_drain() -> None:
     eng = _engine(_spawning_agent(child=_leaf("child")))
     act = _dispatch_agent(eng)

@@ -1577,10 +1577,10 @@ class OrchestrationEngine:
         self, task_ids: Iterable[str] | None = None
     ) -> list[str]:
         """Terminalize the unsettled mediated boundary invocations of the given tasks'
-        activations, or of every activation.
+        activations, or of every activation; one already terminal is left as it is.
 
-        Returns their durable ``invocation_id``s so a control-plane consumer bound to
-        them — a resident-capacity admission credit — releases from this fenced
+        Returns the ``invocation_id``s it terminalized so a control-plane consumer bound
+        to them — a resident-capacity admission credit — releases from this fenced
         terminal rather than being stranded.
         """
         activations = (
@@ -1596,7 +1596,10 @@ class OrchestrationEngine:
         for activation, invocation_id in self._unsettled_invocation_boundaries():
             if activations is not None and activation not in activations:
                 continue
-            if (invocation := self._invocations.get(invocation_id)) is not None:
+            invocation = self._invocations.get(invocation_id)
+            if invocation is not None:
+                if invocation.state in TERMINAL_INVOCATION_STATES:
+                    continue
                 invocation.state = next_on_terminal(invocation.state)
                 self._emitter.emit_boundary(invocation)
             ids.append(invocation_id)
