@@ -577,3 +577,83 @@ async def test_a_sealed_agent_region_retires_the_templates_nested_under_it() -> 
 
     assert registry.remaining_of(workflow_id) == set()
     assert runtime.workflow_settlement(workflow_id).settled
+
+
+_AGENT_REGION = """
+      - name: a
+        spec: {taskType: echo, data: {type: list, items: [x]}}
+      - name: lead
+        dependsOn: [a]
+        spec:
+          taskType: agent
+          task: spawn reviewers
+          v2:
+            authority: {invoke: [model], delegate: [model]}
+            tools: [{name: model}]
+            boundary: [spawn, spawn_seal, yield]
+            child: [{name: reviewer, authority: {invoke: [model], delegate: []}}]
+          harness: {backend: scripted, version: v1, params: {script: []}}
+      - name: reviewer
+        spec:
+          taskType: agent
+          task: research the facet
+          v2:
+            inputs: [facet]
+            authority: {invoke: [model], delegate: []}
+            tools: [{name: model}]
+            boundary: [invocation, yield]
+          harness: {backend: scripted, version: v1, params: {script: []}}
+      - name: merge
+        spec:
+          taskType: agent
+          task: merge the reviews
+          v2:
+            inputs: [{name: reviews, from: lead, region: reviewer}]
+            authority: {invoke: [model], delegate: []}
+            tools: [{name: model}]
+            boundary: [invocation, yield]
+          harness: {backend: scripted, version: v1, params: {script: []}}
+"""
+
+
+def _agent_failure(runtime: TaskRuntime, lead: str) -> None:
+    record_dispatch(runtime, lead, cast(Any, _worker()))
+    failure = HarnessResult(kind=HarnessResultKind.FAILURE, error="agent blew up")
+    runtime.mark_succeeded(
+        lead, "wkr-1", {"agent_episode": failure.model_dump(mode="json")}, _TS
+    )
+
+
+@pytest.mark.parametrize("path", ["reported", "episode", "cascade"])
+def test_a_failed_agent_fails_its_region_and_closes_the_workflow(path: str) -> None:
+    async def run() -> None:
+        registry = FakeRegistry()
+        registry.submitted_at = _TS
+        runtime = _live_runtime(registry)
+        workflow_id, ids = await _register(runtime, _HEAD + _AGENT_REGION)
+        finalizer, redis, _ = _wired(runtime, registry, workflow_id)
+        a, lead = ids["a"], ids["lead"]
+        if path == "cascade":
+            _fail(runtime, a)
+        else:
+            record_dispatch(runtime, a, cast(Any, _worker()))
+            runtime.mark_succeeded(a, "wkr-1", {}, _TS)
+            assert _pop_ready(runtime) == [lead]
+            if path == "reported":
+                _fail(runtime, lead)
+            else:
+                _agent_failure(runtime, lead)
+        _drain(runtime)
+        finalizer.drain()
+
+        primary = "a" if path == "cascade" else "lead"
+        downstream = ["reviewer", "merge"] + (["lead"] if path == "cascade" else [])
+        _assert_failed_downstream(runtime, ids, primary, *downstream)
+        assert _pop_ready(runtime) == []
+        engine = _engine(runtime, workflow_id)
+        kinds = {kind for kind, _ in engine.contract_trace()}
+        assert "child_init_sealed" not in kinds and "join_released" not in kinds
+        assert registry.remaining_of(workflow_id) == set()
+        assert f"workflow:{workflow_id}:logs:closed" in redis.keys
+
+    asyncio.run(run())
