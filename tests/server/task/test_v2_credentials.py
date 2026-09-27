@@ -139,6 +139,12 @@ def test_an_unparseable_source_persists_no_text():
     assert redact_source_text("not json sk-raw", "n8n") == REDACTED
 
 
+def test_a_source_too_deep_to_reserialize_persists_no_text():
+    # YAML's representer recurses deeper than its loader, so this parses but won't dump.
+    nested = "[" * 400 + "]" * 400
+    assert redact_source_text(f"a: {nested}", "native") == REDACTED
+
+
 def test_an_n8n_header_array_is_masked():
     payload = json.dumps(
         {

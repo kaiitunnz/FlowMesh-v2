@@ -46,5 +46,5 @@ def redact_source_text(raw_payload: str, format: str) -> str:
         return yaml.safe_dump(
             redact_credential_fields(yaml.safe_load(raw_payload)), sort_keys=False
         )
-    except (ValueError, TypeError, yaml.YAMLError):
+    except (ValueError, TypeError, RecursionError, yaml.YAMLError):
         return REDACTED
