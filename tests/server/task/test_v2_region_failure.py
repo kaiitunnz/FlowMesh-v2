@@ -7,12 +7,13 @@ from typing import Any, cast
 import pytest
 
 from server.orchestration import OrchestrationEngine, PublicationOutcome
-from server.orchestration.state import BoundaryEvent, ProgressAxis
+from server.orchestration.state import BoundaryEvent, LedgerSnapshot, ProgressAxis
 from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime
 from server.task.v2.representations.operators import BoundaryEventKind
 from shared.harness.adapter import HarnessResult, HarnessResultKind
 from tests.server.dispatch_helpers import record_dispatch
+from tests.server.task.test_agent_episode_runtime import _adapter, _step
 from tests.server.task.test_v2_orchestration import (
     _TS,
     FakeRegistry,
@@ -818,3 +819,98 @@ def _assert_failed_downstream_of(
         record = runtime.get_record(ids[name])
         assert record is not None and record.status == TaskStatus.FAILED, name
         assert record.error == f"Dependency {failed} failed", name
+
+
+_ENTERED = """
+      - name: writer
+        spec:
+          taskType: agent
+          v2:
+            authority: {invoke: [model], delegate: [model]}
+            tools: [{name: model}]
+            child: reviewer
+          harness: {backend: scripted, version: v1, params: {script: []}}
+      - name: reviewer
+        spec: {taskType: echo, data: {type: list, items: [placeholder]}}
+      - name: after
+        dependsOn: [writer]
+        spec: {taskType: echo, data: {type: list, items: [z]}}
+"""
+
+
+async def _entered_region(
+    registry: FakeRegistry,
+) -> tuple[TaskRuntime, str, dict[str, str], str]:
+    """A writer agent that spawned one reviewer child into its region."""
+    runtime = _live_runtime(registry)
+    workflow_id, ids = await _register(runtime, _HEAD + _ENTERED)
+    writer = ids["writer"]
+    assert _pop_ready(runtime) == [writer]
+    _step(runtime, _adapter(), writer)
+    child = next(t for t in _pop_ready(runtime) if t != writer)
+    return runtime, workflow_id, ids, child
+
+
+@pytest.mark.parametrize("path", ["reported", "episode"])
+def test_a_failed_agent_persists_its_records_before_the_ledger(path: str) -> None:
+    async def run() -> None:
+        registry = FakeRegistry()
+        runtime, _, ids, _ = await _entered_region(registry)
+        writer = ids["writer"]
+        record_dispatch(runtime, writer, cast(Any, _worker()))
+        writes: list[str] = []
+        commit, dynamic, save = (
+            registry.commit_transition,
+            registry.commit_dynamic_tasks,
+            registry.save_ledger_snapshot,
+        )
+
+        def commit_transition(workflow_id: str, **kwargs: Any) -> None:
+            if any(
+                p.record.task_id == writer and p.record.status == TaskStatus.FAILED
+                for p in kwargs.get("records", ())
+            ):
+                writes.append("writer failed")
+            commit(workflow_id, **kwargs)
+
+        def commit_dynamic_tasks(*args: Any, **kwargs: Any) -> None:
+            writes.append("ledger")
+            dynamic(*args, **kwargs)
+
+        def save_ledger_snapshot(workflow_id: str, snapshot: LedgerSnapshot) -> None:
+            writes.append("ledger")
+            save(workflow_id, snapshot)
+
+        registry.commit_transition = commit_transition  # type: ignore[method-assign]
+        registry.commit_dynamic_tasks = commit_dynamic_tasks  # type: ignore[method-assign]
+        registry.save_ledger_snapshot = save_ledger_snapshot  # type: ignore[method-assign]
+        if path == "reported":
+            runtime.mark_failed(writer, "wkr-1", {}, _TS, error="boom")
+        else:
+            failure = HarnessResult(kind=HarnessResultKind.FAILURE, error="boom")
+            payload = {"agent_episode": failure.model_dump(mode="json")}
+            runtime.mark_succeeded(writer, "wkr-1", payload, _TS)
+
+        assert writes[0] == "writer failed" and "ledger" in writes
+
+    asyncio.run(run())
+
+
+@pytest.mark.anyio
+async def test_a_restart_retires_a_region_template_whose_retire_a_crash_lost() -> None:
+    registry = FakeRegistry()
+    runtime, workflow_id, ids, child = await _entered_region(registry)
+    record_dispatch(runtime, child, cast(Any, _worker()))
+    runtime.mark_succeeded(child, "wkr-1", {}, _TS)
+    ledger = registry.ledger_blobs[workflow_id]
+    remaining = set(registry.remaining[workflow_id])
+    _fail(runtime, ids["writer"])
+    # The crash kept the task records and lost the retire and the ledger saves.
+    registry.ledger_blobs[workflow_id] = ledger
+    registry.remaining[workflow_id] = remaining - {ids["writer"], ids["after"]}
+
+    restored = _live_runtime(registry, "restored", reader=runtime._results)
+    assert await restored.rehydrate() == 1
+
+    assert registry.remaining_of(workflow_id) == set()
+    assert restored.workflow_settlement(workflow_id).settled

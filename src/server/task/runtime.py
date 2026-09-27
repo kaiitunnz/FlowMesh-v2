@@ -969,14 +969,6 @@ class TaskRuntime:
                 else None
             )
             with self._cv:
-                if snapshot is not None and bundle is not None:
-                    self._install_rehydrated_v2_workflow_locked(
-                        workflow_id, tasks, snapshot, bundle, rehydrated_at
-                    )
-                else:
-                    self._install_rehydrated_workflow_locked(
-                        workflow_id, tasks, sched, rehydrated_at
-                    )
                 # A non-terminal record the remaining set no longer lists was
                 # retired before the crash, and nothing will ever dispatch it; the
                 # durable set is what carries that fact across a restart.
@@ -986,6 +978,14 @@ class TaskRuntime:
                     if persisted.record.status not in TERMINAL_TASK_STATUSES
                     and persisted.record.task_id not in remaining
                 )
+                if snapshot is not None and bundle is not None:
+                    self._install_rehydrated_v2_workflow_locked(
+                        workflow_id, tasks, snapshot, bundle, rehydrated_at
+                    )
+                else:
+                    self._install_rehydrated_workflow_locked(
+                        workflow_id, tasks, sched, rehydrated_at
+                    )
                 # A workflow whose last task settled just before the crash has no
                 # event left to close it: replay the completion notification for
                 # every restored workflow, and let the finalizer reject the ones
@@ -1214,6 +1214,8 @@ class TaskRuntime:
         # handler (a search to the broker, a model to the gateway) it was recorded for.
         for envelope in engine.pending_tool_dispatches():
             self._dispatch_boundary(envelope)
+        # The replayed terminals can seal a region whose retire a crash lost.
+        self._retire_sealed_region_templates_locked(workflow_id, engine)
         self._save_ledger_locked(workflow_id)
 
     # ------------------------------------------------------------------ #
@@ -3286,19 +3288,28 @@ class TaskRuntime:
         self._write_locked(save, lambda held: held.workflow_ids.append(workflow_id))
 
     def _apply_advance_locked(self, workflow_id: str, advance: Advance) -> bool:
+        """Apply an engine advance: fail and persist what it failed, then record the
+        inputs its agents now accept, retire the region templates it sealed, and ready
+        its work. Returns whether it changed any task.
+
+        The failed records persist before a retire writes the ledger, so the ledger
+        never leads them.
+        """
         # A ready/settle advance never carries a retry; the failure path drives those.
         assert not advance.retry, "retry is applied by the failure path"
         engine = self._engines.get(workflow_id)
+        changed = bool(advance.failed)
+        self._fail_v2_advance_locked(engine, advance.failed)
         if engine is not None:
-            self._stage_agent_inputs_locked(workflow_id, engine, advance)
+            staged = Advance()
+            self._stage_agent_inputs_locked(workflow_id, engine, staged)
+            changed |= bool(staged.failed)
+            self._fail_v2_advance_locked(engine, staged.failed)
+            advance.extend(staged)
             self._retire_sealed_region_templates_locked(workflow_id, engine)
-        changed = False
         for task_id in advance.ready:
             if self._enqueue_ready_locked(task_id):
                 changed = True
-        if advance.failed:
-            self._fail_v2_advance_locked(engine, advance.failed)
-            changed = True
         return changed
 
     def _fail_v2_advance_locked(
@@ -5184,16 +5195,13 @@ class TaskRuntime:
 
             impacted = self._fail_v1_dependents_locked(task_id)
 
-            if record is not None and (engine := self._engines.get(record.workflow_id)):
+            engine = self._engines.get(record.workflow_id) if record else None
+            advance = Advance()
+            if engine is not None:
                 advance = engine.on_failed(task_id, message, retryable=False)
                 impacted.extend(
                     self._fail_v2_advance_locked(engine, advance.failed, persist=False)
                 )
-                # A child's failure can release its scope's join, readying what follows.
-                if self._apply_advance_locked(
-                    record.workflow_id, Advance(ready=advance.ready)
-                ):
-                    self._cv.notify_all()
 
             returned = self._return_merged_children_locked(
                 merged_children_ids, unmerge=True
@@ -5210,10 +5218,15 @@ class TaskRuntime:
                 returned += blocked_returned
 
             self._commit_locked(task_id, *(dep_id for dep_id, _ in impacted), *returned)
-            # The ledger snapshot writes last, after the task terminal records, so a
-            # crash can only leave the ledger behind — never ahead — of durable task
-            # state, which rehydration then reconciles.
-            if record is not None and record.workflow_id in self._engines:
+            # The ledger writes after the task terminal records -- the retire a ready
+            # applies included -- so a crash can only leave the ledger behind durable
+            # task state, never ahead of it, and rehydration then reconciles it.
+            if record is not None and engine is not None:
+                # A child's failure can release its scope's join, readying what follows.
+                if self._apply_advance_locked(
+                    record.workflow_id, Advance(ready=advance.ready)
+                ):
+                    self._cv.notify_all()
                 self._save_ledger_locked(record.workflow_id)
 
             if record is not None:
