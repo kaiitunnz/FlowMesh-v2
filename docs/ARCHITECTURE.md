@@ -401,12 +401,11 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   `MediatedOperationPermit` and relays it to that worker as an ordinary control message on
   its authenticated attachment, never a dispatched task. The worker's
   `MediatedEgressSidecar` — a bounded worker-local egress lane, not a task, replica,
-  endpoint, or authority — validates the permit fence and request digest, egresses,
-  and reports a
-  permit-fenced outcome that settles the boundary before the episode resumes. It retains
-  the request non-destructively until the committed outcome is acknowledged. A fence
-  rejection is a declared terminal boundary failure, never a retryable provider response;
-  a lost outcome holds the boundary pending for a same-`idm-*` re-drive. The
+  endpoint, or authority — validates the permit fence and request digest, egresses, and
+  reports a permit-fenced outcome that settles the boundary before the episode resumes.
+  It retains the request non-destructively until the committed outcome is acknowledged.
+  A fence rejection is a declared terminal boundary failure, never a retryable provider
+  response; a lost outcome holds the boundary pending for a same-`idm-*` re-drive. The
   `FabricToolBroker` applies the tool's policy and correlation. See
   [`EXECUTORS.md`](EXECUTORS.md).
 - **Reference-backed invocation outcomes.** A mediated boundary settles by reference: the
