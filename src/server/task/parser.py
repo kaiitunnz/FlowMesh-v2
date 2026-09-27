@@ -131,12 +131,19 @@ def _build_workflow(
     for region_spec in region_specs:
         local_ids[region_spec.name] = region_spec.name
 
+    declared = {spec.local_name for spec in specs if spec.local_name}
+
     def _resolve_depends_on(depends_on: list[str], owner: str) -> list[str]:
         resolved: list[str] = []
         for dep in depends_on:
             if not (name := dep.strip()):
                 continue
             if (dep_id := local_ids.get(name)) is None:
+                if name in declared:
+                    raise ValueError(
+                        f"{owner}: dependsOn '{name}' names a stage declared after "
+                        "it; a stage depends only on earlier stages"
+                    )
                 raise ValueError(
                     f"{owner}: dependsOn '{name}' names no node or stage of this "
                     "workflow"

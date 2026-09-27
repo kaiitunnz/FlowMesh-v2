@@ -9,6 +9,7 @@ import pytest
 
 from server.config import OrchestrationConfig
 from server.registries.workflow import PersistedTask
+from server.task.parser import parse_workflow
 from server.task.runtime import TaskRuntime
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.dispatcher.helpers import CapturingDispatcher
@@ -123,3 +124,20 @@ def test_a_stored_foreign_dependency_never_renders_its_result() -> None:
     (published,) = worker_registry.publish_task.call_args_list
     assert _SECRET not in str(published)
     assert restored.upstream_task_ids(summarize) == set()
+
+
+def test_a_stage_naming_a_later_stage_is_refused_as_out_of_order() -> None:
+    stages = """
+apiVersion: flowmesh/v1
+kind: Workflow
+metadata: {name: stages}
+spec:
+  stages:
+    - name: b
+      dependsOn: [a]
+      spec: {taskType: echo}
+    - name: a
+      spec: {taskType: echo}
+"""
+    with pytest.raises(ValueError, match="names a stage declared after it"):
+        parse_workflow(stages, "native")
