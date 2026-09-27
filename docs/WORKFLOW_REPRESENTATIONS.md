@@ -20,7 +20,7 @@ acyclic subset of a logical template.
 
 | Representation | Question | Contents |
 | --- | --- | --- |
-| `FrontendWorkflowSource` | What did the author submit? | Verbatim payload, format, content digest, submission time. Immutable provenance. |
+| `FrontendWorkflowSource` | What did the author submit? | Payload with credentials redacted, format, content digest, submission time. Immutable provenance. |
 | `LogicalWorkflowTemplate` | What behavior is legal? | Typed operators, port wiring, tool/resource declarations, result declarations, legacy projections, effect boundaries, source maps. |
 | `PhysicalExecutionPlan` | How may the fabric realize it? | Physical nodes, source maps to the template, service-family and residency hooks. |
 
