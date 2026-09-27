@@ -13,8 +13,9 @@ from typing import Any
 import pytest
 
 from server.orchestration.state import InvocationState, LedgerSnapshot
+from server.task.models import EventEffect, SettleOutcome
 from server.task.results import ResultUnreadable
-from server.task.runtime import TaskRuntime, _HeldWrites, _Termination
+from server.task.runtime import TaskRuntime, _HeldWrites, _Termination, _Unacknowledged
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import result_payload
 from tests.server.task.test_agent_episode_runtime import _MODEL_HELD_SCRIPT, _step
@@ -174,3 +175,24 @@ def test_a_recommit_under_a_held_report_keeps_its_release_held() -> None:
 
     assert runtime._pending_terminations == []
     assert current.terminations == [termination]
+
+
+def test_a_replayed_cancel_report_releases_what_its_stash_held() -> None:
+    scenario = _Scenario()
+    runtime = scenario.runtime
+    released: list[str] = []
+    runtime.set_resident_terminal_hook(lambda inv, _failed: released.append(inv))
+    planner = scenario.ids["planner"]
+    termination = _Termination([], [], [], resident_invocation_ids=["inv-x"])
+    runtime._unacknowledged[planner] = _Unacknowledged(
+        "TASK_CANCELLED",
+        "wkr-1",
+        "dsp-p",
+        _HeldWrites(terminations=[termination]),
+        SettleOutcome(EventEffect.SETTLED, "cancelled", [], []),
+    )
+
+    runtime.mark_cancelled(planner, "wkr-1", {}, _TS, "dsp-p")
+
+    assert released == ["inv-x"]
+    assert runtime._pending_terminations == []

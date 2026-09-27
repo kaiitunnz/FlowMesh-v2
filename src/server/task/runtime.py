@@ -5471,15 +5471,19 @@ class TaskRuntime:
     ) -> SettleOutcome:
         """Settle a task CANCELLED on its worker's confirmation; returns what the
         confirmation did to the task."""
-        return self._reported(
-            "TASK_CANCELLED",
-            task_id,
-            worker_id,
-            dispatch_id,
-            lambda: self._apply_cancellation(
-                task_id, worker_id, payload, ts, dispatch_id
-            ),
-        )
+        try:
+            return self._reported(
+                "TASK_CANCELLED",
+                task_id,
+                worker_id,
+                dispatch_id,
+                lambda: self._apply_cancellation(
+                    task_id, worker_id, payload, ts, dispatch_id
+                ),
+            )
+        finally:
+            # A replayed report's recommit makes a held terminal ledger durable.
+            self._release_pending_terminations()
 
     def _apply_cancellation(
         self,
