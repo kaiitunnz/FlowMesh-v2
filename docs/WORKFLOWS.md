@@ -104,8 +104,7 @@ keys untouched:
 `authority`, `tools`, and `boundary` apply to `agent` leaves. An agent input
 `{ name, from: <agent>, region: <role> }` reads the aggregate of that agent's
 child region, and names an agent that runs at the root, not a spawned child. Any
-leaf may
-declare `provenance` (`pinned` | `live`) and `determinism` / `effect` /
+leaf may declare `provenance` (`pinned` | `live`) and `determinism` / `effect` /
 `recovery` overrides, and a `result: { visibility: published }` to publish its
 induced output. A spawn region publishes its children's results as a collection
 keyed by child index within each spawning scope:
