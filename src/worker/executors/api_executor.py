@@ -1,6 +1,7 @@
 import logging
 import os
 import threading
+from http.cookiejar import CookieJar, DefaultCookiePolicy
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -64,10 +65,13 @@ class APIExecutor(Executor):
             if client is not None and not client.is_closed:
                 return client
             # Create a new client for this combination
+            # A pooled client serves many tasks and tenants; a stored cookie would ride
+            # into the next task's request to the same host.
             client = httpx.Client(
                 timeout=timeout,
                 verify=verify_tls,
                 follow_redirects=follow_redirects,
+                cookies=CookieJar(policy=DefaultCookiePolicy(allowed_domains=[])),
             )
             cls._clients[key] = client
             logger.debug(

@@ -1,7 +1,11 @@
 """Tests for the API executor url override and Nebula credential handling."""
 
+import json
 import tempfile
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any, cast
 from unittest.mock import patch
 
 import httpx
@@ -173,3 +177,44 @@ class TestCustomUrl:
         assert transport.request is not None
         assert transport.request.headers["Content-Type"] == "application/json"
         assert "Authorization" not in transport.request.headers
+
+
+class _CookieServer(ThreadingHTTPServer):
+    cookies_seen: list[str | None]
+
+
+class _CookieHandler(BaseHTTPRequestHandler):
+    def do_POST(self) -> None:
+        server = cast(_CookieServer, self.server)
+        server.cookies_seen.append(self.headers.get("Cookie"))
+        self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        body = json.dumps(
+            {"choices": [{"message": {"content": "ok"}}], "usage": {"total_tokens": 1}}
+        ).encode()
+        self.send_response(200)
+        self.send_header("Set-Cookie", "session=tenant-a; Path=/")
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format: str, *args: Any) -> None:
+        return None
+
+
+def test_a_pooled_client_carries_no_cookie_between_tasks() -> None:
+    server = _CookieServer(("127.0.0.1", 0), _CookieHandler)
+    server.cookies_seen = []
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        url = f"http://127.0.0.1:{server.server_address[1]}/v1"
+        for _ in range(2):
+            APIExecutor.__new__(APIExecutor).run(
+                _task_message(url=url), Path(tempfile.gettempdir())
+            )
+    finally:
+        APIExecutor.close_all_clients()
+        server.shutdown()
+        server.server_close()
+    assert server.cookies_seen == [None, None]
