@@ -101,59 +101,6 @@ def test_call_normalizes_to_spawn_then_join() -> None:
     )
 
 
-@pytest.mark.parametrize(
-    ("region", "code"),
-    [
-        ('{kind: branch, selection: "x", ports: [p]}', "region.unknown-kind"),
-        ("{kind: loop, coordinate: t}", "region.unknown-kind"),
-    ],
-)
-def test_an_unsupported_region_kind_is_a_compile_error(region: str, code: str) -> None:
-    text = f"""
-apiVersion: flowmesh/v2
-kind: Workflow
-metadata: {{name: t}}
-spec:
-  graph:
-    nodes:
-      - name: a
-        spec: {{taskType: echo, data: {{type: list, items: [x]}}}}
-      - name: r
-        dependsOn: [a]
-        region: {region}
-"""
-    parsed = parse_workflow(text, "native")
-    source = FrontendWorkflowSource.capture(text, "native", name="wf")
-    with pytest.raises(CompileError) as err:
-        compile_workflow("wfl", parsed, source, bindings=_BINDINGS)
-    assert [d.code for d in err.value.diagnostics] == [code]
-
-
-def test_a_feedback_edge_is_a_compile_error() -> None:
-    text = """
-apiVersion: flowmesh/v2
-kind: Workflow
-metadata: {name: t}
-spec:
-  graph:
-    nodes:
-      - name: a
-        spec: {taskType: echo, data: {type: list, items: [x]}}
-      - name: m
-        dependsOn: [a]
-        region: {kind: merge}
-      - name: b
-        dependsOn: [m]
-        spec: {taskType: echo, data: {type: list, items: [y]}}
-        feedback: {to: m, port: model}
-"""
-    parsed = parse_workflow(text, "native")
-    source = FrontendWorkflowSource.capture(text, "native", name="wf")
-    with pytest.raises(CompileError) as err:
-        compile_workflow("wfl", parsed, source, bindings=_BINDINGS)
-    assert [d.code for d in err.value.diagnostics] == ["feedback.not-loop"]
-
-
 def test_tool_interface_and_published_result() -> None:
     template = _compile(REGIONS_WF)
     assert any(t.name == "web_search" for t in template.tool_declarations)

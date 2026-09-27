@@ -16,7 +16,6 @@ from ..representations.operators import (
     JoinRegion,
     LeafOperator,
     LogicalOperator,
-    LoopContextRegion,
     MergeRegion,
     Port,
     RecoveryClass,
@@ -80,14 +79,13 @@ def lower_frontend_v2(parsed: ParsedWorkflow, acc: LoweringAccumulator) -> None:
     """Normalize v2 frontend constructs into the canonical template form.
 
     Applies ``spec.v2`` leaf declarations to already-lowered task operators, lowers
-    structured regions into canonical operators/ports/regions, adds structured feedback
-    edges, and normalizes a legacy agent child target into one declared child region.
+    structured regions into canonical operators/ports/regions, and normalizes a legacy
+    agent child target into one declared child region.
     Malformed constructs raise :class:`CompileError` with a source location; semantic
     checks are left to the validation passes.
     """
     _apply_leaf_declarations(parsed, acc)
     _lower_regions(parsed, acc)
-    _lower_feedback(parsed, acc)
     normalize_agent_child_regions(acc)
     _reject_published_children(parsed, acc)
 
@@ -660,47 +658,3 @@ def _lower_call(
     acc.edges.append(TemplateEdge(from_op=spawn_id, to_op=join_id))
     for dep in region.depends_on:
         acc.edges.append(TemplateEdge(from_op=dep, to_op=spawn_id))
-
-
-def _lower_feedback(parsed: ParsedWorkflow, acc: LoweringAccumulator) -> None:
-    operator_ids = acc.operator_ids
-    loop_ids = {
-        op.operator_id for op in acc.operators if isinstance(op, LoopContextRegion)
-    }
-    for source_id, feedback, label in _feedback_sources(parsed):
-        target = str(feedback.get("to", "")).strip()
-        if target not in operator_ids:
-            raise compile_error(
-                "feedback.unknown-target",
-                f"feedback targets unknown operator {target!r}",
-                label,
-            )
-        if target not in loop_ids:
-            raise compile_error(
-                "feedback.not-loop",
-                f"feedback target {target!r} is not a LoopContext region",
-                label,
-            )
-        port = feedback.get("port")
-        acc.edges.append(
-            TemplateEdge(
-                from_op=source_id,
-                to_op=target,
-                to_port=str(port) if port else None,
-                feedback=True,
-            )
-        )
-
-
-def _feedback_sources(
-    parsed: ParsedWorkflow,
-) -> list[tuple[str, dict[str, Any], str]]:
-    sources: list[tuple[str, dict[str, Any], str]] = []
-    for task in parsed.tasks:
-        if task.feedback:
-            label = task.graph_node_name or task.local_name or task.task_id
-            sources.append((task.task_id, task.feedback, label))
-    for region in parsed.regions:
-        if region.feedback:
-            sources.append((region.name, region.feedback, region.name))
-    return sources

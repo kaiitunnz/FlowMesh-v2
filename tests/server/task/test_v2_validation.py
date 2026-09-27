@@ -132,22 +132,30 @@ def test_predicate_join_non_positive_threshold_rejected() -> None:
     assert any(d.code == "region.join-bad-predicate" for d in err.diagnostics)
 
 
-def test_unknown_region_kind_rejected() -> None:
-    err = _reject("""      - name: r
-        region: {kind: frobnicate}
+@pytest.mark.parametrize(
+    "region",
+    [
+        "{kind: frobnicate}",
+        '{kind: branch, selection: "x", ports: [p]}',
+        "{kind: loop, coordinate: t}",
+    ],
+)
+def test_unknown_region_kind_rejected(region: str) -> None:
+    err = _reject(f"""      - name: r
+        region: {region}
 """)
-    assert any(d.code == "region.unknown-kind" for d in err.diagnostics)
+    assert [d.code for d in err.diagnostics] == ["region.unknown-kind"]
 
 
-def test_feedback_to_non_loop_rejected() -> None:
-    err = _reject("""      - name: a
+def test_a_feedback_key_is_invalid_input() -> None:
+    with pytest.raises(ValueError, match="Invalid workflow payload"):
+        _compile("""      - name: a
         spec: {taskType: echo, data: {type: list, items: [x]}}
       - name: b
         dependsOn: [a]
         spec: {taskType: echo, data: {type: list, items: [y]}}
         feedback: {to: a, port: p}
 """)
-    assert any(d.code == "feedback.not-loop" for d in err.diagnostics)
 
 
 def test_unstructured_cycle_rejected() -> None:

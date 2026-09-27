@@ -601,8 +601,7 @@ def _check_cycles(
                     Diagnostic(
                         code="topology.unstructured-cycle",
                         message=(
-                            f"operator {hit!r} participates in an unstructured cycle; "
-                            "declare structured feedback with a LoopContext region"
+                            f"operator {hit!r} participates in an unstructured cycle"
                         ),
                         location=loc.get(hit),
                     )
