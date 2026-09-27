@@ -2,6 +2,7 @@
 
 import asyncio
 from typing import Any, cast
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -10,9 +11,10 @@ from server.task.models import TaskStatus
 from server.task.results import ResultUnreadable
 from server.task.runtime import TaskRuntime, _InputCheck
 from shared.content import reference_for
-from shared.schemas.event import TaskFailureKind
+from shared.schemas.event import TaskEvent, TaskFailureKind
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.task.test_agent_episode_runtime import _held_boundary
+from tests.server.task.test_task_merge import _monitor
 from tests.server.task.test_v2_orchestration import (
     _TS,
     FakeRegistry,
@@ -47,6 +49,7 @@ spec:
 def _fail(runtime: TaskRuntime, workflow_id: str) -> None:
     with runtime._cv:
         runtime._fail_workflow_locked(workflow_id, "fan-out producer unreadable")
+    runtime._release_pending_terminations()
 
 
 def _fail_by_unreadable_fanout(runtime: TaskRuntime, planner: str) -> None:
@@ -188,3 +191,70 @@ async def test_a_held_input_check_is_dropped() -> None:
     _fail(runtime, workflow_id)
 
     assert runtime._input_checks == {}
+
+
+@pytest.mark.anyio
+async def test_a_task_being_published_is_interrupted() -> None:
+    interrupts: list[Any] = []
+
+    class _Workers(_WorkerRegistryStub):
+        def publish_interrupt(self, *args: Any) -> int:
+            interrupts.append(args[1])
+            return 1
+
+    runtime = _live_runtime(FakeRegistry())
+    runtime._worker_registry = cast(Any, _Workers())
+    _, ids = await _register(runtime, _PARALLEL)
+    _pop_ready(runtime)
+    side = ids["side"]
+    assert runtime.begin_publish(side, cast(Any, _worker("wkr-2")), "dsp-s")
+
+    _fail_by_unreadable_fanout(runtime, ids["planner"])
+
+    assert [(i.task_id, i.worker_id) for i in interrupts] == [(side, "wkr-2")]
+    assert runtime._tasks[side].status == TaskStatus.FAILED
+
+
+@pytest.mark.anyio
+async def test_a_release_error_stays_out_of_the_report_that_failed_the_workflow() -> (
+    None
+):
+    attempted: list[str] = []
+
+    class _Workers(_WorkerRegistryStub):
+        def publish_interrupt(self, *args: Any) -> int:
+            attempted.append(args[1].task_id)
+            raise ConnectionError("control redis unavailable")
+
+    runtime = _live_runtime(FakeRegistry())
+    runtime._worker_registry = cast(Any, _Workers())
+    monitor = _monitor(runtime)
+    workflow_id, ids = await _register(runtime, _PARALLEL)
+    _pop_ready(runtime)
+    side, planner = ids["side"], ids["planner"]
+    record_dispatch(runtime, side, cast(Any, _worker("wkr-2")), "dsp-s")
+    runtime.mark_started(side, "wkr-2", {}, _TS, dispatch_id="dsp-s")
+    record_dispatch(runtime, planner, cast(Any, _worker()), "dsp-p")
+    payload = _planned(runtime, planner, ["a"])
+
+    def _corrupt(binding: Any) -> Any:
+        raise ResultUnreadable("corrupt")
+
+    runtime._results.read = _corrupt  # type: ignore[method-assign]
+    monitor.handle_task_event(
+        TaskEvent(
+            type="TASK_SUCCEEDED",
+            task_id=planner,
+            worker_id="wkr-1",
+            dispatch_id="dsp-p",
+            payload=payload,
+            ts=_TS,
+        )
+    )
+
+    metrics = cast(MagicMock, monitor._metrics)
+    events = [c.args[0].type for c in metrics.record_task_event.call_args_list]
+    assert events == ["TASK_SUCCEEDED"]
+    assert attempted == [side]
+    assert runtime._tasks[side].status == TaskStatus.FAILED
+    assert runtime._pending_terminations == []

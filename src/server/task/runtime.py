@@ -269,6 +269,16 @@ class _InputCheck:
     unreadable: str | None = None
 
 
+@dataclass
+class _Termination:
+    """What a terminated workflow's work still holds, released after its terminal."""
+
+    interrupts: list[InterruptMessage]
+    # Each pending mediated operation's worker, agent task, and call.
+    reaps: list[tuple[str, str, str]]
+    resident_invocation_ids: list[str] = field(default_factory=list)
+
+
 @dataclass(frozen=True)
 class _InputElement:
     """The producer element a leaf fan-out child runs on."""
@@ -561,6 +571,7 @@ class TaskRuntime:
         self._tool_broker: Callable[[ToolInvocationEnvelope], None] | None = None
         self._resident_terminal_hook: Callable[[str, bool], None] | None = None
         self._failure_reporter: Callable[[TaskEvent], None] | None = None
+        self._pending_terminations: list[_Termination] = []
         # The worker-originated resident path: originate admits and relays the handoff
         # to the origin worker; the ack and outcome handlers consume the worker's fenced
         # transition reports. Set when resident-capacity control is enabled.
@@ -2159,13 +2170,25 @@ class TaskRuntime:
 
     def _reap_ops_for_agents_locked(self, agent_task_ids: Sequence[str]) -> None:
         """Reap pending tool operations whose agent boundary just failed clean."""
-        failed = set(agent_task_ids)
+        for worker_id, agent_task_id, call in self._take_ops_for_agents_locked(
+            agent_task_ids
+        ):
+            self._reap_mediated_op_locked(worker_id, agent_task_id, call)
+
+    def _take_ops_for_agents_locked(
+        self, agent_task_ids: Sequence[str]
+    ) -> list[tuple[str, str, str]]:
+        """Drop the agents' pending tool operations, returning each one's worker, agent
+        and call for reaping."""
+        agents = set(agent_task_ids)
+        taken: list[tuple[str, str, str]] = []
         for permit_id, (agent_task_id, call, worker_id) in list(
             self._pending_ops.items()
         ):
-            if agent_task_id in failed:
+            if agent_task_id in agents:
                 del self._pending_ops[permit_id]
-                self._reap_mediated_op_locked(worker_id, agent_task_id, call)
+                taken.append((worker_id, agent_task_id, call))
+        return taken
 
     def set_model_settler(
         self, settler: Callable[[ToolInvocationEnvelope], None]
@@ -3255,16 +3278,24 @@ class TaskRuntime:
                 "Checking the held inputs of workflow %s failed", workflow_id
             )
             self._redrive.schedule(workflow_id)
-        self._redrive_workflow(workflow_id)
+        try:
+            self._redrive_workflow(workflow_id)
+        finally:
+            # A fan-out read here that finds its collection unreadable fails the
+            # workflow.
+            self._release_pending_terminations()
 
     def _check_unavailable_inputs(self, workflow_id: str) -> None:
         """Read each held task's unreadable inputs from here, off the lock.
 
         Content missing or corrupt here fails the task as a report of the dispatch that
-        could not read it. A store control cannot reach either, or any other error
-        reading it, holds the task until a later re-drive. Content control reads fine
-        returns the task to the queue without blaming its worker: one later read with
-        control's own access says nothing about the path the worker read through.
+        could not read it, published on the task-event stream like the worker's own
+        report. The check stays until that failure has committed, so a verdict whose
+        handling failed a durable write is reported again. A store control cannot reach
+        either, or any other error reading it, holds the task until a later re-drive.
+        Content control reads fine returns the task to the queue without blaming its
+        worker: one later read with control's own access says nothing about the path the
+        worker read through.
         """
         with self._lock:
             checks = {
@@ -3765,20 +3796,13 @@ class TaskRuntime:
         return failed_now
 
     def _fail_workflow_locked(self, workflow_id: str, reason: str) -> None:
-        """Fail a workflow in its ledger and every non-terminal task of it, persist the
-        terminal facts, and release what its work held."""
-        interrupts = [
-            InterruptMessage(
-                task_id=task_id, worker_id=record.assigned_worker, reason=reason
-            )
-            for task_id, record in self._tasks.items()
-            if record.workflow_id == workflow_id
-            and record.status == TaskStatus.DISPATCHED
-            and record.assigned_worker
-        ]
-        resident_invocation_ids = self._terminate_workflow_locked(
-            workflow_id, failure=reason
-        )
+        """Fail a workflow in its ledger and every non-terminal task of it, and persist
+        the terminal facts.
+
+        What its work held is released once the caller leaves the lock, through
+        ``_release_pending_terminations``.
+        """
+        termination = self._terminate_workflow_locked(workflow_id, reason, reason)
         non_terminal = [
             task_id
             for task_id, record in self._tasks.items()
@@ -3790,7 +3814,7 @@ class TaskRuntime:
             self._save_ledger_locked(workflow_id)
         self._reclaim_vault_if_settled_locked(workflow_id)
         self._cv.notify_all()
-        self._release_terminated_work(resident_invocation_ids, interrupts)
+        self._pending_terminations.append(termination)
 
     def _fail_v2_cascade_locked(
         self, primary: str, cascade: list[str]
@@ -4330,15 +4354,19 @@ class TaskRuntime:
         The success binds the result reference it reports, once, at the commit that
         makes the task DONE; a success that does not settle the task binds nothing.
         """
-        return self._reported(
-            "TASK_SUCCEEDED",
-            task_id,
-            worker_id,
-            dispatch_id,
-            lambda: self._apply_success(
-                task_id, worker_id, payload, ts, dispatch_id, skip
-            ),
-        )
+        try:
+            return self._reported(
+                "TASK_SUCCEEDED",
+                task_id,
+                worker_id,
+                dispatch_id,
+                lambda: self._apply_success(
+                    task_id, worker_id, payload, ts, dispatch_id, skip
+                ),
+            )
+        finally:
+            # A success whose fan-out cannot be read fails its workflow.
+            self._release_pending_terminations()
 
     def _apply_success(
         self,
@@ -4969,8 +4997,6 @@ class TaskRuntime:
         cancelling: list[str] = []
         touched: list[str] = []
         returned: list[str] = []
-        interrupts: list[InterruptMessage] = []
-        resident_invocation_ids: list[str] = []
         with self._cv:
             workflow_tasks = [
                 item
@@ -4979,16 +5005,8 @@ class TaskRuntime:
             ]
             if not workflow_tasks:
                 return touched  # Unknown workflow: no records to move
+            termination = self._terminate_workflow_locked(workflow_id, reason, None)
             for task_id, record in workflow_tasks:
-                publish = self._publishing.get(task_id)
-                if (
-                    publish
-                    and not publish.recorded
-                    and record.status == TaskStatus.PENDING
-                ):
-                    # The worker may already be running the task, so the cancel reaches
-                    # it as an interrupt.
-                    self._record_dispatch_locked(record, publish)
                 match record.status:
                     case TaskStatus.PENDING:
                         returned += self._cancel_in_place_locked(record, reason)
@@ -5003,21 +5021,11 @@ class TaskRuntime:
                     case TaskStatus.DISPATCHED if record.assigned_worker:
                         record.status = TaskStatus.CANCELLING
                         record.error = reason
-                        interrupts.append(
-                            InterruptMessage(
-                                task_id=task_id,
-                                worker_id=record.assigned_worker,
-                                reason=reason,
-                            )
-                        )
                         cancelling.append(task_id)
                         touched.append(task_id)
                     case _:
                         continue
 
-            resident_invocation_ids = self._terminate_workflow_locked(
-                workflow_id, failure=None
-            )
             self._workflow_registry.commit_transition(
                 workflow_id,
                 records=self._records_locked(*touched),
@@ -5049,62 +5057,110 @@ class TaskRuntime:
             # for their own terminals.
             self._notify_terminal_transition(workflow_id)
 
-        self._release_terminated_work(resident_invocation_ids, interrupts)
+        self._release_terminated_work(termination)
         self._secret_vault.purge(workflow_id)
         return touched
 
     def _terminate_workflow_locked(
-        self, workflow_id: str, failure: str | None
-    ) -> list[str]:
-        """Settle a workflow's ledger terminally and drop what waits on its work.
+        self, workflow_id: str, reason: str, failure: str | None
+    ) -> _Termination:
+        """Settle a workflow's ledger terminally and take what its work still holds.
 
-        A cancel (``failure`` None) resolves its unpublished outputs as cancelled and a
-        control failure as declared failures. Either way the workflow's pending re-drive
-        and held input checks are dropped, its agents' mediated operations are reaped,
-        and every unsettled boundary invocation is terminalized. Returns those
-        invocations, whose resident credits ``_release_terminated_work`` releases.
+        Runs before the caller moves the task records. A cancel (``failure`` None)
+        resolves the unpublished outputs as cancelled and a control failure as declared
+        failures. Either way a dispatch being published is recorded so its worker is
+        interrupted with every other running task, the agents' mediated operations are
+        taken for reaping, the pending re-drive and held input checks are dropped, and
+        every unsettled boundary invocation is terminalized. Returns what
+        ``_release_terminated_work`` releases once the terminal is committed.
         """
         self._redrive.settle(workflow_id)
-        task_ids = [
-            task_id
-            for task_id, record in self._tasks.items()
+        records = [
+            record
+            for record in self._tasks.values()
             if record.workflow_id == workflow_id
         ]
-        for task_id in task_ids:
-            self._input_checks.pop(task_id, None)
-            self._task_epoch_index.pop(task_id, None)
-        # The worker drops a reaped operation and its custody.
-        self._reap_ops_for_agents_locked(task_ids)
+        interrupts: list[InterruptMessage] = []
+        for record in records:
+            publish = self._publishing.get(record.task_id)
+            if publish and not publish.recorded and record.status == TaskStatus.PENDING:
+                # The worker may already be running the task.
+                self._record_dispatch_locked(record, publish)
+            # A merged child's batch keeps running for siblings from other workflows.
+            if (
+                record.status == TaskStatus.DISPATCHED
+                and record.assigned_worker
+                and not record.merged_parent_id
+            ):
+                interrupts.append(
+                    InterruptMessage(
+                        task_id=record.task_id,
+                        worker_id=record.assigned_worker,
+                        reason=reason,
+                    )
+                )
+            self._input_checks.pop(record.task_id, None)
+            self._task_epoch_index.pop(record.task_id, None)
+        reaps = self._take_ops_for_agents_locked([r.task_id for r in records])
         self._workflow_epoch_tasks.pop(workflow_id, None)
         self._workflow_epoch_frontier.pop(workflow_id, None)
         self._workflow_in_epoch_order.pop(workflow_id, None)
+        termination = _Termination(interrupts, reaps)
         if (engine := self._engines.get(workflow_id)) is None:
-            return []
+            return termination
         if failure is None:
             engine.cancel_instance()
         else:
             engine.fail_instance(failure)
-        return engine.cancel_outstanding_boundary_invocations()
+        termination.resident_invocation_ids = (
+            engine.cancel_outstanding_boundary_invocations()
+        )
+        return termination
 
-    def _release_terminated_work(
-        self, resident_invocation_ids: list[str], interrupts: list[InterruptMessage]
-    ) -> None:
-        """Release a terminated workflow's resident credits and interrupt its
-        workers."""
+    def _release_terminated_work(self, termination: _Termination) -> None:
+        """Release what a terminated workflow's work held, best effort: each resident
+        credit, each interrupt, and each reap is attempted however the others fare."""
         # The fenced terminal releases each in-flight resident invocation's credit, so a
         # lost or draining replica is not held forever.
-        for invocation_id in resident_invocation_ids:
-            self._release_resident_credit(invocation_id, failed=True)
-        for interrupt in interrupts:
-            worker = self._worker_registry.get_worker(interrupt.worker_id)
-            if worker is None:
-                self._logger.warning(
-                    "Cannot publish interrupt for %s; worker %s missing",
+        for invocation_id in termination.resident_invocation_ids:
+            try:
+                self._release_resident_credit(invocation_id, failed=True)
+            except Exception:
+                self._logger.exception(
+                    "Releasing the resident credit of %s failed", invocation_id
+                )
+        for interrupt in termination.interrupts:
+            try:
+                worker = self._worker_registry.get_worker(interrupt.worker_id)
+                if worker is None:
+                    self._logger.warning(
+                        "Cannot publish interrupt for %s; worker %s missing",
+                        interrupt.task_id,
+                        interrupt.worker_id,
+                    )
+                else:
+                    self._worker_registry.publish_interrupt(worker, interrupt)
+            except Exception:
+                self._logger.exception(
+                    "Interrupting %s on %s failed",
                     interrupt.task_id,
                     interrupt.worker_id,
                 )
-            else:
-                self._worker_registry.publish_interrupt(worker, interrupt)
+        # The worker drops a reaped operation and its custody.
+        for worker_id, agent_task_id, call in termination.reaps:
+            try:
+                self._reap_mediated_op_locked(worker_id, agent_task_id, call)
+            except Exception:
+                self._logger.exception(
+                    "Reaping the operation of %s on %s failed", agent_task_id, worker_id
+                )
+
+    def _release_pending_terminations(self) -> None:
+        """Release, off the lock, what workflows control failed under it still hold."""
+        with self._lock:
+            pending, self._pending_terminations = self._pending_terminations, []
+        for termination in pending:
+            self._release_terminated_work(termination)
 
     def _cancel_in_place_locked(self, record: TaskRecord, reason: str) -> list[str]:
         """Cancel a pending task or a merged child in place.
