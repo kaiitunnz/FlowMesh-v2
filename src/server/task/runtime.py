@@ -2055,6 +2055,7 @@ class TaskRuntime:
             self.settle_episode_invocation(
                 env.task_id, env.call_correlation, error=_CREDENTIAL_UNAVAILABLE
             )
+            self._reap_mediated_op(worker_id, env.task_id, env.call_correlation)
             return
         max_results, timeout_sec, result_char_cap = self._op_permit_budget(
             env.interface
@@ -2076,6 +2077,7 @@ class TaskRuntime:
             self.settle_episode_invocation(
                 env.task_id, env.call_correlation, error="could not mint a permit"
             )
+            self._reap_mediated_op(worker_id, env.task_id, env.call_correlation)
             return
         # A re-drive re-mints under a fresh permit id; keep at most one pending op per
         # occurrence.

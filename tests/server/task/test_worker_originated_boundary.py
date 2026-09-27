@@ -791,6 +791,10 @@ def test_a_gone_vaulted_key_fails_the_boundary_without_a_permit() -> None:
 
         assert not _permit_frames(runtime)
         assert not runtime._pending_ops
+        # The worker drops the captured request it can no longer egress.
+        assert _reap_frames(runtime) == [
+            {"agent_task_id": writer, "call_correlation": "m0"}
+        ]
         record = runtime._tasks[writer]
         assert record.status == TaskStatus.FAILED
         assert record.error == "agent boundary failed: model credential unavailable"
@@ -836,5 +840,27 @@ def test_a_failed_episode_shows_its_reason_on_the_task(error: str) -> None:
         record = runtime._tasks[writer]
         assert record.status == TaskStatus.FAILED
         assert record.error == error
+
+    asyncio.run(run())
+
+
+def test_a_permit_that_cannot_be_minted_reaps_the_captured_request() -> None:
+    async def run() -> None:
+        runtime = _runtime()
+        _, ids = await _register(runtime, _MODEL_WF)
+        writer = ids["writer"]
+        engine = runtime.orchestration_engine(runtime._tasks[writer].workflow_id)
+        assert engine is not None
+        setattr(engine, "mint_operation_permit", lambda *a, **k: None)
+
+        _dispatch_agent(runtime, writer, script=_MODEL_SCRIPT)
+
+        assert not _permit_frames(runtime)
+        assert _reap_frames(runtime) == [
+            {"agent_task_id": writer, "call_correlation": "m0"}
+        ]
+        assert runtime._tasks[writer].error == (
+            "agent boundary failed: could not mint a permit"
+        )
 
     asyncio.run(run())
