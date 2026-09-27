@@ -635,3 +635,31 @@ async def test_reporting_a_verdict_again_does_not_count_toward_the_store_backoff
 
     assert fixture.scheduler.pending(workflow_id)
     assert fixture.scheduler._streak.get(workflow_id, 0) == 0
+
+
+@pytest.mark.anyio
+async def test_verdicts_reported_again_while_the_monitor_lags_back_off() -> None:
+    registry = _Registry()
+    fixture, stream = _streamed(registry)
+    runtime = fixture.runtime
+    now = [0.0]
+    fixture.scheduler._clock = lambda: now[0]
+    fixture.scheduler._base = 1.0
+    fixture.scheduler._max = 30.0
+    task_id, reference = await _consumer(runtime)
+    workflow_id = runtime._tasks[task_id].workflow_id
+    fixture.report(_unavailable(task_id, [reference]))
+    fixture.probe.error = ResultUnreadable("no content")
+
+    while now[0] <= 120:  # the monitor handles nothing for two minutes
+        fixture.scheduler.run_due()
+        now[0] += 0.5
+
+    assert 1 < len(stream.entries) < 12
+    assert fixture.scheduler._streak.get(workflow_id, 0) == 0
+    stream.pump()
+    now[0] += 60
+    fixture.scheduler.run_due()
+    assert _finalized(fixture).count(task_id) == 1
+    assert task_id not in runtime._input_checks
+    assert workflow_id not in fixture.scheduler._recheck_streak

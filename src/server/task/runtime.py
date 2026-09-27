@@ -3378,6 +3378,8 @@ class TaskRuntime:
                 # A later drive drops each check whose verdict has committed, or
                 # reports it again.
                 self._redrive.recheck(workflow_id)
+            else:
+                self._redrive.reset_recheck(workflow_id)
         for event in failures:
             self._report_failure(event)
 

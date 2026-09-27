@@ -56,6 +56,7 @@ class StoreRedriveScheduler:
         self._due: dict[str, float] = {}
         self._heap: list[tuple[float, str]] = []
         self._streak: dict[str, int] = {}
+        self._recheck_streak: dict[str, int] = {}
         self._thread: threading.Thread | None = None
         self._stopped = False
 
@@ -82,14 +83,18 @@ class StoreRedriveScheduler:
             self._cv.notify_all()
 
     def recheck(self, workflow_id: str) -> None:
-        """Re-drive a workflow after the base delay, not counting toward its backoff.
+        """Re-drive a workflow to confirm what it reported, on a backoff of its own.
 
-        A workflow already waiting keeps its slot.
+        The delay doubles from the base to the cap across consecutive rechecks, apart
+        from the store-wait backoff and its warning. A workflow already waiting keeps
+        its slot.
         """
         with self._cv:
             if self._stopped or workflow_id in self._due:
                 return
-            due = self._clock() + self._base
+            streak = self._recheck_streak.get(workflow_id, 0) + 1
+            self._recheck_streak[workflow_id] = streak
+            due = self._clock() + min(self._max, self._base * 2 ** (streak - 1))
             self._due[workflow_id] = due
             heapq.heappush(self._heap, (due, workflow_id))
             self._ensure_thread()
@@ -114,6 +119,12 @@ class StoreRedriveScheduler:
         with self._cv:
             self._due.pop(workflow_id, None)
             self._streak.pop(workflow_id, None)
+            self._recheck_streak.pop(workflow_id, None)
+
+    def reset_recheck(self, workflow_id: str) -> None:
+        """Start a workflow's recheck backoff over; it has nothing left to confirm."""
+        with self._cv:
+            self._recheck_streak.pop(workflow_id, None)
 
     def pending(self, workflow_id: str) -> bool:
         with self._cv:
@@ -142,6 +153,7 @@ class StoreRedriveScheduler:
             self._due.clear()
             self._heap.clear()
             self._streak.clear()
+            self._recheck_streak.clear()
             self._cv.notify_all()
         if self._thread is not None:
             self._thread.join(timeout=2.0)
