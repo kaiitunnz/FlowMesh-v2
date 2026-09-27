@@ -121,6 +121,7 @@ class Runner:
         self.executors = executors
         self.logger = logger
         self.default_executor = default_executor
+        self._input_hydrator = TaskInputHydrator(lifecycle.content_plane)
         self._peer_enabled = peer_enabled
         self._peer_material = peer_material
         self._peer_listener_sock = peer_listener_sock
@@ -796,7 +797,7 @@ class Runner:
                             f"Task {task_id} was cancelled before execution"
                         )
                     self._current_task_id = task_id
-                    TaskInputHydrator(self.lifecycle.content_plane).hydrate(msg)
+                    self._input_hydrator.hydrate(msg)
                     if msg.input_preparation:
                         self._raise_if_cancel_pending(task_id)
                         self.lifecycle.notify_task_started(
