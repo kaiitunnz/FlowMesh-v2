@@ -3302,12 +3302,12 @@ class TaskRuntime:
         assert not advance.retry, "retry is applied by the failure path"
         engine = self._engines.get(workflow_id)
         changed = bool(advance.failed)
-        self._fail_v2_advance_locked(engine, advance.failed)
+        self._fail_v2_advance_locked(engine, advance)
         if engine is not None:
             staged = Advance()
             self._stage_agent_inputs_locked(workflow_id, engine, staged)
             changed |= bool(staged.failed)
-            self._fail_v2_advance_locked(engine, staged.failed)
+            self._fail_v2_advance_locked(engine, staged)
             advance.extend(staged)
             self._retire_sealed_region_templates_locked(workflow_id, engine)
         for task_id in advance.ready:
@@ -3318,7 +3318,7 @@ class TaskRuntime:
     def _fail_v2_advance_locked(
         self,
         engine: OrchestrationEngine | None,
-        failed: list[str],
+        advance: Advance,
         *,
         persist: bool = True,
     ) -> list[tuple[str, str]]:
@@ -3326,13 +3326,16 @@ class TaskRuntime:
         reason.
 
         The engine lists each failure before the tasks it cascaded into, so a task
-        with a reason of its own opens a cascade, and each task after it fails as its
-        dependent. Persists them here when ``persist`` is set.
+        with a reason of its own, or one the advance names, opens a cascade, and each
+        task after it fails as its dependent. Persists them here when ``persist`` is
+        set.
         """
         primary: str | None = None
         changed: list[tuple[str, str]] = []
-        for task_id in failed:
-            own = engine.failure_reason(task_id) if engine is not None else None
+        for task_id in advance.failed:
+            own = (
+                engine.failure_reason(task_id) if engine is not None else None
+            ) or advance.reasons.get(task_id)
             if primary is None or own is not None:
                 primary = task_id
                 text = own or "declared-failure obligation"
@@ -5203,7 +5206,7 @@ class TaskRuntime:
             if engine is not None:
                 advance = engine.on_failed(task_id, message, retryable=False)
                 impacted.extend(
-                    self._fail_v2_advance_locked(engine, advance.failed, persist=False)
+                    self._fail_v2_advance_locked(engine, advance, persist=False)
                 )
 
             returned = self._return_merged_children_locked(

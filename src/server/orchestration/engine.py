@@ -194,18 +194,21 @@ class Advance:
 
     ``ready`` work items become admissible for a new attempt, ``failed`` ones settle
     terminally and cascade, and ``retry`` reissues an existing work item as a fresh
-    attempt under its stable identity. Control settlement and dynamic child
-    materialization are internal and never appear here.
+    attempt under its stable identity. ``reasons`` names why a failed task failed when
+    what failed is a control region rather than a task. Control settlement and dynamic
+    child materialization are internal and never appear here.
     """
 
     ready: list[str] = field(default_factory=list)
     failed: list[str] = field(default_factory=list)
     retry: list[str] = field(default_factory=list)
+    reasons: dict[str, str] = field(default_factory=dict)
 
     def extend(self, other: "Advance") -> Self:
         self.ready.extend(other.ready)
         self.failed.extend(other.failed)
         self.retry.extend(other.retry)
+        self.reasons.update(other.reasons)
         return self
 
 
@@ -2885,10 +2888,7 @@ class OrchestrationEngine:
         if failed_child is not None and failed_child.legacy_task_id:
             return Advance(failed=[failed_child.legacy_task_id, *cascade])
         reason = f"join {join_op} resolved no winner"
-        for task_id in cascade:
-            if (dependent := self._work_item_for_task(task_id)) is not None:
-                dependent.failure_reason = reason
-        return Advance(failed=cascade)
+        return Advance(failed=cascade, reasons=dict.fromkeys(cascade, reason))
 
     def _freeze_region_aggregate(
         self, join: JoinRegion, join_op: str, scope_id: str

@@ -860,6 +860,37 @@ async def test_a_join_with_no_winner_fails_its_downstream() -> None:
     assert runtime.workflow_settlement(workflow_id).settled
 
 
+_BEHIND_NO_WINNER = """
+      - name: kid2
+        spec: {taskType: echo, data: {type: list, items: [k2]}}
+      - name: fan2
+        dependsOn: [collect]
+        region: {kind: spawn, child: kid2}
+      - name: collect2
+        dependsOn: [fan2]
+        region: {kind: join, completion: all_settled}
+      - name: after2
+        dependsOn: [collect2]
+        spec: {taskType: echo, data: {type: list, items: [z]}}
+"""
+
+
+@pytest.mark.anyio
+async def test_a_join_with_no_winner_names_every_task_downstream_of_it() -> None:
+    runtime = _live_runtime(FakeRegistry())
+    workflow_id, ids = await _register(runtime, _HEAD + _NO_WINNER + _BEHIND_NO_WINNER)
+    planner = ids["planner"]
+    record_dispatch(runtime, planner, cast(Any, _worker()))
+    runtime.mark_succeeded(planner, "wkr-1", _planned(runtime, planner, []), _TS)
+    _drain(runtime)
+
+    for name in ("after", "kid2", "after2"):
+        record = runtime.get_record(ids[name])
+        assert record is not None and record.status == TaskStatus.FAILED, name
+        assert record.error == "join collect resolved no winner", name
+    assert runtime.workflow_settlement(workflow_id).settled
+
+
 @pytest.mark.anyio
 async def test_a_failed_join_stays_failed_across_a_crash_before_its_ledger_save() -> (
     None
