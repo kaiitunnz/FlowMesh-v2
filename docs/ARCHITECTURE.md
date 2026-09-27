@@ -435,7 +435,8 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   onto real object storage and leaves the co-located store unstarted, which is the shape
   a production deployment takes. The root provisions the bucket it is pointed at where
   its credential allows, since the scoped session a worker reaches content under covers
-  one scope's prefix rather than the bucket. It is a service
+  one scope's prefix rather than the bucket. Its credential also needs list access on the
+  bucket for a missing object to read as missing. It is a service
   beside the fabric, never the root process: the root and its supervisors hold no
   payload. A worker writes an object there before it reports the reference naming it, so
   a reference that reaches any binding names bytes that already outlive their producer,
@@ -461,14 +462,14 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   long a copy goes unused and by disk, least recently used first, and leaves both
   unbounded by default. A read tries the local copy, then another worker's copy, then the
   store itself. For a peer's copy the control plane checks that the requesting worker is
-  running the task and that the task is already bound to exactly that reference, resolves
-  a live holder, and mints one short-lived `chg-` `ContentHydrationGrant` it hands to both
+  running the task and that it is bound to exactly that reference as an input or delivered
+  outcome, resolves a live holder, and mints one short-lived `chg-` grant it hands to both
   ends: the holder serves only a grant it was handed, once, for that exact object, and the
   requester verifies the digest and size before anything reads the bytes. That transfer
   runs over the network plane's relay under its own namespace, so the root bridges opaque
   frames and never holds, assembles, or resolves the payload. A refused, expired, or
   replayed grant, an evicted copy, or a holder that is gone costs a read from the shared
-  store rather than a failure. Enable the cache and its transfers with
+  store, not a failure. Enable the cache and its transfers with
   `CONTENT_HYDRATION_ENABLED=true` (which requires `NETWORK_PLANE_ENABLED=true`).
 - **Task results.** A task's result lives in the shared content store: its worker
   writes the result envelope there under the task's store access before it reports
@@ -476,11 +477,22 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   task, so a retry, relocation, or duplicate success converges on the result already
   bound. A v2 task binds it into the ledger — its induced output slot, or for a spawned
   child or later loop iteration the value its work item settled with — and a v1 task onto
-  its record. Every result the control plane reads — the result and bundle routes, stage
-  references, conditions, fan-out, and an agent's accepted inputs — resolves that binding
-  and reads the verified envelope from the store, holding no copy of its own; the results
+  its record. Every result the control plane reads — the result, bundle, and output
+  routes, stage references, conditions, fan-out cardinality, and an agent's input budget
+  — resolves that binding and reads the verified envelope from the store; the results
   directory keeps only a task's logs and artifacts. A task that outlives its store access
   has it renewed while it still runs on the worker asking.
+- **Consumed values by reference.** A dispatch names each upstream value its task
+  consumes by reference, and the task's worker hydrates each through its content cache
+  before anything validates or runs the task. A worker that cannot reach the store names
+  the inputs it could not read. Control re-reads each named input the task consumes with
+  its own store access: it holds the task while it cannot reach the store either, fails
+  it when the content is missing or corrupt, and otherwise queues it again, in every case
+  without spending an attempt or blaming the worker.
+- **Published outputs.** A leaf declares `result: {visibility: published}` to publish its
+  value, and a spawn region declares it to publish its children's results as a
+  collection keyed by child index within each spawning scope. Clients list and fetch
+  published outputs by the node names they were declared on.
 - **Task merging.** Ready v1 tasks of one org whose specs share a merge key coalesce
   into one dispatch, whose executor runs every task at once and returns each merged
   child's own result; a task's spec defines its merge key. Merged children ride on

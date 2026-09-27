@@ -57,12 +57,12 @@ The hooks:
   startup, falling back to the synthetic admin when no providers are
   registered. Plugins use these to seed their own ACL / ownership
   tables so subsequent `PermissionChecker` calls have data to decide
-  on. `RESULT` ownership is inferred from the owning task; `RESULT`
-  permission checks are always paired with a `task_id`, and
-  workflow-level operations check `WORKFLOW`. At startup the server
-  runs a reconcile sweep — after plugins load, the system principal
-  resolves, and the supervisor handshake completes — enumerating
-  every live workflow, task, worker, and node and calling
+  on. `RESULT` ownership is inferred from the owning task. A `RESULT`
+  check carries a `task_id` to gate one task's result, or no id to gate
+  result values as a whole; workflow-level operations check `WORKFLOW`.
+  At startup the server runs a reconcile sweep — after plugins load, the
+  system principal resolves, and the supervisor handshake completes —
+  enumerating every live workflow, task, worker, and node and calling
   `reconcile(resources, logger)` once per registrar with the full
   batch. `reconcile` is atomic per the `lumid-hooks` contract: on
   failure the registrar's store is unchanged, so the server logs

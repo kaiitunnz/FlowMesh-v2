@@ -1,0 +1,285 @@
+"""Hydrating the upstream values a task consumes from the references it was dispatched.
+
+Control names what a task reads — each upstream stage's settled result, the collection
+element a fan-out child runs on, the producer results an agent's first-turn inputs are
+frozen to — and this worker reads them through its content plane: its own cache, then an
+authorized peer's copy, then the shared store. Every read is verified against its
+reference, and the values are installed exactly as an inline dispatch delivers them,
+before anything validates or runs the task.
+
+A task whose store cannot be reached reports the inputs it could not read, and control
+decides whose fault that is. Content that is missing, corrupt, out of the task's scope,
+or not a result envelope fails the task.
+"""
+
+import time
+from typing import Any
+
+from pydantic import BaseModel
+
+from shared.content import ContentReference, ContentStoreError, ContentUnavailable
+from shared.harness import AgentEpisodeDispatch, InputBinding
+from shared.schemas.event import TaskFailureKind
+from shared.schemas.result import ResultEnvelope
+from shared.schemas.result.binding import (
+    NotAResultEnvelope,
+    collection_element,
+    result_envelope,
+    skip_envelope_bytes,
+    value_text,
+)
+from shared.tasks import MergedChildTaskStrict, TaskEnvelopeStrict
+from shared.tasks.result_binding import ResultBinding
+from shared.tasks.specs import TaskSpecStrictBase
+from shared.tasks.worker_message import WorkerTaskMessage
+from shared.utils.json import normalize_numbers
+
+from ..executors.base_executor import ExecutionError
+from .access import ContentAccessDenied, ContentBackendUnsupported
+from .plane import WorkerContentPlane
+
+# A read that cannot reach the store retries briefly before the task reports it.
+_READ_ATTEMPTS = 3
+_READ_BACKOFF_SEC = 0.2
+
+
+def input_unavailable(message: str, reference: ContentReference) -> ExecutionError:
+    return ExecutionError(
+        message,
+        retryable=True,
+        failure_kind=TaskFailureKind.INPUT_UNAVAILABLE,
+        unavailable_inputs=(reference,),
+    )
+
+
+def input_unreadable(message: str) -> ExecutionError:
+    return ExecutionError(f"input_unreadable: {message}", retryable=False)
+
+
+def read_input(
+    plane: WorkerContentPlane | None,
+    task_id: str,
+    scope: str,
+    reference: ContentReference,
+    backoff_sec: float = _READ_BACKOFF_SEC,
+) -> bytes:
+    """One verified input object, classified by what kept it from being read.
+
+    A store that cannot be reached, or access that has not arrived, retries briefly and
+    then reports the input unavailable, naming the reference so control can tell a
+    shared outage from this worker's own path to the store. A worker that reaches no
+    store, or one it cannot open, fails as its own fault. Content that is missing,
+    corrupt, or outside the task's scope fails the task.
+    """
+    if plane is None:
+        raise ExecutionError(
+            f"task {task_id} reads its inputs by reference and this worker reaches "
+            "no fabric content store",
+            retryable=True,
+        )
+    if reference.authorization_scope != scope:
+        raise input_unreadable(
+            f"task {task_id} runs in scope {scope} and an input it names is in "
+            f"{reference.authorization_scope}"
+        )
+    for attempt in range(_READ_ATTEMPTS):
+        try:
+            return plane.hydrate(task_id, reference)
+        except ContentBackendUnsupported as exc:
+            raise ExecutionError(str(exc), retryable=True) from exc
+        except (ContentUnavailable, ContentAccessDenied) as exc:
+            if attempt + 1 == _READ_ATTEMPTS:
+                raise input_unavailable(
+                    f"task {task_id} cannot reach input "
+                    f"{reference.content_digest}: {exc}",
+                    reference,
+                ) from exc
+            time.sleep(backoff_sec)
+        except ContentStoreError as exc:
+            raise input_unreadable(
+                f"task {task_id} input {reference.content_digest}: {exc}"
+            ) from exc
+    raise AssertionError("unreachable")
+
+
+class TaskInputHydrator:
+    """Installs the values a task's dispatch names by reference."""
+
+    def __init__(
+        self,
+        plane: WorkerContentPlane | None,
+        backoff_sec: float = _READ_BACKOFF_SEC,
+    ) -> None:
+        self._plane = plane
+        self._backoff_sec = backoff_sec
+
+    def hydrate(self, msg: WorkerTaskMessage) -> None:
+        """Install every value the message names by reference, in place.
+
+        A message naming nothing by reference carries its values inline and is left as
+        it is.
+        """
+        agent = msg.agent_episode
+        if not (
+            msg.upstream_results
+            or msg.input_element is not None
+            or any(child.upstream_results for child in msg.merged_children or [])
+            or (agent is not None and _sourced_members(agent))
+        ):
+            return
+        reader = _TaskReader(self, msg)
+        envelopes: dict[str, bytes] = {}
+        upstream: dict[str, ResultEnvelope] = {}
+        for stage, binding in _bound(msg.upstream_results):
+            envelopes[stage] = reader.envelope_bytes(binding)
+            upstream[stage] = reader.envelope(binding)
+        element: tuple[Any] | None = None
+        if (ref := msg.input_element) is not None:
+            source = reader.reference_envelope(ref.reference)
+            try:
+                element = (collection_element(source, ref.element),)
+            except IndexError as exc:
+                raise input_unreadable(str(exc)) from exc
+        msg.task = _with_inputs(msg.task, upstream, element)
+        if msg.merged_children:
+            msg.merged_children = [
+                self._hydrate_child(reader, child) for child in msg.merged_children
+            ]
+        if agent is not None and _sourced_members(agent):
+            msg.agent_episode = _with_member_values(agent, reader)
+        msg.record_hydration(envelopes, element)
+
+    def _hydrate_child(
+        self, reader: "_TaskReader", child: MergedChildTaskStrict
+    ) -> MergedChildTaskStrict:
+        if not child.upstream_results:
+            return child
+        upstream = {
+            stage: reader.envelope(binding)
+            for stage, binding in _bound(child.upstream_results)
+        }
+        return _as_dispatched(
+            child.model_copy(update={"spec": _with_upstream_spec(child.spec, upstream)})
+        )
+
+    def read(self, task_id: str, scope: str, reference: ContentReference) -> bytes:
+        return read_input(self._plane, task_id, scope, reference, self._backoff_sec)
+
+
+class _TaskReader:
+    """One task's reads, each object fetched and parsed at most once."""
+
+    def __init__(self, hydrator: TaskInputHydrator, msg: WorkerTaskMessage) -> None:
+        self._hydrator = hydrator
+        self._task_id = msg.task_id
+        self._scope = msg.content_scope
+        self._bytes: dict[ContentReference, bytes] = {}
+        self._envelopes: dict[ContentReference, ResultEnvelope] = {}
+
+    def envelope_bytes(self, binding: ResultBinding) -> bytes:
+        if binding.reference is None:
+            if binding.skip is None:
+                raise input_unreadable(f"task {binding.task_id} has no bound result")
+            return skip_envelope_bytes(binding)
+        return self.reference_bytes(binding.reference)
+
+    def reference_bytes(self, reference: ContentReference) -> bytes:
+        if (data := self._bytes.get(reference)) is None:
+            data = self._hydrator.read(self._task_id, self._scope, reference)
+            self._bytes[reference] = data
+        return data
+
+    def envelope(self, binding: ResultBinding) -> ResultEnvelope:
+        if binding.reference is not None:
+            return self.reference_envelope(binding.reference)
+        return _parsed(
+            self.envelope_bytes(binding), f"the stored result of task {binding.task_id}"
+        )
+
+    def reference_envelope(self, reference: ContentReference) -> ResultEnvelope:
+        if (cached := self._envelopes.get(reference)) is None:
+            cached = _parsed(
+                self.reference_bytes(reference),
+                f"the stored result {reference.content_digest}",
+            )
+            self._envelopes[reference] = cached
+        return cached
+
+
+def _parsed(data: bytes, source: str) -> ResultEnvelope:
+    try:
+        return result_envelope(data, source)
+    except NotAResultEnvelope as exc:
+        raise input_unreadable(str(exc)) from exc
+
+
+def _bound(
+    upstream: dict[str, ResultBinding] | None,
+) -> list[tuple[str, ResultBinding]]:
+    """The upstream stages that settled with a result or a skip to read."""
+    return [
+        (stage, binding)
+        for stage, binding in (upstream or {}).items()
+        if binding.reference is not None or binding.skip is not None
+    ]
+
+
+def _sourced_members(agent: AgentEpisodeDispatch) -> bool:
+    return any(
+        member.source is not None
+        for binding in agent.input_bindings
+        for member in binding.members
+    )
+
+
+def _with_member_values(
+    agent: AgentEpisodeDispatch, reader: _TaskReader
+) -> AgentEpisodeDispatch:
+    bindings: list[InputBinding] = []
+    for binding in agent.input_bindings:
+        members = []
+        for member in binding.members:
+            if (source := member.source) is None:
+                members.append(member)
+                continue
+            envelope = reader.reference_envelope(source.reference)
+            members.append(
+                member.model_copy(
+                    update={
+                        "value": value_text(envelope, source.element),
+                        "source": None,
+                    }
+                )
+            )
+        bindings.append(binding.model_copy(update={"members": tuple(members)}))
+    return agent.model_copy(update={"input_bindings": tuple(bindings)})
+
+
+def _with_inputs(
+    task: TaskEnvelopeStrict,
+    upstream: dict[str, ResultEnvelope],
+    element: tuple[Any] | None,
+) -> TaskEnvelopeStrict:
+    spec = _with_upstream_spec(task.spec, upstream) if upstream else task.spec
+    if element is not None and "data" in type(spec).model_fields:
+        spec = spec.model_copy(update={"data": {"type": "list", "items": [element[0]]}})
+    if spec is task.spec:
+        return task
+    return _as_dispatched(task.model_copy(update={"spec": spec}))
+
+
+def _with_upstream_spec[S: TaskSpecStrictBase](
+    spec: S, upstream: dict[str, ResultEnvelope]
+) -> S:
+    merged = dict(spec.upstreamResults or {})
+    merged.update({stage: envelope.result for stage, envelope in upstream.items()})
+    return spec.model_copy(update={"upstreamResults": merged})
+
+
+def _as_dispatched[M: BaseModel](model: M) -> M:
+    """The model as an inline dispatch delivers it to this worker."""
+    wire = model.model_dump(mode="json", exclude_none=True, by_alias=True)
+    return type(model).model_validate(normalize_numbers(wire))
+
+
+__all__ = ["TaskInputHydrator", "input_unavailable", "input_unreadable", "read_input"]

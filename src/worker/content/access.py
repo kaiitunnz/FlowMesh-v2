@@ -44,6 +44,10 @@ class ContentAccessDenied(ContentStoreError):
     """This task holds no live access to the shared store in this scope."""
 
 
+class ContentBackendUnsupported(ContentStoreError):
+    """This worker is configured for a store backend it cannot open."""
+
+
 class ContentAccessRegistry:
     """The stores this worker may open, one per task and scope control granted."""
 
@@ -130,7 +134,7 @@ class ContentAccessRegistry:
             case x if x == BACKEND_FILESYSTEM:
                 return SharedFilesystemObjectStore(self._cfg.filesystem_root)
             case _:
-                raise ContentAccessDenied(
+                raise ContentBackendUnsupported(
                     f"unknown content store backend {self._cfg.backend}"
                 )
 

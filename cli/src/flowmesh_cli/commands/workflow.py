@@ -161,6 +161,52 @@ def cancel(
     logging.log(wf.model_dump_json(indent=2))
 
 
+@app.command()
+def outputs(
+    workflow_id: str = typer.Argument(..., help="Workflow identifier"),
+    limit: int = typer.Option(100, help="Maximum number of members to return"),
+    before: str | None = typer.Option(None, help="Return members before this cursor"),
+    after: str | None = typer.Option(None, help="Return members after this cursor"),
+    output: str | None = typer.Option(None, help="Only this output's members"),
+    scope: str | None = typer.Option(None, help="Only members in this scope"),
+) -> None:
+    """List a workflow's published output members."""
+    client = FlowMesh()
+    try:
+        page = client.workflows.list_outputs(
+            workflow_id,
+            limit=limit,
+            before=before,
+            after=after,
+            output=output,
+            scope=scope,
+        )
+    except FlowMeshError as exc:
+        logging.error(str(exc))
+        raise typer.Exit(code=1)
+    logging.log(page.model_dump_json(indent=2))
+
+
+@app.command("output")
+def get_output(
+    workflow_id: str = typer.Argument(..., help="Workflow identifier"),
+    name: str = typer.Argument(..., help="Name of the published output"),
+    scope: str | None = typer.Option(None, help="Scope of a collection member"),
+    key: str | None = typer.Option(None, help="Key of a collection member"),
+    sequence: int | None = typer.Option(None, help="Sequence of the member"),
+) -> None:
+    """Get the value of one published output member."""
+    client = FlowMesh()
+    try:
+        value = client.workflows.get_output(
+            workflow_id, name, scope=scope, key=key, sequence=sequence
+        )
+    except FlowMeshError as exc:
+        logging.error(str(exc))
+        raise typer.Exit(code=1)
+    logging.log(value.model_dump_json(indent=2))
+
+
 logs_app = get_typer(help="Query and monitor workflow logs.")
 app.add_typer(logs_app, name="logs")
 

@@ -281,7 +281,7 @@ def test_worker_originated_boundary_settles_and_keeps_payload_out_of_ledger() ->
         _dispatch_agent(runtime, writer)  # resume: inject the outcome and complete
         writer_wi = engine.work_item(writer)
         assert writer_wi is not None and writer_wi.status is WorkItemStatus.SETTLED
-        pub = engine.resolve_output(f"legacy:{writer}")
+        pub = engine.output_publication(f"legacy:{writer}")
         assert pub is not None and pub.outcome.value == "success"
 
     asyncio.run(run())

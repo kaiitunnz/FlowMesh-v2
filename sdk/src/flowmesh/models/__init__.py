@@ -69,7 +69,7 @@ from .result import (
     SFTResult,
     SSHResult,
 )
-from .tasks import HardwareUsage, TaskInfo, TaskUsage
+from .tasks import HardwareUsage, TaskInfo, TaskInputElement, TaskUsage
 from .traces import (
     ActiveWaitBreakdown,
     AssetSummary,
@@ -101,8 +101,13 @@ from .workers import (
 from .workflows import (
     Diagnostic,
     InspectionReport,
+    OutputOutcome,
     SourceLocation,
     Workflow,
+    WorkflowOutputEntry,
+    WorkflowOutputMember,
+    WorkflowOutputPage,
+    WorkflowOutputValue,
     WorkflowSubmitResponse,
     WorkflowSubmitTaskEntry,
     WorkflowValidateResponse,
@@ -177,6 +182,7 @@ __all__ = [
     "MemoryInfo",
     "NetworkInfo",
     "OkResponse",
+    "OutputOutcome",
     "PathResponse",
     "Node",
     "NodeRegisterResponse",
@@ -188,6 +194,7 @@ __all__ = [
     "SourceLocation",
     "StorageInfo",
     "TaskInfo",
+    "TaskInputElement",
     "TaskStatus",
     "TaskTiming",
     "TaskType",
@@ -204,6 +211,10 @@ __all__ = [
     "WorkerRegisterResponse",
     "WorkerStatus",
     "Workflow",
+    "WorkflowOutputEntry",
+    "WorkflowOutputMember",
+    "WorkflowOutputPage",
+    "WorkflowOutputValue",
     "WorkflowStatus",
     "WorkflowSubmitResponse",
     "WorkflowSubmitTaskEntry",

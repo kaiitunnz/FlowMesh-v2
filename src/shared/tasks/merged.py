@@ -1,6 +1,7 @@
 from ._base import StrictBaseModel
 from .components import TaskMetadata
 from .envelope import TaskSpecStrict
+from .result_binding import ResultBinding
 
 
 class MergedChildTaskStrict(StrictBaseModel):
@@ -9,3 +10,4 @@ class MergedChildTaskStrict(StrictBaseModel):
     workflow_id: str
     spec: TaskSpecStrict
     metadata: TaskMetadata | None = None
+    upstream_results: dict[str, ResultBinding] | None = None

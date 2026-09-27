@@ -30,6 +30,21 @@ self-authenticate the same way, sending `FLOWMESH_API_KEY` as the bearer.
 | GET | `/api/v1/workflows/{id}/logs` | Query logs (`limit`, `before`/`after` cursors). |
 | GET | `/api/v1/workflows/{id}/logs/stream` | SSE log stream. |
 | POST | `/api/v1/workflows/{id}/cancel` | Cancel a workflow and all in-flight tasks. |
+| GET | `/api/v1/workflows/{id}/outputs` | List published outputs. |
+| GET | `/api/v1/workflows/{id}/outputs/{name}` | Get one published output's value. |
+
+### Published outputs
+
+An output is named by the node it is published on, and a fetch selects a spawn's member
+by `scope` and `key`. Errors carry `detail.code`:
+
+| Status | `code` | Meaning |
+|--------|--------|---------|
+| 400 | `invalid_request`, `invalid_cursor` | A collection fetched without `scope` and `key`, or a malformed cursor. |
+| 404 | `output_not_found` | No published output by that name, or no such member in a settled workflow. |
+| 409 | `output_pending` | The member has not settled. |
+| 503 | `content_unavailable` | The content store cannot be reached; retry. |
+| 500 | `output_unreadable` | The member's bound content is missing or corrupt. |
 
 ## Tasks
 
@@ -140,6 +155,6 @@ resident traffic. See [`NETWORK_PLANE.md`](NETWORK_PLANE.md).
 
 ## Cursor pagination
 
-List endpoints (`/api/v1/workflows`, `/api/v1/tasks`, log queries)
-accept `limit` and `before` / `after` cursors. The cursor is an opaque
-base64 of `(timestamp, id)`; do not parse client-side.
+List endpoints (`/api/v1/workflows`, `/api/v1/tasks`, log queries,
+published outputs) accept `limit` and `before` / `after` cursors.
+Cursors are opaque; do not parse them client-side.

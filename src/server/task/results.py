@@ -11,10 +11,6 @@ immutable reference makes safe to reuse.
 
 import threading
 from collections import OrderedDict
-from dataclasses import dataclass
-from typing import Any
-
-from pydantic import ValidationError
 
 from shared.content import (
     ContentReference,
@@ -22,7 +18,14 @@ from shared.content import (
     ContentUnavailable,
     FabricObjectStore,
 )
-from shared.schemas.result import BaseExecutorResult, ResultEnvelope
+from shared.schemas.result import ResultEnvelope
+from shared.schemas.result.binding import (
+    NotAResultEnvelope,
+    result_envelope,
+    skip_envelope,
+    skip_envelope_bytes,
+)
+from shared.tasks.result_binding import ResultBinding
 
 _CACHE_MAX_BYTES = 64 * 1024 * 1024
 
@@ -33,26 +36,6 @@ class ResultUnreadable(RuntimeError):
 
 class ResultUnavailable(RuntimeError):
     """The store holding a bound result could not be reached; a retry may succeed."""
-
-
-@dataclass(frozen=True)
-class ResultBinding:
-    """What a settled task's result resolves to: a stored envelope or a skip."""
-
-    task_id: str
-    reference: ContentReference | None = None
-    skip: dict[str, Any] | None = None
-    settled_at: str | None = None
-
-
-def skip_envelope(binding: ResultBinding) -> ResultEnvelope:
-    """The envelope a task that settled without running reads as."""
-    envelope = ResultEnvelope(
-        task_id=binding.task_id, result=BaseExecutorResult(), metadata=binding.skip
-    )
-    if binding.settled_at is not None:
-        envelope.received_at = binding.settled_at
-    return envelope
 
 
 class ResultReader:
@@ -72,21 +55,35 @@ class ResultReader:
         if binding.reference is None:
             if binding.skip is None:
                 raise ResultUnreadable(f"task {binding.task_id} has no bound result")
-            return skip_envelope(binding).model_dump_json(indent=2).encode("utf-8")
+            return skip_envelope_bytes(binding)
         return self._hydrate(binding.reference)
 
     def read(self, binding: ResultBinding) -> ResultEnvelope:
         """The envelope a binding reads as, validated as a result envelope."""
         if binding.reference is None and binding.skip is not None:
             return skip_envelope(binding)
-        data = self.read_bytes(binding)
+        return _envelope(
+            self.read_bytes(binding), f"the stored result of task {binding.task_id}"
+        )
+
+    def read_reference(self, reference: ContentReference) -> ResultEnvelope:
+        """The envelope a stored result reads as, validated as a result envelope."""
+        return _envelope(
+            self._hydrate(reference), f"the stored result {reference.content_digest}"
+        )
+
+    def verify(self, reference: ContentReference) -> None:
+        """Read one object from the store itself, bypassing the cache, and verify it.
+
+        Raises ``ResultUnavailable`` while the store cannot be reached and
+        ``ResultUnreadable`` for an object that is missing or corrupt.
+        """
         try:
-            return ResultEnvelope.model_validate_json(data)
-        except ValidationError as exc:
-            raise ResultUnreadable(
-                f"the stored result of task {binding.task_id} is not a result "
-                f"envelope: {exc}"
-            ) from exc
+            self._store.hydrate(reference)
+        except ContentUnavailable as exc:
+            raise ResultUnavailable(str(exc)) from exc
+        except ContentStoreError as exc:
+            raise ResultUnreadable(str(exc)) from exc
 
     def _hydrate(self, reference: ContentReference) -> bytes:
         key = reference
@@ -116,10 +113,11 @@ class ResultReader:
                 self._cached_bytes -= len(evicted)
 
 
-__all__ = [
-    "ResultBinding",
-    "ResultReader",
-    "ResultUnavailable",
-    "ResultUnreadable",
-    "skip_envelope",
-]
+def _envelope(data: bytes, source: str) -> ResultEnvelope:
+    try:
+        return result_envelope(data, source)
+    except NotAResultEnvelope as exc:
+        raise ResultUnreadable(str(exc)) from exc
+
+
+__all__ = ["ResultReader", "ResultUnavailable", "ResultUnreadable"]

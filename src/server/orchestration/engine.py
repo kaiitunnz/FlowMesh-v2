@@ -17,7 +17,7 @@ physical decision that never changes what the engine considers ready.
 import contextlib
 import functools
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from typing import Any, Self
@@ -66,7 +66,7 @@ from ..task.v2.representations.operators import (
     operator_service_dependency,
 )
 from ..task.v2.representations.plan import EpisodeSpec, InferenceEmbodimentMenu
-from ..task.v2.representations.results import CardinalityKind
+from ..task.v2.representations.results import CardinalityKind, ResultDeclaration
 from ..utils.time import now_iso
 from .guardrails import ScopeBudget
 from .outcomes import (
@@ -118,6 +118,7 @@ from .state import (
     WorkflowInstance,
     WorkItem,
     WorkItemStatus,
+    slot_identity,
 )
 from .telemetry import NULL_SPAN_EMITTER, TelemetrySpanEmitter
 from .tool_dispatch import (
@@ -162,6 +163,7 @@ _DEDUP_CAPABLE = frozenset(
 _EARLY_JOINS = frozenset(
     {JoinCompletion.ANY, JoinCompletion.FIRST_K, JoinCompletion.PREDICATE}
 )
+_OPEN_ATTEMPT_STATUSES = frozenset({AttemptStatus.ISSUED, AttemptStatus.RUNNING})
 
 
 class RegionError(ValueError):
@@ -260,6 +262,22 @@ def _ds_drive(
     return decorator
 
 
+def _rekeyed_publications(
+    slots: Iterable[ResultSlot], publications: Iterable[ResultPublication]
+) -> dict[str, ResultPublication]:
+    """Index publications by slot identity, re-keying any stored under the unscoped
+    key format."""
+    current = {slot.legacy_slot_key: slot.slot_key for slot in slots}
+    identities = set(current.values())
+    indexed: dict[str, ResultPublication] = {}
+    for publication in publications:
+        key = publication.slot_key
+        if key not in identities and (rekeyed := current.get(key)) is not None:
+            publication = publication.model_copy(update={"slot_key": rekeyed})
+        indexed[publication.slot_key] = publication
+    return indexed
+
+
 class OrchestrationEngine:
     """Drives one workflow instance's semantic readiness over its durable ledger."""
 
@@ -316,7 +334,9 @@ class OrchestrationEngine:
             (c.scope_id, c.axis): c for c in snapshot.progress_capabilities
         }
         self._slots = {s.slot_key: s for s in snapshot.result_slots}
-        self._publications = {p.slot_key: p for p in snapshot.result_publications}
+        self._publications = _rekeyed_publications(
+            self._slots.values(), snapshot.result_publications
+        )
         self._trace = list(snapshot.trace)
         self._private_state = PrivateStateLedger(snapshot.private_state)
 
@@ -377,10 +397,12 @@ class OrchestrationEngine:
             w.activation_id: w.work_item_id for w in self._work_items.values()
         }
         self._slots_by_operator: dict[str, list[str]] = {}
+        self._slots_by_output: dict[str, list[str]] = {}
         for slot in self._slots.values():
             self._slots_by_operator.setdefault(slot.source_operator_id, []).append(
                 slot.slot_key
             )
+            self._slots_by_output.setdefault(slot.output_id, []).append(slot.slot_key)
 
         self._forward = self._build_topology()
         # Scope ownership is keyed on the opener activation, so one operator can own a
@@ -766,11 +788,7 @@ class OrchestrationEngine:
         wi = self._work_item_for_task(task_id)
         if wi is None or wi.status in TERMINAL_WORK_ITEM_STATUSES:
             return Advance()
-        if attempt := self._latest_attempt(wi):
-            attempt.status = AttemptStatus.FAILED
-            attempt.finished_at = now_iso()
-            attempt.error = error
-            self._emitter.emit_attempt(attempt)
+        self._fail_open_attempt(wi, error)
         if retryable:
             wi.status = WorkItemStatus.READY
             self._emit(
@@ -779,6 +797,22 @@ class OrchestrationEngine:
                 operator_id=wi.operator_id,
             )
             return Advance(retry=[wi.legacy_task_id])
+        return self._settle_failed_wi(wi)
+
+    def _fail_open_attempt(self, wi: WorkItem, error: str) -> None:
+        """Close the work item's attempt as failed while it is still in flight; one
+        already closed keeps its outcome."""
+        attempt = self._latest_attempt(wi)
+        if attempt is None or attempt.status not in _OPEN_ATTEMPT_STATUSES:
+            return
+        attempt.status = AttemptStatus.FAILED
+        attempt.finished_at = now_iso()
+        attempt.error = error
+        self._emitter.emit_attempt(attempt)
+
+    def _settle_failed_wi(self, wi: WorkItem) -> Advance:
+        """Settle a work item as a declared failure: a child drains its scope, anything
+        else cascades over its static successors."""
         activation = self._activations[wi.activation_id]
         released = self._agent_terminal_regions(wi.operator_id, wi.activation_id)
         if activation.kind == "child":
@@ -790,6 +824,26 @@ class OrchestrationEngine:
             advance.failed.append(wi.legacy_task_id)
             return advance.extend(released)
         return Advance(failed=self._settle_failure(wi.work_item_id)).extend(released)
+
+    @_ds_drive(ControlPlaneWindow.POST_START)
+    def on_returned(self, task_id: str) -> bool:
+        """Close an in-flight attempt handed back without an outcome, and re-ready it;
+        returns whether there was one.
+
+        The attempt is not charged: the work item runs again under its invocation.
+        """
+        wi = self._work_item_for_task(task_id)
+        if wi is None or wi.status is not WorkItemStatus.DISPATCHED:
+            return False
+        if attempt := self._latest_attempt(wi):
+            attempt.status = AttemptStatus.RETURNED
+            attempt.finished_at = now_iso()
+            self._emitter.emit_attempt(attempt)
+        wi.status = WorkItemStatus.READY
+        self._emit(
+            "attempt_returned", work_item_id=wi.work_item_id, operator_id=wi.operator_id
+        )
+        return True
 
     @_ds_drive(ControlPlaneWindow.POST_START)
     def on_uncertain(self, task_id: str) -> Advance:
@@ -1832,18 +1886,13 @@ class OrchestrationEngine:
         self._admit(wi.work_item_id, advance)
         return advance
 
-    def create_fanout_child(self, spawn: str, producer_task_id: str, index: int) -> str:
+    def create_fanout_child(self, spawn: str, value_ref: ValueRef) -> str:
         """Create one producer-fanout child (unadmitted) and return its task id.
 
-        The child carries a frozen reference to element ``index`` of the producer's
-        collection as its child-init input. It stays blocked on its input manifest until
-        the runtime resolves and records the child-entry accepted input.
+        The child carries ``value_ref``, a frozen reference to one element of the
+        producer's collection, as its child-init input. It stays blocked on its input
+        manifest until the runtime records the child-entry accepted input.
         """
-        value_ref = ValueRef(
-            kind="legacy_task_result",
-            legacy_task_id=producer_task_id,
-            collection_key=str(index),
-        )
         activation, wi = self._create_child(
             spawn, None, dispatchable=True, value_ref=value_ref
         )
@@ -2129,6 +2178,7 @@ class OrchestrationEngine:
             operator_id=body_ref,
             legacy_task_id=activation.activation_id if dispatchable else "",
             value_ref=value_ref,
+            child_input=value_ref,
             effect_class=effect,
             recovery=recovery,
             replay_contract=self._replay.get(body_ref),
@@ -2407,6 +2457,31 @@ class OrchestrationEngine:
         """Cancel the whole workflow instance: the root scope and every descendant."""
         return self.on_cancelled(self._root_scope.scope_id)
 
+    def fail_instance(self, reason: str) -> Advance:
+        """Fail the whole workflow instance as a recorded terminal event.
+
+        No scope admits another child, every unsettled leaf or agent settles as a
+        declared failure, and every unpublished declared output resolves to one.
+        """
+        return self._fail_scope_tree(self._root_scope.scope_id, reason)
+
+    @_ds_drive(ControlPlaneWindow.POST_START)
+    def _fail_scope_tree(self, scope_id: str, reason: str) -> Advance:
+        self._emit("instance_failed", detail={"reason": reason})
+        for sid in self._scope_subtree(scope_id):
+            self._revoke_progress(sid)
+        advance = Advance()
+        for wi in list(self._work_items.values()):
+            if wi.status in TERMINAL_WORK_ITEM_STATUSES or self._kind(
+                wi.operator_id
+            ) not in (OperatorKind.LEAF, OperatorKind.AGENT):
+                continue
+            self._fail_open_attempt(wi, reason)
+            advance.extend(self._settle_failed_wi(wi))
+        for slot in list(self._slots.values()):
+            self._write_publication(slot, PublicationOutcome.DECLARED_FAILURE, None)
+        return advance
+
     @_ds_drive(ControlPlaneWindow.POST_START)
     def on_cancelled(self, scope_or_task: str) -> Advance:
         """Cancel a scope subtree as a durable, recorded-before-terminal event.
@@ -2428,21 +2503,9 @@ class OrchestrationEngine:
         return advance
 
     def _cancel_scope(self, scope_id: str) -> Advance:
-        scope = self._scopes[scope_id]
         self._emit("scope_cancelled", detail={"scope": scope_id})
-        for axis in (ProgressAxis.CHILD_INIT, ProgressAxis.LOOP_TIME):
-            cap = self._capabilities.get((scope_id, axis))
-            if cap is not None and cap.status is CapabilityStatus.OPEN:
-                cap.status = CapabilityStatus.REVOKED
-                self._emit(
-                    (
-                        "child_init_revoked"
-                        if axis is ProgressAxis.CHILD_INIT
-                        else "loop_revoked"
-                    ),
-                    operator_id=scope.owner_operator_id,
-                    detail={"scope": scope_id},
-                )
+        self._revoke_progress(scope_id)
+        scope = self._scopes[scope_id]
         self._apply_cancellation_residual(scope_id)
         for wi in self._scope_work_items(scope_id, kinds=("leaf", "agent")):
             if wi.status not in TERMINAL_WORK_ITEM_STATUSES:
@@ -2459,6 +2522,23 @@ class OrchestrationEngine:
                     detail={"scope": scope_id},
                 )
         return self._resolve_cancelled_outputs(scope_id)
+
+    def _revoke_progress(self, scope_id: str) -> None:
+        """Revoke a scope's open child-init and loop-time capabilities."""
+        scope = self._scopes[scope_id]
+        for axis in (ProgressAxis.CHILD_INIT, ProgressAxis.LOOP_TIME):
+            cap = self._capabilities.get((scope_id, axis))
+            if cap is not None and cap.status is CapabilityStatus.OPEN:
+                cap.status = CapabilityStatus.REVOKED
+                self._emit(
+                    (
+                        "child_init_revoked"
+                        if axis is ProgressAxis.CHILD_INIT
+                        else "loop_revoked"
+                    ),
+                    operator_id=scope.owner_operator_id,
+                    detail={"scope": scope_id},
+                )
 
     def _apply_cancellation_residual(self, scope_id: str) -> None:
         """Apply a cancelled scope's join residual policy to its materialized children.
@@ -3198,6 +3278,8 @@ class OrchestrationEngine:
     ) -> None:
         if slot.slot_key in self._publications:
             return
+        if slot.slot_key not in self._slots:
+            self._slots_by_output.setdefault(slot.output_id, []).append(slot.slot_key)
         self._slots[slot.slot_key] = slot.model_copy(update={"published": True})
         self._publications[slot.slot_key] = ResultPublication(
             slot_key=slot.slot_key,
@@ -3236,16 +3318,45 @@ class OrchestrationEngine:
     # Queries
     # ------------------------------------------------------------------ #
 
-    def resolve_output(self, output_id: str) -> ResultPublication | None:
-        """Resolve a declared logical output to its terminal publication, if any."""
-        for slot in self._slots.values():
-            if slot.output_id == output_id:
-                return self._publications.get(slot.slot_key)
-        return None
+    def output_publication(
+        self,
+        output_id: str,
+        scope_id: str | None = None,
+        logical_key: str | None = None,
+        sequence: int | None = None,
+    ) -> ResultPublication | None:
+        """The terminal publication of exactly one slot, if it has one."""
+        return self._publications.get(
+            slot_identity(
+                self._instance.instance_id, output_id, scope_id, logical_key, sequence
+            )
+        )
+
+    def output_slots(self, output_id: str) -> list[ResultSlot]:
+        """Every slot a declared output holds so far, pending or published."""
+        return [self._slots[key] for key in self._slots_by_output.get(output_id, ())]
+
+    def output_slot(
+        self,
+        output_id: str,
+        scope_id: str | None = None,
+        logical_key: str | None = None,
+        sequence: int | None = None,
+    ) -> ResultSlot | None:
+        """Exactly one slot of a declared output, if it holds one."""
+        return self._slots.get(
+            slot_identity(
+                self._instance.instance_id, output_id, scope_id, logical_key, sequence
+            )
+        )
+
+    def published_outputs(self) -> list[tuple[str, ResultDeclaration]]:
+        """Each published declaration with the public name it was authored under."""
+        return self._bundle.template.published_outputs()
 
     def resolve_legacy_task(self, task_id: str) -> ResultPublication | None:
         """Resolve a legacy task id's induced output slot (compatibility adapter)."""
-        return self.resolve_output(f"legacy:{task_id}")
+        return self.output_publication(f"legacy:{task_id}")
 
     def legacy_task_value(
         self, task_id: str
@@ -3537,6 +3648,11 @@ class OrchestrationEngine:
     def work_item(self, task_id: str) -> WorkItem | None:
         return self._work_item_for_task(task_id)
 
+    def child_input(self, task_id: str) -> ValueRef | None:
+        """The child-init input a spawned child task runs on, if it has one."""
+        wi = self._work_item_for_task(task_id)
+        return wi.child_input if wi is not None else None
+
     def agent_operator(self, task_id: str) -> AgentOperator | None:
         """The agent operator a dispatched task realizes, resolving its work item."""
         wi = self._work_item_for_task(task_id)
@@ -3685,14 +3801,18 @@ class OrchestrationEngine:
         Returns whether the work item is ready to admit. A work item the snapshot still
         shows in flight — a crash after a retry persisted the PENDING record but before
         the ledger caught up — is reset to ready with its lost attempt marked, so the
-        retry is not orphaned; a work item whose predecessors have not all settled stays
-        blocked.
+        retry is not orphaned; a work item whose predecessors have not all settled, or
+        whose declared inputs have not all been accepted, stays blocked.
         """
         wi = self._work_item_for_task(task_id)
         if wi is None or wi.status in TERMINAL_WORK_ITEM_STATUSES:
             return False
         cont = self._continuations.get(wi.work_item_id)
-        if cont is not None and cont.waiting_on:
+        if cont is not None and (
+            cont.waiting_on
+            or not cont.required_ports
+            <= {a.target_port for a in self.accepted_inputs_for(wi.activation_id)}
+        ):
             wi.status = WorkItemStatus.BLOCKED
             return False
         if wi.status is WorkItemStatus.DISPATCHED:

@@ -6,6 +6,7 @@ from fastapi import FastAPI
 
 from server.routers.health import router as health_router
 from server.routers.v1.nodes import router as nodes_router
+from server.routers.v1.outputs import router as outputs_router
 from server.routers.v1.system import router as system_router
 from server.routers.v1.tasks import router as tasks_router
 from server.routers.v1.workers import router as workers_router
@@ -24,6 +25,7 @@ def build_router_app() -> FastAPI:
     app.include_router(tasks_router, prefix="/api/v1")
     app.include_router(workers_router, prefix="/api/v1")
     app.include_router(workflows_router, prefix="/api/v1")
+    app.include_router(outputs_router, prefix="/api/v1")
     return app
 
 

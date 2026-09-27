@@ -8,7 +8,11 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from shared.content import ContentReference, ContentStoreError, FabricObjectStore
+from shared.content import (
+    ContentReference,
+    ContentStoreError,
+    FabricObjectStore,
+)
 from shared.harness.adapter import HarnessResultKind
 from shared.inference import (
     CanonicalInferenceRequest,
@@ -16,7 +20,7 @@ from shared.inference import (
     ResolvedCanonicalInferenceRequest,
     ResolvedInputMaterialization,
     canonical_result,
-    hydrate_resolved_input,
+    parse_resolved_input,
     write_resolved_input,
 )
 from shared.network.mtls import MutualTlsMaterial
@@ -48,6 +52,7 @@ from shared.tools.search.schema import DEFAULT_SEARCH_PROVIDER
 from shared.utils.manifest import prepare_output_dir, sync_manifest
 from shared.utils.time import now_iso
 
+from .content.inputs import TaskInputHydrator, input_unreadable, read_input
 from .egress import MediatedEgressSidecar, ModelEgress, SearchEgress
 from .executors.base_executor import ExecutionError, Executor, TaskCancelledError
 from .executors.episode_support import EpisodeStepResult
@@ -116,6 +121,7 @@ class Runner:
         self.executors = executors
         self.logger = logger
         self.default_executor = default_executor
+        self._input_hydrator = TaskInputHydrator(lifecycle.content_plane)
         self._peer_enabled = peer_enabled
         self._peer_material = peer_material
         self._peer_listener_sock = peer_listener_sock
@@ -386,6 +392,15 @@ class Runner:
         except InputResolutionError as exc:
             raise ExecutionError(str(exc), retryable=False) from exc
 
+    def _raise_if_cancel_pending(self, task_id: str) -> None:
+        """Honor a cancel that landed while the task read its inputs, which can wait on
+        the store."""
+        with self._cancel_lock:
+            cancelled = task_id in self._pending_cancels
+            self._pending_cancels.discard(task_id)
+        if cancelled:
+            raise TaskCancelledError(f"Task {task_id} was cancelled before execution")
+
     def _materialize_contract(self, msg: WorkerTaskMessage) -> None:
         """Settle the one request a task runs, before its embodiment reaches a model.
 
@@ -427,26 +442,15 @@ class Runner:
         missing, out of the task's scope, or not the bytes its digest names fails the
         task before any model I/O and before any admission.
         """
-        store = self._object_store(msg.task_id)
-        if store is None:
-            raise ExecutionError(
-                f"task {msg.task_id} runs a prepared request and this worker reaches "
-                "no fabric content store to hydrate it from",
-                retryable=True,
-            )
-        if reference.authorization_scope != msg.content_scope:
-            raise ExecutionError(
-                f"task {msg.task_id} runs in scope {msg.content_scope} and the request "
-                f"it recorded is in {reference.authorization_scope}",
-                retryable=False,
-            )
+        data = read_input(
+            self.lifecycle.content_plane, msg.task_id, msg.content_scope, reference
+        )
         try:
-            hydrated = hydrate_resolved_input(store, reference)
+            hydrated = parse_resolved_input(reference, data)
         except ContentStoreError as exc:
-            raise ExecutionError(
+            raise input_unreadable(
                 f"task {msg.task_id} cannot hydrate the request its preparation "
-                f"recorded: {exc}",
-                retryable=False,
+                f"recorded: {exc}"
             ) from exc
         committed = msg.recorded_resolution
         if committed is not None and not committed.matches(hydrated.binding):
@@ -793,7 +797,9 @@ class Runner:
                             f"Task {task_id} was cancelled before execution"
                         )
                     self._current_task_id = task_id
+                    self._input_hydrator.hydrate(msg)
                     if msg.input_preparation:
+                        self._raise_if_cancel_pending(task_id)
                         self.lifecycle.notify_task_started(
                             task_id,
                             task_type=task_type,
@@ -897,6 +903,7 @@ class Runner:
                         notified_task_started = True
 
                         self._materialize_contract(msg)
+                        self._raise_if_cancel_pending(task_id)
 
                         # Disable idle checker during execution
                         self._active_executor_last_used_at = None
@@ -968,12 +975,16 @@ class Runner:
                         shard_index=shard_index,
                         shard_total=shard_total,
                     )
-                    retryable = not isinstance(e, ExecutionError) or e.retryable
+                    controlled = e if isinstance(e, ExecutionError) else None
                     self.lifecycle.set_failed(
                         task_id,
                         str(e),
                         metadata=metadata,
-                        retryable=retryable,
+                        retryable=controlled is None or controlled.retryable,
+                        failure_kind=controlled.failure_kind if controlled else None,
+                        unavailable_inputs=(
+                            controlled.unavailable_inputs if controlled else ()
+                        ),
                     )
                     if isinstance(e, ExecutionError):
                         self.logger.error("Task %s failed: %s", task_id, e)

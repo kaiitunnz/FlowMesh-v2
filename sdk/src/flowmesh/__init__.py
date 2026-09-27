@@ -33,9 +33,12 @@ from .exceptions import (
     AuthenticationError,
     ConfigInvalidError,
     ConfigNotFoundError,
+    ContentUnavailableError,
     FlowMeshConnectionError,
     FlowMeshError,
     NotFoundError,
+    OutputPendingError,
+    OutputUnreadableError,
     ValidationError,
 )
 
@@ -48,6 +51,9 @@ __all__ = [
     "AuthenticationError",
     "NotFoundError",
     "ValidationError",
+    "OutputPendingError",
+    "ContentUnavailableError",
+    "OutputUnreadableError",
     "FlowMeshConnectionError",
     "ConfigNotFoundError",
     "ConfigInvalidError",

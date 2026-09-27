@@ -1,18 +1,14 @@
-import json
 import logging
 import threading
 import time
 from collections.abc import Callable
 
-from shared.schemas.event import TaskEvent, serialize_event
+from shared.schemas.event import TaskEvent
 
-from ..clients.redis import (
-    TASK_EVENT_STREAM_KEY,
-    TASK_EVENT_STREAM_MAXLEN,
-    SyncRedisClient,
-)
+from ..clients.redis import SyncRedisClient
 from ..registries.worker import WorkerRegistry
 from ..task.runtime import TaskRuntime
+from .task_events import TaskEventPublisher
 
 
 class WorkerWatchdog:
@@ -29,10 +25,9 @@ class WorkerWatchdog:
         grace_seconds: int,
         rehydration_grace_seconds: int = 0,
     ) -> None:
-        self._redis = redis_client
+        self._events = TaskEventPublisher(redis_client, logger)
         self._worker_registry = worker_registry
         self._runtime = runtime
-        self._apply_failure: Callable[[TaskEvent], None] | None = None
         self._logger = logger
         self._enabled = enabled
         self._check_interval = max(1, check_interval)
@@ -45,7 +40,7 @@ class WorkerWatchdog:
     def set_failure_fallback(self, apply_failure: Callable[[TaskEvent], None]) -> None:
         """Set the handler that applies a synthetic failure directly when its publish
         fails."""
-        self._apply_failure = apply_failure
+        self._events.set_fallback(apply_failure)
 
     @property
     def enabled(self) -> bool:
@@ -170,31 +165,10 @@ class WorkerWatchdog:
                 error="worker_heartbeat_expired",
                 payload=payload,
             )
-            try:
-                event_payload = json.dumps(serialize_event(event), ensure_ascii=False)
-                self._redis.xadd_telemetry(
-                    TASK_EVENT_STREAM_KEY,
-                    {"payload": event_payload},
-                    maxlen=TASK_EVENT_STREAM_MAXLEN,
-                )
-            except Exception as exc:
-                self._logger.error(
-                    "Failed to publish synthetic TASK_FAILED for %s "
-                    "after worker %s expired: %s",
-                    task_id,
-                    worker_id,
-                    exc,
-                )
-                if self._apply_failure is None:
-                    continue
-                try:
-                    self._apply_failure(event)
-                except Exception as apply_exc:
-                    self._logger.error(
-                        "Failed to apply synthetic TASK_FAILED for %s directly: %s",
-                        task_id,
-                        apply_exc,
-                    )
+            self._events.publish(
+                event,
+                f"synthetic TASK_FAILED for {task_id} after worker {worker_id} expired",
+            )
 
     def _mark_dead(self, worker_id: str) -> None:
         if not worker_id:

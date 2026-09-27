@@ -1,10 +1,12 @@
 """Workflow-related models."""
 
+from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, SerializeAsAny
 
 from .common import TaskStatus, WorkflowStatus
+from .result import AnyExecutorResult
 
 
 class WorkflowSubmitTaskEntry(BaseModel):
@@ -73,3 +75,35 @@ class Workflow(BaseModel):
     completed_tasks: list[str]
     failed_tasks: list[str]
     cancelled_tasks: list[str]
+
+
+class OutputOutcome(StrEnum):
+    PENDING = "pending"
+    SUCCESS = "success"
+    EXPLICIT_EMPTY = "explicit_empty"
+    DECLARED_FAILURE = "declared_failure"
+
+
+class WorkflowOutputMember(BaseModel):
+    name: str
+    cardinality: str
+    value_type: str | None = None
+    scope: str | None = None
+    key: str | None = None
+    sequence: int | None = None
+    outcome: OutputOutcome
+
+
+class WorkflowOutputEntry(WorkflowOutputMember):
+    cursor: str
+
+
+class WorkflowOutputPage(BaseModel):
+    entries: list[WorkflowOutputEntry]
+    next_cursor: str | None = None
+    prev_cursor: str | None = None
+    open: bool
+
+
+class WorkflowOutputValue(WorkflowOutputMember):
+    value: SerializeAsAny[AnyExecutorResult] | None = None

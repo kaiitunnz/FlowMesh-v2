@@ -13,6 +13,7 @@ their defaults: a child ``Scope.parent_scope_id`` and ``depth``, an ``Activation
 per-scope ``ProgressCapability`` accounting on the child-init and loop-time axes.
 """
 
+import json
 from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -57,6 +58,7 @@ class AttemptStatus(StrEnum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     LOST = "lost"  # worker/route loss without a terminal receipt
+    RETURNED = "returned"  # handed back without an outcome, not charged as an attempt
 
 
 class InvocationState(StrEnum):
@@ -407,6 +409,7 @@ class WorkItem(BaseModel):
     status: WorkItemStatus = WorkItemStatus.BLOCKED
     outcome: PublicationOutcome | None = None
     value_ref: ValueRef | None = None  # the value this work item settled with
+    child_input: ValueRef | None = None  # the child-init input a spawned child runs on
     invocation_id: str | None = None
     effect_class: EffectClass = EffectClass.PURE
     recovery: RecoveryClass = RecoveryClass.RECOMPUTE
@@ -516,6 +519,24 @@ class EffectReceipt(BaseModel):
     at: str = Field(default_factory=now_iso)
 
 
+def slot_identity(
+    instance_id: str,
+    output_id: str,
+    scope_id: str | None = None,
+    logical_key: str | None = None,
+    sequence: int | None = None,
+) -> str:
+    """The durable identity of one result slot, unambiguous over every component.
+
+    Each component is JSON-encoded, so no key, scope, or sequence can read as another
+    and an absent one is distinct from an empty one.
+    """
+    return json.dumps(
+        [instance_id, output_id, scope_id, logical_key, sequence],
+        separators=(",", ":"),
+    )
+
+
 class ResultSlot(BaseModel):
     """Pending or terminal holder for one declared logical output key.
 
@@ -535,6 +556,18 @@ class ResultSlot(BaseModel):
 
     @property
     def slot_key(self) -> str:
+        return slot_identity(
+            self.instance_id,
+            self.output_id,
+            self.scope_id,
+            self.logical_key,
+            self.sequence,
+        )
+
+    @property
+    def legacy_slot_key(self) -> str:
+        """The unscoped key format, read only to re-key a publication stored under
+        it."""
         key = "" if self.logical_key is None else f":{self.logical_key}"
         seq = "" if self.sequence is None else f"#{self.sequence}"
         return f"{self.instance_id}:{self.output_id}{key}{seq}"

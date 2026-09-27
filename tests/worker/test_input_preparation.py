@@ -5,19 +5,20 @@ from unittest import mock
 
 import pytest
 
-from shared.content import ContentReference
+from shared.content import ContentReference, ContentUnavailable
 from shared.inference import (
     RESOLVED_INPUT_MEDIA_TYPE,
     ResolvedInputMaterialization,
     canonical_contract,
     hydrate_resolved_input,
 )
+from shared.schemas.event import TaskFailureKind
 from shared.schemas.result.catalog import InferenceResult
 from shared.schemas.result.payloads import InferenceItem
 from shared.tasks.specs import InferenceSpecStrict
 from shared.tasks.worker_message import WorkerTaskMessage
 from tests.shared.outcome_helpers import InMemoryContentStore
-from tests.worker.factories import make_worker_task_message
+from tests.worker.factories import FakeContentPlane, make_worker_task_message
 from worker.executors.base_executor import ExecutionError
 from worker.runner import Runner
 
@@ -55,22 +56,12 @@ def _task(
     )
 
 
-class _Plane:
-    """A content plane whose every task reads and writes one in-memory store."""
-
-    def __init__(self, store: InMemoryContentStore) -> None:
-        self._store = store
-
-    def for_task(self, task_id: str) -> InMemoryContentStore:
-        return self._store
-
-
 def _runner(store: InMemoryContentStore | None) -> Runner:
     """A runner with only what resolving and storing a request reads."""
     runner = object.__new__(Runner)
     runner.lifecycle = mock.Mock()
     runner.lifecycle.content_plane = (
-        cast(Any, _Plane(store)) if store is not None else None
+        cast(Any, FakeContentPlane(store)) if store is not None else None
     )
     return runner
 
@@ -170,6 +161,52 @@ class TestHydration:
 
         assert excinfo.value.retryable is False
         assert msg.resolved_contract is None
+
+    def test_an_unreachable_store_reports_the_request_unavailable(self) -> None:
+        store = InMemoryContentStore()
+        prepared = _prepare(store, _task())
+
+        class _Away(InMemoryContentStore):
+            def fetch(self, reference: ContentReference) -> bytes:
+                raise ContentUnavailable("store down")
+
+        with pytest.raises(ExecutionError) as excinfo:
+            _materialize(_Away(), _task(recorded_input=prepared.reference))
+        assert excinfo.value.retryable is True
+        assert excinfo.value.failure_kind is TaskFailureKind.INPUT_UNAVAILABLE
+        assert excinfo.value.unavailable_inputs == (prepared.reference,)
+
+    def test_a_briefly_unreachable_store_is_read_again(self) -> None:
+        store = InMemoryContentStore()
+        prepared = _prepare(store, _task(upstream=_upstream("one")))
+
+        class _Blip(InMemoryContentStore):
+            failures = 1
+
+            def fetch(self, reference: ContentReference) -> bytes:
+                if self.failures:
+                    self.failures -= 1
+                    raise ContentUnavailable("store blipped")
+                return store.fetch(reference)
+
+        msg = _task(
+            recorded_input=prepared.reference, recorded_resolution=prepared.binding
+        )
+        _materialize(_Blip(), msg)
+
+        assert msg.resolved_contract is not None
+
+    def test_a_request_outside_the_task_scope_fails_typed(self) -> None:
+        store = InMemoryContentStore()
+        prepared = _prepare(store, _task())
+        elsewhere = prepared.reference.model_copy(
+            update={"authorization_scope": "other"}
+        )
+
+        with pytest.raises(ExecutionError) as excinfo:
+            _materialize(store, _task(recorded_input=elsewhere))
+        assert excinfo.value.retryable is False
+        assert str(excinfo.value).startswith("input_unreadable:")
 
     def test_content_that_is_not_the_digest_names_fails_closed(self) -> None:
         store = InMemoryContentStore()

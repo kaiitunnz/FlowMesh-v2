@@ -3,7 +3,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, model_validator
 
 from .operators import EffectBoundary, LogicalOperator
-from .results import LegacyLogicalTaskProjection, ResultDeclaration
+from .results import LegacyLogicalTaskProjection, ResultDeclaration, Visibility
 from .versioning import VersionId
 
 type SourceKind = Literal["legacy_task", "stage", "graph_node", "region", "root"]
@@ -75,6 +75,19 @@ class LogicalWorkflowTemplate(BaseModel):
     @property
     def operator_ids(self) -> frozenset[str]:
         return frozenset(op.operator_id for op in self.operators)
+
+    def published_outputs(self) -> list[tuple[str, ResultDeclaration]]:
+        """Each published declaration with its public name, in declaration order.
+
+        The public name is the node the author wrote the output on, read through the
+        source map, so an internal output id never reaches a client.
+        """
+        names = {entry.logical_ref: entry.source_id for entry in self.source_map}
+        return [
+            (names.get(decl.source_ref, decl.source_ref), decl)
+            for decl in self.result_declarations
+            if decl.visibility is Visibility.PUBLISHED
+        ]
 
     @model_validator(mode="after")
     def _validate_ownership_links(self) -> "LogicalWorkflowTemplate":

@@ -1,11 +1,13 @@
 """Shared dummy constructors for test modules."""
 
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Final
 
 from lumid_hooks import PrincipalContext
 
+from shared.content import ContentReference, FabricObjectStore
 from shared.tasks import TaskType
 from shared.tasks.worker_message import (
     CPUInfo,
@@ -142,3 +144,24 @@ def make_worker_hardware(devices: list[GpuInfo] | None = None) -> WorkerHardware
         ),
         network=NetworkInfo(ip=None, bandwidth_bytes_per_sec=None),
     )
+
+
+class FakeContentPlane:
+    """A worker content plane over one store, failing its reads while told to."""
+
+    def __init__(self, store: FabricObjectStore) -> None:
+        self.store = store
+        self.error: Exception | None = None
+        self.reads: list[ContentReference] = []
+        self.on_read: Callable[[], None] | None = None
+
+    def for_task(self, task_id: str) -> FabricObjectStore:
+        return self.store
+
+    def hydrate(self, task_id: str, reference: ContentReference) -> bytes:
+        self.reads.append(reference)
+        if self.on_read is not None:
+            self.on_read()
+        if self.error is not None:
+            raise self.error
+        return self.store.hydrate(reference)

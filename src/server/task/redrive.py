@@ -1,14 +1,15 @@
-"""Re-driving a workflow's advance after the content store could not be reached.
+"""Driving a workflow's advances that wait on a read of stored results.
 
-A settled producer's result is in the shared store before its success is reported, so
-a read that cannot reach the store is a pause, not a loss: the spawn it would have
-fanned out, or the agent input it would have delivered, waits and is driven again once
-the store answers. Nothing else re-fires those advances — the producer has already
-settled — so this schedules one re-drive per waiting workflow, backing off while the
-store stays away.
+A spawn's fan-out and an agent's bound inputs are read from the shared store, and a read
+never runs under the runtime lock, so those advances are driven here, off it. A settled
+producer's result is in the store before its success is reported, so a read that
+cannot reach the store is a pause, not a loss: the advance waits and is driven again
+once the store answers. Nothing else re-fires those advances — the producer has already
+settled — so this keeps one pending drive per workflow, backing off while the store
+stays away.
 
-A re-drive is not durable and does not need to be: a restart re-drives every settled
-producer's unsealed spawn and re-resolves agent inputs on the advances it applies.
+A re-drive is not durable and does not need to be: a restart re-drives every workflow
+with a settled producer's unsealed spawn or an agent waiting on its inputs.
 """
 
 import heapq
@@ -55,6 +56,7 @@ class StoreRedriveScheduler:
         self._due: dict[str, float] = {}
         self._heap: list[tuple[float, str]] = []
         self._streak: dict[str, int] = {}
+        self._recheck_streak: dict[str, int] = {}
         self._thread: threading.Thread | None = None
         self._stopped = False
 
@@ -80,11 +82,49 @@ class StoreRedriveScheduler:
             self._ensure_thread()
             self._cv.notify_all()
 
+    def recheck(self, workflow_id: str) -> None:
+        """Re-drive a workflow to confirm what it reported, on a backoff of its own.
+
+        The delay doubles from the base to the cap across consecutive rechecks, apart
+        from the store-wait backoff and its warning. A workflow already waiting keeps
+        its slot.
+        """
+        with self._cv:
+            if self._stopped or workflow_id in self._due:
+                return
+            streak = self._recheck_streak.get(workflow_id, 0) + 1
+            self._recheck_streak[workflow_id] = streak
+            due = self._clock() + min(self._max, self._base * 2 ** (streak - 1))
+            self._due[workflow_id] = due
+            heapq.heappush(self._heap, (due, workflow_id))
+            self._ensure_thread()
+            self._cv.notify_all()
+
+    def drive_now(self, workflow_id: str) -> None:
+        """Drive a workflow as soon as the re-drive thread is free.
+
+        A workflow already waiting keeps its slot and its backoff.
+        """
+        with self._cv:
+            if self._stopped or workflow_id in self._due:
+                return
+            due = self._clock()
+            self._due[workflow_id] = due
+            heapq.heappush(self._heap, (due, workflow_id))
+            self._ensure_thread()
+            self._cv.notify_all()
+
     def settle(self, workflow_id: str) -> None:
         """Drop a workflow's pending re-drive and backoff; it no longer waits."""
         with self._cv:
             self._due.pop(workflow_id, None)
             self._streak.pop(workflow_id, None)
+            self._recheck_streak.pop(workflow_id, None)
+
+    def reset_recheck(self, workflow_id: str) -> None:
+        """Start a workflow's recheck backoff over; it has nothing left to confirm."""
+        with self._cv:
+            self._recheck_streak.pop(workflow_id, None)
 
     def pending(self, workflow_id: str) -> bool:
         with self._cv:
@@ -113,6 +153,7 @@ class StoreRedriveScheduler:
             self._due.clear()
             self._heap.clear()
             self._streak.clear()
+            self._recheck_streak.clear()
             self._cv.notify_all()
         if self._thread is not None:
             self._thread.join(timeout=2.0)

@@ -109,3 +109,39 @@ def test_the_scheduler_thread_fires_and_stops() -> None:
     scheduler.schedule("wfl-1")
     assert fired.wait(2.0)
     scheduler.stop()
+
+
+def test_a_drive_now_fires_at_once_and_keeps_the_backoff() -> None:
+    clock = _Clock()
+    fired: list[str] = []
+    scheduler: StoreRedriveScheduler
+
+    def away_once(workflow_id: str) -> None:
+        fired.append(workflow_id)
+        if len(fired) == 1:
+            scheduler.schedule(workflow_id)
+
+    scheduler = _scheduler(away_once, clock)
+    scheduler.drive_now("wfl-1")
+    assert scheduler.run_due() == ["wfl-1"]
+    # The first drive found the store away: its backoff starts at the base delay.
+    scheduler.drive_now("wfl-1")
+    assert scheduler.run_due() == []
+    clock.now = 1.0
+    assert scheduler.run_due() == ["wfl-1"]
+    assert fired == ["wfl-1", "wfl-1"]
+    assert not scheduler.pending("wfl-1")
+    scheduler.drive_now("wfl-1")
+    assert scheduler.run_due() == ["wfl-1"]
+
+
+def test_a_drive_now_keeps_a_waiting_re_drive_backing_off() -> None:
+    clock = _Clock()
+    fired: list[str] = []
+    scheduler = _scheduler(fired.append, clock)
+    scheduler.schedule("wfl-1")
+    scheduler.drive_now("wfl-1")
+    assert scheduler.run_due() == []
+    clock.now = 1.0
+    assert scheduler.run_due() == ["wfl-1"]
+    assert fired == ["wfl-1"]

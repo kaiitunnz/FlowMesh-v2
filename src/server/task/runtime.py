@@ -1,11 +1,10 @@
 import heapq
-import json
 import logging
 import threading
 import time
 from collections import defaultdict, deque
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from itertools import chain
 from typing import Any, cast
 
@@ -37,6 +36,7 @@ from shared.inference import (
     InputResolutionBinding,
     ResolvedInputMaterialization,
     canonical_contract,
+    element_contract,
 )
 from shared.outcome import OutcomeManifest
 from shared.private_state import (
@@ -57,7 +57,14 @@ from shared.sandbox import (
     SandboxEgressMode,
 )
 from shared.schemas.command import InterruptMessage, MediatedOpMessage
+from shared.schemas.event import TaskEvent, TaskFailureKind
 from shared.schemas.result import ResultEnvelope
+from shared.schemas.result.binding import collection_elements, value_text
+from shared.tasks.result_binding import (
+    ResultBinding,
+    ResultElementRef,
+    ResultValueRef,
+)
 from shared.tasks.specs import (
     InferenceEmbodimentKind,
     InferenceSpecStrict,
@@ -100,6 +107,7 @@ from ..orchestration.tool_dispatch import (
     MODEL_INTERFACE,
     SEARCH_INTERFACE,
     FacadeTurnGroup,
+    InputMemberPlan,
     ToolInvocationEnvelope,
     ToolOutcome,
     ToolOutcomeStatus,
@@ -116,6 +124,7 @@ from .models import (
     FailureOutcome,
     SettleOutcome,
     TaskInfo,
+    TaskInputElement,
     TaskParsingResult,
     TaskRecord,
     TaskStatus,
@@ -123,14 +132,16 @@ from .models import (
     WorkflowSettlement,
     categorize_task_type,
 )
+from .outputs import (
+    OutputMember,
+    PublishedOutput,
+    PublishedOutputs,
+    published_member,
+    published_members,
+)
 from .parser import ParsedWorkflow, parse_workflow
 from .redrive import StoreRedriveScheduler
-from .results import (
-    ResultBinding,
-    ResultReader,
-    ResultUnavailable,
-    ResultUnreadable,
-)
+from .results import ResultReader, ResultUnavailable, ResultUnreadable
 from .v2 import (
     ExecutionMode,
     FrontendWorkflowSource,
@@ -229,11 +240,6 @@ def _effective_facades(
     return tuple(facades)
 
 
-def _stringify(value: Any) -> str:
-    """A stable string rendering of a resolved input value, for delivery."""
-    return value if isinstance(value, str) else json.dumps(value, sort_keys=True)
-
-
 # A spawn producer's fan-out read retries off the lock before the workflow fails.
 _FANOUT_READ_ATTEMPTS = 3
 _FANOUT_READ_BACKOFF_SEC = 0.2
@@ -241,33 +247,123 @@ _FANOUT_READ_BACKOFF_SEC = 0.2
 
 @dataclass(frozen=True)
 class _FanoutRead:
-    """A spawn producer's fan-out collection, or why it could not be read."""
+    """How many elements a spawn producer's collection holds, or why it went unread."""
 
-    elements: list[Any] = field(default_factory=list)
+    count: int = 0
+    # The stored result the count was read from; None for a producer that skipped.
+    reference: ContentReference | None = None
     error: str | None = None
     # The store could not be reached; the collection is still there to read later.
     unavailable: bool = False
 
 
-def _result_collection(payload: dict[str, Any]) -> list[Any] | None:
-    collection = payload.get("fanout")
-    if not isinstance(collection, list):
-        collection = payload.get("items")
-    return collection if isinstance(collection, list) else None
+@dataclass(frozen=True)
+class _InputCheck:
+    """A task held while control checks the inputs its worker could not read."""
+
+    worker_id: str
+    dispatch_id: str | None
+    references: tuple[ContentReference, ...]
+    # Why control found an input unreadable, once it has; the task then fails as a
+    # report of the dispatch that could not read it.
+    unreadable: str | None = None
 
 
-def _fanout_elements(envelope: ResultEnvelope) -> list[Any]:
-    """A producer result's fan-out collection: its ``fanout`` or ``items`` list.
+_INPUT_VERDICT_REPORT = "TASK_FAILED:input_unreadable"
 
-    A producer element's carried value is unwrapped (an echo item is ``{output: v}``)
-    so it is a valid child input rather than the producer's own result shape. A result
-    with neither list fans out to no children.
-    """
-    collection = _result_collection(envelope.result.model_dump()) or []
-    return [
-        item["output"] if isinstance(item, dict) and "output" in item else item
-        for item in collection
-    ]
+
+def _input_verdict(task_id: str, check: _InputCheck) -> TaskEvent:
+    """Control's report that a held task's input is unreadable, as the dispatch that
+    could not read it."""
+    return TaskEvent(
+        type="TASK_FAILED",
+        task_id=task_id,
+        worker_id=check.worker_id,
+        dispatch_id=check.dispatch_id,
+        error=f"input_unreadable: {check.unreadable}",
+        retryable=False,
+        failure_kind=TaskFailureKind.INPUT_UNREADABLE,
+    )
+
+
+@dataclass
+class _Termination:
+    """What a terminated workflow's work still holds, released after its terminal."""
+
+    interrupts: list[InterruptMessage]
+    # Each pending mediated operation's worker, agent task, and call.
+    reaps: list[tuple[str, str, str]]
+    # Tasks whose published dispatch the termination recorded in memory.
+    recorded: list[str]
+    resident_invocation_ids: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class _InputElement:
+    """The producer element a leaf fan-out child runs on."""
+
+    producer_task_id: str
+    ref: ResultElementRef
+
+
+@dataclass(frozen=True)
+class _PortSnapshot:
+    """One agent input port whose members are each frozen to what supplies them."""
+
+    target_port: str
+    provenance: str
+    members: tuple[tuple[InputMemberPlan, ValueRef], ...]
+
+
+@dataclass(frozen=True)
+class _AgentInputSnapshot:
+    """An agent's pending input ports as of one look at the ledger."""
+
+    task_id: str
+    activation_id: str
+    ports: tuple[_PortSnapshot, ...]
+    # Why the agent's input can never be read, when a producer settled unbound.
+    unreadable: str | None = None
+
+    @property
+    def references(self) -> dict[str, ContentReference]:
+        """Each stored result the ports read, keyed by the producer it names."""
+        return {
+            value_ref.legacy_task_id or "": value_ref.content
+            for port in self.ports
+            for _member, value_ref in port.members
+            if value_ref.content is not None
+        }
+
+
+def _literal_text(value_ref: ValueRef | None) -> str | None:
+    """The value an inline input member carries itself."""
+    if value_ref is None:
+        return None
+    if value_ref.kind == "inline":
+        return value_ref.literal or ""
+    if value_ref.kind == "empty":
+        return ""
+    return None
+
+
+def _member_text(
+    value_ref: ValueRef, values: dict[ContentReference, ResultEnvelope | Exception]
+) -> str | None:
+    """The string an input member resolves to from the results read for it."""
+    if value_ref.content is None:
+        return _literal_text(value_ref)
+    envelope = values.get(value_ref.content)
+    if not isinstance(envelope, ResultEnvelope):
+        return None
+    return value_text(envelope, _element_of(value_ref))
+
+
+def _element_of(value_ref: ValueRef) -> int | None:
+    """The collection member a value reference selects, or None for the whole result."""
+    return (
+        int(value_ref.collection_key) if value_ref.collection_key is not None else None
+    )
 
 
 def _settled_at(record: TaskRecord) -> str | None:
@@ -433,7 +529,7 @@ class TaskRuntime:
         self._worker_registry = worker_registry
         self._logger = logger
         self._results = results
-        self._redrive = redrive(self._redrive_workflow, logger)
+        self._redrive = redrive(self._drive_workflow, logger)
         self._feasibility_check = feasibility_check
         self._policy_surface = surface if surface is not None else PolicySurface()
         self._secret_vault = secret_vault
@@ -477,6 +573,7 @@ class TaskRuntime:
         # The last dispatch of each task that ended by returning it to the queue: its
         # worker and dispatch id, and the tasks the return moved.
         self._returned_dispatches: dict[str, tuple[str, str | None, list[str]]] = {}
+        self._input_checks: dict[str, _InputCheck] = {}
         self._report_writes = _ReportWrites()
         self._unacknowledged: dict[str, _Unacknowledged] = {}
         self._workflow_epoch_tasks: dict[str, deque[set[str]]] = {}
@@ -492,6 +589,8 @@ class TaskRuntime:
         self._model_settler: Callable[[ToolInvocationEnvelope], None] | None = None
         self._tool_broker: Callable[[ToolInvocationEnvelope], None] | None = None
         self._resident_terminal_hook: Callable[[str, bool], None] | None = None
+        self._failure_reporter: Callable[[TaskEvent], None] | None = None
+        self._pending_terminations: list[_Termination] = []
         # The worker-originated resident path: originate admits and relays the handoff
         # to the origin worker; the ack and outcome handlers consume the worker's fenced
         # transition reports. Set when resident-capacity control is enabled.
@@ -1039,16 +1138,17 @@ class TaskRuntime:
             ):
                 self._enqueue_ready_locked(record.task_id)
 
-        # Re-drive fan-out for any DONE producer whose spawn never sealed before a
-        # crash: its terminal event will not replay, so nothing else materializes the
-        # children. Re-driving is idempotent once the spawn has sealed.
-        for persisted in tasks:
-            if persisted.record.status != TaskStatus.DONE:
-                continue
-            advance = self._fan_out_children_locked(
-                workflow_id, engine, persisted.record.task_id
-            )
-            self._apply_advance_locked(workflow_id, advance)
+        # Re-drive any DONE producer whose spawn never sealed and any agent waiting on
+        # its bound inputs: their terminal events do not replay, so nothing else
+        # materializes the children or records the inputs.
+        if engine.blocked_input_agents() or any(
+            persisted.record.status == TaskStatus.DONE
+            and (spawn_op := engine.spawn_successor(persisted.record.task_id))
+            is not None
+            and engine.spawn_awaits_children(spawn_op)
+            for persisted in tasks
+        ):
+            self._redrive.drive_now(workflow_id)
 
         # Re-issue the off-lane dispatch for any mediated boundary suspended with no
         # durable outcome: the handler ran on an in-memory executor a crash discarded,
@@ -2063,13 +2163,13 @@ class TaskRuntime:
                 self.settle_episode_invocation(
                     agent_task_id, call, error="tool operation returned no outcome"
                 )
-            self._reap_mediated_op_locked(worker_id, agent_task_id, call)
+            self._reap_mediated_op(worker_id, agent_task_id, call)
 
     def _assigned_worker_locked(self, agent_task_id: str) -> str | None:
         record = self._tasks.get(agent_task_id)
         return record.assigned_worker if record else None
 
-    def _reap_mediated_op_locked(
+    def _reap_mediated_op(
         self, worker_id: str | None, agent_task_id: str, call: str
     ) -> None:
         """Relay a best-effort reap so the origin worker drops the request custody."""
@@ -2089,13 +2189,25 @@ class TaskRuntime:
 
     def _reap_ops_for_agents_locked(self, agent_task_ids: Sequence[str]) -> None:
         """Reap pending tool operations whose agent boundary just failed clean."""
-        failed = set(agent_task_ids)
+        for worker_id, agent_task_id, call in self._take_ops_for_agents_locked(
+            agent_task_ids
+        ):
+            self._reap_mediated_op(worker_id, agent_task_id, call)
+
+    def _take_ops_for_agents_locked(
+        self, agent_task_ids: Sequence[str]
+    ) -> list[tuple[str, str, str]]:
+        """Drop the agents' pending tool operations, returning each one's worker, agent
+        and call for reaping."""
+        agents = set(agent_task_ids)
+        taken: list[tuple[str, str, str]] = []
         for permit_id, (agent_task_id, call, worker_id) in list(
             self._pending_ops.items()
         ):
-            if agent_task_id in failed:
+            if agent_task_id in agents:
                 del self._pending_ops[permit_id]
-                self._reap_mediated_op_locked(worker_id, agent_task_id, call)
+                taken.append((worker_id, agent_task_id, call))
+        return taken
 
     def set_model_settler(
         self, settler: Callable[[ToolInvocationEnvelope], None]
@@ -2440,16 +2552,14 @@ class TaskRuntime:
             wi = engine.work_item(child_task_id)
             template = self._tasks.get(wi.operator_id) if wi else None
             if template is not None:
-                self._register_child_locked(child_task_id, template, None)
+                self._register_child_locked(child_task_id, template)
                 new_children.append(child_task_id)
         self._commit_new_children_locked(workflow_id, engine, new_children)
 
-    def _register_child_locked(
-        self, child_task_id: str, template: TaskRecord, element: Any
-    ) -> None:
+    def _register_child_locked(self, child_task_id: str, template: TaskRecord) -> None:
         """Install a self-contained task record for one materialized child."""
         self._tasks[child_task_id] = self._synthesize_child_record(
-            template, child_task_id, element
+            template, child_task_id
         )
         self._original_deps[child_task_id] = set()
 
@@ -2559,8 +2669,15 @@ class TaskRuntime:
             spec = record.task.spec
             if not isinstance(spec, (InferenceSpecStrict, InferenceSpecTemplate)):
                 return None
+            element = self._input_element_locked(task_id)
             try:
-                contract = canonical_contract(spec)
+                contract = (
+                    element_contract(
+                        spec, element.producer_task_id, element.ref.element
+                    )
+                    if element is not None
+                    else canonical_contract(spec)
+                )
             except CanonicalProjectionError:
                 self._logger.warning(
                     "[fabric] a contract leaf's request is no longer projectable: %s",
@@ -2647,27 +2764,125 @@ class TaskRuntime:
 
         Read-only evidence for the content authority: the worker must be the one
         running the task, and the task must already be bound to exactly this reference
-        — the request it was prepared with, or an outcome the engine delivered into its
-        episode. Naming an object it merely knows of authorizes nothing.
+        — the request it was prepared with, an outcome the engine delivered into its
+        episode, the settled result of an upstream task it depends on, or the producer
+        result one of its accepted inputs or its fan-out element is frozen to. Naming an
+        object it merely knows of authorizes nothing.
         """
         with self._lock:
             record = self._tasks.get(task_id)
-            if (
-                record is None
-                or record.status in TERMINAL_TASK_STATUSES
-                or not self._holds_dispatch_locked(record, worker_id, None)
-            ):
-                return False
-            resolution = self._input_resolution_locked(task_id)
-            if resolution is not None and resolution.reference == reference:
-                return True
-            engine = self._engines.get(record.workflow_id)
-            if engine is None:
-                return False
-            _, outcomes = engine.episode_context(task_id)
+            return (
+                record is not None
+                and record.status not in TERMINAL_TASK_STATUSES
+                and self._holds_dispatch_locked(record, worker_id, None)
+                and self._consumes_locked(record, reference)
+            )
+
+    def _consumes_locked(self, record: TaskRecord, reference: ContentReference) -> bool:
+        """Whether a task is bound to exactly this object as one of its inputs."""
+        if reference.authorization_scope != record.org_id:
+            return False
+        task_id = record.task_id
+        resolution = self._input_resolution_locked(task_id)
+        if resolution is not None and resolution.reference == reference:
+            return True
+        if self._upstream_result_is_locked(record, reference):
+            return True
+        engine = self._engines.get(record.workflow_id)
+        if engine is None:
+            return False
+        if self._frozen_input_is_locked(engine, task_id, reference):
+            return True
+        _, outcomes = engine.episode_context(task_id)
         return any(
             outcome.outcome_ref is not None and outcome.outcome_ref.content == reference
             for outcome in outcomes
+        )
+
+    def upstream_task_ids(self, task_id: str) -> set[str]:
+        """Every task a task depends on, directly or transitively."""
+        with self._lock:
+            return self._upstream_task_ids_locked(task_id)
+
+    def _upstream_task_ids_locked(self, task_id: str) -> set[str]:
+        pending = list(self._original_deps.get(task_id, ()))
+        visited: set[str] = set()
+        while pending:
+            dep_id = pending.pop()
+            if dep_id in visited:
+                continue
+            visited.add(dep_id)
+            pending.extend(self._original_deps.get(dep_id, ()))
+        return visited
+
+    def _upstream_result_is_locked(
+        self, record: TaskRecord, reference: ContentReference
+    ) -> bool:
+        """Whether a settled upstream of the task, or of one merged into its dispatch,
+        is bound to exactly this result."""
+        for member_id in (record.task_id, *(record.merged_children or [])):
+            member = self._tasks.get(member_id)
+            if member is None:
+                continue
+            for dep_id in self._upstream_task_ids_locked(member_id):
+                upstream = self._tasks.get(dep_id)
+                if (
+                    upstream is None
+                    or upstream.workflow_id != member.workflow_id
+                    or upstream.status != TaskStatus.DONE
+                ):
+                    continue
+                binding = self._result_binding_locked(dep_id)
+                if binding is not None and binding.reference == reference:
+                    return True
+        return False
+
+    def _frozen_input_is_locked(
+        self, engine: OrchestrationEngine, task_id: str, reference: ContentReference
+    ) -> bool:
+        """Whether an accepted input of the task, or its fan-out element, is frozen
+        to exactly this producer result."""
+        child_input = engine.child_input(task_id)
+        if child_input is not None and child_input.content == reference:
+            return True
+        return any(
+            (source := self._member_source_locked(member.value_ref)) is not None
+            and source.reference == reference
+            for accepted in engine.accepted_inputs_for_task(task_id)
+            for member in accepted.members
+        )
+
+    def input_element(self, task_id: str) -> ResultElementRef | None:
+        """The producer element a leaf fan-out child runs on, for its worker to hydrate.
+
+        An agent child receives its element through its accepted input.
+        """
+        with self._lock:
+            record = self._tasks.get(task_id)
+            engine = self._engines.get(record.workflow_id) if record else None
+            if engine is None or engine.agent_operator(task_id) is not None:
+                return None
+            element = self._input_element_locked(task_id)
+        return element.ref if element is not None else None
+
+    def _input_element_locked(self, task_id: str) -> _InputElement | None:
+        record = self._tasks.get(task_id)
+        engine = self._engines.get(record.workflow_id) if record else None
+        if engine is None:
+            return None
+        child_input = engine.child_input(task_id)
+        if (
+            child_input is None
+            or child_input.content is None
+            or child_input.collection_key is None
+            or child_input.legacy_task_id is None
+        ):
+            return None
+        return _InputElement(
+            child_input.legacy_task_id,
+            ResultElementRef(
+                reference=child_input.content, element=int(child_input.collection_key)
+            ),
         )
 
     def recorded_input_reference(self, task_id: str) -> ContentReference | None:
@@ -2751,13 +2966,54 @@ class TaskRuntime:
             self._cv.notify_all()
         self._save_ledger_locked(record.workflow_id)
 
-    def resolve_v2_output(
-        self, workflow_id: str, output_id: str
-    ) -> ResultPublication | None:
-        """Resolve a declared logical output to its terminal publication."""
+    def published_outputs(
+        self, workflow_id: str, name: str | None = None
+    ) -> PublishedOutputs | None:
+        """A workflow's published outputs, or one output's, in no particular order.
+
+        None for a workflow with no ledger.
+        """
         with self._lock:
             engine = self._engines.get(workflow_id)
-            return engine.resolve_output(output_id) if engine else None
+            if engine is None:
+                return None
+            return PublishedOutputs(
+                members=published_members(engine, name),
+                open=not self._workflow_settlement_locked(workflow_id).settled,
+            )
+
+    def published_output(
+        self,
+        workflow_id: str,
+        name: str,
+        scope_id: str | None,
+        key: str | None,
+        sequence: int | None,
+    ) -> PublishedOutput | None:
+        """One published output's member at the selectors, or None with no ledger."""
+        with self._lock:
+            engine = self._engines.get(workflow_id)
+            if engine is None:
+                return None
+            declaration, member = published_member(
+                engine, name, scope_id, key, sequence
+            )
+            return PublishedOutput(
+                declaration=declaration,
+                member=member,
+                open=not self._workflow_settlement_locked(workflow_id).settled,
+            )
+
+    def read_output(self, member: OutputMember) -> ResultEnvelope:
+        """The stored result a published member settled with, read off the lock.
+
+        Raises ``ResultUnavailable`` while the store cannot be reached and
+        ``ResultUnreadable`` for bound content that is missing or corrupt.
+        """
+        value_ref = member.publication.value_ref if member.publication else None
+        if value_ref is None or value_ref.content is None:
+            raise ResultUnreadable(f"output {member.name} has no bound result")
+        return self._results.read_reference(value_ref.content)
 
     def resolve_v2_legacy_result(
         self, workflow_id: str, task_id: str
@@ -2913,7 +3169,7 @@ class TaskRuntime:
         assert not advance.retry, "retry is applied by the failure path"
         engine = self._engines.get(workflow_id)
         if engine is not None:
-            self._resolve_agent_inputs_locked(workflow_id, engine, advance)
+            self._stage_agent_inputs_locked(workflow_id, engine, advance)
             self._retire_sealed_region_templates_locked(workflow_id, engine)
         changed = False
         for task_id in advance.ready:
@@ -2932,7 +3188,7 @@ class TaskRuntime:
         workflow_id: str,
         engine: OrchestrationEngine,
         producer_task_id: str,
-        prefetched: _FanoutRead | None = None,
+        read: _FanoutRead | None,
     ) -> Advance:
         """Materialize one dispatchable child per element of a producer's fan-out.
 
@@ -2968,7 +3224,10 @@ class TaskRuntime:
                 "dispatchable leaf",
             )
             return advance
-        read = prefetched or self._read_fanout_locked(producer_task_id)
+        if read is None:
+            # Nothing read the collection ahead of the lock: read it off the lock.
+            self._redrive.drive_now(workflow_id)
+            return advance
         if read.unavailable:
             # The collection is in a store that could not be reached: the spawn stays
             # open, holding the workflow, until a re-drive reads it.
@@ -2986,32 +3245,39 @@ class TaskRuntime:
             self._logger.error("Failing workflow %s: %s", workflow_id, read.error)
             self._fail_workflow_locked(workflow_id, read.error)
             return advance
-        elements = read.elements
-        # An agent child receives its element through the typed accepted-input channel
-        # its declared entry port; a leaf child keeps the legacy spec.data injection.
+        binding = self._result_binding_locked(producer_task_id)
+        content = binding.reference if binding is not None else None
+        if content != read.reference:
+            # The read predates the binding the producer settled with: read again.
+            self._redrive.drive_now(workflow_id)
+            return advance
+        # A child receives its element as a frozen reference into the producer result:
+        # an agent child through the typed accepted-input channel of its declared entry
+        # port, a leaf child as its child-init input, which its worker hydrates.
         child_is_agent = engine.agent_entry_port(child_template_id) is not None
         new_children: list[str] = []
-        for index, element in enumerate(elements):
+        for index in range(read.count):
+            value_ref = ValueRef(
+                kind="legacy_task_result",
+                legacy_task_id=producer_task_id,
+                content=content,
+                collection_key=str(index),
+            )
             try:
                 if child_is_agent:
-                    child_task_id = engine.create_fanout_child(
-                        spawn_op, producer_task_id, index
-                    )
-                    self._register_child_locked(child_task_id, template_record, None)
+                    child_task_id = engine.create_fanout_child(spawn_op, value_ref)
+                    self._register_child_locked(child_task_id, template_record)
                     self._mint_fanout_facet_locked(
-                        engine, child_task_id, producer_task_id, index
+                        engine, child_task_id, producer_task_id, index, value_ref
                     )
                     advance.extend(engine.reconsider_admission(child_task_id))
                     new_children.append(child_task_id)
                     continue
-                value_ref = ValueRef(
-                    kind="legacy_task_result", legacy_task_id=producer_task_id
-                )
                 child_advance = engine.materialize_child(spawn_op, value_ref=value_ref)
             except RegionError:
                 break  # a budget, seal, or denial stops further children
             for child_task_id in child_advance.ready:
-                self._register_child_locked(child_task_id, template_record, element)
+                self._register_child_locked(child_task_id, template_record)
                 new_children.append(child_task_id)
             advance.extend(child_advance)
         advance.extend(engine.seal_spawn(spawn_op))
@@ -3020,13 +3286,150 @@ class TaskRuntime:
         )
         return advance
 
-    def _redrive_workflow(self, workflow_id: str) -> None:
-        """Drive the advances a workflow deferred while the content store was away.
+    def _drive_workflow(self, workflow_id: str) -> None:
+        try:
+            self._check_unavailable_inputs(workflow_id)
+        except Exception:
+            # A check that stopped partway leaves its tasks held, so it runs again.
+            self._logger.exception(
+                "Checking the held inputs of workflow %s failed", workflow_id
+            )
+            self._redrive.schedule(workflow_id)
+        try:
+            self._redrive_workflow(workflow_id)
+        finally:
+            # A fan-out read here that finds its collection unreadable fails the
+            # workflow.
+            self._release_pending_terminations()
 
-        Every settled producer whose spawn has yet to fan out is read again off the
-        lock, and the fan-out and its advance are applied under it; applying the advance
-        also re-resolves the agent inputs waiting on stored values. A read that still
-        cannot reach the store schedules the next re-drive.
+    def _check_unavailable_inputs(self, workflow_id: str) -> None:
+        """Read each held task's unreadable inputs from here, off the lock.
+
+        Content missing or corrupt here fails the task as a report of the dispatch that
+        could not read it, published on the task-event stream like the worker's own
+        report. The check stays until that failure has committed, so a verdict whose
+        handling failed a durable write is reported again. A store control cannot reach
+        either, or any other error reading it, holds the task until a later re-drive.
+        Content control reads fine returns the task to the queue without blaming its
+        worker: one later read with control's own access says nothing about the path the
+        worker read through.
+        """
+        with self._lock:
+            checks = {
+                task_id: check
+                for task_id, check in self._input_checks.items()
+                if (record := self._tasks.get(task_id)) is not None
+                and record.workflow_id == workflow_id
+            }
+        if not checks:
+            return
+        verdicts = {
+            task_id: self._verify_inputs(check.references)
+            for task_id, check in checks.items()
+            if check.unreadable is None
+        }
+        failures: list[TaskEvent] = []
+        with self._cv:
+            for task_id, check in checks.items():
+                if self._input_checks.get(task_id) is not check:
+                    continue
+                record = self._tasks.get(task_id)
+                if check.unreadable is not None:
+                    if record is not None and (
+                        record.status == TaskStatus.PENDING
+                        or self._verdict_unacknowledged_locked(task_id)
+                    ):
+                        failures.append(_input_verdict(task_id, check))
+                    else:
+                        del self._input_checks[task_id]
+                    continue
+                if record is None or record.status != TaskStatus.PENDING:
+                    del self._input_checks[task_id]
+                    continue
+                verdict = verdicts[task_id]
+                if isinstance(verdict, ResultUnreadable):
+                    self._logger.warning(
+                        "Task %s input is unreadable at control: %s", task_id, verdict
+                    )
+                    check = self._input_checks[task_id] = replace(
+                        check, unreadable=str(verdict)
+                    )
+                    failures.append(_input_verdict(task_id, check))
+                    continue
+                if verdict is not None:
+                    self._logger.warning(
+                        "Task %s waits: control cannot read its inputs either: %s",
+                        task_id,
+                        verdict,
+                    )
+                    self._redrive.schedule(workflow_id)
+                    continue
+                self._logger.info(
+                    "Task %s runs again: control reads the inputs its worker could not",
+                    task_id,
+                )
+                if self._enqueue_ready_locked(task_id, front=False):
+                    self._cv.notify_all()
+                self._commit_locked(task_id)
+                del self._input_checks[task_id]
+            if failures:
+                # A later drive drops each check whose verdict has committed, or
+                # reports it again.
+                self._redrive.recheck(workflow_id)
+            else:
+                self._redrive.reset_recheck(workflow_id)
+        for event in failures:
+            self._report_failure(event)
+
+    def _verdict_unacknowledged_locked(self, task_id: str) -> bool:
+        """Whether control's verdict on a task failed a durable write and waits to be
+        handled again."""
+        pending = self._unacknowledged.get(task_id)
+        return pending is not None and pending.report == _INPUT_VERDICT_REPORT
+
+    def _verify_inputs(
+        self, references: tuple[ContentReference, ...]
+    ) -> ResultUnreadable | Exception | None:
+        """Why control cannot read these objects either, or None when it reads them."""
+        pending: Exception | None = None
+        for reference in references:
+            try:
+                self._results.verify(reference)
+            except ResultUnreadable as exc:
+                return exc
+            except Exception as exc:
+                # Unreachable, or an error that says nothing about the content itself.
+                pending = exc
+        return pending
+
+    def set_failure_reporter(self, report: Callable[[TaskEvent], None]) -> None:
+        """Install the handler a failure control decides on is reported through, so it
+        runs the side effects of a worker's failure report."""
+        self._failure_reporter = report
+
+    def _report_failure(self, event: TaskEvent) -> None:
+        if self._failure_reporter is not None:
+            self._failure_reporter(event)
+            return
+        self.fail_dispatch(
+            event.task_id,
+            event.worker_id or "",
+            {},
+            event.ts,
+            event.dispatch_id,
+            error=event.error,
+            retryable=event.retryable,
+            failure_kind=event.failure_kind,
+        )
+
+    def _redrive_workflow(self, workflow_id: str) -> None:
+        """Drive the advances of a workflow that wait on a read of stored results.
+
+        Every settled producer whose spawn has yet to fan out has its collection read,
+        and every blocked agent whose bound inputs need reading has them read, all off
+        the lock. The results apply under it: an agent's inputs record only while the
+        snapshot they were read for holds, and are read again otherwise. A read
+        that cannot reach the store schedules the next re-drive.
         """
         with self._lock:
             engine = self._engines.get(workflow_id)
@@ -3040,10 +3443,18 @@ class TaskRuntime:
                 and (spawn_op := engine.spawn_successor(task_id)) is not None
                 and engine.spawn_awaits_children(spawn_op)
             ]
-        reads: dict[str, _FanoutRead] = {}
-        for task_id, binding in producers:
-            if binding is not None and binding.reference is not None:
-                reads[task_id] = self._read_collection(binding)
+            snapshots = [
+                snapshot
+                for task_id in engine.blocked_input_agents()
+                if (snapshot := self._agent_input_snapshot_locked(engine, task_id))
+                is not None
+                and snapshot.references
+            ]
+        reads = {
+            task_id: self._read_fanout(task_id, binding)
+            for task_id, binding in producers
+        }
+        values = self._read_input_values(snapshots)
         with self._cv:
             if (engine := self._engines.get(workflow_id)) is None:
                 return
@@ -3051,8 +3462,17 @@ class TaskRuntime:
             for task_id, _binding in producers:
                 advance.extend(
                     self._fan_out_children_locked(
-                        workflow_id, engine, task_id, reads.get(task_id)
+                        workflow_id, engine, task_id, reads[task_id]
                     )
+                )
+            for snapshot in snapshots:
+                if self._agent_input_snapshot_locked(engine, snapshot.task_id) != (
+                    snapshot
+                ):
+                    self._redrive.drive_now(workflow_id)
+                    continue
+                self._settle_agent_inputs_locked(
+                    workflow_id, engine, snapshot, values, advance
                 )
             if self._apply_advance_locked(workflow_id, advance):
                 self._cv.notify_all()
@@ -3084,49 +3504,32 @@ class TaskRuntime:
             ):
                 return None
             reference = self._accepted_reference(record, reference)
-        if skip is not None:
-            return _FanoutRead()
-        if reference is None:
-            return _FanoutRead(error=f"fan-out producer {task_id} has no bound result")
-        return self._read_collection(
-            ResultBinding(task_id=task_id, reference=reference)
+        return self._read_fanout(
+            task_id, ResultBinding(task_id=task_id, reference=reference, skip=skip)
         )
 
-    def _read_collection(self, binding: ResultBinding) -> _FanoutRead:
-        """Read a producer's collection off the lock, retrying a store that is away."""
+    def _read_fanout(self, task_id: str, binding: ResultBinding | None) -> _FanoutRead:
+        """Count a producer's collection off the lock, retrying a store that is away."""
+        if binding is not None and binding.skip is not None:
+            return _FanoutRead()
+        if binding is None or binding.reference is None:
+            return _FanoutRead(error=f"fan-out producer {task_id} has no bound result")
         for attempt in range(_FANOUT_READ_ATTEMPTS):
             try:
-                return _FanoutRead(
-                    elements=_fanout_elements(self._results.read(binding))
-                )
+                envelope = self._results.read(binding)
             except ResultUnreadable as exc:
                 return _FanoutRead(
-                    error=f"fan-out producer {binding.task_id} result is unreadable: "
-                    f"{exc}"
+                    error=f"fan-out producer {task_id} result is unreadable: {exc}"
                 )
             except ResultUnavailable as exc:
                 if attempt + 1 == _FANOUT_READ_ATTEMPTS:
                     return _FanoutRead(error=str(exc), unavailable=True)
                 time.sleep(_FANOUT_READ_BACKOFF_SEC)
+                continue
+            return _FanoutRead(
+                count=len(collection_elements(envelope)), reference=binding.reference
+            )
         raise AssertionError("unreachable")
-
-    def _read_fanout_locked(self, producer_task_id: str) -> _FanoutRead:
-        """Read a settled producer's fan-out collection once, under the lock."""
-        binding = self._result_binding_locked(producer_task_id)
-        if binding is not None and binding.skip is not None:
-            return _FanoutRead()
-        if binding is None or binding.reference is None:
-            return _FanoutRead(
-                error=f"fan-out producer {producer_task_id} has no bound result"
-            )
-        try:
-            return _FanoutRead(elements=_fanout_elements(self._results.read(binding)))
-        except ResultUnreadable as exc:
-            return _FanoutRead(
-                error=f"fan-out producer {producer_task_id} result is unreadable: {exc}"
-            )
-        except ResultUnavailable as exc:
-            return _FanoutRead(error=str(exc), unavailable=True)
 
     def _mint_fanout_facet_locked(
         self,
@@ -3134,6 +3537,7 @@ class TaskRuntime:
         child_task_id: str,
         producer_task_id: str,
         index: int,
+        value_ref: ValueRef,
     ) -> None:
         """Record a fan-out child's typed entry-port input from its producer element."""
         wi = engine.work_item(child_task_id)
@@ -3142,11 +3546,6 @@ class TaskRuntime:
         entry_port = engine.agent_entry_port(wi.operator_id)
         if entry_port is None:
             return
-        value_ref = ValueRef(
-            kind="legacy_task_result",
-            legacy_task_id=producer_task_id,
-            collection_key=str(index),
-        )
         engine.record_accepted_input(
             AcceptedInput(
                 activation_id=wi.activation_id,
@@ -3165,45 +3564,144 @@ class TaskRuntime:
             )
         )
 
-    def _resolve_agent_inputs_locked(
+    def _stage_agent_inputs_locked(
         self, workflow_id: str, engine: OrchestrationEngine, advance: Advance
     ) -> None:
-        """Resolve and record each edge-bound agent's accepted inputs, then re-admit.
+        """Record each edge-bound agent's accepted inputs that need no stored read.
 
-        The engine owns membership and ordering; the runtime resolves every member's
-        frozen value and records the durable accepted input. A member whose value is not
-        yet readable defers the whole port until a later advance, and one whose store
-        cannot be reached defers it until a re-drive.
+        An agent whose bound inputs have to be read from the store is left for an
+        immediate off-lock re-drive, which reads them and records them there.
         """
+        drive = False
         for task_id in engine.blocked_input_agents():
-            plan = engine.agent_input_plan(task_id)
-            if plan is None:
+            snapshot = self._agent_input_snapshot_locked(engine, task_id)
+            if snapshot is None:
                 continue
-            resolved: list[tuple[str, AcceptedInput]] = []
-            total_bytes = 0
-            unreadable: str | None = None
-            unavailable = False
-            for port in plan.ports:
-                members: list[AcceptedInputMember] = []
-                for member in port.members:
-                    value_ref = ValueRef(
-                        kind=member.value_ref_kind,
-                        legacy_task_id=member.legacy_task_id,
-                        collection_key=member.collection_key,
-                        literal=member.literal,
+            if snapshot.references:
+                drive = True
+                continue
+            self._settle_agent_inputs_locked(workflow_id, engine, snapshot, {}, advance)
+        if drive:
+            self._redrive.drive_now(workflow_id)
+
+    def _agent_input_snapshot_locked(
+        self, engine: OrchestrationEngine, task_id: str
+    ) -> _AgentInputSnapshot | None:
+        """What an agent's pending input ports resolve from, as the ledger stands.
+
+        Each member of a port whose producers are all bound is frozen to the result its
+        producer settled with. A port with a member whose producer has nothing bound
+        waits for a later advance; a producer that settled with nothing bound makes the
+        whole input unreadable.
+        """
+        plan = engine.agent_input_plan(task_id)
+        if plan is None:
+            return None
+        ports: list[_PortSnapshot] = []
+        unreadable: str | None = None
+        for port in plan.ports:
+            members: list[tuple[InputMemberPlan, ValueRef]] = []
+            for member in port.members:
+                value_ref = ValueRef(
+                    kind=member.value_ref_kind,
+                    legacy_task_id=member.legacy_task_id,
+                    collection_key=member.collection_key,
+                    literal=member.literal,
+                )
+                if value_ref.kind == "legacy_task_result":
+                    producer = value_ref.legacy_task_id or ""
+                    binding = self._result_binding_locked(producer)
+                    if binding is None or binding.reference is None:
+                        if self._settled_unbound_locked(producer):
+                            unreadable = f"task {producer} settled with no bound result"
+                        break
+                    value_ref = value_ref.model_copy(
+                        update={"content": binding.reference}
                     )
-                    try:
-                        value = self._resolve_value_ref(value_ref)
-                    except ResultUnreadable as exc:
-                        unreadable = str(exc)
-                        break
-                    except ResultUnavailable:
-                        unavailable = True
-                        break
-                    if value is None:
-                        break
-                    total_bytes += len(value.encode("utf-8"))
-                    members.append(
+                elif value_ref.kind not in ("inline", "empty"):
+                    break
+                members.append((member, value_ref))
+            if unreadable is not None:
+                break
+            if len(members) == len(port.members):
+                ports.append(
+                    _PortSnapshot(
+                        target_port=port.target_port,
+                        provenance=port.provenance,
+                        members=tuple(members),
+                    )
+                )
+        return _AgentInputSnapshot(
+            task_id=task_id,
+            activation_id=plan.activation_id,
+            ports=tuple(ports),
+            unreadable=unreadable,
+        )
+
+    def _read_input_values(
+        self, snapshots: list[_AgentInputSnapshot]
+    ) -> dict[ContentReference, ResultEnvelope | Exception]:
+        """Read every result the snapshots' inputs are frozen to, off the lock."""
+        values: dict[ContentReference, ResultEnvelope | Exception] = {}
+        for snapshot in snapshots:
+            for reference in snapshot.references.values():
+                if reference in values:
+                    continue
+                try:
+                    values[reference] = self._results.read_reference(reference)
+                except (ResultUnavailable, ResultUnreadable) as exc:
+                    values[reference] = exc
+        return values
+
+    def _settle_agent_inputs_locked(
+        self,
+        workflow_id: str,
+        engine: OrchestrationEngine,
+        snapshot: _AgentInputSnapshot,
+        values: dict[ContentReference, ResultEnvelope | Exception],
+        advance: Advance,
+    ) -> None:
+        """Record an agent's accepted inputs from their read values, then re-admit.
+
+        The budget counts the bytes of the resolved member strings; inputs over it fail
+        the agent as a declared failure.
+        """
+        task_id = snapshot.task_id
+        if snapshot.unreadable is not None:
+            advance.extend(
+                engine.on_failed(
+                    task_id, f"input_unreadable: {snapshot.unreadable}", retryable=False
+                )
+            )
+            return
+        read = [values.get(ref) for ref in snapshot.references.values()]
+        if any(isinstance(value, ResultUnavailable) for value in read):
+            self._redrive.schedule(workflow_id)
+            return
+        if unreadable := next(
+            (value for value in read if isinstance(value, ResultUnreadable)), None
+        ):
+            advance.extend(
+                engine.on_failed(
+                    task_id, f"input_unreadable: {unreadable}", retryable=False
+                )
+            )
+            return
+        total_bytes = 0
+        accepted: list[AcceptedInput] = []
+        for port in snapshot.ports:
+            texts = [
+                _member_text(value_ref, values) for _member, value_ref in port.members
+            ]
+            if any(text is None for text in texts):
+                continue
+            total_bytes += sum(len((text or "").encode("utf-8")) for text in texts)
+            accepted.append(
+                AcceptedInput(
+                    activation_id=snapshot.activation_id,
+                    target_port=port.target_port,
+                    provenance=port.provenance,
+                    members=tuple(
                         AcceptedInputMember(
                             source_operator_id=member.source_operator_id,
                             source_activation_id=member.source_activation_id,
@@ -3212,93 +3710,32 @@ class TaskRuntime:
                             value_ref=value_ref,
                             ordinal=member.ordinal,
                         )
-                    )
-                if unreadable is not None or unavailable:
-                    break
-                if len(members) != len(port.members):
-                    continue
-                resolved.append(
-                    (
-                        port.target_port,
-                        AcceptedInput(
-                            activation_id=plan.activation_id,
-                            target_port=port.target_port,
-                            provenance=port.provenance,
-                            members=tuple(members),
-                        ),
-                    )
+                        for member, value_ref in port.members
+                    ),
                 )
-            if unavailable:
-                self._redrive.schedule(workflow_id)
-                continue
-            if unreadable is not None:
-                # A bound input is stored before it is bound, so one that cannot be read
-                # fails the agent rather than deferring it on a value that never comes.
-                advance.extend(
-                    engine.on_failed(
-                        task_id, f"input_unreadable: {unreadable}", retryable=False
-                    )
-                )
-                continue
-            # Overflow is a typed declared failure, never silent truncation: a resolved
-            # input cone exceeding the budget fails the agent instead of dispatching it.
-            if total_bytes > self._input_budget_bytes:
-                advance.extend(
-                    engine.on_failed(
-                        task_id,
-                        f"input_too_large: resolved input is {total_bytes} bytes, "
-                        f"over the {self._input_budget_bytes}-byte budget",
-                        retryable=False,
-                    )
-                )
-                continue
-            for _, accepted in resolved:
-                engine.record_accepted_input(accepted)
-            advance.extend(engine.reconsider_admission(task_id))
-
-    def _resolve_value_ref(self, value_ref: ValueRef | None) -> str | None:
-        """Resolve a frozen value reference to its immutable string value, or None.
-
-        An inline value is its literal; a producer reference reads the settled result
-        selects one collection element (a fan-out element) or the whole ``value``. None
-        signals a result with nothing bound yet, deferring the input; a bound result
-        that cannot be read raises ``ResultUnreadable``.
-        """
-        if value_ref is None:
-            return None
-        if value_ref.kind == "inline":
-            return value_ref.literal or ""
-        if value_ref.kind == "empty":
-            return ""
-        if value_ref.kind != "legacy_task_result" or not value_ref.legacy_task_id:
-            return None
-        binding = self._result_binding_locked(value_ref.legacy_task_id)
-        if binding is None or binding.reference is None:
-            if self._settled_unbound_locked(value_ref.legacy_task_id):
-                raise ResultUnreadable(
-                    f"task {value_ref.legacy_task_id} settled with no bound result"
-                )
-            return None
-        payload = self._results.read(binding).result.model_dump()
-        if value_ref.collection_key is not None:
-            collection = _result_collection(payload)
-            if collection is None:
-                return None
-            index = int(value_ref.collection_key)
-            if index < 0 or index >= len(collection):
-                return None
-            item = collection[index]
-            item = (
-                item["output"] if isinstance(item, dict) and "output" in item else item
             )
-            return _stringify(item)
-        value = payload.get("value")
-        return _stringify(value if value is not None else payload)
+        if total_bytes > self._input_budget_bytes:
+            advance.extend(
+                engine.on_failed(
+                    task_id,
+                    f"input_too_large: resolved input is {total_bytes} bytes, "
+                    f"over the {self._input_budget_bytes}-byte budget",
+                    retryable=False,
+                )
+            )
+            return
+        for entry in accepted:
+            engine.record_accepted_input(entry)
+        advance.extend(engine.reconsider_admission(task_id))
 
     def _agent_input_bindings(
         self, engine: OrchestrationEngine, task_id: str
     ) -> tuple[InputBinding, ...]:
-        """The resolved first-turn input bindings for an agent's input ports."""
+        """The first-turn input bindings for an agent's input ports.
+
+        A member a producer's result supplies names that result for the worker to
+        hydrate; an inline member carries its own literal.
+        """
         bindings: list[InputBinding] = []
         for ordinal, accepted in enumerate(engine.accepted_inputs_for_task(task_id)):
             members = tuple(
@@ -3307,7 +3744,8 @@ class TaskRuntime:
                     source_activation_id=member.source_activation_id,
                     child_index=member.child_index,
                     outcome=member.outcome.value,
-                    value=self._resolve_value_ref(member.value_ref),
+                    value=_literal_text(member.value_ref),
+                    source=self._member_source_locked(member.value_ref),
                     ordinal=member.ordinal,
                 )
                 for member in accepted.members
@@ -3322,22 +3760,28 @@ class TaskRuntime:
             )
         return tuple(bindings)
 
+    def _member_source_locked(
+        self, value_ref: ValueRef | None
+    ) -> ResultValueRef | None:
+        """The stored result an input member reads, when a producer supplies it."""
+        if value_ref is None or value_ref.kind != "legacy_task_result":
+            return None
+        reference = value_ref.content
+        if reference is None and value_ref.legacy_task_id:
+            binding = self._result_binding_locked(value_ref.legacy_task_id)
+            reference = binding.reference if binding is not None else None
+        if reference is None:
+            return None
+        return ResultValueRef(reference=reference, element=_element_of(value_ref))
+
     def _synthesize_child_record(
-        self, template: TaskRecord, child_task_id: str, element: Any
+        self, template: TaskRecord, child_task_id: str
     ) -> TaskRecord:
-        """Clone a child-template record for one materialized child, injecting input."""
-        task = template.task
-        spec = task.spec
-        if element is not None and "data" in type(spec).model_fields:
-            spec = spec.model_copy(
-                update={"data": {"type": "list", "items": [element]}}
-            )
-            task = task.model_copy(update={"spec": spec})
+        """Clone a child-template record for one materialized child."""
         return template.model_copy(
             deep=True,
             update={
                 "task_id": child_task_id,
-                "task": task,
                 "status": TaskStatus.PENDING,
                 "assigned_worker": None,
                 "started_ts": None,
@@ -3381,17 +3825,25 @@ class TaskRuntime:
         return failed_now
 
     def _fail_workflow_locked(self, workflow_id: str, reason: str) -> None:
-        """Fail every non-terminal task of a workflow and persist the terminal facts."""
-        self._redrive.settle(workflow_id)
+        """Fail a workflow in its ledger and every non-terminal task of it, and persist
+        the terminal facts.
+
+        What its work held is released once the caller leaves the lock, through
+        ``_release_pending_terminations``.
+        """
+        termination = self._terminate_workflow_locked(workflow_id, reason, reason)
         non_terminal = [
             task_id
             for task_id, record in self._tasks.items()
             if record.workflow_id == workflow_id
             and record.status not in TERMINAL_TASK_STATUSES
         ]
-        if self._fail_v2_records_locked(non_terminal, reason, persist=True):
+        self._fail_v2_records_locked(non_terminal, reason, persist=True)
+        if workflow_id in self._engines:
             self._save_ledger_locked(workflow_id)
-            self._cv.notify_all()
+        self._reclaim_vault_if_settled_locked(workflow_id)
+        self._cv.notify_all()
+        self._pending_terminations.append(termination)
 
     def _fail_v2_cascade_locked(
         self, primary: str, cascade: list[str]
@@ -3829,6 +4281,16 @@ class TaskRuntime:
             return True
 
     def _record_dispatch_locked(self, record: TaskRecord, publish: _Publish) -> None:
+        self._take_dispatch_locked(record, publish)
+        self._workflow_registry.commit_transition(
+            record.workflow_id,
+            records=self._records_locked(record.task_id),
+            dispatched=[record.task_id],
+        )
+        self._save_ledger_locked(record.workflow_id)
+
+    def _take_dispatch_locked(self, record: TaskRecord, publish: _Publish) -> None:
+        """Record a published dispatch as the one holding its task, in memory."""
         task_id = record.task_id
         publish.recorded = True
         self._returned_dispatches.pop(task_id, None)
@@ -3853,12 +4315,6 @@ class TaskRuntime:
                 engine.on_input_preparation_dispatched(task_id, publish.worker_id)
             else:
                 engine.on_dispatched(task_id, publish.worker_id)
-        self._workflow_registry.commit_transition(
-            record.workflow_id,
-            records=self._records_locked(task_id),
-            dispatched=[task_id],
-        )
-        self._save_ledger_locked(record.workflow_id)
 
     def mark_started(
         self,
@@ -3931,15 +4387,19 @@ class TaskRuntime:
         The success binds the result reference it reports, once, at the commit that
         makes the task DONE; a success that does not settle the task binds nothing.
         """
-        return self._reported(
-            "TASK_SUCCEEDED",
-            task_id,
-            worker_id,
-            dispatch_id,
-            lambda: self._apply_success(
-                task_id, worker_id, payload, ts, dispatch_id, skip
-            ),
-        )
+        try:
+            return self._reported(
+                "TASK_SUCCEEDED",
+                task_id,
+                worker_id,
+                dispatch_id,
+                lambda: self._apply_success(
+                    task_id, worker_id, payload, ts, dispatch_id, skip
+                ),
+            )
+        finally:
+            # A success whose fan-out cannot be read fails its workflow.
+            self._release_pending_terminations()
 
     def _apply_success(
         self,
@@ -4182,22 +4642,42 @@ class TaskRuntime:
         *,
         error: str | None = None,
         retryable: bool | None = None,
+        failure_kind: TaskFailureKind | None = None,
+        unavailable_inputs: Sequence[ContentReference] | None = None,
     ) -> FailureOutcome:
         """Apply a worker's report that its dispatch of a task failed.
 
         A report from the dispatch holding a running task returns a merged dispatch to
-        run its tasks alone, or charges the failure to the worker and either returns
-        the task to the head of the queue for another attempt or settles it: FAILED,
-        or CANCELLED when a cancel is already under way. A report on a settled task
-        persists its settlement again, and one from any other dispatch is dropped.
+        run its tasks alone. A task whose inputs were in a store its worker could not
+        reach returns without spending an attempt and is held until control has read
+        them itself; a report naming no input the task consumes is an ordinary failure.
+        Otherwise the failure is charged to the worker and the task either returns to
+        the head of the queue for another attempt or settles: FAILED, or CANCELLED when
+        a cancel is already under way. A report on a settled task persists its
+        settlement again, and one from any other dispatch is dropped.
         """
+        # Control's verdict on a held task's input is a report of its own, so it never
+        # replays the worker report of the same dispatch.
+        report = (
+            _INPUT_VERDICT_REPORT
+            if failure_kind is TaskFailureKind.INPUT_UNREADABLE
+            else "TASK_FAILED"
+        )
         return self._reported(
-            "TASK_FAILED",
+            report,
             task_id,
             worker_id,
             dispatch_id,
             lambda: self._apply_failure(
-                task_id, worker_id, payload, ts, dispatch_id, error, retryable
+                task_id,
+                worker_id,
+                payload,
+                ts,
+                dispatch_id,
+                error,
+                retryable,
+                failure_kind,
+                unavailable_inputs,
             ),
         )
 
@@ -4210,9 +4690,32 @@ class TaskRuntime:
         dispatch_id: str | None,
         error: str | None,
         retryable: bool | None,
+        failure_kind: TaskFailureKind | None,
+        unavailable_inputs: Sequence[ContentReference] | None,
     ) -> FailureOutcome:
         with self._cv:
             record = self._tasks.get(task_id)
+            if record is not None and self._is_input_verdict_locked(
+                record, worker_id, dispatch_id, failure_kind
+            ):
+                # The worker's own report of this dispatch, stashed after a failed
+                # write, is superseded: make what it held back and drop it, so its
+                # redelivery finds the task settled.
+                if (
+                    (stash := self._unacknowledged.get(task_id)) is not None
+                    and stash.report == "TASK_FAILED"
+                    and stash.worker_id == worker_id
+                    and stash.dispatch_id in (None, dispatch_id)
+                ):
+                    self._recommit_locked(stash.held)
+                    del self._unacknowledged[task_id]
+                record.last_error = error
+                impacted, usages = self.mark_failed(
+                    task_id, worker_id, payload, ts, error=error
+                )
+                return FailureOutcome(
+                    DispatchEnd.FAILED, record.attempts, impacted, usages
+                )
             if record is None or not self._accepts_event_locked(
                 record, worker_id, dispatch_id
             ):
@@ -4225,10 +4728,31 @@ class TaskRuntime:
                 return FailureOutcome(
                     DispatchEnd.MERGE_RETURNED, record.attempts, [], []
                 )
-            if worker_id not in record.failed_workers:
-                record.failed_workers.append(worker_id)
             if error:
                 record.last_error = error
+            if (
+                failure_kind is TaskFailureKind.INPUT_UNAVAILABLE
+                and record.status != TaskStatus.CANCELLING
+            ):
+                if consumed := self._consumed_inputs_locked(
+                    record, unavailable_inputs or ()
+                ):
+                    held_dispatch = record.dispatch_id
+                    end = self._return_dispatch_locked(
+                        record, increment_retry=False, front=False
+                    )
+                    self._hold_for_input_check_locked(
+                        record, worker_id, held_dispatch, consumed
+                    )
+                    return FailureOutcome(end, record.attempts, [], [])
+                self._logger.warning(
+                    "Task %s: worker %s reported unreachable inputs the task does not "
+                    "consume; charging the failure to it",
+                    task_id,
+                    worker_id,
+                )
+            if worker_id not in record.failed_workers:
+                record.failed_workers.append(worker_id)
             if _failed_task_can_retry(record, retryable):
                 end = self._return_dispatch_locked(
                     record, increment_retry=True, front=True
@@ -4244,6 +4768,52 @@ class TaskRuntime:
                 else DispatchEnd.FAILED
             )
             return FailureOutcome(end, record.attempts, impacted, usages)
+
+    def _consumed_inputs_locked(
+        self, record: TaskRecord, references: Sequence[ContentReference]
+    ) -> tuple[ContentReference, ...]:
+        """The named objects the task consumes, each once."""
+        return tuple(
+            reference
+            for reference in dict.fromkeys(references)
+            if self._consumes_locked(record, reference)
+        )
+
+    def _hold_for_input_check_locked(
+        self,
+        record: TaskRecord,
+        worker_id: str,
+        dispatch_id: str | None,
+        references: tuple[ContentReference, ...],
+    ) -> None:
+        """Keep a returned task out of the queue until control has read its inputs."""
+        self._remove_from_ready_locked(record.task_id)
+        self._input_checks[record.task_id] = _InputCheck(
+            worker_id, dispatch_id, references
+        )
+        self._redrive.drive_now(record.workflow_id)
+
+    def _is_input_verdict_locked(
+        self,
+        record: TaskRecord,
+        worker_id: str,
+        dispatch_id: str | None,
+        failure_kind: TaskFailureKind | None,
+    ) -> bool:
+        """Whether a failure is control's verdict that a held task's input is
+        unreadable.
+
+        The held check stands in for the dispatch the task returned from, so the verdict
+        reports as that dispatch.
+        """
+        check = self._input_checks.get(record.task_id)
+        return (
+            failure_kind is TaskFailureKind.INPUT_UNREADABLE
+            and check is not None
+            and check.unreadable is not None
+            and record.status == TaskStatus.PENDING
+            and (check.worker_id, check.dispatch_id) == (worker_id, dispatch_id)
+        )
 
     def return_dispatch(
         self,
@@ -4295,15 +4865,20 @@ class TaskRuntime:
                 self._merge_children_map.pop(task_id, [])
             ),
         ]
-        engine = self._engines.get(record.workflow_id) if increment_retry else None
+        engine = self._engines.get(record.workflow_id)
+        changed = False
         if engine is not None:
             # A retry reuses the work item and its invocation; the engine records the
-            # failed attempt and readies the work item for a fresh one.
-            engine.on_failed(
-                task_id, record.last_error or "task failed", retryable=True
-            )
+            # failed attempt, or closes an uncharged one, and readies the work item.
+            if increment_retry:
+                engine.on_failed(
+                    task_id, record.last_error or "task failed", retryable=True
+                )
+                changed = True
+            else:
+                changed = engine.on_returned(task_id)
         self._release_dispatch_locked(record, moved, front=front)
-        if engine is not None:
+        if engine is not None and changed:
             self._save_ledger_locked(record.workflow_id)
         return DispatchEnd.RETURNED
 
@@ -4468,13 +5043,10 @@ class TaskRuntime:
     # ------------------------------------------------------------------ #
 
     def cancel_workflow(self, workflow_id: str, reason: str = "cancelled") -> list[str]:
-        self._redrive.settle(workflow_id)
         cancelled: list[str] = []
         cancelling: list[str] = []
         touched: list[str] = []
         returned: list[str] = []
-        interrupts: list[InterruptMessage] = []
-        resident_invocation_ids: list[str] = []
         with self._cv:
             workflow_tasks = [
                 item
@@ -4483,16 +5055,8 @@ class TaskRuntime:
             ]
             if not workflow_tasks:
                 return touched  # Unknown workflow: no records to move
+            termination = self._terminate_workflow_locked(workflow_id, reason, None)
             for task_id, record in workflow_tasks:
-                publish = self._publishing.get(task_id)
-                if (
-                    publish
-                    and not publish.recorded
-                    and record.status == TaskStatus.PENDING
-                ):
-                    # The worker may already be running the task, so the cancel reaches
-                    # it as an interrupt.
-                    self._record_dispatch_locked(record, publish)
                 match record.status:
                     case TaskStatus.PENDING:
                         returned += self._cancel_in_place_locked(record, reason)
@@ -4507,30 +5071,19 @@ class TaskRuntime:
                     case TaskStatus.DISPATCHED if record.assigned_worker:
                         record.status = TaskStatus.CANCELLING
                         record.error = reason
-                        interrupts.append(
-                            InterruptMessage(
-                                task_id=task_id,
-                                worker_id=record.assigned_worker,
-                                reason=reason,
-                            )
-                        )
                         cancelling.append(task_id)
                         touched.append(task_id)
                     case _:
                         continue
 
-            # Reap the cancelled agents' pending mediated egress so the worker drops the
-            # operation and its custody.
-            self._reap_ops_for_agents_locked([task_id for task_id, _ in workflow_tasks])
-
-            self._workflow_epoch_tasks.pop(workflow_id, None)
-            self._workflow_epoch_frontier.pop(workflow_id, None)
-            self._workflow_in_epoch_order.pop(workflow_id, None)
-            for task_id, _ in workflow_tasks:
-                self._task_epoch_index.pop(task_id, None)
             self._workflow_registry.commit_transition(
                 workflow_id,
                 records=self._records_locked(*touched),
+                dispatched=[
+                    task_id
+                    for task_id in termination.recorded
+                    if self._tasks[task_id].status == TaskStatus.CANCELLING
+                ],
                 cancelled=cancelled,
                 sched=self._sched_locked(workflow_id),
             )
@@ -4541,15 +5094,10 @@ class TaskRuntime:
                     if self._tasks[child_id].workflow_id != workflow_id
                 )
             )
-            # Mirror the cancellation into the orchestration ledger so a v2 workflow's
-            # work items settle CANCELLED in lockstep with its task records; the
-            # snapshot follows the committed task state so the ledger never leads it.
+            # The ledger snapshot follows the committed task state so it never leads
+            # it.
             if workflow_id in self._engines:
                 engine = self._engines[workflow_id]
-                engine.cancel_instance()
-                resident_invocation_ids = (
-                    engine.cancel_outstanding_boundary_invocations()
-                )
                 # A suspended-boundary episode has no dispatch to interrupt and
                 # returns no terminal, so the cancel settles it here.
                 for suspended in engine.suspended_boundary_tasks():
@@ -4564,23 +5112,113 @@ class TaskRuntime:
             # for their own terminals.
             self._notify_terminal_transition(workflow_id)
 
-        # A cancelled in-flight resident invocation releases its credit from this fenced
-        # cancellation terminal, so a lost or draining replica is not held forever.
-        for invocation_id in resident_invocation_ids:
-            self._release_resident_credit(invocation_id, failed=True)
+        self._release_terminated_work(termination)
+        self._secret_vault.purge(workflow_id)
+        return touched
 
-        for interrupt in interrupts:
-            worker = self._worker_registry.get_worker(interrupt.worker_id)
-            if worker is None:
-                self._logger.warning(
-                    "Cannot publish interrupt for %s; worker %s missing",
+    def _terminate_workflow_locked(
+        self, workflow_id: str, reason: str, failure: str | None
+    ) -> _Termination:
+        """Settle a workflow's ledger terminally and take what its work still holds.
+
+        Runs before the caller moves the task records. A cancel (``failure`` None)
+        resolves the unpublished outputs as cancelled and a control failure as declared
+        failures. Either way a dispatch being published is recorded so its worker is
+        interrupted with every other running task, the agents' mediated operations are
+        taken for reaping, the pending re-drive and held input checks are dropped, and
+        every unsettled boundary invocation is terminalized. It writes nothing: the
+        caller's terminal commit persists it, and ``_release_terminated_work`` releases
+        what it returns once that commit is made.
+        """
+        self._redrive.settle(workflow_id)
+        records = [
+            record
+            for record in self._tasks.values()
+            if record.workflow_id == workflow_id
+        ]
+        interrupts: list[InterruptMessage] = []
+        recorded: list[str] = []
+        for record in records:
+            publish = self._publishing.get(record.task_id)
+            if publish and not publish.recorded and record.status == TaskStatus.PENDING:
+                # The worker may already be running the task.
+                self._take_dispatch_locked(record, publish)
+                recorded.append(record.task_id)
+            # A merged child's batch keeps running for siblings from other workflows.
+            if (
+                record.status == TaskStatus.DISPATCHED
+                and record.assigned_worker
+                and not record.merged_parent_id
+            ):
+                interrupts.append(
+                    InterruptMessage(
+                        task_id=record.task_id,
+                        worker_id=record.assigned_worker,
+                        reason=reason,
+                    )
+                )
+            self._input_checks.pop(record.task_id, None)
+            self._task_epoch_index.pop(record.task_id, None)
+        reaps = self._take_ops_for_agents_locked([r.task_id for r in records])
+        self._workflow_epoch_tasks.pop(workflow_id, None)
+        self._workflow_epoch_frontier.pop(workflow_id, None)
+        self._workflow_in_epoch_order.pop(workflow_id, None)
+        termination = _Termination(interrupts, reaps, recorded)
+        if (engine := self._engines.get(workflow_id)) is None:
+            return termination
+        if failure is None:
+            engine.cancel_instance()
+        else:
+            engine.fail_instance(failure)
+        termination.resident_invocation_ids = (
+            engine.cancel_outstanding_boundary_invocations()
+        )
+        return termination
+
+    def _release_terminated_work(self, termination: _Termination) -> None:
+        """Release what a terminated workflow's work held, best effort: each resident
+        credit, each interrupt, and each reap is attempted however the others fare."""
+        # The fenced terminal releases each in-flight resident invocation's credit, so a
+        # lost or draining replica is not held forever.
+        for invocation_id in termination.resident_invocation_ids:
+            try:
+                self._release_resident_credit(invocation_id, failed=True)
+            except Exception:
+                self._logger.exception(
+                    "Releasing the resident credit of %s failed", invocation_id
+                )
+        for interrupt in termination.interrupts:
+            try:
+                worker = self._worker_registry.get_worker(interrupt.worker_id)
+                if worker is None:
+                    self._logger.warning(
+                        "Cannot publish interrupt for %s; worker %s missing",
+                        interrupt.task_id,
+                        interrupt.worker_id,
+                    )
+                else:
+                    self._worker_registry.publish_interrupt(worker, interrupt)
+            except Exception:
+                self._logger.exception(
+                    "Interrupting %s on %s failed",
                     interrupt.task_id,
                     interrupt.worker_id,
                 )
-            else:
-                self._worker_registry.publish_interrupt(worker, interrupt)
-        self._secret_vault.purge(workflow_id)
-        return touched
+        # The worker drops a reaped operation and its custody.
+        for worker_id, agent_task_id, call in termination.reaps:
+            try:
+                self._reap_mediated_op(worker_id, agent_task_id, call)
+            except Exception:
+                self._logger.exception(
+                    "Reaping the operation of %s on %s failed", agent_task_id, worker_id
+                )
+
+    def _release_pending_terminations(self) -> None:
+        """Release, off the lock, what workflows control failed under it still hold."""
+        with self._lock:
+            pending, self._pending_terminations = self._pending_terminations, []
+        for termination in pending:
+            self._release_terminated_work(termination)
 
     def _cancel_in_place_locked(self, record: TaskRecord, reason: str) -> list[str]:
         """Cancel a pending task or a merged child in place.
@@ -4912,6 +5550,7 @@ class TaskRuntime:
             return queueing, dispatched, pending, done, total
 
     def _build_task_info_locked(self, task_id: str, record: TaskRecord) -> TaskInfo:
+        element = self._input_element_locked(task_id)
         return TaskInfo(
             **dict(record),
             depends_on=sorted(self._original_deps.get(task_id, set())),
@@ -4919,4 +5558,11 @@ class TaskRuntime:
             dependents=sorted(self._dependents.get(task_id, set())),
             completed=task_id in self._completed,
             failed=task_id in self._failed,
+            input_element=(
+                TaskInputElement(
+                    producer_task_id=element.producer_task_id, index=element.ref.element
+                )
+                if element is not None
+                else None
+            ),
         )

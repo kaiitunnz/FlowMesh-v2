@@ -11,6 +11,8 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from shared.content import ContentReference
+from shared.schemas.event import TaskFailureKind
 from shared.schemas.worker import SSHLimits, WorkerCapabilities
 from shared.tasks.worker_message import WorkerHardware, WorkerStatus
 from shared.utils.time import now_iso
@@ -143,10 +145,17 @@ class Lifecycle:
         error: str | None = None,
         metadata: dict[str, Any] | None = None,
         retryable: bool = True,
+        failure_kind: TaskFailureKind | None = None,
+        unavailable_inputs: tuple[ContentReference, ...] = (),
     ):
         try:
             self.client.task_failed(
-                task_id, error=error, metadata=metadata, retryable=retryable
+                task_id,
+                error=error,
+                metadata=metadata,
+                retryable=retryable,
+                failure_kind=failure_kind,
+                unavailable_inputs=unavailable_inputs,
             )
         except Exception:
             pass

@@ -1,5 +1,6 @@
 """The control plane's decision to authorize one hydration, and what it refuses."""
 
+import asyncio
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -11,6 +12,7 @@ from server.content import (
     ContentTransferSessions,
     HydrationDenial,
 )
+from server.network.reverse_relay import CONTENT_RELAY_KEYSPACE, RelaySessionStore
 from shared.content import ContentHydrationGrant, reference_for
 
 _REFERENCE = reference_for("local", b"prepared", media_type="application/json")
@@ -20,7 +22,7 @@ _HELD = (_REFERENCE.authorization_scope, _REFERENCE.content_digest)
 class _FakePipeline:
     """Queues the directory's writes and applies them when it is executed."""
 
-    def __init__(self, redis: "_FakeRedis") -> None:
+    def __init__(self, redis: "_FakeRedis | _FakeRelayRedis") -> None:
         self._redis = redis
         self._queued: list[Any] = []
 
@@ -61,6 +63,25 @@ class _FakeRedis:
         return True
 
 
+class _FakeRelayRedis:
+    """The relay's Redis: written through a pipeline, read by the relay's bridges."""
+
+    def __init__(self) -> None:
+        self.hashes: dict[str, dict[str, Any]] = {}
+
+    def pipeline(self) -> _FakePipeline:
+        return _FakePipeline(self)
+
+    def hash_set(self, key: str, mapping: dict[str, Any]) -> None:
+        self.hashes.setdefault(key, {}).update(mapping)
+
+    async def hgetall(self, key: str) -> dict[bytes, bytes]:
+        return {
+            str(k).encode(): str(v).encode()
+            for k, v in self.hashes.get(key, {}).items()
+        }
+
+
 class _Workers:
     """Live workers by id, and the control frames the authority relayed to them."""
 
@@ -92,7 +113,11 @@ class _Workers:
 
 
 def _authority(
-    workers: _Workers, *, authorizes: bool = True, redis: Any = None
+    workers: _Workers,
+    *,
+    authorizes: bool = True,
+    redis: Any = None,
+    relay: _FakeRelayRedis | None = None,
 ) -> ContentHydrationAuthority:
     fake = redis if redis is not None else _FakeRedis()
     client = cast(Any, SimpleNamespace(sync=fake))
@@ -101,7 +126,9 @@ def _authority(
         cast(Any, workers),
         authorizes=lambda task_id, worker_id, reference: authorizes,
         grant_ttl_sec=60.0,
-        sessions=ContentTransferSessions(client, ttl_sec=600.0),
+        sessions=ContentTransferSessions(
+            cast(Any, relay or _FakeRelayRedis()), ttl_sec=600.0
+        ),
     )
 
 
@@ -133,17 +160,24 @@ def test_a_bound_request_grants_both_ends_the_same_grant() -> None:
 
 def test_the_transfer_record_routes_between_the_two_ends() -> None:
     workers = _Workers(**{"wkr-1": 3, "wkr-2": 5})
-    redis = _FakeRedis()
-    authority = _authority(workers, redis=redis)
+    control = _FakeRedis()
+    relay = _FakeRelayRedis()
+    authority = _authority(workers, redis=control, relay=relay)
     authority.record_holding("wkr-1", [_HELD])
 
     authority.authorize("wkr-2", "tsk-1", _REFERENCE)
 
     grant = _granted(workers)
-    record = redis.hashes[f"ct:sess:{grant.transfer_session_id}"]
+    # The record lands where the relay's bridges look a frame's session up.
+    record = asyncio.run(
+        RelaySessionStore(cast(Any, relay), CONTENT_RELAY_KEYSPACE).load(
+            grant.transfer_session_id
+        )
+    )
     assert record["origin_worker"] == "wkr-2"
     assert record["target_worker"] == "wkr-1"
     assert _REFERENCE.content_digest not in str(record)
+    assert not any(key.startswith("ct:sess:") for key in control.hashes)
 
 
 def test_a_request_no_binding_authorizes_is_refused() -> None:

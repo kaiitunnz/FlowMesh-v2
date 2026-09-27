@@ -1,7 +1,9 @@
+from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from shared.content import ContentReference
 from shared.utils.json import normalize_numbers
 from shared.utils.time import now_iso
 
@@ -25,6 +27,17 @@ class BaseEvent(BaseModel):
         return value
 
 
+class TaskFailureKind(StrEnum):
+    """Why a task's dispatch failed, where the reason decides how control handles it."""
+
+    # The task's inputs are in a content store that could not be reached; the store
+    # holds them, so the task runs again without spending an attempt.
+    INPUT_UNAVAILABLE = "input_unavailable"
+    # Control read the task's input and found it missing or corrupt, so the task fails
+    # without blaming the worker that reported it.
+    INPUT_UNREADABLE = "input_unreadable"
+
+
 class TaskEvent(BaseEvent):
     worker_id: str | None = Field(
         default=None, description="Associated worker identifier."
@@ -41,6 +54,13 @@ class TaskEvent(BaseEvent):
             "Whether the failure may be retried on another worker. None to defer the "
             "decision to the server."
         ),
+    )
+    failure_kind: TaskFailureKind | None = Field(
+        default=None, description="Why a failed dispatch failed, when that is typed."
+    )
+    unavailable_inputs: list[ContentReference] | None = Field(
+        default=None,
+        description="Inputs an input_unavailable failure could not read.",
     )
     payload: dict[str, Any] = Field(
         default_factory=dict, description="Additional event payload."
@@ -101,6 +121,7 @@ __all__ = [
     "Event",
     "NodeEvent",
     "TaskEvent",
+    "TaskFailureKind",
     "WorkerEvent",
     "parse_event",
     "serialize_event",

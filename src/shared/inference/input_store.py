@@ -57,7 +57,17 @@ def hydrate_resolved_input(
         raise ContentHydrationError(
             f"the object at {reference.content_digest} is not a resolved request"
         )
-    data = store.hydrate(reference)
+    return parse_resolved_input(reference, store.hydrate(reference))
+
+
+def parse_resolved_input(
+    reference: ContentReference, data: bytes
+) -> ResolvedCanonicalInferenceRequest:
+    """The request a reference's verified bytes hold, or a hydration error."""
+    if reference.media_type != RESOLVED_INPUT_MEDIA_TYPE:
+        raise ContentHydrationError(
+            f"the object at {reference.content_digest} is not a resolved request"
+        )
     try:
         return ResolvedCanonicalInferenceRequest.model_validate_json(data)
     except ValueError as exc:

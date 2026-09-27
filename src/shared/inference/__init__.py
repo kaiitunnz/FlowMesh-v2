@@ -12,6 +12,7 @@ from .codec import (
     canonical_source,
     declared_sampling,
     declares_multiple_prompts,
+    element_contract,
     resolve_contract,
     unforwarded_inference_keys,
 )
@@ -19,6 +20,7 @@ from .input_store import (
     RESOLVED_INPUT_MEDIA_TYPE,
     ResolvedInputMaterialization,
     hydrate_resolved_input,
+    parse_resolved_input,
     write_resolved_input,
 )
 from .source import (
@@ -55,7 +57,9 @@ __all__ = [
     "content_version",
     "declared_sampling",
     "declares_multiple_prompts",
+    "element_contract",
     "hydrate_resolved_input",
+    "parse_resolved_input",
     "request_digest",
     "resolve_contract",
     "unforwarded_inference_keys",

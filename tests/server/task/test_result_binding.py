@@ -6,9 +6,8 @@ from typing import Any, cast
 import pytest
 
 from server.config import OrchestrationConfig
-from server.orchestration import PublicationOutcome, ValueRef
+from server.orchestration import PublicationOutcome
 from server.task.models import EventEffect, TaskStatus
-from server.task.results import ResultUnreadable
 from server.task.runtime import TaskRuntime
 from shared.schemas.result import BaseExecutorResult
 from tests.server.dispatch_helpers import record_dispatch
@@ -171,18 +170,3 @@ async def test_a_merged_child_binds_only_its_own_result() -> None:
     assert _value(runtime, own) == "own"
     assert runtime._tasks[unreported].status != TaskStatus.DONE
     assert runtime.result_binding(unreported) is None
-
-
-@pytest.mark.anyio
-async def test_a_success_with_nothing_bound_is_unreadable_to_its_consumers() -> None:
-    runtime = _runtime(FakeRegistry())
-    _, ids = await _register(runtime, V1_LINEAR)
-    a = ids["a"]
-    value_ref = ValueRef(kind="legacy_task_result", legacy_task_id=a)
-    # Unsettled: a consumer defers rather than failing.
-    assert runtime._resolve_value_ref(value_ref) is None
-    record_dispatch(runtime, a, cast(Any, _worker()))
-    runtime.mark_succeeded(a, "wkr-1", {}, _TS)
-
-    with pytest.raises(ResultUnreadable):
-        runtime._resolve_value_ref(value_ref)

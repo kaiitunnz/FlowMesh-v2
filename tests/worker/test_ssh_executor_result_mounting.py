@@ -1,16 +1,23 @@
 """SSH executor result mounting tests."""
 
+import io
 import tarfile
 from pathlib import Path
 from typing import cast
 from unittest.mock import MagicMock
 
 import pytest
+from docker import DockerClient
+from docker.errors import APIError, NotFound
+from docker.models.containers import Container
 
+from shared.content import reference_for
+from shared.tasks.result_binding import ResultBinding
 from shared.tasks.specs import SSHSpecStrict
 from shared.tasks.worker_message import WorkerTaskMessage
 from tests.worker.factories import DEFAULT_WORKER_CONFIG, make_live_worker_config
 from worker.config import WorkerConfig
+from worker.executors.base_executor import ExecutionError
 from worker.executors.ssh_executor import ResolvedSSHInput, SSHConfig, SSHExecutor
 
 
@@ -33,7 +40,7 @@ def _task_message(**spec_updates: object) -> WorkerTaskMessage:
         "owner_id": "owner",
         "assigned_worker": "worker-1",
         "dispatched_at": "2026-03-22T00:00:00Z",
-        "upstream_task_ids": {"preprocess": "task-pre"},
+        "upstream_results": {"preprocess": {"task_id": "task-pre"}},
         "task": {
             "apiVersion": "mloc/v1",
             "kind": "Task",
@@ -73,7 +80,7 @@ def test_build_mount_plan_uses_worker_volume_view_in_container(
     fake_docker = MagicMock()
     monkeypatch.setattr(executor, "_get_docker_client", lambda: fake_docker)
 
-    resolved_inputs = executor._resolve_inputs(task, cfg)  # noqa: SLF001
+    resolved_inputs = executor._resolve_inputs(task, cfg)
     plan = executor._build_mount_plan(
         executor._get_docker_client(), out_dir, resolved_inputs, cfg, "session-1234"
     )  # noqa: SLF001
@@ -115,7 +122,7 @@ def test_build_mount_plan_uses_direct_binds_outside_container(
     fake_docker = MagicMock()
     monkeypatch.setattr(executor, "_get_docker_client", lambda: fake_docker)
 
-    resolved_inputs = executor._resolve_inputs(task, cfg)  # noqa: SLF001
+    resolved_inputs = executor._resolve_inputs(task, cfg)
     plan = executor._build_mount_plan(
         executor._get_docker_client(), out_dir, resolved_inputs, cfg, "session-1234"
     )  # noqa: SLF001
@@ -152,33 +159,171 @@ def test_resolve_inputs_rejects_unsafe_mount_path(
 def test_stage_inputs_locally_downloads_missing_upstream_results(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # An older root names an upstream by its task id alone.
     task = _task_message()
+    task.upstream_results = None
+    task.upstream_task_ids = {"preprocess": "task-pre"}
     cfg = SSHConfig.from_spec(cast(SSHSpecStrict, task.spec), DEFAULT_WORKER_CONFIG)
     executor = SSHExecutor(_worker_config(tmp_path, results_mount_source=None))
 
     monkeypatch.setenv("RESULTS_DIR", str(tmp_path / "results"))
-    resolved_inputs = executor._resolve_inputs(task, cfg)  # noqa: SLF001
+    resolved_inputs = executor._resolve_inputs(task, cfg)
 
-    def _download(task_id: str, destination_dir: Path) -> None:
+    includes: list[bool] = []
+
+    def _download(task_id: str, destination_dir: Path, include_results: bool) -> None:
+        includes.append(include_results)
         staged = destination_dir / task_id
         staged.mkdir(parents=True)
         (staged / "results.json").write_text("{}", encoding="utf-8")
 
     monkeypatch.setattr(executor, "_download_result_bundle", _download)
 
-    staging_dir = executor._stage_inputs_locally(  # noqa: SLF001
-        resolved_inputs, "session-remote"
-    )
+    staging_dir = executor._stage_inputs_locally(resolved_inputs, "session-remote")
 
+    # A dispatch naming its upstream by task id only takes the result from the bundle.
+    assert includes == [True]
     assert (staging_dir / "task-pre" / "results.json").exists()
 
 
-def test_stage_inputs_in_volume_downloads_missing_upstream_results(
+_ENVELOPE = b'{"task_id": "task-pre", "result": {"items": ["pre"]}}'
+
+
+def _hydrated_message(**spec_updates: object) -> WorkerTaskMessage:
+    task = _task_message(**spec_updates)
+    task.upstream_results = {
+        "preprocess": ResultBinding(
+            task_id="task-pre",
+            reference=reference_for("org", _ENVELOPE, media_type="application/json"),
+        )
+    }
+    task.record_hydration({"preprocess": _ENVELOPE}, None)
+    return task
+
+
+def test_a_hydrated_result_is_staged_and_the_bundle_brings_only_artifacts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    task = _hydrated_message()
+    cfg = SSHConfig.from_spec(cast(SSHSpecStrict, task.spec), DEFAULT_WORKER_CONFIG)
+    executor = SSHExecutor(_worker_config(tmp_path, results_mount_source=None))
+    monkeypatch.setenv("RESULTS_DIR", str(tmp_path / "results"))
+    resolved_inputs = executor._resolve_inputs(task, cfg)
+    includes: list[bool] = []
+
+    def _download(task_id: str, destination_dir: Path, include_results: bool) -> None:
+        includes.append(include_results)
+        (destination_dir / task_id / "artifacts").mkdir(parents=True)
+
+    monkeypatch.setattr(executor, "_download_result_bundle", _download)
+
+    staging_dir = executor._stage_inputs_locally(resolved_inputs, "session-remote")
+
+    assert includes == [False]
+    assert (staging_dir / "task-pre" / "results.json").read_bytes() == _ENVELOPE
+    assert (staging_dir / "task-pre" / "artifacts").is_dir()
+
+
+def test_a_hydrated_result_replaces_a_local_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    local = tmp_path / "worker-results" / "task-pre"
+    local.mkdir(parents=True)
+    (local / "results.json").write_text('{"stale": true}', encoding="utf-8")
+    task = _hydrated_message()
+    cfg = SSHConfig.from_spec(cast(SSHSpecStrict, task.spec), DEFAULT_WORKER_CONFIG)
+    executor = SSHExecutor(_worker_config(tmp_path, results_mount_source=None))
+    monkeypatch.setenv("RESULTS_DIR", str(tmp_path / "results"))
+    resolved_inputs = executor._resolve_inputs(task, cfg)
+
+    staging_dir = executor._stage_inputs_locally(resolved_inputs, "session-local")
+
+    assert (staging_dir / "task-pre" / "results.json").read_bytes() == _ENVELOPE
+
+
+def test_a_skipped_upstream_is_staged_without_a_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = _task_message()
+    task.upstream_results = {
+        "preprocess": ResultBinding(task_id="task-pre", skip={"skipped": True})
+    }
+    task.record_hydration({"preprocess": b"{}"}, None)
+    cfg = SSHConfig.from_spec(cast(SSHSpecStrict, task.spec), DEFAULT_WORKER_CONFIG)
+    executor = SSHExecutor(_worker_config(tmp_path, results_mount_source=None))
+    monkeypatch.setenv("RESULTS_DIR", str(tmp_path / "results"))
+    resolved_inputs = executor._resolve_inputs(task, cfg)
+
+    def _download(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("a skipped upstream has no bundle to fetch")
+
+    monkeypatch.setattr(executor, "_download_result_bundle", _download)
+
+    staging_dir = executor._stage_inputs_locally(resolved_inputs, "session-skip")
+
+    assert (staging_dir / "task-pre" / "results.json").read_bytes() == b"{}"
+
+
+class _FakeVolume:
+    def remove(self, force: bool = False) -> None:
+        return None
+
+
+class _FakeVolumes:
+    def create(self, name: str, labels: dict[str, str] | None = None) -> _FakeVolume:
+        self.name = name
+        self.labels = labels
+        return _FakeVolume()
+
+
+def _container(status_code: int = 0, logs: bytes = b"") -> MagicMock:
+    container = MagicMock(spec=Container)
+    container.wait.return_value = {"StatusCode": status_code}
+    container.logs.return_value = logs
+    return container
+
+
+class _FakeContainers:
+    def __init__(self) -> None:
+        self.kwargs: dict[str, object] | None = None
+        self.container = _container()
+
+    def create(self, **kwargs: object) -> MagicMock:
+        self.kwargs = kwargs
+        return self.container
+
+
+class _FakeImages:
+    def __init__(self, present: bool = True) -> None:
+        self.present = present
+        self.pulled: list[str] = []
+
+    def get(self, name: str) -> object:
+        if not self.present:
+            raise NotFound(f"image not known: {name}")
+        return object()
+
+    def pull(self, name: str) -> object:
+        self.pulled.append(name)
+        return object()
+
+
+class _FakeClient:
+    def __init__(self) -> None:
+        self.volumes = _FakeVolumes()
+        self.containers = _FakeContainers()
+        self.images = _FakeImages()
+
+
+def _archives(container: MagicMock) -> list[tuple[str, bytes]]:
+    return [call.args for call in container.put_archive.call_args_list]
+
+
+def _stage_in_volume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, remote_results: bytes | None
+) -> tuple[_FakeClient, str]:
     monkeypatch.setenv("FLOWMESH_BASE_URL", "http://flowmesh.example")
     monkeypatch.setenv("FLOWMESH_API_KEY", "secret-token")
-
     executor = SSHExecutor(
         _worker_config(tmp_path, network_mode="container:flowmesh-worker-1")
     )
@@ -196,55 +341,117 @@ def test_stage_inputs_in_volume_downloads_missing_upstream_results(
             task_id="task-remote",
             source_path=tmp_path / "results" / "task-remote",
             mount_path="/mnt/flowmesh/inputs/remote",
+            results=remote_results,
         ),
     ]
-
-    class _FakeVolume:
-        def remove(self, force: bool = False) -> None:
-            return None
-
-    class _FakeVolumes:
-        def create(
-            self, name: str, labels: dict[str, str] | None = None
-        ) -> _FakeVolume:
-            self.name = name
-            self.labels = labels
-            return _FakeVolume()
-
-    class _FakeContainers:
-        def __init__(self) -> None:
-            self.kwargs: dict[str, object] | None = None
-
-        def run(self, **kwargs: object) -> None:
-            self.kwargs = kwargs
-
-    class _FakeClient:
-        def __init__(self) -> None:
-            self.volumes = _FakeVolumes()
-            self.containers = _FakeContainers()
-
     fake_client = _FakeClient()
     monkeypatch.setattr(executor, "_get_docker_client", lambda: fake_client)
-
     volume_name = executor._stage_inputs_in_volume(
         executor._get_docker_client(),
         resolved_inputs,
         "flowmesh-results",
         "session-remote",
     )
-
-    assert fake_client.containers.kwargs is not None
-    command = cast(list[str], fake_client.containers.kwargs["command"])[2]
     assert volume_name == "flowmesh_ssh_inputs_session-remote"
-    assert (
-        fake_client.containers.kwargs["network_mode"] == "container:flowmesh-worker-1"
-    )
+    kwargs = fake_client.containers.kwargs
+    assert kwargs is not None
+    assert kwargs["network_mode"] == "container:flowmesh-worker-1"
+    fake_client.containers.container.start.assert_called_once()
+    fake_client.containers.container.remove.assert_called_once()
+    return fake_client, cast(list[str], kwargs["command"])[2]
+
+
+def test_stage_inputs_in_volume_downloads_missing_upstream_results(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_client, command = _stage_in_volume(tmp_path, monkeypatch, None)
+
     assert "cp -a /src/task-local/. /dst/task-local/" in command
     assert (
         "wget -qO- -T 300 -t 1 --header 'Authorization: Bearer secret-token' "
         "'http://flowmesh.example/api/v1/results/task-remote/bundle"
         "?include=results&include=artifacts' | tar -xz -C /dst" in command
     )
+    assert _archives(fake_client.containers.container) == []
+
+
+def test_stage_inputs_in_volume_places_hydrated_results(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_client, command = _stage_in_volume(tmp_path, monkeypatch, _ENVELOPE)
+
+    assert (
+        "'http://flowmesh.example/api/v1/results/task-remote/bundle"
+        "?include=artifacts' | tar -xz -C /dst" in command
+    )
+    assert (
+        "cp /flowmesh-hydrated/task-remote/results.json "
+        "/dst/task-remote/results.json" in command
+    )
+    ((path, data),) = _archives(fake_client.containers.container)
+    assert path == "/"
+    with tarfile.open(fileobj=io.BytesIO(data)) as archive:
+        member = archive.extractfile("flowmesh-hydrated/task-remote/results.json")
+        assert member is not None and member.read() == _ENVELOPE
+
+
+def _stage_remote(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_client: _FakeClient
+) -> str:
+    monkeypatch.setenv("FLOWMESH_BASE_URL", "http://flowmesh.example")
+    executor = SSHExecutor(_worker_config(tmp_path))
+    return executor._stage_inputs_in_volume(
+        cast(DockerClient, fake_client),
+        [
+            ResolvedSSHInput(
+                stage="remote",
+                task_id="task-remote",
+                source_path=tmp_path / "results" / "task-remote",
+                mount_path="/mnt/flowmesh/inputs/remote",
+            )
+        ],
+        "flowmesh-results",
+        "session-x",
+    )
+
+
+def test_a_failed_staging_container_is_retryable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_client = _FakeClient()
+    fake_client.containers.container = _container(1, b"wget: download timed out")
+
+    with pytest.raises(ExecutionError) as caught:
+        _stage_remote(tmp_path, monkeypatch, fake_client)
+
+    assert caught.value.retryable is True
+    assert "download timed out" in str(caught.value)
+
+
+def test_a_missing_staging_image_is_pulled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_client = _FakeClient()
+    fake_client.images = _FakeImages(present=False)
+
+    _stage_remote(tmp_path, monkeypatch, fake_client)
+
+    assert fake_client.images.pulled == ["busybox:1.36.1"]
+
+
+def test_a_failing_image_lookup_is_not_taken_for_a_missing_image(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _Down(_FakeImages):
+        def get(self, name: str) -> object:
+            raise APIError("daemon unavailable")
+
+    fake_client = _FakeClient()
+    fake_client.images = _Down()
+
+    with pytest.raises(APIError):
+        _stage_remote(tmp_path, monkeypatch, fake_client)
+    assert fake_client.images.pulled == []
 
 
 def test_extract_result_bundle_rejects_path_traversal(tmp_path: Path) -> None:
@@ -256,3 +463,26 @@ def test_extract_result_bundle_rejects_path_traversal(tmp_path: Path) -> None:
 
     with pytest.raises(Exception, match="Unsafe path"):
         SSHExecutor._extract_result_bundle(bundle, tmp_path / "dest")  # noqa: SLF001
+
+
+def test_an_upstream_with_nothing_bound_still_stages_its_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = _task_message()
+    task.upstream_results = {"preprocess": ResultBinding(task_id="task-pre")}
+    cfg = SSHConfig.from_spec(cast(SSHSpecStrict, task.spec), DEFAULT_WORKER_CONFIG)
+    executor = SSHExecutor(_worker_config(tmp_path, results_mount_source=None))
+    monkeypatch.setenv("RESULTS_DIR", str(tmp_path / "results"))
+    resolved_inputs = executor._resolve_inputs(task, cfg)
+    includes: list[bool] = []
+
+    def _download(task_id: str, destination_dir: Path, include_results: bool) -> None:
+        includes.append(include_results)
+        (destination_dir / task_id / "artifacts").mkdir(parents=True)
+
+    monkeypatch.setattr(executor, "_download_result_bundle", _download)
+
+    staging_dir = executor._stage_inputs_locally(resolved_inputs, "session-empty")
+
+    assert includes == [True]
+    assert (staging_dir / "task-pre" / "artifacts").is_dir()

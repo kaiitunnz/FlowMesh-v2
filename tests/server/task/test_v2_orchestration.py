@@ -29,6 +29,7 @@ from server.orchestration.state import LedgerSnapshot
 from server.registries.workflow import PersistedTask, WorkflowSched
 from server.task.models import TaskStatus
 from server.task.parser import parse_workflow
+from server.task.redrive import StoreRedriveScheduler
 from server.task.runtime import TaskRuntime
 from server.task.v2 import FrontendWorkflowSource, compile_bundle
 from server.task.v2.representations.operators import (
@@ -334,7 +335,23 @@ def _live_runtime(
         reader or make_result_reader(),
         logging.getLogger(name),
         secret_vault=cast(Any, _NoopSecretVault()),
+        redrive=lambda fire, logger: StoreRedriveScheduler(
+            fire, logger, run_thread=False
+        ),
     )
+
+
+def _read_off_the_lock(runtime: TaskRuntime) -> list[bool]:
+    """Record, for every stored result the runtime reads, whether it held its lock."""
+    held: list[bool] = []
+    read = runtime._results.read
+
+    def _recording(binding: Any) -> Any:
+        held.append(runtime._lock._is_owned())  # type: ignore[attr-defined]
+        return read(binding)
+
+    runtime._results.read = _recording  # type: ignore[method-assign]
+    return held
 
 
 AUTORESEARCH = """
@@ -377,17 +394,27 @@ async def test_live_spawn_fans_out_children_to_real_dispatch() -> None:
 
     children = _pop_ready(runtime)
     assert len(children) == 3
-    injected: list[list[str]] = []
+    template_data = runtime._tasks[ids["trial"]].task.spec.model_dump().get("data")
+    produced = runtime.result_binding(planner)
+    assert produced is not None and produced.reference is not None
+    indices: list[int] = []
     for child in children:
         assert child.startswith("act-")
         record = runtime._tasks[child]  # noqa: SLF001 - inspects the synthesized record
         assert record.status is TaskStatus.PENDING
         assert child in registry.dynamic_task_ids[workflow_id]  # persisted durably
-        data = getattr(record.task.spec, "data", None)
-        assert isinstance(data, dict)
-        injected.append(data["items"])
-    # Each child is self-contained: its own element is injected into its spec.
-    assert sorted(items for (items,) in injected) == ["h1", "h2", "h3"]
+        # The record names its element rather than carrying it.
+        assert record.task.spec.model_dump().get("data") == template_data
+        assert "h1" not in record.model_dump_json()
+        element = runtime.input_element(child)
+        assert element is not None and element.reference == produced.reference
+        assert element.element is not None
+        info = runtime.describe_task(child)
+        assert info is not None and info.input_element is not None
+        assert info.input_element.producer_task_id == planner
+        assert info.input_element.index == element.element
+        indices.append(element.element)
+    assert sorted(indices) == [0, 1, 2]
 
     for child in children:
         record_dispatch(runtime, child, cast(Any, _worker()))
@@ -526,10 +553,14 @@ async def test_rehydration_re_drives_an_unsealed_fan_out(
     restored = _live_runtime(
         registry, "rehydrate", reader=make_result_reader(reader.store)
     )
+    held = _read_off_the_lock(restored)
     assert await restored.rehydrate() == 1
     engine = restored.orchestration_engine(workflow_id)
     assert engine is not None
+    assert _child_count(engine) == 0
+    restored._redrive.run_due()
     assert len(_pop_ready(restored)) == 3 and _child_count(engine) == 3
+    assert held == [False]
 
 
 _INFEASIBLE = """
@@ -729,7 +760,7 @@ async def test_linear_dag_runs_via_v2_path_with_same_dependency_semantics() -> N
         assert pub.value_ref.legacy_task_id == ids[name]
 
     # The internal logical-output query resolves by declared output id too.
-    by_output = runtime.resolve_v2_output(workflow_id, f"legacy:{ids['a']}")
+    by_output = engine.output_publication(f"legacy:{ids['a']}")
     assert by_output is not None and by_output.outcome is PublicationOutcome.SUCCESS
 
     # The contract-relevant trace records the semantic seams for inspection.
@@ -1241,10 +1272,7 @@ async def test_a_fan_out_reads_its_collection_before_taking_the_lock(
     workflow_id, ids = await _register(runtime, AUTORESEARCH)
     planner = ids["planner"]
 
-    def _locked_read(*_args: Any) -> Any:
-        raise AssertionError("the collection was read under the runtime lock")
-
-    monkeypatch.setattr(runtime, "_read_fanout_locked", _locked_read)
+    held = _read_off_the_lock(runtime)
     record_dispatch(runtime, planner, cast(Any, _worker()))
     runtime.mark_succeeded(
         planner, "wkr-1", _planned(runtime, planner, ["h1", "h2", "h3"]), _TS
@@ -1252,6 +1280,7 @@ async def test_a_fan_out_reads_its_collection_before_taking_the_lock(
     engine = runtime.orchestration_engine(workflow_id)
     assert engine is not None
     assert len(_pop_ready(runtime)) == 3 and _child_count(engine) == 3
+    assert held and not any(held)
 
 
 @pytest.mark.anyio

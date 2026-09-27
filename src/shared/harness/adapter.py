@@ -20,6 +20,7 @@ from pydantic import BaseModel, ConfigDict
 from ..outcome import OutcomeManifest
 from ..private_state import PrivateStateAttachment, PrivateStateBinding
 from ..sandbox import LocalSandboxCapability
+from ..tasks.result_binding import ResultValueRef
 from ..tasks.specs.misc import ModelBindingMode
 from ..tools.facade import FacadeDescriptor
 from .boundary import BoundaryRequest, DenialKind
@@ -137,11 +138,13 @@ class DeliveredOutcome(BaseModel):
 
 
 class InputBindingMember(BaseModel):
-    """One resolved member of a first-turn input binding.
+    """One member of a first-turn input binding.
 
-    Carries the source operator/activation, its terminal outcome, the frozen resolved
-    value, and a canonical ordinal. The adapter renders members in ordinal order and may
-    add only presentation labels — never choose membership or ordering.
+    Carries the source operator/activation, its terminal outcome, the frozen value, and
+    a canonical ordinal. A member a producer's result supplies names that result as
+    ``source``, which the worker hydrates into ``value`` before the adapter steps; an
+    inline member carries ``value`` itself. The adapter renders members in ordinal order
+    and may add only presentation labels — never choose membership or ordering.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -151,6 +154,7 @@ class InputBindingMember(BaseModel):
     child_index: int | None = None
     outcome: str
     value: str | None = None
+    source: ResultValueRef | None = None
     ordinal: int = 0
 
 

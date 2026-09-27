@@ -36,7 +36,7 @@ from shared.telemetry.semconv import (
 
 from .auth import reconcile_resources, resolve_system_principal
 from .clients import RedisClient
-from .clients.redis import resident_relay_client
+from .clients.redis import resident_relay_client, resident_relay_sync_client
 from .config import NodeRole, ServerConfig
 from .content import (
     ContentAccessBroker,
@@ -82,6 +82,7 @@ from .services.model_secret_vault import ModelSecretVault
 from .services.monitoring import EventMonitor
 from .services.port_forward import PortForwardService
 from .services.ssh_audit import SshAuditService
+from .services.task_events import TaskEventPublisher
 from .services.watchdog import WorkerWatchdog
 from .startup import (
     rehydrate_root_state,
@@ -286,13 +287,7 @@ if IS_ROOT_NODE:
         )
         _relay_redis = cast(
             BinaryRedis,
-            resident_relay_client(
-                config.redis.resident_relay_url,
-                acl_enabled=config.redis.acl_enabled,
-                username=config.redis.username,
-                password=config.redis.password,
-                tls_ca_file=config.redis.tls_ca_file,
-            ),
+            resident_relay_client(config.redis),
         )
         RESIDENT_BRIDGE = RootRendezvousBridge(
             RelayStreamStore(_relay_redis, RESIDENT_RELAY_KEYSPACE),
@@ -426,7 +421,8 @@ if IS_ROOT_NODE:
             authorizes=RUNTIME.content_binding_authorizes,
             grant_ttl_sec=config.content_store.grant_ttl_sec,
             sessions=ContentTransferSessions(
-                REDIS_CLIENT, ttl_sec=config.content_store.grant_ttl_sec * 10
+                resident_relay_sync_client(config.redis),
+                ttl_sec=config.content_store.grant_ttl_sec * 10,
             ),
             logger=logger,
         )
@@ -458,6 +454,9 @@ if IS_ROOT_NODE:
     # the monitor's finalizer when a workflow may have ended; the finalizer decides.
     RUNTIME.set_completion_notifier(EVENT_MONITOR.finalizer.request)
     WATCHDOG.set_failure_fallback(EVENT_MONITOR.handle_task_event)
+    TASK_EVENTS = TaskEventPublisher(REDIS_CLIENT.sync, logger)
+    TASK_EVENTS.set_fallback(EVENT_MONITOR.handle_task_event)
+    RUNTIME.set_failure_reporter(TASK_EVENTS.publish)
 
     if GATED_SERVE is not None:
         # A forward exposure goes live off the request path (its listener binds after
@@ -786,6 +785,7 @@ if IS_ROOT_NODE:
     app.include_router(v1.nodes.router, prefix=v1_prefix)
     app.include_router(v1.tasks.router, prefix=v1_prefix)
     app.include_router(v1.results.router, prefix=v1_prefix)
+    app.include_router(v1.outputs.router, prefix=v1_prefix)
     app.include_router(v1.content.router, prefix=v1_prefix)
     app.include_router(v1.ssh.router, prefix=v1_prefix)
     app.include_router(v1.serve.router, prefix=v1_prefix)

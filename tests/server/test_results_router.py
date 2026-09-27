@@ -11,13 +11,14 @@ from lumid_hooks import PrincipalContext, ResourceRef
 
 from server.hooks import PERMISSION_CHECKERS
 from server.routers.v1 import results as results_router
-from server.task.results import ResultBinding, ResultReader
+from server.task.results import ResultReader
 from shared.content import (
     ContentReference,
     ContentUnavailable,
     SharedFilesystemObjectStore,
 )
 from shared.schemas.result import RESULT_MEDIA_TYPE, ResultEnvelope
+from shared.tasks.result_binding import ResultBinding
 
 
 class _UnreachableStore(SharedFilesystemObjectStore):

@@ -13,8 +13,10 @@ from server.registries.worker import WorkerRegistry
 from server.task.models import TaskRecord, TaskStatus
 from server.task.parser import parse_workflow
 from server.task.runtime import TaskRuntime
+from shared.content import reference_for
 from shared.schemas.result import ResultEnvelope
 from shared.tasks import TaskEnvelopeTemplate, TaskType
+from shared.tasks.result_binding import ResultBinding
 from shared.tasks.specs import SSHSpecStrict
 
 
@@ -33,8 +35,28 @@ class _DummyRuntime:
         envelope = self._results.get(task_id)
         return ResultEnvelope.model_validate(envelope) if envelope else None
 
+    def result_binding(self, task_id: str) -> ResultBinding | None:
+        record = self.tasks.get(task_id)
+        if record is None or record.status != TaskStatus.DONE:
+            return None
+        return ResultBinding(
+            task_id=task_id,
+            reference=reference_for(
+                "org", task_id.encode(), media_type="application/json"
+            ),
+        )
+
     def get_record(self, task_id: str) -> TaskRecord | None:
         return self.tasks.get(task_id)
+
+    def upstream_task_ids(self, task_id: str) -> set[str]:
+        pending = list(self._depends_on.get(task_id, []))
+        visited: set[str] = set()
+        while pending:
+            if (dep_id := pending.pop()) not in visited:
+                visited.add(dep_id)
+                pending.extend(self._depends_on.get(dep_id, []))
+        return visited
 
     def describe_task(self, task_id: str) -> SimpleNamespace | None:
         record = self.tasks.get(task_id)
@@ -117,9 +139,15 @@ def test_dispatcher_resolves_ssh_input_stage_names_from_local_stage_names() -> N
     )
 
     spec = SSHSpecStrict.model_validate(current.task.spec.model_dump())
-    resolved = dispatcher._resolve_upstream_task_ids(current, spec)  # noqa: SLF001
+    context = dispatcher._build_stage_context(current)
+    dispatcher._validate_ssh_inputs(current, spec, context)
+    _, upstream_results = dispatcher._resolve_stage_references(
+        current.task_id, current.task, context
+    )
 
-    assert resolved == {"preprocess": "task-pre"}
+    assert upstream_results is not None
+    assert upstream_results["preprocess"].task_id == "task-pre"
+    assert upstream_results["preprocess"].reference is not None
 
 
 def test_dispatcher_requeues_when_ssh_input_stage_not_done() -> None:
@@ -157,7 +185,9 @@ def test_dispatcher_requeues_when_ssh_input_stage_not_done() -> None:
     spec = SSHSpecStrict.model_validate(current.task.spec.model_dump())
 
     with pytest.raises(StageReferenceNotReady):
-        dispatcher._resolve_upstream_task_ids(current, spec)  # noqa: SLF001
+        dispatcher._validate_ssh_inputs(
+            current, spec, dispatcher._build_stage_context(current)
+        )
 
 
 def test_build_stage_context_includes_only_transitive_dependencies() -> None:
@@ -229,7 +259,7 @@ def test_build_stage_context_includes_only_transitive_dependencies() -> None:
     assert set(context) == {"preprocess", "transform"}
 
 
-def test_collect_upstream_results_excludes_unrelated_completed_stages(
+def test_upstream_bindings_exclude_unrelated_completed_stages(
     tmp_path: Path,
 ) -> None:
     results = {
@@ -295,9 +325,7 @@ def test_collect_upstream_results_excludes_unrelated_completed_stages(
     )
 
     context = dispatcher._build_stage_context(current)  # noqa: SLF001
-    upstream_results = dispatcher._collect_upstream_results(  # noqa: SLF001
-        context, current.task_id
-    )
+    upstream_results = dispatcher._upstream_bindings(context, current.task_id)
 
     assert set(upstream_results) == {"preprocess"}
 

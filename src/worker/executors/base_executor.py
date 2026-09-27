@@ -31,6 +31,8 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
+from shared.content import ContentReference
+from shared.schemas.event import TaskFailureKind
 from shared.schemas.result import BaseExecutorResult
 from shared.tasks import MergedChildTaskStrict
 from shared.tasks.specs import TaskSpecStrictBase
@@ -57,12 +59,22 @@ class ExecutionError(RuntimeError):
 
     ``retryable`` marks failures that may succeed on another worker (transient network
     or I/O errors). Deterministic failures (invalid spec, unsupported config) leave it
-    ``False`` so they fail without retry.
+    ``False`` so they fail without retry. ``failure_kind`` types a failure whose kind
+    decides how control handles it, and ``unavailable_inputs`` names the references an
+    ``input_unavailable`` failure could not read.
     """
 
-    def __init__(self, *args: object, retryable: bool = False) -> None:
+    def __init__(
+        self,
+        *args: object,
+        retryable: bool = False,
+        failure_kind: TaskFailureKind | None = None,
+        unavailable_inputs: tuple[ContentReference, ...] = (),
+    ) -> None:
         super().__init__(*args)
         self.retryable = retryable
+        self.failure_kind = failure_kind
+        self.unavailable_inputs = unavailable_inputs
 
 
 class TaskCancelledError(RuntimeError):
