@@ -67,3 +67,20 @@ class TestDecodeSecretPart:
     def test_invalid_input_raises(self) -> None:
         with pytest.raises(Exception):
             _decode_secret_part("!!!not-valid-hex-or-base64!!!")
+
+
+def test_a_credentialed_node_carries_its_key_only_in_the_header() -> None:
+    nodes = [
+        {
+            "name": "Chat",
+            "type": "@n8n/n8n-nodes-langchain.openAi",
+            "parameters": {
+                "modelId": {"value": "gpt-4"},
+                "responses": {"values": [{"content": "hi"}]},
+            },
+            "credentials": {"openAiApi": {"data": {"apiKey": "sk-n8n"}}},
+        }
+    ]
+    api = translate_n8n_workflow({"nodes": nodes, "connections": {}})["spec"]["api"]
+    assert api["headers"]["Authorization"] == "Bearer sk-n8n"
+    assert "key" not in api
