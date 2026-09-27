@@ -101,13 +101,14 @@ keys untouched:
       boundary: [invocation, external_effect, yield]
 ```
 
-`authority`, `tools`, and `boundary` apply to `agent` leaves. An agent input
-`{ name, from: <agent>, region: <role> }` reads the aggregate of that agent's
-child region, and names an agent that runs at the root, not a spawned child, and
-not the reader itself or an agent downstream of it. Any leaf may declare `provenance` (`pinned` | `live`) and `determinism` / `effect` /
-`recovery` overrides, and a `result: { visibility: published }` to publish its
-induced output. A spawn region publishes its children's results as a collection
-keyed by child index within each spawning scope:
+`authority`, `tools`, and `boundary` apply to `agent` leaves. An agent input `{
+name, from: <agent>, region: <role> }` reads the aggregate of that agent's child
+region, and names an agent that runs at the root, not a spawned child, and not
+the reader itself or an agent downstream of it. Any leaf may declare
+`provenance` (`pinned` | `live`) and `determinism` / `effect` / `recovery`
+overrides, and a `result: { visibility: published }` to publish its induced
+output. A spawn region publishes its children's results as a collection keyed by
+child index within each spawning scope:
 
 ```yaml
 - name: fanout
@@ -193,9 +194,10 @@ completion (`any`/`first_k`/`predicate`) declares a `residual` policy
 (`continue`, `drain`, `cancel`) for children still unsettled when it releases;
 `cancel` cancels each of their tasks, with everything a cancelled agent spawned,
 and interrupts one already running. It may set `no_winner_failure: true` to
-resolve a no-winner join as a failure rather than empty. The winner is the lowest-`child_index` child that qualifies. An
-`all_succeed` join with a failed child, or a no-winner join under
-`no_winner_failure`, resolves as a failure and fails everything downstream of it.
+resolve a no-winner join as a failure rather than empty. The winner is the
+lowest-`child_index` child that qualifies. An `all_succeed` join with a failed
+child, or a no-winner join under `no_winner_failure`, resolves as a failure and
+fails everything downstream of it.
 
 ### Dry-run inspection
 
