@@ -535,6 +535,27 @@ def _check_region_outputs(
     return diags
 
 
+def _check_spawn_dependents(
+    template: LogicalWorkflowTemplate, loc: dict[str, SourceLocation]
+) -> list[Diagnostic]:
+    """A spawn delivers no record of its own: only its join may depend on it."""
+    op_by_id = {op.operator_id: op for op in template.operators}
+    return [
+        Diagnostic(
+            code="dataflow.spawn-dependent",
+            message=(
+                f"{edge.to_op!r} depends on spawn {edge.from_op!r}, which delivers "
+                "nothing itself; depend on the join that collects its children"
+            ),
+            location=loc.get(edge.to_op),
+        )
+        for edge in template.edges
+        if not edge.feedback
+        and isinstance(op_by_id.get(edge.from_op), SpawnRegion)
+        and not isinstance(op_by_id.get(edge.to_op), JoinRegion)
+    ]
+
+
 def _check_result_declarations(
     template: LogicalWorkflowTemplate, loc: dict[str, SourceLocation]
 ) -> list[Diagnostic]:
@@ -731,6 +752,7 @@ def validate_compilation(
     diags.extend(_check_child_regions(template, loc))
     diags.extend(_check_agent_inputs(template, loc))
     diags.extend(_check_region_outputs(template, loc))
+    diags.extend(_check_spawn_dependents(template, loc))
     diags.extend(_check_result_declarations(template, loc))
     diags.extend(_check_cycles(template, loc))
 

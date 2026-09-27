@@ -2,6 +2,11 @@ import pytest
 
 from server.task.parser import parse_workflow
 from server.task.v2 import CompileError, FrontendWorkflowSource, compile_workflow
+from tests.server.task.test_v2_orchestration import (
+    FakeRegistry,
+    _live_runtime,
+    _register,
+)
 
 _HEAD = """
 apiVersion: flowmesh/v2
@@ -262,3 +267,57 @@ _UPSTREAM_READER = """      - name: lead
 def test_an_agent_reading_a_region_that_waits_on_it_is_refused(body: str) -> None:
     err = _reject(body)
     assert [d.code for d in err.diagnostics] == ["topology.unstructured-cycle"]
+
+
+_FAN = """      - name: planner
+        spec: {taskType: echo, data: {type: list, items: [seed]}}
+      - name: kid
+        spec: {taskType: echo, data: {type: list, items: [k]}}
+      - name: fan
+        dependsOn: [planner]
+        region: {kind: spawn, child: kid}
+"""
+
+SPAWN_DEPENDENTS = {
+    "task": """      - name: after
+        dependsOn: [fan]
+        spec: {taskType: echo, data: {type: list, items: [z]}}
+""",
+    "region": """      - name: m
+        dependsOn: [fan]
+        region: {kind: merge}
+""",
+    "agent_input": """      - name: reader
+        spec:
+          taskType: agent
+          v2:
+            inputs: [{name: kids, from: fan}]
+            authority: {invoke: [model], delegate: []}
+            tools: [{name: model}]
+          harness: {backend: scripted, version: v1, params: {script: []}}
+""",
+}
+
+
+@pytest.mark.parametrize("dependent", SPAWN_DEPENDENTS.values(), ids=SPAWN_DEPENDENTS)
+def test_a_node_depending_on_a_spawn_is_refused(dependent: str) -> None:
+    err = _reject(_FAN + dependent)
+    assert "dataflow.spawn-dependent" in {d.code for d in err.diagnostics}
+
+
+def test_a_node_depending_on_a_spawns_join_compiles() -> None:
+    _compile(_FAN + """      - name: collect
+        dependsOn: [fan]
+        region: {kind: join, completion: all_settled}
+      - name: after
+        dependsOn: [collect]
+        spec: {taskType: echo, data: {type: list, items: [z]}}
+""")
+
+
+@pytest.mark.anyio
+async def test_a_node_depending_on_a_spawn_is_refused_at_submit() -> None:
+    runtime = _live_runtime(FakeRegistry())
+    with pytest.raises(CompileError) as exc:
+        await _register(runtime, _HEAD + _FAN + SPAWN_DEPENDENTS["task"])
+    assert "dataflow.spawn-dependent" in {d.code for d in exc.value.diagnostics}

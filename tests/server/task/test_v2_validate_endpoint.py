@@ -13,7 +13,12 @@ from server.routers.v1 import workflows as workflows_router
 from server.task.runtime import TaskRuntime
 from tests.server.result_store import make_result_reader
 from tests.server.task.test_v2_orchestration import _NoopSecretVault
-from tests.server.task.test_v2_validation import _REGION_CONSUMER, _SPAWNED_WORKER
+from tests.server.task.test_v2_validation import (
+    _FAN,
+    _REGION_CONSUMER,
+    _SPAWNED_WORKER,
+    SPAWN_DEPENDENTS,
+)
 
 _V1_WF = """
 apiVersion: flowmesh/v1
@@ -193,3 +198,18 @@ spec:
     assert resp.status_code == 422
     diagnostics = resp.json()["detail"]["diagnostics"]
     assert any("dataflow.spawned-region-output" in d for d in diagnostics)
+
+
+def test_v2_a_node_depending_on_a_spawn_returns_422(client: TestClient) -> None:
+    body = """
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {name: t}
+spec:
+  graph:
+    nodes:
+""" + _FAN + SPAWN_DEPENDENTS["task"]
+    resp = _post(client, body)
+    assert resp.status_code == 422
+    diagnostics = resp.json()["detail"]["diagnostics"]
+    assert any("dataflow.spawn-dependent" in d for d in diagnostics)
