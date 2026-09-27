@@ -384,3 +384,40 @@ async def test_a_restart_leaves_a_cancelled_hung_workflow_cancelled(
         record = restored.get_record(ids[name])
         assert record is not None and record.status == TaskStatus.CANCELLED
     assert _engine(restored, workflow_id).to_snapshot().failed_regions == []
+
+
+_SSH_PRODUCER = _HEAD + """
+      - name: a
+        spec:
+          taskType: ssh
+          interactive: false
+          image: alpine:3
+          command: ["sh", "-c", "exit 3"]
+      - name: kid
+        spec: {taskType: echo, data: {type: list, items: [k]}}
+      - name: fan
+        dependsOn: [a]
+        region: {kind: spawn, child: kid}
+      - name: collect
+        dependsOn: [fan]
+        region: {kind: join, completion: all_settled}
+      - name: after
+        dependsOn: [collect]
+        spec: {taskType: echo, data: {type: list, items: [z]}}
+"""
+
+
+@pytest.mark.anyio
+async def test_an_ambiguous_producer_fails_its_region_downstream_as_dependents() -> (
+    None
+):
+    runtime = _live_runtime(FakeRegistry())
+    workflow_id, ids = await _register(runtime, _SSH_PRODUCER)
+    record_dispatch(runtime, ids["a"], cast(Any, _worker()))
+
+    runtime.mark_v2_uncertain(ids["a"])
+
+    record = runtime.get_record(ids["a"])
+    assert record is not None and record.error == "ambiguity-terminal effect"
+    _assert_failed_downstream(runtime, ids, "a", "kid", "after")
+    assert runtime.workflow_settlement(workflow_id).settled

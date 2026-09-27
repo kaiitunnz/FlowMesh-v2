@@ -3235,8 +3235,8 @@ class TaskRuntime:
         if advance.retry:
             self._release_dispatch_locked(record, [task_id], front=True)
         elif advance.failed:
-            self._fail_v2_records_locked(
-                advance.failed, "ambiguity-terminal effect", persist=True
+            self._fail_v2_advance_locked(
+                engine, advance.failed, "ambiguity-terminal effect"
             )
             self._reap_ops_for_agents_locked(advance.failed)
         self._save_ledger_locked(record.workflow_id)
@@ -3265,13 +3265,35 @@ class TaskRuntime:
         for task_id in advance.ready:
             if self._enqueue_ready_locked(task_id):
                 changed = True
-        for task_id in advance.failed:
-            reason = (
-                engine and engine.failure_reason(task_id)
-            ) or "declared-failure obligation"
-            self._fail_v2_records_locked([task_id], reason, persist=True)
+        if advance.failed:
+            self._fail_v2_advance_locked(engine, advance.failed)
             changed = True
         return changed
+
+    def _fail_v2_advance_locked(
+        self,
+        engine: OrchestrationEngine | None,
+        failed: list[str],
+        reason: str | None = None,
+    ) -> None:
+        """Fail and persist the tasks an advance settled failed.
+
+        The engine lists each failure before the tasks it cascaded into, so a task
+        with a reason of its own opens a cascade, and each task after it fails as its
+        dependent. ``reason`` stands for a first failure with none of its own.
+        """
+        primary: str | None = None
+        changed: list[str] = []
+        for task_id in failed:
+            own = engine.failure_reason(task_id) if engine is not None else None
+            if primary is None or own is not None:
+                primary = task_id
+                text = own or reason or "declared-failure obligation"
+            else:
+                text = f"Dependency {primary} failed"
+            changed += self._fail_v2_records_locked([task_id], text, persist=False)
+        if changed:
+            self._commit_locked(*changed)
 
     def _fan_out_children_locked(
         self,
