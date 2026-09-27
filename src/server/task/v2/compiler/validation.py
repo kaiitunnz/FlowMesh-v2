@@ -591,6 +591,12 @@ def _check_cycles(
             continue
         if edge.from_op in adjacency:
             adjacency[edge.from_op].append(edge.to_op)
+    # An agent's region fills only once the agent runs, so it follows the agent.
+    for op in template.operators:
+        if isinstance(op, AgentOperator):
+            adjacency[op.operator_id].extend(
+                ref.spawn_ref for ref in op.child_region_refs
+            )
 
     visiting, visited = set(), set()
 

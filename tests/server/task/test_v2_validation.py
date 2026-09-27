@@ -219,3 +219,46 @@ def test_a_region_input_from_a_root_agent_compiles() -> None:
       - name: sub
         spec: {taskType: echo, data: {type: list, items: [k]}}
 """ + _REGION_CONSUMER % "lead")
+
+
+_SELF_READER = """      - name: lead
+        spec:
+          taskType: agent
+          v2:
+            inputs: [{name: mine, from: lead, region: sub}]
+            authority: {invoke: [model], delegate: [model]}
+            tools: [{name: model}]
+            child: [{name: sub, authority: {invoke: [model], delegate: []}}]
+          harness: {backend: scripted, version: v1, params: {script: []}}
+      - name: sub
+        spec: {taskType: echo, data: {type: list, items: [k]}}
+"""
+
+_UPSTREAM_READER = """      - name: lead
+        spec:
+          taskType: agent
+          v2:
+            inputs: [{name: theirs, from: helper, region: sub}]
+            authority: {invoke: [model], delegate: []}
+            tools: [{name: model}]
+          harness: {backend: scripted, version: v1, params: {script: []}}
+      - name: helper
+        dependsOn: [lead]
+        spec:
+          taskType: agent
+          v2:
+            authority: {invoke: [model], delegate: [model]}
+            tools: [{name: model}]
+            child: [{name: sub, authority: {invoke: [model], delegate: []}}]
+          harness: {backend: scripted, version: v1, params: {script: []}}
+      - name: sub
+        spec: {taskType: echo, data: {type: list, items: [k]}}
+"""
+
+
+@pytest.mark.parametrize(
+    "body", [_SELF_READER, _UPSTREAM_READER], ids=["own", "dependent"]
+)
+def test_an_agent_reading_a_region_that_waits_on_it_is_refused(body: str) -> None:
+    err = _reject(body)
+    assert [d.code for d in err.diagnostics] == ["topology.unstructured-cycle"]
