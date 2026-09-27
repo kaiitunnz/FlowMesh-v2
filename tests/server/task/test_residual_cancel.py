@@ -134,10 +134,12 @@ def test_a_restart_cancels_a_residual_child_a_crash_left_behind(
             _win(runtime, winner)
 
         restored = _live_runtime(registry, "restored", reader=runtime._results)
+        interrupts = _Interrupts(restored)
         assert await restored.rehydrate() == 1
 
         if state == "running":
             assert _status(restored, loser) == TaskStatus.CANCELLING
+            assert interrupts.sent == [(loser, "wkr-2")]
             record = restored.get_record(loser)
             assert record is not None
             restored.mark_succeeded(loser, "wkr-2", {}, _TS, record.dispatch_id)
@@ -145,6 +147,28 @@ def test_a_restart_cancels_a_residual_child_a_crash_left_behind(
         assert _pop_ready(restored) == [ids["after"]]
         _finish(restored, ids["after"])
         assert restored.workflow_settlement(workflow_id).settled
+
+    asyncio.run(run())
+
+
+def test_a_restart_interrupts_a_task_whose_cancel_interrupt_was_lost(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        registry = FakeRegistry()
+        runtime, workflow_id, _, (running, _) = await _fanned_out(registry, 2)
+        record_dispatch(runtime, running, cast(Any, _worker("wkr-2")))
+        # The root crashes after the cancel is durable, before it interrupts the worker.
+        with monkeypatch.context() as patch:
+            patch.setattr(runtime, "_release_terminated_work", lambda *_: None)
+            runtime.cancel_workflow(workflow_id)
+
+        restored = _live_runtime(registry, "restored", reader=runtime._results)
+        interrupts = _Interrupts(restored)
+        assert await restored.rehydrate() == 1
+
+        assert _status(restored, running) == TaskStatus.CANCELLING
+        assert interrupts.sent == [(running, "wkr-2")]
 
     asyncio.run(run())
 

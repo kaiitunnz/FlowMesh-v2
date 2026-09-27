@@ -994,6 +994,7 @@ class TaskRuntime:
                     self._install_rehydrated_workflow_locked(
                         workflow_id, tasks, sched, rehydrated_at
                     )
+                self._interrupt_cancelling_locked(workflow_id)
                 # A workflow whose last task settled just before the crash has no
                 # event left to close it: replay the completion notification for
                 # every restored workflow, and let the finalizer reject the ones
@@ -1003,6 +1004,7 @@ class TaskRuntime:
             restored += 1
         with self._cv:
             self._restore_merges_locked()
+        self._release_pending_terminations()
         if restored:
             self._logger.info("Rehydrated %d workflow(s) from durable state", restored)
         return restored
@@ -5404,23 +5406,36 @@ class TaskRuntime:
                 # The worker may already be running the task.
                 self._take_dispatch_locked(record, publish)
                 recorded.append(record.task_id)
-            # A merged child's batch keeps running for siblings from other workflows.
-            if (
-                record.status == TaskStatus.DISPATCHED
-                and record.assigned_worker
-                and not record.merged_parent_id
+            if record.status == TaskStatus.DISPATCHED and (
+                interrupt := self._interrupt_for(record, reason)
             ):
-                interrupts.append(
-                    InterruptMessage(
-                        task_id=record.task_id,
-                        worker_id=record.assigned_worker,
-                        reason=reason,
-                    )
-                )
+                interrupts.append(interrupt)
             self._input_checks.pop(record.task_id, None)
             self._task_epoch_index.pop(record.task_id, None)
         reaps = self._take_ops_for_agents_locked([r.task_id for r in records])
         return _Termination(interrupts, reaps, recorded)
+
+    @staticmethod
+    def _interrupt_for(record: TaskRecord, reason: str) -> InterruptMessage | None:
+        # A merged child's batch keeps running for siblings from other workflows.
+        if not record.assigned_worker or record.merged_parent_id:
+            return None
+        return InterruptMessage(
+            task_id=record.task_id, worker_id=record.assigned_worker, reason=reason
+        )
+
+    def _interrupt_cancelling_locked(self, workflow_id: str) -> None:
+        """Queue an interrupt for each task a restart found still being cancelled,
+        whose worker may never have received one."""
+        interrupts = [
+            interrupt
+            for record in self._tasks.values()
+            if record.workflow_id == workflow_id
+            and record.status == TaskStatus.CANCELLING
+            and (interrupt := self._interrupt_for(record, record.error or "cancelled"))
+        ]
+        if interrupts:
+            self._pending_terminations.append(_Termination(interrupts, [], []))
 
     def _release_terminated_work(self, termination: _Termination) -> None:
         """Release what a terminated workflow's work held, best effort: each resident
