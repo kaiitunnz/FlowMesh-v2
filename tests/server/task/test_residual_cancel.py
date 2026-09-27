@@ -10,6 +10,7 @@ from server.orchestration.state import InvocationState, LedgerSnapshot
 from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime
 from server.task.v2.representations.operators import JoinRegion
+from shared.harness import BoundaryEventKind
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.task.test_agent_episode_runtime import _SCRIPT, _step
 from tests.server.task.test_resident_origin_loss import _capture_resident_boundary
@@ -24,7 +25,7 @@ from tests.server.task.test_v2_orchestration import (
 )
 from tests.server.task.test_v2_region_failure import _HEAD, _engine
 from tests.server.task.test_worker_originated_boundary import _runtime
-from worker.executors.harness.scripted import ScriptedHarnessAdapter
+from worker.executors.harness.scripted import ScriptedHarnessAdapter, ScriptedStep
 
 _ANY_CANCEL = """
       - name: planner
@@ -248,3 +249,86 @@ async def test_a_residual_cancel_settles_its_workflow_as_finished_work() -> None
     assert _status(runtime, loser) == TaskStatus.CANCELLED
     assert loser not in registry.remaining_of(workflow_id)
     assert cancelled == []
+
+
+_NESTED_REVIEWERS = """
+      - name: lead
+        spec:
+          taskType: agent
+          v2:
+            authority: {invoke: [model], delegate: [model]}
+            tools: [{name: model}]
+            child: [{name: reviewer, authority: {invoke: [model], delegate: [model]}}]
+          harness: {backend: scripted, version: v1, params: {script: []}}
+      - name: reviewer
+        spec:
+          taskType: agent
+          v2:
+            authority: {invoke: [model], delegate: [model]}
+            tools: [{name: model}]
+            child: [{name: sub, authority: {invoke: [model], delegate: []}}]
+          harness: {backend: scripted, version: v1, params: {script: []}}
+      - name: sub
+        spec: {taskType: echo, data: {type: list, items: [s]}}
+"""
+
+
+def _spawner(region: str, value: str) -> ScriptedHarnessAdapter:
+    return ScriptedHarnessAdapter(
+        [
+            ScriptedStep(
+                op="boundary", kind=BoundaryEventKind.SPAWN, call="c0", region=region
+            ),
+            ScriptedStep(op="complete", value=value),
+        ],
+        "v1",
+    )
+
+
+@pytest.mark.parametrize("state", ["pending", "running"])
+def test_a_residual_cancel_reaches_a_cancelled_agents_own_children(state: str) -> None:
+    async def run() -> None:
+        runtime = _live_runtime(FakeRegistry())
+        interrupts = _Interrupts(runtime)
+        workflow_id, ids = await _register(runtime, _HEAD + _NESTED_REVIEWERS)
+        engine = _engine(runtime, workflow_id)
+        join_op = f"{ids['lead']}:reviewer:spawn:join"
+        join = engine._operators[join_op]
+        assert isinstance(join, JoinRegion)
+        engine._operators[join_op] = join.model_copy(
+            update={"residual_policy": "cancel"}
+        )
+        lead, lead_adapter = ids["lead"], _spawner("reviewer", "done")
+        assert _pop_ready(runtime) == [lead]
+        _step(runtime, lead_adapter, lead)
+        reviewer = next(t for t in _pop_ready(runtime) if t != lead)
+        _step(runtime, _spawner("sub", "reviewed"), reviewer, worker="wkr-2")
+        sub = next(t for t in _pop_ready(runtime) if t != reviewer)
+        if state == "running":
+            record_dispatch(runtime, sub, cast(Any, _worker("wkr-3")))
+        else:
+            with runtime._cv:
+                runtime._enqueue_ready_locked(sub)
+
+        # The lead completes while its reviewer and the reviewer's own child still run.
+        _step(runtime, lead_adapter, lead)
+
+        assert _status(runtime, reviewer) == TaskStatus.CANCELLED
+        sub_wi = engine.work_item(sub)
+        assert sub_wi is not None
+        sub_scope = engine._scopes[engine._activations[sub_wi.activation_id].scope_id]
+        assert (
+            sub_scope.grant_id is not None
+            and engine._grants[sub_scope.grant_id].revoked
+        )
+        if state == "running":
+            assert _status(runtime, sub) == TaskStatus.CANCELLING
+            assert interrupts.sent == [(sub, "wkr-3")]
+            record = runtime.get_record(sub)
+            assert record is not None
+            runtime.mark_succeeded(sub, "wkr-3", {}, _TS, record.dispatch_id)
+        assert _pop_ready(runtime) == []
+        assert _status(runtime, sub) == TaskStatus.CANCELLED
+        assert runtime.workflow_settlement(workflow_id).settled
+
+    asyncio.run(run())

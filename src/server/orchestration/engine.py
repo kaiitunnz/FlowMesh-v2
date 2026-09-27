@@ -2351,7 +2351,7 @@ class OrchestrationEngine:
                 operator_id=owner,
                 detail={"scope": scope_id, "reason": "agent_terminal"},
             )
-            advance.cancelled.extend(self._cancel_residual_children(scope_id))
+            advance.cancelled.extend(self._cancel_residual_subtrees(scope_id))
         else:
             cap.status = CapabilityStatus.SEALED
             self._emit(
@@ -2594,10 +2594,11 @@ class OrchestrationEngine:
         self._emit("scope_cancelled", detail={"scope": scope_id})
         self._revoke_progress(scope_id)
         scope = self._scopes[scope_id]
-        self._apply_cancellation_residual(scope_id)
+        cancelled = self._apply_cancellation_residual(scope_id)
         for wi in self._scope_work_items(scope_id, kinds=("leaf", "agent")):
             if wi.status not in TERMINAL_WORK_ITEM_STATUSES:
                 self._cancel_work_item(wi)
+                cancelled.append(wi.legacy_task_id)
         if scope.grant_id and scope.grant_id in self._grants:
             grant = self._grants[scope.grant_id]
             if not grant.revoked:
@@ -2609,7 +2610,9 @@ class OrchestrationEngine:
                     operator_id=scope.owner_operator_id,
                     detail={"scope": scope_id},
                 )
-        return self._resolve_cancelled_outputs(scope_id)
+        advance = self._resolve_cancelled_outputs(scope_id)
+        advance.cancelled.extend(cancelled)
+        return advance
 
     def _revoke_progress(self, scope_id: str) -> None:
         """Revoke a scope's open child-init and loop-time capabilities."""
@@ -2628,8 +2631,9 @@ class OrchestrationEngine:
                     detail={"scope": scope_id},
                 )
 
-    def _apply_cancellation_residual(self, scope_id: str) -> None:
-        """Apply a cancelled scope's join residual policy to its materialized children.
+    def _apply_cancellation_residual(self, scope_id: str) -> list[str]:
+        """Apply a cancelled scope's join residual policy to its materialized children;
+        returns the task ids it cancelled.
 
         A declared ``drain``/``continue`` leaves materialized children to settle; the
         default (``cancel``, and any scope without a declared policy) cancels every not-
@@ -2637,9 +2641,17 @@ class OrchestrationEngine:
         """
         join = self._join_of_scope(scope_id)
         if self._residual_policy(join, ResidualPolicy.CANCEL) is ResidualPolicy.CANCEL:
-            self._cancel_residual_children(scope_id)
+            return [
+                wi.legacy_task_id for wi in self._cancel_residual_children(scope_id)
+            ]
+        return []
 
     def _resolve_cancelled_outputs(self, scope_id: str) -> Advance:
+        """Release a cancelled scope's join as its cancellation outcome.
+
+        Only a root-level scope publishes it and delivers its record, as only a
+        root-level scope does when its join releases.
+        """
         if scope_id in self._released_scopes:
             return Advance()
         owner_op = self._scopes[scope_id].owner_operator_id or ""
@@ -2661,6 +2673,8 @@ class OrchestrationEngine:
             detail={"outcome": outcome.value, "cancelled": "true"},
         )
         self._frontier_closed(scope_id)
+        if not self._root_level(scope_id):
+            return Advance()
         self._publish(release_op, outcome, ValueRef(kind="empty"))
         return self._deliver_record(
             release_op, self._control_activation(release_op), ValueRef(kind="empty")
@@ -3071,18 +3085,36 @@ class OrchestrationEngine:
         join = self._operators.get(join_op) if join_op else None
         return join if isinstance(join, JoinRegion) else None
 
-    def _cancel_residual_children(self, scope_id: str) -> list[str]:
-        """Cancel a scope's unsettled children; returns their task ids."""
+    def _cancel_residual_children(self, scope_id: str) -> list[WorkItem]:
+        """Cancel a scope's unsettled children; returns their work items."""
         cap = self._capabilities.get((scope_id, ProgressAxis.CHILD_INIT))
-        cancelled: list[str] = []
+        cancelled: list[WorkItem] = []
         for child in self._materialized_children(scope_id):
             wi = self._work_items[self._wi_by_activation[child.activation_id]]
             if wi.status not in TERMINAL_WORK_ITEM_STATUSES:
                 self._cancel_work_item(wi)
-                cancelled.append(wi.legacy_task_id)
+                cancelled.append(wi)
                 if cap is not None:
                     cap.outstanding = max(0, cap.outstanding - 1)
         return cancelled
+
+    def _cancel_residual_subtrees(self, scope_id: str) -> list[str]:
+        """Cancel a scope's unsettled children, each with the regions it entered and
+        everything under them, as a cancel does; returns the task ids cancelled."""
+        cancelled: list[str] = []
+        for wi in self._cancel_residual_children(scope_id):
+            cancelled.append(wi.legacy_task_id)
+            for opener in self._entered_region_openers(wi.activation_id):
+                for sid in self._scope_subtree(self._scope_by_activation[opener]):
+                    cancelled.extend(self._cancel_scope(sid).cancelled)
+        return cancelled
+
+    def _entered_region_openers(self, agent_activation: str) -> list[str]:
+        return [
+            opener
+            for (activation_id, _), opener in self._region_openers.items()
+            if activation_id == agent_activation and opener in self._scope_by_activation
+        ]
 
     def _apply_residual_policy(self, join: JoinRegion, scope_id: str) -> list[str]:
         """Govern a released early join's not-yet-settled materialized children;
@@ -3106,7 +3138,7 @@ class OrchestrationEngine:
                 operator_id=self._scopes[scope_id].owner_operator_id,
                 detail={"scope": scope_id, "residual": policy.value},
             )
-        return self._cancel_residual_children(scope_id) if cancel else []
+        return self._cancel_residual_subtrees(scope_id) if cancel else []
 
     def _maybe_egress_loop(self, scope_id: str) -> Advance:
         if not scope_id or scope_id in self._released_scopes:

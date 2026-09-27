@@ -1093,6 +1093,25 @@ def test_a_nested_level_closes_after_its_join_failed_at_the_root() -> None:
     assert nested in eng.to_snapshot().released_scopes
 
 
+def test_a_cancelled_instances_region_delivers_nothing_downstream() -> None:
+    eng = _engine(_self_recursive_agent(), budget=ScopeBudget(max_scope_depth=8))
+    join = eng._operators["self:spawn:join"]
+    assert isinstance(join, JoinRegion)
+    eng._operators["self:spawn:join"] = join.model_copy(
+        update={"residual_policy": "cancel"}
+    )
+    i1, grandchild = _nested_level(eng)
+
+    # A completes while I1 and I1's own child run: the cancel reaches both, and only
+    # A's level of the shared region releases downstream.
+    advance = eng.on_succeeded("A")
+
+    assert advance.cancelled == [i1, grandchild]
+    assert advance.ready == ["after"]
+    nested = eng.region_scope_for(_work_item(eng, i1).activation_id, "self")
+    assert nested in eng.to_snapshot().released_scopes
+
+
 def test_the_root_level_aggregate_survives_a_later_nested_release() -> None:
     bundle = _self_recursive_agent()
     eng = _engine(bundle, budget=ScopeBudget(max_scope_depth=8))
