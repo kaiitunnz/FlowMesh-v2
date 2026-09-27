@@ -228,3 +228,23 @@ def test_an_agents_cancel_residual_releases_a_cancelled_childs_credit() -> None:
         assert runtime.workflow_settlement(workflow_id).settled
 
     asyncio.run(run())
+
+
+@pytest.mark.anyio
+async def test_a_residual_cancel_settles_its_workflow_as_finished_work() -> None:
+    registry = FakeRegistry()
+    runtime, workflow_id, _, (winner, loser) = await _fanned_out(registry, 2)
+    cancelled: list[str] = []
+    commit = registry.commit_transition
+
+    def spy(workflow_id: str, **kwargs: Any) -> None:
+        cancelled.extend(kwargs.get("cancelled", ()))
+        commit(workflow_id, **kwargs)
+
+    registry.commit_transition = spy  # type: ignore[method-assign]
+    _win(runtime, winner)
+
+    # The loser leaves the remaining set without reading as a cancelled workflow.
+    assert _status(runtime, loser) == TaskStatus.CANCELLED
+    assert loser not in registry.remaining_of(workflow_id)
+    assert cancelled == []

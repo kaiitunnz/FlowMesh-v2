@@ -394,6 +394,15 @@ def _reset_to_pending(record: TaskRecord) -> None:
     record.error = None
 
 
+def _membership(record: TaskRecord) -> str:
+    """The status set a task's record commits into. A child its region's residual
+    policy cancelled settles its workflow as a finished task does, never as a
+    cancelled one."""
+    if record.status == TaskStatus.CANCELLED and record.residual_cancel:
+        return TaskStatus.DONE
+    return record.status
+
+
 def _dependency_failed(task_id: str) -> str:
     return f"Dependency {task_id} failed"
 
@@ -1306,7 +1315,7 @@ class TaskRuntime:
             )
             for task_id in dict.fromkeys(task_ids):
                 if (record := self._tasks.get(task_id)) is not None:
-                    moves[record.workflow_id][record.status].append(task_id)
+                    moves[record.workflow_id][_membership(record)].append(task_id)
             for workflow_id, by_status in moves.items():
                 self._workflow_registry.commit_transition(
                     workflow_id,
@@ -5480,10 +5489,15 @@ class TaskRuntime:
                     for task_id in recorded
                     if self._tasks[task_id].status == TaskStatus.CANCELLING
                 ],
+                done=[
+                    task_id
+                    for task_id in touched
+                    if _membership(self._tasks[task_id]) == TaskStatus.DONE
+                ],
                 cancelled=[
                     task_id
                     for task_id in touched
-                    if self._tasks[task_id].status == TaskStatus.CANCELLED
+                    if _membership(self._tasks[task_id]) == TaskStatus.CANCELLED
                 ],
                 sched=self._sched_locked(workflow_id),
             )
