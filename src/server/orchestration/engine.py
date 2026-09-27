@@ -446,7 +446,8 @@ class OrchestrationEngine:
         # Control operators settled as a declared failure; a late record from another
         # input never fires one.
         self._failed_regions: set[str] = set(snapshot.failed_regions)
-        # Child-init scopes of a failed agent instance: its join never releases.
+        # Child-init scopes a failed agent opened and that had not released: each
+        # one's join never releases.
         self._failed_scopes: set[str] = set(snapshot.failed_scopes)
         # A spawn-site denial names no work item; an agent's denied boundary names one
         # and never refuses a later spawn.
@@ -3360,7 +3361,7 @@ class OrchestrationEngine:
 
         A region the agent never entered fails as a spawn whose input failed does, and
         opens no scope. An entered region's children follow its residual policy, and
-        its join fails rather than releasing. A spawned agent instance shares its
+        its join fails unless it already released. A spawned agent instance shares its
         regions' operators with its siblings, so only its own scopes fail.
         """
         op = self._operators.get(wi.operator_id)
@@ -3374,17 +3375,36 @@ class OrchestrationEngine:
                 if not instance:
                     self._fail_region(ref.spawn_ref, cascade, visited)
                 continue
-            if instance:
-                if scope_id not in self._released_scopes:
-                    self._failed_scopes.add(scope_id)
-                    self._emit(
-                        "region_failed",
-                        operator_id=self._join_for_spawn(ref.spawn_ref),
-                        detail={"scope": scope_id},
-                    )
-            elif (join_op := self._join_for_spawn(ref.spawn_ref)) is not None:
-                self._fail_region(join_op, cascade, visited)
+            if (
+                scope_id not in self._released_scopes
+                and scope_id not in self._failed_scopes
+            ):
+                self._fail_entered_region(
+                    ref.spawn_ref, scope_id, instance, cascade, visited
+                )
             self._close_owned_region(scope_id)
+
+    def _fail_entered_region(
+        self,
+        spawn_op: str,
+        scope_id: str,
+        instance: bool,
+        cascade: list[str],
+        visited: set[str],
+    ) -> None:
+        """Fail the join of one scope a failed agent opened, which has not released.
+
+        The scope is named directly: a recursive agent's levels share the join
+        operator, and another level's scope may already have released.
+        """
+        self._failed_scopes.add(scope_id)
+        join_op = self._join_for_spawn(spawn_op)
+        if instance or join_op is None:
+            self._emit("region_failed", operator_id=join_op, detail={"scope": scope_id})
+        elif join_op not in visited and join_op not in self._failed_regions:
+            visited.add(join_op)
+            self._settle_region_failed(join_op)
+            self._fail_downstream(join_op, cascade, visited)
 
     def _fail_downstream(
         self, operator_id: str, cascade: list[str], visited: set[str]

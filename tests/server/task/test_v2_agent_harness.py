@@ -984,6 +984,57 @@ def test_a_failed_agent_instance_fails_only_its_own_region_scope() -> None:
     assert restored.to_snapshot().failed_scopes == [failed_scope]
 
 
+def _self_recursive_agent() -> PersistedV2Workflow:
+    """Agent A spawns instances of itself; ``after`` consumes A's region."""
+    ref, ops, edge = _region("self", "A")
+    return _bundle(
+        [_agent("A", regions=(ref,)), *ops, _leaf("after")],
+        [edge, TemplateEdge(from_op="self:spawn:join", to_op="after")],
+        (_decl("out:A", "A"), _decl("out:after", "after")),
+    )
+
+
+def _nested_level(eng: OrchestrationEngine) -> tuple[str, str]:
+    """A's instance I1 spawns a grandchild G into I1's own scope of the region."""
+    _dispatch_agent(eng)
+    i1 = _spawn_in(eng, "A", "c0", "self")
+    eng.on_dispatched(i1, "w1")
+    grandchild = _spawn_in(eng, i1, "c0", "self")
+    eng.on_dispatched(grandchild, "w1")
+    return i1, grandchild
+
+
+def test_a_failed_agent_leaves_its_released_region_released() -> None:
+    eng = _engine(_self_recursive_agent(), budget=ScopeBudget(max_scope_depth=8))
+    i1, _ = _nested_level(eng)
+    eng.on_succeeded(i1)
+    seal = BoundaryEvent(
+        kind=BoundaryEventKind.SPAWN_SEAL,
+        call_correlation="s0",
+        child_region_ref="self",
+    )
+    assert eng.route_boundary_event("A", seal).ready == ["after"]
+
+    assert eng.on_failed("A", "boom", retryable=False).failed == ["A"]
+
+    assert _work_item(eng, "after").status is WorkItemStatus.READY
+    assert not eng.to_snapshot().failed_regions
+    assert eng.output_publication("out:after") is None
+
+
+def test_a_failed_agent_fails_its_own_region_while_a_nested_level_released() -> None:
+    eng = _engine(_self_recursive_agent(), budget=ScopeBudget(max_scope_depth=8))
+    i1, grandchild = _nested_level(eng)
+    eng.on_succeeded(grandchild)
+    # I1's scope of the shared region releases; A's own scope stays open.
+    eng.on_succeeded(i1)
+
+    failed = eng.on_failed("A", "boom", retryable=False).failed
+
+    assert failed == ["A", "after"]
+    assert "self:spawn:join" in eng.to_snapshot().failed_regions
+
+
 def _work_item(eng: OrchestrationEngine, task: str) -> WorkItem:
     wi = eng.work_item(task)
     assert wi is not None
