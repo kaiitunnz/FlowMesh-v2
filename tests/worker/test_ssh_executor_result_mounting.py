@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from docker import DockerClient
-from docker.errors import APIError, ImageNotFound
+from docker.errors import APIError, NotFound
 from docker.models.containers import Container
 
 from shared.content import reference_for
@@ -300,7 +300,7 @@ class _FakeImages:
 
     def get(self, name: str) -> object:
         if not self.present:
-            raise ImageNotFound(f"No such image: {name}")
+            raise NotFound(f"image not known: {name}")
         return object()
 
     def pull(self, name: str) -> object:

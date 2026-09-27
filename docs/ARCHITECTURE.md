@@ -485,10 +485,10 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
 - **Consumed values by reference.** A dispatch names each upstream value its task
   consumes by reference, and the task's worker hydrates each through its content cache
   before anything validates or runs the task. A worker that cannot reach the store names
-  the inputs it could not read. Control reads those the task consumes itself: it holds
-  the task while it cannot reach the store either, fails it when the content is missing
-  or corrupt, and otherwise queues it again, in every case without spending an attempt
-  or blaming the worker.
+  the inputs it could not read. Control re-reads each named input the task consumes with
+  its own store access: it holds the task while it cannot reach the store either, fails
+  it when the content is missing or corrupt, and otherwise queues it again, in every case
+  without spending an attempt or blaming the worker.
 - **Published outputs.** A leaf declares `result: {visibility: published}` to publish its
   value, and a spawn region declares it to publish its children's results as a
   collection keyed by child index within each spawning scope. Clients list and fetch
