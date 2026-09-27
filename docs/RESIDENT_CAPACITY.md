@@ -77,7 +77,8 @@ TERMINAL --(permitted reissue)--> successor PENDING (same invocation_id, fresh e
   or streaming claim the only normal release is a fenced terminal outcome recorded in `DS`
   and consumed by `invocation_id`; a stream close or a telemetry report alone never releases
   it. A pre-acceptance cancellation, known enqueue failure, or expiry records a terminal
-  transition directly.
+  transition directly. On a root restart, a workflow claim whose invocation the restored
+  ledger holds terminal is released from that terminal; every other claim keeps its credit.
 - **Loss and reissue.** A transient or ambiguous route loss moves a credit-bearing claim to
   `UNCERTAIN` and re-drives the boundary under the held credit — the runtime re-issues the
   same durable invocation, which resumes on the fenced replica — releasing nothing until a

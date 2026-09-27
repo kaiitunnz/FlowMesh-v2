@@ -2310,6 +2310,17 @@ class TaskRuntime:
         """
         self._resident_terminal_hook = hook
 
+    def resident_invocation_completed(
+        self, workflow_id: str, invocation_id: str
+    ) -> bool | None:
+        """Whether a workflow's terminal boundary invocation completed; None while its
+        ledger holds no terminal for it."""
+        with self._lock:
+            engine = self._engines.get(workflow_id)
+            return (
+                engine.boundary_invocation_completed(invocation_id) if engine else None
+            )
+
     def _release_resident_credit(
         self, invocation_id: str | None, *, failed: bool
     ) -> None:

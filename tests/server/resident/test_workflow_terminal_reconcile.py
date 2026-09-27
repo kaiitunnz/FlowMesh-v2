@@ -1,0 +1,93 @@
+"""A root restart releases a resident credit its ledger already settled.
+
+A crash between the ledger terminal and the credit release leaves the claim holding
+its credit with nothing left to settle it; startup replays the ledger terminal.
+"""
+
+import asyncio
+from typing import Any
+
+import pytest
+
+from server.resident.state import ClaimState, ClaimTerminalReason, ResidentSnapshot
+from server.startup import rehydrate_root_state
+from server.task.runtime import TaskRuntime
+from tests.server.resident.test_service import _admission, _build, _env
+from tests.server.task.test_agent_episode_runtime import _held_boundary
+from tests.server.task.test_v2_orchestration import FakeRegistry, _runtime
+
+
+class _SnapshotRegistry:
+    def __init__(self, snapshot: ResidentSnapshot) -> None:
+        self._snapshot = snapshot
+
+    async def load_snapshot_async(self) -> ResidentSnapshot:
+        return self._snapshot
+
+
+def _admit(workflow_id: str, invocation_id: str) -> ResidentSnapshot:
+    """A resident control holding one credit for a workflow's boundary invocation."""
+    svc, stores, _settled, _delivery = _build()
+    binding = _admission().model_copy(update={"workflow_id": workflow_id})
+    svc._resolve_dependency = lambda _task_id: binding  # type: ignore[method-assign]
+    asyncio.run(svc._originate(_env(invocation_id)))
+    (claim,) = stores.claims.by_invocation(invocation_id)
+    assert claim.holds_credit
+    return stores.to_snapshot()
+
+
+def _restart(registry: FakeRegistry, snapshot: ResidentSnapshot) -> Any:
+    runtime = _runtime(registry)
+    svc, stores, _settled, _delivery = _build()
+    asyncio.run(
+        rehydrate_root_state(runtime, svc, _SnapshotRegistry(snapshot))  # type: ignore[arg-type]
+    )
+    svc.shutdown()
+    return stores
+
+
+def _held(registry: FakeRegistry) -> tuple[TaskRuntime, str, Any]:
+    runtime = _runtime(registry)
+    workflow_id, _writer, _engine, env = asyncio.run(_held_boundary(runtime))
+    return runtime, workflow_id, env
+
+
+@pytest.mark.parametrize(
+    ("path", "reason"),
+    [
+        ("settled", ClaimTerminalReason.COMPLETED),
+        ("failed", ClaimTerminalReason.FAILED),
+        ("cancelled", ClaimTerminalReason.FAILED),
+    ],
+)
+def test_a_restart_releases_a_credit_the_ledger_settled(
+    path: str, reason: ClaimTerminalReason
+) -> None:
+    registry = FakeRegistry()
+    runtime, workflow_id, env = _held(registry)
+    snapshot = _admit(workflow_id, env.invocation_id)
+    # The ledger terminal commits; the root crashes before the credit release runs.
+    if path == "cancelled":
+        runtime.cancel_workflow(workflow_id)
+    else:
+        value = "draft" if path == "settled" else None
+        error = "upstream refused" if path == "failed" else None
+        assert runtime.settle_episode_invocation(
+            env.task_id, env.call_correlation, value, error=error
+        )
+
+    stores = _restart(registry, snapshot)
+    (claim,) = stores.claims.by_invocation(env.invocation_id)
+    assert claim.state is ClaimState.TERMINAL and claim.terminal_reason is reason
+    assert stores.credit_ledger.held(claim.replica_id) == 0
+
+
+def test_a_restart_holds_a_credit_whose_invocation_is_still_open() -> None:
+    registry = FakeRegistry()
+    _runtime_, workflow_id, env = _held(registry)
+    snapshot = _admit(workflow_id, env.invocation_id)
+
+    stores = _restart(registry, snapshot)
+    (claim,) = stores.claims.by_invocation(env.invocation_id)
+    assert claim.state is ClaimState.UNCERTAIN
+    assert stores.credit_ledger.held(claim.replica_id) == 1

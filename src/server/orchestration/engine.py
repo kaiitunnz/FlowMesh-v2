@@ -165,6 +165,13 @@ _EARLY_JOINS = frozenset(
     {JoinCompletion.ANY, JoinCompletion.FIRST_K, JoinCompletion.PREDICATE}
 )
 _OPEN_ATTEMPT_STATUSES = frozenset({AttemptStatus.ISSUED, AttemptStatus.RUNNING})
+_TERMINAL_INVOCATION_STATES = frozenset(
+    {
+        InvocationState.TERMINAL,
+        InvocationState.AMBIGUITY_TERMINAL,
+        InvocationState.COMPENSATION_REQUIRED,
+    }
+)
 
 
 class RegionError(ValueError):
@@ -1551,6 +1558,18 @@ class OrchestrationEngine:
             invocation.state = next_on_terminal(invocation.state)
             self._emitter.emit_boundary(invocation)
         return env.invocation_id
+
+    def boundary_invocation_completed(self, invocation_id: str) -> bool | None:
+        """Whether a terminal boundary invocation completed with an outcome; None while
+        it is unknown or not terminal."""
+        invocation = self._invocations.get(invocation_id)
+        if invocation is None or invocation.state not in _TERMINAL_INVOCATION_STATES:
+            return None
+        return any(
+            env.invocation_id == invocation_id
+            and (env.outcome_value is not None or env.outcome_ref is not None)
+            for env in self._boundary_events.values()
+        )
 
     def cancel_outstanding_boundary_invocations(self) -> list[str]:
         """Terminalize every unsettled mediated boundary invocation on cancellation.
