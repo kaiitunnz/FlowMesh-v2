@@ -92,7 +92,7 @@ def published_member(
     return decl, _member(engine, name, decl, slot) if slot is not None else None
 
 
-def page(
+def paginate_members(
     members: list[OutputMember],
     limit: int,
     after: str | None = None,
@@ -153,7 +153,7 @@ __all__ = [
     "OutputMember",
     "PublishedOutput",
     "PublishedOutputs",
-    "page",
+    "paginate_members",
     "published_member",
     "published_members",
 ]

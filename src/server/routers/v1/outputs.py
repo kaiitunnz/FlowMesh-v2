@@ -18,7 +18,7 @@ from ...schemas.outputs import (
     WorkflowOutputPage,
     WorkflowOutputValue,
 )
-from ...task.outputs import InvalidCursor, OutputMember, page
+from ...task.outputs import InvalidCursor, OutputMember, paginate_members
 from ...task.results import ResultUnavailable, ResultUnreadable
 from ...task.runtime import TaskRuntime
 from ...task.v2.representations.results import CardinalityKind
@@ -107,7 +107,7 @@ async def list_outputs(
         raise _no_outputs(workflow_id)
     members = [m for m in outputs.members if scope is None or m.scope_id == scope]
     try:
-        selected = page(members, limit, after=after, before=before)
+        selected = paginate_members(members, limit, after=after, before=before)
     except InvalidCursor as exc:
         raise _error(status.HTTP_400_BAD_REQUEST, "invalid_cursor", str(exc)) from exc
     entries = [
