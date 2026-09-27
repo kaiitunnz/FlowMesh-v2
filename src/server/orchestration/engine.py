@@ -333,9 +333,7 @@ class OrchestrationEngine:
                 accepted
             )
         self._region_aggregates = list(snapshot.region_aggregates)
-        self._aggregate_by_join: dict[str, RegionJoinAggregate] = {
-            agg.join_operator_id: agg for agg in self._region_aggregates
-        }
+        self._aggregate_by_join: dict[str, RegionJoinAggregate] = {}
         self._invocations = {i.invocation_id: i for i in snapshot.invocations}
         self._attempts = {a.attempt_id: a for a in snapshot.attempts}
         self._embodiment_selections = {
@@ -462,6 +460,16 @@ class OrchestrationEngine:
         self._failed_scopes: set[str] = set(snapshot.failed_scopes)
         # Why each task settled as a declared failure: its own reason, or the failure
         # it depends on. A ledger stored without them names each failed work item's own.
+        # A ledger stored while nested levels still froze an aggregate may hold one
+        # after its root level's; the root level's is the one delivered downstream.
+        for aggregate in self._region_aggregates:
+            join_op = aggregate.join_operator_id
+            if join_op not in self._aggregate_by_join or not any(
+                (act := self._activations.get(member.child_activation_id)) is not None
+                and not self._root_level(act.scope_id)
+                for member in aggregate.members
+            ):
+                self._aggregate_by_join[join_op] = aggregate
         self._failure_reasons: dict[str, str] = dict(snapshot.failure_reasons)
         for wi in self._work_items.values():
             if wi.outcome is PublicationOutcome.DECLARED_FAILURE and wi.legacy_task_id:
@@ -2825,10 +2833,12 @@ class OrchestrationEngine:
         if scope_id in self._failed_scopes:
             self._emit_scope_owner(scope_id)
             return Advance()
+        # A join failed at the root blocks only the root-level scope: a nested level
+        # still releases, delivering nothing.
         if (
             join_op is None
             or scope_id in self._released_scopes
-            or join_op in self._failed_regions
+            or (join_op in self._failed_regions and self._root_level(scope_id))
         ):
             return Advance()
         cap = self._capabilities.get((scope_id, ProgressAxis.CHILD_INIT))
@@ -2857,6 +2867,12 @@ class OrchestrationEngine:
         return self._release_join(join_op, scope_id)
 
     def _release_join(self, join_op: str, scope_id: str) -> Advance:
+        """Release a scope's join by its completion rule.
+
+        Only a root-level scope freezes the join's aggregate, publishes it, and
+        delivers its record downstream. A scope nested under a spawned child shares the
+        join operator with its sibling levels, so its release stays local to its level.
+        """
         self._released_scopes.add(scope_id)
         if (owner_act := self._scopes[scope_id].owner_activation_id) is not None:
             self._emitter.emit_activation(owner_act)
@@ -2864,7 +2880,9 @@ class OrchestrationEngine:
         assert isinstance(join, JoinRegion)
         outcome, value_ref = self._join_result(join, scope_id)
         children = self._materialized_children(scope_id)
-        self._freeze_region_aggregate(join, join_op, scope_id)
+        nested = not self._root_level(scope_id)
+        if not nested:
+            self._freeze_region_aggregate(join, join_op, scope_id)
         if outcome is PublicationOutcome.DECLARED_FAILURE:
             self._frontier_closed(scope_id)
             cancelled = self._apply_residual_policy(join, scope_id)
@@ -2878,12 +2896,17 @@ class OrchestrationEngine:
         )
         self._frontier_closed(scope_id)
         cancelled = self._apply_residual_policy(join, scope_id)
+        if nested:
+            return Advance(cancelled=cancelled)
         self._publish(join_op, outcome, value_ref)
         advance = self._deliver_record(
             join_op, self._control_activation(join_op), value_ref
         )
         advance.cancelled.extend(cancelled)
         return advance
+
+    def _root_level(self, scope_id: str) -> bool:
+        return self._scopes[scope_id].parent_scope_id == self._root_scope.scope_id
 
     def _fail_resolved_join(
         self, join_op: str, scope_id: str, children: list[Activation]
@@ -2895,7 +2918,7 @@ class OrchestrationEngine:
         of a scope nested under a spawned child fails only that scope, since sibling
         scopes share its operator.
         """
-        if self._scopes[scope_id].parent_scope_id != self._root_scope.scope_id:
+        if not self._root_level(scope_id):
             self._failed_scopes.add(scope_id)
             self._emit("region_failed", operator_id=join_op, detail={"scope": scope_id})
             return Advance()

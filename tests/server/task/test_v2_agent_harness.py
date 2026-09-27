@@ -1053,6 +1053,86 @@ def test_a_failed_agent_fails_its_own_region_while_a_nested_level_released() -> 
     assert "self:spawn:join" in eng.to_snapshot().failed_regions
 
 
+_SELF_SEAL = BoundaryEvent(
+    kind=BoundaryEventKind.SPAWN_SEAL, call_correlation="s0", child_region_ref="self"
+)
+
+
+def test_a_nested_levels_release_delivers_nothing_downstream() -> None:
+    eng = _engine(_self_recursive_agent(), budget=ScopeBudget(max_scope_depth=8))
+    _dispatch_agent(eng)
+    instance = _spawn_in(eng, "A", "c0", "self")
+    eng.on_dispatched(instance, "w1")
+
+    # The instance's own, never-entered region closes as it completes.
+    assert eng.on_succeeded(instance).ready == []
+    assert eng.output_publication("self:spawn:join") is None
+
+    assert eng.route_boundary_event("A", _SELF_SEAL).ready == ["after"]
+
+
+def test_a_failed_agent_fails_what_a_nested_level_released() -> None:
+    eng = _engine(_self_recursive_agent(), budget=ScopeBudget(max_scope_depth=8))
+    _dispatch_agent(eng)
+    instance = _spawn_in(eng, "A", "c0", "self")
+    eng.on_dispatched(instance, "w1")
+    assert eng.on_succeeded(instance).ready == []
+
+    assert eng.on_failed("A", "boom", retryable=False).failed == ["A", "after"]
+
+
+def test_a_nested_level_closes_after_its_join_failed_at_the_root() -> None:
+    eng = _engine(_self_recursive_agent(), budget=ScopeBudget(max_scope_depth=8))
+    i1, grandchild = _nested_level(eng)
+    eng.on_failed("A", "boom", retryable=False)
+
+    eng.on_succeeded(grandchild)
+    eng.on_succeeded(i1)
+
+    nested = eng.region_scope_for(_work_item(eng, i1).activation_id, "self")
+    assert nested in eng.to_snapshot().released_scopes
+
+
+def test_the_root_level_aggregate_survives_a_later_nested_release() -> None:
+    bundle = _self_recursive_agent()
+    eng = _engine(bundle, budget=ScopeBudget(max_scope_depth=8))
+    i1, grandchild = _nested_level(eng)
+    # I1 completes while its own child runs, so the root level releases first.
+    eng.on_succeeded(i1)
+    assert eng.route_boundary_event("A", _SELF_SEAL).ready == ["after"]
+    root_members = [
+        member.child_activation_id
+        for member in eng._aggregate_by_join["self:spawn:join"].members
+    ]
+    assert root_members == [_work_item(eng, i1).activation_id]
+
+    eng.on_succeeded(grandchild)
+
+    snapshot = eng.to_snapshot()
+    assert len(snapshot.region_aggregates) == 1
+    # A ledger stored with a nested aggregate after the root's restores the root's.
+    nested = snapshot.region_aggregates[0].model_copy(
+        update={
+            "members": tuple(
+                member.model_copy(
+                    update={
+                        "child_activation_id": _work_item(eng, grandchild).activation_id
+                    }
+                )
+                for member in snapshot.region_aggregates[0].members
+            )
+        }
+    )
+    stored = snapshot.model_copy(
+        update={"region_aggregates": [*snapshot.region_aggregates, nested]}
+    )
+    restored = OrchestrationEngine(stored, bundle)
+    assert [
+        member.child_activation_id
+        for member in restored._aggregate_by_join["self:spawn:join"].members
+    ] == root_members
+
+
 def _work_item(eng: OrchestrationEngine, task: str) -> WorkItem:
     wi = eng.work_item(task)
     assert wi is not None
