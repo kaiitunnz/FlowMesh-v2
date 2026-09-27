@@ -1205,6 +1205,7 @@ class TaskRuntime:
             engine.cancel_instance()
         else:
             self._reconcile_failures_locked(engine, tasks)
+            engine.fail_undeliverable_region_inputs()
             self._reconcile_residual_cancels_locked(engine, tasks)
         # A boundary invocation of a durably settled task is terminal, even when a crash
         # beat the ledger save that recorded it: the save below makes it durable, and

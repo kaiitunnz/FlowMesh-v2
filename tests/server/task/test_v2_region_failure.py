@@ -10,6 +10,7 @@ from server.orchestration import OrchestrationEngine, PublicationOutcome
 from server.orchestration.state import BoundaryEvent, LedgerSnapshot, ProgressAxis
 from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime
+from server.task.v2.compiler import validation
 from server.task.v2.representations.operators import BoundaryEventKind
 from shared.harness.adapter import HarnessResult, HarnessResultKind
 from tests.server.dispatch_helpers import record_dispatch
@@ -24,6 +25,7 @@ from tests.server.task.test_v2_orchestration import (
     _register,
     _worker,
 )
+from tests.server.task.test_v2_validation import _REGION_CONSUMER, _SPAWNED_WORKER
 from tests.server.task.test_workflow_finalizer import _wired
 
 _HEAD = """
@@ -1138,3 +1140,30 @@ async def test_a_restart_fails_a_task_the_ledger_already_failed() -> None:
     persisted = registry.load_task_states(after)[0]
     assert persisted is not None and persisted.record.status == TaskStatus.FAILED
     assert restored.workflow_settlement(workflow_id).settled
+
+
+def test_a_restart_fails_a_stored_reader_of_a_spawned_agents_region(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        registry = FakeRegistry()
+        runtime = _live_runtime(registry)
+        # A workflow stored before submission refused this shape.
+        with monkeypatch.context() as patch:
+            patch.setattr(validation, "_check_region_outputs", lambda *_: [])
+            _, ids = await _register(
+                runtime, _HEAD + _SPAWNED_WORKER + _REGION_CONSUMER % "worker"
+            )
+
+        restored = _live_runtime(registry, "restored", reader=runtime._results)
+        assert await restored.rehydrate() == 1
+
+        record = restored.get_record(ids["merge"])
+        assert record is not None and record.status == TaskStatus.FAILED
+        assert record.error == (
+            f"region of spawned-only agent {ids['worker']} delivers nothing"
+        )
+        persisted = registry.load_task_states(ids["merge"])[0]
+        assert persisted is not None and persisted.record.status == TaskStatus.FAILED
+
+    asyncio.run(run())

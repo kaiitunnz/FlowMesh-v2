@@ -65,6 +65,7 @@ from ..task.v2.representations.operators import (
     ServiceDependency,
     SpawnRegion,
     operator_service_dependency,
+    spawned_only_region_owners,
 )
 from ..task.v2.representations.plan import EpisodeSpec, InferenceEmbodimentMenu
 from ..task.v2.representations.results import CardinalityKind, ResultDeclaration
@@ -4205,6 +4206,31 @@ class OrchestrationEngine:
         self._fail_agent_regions(wi, cascade, visited)
         self._fail_downstream(wi.operator_id, cascade, visited)
         self._name_failures(cascade.failed, dependency_failed(task_id))
+        return cascade.failed
+
+    def fail_undeliverable_region_inputs(self) -> list[str]:
+        """Fail each task reading a region of an agent that runs only as a spawned
+        child, and everything downstream of it.
+
+        Every scope of such a region is nested, so its join never delivers at the root
+        and the reader would wait forever. Returns the legacy task ids newly failed.
+        """
+        cascade = Advance()
+        visited: set[str] = set()
+        owners = spawned_only_region_owners(self._operators.values())
+        for spawn_op, owner in sorted(owners.items()):
+            join_op = self._join_for_spawn(spawn_op)
+            for successor in sorted(self._forward.get(join_op or "", ())):
+                if (wi_id := self._wi_by_operator.get(successor)) is None:
+                    continue
+                start = len(cascade.failed)
+                self._fail_work_item(wi_id, cascade, visited)
+                if failed := cascade.failed[start:]:
+                    self._name_failures(
+                        failed[:1],
+                        f"region of spawned-only agent {owner} delivers nothing",
+                    )
+                    self._name_failures(failed[1:], dependency_failed(failed[0]))
         return cascade.failed
 
     def reconcile_pending(self, task_id: str) -> bool:

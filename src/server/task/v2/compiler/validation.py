@@ -17,6 +17,7 @@ from ..representations.operators import (
     RecoveryClass,
     ResidualPolicy,
     SpawnRegion,
+    spawned_only_region_owners,
 )
 from ..representations.plan import PhysicalExecutionPlan
 from ..representations.results import CardinalityKind, ReleaseConditionKind
@@ -500,21 +501,7 @@ def _check_region_outputs(
         if isinstance(op_by_id.get(edge.from_op), SpawnRegion)
         and isinstance(op_by_id.get(edge.to_op), JoinRegion)
     }
-    region_owner = {
-        ref.spawn_ref: op.operator_id
-        for op in template.operators
-        if isinstance(op, AgentOperator)
-        for ref in op.child_region_refs
-    }
-    # An agent a spawn instantiates, other than through its own recursive region, runs
-    # only as a spawned child.
-    spawned_only = {
-        op.child_template_ref
-        for op in template.operators
-        if isinstance(op, SpawnRegion)
-        and op.child_template_ref
-        and region_owner.get(op.operator_id) != op.child_template_ref
-    }
+    spawned_only = spawned_only_region_owners(template.operators)
     for edge in template.edges:
         if edge.feedback or edge.to_port is None:
             continue
@@ -522,8 +509,7 @@ def _check_region_outputs(
         target = op_by_id.get(edge.to_op)
         if not isinstance(source, JoinRegion) or not isinstance(target, AgentOperator):
             continue
-        owner = region_owner.get(spawn_of_join.get(edge.from_op, ""))
-        if owner in spawned_only:
+        if owner := spawned_only.get(spawn_of_join.get(edge.from_op, "")):
             diags.append(
                 Diagnostic(
                     code="dataflow.spawned-region-output",
