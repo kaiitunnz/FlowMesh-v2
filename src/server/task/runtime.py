@@ -1256,10 +1256,17 @@ class TaskRuntime:
         # re-derivation re-admits it instead of orphaning the workflow.
         for persisted in tasks:
             record = persisted.record
-            if record.status == TaskStatus.PENDING and engine.reconcile_pending(
-                record.task_id
-            ):
+            if record.status != TaskStatus.PENDING:
+                continue
+            if engine.reconcile_pending(record.task_id):
                 self._enqueue_ready_locked(record.task_id)
+            elif (worker_id := engine.suspending_worker(record.task_id)) is not None:
+                # A crash beat the ledger save of a boundary's settle, which had
+                # already returned the record to PENDING. The re-issued boundary
+                # reaches the worker that captured it through the record.
+                record.status = TaskStatus.DISPATCHED
+                record.assigned_worker = worker_id
+                self._commit_locked(record.task_id)
 
         # Re-drive any DONE producer whose spawn never sealed and any agent waiting on
         # its bound inputs: their terminal events do not replay, so nothing else
@@ -6060,7 +6067,7 @@ class TaskRuntime:
                     continue
                 if record.status not in (TaskStatus.DISPATCHED, TaskStatus.CANCELLING):
                     continue
-                # A worker's loss loses a boundary whose request only it holds.
+                # A boundary whose raw request only this worker holds is lost with it.
                 if self._dispatch_ended_at_suspension_locked(record) and not (
                     self._engines[record.workflow_id].awaits_worker_held_boundary(
                         task_id

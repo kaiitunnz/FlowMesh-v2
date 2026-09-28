@@ -988,6 +988,9 @@ def test_a_boundary_whose_settle_a_crash_cut_short_is_issued_again() -> None:
         assert engine is not None
         work_item = engine.work_item(writer)
         assert work_item is not None and work_item.status is WorkItemStatus.BLOCKED
+        record = restored.get_record(writer)
+        assert record is not None and record.status is TaskStatus.DISPATCHED
+        assert record.assigned_worker == "wkr-1"
         assert [e.call_correlation for e in redriven] == [env.call_correlation]
         assert restored.settle_episode_invocation(
             writer, env.call_correlation, "model:draft"

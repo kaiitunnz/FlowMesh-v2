@@ -1,21 +1,30 @@
 """Losing the origin worker of a resident boundary releases the credit it holds."""
 
 import asyncio
+import logging
 from typing import Any, cast
 
 import pytest
 
+from server.config import OrchestrationConfig
 from server.orchestration.state import InvocationState, LedgerSnapshot
 from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime
 from shared.harness import HarnessCapsule
 from shared.schemas.event import WorkerEvent
+from tests.server.result_store import make_result_reader
 from tests.server.task.test_task_merge import _monitor
-from tests.server.task.test_v2_orchestration import _TS, FakeRegistry, _register
+from tests.server.task.test_v2_orchestration import (
+    _TS,
+    FakeRegistry,
+    _NoopSecretVault,
+    _register,
+)
 from tests.server.task.test_worker_originated_boundary import (
     _HOLDER,
     _MODEL_SCRIPT,
     _runtime,
+    _WorkerStub,
 )
 from worker.executors.harness.scripted import ScriptedHarnessAdapter
 from worker.resident import capture_resident_request
@@ -165,5 +174,48 @@ def test_an_agent_whose_drained_worker_finished_its_resident_call_resumes() -> N
         assert dispatch is not None
         assert [o.value for o in dispatch.delivered_outcomes] == ["a completion"]
         assert releases == [(env.invocation_id, False)]
+
+    asyncio.run(run())
+
+
+def test_a_resident_call_whose_settle_a_crash_cut_short_originates_again() -> None:
+    async def run() -> None:
+        runtime = _runtime()
+        originated = _originating(runtime)
+        _, ids = await _register(runtime, _RESIDENT_WF)
+        writer = ids["writer"]
+        _capture_resident_boundary(runtime, writer)
+        (env,) = originated
+        registry = cast(FakeRegistry, runtime._workflow_registry)
+        save = registry.save_ledger_snapshot
+
+        def crash(*_: Any, **__: Any) -> None:
+            raise ConnectionError("crash before the ledger save")
+
+        registry.save_ledger_snapshot = crash  # type: ignore[method-assign]
+        with pytest.raises(ConnectionError):
+            runtime.settle_episode_invocation(writer, env.call_correlation, "done")
+        registry.save_ledger_snapshot = save  # type: ignore[method-assign]
+
+        restored = TaskRuntime(
+            cast(Any, registry),
+            cast(Any, _WorkerStub()),
+            OrchestrationConfig(),
+            make_result_reader(),
+            logging.getLogger("resident-test"),
+            secret_vault=cast(Any, _NoopSecretVault()),
+        )
+        reoriginated = _originating(restored)
+        await restored.rehydrate()
+
+        assert [e.call_correlation for e in reoriginated] == [env.call_correlation]
+        # The resident delivery reaches the origin worker through the task's record.
+        record = restored.get_record(writer)
+        assert record is not None and record.status is TaskStatus.DISPATCHED
+        assert record.assigned_worker == "wkr-1"
+        assert restored.settle_episode_invocation(writer, env.call_correlation, "done")
+        dispatch = restored.agent_episode_dispatch(writer, _HOLDER)
+        assert dispatch is not None
+        assert [o.value for o in dispatch.delivered_outcomes] == ["done"]
 
     asyncio.run(run())

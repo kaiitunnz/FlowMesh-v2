@@ -163,7 +163,7 @@ _DEDUP_CAPABLE = frozenset(
         BoundaryEventKind.EXTERNAL_EFFECT,
     }
 )
-# Boundary kinds an off-lane handler settles while the episode stays suspended.
+# Boundary kinds an off-lane handler settles while their episode is suspended.
 _MEDIATED_BOUNDARY_KINDS = frozenset(
     {BoundaryEventKind.INVOCATION, BoundaryEventKind.EXTERNAL_EFFECT}
 )
@@ -1229,6 +1229,19 @@ class OrchestrationEngine:
             and self._has_pending_local_boundary(wi)
         )
 
+    def suspending_worker(self, task_id: str) -> str | None:
+        """The worker whose step suspended the task on a mediated boundary still
+        awaiting its outcome, or None when the task is not so suspended."""
+        wi = self._work_item_for_task(task_id)
+        if (
+            wi is None
+            or wi.status is not WorkItemStatus.BLOCKED
+            or not self._awaits_mediated_outcome(wi)
+            or (attempt := self._latest_attempt(wi)) is None
+        ):
+            return None
+        return attempt.worker_id
+
     def _has_pending_local_boundary(self, wi: WorkItem) -> bool:
         """Whether the work item awaits an unsettled worker-originated boundary.
 
@@ -1334,7 +1347,8 @@ class OrchestrationEngine:
                 self._emitter.emit_attempt(attempt)
 
     def _awaits_mediated_outcome(self, wi: WorkItem) -> bool:
-        """Whether the work item is suspended on a mediated boundary with no outcome."""
+        """Whether the work item's activation awaits a mediated boundary with no
+        outcome."""
         return any(
             act == wi.activation_id
             and env.kind in _MEDIATED_BOUNDARY_KINDS

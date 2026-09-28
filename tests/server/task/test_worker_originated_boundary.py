@@ -1033,3 +1033,66 @@ def test_a_boundary_a_drained_worker_could_not_finish_fails_the_agent() -> None:
         assert not runtime._pending_ops
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("interface", ["search", "model"])
+def test_a_boundary_whose_settle_a_crash_cut_short_reaches_its_origin_again(
+    interface: str,
+) -> None:
+    workflow, script = (
+        (_SEARCH_WF, _SCRIPT) if interface == "search" else (_MODEL_WF, _MODEL_SCRIPT)
+    )
+
+    async def run() -> None:
+        registry = FakeRegistry()
+
+        def runtime_on(store: FakeRegistry) -> TaskRuntime:
+            return TaskRuntime(
+                cast(Any, store),
+                cast(Any, _WorkerStub()),
+                OrchestrationConfig(),
+                make_result_reader(),
+                logging.getLogger("wo-test"),
+                secret_vault=cast(Any, _NoopSecretVault()),
+            )
+
+        runtime = runtime_on(registry)
+        _, ids = await _register(runtime, workflow)
+        writer = ids["writer"]
+        _dispatch_agent(runtime, writer, script=script)
+        permit = MediatedOperationPermit.model_validate(_permit_frames(runtime)[0])
+        save = registry.save_ledger_snapshot
+
+        def crash(*_: Any, **__: Any) -> None:
+            raise ConnectionError("crash before the ledger save")
+
+        registry.save_ledger_snapshot = crash  # type: ignore[method-assign]
+        with pytest.raises(ConnectionError):
+            _report(runtime, writer, "m0", "sunny")
+        registry.save_ledger_snapshot = save  # type: ignore[method-assign]
+
+        restored = runtime_on(registry)
+        await restored.rehydrate()
+
+        record = restored.get_record(writer)
+        assert record is not None and record.status is TaskStatus.DISPATCHED
+        assert record.assigned_worker == "wkr-1"
+        frames = cast(Any, restored._worker_registry).frames
+        reissued = [
+            (target, MediatedOperationPermit.model_validate(payload))
+            for target, kind, payload in frames
+            if kind == "permit"
+        ]
+        assert [(target, p.idempotency_key) for target, p in reissued] == [
+            ("wkr-1", permit.idempotency_key)
+        ]
+        _report(restored, writer, "m0", "sunny")
+        dispatch = restored.agent_episode_dispatch(writer, _HOLDER)
+        assert dispatch is not None
+        assert [o.value for o in dispatch.delivered_outcomes] == [
+            ToolOutcome(
+                status=ToolOutcomeStatus.SUCCESS, value="sunny"
+            ).model_dump_json()
+        ]
+
+    asyncio.run(run())
