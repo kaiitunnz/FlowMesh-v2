@@ -5449,7 +5449,7 @@ class TaskRuntime:
         A worker that holds the task again may have captured the same boundary anew,
         so its requests are left to that dispatch.
         """
-        if record.assigned_worker == worker_id:
+        if self._holds_dispatch_locked(record, worker_id, None):
             return
         step = payload.get("agent_episode")
         carried = payload.get("agent_episode_facade_group")

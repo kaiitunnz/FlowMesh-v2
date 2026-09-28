@@ -20,6 +20,7 @@ from pydantic import SecretStr
 from server.config import AgentBindingConfig, OrchestrationConfig
 from server.orchestration.state import WorkItemStatus
 from server.orchestration.tool_dispatch import MODEL_INTERFACE, SEARCH_INTERFACE
+from server.registries.worker import Worker
 from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime, _is_default_url, _OpCredential
 from shared.harness import (
@@ -1323,6 +1324,25 @@ def test_a_resident_bound_agent_s_search_is_reaped_when_it_settles(
         )
 
         assert _egress(runtime).occurrences() == []
+
+    asyncio.run(run())
+
+
+def test_a_stale_step_leaves_what_a_new_dispatch_to_its_worker_captured() -> None:
+    async def run() -> None:
+        runtime = _runtime()
+        _, ids = await _register(runtime, _SEARCH_WF)
+        writer = ids["writer"]
+        _, stale = _run_agent_step(runtime, writer)
+        runtime._tasks[writer].dispatch_id = "dsp-1"
+        runtime.return_dispatch(writer, "wkr-1", increment_retry=False, front=True)
+        # The next dispatch goes to the same worker, which captures the same call anew.
+        worker = cast(Worker, SimpleNamespace(id="wkr-1", node_id="nde-1"))
+        assert runtime.begin_publish(writer, worker, "dsp-2")
+
+        runtime.mark_succeeded(writer, "wkr-1", stale, _TS, dispatch_id="dsp-1")
+
+        assert _frames(runtime, "reap") == []
 
     asyncio.run(run())
 
