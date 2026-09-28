@@ -36,18 +36,19 @@ nodes, the same command works everywhere.
 ## What survives a restart
 
 **Worker nodes.** Draining a node tears down its workers. Each worker gives up
-the tasks it runs and unregisters, so the server requeues its `DISPATCHED` tasks
-onto other eligible nodes without spending an attempt, whichever of the worker's
-reports arrives first. A v2 task that cannot safely re-run, such as an `ssh`,
-`serve`, `api` or training task, fails instead, as it does when its worker is
-lost. A draining worker finishes the calls it holds for suspended agents, such
-as a search or a model call, before it leaves, within its stop window; a call
-that cannot finish in time fails its agent. A worker that leaves without
-unregistering, such as one that crashed, is unregistered by its supervisor. Its
-v1 tasks requeue at the cost of an attempt, and its v2 tasks retry when they can
-safely re-run and fail otherwise. A recreated node's supervisor re-creates its
-configured workers, which re-register themselves on startup. No cordon step is
-required.
+the tasks it runs and unregisters, so the server requeues those tasks onto other
+eligible nodes without spending an attempt, whichever of the worker's reports
+arrives first. A v2 task that cannot safely re-run, such as an `ssh`, `serve`,
+`api` or training task, fails instead, as it does when its worker is lost. An
+agent's steps run on the worker holding its private state, so a drained or lost
+worker fails its agents at their next step. A draining worker finishes the
+resident calls it holds for suspended inference and embedding steps before it
+leaves, within its stop window; a call that cannot finish in time fails its
+step. A worker that leaves without unregistering, such as one that crashed, is
+unregistered by its supervisor. Its v1 tasks requeue at the cost of an attempt,
+and its v2 tasks retry when they can safely re-run and fail otherwise. A
+recreated node's supervisor re-creates its configured workers, which re-register
+themselves on startup. No cordon step is required.
 
 **Root node.** The root holds the dispatcher's scheduling state in memory, so a
 naive restart would lose every in-flight workflow. Three mechanisms make a root
