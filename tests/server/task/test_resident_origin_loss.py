@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -11,8 +12,10 @@ from server.orchestration.state import InvocationState, LedgerSnapshot
 from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime
 from shared.harness import HarnessCapsule
+from shared.private_state import PrivateStateSealReport
 from shared.schemas.event import WorkerEvent
 from tests.server.result_store import make_result_reader
+from tests.server.task.test_private_state_ledger import _manifest
 from tests.server.task.test_task_merge import _monitor
 from tests.server.task.test_v2_orchestration import (
     _TS,
@@ -60,9 +63,12 @@ def _originating(runtime: TaskRuntime) -> list[Any]:
     return originated
 
 
-def _capture_resident_boundary(runtime: TaskRuntime, task_id: str) -> None:
+def _capture_resident_boundary(
+    runtime: TaskRuntime, task_id: str, seal_in: Path | None = None
+) -> None:
     """Run the agent's step as its worker does: the resident request stays on the
-    worker and only its digest reaches control."""
+    worker and only its digest reaches control, with the private state the worker
+    sealed under ``seal_in`` when given."""
     engine = runtime.orchestration_engine(runtime._tasks[task_id].workflow_id)
     dispatch = runtime.agent_episode_dispatch(task_id, _HOLDER)
     assert engine is not None and dispatch is not None
@@ -79,9 +85,15 @@ def _capture_resident_boundary(runtime: TaskRuntime, task_id: str) -> None:
         task_id, capsule=capsule, outcomes=dispatch.delivered_outcomes
     )
     result = capture_resident_request(ResidentRequestStore(), task_id, result)
-    runtime.mark_succeeded(
-        task_id, "wkr-1", {"agent_episode": result.model_dump(mode="json")}, _TS
-    )
+    payload: dict[str, Any] = {"agent_episode": result.model_dump(mode="json")}
+    if seal_in is not None and (attachment := dispatch.private_state_attachment):
+        manifest = _manifest(
+            seal_in, attachment.reference_id, attachment.generation + 1
+        )
+        payload["agent_episode_private_state"] = PrivateStateSealReport(
+            manifest=manifest, write_epoch=attachment.write_epoch
+        ).model_dump(mode="json")
+    runtime.mark_succeeded(task_id, "wkr-1", payload, _TS)
 
 
 def test_losing_the_origin_worker_releases_the_resident_credit_once_durable() -> None:
@@ -179,13 +191,15 @@ def test_an_agent_whose_drained_worker_finished_its_resident_call_keeps_it() -> 
     asyncio.run(run())
 
 
-def test_a_resident_call_whose_settle_a_crash_cut_short_originates_again() -> None:
+def test_a_resident_call_whose_settle_a_crash_cut_short_originates_again(
+    tmp_path: Path,
+) -> None:
     async def run() -> None:
         runtime = _runtime()
         originated = _originating(runtime)
         _, ids = await _register(runtime, _RESIDENT_WF)
         writer = ids["writer"]
-        _capture_resident_boundary(runtime, writer)
+        _capture_resident_boundary(runtime, writer, seal_in=tmp_path)
         (env,) = originated
         registry = cast(FakeRegistry, runtime._workflow_registry)
         save = registry.save_ledger_snapshot
@@ -222,13 +236,15 @@ def test_a_resident_call_whose_settle_a_crash_cut_short_originates_again() -> No
     asyncio.run(run())
 
 
-def test_a_resident_call_control_cannot_originate_reaps_its_request() -> None:
+def test_a_resident_call_control_cannot_originate_reaps_its_request(
+    tmp_path: Path,
+) -> None:
     async def run() -> None:
         runtime = _runtime()
         _, ids = await _register(runtime, _RESIDENT_WF)
         writer = ids["writer"]
 
-        _capture_resident_boundary(runtime, writer)
+        _capture_resident_boundary(runtime, writer, seal_in=tmp_path)
 
         record = runtime.get_record(writer)
         assert record is not None and record.status is TaskStatus.FAILED

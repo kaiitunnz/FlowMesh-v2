@@ -1195,13 +1195,15 @@ _SEARCH_S0 = [
 ]
 
 
-def test_a_denied_boundary_reaps_the_request_its_worker_captured() -> None:
+def test_a_denied_boundary_reaps_the_request_its_worker_captured(
+    tmp_path: Path,
+) -> None:
     async def run() -> None:
         runtime = _runtime()
         _, ids = await _register(runtime, _MODEL_WF)
         writer = ids["writer"]
 
-        _dispatch_agent(runtime, writer, script=_SEARCH_S0)
+        _dispatch_agent(runtime, writer, script=_SEARCH_S0, seal_in=tmp_path)
 
         assert _permit_frames(runtime) == []
         assert _frames(runtime, "reap") == [
