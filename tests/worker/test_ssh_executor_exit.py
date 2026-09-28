@@ -11,7 +11,7 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
-from docker.errors import APIError
+from docker.errors import APIError, NotFound
 from docker.models.containers import Container
 
 from shared.schemas.result import SSHResult
@@ -216,3 +216,22 @@ def test_output_written_directly_at_exit_is_held_to_its_limit(
 
     with pytest.raises(ExecutionError, match="exceeded maxBytes"):
         _run(executor, tmp_path, container, 1000, direct_output=output)
+
+
+@pytest.mark.parametrize("stopped", [True, False])
+def test_output_that_was_never_created_is_empty_only_for_a_stopped_task(
+    executor: SSHExecutor, tmp_path: Path, stopped: bool
+) -> None:
+    container = _container(0, output_bytes=0)
+    container.get_archive.side_effect = NotFound("no such path")
+    if stopped:
+        # The stop lands while the session is still staging its inputs.
+        container.reload.side_effect = lambda: (
+            executor.stop(_TASK_ID) if container.reload.call_count == 1 else None
+        )
+
+    if stopped:
+        assert _run(executor, tmp_path, container, 1000, copy=True).exit_code == 0
+    else:
+        with pytest.raises(ExecutionError, match="Failed to collect SSH output"):
+            _run(executor, tmp_path, container, 1000, copy=True)

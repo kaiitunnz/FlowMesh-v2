@@ -1627,6 +1627,14 @@ class SSHExecutor(Executor):
         self.ensure_dir(destination)
         try:
             stream, _ = container.get_archive(source_path)
+        except NotFound:
+            # A stop that lands before the session creates its output directory
+            # leaves no output, and a stop is a success.
+            if self._signals.stopped:
+                return
+            raise ExecutionError(
+                f"Failed to collect SSH output from {source_path}: it does not exist"
+            ) from None
         except Exception as exc:
             raise ExecutionError(
                 f"Failed to collect SSH output from {source_path}: {exc}"
