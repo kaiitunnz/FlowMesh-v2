@@ -1219,6 +1219,16 @@ class OrchestrationEngine:
             or env.denial is not None
         )
 
+    def awaits_worker_held_boundary(self, task_id: str) -> bool:
+        """Whether the task is suspended on an unsettled boundary whose raw request
+        only its capturing worker holds."""
+        wi = self._work_item_for_task(task_id)
+        return (
+            wi is not None
+            and wi.status is WorkItemStatus.BLOCKED
+            and self._has_pending_local_boundary(wi)
+        )
+
     def _has_pending_local_boundary(self, wi: WorkItem) -> bool:
         """Whether the work item awaits an unsettled worker-originated boundary.
 

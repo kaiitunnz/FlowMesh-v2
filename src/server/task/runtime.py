@@ -6048,9 +6048,12 @@ class TaskRuntime:
                     continue
                 if record.status not in (TaskStatus.DISPATCHED, TaskStatus.CANCELLING):
                     continue
-                if self._dispatch_ended_at_suspension_locked(
-                    record
-                ) and not self._originated_pending_boundary_locked(record):
+                # A worker's loss loses a boundary whose request only it holds.
+                if self._dispatch_ended_at_suspension_locked(record) and not (
+                    self._engines[record.workflow_id].awaits_worker_held_boundary(
+                        task_id
+                    )
+                ):
                     continue
                 self._rehydrated_dispatched.pop(task_id, None)
                 if (
@@ -6067,15 +6070,6 @@ class TaskRuntime:
                 if op_worker == worker_id:
                     del self._pending_ops[permit_id]
         return WorkerRecovery(recovered, resolved)
-
-    def _originated_pending_boundary_locked(self, record: TaskRecord) -> bool:
-        """Whether a task suspended on an unsettled boundary its worker originated,
-        whose raw request that worker holds."""
-        engine = self._engines.get(record.workflow_id)
-        return engine is not None and any(
-            env.task_id == record.task_id and env.request_digest is not None
-            for env in engine.pending_tool_dispatches()
-        )
 
     def resolve_disowned_dispatch(
         self, task_id: str, dispatch_id: str, worker_id: str, bound_sec: float
