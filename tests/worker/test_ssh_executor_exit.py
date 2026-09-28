@@ -18,7 +18,7 @@ from shared.schemas.result import SSHResult
 from shared.tasks.worker_message import WorkerTaskMessage
 from tests.worker.factories import make_live_worker_config
 from worker.executors import ssh_executor as ssh_module
-from worker.executors.base_executor import ExecutionError
+from worker.executors.base_executor import ExecutionError, TaskCancelledError
 from worker.executors.ssh_executor import SSHExecutor
 
 _TASK_ID = "tsk-ssh-exit"
@@ -295,3 +295,57 @@ def test_a_session_whose_container_fails_to_start_cleans_its_mounts(
             1000,
             start_failure=ExecutionError("no such network"),
         )
+
+
+def _archive_of(files: dict[str, int]) -> bytes:
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as archive:
+        for name, size in files.items():
+            info = tarfile.TarInfo(f"out/{name}")
+            info.size = size
+            archive.addfile(info, io.BytesIO(b"x" * size))
+    return buffer.getvalue()
+
+
+@pytest.mark.parametrize("kind", ["cancel", "stop"])
+def test_a_cancel_during_an_output_copy_ends_it(
+    executor: SSHExecutor, tmp_path: Path, kind: str
+) -> None:
+    data = _archive_of({"first.bin": 4096, "second.bin": 4096, "third.bin": 4096})
+
+    def stream() -> Any:
+        yield data[:2048]
+        getattr(executor, kind)(_TASK_ID)
+        yield data[2048:]
+
+    container = MagicMock(spec=Container)
+    container.get_archive.return_value = (stream(), {})
+    destination = tmp_path / "copied"
+
+    with executor._signals.running(_TASK_ID):
+        if kind == "cancel":
+            with pytest.raises(TaskCancelledError):
+                executor._copy_output_directory(container, "/out", destination)
+        else:
+            executor._copy_output_directory(container, "/out", destination)
+
+    copied = sorted(path.name for path in destination.iterdir())
+    assert copied == (
+        ["first.bin"] if kind == "cancel" else ["first.bin", "second.bin", "third.bin"]
+    )
+
+
+def test_an_output_copy_reads_its_archive_in_any_chunking(
+    executor: SSHExecutor, tmp_path: Path
+) -> None:
+    data = _archive_of({"a.bin": 70_000, "b.bin": 3})
+    container = MagicMock(spec=Container)
+    container.get_archive.return_value = (
+        [data[i : i + 777] for i in range(0, len(data), 777)],
+        {},
+    )
+
+    executor._copy_output_directory(container, "/out", tmp_path / "copied")
+
+    assert (tmp_path / "copied" / "a.bin").read_bytes() == b"x" * 70_000
+    assert (tmp_path / "copied" / "b.bin").read_bytes() == b"xxx"

@@ -129,7 +129,7 @@ class _ChunkReader(io.RawIOBase):
 
     def __init__(self, chunks: Iterable[bytes]) -> None:
         self._chunks = iter(chunks)
-        self._pending = b""
+        self._pending = memoryview(b"")
 
     def readable(self) -> bool:
         return True
@@ -137,7 +137,7 @@ class _ChunkReader(io.RawIOBase):
     def readinto(self, buffer: Any) -> int:
         while not self._pending:
             try:
-                self._pending = next(self._chunks)
+                self._pending = memoryview(next(self._chunks))
             except StopIteration:
                 return 0
         size = min(len(buffer), len(self._pending))
@@ -1653,6 +1653,8 @@ class SSHExecutor(Executor):
         total = 0
         with tarfile.open(fileobj=_ChunkReader(stream), mode="r|") as archive:
             for member in archive:
+                # A stop still collects the output; a cancel wants none of it.
+                self._signals.raise_if_cancelled()
                 relative = self._relative_archive_path(member.name, source_name)
                 if relative is None:
                     continue
