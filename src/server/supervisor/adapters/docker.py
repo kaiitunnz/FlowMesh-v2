@@ -495,22 +495,26 @@ class DockerWorkerAdapter(WorkerAdapter):
             return False
 
         # The worker stops first, so its shutdown gives up the SSH tasks it runs before
-        # their containers go; what it leaves behind is removed after.
+        # their containers go; what it leaves behind is removed after. A worker still
+        # running keeps them.
         try:
             container.stop(timeout=_STOP_TIMEOUT)
+        except Exception as exc:
+            self._log_stop_failure(is_started, exc)
+            return False
+        try:
             container.remove()
             self._is_started = False
             return True
         except Exception as exc:
-            log_fn = logger.error if is_started else logger.warning
-            log_fn(
-                "Failed to stop Docker container %s: %s",
-                self.container_name,
-                repr(exc),
-            )
+            self._log_stop_failure(is_started, exc)
             return False
         finally:
             self._remove_owned_ssh_resources()
+
+    def _log_stop_failure(self, is_started: bool, exc: Exception) -> None:
+        log_fn = logger.error if is_started else logger.warning
+        log_fn("Failed to stop Docker container %s: %s", self.container_name, repr(exc))
 
     def _remove_owned_ssh_resources(self) -> None:
         # A volume is in use until the container mounting it is removed.

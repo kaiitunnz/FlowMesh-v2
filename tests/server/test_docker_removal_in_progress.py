@@ -221,16 +221,31 @@ class TestStopOrder:
             "volume removed",
         ]
 
-    def test_a_worker_that_fails_to_stop_still_has_its_ssh_resources_removed(
-        self,
-    ) -> None:
+    def test_a_worker_that_fails_to_stop_keeps_its_ssh_resources(self) -> None:
         events: list[str] = []
         worker = MagicMock()
         worker.stop.side_effect = APIError("stuck")
 
         assert _adapter(self._docker(events, worker))._stop() is False
 
-        assert events == ["ssh stopped", "ssh removed", "volume removed"]
+        assert events == []
+
+    def test_a_stopped_worker_that_fails_to_be_removed_has_its_ssh_resources_removed(
+        self,
+    ) -> None:
+        events: list[str] = []
+        worker = MagicMock()
+        worker.stop.side_effect = lambda **_: events.append("worker stopped")
+        worker.remove.side_effect = APIError("busy")
+
+        assert _adapter(self._docker(events, worker))._stop() is False
+
+        assert events == [
+            "worker stopped",
+            "ssh stopped",
+            "ssh removed",
+            "volume removed",
+        ]
 
     def test_a_missing_worker_has_its_ssh_resources_removed(self) -> None:
         events: list[str] = []
