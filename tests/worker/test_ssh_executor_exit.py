@@ -2,6 +2,7 @@
 and a breach of its output limit fails it, whether its output is copied out of the
 container or mounted directly."""
 
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -24,7 +25,7 @@ _TTL_SEC = 30
 _PROMPT_SEC = 5.0
 
 
-def _task(max_bytes: int) -> WorkerTaskMessage:
+def _task(max_bytes: int, ttl_sec: int = _TTL_SEC) -> WorkerTaskMessage:
     return WorkerTaskMessage.model_validate(
         {
             "task_id": _TASK_ID,
@@ -39,7 +40,7 @@ def _task(max_bytes: int) -> WorkerTaskMessage:
                 "spec": {
                     "taskType": "ssh",
                     "interactive": False,
-                    "ttlSeconds": _TTL_SEC,
+                    "ttlSeconds": ttl_sec,
                     "image": "python:3.12-slim",
                     "command": ["true"],
                     "sshOutput": {"mountPath": "/out", "maxBytes": max_bytes},
@@ -83,7 +84,14 @@ def _container(exit_code: int, output_bytes: int, polls: int = 3) -> MagicMock:
     return container
 
 
-def _run(ex: SSHExecutor, tmp_path: Path, container: Any, max_bytes: int) -> SSHResult:
+def _run(
+    ex: SSHExecutor,
+    tmp_path: Path,
+    container: Any,
+    max_bytes: int,
+    ttl_sec: int = _TTL_SEC,
+    stream_logs: Any = None,
+) -> SSHResult:
     plan = MagicMock()
     plan.copy_output_path = "/out"
     plan.direct_output_path = None
@@ -95,14 +103,14 @@ def _run(ex: SSHExecutor, tmp_path: Path, container: Any, max_bytes: int) -> SSH
         patch.object(ex, "_build_environment", return_value={}),
         patch.object(ex, "_build_run_kwargs", return_value={}),
         patch.object(ex, "_start_container", return_value=(container, None)),
-        patch.object(ex, "_stream_container_logs"),
+        patch.object(ex, "_stream_container_logs", side_effect=stream_logs),
         patch.object(ex, "_save_container_logs"),
         patch.object(ex, "_copy_output_directory"),
         patch.object(ex, "_cleanup_mount_plan"),
         patch.object(ex, "emit_update"),
         patch.object(ssh_module, "maybe_upload_artifacts"),
     ):
-        return ex.run(_task(max_bytes), tmp_path / "out")
+        return ex.run(_task(max_bytes, ttl_sec), tmp_path / "out")
 
 
 def test_a_clean_exit_succeeds_promptly(executor: SSHExecutor, tmp_path: Path) -> None:
@@ -134,3 +142,24 @@ def test_an_output_limit_breach_fails_promptly(
         _run(executor, tmp_path, container, max_bytes=100)
     assert time.monotonic() - started < _PROMPT_SEC
     container.stop.assert_called()
+
+
+def test_a_session_past_its_ttl_stops_before_its_logs_are_joined(
+    executor: SSHExecutor, tmp_path: Path
+) -> None:
+    stopped = threading.Event()
+    container = _container(0, output_bytes=10, polls=1_000_000)
+    container.stop.side_effect = lambda **_: stopped.set()
+
+    def stream_logs(_stream: Any) -> None:
+        # A log stream ends only once its container stops.
+        stopped.wait(timeout=60.0)
+
+    started = time.monotonic()
+    result = _run(
+        executor, tmp_path, container, 100, ttl_sec=1, stream_logs=stream_logs
+    )
+
+    assert result.exit_code == 0
+    assert time.monotonic() - started < _PROMPT_SEC
+    container.remove.assert_called_once_with(force=True)

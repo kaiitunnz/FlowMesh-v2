@@ -632,17 +632,22 @@ class SSHExecutor(Executor):
                 )
             maybe_upload_artifacts(task, out_dir, logger=logger, skip_errors=True)
         finally:
-            self._current_container = None
-            if self._signals.interrupted:
-                # A cancel or stop ends the task well inside the worker's own stop
-                # timeout, and a log stream ends only once its container stops.
-                self._interrupt_container(container)
+            if container is not None:
+                # A log stream ends only once its container stops. A cancel or stop
+                # stops it at once, well inside the worker's own stop timeout, and one
+                # landing during the graceful stop of a session past its TTL still
+                # reaches the container.
+                self._stop_container(
+                    container,
+                    1 if self._signals.interrupted else cfg.stop_timeout_sec,
+                )
             if log_thread is not None:
                 # Wait for the thread to drain remaining output before tearing down
                 # the container.
                 log_thread.join(timeout=30.0)
+            self._current_container = None
             if container is not None:
-                self._stop_container(container, container_name, cfg.stop_timeout_sec)
+                self._remove_container(container)
             self._cleanup_mount_plan(client, mount_plan)
 
         if not (interactive or exit_code == 0):
@@ -974,13 +979,15 @@ class SSHExecutor(Executor):
         logger.info("SSH session TTL reached; stopping container")
         return 0
 
-    def _stop_container(
-        self, container: Container, name: str, stop_timeout_sec: float
-    ) -> None:
+    @staticmethod
+    def _stop_container(container: Container, stop_timeout_sec: float) -> None:
         try:
             container.stop(timeout=stop_timeout_sec)
         except Exception as exc:
             logger.debug("Error stopping container: %s", exc)
+
+    @staticmethod
+    def _remove_container(container: Container) -> None:
         try:
             container.remove(force=True)
             logger.info("Removed SSH session container")
