@@ -1283,8 +1283,10 @@ class TaskRuntime:
             if engine.input_preparation(task_id) is None:
                 engine.on_input_preparation_dispatched(task_id, worker_id)
         elif (wi := engine.work_item(task_id)) is not None and (
-            wi.status is not WorkItemStatus.DISPATCHED
+            wi.status is WorkItemStatus.READY
         ):
+            # Only a lost save leaves a dispatched task's work item ready; one blocked
+            # on a boundary it suspended on still holds its dispatch.
             engine.on_dispatched(task_id, worker_id)
 
     # ------------------------------------------------------------------ #
@@ -6018,6 +6020,7 @@ class TaskRuntime:
                     or record.assigned_worker != worker_id
                     or record.dispatch_id != dispatch_id
                     or record.started_ts is not None
+                    or not self._awaits_its_dispatch_locked(record)
                 ):
                     return None
                 since = max(
@@ -6038,6 +6041,19 @@ class TaskRuntime:
                 return self._return_given_up_locked(record, worker_id, {})
         finally:
             self._release_pending_terminations()
+
+    def _awaits_its_dispatch_locked(self, record: TaskRecord) -> bool:
+        """Whether a v2 task's work item still waits on its dispatch to run, as
+        opposed to a step of it that ran and suspended on a boundary."""
+        engine = self._engines.get(record.workflow_id)
+        if engine is None:
+            return True
+        wi = engine.work_item(record.task_id)
+        if wi is None:
+            return False
+        if engine.input_preparation(record.task_id) is not None:
+            return wi.status is WorkItemStatus.READY
+        return wi.status is WorkItemStatus.DISPATCHED
 
     def dispatch_in_flight(
         self, task_id: str, dispatch_id: str, worker_id: str

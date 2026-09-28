@@ -916,3 +916,40 @@ def test_a_first_report_handled_again_after_its_record_failed_opens_the_attempt(
         assert runtime.workflow_settlement(workflow_id).settled
 
     asyncio.run(run())
+
+
+def test_an_agent_suspended_on_a_boundary_resumes_after_a_restart() -> None:
+    async def run() -> None:
+        registry = FakeRegistry()
+        runtime = _runtime(registry)
+        workflow_id, writer, _, env = await _held_boundary(runtime)
+
+        restored = _runtime(registry)
+        redriven: list[ToolInvocationEnvelope] = []
+        restored.set_model_settler(redriven.append)
+        await restored.rehydrate()
+
+        engine = restored.orchestration_engine(workflow_id)
+        assert engine is not None
+        work_item = engine.work_item(writer)
+        assert work_item is not None
+        assert work_item.status is WorkItemStatus.BLOCKED
+        assert len(work_item.attempt_ids) == 1
+        assert [e.call_correlation for e in redriven] == [env.call_correlation]
+        # A suspended dispatch has started, so it never reads as disowned.
+        suspended = restored.get_record(writer)
+        assert suspended is not None and suspended.assigned_worker is not None
+        suspended.dispatch_id = "dsp-1"
+        assert (
+            restored.resolve_disowned_dispatch(
+                writer, "dsp-1", suspended.assigned_worker, 0
+            )
+            is None
+        )
+        assert restored.settle_episode_invocation(
+            writer, env.call_correlation, "model:draft"
+        )
+        record = restored.get_record(writer)
+        assert record is not None and record.status is TaskStatus.PENDING
+
+    asyncio.run(run())
