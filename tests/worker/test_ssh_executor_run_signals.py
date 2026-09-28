@@ -136,6 +136,39 @@ def test_a_cancel_while_the_session_runs_is_cancelled(
         _run(executor, interactive, tmp_path, container)
 
 
+@pytest.mark.parametrize("kind", ["stop", "cancel"])
+def test_a_signal_in_the_last_readiness_poll_ends_the_session_as_requested(
+    executor: SSHExecutor, tmp_path: Path, kind: str
+) -> None:
+    real_sleep = time.sleep
+    signalled: list[str] = []
+
+    def sleep(_seconds: float) -> None:
+        if not signalled:
+            signalled.append(kind)
+            getattr(executor, kind)(_TASK_ID)
+        real_sleep(0.1)
+
+    container = _container(lambda _c: None)  # running, never ready
+    container.stop.side_effect = lambda **_: setattr(container, "status", "exited")
+    wait_for_port = SSHExecutor._wait_for_port
+    with (
+        patch.object(
+            executor,
+            "_wait_for_port",
+            lambda c: wait_for_port(executor, c, timeout_sec=0.05),
+        ),
+        patch.object(ssh_module.time, "sleep", side_effect=sleep),
+    ):
+        if kind == "cancel":
+            with pytest.raises(TaskCancelledError):
+                _run(executor, True, tmp_path, container)
+        else:
+            assert _run(executor, True, tmp_path, container).exit_code == 0
+
+    assert signalled == [kind]
+
+
 @pytest.mark.parametrize("interactive", [False, True], ids=["batch", "interactive"])
 def test_a_session_container_removed_unasked_fails(
     executor: SSHExecutor, tmp_path: Path, interactive: bool

@@ -913,6 +913,8 @@ class SSHExecutor(Executor):
             except Exception:
                 pass
             time.sleep(1.0)
+        if self._signals.raise_if_cancelled():
+            return None
         raise ExecutionError(
             f"Timed out waiting for SSH readiness on container {container.name}. "
             f"Ensure the image has an SSH server (e.g. openssh-server) installed "
