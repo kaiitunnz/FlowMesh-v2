@@ -53,7 +53,10 @@ def test_a_stopped_client_relays_mediated_operations_until_shutdown() -> None:
 
 
 def _draining_runner(
-    tmp_path: Path, reap_after_sec: float | None, order: list[str]
+    tmp_path: Path,
+    reap_after_sec: float | None,
+    order: list[str],
+    executor_cls: type[_Echo] = _Echo,
 ) -> tuple[Runner, MagicMock]:
     """A runner whose one task stops the worker while it holds a boundary; control
     reaps the boundary ``reap_after_sec`` into the shutdown, or never."""
@@ -62,7 +65,7 @@ def _draining_runner(
     def stop_while_running(_task_id: str) -> None:
         runner.stop()
 
-    runner = _runner(tmp_path, _Echo(on_run=stop_while_running), "tsk-1")
+    runner = _runner(tmp_path, executor_cls(on_run=stop_while_running), "tsk-1")
     lifecycle = Lifecycle(MagicMock(), 5, 15, tmp_path / "hb", 0.0)
     cast(MagicMock, lifecycle.client).worker_id = runner.lifecycle.worker_id
     lifecycle.pending_egress_requests.put(*_HELD, cast(Any, object()))
@@ -214,10 +217,7 @@ def test_a_slow_executor_cleanup_still_unregisters_inside_the_stop_budget(
     tmp_path: Path,
 ) -> None:
     order: list[str] = []
-    runner, client = _draining_runner(tmp_path, None, order)
-    executor = _SlowCleanup(on_run=lambda _task_id: runner.stop())
-    runner.executors = {"echo": executor, "default": executor}
-    runner.default_executor = executor
+    runner, client = _draining_runner(tmp_path, None, order, _SlowCleanup)
     unregistered: list[float] = []
     client.unregister.side_effect = lambda *_, **__: unregistered.append(
         time.monotonic()
