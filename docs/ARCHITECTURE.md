@@ -533,8 +533,10 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   worker for a dispatch before publishing it. An idle report frees the worker only
   when it names that dispatch, so a report about an earlier task never frees a worker
   another task is on its way to; the dispatch ending frees it too, returning it to the
-  status it last reported. A worker shutting down reports itself busy until it
-  leaves.
+  status it last reported. A dispatch its live worker keeps reporting it does not
+  hold resolves as a lost dispatch after the same bound a silent worker gets, and the
+  task's next placement avoids that worker. A worker shutting down reports itself busy
+  until it leaves.
 - **Stale worker reaping.** The watchdog deletes the registry record of a worker
   dead for `WORKER_REAP_GRACE_SEC`. A late heartbeat, status or cache write never
   recreates a deleted record.

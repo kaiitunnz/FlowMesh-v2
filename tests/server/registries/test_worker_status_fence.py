@@ -51,6 +51,12 @@ class _Sync:
     def control_pipeline(self) -> Any:
         return self._client.pipeline()
 
+    def hash_getall(self, key: str) -> dict[str, str]:
+        return cast(dict[str, str], self._client.hgetall(key))
+
+    def publish_control(self, *_args: Any) -> int:
+        return 1
+
     def publish_telemetry(self, *_args: Any) -> None:
         return None
 

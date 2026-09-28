@@ -815,14 +815,11 @@ class EventMonitor:
                     )
             case "HEARTBEAT":
                 worker_id = (event.worker_id or "").strip()
+                ttl_sec = event.payload.get("ttl_sec", 120)
                 report = self._worker_registry.update_worker_hb(
-                    worker_id,
-                    event.ts,
-                    event.payload.get("ttl_sec", 120),
-                    event.status,
-                    event.dispatch_id,
+                    worker_id, event.ts, ttl_sec, event.status, event.dispatch_id
                 )
-                self._took_status_report(worker_id, report, "Heartbeat")
+                self._took_status_report(worker_id, report, "Heartbeat", ttl_sec)
             case "STATUS" if event.origin == "worker":
                 # A server-origin event announces a write the registry already applied
                 # inline; replaying it would land that value again on top of whatever
@@ -909,13 +906,21 @@ class EventMonitor:
                 )
 
     def _took_status_report(
-        self, worker_id: str, report: StatusReport, kind: str
+        self,
+        worker_id: str,
+        report: StatusReport,
+        kind: str,
+        heartbeat_ttl_sec: float | None = None,
     ) -> None:
         """Handle how the registry took a worker's status report.
 
         A fenced IDLE names a reservation for a dispatch the worker never reported
         running; once no publish or task holds that dispatch, it was lost before it
-        reached the worker, so the worker is released.
+        reached the worker, so the worker is released. A dispatch still held that the
+        worker's heartbeats keep disowning resolves as lost once the worker has
+        disowned it for as long as a silent worker takes to be declared dead: a worker
+        reports a dispatch busy before it runs anything of it, and its heartbeat repeats
+        that report.
         """
         match report.outcome:
             case ReportOutcome.UNKNOWN:
@@ -924,12 +929,15 @@ class EventMonitor:
                 )
             case ReportOutcome.FENCED:
                 task_id, dispatch_id = report.reserved_task, report.reserved_dispatch
-                if dispatch_id is None or (
-                    task_id is not None
-                    and self._runtime.dispatch_in_flight(
-                        task_id, dispatch_id, worker_id
-                    )
-                ):
+                if dispatch_id is None or task_id is None:
+                    return
+                if self._runtime.dispatch_in_flight(task_id, dispatch_id, worker_id):
+                    # Only a heartbeat carries a status the worker repeats; a status
+                    # report naming no dispatch may come from an earlier version.
+                    if heartbeat_ttl_sec is not None:
+                        self._resolve_disowned_dispatch(
+                            worker_id, task_id, dispatch_id, heartbeat_ttl_sec
+                        )
                     return
                 if self._worker_registry.release_worker(worker_id, dispatch_id):
                     self._logger.info(
@@ -938,6 +946,37 @@ class EventMonitor:
                         dispatch_id,
                         task_id,
                     )
+
+    def _resolve_disowned_dispatch(
+        self, worker_id: str, task_id: str, dispatch_id: str, ttl_sec: float
+    ) -> None:
+        outcome = self._runtime.resolve_disowned_dispatch(
+            task_id, dispatch_id, worker_id, self._watchdog.death_bound_sec(ttl_sec)
+        )
+        if outcome is None:
+            return
+        self._logger.warning(
+            "Worker %s kept reporting it does not hold dispatch %s of task %s; "
+            "resolving it as lost",
+            worker_id,
+            dispatch_id,
+            task_id,
+        )
+        if (end := _GIVEN_UP_ENDS.get(outcome.effect)) is not None:
+            self._record_loss(
+                worker_id, LossOutcome(task_id, end, outcome.impacted), dispatch_id
+            )
+        elif outcome.status == TaskStatus.CANCELLED:
+            self._record_cancellation(
+                TaskEvent(
+                    type="TASK_CANCELLED",
+                    task_id=task_id,
+                    worker_id=worker_id,
+                    dispatch_id=dispatch_id,
+                    ts=now_iso(),
+                ),
+                [],
+            )
 
     def _return_lost_tasks(self, worker_id: str, graceful: bool) -> None:
         """Return the tasks a departed worker held, settling any being cancelled.

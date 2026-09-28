@@ -5994,6 +5994,51 @@ class TaskRuntime:
                     del self._pending_ops[permit_id]
         return WorkerRecovery(recovered, resolved)
 
+    def resolve_disowned_dispatch(
+        self, task_id: str, dispatch_id: str, worker_id: str, bound_sec: float
+    ) -> SettleOutcome | None:
+        """Resolve a dispatch its live worker keeps reporting it does not hold as lost.
+
+        Only a dispatch no event of has applied, recorded at least ``bound_sec`` ago,
+        resolves: the bound a silent worker gets before it is declared dead. Nothing
+        revokes the dispatch, so it may still reach its worker and run; it resolves as
+        a lost dispatch does. A task being cancelled settles CANCELLED; any other
+        returns without spending an attempt, or fails as on its worker's loss when it
+        is a v2 task that cannot safely re-run. The worker is excluded from the task's
+        next placement, so a worker that cannot take the task never gets it back.
+        Returns None when the dispatch does not resolve.
+        """
+        try:
+            with self._cv:
+                record = self._tasks.get(task_id)
+                if (
+                    record is None
+                    or record.status
+                    not in (TaskStatus.DISPATCHED, TaskStatus.CANCELLING)
+                    or record.assigned_worker != worker_id
+                    or record.dispatch_id != dispatch_id
+                    or record.started_ts is not None
+                ):
+                    return None
+                since = max(
+                    record.dispatched_ts or 0.0,
+                    self._rehydrated_dispatched.get(task_id, 0.0),
+                )
+                if time.time() - since < bound_sec:
+                    return None
+                if worker_id not in record.failed_workers:
+                    record.failed_workers.append(worker_id)
+                record.last_error = (
+                    f"Worker {worker_id} kept reporting it does not hold dispatch "
+                    f"{dispatch_id}"
+                )
+                if record.status == TaskStatus.CANCELLING:
+                    self._settle_cancelled_locked(record, time.time(), unmerge=True)
+                    return _settle_outcome(EventEffect.APPLIED, record, [], [])
+                return self._return_given_up_locked(record, worker_id, {})
+        finally:
+            self._release_pending_terminations()
+
     def dispatch_in_flight(
         self, task_id: str, dispatch_id: str, worker_id: str
     ) -> bool:

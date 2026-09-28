@@ -69,6 +69,11 @@ class WorkerWatchdog:
     def enabled(self) -> bool:
         return self._enabled
 
+    def death_bound_sec(self, ttl_sec: float) -> float:
+        """How long after its last heartbeat a worker whose heartbeat lives
+        ``ttl_sec`` is declared dead."""
+        return ttl_sec + self._grace_seconds
+
     def is_marked_dead(self, worker_id: str) -> bool:
         if not self._enabled or not worker_id:
             return False
