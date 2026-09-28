@@ -397,3 +397,22 @@ def test_an_output_copy_closes_its_archive_before_the_container_stops(
             _run(executor, tmp_path, container, 1000, copy=True)
 
     assert closed_at_stop == [True]
+
+
+def test_a_cancel_ends_an_output_copy_within_one_large_file(
+    executor: SSHExecutor, tmp_path: Path
+) -> None:
+    archive = _Archive(
+        _archive_of({"large.bin": 4 * 1024 * 1024}),
+        chunk=64 * 1024,
+        on_read=lambda n: executor.cancel(_TASK_ID) if n == 2 else None,
+    )
+    container = MagicMock(spec=Container)
+    container.get_archive.return_value = (archive, {})
+
+    with executor._signals.running(_TASK_ID):
+        with pytest.raises(TaskCancelledError):
+            executor._copy_output_directory(container, "/out", tmp_path / "copied")
+
+    assert archive.closed
+    assert archive.chunks_read <= 3

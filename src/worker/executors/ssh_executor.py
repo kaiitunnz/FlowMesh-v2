@@ -21,7 +21,7 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
@@ -125,16 +125,19 @@ type DemuxLogStream = Iterator[tuple[bytes | None, bytes | None]]
 
 
 class _ChunkReader(io.RawIOBase):
-    """A readable stream over an iterator of byte chunks."""
+    """A readable stream over an iterator of byte chunks that calls ``check`` before
+    each read."""
 
-    def __init__(self, chunks: Iterable[bytes]) -> None:
+    def __init__(self, chunks: Iterable[bytes], check: Callable[[], Any]) -> None:
         self._chunks = iter(chunks)
+        self._check = check
         self._pending = memoryview(b"")
 
     def readable(self) -> bool:
         return True
 
     def readinto(self, buffer: Any) -> int:
+        self._check()
         while not self._pending:
             try:
                 self._pending = memoryview(next(self._chunks))
@@ -1640,7 +1643,7 @@ class SSHExecutor(Executor):
         except NotFound:
             # A stop that lands before the session creates its output directory
             # leaves no output, and a stop is a success.
-            if self._signals.stopped:
+            if self._signals.raise_if_cancelled():
                 return
             raise ExecutionError(
                 f"Failed to collect SSH output from {source_path}: not found"
@@ -1666,9 +1669,10 @@ class SSHExecutor(Executor):
     ) -> None:
         source_name = PurePosixPath(source_path).name
         total = 0
-        with tarfile.open(fileobj=_ChunkReader(stream), mode="r|") as archive:
+        # A stop collects the output; a cancel discards it.
+        reader = _ChunkReader(stream, self._signals.raise_if_cancelled)
+        with tarfile.open(fileobj=reader, mode="r|") as archive:
             for member in archive:
-                # A stop still collects the output; a cancel wants none of it.
                 self._signals.raise_if_cancelled()
                 relative = self._relative_archive_path(member.name, source_name)
                 if relative is None:
