@@ -17,7 +17,6 @@ from .task_events import TaskEventPublisher
 @dataclass
 class _WatchdogState:
     stale_since: dict[str, float] = field(default_factory=dict)
-    declared_dead: set[str] = field(default_factory=set)
     dead_since: dict[str, float] = field(default_factory=dict)
     unpublished: set[str] = field(default_factory=set)
 
@@ -134,12 +133,11 @@ class WorkerWatchdog:
 
             if not stale:
                 state.stale_since.pop(worker_id, None)
-                state.declared_dead.discard(worker_id)
                 state.dead_since.pop(worker_id, None)
                 self.clear_dead_mark(worker_id)
                 continue
 
-            if worker_id in state.declared_dead:
+            if worker_id in state.dead_since:
                 self._maybe_reap(worker_id, state, now)
                 continue
 
@@ -154,7 +152,6 @@ class WorkerWatchdog:
             if now - first_seen < grace:
                 continue
 
-            state.declared_dead.add(worker_id)
             state.dead_since[worker_id] = now
             self._mark_dead(worker_id)
             state.stale_since.pop(worker_id, None)
@@ -163,7 +160,6 @@ class WorkerWatchdog:
         for worker_id in list(state.stale_since):
             if worker_id not in worker_ids:
                 state.stale_since.pop(worker_id, None)
-        state.declared_dead.intersection_update(worker_ids)
         for worker_id in list(state.dead_since):
             if worker_id not in worker_ids:
                 state.dead_since.pop(worker_id, None)
@@ -178,18 +174,10 @@ class WorkerWatchdog:
         if first is None or now - first < self._reap_grace_seconds:
             return
         try:
-            if not self._worker_registry.is_worker_stale(worker_id):
+            # A heartbeat landing since the scan keeps the worker: the staleness check
+            # and the delete are one atomic call.
+            if not self._worker_registry.reap_stale_worker(worker_id):
                 return
-        except Exception as exc:
-            self._logger.debug(
-                "Worker watchdog failed to re-check %s staleness before reap: %s",
-                worker_id,
-                exc,
-            )
-            return
-
-        try:
-            self._worker_registry.unregister_workers(worker_id)
         except Exception as exc:
             self._logger.warning(
                 "Worker watchdog failed to reap worker %s: %s", worker_id, exc
@@ -197,7 +185,6 @@ class WorkerWatchdog:
             return
 
         state.dead_since.pop(worker_id, None)
-        state.declared_dead.discard(worker_id)
         state.stale_since.pop(worker_id, None)
         self._logger.warning(
             "Reaped stale worker %s (dead for %.0fs)",

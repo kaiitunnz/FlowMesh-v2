@@ -65,3 +65,14 @@ def test_cache_write_is_guarded_by_membership() -> None:
     assert args[4] == "wkr-1"
     assert "cache_models_json" in args
     registry._rds.sync.hash_set.assert_not_called()
+
+
+def test_a_reap_checks_staleness_and_deletes_in_one_call() -> None:
+    registry: Any = _registry(wrote=1)
+
+    assert registry.reap_stale_worker("wkr-1") is True
+    args = registry._rds.sync.eval.call_args.args
+    assert args[1] == 3
+    assert args[-1] == "wkr-1"
+    registry._rds.sync.ttl.assert_not_called()
+    registry._rds.sync.control_pipeline.assert_not_called()

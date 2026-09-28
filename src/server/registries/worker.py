@@ -58,6 +58,16 @@ redis.call('HSET', KEYS[2], unpack(ARGV, 2))
 return 1
 """
 
+# A heartbeat key with no TTL left (missing, or never given one) is a stale worker.
+_REAP_IF_STALE = """
+if redis.call('TTL', KEYS[3]) >= 0 then
+    return 0
+end
+redis.call('SREM', KEYS[1], ARGV[1])
+redis.call('DEL', KEYS[2], KEYS[3])
+return 1
+"""
+
 
 def _flatten_fields(mapping: dict[str, str]) -> list[str]:
     """Flatten a hash mapping into the field/value ARGV tail HSET expects."""
@@ -185,6 +195,19 @@ class WorkerRegistry:
         if extra:
             mapping.update({f"extra_{k}": str(v) for k, v in extra.items()})
         return self._set_worker_fields(worker_id, mapping)
+
+    def reap_stale_worker(self, worker_id: str) -> bool:
+        """Delete a worker's record while its heartbeat is stale; returns whether it
+        was deleted."""
+        reaped = self._rds.sync.eval(
+            _REAP_IF_STALE,
+            3,
+            WORKERS_SET_KEY,
+            worker_key(worker_id),
+            worker_hb_key(worker_id),
+            worker_id,
+        )
+        return bool(int(reaped))
 
     def unregister_workers(self, *worker_ids: str) -> None:
         with self._rds.sync.control_pipeline() as pipe:
