@@ -76,3 +76,13 @@ def test_register_before_deliver_closes_the_race() -> None:
         got = waiter.await_permit(timeout=1.0)
         t.join()
     assert isinstance(got, MediatedOperationPermit)
+
+
+def test_a_released_episode_arms_denied_waiters_until_it_reopens() -> None:
+    rv = ModelTurnRendezvous()
+    rv.release(_AGENT, "the model turn was cancelled")
+    with rv.register(_AGENT, _CALL) as waiter:
+        assert waiter.released
+    rv.reopen(_AGENT)
+    with rv.register(_AGENT, _CALL) as waiter:
+        assert not waiter.released

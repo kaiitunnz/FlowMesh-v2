@@ -9,6 +9,8 @@ already were.
 import json
 from typing import Any, cast
 
+import pytest
+
 from shared.harness import BoundaryEventKind
 from shared.sandbox import (
     SANDBOX_EXECUTE_INTERFACE,
@@ -18,12 +20,15 @@ from shared.sandbox import (
     SandboxDenied,
     SandboxUnavailable,
 )
+from shared.tools.contract import AgentModelTurnProposal, MediatedOperationPermit
 from shared.tools.facade import FacadeDescriptor, FacadeResolution
 from shared.tools.model.schema import ModelCompletion, ModelToolCall
 from shared.tools.search.schema import SEARCH_INTERFACE
+from shared.utils.ids import new_mediated_permit_id
 from worker.egress import PendingEgressRequestStore
-from worker.model_turn import ResponsesFacade
-from worker.model_turn.facade import _MAX_TURN_COMMANDS
+from worker.model_turn import HeldModelEgress, ResponsesFacade
+from worker.model_turn.facade import _MAX_TURN_COMMANDS, FacadeTurnError
+from worker.model_turn.rendezvous import ModelTurnRendezvous
 
 _TASK = "tsk-agent"
 _RUN_COMMAND = FacadeDescriptor(
@@ -56,6 +61,9 @@ class _ScriptedEgress:
         self.seen.append((task_id, correlation, request))
         index = min(len(self.seen) - 1, len(self._completions) - 1)
         return self._completions[index]
+
+    def reopen(self, task_id: str) -> None:
+        pass
 
 
 class _RecordingSandbox(LocalSandboxExecutor):
@@ -287,3 +295,69 @@ def test_a_native_tool_co_emitted_with_a_command_still_gets_a_result() -> None:
     messages = egress.seen[1][2].body["messages"]
     answered = {m["tool_call_id"] for m in messages if m["role"] == "tool"}
     assert answered == {"c1", "c2"}
+
+
+def test_a_turn_cancelled_during_a_command_proposes_no_later_round() -> None:
+    rendezvous = ModelTurnRendezvous()
+    pending = PendingEgressRequestStore()
+    proposed: list[str] = []
+    egressed: list[str] = []
+
+    class _Sidecar:
+        def egress_now(self, permit: MediatedOperationPermit) -> ModelCompletion:
+            egressed.append(permit.call_correlation)
+            return ModelCompletion(
+                content="",
+                tool_calls=(_call("run_command", {"command": ["make"]}),),
+            )
+
+    def propose(proposal: AgentModelTurnProposal) -> None:
+        proposed.append(proposal.call_correlation)
+        rendezvous.deliver_permit(
+            _permit(proposal.agent_task_id, proposal.call_correlation)
+        )
+
+    held = HeldModelEgress(
+        rendezvous=rendezvous,
+        pending=pending,
+        propose=propose,
+        sidecar=cast(Any, _Sidecar()),
+        timeout_sec=5.0,
+    )
+    facade = ResponsesFacade(held_egress=held, pending=pending)
+
+    class _CancelledMidCommand(_RecordingSandbox):
+        def execute(self, command: SandboxCommand) -> SandboxCommandResult:
+            facade.cancel_episode(_TASK)
+            return super().execute(command)
+
+    sandbox = _CancelledMidCommand()
+    token = facade.register_episode(_TASK, "http://up/v1", "m", [_RUN_COMMAND], sandbox)
+
+    with pytest.raises(FacadeTurnError, match="cancelled"):
+        facade.handle_turn(_TASK, token, {"input": "go"})
+
+    assert sandbox.commands == [("make",)]
+    assert len(proposed) == 1
+    assert egressed == proposed
+    assert pending.occurrences() == []
+    assert not rendezvous.has_waiter(_TASK, proposed[0])
+
+
+def _permit(task_id: str, call_correlation: str) -> MediatedOperationPermit:
+    return MediatedOperationPermit(
+        permit_id=new_mediated_permit_id(),
+        agent_task_id=task_id,
+        call_correlation=call_correlation,
+        interface="model",
+        subject="model",
+        invocation_id="inv-1",
+        idempotency_key="idm-1",
+        request_digest="d",
+        target_id="wrk-test",
+        target_generation=1,
+        deadline_epoch=2_000_000_000.0,
+        max_results=1,
+        timeout_sec=10.0,
+        result_char_cap=4000,
+    )

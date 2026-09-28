@@ -114,6 +114,7 @@ class ResponsesFacade:
                 token=token,
                 sandbox=sandbox,
             )
+        self._held_egress.reopen(task_id)
         return token
 
     def unregister_episode(self, task_id: str) -> None:

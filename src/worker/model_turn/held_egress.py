@@ -26,6 +26,8 @@ from ..egress import (
 )
 from .rendezvous import ModelTurnRendezvous, PermitDenied
 
+_CANCELLED = "the model turn was cancelled"
+
 ProposeFn = Callable[[AgentModelTurnProposal], None]
 
 
@@ -50,8 +52,12 @@ class HeldModelEgress:
         self._log = logger or logging.getLogger("held-model-egress")
 
     def release(self, task_id: str) -> None:
-        """End every held turn of one episode still waiting on its permit."""
-        self._rendezvous.release(task_id, "the model turn was cancelled")
+        """End an episode's held turns awaiting a permit, and refuse its later ones."""
+        self._rendezvous.release(task_id, _CANCELLED)
+
+    def reopen(self, task_id: str) -> None:
+        """Let a registered episode run held turns again."""
+        self._rendezvous.reopen(task_id)
 
     def run(
         self, task_id: str, call_correlation: str, request: ModelRequest
@@ -59,6 +65,8 @@ class HeldModelEgress:
         """Authorize and egress one held model turn, returning its whole reply."""
         digest = model_request_digest(request.interface, request.url, request.body)
         with self._rendezvous.register(task_id, call_correlation) as waiter:
+            if waiter.released:
+                return HeldEgressReject(reason=_CANCELLED)
             self._pending.put(task_id, call_correlation, request)
             try:
                 self._propose(

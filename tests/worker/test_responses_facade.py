@@ -33,6 +33,9 @@ class _StubEgress:
         self.seen.append((task_id, correlation, request))
         return self._result
 
+    def reopen(self, task_id: str) -> None:
+        pass
+
 
 def _facade(
     result: Any,
