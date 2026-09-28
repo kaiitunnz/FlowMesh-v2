@@ -5652,8 +5652,9 @@ class TaskRuntime:
         """Apply a worker's cancellation report; returns what it did to the task.
 
         A task being cancelled settles CANCELLED. A cancel nothing requested is the
-        worker giving the task up, as a draining worker does, so the task returns as
-        it would on its worker's loss, spending no attempt.
+        worker giving the task up, as a draining worker does, so the task returns
+        without spending an attempt, or fails as on its worker's loss when it is a v2
+        task that cannot safely re-run.
         """
         try:
             return self._reported(
@@ -5714,10 +5715,10 @@ class TaskRuntime:
     def _return_given_up_locked(
         self, record: TaskRecord, worker_id: str | None
     ) -> SettleOutcome:
-        """Return a task its worker gave up, as its worker's loss would.
+        """Return a task its worker gave up, without spending an attempt.
 
-        A v2 task resolves through its invocation's uncertainty: a replayable one
-        retries free and a non-replayable one fails. A v1 task returns free.
+        A v2 task resolves as its worker's loss does: one that can safely re-run
+        returns, and one that cannot fails.
         """
         if record.workflow_id in self._engines:
             loss = self._resolve_lost_locked(record)
@@ -5782,7 +5783,8 @@ class TaskRuntime:
         usage: TaskUsage | None = None,
         unmerge: bool = False,
     ) -> None:
-        """Settle a task CANCELLED and mirror the cancellation into the ledger.
+        """Settle a task being cancelled CANCELLED; the cancel that moved it, of its
+        workflow or of its region's residual children, already settled its work item.
 
         A cancel interrupts the worker and waits for its terminal, but an interrupt
         cannot un-finish a dispatch the worker already completed: that dispatch reports
@@ -5799,8 +5801,6 @@ class TaskRuntime:
             record.started_ts = started_ts
         if usage is not None:
             record.usages.append(usage)
-        # The cancel that moved the task, of its workflow or of its region's residual
-        # children, already settled its work item.
         returned = self._mark_cancelled_locked(record, finished_ts, unmerge=unmerge)
         # Persist the task terminal record first and snapshot the ledger last, so the
         # ledger never leads task state.

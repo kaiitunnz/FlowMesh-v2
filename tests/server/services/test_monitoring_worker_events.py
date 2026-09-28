@@ -68,7 +68,7 @@ class TestServerOriginStatusEvents:
         monitor._handle_worker_event(event)
         registry.set_worker_status.assert_not_called()
 
-    def test_worker_origin_status_is_still_applied(self) -> None:
+    def test_a_worker_origin_status_is_applied(self) -> None:
         registry = MagicMock()
         registry.set_worker_status.return_value = True
         monitor = _monitor(registry)

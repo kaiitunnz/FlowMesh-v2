@@ -2,6 +2,7 @@
 
 import logging
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -133,7 +134,7 @@ class TestWaitContainerGone:
 
 
 class TestStartWithStaleContainer:
-    def _client(self, stale: MagicMock, *after_remove: object) -> MagicMock:
+    def _client(self, stale: MagicMock, *after_remove: Any) -> MagicMock:
         client = MagicMock()
         client.containers.get.side_effect = [stale, *after_remove]
         return client

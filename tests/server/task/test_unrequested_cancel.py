@@ -1,5 +1,6 @@
 """A task its worker gives up without a requested cancel, as a draining worker does,
-returns as it would on its worker's loss."""
+returns without spending an attempt, or fails as on its worker's loss when it is a v2
+task that cannot safely re-run."""
 
 import threading
 from typing import Any, cast
@@ -55,6 +56,38 @@ def _on_last_attempt(runtime: TaskRuntime, task_id: str) -> None:
     record.max_attempts = 1
 
 
+def _given_up_reports(
+    task_id: str, unregister_first: bool, worker_id: str = "wkr-1"
+) -> tuple[TaskEvent | WorkerEvent, ...]:
+    """A draining worker's two reports of a task it gave up, in arrival order."""
+    cancelled = TaskEvent(
+        type="TASK_CANCELLED",
+        task_id=task_id,
+        worker_id=worker_id,
+        dispatch_id="dsp-1" if worker_id == "wkr-1" else f"dsp-{worker_id}",
+        ts=_TS,
+    )
+    left = WorkerEvent(type="UNREGISTER", worker_id=worker_id, graceful=True)
+    return (left, cancelled) if unregister_first else (cancelled, left)
+
+
+def _deliver(monitor: Any, events: tuple[Any, ...]) -> None:
+    for event in events:
+        if isinstance(event, TaskEvent):
+            monitor.handle_task_event(event)
+        else:
+            monitor._handle_worker_event(event)
+
+
+def _statuses(runtime: TaskRuntime, task_ids: Any) -> set[str]:
+    statuses = set()
+    for task_id in task_ids:
+        record = runtime.get_record(task_id)
+        assert record is not None
+        statuses.add(record.status)
+    return statuses
+
+
 def _next(runtime: TaskRuntime) -> str | None:
     if runtime.ready_queue_length() == 0:
         return None
@@ -72,13 +105,12 @@ async def test_a_workflow_whose_task_its_worker_gave_up_reruns_it_and_settles() 
     record = runtime.get_record(ids["a"])
     assert record is not None and record.status == TaskStatus.PENDING
     assert record.attempts == 0 and record.failed_workers == []
-    work_item = runtime.orchestration_engine(workflow_id).work_item(ids["a"])  # type: ignore[union-attr]
+    engine = runtime.orchestration_engine(workflow_id)
+    assert engine is not None
+    work_item = engine.work_item(ids["a"])
     assert work_item is not None and work_item.status is not WorkItemStatus.CANCELLED
     assert _drain(runtime) == [ids["a"], ids["b"], ids["c"]]
-    assert all(
-        runtime.get_record(task_id).status == TaskStatus.DONE  # type: ignore[union-attr]
-        for task_id in ids.values()
-    )
+    assert _statuses(runtime, ids.values()) == {TaskStatus.DONE}
     assert runtime.workflow_settlement(workflow_id).settled
 
 
@@ -102,19 +134,8 @@ async def test_a_spawned_child_its_worker_gave_up_reruns_alone(
     assert engine is not None
     scope = engine.scope_for("fan")
 
-    record_dispatch(runtime, kids[0], cast(Any, _worker("wkr-9")), "dsp-9")
-    cancelled = TaskEvent(
-        type="TASK_CANCELLED",
-        task_id=kids[0],
-        worker_id="wkr-9",
-        dispatch_id="dsp-9",
-        ts=_TS,
-    )
-    unregistered = WorkerEvent(type="UNREGISTER", worker_id="wkr-9", graceful=True)
-    _deliver(
-        monitor,
-        (unregistered, cancelled) if unregister_first else (cancelled, unregistered),
-    )
+    record_dispatch(runtime, kids[0], cast(Any, _worker("wkr-9")), "dsp-wkr-9")
+    _deliver(monitor, _given_up_reports(kids[0], unregister_first, "wkr-9"))
 
     assert engine.scope_for("fan") == scope
     for kid in kids:
@@ -147,22 +168,8 @@ async def test_a_drained_worker_returns_its_last_attempt_whichever_report_lands_
     assert _next(runtime) == task_id
     record_dispatch(runtime, task_id, cast(Any, _worker()), "dsp-1")
     _on_last_attempt(runtime, task_id)
-    cancelled = TaskEvent(
-        type="TASK_CANCELLED",
-        task_id=task_id,
-        worker_id="wkr-1",
-        dispatch_id="dsp-1",
-        ts=_TS,
-    )
-    unregistered = WorkerEvent(type="UNREGISTER", worker_id="wkr-1", graceful=True)
 
-    for event in (
-        (unregistered, cancelled) if unregister_first else (cancelled, unregistered)
-    ):
-        if isinstance(event, TaskEvent):
-            monitor.handle_task_event(event)
-        else:
-            monitor._handle_worker_event(event)
+    _deliver(monitor, _given_up_reports(task_id, unregister_first))
 
     record = runtime.get_record(task_id)
     assert record is not None and record.status == TaskStatus.PENDING
@@ -172,10 +179,7 @@ async def test_a_drained_worker_returns_its_last_attempt_whichever_report_lands_
     record_dispatch(runtime, task_id, cast(Any, _worker("wkr-2")), "dsp-2")
     runtime.mark_succeeded(task_id, "wkr-2", {}, _TS, "dsp-2")
     _drain(runtime, "wkr-2")
-    assert all(
-        runtime.get_record(t).status == TaskStatus.DONE  # type: ignore[union-attr]
-        for t in ids.values()
-    )
+    assert _statuses(runtime, ids.values()) == {TaskStatus.DONE}
     assert runtime.workflow_settlement(workflow_id).settled
 
 
@@ -190,10 +194,7 @@ async def test_a_requested_cancel_still_settles_cancelled() -> None:
     outcome = runtime.mark_cancelled(ids["a"], "wkr-1", {}, _TS, "dsp-1")
 
     assert outcome.effect is EventEffect.APPLIED
-    assert all(
-        runtime.get_record(task_id).status == TaskStatus.CANCELLED  # type: ignore[union-attr]
-        for task_id in ids.values()
-    )
+    assert _statuses(runtime, ids.values()) == {TaskStatus.CANCELLED}
     assert runtime.workflow_settlement(workflow_id).settled
 
 
@@ -221,7 +222,7 @@ async def test_a_returned_task_reruns_after_a_restart() -> None:
         WorkerEvent(type="UNREGISTER", worker_id="wkr-1"),
         parse_event({"type": "UNREGISTER", "worker_id": "wkr-1", "payload": {}}),
     ],
-    ids=["synthetic", "unmarked"],
+    ids=["supervisor", "older_worker"],
 )
 async def test_a_worker_lost_without_a_graceful_unregister_spends_an_attempt(
     unregistered: Any,
@@ -256,14 +257,6 @@ spec:
 """
 
 
-def _deliver(monitor: Any, events: tuple[Any, ...]) -> None:
-    for event in events:
-        if isinstance(event, TaskEvent):
-            monitor.handle_task_event(event)
-        else:
-            monitor._handle_worker_event(event)
-
-
 @pytest.mark.anyio
 @pytest.mark.parametrize("unregister_first", [False, True])
 async def test_a_drained_external_effect_fails_whichever_report_lands_first(
@@ -276,19 +269,8 @@ async def test_a_drained_external_effect_fails_whichever_report_lands_first(
     task_id = ids["session"]
     assert _next(runtime) == task_id
     record_dispatch(runtime, task_id, cast(Any, _worker()), "dsp-1")
-    cancelled = TaskEvent(
-        type="TASK_CANCELLED",
-        task_id=task_id,
-        worker_id="wkr-1",
-        dispatch_id="dsp-1",
-        ts=_TS,
-    )
-    unregistered = WorkerEvent(type="UNREGISTER", worker_id="wkr-1", graceful=True)
 
-    _deliver(
-        monitor,
-        (unregistered, cancelled) if unregister_first else (cancelled, unregistered),
-    )
+    _deliver(monitor, _given_up_reports(task_id, unregister_first))
 
     for rt in (runtime, _runtime(registry)):
         if rt is not runtime:

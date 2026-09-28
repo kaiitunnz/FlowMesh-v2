@@ -84,9 +84,10 @@ after `TASK_NO_WORKER_GRACE_SEC`.
 
 Each dispatch carries a `dsp-` id that the worker echoes on the task's events;
 an event applies only while its dispatch holds the task. A cancelling task
-settles `CANCELLED` however its dispatch ends. A task its worker gives up without a
-requested cancel, as a draining worker does, returns as it would on its worker's
-loss, spending no attempt.
+settles `CANCELLED` however its dispatch ends. A task its worker gives up
+without a requested cancel, as a draining worker does, returns without spending
+an attempt. A v2 task that cannot safely re-run, such as an `ssh`, `serve`,
+`api` or training task, fails instead, as on its worker's loss.
 
 ## Directory map
 
@@ -528,9 +529,8 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   require their (often GPU-only) dependencies — so a worker missing that executor
   isn't a candidate, rather than being handed a task it would fail.
 - **Stale worker reaping.** The watchdog deletes the registry record of a worker
-  that has been dead for `WORKER_REAP_GRACE_SEC`, so a worker that leaves without an
-  `UNREGISTER`, such as one that crashed, leaves no record behind. A late heartbeat or
-  status write never recreates a deleted record.
+  dead for `WORKER_REAP_GRACE_SEC`. A late heartbeat, status or cache write never
+  recreates a deleted record.
 - **Cursor pagination.** List endpoints accept `limit` and `before` /
   `after` cursors. The cursor is an opaque base64 of `(timestamp, id)`;
   do not parse client-side.

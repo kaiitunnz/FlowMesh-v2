@@ -35,14 +35,15 @@ nodes, the same command works everywhere.
 
 ## What survives a restart
 
-**Worker nodes.** Draining a node tears down its workers. Each worker's
-departure produces a `WORKER_UNREGISTER` (the supervisor synthesizes one if the
-worker did not send it), so the server recovers the worker's `DISPATCHED` tasks
-and requeues them onto other eligible nodes, spending no attempt, whichever of the
-worker's reports arrives first. A v2 task with an external effect (`ssh`, `serve`,
-`api`) fails instead, as it does when its worker is lost. A recreated node's supervisor
-re-creates its configured workers, which re-register themselves on startup. No
-cordon step is required.
+**Worker nodes.** Draining a node tears down its workers. Each worker gives up
+the tasks it runs and unregisters, so the server requeues its `DISPATCHED` tasks
+onto other eligible nodes without spending an attempt, whichever of the worker's
+reports arrives first. A v2 task that cannot safely re-run, such as an `ssh`,
+`serve`, `api` or training task, fails instead, as it does when its worker is
+lost. A worker that leaves without unregistering, such as one that crashed, is
+unregistered by its supervisor, and its tasks requeue at the cost of an attempt.
+A recreated node's supervisor re-creates its configured workers, which
+re-register themselves on startup. No cordon step is required.
 
 **Root node.** The root holds the dispatcher's scheduling state in memory, so a
 naive restart would lose every in-flight workflow. Three mechanisms make a root
@@ -110,10 +111,10 @@ root's durable state carries its in-flight workflows across its own restart.
   `redis_telemetry` running so durable state and the event stream survive.
   Updating the Redis image is a heavier, control-plane-wide outage and is out of
   scope for a brief in-place restart.
-- **Co-located root workers are recreated.** Workers running on the root host die
-  with the root's supervisor; their in-flight tasks requeue and re-run, except a v2
-  task with an external effect, which fails. To avoid this, prefer not to run workers
-  on the root node.
+- **Co-located root workers are recreated.** Workers running on the root host
+  die with the root's supervisor; their in-flight tasks requeue and re-run,
+  except a v2 task that cannot safely re-run, which fails. To avoid this, prefer
+  not to run workers on the root node.
 - **The no-worker grace restarts on a root restart.** The window before a task
   that no worker can satisfy is failed (`TASK_NO_WORKER_GRACE_SEC`) is tracked
   with ephemeral scheduler state that is intentionally not persisted, so it
