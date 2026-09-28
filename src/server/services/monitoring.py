@@ -484,7 +484,7 @@ class EventMonitor:
                     # registers one, so the forward is this update's.
                     self._unregister_port_forward(event.task_id)
                     return
-                self._maybe_adopt_serve(event.task_id)
+                self._maybe_adopt_serve(event.task_id, worker_id, event.dispatch_id)
             case "TASK_SUCCEEDED":
                 # Count only a settling success; one that yields the lane back would
                 # tally several times for one task.
@@ -1134,12 +1134,15 @@ class EventMonitor:
             return None
         return f"{self._server_base_url.rstrip('/')}/api/v1/serve/tasks/{task_id}"
 
-    def _maybe_adopt_serve(self, task_id: str) -> None:
+    def _maybe_adopt_serve(
+        self, task_id: str, worker_id: str, dispatch_id: str | None
+    ) -> None:
         """Adopt a serve task as a standing resident allocation once its endpoint is up.
 
         Idempotent: the gated edge skips a task that already has a live binding, so
         repeated updates do not re-adopt. Runs after the record's endpoint is stored so
-        the adoption probe reads it.
+        the adoption probe reads it, and adopts only while the update's dispatch holds
+        the task: a release that ran first drained nothing.
         """
         if self._gated_serve is None:
             return
@@ -1156,6 +1159,7 @@ class EventMonitor:
                 task_id,
                 _serve_access_mode(record),
                 _serve_forward_port(record),
+                lambda: self._runtime.holds_dispatch(task_id, worker_id, dispatch_id),
             )
 
     def _release_task(self, task_id: str) -> None:

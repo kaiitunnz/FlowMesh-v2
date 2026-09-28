@@ -6,6 +6,7 @@ adopted; a serve task's terminal drains its binding.
 """
 
 import logging
+from collections.abc import Callable
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -24,6 +25,7 @@ class _GatedServe:
         task_id: str,
         access_mode: ServeAccessMode,
         forward_port: int | None = None,
+        current: Callable[[], bool] | None = None,
     ) -> None:
         self.adopted.append((task_id, access_mode))
 
@@ -66,7 +68,7 @@ def test_serve_and_dev_model_endpoints_are_adopted() -> None:
         runtime = MagicMock()
         runtime.get_record.return_value = _record(task_type)
         gated = _GatedServe()
-        _monitor(runtime, gated)._maybe_adopt_serve("tsk-1")
+        _monitor(runtime, gated)._maybe_adopt_serve("tsk-1", "wkr-1", "dsp-1")
         assert gated.adopted == [("tsk-1", ServeAccessMode.PROXY)]
 
 
@@ -74,7 +76,7 @@ def test_internal_resident_backing_task_is_not_adopted() -> None:
     runtime = MagicMock()
     runtime.get_record.return_value = _record(TaskType.SERVE, resident=True)
     gated = _GatedServe()
-    _monitor(runtime, gated)._maybe_adopt_serve("tsk-1")
+    _monitor(runtime, gated)._maybe_adopt_serve("tsk-1", "wkr-1", "dsp-1")
     assert gated.adopted == []
 
 
@@ -82,7 +84,7 @@ def test_non_serve_task_is_not_adopted() -> None:
     runtime = MagicMock()
     runtime.get_record.return_value = _record(TaskType.AGENT)
     gated = _GatedServe()
-    _monitor(runtime, gated)._maybe_adopt_serve("tsk-1")
+    _monitor(runtime, gated)._maybe_adopt_serve("tsk-1", "wkr-1", "dsp-1")
     assert gated.adopted == []
 
 
@@ -90,7 +92,7 @@ def test_serve_task_without_an_endpoint_yet_is_not_adopted() -> None:
     runtime = MagicMock()
     runtime.get_record.return_value = _record(TaskType.SERVE, port=None)
     gated = _GatedServe()
-    _monitor(runtime, gated)._maybe_adopt_serve("tsk-1")
+    _monitor(runtime, gated)._maybe_adopt_serve("tsk-1", "wkr-1", "dsp-1")
     assert gated.adopted == []
 
 
@@ -114,7 +116,7 @@ def test_adopt_and_drain_are_noops_without_a_gated_serve() -> None:
     runtime = MagicMock()
     runtime.get_record.return_value = _record(TaskType.SERVE)
     monitor = _monitor(runtime, None)
-    monitor._maybe_adopt_serve("tsk-1")
+    monitor._maybe_adopt_serve("tsk-1", "wkr-1", "dsp-1")
     monitor._maybe_drain_serve("tsk-1")  # no raise
 
 
@@ -124,7 +126,7 @@ def test_the_tasks_pinned_access_mode_reaches_adoption() -> None:
     runtime = MagicMock()
     runtime.get_record.return_value = _record(TaskType.SERVE, access_mode="forward")
     gated = _GatedServe()
-    _monitor(runtime, gated)._maybe_adopt_serve("tsk-1")
+    _monitor(runtime, gated)._maybe_adopt_serve("tsk-1", "wkr-1", "dsp-1")
     assert gated.adopted == [("tsk-1", ServeAccessMode.FORWARD)]
 
 

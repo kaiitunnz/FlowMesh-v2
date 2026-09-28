@@ -512,6 +512,7 @@ class GatedServe:
         serve_task_id: str,
         access_mode: ServeAccessMode = ServeAccessMode.PROXY,
         forward_port: int | None = None,
+        current: Callable[[], bool] | None = None,
     ) -> None:
         """Adopt a live public serve task as a standing resident allocation.
 
@@ -519,10 +520,14 @@ class GatedServe:
         under the resident allowed-model policy, registers the task's residency binding
         and per-task allocation family, and adopts the running replica. A disallowed
         model creates neither binding, family, replica, nor route. The work runs on the
-        control loop so all store access stays single-threaded with admission.
+        control loop so all store access stays single-threaded with admission, and
+        adopts nothing once ``current`` says the endpoint's dispatch no longer holds the
+        task.
         """
 
         def _adopt() -> None:
+            if current is not None and not current():
+                return
             if self._bindings.live(serve_task_id) is not None:
                 # Already adopted: repeated endpoint reports for a live serve task are a
                 # no-op, so admission never re-registers or duplicates its allocation.

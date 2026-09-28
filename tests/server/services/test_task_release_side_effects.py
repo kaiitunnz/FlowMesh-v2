@@ -236,3 +236,26 @@ async def test_a_forward_an_update_registers_as_its_task_fails_is_released() -> 
     record = harness.runtime.get_record(task_id)
     assert record is not None and record.status == TaskStatus.FAILED
     assert calls[-1] == "released"
+
+
+@pytest.mark.anyio
+async def test_a_serve_task_returned_before_its_adoption_is_not_adopted() -> None:
+    harness = _Harness(_runtime(FakeRegistry()))
+    _, ids = await _dispatched(harness, SERVE_V1, "serve")
+    task_id = ids["serve"]
+
+    harness.deliver(
+        TaskEvent(
+            type="TASK_UPDATE",
+            task_id=task_id,
+            worker_id="wkr-1",
+            dispatch_id="dsp-1",
+            payload={"serve": {"_host": "h", "_port": 8000, "model": "org/served"}},
+            ts=_TS,
+        )
+    )
+    # The watchdog returns the task before the adoption runs on the control loop.
+    harness.deliver(WorkerEvent(type="UNREGISTER", worker_id="wkr-1"))
+
+    current = harness.serve.adopt.call_args.args[3]
+    assert current() is False

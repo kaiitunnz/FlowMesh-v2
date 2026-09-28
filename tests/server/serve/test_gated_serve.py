@@ -533,6 +533,17 @@ def test_adopt_is_idempotent_and_model_gated() -> None:
     assert denied_edge._bindings.live("tsk-2") is None
 
 
+def test_an_endpoint_whose_dispatch_ended_is_not_adopted() -> None:
+    endpoint = ReplicaEndpoint(base_url="http://x/v1", model="org/model")
+    control = _FakeControl(endpoint=endpoint)
+    edge = _edge(control)
+
+    edge.adopt("tsk-1", current=lambda: False)
+
+    assert control.adopt_calls == []
+    assert edge._bindings.get("tsk-1") is None
+
+
 def test_drain_refuses_new_calls_and_drains_the_replica() -> None:
     endpoint = ReplicaEndpoint(base_url="http://x/v1", model="org/model")
     control = _FakeControl(endpoint=endpoint)
