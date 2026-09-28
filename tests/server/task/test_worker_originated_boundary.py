@@ -1417,6 +1417,67 @@ def test_a_completion_racing_a_cancel_reaps_its_facade_group() -> None:
     asyncio.run(run())
 
 
+def test_a_late_step_of_a_dispatch_settled_cancelled_reaps_and_routes_nothing(
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        runtime = _runtime()
+        workflow_id, ids = await _register(runtime, _SEARCH_WF)
+        writer = ids["writer"]
+        _, payload = _run_agent_step(runtime, writer, seal_in=tmp_path)
+        record = runtime._tasks[writer]
+        record.dispatch_id = "dsp-1"
+        runtime.cancel_workflow(workflow_id)
+        runtime.resolve_disowned_dispatch(writer, "dsp-1", "wkr-1", 0.0)
+        assert record.status is TaskStatus.CANCELLED
+
+        runtime.mark_succeeded(writer, "wkr-1", payload, _TS, dispatch_id="dsp-1")
+
+        assert record.status is TaskStatus.CANCELLED
+        assert _permit_frames(runtime) == []
+        assert _egress(runtime).occurrences() == []
+
+    asyncio.run(run())
+
+
+def test_a_late_completion_of_a_dispatch_settled_cancelled_routes_no_group() -> None:
+    async def run() -> None:
+        runtime = _runtime()
+        workflow_id, ids = await _register(runtime, _SEARCH_WF)
+        writer = ids["writer"]
+        _hold_dispatch(runtime, writer)
+        record = runtime._tasks[writer]
+        record.dispatch_id = "dsp-1"
+        group = _stash_search_group(runtime, writer)
+        runtime.cancel_workflow(workflow_id)
+        runtime.resolve_disowned_dispatch(writer, "dsp-1", "wkr-1", 0.0)
+        completion = HarnessResult(
+            kind=HarnessResultKind.COMPLETION,
+            value="done",
+            capsule=HarnessCapsule(
+                backend=HarnessBackendKey(backend="scripted", version="v1"), blob="c"
+            ),
+        )
+
+        runtime.mark_succeeded(
+            writer,
+            "wkr-1",
+            {
+                "agent_episode": completion.model_dump(mode="json"),
+                "agent_episode_facade_group": group.model_dump(mode="json"),
+            },
+            _TS,
+            dispatch_id="dsp-1",
+        )
+
+        assert record.status is TaskStatus.CANCELLED
+        assert record.pending_facade_group is None
+        assert _permit_frames(runtime) == []
+        assert _egress(runtime).occurrences() == []
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("carried", [True, False])
 @pytest.mark.parametrize(
     "kind", [HarnessResultKind.FAILURE, HarnessResultKind.CANCELLATION]

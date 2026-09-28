@@ -4981,14 +4981,29 @@ class TaskRuntime:
                 # routed and the episode can be re-dispatched.
                 if (sealed := payload.get("agent_episode_private_state")) is not None:
                     self._apply_private_state_seal_locked(task_id, sealed)
-                # A facade group the worker captured on this turn rides the completion's
-                # own metadata on the durable task stream, so it is ingested here rather
-                # than on a separate channel that could deliver it after the completion
-                # (settling the episode DONE and dropping its searches) or drop it.
-                if (carried := payload.get("agent_episode_facade_group")) is not None:
-                    self.receive_worker_facade_group(
-                        task_id, FacadeTurnGroup.model_validate(carried)
+                carried = payload.get("agent_episode_facade_group")
+                carried_group = (
+                    FacadeTurnGroup.model_validate(carried)
+                    if carried is not None
+                    else None
+                )
+                if record.status in TERMINAL_TASK_STATUSES:
+                    # A late report of a dispatch its task already settled routes
+                    # nothing it carries, so its worker drops what it holds for it.
+                    self._reap_captures_locked(
+                        worker_id,
+                        task_id,
+                        _captured_calls(harness_result, carried_group),
                     )
+                    if harness_result.kind is not HarnessResultKind.COMPLETION:
+                        return _settle_outcome(effect, record, [], [])
+                elif carried_group is not None:
+                    # A facade group the worker captured on this turn rides the
+                    # completion's own metadata on the durable task stream, so it is
+                    # ingested here rather than on a separate channel that could
+                    # deliver it after the completion (settling the episode DONE and
+                    # dropping its searches) or drop it.
+                    self.receive_worker_facade_group(task_id, carried_group)
                 # The durable record is the source of truth: a restart drops the
                 # in-memory stash, but a replayed completion still finds its captured
                 # boundary and reroute rather than settling the episode DONE.
