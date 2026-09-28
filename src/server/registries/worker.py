@@ -1,4 +1,5 @@
 import json
+import logging
 from collections.abc import Iterable, Sequence
 from enum import StrEnum
 from typing import Any, NamedTuple
@@ -37,6 +38,8 @@ from ..clients.redis import (
     worker_hb_key,
     worker_key,
 )
+
+logger = logging.getLogger(__name__)
 
 # A write for a worker that is no longer a set member must not recreate a partial
 # record. A read-then-write cannot promise that, since the watchdog can reap
@@ -338,6 +341,8 @@ class WorkerRegistry:
         return True
 
     def _announce_status(self, worker_id: str, status: WorkerStatus, ts: str) -> None:
+        """Announce a status the registry stored; a failed announcement leaves the
+        stored status as it is."""
         payload = {
             "type": "STATUS",
             "worker_id": worker_id,
@@ -345,9 +350,14 @@ class WorkerRegistry:
             "ts": ts,
             "origin": "server",
         }
-        self._rds.sync.publish_telemetry(
-            WORKER_EVENT_CHANNEL, json.dumps(payload, ensure_ascii=False)
-        )
+        try:
+            self._rds.sync.publish_telemetry(
+                WORKER_EVENT_CHANNEL, json.dumps(payload, ensure_ascii=False)
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to announce worker %s as %s: %s", worker_id, status, exc
+            )
 
     def reservations(self) -> list[Reservation]:
         """Every registered worker's reservation."""

@@ -625,6 +625,9 @@ class TaskRuntime:
         # The worker and dispatch holding each dispatched task, until a commit moves the
         # task off it and releases the worker's reservation for it.
         self._held_dispatches: dict[str, tuple[str, str]] = {}
+        # Reservations of dispatches that ended, released after the lock; one whose
+        # release failed stays here for the next release.
+        self._ended_dispatches: list[tuple[str, str]] = []
         self._input_checks: dict[str, _InputCheck] = {}
         self._report_writes = _ReportWrites()
         self._unacknowledged: dict[str, _Unacknowledged] = {}
@@ -1389,28 +1392,46 @@ class TaskRuntime:
             ):
                 continue
             del self._held_dispatches[task_id]
-            self._release_worker(*held)
+            self._ended_dispatches.append(held)
 
-    def _release_worker(self, worker_id: str, dispatch_id: str) -> None:
-        # A failed release is healed by the worker's next fenced report.
-        try:
-            self._worker_registry.release_worker(worker_id, dispatch_id)
-        except Exception as exc:
-            self._logger.warning(
-                "Failed to release worker %s from dispatch %s: %s",
-                worker_id,
-                dispatch_id,
-                exc,
-            )
+    def _release_ended_workers(self) -> None:
+        """Release, off the lock, each worker reserved for a dispatch that ended."""
+        with self._lock:
+            ended, self._ended_dispatches = self._ended_dispatches, []
+        if failed := self._release_workers(ended):
+            with self._lock:
+                self._ended_dispatches[:0] = failed
+
+    def _release_workers(
+        self, reservations: Sequence[tuple[str, str]]
+    ) -> list[tuple[str, str]]:
+        """Release each worker from its dispatch; returns those that failed."""
+        failed: list[tuple[str, str]] = []
+        for worker_id, dispatch_id in reservations:
+            try:
+                self._worker_registry.release_worker(worker_id, dispatch_id)
+            except Exception as exc:
+                self._logger.warning(
+                    "Failed to release worker %s from dispatch %s: %s",
+                    worker_id,
+                    dispatch_id,
+                    exc,
+                )
+                failed.append((worker_id, dispatch_id))
+        return failed
 
     def release_ended_reservations(self) -> None:
-        """Release every worker reserved for a dispatch no longer in flight, such as
-        one whose task settled just before a restart."""
-        for reservation in self._worker_registry.reservations():
-            if not self.dispatch_in_flight(
-                reservation.task_id, reservation.dispatch_id, reservation.worker_id
-            ):
-                self._release_worker(reservation.worker_id, reservation.dispatch_id)
+        """Release every worker reserved for a dispatch not in flight, such as one
+        whose task settled just before a restart."""
+        self._release_workers(
+            [
+                (reservation.worker_id, reservation.dispatch_id)
+                for reservation in self._worker_registry.reservations()
+                if not self.dispatch_in_flight(
+                    reservation.task_id, reservation.dispatch_id, reservation.worker_id
+                )
+            ]
+        )
 
     def _write_locked(
         self, write: Callable[[], None], hold: Callable[[_HeldWrites], None]
@@ -4599,19 +4620,22 @@ class TaskRuntime:
         Returns whether the task still needs returning: a dispatch its worker reported
         on stands, and one a cancel recorded settles CANCELLED.
         """
-        with self._cv:
-            publish = self._publishing.pop(task_id, None)
-            if publish is None or not publish.recorded:
-                return True
-            record = self._tasks.get(task_id)
-            if (
-                not publish.reported
-                and record is not None
-                and record.status == TaskStatus.CANCELLING
-                and record.dispatch_id == publish.dispatch_id
-            ):
-                self._settle_cancelled_locked(record, time.time())
-            return False
+        try:
+            with self._cv:
+                publish = self._publishing.pop(task_id, None)
+                if publish is None or not publish.recorded:
+                    return True
+                record = self._tasks.get(task_id)
+                if (
+                    not publish.reported
+                    and record is not None
+                    and record.status == TaskStatus.CANCELLING
+                    and record.dispatch_id == publish.dispatch_id
+                ):
+                    self._settle_cancelled_locked(record, time.time())
+                return False
+        finally:
+            self._release_ended_workers()
 
     def mark_dispatched(self, task_id: str) -> bool:
         """Record the publish `begin_publish` marked; returns whether it holds the task.
@@ -4661,7 +4685,7 @@ class TaskRuntime:
             held = (publish.worker_id, publish.dispatch_id)
             earlier = self._held_dispatches.get(task_id)
             if earlier is not None and earlier != held:
-                self._release_worker(*earlier)
+                self._ended_dispatches.append(earlier)
             self._held_dispatches[task_id] = held
         record.merged_dispatch_worker = (
             publish.worker_id if self._merge_children_map.get(task_id) else None
@@ -5197,22 +5221,29 @@ class TaskRuntime:
         settles CANCELLED, its merged children returning to run alone. A task whose
         last attempt this would spend is left for the caller to fail.
         """
-        with self._cv:
-            record = self._tasks.get(task_id)
-            if record is None or not self._holds_dispatch_locked(record, holder, None):
-                if holder is not None:
-                    self._heal_returned_locked(task_id, holder, None)
-                return DispatchEnd.STALE
-            if record.status in TERMINAL_TASK_STATUSES:
-                return DispatchEnd.SETTLED
-            if record.status == TaskStatus.CANCELLING:
-                self._settle_cancelled_locked(record, time.time(), unmerge=True)
-                return DispatchEnd.CANCELLED
-            if holder is not None and self._return_failed_merge_locked(record, holder):
-                return DispatchEnd.MERGE_RETURNED
-            return self._return_dispatch_locked(
-                record, increment_retry=increment_retry, front=front
-            )
+        try:
+            with self._cv:
+                record = self._tasks.get(task_id)
+                if record is None or not self._holds_dispatch_locked(
+                    record, holder, None
+                ):
+                    if holder is not None:
+                        self._heal_returned_locked(task_id, holder, None)
+                    return DispatchEnd.STALE
+                if record.status in TERMINAL_TASK_STATUSES:
+                    return DispatchEnd.SETTLED
+                if record.status == TaskStatus.CANCELLING:
+                    self._settle_cancelled_locked(record, time.time(), unmerge=True)
+                    return DispatchEnd.CANCELLED
+                if holder is not None and self._return_failed_merge_locked(
+                    record, holder
+                ):
+                    return DispatchEnd.MERGE_RETURNED
+                return self._return_dispatch_locked(
+                    record, increment_retry=increment_retry, front=front
+                )
+        finally:
+            self._release_ended_workers()
 
     def _return_dispatch_locked(
         self, record: TaskRecord, *, increment_retry: bool, front: bool
@@ -5447,6 +5478,7 @@ class TaskRuntime:
             self._notify_terminal_transition(workflow_id)
 
         self._release_terminated_work(termination)
+        self._release_ended_workers()
         self._secret_vault.purge(workflow_id)
         return touched
 
@@ -5570,11 +5602,13 @@ class TaskRuntime:
                 )
 
     def _release_pending_terminations(self) -> None:
-        """Release, off the lock, what workflows control failed under it still hold."""
+        """Release, off the lock, what workflows control failed under it still hold,
+        and each worker reserved for a dispatch that ended."""
         with self._lock:
             pending, self._pending_terminations = self._pending_terminations, []
         for termination in pending:
             self._release_terminated_work(termination)
+        self._release_ended_workers()
 
     def _commit_cancelled_locked(
         self, workflow_id: str, touched: list[str], returned: list[str]
