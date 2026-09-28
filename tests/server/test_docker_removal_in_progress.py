@@ -183,3 +183,55 @@ class TestStartWithStaleContainer:
         assert _adapter(client)._start() is True
         running.remove.assert_not_called()
         client.containers.run.assert_not_called()
+
+
+class TestStopOrder:
+    def _docker(self, events: list[str], worker: MagicMock | Exception) -> MagicMock:
+        docker_client = MagicMock()
+        if isinstance(worker, Exception):
+            docker_client.containers.get.side_effect = worker
+        else:
+            docker_client.containers.get.return_value = worker
+        ssh_container = MagicMock(status="running")
+        ssh_container.name = "ssh_0"
+        ssh_container.stop.side_effect = lambda **_: events.append("ssh stopped")
+        ssh_container.remove.side_effect = lambda **_: events.append("ssh removed")
+        docker_client.containers.list.return_value = [ssh_container]
+        volume = MagicMock()
+        volume.remove.side_effect = lambda **_: events.append("volume removed")
+        docker_client.volumes.list.return_value = [volume]
+        return docker_client
+
+    def test_the_worker_stops_before_its_ssh_containers_and_volumes(self) -> None:
+        events: list[str] = []
+        worker = MagicMock()
+        worker.stop.side_effect = lambda **_: events.append("worker stopped")
+        worker.remove.side_effect = lambda **_: events.append("worker removed")
+
+        assert _adapter(self._docker(events, worker))._stop() is True
+
+        assert events == [
+            "worker stopped",
+            "worker removed",
+            "ssh stopped",
+            "ssh removed",
+            "volume removed",
+        ]
+
+    def test_a_worker_that_fails_to_stop_still_has_its_ssh_resources_removed(
+        self,
+    ) -> None:
+        events: list[str] = []
+        worker = MagicMock()
+        worker.stop.side_effect = APIError("stuck")
+
+        assert _adapter(self._docker(events, worker))._stop() is False
+
+        assert events == ["ssh stopped", "ssh removed", "volume removed"]
+
+    def test_a_missing_worker_has_its_ssh_resources_removed(self) -> None:
+        events: list[str] = []
+
+        assert _adapter(self._docker(events, NotFound("gone")))._stop() is True
+
+        assert events == ["ssh stopped", "ssh removed", "volume removed"]

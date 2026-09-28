@@ -242,6 +242,7 @@ class DockerWorkerAdapter(WorkerAdapter):
         self._docker = docker_client
         self._status: WorkerStatus = WorkerStatus.STOPPED
         self._hardware: dict[str, Any] | WorkerHardware | None = None
+        self._is_started = False
 
     @property
     def status(self) -> WorkerStatus:
@@ -479,6 +480,7 @@ class DockerWorkerAdapter(WorkerAdapter):
             self._is_started = False
             if is_started:
                 logger.warning("Container %s not found.", self.container_name)
+            self._remove_owned_ssh_resources()
             return True
         except Exception as exc:
             log_fn = logger.error if is_started else logger.warning
@@ -489,9 +491,8 @@ class DockerWorkerAdapter(WorkerAdapter):
             )
             return False
 
-        self._stop_owned_ssh_containers()
-        self._remove_owned_ssh_volumes()
-
+        # The worker stops first, so its shutdown gives up the SSH tasks it runs before
+        # their containers go; what it leaves behind is removed after.
         try:
             container.stop(timeout=_STOP_TIMEOUT)
             container.remove()
@@ -505,6 +506,13 @@ class DockerWorkerAdapter(WorkerAdapter):
                 repr(exc),
             )
             return False
+        finally:
+            self._remove_owned_ssh_resources()
+
+    def _remove_owned_ssh_resources(self) -> None:
+        # A volume is in use until the container mounting it is removed.
+        self._stop_owned_ssh_containers()
+        self._remove_owned_ssh_volumes()
 
     def _stop_owned_ssh_containers(self) -> None:
         try:
