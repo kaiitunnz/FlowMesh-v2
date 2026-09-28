@@ -184,9 +184,14 @@ class WorkerManager:
 
         worker = self._create_worker(init_config)
         if init_config.init_on_start:
-            started = await self._start_worker(worker)
-            if not started:
-                raise RuntimeError(f"Failed to start worker '{worker.name}'")
+            # A worker created here must not hold its name or GPUs against a retry.
+            try:
+                if not await self._start_worker(worker):
+                    raise RuntimeError(f"Failed to start worker '{worker.name}'")
+            except Exception:
+                await self._stop_and_destroy_worker(worker)
+                self._registry.try_pop(worker.token)
+                raise
         self._report_capacity_change()
         return worker.get_info()
 
@@ -285,9 +290,7 @@ class WorkerManager:
 
         started = await worker.start()
         if not started:
-            self.logger.error("Worker %s failed to start; discarding it", worker.name)
-            await self._stop_and_destroy_worker(worker)
-            self._registry.try_pop(worker.token)
+            self.logger.error("Worker %s failed to start", worker.name)
             return False
         return True
 
