@@ -274,6 +274,35 @@ def _sig(span: ReadableSpan) -> tuple[Any, ...]:
     )
 
 
+def test_a_failed_agents_region_opener_emits_once_its_children_drain() -> None:
+    tracer, exporter, config = recording_tracer(TelemetryLevel.FULL)
+    emitter = TelemetrySpanEmitter(tracer, config, _WORKFLOW_ID)
+    eng = _engine(_spawning_agent_bundle(), emitter=emitter)
+    _dispatch(eng, "A")
+    spawn = BoundaryEvent(
+        kind=BoundaryEventKind.SPAWN, call_correlation="s0", child_region_ref="worker"
+    )
+    child = eng.route_boundary_event("A", spawn).ready[0]
+    _dispatch(eng, child)
+    wi_a = eng.work_item("A")
+    assert wi_a is not None
+    opener = eng._scopes[eng.region_scope_for(wi_a.activation_id, "worker") or ""]
+    assert opener.owner_activation_id is not None
+    opener_span = derived_span_id(SpanIdKind.ACTIVATION, opener.owner_activation_id)
+
+    eng.on_failed("A", "boom", retryable=False)
+    assert opener_span not in {sid for _, sid in _span_ids(exporter)}
+    eng.on_succeeded(child)
+
+    known = {sid for _, sid in _span_ids(exporter)}
+    assert opener_span in known
+    workflow_span = derived_span_id(SpanIdKind.WORKFLOW, _WORKFLOW_ID)
+    assert all(
+        s.parent is None or s.parent.span_id in known | {workflow_span}
+        for s in exporter.get_finished_spans()
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Full-coverage tree: root agent, region opener, spawn child, retry, boundary
 # --------------------------------------------------------------------------- #
@@ -588,7 +617,7 @@ def test_an_unclassifiable_activation_drops_its_span_instead_of_raising() -> Non
         attempts={},
         invocations={},
         trace=[],
-        released_scopes=set(),
+        scope_closed=lambda _: False,
     )
 
     assert _spans_named(exporter, SPAN_OPERATOR) == []

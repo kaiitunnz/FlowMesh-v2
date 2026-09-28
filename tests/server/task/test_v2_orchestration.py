@@ -132,11 +132,6 @@ class FakeRegistry:
     def save_ledger_snapshot(self, workflow_id: str, snapshot: LedgerSnapshot) -> None:
         self.ledger_blobs[workflow_id] = snapshot.model_dump_json()
 
-    async def save_ledger_snapshot_async(
-        self, workflow_id: str, snapshot: LedgerSnapshot
-    ) -> None:
-        self.save_ledger_snapshot(workflow_id, snapshot)
-
     async def load_ledger_snapshot_async(
         self, workflow_id: str
     ) -> LedgerSnapshot | None:
@@ -1330,3 +1325,45 @@ async def test_a_skipped_producer_fans_out_to_no_children() -> None:
     assert engine is not None
     assert _child_count(engine) == 0 and engine.region_closed("collect")
     assert registry.remaining_of(workflow_id) == set()
+
+
+class _LockProbingRegistry(FakeRegistry):
+    """Records, at each ledger save, whether another thread could take the runtime
+    lock."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.runtime: TaskRuntime | None = None
+        self.saved_unlocked: list[bool] = []
+
+    def save_ledger_snapshot(self, workflow_id: str, snapshot: LedgerSnapshot) -> None:
+        assert self.runtime is not None
+        lock = self.runtime._lock
+        taken: list[bool] = []
+
+        def probe() -> None:
+            if lock.acquire(blocking=False):
+                lock.release()
+                taken.append(True)
+            else:
+                taken.append(False)
+
+        thread = threading.Thread(target=probe)
+        thread.start()
+        thread.join()
+        self.saved_unlocked.append(taken[0])
+        super().save_ledger_snapshot(workflow_id, snapshot)
+
+
+@pytest.mark.anyio
+async def test_the_submit_ledger_save_runs_under_the_runtime_lock() -> None:
+    registry = _LockProbingRegistry()
+    runtime = registry.runtime = _runtime(registry)
+
+    workflow_id, _ = await _register(runtime, LINEAR)
+
+    assert registry.saved_unlocked == [False]
+    live = runtime.orchestration_engine(workflow_id)
+    assert live is not None
+    stored = LedgerSnapshot.model_validate_json(registry.ledger_blobs[workflow_id])
+    assert stored == live.to_snapshot()

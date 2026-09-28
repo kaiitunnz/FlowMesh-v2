@@ -6,7 +6,6 @@ from shared.tasks.specs import ModelBindingMode
 from ..representations.operators import (
     AgentOperator,
     AuthorityCeiling,
-    BranchRegion,
     DeterminismClass,
     EffectClass,
     InputProvenanceKind,
@@ -14,11 +13,11 @@ from ..representations.operators import (
     JoinRegion,
     LeafOperator,
     LogicalOperator,
-    LoopContextRegion,
     MergeRegion,
     RecoveryClass,
     ResidualPolicy,
     SpawnRegion,
+    spawned_only_region_owners,
 )
 from ..representations.plan import PhysicalExecutionPlan
 from ..representations.results import CardinalityKind, ReleaseConditionKind
@@ -205,24 +204,7 @@ def _check_region(
 ) -> list[Diagnostic]:
     diags: list[Diagnostic] = []
     location = loc.get(op.operator_id)
-    if isinstance(op, BranchRegion):
-        if not op.outputs:
-            diags.append(
-                Diagnostic(
-                    code="region.branch-no-ports",
-                    message="branch region declares no output ports",
-                    location=location,
-                )
-            )
-        if not op.selection:
-            diags.append(
-                Diagnostic(
-                    code="region.branch-no-selection",
-                    message="branch region declares no selection rule",
-                    location=location,
-                )
-            )
-    elif isinstance(op, MergeRegion):
+    if isinstance(op, MergeRegion):
         if not op.inputs:
             diags.append(
                 Diagnostic(
@@ -277,15 +259,6 @@ def _check_region(
                 Diagnostic(
                     code="region.bad-residual",
                     message=f"unknown residual-child policy {op.residual_policy!r}",
-                    location=location,
-                )
-            )
-    elif isinstance(op, LoopContextRegion):
-        if not op.loop_coordinate:
-            diags.append(
-                Diagnostic(
-                    code="region.loop-no-coordinate",
-                    message="loop-context region declares no loop coordinate",
                     location=location,
                 )
             )
@@ -522,12 +495,13 @@ def _check_region_outputs(
     """
     diags: list[Diagnostic] = []
     op_by_id = {op.operator_id: op for op in template.operators}
-    matched_joins = {
-        edge.to_op
+    spawn_of_join = {
+        edge.to_op: edge.from_op
         for edge in template.edges
         if isinstance(op_by_id.get(edge.from_op), SpawnRegion)
         and isinstance(op_by_id.get(edge.to_op), JoinRegion)
     }
+    spawned_only = spawned_only_region_owners(template.operators)
     for edge in template.edges:
         if edge.feedback or edge.to_port is None:
             continue
@@ -535,7 +509,19 @@ def _check_region_outputs(
         target = op_by_id.get(edge.to_op)
         if not isinstance(source, JoinRegion) or not isinstance(target, AgentOperator):
             continue
-        if edge.from_op not in matched_joins:
+        if owner := spawned_only.get(spawn_of_join.get(edge.from_op, "")):
+            diags.append(
+                Diagnostic(
+                    code="dataflow.spawned-region-output",
+                    message=(
+                        f"region-output edge into {target.operator_id!r} reads a "
+                        f"region of agent {owner!r}, which runs only as a spawned "
+                        "child; a region input names an agent that runs at the root"
+                    ),
+                    location=loc.get(edge.to_op),
+                )
+            )
+        if edge.from_op not in spawn_of_join:
             diags.append(
                 Diagnostic(
                     code="dataflow.unmatched-region-output",
@@ -547,6 +533,71 @@ def _check_region_outputs(
                 )
             )
     return diags
+
+
+def _check_spawn_dependents(
+    template: LogicalWorkflowTemplate, loc: dict[str, SourceLocation]
+) -> list[Diagnostic]:
+    """A spawn delivers no record of its own: only its join may depend on it."""
+    op_by_id = {op.operator_id: op for op in template.operators}
+    return [
+        Diagnostic(
+            code="dataflow.spawn-dependent",
+            message=(
+                f"{edge.to_op!r} depends on spawn {edge.from_op!r}, which delivers "
+                "nothing itself; depend on the join that collects its children"
+            ),
+            location=loc.get(edge.to_op),
+        )
+        for edge in template.edges
+        if not edge.feedback
+        and isinstance(op_by_id.get(edge.from_op), SpawnRegion)
+        and not isinstance(op_by_id.get(edge.to_op), JoinRegion)
+    ]
+
+
+def _check_region_inputs(
+    template: LogicalWorkflowTemplate, loc: dict[str, SourceLocation]
+) -> list[Diagnostic]:
+    """A spawn (a call included) fans out over a task's result, and a join releases
+    over a spawn's children: a spawn takes input only from tasks, and a join needs a
+    spawn among its inputs."""
+    op_by_id = {op.operator_id: op for op in template.operators}
+    fed_by_spawn: set[str] = set()
+    diags: list[Diagnostic] = []
+    for edge in template.edges:
+        if edge.feedback:
+            continue
+        source, target = op_by_id.get(edge.from_op), op_by_id.get(edge.to_op)
+        if isinstance(source, SpawnRegion):
+            fed_by_spawn.add(edge.to_op)
+        if isinstance(target, SpawnRegion) and not isinstance(
+            source, (LeafOperator, AgentOperator)
+        ):
+            diags.append(
+                _region_input(
+                    edge.to_op, f"takes input from {edge.from_op!r}, not a task", loc
+                )
+            )
+    diags.extend(
+        _region_input(op.operator_id, "collects no spawn's children", loc)
+        for op in template.operators
+        if isinstance(op, JoinRegion) and op.operator_id not in fed_by_spawn
+    )
+    return diags
+
+
+def _region_input(
+    operator_id: str, problem: str, loc: dict[str, SourceLocation]
+) -> Diagnostic:
+    return Diagnostic(
+        code="dataflow.region-input",
+        message=(
+            f"region {operator_id!r} {problem}; a spawn fans out over a task's "
+            "result and a join collects a spawn's children"
+        ),
+        location=loc.get(operator_id),
+    )
 
 
 def _check_result_declarations(
@@ -605,6 +656,12 @@ def _check_cycles(
             continue
         if edge.from_op in adjacency:
             adjacency[edge.from_op].append(edge.to_op)
+    # An agent's region fills only once the agent runs, so it follows the agent.
+    for op in template.operators:
+        if isinstance(op, AgentOperator):
+            adjacency[op.operator_id].extend(
+                ref.spawn_ref for ref in op.child_region_refs
+            )
 
     visiting, visited = set(), set()
 
@@ -629,8 +686,7 @@ def _check_cycles(
                     Diagnostic(
                         code="topology.unstructured-cycle",
                         message=(
-                            f"operator {hit!r} participates in an unstructured cycle; "
-                            "declare structured feedback with a LoopContext region"
+                            f"operator {hit!r} participates in an unstructured cycle"
                         ),
                         location=loc.get(hit),
                     )
@@ -740,6 +796,8 @@ def validate_compilation(
     diags.extend(_check_child_regions(template, loc))
     diags.extend(_check_agent_inputs(template, loc))
     diags.extend(_check_region_outputs(template, loc))
+    diags.extend(_check_spawn_dependents(template, loc))
+    diags.extend(_check_region_inputs(template, loc))
     diags.extend(_check_result_declarations(template, loc))
     diags.extend(_check_cycles(template, loc))
 

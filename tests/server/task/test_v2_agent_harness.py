@@ -11,6 +11,9 @@ agent's finite declared child regions, creating one child attenuated from that r
 entry, sealed per region, with recursive agent children reusing the declared region.
 """
 
+import sys
+from typing import Any
+
 import pytest
 
 from server.orchestration import (
@@ -20,7 +23,12 @@ from server.orchestration import (
     ScopeBudget,
     WorkItemStatus,
 )
-from server.orchestration.state import BoundaryEvent, DenialKind, InvocationState
+from server.orchestration.state import (
+    BoundaryEvent,
+    DenialKind,
+    InvocationState,
+    WorkItem,
+)
 from server.task.v2 import FrontendWorkflowSource, PersistedV2Workflow
 from server.task.v2.compiler.bindings import leaf_profile
 from server.task.v2.representations.operators import (
@@ -861,7 +869,66 @@ def test_terminal_completion_settles_a_never_entered_region() -> None:
     assert eng.region_closed("reviewer:spawn:join")
 
 
-def test_terminal_failure_settles_an_open_region() -> None:
+def test_terminal_failure_fails_a_never_entered_region() -> None:
+    eng = _engine(_multi_region_agent())
+    act = _dispatch_agent(eng)
+
+    failed = eng.on_failed("A", "boom", retryable=False).failed
+
+    # A failed agent's unused region is not an empty one: it opens no scope, seals
+    # nothing, and its template and join fail with it.
+    assert failed[0] == "A" and {"rbody", "vbody"} <= set(failed)
+    for role in ("researcher", "reviewer"):
+        assert eng.region_scope_for(act, role) is None
+    assert set(eng.to_snapshot().failed_regions) == {
+        "researcher:spawn",
+        "researcher:spawn:join",
+        "reviewer:spawn",
+        "reviewer:spawn:join",
+    }
+    kinds = {kind for kind, _ in eng.contract_trace()}
+    assert "child_init_sealed" not in kinds and "join_released" not in kinds
+
+
+def test_an_ambiguity_terminal_fails_a_never_entered_region() -> None:
+    eng = _engine(_multi_region_agent())
+    act = _dispatch_agent(eng)
+    eng.route_boundary_event(
+        "A",
+        BoundaryEvent(
+            kind=BoundaryEventKind.INVOCATION,
+            call_correlation="c0",
+            interface="model",
+            request_digest="sha256:abc",
+        ),
+    )
+
+    failed = eng.on_uncertain("A").failed
+
+    assert failed[0] == "A" and {"rbody", "vbody"} <= set(failed)
+    assert eng.region_scope_for(act, "researcher") is None
+    assert "reviewer:spawn:join" in eng.to_snapshot().failed_regions
+
+
+def test_terminalizing_leaves_an_already_terminal_invocation_alone() -> None:
+    eng = _engine(_multi_region_agent())
+    _dispatch_agent(eng)
+    eng.route_boundary_event(
+        "A",
+        BoundaryEvent(
+            kind=BoundaryEventKind.INVOCATION,
+            call_correlation="c0",
+            interface="model",
+            request_digest="sha256:abc",
+        ),
+    )
+    (invocation_id,) = eng.terminalize_unsettled_invocations()
+
+    assert eng.terminalize_unsettled_invocations() == []
+    assert eng.boundary_invocation_completed(invocation_id) is False
+
+
+def test_terminal_failure_fails_an_entered_region_while_its_children_drain() -> None:
     eng = _engine(_spawning_agent(child=_leaf("child")))
     act = _dispatch_agent(eng)
     child = eng.route_boundary_event("A", _spawn("worker", "c0")).ready[0]
@@ -870,8 +937,315 @@ def test_terminal_failure_settles_an_open_region() -> None:
     eng.on_failed("A", "boom", retryable=False)
     cap = eng.capability(eng.region_scope_for(act, "worker"), ProgressAxis.CHILD_INIT)
     assert cap is not None and cap.status.value == "sealed" and not cap.closed
-    # The child drains and the region's join then releases.
+    assert "worker:spawn:join" in eng.to_snapshot().failed_regions
+    # The child drains under the drain residual, and the join never releases.
     eng.on_succeeded(child)
     cap = eng.capability(eng.region_scope_for(act, "worker"), ProgressAxis.CHILD_INIT)
     assert cap is not None and cap.closed
-    assert eng.region_closed("worker:spawn:join")
+    assert "join_released" not in {kind for kind, _ in eng.contract_trace()}
+
+
+def test_terminal_failure_cancels_an_entered_region_under_a_cancel_residual() -> None:
+    bundle = _spawning_agent(child=_leaf("child"))
+    ops = [
+        (
+            op.model_copy(update={"residual_policy": "cancel"})
+            if isinstance(op, JoinRegion)
+            else op
+        )
+        for op in bundle.template.operators
+    ]
+    template = bundle.template.model_copy(update={"operators": tuple(ops)})
+    eng = _engine(bundle.model_copy(update={"template": template}))
+    act = _dispatch_agent(eng)
+    child = eng.route_boundary_event("A", _spawn("worker", "c0")).ready[0]
+    eng.on_dispatched(child, "w1")
+
+    eng.on_failed("A", "boom", retryable=False)
+
+    cap = eng.capability(eng.region_scope_for(act, "worker"), ProgressAxis.CHILD_INIT)
+    assert cap is not None and cap.status.value == "revoked"
+    assert _work_item(eng, child).status is WorkItemStatus.CANCELLED
+    assert "join_released" not in {kind for kind, _ in eng.contract_trace()}
+
+
+def test_a_failed_agent_instance_fails_only_its_own_region_scope() -> None:
+    bundle = _recursive_agent_bundle()
+    eng = _engine(bundle, budget=ScopeBudget(max_scope_depth=8))
+    _dispatch_agent(eng)
+    failing = _spawn_in(eng, "A", "c0", "worker")
+    sibling = _spawn_in(eng, "A", "c1", "worker")
+    for instance in (failing, sibling):
+        eng.on_dispatched(instance, "w1")
+    grandchild = _spawn_in(eng, failing, "c0", "self")
+    eng.on_dispatched(grandchild, "w1")
+    failing_act = _work_item(eng, failing).activation_id
+
+    eng.on_failed(failing, "boom", retryable=False)
+    eng.on_succeeded(grandchild)
+
+    failed_scope = eng.region_scope_for(failing_act, "self")
+    snapshot = eng.to_snapshot()
+    assert snapshot.failed_scopes == [failed_scope]
+    assert failed_scope not in snapshot.released_scopes
+    assert not snapshot.failed_regions
+    # A sibling instance of the same template still spawns and releases its own region.
+    nephew = _spawn_in(eng, sibling, "c0", "self")
+    eng.on_dispatched(nephew, "w1")
+    eng.on_succeeded(nephew)
+    eng.on_succeeded(sibling)
+    sibling_act = _work_item(eng, sibling).activation_id
+    assert eng.region_scope_for(sibling_act, "self") in (
+        eng.to_snapshot().released_scopes
+    )
+    restored = OrchestrationEngine(eng.to_snapshot(), bundle)
+    assert restored.to_snapshot().failed_scopes == [failed_scope]
+
+
+def _self_recursive_agent() -> PersistedV2Workflow:
+    """Agent A spawns instances of itself; ``after`` consumes A's region."""
+    ref, ops, edge = _region("self", "A")
+    return _bundle(
+        [_agent("A", regions=(ref,)), *ops, _leaf("after")],
+        [edge, TemplateEdge(from_op="self:spawn:join", to_op="after")],
+        (_decl("out:A", "A"), _decl("out:after", "after")),
+    )
+
+
+def _nested_level(eng: OrchestrationEngine) -> tuple[str, str]:
+    """A's instance I1 spawns a grandchild G into I1's own scope of the region."""
+    _dispatch_agent(eng)
+    i1 = _spawn_in(eng, "A", "c0", "self")
+    eng.on_dispatched(i1, "w1")
+    grandchild = _spawn_in(eng, i1, "c0", "self")
+    eng.on_dispatched(grandchild, "w1")
+    return i1, grandchild
+
+
+def test_a_failed_agent_leaves_its_released_region_released() -> None:
+    eng = _engine(_self_recursive_agent(), budget=ScopeBudget(max_scope_depth=8))
+    i1, _ = _nested_level(eng)
+    eng.on_succeeded(i1)
+    seal = BoundaryEvent(
+        kind=BoundaryEventKind.SPAWN_SEAL,
+        call_correlation="s0",
+        child_region_ref="self",
+    )
+    assert eng.route_boundary_event("A", seal).ready == ["after"]
+
+    assert eng.on_failed("A", "boom", retryable=False).failed == ["A"]
+
+    assert _work_item(eng, "after").status is WorkItemStatus.READY
+    assert not eng.to_snapshot().failed_regions
+    assert eng.output_publication("out:after") is None
+
+
+def test_a_failed_agent_fails_its_own_region_while_a_nested_level_released() -> None:
+    eng = _engine(_self_recursive_agent(), budget=ScopeBudget(max_scope_depth=8))
+    i1, grandchild = _nested_level(eng)
+    eng.on_succeeded(grandchild)
+    # I1's scope of the shared region releases; A's own scope stays open.
+    eng.on_succeeded(i1)
+
+    failed = eng.on_failed("A", "boom", retryable=False).failed
+
+    assert failed == ["A", "after"]
+    assert "self:spawn:join" in eng.to_snapshot().failed_regions
+
+
+_SELF_SEAL = BoundaryEvent(
+    kind=BoundaryEventKind.SPAWN_SEAL, call_correlation="s0", child_region_ref="self"
+)
+
+
+def test_a_nested_levels_release_delivers_nothing_downstream() -> None:
+    eng = _engine(_self_recursive_agent(), budget=ScopeBudget(max_scope_depth=8))
+    _dispatch_agent(eng)
+    instance = _spawn_in(eng, "A", "c0", "self")
+    eng.on_dispatched(instance, "w1")
+
+    # The instance's own, never-entered region closes as it completes.
+    assert eng.on_succeeded(instance).ready == []
+    assert eng.output_publication("self:spawn:join") is None
+
+    assert eng.route_boundary_event("A", _SELF_SEAL).ready == ["after"]
+
+
+def test_a_failed_agent_fails_what_a_nested_level_released() -> None:
+    eng = _engine(_self_recursive_agent(), budget=ScopeBudget(max_scope_depth=8))
+    _dispatch_agent(eng)
+    instance = _spawn_in(eng, "A", "c0", "self")
+    eng.on_dispatched(instance, "w1")
+    assert eng.on_succeeded(instance).ready == []
+
+    assert eng.on_failed("A", "boom", retryable=False).failed == ["A", "after"]
+
+
+def test_a_nested_level_closes_after_its_join_failed_at_the_root() -> None:
+    eng = _engine(_self_recursive_agent(), budget=ScopeBudget(max_scope_depth=8))
+    i1, grandchild = _nested_level(eng)
+    eng.on_failed("A", "boom", retryable=False)
+
+    eng.on_succeeded(grandchild)
+    eng.on_succeeded(i1)
+
+    nested = eng.region_scope_for(_work_item(eng, i1).activation_id, "self")
+    assert nested in eng.to_snapshot().released_scopes
+
+
+def test_a_cancelled_instances_region_delivers_nothing_downstream() -> None:
+    eng = _engine(_self_recursive_agent(), budget=ScopeBudget(max_scope_depth=8))
+    join = eng._operators["self:spawn:join"]
+    assert isinstance(join, JoinRegion)
+    eng._operators["self:spawn:join"] = join.model_copy(
+        update={"residual_policy": "cancel"}
+    )
+    i1, grandchild = _nested_level(eng)
+
+    # A completes while I1 and I1's own child run: the cancel reaches both, and only
+    # A's level of the shared region releases downstream.
+    advance = eng.on_succeeded("A")
+
+    assert advance.cancelled == [i1, grandchild]
+    assert advance.ready == ["after"]
+    nested = eng.region_scope_for(_work_item(eng, i1).activation_id, "self")
+    assert nested in eng.to_snapshot().released_scopes
+
+
+def test_the_root_level_aggregate_survives_a_later_nested_release() -> None:
+    bundle = _self_recursive_agent()
+    eng = _engine(bundle, budget=ScopeBudget(max_scope_depth=8))
+    i1, grandchild = _nested_level(eng)
+    # I1 completes while its own child runs, so the root level releases first.
+    eng.on_succeeded(i1)
+    assert eng.route_boundary_event("A", _SELF_SEAL).ready == ["after"]
+    root_members = [
+        member.child_activation_id
+        for member in eng._aggregate_by_join["self:spawn:join"].members
+    ]
+    assert root_members == [_work_item(eng, i1).activation_id]
+
+    eng.on_succeeded(grandchild)
+
+    snapshot = eng.to_snapshot()
+    assert len(snapshot.region_aggregates) == 1
+    # A ledger stored with a nested aggregate after the root's restores the root's.
+    nested = snapshot.region_aggregates[0].model_copy(
+        update={
+            "members": tuple(
+                member.model_copy(
+                    update={
+                        "child_activation_id": _work_item(eng, grandchild).activation_id
+                    }
+                )
+                for member in snapshot.region_aggregates[0].members
+            )
+        }
+    )
+    stored = snapshot.model_copy(
+        update={"region_aggregates": [*snapshot.region_aggregates, nested]}
+    )
+    restored = OrchestrationEngine(stored, bundle)
+    assert [
+        member.child_activation_id
+        for member in restored._aggregate_by_join["self:spawn:join"].members
+    ] == root_members
+
+
+def _work_item(eng: OrchestrationEngine, task: str) -> WorkItem:
+    wi = eng.work_item(task)
+    assert wi is not None
+    return wi
+
+
+def _spawn_in(eng: OrchestrationEngine, task: str, call: str, role: str) -> str:
+    return eng.route_boundary_event(
+        task,
+        BoundaryEvent(
+            kind=BoundaryEventKind.SPAWN, call_correlation=call, child_region_ref=role
+        ),
+    ).ready[0]
+
+
+def _numbered_by_scope_order(eng: OrchestrationEngine) -> bool:
+    """Each child's index counts every activation its scope held before it."""
+    seen: dict[str, int] = {}
+    for act in eng.to_snapshot().activations:
+        if act.kind == "child" and act.child_index != seen.get(act.scope_id, 0):
+            return False
+        seen[act.scope_id] = seen.get(act.scope_id, 0) + 1
+    return True
+
+
+def test_a_child_index_counts_every_activation_in_its_scope_across_a_restart() -> None:
+    eng = _engine(_recursive_agent_bundle(), budget=ScopeBudget(max_scope_depth=8))
+    _dispatch_agent(eng)
+    lvl1 = _spawn_in(eng, "A", "c0", "worker")
+    eng.on_dispatched(lvl1, "w1")
+    # The nested spawn mints lvl1's region opener inside lvl1's own scope.
+    _spawn_in(eng, lvl1, "c0", "self")
+    second = _spawn_in(eng, "A", "c1", "worker")
+
+    activations = {a.activation_id: a for a in eng.to_snapshot().activations}
+    assert activations[second].child_index == 2
+    assert _numbered_by_scope_order(eng)
+
+    restored = OrchestrationEngine(eng.to_snapshot(), eng._bundle)
+    third = _spawn_in(restored, "A", "c2", "worker")
+    activations = {a.activation_id: a for a in restored.to_snapshot().activations}
+    assert activations[third].child_index == 3
+    assert _numbered_by_scope_order(restored)
+
+
+def test_the_activation_budget_holds_across_a_restart() -> None:
+    eng = _engine(
+        _spawning_agent(child=_leaf("child")), budget=ScopeBudget(max_activations=2)
+    )
+    _dispatch_agent(eng)
+    _spawn_in(eng, "A", "c0", "worker")
+    restored = OrchestrationEngine(
+        eng.to_snapshot(), eng._bundle, budget=ScopeBudget(max_activations=2)
+    )
+    _spawn_in(restored, "A", "c1", "worker")
+    with pytest.raises(RegionError):
+        _spawn_in(restored, "A", "c2", "worker")
+
+
+def test_spawning_a_child_never_rescans_every_activation() -> None:
+    eng = _engine(_spawning_agent(child=_leaf("child")))
+    _dispatch_agent(eng)
+    activations = eng._activations
+    scans = 0
+
+    def count(_frame: Any, event: str, arg: Any) -> None:
+        nonlocal scans
+        if (
+            event == "c_call"
+            and getattr(arg, "__self__", None) is activations
+            and arg.__name__ == "values"
+        ):
+            scans += 1
+
+    sys.setprofile(count)
+    try:
+        for i in range(8):
+            _spawn_in(eng, "A", f"c{i}", "worker")
+    finally:
+        sys.setprofile(None)
+    assert scans == 0
+
+
+def test_a_restart_restores_only_the_spawn_site_denials() -> None:
+    eng = _engine(_spawning_agent(child=_leaf("child")))
+    _dispatch_agent(eng)
+    eng.route_boundary_event(
+        "A",
+        BoundaryEvent(
+            kind=BoundaryEventKind.INVOCATION, call_correlation="c0", interface="x"
+        ),
+    )
+    eng.deny_spawn("worker:spawn", "x")
+    live = set(eng._denied_spawns)
+
+    restored = OrchestrationEngine(eng.to_snapshot(), eng._bundle)
+    assert restored._denied_spawns == live == {"worker:spawn"}

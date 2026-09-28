@@ -51,7 +51,8 @@ async with AsyncFlowMesh(base_url="...", api_key="...") as client:
   iterator stops when the source closes.
 - **Read published outputs** — `client.workflows.list_outputs(wf_id)`
   pages a workflow's published members by cursor, and
-  `client.workflows.get_output(wf_id, name, scope=..., key=...)` returns one.
+  `client.workflows.get_output(wf_id, name, scope=..., key=...)` returns one; a
+  spawn whose input failed has one failed member, fetched by name alone.
 - **Pull artifacts** — `client.results.get(task_id)` for the result
   payload, `client.results.download_bundle(task_id, include="all")`
   for the tar.gz.

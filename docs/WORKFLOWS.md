@@ -56,7 +56,8 @@ spec:
 ```
 
 `spec.stages[].dependsOn` declares the DAG edges; the dispatcher
-schedules each stage once all of its dependencies are `DONE`.
+schedules each stage once all of its dependencies are `DONE`. A stage's
+`dependsOn` names an earlier stage of the same workflow.
 Substitutions like `{{extract.output}}` are resolved against the
 upstream stage's result.
 
@@ -64,7 +65,8 @@ upstream stage's result.
 
 `spec.graph.nodes[]` — each node carries a `name`, an optional
 `dependsOn`, and a task `spec` (with its own `taskType`). Dependencies
-are explicit per node, and cycles are rejected. Multi-input prompts use
+are explicit per node and name nodes of the same workflow, and cycles are
+rejected. Multi-input prompts use
 `spec.data.type: graph_template` on a downstream node to combine parent
 outputs by node name and path; see
 `src/worker/executors/utils/graph_templates.py` for the templating
@@ -100,11 +102,14 @@ keys untouched:
       boundary: [invocation, external_effect, yield]
 ```
 
-`authority`, `tools`, and `boundary` apply to `agent` leaves. Any leaf may
-declare `provenance` (`pinned` | `live`) and `determinism` / `effect` /
-`recovery` overrides, and a `result: { visibility: published }` to publish its
-induced output. A spawn region publishes its children's results as a collection
-keyed by child index within each spawning scope:
+`authority`, `tools`, and `boundary` apply to `agent` leaves. An agent input
+`{ name, from: <agent>, region: <role> }` reads the aggregate of that agent's
+child region; the named agent runs at the root, and is neither the reader nor
+downstream of it. Any leaf may declare `provenance` (`pinned` | `live`) and
+`determinism` / `effect` / `recovery` overrides, and a
+`result: { visibility: published }` to publish its induced output. A spawn region
+publishes its children's results as a collection keyed by child index within each
+spawning scope:
 
 ```yaml
 - name: fanout
@@ -164,43 +169,36 @@ through `dependsOn` like tasks:
 spec:
   graph:
     nodes:
-      - name: classify
+      - name: plan
         spec: { taskType: inference, ... }
-      - name: route
-        dependsOn: [classify]
-        region: { kind: branch, selection: "{{classify.output.label}}", ports: [accept, revise] }
       - name: fanout
-        dependsOn: [route]
+        dependsOn: [plan]
         region: { kind: spawn, child: worker, authority: { invoke: [search] } }
       - name: collect
         dependsOn: [fanout]
         region: { kind: join, completion: all_settled, residual: cancel }
-      - name: refine
+      - name: report
         dependsOn: [collect]
-        region:
-          kind: loop
-          coordinate: refine
-          carried:
-            - name: model
-              kind: model_ref
-              modelRef: { architecture: llama, version: base }
-      - name: train
-        dependsOn: [refine]
-        spec: { taskType: lora_sft, ... }
-        feedback: { to: refine, port: model }
+        spec: { taskType: echo, ... }
 ```
 
-Region kinds are `branch`, `merge`, `spawn`, `join`, `loop`, and `call`
-(`call` normalizes to a `spawn`/`join` pair). A `feedback` edge is a structured
-back-edge into a `loop` region; it is excluded from acyclic-topology checks, so
-an unstructured `dependsOn` cycle is still rejected.
+Region kinds are `merge`, `spawn`, `join`, and `call` (`call` normalizes to a
+`spawn`/`join` pair). A spawn or call fans out over a task's result, so its
+input is a task, and a join collects a spawn's children, so one of its inputs is
+a spawn. Only a join may depend on a spawn, and a node that depends on a call
+reads the call's join. A failed input fails the region and everything
+downstream of it, as a failed dependency fails a task.
 
 A `join` `completion` is `all_settled`, `all_succeed`, `any`, `first_k` (with
 `k`), or `predicate` (with `predicate: { min_qualifiers, monotone }`). An early
 completion (`any`/`first_k`/`predicate`) declares a `residual` policy
-(`continue`, `drain`, `cancel`) for children still running when it releases, and
-may set `no_winner_failure: true` to resolve a no-winner join as a failure rather
-than empty. The winner is the lowest-`child_index` child that qualifies.
+(`continue`, `drain`, `cancel`) for children still unsettled when it releases;
+`cancel` cancels them, interrupting any already running, with everything a
+cancelled agent child spawned. It may set `no_winner_failure: true` to resolve a
+no-winner join as a failure rather than empty. The winner is the
+lowest-`child_index` child that qualifies. An `all_succeed` join with a failed
+child, or a no-winner join under `no_winner_failure`, resolves as a failure and
+fails everything downstream of it.
 
 ### Dry-run inspection
 

@@ -46,7 +46,6 @@ class _WorkflowNodeInput(BaseModel):
     spec: dict[str, Any] | None = None
     dependsOn: list[Any] | None = None
     region: dict[str, Any] | None = None
-    feedback: dict[str, Any] | None = None
 
 
 @dataclass
@@ -59,7 +58,6 @@ class ParsedTaskSpec:
     position_in_epoch: int | None = None
     selected_worker: list[str] | None = None
     v2: dict[str, Any] | None = None
-    feedback: dict[str, Any] | None = None
 
 
 @dataclass
@@ -67,7 +65,6 @@ class ParsedRegion:
     name: str
     region: dict[str, Any]
     depends_on: list[str]
-    feedback: dict[str, Any] | None = None
 
 
 @dataclass
@@ -90,7 +87,6 @@ class ParsedTask:
     position_in_epoch: int | None = None
     selected_worker: list[str] | None = None
     v2: dict[str, Any] | None = None
-    feedback: dict[str, Any] | None = None
 
 
 def parse_workflow(payload: str, format: str) -> ParsedWorkflow:
@@ -135,23 +131,30 @@ def _build_workflow(
     for region_spec in region_specs:
         local_ids[region_spec.name] = region_spec.name
 
-    def _resolve_feedback(
-        feedback: dict[str, Any] | None,
-    ) -> dict[str, Any] | None:
-        if not feedback:
-            return None
-        resolved = dict(feedback)
-        target = feedback.get("to")
-        if isinstance(target, str) and (to := target.strip()):
-            resolved["to"] = local_ids.get(to, to)
+    declared = {spec.local_name for spec in specs if spec.local_name}
+
+    def _resolve_depends_on(depends_on: list[str], owner: str) -> list[str]:
+        resolved: list[str] = []
+        for dep in depends_on:
+            if not (name := dep.strip()):
+                continue
+            if (dep_id := local_ids.get(name)) is None:
+                if name in declared:
+                    raise ValueError(
+                        f"{owner}: dependsOn '{name}' names a stage declared after "
+                        "it; a stage depends only on earlier stages"
+                    )
+                raise ValueError(
+                    f"{owner}: dependsOn '{name}' names no node or stage of this "
+                    "workflow"
+                )
+            resolved.append(dep_id)
         return resolved
 
     for spec in specs:
         _validate_condition_depends_on(spec)
         task_id = new_task_id()
-        depends_on = [
-            local_ids.get(s, s) for dep in spec.depends_on if dep and (s := dep.strip())
-        ]
+        depends_on = _resolve_depends_on(spec.depends_on, spec.local_name or "task")
         results.append(
             ParsedTask(
                 task_id=task_id,
@@ -163,23 +166,15 @@ def _build_workflow(
                 position_in_epoch=spec.position_in_epoch,
                 selected_worker=spec.selected_worker,
                 v2=spec.v2,
-                feedback=spec.feedback,
             )
         )
         if spec.local_name:
             local_ids[spec.local_name] = task_id
-    for task in results:
-        task.feedback = _resolve_feedback(task.feedback)
     regions = [
         ParsedRegion(
             name=region_spec.name,
             region=region_spec.region,
-            depends_on=[
-                local_ids.get(s, s)
-                for dep in region_spec.depends_on
-                if dep and (s := dep.strip())
-            ],
-            feedback=_resolve_feedback(region_spec.feedback),
+            depends_on=_resolve_depends_on(region_spec.depends_on, region_spec.name),
         )
         for region_spec in region_specs
     ]
@@ -317,11 +312,9 @@ def _expand_graph_nodes(
     for idx, node in enumerate(nodes):
         node = _validate_workflow_node(node, f"graph.nodes[{idx}]")
 
-        if (node.region is not None or node.feedback is not None) and not _is_v2_mode(
-            base.apiVersion
-        ):
+        if node.region is not None and not _is_v2_mode(base.apiVersion):
             raise ValueError(
-                f"graph.nodes[{idx}]: region/feedback require apiVersion 'flowmesh/v2'"
+                f"graph.nodes[{idx}]: region requires apiVersion 'flowmesh/v2'"
             )
         if node.region is not None and node.spec is not None:
             raise ValueError(
@@ -373,7 +366,6 @@ def _expand_graph_nodes(
                         name=name,
                         region=node.region,
                         depends_on=pending,
-                        feedback=node.feedback,
                     )
                 )
                 unresolved.pop(name)
@@ -394,7 +386,6 @@ def _expand_graph_nodes(
                     position_in_epoch=node_position_in_epoch.get(name),
                     selected_worker=selected_workers.get(name),
                     v2=v2_block,
-                    feedback=node.feedback,
                 )
             )
             unresolved.pop(name)
@@ -460,7 +451,7 @@ def _expand_stages(
 
     for idx, stage in enumerate(stages):
         stage = _validate_workflow_node(stage, f"spec.stages[{idx}]")
-        if stage.region is not None or stage.feedback is not None:
+        if stage.region is not None:
             raise ValueError(
                 f"spec.stages[{idx}]: structured regions are only supported in "
                 "the graph form (spec.graph.nodes)"

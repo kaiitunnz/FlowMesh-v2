@@ -7,7 +7,6 @@ from ..representations.operators import (
     AuthorityCeiling,
     BoundaryEventKind,
     BoundarySignature,
-    BranchRegion,
     ChildRegionRef,
     DeterminismClass,
     EffectClass,
@@ -17,11 +16,8 @@ from ..representations.operators import (
     JoinRegion,
     LeafOperator,
     LogicalOperator,
-    LoopContextRegion,
     MergeRegion,
-    ModelRef,
     Port,
-    PortKind,
     RecoveryClass,
     SpawnRegion,
 )
@@ -39,7 +35,7 @@ from ..representations.template import (
     ToolDeclaration,
 )
 from .diagnostics import compile_error
-from .project import LoweringAccumulator, build_name_map
+from .project import LoweringAccumulator, build_name_map, call_join_id
 
 # Friendly aliases for the two provenance values authors write in spec.v2.
 _PROVENANCE = {
@@ -83,14 +79,13 @@ def lower_frontend_v2(parsed: ParsedWorkflow, acc: LoweringAccumulator) -> None:
     """Normalize v2 frontend constructs into the canonical template form.
 
     Applies ``spec.v2`` leaf declarations to already-lowered task operators, lowers
-    structured regions into canonical operators/ports/regions, adds structured feedback
-    edges, and normalizes a legacy agent child target into one declared child region.
+    structured regions into canonical operators/ports/regions, and normalizes a legacy
+    agent child target into one declared child region.
     Malformed constructs raise :class:`CompileError` with a source location; semantic
     checks are left to the validation passes.
     """
     _apply_leaf_declarations(parsed, acc)
     _lower_regions(parsed, acc)
-    _lower_feedback(parsed, acc)
     normalize_agent_child_regions(acc)
     _reject_published_children(parsed, acc)
 
@@ -461,9 +456,7 @@ def _lower_region(
             name,
         )
 
-    if kind == "branch":
-        _add_operator(_branch(region, has_input), region, acc)
-    elif kind == "merge":
+    if kind == "merge":
         _add_operator(_merge(region, has_input), region, acc)
     elif kind == "spawn":
         spawn = _spawn(region, name_to_op, has_input)
@@ -472,8 +465,6 @@ def _lower_region(
             _publish_spawn(result, spawn, region.name, acc)
     elif kind == "join":
         _add_operator(_join(region, has_input), region, acc)
-    elif kind == "loop":
-        _add_operator(_loop(region, has_input), region, acc)
     elif kind == "call":
         _lower_call(region, name_to_op, acc)
         return
@@ -483,7 +474,7 @@ def _lower_region(
         )
 
     for dep in region.depends_on:
-        acc.edges.append(TemplateEdge(from_op=dep, to_op=name))
+        acc.edges.append(TemplateEdge(from_op=name_to_op.get(dep, dep), to_op=name))
 
 
 def _add_operator(
@@ -506,17 +497,6 @@ def _add_operator(
 
 def _inputs(has_input: bool, name: str = "in") -> tuple[Port, ...]:
     return (Port(name=name),) if has_input else ()
-
-
-def _branch(region: ParsedRegion, has_input: bool) -> BranchRegion:
-    ports = _str_list(region.region.get("ports"), region.name)
-    return BranchRegion(
-        operator_id=region.name,
-        source_ref=region.name,
-        inputs=_inputs(has_input),
-        outputs=tuple(Port(name=port) for port in ports),
-        selection=(str(sel) if (sel := region.region.get("selection")) else None),
-    )
 
 
 def _merge(region: ParsedRegion, has_input: bool) -> MergeRegion:
@@ -649,51 +629,6 @@ def _join(region: ParsedRegion, has_input: bool) -> JoinRegion:
     )
 
 
-def _loop(region: ParsedRegion, has_input: bool) -> LoopContextRegion:
-    coordinate = str(region.region.get("coordinate", "")).strip()
-    if not coordinate:
-        raise compile_error(
-            "region.loop-no-coordinate",
-            "loop region requires a coordinate",
-            region.name,
-        )
-    carried: list[Port] = []
-    for entry in region.region.get("carried", []) or []:
-        if not isinstance(entry, dict) or not entry.get("name"):
-            raise compile_error(
-                "region.loop-bad-carried",
-                "each carried entry needs a name",
-                region.name,
-            )
-        port_kind = str(entry.get("kind", "value"))
-        model_ref = None
-        if port_kind == PortKind.MODEL_REF.value:
-            ref = entry.get("modelRef") or {}
-            model_ref = ModelRef(
-                architecture=str(ref.get("architecture", entry["name"])),
-                version=str(v) if (v := ref.get("version")) else None,
-            )
-        carried.append(
-            Port(
-                name=str(entry["name"]),
-                kind=(
-                    PortKind(port_kind)
-                    if port_kind in {k.value for k in PortKind}
-                    else PortKind.VALUE
-                ),
-                model_ref=model_ref,
-            )
-        )
-    return LoopContextRegion(
-        operator_id=region.name,
-        source_ref=region.name,
-        inputs=_inputs(has_input, "ingress") + tuple(carried),
-        outputs=(Port(name="egress"), *carried),
-        loop_coordinate=coordinate,
-        carried=tuple(carried),
-    )
-
-
 def _lower_call(
     region: ParsedRegion, name_to_op: dict[str, str], acc: LoweringAccumulator
 ) -> None:
@@ -702,7 +637,7 @@ def _lower_call(
     child_ref = name_to_op.get(str(child), str(child)) if child else None
     returns = _str_list(region.region.get("returns"), region.name)
     spawn_id = region.name
-    join_id = f"{region.name}:join"
+    join_id = call_join_id(region.name)
     spawn = SpawnRegion(
         operator_id=spawn_id,
         source_ref=region.name,
@@ -722,48 +657,4 @@ def _lower_call(
     _add_operator(join, region, acc)
     acc.edges.append(TemplateEdge(from_op=spawn_id, to_op=join_id))
     for dep in region.depends_on:
-        acc.edges.append(TemplateEdge(from_op=dep, to_op=spawn_id))
-
-
-def _lower_feedback(parsed: ParsedWorkflow, acc: LoweringAccumulator) -> None:
-    operator_ids = acc.operator_ids
-    loop_ids = {
-        op.operator_id for op in acc.operators if isinstance(op, LoopContextRegion)
-    }
-    for source_id, feedback, label in _feedback_sources(parsed):
-        target = str(feedback.get("to", "")).strip()
-        if target not in operator_ids:
-            raise compile_error(
-                "feedback.unknown-target",
-                f"feedback targets unknown operator {target!r}",
-                label,
-            )
-        if target not in loop_ids:
-            raise compile_error(
-                "feedback.not-loop",
-                f"feedback target {target!r} is not a LoopContext region",
-                label,
-            )
-        port = feedback.get("port")
-        acc.edges.append(
-            TemplateEdge(
-                from_op=source_id,
-                to_op=target,
-                to_port=str(port) if port else None,
-                feedback=True,
-            )
-        )
-
-
-def _feedback_sources(
-    parsed: ParsedWorkflow,
-) -> list[tuple[str, dict[str, Any], str]]:
-    sources: list[tuple[str, dict[str, Any], str]] = []
-    for task in parsed.tasks:
-        if task.feedback:
-            label = task.graph_node_name or task.local_name or task.task_id
-            sources.append((task.task_id, task.feedback, label))
-    for region in parsed.regions:
-        if region.feedback:
-            sources.append((region.name, region.feedback, region.name))
-    return sources
+        acc.edges.append(TemplateEdge(from_op=name_to_op.get(dep, dep), to_op=spawn_id))

@@ -427,17 +427,13 @@ class ResidentCapacityControl:
         except asyncio.CancelledError:
             return
 
-    def originate(self, env: ToolInvocationEnvelope) -> None:
-        """Originate a worker-captured resident boundary through resident admission."""
+    def originate(self, env: ToolInvocationEnvelope) -> bool:
+        """Originate a worker-captured resident boundary through resident admission;
+        returns whether control is running to take it."""
         if self._loop is None:
-            self._settle(
-                env.task_id,
-                env.call_correlation,
-                None,
-                error="resident-capacity control is not running",
-            )
-            return
+            return False
         asyncio.run_coroutine_threadsafe(self._originate(env), self._loop)
+        return True
 
     def originate_serve(self, request: ServeOrigination) -> None:
         """Originate an authenticated task-addressed serve request through admission.
@@ -984,6 +980,26 @@ class ResidentCapacityControl:
         self._finalize_serve(
             invocation_id, delivery, ClaimTerminalReason.FAILED, detail, success=False
         )
+
+    def reconcile_workflow_terminals(
+        self, completed: Callable[[str, str], bool | None]
+    ) -> None:
+        """Release each workflow claim whose invocation the ledger already settled.
+
+        A crash between a ledger terminal and its credit release leaves the claim
+        credit-bearing with nothing left to settle it. ``completed`` reads the restored
+        ledger by (workflow id, invocation id): a terminal settles the claim through the
+        claim FSM, and a claim without one keeps its credit.
+        """
+        for claim in self._stores.claims.all():
+            request = self._stores.invocations.get(claim.invocation_id)
+            if not claim.holds_credit or request is None:
+                continue
+            if (workflow_id := _subject_workflow_id(request.subject)) is None:
+                continue
+            outcome = completed(workflow_id, claim.invocation_id)
+            if outcome is not None:
+                self._settle_terminal_local(claim.invocation_id, failed=not outcome)
 
     def reconcile_serve_terminal(
         self, invocation_id: str, reason: ClaimTerminalReason

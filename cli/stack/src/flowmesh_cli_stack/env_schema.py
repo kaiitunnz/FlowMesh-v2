@@ -330,13 +330,6 @@ STACK_ENV_SCHEMA = EnvSchema(
                     min_value=1,
                 ),
                 EnvVar(
-                    "ORCHESTRATOR_MAX_LOOP_ITERATIONS",
-                    "1000",
-                    description="Max loop-time iterations per LoopContext activation.",
-                    var_type=EnvVarType.INT,
-                    min_value=1,
-                ),
-                EnvVar(
                     "ORCHESTRATOR_MAX_ACTIVATIONS",
                     "10000",
                     description="Max dynamic activations per workflow instance.",

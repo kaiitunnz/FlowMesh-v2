@@ -48,9 +48,6 @@ class FakeWorkflowRegistry:
     def save_ledger_snapshot(self, workflow_id: str, snapshot: Any) -> None:
         self.ledger_blobs[workflow_id] = snapshot.model_dump_json()
 
-    async def save_ledger_snapshot_async(self, workflow_id: str, snapshot: Any) -> None:
-        self.save_ledger_snapshot(workflow_id, snapshot)
-
     def load_ledger_snapshot(self, workflow_id: str) -> Any:
         from server.orchestration import LedgerSnapshot
 
@@ -639,3 +636,56 @@ async def test_rehydrate_restores_cancelled_workflow() -> None:
     assert record_a is not None and record_a.status == TaskStatus.CANCELLED
     assert record_b is not None and record_b.status == TaskStatus.CANCELLED
     assert restored.ready_queue_length() == 0
+
+
+@pytest.mark.anyio
+async def test_a_cascaded_dependent_reads_failed_before_and_after_a_restart() -> None:
+    registry = FakeWorkflowRegistry()
+    runtime = _runtime(registry)
+    _, ids = await _register(runtime, GRAPH)
+    a, b = ids["a"], ids["b"]
+    runtime.mark_failed(a, "wkr-1", {}, "2026-06-01T00:00:00Z")
+
+    info = runtime.describe_task(b)
+    assert info is not None and info.failed
+
+    restored = _runtime(registry)
+    await restored.rehydrate()
+    info = restored.describe_task(b)
+    assert info is not None and info.failed
+
+
+_CHAIN = """
+apiVersion: mloc/v1
+kind: Workflow
+metadata: {name: chain}
+spec:
+  graph:
+    nodes:
+      - name: a
+        spec: {taskType: echo}
+      - name: b
+        dependsOn: [a]
+        spec: {taskType: echo}
+      - name: c
+        dependsOn: [b]
+        spec: {taskType: echo}
+"""
+
+
+@pytest.mark.anyio
+async def test_a_failure_cascades_through_every_level_of_dependents() -> None:
+    registry = FakeWorkflowRegistry()
+    runtime = _runtime(registry)
+    workflow_id, ids = await _register(runtime, _CHAIN)
+    a, b, c = ids["a"], ids["b"], ids["c"]
+
+    impacted, _ = runtime.mark_failed(a, "wkr-1", {}, "2026-06-01T00:00:00Z")
+
+    reason = f"Dependency {a} failed"
+    assert sorted(impacted) == sorted([(b, reason), (c, reason)])
+    for task_id in (b, c):
+        record = runtime.get_record(task_id)
+        assert record is not None and record.status == TaskStatus.FAILED
+        assert record.error == reason
+    assert runtime.workflow_settlement(workflow_id).settled

@@ -19,6 +19,7 @@ from tests.server.result_store import result_payload
 from tests.server.task.test_v2_orchestration import (
     _TS,
     FakeRegistry,
+    _drain,
     _live_runtime,
     _planned,
     _pop_ready,
@@ -444,3 +445,31 @@ async def test_a_failed_workflow_stays_failed_across_a_restart() -> None:
     listed = await _list(again)
     assert not listed.open
     assert (await _get(again, "summarize")).outcome is OutputOutcome.DECLARED_FAILURE
+
+
+async def _failed_producer_workflow() -> _Workflow:
+    runtime = _live_runtime(FakeRegistry())
+    workflow_id, ids = await _register(runtime, _WF)
+    planner = ids["planner"]
+    record_dispatch(runtime, planner, cast(Any, _worker()))
+    runtime.mark_failed(planner, "wkr-1", {}, _TS, error="boom")
+    _drain(runtime)
+    return _Workflow(runtime, workflow_id, ids)
+
+
+@pytest.mark.anyio
+async def test_a_spawn_whose_producer_failed_publishes_one_failed_member() -> None:
+    wf = await _failed_producer_workflow()
+
+    listed = await _list(wf)
+    collection = await _get(wf, "fanout")
+
+    assert not listed.open
+    entries = {(e.name, e.scope, e.key): e.outcome for e in listed.entries}
+    assert entries == {
+        ("fanout", None, None): OutputOutcome.DECLARED_FAILURE,
+        ("summarize", None, None): OutputOutcome.DECLARED_FAILURE,
+    }
+    assert collection.outcome is OutputOutcome.DECLARED_FAILURE
+    assert collection.scope is None and collection.key is None
+    assert (await _status(_get(wf, "fanout", key="0")))[0] == 400

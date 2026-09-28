@@ -17,6 +17,7 @@ physical decision that never changes what the engine considers ready.
 import contextlib
 import functools
 import logging
+from collections import Counter
 from collections.abc import Callable, Iterable, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
@@ -64,6 +65,7 @@ from ..task.v2.representations.operators import (
     ServiceDependency,
     SpawnRegion,
     operator_service_dependency,
+    spawned_only_region_owners,
 )
 from ..task.v2.representations.plan import EpisodeSpec, InferenceEmbodimentMenu
 from ..task.v2.representations.results import CardinalityKind, ResultDeclaration
@@ -82,6 +84,7 @@ from .outcomes import (
 )
 from .private_state import PrivateStateLedger
 from .state import (
+    TERMINAL_INVOCATION_STATES,
     TERMINAL_WORK_ITEM_STATUSES,
     AcceptedInput,
     AcceptedInputMember,
@@ -163,6 +166,15 @@ _DEDUP_CAPABLE = frozenset(
 _EARLY_JOINS = frozenset(
     {JoinCompletion.ANY, JoinCompletion.FIRST_K, JoinCompletion.PREDICATE}
 )
+_AMBIGUITY_TERMINAL_REASON = "ambiguity-terminal effect"
+_DECLARED_FAILURE_REASON = "declared-failure obligation"
+
+
+def dependency_failed(task_id: str) -> str:
+    """The reason a task fails for when a failure it depends on cascades into it."""
+    return f"Dependency {task_id} failed"
+
+
 _OPEN_ATTEMPT_STATUSES = frozenset({AttemptStatus.ISSUED, AttemptStatus.RUNNING})
 
 
@@ -191,18 +203,21 @@ class Advance:
 
     ``ready`` work items become admissible for a new attempt, ``failed`` ones settle
     terminally and cascade, and ``retry`` reissues an existing work item as a fresh
-    attempt under its stable identity. Control settlement and dynamic child
-    materialization are internal and never appear here.
+    attempt under its stable identity; ``cancelled`` lists the children a residual
+    policy cancelled. Control settlement and dynamic child materialization are internal
+    and never appear here.
     """
 
     ready: list[str] = field(default_factory=list)
     failed: list[str] = field(default_factory=list)
     retry: list[str] = field(default_factory=list)
+    cancelled: list[str] = field(default_factory=list)
 
     def extend(self, other: "Advance") -> Self:
         self.ready.extend(other.ready)
         self.failed.extend(other.failed)
         self.retry.extend(other.retry)
+        self.cancelled.extend(other.cancelled)
         return self
 
 
@@ -302,7 +317,13 @@ class OrchestrationEngine:
 
         self._scopes = {s.scope_id: s for s in snapshot.scopes}
         self._scopes.setdefault(self._root_scope.scope_id, self._root_scope)
-        self._activations = {a.activation_id: a for a in snapshot.activations}
+        self._activations: dict[str, Activation] = {}
+        # Per-scope and dynamic activation counts that number and budget each child.
+        self._scope_population: Counter[str] = Counter()
+        self._scope_children: Counter[str] = Counter()
+        self._dynamic_activations = 0
+        for activation in snapshot.activations:
+            self._add_activation(activation)
         self._work_items = {w.work_item_id: w for w in snapshot.work_items}
         self._continuations = {c.work_item_id: c for c in snapshot.continuations}
         self._records = list(snapshot.records)
@@ -313,9 +334,17 @@ class OrchestrationEngine:
                 accepted
             )
         self._region_aggregates = list(snapshot.region_aggregates)
-        self._aggregate_by_join: dict[str, RegionJoinAggregate] = {
-            agg.join_operator_id: agg for agg in self._region_aggregates
-        }
+        self._aggregate_by_join: dict[str, RegionJoinAggregate] = {}
+        # A stored ledger may hold a nested level's aggregate after its root level's;
+        # the root level's is the one delivered downstream.
+        for aggregate in self._region_aggregates:
+            join_op = aggregate.join_operator_id
+            if join_op not in self._aggregate_by_join or not any(
+                (act := self._activations.get(member.child_activation_id)) is not None
+                and not self._root_level(act.scope_id)
+                for member in aggregate.members
+            ):
+                self._aggregate_by_join[join_op] = aggregate
         self._invocations = {i.invocation_id: i for i in snapshot.invocations}
         self._attempts = {a.attempt_id: a for a in snapshot.attempts}
         self._embodiment_selections = {
@@ -434,10 +463,28 @@ class OrchestrationEngine:
         # than re-derived from records: a recursive region's levels share one join/loop
         # operator, so a record could not attribute a release to the right level.
         self._released_scopes: set[str] = set(snapshot.released_scopes)
+        # Control operators settled as a declared failure; a late record from another
+        # input never fires one.
+        self._failed_regions: set[str] = set(snapshot.failed_regions)
+        # Child-init scopes a failed agent opened and that had not released: each
+        # one's join never releases.
+        self._failed_scopes: set[str] = set(snapshot.failed_scopes)
+        # Why each task settled as a declared failure: its own reason, or the failure
+        # it depends on. A ledger stored without them names each failed work item's own.
+        self._failure_reasons: dict[str, str] = dict(snapshot.failure_reasons)
+        for wi in self._work_items.values():
+            if wi.outcome is PublicationOutcome.DECLARED_FAILURE and wi.legacy_task_id:
+                self._failure_reasons.setdefault(
+                    wi.legacy_task_id, wi.failure_reason or _DECLARED_FAILURE_REASON
+                )
+        # A spawn-site denial names no work item; an agent's denied boundary names one
+        # and never refuses a later spawn.
         self._denied_spawns = {
             d.operator_id
             for d in self._decisions
-            if d.kind is AuthorityDecisionKind.DENIED and d.operator_id
+            if d.kind is AuthorityDecisionKind.DENIED
+            and d.operator_id
+            and d.work_item_id is None
         }
 
         # Binds the emitter to this engine's own live collections (mutated in place,
@@ -450,7 +497,7 @@ class OrchestrationEngine:
             attempts=self._attempts,
             invocations=self._invocations,
             trace=self._trace,
-            released_scopes=self._released_scopes,
+            scope_closed=self._scope_closed,
         )
 
     def _build_topology(self) -> dict[str, list[str]]:
@@ -813,18 +860,24 @@ class OrchestrationEngine:
 
     def _settle_failed_wi(self, wi: WorkItem) -> Advance:
         """Settle a work item as a declared failure: a child drains its scope, anything
-        else cascades over its static successors."""
+        else cascades over its static successors. A failed agent fails the regions it
+        declares either way."""
         activation = self._activations[wi.activation_id]
-        released = self._agent_terminal_regions(wi.operator_id, wi.activation_id)
-        if activation.kind == "child":
-            # A child's terminal failure drains its scope account and lets an
-            # all-succeed join fail; it does not cascade over static successors.
-            advance = self._settle_child_wi(
-                wi, activation, PublicationOutcome.DECLARED_FAILURE, None
-            )
-            advance.failed.append(wi.legacy_task_id)
-            return advance.extend(released)
-        return Advance(failed=self._settle_failure(wi.work_item_id)).extend(released)
+        if activation.kind != "child":
+            return self._settle_failure(wi.work_item_id)
+        if wi.status in TERMINAL_WORK_ITEM_STATUSES:
+            return Advance()
+        # A child's terminal failure drains its scope account and lets an all-succeed
+        # join fail; it does not cascade over static successors.
+        advance = self._settle_child_wi(
+            wi, activation, PublicationOutcome.DECLARED_FAILURE, None
+        )
+        cascade = Advance(failed=[wi.legacy_task_id])
+        self._fail_agent_regions(wi, cascade, set())
+        self._declare_failures(wi, cascade.failed)
+        advance.failed[:0] = cascade.failed
+        advance.cancelled.extend(cascade.cancelled)
+        return advance
 
     @_ds_drive(ControlPlaneWindow.POST_START)
     def on_returned(self, task_id: str) -> bool:
@@ -867,10 +920,8 @@ class OrchestrationEngine:
                 invocation_id=wi.invocation_id,
             )
             self._emitter.emit_boundary(self._invocations[wi.invocation_id])
-            released = self._agent_terminal_regions(wi.operator_id, wi.activation_id)
-            return Advance(failed=self._settle_failure(wi.work_item_id)).extend(
-                released
-            )
+            wi.failure_reason = _AMBIGUITY_TERMINAL_REASON
+            return self._settle_failed_wi(wi)
         invocation = self._invocations[wi.invocation_id]
         invocation.state = next_on_uncertain(
             invocation.state,
@@ -899,8 +950,8 @@ class OrchestrationEngine:
             work_item_id=wi.work_item_id,
             invocation_id=wi.invocation_id,
         )
-        released = self._agent_terminal_regions(wi.operator_id, wi.activation_id)
-        return Advance(failed=self._settle_failure(wi.work_item_id)).extend(released)
+        wi.failure_reason = _AMBIGUITY_TERMINAL_REASON
+        return self._settle_failed_wi(wi)
 
     def route_boundary_event(self, task_id: str, event: BoundaryEvent) -> Advance:
         """Route an episode's boundary request back into the ledger, validated first.
@@ -1137,11 +1188,7 @@ class OrchestrationEngine:
         opener = self._region_openers.get((agent_activation, region_op))
         if opener is None or (scope_id := self._scope_id_for(opener)) is None:
             return 0
-        return sum(
-            1
-            for a in self._activations.values()
-            if a.scope_id == scope_id and a.kind == "child"
-        )
+        return self._scope_children[scope_id]
 
     def _group_members(self, activation_id: str, group_id: str) -> list[BoundaryEvent]:
         members = [
@@ -1541,16 +1588,45 @@ class OrchestrationEngine:
             self._emitter.emit_boundary(invocation)
         return env.invocation_id
 
-    def cancel_outstanding_boundary_invocations(self) -> list[str]:
-        """Terminalize every unsettled mediated boundary invocation on cancellation.
+    def boundary_invocation_completed(self, invocation_id: str) -> bool | None:
+        """Whether a terminal boundary invocation completed with an outcome; None while
+        it is unknown or not terminal."""
+        invocation = self._invocations.get(invocation_id)
+        if invocation is None or invocation.state not in TERMINAL_INVOCATION_STATES:
+            return None
+        return any(
+            env.invocation_id == invocation_id
+            and (env.outcome_value is not None or env.outcome_ref is not None)
+            for env in self._boundary_events.values()
+        )
 
-        Returns their durable ``invocation_id``s so a control-plane consumer bound to
-        them — a resident-capacity admission credit — releases from this fenced
-        cancellation terminal rather than being stranded.
+    def terminalize_unsettled_invocations(
+        self, task_ids: Iterable[str] | None = None
+    ) -> list[str]:
+        """Terminalize the unsettled mediated boundary invocations of the given tasks'
+        activations, or of every activation; one already terminal is left as it is.
+
+        Returns the ``invocation_id``s it terminalized so a control-plane consumer bound
+        to them — a resident-capacity admission credit — releases from this fenced
+        terminal.
         """
+        activations = (
+            None
+            if task_ids is None
+            else {
+                wi.activation_id
+                for task_id in task_ids
+                if (wi := self._work_item_for_task(task_id)) is not None
+            }
+        )
         ids: list[str] = []
-        for _, invocation_id in self._unsettled_invocation_boundaries():
-            if (invocation := self._invocations.get(invocation_id)) is not None:
+        for activation, invocation_id in self._unsettled_invocation_boundaries():
+            if activations is not None and activation not in activations:
+                continue
+            invocation = self._invocations.get(invocation_id)
+            if invocation is not None:
+                if invocation.state in TERMINAL_INVOCATION_STATES:
+                    continue
                 invocation.state = next_on_terminal(invocation.state)
                 self._emitter.emit_boundary(invocation)
             ids.append(invocation_id)
@@ -1715,7 +1791,7 @@ class OrchestrationEngine:
             kind="region",
             parent_activation_id=agent_activation,
         )
-        self._activations[opener_act.activation_id] = opener_act
+        self._add_activation(opener_act)
         self._region_openers[key] = opener_act.activation_id
         self._open_child_init_scope(
             opener_act.activation_id,
@@ -2168,7 +2244,7 @@ class OrchestrationEngine:
         self._charge_activation()
         if body_opens_scope:
             self._check_scope_depth(scope_id)
-        index = sum(1 for a in self._activations.values() if a.scope_id == scope_id)
+        index = self._scope_population[scope_id]
         activation = Activation(
             activation_id=new_activation_id(),
             instance_id=self._instance.instance_id,
@@ -2177,7 +2253,7 @@ class OrchestrationEngine:
             kind="child",
             child_index=index,
         )
-        self._activations[activation.activation_id] = activation
+        self._add_activation(activation)
         effect, recovery = _effect_recovery(body_op)
         child_wi = WorkItem(
             work_item_id=new_work_item_id(),
@@ -2224,7 +2300,7 @@ class OrchestrationEngine:
         return self._maybe_release_join(scope_id)
 
     def _settle_agent_regions(self, activation_id: str) -> Advance:
-        """Settle every declared child region of a terminal agent under its residual.
+        """Settle every declared child region of a completed agent under its residual.
 
         Each entered region seals its open child-init capability so its join releases on
         drain; a declared-but-never-entered region opens as a zero-child region and
@@ -2249,18 +2325,24 @@ class OrchestrationEngine:
         return advance
 
     def _agent_terminal_regions(self, operator_id: str, activation_id: str) -> Advance:
-        """Settle an agent's declared regions when the agent terminates, else no-op."""
+        """Settle an agent's declared regions when the agent completes, else no-op."""
         if isinstance(self._operators.get(operator_id), AgentOperator):
             return self._settle_agent_regions(activation_id)
         return Advance()
 
     def _settle_owned_region(self, opener: str) -> Advance:
         scope_id = self._scope_by_activation.get(opener)
-        if scope_id is None:
-            return Advance()
+        advance = Advance()
+        if scope_id is None or not self._close_owned_region(scope_id, advance):
+            return advance
+        return advance.extend(self._maybe_release_join(scope_id))
+
+    def _close_owned_region(self, scope_id: str, advance: Advance) -> bool:
+        """Close a terminal agent's open region under its residual policy, adding the
+        children it cancels to ``advance``; returns whether it was open."""
         cap = self._capabilities.get((scope_id, ProgressAxis.CHILD_INIT))
         if cap is None or cap.status is not CapabilityStatus.OPEN:
-            return Advance()
+            return False
         owner = self._scopes[scope_id].owner_operator_id
         join = self._join_of_scope(scope_id)
         if self._residual_policy(join, ResidualPolicy.DRAIN) is ResidualPolicy.CANCEL:
@@ -2270,7 +2352,7 @@ class OrchestrationEngine:
                 operator_id=owner,
                 detail={"scope": scope_id, "reason": "agent_terminal"},
             )
-            self._cancel_residual_children(scope_id)
+            advance.cancelled.extend(self._cancel_residual_subtrees(scope_id))
         else:
             cap.status = CapabilityStatus.SEALED
             self._emit(
@@ -2278,7 +2360,7 @@ class OrchestrationEngine:
                 operator_id=owner,
                 detail={"scope": scope_id, "reason": "agent_terminal"},
             )
-        return self._maybe_release_join(scope_id)
+        return True
 
     def revoke_spawn(self, spawn: str) -> None:
         """Revoke a spawn's child-init capability as a progress transition.
@@ -2384,7 +2466,7 @@ class OrchestrationEngine:
             kind="iteration",
             loop_time=next_time,
         )
-        self._activations[activation.activation_id] = activation
+        self._add_activation(activation)
         self._records.append(
             Record(
                 operator_id=loop_op,
@@ -2513,10 +2595,11 @@ class OrchestrationEngine:
         self._emit("scope_cancelled", detail={"scope": scope_id})
         self._revoke_progress(scope_id)
         scope = self._scopes[scope_id]
-        self._apply_cancellation_residual(scope_id)
+        cancelled = self._apply_cancellation_residual(scope_id)
         for wi in self._scope_work_items(scope_id, kinds=("leaf", "agent")):
             if wi.status not in TERMINAL_WORK_ITEM_STATUSES:
                 self._cancel_work_item(wi)
+                cancelled.append(wi.legacy_task_id)
         if scope.grant_id and scope.grant_id in self._grants:
             grant = self._grants[scope.grant_id]
             if not grant.revoked:
@@ -2528,7 +2611,9 @@ class OrchestrationEngine:
                     operator_id=scope.owner_operator_id,
                     detail={"scope": scope_id},
                 )
-        return self._resolve_cancelled_outputs(scope_id)
+        advance = self._resolve_cancelled_outputs(scope_id)
+        advance.cancelled.extend(cancelled)
+        return advance
 
     def _revoke_progress(self, scope_id: str) -> None:
         """Revoke a scope's open child-init and loop-time capabilities."""
@@ -2547,8 +2632,9 @@ class OrchestrationEngine:
                     detail={"scope": scope_id},
                 )
 
-    def _apply_cancellation_residual(self, scope_id: str) -> None:
-        """Apply a cancelled scope's join residual policy to its materialized children.
+    def _apply_cancellation_residual(self, scope_id: str) -> list[str]:
+        """Apply a cancelled scope's join residual policy to its materialized children;
+        returns the task ids it cancelled.
 
         A declared ``drain``/``continue`` leaves materialized children to settle; the
         default (``cancel``, and any scope without a declared policy) cancels every not-
@@ -2556,9 +2642,16 @@ class OrchestrationEngine:
         """
         join = self._join_of_scope(scope_id)
         if self._residual_policy(join, ResidualPolicy.CANCEL) is ResidualPolicy.CANCEL:
-            self._cancel_residual_children(scope_id)
+            return [
+                wi.legacy_task_id for wi in self._cancel_residual_children(scope_id)
+            ]
+        return []
 
     def _resolve_cancelled_outputs(self, scope_id: str) -> Advance:
+        """Release a cancelled scope's join as its cancellation outcome.
+
+        Only a root-level scope publishes it and delivers its record.
+        """
         if scope_id in self._released_scopes:
             return Advance()
         owner_op = self._scopes[scope_id].owner_operator_id or ""
@@ -2580,6 +2673,8 @@ class OrchestrationEngine:
             detail={"outcome": outcome.value, "cancelled": "true"},
         )
         self._frontier_closed(scope_id)
+        if not self._root_level(scope_id):
+            return Advance()
         self._publish(release_op, outcome, ValueRef(kind="empty"))
         return self._deliver_record(
             release_op, self._control_activation(release_op), ValueRef(kind="empty")
@@ -2670,7 +2765,7 @@ class OrchestrationEngine:
         """Deliver a record to one successor: fire a control op, or admit a leaf."""
         if self._is_control(successor):
             cont = self._continuations.get(_control_key(successor))
-            if cont is None:
+            if cont is None or successor in self._failed_regions:
                 return
             cont.waiting_on.discard(from_op)
             if not cont.waiting_on:
@@ -2749,7 +2844,16 @@ class OrchestrationEngine:
         if scope is None or scope.owner_operator_id is None:
             return Advance()
         join_op = self._join_for_spawn(scope.owner_operator_id)
-        if join_op is None or scope_id in self._released_scopes:
+        if scope_id in self._failed_scopes:
+            self._emit_scope_owner(scope_id)
+            return Advance()
+        # A join failed at the root blocks only the root-level scope: a nested level
+        # still releases, delivering nothing.
+        if (
+            join_op is None
+            or scope_id in self._released_scopes
+            or (join_op in self._failed_regions and self._root_level(scope_id))
+        ):
             return Advance()
         cap = self._capabilities.get((scope_id, ProgressAxis.CHILD_INIT))
         if cap is None:
@@ -2777,6 +2881,12 @@ class OrchestrationEngine:
         return self._release_join(join_op, scope_id)
 
     def _release_join(self, join_op: str, scope_id: str) -> Advance:
+        """Release a scope's join by its completion rule.
+
+        Only a root-level scope freezes the join's aggregate, publishes it, and
+        delivers its record downstream. A scope nested under a spawned child shares the
+        join operator with its sibling levels, so its release is local to its level.
+        """
         self._released_scopes.add(scope_id)
         if (owner_act := self._scopes[scope_id].owner_activation_id) is not None:
             self._emitter.emit_activation(owner_act)
@@ -2784,18 +2894,70 @@ class OrchestrationEngine:
         assert isinstance(join, JoinRegion)
         outcome, value_ref = self._join_result(join, scope_id)
         children = self._materialized_children(scope_id)
-        self._freeze_region_aggregate(join, join_op, scope_id)
+        nested = not self._root_level(scope_id)
+        if not nested:
+            self._freeze_region_aggregate(join, join_op, scope_id)
+        if outcome is PublicationOutcome.DECLARED_FAILURE:
+            self._frontier_closed(scope_id)
+            cancelled = self._apply_residual_policy(join, scope_id)
+            advance = self._fail_resolved_join(join_op, scope_id, children)
+            advance.cancelled.extend(cancelled)
+            return advance
         self._emit(
             "join_released",
             operator_id=join_op,
             detail={"outcome": outcome.value, "children": str(len(children))},
         )
         self._frontier_closed(scope_id)
-        self._apply_residual_policy(join, scope_id)
+        cancelled = self._apply_residual_policy(join, scope_id)
+        if nested:
+            return Advance(cancelled=cancelled)
         self._publish(join_op, outcome, value_ref)
-        return self._deliver_record(
+        advance = self._deliver_record(
             join_op, self._control_activation(join_op), value_ref
         )
+        advance.cancelled.extend(cancelled)
+        return advance
+
+    def _root_level(self, scope_id: str) -> bool:
+        return self._scopes[scope_id].parent_scope_id == self._root_scope.scope_id
+
+    def _fail_resolved_join(
+        self, join_op: str, scope_id: str, children: list[Activation]
+    ) -> Advance:
+        """Settle a join that resolved as a declared failure as a failed region.
+
+        It delivers no record, and everything downstream of it fails as the dependent
+        of its first failed child, or of the join itself when no child failed. A join
+        of a scope nested under a spawned child fails only that scope, since sibling
+        scopes share its operator.
+        """
+        if not self._root_level(scope_id):
+            self._failed_scopes.add(scope_id)
+            self._emit("region_failed", operator_id=join_op, detail={"scope": scope_id})
+            return Advance()
+        cascade = Advance()
+        self._settle_region_failed(join_op)
+        self._fail_downstream(join_op, cascade, {join_op})
+        failed_child = next(
+            (
+                wi
+                for child in children
+                if (
+                    wi := self._work_items[self._wi_by_activation[child.activation_id]]
+                ).outcome
+                is PublicationOutcome.DECLARED_FAILURE
+            ),
+            None,
+        )
+        if failed_child is not None and failed_child.legacy_task_id:
+            self._name_failures(
+                cascade.failed, dependency_failed(failed_child.legacy_task_id)
+            )
+            cascade.failed.insert(0, failed_child.legacy_task_id)
+            return cascade
+        self._name_failures(cascade.failed, f"join {join_op} resolved no winner")
+        return cascade
 
     def _freeze_region_aggregate(
         self, join: JoinRegion, join_op: str, scope_id: str
@@ -2923,28 +3085,51 @@ class OrchestrationEngine:
         join = self._operators.get(join_op) if join_op else None
         return join if isinstance(join, JoinRegion) else None
 
-    def _cancel_residual_children(self, scope_id: str) -> None:
+    def _cancel_residual_children(self, scope_id: str) -> list[WorkItem]:
+        """Cancel a scope's unsettled children; returns their work items."""
         cap = self._capabilities.get((scope_id, ProgressAxis.CHILD_INIT))
+        cancelled: list[WorkItem] = []
         for child in self._materialized_children(scope_id):
             wi = self._work_items[self._wi_by_activation[child.activation_id]]
             if wi.status not in TERMINAL_WORK_ITEM_STATUSES:
                 self._cancel_work_item(wi)
+                cancelled.append(wi)
                 if cap is not None:
                     cap.outstanding = max(0, cap.outstanding - 1)
+        return cancelled
 
-    def _apply_residual_policy(self, join: JoinRegion, scope_id: str) -> None:
-        """Govern a released early join's not-yet-settled materialized children.
+    def _cancel_residual_subtrees(self, scope_id: str) -> list[str]:
+        """Cancel a scope's unsettled children, each with the regions it entered and
+        everything under them, as a cancel does; returns the task ids cancelled."""
+        cancelled: list[str] = []
+        for wi in self._cancel_residual_children(scope_id):
+            cancelled.append(wi.legacy_task_id)
+            for opener in self._entered_region_openers(wi.activation_id):
+                for sid in self._scope_subtree(self._scope_by_activation[opener]):
+                    cancelled.extend(self._cancel_scope(sid).cancelled)
+        return cancelled
+
+    def _entered_region_openers(self, agent_activation: str) -> list[str]:
+        return [
+            opener
+            for (activation_id, _), opener in self._region_openers.items()
+            if activation_id == agent_activation and opener in self._scope_by_activation
+        ]
+
+    def _apply_residual_policy(self, join: JoinRegion, scope_id: str) -> list[str]:
+        """Govern a released early join's not-yet-settled materialized children;
+        returns the ones it cancelled.
 
         ``continue`` leaves child-init open; ``drain`` seals it; ``cancel`` revokes it
         and cancels the residual children. Residual settlements stay ledger-visible but
         never become the join's implicit winner output.
         """
         if join.completion not in _EARLY_JOINS:
-            return
+            return []
         policy = self._residual_policy(join, ResidualPolicy.CONTINUE)
         cap = self._capabilities.get((scope_id, ProgressAxis.CHILD_INIT))
         if policy is ResidualPolicy.CONTINUE or cap is None:
-            return
+            return []
         cancel = policy is ResidualPolicy.CANCEL
         if cap.status is CapabilityStatus.OPEN:
             cap.status = CapabilityStatus.REVOKED if cancel else CapabilityStatus.SEALED
@@ -2953,8 +3138,7 @@ class OrchestrationEngine:
                 operator_id=self._scopes[scope_id].owner_operator_id,
                 detail={"scope": scope_id, "residual": policy.value},
             )
-        if cancel:
-            self._cancel_residual_children(scope_id)
+        return self._cancel_residual_subtrees(scope_id) if cancel else []
 
     def _maybe_egress_loop(self, scope_id: str) -> Advance:
         if not scope_id or scope_id in self._released_scopes:
@@ -3032,11 +3216,16 @@ class OrchestrationEngine:
     def _frontier_closed(self, scope_id: str) -> None:
         self._emit("frontier_closed", detail={"scope": scope_id})
 
+    def _add_activation(self, activation: Activation) -> None:
+        self._activations[activation.activation_id] = activation
+        self._scope_population[activation.scope_id] += 1
+        if activation.kind == "child":
+            self._scope_children[activation.scope_id] += 1
+        if activation.kind in ("child", "iteration"):
+            self._dynamic_activations += 1
+
     def _charge_activation(self) -> None:
-        dynamic = sum(
-            1 for a in self._activations.values() if a.kind in ("child", "iteration")
-        )
-        if dynamic >= self._budget.max_activations:
+        if self._dynamic_activations >= self._budget.max_activations:
             self._exhaust_budget("activations", self._budget.max_activations)
 
     def _exhaust_budget(self, budget: str, limit: int) -> None:
@@ -3161,6 +3350,7 @@ class OrchestrationEngine:
                 return
         interface = self._requested_interface(wi.operator_id)
         if interface is not None and interface not in self._root_grant.invoke:
+            reason = f"interface {interface!r} outside root grant invoke face"
             self._decisions.append(
                 AuthorityDecision(
                     work_item_id=work_item_id,
@@ -3168,15 +3358,16 @@ class OrchestrationEngine:
                     interface=interface,
                     kind=AuthorityDecisionKind.DENIED,
                     denial_kind=DenialKind.AUTHORITY,
-                    reason=f"interface {interface!r} outside root grant invoke face",
+                    reason=reason,
                 )
             )
+            wi.failure_reason = f"authority denied: {reason}"
             self._emit(
                 "authority_denied",
                 work_item_id=work_item_id,
                 operator_id=wi.operator_id,
             )
-            advance.failed.extend(self._settle_failure(work_item_id))
+            advance.extend(self._settle_failed_wi(wi))
             return
         if interface is not None:
             self._decisions.append(
@@ -3231,23 +3422,209 @@ class OrchestrationEngine:
         for successor in sorted(self._forward.get(operator_id, ())):
             self._settle_empty_successor(successor, visited)
 
-    def _settle_failure(self, work_item_id: str) -> list[str]:
+    def _settle_failure(self, work_item_id: str) -> Advance:
+        """Settle a work item as a declared failure and fail everything downstream of
+        it."""
+        cascade = Advance()
+        self._fail_work_item(work_item_id, cascade, set())
+        self._declare_failures(self._work_items[work_item_id], cascade.failed)
+        return cascade
+
+    def _declare_failures(self, primary: WorkItem, failed: list[str]) -> None:
+        """Name why a failed work item and each task its failure cascaded into failed:
+        the work item by its own reason, the rest as its dependents. A task an earlier
+        failure named keeps that reason."""
+        if not failed:
+            return
+        self._failure_reasons.setdefault(
+            primary.legacy_task_id, primary.failure_reason or _DECLARED_FAILURE_REASON
+        )
+        self._name_failures(failed, dependency_failed(primary.legacy_task_id))
+
+    def _name_failures(self, failed: list[str], reason: str) -> None:
+        for task_id in failed:
+            self._failure_reasons.setdefault(task_id, reason)
+
+    def _fail_work_item(
+        self, work_item_id: str, cascade: Advance, visited: set[str]
+    ) -> None:
         wi = self._work_items[work_item_id]
         if wi.status in TERMINAL_WORK_ITEM_STATUSES:
-            return []
+            return
         wi.status = WorkItemStatus.SETTLED
         wi.outcome = PublicationOutcome.DECLARED_FAILURE
         self._emitter.emit_work_item(wi)
         self._emitter.emit_activation(wi.activation_id)
         self._private_state.release(wi.activation_id)
         self._publish(wi.operator_id, PublicationOutcome.DECLARED_FAILURE, None)
-        cascade = [wi.legacy_task_id]
-        for successor in sorted(self._forward.get(wi.operator_id, ())):
-            if self._is_control(successor):
+        cascade.failed.append(wi.legacy_task_id)
+        self._fail_agent_regions(wi, cascade, visited)
+        self._fail_downstream(wi.operator_id, cascade, visited)
+
+    def _fail_agent_regions(
+        self, wi: WorkItem, cascade: Advance, visited: set[str]
+    ) -> None:
+        """Fail every child region a failed agent declares.
+
+        A region the agent never entered fails as a spawn whose input failed does, and
+        opens no scope. An entered region's children follow its residual policy, and
+        its join fails unless it already released. A spawned agent instance shares its
+        regions' operators with its siblings, so only its own scopes fail.
+        """
+        op = self._operators.get(wi.operator_id)
+        if not isinstance(op, AgentOperator):
+            return
+        instance = self._activations[wi.activation_id].kind == "child"
+        for ref in op.child_region_refs:
+            opener = self._region_openers.get((wi.activation_id, ref.spawn_ref))
+            scope_id = self._scope_by_activation.get(opener) if opener else None
+            if scope_id is None:
+                if not instance:
+                    self._fail_region(ref.spawn_ref, cascade, visited)
                 continue
-            if succ_wi := self._wi_by_operator.get(successor):
-                cascade.extend(self._settle_failure(succ_wi))
-        return cascade
+            if (
+                scope_id not in self._released_scopes
+                and scope_id not in self._failed_scopes
+            ):
+                self._fail_entered_region(
+                    ref.spawn_ref, scope_id, instance, cascade, visited
+                )
+            self._close_owned_region(scope_id, cascade)
+            self._emit_scope_owner(scope_id)
+
+    def _scope_closed(self, scope_id: str) -> bool:
+        """Whether a scope closed: its join released, or it failed and every child it
+        admitted has settled."""
+        if scope_id in self._released_scopes:
+            return True
+        cap = self._capabilities.get((scope_id, ProgressAxis.CHILD_INIT))
+        return scope_id in self._failed_scopes and cap is not None and cap.closed
+
+    def _emit_scope_owner(self, scope_id: str) -> None:
+        if (owner := self._scopes[scope_id].owner_activation_id) is not None:
+            self._emitter.emit_activation(owner)
+
+    def _fail_entered_region(
+        self,
+        spawn_op: str,
+        scope_id: str,
+        instance: bool,
+        cascade: Advance,
+        visited: set[str],
+    ) -> None:
+        """Fail the join of one scope a failed agent opened, which has not released.
+
+        The scope is named directly: a recursive agent's levels share the join
+        operator, and another level's scope may already have released.
+        """
+        self._failed_scopes.add(scope_id)
+        join_op = self._join_for_spawn(spawn_op)
+        if instance or join_op is None:
+            self._emit("region_failed", operator_id=join_op, detail={"scope": scope_id})
+        elif join_op not in visited and join_op not in self._failed_regions:
+            visited.add(join_op)
+            self._settle_region_failed(join_op)
+            self._fail_downstream(join_op, cascade, visited)
+
+    def _fail_downstream(
+        self, operator_id: str, cascade: Advance, visited: set[str]
+    ) -> None:
+        for successor in sorted(self._forward.get(operator_id, ())):
+            if self._is_control(successor):
+                self._fail_region(successor, cascade, visited)
+            elif succ_wi := self._wi_by_operator.get(successor):
+                self._fail_work_item(succ_wi, cascade, visited)
+
+    def _fail_region(
+        self, operator_id: str, cascade: Advance, visited: set[str]
+    ) -> None:
+        """Settle a control operator a failed input feeds as a declared failure.
+
+        The region never fires. A failed spawn opens no scope and creates no child: it
+        fails its child template and its join, and each collection it publishes holds
+        one failed member. A join fails whatever its completion rule, unless its scope
+        already released.
+        """
+        if operator_id in visited or operator_id in self._failed_regions:
+            return
+        visited.add(operator_id)
+        kind = self._kind(operator_id)
+        if kind is OperatorKind.JOIN and self.region_closed(operator_id):
+            return
+        self._settle_region_failed(operator_id)
+        if kind is OperatorKind.SPAWN:
+            self._fail_spawn_template(operator_id, cascade)
+            self._publish_keyed(
+                operator_id, None, PublicationOutcome.DECLARED_FAILURE, None
+            )
+            if (join_op := self._join_for_spawn(operator_id)) is not None:
+                self._fail_region(join_op, cascade, visited)
+        self._fail_downstream(operator_id, cascade, visited)
+
+    def _settle_region_failed(self, operator_id: str) -> None:
+        self._failed_regions.add(operator_id)
+        self._emit("region_failed", operator_id=operator_id)
+        self._publish(operator_id, PublicationOutcome.DECLARED_FAILURE, None)
+
+    def _fail_spawn_template(self, spawn_op: str, cascade: Advance) -> None:
+        """Fail a failed spawn's child template, and the templates nested under it,
+        once no live spawn instantiates them."""
+        template = self.child_template_of(spawn_op)
+        if template is None:
+            return
+        for failed in self.template_closure(template, self._instantiable_by_live):
+            self._publish(failed, PublicationOutcome.DECLARED_FAILURE, None)
+            cascade.failed.append(failed)
+
+    def _instantiable_by_live(self, template: str, dead: list[str]) -> bool:
+        """Whether a spawn that neither failed nor belongs to a dead template can still
+        instantiate ``template``."""
+        return any(
+            isinstance(op, SpawnRegion)
+            and op.child_template_ref == template
+            and op.operator_id not in self._failed_regions
+            and self._region_owner(op.operator_id) not in dead
+            for op in self._operators.values()
+        )
+
+    def _region_owner(self, spawn_op: str) -> str | None:
+        """The agent declaring ``spawn_op`` as one of its child regions, if any."""
+        return next(
+            (
+                op.operator_id
+                for op in self._operators.values()
+                if isinstance(op, AgentOperator)
+                and any(ref.spawn_ref == spawn_op for ref in op.child_region_refs)
+            ),
+            None,
+        )
+
+    def template_closure(
+        self,
+        template: str,
+        excluded: Callable[[str, list[str]], bool] | None = None,
+    ) -> list[str]:
+        """A child template and, under an agent template, the child templates of every
+        region it declares, however deep; a template ``excluded`` rejects is left out
+        together with what is nested under it."""
+        closure: list[str] = []
+        frontier = [template]
+        while frontier:
+            current = frontier.pop()
+            if (
+                current in closure
+                or current in self._wi_by_operator
+                or (excluded is not None and excluded(current, closure))
+            ):
+                continue
+            closure.append(current)
+            if isinstance(op := self._operators.get(current), AgentOperator):
+                frontier.extend(
+                    nested
+                    for ref in op.child_region_refs
+                    if (nested := self.child_template_of(ref.spawn_ref)) is not None
+                )
+        return closure
 
     def _publish(
         self, operator_id: str, outcome: PublicationOutcome, value_ref: ValueRef | None
@@ -3258,10 +3635,12 @@ class OrchestrationEngine:
     def _publish_keyed(
         self,
         spawn_op: str,
-        activation: Activation,
+        activation: Activation | None,
         outcome: PublicationOutcome,
         value_ref: ValueRef | None,
     ) -> None:
+        """Publish a spawn child's member of each collection the spawn declares, or,
+        with no child, the collection's one member."""
         for decl in self._bundle.template.result_declarations:
             if (
                 decl.source_ref != spawn_op
@@ -3273,8 +3652,8 @@ class OrchestrationEngine:
                     instance_id=self._instance.instance_id,
                     output_id=decl.output_id,
                     source_operator_id=spawn_op,
-                    scope_id=activation.scope_id,
-                    logical_key=str(activation.child_index),
+                    scope_id=activation.scope_id if activation else None,
+                    logical_key=str(activation.child_index) if activation else None,
                 ),
                 outcome,
                 value_ref,
@@ -3383,21 +3762,12 @@ class OrchestrationEngine:
         return wi.outcome, wi.value_ref
 
     def failure_reason(self, task_id: str) -> str | None:
-        """Why a task's work item settled failed: the reason its non-retryable failure
-        recorded, else its authority denial."""
-        wi_id = self._wi_by_task.get(task_id)
-        if wi_id is None:
-            return None
-        wi = self._work_items.get(wi_id)
-        if wi is not None and wi.failure_reason is not None:
-            return wi.failure_reason
-        for decision in reversed(self._decisions):
-            if (
-                decision.work_item_id == wi_id
-                and decision.kind is AuthorityDecisionKind.DENIED
-            ):
-                return f"authority denied: {decision.reason or decision.interface}"
-        return None
+        """Why a task settled as a declared failure, or None for one that has not."""
+        return self._failure_reasons.get(task_id)
+
+    def declared_failures(self) -> dict[str, str]:
+        """Every task settled as a declared failure, with why."""
+        return self._failure_reasons
 
     def recovery_disposition(self, task_id: str) -> RecoveryDisposition | None:
         """Whether the task's operation may be recomputed or must be restored."""
@@ -3447,6 +3817,8 @@ class OrchestrationEngine:
         return self._grants.get(grant_id) if grant_id else None
 
     def region_closed(self, region_op: str) -> bool:
+        if region_op in self._failed_regions:
+            return True
         scope_id = (
             self._scope_for_join(region_op)
             if self._kind(region_op) is OperatorKind.JOIN
@@ -3489,11 +3861,16 @@ class OrchestrationEngine:
                 CapabilityStatus.SEALED,
                 CapabilityStatus.REVOKED,
             ):
-                sealed.add(template)
+                sealed.update(self.template_closure(template))
         return frozenset(sealed)
 
     def spawn_awaits_children(self, spawn_op: str) -> bool:
-        """Whether a spawn has yet to fan out: unopened, or open and not sealed."""
+        """Whether a spawn has yet to fan out: unopened, or open and not sealed.
+
+        A failed spawn never fans out.
+        """
+        if spawn_op in self._failed_regions:
+            return False
         scope_id = self._scope_id_for(spawn_op)
         if scope_id is None:
             return True
@@ -3803,8 +4180,57 @@ class OrchestrationEngine:
             trace=list(self._trace),
             private_state=self._private_state.lineages(),
             released_scopes=sorted(self._released_scopes),
+            failed_regions=sorted(self._failed_regions),
+            failed_scopes=sorted(self._failed_scopes),
+            failure_reasons=dict(self._failure_reasons),
             next_seq=self._next_seq,
         )
+
+    def reconcile_failure(self, task_id: str) -> list[str]:
+        """Fail what a task's settled failure left standing downstream of it.
+
+        Returns the legacy task ids newly failed; empty for a task that has not failed,
+        for a spawned child, whose failure drains its scope instead, and once the
+        downstream has already failed.
+        """
+        wi = self._work_item_for_task(task_id)
+        if (
+            wi is None
+            or wi.outcome is not PublicationOutcome.DECLARED_FAILURE
+            or self._is_dynamic_activation(wi.activation_id)
+        ):
+            return []
+        cascade = Advance()
+        visited: set[str] = set()
+        self._fail_agent_regions(wi, cascade, visited)
+        self._fail_downstream(wi.operator_id, cascade, visited)
+        self._name_failures(cascade.failed, dependency_failed(task_id))
+        return cascade.failed
+
+    def fail_undeliverable_region_inputs(self) -> list[str]:
+        """Fail each task reading a region of an agent that runs only as a spawned
+        child, and everything downstream of it.
+
+        Every scope of such a region is nested, so its join never delivers at the root
+        and the reader would wait forever. Returns the legacy task ids newly failed.
+        """
+        cascade = Advance()
+        visited: set[str] = set()
+        owners = spawned_only_region_owners(self._operators.values())
+        for spawn_op, owner in sorted(owners.items()):
+            join_op = self._join_for_spawn(spawn_op)
+            for successor in sorted(self._forward.get(join_op or "", ())):
+                if (wi_id := self._wi_by_operator.get(successor)) is None:
+                    continue
+                start = len(cascade.failed)
+                self._fail_work_item(wi_id, cascade, visited)
+                if failed := cascade.failed[start:]:
+                    self._name_failures(
+                        failed[:1],
+                        f"region of spawned-only agent {owner} delivers nothing",
+                    )
+                    self._name_failures(failed[1:], dependency_failed(failed[0]))
+        return cascade.failed
 
     def reconcile_pending(self, task_id: str) -> bool:
         """Re-derive readiness for a task whose durable record shows PENDING.

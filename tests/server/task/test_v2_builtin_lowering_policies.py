@@ -361,7 +361,7 @@ class _CapturingRegistry:
     ) -> None:
         return None
 
-    async def save_ledger_snapshot_async(self, *args: Any, **kwargs: Any) -> None:
+    def save_ledger_snapshot(self, *args: Any, **kwargs: Any) -> None:
         return None
 
 

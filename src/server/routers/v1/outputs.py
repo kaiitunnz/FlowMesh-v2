@@ -127,7 +127,8 @@ async def list_outputs(
     summary="Get a published output",
     description=(
         "Get the value of one published output member. A singleton is selected by "
-        "its name alone, a collection member by its scope and key."
+        "its name alone, a collection member by its scope and key. A collection "
+        "whose spawn failed holds one failed member selected by its name alone."
     ),
     response_description="The published output member and its value",
 )
@@ -152,13 +153,14 @@ async def get_output(
             f"workflow {workflow_id} publishes no output named {output_name!r}",
         )
     keyed = declaration.cardinality is CardinalityKind.KEYED_COLLECTION
-    if keyed and (scope is None or key is None):
+    member = found.member
+    # A collection whose spawn failed holds one member with no scope and no key.
+    if keyed and (scope is None or key is None) and member is None:
         raise _error(
             status.HTTP_400_BAD_REQUEST,
             "invalid_request",
             f"output {output_name!r} is a collection; select a member by scope and key",
         )
-    member = found.member
     if member is None and (not keyed or not found.open):
         # A settled workflow publishes nothing more, so a missing member never comes.
         raise _error(

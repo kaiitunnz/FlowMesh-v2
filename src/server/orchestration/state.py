@@ -77,6 +77,16 @@ class InvocationState(StrEnum):
     AMBIGUITY_TERMINAL = "ambiguity_terminal"
 
 
+TERMINAL_INVOCATION_STATES = frozenset(
+    {
+        InvocationState.TERMINAL,
+        InvocationState.AMBIGUITY_TERMINAL,
+        InvocationState.COMPENSATION_REQUIRED,
+    }
+)
+"""The invocation states no later transition leaves."""
+
+
 class PublicationOutcome(StrEnum):
     """Terminal outcome of a declared logical output."""
 
@@ -643,4 +653,7 @@ class LedgerSnapshot(BaseModel):
     trace: list[OrchestrationEvent] = Field(default_factory=list)
     private_state: list[PrivateStateLineage] = Field(default_factory=list)
     released_scopes: list[str] = Field(default_factory=list)
+    failed_regions: list[str] = Field(default_factory=list)
+    failed_scopes: list[str] = Field(default_factory=list)
+    failure_reasons: dict[str, str] = Field(default_factory=dict)
     next_seq: int = 0

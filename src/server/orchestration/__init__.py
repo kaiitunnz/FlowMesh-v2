@@ -1,4 +1,4 @@
-from .engine import Advance, OrchestrationEngine, RegionError
+from .engine import Advance, OrchestrationEngine, RegionError, dependency_failed
 from .episode import BoundaryEvent, EpisodeOutcome, EpisodeOutcomeKind
 from .guardrails import ScopeBudget
 from .outcomes import (
@@ -82,6 +82,7 @@ __all__ = [
     "WorkflowInstance",
     "attenuate",
     "classify_recovery",
+    "dependency_failed",
     "is_compensable",
     "is_replayable",
 ]

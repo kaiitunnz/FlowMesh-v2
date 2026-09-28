@@ -413,14 +413,23 @@ class LoweringAccumulator:
         return {op.operator_id for op in self.operators}
 
 
+def call_join_id(name: str) -> str:
+    """The join operator a ``call`` region settles through."""
+    return f"{name}:join"
+
+
 def build_name_map(parsed: ParsedWorkflow) -> dict[str, str]:
-    """Map source-visible task names to their stable operator ids."""
+    """Map source-visible node names to the operator ids that produce their values."""
     name_to_op: dict[str, str] = {}
     for task in parsed.tasks:
         if task.graph_node_name:
             name_to_op[task.graph_node_name] = task.task_id
         if task.local_name:
             name_to_op[task.local_name] = task.task_id
+    # A call's value is its join's, so a reference to a call names the join.
+    for region in parsed.regions:
+        if str(region.region.get("kind", "")).strip() == "call":
+            name_to_op[region.name] = call_join_id(region.name)
     return name_to_op
 
 
@@ -471,7 +480,9 @@ def lower_tasks(
         operator_id = task.task_id
         for dep in task.depends_on:
             if dep in known_ids:
-                acc.edges.append(TemplateEdge(from_op=dep, to_op=operator_id))
+                acc.edges.append(
+                    TemplateEdge(from_op=name_to_op.get(dep, dep), to_op=operator_id)
+                )
 
         # serve administers resident capacity: a residency node, no result slot.
         if binding_class(task_type) is BindingClass.RESIDENCY:

@@ -67,7 +67,8 @@ restart safe:
   double-apply. Completions that occur while the root is down are replayed on
   startup rather than dropped. In-flight tasks are left assigned to their worker
   — surviving workers' completions arrive via the stream, and workers that
-  genuinely departed are reclaimed by the watchdog.
+  genuinely departed are reclaimed by the watchdog. A task still being cancelled
+  has its worker interrupted again.
 - **Heartbeat grace for rehydrated work.** Worker heartbeats are dropped while
   the root is down, so a surviving worker briefly looks stale once the root is
   back. The watchdog gives any worker that owns rehydrated in-flight tasks an

@@ -13,6 +13,13 @@ from server.routers.v1 import workflows as workflows_router
 from server.task.runtime import TaskRuntime
 from tests.server.result_store import make_result_reader
 from tests.server.task.test_v2_orchestration import _NoopSecretVault
+from tests.server.task.test_v2_validation import (
+    _CALL,
+    _FAN,
+    _REGION_CONSUMER,
+    _SPAWNED_WORKER,
+    SPAWN_DEPENDENTS,
+)
 
 _V1_WF = """
 apiVersion: flowmesh/v1
@@ -47,7 +54,7 @@ spec:
   graph:
     nodes:
       - name: gate
-        region: {kind: branch, selection: "x", ports: [p, q]}
+        region: {kind: merge}
       - name: gated
         dependsOn: [gate]
         spec:
@@ -67,7 +74,23 @@ spec:
         spec: {taskType: echo, data: {type: list, items: [x]}}
       - name: route
         dependsOn: [a]
-        region: {kind: branch, selection: "x", ports: [p, q]}
+        region: {kind: merge}
+"""
+
+
+def _region(region: str) -> str:
+    return f"""
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {{name: t}}
+spec:
+  graph:
+    nodes:
+      - name: a
+        spec: {{taskType: echo, data: {{type: list, items: [x]}}}}
+      - name: route
+        dependsOn: [a]
+        region: {region}
 """
 
 
@@ -148,3 +171,68 @@ def test_v2_guard_on_region_returns_422_with_location(client: TestClient) -> Non
     assert any(
         "guard.unknown-node" in d and "graph node 'gated'" in d for d in diagnostics
     )
+
+
+@pytest.mark.parametrize(
+    "region",
+    ['{kind: branch, selection: "x", ports: [p, q]}', "{kind: loop, coordinate: t}"],
+)
+def test_v2_unsupported_region_kind_returns_422(
+    client: TestClient, region: str
+) -> None:
+    resp = _post(client, _region(region))
+    assert resp.status_code == 422
+    diagnostics = resp.json()["detail"]["diagnostics"]
+    assert any("region.unknown-kind" in d for d in diagnostics)
+
+
+def test_v2_region_input_from_a_spawned_agent_returns_422(client: TestClient) -> None:
+    body = """
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {name: t}
+spec:
+  graph:
+    nodes:
+""" + _SPAWNED_WORKER + _REGION_CONSUMER % "worker"
+    resp = _post(client, body)
+    assert resp.status_code == 422
+    diagnostics = resp.json()["detail"]["diagnostics"]
+    assert any("dataflow.spawned-region-output" in d for d in diagnostics)
+
+
+def test_v2_a_node_depending_on_a_spawn_returns_422(client: TestClient) -> None:
+    body = """
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {name: t}
+spec:
+  graph:
+    nodes:
+""" + _FAN + SPAWN_DEPENDENTS["task"]
+    resp = _post(client, body)
+    assert resp.status_code == 422
+    diagnostics = resp.json()["detail"]["diagnostics"]
+    assert any("dataflow.spawn-dependent" in d for d in diagnostics)
+
+
+def test_v2_a_region_fed_by_a_call_returns_422(client: TestClient) -> None:
+    body = (
+        """
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {name: t}
+spec:
+  graph:
+    nodes:
+"""
+        + _CALL
+        + """      - name: r
+        dependsOn: [c]
+        region: {kind: spawn, child: kid}
+"""
+    )
+    resp = _post(client, body)
+    assert resp.status_code == 422
+    diagnostics = resp.json()["detail"]["diagnostics"]
+    assert any("dataflow.region-input" in d for d in diagnostics)

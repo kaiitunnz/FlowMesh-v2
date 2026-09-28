@@ -75,11 +75,11 @@ from shared.utils.time import iso_to_ns
 
 from ..task.v2.representations.operators import REGION_OPERATOR_KINDS
 from .state import (
+    TERMINAL_INVOCATION_STATES,
     TERMINAL_WORK_ITEM_STATUSES,
     Activation,
     Attempt,
     Invocation,
-    InvocationState,
     OrchestrationEvent,
     Scope,
     WorkItem,
@@ -114,13 +114,6 @@ _NO_EXTENT_OPERATOR_KINDS = REGION_OPERATOR_KINDS
 # merely has not settled yet.
 _NO_EXTENT_ACTIVATION_KINDS = frozenset({"iteration", "leaf", "agent"})
 
-_TERMINAL_INVOCATION = frozenset(
-    {
-        InvocationState.TERMINAL,
-        InvocationState.AMBIGUITY_TERMINAL,
-        InvocationState.COMPENSATION_REQUIRED,
-    }
-)
 
 _logger = logging.getLogger("orchestration-telemetry")
 _reported_faults: set[str] = set()
@@ -270,7 +263,7 @@ class TelemetrySpanEmitter:
         self._attempts: dict[str, Attempt] = {}
         self._invocations: dict[str, Invocation] = {}
         self._trace: list[OrchestrationEvent] = []
-        self._released_scopes: set[str] = set()
+        self._scope_closed: Callable[[str], bool] = lambda _: False
         self._reset_indexes()
 
     @_absorbs_faults
@@ -283,7 +276,7 @@ class TelemetrySpanEmitter:
         attempts: dict[str, Attempt],
         invocations: dict[str, Invocation],
         trace: list[OrchestrationEvent],
-        released_scopes: set[str],
+        scope_closed: Callable[[str], bool],
     ) -> None:
         self._activations = activations
         self._scopes = scopes
@@ -291,7 +284,7 @@ class TelemetrySpanEmitter:
         self._attempts = attempts
         self._invocations = invocations
         self._trace = trace
-        self._released_scopes = released_scopes
+        self._scope_closed = scope_closed
         self._reset_indexes()
         self._rehydrate()
 
@@ -508,7 +501,7 @@ class TelemetrySpanEmitter:
     def _scope_subtree_extent(
         self, scope_id: str, memo: dict[str, tuple[int, int] | None]
     ) -> tuple[int, int] | None:
-        if scope_id not in self._released_scopes:
+        if not self._scope_closed(scope_id):
             return None
         starts: list[int] = []
         ends: list[int] = []
@@ -637,7 +630,7 @@ class TelemetrySpanEmitter:
     def emit_boundary(self, invocation: Invocation) -> None:
         if not self._emits(TelemetryLevel.FINE):
             return
-        if invocation.state not in _TERMINAL_INVOCATION:
+        if invocation.state not in TERMINAL_INVOCATION_STATES:
             return
         span_id = derived_span_id(SpanIdKind.INVOCATION, invocation.invocation_id)
         key = (self._trace_id, span_id)

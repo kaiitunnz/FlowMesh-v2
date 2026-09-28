@@ -1,3 +1,4 @@
+from collections.abc import Iterable
 from enum import StrEnum
 from typing import Annotated, Any, Literal
 
@@ -585,3 +586,30 @@ type LogicalOperator = Annotated[
     | LoopContextRegion,
     Field(discriminator="kind"),
 ]
+
+
+def spawned_only_region_owners(operators: Iterable[LogicalOperator]) -> dict[str, str]:
+    """Map each child-region spawn to its owning agent, where that agent runs only as a
+    spawned child.
+
+    An agent a spawn instantiates, other than through its own recursive region, runs
+    only as a spawned child, so every scope of its regions is nested and none of its
+    joins delivers at the root.
+    """
+    ops = list(operators)
+    region_owner = {
+        ref.spawn_ref: op.operator_id
+        for op in ops
+        if isinstance(op, AgentOperator)
+        for ref in op.child_region_refs
+    }
+    spawned_only = {
+        op.child_template_ref
+        for op in ops
+        if isinstance(op, SpawnRegion)
+        and op.child_template_ref
+        and region_owner.get(op.operator_id) != op.child_template_ref
+    }
+    return {
+        spawn: owner for spawn, owner in region_owner.items() if owner in spawned_only
+    }

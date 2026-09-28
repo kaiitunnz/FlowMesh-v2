@@ -16,6 +16,11 @@ class _Runtime(_Recorder):
     async def rehydrate(self) -> None:
         self.calls.append("runtime.rehydrate")
 
+    def resident_invocation_completed(
+        self, workflow_id: str, invocation_id: str
+    ) -> None:
+        return None
+
 
 class _Registry(_Recorder):
     async def load_snapshot_async(self) -> Any:
@@ -29,6 +34,9 @@ class _Control(_Recorder):
 
     def rehydrate(self, snapshot: Any) -> None:
         self.calls.append("control.rehydrate")
+
+    def reconcile_workflow_terminals(self, completed: Any) -> None:
+        self.calls.append("control.reconcile")
 
     def start(self) -> None:
         self.calls.append("start")
@@ -47,12 +55,14 @@ def test_root_startup_loads_resident_capacity_before_the_runtime() -> None:
     )
     # The BLOCKER guard: the claim store is bound and loaded before the runtime
     # re-drives suspended boundaries (a resident boundary would otherwise terminalize
-    # against an empty store), and the idle sweep starts only after the store rebuilds.
+    # against an empty store), the claims the restored ledger settled release before
+    # the idle sweep starts, and it starts only after the store rebuilds.
     assert calls == [
         "bind_loop",
         "load_snapshot",
         "control.rehydrate",
         "runtime.rehydrate",
+        "control.reconcile",
         "start",
     ]
 
@@ -72,5 +82,6 @@ def test_root_startup_reconciles_serve_terminals_after_the_claim_store() -> None
         "control.rehydrate",
         "serve.reconcile",
         "runtime.rehydrate",
+        "control.reconcile",
         "start",
     ]

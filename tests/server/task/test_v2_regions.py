@@ -1,3 +1,4 @@
+import json
 import logging
 from typing import Any, cast
 
@@ -14,15 +15,18 @@ from server.task.v2 import (
     compile_workflow,
 )
 from server.task.v2.compiler.agent_binding import AgentBindingDefaults
-from server.task.v2.representations.operators import LoopContextRegion, PortKind
 from tests.server.result_store import make_result_reader
-from tests.server.task.test_v2_orchestration import _NoopSecretVault
+from tests.server.task.test_v2_orchestration import (
+    FakeRegistry,
+    _live_runtime,
+    _NoopSecretVault,
+)
 
 REGIONS_WF = """
 apiVersion: flowmesh/v2
 kind: Workflow
 metadata:
-  name: autoresearch-loop
+  name: autoresearch
 spec:
   graph:
     nodes:
@@ -34,14 +38,11 @@ spec:
             authority: {invoke: [search/v1], delegate: []}
             tools: [{name: web_search, interface: search/v1}]
             boundary: [invocation, external_effect, yield]
-      - name: route
-        dependsOn: [plan]
-        region: {kind: branch, selection: "{{plan.output.mode}}", ports: [deep, quick]}
       - name: deep
-        dependsOn: [route]
+        dependsOn: [plan]
         spec: {taskType: agent, task: deep dive}
       - name: quick
-        dependsOn: [route]
+        dependsOn: [plan]
         spec: {taskType: echo, data: {type: list, items: [quick]}}
       - name: brief
         dependsOn: [deep, quick]
@@ -50,11 +51,17 @@ spec:
         spec: {taskType: echo, data: {type: list, items: [verdict]}}
       - name: search_child
         spec: {taskType: echo, data: {type: list, items: [hit]}}
-      - name: verify
+      - name: draft
         dependsOn: [brief]
+        spec: {taskType: echo, data: {type: list, items: [draft]}}
+      - name: verify
+        dependsOn: [draft]
         region: {kind: call, child: verify_child, returns: [verdict]}
-      - name: fanout
+      - name: route
         dependsOn: [verify]
+        spec: {taskType: echo, data: {type: list, items: [route]}}
+      - name: fanout
+        dependsOn: [route]
         region:
           kind: spawn
           child: search_child
@@ -62,21 +69,8 @@ spec:
       - name: collect
         dependsOn: [fanout]
         region: {kind: join, completion: all_settled, residual: cancel}
-      - name: refine
-        dependsOn: [collect]
-        region:
-          kind: loop
-          coordinate: refine
-          carried:
-            - name: model
-              kind: model_ref
-              modelRef: {architecture: llama-3.1-8b, version: base}
-      - name: train
-        dependsOn: [refine]
-        spec: {taskType: echo, data: {type: list, items: [update]}}
-        feedback: {to: refine, port: model}
       - name: report
-        dependsOn: [refine]
+        dependsOn: [collect]
         spec:
           taskType: echo
           data: {type: list, items: [done]}
@@ -99,7 +93,7 @@ def _compile(text: str) -> Any:
 def test_inspection_fixture_demonstrates_all_shapes() -> None:
     template = _compile(REGIONS_WF)
     kinds = {op.kind.value for op in template.operators}
-    for shape in ("branch", "merge", "spawn", "join", "loop_context", "agent", "leaf"):
+    for shape in ("merge", "spawn", "join", "agent", "leaf"):
         assert shape in kinds, shape
 
 
@@ -113,22 +107,43 @@ def test_call_normalizes_to_spawn_then_join() -> None:
     )
 
 
-def test_loop_carries_model_ref() -> None:
-    template = _compile(REGIONS_WF)
-    loop = next(op for op in template.operators if isinstance(op, LoopContextRegion))
-    carried = {p.name: p for p in loop.carried}
-    assert "model" in carried
-    assert carried["model"].kind is PortKind.MODEL_REF
-    assert carried["model"].model_ref is not None
-    assert carried["model"].model_ref.architecture == "llama-3.1-8b"
-
-
-def test_feedback_edge_is_structured() -> None:
-    template = _compile(REGIONS_WF)
-    feedback = [e for e in template.edges if e.feedback]
-    assert len(feedback) == 1
-    assert feedback[0].to_op == "refine"
-    assert feedback[0].to_port == "model"
+def test_every_reference_to_a_call_names_its_join() -> None:
+    text = """
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {name: t}
+spec:
+  graph:
+    nodes:
+      - name: kid
+        spec: {taskType: echo, data: {type: list, items: [k]}}
+      - name: c
+        region: {kind: call, child: kid, returns: [out]}
+      - name: after
+        dependsOn: [c]
+        spec: {taskType: echo, data: {type: list, items: [z]}}
+      - name: m
+        dependsOn: [c]
+        region: {kind: merge}
+      - name: reader
+        dependsOn: [c]
+        spec:
+          taskType: agent
+          task: read
+          v2: {inputs: [{name: verdict, from: c}]}
+"""
+    parsed = parse_workflow(text, "native")
+    source = FrontendWorkflowSource.capture(text, "native", name="wf")
+    template, _ = compile_workflow("wfl-test", parsed, source, bindings=_BINDINGS)
+    ids = {t.graph_node_name: t.task_id for t in parsed.tasks}
+    from_call = {(e.to_op, e.to_port) for e in template.edges if e.from_op == "c:join"}
+    assert from_call == {
+        (ids["after"], None),
+        ("m", None),
+        (ids["reader"], None),
+        (ids["reader"], "verdict"),
+    }
+    assert {e.to_op for e in template.edges if e.from_op == "c"} == {"c:join"}
 
 
 def test_tool_interface_and_published_result() -> None:
@@ -147,7 +162,7 @@ def test_inspection_report_renders_without_executing() -> None:
     assert report.ok
     assert report.region_bearing
     text = report.render_text()
-    assert "branch" in text and "loop_context" in text
+    assert "merge" in text and "spawn" in text
 
 
 # --------------------------------------------------------------------------- #
@@ -176,7 +191,7 @@ class _CapturingRegistry:
     ) -> None:
         return None
 
-    async def save_ledger_snapshot_async(self, workflow_id: str, snapshot: Any) -> None:
+    def save_ledger_snapshot(self, workflow_id: str, snapshot: Any) -> None:
         return None
 
 
@@ -257,7 +272,7 @@ spec:
         spec: {taskType: echo, data: {type: list, items: [x]}}
       - name: route
         dependsOn: [a]
-        region: {kind: branch, selection: s, ports: [p]}
+        region: {kind: merge}
       - name: after
         dependsOn: [route]
         spec: {taskType: echo, data: {type: list, items: [y]}}
@@ -316,3 +331,41 @@ spec:
 """
     with pytest.raises(ValueError, match="flowmesh/v2"):
         parse_workflow(text, "native")
+
+
+_MERGE_ONLY = """
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {name: t}
+spec:
+  graph:
+    nodes:
+      - name: a
+        spec: {taskType: echo, data: {type: list, items: [x]}}
+      - name: route
+        dependsOn: [a]
+        region: {kind: merge}
+"""
+
+
+@pytest.mark.anyio
+async def test_a_stored_branch_bearing_workflow_rehydrates() -> None:
+    registry = FakeRegistry()
+    runtime = _live_runtime(registry)
+    workflow_id, _ = await runtime.register(
+        "owner", "org", _MERGE_ONLY, format="native"
+    )
+    # A stored bundle carrying a branch region, which compile refuses.
+    bundle = json.loads(registry.v2_blobs[workflow_id])
+    route = next(
+        op for op in bundle["template"]["operators"] if op["operator_id"] == "route"
+    )
+    route.pop("combination", None)
+    route.update(kind="branch", selection="s", outputs=[{"name": "p"}])
+    registry.v2_blobs[workflow_id] = json.dumps(bundle)
+
+    restored = _live_runtime(registry, "restored")
+    assert await restored.rehydrate() == 1
+    engine = restored.orchestration_engine(workflow_id)
+    assert engine is not None
+    assert any(op.kind.value == "branch" for op in engine._bundle.template.operators)

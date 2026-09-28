@@ -141,17 +141,21 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   its `invocation_id`; outputs publish idempotently to logical result slots. The snapshot
   persists at `workflow:{id}:ds` and `TaskRuntime.rehydrate` rebuilds it on restart; a v1
   submission keeps the static-DAG path.
-- **Structured dynamic regions.** The engine executes the compiler's semi-static
-  regions: control operators (`Branch`/`Merge`/`Spawn`/`Join`/`LoopContext`) settle
-  in-ledger and never dispatch, while spawn children and loop iterations materialize
-  incrementally by activation identity. A region closes on its child-init and loop-time
-  capability account — sealed or revoked and drained — never on an observed-empty set.
-  Every spawn site mints a monotonically attenuated `DelegatedAuthorityGrant`, and a
-  denial records a durable `AuthorityDenied`/`PolicyDenied` that creates no child. An
-  early join may release before full closure per its declared rule, with a residual
-  policy governing children still running. Scope, loop, and activation budgets bound
-  recursion. A spawn fans out to one child per element of its producer's result, and
-  each child dispatches to a worker like any other task.
+- **Structured dynamic regions.** The engine executes the compiler's semi-static regions:
+  control operators (`Merge`/`Spawn`/`Join`) settle in-ledger and never dispatch, while
+  spawn children materialize incrementally by activation identity. A region closes on its
+  child-init capability account — sealed or revoked and drained — never on an
+  observed-empty set. Every spawn site mints a monotonically attenuated
+  `DelegatedAuthorityGrant`, and a denial records a durable
+  `AuthorityDenied`/`PolicyDenied` that creates no child. An early join may release
+  before full closure per its declared rule, with a residual policy governing children
+  still running. Scope and activation budgets bound recursion. A spawn fans out to one
+  child per element of its producer's result, and each child dispatches to a worker like
+  any other task. A failed input fails a region and everything downstream of it, as a
+  failed dependency fails a task: a spawn whose producer failed creates no child, and its
+  join fails whatever its completion rule. A failed agent fails the regions it declares
+  the same way; children it already spawned follow their region's residual policy. A join
+  that resolves as a failure fails everything downstream of it too.
 - **Cancellation.** A `flowmesh/v2` workflow cancels through the orchestration engine as
   a durable semantic event, so the ledger stays consistent with the task records and a
   cancelled workflow survives a restart without re-admitting cancelled work. A worker
@@ -472,17 +476,17 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   replayed grant, an evicted copy, or a holder that is gone costs a read from the shared
   store, not a failure. Enable the cache and its transfers with
   `CONTENT_HYDRATION_ENABLED=true` (which requires `NETWORK_PLANE_ENABLED=true`).
-- **Task results.** A task's result lives in the shared content store: its worker
-  writes the result envelope there under the task's store access before it reports
-  success, and the success binds that reference once, at the commit that settles the
-  task, so a retry, relocation, or duplicate success converges on the result already
-  bound. A v2 task binds it into the ledger — its induced output slot, or for a spawned
-  child or later loop iteration the value its work item settled with — and a v1 task onto
-  its record. Every result the control plane reads — the result, bundle, and output
-  routes, stage references, conditions, fan-out cardinality, and an agent's input budget
-  — resolves that binding and reads the verified envelope from the store; the results
-  directory keeps only a task's logs and artifacts. A task that outlives its store access
-  has it renewed while it still runs on the worker asking.
+- **Task results.** A task's result lives in the shared content store: its worker writes
+  the result envelope there under the task's store access before it reports success, and
+  the success binds that reference once, at the commit that settles the task, so a retry,
+  relocation, or duplicate success converges on the result already bound. A v2 task binds
+  it into the ledger — its induced output slot, or for a spawned child the value its work
+  item settled with — and a v1 task onto its record. Every result the control plane reads
+  — the result, bundle, and output routes, stage references, conditions, fan-out
+  cardinality, and an agent's input budget — resolves that binding and reads the verified
+  envelope from the store; the results directory keeps only a task's logs and artifacts.
+  A task that outlives its store access has it renewed while it still runs on the worker
+  asking.
 - **Consumed values by reference.** A dispatch names each upstream value its task
   consumes by reference, and the task's worker hydrates each through its content cache
   before anything validates or runs the task. A worker that cannot reach the store names
@@ -491,9 +495,10 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   it when the content is missing or corrupt, and otherwise queues it again, in every case
   without spending an attempt or blaming the worker.
 - **Published outputs.** A leaf declares `result: {visibility: published}` to publish its
-  value, and a spawn region declares it to publish its children's results as a
-  collection keyed by child index within each spawning scope. Clients list and fetch
-  published outputs by the node names they were declared on.
+  value, and a spawn region declares it to publish its children's results as a collection
+  keyed by child index within each spawning scope. A spawn whose input failed publishes
+  one failed member. Clients list and fetch published outputs by the node names they were
+  declared on.
 - **Task merging.** Ready v1 tasks of one org whose specs share a merge key coalesce
   into one dispatch, whose executor runs every task at once and returns each merged
   child's own result; a task's spec defines its merge key. Merged children ride on

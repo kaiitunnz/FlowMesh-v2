@@ -276,8 +276,8 @@ def test_result_extra_policy_matches(server_model: type, sdk_model: type) -> Non
 
 
 def test_task_info_fields() -> None:
-    """TaskInfo: last_queue_ts, the pending facade capture, and the resident marker are
-    server-internal."""
+    """TaskInfo: last_queue_ts, the pending facade capture, and the resident and
+    residual-cancel markers are server-internal."""
     assert_fields_match(
         SrvTaskInfo,
         TaskInfo,
@@ -285,6 +285,7 @@ def test_task_info_fields() -> None:
             "last_queue_ts",
             "pending_facade_group",
             "resident",
+            "residual_cancel",
         },
     )
 
