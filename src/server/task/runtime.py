@@ -1879,7 +1879,6 @@ class TaskRuntime:
             self._reap_captures_locked(worker_id, task_id, _captured_calls(hr, group))
             return
         if hr.kind in (HarnessResultKind.FAILURE, HarnessResultKind.CANCELLATION):
-            group = self._pending_facade_groups.pop(task_id, None) or group
             record.pending_facade_group = None
             reason = hr.error or (
                 "agent episode cancelled"
