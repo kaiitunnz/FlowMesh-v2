@@ -414,8 +414,7 @@ if IS_ROOT_NODE:
     )
     if config.watchdog.reap_enabled and not config.watchdog.enabled:
         logger.warning(
-            "ENABLE_WORKER_REAPER is set but ENABLE_WORKER_WATCHDOG is false; "
-            "the reaper will not run"
+            "ENABLE_WORKER_REAPER has no effect while ENABLE_WORKER_WATCHDOG is false"
         )
 
     CONTENT_AUTHORITY: ContentHydrationAuthority | None = None
