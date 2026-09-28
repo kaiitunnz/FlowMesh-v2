@@ -9,8 +9,10 @@ entering the ledger. If the origin worker is lost the boundary fails clean.
 import asyncio
 import logging
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import MagicMock
 
 import pytest
 from pydantic import SecretStr
@@ -27,7 +29,11 @@ from shared.harness import (
     HarnessResult,
     HarnessResultKind,
 )
-from shared.private_state import OwnerFence
+from shared.private_state import (
+    OwnerFence,
+    PrivateStateSealReport,
+    PrivateStateUnavailableReason,
+)
 from shared.schemas.event import WorkerEvent, parse_event
 from shared.tasks.specs import ModelBindingMode
 from shared.tools.contract import (
@@ -42,7 +48,9 @@ from shared.tools.facade import (
     FacadeCompletionMode,
     FacadeTurnGroup,
 )
+from tests.server.dispatcher.helpers import CapturingDispatcher
 from tests.server.result_store import make_result_reader
+from tests.server.task.test_private_state_ledger import _manifest
 from tests.server.task.test_task_merge import _monitor
 from tests.server.task.test_v2_orchestration import (
     FakeRegistry,
@@ -176,9 +184,11 @@ def _dispatch_agent(
     task_id: str,
     worker: str = "wkr-1",
     script: list[ScriptedStep] = _SCRIPT,
+    seal_in: Path | None = None,
 ) -> Any:
     """Mimic a dispatch: pin the worker and run one scripted step, worker-side strip
-    included, then report the step to the runtime."""
+    included, then report the step to the runtime, with the private state the worker
+    sealed under ``seal_in`` when given."""
     engine = runtime.orchestration_engine(runtime._tasks[task_id].workflow_id)
     dispatch = runtime.agent_episode_dispatch(task_id, _HOLDER)
     assert engine is not None and dispatch is not None
@@ -197,9 +207,15 @@ def _dispatch_agent(
     result = AgentEpisodeExecutor._capture_local_request(
         PendingEgressRequestStore(), task_id, result, dispatch.model_binding
     )
-    runtime.mark_succeeded(
-        task_id, worker, {"agent_episode": result.model_dump(mode="json")}, _TS
-    )
+    payload: dict[str, Any] = {"agent_episode": result.model_dump(mode="json")}
+    if seal_in is not None and (attachment := dispatch.private_state_attachment):
+        manifest = _manifest(
+            seal_in, attachment.reference_id, attachment.generation + 1
+        )
+        payload["agent_episode_private_state"] = PrivateStateSealReport(
+            manifest=manifest, write_epoch=attachment.write_epoch
+        ).model_dump(mode="json")
+    runtime.mark_succeeded(task_id, worker, payload, _TS)
     return engine
 
 
@@ -946,9 +962,24 @@ def _report(runtime: TaskRuntime, agent: str, call: str, value: str) -> None:
     )
 
 
+def _placement_failures(runtime: TaskRuntime, task_id: str) -> list[str]:
+    """What the dispatcher fails the task with once its worker has left."""
+    registry = MagicMock()
+    registry.idle_satisfying_pool.return_value = []
+    registry.get_worker.return_value = None
+    dispatcher = CapturingDispatcher(
+        runtime=runtime,
+        worker_registry=registry,
+        logger=logging.getLogger("wo-test"),
+        no_worker_grace_sec=0,
+    )
+    dispatcher.dispatch_once(task_id)
+    return [message for _, message, _ in dispatcher.failed]
+
+
 @pytest.mark.parametrize("interface", ["search", "model"])
-def test_an_agent_whose_drained_worker_finished_its_boundary_resumes_with_it(
-    interface: str,
+def test_an_agent_whose_drained_worker_finished_its_call_fails_at_its_next_step(
+    interface: str, tmp_path: Path
 ) -> None:
     workflow, script = (
         (_SEARCH_WF, _SCRIPT) if interface == "search" else (_MODEL_WF, _MODEL_SCRIPT)
@@ -958,7 +989,8 @@ def test_an_agent_whose_drained_worker_finished_its_boundary_resumes_with_it(
         runtime = _runtime()
         _, ids = await _register(runtime, workflow)
         writer = ids["writer"]
-        engine = _dispatch_agent(runtime, writer, script=script)
+        engine = _dispatch_agent(runtime, writer, script=script, seal_in=tmp_path)
+        assert runtime.private_state_owner(writer) == _HOLDER
 
         # The draining worker reports the outcome, and unregisters once control
         # acknowledges it.
@@ -966,29 +998,38 @@ def test_an_agent_whose_drained_worker_finished_its_boundary_resumes_with_it(
         assert len(_reap_frames(runtime)) == 1
         _drain(runtime)
 
-        dispatch = runtime.agent_episode_dispatch(writer, _HOLDER)
-        assert dispatch is not None
-        assert [o.value for o in dispatch.delivered_outcomes] == [
+        record = runtime.get_record(writer)
+        assert record is not None and record.status is TaskStatus.PENDING
+        _, outcomes = engine.episode_context(writer)
+        assert [o.value for o in outcomes] == [
             ToolOutcome(
                 status=ToolOutcomeStatus.SUCCESS, value="sunny"
             ).model_dump_json()
         ]
-        _dispatch_agent(runtime, writer, worker="wkr-2", script=script)
-        record = runtime.get_record(writer)
-        assert record is not None and record.status is TaskStatus.DONE
-        work_item = engine.work_item(writer)
-        assert work_item is not None and work_item.status is WorkItemStatus.SETTLED
+        # The agent's next step can run only where its private state is.
+        (failure,) = _placement_failures(runtime, writer)
+        assert PrivateStateUnavailableReason.OWNER_LOST.value in failure
 
     asyncio.run(run())
 
 
-def test_an_agent_whose_drained_worker_finished_its_facade_group_resumes() -> None:
+@pytest.mark.parametrize("how", ["expired", "drained"])
+def test_an_agent_suspended_on_a_search_group_through_its_worker_leaving(
+    how: str,
+) -> None:
     async def run() -> None:
         runtime = _runtime()
-        _, ids = await _register(runtime, _SEARCH_WF)
+        workflow_id, ids = await _register(runtime, _SEARCH_WF)
         writer = ids["writer"]
         _hold_dispatch(runtime, writer)
-        group = _search_group(writer, 0, "sha-xyz")
+        first = _search_group(writer, 0, "sha-a").members[0]
+        second = first.model_copy(
+            update={"ordinal": 1, "call_correlation": f"{writer}:0:1"}
+        )
+        group = _search_group(writer, 0, "sha-a").model_copy(
+            update={"members": (first, second)}
+        )
+        runtime.receive_worker_facade_group(writer, group)
         completion = HarnessResult(
             kind=HarnessResultKind.COMPLETION,
             value="done",
@@ -997,25 +1038,35 @@ def test_an_agent_whose_drained_worker_finished_its_facade_group_resumes() -> No
             ),
         )
         runtime.mark_succeeded(
-            writer,
-            "wkr-1",
-            {
-                "agent_episode": completion.model_dump(mode="json"),
-                "agent_episode_facade_group": group.model_dump(mode="json"),
-            },
-            _TS,
+            writer, "wkr-1", {"agent_episode": completion.model_dump(mode="json")}, _TS
         )
+        engine = runtime.orchestration_engine(workflow_id)
+        assert engine is not None
 
-        _report(runtime, writer, group.members[0].call_correlation, "hit")
+        if how == "expired":
+            runtime.recover_tasks_for_worker("wkr-1")
+            record = runtime.get_record(writer)
+            assert record is not None and record.status is TaskStatus.FAILED
+            return
+        for permit in list(_permit_frames(runtime)):
+            outcome = MediatedOperationPermit.model_validate(permit)
+            runtime.settle_mediated_operation(
+                MediatedOperationOutcome(
+                    permit_id=outcome.permit_id,
+                    agent_task_id=writer,
+                    call_correlation=outcome.call_correlation,
+                    invocation_id=outcome.invocation_id,
+                    idempotency_key=outcome.idempotency_key,
+                    outcome=ToolOutcome(status=ToolOutcomeStatus.SUCCESS, value="hit"),
+                )
+            )
+        assert len(_reap_frames(runtime)) == 2
         _drain(runtime)
 
         record = runtime.get_record(writer)
         assert record is not None and record.status is TaskStatus.PENDING
-        dispatch = runtime.agent_episode_dispatch(writer, _HOLDER)
-        assert dispatch is not None
-        assert [o.value for o in dispatch.delivered_outcomes] == [
-            ToolOutcome(status=ToolOutcomeStatus.SUCCESS, value="hit").model_dump_json()
-        ]
+        _, outcomes = engine.episode_context(writer)
+        assert len(outcomes) == 2
 
     asyncio.run(run())
 

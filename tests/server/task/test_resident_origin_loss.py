@@ -146,7 +146,7 @@ def test_a_failed_save_holds_the_credit_until_the_next_save_succeeds() -> None:
     asyncio.run(run())
 
 
-def test_an_agent_whose_drained_worker_finished_its_resident_call_resumes() -> None:
+def test_an_agent_whose_drained_worker_finished_its_resident_call_keeps_it() -> None:
     async def run() -> None:
         runtime = _runtime()
         originated = _originating(runtime)
@@ -170,9 +170,10 @@ def test_an_agent_whose_drained_worker_finished_its_resident_call_resumes() -> N
 
         record = runtime.get_record(writer)
         assert record is not None and record.status is TaskStatus.PENDING
-        dispatch = runtime.agent_episode_dispatch(writer, _HOLDER)
-        assert dispatch is not None
-        assert [o.value for o in dispatch.delivered_outcomes] == ["a completion"]
+        engine = runtime.orchestration_engine(record.workflow_id)
+        assert engine is not None
+        _, outcomes = engine.episode_context(writer)
+        assert [o.value for o in outcomes] == ["a completion"]
         assert releases == [(env.invocation_id, False)]
 
     asyncio.run(run())
