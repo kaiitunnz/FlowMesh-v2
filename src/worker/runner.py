@@ -215,6 +215,8 @@ class Runner:
         The work runs on its own thread, since the frame a signal interrupts may hold a
         lock that cancelling the active executor takes.
         """
+        if self._shutdown_requested.is_set():
+            return
         self._shutdown_requested.set()
         thread = threading.Thread(
             target=self._shut_down, name="worker-shutdown", daemon=True
@@ -223,6 +225,7 @@ class Runner:
         thread.start()
 
     def _shut_down(self) -> None:
+        self.logger.info("Shutdown requested; giving up the running task")
         self.lifecycle.stop()
         self._cancel_active_executor()
         if self._mediated_sidecar is not None:

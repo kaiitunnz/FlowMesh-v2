@@ -187,3 +187,15 @@ def test_a_shutdown_landing_before_the_executor_binds_gives_the_task_up(
 
     assert executor.ran == []
     runner.lifecycle.set_cancelled.assert_called_once()  # type: ignore[attr-defined]
+
+
+def test_a_repeated_stop_starts_one_shutdown(tmp_path: Path) -> None:
+    runner = _runner(tmp_path, _Echo())
+    runner.stop()
+    first = runner._shutdown_thread
+    runner.stop()
+
+    assert runner._shutdown_thread is first
+    assert first is not None
+    first.join(timeout=2.0)
+    runner.lifecycle.stop.assert_called_once_with()  # type: ignore[attr-defined]

@@ -434,8 +434,9 @@ def main() -> None:
     )
 
     # Install signal handlers to allow graceful shutdown
-    def handle_exit_signal(signum: int, _) -> None:
-        logger.info("Received exit signal %d; initiating shutdown", signum)
+    def handle_exit_signal(_signum: int, _) -> None:
+        # No logging here: a handler that takes a lock the interrupted frame holds
+        # never returns.
         runner.stop()
 
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGQUIT):
