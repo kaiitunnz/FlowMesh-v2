@@ -218,6 +218,7 @@ class Runner:
         if self._shutdown_requested.is_set():
             return
         self._shutdown_requested.set()
+        self.lifecycle.begin_draining()
         thread = threading.Thread(
             target=self._shut_down, name="worker-shutdown", daemon=True
         )

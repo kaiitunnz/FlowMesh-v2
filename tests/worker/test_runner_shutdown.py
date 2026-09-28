@@ -235,3 +235,18 @@ def test_a_repeated_stop_starts_one_shutdown(tmp_path: Path) -> None:
     assert first is not None
     first.join(timeout=2.0)
     runner.lifecycle.stop.assert_called_once_with()  # type: ignore[attr-defined]
+
+
+def test_a_stop_refuses_reports_before_its_shutdown_thread_runs(
+    tmp_path: Path,
+) -> None:
+    client = MagicMock()
+    client.dispatch_id.side_effect = lambda task_id: f"dsp-{task_id}"
+    runner = _runner(tmp_path, _Echo())
+    runner.lifecycle = Lifecycle(client, 5, 15, tmp_path / "hb", 0.0)
+
+    with patch.object(threading.Thread, "start"):
+        runner.stop()
+    runner.lifecycle.set_idle("tsk-1")
+
+    client.set_status.assert_not_called()

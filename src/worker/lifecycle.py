@@ -60,7 +60,7 @@ class Lifecycle:
         self._status_lock = threading.Lock()
         self._status = WorkerStatus.STARTING
         self._dispatch_id: str | None = None
-        self._draining = False
+        self._draining = threading.Event()
 
     @property
     def worker_id(self) -> str:
@@ -153,18 +153,22 @@ class Lifecycle:
             WorkerStatus.IDLE, self.client.dispatch_id(task_id), {"last_task": task_id}
         )
 
+    def begin_draining(self) -> None:
+        """Refuse every later status report; safe from a signal handler."""
+        self._draining.set()
+
     def set_draining(self) -> None:
         """Report the worker busy for as long as it runs, so it takes no further task
         while it shuts down."""
+        self._draining.set()
         with self._status_lock:
-            self._draining = True
             self._report_locked(WorkerStatus.BUSY, self._dispatch_id, {})
 
     def _report(
         self, status: WorkerStatus, dispatch_id: str | None, extra: dict[str, Any]
     ) -> None:
         with self._status_lock:
-            if not self._draining:
+            if not self._draining.is_set():
                 self._report_locked(status, dispatch_id, extra)
 
     def _report_locked(
