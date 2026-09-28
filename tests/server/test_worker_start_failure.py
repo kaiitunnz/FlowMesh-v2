@@ -5,6 +5,7 @@ import asyncio
 import contextlib
 import logging
 import threading
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -249,19 +250,35 @@ class TestCancelledCreate:
         assert registry.try_get(adapter.token) is None
 
     @pytest.mark.asyncio
-    async def test_a_destroy_during_the_unwind_stop_waits_for_it(self) -> None:
+    @pytest.mark.parametrize(
+        "stop, stream_closed",
+        [("unwind", False), ("unwind", True), ("timed_out", True)],
+    )
+    async def test_a_destroy_during_a_stop_waits_for_it(
+        self, stop: str, stream_closed: bool
+    ) -> None:
         release, stopped = threading.Event(), threading.Event()
         wm, registry, adapter, created, factory = _creating_manager(release)
         created.stop.side_effect = lambda **_: stopped.wait(timeout=5.0)
-        task = asyncio.ensure_future(
-            asyncio.wait_for(
-                wm.create_worker(WorkerInitConfig(init_on_start=True)), timeout=0.1
+        create = WorkerInitConfig(init_on_start=True)
+        task: asyncio.Future[Any]
+        if stop == "unwind":
+            task = asyncio.ensure_future(
+                asyncio.wait_for(wm.create_worker(create), timeout=0.1)
             )
-        )
-        await asyncio.sleep(0.2)
-        release.set()
+            await asyncio.sleep(0.2)
+            release.set()
+        else:
+            release.set()
+            await wm.create_worker(create)
+            task = asyncio.ensure_future(
+                asyncio.wait_for(wm.stop_worker(adapter.name), timeout=0.1)
+            )
         await asyncio.sleep(0.2)
         assert adapter.status is WorkerStatus.STOPPING
+        if stream_closed:
+            # The worker unregisters as it drains, before its container stops.
+            adapter.set_status(WorkerStatus.STOPPED)
 
         destroy = asyncio.ensure_future(wm.destroy_worker(adapter.name))
         await asyncio.sleep(0.2)

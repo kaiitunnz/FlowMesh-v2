@@ -344,25 +344,18 @@ class WorkerManager:
 
     async def _stop_and_destroy_worker(self, worker: WorkerAdapter) -> bool:
         worker_name = worker.name
-        success = True
-        # A worker another stop is stopping is still running until that stop ends.
-        was_running = worker.status in (
-            WorkerStatus.STARTING,
-            WorkerStatus.RUNNING,
-            WorkerStatus.STOPPING,
-        )
-
+        was_running = worker.status in (WorkerStatus.STARTING, WorkerStatus.RUNNING)
         if was_running:
             self.logger.info("Stopping worker %s...", worker_name)
-            try:
-                success = await worker.stop()
-            except Exception as exc:
-                self.logger.error(
-                    "Failed to stop worker %s: %s", worker_name, repr(exc)
-                )
-                success = False
         else:
             self.logger.info("Destroying worker %s that is not running.", worker_name)
+        # A worker mid-stop runs until that stop ends, whatever its status reads, so
+        # a destroy joins the stop.
+        try:
+            success = await worker.stop()
+        except Exception as exc:
+            self.logger.error("Failed to stop worker %s: %s", worker_name, repr(exc))
+            success = False
 
         try:
             self._destroy_worker(worker)
