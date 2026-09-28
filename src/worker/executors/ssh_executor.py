@@ -142,7 +142,7 @@ class _ChunkReader(io.RawIOBase):
                 self._pending = memoryview(next(self._chunks))
             except StopIteration:
                 return 0
-        # A Docker stream closed before its first read never releases its connection.
+        # Closing a Docker stream before its first read leaves its connection open.
         self._check()
         size = min(len(buffer), len(self._pending))
         buffer[:size] = self._pending[:size]

@@ -1230,8 +1230,8 @@ class OrchestrationEngine:
         )
 
     def suspending_worker(self, task_id: str) -> str | None:
-        """The worker whose step suspended the task on a mediated boundary still
-        awaiting its outcome, or None when the task is not so suspended."""
+        """The worker whose step suspended the task on a mediated boundary that awaits
+        its outcome, or None when the task is not suspended on one."""
         wi = self._work_item_for_task(task_id)
         if (
             wi is None

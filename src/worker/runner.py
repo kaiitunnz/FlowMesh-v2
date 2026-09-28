@@ -278,7 +278,7 @@ class Runner:
 
     def _finish_held_boundaries(self, deadline: float) -> None:
         """Wait until ``deadline`` for control to commit the outcome of each boundary
-        this worker holds for a suspended agent.
+        this worker holds for a suspended step.
 
         The permits that run them and the reaps that acknowledge their outcomes keep
         arriving until the worker unregisters, and an outcome reported after it

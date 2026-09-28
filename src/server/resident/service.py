@@ -386,7 +386,7 @@ class ResidentCapacityControl:
         self._transient_failures: dict[str, int] = {}
         self._attempts: dict[str, _Attempt] = {}
         # The task and call of each workflow origination, so a terminal that ends one
-        # before any attempt still reaps the request its origin worker captured.
+        # before any attempt reaps the request its origin worker captured.
         self._originations: dict[str, tuple[str, str]] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
         self._admit_lock = asyncio.Lock()

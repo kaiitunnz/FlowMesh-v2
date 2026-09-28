@@ -261,9 +261,10 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   durable context and returns a completion, failure, cancellation, yield, or a typed
   boundary request; the server routes a boundary into the ledger and either re-dispatches
   the agent or suspends it until a durable outcome arrives, and a restart resumes with the
-  same context. A suspended agent keeps waiting on its boundary when its worker leaves,
-  and a boundary that worker originated resolves as its loss. The agent's next step runs
-  only on the worker holding its private state, so it fails once that worker is gone. An
+  same context. A suspended agent keeps waiting on its boundary when its worker leaves;
+  a boundary that worker originated settles with its outcome when the worker finished it
+  before leaving, and as its loss otherwise. The agent's next step runs only on the worker
+  holding its private state, so it fails once that worker is gone. An
   agent's harness and managed-model binding are resolved at submission and pinned on its
   compiled operator; the backend comes from `spec.harness.backend` or the
   `AGENT_HARNESS_DEFAULT_BACKEND` default, and an agent with neither fails template

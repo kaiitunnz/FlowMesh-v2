@@ -138,7 +138,8 @@ With one or more `SERVICE` arguments (`server`, `redis_control`,
 `redis_telemetry`) only those services are recreated (`--no-deps
 --force-recreate`), leaving the rest of the stack — including Redis — running.
 When any of them manages workers (the server / supervisor), its workers are
-drained first (once) so their in-flight tasks requeue onto other nodes; the
+drained first (once), which requeues their in-flight tasks that can safely
+re-run onto other nodes; the
 server's healthcheck gates `--wait` until it is back and ready. With no
 argument the whole stack is restarted. To roll a new image across a cluster,
 recreate the server on each node in turn (root last) with `--image-tag` — see

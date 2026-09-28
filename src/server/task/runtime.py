@@ -2472,8 +2472,8 @@ class TaskRuntime:
             record = self._tasks.get(agent_task_id)
             engine = self._engines.get(record.workflow_id) if record else None
             if engine is None or not engine.boundary_settleable(agent_task_id, call):
-                # A duplicate or late report settles nothing, so nothing else reaps
-                # the request its worker still holds.
+                # No settle follows a duplicate or late report, so the request its
+                # worker holds is reaped here.
                 self._reap_mediated_op(worker_id, agent_task_id, call)
                 return
             if outcome.error is not None:
