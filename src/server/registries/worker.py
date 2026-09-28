@@ -348,9 +348,6 @@ class WorkerRegistry:
         if not models_list and not datasets_list:
             return
 
-        if not self.worker_exists(worker_id):
-            return
-
         try:
             current_models_json, current_datasets_json = self._rds.sync.hash_mget(
                 worker_key(worker_id), ["cache_models_json", "cache_datasets_json"]

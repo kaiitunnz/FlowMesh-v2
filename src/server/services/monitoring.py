@@ -907,7 +907,7 @@ class EventMonitor:
                     "Ignoring task event type=%s payload=%s", event_type, event.payload
                 )
 
-    def _return_lost_tasks(self, worker_id: str, graceful: bool = False) -> None:
+    def _return_lost_tasks(self, worker_id: str, graceful: bool) -> None:
         """Return the tasks a departed worker held, settling any being cancelled.
 
         A worker that left on its own shutdown gave its tasks up, so they return

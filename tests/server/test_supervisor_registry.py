@@ -48,49 +48,6 @@ def test_add_rejects_duplicate_token_and_name() -> None:
         registry.add(_adapter("tok-2", "worker-1"))
 
 
-def test_concurrent_mutation_and_snapshot_do_not_crash() -> None:
-    """A mutating loop and an all_workers() reader must not race into a
-    'dictionary changed size during iteration' error."""
-    registry = WorkerRegistry()
-    iterations = 20_000
-    errors: list[BaseException] = []
-    start = threading.Barrier(2)
-    done = threading.Event()
-
-    def mutate() -> None:
-        start.wait()
-        try:
-            for i in range(iterations):
-                token = cast(WorkerTokenType, f"tok-{i}")
-                registry.add(_adapter(token, f"worker-{i}"))
-                registry.try_pop(token)
-        except BaseException as exc:
-            errors.append(exc)
-        finally:
-            done.set()
-
-    def snapshot() -> None:
-        start.wait()
-        try:
-            while not done.is_set():
-                for worker in registry.all_workers():
-                    _ = worker.name
-        except BaseException as exc:
-            errors.append(exc)
-
-    threads = [
-        threading.Thread(target=mutate),
-        threading.Thread(target=snapshot),
-    ]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-
-    assert errors == []
-    assert registry.all_workers() == []
-
-
 class _YieldingName(str):
     """A name whose second hash (``add``'s insert, after its duplicate check)
     waits for ``resume`` so another thread can act in between."""

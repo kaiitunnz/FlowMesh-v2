@@ -69,18 +69,18 @@ class WorkerManager:
         self._is_started: bool = False
         self._capacity_change_callback = capacity_change_callback
         specs: list[ProviderSpec] = []
-        try:
-            specs.append(docker_provider_spec(system_principal))
-        except Exception as exc:
-            logger.warning(
-                "Docker worker provider unavailable, continuing without it: %s", exc
-            )
-        try:
-            specs.append(vastai_provider_spec(system_principal))
-        except Exception as exc:
-            logger.warning(
-                "Vast.ai worker provider unavailable, continuing without it: %s", exc
-            )
+        for label, build_spec in (
+            ("Docker", docker_provider_spec),
+            ("Vast.ai", vastai_provider_spec),
+        ):
+            try:
+                specs.append(build_spec(system_principal))
+            except Exception as exc:
+                logger.warning(
+                    "%s worker provider unavailable, continuing without it: %s",
+                    label,
+                    exc,
+                )
         self._providers: dict[str, ProviderSpec] = {spec.name: spec for spec in specs}
 
     @property
