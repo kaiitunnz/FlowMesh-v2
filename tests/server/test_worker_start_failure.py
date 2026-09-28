@@ -1,6 +1,7 @@
 """Tests for how the worker manager reports a worker that fails to start or is
 torn down."""
 
+import asyncio
 import logging
 from unittest.mock import AsyncMock, MagicMock
 
@@ -95,6 +96,30 @@ class TestCreateWorkerFailure:
 
         with pytest.raises(OSError, match="docker unavailable"):
             await wm.create_worker(WorkerInitConfig(init_on_start=True))
+
+        wm._stop_and_destroy_worker.assert_awaited_once_with(worker)
+        registry.try_pop.assert_called_once_with(worker.token)
+
+    @pytest.mark.asyncio
+    async def test_a_create_its_command_times_out_unwinds_the_worker_it_made(
+        self,
+    ) -> None:
+        registry = MagicMock()
+        wm = StubWorkerManager(registry)
+        worker = _worker(started=True)
+
+        async def long_pull() -> bool:
+            await asyncio.sleep(60)
+            return True
+
+        worker.start = AsyncMock(side_effect=long_pull)
+        wm._create_worker = MagicMock(return_value=worker)  # type: ignore[method-assign]
+        wm._stop_and_destroy_worker = AsyncMock(return_value=True)  # type: ignore[method-assign]
+
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(
+                wm.create_worker(WorkerInitConfig(init_on_start=True)), timeout=0.05
+            )
 
         wm._stop_and_destroy_worker.assert_awaited_once_with(worker)
         registry.try_pop.assert_called_once_with(worker.token)

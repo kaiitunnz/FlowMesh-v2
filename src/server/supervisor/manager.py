@@ -193,11 +193,12 @@ class WorkerManager:
 
         worker = self._create_worker(init_config)
         if init_config.init_on_start:
-            # A worker created here must not hold its name or GPUs against a retry.
+            # A worker created here must not hold its name or GPUs against a retry,
+            # including when its command times out and cancels the start.
             try:
                 if not await self._start_worker(worker):
                     raise RuntimeError(f"Failed to start worker '{worker.name}'")
-            except Exception:
+            except BaseException:
                 await self._stop_and_destroy_worker(worker)
                 self._registry.try_pop(worker.token)
                 raise
