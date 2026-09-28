@@ -103,6 +103,7 @@ from ..orchestration import (
 )
 from ..orchestration.episode import BoundaryEvent
 from ..orchestration.harness import to_boundary_event
+from ..orchestration.state import TERMINAL_WORK_ITEM_STATUSES
 from ..orchestration.telemetry import build_span_emitter
 from ..orchestration.tool_dispatch import (
     MODEL_INTERFACE,
@@ -6051,7 +6052,7 @@ class TaskRuntime:
     ) -> SettleOutcome | None:
         """Resolve a dispatch its live worker keeps reporting it does not hold as lost.
 
-        Only a dispatch no event of has applied, recorded at least ``bound_sec`` ago,
+        Only a dispatch recorded at least ``bound_sec`` ago with no event of it applied
         resolves: the bound a silent worker gets before it is declared dead. Nothing
         revokes the dispatch, so it may still reach its worker and run; it resolves as
         a lost dispatch does. A task being cancelled settles CANCELLED; any other
@@ -6093,17 +6094,30 @@ class TaskRuntime:
             self._release_pending_terminations()
 
     def _awaits_its_dispatch_locked(self, record: TaskRecord) -> bool:
-        """Whether a v2 task's work item still waits on its dispatch to run, as
-        opposed to a step of it that ran and suspended on a boundary."""
+        """Whether the task's dispatch is waiting to run it: a task being cancelled
+        settles whatever its work item's state, and any other v2 task's work item is
+        neither settled nor ended at a suspension."""
         engine = self._engines.get(record.workflow_id)
-        if engine is None:
+        if engine is None or record.status == TaskStatus.CANCELLING:
             return True
         wi = engine.work_item(record.task_id)
-        if wi is None:
-            return False
-        if engine.input_preparation(record.task_id) is not None:
-            return wi.status is WorkItemStatus.READY
-        return wi.status is WorkItemStatus.DISPATCHED
+        return (
+            wi is not None
+            and wi.status not in TERMINAL_WORK_ITEM_STATUSES
+            and not self._dispatch_ended_at_suspension_locked(record)
+        )
+
+    def _dispatch_ended_at_suspension_locked(self, record: TaskRecord) -> bool:
+        """Whether a task's dispatch ended at a suspension: a step of it ran and
+        suspended on a boundary, so its worker holds nothing of it, though the task
+        stays DISPATCHED until the boundary settles."""
+        engine = self._engines.get(record.workflow_id)
+        wi = engine.work_item(record.task_id) if engine is not None else None
+        return (
+            record.status == TaskStatus.DISPATCHED
+            and wi is not None
+            and wi.status is WorkItemStatus.BLOCKED
+        )
 
     def dispatch_in_flight(
         self, task_id: str, dispatch_id: str, worker_id: str

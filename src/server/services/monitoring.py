@@ -917,10 +917,10 @@ class EventMonitor:
         A fenced IDLE names a reservation for a dispatch the worker never reported
         running; once no publish or task holds that dispatch, it was lost before it
         reached the worker, so the worker is released. A dispatch still held that the
-        worker's heartbeats keep disowning resolves as lost once the worker has
-        disowned it for as long as a silent worker takes to be declared dead: a worker
-        reports a dispatch busy before it runs anything of it, and its heartbeat repeats
-        that report.
+        worker's heartbeats disown resolves as lost once it was recorded as long ago as
+        a silent worker takes to be declared dead, as
+        ``TaskRuntime.resolve_disowned_dispatch`` states: a worker reports a dispatch
+        busy before it runs anything of it, and its heartbeat repeats that report.
         """
         match report.outcome:
             case ReportOutcome.UNKNOWN:

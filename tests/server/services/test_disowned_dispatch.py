@@ -27,7 +27,7 @@ from shared.schemas.event import WorkerEvent
 from shared.schemas.worker import WorkerStatus
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.registries.test_worker_status_fence import _Rds
-from tests.server.services.test_task_event_fence import _ECHO, _worker
+from tests.server.services.test_task_event_fence import _ECHO, _ECHO_V2, _worker
 from tests.server.task.test_task_merge import (
     _monitor,
     _next,
@@ -70,12 +70,12 @@ def client() -> Iterator[redis.Redis]:
 
 
 def _dispatched(
-    client: redis.Redis, workers: tuple[str, ...] = (_WORKER,)
+    client: redis.Redis, workers: tuple[str, ...] = (_WORKER,), workflow: str = _ECHO
 ) -> tuple[TaskRuntime, EventMonitor, Dispatcher, str, str]:
-    """A v1 task dispatched to the live worker, with the monitor handling its events."""
+    """A task dispatched to the live worker, with the monitor handling its events."""
     registry = WorkerRegistry(cast(Any, _Rds(client)))
     runtime = _runtime(_Registry(), registry)
-    workflow_id, _ = asyncio.run(_register(runtime, _ECHO))
+    workflow_id, _ = asyncio.run(_register(runtime, workflow))
     task_id = _next(runtime)
     pool = Mock()
     pool.idle_satisfying_pool.return_value = [_worker(workers[0])]
@@ -196,10 +196,11 @@ def test_a_late_start_of_a_resolved_dispatch_is_fenced(client: redis.Redis) -> N
 
 
 @_live
+@pytest.mark.parametrize("workflow", [_ECHO, _ECHO_V2], ids=["v1", "v2"])
 def test_a_disowned_dispatch_being_cancelled_settles_cancelled(
-    client: redis.Redis,
+    client: redis.Redis, workflow: str
 ) -> None:
-    runtime, monitor, _, workflow_id, task_id = _dispatched(client)
+    runtime, monitor, _, workflow_id, task_id = _dispatched(client, workflow=workflow)
     runtime.cancel_workflow(workflow_id)
     assert runtime._tasks[task_id].status == TaskStatus.CANCELLING
     _age(runtime, task_id, _PAST_BOUND_SEC)

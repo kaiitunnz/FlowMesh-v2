@@ -411,3 +411,27 @@ async def test_a_preparation_dispatch_lost_after_a_restart_prepares_again(
     assert record is not None and record.status == TaskStatus.PENDING
     assert _next(restored) == task_id
     assert restored.prepares_inputs(task_id) is True
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("prepared", [False, True], ids=["preparation", "embodiment"])
+async def test_a_disowned_dispatch_of_an_upstream_leaf_resolves(prepared: bool) -> None:
+    runtime = _runtime()
+    task_id = await _upstream_task(runtime, max_items=None)
+    source = _next(runtime)
+    assert source is not None
+    record_dispatch(runtime, source, "wkr-0", "dsp-0")
+    runtime.mark_succeeded(
+        source, "wkr-0", _planned(runtime, source, ["a", "b"]), now_iso(), "dsp-0"
+    )
+    assert _next(runtime) == task_id
+    if prepared:
+        _report(runtime, task_id)
+        assert _next(runtime) == task_id
+    record_dispatch(runtime, task_id, "wkr-1", "dsp-1", input_preparation=not prepared)
+
+    outcome = runtime.resolve_disowned_dispatch(task_id, "dsp-1", "wkr-1", 0)
+
+    assert outcome is not None and outcome.effect is EventEffect.RETURNED
+    record = runtime.get_record(task_id)
+    assert record is not None and record.status == TaskStatus.PENDING
