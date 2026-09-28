@@ -1000,7 +1000,7 @@ def test_a_boundary_whose_settle_a_crash_cut_short_is_issued_again() -> None:
     asyncio.run(run())
 
 
-def _leave(runtime, how: str, worker: str = "wkr-1") -> None:
+def _leave(runtime: TaskRuntime, how: str, worker: str = "wkr-1") -> None:
     if how == "expired":
         runtime.recover_tasks_for_worker(worker)
     else:

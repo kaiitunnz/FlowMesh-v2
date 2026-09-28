@@ -6095,8 +6095,8 @@ class TaskRuntime:
         returns without spending an attempt, or fails as on its worker's loss when it
         is a v2 task that cannot safely re-run. The worker is excluded from the task's
         next placement, so a worker that cannot take the task never gets it back. A
-        task bound to that worker's private state must go back to it, so its return
-        spends an attempt instead. Returns None when the dispatch does not resolve.
+        task bound to that worker's private state goes back to it, and its return
+        spends an attempt. Returns None when the dispatch does not resolve.
         """
         try:
             with self._cv:
@@ -6136,9 +6136,13 @@ class TaskRuntime:
     def _retry_on_owner_locked(
         self, record: TaskRecord, worker_id: str
     ) -> SettleOutcome:
-        """Return a task bound to its worker's private state, spending an attempt: its
-        placement goes back to that worker, so the attempt budget bounds how often the
-        worker disowns it."""
+        """Return a task bound to its worker's private state, spending an attempt.
+
+        The task can run only on that worker, so the attempt budget bounds how often
+        the worker disowns it. A late delivery of the disowned dispatch may still run
+        there: its events are fenced, and a retry that finds the private state it
+        changed fails closed.
+        """
         end = self._return_dispatch_locked(record, increment_retry=True, front=True)
         if end is DispatchEnd.RETURNED:
             return _settle_outcome(EventEffect.RETURNED, record, [], [])
@@ -6148,9 +6152,9 @@ class TaskRuntime:
         return _settle_outcome(EventEffect.FAILED, record, [], usages, tuple(impacted))
 
     def _awaits_its_dispatch_locked(self, record: TaskRecord) -> bool:
-        """Whether the task's dispatch is waiting to run it: a task being cancelled
-        settles whatever its work item's state, and any other v2 task's work item is
-        neither settled nor ended at a suspension."""
+        """Whether the task's dispatch may still run it: always for a cancelling or v1
+        task; for any other v2 task, while its work item is unsettled and its dispatch
+        did not end at a suspension."""
         engine = self._engines.get(record.workflow_id)
         if engine is None or record.status == TaskStatus.CANCELLING:
             return True

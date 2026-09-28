@@ -659,7 +659,7 @@ class SSHExecutor(Executor):
             )
             self._signals.raise_if_cancelled()
             # Output written after the last poll is checked once the session ends,
-            # before the container's own logs join it.
+            # before the container's logs are saved under it.
             max_bytes = _output_limit(cfg.output)
             if mount_plan.direct_output_path is not None and max_bytes is not None:
                 _raise_if_exceeded(

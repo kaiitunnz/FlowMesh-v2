@@ -917,10 +917,10 @@ class EventMonitor:
         A fenced IDLE names a reservation for a dispatch the worker never reported
         running; once no publish or task holds that dispatch, it was lost before it
         reached the worker, so the worker is released. A dispatch still held that the
-        worker's heartbeats disown resolves as lost once it was recorded as long ago as
-        a silent worker takes to be declared dead, as
-        ``TaskRuntime.resolve_disowned_dispatch`` states: a worker reports a dispatch
-        busy before it runs anything of it, and its heartbeat repeats that report.
+        worker's heartbeats disown resolves as lost once the bound a silent worker gets
+        has passed since it was recorded (see
+        ``TaskRuntime.resolve_disowned_dispatch``): a worker reports a dispatch busy
+        before it runs anything of it, and its heartbeat repeats that report.
         """
         match report.outcome:
             case ReportOutcome.UNKNOWN:
@@ -1142,7 +1142,8 @@ class EventMonitor:
         Idempotent: the gated edge skips a task that already has a live binding, so
         repeated updates do not re-adopt. Runs after the record's endpoint is stored so
         the adoption probe reads it, and adopts only while the update's dispatch holds
-        the task, since a release that ran first had nothing to drain.
+        the task: a release that ran first found nothing to drain, so a later adoption
+        would outlive the task.
         """
         if self._gated_serve is None:
             return

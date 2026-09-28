@@ -297,9 +297,7 @@ def test_a_dispatch_an_event_applied_to_never_resolves() -> None:
     assert _resolve(runtime, ids["a"])() is None
 
 
-def test_a_task_bound_to_its_owner_that_keeps_disowning_it_fails_at_its_budget() -> (
-    None
-):
+def test_a_task_its_owner_keeps_disowning_fails_at_its_budget() -> None:
     runtime = _runtime(_Registry())
     _, ids = asyncio.run(_register(runtime, _ECHO_V2))
     task_id = ids["a"]
