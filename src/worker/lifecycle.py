@@ -60,6 +60,7 @@ class Lifecycle:
         self._status_lock = threading.Lock()
         self._status = WorkerStatus.STARTING
         self._dispatch_id: str | None = None
+        self._draining = False
 
     @property
     def worker_id(self) -> str:
@@ -153,20 +154,27 @@ class Lifecycle:
         )
 
     def set_draining(self) -> None:
-        """Report the worker busy, so it takes no further task while it shuts down."""
+        """Report the worker busy for as long as it runs, so it takes no further task
+        while it shuts down."""
         with self._status_lock:
-            dispatch_id = self._dispatch_id
-        self._report(WorkerStatus.BUSY, dispatch_id, {})
+            self._draining = True
+            self._report_locked(WorkerStatus.BUSY, self._dispatch_id, {})
 
     def _report(
         self, status: WorkerStatus, dispatch_id: str | None, extra: dict[str, Any]
     ) -> None:
         with self._status_lock:
-            self._status, self._dispatch_id = status, dispatch_id
-            try:
-                self.client.set_status(status, extra, dispatch_id)
-            except Exception:
-                pass
+            if not self._draining:
+                self._report_locked(status, dispatch_id, extra)
+
+    def _report_locked(
+        self, status: WorkerStatus, dispatch_id: str | None, extra: dict[str, Any]
+    ) -> None:
+        self._status, self._dispatch_id = status, dispatch_id
+        try:
+            self.client.set_status(status, extra, dispatch_id)
+        except Exception:
+            pass
 
     def set_failed(
         self,

@@ -240,7 +240,7 @@ class SupervisorClient:
             metrics=metrics or {},
             payload={"ttl_sec": ttl_sec},
         )
-        self._send_event(event)
+        self._offer_event(event)
 
     def set_status(
         self,
@@ -255,7 +255,7 @@ class SupervisorClient:
             dispatch_id=dispatch_id,
             payload=extra or {},
         )
-        self._send_event(event)
+        self._offer_event(event)
 
     def unregister(
         self,
@@ -638,6 +638,19 @@ class SupervisorClient:
         # Wait until the stream is ready without an explicit timeout.
         if not self._event_ready.wait():
             raise RuntimeError("Supervisor event stream not ready")
+        self._event_queue.put(serialize_event(event))
+
+    def _offer_event(self, event: Event) -> None:
+        """Send an event the worker repeats, dropping it while the stream is down.
+
+        Every heartbeat repeats the worker's status, so a report lost to an outage is
+        restored by the first heartbeat after it rather than waited for.
+        """
+        if self._stub is None:
+            raise RuntimeError("Supervisor gRPC client not started")
+        if not self._event_ready.is_set():
+            self.logger.debug("Event stream not ready; dropping %s", event.type)
+            return
         self._event_queue.put(serialize_event(event))
 
     def push_mediated_outcome(self, outcome: MediatedOperationOutcome) -> None:

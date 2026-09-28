@@ -1,19 +1,23 @@
 """Runner shutdown and the bookkeeping of cancels and stops it was sent."""
 
+import logging
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from shared.schemas.result import BaseExecutorResult
 from shared.tasks.task_type import TaskType
+from shared.tasks.worker_message import WorkerStatus
 from tests.worker.factories import make_worker_hardware, make_worker_task_message
 from worker.executors.base_executor import Executor
+from worker.lifecycle import Lifecycle
 from worker.main import run_until_exit
 from worker.runner import Runner
+from worker.supervisor_client import SupervisorClient
 
 
 class _Echo(Executor):
@@ -122,15 +126,47 @@ def test_a_requested_shutdown_unregisters_gracefully(tmp_path: Path) -> None:
 
 def test_a_worker_shutting_down_never_reports_itself_idle(tmp_path: Path) -> None:
     runner: Runner
+    client = MagicMock()
+    client.dispatch_id.side_effect = lambda task_id: f"dsp-{task_id}"
 
     def stop_while_running(_task_id: str) -> None:
         runner.stop()
+        assert runner._shutdown_thread is not None
+        runner._shutdown_thread.join(timeout=2.0)
 
     runner = _runner(tmp_path, _Echo(on_run=stop_while_running), "tsk-1")
+    stub = runner.lifecycle.client
+    client.worker_id = runner.lifecycle.worker_id
+    client.create_task_log_emitter = stub.create_task_log_emitter
+    client.iter_interrupts, client.iter_stops = stub.iter_interrupts, stub.iter_stops
+    runner.lifecycle = Lifecycle(client, 5, 15, tmp_path / "hb", 0.0)
     runner.start()
 
-    runner.lifecycle.set_busy.assert_called_once_with("tsk-1")  # type: ignore[attr-defined]
-    runner.lifecycle.set_idle.assert_not_called()  # type: ignore[attr-defined]
+    statuses = [call.args[0] for call in client.set_status.call_args_list]
+    assert statuses == [WorkerStatus.BUSY, WorkerStatus.BUSY]
+
+
+def test_a_shutdown_gives_the_task_up_while_the_event_stream_is_down(
+    tmp_path: Path,
+) -> None:
+    client = SupervisorClient(
+        "tok", None, "127.0.0.1:1", "ns", "c", "a", logging.getLogger("test")
+    )
+    client._worker_id = "wkr-1"
+    # Started, with its event stream reconnecting.
+    client._stub = cast(Any, object())
+    client._event_ready.clear()
+    runner = _runner(tmp_path, _Echo())
+    runner.lifecycle = Lifecycle(client, 5, 15, tmp_path / "hb", 0.0)
+    threading.Thread(target=runner.lifecycle._hb_loop, daemon=True).start()
+
+    with patch.object(runner, "_cancel_active_executor") as cancel:
+        runner.stop()
+        assert runner._shutdown_thread is not None
+        runner._shutdown_thread.join(timeout=2.0)
+
+    assert not runner._shutdown_thread.is_alive()
+    cancel.assert_called_once_with()
 
 
 class _Recording(_Echo):

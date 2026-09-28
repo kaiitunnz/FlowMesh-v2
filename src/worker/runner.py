@@ -1016,9 +1016,7 @@ class Runner:
                         self._pending_stops.discard(task_id)
                     with self._active_executor_lock:
                         self._active_executor_last_used_at = time.time()
-                    # A worker shutting down takes no further task.
-                    if not self._shutdown_requested.is_set():
-                        self.lifecycle.set_idle(task_id)
+                    self.lifecycle.set_idle(task_id)
                     if task_log_emitter is not None:
                         if log_handler_attached:
                             logging.getLogger().removeHandler(task_log_emitter)

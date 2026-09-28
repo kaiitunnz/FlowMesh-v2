@@ -95,3 +95,14 @@ def test_a_heartbeat_never_trails_a_report_sent_before_it(tmp_path: Path) -> Non
     reporter.join(timeout=2.0)
 
     assert sent == [WorkerStatus.IDLE, WorkerStatus.IDLE]
+
+
+def test_a_draining_worker_never_reports_itself_idle(tmp_path: Path) -> None:
+    lifecycle, client = _lifecycle(tmp_path)
+    lifecycle.set_busy("tsk-1")
+    lifecycle.set_draining()
+
+    lifecycle.set_idle("tsk-1")
+
+    assert client.set_status.call_args.args[0] is WorkerStatus.BUSY
+    assert _heartbeat(lifecycle, client)["status"] is WorkerStatus.BUSY
