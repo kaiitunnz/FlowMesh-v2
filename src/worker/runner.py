@@ -199,6 +199,19 @@ class Runner:
                         "Error cancelling active executor during shutdown: %s", exc
                     )
 
+    def _cleanup_active_executor_in_budget(self) -> None:
+        """Clean up the active executor, within what is left of a requested stop."""
+        if self._stop_deadline is None:
+            self._cleanup_active_executor()
+            return
+        cleanup = threading.Thread(
+            target=self._cleanup_active_executor, name="executor-cleanup", daemon=True
+        )
+        cleanup.start()
+        cleanup.join(self._stop_time_left())
+        if cleanup.is_alive():
+            self.logger.warning("Leaving the executor's cleanup unfinished at shutdown")
+
     def _cleanup_active_executor(self) -> None:
         self._cancel_active_executor()
         with self._active_executor_lock:
@@ -1092,7 +1105,7 @@ class Runner:
         finally:
             if self._shutdown_thread is not None:
                 self._shutdown_thread.join()
-            self._cleanup_active_executor()
+            self._cleanup_active_executor_in_budget()
             self._stop_interrupt_monitor(min(2.0, self._stop_time_left()))
             self._stop_idle_checker(min(2.0, self._stop_time_left()))
 

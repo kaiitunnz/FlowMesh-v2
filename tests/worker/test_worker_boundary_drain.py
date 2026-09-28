@@ -203,3 +203,31 @@ def test_a_held_model_turn_does_not_hold_the_boundary_drain(tmp_path: Path) -> N
         runner._finish_held_boundaries(started + 5.0)
 
     assert time.monotonic() - started < 1.0
+
+
+class _SlowCleanup(_Echo):
+    def cleanup_after_run(self) -> None:
+        time.sleep(3.0)
+
+
+def test_a_slow_executor_cleanup_still_unregisters_inside_the_stop_budget(
+    tmp_path: Path,
+) -> None:
+    order: list[str] = []
+    runner, client = _draining_runner(tmp_path, None, order)
+    executor = _SlowCleanup(on_run=lambda _task_id: runner.stop())
+    runner.executors = {"echo": executor, "default": executor}
+    runner.default_executor = executor
+    unregistered: list[float] = []
+    client.unregister.side_effect = lambda *_, **__: unregistered.append(
+        time.monotonic()
+    )
+    started = time.monotonic()
+
+    with (
+        patch.object(runner_module, "_STOP_BUDGET_SEC", 2.0),
+        patch.object(runner_module, "_BOUNDARY_DRAIN_SEC", 0.5),
+    ):
+        run_until_exit(runner, runner.lifecycle, MagicMock())
+
+    assert unregistered and unregistered[0] - started < 2.5
