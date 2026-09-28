@@ -1,6 +1,8 @@
 """Tests for the supervisor Docker adapter's handling of a concurrent remove."""
 
+import asyncio
 import logging
+import threading
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
@@ -236,3 +238,52 @@ class TestStopOrder:
         assert _adapter(self._docker(events, NotFound("gone")))._stop() is True
 
         assert events == ["ssh stopped", "ssh removed", "volume removed"]
+
+
+class TestCancelledStart:
+    @pytest.mark.asyncio
+    async def test_a_start_cancelled_mid_create_is_stopped_by_the_unwind(
+        self,
+    ) -> None:
+        creating = threading.Event()
+        release = threading.Event()
+        created = MagicMock(status="running")
+        docker_client = MagicMock()
+        containers: list[MagicMock] = []
+
+        def get(_name: str) -> MagicMock:
+            if not containers:
+                raise NotFound("gone")
+            return containers[0]
+
+        def run(**_: Any) -> MagicMock:
+            creating.set()
+            # The create outlives the cancel of the start awaiting it.
+            release.wait(timeout=5.0)
+            containers.append(created)
+            return created
+
+        docker_client.containers.get.side_effect = get
+        docker_client.containers.run.side_effect = run
+        docker_client.containers.list.return_value = []
+        docker_client.volumes.list.return_value = []
+        adapter = _adapter(docker_client)
+
+        async def create() -> None:
+            try:
+                await adapter.start()
+            except BaseException:
+                await adapter.stop()
+                raise
+
+        task = asyncio.ensure_future(create())
+        await asyncio.to_thread(creating.wait, 5.0)
+        task.cancel()
+        # An unwind that runs before the create finishes finds no container to stop.
+        await asyncio.wait({task}, timeout=0.3)
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        created.stop.assert_called_once()
+        created.remove.assert_called_once()
