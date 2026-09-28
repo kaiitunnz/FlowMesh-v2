@@ -1962,6 +1962,20 @@ class TaskRuntime:
         self._save_ledger_locked(record.workflow_id)
         self._cv.notify_all()
 
+    def _end_suspended_dispatch_locked(self, record: TaskRecord) -> None:
+        """Release the worker of an episode step that suspended on a boundary: the
+        step ended its dispatch on the worker, though the task holds it until the
+        boundary settles."""
+        engine = self._engines.get(record.workflow_id)
+        wi = engine.work_item(record.task_id) if engine is not None else None
+        if (
+            record.status == TaskStatus.DISPATCHED
+            and wi is not None
+            and wi.status is WorkItemStatus.BLOCKED
+            and (held := self._held_dispatches.pop(record.task_id, None)) is not None
+        ):
+            self._ended_dispatches.append(held)
+
     def _reenqueue_episode_locked(self, task_id: str) -> None:
         """Re-ready a still-running agent episode for its next run-to-yield step."""
         record = self._tasks.get(task_id)
@@ -4853,6 +4867,7 @@ class TaskRuntime:
                     # A non-terminal episode step routes its boundary and re-dispatches;
                     # a completion falls through to the terminal path below.
                     self._apply_episode_step_locked(task_id, harness_result)
+                    self._end_suspended_dispatch_locked(record)
                     return _settle_outcome(
                         effect, record, [], _in_flight_usage(task_id, payload)
                     )
@@ -4876,6 +4891,7 @@ class TaskRuntime:
                     self._route_and_dispatch_facade_group_locked(
                         task_id, group, harness_result.capsule
                     )
+                    self._end_suspended_dispatch_locked(record)
                     return _settle_outcome(
                         effect, record, [], _in_flight_usage(task_id, payload)
                     )

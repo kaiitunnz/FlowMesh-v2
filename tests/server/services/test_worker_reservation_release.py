@@ -18,14 +18,22 @@ import redis
 
 from server.clients.redis import WORKERS_SET_KEY, worker_hb_key, worker_key
 from server.dispatcher.base import Dispatcher
+from server.orchestration import WorkItemStatus
 from server.registries.worker import WorkerRegistry
 from server.services.monitoring import EventMonitor
 from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime
 from shared.schemas.event import WorkerEvent
 from shared.schemas.worker import WorkerStatus
+from tests.server.dispatch_helpers import record_dispatch
 from tests.server.registries.test_worker_status_fence import _Rds
 from tests.server.services.test_task_event_fence import _ECHO, _event, _worker
+from tests.server.task.test_agent_episode_runtime import (
+    _AGENT_WF,
+    _HOLDER,
+    _MODEL_HELD_SCRIPT,
+    _TS,
+)
 from tests.server.task.test_task_merge import (
     _monitor,
     _next,
@@ -33,6 +41,9 @@ from tests.server.task.test_task_merge import (
     _Registry,
     _runtime,
 )
+from tests.server.task.test_v2_orchestration import _register as _register_v2
+from tests.server.task.test_v2_orchestration import _runtime as _v2_runtime
+from worker.executors.harness.scripted import ScriptedHarnessAdapter
 
 _LIVE_URL = os.getenv("FLOWMESH_TEST_REDIS_URL")
 
@@ -141,3 +152,39 @@ def test_a_restart_releases_a_reservation_whose_dispatch_ended(
     # A root restarted after the task settled holds no dispatch for it.
     _runtime(_Registry(), registry).release_ended_reservations()
     assert _state(client) == {"status": "IDLE"}
+
+
+def test_a_worker_whose_agent_step_suspended_is_freed(client: redis.Redis) -> None:
+    async def run() -> None:
+        registry = WorkerRegistry(cast(Any, _Rds(client)))
+        runtime = _v2_runtime(_Registry())
+        runtime._worker_registry = registry
+        monitor = _monitor(runtime)
+        monitor._worker_registry = registry
+        runtime.set_model_settler(lambda _envelope: None)
+        workflow_id, ids = await _register_v2(runtime, _AGENT_WF)
+        writer = ids["writer"]
+        adapter = ScriptedHarnessAdapter(_MODEL_HELD_SCRIPT, "v1")
+        dispatch = runtime.agent_episode_dispatch(writer, _HOLDER)
+        assert dispatch is not None
+        registry.reserve_worker(_WORKER, writer, "dsp-1")
+        record_dispatch(runtime, writer, _WORKER, "dsp-1")
+        monitor._handle_worker_event(_unversioned(WorkerStatus.BUSY))
+        step = adapter.start(writer, capsule=None, outcomes=dispatch.delivered_outcomes)
+
+        runtime.mark_succeeded(
+            writer,
+            _WORKER,
+            {"agent_episode": step.model_dump(mode="json")},
+            _TS,
+            "dsp-1",
+        )
+        monitor._handle_worker_event(_unversioned(WorkerStatus.IDLE))
+
+        engine = runtime.orchestration_engine(workflow_id)
+        assert engine is not None
+        work_item = engine.work_item(writer)
+        assert work_item is not None and work_item.status is WorkItemStatus.BLOCKED
+        assert _state(client) == {"status": "IDLE"}
+
+    asyncio.run(run())
