@@ -198,7 +198,9 @@ class TestStopOrder:
         ssh_container = MagicMock(status="running")
         ssh_container.name = "ssh_0"
         ssh_container.stop.side_effect = lambda **_: events.append("ssh stopped")
-        ssh_container.remove.side_effect = lambda **_: events.append("ssh removed")
+        ssh_container.remove.side_effect = lambda **kwargs: events.append(
+            "ssh removed" if kwargs == {"force": True} else "ssh removed unforced"
+        )
         docker_client.containers.list.return_value = [ssh_container]
         volume = MagicMock()
         volume.remove.side_effect = lambda **_: events.append("volume removed")
@@ -216,7 +218,6 @@ class TestStopOrder:
         assert events == [
             "worker stopped",
             "worker removed",
-            "ssh stopped",
             "ssh removed",
             "volume removed",
         ]
@@ -242,7 +243,6 @@ class TestStopOrder:
 
         assert events == [
             "worker stopped",
-            "ssh stopped",
             "ssh removed",
             "volume removed",
         ]
@@ -252,7 +252,7 @@ class TestStopOrder:
 
         assert _adapter(self._docker(events, NotFound("gone")))._stop() is True
 
-        assert events == ["ssh stopped", "ssh removed", "volume removed"]
+        assert events == ["ssh removed", "volume removed"]
 
 
 class TestCancelledStart:

@@ -518,10 +518,10 @@ class DockerWorkerAdapter(WorkerAdapter):
 
     def _remove_owned_ssh_resources(self) -> None:
         # A volume is in use until the container mounting it is removed.
-        self._stop_owned_ssh_containers()
+        self._remove_owned_ssh_containers()
         self._remove_owned_ssh_volumes()
 
-    def _stop_owned_ssh_containers(self) -> None:
+    def _remove_owned_ssh_containers(self) -> None:
         try:
             containers = self._docker.containers.list(
                 all=True, filters={"label": f"{_SSH_OWNER_LABEL}={self.container_name}"}
@@ -534,17 +534,9 @@ class DockerWorkerAdapter(WorkerAdapter):
             )
             return
 
+        # The worker has stopped, so nothing of its own will stop these; a staging
+        # container's shell ignores SIGTERM, so a graceful stop only waits it out.
         for ssh_container in containers:
-            try:
-                ssh_container.reload()
-                if ssh_container.status == "running":
-                    ssh_container.stop(timeout=_STOP_TIMEOUT)
-            except Exception as exc:
-                logger.warning(
-                    "Failed to stop SSH session container %s: %s",
-                    ssh_container.name,
-                    repr(exc),
-                )
             try:
                 ssh_container.remove(force=True)
             except Exception as exc:
