@@ -383,6 +383,21 @@ def test_a_pull_error_fails_the_task(executor: SSHExecutor) -> None:
         executor._pull_image(client, "alpine:404")
 
 
+def test_a_failed_staging_pull_is_retryable(executor: SSHExecutor) -> None:
+    client = MagicMock()
+    client.images.get.side_effect = NotFound("No such image: busybox")
+    client.api.pull.return_value = (line for line in [{"error": "toomanyrequests"}])
+
+    with (
+        executor._signals.running(_TASK_ID),
+        pytest.raises(ExecutionError) as failed,
+    ):
+        executor._run_staging_container(client, {"image": "busybox"}, {})
+
+    assert failed.value.retryable is True
+    client.containers.create.assert_not_called()
+
+
 def test_a_bundle_download_is_abandoned_once_a_signal_lands(
     executor: SSHExecutor, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

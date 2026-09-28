@@ -1153,15 +1153,20 @@ class SSHExecutor(Executor):
         assert isinstance(container, Container)
         return container, log_stream
 
-    def _ensure_image(self, client: DockerClient, image: str) -> None:
-        """Pull an image the daemon lacks."""
+    def _ensure_image(
+        self, client: DockerClient, image: str, *, retryable: bool = False
+    ) -> None:
+        """Pull an image the daemon lacks; ``retryable`` marks a failed pull that may
+        succeed on another attempt."""
         try:
             client.images.get(image)
         except NotFound:
             logger.info("Pulling missing image %s", image)
-            self._pull_image(client, image)
+            self._pull_image(client, image, retryable=retryable)
 
-    def _pull_image(self, client: DockerClient, image: str) -> None:
+    def _pull_image(
+        self, client: DockerClient, image: str, *, retryable: bool = False
+    ) -> None:
         """Pull an image, abandoning the pull once a cancel or stop reaches the task."""
         progress = client.api.pull(image, stream=True, decode=True)
         try:
@@ -1169,7 +1174,9 @@ class SSHExecutor(Executor):
                 if self._signals.interrupted:
                     raise _Interrupted
                 if error := line.get("error"):
-                    raise ExecutionError(f"Failed to pull image '{image}': {error}")
+                    raise ExecutionError(
+                        f"Failed to pull image '{image}': {error}", retryable=retryable
+                    )
         finally:
             progress.close()
 
@@ -1424,7 +1431,7 @@ class SSHExecutor(Executor):
         A staging failure is retryable: it is a download or a copy that may succeed on
         another attempt. A cancel or stop ends it with `_Interrupted`.
         """
-        self._ensure_image(client, create_kwargs["image"])
+        self._ensure_image(client, create_kwargs["image"], retryable=True)
         container = client.containers.create(**create_kwargs)
         try:
             if hydrated:
