@@ -257,14 +257,17 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   completion.
 - **Agent-episode dispatch seam.** Every agent dispatches to the `AgentEpisodeExecutor`,
   which runs one adapter step per dispatch behind its resolved backend key (the built-in
-  `scripted` backend or the `codex` app-server binding). A step resumes the agent's durable
-  context and returns a completion, failure, cancellation, yield, or a typed boundary
-  request; the server routes a boundary into the ledger and either re-dispatches the agent
-  or suspends it until a durable outcome arrives, and a restart resumes with the same
-  context. An agent's harness and managed-model binding are resolved at submission and
-  pinned on its compiled operator; the backend comes from `spec.harness.backend` or the
-  `AGENT_HARNESS_DEFAULT_BACKEND` default, and an agent with neither fails template
-  validation. `agent` is a v2-only task type: a legacy v1 agent submission is rejected.
+  `scripted` backend or the `codex` app-server binding). A step resumes the agent's
+  durable context and returns a completion, failure, cancellation, yield, or a typed
+  boundary request; the server routes a boundary into the ledger and either re-dispatches
+  the agent or suspends it until a durable outcome arrives, and a restart resumes with the
+  same context. A suspended agent holds no worker, so its worker's loss or drain leaves it
+  waiting on its boundary. A boundary that worker originated resolves as its loss, unless
+  the worker was draining and finished the boundary first. An agent's harness and
+  managed-model binding are resolved at submission and pinned on its compiled operator;
+  the backend comes from `spec.harness.backend` or the `AGENT_HARNESS_DEFAULT_BACKEND`
+  default, and an agent with neither fails template validation. `agent` is a v2-only task
+  type: a legacy v1 agent submission is rejected.
 - **Activation-private state.** An agent activation owns its mutable harness state
   under an opaque `ActivationPrivateStateReference`, whose lifecycle and recovery the
   orchestration ledger owns. A `PrivateStateBinding` names the private-state generation

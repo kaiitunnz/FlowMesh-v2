@@ -42,3 +42,8 @@ class PendingEgressRequestStore:
         """Drop the request for an occurrence once its outcome has committed."""
         with self._lock:
             self._store.pop((agent_task_id, call_correlation), None)
+
+    def occurrences(self) -> list[tuple[str, str]]:
+        """The occurrences whose requests the store holds."""
+        with self._lock:
+            return list(self._store)

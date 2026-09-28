@@ -27,7 +27,7 @@ from shared.harness import (
     HarnessResultKind,
 )
 from shared.private_state import OwnerFence
-from shared.schemas.event import parse_event
+from shared.schemas.event import WorkerEvent, parse_event
 from shared.tasks.specs import ModelBindingMode
 from shared.tools.contract import (
     AgentModelTurnProposal,
@@ -42,6 +42,7 @@ from shared.tools.facade import (
     FacadeTurnGroup,
 )
 from tests.server.result_store import make_result_reader
+from tests.server.task.test_task_merge import _monitor
 from tests.server.task.test_v2_orchestration import (
     FakeRegistry,
     _NoopSecretVault,
@@ -919,5 +920,116 @@ def test_a_permit_that_cannot_be_minted_reaps_the_captured_request() -> None:
         assert runtime._tasks[writer].error == (
             "agent boundary failed: could not mint a permit"
         )
+
+    asyncio.run(run())
+
+
+def _drain(runtime: TaskRuntime, worker: str = "wkr-1") -> None:
+    _monitor(runtime)._handle_worker_event(
+        WorkerEvent(type="UNREGISTER", worker_id=worker, graceful=True)
+    )
+
+
+def _report(runtime: TaskRuntime, agent: str, call: str, value: str) -> None:
+    """The origin worker's outcome for its one outstanding permit."""
+    permit = MediatedOperationPermit.model_validate(_permit_frames(runtime)[-1])
+    runtime.settle_mediated_operation(
+        MediatedOperationOutcome(
+            permit_id=permit.permit_id,
+            agent_task_id=agent,
+            call_correlation=call,
+            invocation_id=permit.invocation_id,
+            idempotency_key=permit.idempotency_key,
+            outcome=ToolOutcome(status=ToolOutcomeStatus.SUCCESS, value=value),
+        )
+    )
+
+
+@pytest.mark.parametrize("interface", ["search", "model"])
+def test_an_agent_whose_drained_worker_finished_its_boundary_resumes_with_it(
+    interface: str,
+) -> None:
+    workflow, script = (
+        (_SEARCH_WF, _SCRIPT) if interface == "search" else (_MODEL_WF, _MODEL_SCRIPT)
+    )
+
+    async def run() -> None:
+        runtime = _runtime()
+        _, ids = await _register(runtime, workflow)
+        writer = ids["writer"]
+        engine = _dispatch_agent(runtime, writer, script=script)
+
+        # The draining worker reports the outcome, and unregisters once control
+        # acknowledges it.
+        _report(runtime, writer, "m0", "sunny")
+        assert len(_reap_frames(runtime)) == 1
+        _drain(runtime)
+
+        dispatch = runtime.agent_episode_dispatch(writer, _HOLDER)
+        assert dispatch is not None
+        assert [o.value for o in dispatch.delivered_outcomes] == [
+            ToolOutcome(
+                status=ToolOutcomeStatus.SUCCESS, value="sunny"
+            ).model_dump_json()
+        ]
+        _dispatch_agent(runtime, writer, worker="wkr-2", script=script)
+        record = runtime.get_record(writer)
+        assert record is not None and record.status is TaskStatus.DONE
+        work_item = engine.work_item(writer)
+        assert work_item is not None and work_item.status is WorkItemStatus.SETTLED
+
+    asyncio.run(run())
+
+
+def test_an_agent_whose_drained_worker_finished_its_facade_group_resumes() -> None:
+    async def run() -> None:
+        runtime = _runtime()
+        _, ids = await _register(runtime, _SEARCH_WF)
+        writer = ids["writer"]
+        _hold_dispatch(runtime, writer)
+        group = _search_group(writer, 0, "sha-xyz")
+        completion = HarnessResult(
+            kind=HarnessResultKind.COMPLETION,
+            value="done",
+            capsule=HarnessCapsule(
+                backend=HarnessBackendKey(backend="scripted", version="v1"), blob="c"
+            ),
+        )
+        runtime.mark_succeeded(
+            writer,
+            "wkr-1",
+            {
+                "agent_episode": completion.model_dump(mode="json"),
+                "agent_episode_facade_group": group.model_dump(mode="json"),
+            },
+            _TS,
+        )
+
+        _report(runtime, writer, group.members[0].call_correlation, "hit")
+        _drain(runtime)
+
+        record = runtime.get_record(writer)
+        assert record is not None and record.status is TaskStatus.PENDING
+        dispatch = runtime.agent_episode_dispatch(writer, _HOLDER)
+        assert dispatch is not None
+        assert [o.value for o in dispatch.delivered_outcomes] == [
+            ToolOutcome(status=ToolOutcomeStatus.SUCCESS, value="hit").model_dump_json()
+        ]
+
+    asyncio.run(run())
+
+
+def test_a_boundary_a_drained_worker_could_not_finish_fails_the_agent() -> None:
+    async def run() -> None:
+        runtime = _runtime()
+        _, ids = await _register(runtime, _SEARCH_WF)
+        writer = ids["writer"]
+        _dispatch_agent(runtime, writer)
+
+        _drain(runtime)
+
+        record = runtime.get_record(writer)
+        assert record is not None and record.status is TaskStatus.FAILED
+        assert not runtime._pending_ops
 
     asyncio.run(run())

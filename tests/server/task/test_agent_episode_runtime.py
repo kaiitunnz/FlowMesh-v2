@@ -1000,12 +1000,12 @@ def test_a_boundary_whose_settle_a_crash_cut_short_is_issued_again() -> None:
     asyncio.run(run())
 
 
-def _leave(runtime: TaskRuntime, how: str, worker: str = "wkr-1") -> None:
+def _leave(runtime: TaskRuntime, how: str) -> None:
     if how == "expired":
-        runtime.recover_tasks_for_worker(worker)
+        runtime.recover_tasks_for_worker("wkr-1")
     else:
         _monitor(runtime)._handle_worker_event(
-            WorkerEvent(type="UNREGISTER", worker_id=worker, graceful=how == "drained")
+            WorkerEvent(type="UNREGISTER", worker_id="wkr-1", graceful=how == "drained")
         )
 
 

@@ -9,6 +9,8 @@ from server.orchestration.state import InvocationState, LedgerSnapshot
 from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime
 from shared.harness import HarnessCapsule
+from shared.schemas.event import WorkerEvent
+from tests.server.task.test_task_merge import _monitor
 from tests.server.task.test_v2_orchestration import _TS, FakeRegistry, _register
 from tests.server.task.test_worker_originated_boundary import (
     _HOLDER,
@@ -131,5 +133,37 @@ def test_a_failed_save_holds_the_credit_until_the_next_save_succeeds() -> None:
             runtime._save_ledger_locked(workflow_id)
         runtime._release_pending_terminations()
         assert releases == [env.invocation_id]
+
+    asyncio.run(run())
+
+
+def test_an_agent_whose_drained_worker_finished_its_resident_call_resumes() -> None:
+    async def run() -> None:
+        runtime = _runtime()
+        originated = _originating(runtime)
+        releases: list[tuple[str, bool]] = []
+        # The fenced terminal releases the credit and reaps the origin's request.
+        runtime.set_resident_terminal_hook(
+            lambda inv, failed: releases.append((inv, failed))
+        )
+        _, ids = await _register(runtime, _RESIDENT_WF)
+        writer = ids["writer"]
+        _capture_resident_boundary(runtime, writer)
+        (env,) = originated
+
+        assert runtime.settle_episode_invocation(
+            writer, env.call_correlation, "a completion"
+        )
+        assert releases == [(env.invocation_id, False)]
+        _monitor(runtime)._handle_worker_event(
+            WorkerEvent(type="UNREGISTER", worker_id="wkr-1", graceful=True)
+        )
+
+        record = runtime.get_record(writer)
+        assert record is not None and record.status is TaskStatus.PENDING
+        dispatch = runtime.agent_episode_dispatch(writer, _HOLDER)
+        assert dispatch is not None
+        assert [o.value for o in dispatch.delivered_outcomes] == ["a completion"]
+        assert releases == [(env.invocation_id, False)]
 
     asyncio.run(run())

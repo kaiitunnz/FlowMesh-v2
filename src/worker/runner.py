@@ -77,6 +77,12 @@ def _publishes_result(result: BaseExecutorResult) -> bool:
     return True
 
 
+# How long a shutdown waits for the boundaries it holds to finish: inside the
+# supervisor's 30-second container stop, with margin to unregister.
+_BOUNDARY_DRAIN_SEC = 20.0
+_BOUNDARY_DRAIN_POLL_SEC = 0.1
+
+
 def _declared_result(
     result: BaseExecutorResult, request: CanonicalInferenceRequest | None
 ) -> BaseExecutorResult | None:
@@ -226,16 +232,34 @@ class Runner:
         thread.start()
 
     def _shut_down(self) -> None:
+        deadline = time.monotonic() + _BOUNDARY_DRAIN_SEC
         self.logger.info("Shutdown requested; giving up the running task")
         self.lifecycle.set_draining()
         self.lifecycle.stop()
         self._cancel_active_executor()
+        self._finish_held_boundaries(deadline)
         if self._mediated_sidecar is not None:
             self._mediated_sidecar.stop()
         if self._responses_facade is not None:
             self._responses_facade.stop()
         if self._resident_host is not None:
             self._resident_host.stop()
+
+    def _finish_held_boundaries(self, deadline: float) -> None:
+        """Wait until ``deadline`` for control to commit the outcome of each boundary
+        this worker holds for a suspended agent.
+
+        The permits that run them and the reaps that acknowledge their outcomes keep
+        arriving until the worker unregisters, and an outcome reported after it
+        unregisters would find the boundary already failed as this worker's loss.
+        """
+        while held := self.lifecycle.held_boundaries():
+            if time.monotonic() >= deadline:
+                self.logger.warning(
+                    "Leaving %d unfinished boundaries at shutdown: %s", len(held), held
+                )
+                return
+            time.sleep(_BOUNDARY_DRAIN_POLL_SEC)
 
     def _ensure_mediated_sidecar(self) -> MediatedEgressSidecar | None:
         """Build the mediated-egress sidecar once the worker id is known."""

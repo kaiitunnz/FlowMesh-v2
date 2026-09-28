@@ -245,6 +245,14 @@ class Lifecycle:
     def stop(self) -> None:
         self.client.stop()
 
+    def held_boundaries(self) -> list[tuple[str, str]]:
+        """The boundaries whose raw requests this worker holds, by task and call; each
+        is dropped once control commits its outcome."""
+        return (
+            self.pending_egress_requests.occurrences()
+            + self.resident_requests.occurrences()
+        )
+
     def start_content_plane(self, plane: "WorkerContentPlane | None") -> None:
         """Own the worker's content plane from here to shutdown."""
         self.content_plane = plane

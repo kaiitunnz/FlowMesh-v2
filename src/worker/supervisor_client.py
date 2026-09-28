@@ -186,7 +186,8 @@ class SupervisorClient:
         self._send_register_event()
 
     def stop(self) -> None:
-        """Stop task pulling without fully shutting down."""
+        """Stop task pulling without fully shutting down; the task stream keeps
+        relaying interrupts and mediated operations until shutdown."""
         if self._stop.is_set():
             return
         self._stop.set()
@@ -522,7 +523,7 @@ class SupervisorClient:
             self.logger.error("Supervisor gRPC channel not initialized")
             return
         metadata = self._grpc_metadata()
-        while not self._stop.is_set():
+        while not self._shutdown.is_set():
             try:
                 grpc.channel_ready_future(self._channel).result(timeout=10)
                 self._task_ready.set()
@@ -554,21 +555,21 @@ class SupervisorClient:
                             )
                         else:
                             self._task_queue.put(task_message)
-                    if self._stop.is_set():
+                    if self._shutdown.is_set():
                         break
-                if self._stop.is_set():
+                if self._shutdown.is_set():
                     break
                 self._task_ready.clear()
                 self.logger.warning("Task stream closed, retrying in 3 seconds")
                 time.sleep(3)
             except grpc.FutureTimeoutError:
-                if self._stop.is_set():
+                if self._shutdown.is_set():
                     break
                 self._task_ready.clear()
                 self.logger.warning("Task stream not ready, retrying in 3 seconds")
                 time.sleep(3)
             except grpc.RpcError as exc:
-                if self._stop.is_set():
+                if self._shutdown.is_set():
                     break
                 self._task_ready.clear()
                 self.logger.error("Supervisor task stream error: %s", exc)

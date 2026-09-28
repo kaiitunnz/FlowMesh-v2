@@ -39,6 +39,7 @@ def _runner(tmp_path: Path, executor: Executor, *task_ids: str) -> Runner:
     lifecycle.client.create_task_log_emitter.return_value = None
     lifecycle.client.iter_interrupts.return_value = []
     lifecycle.client.iter_stops.return_value = []
+    lifecycle.held_boundaries.return_value = []
     return Runner(
         lifecycle=lifecycle,
         task_stream=[
