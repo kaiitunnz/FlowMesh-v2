@@ -37,7 +37,7 @@ from shared.tools.search.schema import (
     tool_request_digest,
 )
 
-from ..egress import PendingEgressRequestStore
+from ..egress import CapturedRequest, PendingEgressRequestStore
 from ..private_state import MaterializedState, PrivateStateHolder
 from ..resident import capture_resident_request
 from ..sandbox import AgentSandboxRuntime, SandboxRuntime, build_sandbox_runtime
@@ -137,15 +137,25 @@ class AgentEpisodeExecutor(Executor):
             if self._signals.cancelled and not isinstance(exc, TaskCancelledError):
                 raise TaskCancelledError(f"Task {task.task_id} cancelled") from exc
             raise
-        if self._is_capturable_boundary(result, dispatch.model_binding):
-            if (
-                adapter.egress_handoff_mode()
-                is not EgressHandoffMode.DURABLE_PRE_EGRESS_YIELD
-            ):
-                raise ExecutionError(
-                    f"backend {dispatch.backend.backend!r} deferred a mediated egress "
-                    "boundary but is not durable_pre_egress_yield"
-                )
+        capturable = self._is_capturable_boundary(result, dispatch.model_binding)
+        if (
+            capturable
+            and adapter.egress_handoff_mode()
+            is not EgressHandoffMode.DURABLE_PRE_EGRESS_YIELD
+        ):
+            raise ExecutionError(
+                f"backend {dispatch.backend.backend!r} deferred a mediated egress "
+                "boundary but is not durable_pre_egress_yield"
+            )
+        value = result.value if result.kind is HarnessResultKind.COMPLETION else None
+        sealed = None
+        if state is not None and holder is not None:
+            # The step has run to its yield, so the components are quiescent and seal as
+            # one generation the next resume binds.
+            sealed = holder.seal(state, _attachment(dispatch))
+        # Captured last, so nothing after the capture can raise past a request the step
+        # holds for control.
+        if capturable:
             result = self._capture_local_request(
                 self._pending_egress_requests(),
                 task.task_id,
@@ -162,12 +172,6 @@ class AgentEpisodeExecutor(Executor):
                 result.request.kind.value,
                 result.request.interface or "-",
             )
-        value = result.value if result.kind is HarnessResultKind.COMPLETION else None
-        sealed = None
-        if state is not None and holder is not None:
-            # The step has run to its yield, so the components are quiescent and seal as
-            # one generation the next resume binds.
-            sealed = holder.seal(state, _attachment(dispatch))
         group = facade.take_captured_group(task.task_id) if facade is not None else None
         return EpisodeStepResult(
             harness_result=result,
@@ -257,18 +261,20 @@ class AgentEpisodeExecutor(Executor):
                 url=model_binding.url or "",
                 model=model_binding.model or "",
             )
-            store.put(task_id, req.call_correlation, model)
+            captured: CapturedRequest = model
             digest = model_request_digest(model.interface, model.url, model.body)
         else:
             parsed = parse_search_request(req.request_payload)
-            store.put(task_id, req.call_correlation, parsed)
+            captured = parsed
             digest = tool_request_digest(
                 parsed.interface, parsed.query, parsed.max_results
             )
         stripped = req.model_copy(
             update={"request_payload": None, "request_digest": digest}
         )
-        return result.model_copy(update={"request": stripped})
+        stripped_result = result.model_copy(update={"request": stripped})
+        store.put(task_id, req.call_correlation, captured)
+        return stripped_result
 
     @staticmethod
     def _is_resident_boundary(

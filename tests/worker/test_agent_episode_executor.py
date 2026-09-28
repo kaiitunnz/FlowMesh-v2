@@ -7,7 +7,7 @@ native-bypass backend is refused.
 
 import json
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -15,26 +15,40 @@ from shared.harness import (
     REQUIRED_MEDIATED_FACADES,
     BoundaryEventKind,
     BoundaryRequest,
+    EgressHandoffMode,
     HarnessAdapter,
     HarnessBackendKey,
     HarnessResult,
     HarnessResultKind,
     MediatedFacade,
 )
+from shared.private_state import PrivateStateUnavailable, PrivateStateUnavailableReason
 from shared.tasks.task_type import TaskType
 from shared.tasks.worker_message import WorkerTaskMessage
-from shared.tools.facade import FacadeDescriptor
+from shared.tools.facade import (
+    FacadeCallMember,
+    FacadeCompletionMode,
+    FacadeDescriptor,
+    FacadeTurnGroup,
+)
 from shared.tools.model.schema import ModelCompletion, ModelToolCall
-from shared.tools.search.schema import SEARCH_INTERFACE
-from tests.worker.factories import make_worker_config, make_worker_task_message
+from shared.tools.search.schema import SEARCH_INTERFACE, parse_search_request
+from tests.worker.factories import (
+    make_worker_config,
+    make_worker_hardware,
+    make_worker_task_message,
+)
 from worker.egress import PendingEgressRequestStore
 from worker.executors import EXECUTOR_REGISTRY
+from worker.executors import agent_episode_executor as aee
 from worker.executors.agent_episode_executor import AgentEpisodeExecutor
-from worker.executors.base_executor import ExecutionError, Executor
+from worker.executors.base_executor import ExecutionError, Executor, ExecutorTask
 from worker.executors.episode_support import EpisodeStepResult
 from worker.executors.harness import UnknownHarnessBackendError, register_adapter
+from worker.lifecycle import Lifecycle
 from worker.main import build_capabilities
 from worker.model_turn import ResponsesFacade
+from worker.resident import ResidentRequestStore
 from worker.runner import Runner
 
 _SEARCH = FacadeDescriptor(
@@ -278,3 +292,159 @@ def test_a_step_that_raises_drops_the_requests_its_turn_stashed(
             (msg.task_id, m.call_correlation) for m in out.facade_group.members
         ]
     assert facade.take_captured_group(msg.task_id) is None
+
+
+class _YieldingAdapter(_FakeAdapter):
+    def egress_handoff_mode(self) -> EgressHandoffMode:
+        return EgressHandoffMode.DURABLE_PRE_EGRESS_YIELD
+
+
+class _FailingSeal:
+    def seal(self, state: object, attachment: object) -> None:
+        raise PrivateStateUnavailable(
+            PrivateStateUnavailableReason.STALE_EPOCH,
+            "superseded",
+            reference_id="aps-x",
+        )
+
+
+@pytest.mark.parametrize("resident", [False, True])
+def test_a_step_whose_seal_fails_holds_no_request_for_control(
+    tmp_path: Path, resident: bool
+) -> None:
+    boundary = HarnessResult(
+        kind=HarnessResultKind.BOUNDARY,
+        request=BoundaryRequest(
+            kind=BoundaryEventKind.INVOCATION,
+            call_correlation="c0",
+            interface="model" if resident else SEARCH_INTERFACE,
+            request_payload=(
+                '{"messages": []}' if resident else '{"query": "q", "max_results": 3}'
+            ),
+        ),
+    )
+    register_adapter(
+        "fake",
+        lambda backend, task, config, facade, state, sandbox: _YieldingAdapter(
+            boundary
+        ),
+    )
+    lifecycle = MagicMock()
+    lifecycle.pending_egress_requests = PendingEgressRequestStore()
+    lifecycle.resident_requests = ResidentRequestStore()
+    lifecycle.responses_facade = None
+    ex = AgentEpisodeExecutor(make_worker_config(), lifecycle=lifecycle)
+    msg = _dispatch_msg(
+        model_binding={"mode": "resident"} if resident else None,
+    )
+    with (
+        patch.object(
+            AgentEpisodeExecutor,
+            "_open_private_state",
+            lambda self, dispatch: (MagicMock(), _FailingSeal()),
+        ),
+        patch.object(aee, "_attachment", lambda dispatch: MagicMock()),
+        pytest.raises(PrivateStateUnavailable),
+    ):
+        ex.run(msg, tmp_path)
+
+    assert lifecycle.pending_egress_requests.occurrences() == []
+    assert lifecycle.resident_requests.occurrences() == []
+
+
+class _CapturingExecutor(Executor):
+    """A step that holds one request for control of the given kind."""
+
+    def __init__(self, lifecycle: Lifecycle, kind: str) -> None:
+        super().__init__(make_worker_config(), lifecycle=lifecycle)
+        self._kind = kind
+
+    def run(self, task: ExecutorTask, out_dir: Path) -> EpisodeStepResult:
+        assert self._lifecycle is not None
+        request = BoundaryRequest(
+            kind=BoundaryEventKind.INVOCATION,
+            call_correlation="c0",
+            interface=SEARCH_INTERFACE,
+            request_digest="d",
+        )
+        if self._kind == "facade_group":
+            self._lifecycle.pending_egress_requests.put(
+                task.task_id, "c1", parse_search_request('{"query": "q"}')
+            )
+            return EpisodeStepResult(
+                harness_result=HarnessResult(
+                    kind=HarnessResultKind.COMPLETION, value="ok"
+                ),
+                facade_group=FacadeTurnGroup(
+                    group_id="grp-1",
+                    activation_id=task.task_id,
+                    turn_id="turn-1",
+                    members=(
+                        FacadeCallMember(
+                            ordinal=0,
+                            kind=BoundaryEventKind.INVOCATION,
+                            completion_mode=FacadeCompletionMode.AWAIT_OUTCOME,
+                            call_correlation="c1",
+                            harness_call_id="call-1",
+                            tool_name="web_search",
+                            interface_or_region=SEARCH_INTERFACE,
+                            request_digest="d",
+                        ),
+                    ),
+                ),
+            )
+        if self._kind == "resident":
+            self._lifecycle.resident_requests.put(task.task_id, "c0", "{}")
+        else:
+            self._lifecycle.pending_egress_requests.put(
+                task.task_id, "c0", parse_search_request('{"query": "q"}')
+            )
+        return EpisodeStepResult(
+            harness_result=HarnessResult(
+                kind=HarnessResultKind.BOUNDARY, request=request
+            )
+        )
+
+
+@pytest.mark.parametrize("kind", ["search", "resident", "facade_group"])
+@pytest.mark.parametrize("reported", [False, True])
+def test_a_step_whose_report_fails_holds_no_request_for_control(
+    tmp_path: Path, kind: str, reported: bool
+) -> None:
+    lifecycle = Lifecycle(MagicMock(), 5, 15, tmp_path / "hb", 0.0)
+    client = lifecycle.client
+    assert isinstance(client, MagicMock)
+    client.worker_id = "wrk-test"
+    client.create_task_log_emitter.return_value = None
+    client.iter_interrupts.return_value = []
+    client.iter_stops.return_value = []
+    client.iter_mediated_ops.return_value = []
+    executor = _CapturingExecutor(lifecycle, kind)
+    runner = Runner(
+        lifecycle=lifecycle,
+        task_stream=[_dispatch_msg()],
+        results_dir=tmp_path / "out",
+        hardware=make_worker_hardware(),
+        executors={"agent_episode": executor, "default": executor},
+        default_executor=executor,
+        logger=MagicMock(),
+    )
+
+    def write_results(self: Runner, msg: object, out_dir: object, out: object) -> dict:
+        if not reported:
+            raise ExecutionError("the result store is unavailable", retryable=True)
+        return {}
+
+    with patch.object(Runner, "_write_results", write_results):
+        runner.start()
+
+    held = (
+        lifecycle.pending_egress_requests.occurrences()
+        + lifecycle.resident_requests.occurrences()
+    )
+    if reported:
+        client.task_succeeded.assert_called_once()
+        assert len(held) == 1
+    else:
+        client.task_failed.assert_called_once()
+        assert held == []

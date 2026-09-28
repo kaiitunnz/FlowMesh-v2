@@ -55,7 +55,7 @@ from shared.utils.time import now_iso
 from .content.inputs import TaskInputHydrator, input_unreadable, read_input
 from .egress import MediatedEgressSidecar, ModelEgress, SearchEgress
 from .executors.base_executor import ExecutionError, Executor, TaskCancelledError
-from .executors.episode_support import EpisodeStepResult
+from .executors.episode_support import EpisodeStepResult, discard_step_captures
 from .executors.inference.projection import generated_outputs
 from .executors.inference.resolution import resolve_task_contract
 from .executors.utils.checkpoints import write_executor_result
@@ -889,6 +889,9 @@ class Runner:
                 start_iso = now_iso()
                 start_wall = time.time()
                 notified_task_started: bool = False
+                # A step's captures reach control only on its success report; until it
+                # is sent, the worker drops them if the task ends another way.
+                unreported_step: EpisodeStepResult | None = None
                 try:
                     self._raise_if_cancel_pending(task_id)
                     self._current_task_id = task_id
@@ -1010,6 +1013,8 @@ class Runner:
                         if stop_pending:
                             executor_to_run.stop(task_id)
                     out = self._run_executor(executor_to_run, msg, out_dir)
+                    if isinstance(out, EpisodeStepResult):
+                        unreported_step = out
                     references = self._write_results(msg, out_dir, out)
                     metadata = self._build_task_metadata(
                         task_type,
@@ -1037,6 +1042,7 @@ class Runner:
                                 out.private_state.model_dump(mode="json")
                             )
                     self.lifecycle.set_succeeded(task_id, metadata=metadata)
+                    unreported_step = None
                     self.logger.info("Task %s completed successfully", task_id)
                 except TaskCancelledError as e:
                     if not notified_task_started:
@@ -1090,6 +1096,8 @@ class Runner:
                     else:
                         self.logger.exception("Task %s failed", task_id)
                 finally:
+                    if unreported_step is not None:
+                        discard_step_captures(self.lifecycle, task_id, unreported_step)
                     self._current_task_id = None
                     with self._cancel_lock:
                         self._pending_cancels.discard(task_id)

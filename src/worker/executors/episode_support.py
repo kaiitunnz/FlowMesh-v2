@@ -30,6 +30,23 @@ class EpisodeStepResult(BaseExecutorResult):
     private_state: PrivateStateSealReport | None = None
 
 
+def discard_step_captures(
+    lifecycle: "Lifecycle", task_id: str, step: EpisodeStepResult
+) -> None:
+    """Drop the requests a step holds for control once its report cannot carry them.
+
+    Control learns of a captured boundary or facade group only from the step's report,
+    so a request that report never delivers would be held until the worker leaves.
+    """
+    request = step.harness_result.request
+    if request is not None and request.call_correlation is not None:
+        lifecycle.pending_egress_requests.delete(task_id, request.call_correlation)
+        lifecycle.resident_requests.delete(task_id, request.call_correlation)
+    if step.facade_group is not None:
+        for member in step.facade_group.members:
+            lifecycle.pending_egress_requests.delete(task_id, member.call_correlation)
+
+
 def hydrate_delivered_outcomes(
     lifecycle: "Lifecycle | None",
     task_id: str,
