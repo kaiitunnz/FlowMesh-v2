@@ -654,6 +654,13 @@ class SSHExecutor(Executor):
                 cfg.output,
                 mount_plan,
             )
+            # Output written after the last poll is checked once the session ends,
+            # before the container's own logs join it.
+            max_bytes = _output_limit(cfg.output)
+            if mount_plan.direct_output_path is not None and max_bytes is not None:
+                _raise_if_exceeded(
+                    self._path_size_bytes(mount_plan.direct_output_path), max_bytes
+                )
             result = SSHResult(session_id=session_id, exit_code=exit_code)
             if interactive:
                 for key, value in session_info.items():
@@ -665,12 +672,6 @@ class SSHExecutor(Executor):
                     result.command = cfg.command
                 if cfg.entrypoint is not None:
                     result.entrypoint = cfg.entrypoint
-            # Output written after the last poll is checked once the session ends.
-            max_bytes = _output_limit(cfg.output)
-            if mount_plan.direct_output_path is not None and max_bytes is not None:
-                _raise_if_exceeded(
-                    self._path_size_bytes(mount_plan.direct_output_path), max_bytes
-                )
             if mount_plan.copy_output_path:
                 self._copy_output_directory(
                     container,

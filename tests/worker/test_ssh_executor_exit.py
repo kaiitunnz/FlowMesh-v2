@@ -95,6 +95,7 @@ def _run(
     stream_logs: Any = None,
     copy: bool = False,
     direct_output: Path | None = None,
+    save_logs: bool = False,
 ) -> SSHResult:
     plan = MagicMock()
     plan.copy_output_path = None if direct_output is not None else "/out"
@@ -108,7 +109,11 @@ def _run(
         patch.object(ex, "_build_run_kwargs", return_value={}),
         patch.object(ex, "_start_container", return_value=(container, None)),
         patch.object(ex, "_stream_container_logs", side_effect=stream_logs),
-        patch.object(ex, "_save_container_logs"),
+        patch.object(
+            ex,
+            "_save_container_logs",
+            wraps=ex._save_container_logs if save_logs else None,
+        ),
         patch.object(
             ex,
             "_copy_output_directory",
@@ -235,3 +240,21 @@ def test_output_that_was_never_created_is_empty_only_for_a_stopped_task(
     else:
         with pytest.raises(ExecutionError, match="Failed to collect SSH output"):
             _run(executor, tmp_path, container, 1000, copy=True)
+
+
+def test_a_session_log_never_counts_against_its_output_limit(
+    executor: SSHExecutor, tmp_path: Path
+) -> None:
+    # A worker with no results mount writes a session's output where its logs go.
+    output = tmp_path / "out" / "artifacts"
+    output.mkdir(parents=True)
+    (output / "result.bin").write_bytes(b"x" * 500)
+    container = _container(0, output_bytes=0)
+    container.logs.return_value = b"y" * 2000
+
+    result = _run(
+        executor, tmp_path, container, 1000, direct_output=output, save_logs=True
+    )
+
+    assert result.exit_code == 0
+    assert (output / "logs" / "container_output.log").stat().st_size == 2000
