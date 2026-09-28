@@ -104,6 +104,12 @@ class _WorkerRegistryStub:
     def publish_interrupt(self, *args: Any) -> int:
         return 0
 
+    def release_worker(self, *args: Any) -> bool:
+        return False
+
+    def reservations(self) -> list[Any]:
+        return []
+
 
 def _runtime(registry: _CapturingRegistry) -> TaskRuntime:
     return TaskRuntime(

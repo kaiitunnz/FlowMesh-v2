@@ -48,7 +48,8 @@ from ..clients.redis import (
 # worker reports applies only when it names the reserved dispatch, which it clears.
 # An IDLE for an earlier dispatch is fenced and returns the reservation, so it can
 # never free a worker a dispatch is still on its way to. A BUSY always applies and
-# never moves the reservation.
+# never moves the reservation. The status last reported is kept, fenced or not, so a
+# release returns the worker to it.
 _REPORT_STATUS_IF_REGISTERED = """
 if redis.call('SISMEMBER', KEYS[1], ARGV[1]) == 0 then
     return {0}
@@ -60,6 +61,7 @@ redis.call('HSET', KEYS[2], 'last_seen', ARGV[2])
 if ARGV[4] == '' then
     return {1}
 end
+redis.call('HSET', KEYS[2], 'reported_status', ARGV[4])
 if ARGV[4] == 'IDLE' then
     local reserved = redis.call('HGET', KEYS[2], 'reserved_dispatch')
     if reserved and reserved ~= ARGV[5] then
@@ -85,14 +87,15 @@ return 1
 
 _RELEASE_IF_RESERVED = """
 if redis.call('SISMEMBER', KEYS[1], ARGV[1]) == 0 then
-    return 0
+    return ''
 end
 if redis.call('HGET', KEYS[2], 'reserved_dispatch') ~= ARGV[3] then
-    return 0
+    return ''
 end
-redis.call('HSET', KEYS[2], 'status', 'IDLE', 'last_seen', ARGV[2])
+local status = redis.call('HGET', KEYS[2], 'reported_status') or 'IDLE'
+redis.call('HSET', KEYS[2], 'status', status, 'last_seen', ARGV[2])
 redis.call('HDEL', KEYS[2], 'reserved_dispatch', 'reserved_task')
-return 1
+return status
 """
 
 _SET_FIELDS_IF_REGISTERED = """
@@ -129,6 +132,14 @@ class StatusReport(NamedTuple):
     outcome: ReportOutcome
     reserved_task: str | None = None
     reserved_dispatch: str | None = None
+
+
+class Reservation(NamedTuple):
+    """A worker reserved for a dispatch of a task."""
+
+    worker_id: str
+    task_id: str
+    dispatch_id: str
 
 
 def _flatten_fields(mapping: dict[str, str]) -> list[str]:
@@ -307,21 +318,23 @@ class WorkerRegistry:
         return True
 
     def release_worker(self, worker_id: str, dispatch_id: str) -> bool:
-        """Mark a worker IDLE if it is still reserved for ``dispatch_id``; returns
-        whether it was."""
+        """Return a worker still reserved for ``dispatch_id`` to the status it last
+        reported, IDLE if none; returns whether it was reserved for it."""
         ts = now_iso()
-        released = self._rds.sync.eval(
-            _RELEASE_IF_RESERVED,
-            2,
-            WORKERS_SET_KEY,
-            worker_key(worker_id),
-            worker_id,
-            ts,
-            dispatch_id,
+        released = _text(
+            self._rds.sync.eval(
+                _RELEASE_IF_RESERVED,
+                2,
+                WORKERS_SET_KEY,
+                worker_key(worker_id),
+                worker_id,
+                ts,
+                dispatch_id,
+            )
         )
-        if not int(released):
+        if not released:
             return False
-        self._announce_status(worker_id, WorkerStatus.IDLE, ts)
+        self._announce_status(worker_id, WorkerStatus(released), ts)
         return True
 
     def _announce_status(self, worker_id: str, status: WorkerStatus, ts: str) -> None:
@@ -335,6 +348,21 @@ class WorkerRegistry:
         self._rds.sync.publish_telemetry(
             WORKER_EVENT_CHANNEL, json.dumps(payload, ensure_ascii=False)
         )
+
+    def reservations(self) -> list[Reservation]:
+        """Every registered worker's reservation."""
+        worker_ids = sorted(self.get_worker_ids())
+        with self._rds.sync.control_pipeline() as pipe:
+            for worker_id in worker_ids:
+                pipe.hmget(
+                    worker_key(worker_id), ["reserved_task", "reserved_dispatch"]
+                )
+            replies = pipe.execute()
+        return [
+            Reservation(worker_id, _text(task_id), _text(dispatch_id))
+            for worker_id, (task_id, dispatch_id) in zip(worker_ids, replies)
+            if task_id and dispatch_id
+        ]
 
     def reap_stale_worker(self, worker_id: str) -> bool:
         """Delete a worker's record while its heartbeat is stale; returns whether it

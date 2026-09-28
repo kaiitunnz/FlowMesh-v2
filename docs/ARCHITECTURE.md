@@ -530,10 +530,11 @@ scripts/dev/            compile_protos, sync_requirements, check_env_examples
   isn't a candidate, rather than being handed a task it would fail.
 - **Worker status.** A worker reports whether it is busy, naming the dispatch the
   report concerns, and repeats it on every heartbeat. The dispatcher reserves a
-  worker for a dispatch before publishing it, and an idle report frees the worker
-  only when it names that dispatch, so a report about an earlier task never frees a
-  worker another task is on its way to. A worker shutting down reports itself busy
-  until it leaves.
+  worker for a dispatch before publishing it. An idle report frees the worker only
+  when it names that dispatch, so a report about an earlier task never frees a worker
+  another task is on its way to; the dispatch ending frees it too, returning it to the
+  status it last reported. A worker shutting down reports itself busy until it
+  leaves.
 - **Stale worker reaping.** The watchdog deletes the registry record of a worker
   dead for `WORKER_REAP_GRACE_SEC`. A late heartbeat, status or cache write never
   recreates a deleted record.

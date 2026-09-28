@@ -15,7 +15,12 @@ import pytest
 import redis
 
 from server.clients.redis import WORKERS_SET_KEY, worker_hb_key, worker_key
-from server.registries.worker import ReportOutcome, StatusReport, WorkerRegistry
+from server.registries.worker import (
+    ReportOutcome,
+    Reservation,
+    StatusReport,
+    WorkerRegistry,
+)
 from shared.schemas.worker import WorkerStatus
 
 _LIVE_URL = os.getenv("FLOWMESH_TEST_REDIS_URL")
@@ -39,6 +44,12 @@ class _Sync:
 
     def eval(self, *args: Any) -> Any:
         return self._client.eval(*args)
+
+    def set_members(self, key: str) -> set[str]:
+        return cast(set[str], self._client.smembers(key))
+
+    def control_pipeline(self) -> Any:
+        return self._client.pipeline()
 
     def publish_telemetry(self, *_args: Any) -> None:
         return None
@@ -179,3 +190,38 @@ def test_an_unregistered_worker_gets_nothing_written(
     assert registry.reserve_worker(_WORKER, "tsk-1", "dsp-1") is False
     assert registry.release_worker(_WORKER, "dsp-1") is False
     assert client.exists(worker_key(_WORKER)) == 0
+
+
+@_live
+def test_a_release_returns_the_worker_to_the_status_it_last_reported(
+    client: redis.Redis, registry: WorkerRegistry
+) -> None:
+    registry.reserve_worker(_WORKER, "tsk-1", "dsp-1")
+    # A draining worker reports itself busy with the dispatch it gives up.
+    registry.set_worker_status(_WORKER, WorkerStatus.BUSY, "ts", None, "dsp-1")
+
+    assert registry.release_worker(_WORKER, "dsp-1") is True
+    assert _status(client) == "BUSY"
+    assert client.hget(worker_key(_WORKER), "reserved_dispatch") is None
+
+
+@_live
+def test_a_release_applies_a_fenced_idle(
+    client: redis.Redis, registry: WorkerRegistry
+) -> None:
+    registry.reserve_worker(_WORKER, "tsk-1", "dsp-1")
+    # A worker that names no dispatch is fenced while reserved.
+    assert _idle(registry, None).outcome is ReportOutcome.FENCED
+
+    assert registry.release_worker(_WORKER, "dsp-1") is True
+    assert _status(client) == "IDLE"
+
+
+@_live
+def test_reservations_lists_each_reserved_worker(
+    client: redis.Redis, registry: WorkerRegistry
+) -> None:
+    assert registry.reservations() == []
+    registry.reserve_worker(_WORKER, "tsk-1", "dsp-1")
+
+    assert registry.reservations() == [Reservation(_WORKER, "tsk-1", "dsp-1")]

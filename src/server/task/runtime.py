@@ -622,6 +622,9 @@ class TaskRuntime:
         # The last dispatch of each task that ended by returning it to the queue: its
         # worker and dispatch id, and the tasks the return moved.
         self._returned_dispatches: dict[str, tuple[str, str | None, list[str]]] = {}
+        # The worker and dispatch holding each dispatched task, until a commit moves the
+        # task off it and releases the worker's reservation for it.
+        self._held_dispatches: dict[str, tuple[str, str]] = {}
         self._input_checks: dict[str, _InputCheck] = {}
         self._report_writes = _ReportWrites()
         self._unacknowledged: dict[str, _Unacknowledged] = {}
@@ -1014,6 +1017,13 @@ class TaskRuntime:
             restored += 1
         with self._cv:
             self._restore_merges_locked()
+            self._held_dispatches.update(
+                (record.task_id, (record.assigned_worker, record.dispatch_id))
+                for record in self._tasks.values()
+                if _membership(record) == TaskStatus.DISPATCHED
+                and record.assigned_worker is not None
+                and record.dispatch_id is not None
+            )
         self._release_pending_terminations()
         if restored:
             self._logger.info("Rehydrated %d workflow(s) from durable state", restored)
@@ -1337,8 +1347,50 @@ class TaskRuntime:
                 )
                 if any(by_status[status] for status in TERMINAL_TASK_STATUSES):
                     self._notify_terminal_transition(workflow_id)
+            self._release_ended_dispatches_locked(task_ids)
 
         self._write_locked(commit, lambda held: held.task_ids.extend(task_ids))
+
+    def _release_ended_dispatches_locked(self, task_ids: Sequence[str]) -> None:
+        """Release each worker reserved for a dispatch a commit moved its task off.
+
+        A worker reporting its status names the dispatch it concerns, and its IDLE
+        clears the reservation itself; one that names none is fenced while reserved, so
+        the end of the dispatch is what frees it. The release is a no-op once the
+        worker's own IDLE cleared it, and never frees a later reservation.
+        """
+        for task_id in dict.fromkeys(task_ids):
+            held = self._held_dispatches.get(task_id)
+            record = self._tasks.get(task_id)
+            if held is None or (
+                record is not None
+                and _membership(record) == TaskStatus.DISPATCHED
+                and record.dispatch_id == held[1]
+            ):
+                continue
+            del self._held_dispatches[task_id]
+            self._release_worker(*held)
+
+    def _release_worker(self, worker_id: str, dispatch_id: str) -> None:
+        # A failed release is healed by the worker's next fenced report.
+        try:
+            self._worker_registry.release_worker(worker_id, dispatch_id)
+        except Exception as exc:
+            self._logger.warning(
+                "Failed to release worker %s from dispatch %s: %s",
+                worker_id,
+                dispatch_id,
+                exc,
+            )
+
+    def release_ended_reservations(self) -> None:
+        """Release every worker reserved for a dispatch no longer in flight, such as
+        one whose task settled just before a restart."""
+        for reservation in self._worker_registry.reservations():
+            if not self.dispatch_in_flight(
+                reservation.task_id, reservation.dispatch_id, reservation.worker_id
+            ):
+                self._release_worker(reservation.worker_id, reservation.dispatch_id)
 
     def _write_locked(
         self, write: Callable[[], None], hold: Callable[[_HeldWrites], None]
@@ -4585,6 +4637,12 @@ class TaskRuntime:
         record.status = TaskStatus.DISPATCHED
         record.assigned_worker = publish.worker_id
         record.dispatch_id = publish.dispatch_id
+        if publish.dispatch_id is not None:
+            held = (publish.worker_id, publish.dispatch_id)
+            earlier = self._held_dispatches.get(task_id)
+            if earlier is not None and earlier != held:
+                self._release_worker(*earlier)
+            self._held_dispatches[task_id] = held
         record.merged_dispatch_worker = (
             publish.worker_id if self._merge_children_map.get(task_id) else None
         )

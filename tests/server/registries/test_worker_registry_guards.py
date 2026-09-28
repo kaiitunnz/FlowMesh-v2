@@ -6,6 +6,7 @@ and the write are one atomic Redis script, so the registry never reads
 membership separately.
 """
 
+import json
 from typing import Any, cast
 from unittest.mock import MagicMock
 
@@ -41,6 +42,7 @@ def test_a_fenced_report_names_the_reserved_dispatch() -> None:
 def test_a_reservation_of_an_unregistered_worker_announces_nothing() -> None:
     registry: Any = _registry(wrote=0)
     assert registry.reserve_worker("wkr-1", "tsk-1", "dsp-1") is False
+    registry._rds.sync.eval.return_value = b""
     assert registry.release_worker("wkr-1", "dsp-1") is False
     # A skipped status write must not announce a status it never stored.
     registry._rds.sync.publish_telemetry.assert_not_called()
@@ -49,8 +51,13 @@ def test_a_reservation_of_an_unregistered_worker_announces_nothing() -> None:
 def test_a_reservation_announces_the_status_it_stored() -> None:
     registry: Any = _registry(wrote=1)
     assert registry.reserve_worker("wkr-1", "tsk-1", "dsp-1") is True
+    registry._rds.sync.eval.return_value = b"BUSY"
     assert registry.release_worker("wkr-1", "dsp-1") is True
-    assert registry._rds.sync.publish_telemetry.call_count == 2
+    announced = [
+        json.loads(call.args[1])["status"]
+        for call in registry._rds.sync.publish_telemetry.call_args_list
+    ]
+    assert announced == ["BUSY", "BUSY"]
 
 
 def test_writes_are_a_single_atomic_call() -> None:

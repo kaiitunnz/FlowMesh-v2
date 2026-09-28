@@ -186,6 +186,12 @@ class _WorkerRegistryStub:
     def publish_interrupt(self, *args: Any) -> int:
         return 0
 
+    def release_worker(self, *args: Any) -> bool:
+        return False
+
+    def reservations(self) -> list[Any]:
+        return []
+
 
 class _NoopSecretVault:
     """A model-secret vault for tests that never exercise the credential path."""
