@@ -249,6 +249,34 @@ class TestCancelledCreate:
         assert registry.try_get(adapter.token) is None
 
     @pytest.mark.asyncio
+    async def test_a_destroy_during_the_unwind_stop_waits_for_it(self) -> None:
+        release, stopped = threading.Event(), threading.Event()
+        wm, registry, adapter, created, factory = _creating_manager(release)
+        created.stop.side_effect = lambda **_: stopped.wait(timeout=5.0)
+        task = asyncio.ensure_future(
+            asyncio.wait_for(
+                wm.create_worker(WorkerInitConfig(init_on_start=True)), timeout=0.1
+            )
+        )
+        await asyncio.sleep(0.2)
+        release.set()
+        await asyncio.sleep(0.2)
+        assert adapter.status is WorkerStatus.STOPPING
+
+        destroy = asyncio.ensure_future(wm.destroy_worker(adapter.name))
+        await asyncio.sleep(0.2)
+
+        assert not destroy.done()
+        assert registry.try_get_by_name(adapter.name) is adapter
+        stopped.set()
+        assert await destroy is True
+        with contextlib.suppress(BaseException):
+            await task
+        created.stop.assert_called_once()
+        factory.destroy_worker.assert_called_once_with(adapter)
+        assert registry.try_get_by_name(adapter.name) is None
+
+    @pytest.mark.asyncio
     async def test_a_create_keeps_its_name_until_its_unwind_ends(self) -> None:
         release = threading.Event()
         wm, registry, adapter, created, _ = _creating_manager(release)

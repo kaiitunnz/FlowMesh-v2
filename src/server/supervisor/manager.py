@@ -197,14 +197,13 @@ class WorkerManager:
 
         worker = self._create_worker(init_config)
         if init_config.init_on_start:
-            # A worker created here must not hold its name or GPUs against a retry,
-            # including when its command times out and cancels the start.
+            # A create that fails or is cancelled (its command timing out) stops and
+            # destroys its worker. The unwind outlives a second cancel, and the worker
+            # keeps its name until the unwind ends.
             try:
                 if not await self._start_worker(worker):
                     raise RuntimeError(f"Failed to start worker '{worker.name}'")
             except BaseException:
-                # The unwind outlives a second cancel; the worker keeps its name until
-                # it ends.
                 unwind = asyncio.ensure_future(self._stop_and_destroy_worker(worker))
                 unwind.add_done_callback(lambda _: self._registry.try_pop(worker.token))
                 await asyncio.shield(unwind)
@@ -346,7 +345,12 @@ class WorkerManager:
     async def _stop_and_destroy_worker(self, worker: WorkerAdapter) -> bool:
         worker_name = worker.name
         success = True
-        was_running = worker.status in (WorkerStatus.STARTING, WorkerStatus.RUNNING)
+        # A worker another stop is stopping is still running until that stop ends.
+        was_running = worker.status in (
+            WorkerStatus.STARTING,
+            WorkerStatus.RUNNING,
+            WorkerStatus.STOPPING,
+        )
 
         if was_running:
             self.logger.info("Stopping worker %s...", worker_name)
