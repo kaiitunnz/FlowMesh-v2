@@ -503,6 +503,11 @@ class SSHExecutor(Executor):
         container_name = f"{worker_name}_ssh-{task.task_id[:8]}-{session_id[:8]}"
 
         prepare_output_dir(out_dir)  # Ensure output dir exists before mounting
+        if self._signals.raise_if_cancelled():
+            logger.info(
+                "SSH task %s stopped before its container started", task.task_id
+            )
+            return SSHResult(session_id=session_id, exit_code=0)
         resolved_inputs = self._resolve_inputs(task, cfg)
         mount_plan = self._build_mount_plan(
             client, out_dir, resolved_inputs, cfg, session_id
@@ -782,13 +787,21 @@ class SSHExecutor(Executor):
             kwargs["network"] = self._ssh_network
         return kwargs
 
-    def _wait_for_port(self, container: Container, timeout_sec: float = 30.0) -> int:
-        """Wait until Docker assigns a host port and sshd accepts connections."""
+    def _wait_for_port(
+        self, container: Container, timeout_sec: float = 30.0
+    ) -> int | None:
+        """Wait until Docker assigns a host port and sshd accepts connections; returns
+        None for a session stopped first."""
         deadline = time.time() + timeout_sec
         while time.time() < deadline:
+            if self._signals.raise_if_cancelled():
+                return None
             try:
                 container.reload()
                 if container.status not in ("running", "restarting"):
+                    # A stop or cancel stops the container it waits on.
+                    if self._signals.raise_if_cancelled():
+                        return None
                     exit_info = container.wait()
                     exit_code = int(exit_info.get("StatusCode", -1))
                     tail = ""
@@ -812,8 +825,14 @@ class SSHExecutor(Executor):
                     host_port = int(port_bindings[0]["HostPort"])
                     if self._is_ssh_ready("127.0.0.1", host_port):
                         return host_port
-            except ExecutionError:
+            except (ExecutionError, TaskCancelledError):
                 raise
+            except NotFound as exc:
+                if self._signals.raise_if_cancelled():
+                    return None
+                raise ExecutionError(
+                    f"Container {container.name} disappeared before SSH became ready"
+                ) from exc
             except Exception:
                 pass
             time.sleep(1.0)
@@ -839,6 +858,8 @@ class SSHExecutor(Executor):
         access_mode = cfg.access_mode
         expires_at = self._iso_offset(cfg.ttl_sec)
         host_port = self._wait_for_port(container)
+        if host_port is None:
+            return {}
         host_name = socket.getfqdn()
         ssh_info: dict[str, Any] = {
             "session_id": session_id,
@@ -895,9 +916,7 @@ class SSHExecutor(Executor):
         # and last activity timestamp
         deadline = time.time() + ttl_sec
         while time.time() < deadline:
-            if self._signals.cancelled:
-                raise TaskCancelledError("SSH session cancelled")
-            if self._signals.stopped or self._finish_requested(container):
+            if self._signals.raise_if_cancelled() or self._finish_requested(container):
                 logger.info("SSH session finish requested; stopping container")
                 try:
                     container.stop(timeout=1)
@@ -910,13 +929,22 @@ class SSHExecutor(Executor):
             try:
                 container.reload()
                 self._enforce_output_limit(container, output_cfg, mount_plan)
-                if container.status not in ("running", "restarting"):
-                    return int(container.wait()["StatusCode"])
-            except Exception as exc:
-                logger.debug("Container reload error (may have exited): %s", exc)
-                if self._signals.stopped:
+                exited = container.status not in ("running", "restarting")
+            except NotFound as exc:
+                # A stop or cancel stops the container it waits on; nothing else
+                # removes it while the session runs.
+                if self._signals.raise_if_cancelled():
                     return 0
-                break
+                raise ExecutionError(
+                    f"SSH container {container.name} disappeared while running"
+                ) from exc
+            except Exception as exc:
+                logger.debug("Container reload error: %s", exc)
+            else:
+                if exited:
+                    if self._signals.raise_if_cancelled():
+                        return 0
+                    return int(container.wait()["StatusCode"])
             time.sleep(poll_interval_sec)
 
         logger.info("SSH session TTL reached; stopping container")
