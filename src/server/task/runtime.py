@@ -423,7 +423,7 @@ def _settle_outcome(
     return SettleOutcome(
         effect,
         record.status if record is not None else None,
-        usages if effect is EventEffect.APPLIED else [],
+        usages if effect in (EventEffect.APPLIED, EventEffect.FAILED) else [],
         merged_children,
         impacted,
     )
@@ -5782,24 +5782,31 @@ class TaskRuntime:
                 )
                 return _settle_outcome(EventEffect.SETTLED, record, [], [])
             if record.status == TaskStatus.DISPATCHED:
-                return self._return_given_up_locked(record, worker_id)
+                return self._return_given_up_locked(record, worker_id, payload)
             self._settle_cancelled_locked(
                 record, finished_ts, started_ts=started_ts, usage=usage
             )
             return _settle_outcome(EventEffect.APPLIED, record, [], usages)
 
     def _return_given_up_locked(
-        self, record: TaskRecord, worker_id: str | None
+        self, record: TaskRecord, worker_id: str | None, payload: dict[str, Any]
     ) -> SettleOutcome:
         """Return a task its worker gave up, without spending an attempt.
 
         A v2 task resolves as its worker's loss does: one that can safely re-run
-        returns, and one that cannot fails.
+        returns, and one that cannot fails, billed for the dispatch it gave up.
         """
         if record.workflow_id in self._engines:
             loss = self._resolve_lost_locked(record)
+            usages: list[tuple[str, TaskUsage]] = []
+            if loss.end is DispatchEnd.FAILED and (
+                usage := TaskUsage.from_payload(payload, TaskStatus.FAILED)
+            ):
+                record.usages.append(usage)
+                self._commit_locked(record.task_id)
+                usages.append((record.task_id, usage))
             return _settle_outcome(
-                _LOSS_EFFECTS[loss.end], record, [], [], loss.impacted
+                _LOSS_EFFECTS[loss.end], record, [], usages, loss.impacted
             )
         if worker_id is None or not self._return_failed_merge_locked(record, worker_id):
             self._return_dispatch_locked(record, increment_retry=False, front=True)

@@ -554,6 +554,7 @@ class EventMonitor:
                         worker_id,
                         LossOutcome(event.task_id, end, cancellation.impacted),
                         event.dispatch_id,
+                        cancellation.usages,
                     )
                     return
                 if self._unapplied(event, cancellation.effect):
@@ -646,7 +647,11 @@ class EventMonitor:
             self._record_loss(worker_id, loss, None)
 
     def _record_loss(
-        self, worker_id: str, loss: LossOutcome, dispatch_id: str | None
+        self,
+        worker_id: str,
+        loss: LossOutcome,
+        dispatch_id: str | None,
+        usages: list[tuple[str, TaskUsage]] | None = None,
     ) -> None:
         """Apply the side effects of a task its worker lost or gave up."""
         match loss.end:
@@ -677,7 +682,7 @@ class EventMonitor:
                         payload={"worker": worker_id},
                     ),
                     loss.impacted,
-                    [],
+                    usages or [],
                 )
 
     def _record_cancellation(

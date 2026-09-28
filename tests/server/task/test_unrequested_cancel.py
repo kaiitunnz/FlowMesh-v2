@@ -4,6 +4,7 @@ task that cannot safely re-run."""
 
 import threading
 from typing import Any, cast
+from unittest.mock import patch
 
 import pytest
 
@@ -26,6 +27,15 @@ from tests.server.task.test_v2_orchestration import (
     _worker,
 )
 from tests.server.task.test_v2_region_failure import _HEAD, _JOINS, _spawn_join
+
+_USAGE = {
+    "started_at": _TS,
+    "finished_at": _TS,
+    "runtime_sec": 1.5,
+    "hardware": {"gpu": {"driver_version": None, "cuda_version": None, "devices": []}},
+    "cost_per_hour": 2.0,
+    "total_cost": 0.5,
+}
 
 V1_CHAIN = """
 apiVersion: mloc/v1
@@ -337,3 +347,50 @@ async def test_a_dispatch_its_ledger_never_saved_resolves_after_a_restart(
     else:
         assert record.status == TaskStatus.FAILED
     assert restored.workflow_settlement(workflow_id).settled
+
+
+@pytest.mark.anyio
+async def test_a_given_up_task_that_fails_is_billed_for_its_dispatch() -> None:
+    registry = FakeRegistry()
+    runtime = _runtime(registry)
+    _, ids = await _register(runtime, SSH_THEN_ECHO)
+    task_id = ids["session"]
+    assert _next(runtime) == task_id
+    record_dispatch(runtime, task_id, cast(Any, _worker()), "dsp-1")
+
+    outcome = runtime.mark_cancelled(task_id, "wkr-1", _USAGE, _TS, "dsp-1")
+
+    assert outcome.effect is EventEffect.FAILED
+    [(billed, usage)] = outcome.usages
+    assert (billed, usage.status, usage.total_cost) == (task_id, "FAILED", 0.5)
+    restored = _runtime(registry)
+    await restored.rehydrate()
+    record = restored.get_record(task_id)
+    assert record is not None and record.usages == [usage]
+
+
+@pytest.mark.anyio
+async def test_the_monitor_emits_the_usage_of_a_given_up_task_that_fails() -> None:
+    runtime = _runtime(FakeRegistry())
+    monitor = _monitor(runtime)
+    _, ids = await _register(runtime, SSH_THEN_ECHO)
+    task_id = ids["session"]
+    assert _next(runtime) == task_id
+    record_dispatch(runtime, task_id, cast(Any, _worker()), "dsp-1")
+    emitted: list[Any] = []
+
+    with patch.object(monitor, "_schedule_emit_usage", side_effect=emitted.extend):
+        monitor.handle_task_event(
+            TaskEvent(
+                type="TASK_CANCELLED",
+                task_id=task_id,
+                worker_id="wkr-1",
+                dispatch_id="dsp-1",
+                ts=_TS,
+                payload=_USAGE,
+            )
+        )
+
+    assert [(billed, usage.status) for billed, usage in emitted] == [
+        (task_id, "FAILED")
+    ]
