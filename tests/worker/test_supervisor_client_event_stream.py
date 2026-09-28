@@ -18,8 +18,9 @@ def test_the_ready_callback_runs_before_the_stream_sends() -> None:
         order.append("sent")
         client._shutdown.set()
 
-    client._stub = cast(Any, MagicMock())
-    client._stub.PushEvents.side_effect = push
+    stub = MagicMock()
+    stub.PushEvents.side_effect = push
+    client._stub = cast(Any, stub)
     client.on_event_stream_ready(lambda: order.append("ready"))
 
     with patch.object(supervisor_module.grpc, "channel_ready_future"):
