@@ -247,10 +247,7 @@ class ResidentLaneHost:
 
     def _authorize(self, frame: dict[str, Any]) -> None:
         if self._origin is not None:
-            self._origin.authorize(
-                str(frame["call_correlation"]),
-                RouteAuthorization.model_validate(frame["auth"]),
-            )
+            self._origin.authorize(RouteAuthorization.model_validate(frame["auth"]))
 
     def _bind(self, frame: dict[str, Any]) -> None:
         if self._replica is None:
@@ -278,7 +275,7 @@ class ResidentLaneHost:
         # A fenced terminal reaps the origin driver and drops the worker-private request
         # so it does not outlive the invocation.
         if self._origin is not None:
-            self._origin.reap(str(frame["call_correlation"]))
+            self._origin.reap(str(frame["task_id"]), str(frame["call_correlation"]))
         self._delete_request(str(frame["task_id"]), str(frame["call_correlation"]))
 
     def _sidecar_reap(self, frame: dict[str, Any]) -> None:

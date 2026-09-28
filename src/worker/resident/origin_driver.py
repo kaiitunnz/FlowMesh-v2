@@ -114,11 +114,14 @@ class ResidentOriginDriver:
         self._auth_deadline = auth_deadline_sec
         self._logger = logger or logging.getLogger("resident-origin-driver")
         self._by_session: dict[str, _Origin] = {}
-        self._by_call: dict[str, _Origin] = {}
+        # A call correlation is unique only within its task: the children of one
+        # fan-out share their author's call names.
+        self._by_boundary: dict[tuple[str, str], _Origin] = {}
+        self._by_invocation: dict[str, _Origin] = {}
 
     def begin(self, request: ResidentOriginRequest) -> None:
         """Start one bootstrap attempt for a control-relayed handoff."""
-        self._reap(request.call_correlation)
+        self._reap((request.task_id, request.call_correlation))
         try:
             sink = self._carriage.select(request.carriage_plan)
         except CarriageUnavailable as exc:
@@ -142,12 +145,14 @@ class ResidentOriginDriver:
             authorization=asyncio.get_running_loop().create_future(),
         )
         self._by_session[request.session_id] = origin
-        self._by_call[request.call_correlation] = origin
+        self._by_boundary[(request.task_id, request.call_correlation)] = origin
+        self._by_invocation[request.handoff.invocation_id] = origin
         origin.task = asyncio.ensure_future(self._drive(origin))
 
-    def authorize(self, call_correlation: str, auth: RouteAuthorization) -> None:
-        """Deliver control's post-acceptance route authorization to a waiting driver."""
-        origin = self._by_call.get(call_correlation)
+    def authorize(self, auth: RouteAuthorization) -> None:
+        """Deliver control's post-acceptance route authorization to the driver of its
+        invocation."""
+        origin = self._by_invocation.get(auth.invocation_id)
         if origin is not None and not origin.authorization.done():
             origin.authorization.set_result(auth)
 
@@ -157,14 +162,15 @@ class ResidentOriginDriver:
         if origin is not None:
             await origin.session.on_frame(frame)
 
-    def reap(self, call_correlation: str) -> None:
+    def reap(self, task_id: str, call_correlation: str) -> None:
         """Cancel and forget a driver, e.g. on a fenced cancellation terminal."""
-        self._reap(call_correlation)
+        self._reap((task_id, call_correlation))
 
-    def _reap(self, call_correlation: str) -> None:
-        origin = self._by_call.pop(call_correlation, None)
+    def _reap(self, boundary: tuple[str, str]) -> None:
+        origin = self._by_boundary.pop(boundary, None)
         if origin is None:
             return
+        self._forget(origin)
         self._by_session.pop(origin.request.session_id, None)
         self._carriage.close(origin.request.session_id)
         task = origin.task
@@ -248,8 +254,15 @@ class ResidentOriginDriver:
             # connection cannot end until the origin closes.
             self._carriage.close(req.session_id)
             self._by_session.pop(req.session_id, None)
-            if self._by_call.get(req.call_correlation) is origin:
-                self._by_call.pop(req.call_correlation, None)
+            boundary = (req.task_id, req.call_correlation)
+            if self._by_boundary.get(boundary) is origin:
+                self._by_boundary.pop(boundary, None)
+            self._forget(origin)
+
+    def _forget(self, origin: _Origin) -> None:
+        invocation_id = origin.request.handoff.invocation_id
+        if self._by_invocation.get(invocation_id) is origin:
+            self._by_invocation.pop(invocation_id, None)
 
     def _handle_ack(
         self, req: ResidentOriginRequest, ack: dict[str, Any] | None

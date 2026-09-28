@@ -7,9 +7,12 @@ reference — exercising the loop marshal, the frame wire round-trip, and the
 direction-based routing to the origin vs replica lane.
 """
 
+import asyncio
 import threading
 from collections.abc import AsyncIterator
 from typing import Any
+
+import pytest
 
 from shared.network.relay_frame import RelayDirection, RelayFrame, RelayFrameKind
 from shared.resident.carriage import ResidentCarriagePlan
@@ -232,3 +235,134 @@ def test_bind_frame_threads_the_serve_task_fence_to_the_sidecar() -> None:
         assert captured["binding_generation"] == 5
     finally:
         host._loop.close()
+
+
+def _gated_engine(gate: threading.Event) -> Any:
+    async def engine(
+        endpoint: ReplicaEndpoint,
+        request: str | None,
+        adapter_name: str | None = None,
+        adapter_source: str | None = None,
+    ) -> EngineResponse:
+        while not gate.is_set():
+            await asyncio.sleep(0.01)
+        return await _fake_engine(endpoint, request, adapter_name, adapter_source)
+
+    return engine
+
+
+def _fenced(task_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    """A handoff and its authorization for one invocation of ``task_id``."""
+    fence: dict[str, Any] = {
+        "claim_id": f"scl-{task_id}",
+        "invocation_id": f"inv-{task_id}",
+        "idempotency_key": f"idm-{task_id}",
+        "tenant": "t1",
+        "origin_id": "rog-1",
+        "replica_id": "rpl-1",
+        "incarnation": 1,
+        "listener_generation": 1,
+    }
+    handoff = AdmissionHandoff(token=f"hnd-{task_id}", family="fam", **fence)
+    return (
+        handoff.model_dump(mode="json"),
+        RouteAuthorization(**fence).model_dump(mode="json"),
+    )
+
+
+@pytest.mark.parametrize("reap_first", [False, True])
+def test_siblings_sharing_a_call_keep_their_own_resident_drivers(
+    reap_first: bool,
+) -> None:
+    # The children of one fan-out run the same script, so their calls share a name;
+    # suspended, both can hold a resident call on one origin worker at once.
+    store = InMemoryContentStore()
+    outcomes: dict[str, ResidentOpOutcome] = {}
+    gate = threading.Event()
+    hosts: dict[str, ResidentLaneHost] = {}
+    fences = {task: _fenced(task) for task in ("tsk-a", "tsk-b")}
+
+    def on_ack(ack: ResidentBootstrapAck) -> None:
+        if ack.outcome is ResidentBootstrapOutcome.ACKED:
+            # The frame a root sends: the call and the authorization, no task.
+            auth = next(
+                a for _, a in fences.values() if a["invocation_id"] == ack.invocation_id
+            )
+            hosts["origin"].route(
+                "resident_authorization",
+                {"call_correlation": ack.call_correlation, "auth": auth},
+            )
+
+    def on_outcome(outcome: ResidentOpOutcome) -> None:
+        outcomes[outcome.task_id] = outcome
+
+    def origin_pushes(frame: dict[str, Any]) -> None:
+        hosts["replica"].route("resident_frame", frame)
+
+    def replica_pushes(frame: dict[str, Any]) -> None:
+        hosts["origin"].route("resident_frame", frame)
+
+    origin = ResidentLaneHost(
+        push_frame=origin_pushes,
+        report_ack=on_ack,
+        report_outcome=on_outcome,
+        content_store_for=lambda task_id: store,
+        peek_request=lambda _t, _c: '{"prompt": "hi"}',
+        delete_request=lambda _t, _c: None,
+    )
+    replica = ResidentLaneHost(
+        push_frame=replica_pushes,
+        report_ack=lambda _a: None,
+        report_outcome=lambda _o: None,
+        content_store_for=lambda task_id: None,
+        peek_request=lambda _t, _c: None,
+        delete_request=lambda _t, _c: None,
+        engine_open=_gated_engine(gate),
+    )
+    hosts["origin"], hosts["replica"] = origin, replica
+    origin.start()
+    replica.start()
+    try:
+        replica.route(
+            "resident_sidecar_bind",
+            {
+                "replica_id": "rpl-1",
+                "incarnation": 1,
+                "listener_generation": 1,
+                "engine": {
+                    "base_url": "http://engine/v1",
+                    "model": "m",
+                    "api_key": None,
+                },
+            },
+        )
+        for number, (task, (handoff, _)) in enumerate(fences.items()):
+            origin.route(
+                "resident_handoff",
+                {
+                    "task_id": task,
+                    "call_correlation": "m0",
+                    "session_id": f"rly-{number}",
+                    "handoff": handoff,
+                    "carriage_plan": ResidentCarriagePlan(
+                        session_id=f"rly-{number}"
+                    ).model_dump(mode="json"),
+                },
+            )
+        if reap_first:
+            origin.route(
+                "resident_reap", {"task_id": "tsk-a", "call_correlation": "m0"}
+            )
+        gate.set()
+
+        expected = {"tsk-b"} if reap_first else {"tsk-a", "tsk-b"}
+        for _ in range(500):
+            if set(outcomes) >= expected:
+                break
+            threading.Event().wait(0.02)
+        threading.Event().wait(0.2)
+        assert set(outcomes) == expected
+        assert all(o.status is ResidentStreamStatus.SUCCESS for o in outcomes.values())
+    finally:
+        origin.stop()
+        replica.stop()
