@@ -284,7 +284,7 @@ class VastAIWorkerAdapter(WorkerAdapter):
             return True
         raise RuntimeError("Failed to launch any VastAI instance.")
 
-    def _holds_worker(self) -> bool:
+    def holds_worker(self) -> bool:
         return self._holds_instance
 
     def _stop(self) -> bool:

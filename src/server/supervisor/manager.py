@@ -18,6 +18,12 @@ from .schemas import WorkerInfo, WorkerStatus
 _MAX_PARALLELISM: int = 16
 
 
+def _is_live(worker: WorkerAdapter) -> bool:
+    # The status reads STOPPED whenever the worker's event stream closes, while what the
+    # adapter started may still run.
+    return worker.status is not WorkerStatus.STOPPED or worker.holds_worker()
+
+
 class WorkerInitConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -237,9 +243,6 @@ class WorkerManager:
         worker = self._registry.try_get_by_name(name)
         if worker is None:
             raise ValueError(f"Worker '{name}' does not exist")
-        if worker.status not in (WorkerStatus.STARTING, WorkerStatus.RUNNING):
-            raise ValueError(f"Worker '{name}' is not starting or running")
-
         return await self._stop_worker(worker)
 
     async def destroy_worker(self, name: str) -> bool:
@@ -301,7 +304,7 @@ class WorkerManager:
     async def _start_worker(self, worker: WorkerAdapter) -> bool:
         if not self.is_started:
             raise RuntimeError("WorkerManager not started")
-        if worker.status is not WorkerStatus.STOPPED:
+        if _is_live(worker):
             raise ValueError(f"Worker '{worker.name}' is already started")
 
         started = await worker.start()
@@ -344,7 +347,7 @@ class WorkerManager:
 
     async def _stop_and_destroy_worker(self, worker: WorkerAdapter) -> bool:
         worker_name = worker.name
-        was_running = worker.status is not WorkerStatus.STOPPED
+        was_running = _is_live(worker)
         if was_running:
             self.logger.info("Stopping worker %s...", worker_name)
         else:
@@ -371,7 +374,7 @@ class WorkerManager:
 
     async def _stop_worker(self, worker: WorkerAdapter) -> bool:
         worker_name = worker.name
-        if worker.status not in (WorkerStatus.STARTING, WorkerStatus.RUNNING):
+        if not _is_live(worker):
             raise ValueError(f"Worker '{worker_name}' is not starting or running")
 
         self.logger.info("Stopping worker %s...", worker_name)

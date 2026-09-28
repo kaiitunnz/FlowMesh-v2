@@ -4,6 +4,9 @@ The status reads STOPPED whenever the worker's event stream closes, as after a w
 crash or a reconnect, while its container or instance still runs.
 """
 
+import asyncio
+import logging
+import threading
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -126,3 +129,95 @@ async def test_a_stopped_worker_is_not_stopped_again(kind: str) -> None:
     assert await world.adapter.stop()
 
     assert world.stops == 1
+
+
+def _manager(world: Any, kind: str) -> StubWorkerManager:
+    registry = WorkerRegistry()
+    registry.add(world.adapter)
+    wm = StubWorkerManager(registry)
+    wm._is_started = True
+    wm._providers = {
+        kind: ProviderSpec(
+            kind, type(world.adapter.config), type(world.adapter), MagicMock()
+        )
+    }
+    return wm
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["docker", "vastai"])
+async def test_an_operator_stops_a_worker_whose_event_stream_closed(kind: str) -> None:
+    world = _world(kind)
+    await world.start()
+    world.adapter.set_status(WorkerStatus.STOPPED)
+
+    assert await _manager(world, kind).stop_worker(world.adapter.name)
+
+    assert world.stops == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["docker", "vastai"])
+async def test_a_worker_whose_event_stream_closed_is_not_started_again(
+    kind: str,
+) -> None:
+    world = _world(kind)
+    await world.start()
+    world.adapter.set_status(WorkerStatus.STOPPED)
+
+    with pytest.raises(ValueError, match="already started"):
+        await _manager(world, kind).start_worker(world.adapter.name)
+
+    if kind == "vastai":
+        assert world.client.create_instance.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_a_start_waits_for_the_stop_still_running() -> None:
+    world = _VastAI()
+    contracts = iter([70, 80])
+    world.client.create_instance.side_effect = lambda **_: {
+        "success": True,
+        "new_contract": next(contracts),
+    }
+    await world.start()
+    destroying = threading.Event()
+    release = threading.Event()
+
+    def destroy_instance(**_: Any) -> None:
+        destroying.set()
+        release.wait(5)
+
+    world.client.destroy_instance.side_effect = destroy_instance
+    stop = asyncio.ensure_future(world.adapter.stop())
+    await asyncio.to_thread(destroying.wait, 5)
+    world.adapter.set_status(WorkerStatus.STOPPED)  # the stream closes mid-stop
+    start = asyncio.ensure_future(world.adapter.start())
+    await asyncio.sleep(0.05)
+    assert world.client.create_instance.call_count == 1
+
+    release.set()
+    assert await stop
+    assert await start
+
+    assert world.client.create_instance.call_count == 2
+    assert [c.kwargs["id"] for c in world.client.destroy_instance.call_args_list] == [
+        70
+    ]
+    assert world.adapter.holds_worker()
+
+
+@pytest.mark.asyncio
+async def test_a_destroy_logs_stopping_a_worker_whose_event_stream_closed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    world = _world("docker")
+    await world.start()
+    world.adapter.set_status(WorkerStatus.STOPPED)
+    wm = _manager(world, "docker")
+
+    with caplog.at_level(logging.INFO, logger=wm.logger.name):
+        assert await wm.destroy_worker(world.adapter.name)
+
+    assert f"Stopping worker {world.adapter.name}..." in caplog.messages
+    assert f"Worker {world.adapter.name} stopped." in caplog.messages

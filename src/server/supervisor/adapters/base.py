@@ -123,8 +123,11 @@ class WorkerAdapter(ABC):
         """Start worker. Returns whether the worker was successfully started.
 
         ``_start`` runs on a thread, which a cancel cannot stop; a stop waits for it
-        first, so it finds whatever the start created.
+        first, so it finds whatever the start created. A start waits for a stop still
+        running, so the stop never removes what the start creates.
         """
+        if (stopping := self._stopping) is not None and not stopping.done():
+            await asyncio.wait({stopping})
         self.set_status(WorkerStatus.STARTING)
         starting = self._starting = asyncio.ensure_future(
             asyncio.to_thread(self._start)
@@ -162,7 +165,7 @@ class WorkerAdapter(ABC):
             # only what the adapter started says whether there is anything to stop.
             if (
                 prev_status in (WorkerStatus.STOPPING, WorkerStatus.STOPPED)
-                and not self._holds_worker()
+                and not self.holds_worker()
             ):
                 return True
             self.set_status(WorkerStatus.STOPPING)
@@ -182,7 +185,7 @@ class WorkerAdapter(ABC):
         pass
 
     @abstractmethod
-    def _holds_worker(self) -> bool:
+    def holds_worker(self) -> bool:
         """Whether this adapter started a worker it has not stopped."""
         pass
 
