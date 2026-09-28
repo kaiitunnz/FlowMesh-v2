@@ -748,3 +748,28 @@ def test_a_plan_annotation_for_another_node_is_not_read_as_this_one_s():
 
     family = stores.families.get(stores.claims.by_invocation("inv-1")[0].family)
     assert family is not None and family.warmth is None
+
+
+def test_a_request_that_exhausts_its_redrives_settles_before_it_releases() -> None:
+    svc, stores, _settled, delivery = _build()
+    asyncio.run(svc._originate(_env()))
+    asyncio.run(svc._on_ack(_ack(svc, ResidentBootstrapOutcome.ACKED)))
+    delivery.relays.clear()
+    at_settle: list[tuple[ClaimState, list[str]]] = []
+    settle = svc._settle
+
+    def recording_settle(*args: Any, **kwargs: Any) -> bool:
+        claim = stores.claims.by_invocation("inv-1")[-1]
+        at_settle.append((claim.state, [kind for _, kind, _ in delivery.relays]))
+        return settle(*args, **kwargs)
+
+    svc._settle = recording_settle  # type: ignore[method-assign]
+
+    svc._terminalize_failed("inv-1", "tsk-1", "c1", None, "re-drives exhausted")
+    # The runtime's ledger terminal for the boundary.
+    svc.on_invocation_terminal("inv-1", failed=True)
+
+    ((state, relays),) = at_settle
+    assert state is not ClaimState.TERMINAL and "resident_reap" not in relays
+    assert stores.claims.by_invocation("inv-1")[-1].state is ClaimState.TERMINAL
+    assert [kind for _, kind, _ in delivery.relays].count("resident_reap") == 1

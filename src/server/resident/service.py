@@ -1449,11 +1449,7 @@ class ResidentCapacityControl:
                 invocation_id, serve, ClaimTerminalReason.FAILED, detail, success=False
             )
         else:
-            self._admission.settle_invocation_terminal(
-                invocation_id, ClaimTerminalReason.FAILED
-            )
-            self._transient_failures.pop(invocation_id, None)
-            self._reap_attempt(invocation_id)
+            # The boundary's ledger terminal releases the credit and reaps.
             self._settle(task_id, call_correlation, None, error=detail)
 
     def _release_definite(
