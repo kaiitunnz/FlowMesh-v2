@@ -8,6 +8,7 @@ the server routes any boundary and re-dispatches with the next capsule and outco
 """
 
 import logging
+import threading
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -38,6 +39,7 @@ from shared.tools.search.schema import (
 )
 
 from ..egress import CapturedRequest, PendingEgressRequestStore
+from ..model_turn import ResponsesFacade
 from ..private_state import MaterializedState, PrivateStateHolder
 from ..resident import capture_resident_request
 from ..sandbox import AgentSandboxRuntime, SandboxRuntime, build_sandbox_runtime
@@ -304,12 +306,16 @@ class AgentEpisodeExecutor(Executor):
     def cancel(self, task_id: str) -> None:
         if not self._signals.cancel(task_id):
             return
-        if (adapter := self._adapter) is not None:
-            adapter.cancel(task_id)
-        # After the harness, so it cannot retry the call into a fresh held turn.
+        adapter = self._adapter
         facade = self._lifecycle.responses_facade if self._lifecycle else None
-        if facade is not None:
-            facade.cancel_episode(task_id)
+        # Ending the harness waits for it to exit, and the caller may be the thread that
+        # relays the worker's permits and reaps.
+        threading.Thread(
+            target=_give_up,
+            args=(task_id, adapter, facade),
+            name="agent-episode-give-up",
+            daemon=True,
+        ).start()
 
     def cleanup_after_run(self) -> None:
         facade = self._lifecycle.responses_facade if self._lifecycle else None
@@ -317,6 +323,17 @@ class AgentEpisodeExecutor(Executor):
             facade.unregister_episode(self._episode_task_id)
         self._episode_task_id = None
         self._adapter = None
+
+
+def _give_up(
+    task_id: str, adapter: HarnessAdapter | None, facade: ResponsesFacade | None
+) -> None:
+    if adapter is not None:
+        adapter.cancel(task_id)
+    # After the harness has exited, so it cannot end its turn on the released call or
+    # retry it into a fresh held turn.
+    if facade is not None:
+        facade.cancel_episode(task_id)
 
 
 def _attachment(dispatch: AgentEpisodeDispatch) -> PrivateStateAttachment:

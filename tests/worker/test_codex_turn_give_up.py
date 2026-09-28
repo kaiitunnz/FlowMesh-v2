@@ -106,9 +106,12 @@ class _AppServer:
         threading.Thread(target=call_model, daemon=True).start()
         self._on_held()
         deadline = time.monotonic() + _TURN_SEC
-        while time.monotonic() < deadline and not replied.is_set():
+        # A closed app-server delivers no later event, whatever its call answered.
+        while time.monotonic() < deadline:
             if self.closed.is_set():
                 raise RuntimeError("the Codex app-server closed mid-turn")
+            if replied.is_set():
+                break
             time.sleep(0.01)
         return CodexEvent(kind="completed", value="done")
 

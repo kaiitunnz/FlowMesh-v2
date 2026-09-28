@@ -6,7 +6,10 @@ native-bypass backend is refused.
 """
 
 import json
+import threading
+import time
 from pathlib import Path
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -448,3 +451,38 @@ def test_a_step_whose_report_fails_holds_no_request_for_control(
     else:
         client.task_failed.assert_called_once()
         assert held == []
+
+
+def test_a_give_up_returns_at_once_and_releases_the_turn_once_the_harness_exited(
+    tmp_path: Path,
+) -> None:
+    order: list[str] = []
+    exiting = threading.Event()
+    exited = threading.Event()
+
+    class _SlowExit:
+        def cancel(self, task_id: str) -> None:
+            exiting.set()
+            exited.wait(5)
+            order.append("harness exited")
+
+    lifecycle = MagicMock()
+    lifecycle.responses_facade.cancel_episode.side_effect = lambda _: order.append(
+        "turn released"
+    )
+    ex = AgentEpisodeExecutor(make_worker_config(), lifecycle=lifecycle)
+    ex._adapter = cast(Any, _SlowExit())
+
+    with ex._signals.running("tsk-1"):
+        started = time.monotonic()
+        ex.cancel("tsk-1")
+        returned_after = time.monotonic() - started
+        assert exiting.wait(5)
+        assert order == []
+        exited.set()
+        deadline = time.monotonic() + 5
+        while len(order) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+    assert returned_after < 1.0
+    assert order == ["harness exited", "turn released"]
