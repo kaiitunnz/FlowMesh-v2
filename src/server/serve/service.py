@@ -521,7 +521,7 @@ class GatedServe:
         and per-task allocation family, and adopts the running replica. A disallowed
         model creates neither binding, family, replica, nor route. The work runs on the
         control loop so all store access stays single-threaded with admission, and
-        adopts nothing once ``current`` says the endpoint's dispatch no longer holds the
+        adopts nothing once ``current`` says the endpoint's dispatch does not hold the
         task.
         """
 

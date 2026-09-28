@@ -1142,7 +1142,7 @@ class EventMonitor:
         Idempotent: the gated edge skips a task that already has a live binding, so
         repeated updates do not re-adopt. Runs after the record's endpoint is stored so
         the adoption probe reads it, and adopts only while the update's dispatch holds
-        the task: a release that ran first drained nothing.
+        the task, since a release that ran first had nothing to drain.
         """
         if self._gated_serve is None:
             return

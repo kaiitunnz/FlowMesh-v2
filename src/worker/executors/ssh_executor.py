@@ -1642,7 +1642,7 @@ class SSHExecutor(Executor):
             if self._signals.stopped:
                 return
             raise ExecutionError(
-                f"Failed to collect SSH output from {source_path}: it does not exist"
+                f"Failed to collect SSH output from {source_path}: not found"
             ) from None
         except Exception as exc:
             raise ExecutionError(

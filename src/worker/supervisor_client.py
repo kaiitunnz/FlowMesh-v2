@@ -644,8 +644,9 @@ class SupervisorClient:
         self._event_queue.put(serialize_event(event))
 
     def on_event_stream_ready(self, callback: Callable[[], None]) -> None:
-        """Run ``callback`` each time the event stream (re)connects, before it sends
-        anything queued."""
+        """Run ``callback`` each time the event stream (re)connects, before the stream
+        starts sending; what the callback sends queues behind any event already
+        queued."""
         self._on_event_stream_ready = callback
 
     def _offer_event(self, event: Event) -> None:
