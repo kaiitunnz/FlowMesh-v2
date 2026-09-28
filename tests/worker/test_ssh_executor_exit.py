@@ -416,3 +416,30 @@ def test_a_cancel_ends_an_output_copy_within_one_large_file(
 
     assert archive.closed
     assert archive.chunks_read <= 3
+
+
+@pytest.mark.parametrize("output", ["copied", "direct"])
+def test_a_cancel_as_the_session_ends_cancels_it_whatever_its_output_path(
+    executor: SSHExecutor, tmp_path: Path, output: str
+) -> None:
+    container = _container(0, output_bytes=0)
+    container.get_archive.return_value = (_output_archive(10), {})
+
+    def cancel_as_it_exits() -> dict[str, int]:
+        executor.cancel(_TASK_ID)
+        return {"StatusCode": 0}
+
+    container.wait.side_effect = cancel_as_it_exits
+    direct = tmp_path / "direct" if output == "direct" else None
+    if direct is not None:
+        direct.mkdir()
+
+    with pytest.raises(TaskCancelledError):
+        _run(
+            executor,
+            tmp_path,
+            container,
+            1000,
+            copy=output == "copied",
+            direct_output=direct,
+        )
