@@ -53,7 +53,7 @@ from ..orchestration.telemetry import (
     WorkflowSpanEmitter,
 )
 from ..registries.node import NodeRegistry
-from ..registries.worker import WorkerRegistry
+from ..registries.worker import ReportOutcome, StatusReport, WorkerRegistry
 from ..schemas.logs import LogEvent
 from ..serve import ServeAccessMode, is_public_base_url
 from ..task.finalizer import WorkflowFinalizer
@@ -492,7 +492,6 @@ class EventMonitor:
                     return
                 if success.status == TaskStatus.CANCELLED:
                     self._record_cancellation(event, success.usages)
-                    self._mark_worker_idle(worker_id)
                     return
                 self._release_task(event.task_id)
                 if settles:
@@ -543,7 +542,6 @@ class EventMonitor:
                         worker_id,
                         exc,
                     )
-                self._mark_worker_idle(worker_id)
                 self._finalizer.close_task_workflow(event.task_id)
             case "TASK_FAILED":
                 self._handle_task_failed(event, worker_id, payload)
@@ -561,7 +559,6 @@ class EventMonitor:
                 if self._unapplied(event, cancellation.effect):
                     return
                 self._record_cancellation(event, cancellation.usages)
-                self._mark_worker_idle(worker_id)
             case _:
                 self._logger.debug(
                     "Ignoring task event type=%s payload=%s", event_type, payload
@@ -697,12 +694,6 @@ class EventMonitor:
         self._close_task_log_stream(event.task_id)
         self._finalizer.close_task_workflow(event.task_id)
 
-    def _mark_worker_idle(self, worker_id: str) -> None:
-        try:
-            self._worker_registry.update_worker_status(worker_id, WorkerStatus.IDLE)
-        except Exception:
-            pass
-
     def _unapplied(self, event: TaskEvent, effect: EventEffect) -> bool:
         """Whether an event left its task as it was, logging a stale one and closing
         the workflow of a task it found settled."""
@@ -815,26 +806,27 @@ class EventMonitor:
                     )
             case "HEARTBEAT":
                 worker_id = (event.worker_id or "").strip()
-                success = self._worker_registry.update_worker_hb(
-                    worker_id, event.ts, event.payload.get("ttl_sec", 120)
+                report = self._worker_registry.update_worker_hb(
+                    worker_id,
+                    event.ts,
+                    event.payload.get("ttl_sec", 120),
+                    event.status,
+                    event.dispatch_id,
                 )
-                if not success:
-                    self._logger.warning(
-                        "Heartbeat from unknown worker %s; ignoring", worker_id
-                    )
+                self._took_status_report(worker_id, report, "Heartbeat")
             case "STATUS" if event.origin == "worker":
                 # A server-origin event announces a write the registry already applied
                 # inline; replaying it would land that value again on top of whatever
                 # has since replaced it.
                 worker_id = (event.worker_id or "").strip()
-                status = event.status or WorkerStatus.UNKNOWN
-                success = self._worker_registry.set_worker_status(
-                    worker_id, status, event.ts, event.payload
+                report = self._worker_registry.set_worker_status(
+                    worker_id,
+                    event.status or WorkerStatus.UNKNOWN,
+                    event.ts,
+                    event.payload,
+                    event.dispatch_id,
                 )
-                if not success:
-                    self._logger.warning(
-                        "Status update from unknown worker %s; ignoring", worker_id
-                    )
+                self._took_status_report(worker_id, report, "Status update")
             case "MEDIATED_OP_OUTCOME":
                 self._runtime.settle_mediated_operation(
                     MediatedOperationOutcome.model_validate(event.payload["outcome"])
@@ -906,6 +898,37 @@ class EventMonitor:
                 self._logger.debug(
                     "Ignoring task event type=%s payload=%s", event_type, event.payload
                 )
+
+    def _took_status_report(
+        self, worker_id: str, report: StatusReport, kind: str
+    ) -> None:
+        """Handle how the registry took a worker's status report.
+
+        A fenced IDLE names a reservation for a dispatch the worker never reported
+        running; once no publish or task holds that dispatch, it was lost before it
+        reached the worker, so the worker is released.
+        """
+        match report.outcome:
+            case ReportOutcome.UNKNOWN:
+                self._logger.warning(
+                    "%s from unknown worker %s; ignoring", kind, worker_id
+                )
+            case ReportOutcome.FENCED:
+                task_id, dispatch_id = report.reserved_task, report.reserved_dispatch
+                if dispatch_id is None or (
+                    task_id is not None
+                    and self._runtime.dispatch_in_flight(
+                        task_id, dispatch_id, worker_id
+                    )
+                ):
+                    return
+                if self._worker_registry.release_worker(worker_id, dispatch_id):
+                    self._logger.info(
+                        "Released worker %s from lost dispatch %s of task %s",
+                        worker_id,
+                        dispatch_id,
+                        task_id,
+                    )
 
     def _return_lost_tasks(self, worker_id: str, graceful: bool) -> None:
         """Return the tasks a departed worker held, settling any being cancelled.

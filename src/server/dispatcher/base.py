@@ -715,17 +715,23 @@ class Dispatcher:
             task_id, worker, dispatch_id, input_preparation=preparing
         ):
             return True
-        # BUSY is written before the worker can start the task, so every IDLE its end
-        # writes lands after it.
-        self._write_worker_status(worker.id, WorkerStatus.BUSY)
+        # The worker is reserved BUSY for this dispatch before it can start the task,
+        # so only the IDLE that ends this dispatch frees it.
+        if not self._reserve_worker(worker, task_id, dispatch_id):
+            # The worker unregistered after it was selected; nothing would run it.
+            if self._runtime.abandon_publish(task_id):
+                self.requeue_task(
+                    task_id, reason="worker_departed", front=True, count_retry=False
+                )
+            return False
         try:
             if self._content_access is not None:
                 self._content_access.issue(worker.id, task_id, record.org_id)
             receivers = self._worker_registry.publish_task(worker, message)
         except Exception as exc:
-            self._write_worker_status(worker.id, WorkerStatus.IDLE)
             if not self._runtime.abandon_publish(task_id):
                 return True
+            self._release_worker(worker.id, dispatch_id)
             self._logger.warning(
                 "Failed to publish task %s to worker %s: %s", task_id, worker.id, exc
             )
@@ -738,9 +744,9 @@ class Dispatcher:
             )
 
         if receivers <= 0:
-            self._write_worker_status(worker.id, WorkerStatus.IDLE)
             if not self._runtime.abandon_publish(task_id):
                 return True
+            self._release_worker(worker.id, dispatch_id)
             self._logger.info(
                 "Node %s dispatch channel has no subscriber; delaying task %s "
                 "(worker %s)",
@@ -790,11 +796,22 @@ class Dispatcher:
             pass
         return True
 
-    def _write_worker_status(self, worker_id: str, status: WorkerStatus) -> None:
+    def _reserve_worker(self, worker: Worker, task_id: str, dispatch_id: str) -> bool:
+        """Reserve a worker for a dispatch; False only when it is no longer
+        registered. A failed write proceeds, and the worker's heartbeat restores its
+        status."""
         try:
-            self._worker_registry.update_worker_status(worker_id, status)
+            return self._worker_registry.reserve_worker(worker.id, task_id, dispatch_id)
         except Exception as exc:
-            self._logger.debug("Failed to update worker %s status: %s", worker_id, exc)
+            self._logger.debug("Failed to reserve worker %s: %s", worker.id, exc)
+            return True
+
+    def _release_worker(self, worker_id: str, dispatch_id: str) -> None:
+        # A failed release is healed by the worker's next heartbeat.
+        try:
+            self._worker_registry.release_worker(worker_id, dispatch_id)
+        except Exception as exc:
+            self._logger.debug("Failed to release worker %s: %s", worker_id, exc)
 
     def dispatch_loop(self, stop_event, poll_interval: float = 1.0) -> None:
         """Continuously dispatch ready tasks until stop_event is set."""

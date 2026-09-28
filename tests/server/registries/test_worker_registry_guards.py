@@ -9,7 +9,7 @@ membership separately.
 from typing import Any, cast
 from unittest.mock import MagicMock
 
-from server.registries.worker import WorkerRegistry
+from server.registries.worker import ReportOutcome, StatusReport, WorkerRegistry
 from shared.schemas.worker import WorkerStatus
 
 
@@ -19,39 +19,56 @@ def _registry(wrote: int) -> WorkerRegistry:
     return WorkerRegistry(cast(Any, rds))
 
 
-def test_writers_report_a_skipped_unregistered_worker() -> None:
+def _reporting(reply: Any) -> Any:
+    rds: Any = MagicMock()
+    rds.sync.eval.return_value = reply
+    return WorkerRegistry(cast(Any, rds))
+
+
+def test_a_report_from_an_unregistered_worker_is_unknown() -> None:
+    registry = _reporting([0])
+    unknown = StatusReport(ReportOutcome.UNKNOWN)
+    assert registry.update_worker_hb("wkr-1", "ts", 120) == unknown
+    assert registry.set_worker_status("wkr-1", WorkerStatus.IDLE, "ts", None) == unknown
+
+
+def test_a_fenced_report_names_the_reserved_dispatch() -> None:
+    registry = _reporting([2, b"dsp-2", b"tsk-2"])
+    report = registry.set_worker_status("wkr-1", WorkerStatus.IDLE, "ts", None, "dsp-1")
+    assert report == StatusReport(ReportOutcome.FENCED, "tsk-2", "dsp-2")
+
+
+def test_a_reservation_of_an_unregistered_worker_announces_nothing() -> None:
     registry: Any = _registry(wrote=0)
-    assert registry.update_worker_hb("wkr-1", "ts", 120) is False
-    assert registry.set_worker_status("wkr-1", WorkerStatus.IDLE, "ts", None) is False
-    assert registry.update_worker_status("wkr-1", WorkerStatus.BUSY) is False
+    assert registry.reserve_worker("wkr-1", "tsk-1", "dsp-1") is False
+    assert registry.release_worker("wkr-1", "dsp-1") is False
     # A skipped status write must not announce a status it never stored.
     registry._rds.sync.publish_telemetry.assert_not_called()
 
 
-def test_writers_report_a_registered_worker() -> None:
+def test_a_reservation_announces_the_status_it_stored() -> None:
     registry: Any = _registry(wrote=1)
-    assert registry.update_worker_hb("wkr-1", "ts", 120) is True
-    assert registry.set_worker_status("wkr-1", WorkerStatus.IDLE, "ts", None) is True
-    assert registry.update_worker_status("wkr-1", WorkerStatus.BUSY) is True
-    assert registry._rds.sync.eval.call_count == 3
-    registry._rds.sync.publish_telemetry.assert_called_once()
+    assert registry.reserve_worker("wkr-1", "tsk-1", "dsp-1") is True
+    assert registry.release_worker("wkr-1", "dsp-1") is True
+    assert registry._rds.sync.publish_telemetry.call_count == 2
 
 
 def test_writes_are_a_single_atomic_call() -> None:
-    registry: Any = _registry(wrote=1)
-    registry.update_worker_hb("wkr-1", "ts", 120)
+    registry: Any = _reporting([1])
+    registry.update_worker_hb("wkr-1", "ts", 120, WorkerStatus.IDLE, "dsp-1")
     # No separate membership read, and no pipeline that could interleave a reap.
     registry._rds.sync.sismember.assert_not_called()
+    registry._rds.sync.hget.assert_not_called()
     registry._rds.sync.control_pipeline.assert_not_called()
 
 
 def test_status_extras_are_prefixed_in_the_script_arguments() -> None:
-    registry: Any = _registry(wrote=1)
+    registry: Any = _reporting([1])
     registry.set_worker_status("wkr-1", WorkerStatus.IDLE, "ts", {"gpu": 2})
     args = registry._rds.sync.eval.call_args.args
-    # numkeys, the two keys, then worker_id followed by field/value pairs.
-    assert args[1] == 2
-    assert args[4] == "wkr-1"
+    # numkeys, the three keys, then worker_id followed by the report and its fields.
+    assert args[1] == 3
+    assert args[5] == "wkr-1"
     assert "extra_gpu" in args
     assert args[args.index("extra_gpu") + 1] == "2"
 

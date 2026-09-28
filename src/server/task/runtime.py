@@ -5906,6 +5906,23 @@ class TaskRuntime:
                     del self._pending_ops[permit_id]
         return WorkerRecovery(recovered, resolved)
 
+    def dispatch_in_flight(
+        self, task_id: str, dispatch_id: str, worker_id: str
+    ) -> bool:
+        """Whether a dispatch to a worker is being published or holds its task."""
+        with self._lock:
+            record = self._tasks.get(task_id)
+            if record is None:
+                return False
+            publish = self._publishing.get(task_id)
+            in_flight = record.status in (
+                TaskStatus.DISPATCHED,
+                TaskStatus.CANCELLING,
+            ) or (publish is not None and not publish.recorded)
+            return in_flight and self._holds_dispatch_locked(
+                record, worker_id, dispatch_id
+            )
+
     def has_rehydrated_in_flight(self, worker_id: str, within_sec: float) -> bool:
         """
         Whether ``worker_id`` still owns an in-flight task that was rehydrated within

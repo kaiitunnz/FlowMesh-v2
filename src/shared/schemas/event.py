@@ -86,6 +86,9 @@ class WorkerEvent(BaseEvent):
     graceful: bool = Field(
         default=False, description="Whether the worker left on its own shutdown."
     )
+    dispatch_id: str | None = Field(
+        default=None, description="Dispatch the reported status concerns."
+    )
     tags: list[str] | None = Field(default=None, description="Worker tags.")
     metrics: dict[str, Any] = Field(
         default_factory=dict, description="Metrics reported in heartbeat."
