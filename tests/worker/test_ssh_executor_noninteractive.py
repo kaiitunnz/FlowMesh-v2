@@ -8,7 +8,7 @@ from typing import cast
 from unittest.mock import MagicMock
 
 import pytest
-from docker.errors import NotFound
+from docker.errors import APIError, ImageNotFound, NotFound
 
 import worker.executors.ssh_executor as ssh_executor_module
 from shared.tasks.specs import SSHSpecStrict
@@ -482,7 +482,9 @@ class TestNoninteractiveContainerStartup:
         client.containers.create.return_value = container
         kwargs = {"image": "myimg:latest", "entrypoint": [_SSH_RUN_ENTRYPOINT_PATH]}
 
-        result, log_stream = executor._run_noninteractive_container(client, kwargs)
+        result, log_stream = executor._start_container(
+            client, kwargs, interactive=False
+        )
 
         assert result is container
         assert log_stream is container.attach.return_value
@@ -505,7 +507,7 @@ class TestNoninteractiveContainerStartup:
         client.containers.create.return_value = container
 
         with pytest.raises(Exception, match="initialize non-interactive container"):
-            executor._run_noninteractive_container(client, {"image": "x"})
+            executor._start_container(client, {"image": "x"}, interactive=False)
 
         container.start.assert_not_called()
         container.remove.assert_called_once_with(force=True)
@@ -520,7 +522,6 @@ class TestNoninteractiveContainerStartup:
         client = MagicMock()
         client.images.get.side_effect = NotFound("No such image: myimg:latest")
         client.containers.create.return_value = container
-        client.containers.run.return_value = container
 
         result, _ = executor._start_container(
             client, {"image": "myimg:latest"}, interactive=interactive
@@ -530,8 +531,54 @@ class TestNoninteractiveContainerStartup:
         client.api.pull.assert_called_once_with(
             "myimg:latest", stream=True, decode=True
         )
-        started = client.containers.run if interactive else client.containers.create
-        started.assert_called_once()
+        client.containers.create.assert_called_once()
+        client.containers.run.assert_not_called()
+
+    @pytest.mark.parametrize("interactive", [False, True])
+    def test_pulls_an_image_that_went_missing_before_the_create(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interactive: bool
+    ) -> None:
+        executor = self._make_executor(tmp_path)
+        monkeypatch.setattr(ssh_executor_module, "Container", MagicMock)
+        container = MagicMock()
+        client = MagicMock()
+        # A concurrent prune removes the image after it was found.
+        client.images.get.side_effect = [
+            MagicMock(),
+            NotFound("No such image: myimg:latest"),
+        ]
+        client.containers.create.side_effect = [
+            ImageNotFound("No such image: myimg:latest"),
+            container,
+        ]
+        client.api.pull.return_value = (line for line in [{"status": "done"}])
+
+        result, _ = executor._start_container(
+            client, {"image": "myimg:latest"}, interactive=interactive
+        )
+
+        assert result is container
+        client.api.pull.assert_called_once_with(
+            "myimg:latest", stream=True, decode=True
+        )
+        assert client.containers.create.call_count == 2
+        client.containers.run.assert_not_called()
+
+    @pytest.mark.parametrize("interactive", [False, True])
+    def test_removes_a_container_whose_start_fails(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interactive: bool
+    ) -> None:
+        executor = self._make_executor(tmp_path)
+        monkeypatch.setattr(ssh_executor_module, "Container", MagicMock)
+        container = MagicMock()
+        container.start.side_effect = APIError("could not select device driver")
+        client = MagicMock()
+        client.containers.create.return_value = container
+
+        with pytest.raises(ExecutionError, match="could not select device driver"):
+            executor._start_container(client, {"image": "x"}, interactive=interactive)
+
+        container.remove.assert_called_once_with(force=True)
 
 
 # ------------------------------------------------------------------ #

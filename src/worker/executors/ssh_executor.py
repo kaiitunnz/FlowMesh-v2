@@ -65,7 +65,7 @@ from .base_executor import (
 
 try:
     from docker import DockerClient
-    from docker.errors import DockerException, NotFound
+    from docker.errors import DockerException, ImageNotFound, NotFound
     from docker.models.containers import Container
     from docker.types import DeviceRequest
 
@@ -74,7 +74,7 @@ except Exception:
     _HAS_DOCKER = False
     if TYPE_CHECKING:
         from docker import DockerClient
-        from docker.errors import DockerException, NotFound
+        from docker.errors import DockerException, ImageNotFound, NotFound
         from docker.models.containers import Container
         from docker.types import DeviceRequest
     else:
@@ -1143,21 +1143,50 @@ class SSHExecutor(Executor):
         self, client: DockerClient, kwargs: dict[str, Any], interactive: bool
     ) -> tuple[Container, DemuxLogStream | None]:
         mode = "interactive" if interactive else "non-interactive"
-        log_stream: DemuxLogStream | None = None
         self._ensure_image(client, kwargs["image"])
         try:
-            if interactive:
-                container = client.containers.run(**kwargs)
-            else:
-                container, log_stream = self._run_noninteractive_container(
-                    client, kwargs
-                )
-        except ExecutionError:
+            container = self._create_container(client, kwargs)
+        except (_Interrupted, ExecutionError):
             raise
         except Exception as exc:
-            raise ExecutionError(f"Failed to start {mode} container: {exc}") from exc
+            raise ExecutionError(f"Failed to create {mode} container: {exc}") from exc
         assert isinstance(container, Container)
+        log_stream: DemuxLogStream | None = None
+        try:
+            if not interactive:
+                container.put_archive("/", self._build_ssh_run_archive())
+                log_stream = cast(
+                    DemuxLogStream,
+                    container.attach(
+                        stream=True, logs=True, stdout=True, stderr=True, demux=True
+                    ),
+                )
+            container.start()
+        except Exception as exc:
+            # A created container holds the session's staged volumes until removed.
+            try:
+                container.remove(force=True)
+            except Exception:
+                logger.debug(
+                    "Failed to remove %s container after startup error",
+                    mode,
+                    exc_info=True,
+                )
+            raise ExecutionError(
+                f"Failed to initialize {mode} container: {exc}"
+            ) from exc
         return container, log_stream
+
+    def _create_container(
+        self, client: DockerClient, kwargs: dict[str, Any], *, retryable: bool = False
+    ) -> Any:
+        """Create a container, pulling its image again if it went missing after it was
+        ensured."""
+        try:
+            return client.containers.create(**kwargs)
+        except ImageNotFound:
+            self._ensure_image(client, kwargs["image"], retryable=retryable)
+            return client.containers.create(**kwargs)
 
     def _ensure_image(
         self, client: DockerClient, image: str, *, retryable: bool = False
@@ -1185,38 +1214,6 @@ class SSHExecutor(Executor):
                     )
         finally:
             progress.close()
-
-    def _run_noninteractive_container(
-        self, client: DockerClient, kwargs: dict[str, Any]
-    ) -> tuple[Container, DemuxLogStream]:
-        try:
-            container = client.containers.create(**kwargs)
-        except Exception as exc:
-            raise ExecutionError(
-                f"Failed to create non-interactive container: {exc}"
-            ) from exc
-        assert isinstance(container, Container)
-        try:
-            container.put_archive("/", self._build_ssh_run_archive())
-            log_stream = cast(
-                DemuxLogStream,
-                container.attach(
-                    stream=True, logs=True, stdout=True, stderr=True, demux=True
-                ),
-            )
-            container.start()
-        except Exception as exc:
-            try:
-                container.remove(force=True)
-            except Exception:
-                logger.debug(
-                    "Failed to remove non-interactive container after startup error",
-                    exc_info=True,
-                )
-            raise ExecutionError(
-                f"Failed to initialize non-interactive container: {exc}"
-            ) from exc
-        return container, log_stream
 
     @staticmethod
     def _iso_offset(seconds: float) -> str:
@@ -1452,7 +1449,7 @@ class SSHExecutor(Executor):
         another attempt. A cancel or stop ends it with `_Interrupted`.
         """
         self._ensure_image(client, create_kwargs["image"], retryable=True)
-        container = client.containers.create(**create_kwargs)
+        container = self._create_container(client, create_kwargs, retryable=True)
         try:
             if hydrated:
                 container.put_archive("/", _results_archive(hydrated))
