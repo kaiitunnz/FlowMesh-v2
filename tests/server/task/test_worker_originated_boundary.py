@@ -48,6 +48,7 @@ from shared.tools.facade import (
     FacadeCompletionMode,
     FacadeTurnGroup,
 )
+from shared.tools.search.schema import parse_search_request
 from tests.server.dispatcher.helpers import CapturingDispatcher
 from tests.server.result_store import make_result_reader
 from tests.server.task.test_private_state_ledger import _manifest
@@ -197,6 +198,19 @@ def _dispatch_agent(
     """Mimic a dispatch: pin the worker and run one scripted step, worker-side strip
     included, then report the step to the runtime, with the private state the worker
     sealed under ``seal_in`` when given."""
+    engine, payload = _run_agent_step(runtime, task_id, worker, script, seal_in)
+    runtime.mark_succeeded(task_id, worker, payload, _TS)
+    return engine
+
+
+def _run_agent_step(
+    runtime: TaskRuntime,
+    task_id: str,
+    worker: str = "wkr-1",
+    script: list[ScriptedStep] = _SCRIPT,
+    seal_in: Path | None = None,
+) -> tuple[Any, dict[str, Any]]:
+    """Pin the worker and run one scripted step on it; return the step's report."""
     engine = runtime.orchestration_engine(runtime._tasks[task_id].workflow_id)
     dispatch = runtime.agent_episode_dispatch(task_id, _HOLDER)
     assert engine is not None and dispatch is not None
@@ -223,8 +237,7 @@ def _dispatch_agent(
         payload["agent_episode_private_state"] = PrivateStateSealReport(
             manifest=manifest, write_epoch=attachment.write_epoch
         ).model_dump(mode="json")
-    runtime.mark_succeeded(task_id, worker, payload, _TS)
-    return engine
+    return engine, payload
 
 
 def _egress(runtime: TaskRuntime) -> PendingEgressRequestStore:
@@ -1305,6 +1318,107 @@ def test_a_resident_bound_agent_s_search_is_reaped_when_it_settles(
             )
         )
 
+        assert _egress(runtime).occurrences() == []
+
+    asyncio.run(run())
+
+
+def _stash_search_group(runtime: TaskRuntime, writer: str) -> FacadeTurnGroup:
+    """A two-member search group a held turn captured, its requests in the worker's
+    egress store as the facade stashes them."""
+    first = _search_group(writer, 0, "sha-a").members[0]
+    second = first.model_copy(
+        update={"ordinal": 1, "call_correlation": f"{writer}:0:1"}
+    )
+    group = _search_group(writer, 0, "sha-a").model_copy(
+        update={"members": (first, second)}
+    )
+    for member in group.members:
+        _egress(runtime).put(
+            writer, member.call_correlation, parse_search_request(_PAYLOAD)
+        )
+    return group
+
+
+def test_a_step_landing_on_a_cancel_reaps_the_request_its_worker_captured(
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        runtime = _runtime()
+        workflow_id, ids = await _register(runtime, _SEARCH_WF)
+        writer = ids["writer"]
+        _, payload = _run_agent_step(runtime, writer, seal_in=tmp_path)
+        assert _egress(runtime).occurrences() == [(writer, "m0")]
+        runtime.cancel_workflow(workflow_id)
+
+        runtime.mark_succeeded(writer, "wkr-1", payload, _TS)
+
+        record = runtime.get_record(writer)
+        assert record is not None and record.status is TaskStatus.CANCELLED
+        assert _egress(runtime).occurrences() == []
+
+    asyncio.run(run())
+
+
+def test_a_completion_racing_a_cancel_reaps_its_facade_group() -> None:
+    async def run() -> None:
+        runtime = _runtime()
+        workflow_id, ids = await _register(runtime, _SEARCH_WF)
+        writer = ids["writer"]
+        _hold_dispatch(runtime, writer)
+        group = _stash_search_group(runtime, writer)
+        runtime.cancel_workflow(workflow_id)
+        completion = HarnessResult(
+            kind=HarnessResultKind.COMPLETION,
+            value="done",
+            capsule=HarnessCapsule(
+                backend=HarnessBackendKey(backend="scripted", version="v1"), blob="c"
+            ),
+        )
+
+        runtime.mark_succeeded(
+            writer,
+            "wkr-1",
+            {
+                "agent_episode": completion.model_dump(mode="json"),
+                "agent_episode_facade_group": group.model_dump(mode="json"),
+            },
+            _TS,
+        )
+
+        record = runtime.get_record(writer)
+        assert record is not None and record.status is TaskStatus.CANCELLED
+        assert _egress(runtime).occurrences() == []
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("carried", [True, False])
+@pytest.mark.parametrize(
+    "kind", [HarnessResultKind.FAILURE, HarnessResultKind.CANCELLATION]
+)
+def test_a_turn_that_fails_reaps_its_facade_group(
+    kind: HarnessResultKind, carried: bool
+) -> None:
+    async def run() -> None:
+        runtime = _runtime()
+        _, ids = await _register(runtime, _SEARCH_WF)
+        writer = ids["writer"]
+        _hold_dispatch(runtime, writer)
+        group = _stash_search_group(runtime, writer)
+        payload: dict[str, Any] = {
+            "agent_episode": HarnessResult(kind=kind, error="turn failed").model_dump(
+                mode="json"
+            )
+        }
+        if carried:
+            payload["agent_episode_facade_group"] = group.model_dump(mode="json")
+        else:
+            runtime.receive_worker_facade_group(writer, group)
+
+        runtime.mark_succeeded(writer, "wkr-1", payload, _TS)
+
+        assert _permit_frames(runtime) == []
         assert _egress(runtime).occurrences() == []
 
     asyncio.run(run())

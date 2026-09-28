@@ -5,7 +5,9 @@ and advertises the AGENT capability; a step returns the backend's result; and a
 native-bypass backend is refused.
 """
 
+import json
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -21,14 +23,28 @@ from shared.harness import (
 )
 from shared.tasks.task_type import TaskType
 from shared.tasks.worker_message import WorkerTaskMessage
+from shared.tools.facade import FacadeDescriptor
+from shared.tools.model.schema import ModelCompletion, ModelToolCall
+from shared.tools.search.schema import SEARCH_INTERFACE
 from tests.worker.factories import make_worker_config, make_worker_task_message
+from worker.egress import PendingEgressRequestStore
 from worker.executors import EXECUTOR_REGISTRY
 from worker.executors.agent_episode_executor import AgentEpisodeExecutor
 from worker.executors.base_executor import ExecutionError, Executor
 from worker.executors.episode_support import EpisodeStepResult
 from worker.executors.harness import UnknownHarnessBackendError, register_adapter
 from worker.main import build_capabilities
+from worker.model_turn import ResponsesFacade
 from worker.runner import Runner
+
+_SEARCH = FacadeDescriptor(
+    name="web_search",
+    kind=BoundaryEventKind.INVOCATION,
+    interface=SEARCH_INTERFACE,
+    tool_schema=json.dumps(
+        {"type": "function", "name": "web_search", "parameters": {"type": "object"}}
+    ),
+)
 
 
 class _FakeAdapter(HarnessAdapter):
@@ -206,3 +222,59 @@ def test_runner_routes_an_episode_message_to_the_episode_executor(
     runner.task_stream = [bare]
     runner.start()
     assert not episode.ran and not default.ran
+
+
+class _CapturingAdapter(_FakeAdapter):
+    """A held turn that captures a search group through the facade, then either ends
+    the step or raises."""
+
+    def __init__(self, facade: ResponsesFacade, raises: bool) -> None:
+        super().__init__(HarnessResult(kind=HarnessResultKind.COMPLETION, value="ok"))
+        self._facade = facade
+        self._raises = raises
+
+    def start(self, activation_id, *, capsule, outcomes) -> HarnessResult:
+        token = self._facade.register_episode(
+            activation_id, "http://up/v1", "m", [_SEARCH]
+        )
+        self._facade.handle_turn(activation_id, token, {"input": "find it"})
+        if self._raises:
+            raise RuntimeError("the app-server died after the turn")
+        return self._step
+
+
+@pytest.mark.parametrize("raises", [False, True])
+def test_a_step_that_raises_drops_the_requests_its_turn_stashed(
+    tmp_path: Path, raises: bool
+) -> None:
+    pending = PendingEgressRequestStore()
+    held = MagicMock()
+    held.run.return_value = ModelCompletion(
+        content="searching",
+        tool_calls=(
+            ModelToolCall(call_id="c1", name="web_search", arguments='{"query": "q"}'),
+        ),
+    )
+    facade = ResponsesFacade(held_egress=held, pending=pending)
+    lifecycle = MagicMock()
+    lifecycle.responses_facade = facade
+    register_adapter(
+        "fake",
+        lambda backend, task, config, _facade, state, sandbox: _CapturingAdapter(
+            facade, raises
+        ),
+    )
+    ex = AgentEpisodeExecutor(make_worker_config(), lifecycle=lifecycle)
+    msg = _dispatch_msg()
+
+    if raises:
+        with pytest.raises(RuntimeError):
+            ex.run(msg, tmp_path)
+        assert pending.occurrences() == []
+    else:
+        out = ex.run(msg, tmp_path)
+        assert out.facade_group is not None
+        assert pending.occurrences() == [
+            (msg.task_id, m.call_correlation) for m in out.facade_group.members
+        ]
+    assert facade.take_captured_group(msg.task_id) is None

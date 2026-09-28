@@ -554,6 +554,28 @@ def _in_flight_usage(
     return [(task_id, usage)] if usage is not None else []
 
 
+def _captured_calls(
+    step: HarnessResult | None, group: FacadeTurnGroup | None
+) -> list[tuple[str, str | None]]:
+    """The calls whose request a step's worker holds: the step's digested boundary and
+    the digested members of the facade group its turn captured."""
+    captures: list[tuple[str, str | None]] = []
+    if (
+        step is not None
+        and (request := step.request) is not None
+        and request.request_digest is not None
+        and request.call_correlation is not None
+    ):
+        captures.append((request.call_correlation, request.interface))
+    if group is not None:
+        captures.extend(
+            (member.call_correlation, SEARCH_INTERFACE)
+            for member in group.members
+            if member.request_digest is not None
+        )
+    return captures
+
+
 class TaskRuntime:
     """In-memory task registry with FIFO-ready queue and dependency tracking."""
 
@@ -1835,7 +1857,9 @@ class TaskRuntime:
         finally:
             self._release_pending_terminations()
 
-    def _apply_episode_step_locked(self, task_id: str, hr: HarnessResult) -> None:
+    def _apply_episode_step_locked(
+        self, task_id: str, hr: HarnessResult, group: FacadeTurnGroup | None = None
+    ) -> None:
         """Route one non-terminal agent-episode step and re-dispatch or suspend.
 
         A failure/cancellation settles the agent terminally. A boundary routes into the
@@ -1848,11 +1872,13 @@ class TaskRuntime:
         engine = self._engines.get(record.workflow_id) if record else None
         if record is None or engine is None:
             return
+        worker_id = record.assigned_worker
         if record.status == TaskStatus.CANCELLING:
             self._settle_cancelled_locked(record, time.time())
+            self._reap_captures_locked(worker_id, task_id, _captured_calls(hr, group))
             return
         if hr.kind in (HarnessResultKind.FAILURE, HarnessResultKind.CANCELLATION):
-            self._pending_facade_groups.pop(task_id, None)
+            group = self._pending_facade_groups.pop(task_id, None) or group
             record.pending_facade_group = None
             reason = hr.error or (
                 "agent episode cancelled"
@@ -1864,6 +1890,7 @@ class TaskRuntime:
             ):
                 self._cv.notify_all()
             self._save_ledger_locked(record.workflow_id)
+            self._reap_captures_locked(worker_id, task_id, _captured_calls(hr, group))
             return
         request = hr.request
         if request is None:
@@ -4961,7 +4988,7 @@ class TaskRuntime:
                 if harness_result.kind is not HarnessResultKind.COMPLETION:
                     # A non-terminal episode step routes its boundary and re-dispatches;
                     # a completion falls through to the terminal path below.
-                    self._apply_episode_step_locked(task_id, harness_result)
+                    self._apply_episode_step_locked(task_id, harness_result, group)
                     self._release_ended_dispatches_locked([task_id])
                     return _settle_outcome(
                         effect, record, [], _in_flight_usage(task_id, payload)
@@ -4969,14 +4996,13 @@ class TaskRuntime:
                 if record.status == TaskStatus.CANCELLING:
                     # A completion racing the cancel settles it before routing a
                     # captured facade group or consulting the reroute guard.
-                    return _settle_outcome(
-                        effect,
-                        record,
-                        [],
-                        self._settle_cancelled_usage_locked(
-                            record, payload, finished_ts, started_ts
-                        ),
+                    usages = self._settle_cancelled_usage_locked(
+                        record, payload, finished_ts, started_ts
                     )
+                    self._reap_captures_locked(
+                        worker_id, task_id, _captured_calls(harness_result, group)
+                    )
+                    return _settle_outcome(effect, record, [], usages)
                 if group is not None:
                     # The gateway captured a turn-scoped facade group: the clean
                     # turn-completion is a yield on that group, not the episode's
@@ -5424,26 +5450,30 @@ class TaskRuntime:
         """
         if record.assigned_worker == worker_id:
             return
-        captures: list[tuple[str, str | None]] = []
-        if (step := payload.get("agent_episode")) is not None:
-            request = HarnessResult.model_validate(step).request
-            if (
-                request is not None
-                and request.request_digest is not None
-                and request.call_correlation is not None
-            ):
-                captures.append((request.call_correlation, request.interface))
-        if (carried := payload.get("agent_episode_facade_group")) is not None:
-            group = FacadeTurnGroup.model_validate(carried)
-            captures.extend(
-                (member.call_correlation, SEARCH_INTERFACE)
-                for member in group.members
-                if member.request_digest is not None
-            )
+        step = payload.get("agent_episode")
+        carried = payload.get("agent_episode_facade_group")
+        self._reap_captures_locked(
+            worker_id,
+            record.task_id,
+            _captured_calls(
+                HarnessResult.model_validate(step) if step is not None else None,
+                (
+                    FacadeTurnGroup.model_validate(carried)
+                    if carried is not None
+                    else None
+                ),
+            ),
+        )
+
+    def _reap_captures_locked(
+        self,
+        worker_id: str | None,
+        task_id: str,
+        captures: list[tuple[str, str | None]],
+    ) -> None:
+        """Reap the requests a step captured for boundaries control never runs."""
         for call, interface in captures:
-            self._reap_captured_request_locked(
-                worker_id, record.task_id, call, interface
-            )
+            self._reap_captured_request_locked(worker_id, task_id, call, interface)
 
     def _heal_returned_locked(
         self, task_id: str, worker_id: str, dispatch_id: str | None

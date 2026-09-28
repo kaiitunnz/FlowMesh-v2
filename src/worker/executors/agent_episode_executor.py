@@ -69,7 +69,15 @@ class AgentEpisodeExecutor(Executor):
 
     def run(self, task: ExecutorTask, out_dir: Path) -> EpisodeStepResult:
         with self._signals.running(task.task_id):
-            return self._step(task)
+            try:
+                return self._step(task)
+            except BaseException:
+                # Control never learns of a group a raised step captured, so the worker
+                # drops the requests it stashed for it.
+                facade = self._lifecycle.responses_facade if self._lifecycle else None
+                if facade is not None:
+                    facade.discard_captured_group(task.task_id)
+                raise
 
     def _step(self, task: ExecutorTask) -> EpisodeStepResult:
         dispatch = task.agent_episode
@@ -155,12 +163,12 @@ class AgentEpisodeExecutor(Executor):
                 result.request.interface or "-",
             )
         value = result.value if result.kind is HarnessResultKind.COMPLETION else None
-        group = facade.take_captured_group(task.task_id) if facade is not None else None
         sealed = None
         if state is not None and holder is not None:
             # The step has run to its yield, so the components are quiescent and seal as
             # one generation the next resume binds.
             sealed = holder.seal(state, _attachment(dispatch))
+        group = facade.take_captured_group(task.task_id) if facade is not None else None
         return EpisodeStepResult(
             harness_result=result,
             value=value,

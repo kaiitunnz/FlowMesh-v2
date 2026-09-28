@@ -119,7 +119,15 @@ class ResponsesFacade:
     def unregister_episode(self, task_id: str) -> None:
         with self._lock:
             self._episodes.pop(task_id, None)
-            self._captured.pop(task_id, None)
+        self.discard_captured_group(task_id)
+
+    def discard_captured_group(self, task_id: str) -> None:
+        """Drop a captured group no step will report, with the requests it stashed."""
+        with self._lock:
+            group = self._captured.pop(task_id, None)
+        if group is not None:
+            for member in group.members:
+                self._pending.delete(task_id, member.call_correlation)
 
     def cancel_episode(self, task_id: str) -> None:
         """Refuse the episode's further turns and end the ones waiting on a permit."""
