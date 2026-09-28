@@ -564,64 +564,63 @@ class SSHExecutor(Executor):
         except _Interrupted:
             return self._interrupted_before_start(task, session_id)
 
-        labels = {
-            _LABEL_WORKER: worker_name,
-            _LABEL_TASK: task.task_id,
-            _LABEL_SESSION: session_id,
-            _LABEL_MANAGED: "true",
-        }
-        environment = self._build_environment(
-            cfg.user,
-            cfg.authorized_keys,
-            cfg.extra_env,
-            mount_plan.staged_input_specs,
-            mount_plan.create_dirs,
-            interactive,
-            cfg.gpu_device_ids,
-        )
-        kwargs = self._build_run_kwargs(
-            cfg,
-            container_name,
-            environment,
-            labels,
-            ports,
-            mount_plan.volumes,
-            container_cmd,
-            interactive,
-        )
-
-        if interactive:
-            container_kind = "SSH session"
-            logger.info(
-                "Starting %s container (task=%s session=%s mode=%s ttl=%ds)",
-                container_kind,
-                task.task_id,
-                session_id,
-                access_mode,
-                cfg.ttl_sec,
-            )
-        else:
-            container_kind = "non-interactive"
-            logger.info(
-                "Starting %s container (task=%s session=%s ttl=%ds cmd=%s)",
-                container_kind,
-                task.task_id,
-                session_id,
-                cfg.ttl_sec,
-                container_cmd,
-            )
-
         container: Container | None = None
         log_stream: DemuxLogStream | None = None
         exit_code = 0
+        container_kind = "SSH session" if interactive else "non-interactive"
         try:
+            labels = {
+                _LABEL_WORKER: worker_name,
+                _LABEL_TASK: task.task_id,
+                _LABEL_SESSION: session_id,
+                _LABEL_MANAGED: "true",
+            }
+            environment = self._build_environment(
+                cfg.user,
+                cfg.authorized_keys,
+                cfg.extra_env,
+                mount_plan.staged_input_specs,
+                mount_plan.create_dirs,
+                interactive,
+                cfg.gpu_device_ids,
+            )
+            kwargs = self._build_run_kwargs(
+                cfg,
+                container_name,
+                environment,
+                labels,
+                ports,
+                mount_plan.volumes,
+                container_cmd,
+                interactive,
+            )
+
+            if interactive:
+                logger.info(
+                    "Starting %s container (task=%s session=%s mode=%s ttl=%ds)",
+                    container_kind,
+                    task.task_id,
+                    session_id,
+                    access_mode,
+                    cfg.ttl_sec,
+                )
+            else:
+                logger.info(
+                    "Starting %s container (task=%s session=%s ttl=%ds cmd=%s)",
+                    container_kind,
+                    task.task_id,
+                    session_id,
+                    cfg.ttl_sec,
+                    container_cmd,
+                )
             container, log_stream = self._start_container(client, kwargs, interactive)
         except _Interrupted:
             self._cleanup_mount_plan(client, mount_plan)
             return self._interrupted_before_start(task, session_id)
-        except ExecutionError:
-            raise
         except Exception as exc:
+            self._cleanup_mount_plan(client, mount_plan)
+            if isinstance(exc, ExecutionError):
+                raise
             raise ExecutionError(
                 f"Failed to start {container_kind} container: {exc}"
             ) from exc
@@ -1270,6 +1269,16 @@ class SSHExecutor(Executor):
         staged_inputs_dir: Path | None = None
         staged_inputs_volume: str | None = None
 
+        # A bad mount path fails before any input is staged.
+        for resolved in resolved_inputs:
+            self._reserve_mount_path(used_mount_paths, resolved.mount_path)
+        output_mount_path: str | None = None
+        if cfg.output is not None:
+            output_mount_path = self._normalize_mount_path(
+                cfg.output.mount_path, field_name="sshOutput.mountPath"
+            )
+            self._reserve_mount_path(used_mount_paths, output_mount_path)
+
         # Stage inputs in an isolated volume/directory
         if results_source and resolved_inputs:
             staged_inputs_volume = self._stage_inputs_in_volume(
@@ -1283,7 +1292,6 @@ class SSHExecutor(Executor):
 
         # Mount resolved inputs
         for resolved in resolved_inputs:
-            self._reserve_mount_path(used_mount_paths, resolved.mount_path)
             if results_source:
                 # Materialize the requested staged input into the final mount path.
                 staged_input_specs.append(
@@ -1300,12 +1308,8 @@ class SSHExecutor(Executor):
 
         direct_output_path: Path | None = None
         copy_output_path: str | None = None
-        if cfg.output is not None:
+        if output_mount_path is not None:
             # Mount output directory
-            output_mount_path = self._normalize_mount_path(
-                cfg.output.mount_path, field_name="sshOutput.mountPath"
-            )
-            self._reserve_mount_path(used_mount_paths, output_mount_path)
             artifacts_dir = out_dir / ARTIFACTS_DIR
             if results_source:
                 # Copy output back from the container after the session ends.
@@ -1337,6 +1341,16 @@ class SSHExecutor(Executor):
         staging_dir = Path(
             tempfile.mkdtemp(prefix=f"flowmesh-ssh-inputs-{session_id[:8]}-")
         )
+        try:
+            self._fill_staging_dir(staging_dir, resolved_inputs)
+        except BaseException:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            raise
+        return staging_dir
+
+    def _fill_staging_dir(
+        self, staging_dir: Path, resolved_inputs: list[ResolvedSSHInput]
+    ) -> None:
         for resolved in resolved_inputs:
             destination = staging_dir / resolved.task_id
             if resolved.source_path.exists():
@@ -1355,7 +1369,6 @@ class SSHExecutor(Executor):
             if resolved.results is not None:
                 destination.mkdir(parents=True, exist_ok=True)
                 (destination / RESULTS_NAME).write_bytes(resolved.results)
-        return staging_dir
 
     def _stage_inputs_in_volume(
         self,

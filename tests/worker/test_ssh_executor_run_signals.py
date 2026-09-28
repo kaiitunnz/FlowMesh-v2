@@ -423,3 +423,42 @@ def test_a_bundle_download_is_abandoned_once_a_signal_lands(
         executor._download_result_bundle("tsk-up", tmp_path / "bundle", True)
 
     assert chunks == [0, 1, 2]
+
+
+def test_a_signal_during_local_staging_leaves_no_staging_dir(
+    executor: SSHExecutor, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(ssh_module.tempfile, "tempdir", str(tmp_path))
+    upstream = ssh_module.ResolvedSSHInput(
+        stage="up", task_id="tsk-up", source_path=tmp_path / "absent", mount_path="/in"
+    )
+
+    with (
+        patch.object(
+            executor, "_download_result_bundle", side_effect=ssh_module._Interrupted
+        ),
+        pytest.raises(ssh_module._Interrupted),
+    ):
+        executor._stage_inputs_locally([upstream], "ssn-12345678")
+
+    assert list(tmp_path.glob("flowmesh-ssh-inputs-*")) == []
+
+
+def test_a_duplicate_mount_path_fails_before_staging_anything(
+    executor: SSHExecutor, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(ssh_module.tempfile, "tempdir", str(tmp_path))
+    upstreams = [
+        ssh_module.ResolvedSSHInput(
+            stage=stage, task_id=f"tsk-{stage}", source_path=tmp_path, mount_path="/in"
+        )
+        for stage in ("a", "b")
+    ]
+    cfg = MagicMock(output=None)
+
+    with pytest.raises(ExecutionError, match="Duplicate SSH mountPath"):
+        executor._build_mount_plan(
+            MagicMock(), tmp_path / "out", upstreams, cfg, "ssn-12345678"
+        )
+
+    assert list(tmp_path.glob("flowmesh-ssh-inputs-*")) == []

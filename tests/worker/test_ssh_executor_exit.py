@@ -96,6 +96,7 @@ def _run(
     copy: bool = False,
     direct_output: Path | None = None,
     save_logs: bool = False,
+    start_failure: Exception | None = None,
 ) -> SSHResult:
     plan = MagicMock()
     plan.copy_output_path = None if direct_output is not None else "/out"
@@ -107,7 +108,12 @@ def _run(
         patch.object(ex, "_build_mount_plan", return_value=plan),
         patch.object(ex, "_build_environment", return_value={}),
         patch.object(ex, "_build_run_kwargs", return_value={}),
-        patch.object(ex, "_start_container", return_value=(container, None)),
+        patch.object(
+            ex,
+            "_start_container",
+            return_value=(container, None),
+            side_effect=start_failure,
+        ),
         patch.object(ex, "_stream_container_logs", side_effect=stream_logs),
         patch.object(
             ex,
@@ -119,11 +125,14 @@ def _run(
             "_copy_output_directory",
             wraps=ex._copy_output_directory if copy else None,
         ),
-        patch.object(ex, "_cleanup_mount_plan"),
+        patch.object(ex, "_cleanup_mount_plan") as cleanup,
         patch.object(ex, "emit_update"),
         patch.object(ssh_module, "maybe_upload_artifacts"),
     ):
-        return ex.run(_task(max_bytes, ttl_sec), tmp_path / "out")
+        try:
+            return ex.run(_task(max_bytes, ttl_sec), tmp_path / "out")
+        finally:
+            cleanup.assert_called_once_with(ex._docker, plan)
 
 
 def test_a_clean_exit_succeeds_promptly(executor: SSHExecutor, tmp_path: Path) -> None:
@@ -273,3 +282,16 @@ def test_output_written_during_the_stop_at_the_ttl_is_held_to_its_limit(
 
     with pytest.raises(ExecutionError, match="exceeded maxBytes"):
         _run(executor, tmp_path, container, 1000, ttl_sec=1, direct_output=output)
+
+
+def test_a_session_whose_container_fails_to_start_cleans_its_mounts(
+    executor: SSHExecutor, tmp_path: Path
+) -> None:
+    with pytest.raises(ExecutionError, match="no such network"):
+        _run(
+            executor,
+            tmp_path,
+            None,
+            1000,
+            start_failure=ExecutionError("no such network"),
+        )
