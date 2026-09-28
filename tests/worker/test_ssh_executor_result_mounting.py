@@ -486,3 +486,15 @@ def test_an_upstream_with_nothing_bound_still_stages_its_artifacts(
 
     assert includes == [True]
     assert (staging_dir / "task-pre" / "artifacts").is_dir()
+
+
+def test_a_staging_container_carries_the_worker_labels_its_volume_does(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_client = _FakeClient()
+
+    _stage_remote(tmp_path, monkeypatch, fake_client)
+
+    kwargs = fake_client.containers.kwargs
+    assert kwargs is not None
+    assert kwargs["labels"] == fake_client.volumes.labels

@@ -1318,6 +1318,13 @@ class SSHExecutor(Executor):
                     f"{results_source}:/src:ro",
                     f"{volume_name}:/dst:rw",
                 ],
+                # A worker killed mid-staging leaves it mounting the input volume;
+                # the labels let the worker's cleanup remove both.
+                "labels": {
+                    _LABEL_WORKER: self.worker_name,
+                    _LABEL_SESSION: session_id,
+                    _LABEL_MANAGED: "true",
+                },
             }
             if self._config.network_mode:
                 create_kwargs["network_mode"] = self._config.network_mode
