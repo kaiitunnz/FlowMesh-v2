@@ -5,7 +5,7 @@ import logging
 import queue
 import threading
 import time
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -82,6 +82,7 @@ class SupervisorClient:
         self._stop = threading.Event()
         self._stop.set()  # Initially stopped
         self._event_ready = threading.Event()
+        self._on_event_stream_ready: Callable[[], None] | None = None
         self._task_ready = threading.Event()
         self._task_queue: queue.Queue[WorkerTaskMessage | object] = queue.Queue()
         # The task being run and its dispatch id: tasks run one at a time, in the order
@@ -495,6 +496,8 @@ class SupervisorClient:
             try:
                 grpc.channel_ready_future(self._channel).result(timeout=10)
                 self._event_ready.set()
+                if (on_ready := self._on_event_stream_ready) is not None:
+                    on_ready()
                 self._stub.PushEvents(self._event_messages(), metadata=metadata)
                 if self._shutdown.is_set():
                     break
@@ -640,11 +643,16 @@ class SupervisorClient:
             raise RuntimeError("Supervisor event stream not ready")
         self._event_queue.put(serialize_event(event))
 
+    def on_event_stream_ready(self, callback: Callable[[], None]) -> None:
+        """Run ``callback`` each time the event stream (re)connects, before it sends
+        anything queued."""
+        self._on_event_stream_ready = callback
+
     def _offer_event(self, event: Event) -> None:
         """Send an event the worker repeats, dropping it while the stream is down.
 
-        Every heartbeat repeats the worker's status, so a report lost to an outage is
-        restored by the first heartbeat after it rather than waited for.
+        Every heartbeat repeats the worker's status, so the first heartbeat after an
+        outage restores a report the outage dropped.
         """
         if self._stub is None:
             raise RuntimeError("Supervisor gRPC client not started")

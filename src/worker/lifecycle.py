@@ -122,6 +122,7 @@ class Lifecycle:
         )
         self.client.start()
         self._report(WorkerStatus.IDLE, None, {})
+        self.client.on_event_stream_ready(self._report_again)
         self._touch_hb_file()
         threading.Thread(target=self._hb_loop, daemon=True).start()
 
@@ -163,6 +164,11 @@ class Lifecycle:
         self._draining.set()
         with self._status_lock:
             self._report_locked(WorkerStatus.BUSY, self._dispatch_id, {})
+
+    def _report_again(self) -> None:
+        """Report the last status again, which an outage may have dropped."""
+        with self._status_lock:
+            self._report_locked(self._status, self._dispatch_id, {})
 
     def _report(
         self, status: WorkerStatus, dispatch_id: str | None, extra: dict[str, Any]

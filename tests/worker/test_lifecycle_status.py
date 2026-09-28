@@ -106,3 +106,17 @@ def test_a_draining_worker_never_reports_itself_idle(tmp_path: Path) -> None:
 
     assert client.set_status.call_args.args[0] is WorkerStatus.BUSY
     assert _heartbeat(lifecycle, client)["status"] is WorkerStatus.BUSY
+
+
+def test_a_reconnected_event_stream_gets_the_last_status_again(
+    tmp_path: Path,
+) -> None:
+    lifecycle, client = _lifecycle(tmp_path)
+    lifecycle.start({}, cast(Any, None), cast(Any, None), None, [])
+    lifecycle.set_busy("tsk-1")
+    cast(Any, lifecycle)._stop_event.set()
+    [(on_ready,), _] = client.on_event_stream_ready.call_args
+
+    on_ready()
+
+    assert client.set_status.call_args.args == (WorkerStatus.BUSY, {}, "dsp-tsk-1")
