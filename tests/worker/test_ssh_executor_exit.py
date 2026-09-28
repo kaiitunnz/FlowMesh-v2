@@ -2,6 +2,8 @@
 and a breach of its output limit fails it, whether its output is copied out of the
 container or mounted directly."""
 
+import io
+import tarfile
 import threading
 import time
 from pathlib import Path
@@ -91,10 +93,12 @@ def _run(
     max_bytes: int,
     ttl_sec: int = _TTL_SEC,
     stream_logs: Any = None,
+    copy: bool = False,
+    direct_output: Path | None = None,
 ) -> SSHResult:
     plan = MagicMock()
-    plan.copy_output_path = "/out"
-    plan.direct_output_path = None
+    plan.copy_output_path = None if direct_output is not None else "/out"
+    plan.direct_output_path = direct_output
     with (
         patch.object(ex, "prepare"),
         patch.object(ex, "_resolve_noninteractive_command", return_value=["true"]),
@@ -105,7 +109,11 @@ def _run(
         patch.object(ex, "_start_container", return_value=(container, None)),
         patch.object(ex, "_stream_container_logs", side_effect=stream_logs),
         patch.object(ex, "_save_container_logs"),
-        patch.object(ex, "_copy_output_directory"),
+        patch.object(
+            ex,
+            "_copy_output_directory",
+            wraps=ex._copy_output_directory if copy else None,
+        ),
         patch.object(ex, "_cleanup_mount_plan"),
         patch.object(ex, "emit_update"),
         patch.object(ssh_module, "maybe_upload_artifacts"),
@@ -163,3 +171,48 @@ def test_a_session_past_its_ttl_stops_before_its_logs_are_joined(
     assert result.exit_code == 0
     assert time.monotonic() - started < _PROMPT_SEC
     container.remove.assert_called_once_with(force=True)
+
+
+def _output_archive(size: int) -> list[bytes]:
+    """The tar stream Docker returns for an output directory holding one file."""
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as archive:
+        info = tarfile.TarInfo("out/result.bin")
+        info.size = size
+        archive.addfile(info, io.BytesIO(b"x" * size))
+    data = buffer.getvalue()
+    return [data[i : i + 1024] for i in range(0, len(data), 1024)]
+
+
+@pytest.mark.parametrize("size", [500, 5000], ids=["within", "past"])
+def test_output_copied_out_at_exit_is_held_to_its_limit(
+    executor: SSHExecutor, tmp_path: Path, size: int
+) -> None:
+    # The file lands after the last size check, as the job exits.
+    container = _container(0, output_bytes=0)
+    container.get_archive.return_value = (_output_archive(size), {})
+
+    if size > 1000:
+        with pytest.raises(ExecutionError, match="exceeded maxBytes"):
+            _run(executor, tmp_path, container, 1000, copy=True)
+    else:
+        _run(executor, tmp_path, container, 1000, copy=True)
+        copied = tmp_path / "out" / "artifacts" / "result.bin"
+        assert copied.read_bytes() == b"x" * size
+
+
+def test_output_written_directly_at_exit_is_held_to_its_limit(
+    executor: SSHExecutor, tmp_path: Path
+) -> None:
+    output = tmp_path / "direct"
+    output.mkdir()
+    container = _container(0, output_bytes=0)
+
+    def exits_after_writing() -> None:
+        (output / "late.bin").write_bytes(b"x" * 5000)
+        container.status = "exited"
+
+    container.reload.side_effect = exits_after_writing
+
+    with pytest.raises(ExecutionError, match="exceeded maxBytes"):
+        _run(executor, tmp_path, container, 1000, direct_output=output)

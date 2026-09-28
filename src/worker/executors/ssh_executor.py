@@ -21,7 +21,7 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
@@ -124,6 +124,28 @@ _STAGING_WAIT_SEC = 1
 type DemuxLogStream = Iterator[tuple[bytes | None, bytes | None]]
 
 
+class _ChunkReader(io.RawIOBase):
+    """A readable stream over an iterator of byte chunks."""
+
+    def __init__(self, chunks: Iterable[bytes]) -> None:
+        self._chunks = iter(chunks)
+        self._pending = b""
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer: Any) -> int:
+        while not self._pending:
+            try:
+                self._pending = next(self._chunks)
+            except StopIteration:
+                return 0
+        size = min(len(buffer), len(self._pending))
+        buffer[:size] = self._pending[:size]
+        self._pending = self._pending[size:]
+        return size
+
+
 class _Interrupted(Exception):
     """A cancel or stop reached an SSH task before its session container started."""
 
@@ -153,6 +175,25 @@ class SSHOutputConfig:
             mount_path=spec.mountPath or _DEFAULT_OUTPUT_PATH,
             max_bytes=spec.maxBytes,
         )
+
+
+def _output_limit(output_cfg: SSHOutputConfig | None) -> int | None:
+    """The byte limit on a session's output, if it declares a valid one."""
+    if output_cfg is None or output_cfg.max_bytes is None:
+        return None
+    if output_cfg.max_bytes < 0:
+        logger.warning(
+            "Invalid maxBytes %d in SSH output config; ignoring limit",
+            output_cfg.max_bytes,
+        )
+        return None
+    return output_cfg.max_bytes
+
+
+def _raise_if_exceeded(size: int, max_bytes: int) -> None:
+    if size > max_bytes:
+        logger.warning("SSH output exceeded maxBytes (%d > %d)", size, max_bytes)
+        raise ExecutionError(f"SSH sshOutput exceeded maxBytes ({size} > {max_bytes})")
 
 
 @dataclass(slots=True)
@@ -624,11 +665,18 @@ class SSHExecutor(Executor):
                     result.command = cfg.command
                 if cfg.entrypoint is not None:
                     result.entrypoint = cfg.entrypoint
+            # Output written after the last poll is checked once the session ends.
+            max_bytes = _output_limit(cfg.output)
+            if mount_plan.direct_output_path is not None and max_bytes is not None:
+                _raise_if_exceeded(
+                    self._path_size_bytes(mount_plan.direct_output_path), max_bytes
+                )
             if mount_plan.copy_output_path:
                 self._copy_output_directory(
                     container,
                     mount_plan.copy_output_path,
                     out_dir / ARTIFACTS_DIR,
+                    max_bytes,
                 )
             maybe_upload_artifacts(task, out_dir, logger=logger, skip_errors=True)
         finally:
@@ -1520,13 +1568,7 @@ class SSHExecutor(Executor):
         output_cfg: SSHOutputConfig | None,
         mount_plan: SSHMountPlan,
     ) -> None:
-        if output_cfg is None or output_cfg.max_bytes is None:
-            return
-        max_bytes = output_cfg.max_bytes
-        if max_bytes < 0:
-            logger.warning(
-                "Invalid maxBytes %d in SSH output config; ignoring limit", max_bytes
-            )
+        if (max_bytes := _output_limit(output_cfg)) is None:
             return
 
         if mount_plan.direct_output_path is not None:
@@ -1541,16 +1583,11 @@ class SSHExecutor(Executor):
         if current_size <= max_bytes:
             return
 
-        logger.warning(
-            "SSH output exceeded maxBytes (%d > %d)", current_size, max_bytes
-        )
         try:
             container.stop(timeout=1)
         except Exception as exc:
             logger.debug("Failed to stop SSH container after maxBytes breach: %s", exc)
-        raise ExecutionError(
-            f"SSH sshOutput exceeded maxBytes ({current_size} > {max_bytes})"
-        )
+        _raise_if_exceeded(current_size, max_bytes)
 
     @staticmethod
     def _path_size_bytes(path: Path) -> int:
@@ -1579,8 +1616,14 @@ class SSHExecutor(Executor):
             return 0
 
     def _copy_output_directory(
-        self, container: Container, source_path: str, destination: Path
+        self,
+        container: Container,
+        source_path: str,
+        destination: Path,
+        max_bytes: int | None = None,
     ) -> None:
+        """Copy a session's output out of its container, failing once the files it
+        holds pass ``max_bytes``, before any more of them is read."""
         self.ensure_dir(destination)
         try:
             stream, _ = container.get_archive(source_path)
@@ -1589,32 +1632,28 @@ class SSHExecutor(Executor):
                 f"Failed to collect SSH output from {source_path}: {exc}"
             ) from exc
 
-        with tempfile.NamedTemporaryFile(suffix=".tar", delete=False) as tmp:
-            tmp_path = Path(tmp.name)
-            for chunk in stream:
-                tmp.write(chunk)
-
         source_name = PurePosixPath(source_path).name
-        try:
-            with tarfile.open(tmp_path) as archive:
-                for member in archive.getmembers():
-                    relative = self._relative_archive_path(member.name, source_name)
-                    if relative is None:
-                        continue
-                    target = destination / relative
-                    if member.isdir():
-                        target.mkdir(parents=True, exist_ok=True)
-                        continue
-                    if not member.isfile():
-                        continue
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    extracted = archive.extractfile(member)
-                    if extracted is None:
-                        continue
-                    with target.open("wb") as fh:
-                        shutil.copyfileobj(extracted, fh)
-        finally:
-            tmp_path.unlink(missing_ok=True)
+        total = 0
+        with tarfile.open(fileobj=_ChunkReader(stream), mode="r|") as archive:
+            for member in archive:
+                relative = self._relative_archive_path(member.name, source_name)
+                if relative is None:
+                    continue
+                target = destination / relative
+                if member.isdir():
+                    target.mkdir(parents=True, exist_ok=True)
+                    continue
+                if not member.isfile():
+                    continue
+                total += member.size
+                if max_bytes is not None:
+                    _raise_if_exceeded(total, max_bytes)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                extracted = archive.extractfile(member)
+                if extracted is None:
+                    continue
+                with target.open("wb") as fh:
+                    shutil.copyfileobj(extracted, fh)
 
     @staticmethod
     def _relative_archive_path(member_name: str, source_name: str) -> Path | None:
