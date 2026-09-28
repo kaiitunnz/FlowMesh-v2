@@ -20,6 +20,7 @@ from server.supervisor.adapters.docker import (
     WorkerType,
     _is_removal_in_progress,
 )
+from server.supervisor.schemas import WorkerStatus
 
 _IN_PROGRESS = "removal of container gpu_0 is already in progress"
 
@@ -350,3 +351,36 @@ class TestAbandonedStart:
             await adapter.stop()
 
         assert "failed to start after its start was cancelled" in caplog.text
+
+
+class TestConcurrentStops:
+    @pytest.mark.asyncio
+    async def test_a_second_stop_returns_once_the_first_has_stopped_the_worker(
+        self,
+    ) -> None:
+        stopping = threading.Event()
+        release = threading.Event()
+        worker = MagicMock()
+
+        def stop(**_: Any) -> None:
+            stopping.set()
+            release.wait(timeout=5.0)
+
+        worker.stop.side_effect = stop
+        docker_client = MagicMock()
+        docker_client.containers.get.return_value = worker
+        docker_client.containers.list.return_value = []
+        docker_client.volumes.list.return_value = []
+        adapter = _adapter(docker_client)
+        adapter.set_status(WorkerStatus.RUNNING)
+
+        first = asyncio.ensure_future(adapter.stop())
+        await asyncio.to_thread(stopping.wait, 5.0)
+        second = asyncio.ensure_future(adapter.stop())
+        done, _ = await asyncio.wait({second}, timeout=0.2)
+        assert not done
+        release.set()
+
+        assert await second is True
+        assert await first is True
+        worker.remove.assert_called_once()

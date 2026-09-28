@@ -91,6 +91,7 @@ class WorkerAdapter(ABC):
         self.config = config
         self.owner = owner
         self._starting: asyncio.Future[bool] | None = None
+        self._stopping: asyncio.Future[bool] | None = None
 
     @property
     @abstractmethod
@@ -137,10 +138,36 @@ class WorkerAdapter(ABC):
                 exc,
             )
 
-    async def _wait_for_start(self) -> None:
-        """Wait for a start still creating the worker."""
+    async def _run_stop(self, stop: Callable[[], bool]) -> bool:
+        """Run ``stop`` on a thread once a start still creating the worker finishes.
+
+        A stop while another runs waits for that one and returns its result, so no
+        caller sees the worker stopped before it is; a cancel of a caller never stops
+        the stop.
+        """
         if (starting := self._starting) is not None and not starting.done():
             await asyncio.wait({starting})
+        if (stopping := self._stopping) is None or stopping.done():
+            prev_status = self.status
+            if prev_status in (WorkerStatus.STOPPING, WorkerStatus.STOPPED):
+                return True
+            self.set_status(WorkerStatus.STOPPING)
+            stopping = self._stopping = asyncio.ensure_future(
+                self._stopped(stop, prev_status)
+            )
+        return await asyncio.shield(stopping)
+
+    async def _stopped(
+        self, stop: Callable[[], bool], prev_status: WorkerStatus
+    ) -> bool:
+        try:
+            ok = await asyncio.to_thread(stop)
+        except Exception:
+            self.set_status(prev_status)
+            raise
+        if not ok:
+            self.set_status(prev_status)
+        return ok
 
     @abstractmethod
     async def start(self) -> bool:

@@ -280,19 +280,7 @@ class DockerWorkerAdapter(WorkerAdapter):
         self._hardware = await asyncio.to_thread(self._probe_hardware)
 
     async def stop(self) -> bool:
-        await self._wait_for_start()
-        prev_status = self.status
-        if prev_status in (WorkerStatus.STOPPING, WorkerStatus.STOPPED):
-            return True
-        self.set_status(WorkerStatus.STOPPING)
-        try:
-            ok = await asyncio.to_thread(self._stop)
-            if not ok:
-                self.set_status(prev_status)
-            return ok
-        except Exception:
-            self.set_status(prev_status)
-            raise
+        return await self._run_stop(self._stop)
 
     def get_image_name(self) -> str:
         return get_worker_image_name(

@@ -1,4 +1,3 @@
-import asyncio
 import logging
 import threading
 from collections import Counter
@@ -164,19 +163,7 @@ class VastAIWorkerAdapter(WorkerAdapter):
             self._hardware = hardware
 
     async def stop(self) -> bool:
-        await self._wait_for_start()
-        prev_status = self.status
-        if prev_status in (WorkerStatus.STOPPING, WorkerStatus.STOPPED):
-            return True
-        self.set_status(WorkerStatus.STOPPING)
-        try:
-            ok = await asyncio.to_thread(self._stop)
-            if not ok:
-                self.set_status(prev_status)
-            return ok
-        except Exception:
-            self.set_status(prev_status)
-            raise
+        return await self._run_stop(self._stop)
 
     def _base_environment(self) -> dict[str, str]:
         environment = super()._base_environment()
