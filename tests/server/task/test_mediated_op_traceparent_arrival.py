@@ -27,7 +27,6 @@ from google.protobuf.json_format import MessageToDict
 from google.protobuf.struct_pb2 import Struct
 
 from server.supervisor.services.task_listener import TaskListener
-from server.utils.helpers import TSQueue
 from shared.network.relay_frame import RelayDirection, RelayFrame, RelayFrameKind
 from shared.schemas.command import MediatedOpMessage
 
@@ -53,12 +52,12 @@ def _through_grpc_struct(payload: dict[str, Any]) -> dict[str, Any]:
 def _through_task_listener(frame_kind: str, payload: dict[str, Any]) -> dict[str, Any]:
     """The real Redis pub/sub JSON rebuild every non-``resident_frame`` kind crosses.
 
-    ``_handle_message`` schedules the enqueue via ``run_coroutine_threadsafe``, which
+    ``_handle_message`` schedules the enqueue via ``call_soon_threadsafe``, which
     needs a loop actually running on another thread to execute -- exactly the
     production shape, reproduced here rather than faked.
     """
     listener = TaskListener.__new__(TaskListener)
-    listener._qs = {_WORKER: TSQueue()}
+    listener._qs = {_WORKER: asyncio.Queue()}
 
     loop = asyncio.new_event_loop()
     thread = threading.Thread(target=loop.run_forever, daemon=True)
