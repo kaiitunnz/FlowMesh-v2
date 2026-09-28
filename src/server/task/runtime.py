@@ -6069,8 +6069,9 @@ class TaskRuntime:
         a lost dispatch does. A task being cancelled settles CANCELLED; any other
         returns without spending an attempt, or fails as on its worker's loss when it
         is a v2 task that cannot safely re-run. The worker is excluded from the task's
-        next placement, so a worker that cannot take the task never gets it back.
-        Returns None when the dispatch does not resolve.
+        next placement, so a worker that cannot take the task never gets it back. A
+        task bound to that worker's private state must go back to it, so its return
+        spends an attempt instead. Returns None when the dispatch does not resolve.
         """
         try:
             with self._cv:
@@ -6100,9 +6101,26 @@ class TaskRuntime:
                 if record.status == TaskStatus.CANCELLING:
                     self._settle_cancelled_locked(record, time.time(), unmerge=True)
                     return _settle_outcome(EventEffect.APPLIED, record, [], [])
+                engine = self._engines.get(record.workflow_id)
+                if engine is not None and engine.private_state_owner(task_id):
+                    return self._retry_on_owner_locked(record, worker_id)
                 return self._return_given_up_locked(record, worker_id, {})
         finally:
             self._release_pending_terminations()
+
+    def _retry_on_owner_locked(
+        self, record: TaskRecord, worker_id: str
+    ) -> SettleOutcome:
+        """Return a task bound to its worker's private state, spending an attempt: its
+        placement goes back to that worker, so the attempt budget bounds how often the
+        worker disowns it."""
+        end = self._return_dispatch_locked(record, increment_retry=True, front=True)
+        if end is DispatchEnd.RETURNED:
+            return _settle_outcome(EventEffect.RETURNED, record, [], [])
+        impacted, usages = self._mark_failed(
+            record.task_id, worker_id, {}, now_iso(), error=record.last_error
+        )
+        return _settle_outcome(EventEffect.FAILED, record, [], usages, tuple(impacted))
 
     def _awaits_its_dispatch_locked(self, record: TaskRecord) -> bool:
         """Whether the task's dispatch is waiting to run it: a task being cancelled

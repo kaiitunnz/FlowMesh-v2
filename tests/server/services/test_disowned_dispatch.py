@@ -1,6 +1,6 @@
-"""A dispatch its live worker keeps reporting it does not hold resolves as a lost
-dispatch once the worker has disowned it for as long as a silent worker takes to be
-declared dead, run against a real Redis where the registry is involved.
+"""When a live worker keeps reporting that it does not hold a dispatch, the dispatch
+resolves as lost after the bound a silent worker gets, run against a real Redis where
+the registry is involved.
 
 Setting ``FLOWMESH_TEST_REDIS_URL`` points the live tests at a Redis whose worker keys
 they own; the runtime-only tests always run.
@@ -23,6 +23,7 @@ from server.registries.worker import WorkerRegistry
 from server.services.monitoring import EventMonitor
 from server.task.models import EventEffect, TaskStatus
 from server.task.runtime import TaskRuntime
+from shared.private_state import OwnerFence
 from shared.schemas.event import WorkerEvent
 from shared.schemas.worker import WorkerStatus
 from tests.server.dispatch_helpers import record_dispatch
@@ -294,3 +295,29 @@ def test_a_dispatch_an_event_applied_to_never_resolves() -> None:
     runtime.mark_started(ids["a"], "wkr-1", {}, "2026-06-01T00:00:00Z", "dsp-1")
 
     assert _resolve(runtime, ids["a"])() is None
+
+
+def test_a_task_bound_to_its_owner_that_keeps_disowning_it_fails_at_its_budget() -> (
+    None
+):
+    runtime = _runtime(_Registry())
+    _, ids = asyncio.run(_register(runtime, _ECHO_V2))
+    task_id = ids["a"]
+    record = runtime._tasks[task_id]
+    record.max_attempts = 3
+    engine = runtime.orchestration_engine(record.workflow_id)
+    assert engine is not None
+    cast(Any, engine).private_state_owner = Mock(
+        return_value=OwnerFence(worker_id=_WORKER, incarnation=1)
+    )
+    ends: list[EventEffect] = []
+    for dispatch in ("dsp-1", "dsp-2", "dsp-3"):
+        assert _next(runtime) == task_id
+        record_dispatch(runtime, task_id, _WORKER, dispatch)
+        outcome = runtime.resolve_disowned_dispatch(task_id, dispatch, _WORKER, 0)
+        assert outcome is not None
+        ends.append(outcome.effect)
+
+    assert ends == [EventEffect.RETURNED, EventEffect.RETURNED, EventEffect.FAILED]
+    assert record.status == TaskStatus.FAILED
+    assert record.attempts == 3
