@@ -285,6 +285,7 @@ class WorkerManager:
 
         started = await worker.start()
         if not started:
+            self.logger.error("Worker %s failed to start; discarding it", worker.name)
             await self._stop_and_destroy_worker(worker)
             self._registry.try_pop(worker.token)
             return False
@@ -322,8 +323,9 @@ class WorkerManager:
     async def _stop_and_destroy_worker(self, worker: WorkerAdapter) -> bool:
         worker_name = worker.name
         success = True
+        was_running = worker.status in (WorkerStatus.STARTING, WorkerStatus.RUNNING)
 
-        if worker.status in (WorkerStatus.STARTING, WorkerStatus.RUNNING):
+        if was_running:
             self.logger.info("Stopping worker %s...", worker_name)
             try:
                 success = await worker.stop()
@@ -342,7 +344,8 @@ class WorkerManager:
             success = False
 
         if success:
-            self.logger.info("Worker %s stopped.", worker_name)
+            outcome = "stopped" if was_running else "destroyed"
+            self.logger.info("Worker %s %s.", worker_name, outcome)
 
         return success
 
