@@ -487,8 +487,7 @@ class EventMonitor:
                     self._record_cancellation(event, success.usages)
                     self._mark_worker_idle(worker_id)
                     return
-                self._unregister_port_forward(event.task_id)
-                self._maybe_drain_serve(event.task_id)
+                self._release_task(event.task_id)
                 if settles:
                     self._metrics.record_task_event(event)
                 self._schedule_emit_usage(success.usages)
@@ -582,7 +581,7 @@ class EventMonitor:
                     event.error,
                 )
             case DispatchEnd.RETURNED:
-                self._unregister_port_forward(event.task_id)
+                self._release_task(event.task_id)
                 self._logger.warning(
                     "Retrying task %s after failure (attempt %d)",
                     event.task_id,
@@ -602,8 +601,7 @@ class EventMonitor:
             case DispatchEnd.CANCELLED:
                 self._record_cancellation(event, failure.usages)
             case DispatchEnd.FAILED:
-                self._unregister_port_forward(event.task_id)
-                self._maybe_drain_serve(event.task_id)
+                self._release_task(event.task_id)
                 self._metrics.record_task_event(event)
                 self._schedule_emit_usage(failure.usages)
                 self._metrics.finalize_task_failure(event.task_id)
@@ -626,8 +624,7 @@ class EventMonitor:
     ) -> None:
         """Apply the side effects of a task that settled CANCELLED, whatever the event
         that settled it reported."""
-        self._unregister_port_forward(event.task_id)
-        self._maybe_drain_serve(event.task_id)
+        self._release_task(event.task_id)
         self._metrics.record_task_event(
             event.model_copy(update={"type": "TASK_CANCELLED", "error": None})
         )
@@ -665,7 +662,7 @@ class EventMonitor:
                     event.worker_id,
                     event.dispatch_id,
                 )
-                self._unregister_port_forward(event.task_id)
+                self._release_task(event.task_id)
         return True
 
     # ------------------------------------------------------------------ # Node event
@@ -883,7 +880,7 @@ class EventMonitor:
                 )
                 continue
             if end not in (DispatchEnd.STALE, DispatchEnd.SETTLED):
-                self._unregister_port_forward(task_id)
+                self._release_task(task_id)
             if end is DispatchEnd.RETURNED:
                 requeued.append(task_id)
         if requeued:
@@ -1032,8 +1029,14 @@ class EventMonitor:
                 _serve_forward_port(record),
             )
 
+    def _release_task(self, task_id: str) -> None:
+        """Release what a task's dispatch exposed, once it ends or returns to the queue:
+        its forward relay and its serve binding, which a re-run registers afresh."""
+        self._unregister_port_forward(task_id)
+        self._maybe_drain_serve(task_id)
+
     def _maybe_drain_serve(self, task_id: str) -> None:
-        """Drain a stopped serve task's binding and standing replica on its terminal."""
+        """Drain a serve task's binding and standing replica."""
         if self._gated_serve is None:
             return
         record = self._runtime.get_record(task_id)
