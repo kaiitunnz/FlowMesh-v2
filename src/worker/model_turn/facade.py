@@ -130,8 +130,12 @@ class ResponsesFacade:
                 self._pending.delete(task_id, member.call_correlation)
 
     def cancel_episode(self, task_id: str) -> None:
-        """Refuse the episode's further turns and end the ones waiting on a permit."""
-        self.unregister_episode(task_id)
+        """Refuse the episode's further turns and end the ones waiting on a permit.
+
+        A group a returned turn already captured stays for its step to report.
+        """
+        with self._lock:
+            self._episodes.pop(task_id, None)
         self._held_egress.release(task_id)
 
     def take_captured_group(self, task_id: str) -> FacadeTurnGroup | None:
