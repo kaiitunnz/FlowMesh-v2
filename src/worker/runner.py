@@ -410,13 +410,17 @@ class Runner:
             raise ExecutionError(str(exc), retryable=False) from exc
 
     def _raise_if_cancel_pending(self, task_id: str) -> None:
-        """Honor a cancel that landed while the task read its inputs, which can wait on
-        the store."""
+        """Honor a cancel, or the worker's shutdown, that landed before the task's
+        executor runs it, such as while it read its inputs from the store."""
         with self._cancel_lock:
             cancelled = task_id in self._pending_cancels
             self._pending_cancels.discard(task_id)
         if cancelled:
             raise TaskCancelledError(f"Task {task_id} was cancelled before execution")
+        if self._shutdown_requested.is_set():
+            raise TaskCancelledError(
+                f"Task {task_id} was given up by the worker shutting down"
+            )
 
     def _materialize_contract(self, msg: WorkerTaskMessage) -> None:
         """Settle the one request a task runs, before its embodiment reaches a model.
@@ -702,9 +706,9 @@ class Runner:
                             except Exception as exc:
                                 self.logger.warning("Executor cancel() raised: %s", exc)
                     for task_id, reason in self.lifecycle.client.iter_stops():
+                        with self._cancel_lock:
+                            self._pending_stops.add(task_id)
                         if self._current_task_id != task_id:
-                            with self._cancel_lock:
-                                self._pending_stops.add(task_id)
                             continue
                         self.logger.info(
                             "Graceful stop for running task %s (reason=%s)",
@@ -802,17 +806,7 @@ class Runner:
                 start_wall = time.time()
                 notified_task_started: bool = False
                 try:
-                    with self._cancel_lock:
-                        cancelled_before_start = task_id in self._pending_cancels
-                        if cancelled_before_start:
-                            self._pending_cancels.discard(task_id)
-                        stop_before_start = task_id in self._pending_stops
-                        if stop_before_start:
-                            self._pending_stops.discard(task_id)
-                    if cancelled_before_start:
-                        raise TaskCancelledError(
-                            f"Task {task_id} was cancelled before execution"
-                        )
+                    self._raise_if_cancel_pending(task_id)
                     self._current_task_id = task_id
                     self._input_hydrator.hydrate(msg)
                     if msg.input_preparation:
@@ -925,7 +919,11 @@ class Runner:
                         # Disable idle checker during execution
                         self._active_executor_last_used_at = None
                         executor_to_run = self._active_executor
-                        if stop_before_start:
+                        # A stop that landed before the executor was bound is handed to
+                        # it here, under the lock the stop's delivery reads it with.
+                        with self._cancel_lock:
+                            stop_pending = task_id in self._pending_stops
+                        if stop_pending:
                             executor_to_run.stop(task_id)
                     out = self._run_executor(executor_to_run, msg, out_dir)
                     references = self._write_results(msg, out_dir, out)

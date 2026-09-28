@@ -1,6 +1,7 @@
 """Runner shutdown and the bookkeeping of cancels and stops it was sent."""
 
 import threading
+import time
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -130,3 +131,59 @@ def test_a_worker_shutting_down_never_reports_itself_idle(tmp_path: Path) -> Non
 
     runner.lifecycle.set_busy.assert_called_once_with("tsk-1")  # type: ignore[attr-defined]
     runner.lifecycle.set_idle.assert_not_called()  # type: ignore[attr-defined]
+
+
+class _Recording(_Echo):
+    def __init__(self) -> None:
+        super().__init__()
+        self.stops: list[str] = []
+        self.ran: list[str] = []
+
+    def stop(self, task_id: str) -> None:
+        self.stops.append(task_id)
+
+    def run(self, task: Any, out_dir: Path) -> BaseExecutorResult:
+        self.ran.append(task.task_id)
+        return BaseExecutorResult()
+
+
+def test_a_stop_landing_before_the_executor_binds_reaches_it(tmp_path: Path) -> None:
+    executor = _Recording()
+    runner = _runner(tmp_path, executor, "tsk-1")
+    stops: list[tuple[str, str]] = []
+    runner.lifecycle.client.iter_stops.side_effect = lambda: (  # type: ignore[attr-defined]
+        [stops.pop()] if stops else []
+    )
+
+    def stop_while_hydrating(_msg: Any) -> None:
+        stops.append(("tsk-1", "user"))
+        # The interrupt monitor polls every half second.
+        time.sleep(1.2)
+
+    with patch.object(
+        runner._input_hydrator, "hydrate", side_effect=stop_while_hydrating
+    ):
+        runner.start()
+
+    assert executor.stops == ["tsk-1"]
+    assert executor.ran == ["tsk-1"]
+
+
+def test_a_shutdown_landing_before_the_executor_binds_gives_the_task_up(
+    tmp_path: Path,
+) -> None:
+    executor = _Recording()
+    runner = _runner(tmp_path, executor, "tsk-1")
+
+    def shut_down_while_hydrating(_msg: Any) -> None:
+        runner.stop()
+        assert runner._shutdown_thread is not None
+        runner._shutdown_thread.join()
+
+    with patch.object(
+        runner._input_hydrator, "hydrate", side_effect=shut_down_while_hydrating
+    ):
+        runner.start()
+
+    assert executor.ran == []
+    runner.lifecycle.set_cancelled.assert_called_once()  # type: ignore[attr-defined]
