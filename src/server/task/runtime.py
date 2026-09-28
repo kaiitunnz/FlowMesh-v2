@@ -4244,8 +4244,11 @@ class TaskRuntime:
     ) -> list[str]:
         if max_batch_size <= 1:
             return []
-        with self._cv:
-            return self._plan_merge_locked(task_id, max_batch_size, assigned_worker)
+        try:
+            with self._cv:
+                return self._plan_merge_locked(task_id, max_batch_size, assigned_worker)
+        finally:
+            self._release_ended_workers()
 
     def _plan_merge_locked(
         self, task_id: str, max_batch_size: int, assigned_worker: str
@@ -4304,8 +4307,11 @@ class TaskRuntime:
         return siblings
 
     def release_merge(self, task_id: str) -> None:
-        with self._cv:
-            self._release_merge_locked(task_id)
+        try:
+            with self._cv:
+                self._release_merge_locked(task_id)
+        finally:
+            self._release_ended_workers()
 
     def _return_failed_merge_locked(self, record: TaskRecord, worker_id: str) -> bool:
         """Return a merged dispatch that failed or lost ``worker_id``, if it is one.
@@ -4355,28 +4361,34 @@ class TaskRuntime:
     ) -> None:
         """Take one child out of a task's merge and return it to the ready queue, to
         merge next under ``merge_key``, or to run alone when it is None."""
-        with self._cv:
-            if parent := self._tasks.get(task_id):
-                parent.merged_children = [
-                    sibling
-                    for sibling in parent.merged_children or []
-                    if sibling != child_id
-                ] or None
-            if (siblings := self._merge_children_map.get(task_id)) and (
-                child_id in siblings
-            ):
-                siblings.remove(child_id)
-            returned: list[str] = []
-            if self._merge_parent_map.get(child_id) == task_id and (
-                child := self._tasks.get(child_id)
-            ):
-                child.merge_key = merge_key
-                _, selected_worker_hint = self._merge_key_by_task.get(
-                    child_id, (None, None)
-                )
-                self._merge_key_by_task[child_id] = (merge_key, selected_worker_hint)
-                returned = self._return_merged_children_locked([child_id])
-            self._commit_locked(task_id, *returned)
+        try:
+            with self._cv:
+                if parent := self._tasks.get(task_id):
+                    parent.merged_children = [
+                        sibling
+                        for sibling in parent.merged_children or []
+                        if sibling != child_id
+                    ] or None
+                if (siblings := self._merge_children_map.get(task_id)) and (
+                    child_id in siblings
+                ):
+                    siblings.remove(child_id)
+                returned: list[str] = []
+                if self._merge_parent_map.get(child_id) == task_id and (
+                    child := self._tasks.get(child_id)
+                ):
+                    child.merge_key = merge_key
+                    _, selected_worker_hint = self._merge_key_by_task.get(
+                        child_id, (None, None)
+                    )
+                    self._merge_key_by_task[child_id] = (
+                        merge_key,
+                        selected_worker_hint,
+                    )
+                    returned = self._return_merged_children_locked([child_id])
+                self._commit_locked(task_id, *returned)
+        finally:
+            self._release_ended_workers()
 
     def _return_merged_children_locked(
         self, child_ids: list[str], unmerge: bool = False

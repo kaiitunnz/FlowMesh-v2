@@ -80,6 +80,23 @@ def test_a_failed_release_is_retried_at_the_next() -> None:
     ]
 
 
+@pytest.mark.parametrize("entry", ["plan_merge", "release_merge", "release_child"])
+def test_a_failed_release_is_retried_at_a_merge(entry: str) -> None:
+    registry = MagicMock()
+    runtime, task_id = _dispatched(registry)
+    registry.release_worker.side_effect = [ConnectionError("down"), True]
+    _succeed(runtime, task_id)
+
+    if entry == "plan_merge":
+        runtime.plan_merge(task_id, 2, "wkr-1")
+    elif entry == "release_merge":
+        runtime.release_merge(task_id)
+    else:
+        runtime.release_merged_child(task_id, "tsk-unknown", None)
+
+    assert registry.release_worker.call_count == 2
+
+
 def test_a_failed_announcement_still_releases(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
