@@ -77,9 +77,12 @@ def _publishes_result(result: BaseExecutorResult) -> bool:
     return True
 
 
-# How long a shutdown waits for the boundaries it holds to finish: inside the
-# supervisor's 30-second container stop, with margin to unregister.
-_BOUNDARY_DRAIN_SEC = 20.0
+# The supervisor kills a worker's container 30 seconds after stopping it, so a shutdown
+# unregisters within this budget, leaving the process time to exit.
+_STOP_BUDGET_SEC = 25.0
+# How long, within the budget, a shutdown waits for the boundaries it holds to finish;
+# the rest is left to the teardown.
+_BOUNDARY_DRAIN_SEC = 15.0
 _BOUNDARY_DRAIN_POLL_SEC = 0.1
 
 
@@ -160,6 +163,7 @@ class Runner:
         self._cancel_lock = threading.Lock()
         self._shutdown_requested = threading.Event()
         self._shutdown_thread: threading.Thread | None = None
+        self._stop_deadline: float | None = None
 
         self._web_search_provider = web_search_provider
         self._web_search_api_key = web_search_api_key
@@ -215,6 +219,11 @@ class Runner:
     def shutdown_requested(self) -> bool:
         return self._shutdown_requested.is_set()
 
+    @property
+    def stop_deadline(self) -> float | None:
+        """The monotonic time a requested shutdown must unregister by."""
+        return self._stop_deadline
+
     def stop(self) -> None:
         """Request shutdown; safe from a signal handler.
 
@@ -223,6 +232,7 @@ class Runner:
         """
         if self._shutdown_requested.is_set():
             return
+        self._stop_deadline = time.monotonic() + _STOP_BUDGET_SEC
         self._shutdown_requested.set()
         self.lifecycle.begin_draining()
         thread = threading.Thread(
@@ -232,18 +242,24 @@ class Runner:
         thread.start()
 
     def _shut_down(self) -> None:
-        deadline = time.monotonic() + _BOUNDARY_DRAIN_SEC
+        drain_deadline = time.monotonic() + _BOUNDARY_DRAIN_SEC
         self.logger.info("Shutdown requested; giving up the running task")
         self.lifecycle.set_draining()
         self.lifecycle.stop()
         self._cancel_active_executor()
-        self._finish_held_boundaries(deadline)
+        self._finish_held_boundaries(drain_deadline)
         if self._mediated_sidecar is not None:
             self._mediated_sidecar.stop()
         if self._responses_facade is not None:
-            self._responses_facade.stop()
+            self._responses_facade.stop(min(5.0, self._stop_time_left()))
         if self._resident_host is not None:
-            self._resident_host.stop()
+            self._resident_host.stop(min(15.0, self._stop_time_left()))
+
+    def _stop_time_left(self) -> float:
+        """Seconds left of the stop budget, or the budget when no stop was asked."""
+        if self._stop_deadline is None:
+            return _STOP_BUDGET_SEC
+        return max(0.0, self._stop_deadline - time.monotonic())
 
     def _finish_held_boundaries(self, deadline: float) -> None:
         """Wait until ``deadline`` for control to commit the outcome of each boundary
@@ -701,14 +717,14 @@ class Runner:
         self._idle_checker_thread = t
         t.start()
 
-    def _stop_idle_checker(self) -> None:
+    def _stop_idle_checker(self, timeout: float = 2.0) -> None:
         """Signal the idle checker thread to stop and wait briefly for join."""
         if not self._idle_checker_thread:
             return
         if self._idle_checker_stop_event:
             self._idle_checker_stop_event.set()
         try:
-            self._idle_checker_thread.join(timeout=2.0)
+            self._idle_checker_thread.join(timeout=timeout)
         except Exception:
             pass
         finally:
@@ -771,13 +787,13 @@ class Runner:
         self._interrupt_thread = thread
         thread.start()
 
-    def _stop_interrupt_monitor(self) -> None:
+    def _stop_interrupt_monitor(self, timeout: float = 2.0) -> None:
         if not self._interrupt_thread:
             return
         if self._interrupt_stop_event is not None:
             self._interrupt_stop_event.set()
         try:
-            self._interrupt_thread.join(timeout=2.0)
+            self._interrupt_thread.join(timeout=timeout)
         except Exception:
             pass
         finally:
@@ -1058,8 +1074,8 @@ class Runner:
             if self._shutdown_thread is not None:
                 self._shutdown_thread.join()
             self._cleanup_active_executor()
-            self._stop_interrupt_monitor()
-            self._stop_idle_checker()
+            self._stop_interrupt_monitor(min(2.0, self._stop_time_left()))
+            self._stop_idle_checker(min(2.0, self._stop_time_left()))
 
     def _create_task_logger(
         self, task_id: str, msg: WorkerTaskMessage, out_dir: Path

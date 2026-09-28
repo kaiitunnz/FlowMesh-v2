@@ -259,14 +259,20 @@ class Lifecycle:
         if plane is not None:
             plane.start()
 
-    def shutdown(self, graceful: bool) -> None:
-        """Unregister the worker; `graceful` marks a shutdown it was asked for."""
+    def shutdown(self, graceful: bool, deadline: float | None = None) -> None:
+        """Unregister the worker; `graceful` marks a shutdown it was asked for, and
+        `deadline` is the monotonic time by which it must have unregistered."""
+
+        def left() -> float | None:
+            return None if deadline is None else max(0.0, deadline - time.monotonic())
+
         self._stop_event.set()
         if self.content_plane is not None:
             # Before unregistering: draining the lane cancels the transfers it serves,
             # and those frames leave over the attachment unregistering closes.
             try:
-                self.content_plane.stop()
+                remaining = left()
+                self.content_plane.stop(10.0 if remaining is None else remaining)
             except Exception:
                 pass
         try:
@@ -287,6 +293,7 @@ class Lifecycle:
                 uptime_sec=uptime,
                 accrued_cost_usd=accrued_cost,
                 power_summary=summary,
+                timeout=left(),
             )
         except Exception:
             pass

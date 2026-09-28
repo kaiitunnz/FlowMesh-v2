@@ -1,6 +1,7 @@
 """A worker shutting down finishes the boundaries it holds for suspended agents: it
 unregisters only once control has committed each one's outcome, or at its deadline."""
 
+import threading
 import time
 from pathlib import Path
 from typing import Any, cast
@@ -132,3 +133,47 @@ def test_a_crashed_worker_unregisters_without_waiting(tmp_path: Path) -> None:
     assert order == ["unregistered"]
     assert time.monotonic() - started < 5.0
     assert client.unregister.call_args.args == (False,)
+
+
+def test_a_shutdown_bounds_its_teardown_by_the_stop_budget(tmp_path: Path) -> None:
+    order: list[str] = []
+    runner, client = _draining_runner(tmp_path, None, order)
+    runner._resident_host = cast(Any, MagicMock())
+    runner._responses_facade = cast(Any, MagicMock())
+    plane = MagicMock()
+    runner.lifecycle.start_content_plane(plane)
+    started = time.monotonic()
+
+    with (
+        patch.object(runner_module, "_STOP_BUDGET_SEC", 2.0),
+        patch.object(runner_module, "_BOUNDARY_DRAIN_SEC", 1.5),
+    ):
+        run_until_exit(runner, runner.lifecycle, MagicMock())
+
+    budget_end = started + 2.0
+    (facade_timeout,) = cast(MagicMock, runner._responses_facade).stop.call_args.args
+    (resident_timeout,) = cast(MagicMock, runner._resident_host).stop.call_args.args
+    (plane_timeout,) = plane.stop.call_args.args
+    assert 0.0 <= facade_timeout <= 0.6
+    assert 0.0 <= resident_timeout <= 0.6
+    assert 0.0 <= plane_timeout <= 0.6
+    unregister_timeout = client.unregister.call_args.kwargs["timeout"]
+    assert unregister_timeout is not None and unregister_timeout <= 0.6
+    assert time.monotonic() < budget_end + 0.5
+
+
+def test_an_unregister_waits_for_the_event_stream_only_until_its_timeout() -> None:
+    client = _client()
+    client._event_ready.clear()
+    finished = threading.Event()
+
+    def unregister() -> None:
+        try:
+            client.unregister(True, timeout=0.2)
+        except RuntimeError:
+            pass
+        finished.set()
+
+    threading.Thread(target=unregister, daemon=True).start()
+
+    assert finished.wait(timeout=2.0)

@@ -108,7 +108,7 @@ def test_a_task_loop_ending_on_an_error_unregisters_ungracefully(
     ):
         run_until_exit(runner, lifecycle, MagicMock())
 
-    lifecycle.shutdown.assert_called_once_with(graceful=False)
+    lifecycle.shutdown.assert_called_once_with(graceful=False, deadline=None)
 
 
 def test_a_requested_shutdown_unregisters_gracefully(tmp_path: Path) -> None:
@@ -122,7 +122,10 @@ def test_a_requested_shutdown_unregisters_gracefully(tmp_path: Path) -> None:
 
     run_until_exit(runner, lifecycle, MagicMock())
 
-    lifecycle.shutdown.assert_called_once_with(graceful=True)
+    lifecycle.shutdown.assert_called_once_with(
+        graceful=True, deadline=runner.stop_deadline
+    )
+    assert runner.stop_deadline is not None
 
 
 def test_a_worker_shutting_down_never_reports_itself_idle(tmp_path: Path) -> None:

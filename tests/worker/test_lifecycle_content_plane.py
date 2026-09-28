@@ -15,7 +15,7 @@ def test_the_lifecycle_starts_the_plane_and_stops_it_before_unregistering(
     client.unregister.side_effect = lambda *_, **__: events.append("unregister")
     plane = mock.Mock()
     plane.start.side_effect = lambda: events.append("start")
-    plane.stop.side_effect = lambda: events.append("stop")
+    plane.stop.side_effect = lambda *_: events.append("stop")
     lifecycle = Lifecycle(
         cast(Any, client),
         hb_sec=5,

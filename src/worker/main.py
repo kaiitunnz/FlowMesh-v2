@@ -313,7 +313,9 @@ def run_until_exit(
         runner.start()
     finally:
         gpu_sampler.shutdown()
-        lifecycle.shutdown(graceful=runner.shutdown_requested)
+        lifecycle.shutdown(
+            graceful=runner.shutdown_requested, deadline=runner.stop_deadline
+        )
 
 
 def main() -> None:

@@ -141,12 +141,12 @@ class ResponsesFacade:
         self._log.info("responses facade serving on %s", self.base_url())
         return self._port
 
-    def stop(self) -> None:
+    def stop(self, timeout: float = 5.0) -> None:
         if (server := self._server) is not None:
             server.shutdown()
             server.server_close()
         if (thread := self._serve_thread) is not None:
-            thread.join(timeout=5.0)
+            thread.join(timeout=timeout)
         self._server = None
         self._serve_thread = None
         self._port = None

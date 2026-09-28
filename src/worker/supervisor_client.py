@@ -266,6 +266,7 @@ class SupervisorClient:
         uptime_sec: float | None = None,
         accrued_cost_usd: float | None = None,
         power_summary: dict[str, Any] | None = None,
+        timeout: float | None = None,
     ) -> None:
         payload: dict[str, Any] = {}
         if cost_per_hour is not None:
@@ -283,7 +284,7 @@ class SupervisorClient:
             payload=payload,
             actor=self.owner_principal,
         )
-        self._send_event(event)
+        self._send_event(event, timeout)
 
     def task_update(self, task_id: str, payload: dict[str, Any]) -> None:
         event = TaskEvent(
@@ -636,11 +637,10 @@ class SupervisorClient:
         payload = MessageToDict(struct, preserving_proto_field_name=True)
         return normalize_numbers(payload)
 
-    def _send_event(self, event: Event) -> None:
+    def _send_event(self, event: Event, timeout: float | None = None) -> None:
         if self._stub is None:
             raise RuntimeError("Supervisor gRPC client not started")
-        # Wait until the stream is ready without an explicit timeout.
-        if not self._event_ready.wait():
+        if not self._event_ready.wait(timeout):
             raise RuntimeError("Supervisor event stream not ready")
         self._event_queue.put(serialize_event(event))
 
