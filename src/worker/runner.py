@@ -1005,6 +1005,9 @@ class Runner:
                         self.logger.exception("Task %s failed", task_id)
                 finally:
                     self._current_task_id = None
+                    with self._cancel_lock:
+                        self._pending_cancels.discard(task_id)
+                        self._pending_stops.discard(task_id)
                     with self._active_executor_lock:
                         self._active_executor_last_used_at = time.time()
                     self.lifecycle.set_idle(task_id)

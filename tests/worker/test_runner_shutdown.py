@@ -1,4 +1,4 @@
-"""Runner shutdown."""
+"""Runner shutdown and the bookkeeping of cancels and stops it was sent."""
 
 import threading
 from pathlib import Path
@@ -68,3 +68,20 @@ def test_a_stop_from_a_frame_holding_the_executor_lock_returns(
     assert runner._shutdown_thread is not None
     runner._shutdown_thread.join(timeout=2.0)
     runner.lifecycle.stop.assert_called_once_with()  # type: ignore[attr-defined]
+
+
+def test_cancels_and_stops_for_a_task_are_dropped_once_it_ends(
+    tmp_path: Path,
+) -> None:
+    runner: Runner
+
+    def signalled_while_running(task_id: str) -> None:
+        with runner._cancel_lock:
+            runner._pending_cancels.add(task_id)
+            runner._pending_stops.add(task_id)
+
+    runner = _runner(tmp_path, _Echo(on_run=signalled_while_running), "tsk-1")
+    runner.start()
+
+    assert runner._pending_cancels == set()
+    assert runner._pending_stops == set()
