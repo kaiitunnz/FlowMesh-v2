@@ -334,6 +334,7 @@ def _fast_worker_dispatcher(
     registry = mock.Mock()
     registry.idle_satisfying_pool.return_value = [_worker("wkr-1")]
     registry.satisfying_workers.return_value = [_worker("wkr-1")]
+    monitor._worker_registry = registry
 
     def publish(_worker: Worker, message: WorkerTaskMessage) -> int:
         for event_type in event_types:
@@ -494,7 +495,7 @@ async def test_a_worker_lost_before_its_dispatch_was_recorded_runs_the_task_else
     [("TASK_STARTED", "TASK_SUCCEEDED"), ("TASK_STARTED", "TASK_FAILED")],
     ids=["succeeded", "failed"],
 )
-async def test_a_dispatch_its_worker_ended_first_leaves_the_worker_idle(
+async def test_a_dispatch_its_worker_ended_first_is_marked_busy_only_before_its_publish(
     event_types: tuple[str, ...],
 ) -> None:
     runtime = _runtime(_Registry())
@@ -507,7 +508,8 @@ async def test_a_dispatch_its_worker_ended_first_leaves_the_worker_idle(
     dispatcher.dispatch_once(task_id)
 
     writes = [call.args for call in worker_registry.update_worker_status.call_args_list]
-    assert ("wkr-1", WorkerStatus.BUSY) not in writes
+    assert writes[0] == ("wkr-1", WorkerStatus.BUSY)
+    assert ("wkr-1", WorkerStatus.BUSY) not in writes[1:]
 
 
 @pytest.mark.anyio

@@ -715,11 +715,15 @@ class Dispatcher:
             task_id, worker, dispatch_id, input_preparation=preparing
         ):
             return True
+        # BUSY is written before the worker can start the task, so every IDLE its end
+        # writes lands after it.
+        self._write_worker_status(worker.id, WorkerStatus.BUSY)
         try:
             if self._content_access is not None:
                 self._content_access.issue(worker.id, task_id, record.org_id)
             receivers = self._worker_registry.publish_task(worker, message)
         except Exception as exc:
+            self._write_worker_status(worker.id, WorkerStatus.IDLE)
             if not self._runtime.abandon_publish(task_id):
                 return True
             self._logger.warning(
@@ -734,6 +738,7 @@ class Dispatcher:
             )
 
         if receivers <= 0:
+            self._write_worker_status(worker.id, WorkerStatus.IDLE)
             if not self._runtime.abandon_publish(task_id):
                 return True
             self._logger.info(
@@ -758,7 +763,7 @@ class Dispatcher:
 
         # 9. Mark dispatched
         record.no_dispatch_since = None
-        live = self._runtime.mark_dispatched(task_id)
+        self._runtime.mark_dispatched(task_id)
         if rendered_children:
             self._logger.info(
                 "[TaskMerge] parent=%s merged_children=%d -> %s",
@@ -766,14 +771,6 @@ class Dispatcher:
                 len(rendered_children),
                 ", ".join(child.task_id for child in rendered_children),
             )
-        if live:
-            try:
-                self._worker_registry.update_worker_status(worker.id, WorkerStatus.BUSY)
-            except Exception as exc:
-                self._logger.debug(
-                    "Failed to update worker %s status: %s", worker.id, exc
-                )
-
         try:
             chosen_score = selection_info.get("chosen_metrics", {}).get("score")
             score_display = (
@@ -792,6 +789,12 @@ class Dispatcher:
         except Exception:
             pass
         return True
+
+    def _write_worker_status(self, worker_id: str, status: WorkerStatus) -> None:
+        try:
+            self._worker_registry.update_worker_status(worker_id, status)
+        except Exception as exc:
+            self._logger.debug("Failed to update worker %s status: %s", worker_id, exc)
 
     def dispatch_loop(self, stop_event, poll_interval: float = 1.0) -> None:
         """Continuously dispatch ready tasks until stop_event is set."""
