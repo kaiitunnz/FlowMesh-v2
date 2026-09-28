@@ -251,6 +251,7 @@ class SupervisorClient:
 
     def unregister(
         self,
+        graceful: bool,
         cost_per_hour: float | None = None,
         uptime_sec: float | None = None,
         accrued_cost_usd: float | None = None,
@@ -268,7 +269,7 @@ class SupervisorClient:
         event = WorkerEvent(
             type="UNREGISTER",
             worker_id=self.worker_id,
-            graceful=True,
+            graceful=graceful,
             payload=payload,
             actor=self.owner_principal,
         )

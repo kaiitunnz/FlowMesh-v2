@@ -12,7 +12,7 @@ def test_the_lifecycle_starts_the_plane_and_stops_it_before_unregistering(
 ) -> None:
     events: list[str] = []
     client = mock.Mock()
-    client.unregister.side_effect = lambda **_: events.append("unregister")
+    client.unregister.side_effect = lambda *_, **__: events.append("unregister")
     plane = mock.Mock()
     plane.start.side_effect = lambda: events.append("start")
     plane.stop.side_effect = lambda: events.append("stop")
@@ -26,6 +26,6 @@ def test_the_lifecycle_starts_the_plane_and_stops_it_before_unregistering(
 
     lifecycle.start_content_plane(cast(WorkerContentPlane, plane))
     assert lifecycle.content_plane is plane
-    lifecycle.shutdown()
+    lifecycle.shutdown(graceful=True)
 
     assert events == ["start", "stop", "unregister"]

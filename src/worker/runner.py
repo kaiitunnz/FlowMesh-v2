@@ -205,6 +205,10 @@ class Runner:
                 self._active_executor_key = None
                 self._active_executor_last_used_at = None
 
+    @property
+    def shutdown_requested(self) -> bool:
+        return self._shutdown_requested.is_set()
+
     def stop(self) -> None:
         """Request shutdown; safe from a signal handler.
 

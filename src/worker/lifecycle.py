@@ -204,7 +204,8 @@ class Lifecycle:
         if plane is not None:
             plane.start()
 
-    def shutdown(self):
+    def shutdown(self, graceful: bool) -> None:
+        """Unregister the worker; `graceful` marks a shutdown it was asked for."""
         self._stop_event.set()
         if self.content_plane is not None:
             # Before unregistering: draining the lane cancels the transfers it serves,
@@ -226,6 +227,7 @@ class Lifecycle:
         summary = self.power_monitor.summary()
         try:
             self.client.unregister(
+                graceful,
                 cost_per_hour=self.cost_per_hour,
                 uptime_sec=uptime,
                 accrued_cost_usd=accrued_cost,

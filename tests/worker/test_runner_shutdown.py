@@ -3,12 +3,15 @@
 import threading
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 from shared.schemas.result import BaseExecutorResult
 from shared.tasks.task_type import TaskType
 from tests.worker.factories import make_worker_hardware, make_worker_task_message
 from worker.executors.base_executor import Executor
+from worker.main import run_until_exit
 from worker.runner import Runner
 
 
@@ -85,3 +88,32 @@ def test_cancels_and_stops_for_a_task_are_dropped_once_it_ends(
 
     assert runner._pending_cancels == set()
     assert runner._pending_stops == set()
+
+
+def test_a_task_loop_ending_on_an_error_unregisters_ungracefully(
+    tmp_path: Path,
+) -> None:
+    runner = _runner(tmp_path, _Echo(), "tsk-1")
+    lifecycle = MagicMock()
+
+    with (
+        patch.object(runner, "_resolve_output_dir", side_effect=OSError(28, "full")),
+        pytest.raises(OSError),
+    ):
+        run_until_exit(runner, lifecycle, MagicMock())
+
+    lifecycle.shutdown.assert_called_once_with(graceful=False)
+
+
+def test_a_requested_shutdown_unregisters_gracefully(tmp_path: Path) -> None:
+    runner: Runner
+
+    def stop_while_running(_task_id: str) -> None:
+        runner.stop()
+
+    runner = _runner(tmp_path, _Echo(on_run=stop_while_running), "tsk-1", "tsk-2")
+    lifecycle = MagicMock()
+
+    run_until_exit(runner, lifecycle, MagicMock())
+
+    lifecycle.shutdown.assert_called_once_with(graceful=True)
