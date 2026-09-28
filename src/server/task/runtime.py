@@ -1027,6 +1027,7 @@ class TaskRuntime:
                 if _membership(record) == TaskStatus.DISPATCHED
                 and record.assigned_worker is not None
                 and record.dispatch_id is not None
+                and not self._dispatch_ended_at_suspension_locked(record)
             )
         self._release_pending_terminations()
         if restored:
@@ -1289,8 +1290,8 @@ class TaskRuntime:
         elif (wi := engine.work_item(task_id)) is not None and (
             wi.status is WorkItemStatus.READY
         ):
-            # Only a lost save leaves a dispatched task's work item ready; one blocked
-            # on a boundary it suspended on still holds its dispatch.
+            # Only a lost save leaves a dispatched task's work item READY; a BLOCKED
+            # one's dispatch ended at a suspension on a boundary.
             engine.on_dispatched(task_id, worker_id)
 
     # ------------------------------------------------------------------ #
@@ -1376,7 +1377,8 @@ class TaskRuntime:
         self._write_locked(commit, lambda held: held.task_ids.extend(task_ids))
 
     def _release_ended_dispatches_locked(self, task_ids: Sequence[str]) -> None:
-        """Release each worker reserved for a dispatch a commit moved its task off.
+        """Release each worker reserved for a dispatch that ended: its task moved off
+        it, or it ended at a suspension.
 
         A worker reporting its status names the dispatch it concerns, and its IDLE
         clears the reservation itself; one that names none is fenced while reserved, so
@@ -1390,6 +1392,7 @@ class TaskRuntime:
                 record is not None
                 and _membership(record) == TaskStatus.DISPATCHED
                 and record.dispatch_id == held[1]
+                and not self._dispatch_ended_at_suspension_locked(record)
             ):
                 continue
             del self._held_dispatches[task_id]
@@ -1962,20 +1965,6 @@ class TaskRuntime:
             self._persist_locked(task_id)
         self._save_ledger_locked(record.workflow_id)
         self._cv.notify_all()
-
-    def _end_suspended_dispatch_locked(self, record: TaskRecord) -> None:
-        """Release the worker of an episode step that suspended on a boundary: the
-        step ended its dispatch on the worker, though the task holds it until the
-        boundary settles."""
-        engine = self._engines.get(record.workflow_id)
-        wi = engine.work_item(record.task_id) if engine is not None else None
-        if (
-            record.status == TaskStatus.DISPATCHED
-            and wi is not None
-            and wi.status is WorkItemStatus.BLOCKED
-            and (held := self._held_dispatches.pop(record.task_id, None)) is not None
-        ):
-            self._ended_dispatches.append(held)
 
     def _reenqueue_episode_locked(self, task_id: str) -> None:
         """Re-ready a still-running agent episode for its next run-to-yield step."""
@@ -4868,7 +4857,7 @@ class TaskRuntime:
                     # A non-terminal episode step routes its boundary and re-dispatches;
                     # a completion falls through to the terminal path below.
                     self._apply_episode_step_locked(task_id, harness_result)
-                    self._end_suspended_dispatch_locked(record)
+                    self._release_ended_dispatches_locked([task_id])
                     return _settle_outcome(
                         effect, record, [], _in_flight_usage(task_id, payload)
                     )
@@ -4892,7 +4881,7 @@ class TaskRuntime:
                     self._route_and_dispatch_facade_group_locked(
                         task_id, group, harness_result.capsule
                     )
-                    self._end_suspended_dispatch_locked(record)
+                    self._release_ended_dispatches_locked([task_id])
                     return _settle_outcome(
                         effect, record, [], _in_flight_usage(task_id, payload)
                     )
@@ -6144,10 +6133,11 @@ class TaskRuntime:
     def dispatch_in_flight(
         self, task_id: str, dispatch_id: str, worker_id: str
     ) -> bool:
-        """Whether a dispatch to a worker is being published or holds its task."""
+        """Whether a dispatch to a worker is being published or holds its task, and has
+        not ended at a suspension."""
         with self._lock:
             record = self._tasks.get(task_id)
-            if record is None:
+            if record is None or self._dispatch_ended_at_suspension_locked(record):
                 return False
             publish = self._publishing.get(task_id)
             in_flight = record.status in (
