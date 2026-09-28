@@ -1288,6 +1288,7 @@ class TaskRuntime:
                 # reaches the worker that captured it through the record.
                 record.status = TaskStatus.DISPATCHED
                 record.assigned_worker = worker_id
+                self._rehydrated_dispatched[record.task_id] = rehydrated_at
                 self._commit_locked(record.task_id)
 
         # Re-drive any DONE producer whose spawn never sealed and any agent waiting on

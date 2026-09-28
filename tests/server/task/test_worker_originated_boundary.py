@@ -1115,7 +1115,7 @@ def test_a_boundary_a_drained_worker_could_not_finish_fails_the_agent() -> None:
 
 @pytest.mark.parametrize("interface", ["search", "model"])
 def test_a_boundary_whose_settle_a_crash_cut_short_reaches_its_origin_again(
-    interface: str,
+    interface: str, tmp_path: Path
 ) -> None:
     workflow, script = (
         (_SEARCH_WF, _SCRIPT) if interface == "search" else (_MODEL_WF, _MODEL_SCRIPT)
@@ -1137,7 +1137,7 @@ def test_a_boundary_whose_settle_a_crash_cut_short_reaches_its_origin_again(
         runtime = runtime_on(registry)
         _, ids = await _register(runtime, workflow)
         writer = ids["writer"]
-        _dispatch_agent(runtime, writer, script=script)
+        _dispatch_agent(runtime, writer, script=script, seal_in=tmp_path)
         permit = MediatedOperationPermit.model_validate(_permit_frames(runtime)[0])
         save = registry.save_ledger_snapshot
 
@@ -1155,6 +1155,8 @@ def test_a_boundary_whose_settle_a_crash_cut_short_reaches_its_origin_again(
         record = restored.get_record(writer)
         assert record is not None and record.status is TaskStatus.DISPATCHED
         assert record.assigned_worker == "wkr-1"
+        # Its worker gets the grace a restart gives the workers it finds in flight.
+        assert restored.has_rehydrated_in_flight("wkr-1", 60.0)
         frames = cast(Any, restored._worker_registry).frames
         reissued = [
             (target, MediatedOperationPermit.model_validate(payload))
