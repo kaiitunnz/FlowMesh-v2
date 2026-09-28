@@ -24,7 +24,7 @@ from shared.tasks.task_type import TaskType
 from shared.utils.parsing import parse_float_env
 from worker.config import WorkerConfig
 
-from .base_executor import Executor, ExecutorTask, RunSignals, TaskCancelledError
+from .base_executor import Executor, ExecutorTask, RunSignals
 from .utils.net import resolve_bind_port
 
 logger = logging.getLogger(__name__)
@@ -384,7 +384,7 @@ class DevModelExecutor(Executor):
         forward_url = self._config.dev_model_forward_url
 
         out_dir.mkdir(parents=True, exist_ok=True)
-        if self._signals.stopped:
+        if self._signals.raise_if_cancelled():
             logger.info("dev_model task %s stopped before launch", task.task_id)
             return DevModelResult(model=model_id, port=port)
 
@@ -448,9 +448,7 @@ class DevModelExecutor(Executor):
     def _wait_for_serve(self, ttl_sec: float) -> None:
         deadline = time.time() + ttl_sec
         while time.time() < deadline:
-            if self._signals.cancelled:
-                raise TaskCancelledError("dev_model task cancelled")
-            if self._signals.stopped:
+            if self._signals.raise_if_cancelled():
                 logger.info("dev_model task stop requested; terminating server")
                 return
             time.sleep(_POLL_INTERVAL_SEC)

@@ -25,13 +25,7 @@ from shared.tasks.task_type import TaskType
 from shared.utils.parsing import parse_float_env
 from worker.config import WorkerConfig
 
-from .base_executor import (
-    ExecutionError,
-    Executor,
-    ExecutorTask,
-    RunSignals,
-    TaskCancelledError,
-)
+from .base_executor import ExecutionError, Executor, ExecutorTask, RunSignals
 from .utils.net import resolve_bind_port
 
 logger = logging.getLogger(__name__)
@@ -165,7 +159,7 @@ class VLLMServeExecutor(Executor):
 
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        if self._signals.stopped:
+        if self._signals.raise_if_cancelled():
             logger.info("Serve task %s stopped before vLLM launch", task.task_id)
             return ServeResult(model=model_id, port=port)
 
@@ -196,7 +190,7 @@ class VLLMServeExecutor(Executor):
             self._poll_health(
                 proc, port, task.task_id, readiness_timeout, tail, eof_event
             )
-            if self._signals.stopped:
+            if self._signals.raise_if_cancelled():
                 logger.info("Serve task stop requested before vLLM became ready")
                 return ServeResult(model=model_id, port=port)
             # Worker-private endpoint facts ("_"-prefixed so task metadata never
@@ -238,11 +232,11 @@ class VLLMServeExecutor(Executor):
         url = f"http://127.0.0.1:{port}/health"
         deadline = time.time() + timeout_sec
         while time.time() < deadline:
-            if self._signalled():
+            if self._signals.raise_if_cancelled():
                 return
             if proc.poll() is not None:
                 # A stop or cancel terminates the process it waits on.
-                if self._signalled():
+                if self._signals.raise_if_cancelled():
                     return
                 _raise_with_tail(
                     f"vLLM server process exited (code={proc.returncode}) "
@@ -256,7 +250,7 @@ class VLLMServeExecutor(Executor):
                     proc.wait(timeout=2.0)
                 except subprocess.TimeoutExpired:
                     pass
-                if self._signalled():
+                if self._signals.raise_if_cancelled():
                     return
                 _raise_with_tail(
                     f"vLLM server process exited (code={proc.returncode}) "
@@ -279,23 +273,17 @@ class VLLMServeExecutor(Executor):
     def _wait_for_serve(self, proc: subprocess.Popen[str], ttl_sec: float) -> None:
         deadline = time.time() + ttl_sec
         while time.time() < deadline:
-            if self._signalled():
+            if self._signals.raise_if_cancelled():
                 logger.info("Serve task stop requested; terminating vLLM server")
                 return
             if proc.poll() is not None:
-                if self._signalled():
+                if self._signals.raise_if_cancelled():
                     return
                 raise ExecutionError(
                     f"vLLM server process exited unexpectedly (code={proc.returncode})"
                 )
             time.sleep(_POLL_INTERVAL_SEC)
         logger.info("Serve task TTL reached; terminating vLLM server")
-
-    def _signalled(self) -> bool:
-        """Whether a stop was requested, raising if a cancel was."""
-        if self._signals.cancelled:
-            raise TaskCancelledError("Serve task cancelled")
-        return self._signals.stopped
 
     def _terminate_process_group(self, proc: subprocess.Popen[str]) -> None:
         try:

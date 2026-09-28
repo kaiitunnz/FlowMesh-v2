@@ -94,8 +94,8 @@ class RunSignals:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._running: str | None = None
-        self._cancel: str | None = None
-        self._stop: str | None = None
+        self._cancels: set[str] = set()
+        self._stops: set[str] = set()
 
     @contextmanager
     def running(self, task_id: str) -> Iterator[None]:
@@ -105,29 +105,42 @@ class RunSignals:
             yield
         finally:
             with self._lock:
-                self._running = self._cancel = self._stop = None
+                self._running = None
+                self._cancels.clear()
+                self._stops.clear()
 
     def cancel(self, task_id: str) -> bool:
         """Request a cancel; returns whether the task is running."""
         with self._lock:
-            self._cancel = task_id
+            self._cancels.add(task_id)
             return task_id == self._running
 
     def stop(self, task_id: str) -> bool:
         """Request a graceful stop; returns whether the task is running."""
         with self._lock:
-            self._stop = task_id
+            self._stops.add(task_id)
             return task_id == self._running
 
     @property
     def cancelled(self) -> bool:
         with self._lock:
-            return self._running is not None and self._cancel == self._running
+            return self._running is not None and self._running in self._cancels
 
     @property
     def stopped(self) -> bool:
         with self._lock:
-            return self._running is not None and self._stop == self._running
+            return self._running is not None and self._running in self._stops
+
+    def raise_if_cancelled(self) -> bool:
+        """Raise `TaskCancelledError` if the running task is cancelled; returns whether
+        it is stopped."""
+        with self._lock:
+            running = self._running
+            if running is None:
+                return False
+            if running in self._cancels:
+                raise TaskCancelledError(f"Task {running} cancelled")
+            return running in self._stops
 
 
 class Executor(ABC):

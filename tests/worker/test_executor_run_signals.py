@@ -20,6 +20,7 @@ from tests.worker.factories import (
     make_worker_task_message,
 )
 from worker.executors import dev_model_executor
+from worker.executors.base_executor import RunSignals, TaskCancelledError
 from worker.executors.dev_model_executor import DevModelExecutor
 from worker.executors.vllm_serve_executor import VLLMServeExecutor
 
@@ -76,7 +77,13 @@ def test_a_serve_stopped_before_launch_succeeds_without_starting_vllm(
 ) -> None:
     ex = VLLMServeExecutor(make_worker_config(), make_worker_hardware())
     ex.stop("tsk-1")
-    with patch("subprocess.Popen") as popen:
+    with (
+        patch("subprocess.Popen") as popen,
+        patch.object(ex, "_poll_health"),
+        patch.object(ex, "_wait_for_serve"),
+        patch.object(ex, "_terminate_process_group"),
+        patch.object(ex, "emit_update"),
+    ):
         result = ex.run(_serve_task("tsk-1"), tmp_path)
 
     assert isinstance(result, ServeResult)
@@ -100,4 +107,42 @@ def test_a_serve_stopped_before_it_is_ready_succeeds(tmp_path: Path) -> None:
         result = ex.run(_serve_task("tsk-1"), tmp_path)
 
     assert isinstance(result, ServeResult)
+    emit.assert_not_called()
+
+
+def test_a_late_request_for_an_ended_task_keeps_the_running_tasks_request() -> None:
+    signals = RunSignals()
+    with signals.running("tsk-2"):
+        signals.stop("tsk-2")
+        signals.stop("tsk-1")
+        signals.cancel("tsk-1")
+
+        assert signals.stopped
+        assert not signals.cancelled
+        assert signals.raise_if_cancelled() is True
+
+
+def test_a_serve_cancelled_before_launch_never_starts_vllm(tmp_path: Path) -> None:
+    ex = VLLMServeExecutor(make_worker_config(), make_worker_hardware())
+    ex.cancel("tsk-1")
+    with (
+        patch("subprocess.Popen") as popen,
+        patch.object(ex, "_poll_health"),
+        patch.object(ex, "_wait_for_serve"),
+        patch.object(ex, "_terminate_process_group"),
+        patch.object(ex, "emit_update"),
+        pytest.raises(TaskCancelledError),
+    ):
+        ex.run(_serve_task("tsk-1"), tmp_path)
+
+    popen.assert_not_called()
+
+
+def test_a_dev_model_cancelled_before_launch_never_serves(tmp_path: Path) -> None:
+    ex = _dev_model()
+    emit = MagicMock()
+    ex.cancel("tsk-1")
+    with patch.object(ex, "emit_update", emit), pytest.raises(TaskCancelledError):
+        ex.run(_dev_model_task("tsk-1"), tmp_path)
+
     emit.assert_not_called()
