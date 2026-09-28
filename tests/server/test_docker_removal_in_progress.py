@@ -304,6 +304,21 @@ class TestCancelledStart:
         created.remove.assert_called_once()
 
 
+class TestVanishingWorker:
+    @pytest.mark.parametrize("step", ["stop", "remove"])
+    def test_a_worker_gone_mid_stop_has_stopped_and_its_ssh_resources_go(
+        self, step: str
+    ) -> None:
+        events: list[str] = []
+        worker = MagicMock()
+        getattr(worker, step).side_effect = NotFound("gone")
+
+        docker_client = TestStopOrder()._docker(events, worker)
+        assert _adapter(docker_client)._stop() is True
+
+        assert events == ["ssh removed", "volume removed"]
+
+
 class TestAbandonedStart:
     @pytest.mark.asyncio
     async def test_a_start_that_fails_after_its_cancel_is_logged(
