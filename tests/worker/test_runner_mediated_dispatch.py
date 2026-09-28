@@ -38,6 +38,7 @@ def _self(rv: ModelTurnRendezvous, sidecar: _StubSidecar) -> Any:
         _model_turn_rendezvous=rv,
         _ensure_mediated_sidecar=lambda: sidecar,
         _boundaries_closed=threading.Event(),
+        _boundary_lanes_lock=threading.Lock(),
         logger=logging.getLogger("runner-dispatch-test"),
     )
 

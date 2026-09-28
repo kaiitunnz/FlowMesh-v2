@@ -165,6 +165,9 @@ class Runner:
         self._shutdown_thread: threading.Thread | None = None
         self._stop_deadline: float | None = None
         self._boundaries_closed = threading.Event()
+        # Orders building a boundary lane against the drain closing them, so a lane
+        # built by a racing frame is one the shutdown sees and stops.
+        self._boundary_lanes_lock = threading.Lock()
 
         self._web_search_provider = web_search_provider
         self._web_search_api_key = web_search_api_key
@@ -262,13 +265,17 @@ class Runner:
         self.lifecycle.stop()
         self._cancel_active_executor()
         self._finish_held_boundaries(drain_deadline)
-        self._boundaries_closed.set()
-        if self._mediated_sidecar is not None:
-            self._mediated_sidecar.stop()
-        if self._responses_facade is not None:
-            self._responses_facade.stop(min(5.0, self._stop_time_left()))
-        if self._resident_host is not None:
-            self._resident_host.stop(min(15.0, self._stop_time_left()))
+        with self._boundary_lanes_lock:
+            self._boundaries_closed.set()
+            sidecar = self._mediated_sidecar
+            facade = self._responses_facade
+            host = self._resident_host
+        if sidecar is not None:
+            sidecar.stop()
+        if facade is not None:
+            facade.stop(min(5.0, self._stop_time_left()))
+        if host is not None:
+            host.stop(min(15.0, self._stop_time_left()))
 
     def _stop_time_left(self) -> float:
         """Seconds left of the stop budget, or the budget when no stop was asked."""
@@ -359,6 +366,10 @@ class Runner:
 
     def _ensure_resident_host(self) -> ResidentLaneHost | None:
         """Build the resident lane host once the worker id is known."""
+        with self._boundary_lanes_lock:
+            return self._ensure_resident_host_locked()
+
+    def _ensure_resident_host_locked(self) -> ResidentLaneHost | None:
         if self._resident_host is not None:
             return self._resident_host
         if self._boundaries_closed.is_set():
@@ -425,16 +436,17 @@ class Runner:
             )
             if stale_held:
                 return
-            if self._boundaries_closed.is_set():
-                self.logger.warning(
-                    "Dropping a permit for %s:%s that arrived after the shutdown's "
-                    "boundary drain",
-                    permit.agent_task_id,
-                    permit.call_correlation,
-                )
-                return
-            if (sidecar := self._ensure_mediated_sidecar()) is not None:
-                sidecar.submit_permit(permit)
+            with self._boundary_lanes_lock:
+                if self._boundaries_closed.is_set():
+                    self.logger.warning(
+                        "Dropping a permit for %s:%s that arrived after the shutdown's "
+                        "boundary drain",
+                        permit.agent_task_id,
+                        permit.call_correlation,
+                    )
+                    return
+                if (sidecar := self._ensure_mediated_sidecar()) is not None:
+                    sidecar.submit_permit(permit)
             return
         if frame_kind == "reap":
             if (sidecar := self._ensure_mediated_sidecar()) is not None:

@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from shared.grpc.supervisor.v1 import supervisor_pb2
+from shared.tools.search.schema import SEARCH_INTERFACE
 from tests.worker.test_runner_mediated_dispatch import _permit
 from tests.worker.test_runner_shutdown import _Echo, _runner
 from tests.worker.test_supervisor_client_dispatch_id import _client
@@ -18,6 +19,7 @@ from worker import runner as runner_module
 from worker import supervisor_client as supervisor_module
 from worker.lifecycle import Lifecycle
 from worker.main import run_until_exit
+from worker.resident.lane_host import ResidentLaneHost
 from worker.runner import Runner
 
 _HELD = ("tsk-agent", "call-1")
@@ -265,6 +267,74 @@ def test_a_resident_frame_after_the_boundary_drain_builds_no_lanes(
     if host is not None:
         host.stop(1.0)
     assert host is None
+
+
+def _race_the_boundary_drain(runner: Runner, building: threading.Event) -> None:
+    """Close the boundaries while a frame is building a lane, then let the build end."""
+    assert building.wait(5)
+    shutdown = threading.Thread(target=runner._shut_down)
+    shutdown.start()
+    time.sleep(0.2)
+    building.clear()
+    shutdown.join(5)
+
+
+def test_a_resident_host_built_across_the_boundary_drain_is_stopped(
+    tmp_path: Path,
+) -> None:
+    runner = _runner(tmp_path, _Echo())
+    lifecycle = Lifecycle(MagicMock(), 5, 15, tmp_path / "hb", 0.0)
+    cast(MagicMock, lifecycle.client).worker_id = "wkr-1"
+    runner.lifecycle = lifecycle
+    building = threading.Event()
+    real_start = ResidentLaneHost.start
+
+    def slow_start(host: ResidentLaneHost) -> None:
+        real_start(host)
+        building.set()
+        while building.is_set():
+            time.sleep(0.01)
+
+    with patch.object(ResidentLaneHost, "start", slow_start):
+        frame = threading.Thread(
+            target=runner._route_mediated_op,
+            args=("resident_reap", {"task_id": "tsk-leaf", "call_correlation": "c"}),
+        )
+        frame.start()
+        _race_the_boundary_drain(runner, building)
+        frame.join(5)
+
+    host = runner._resident_host
+    alive = host is not None and host._thread.is_alive()
+    if alive:
+        cast(ResidentLaneHost, host).stop(1.0)
+    assert not alive
+
+
+def test_a_permit_sidecar_built_across_the_boundary_drain_is_stopped(
+    tmp_path: Path,
+) -> None:
+    runner = _runner(tmp_path, _Echo())
+    building = threading.Event()
+    sidecar = MagicMock()
+
+    def slow_build(**_: Any) -> MagicMock:
+        building.set()
+        while building.is_set():
+            time.sleep(0.01)
+        return sidecar
+
+    with patch.object(runner_module, "MediatedEgressSidecar", side_effect=slow_build):
+        frame = threading.Thread(
+            target=runner._route_mediated_op,
+            args=("permit", _permit(SEARCH_INTERFACE).model_dump(mode="json")),
+        )
+        frame.start()
+        _race_the_boundary_drain(runner, building)
+        frame.join(5)
+
+    assert runner._mediated_sidecar is sidecar
+    sidecar.stop.assert_called_once()
 
 
 def test_a_spent_stop_budget_still_gives_the_unregister_its_floor(
