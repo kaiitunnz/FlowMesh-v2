@@ -158,7 +158,12 @@ class WorkerAdapter(ABC):
             await asyncio.wait({starting})
         if (stopping := self._stopping) is None or stopping.done():
             prev_status = self.status
-            if prev_status in (WorkerStatus.STOPPING, WorkerStatus.STOPPED):
+            # The status reads STOPPED whenever the worker's event stream closes, so
+            # only what the adapter started says whether there is anything to stop.
+            if (
+                prev_status in (WorkerStatus.STOPPING, WorkerStatus.STOPPED)
+                and not self._holds_worker()
+            ):
                 return True
             self.set_status(WorkerStatus.STOPPING)
             stopping = self._stopping = asyncio.ensure_future(
@@ -174,6 +179,11 @@ class WorkerAdapter(ABC):
     @abstractmethod
     def _stop(self) -> bool:
         """Stop the worker, blocking; returns whether it stopped."""
+        pass
+
+    @abstractmethod
+    def _holds_worker(self) -> bool:
+        """Whether this adapter started a worker it has not stopped."""
         pass
 
     def _log_abandoned_start(self, starting: asyncio.Future[bool]) -> None:

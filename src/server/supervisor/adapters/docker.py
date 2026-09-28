@@ -447,6 +447,9 @@ class DockerWorkerAdapter(WorkerAdapter):
 
         return self._parse_hardware_output(output, output_prefix)
 
+    def _holds_worker(self) -> bool:
+        return self._is_started
+
     def _stop(self) -> bool:
         is_started = self._is_started
         try:

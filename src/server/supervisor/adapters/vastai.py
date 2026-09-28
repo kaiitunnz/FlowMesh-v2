@@ -107,6 +107,7 @@ class VastAIWorkerAdapter(WorkerAdapter):
         self._status: WorkerStatus = WorkerStatus.STOPPED
         self._instance_id: int | None = config.instance_id
         self._created_instance = False
+        self._holds_instance = False
         self._hardware: dict[str, Any] | WorkerHardware | None = None
         self._reserved_offer_id: int | None = None
 
@@ -184,6 +185,7 @@ class VastAIWorkerAdapter(WorkerAdapter):
                 return False
             self._instance_id = instance_id
             self._created_instance = False
+            self._holds_instance = True
             self._hardware = instance_info
             return True
 
@@ -271,6 +273,7 @@ class VastAIWorkerAdapter(WorkerAdapter):
                 hardware = instance_info
             self._instance_id = new_instance_id
             self._created_instance = True
+            self._holds_instance = True
             self._hardware = hardware
             self._reserved_offer_id = instance_id
             logger.debug(
@@ -280,6 +283,9 @@ class VastAIWorkerAdapter(WorkerAdapter):
             )
             return True
         raise RuntimeError("Failed to launch any VastAI instance.")
+
+    def _holds_worker(self) -> bool:
+        return self._holds_instance
 
     def _stop(self) -> bool:
         instance_id = self._instance_id
@@ -312,6 +318,7 @@ class VastAIWorkerAdapter(WorkerAdapter):
         self._stop_event.wait(self._STOP_TIMEOUT)
         self._release_reserved_offer()
         self._instance_id = None
+        self._holds_instance = False
         self._hardware = self.config.hardware_specs
         return True
 
