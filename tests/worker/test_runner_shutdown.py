@@ -117,3 +117,16 @@ def test_a_requested_shutdown_unregisters_gracefully(tmp_path: Path) -> None:
     run_until_exit(runner, lifecycle, MagicMock())
 
     lifecycle.shutdown.assert_called_once_with(graceful=True)
+
+
+def test_a_worker_shutting_down_never_reports_itself_idle(tmp_path: Path) -> None:
+    runner: Runner
+
+    def stop_while_running(_task_id: str) -> None:
+        runner.stop()
+
+    runner = _runner(tmp_path, _Echo(on_run=stop_while_running), "tsk-1")
+    runner.start()
+
+    runner.lifecycle.set_busy.assert_called_once_with("tsk-1")  # type: ignore[attr-defined]
+    runner.lifecycle.set_idle.assert_not_called()  # type: ignore[attr-defined]
