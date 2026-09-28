@@ -6,7 +6,7 @@ import io
 import tarfile
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -189,8 +189,9 @@ def test_a_session_past_its_ttl_stops_before_its_logs_are_joined(
 
 
 class _Archive:
-    """An archive stream as Docker returns it, recording how much of it was read and
-    whether it was closed."""
+    """An archive stream as Docker returns it: a generator whose connection is
+    released only when its body ends, so closing it before its first read releases
+    nothing."""
 
     def __init__(
         self,
@@ -198,22 +199,28 @@ class _Archive:
         chunk: int = 1024,
         on_read: Callable[[int], Any] = lambda _: None,
     ) -> None:
-        self._chunks = iter([data[i : i + chunk] for i in range(0, len(data), chunk)])
         self._on_read = on_read
+        self._stream = self._generate(data, chunk)
         self.chunks_read = 0
-        self.closed = False
+        self.released = False
+
+    def _generate(self, data: bytes, chunk: int) -> Generator[bytes]:
+        try:
+            for offset in range(0, len(data), chunk):
+                self.chunks_read += 1
+                self._on_read(self.chunks_read)
+                yield data[offset : offset + chunk]
+        finally:
+            self.released = True
 
     def __iter__(self) -> "_Archive":
         return self
 
     def __next__(self) -> bytes:
-        chunk = next(self._chunks)
-        self.chunks_read += 1
-        self._on_read(self.chunks_read)
-        return chunk
+        return next(self._stream)
 
     def close(self) -> None:
-        self.closed = True
+        self._stream.close()
 
 
 def _output_archive(size: int) -> _Archive:
@@ -372,7 +379,7 @@ def test_an_output_copy_reads_its_archive_in_any_chunking(
 
 
 @pytest.mark.parametrize("end", ["complete", "breach", "cancel", "failure"])
-def test_an_output_copy_closes_its_archive_before_the_container_stops(
+def test_an_output_copy_releases_its_archive_before_the_container_stops(
     executor: SSHExecutor, tmp_path: Path, end: str
 ) -> None:
     def on_read(chunks_read: int) -> None:
@@ -387,8 +394,8 @@ def test_an_output_copy_closes_its_archive_before_the_container_stops(
     )
     container = _container(0, output_bytes=0)
     container.get_archive.return_value = (archive, {})
-    closed_at_stop: list[bool] = []
-    container.stop.side_effect = lambda **_: closed_at_stop.append(archive.closed)
+    released_at_stop: list[bool] = []
+    container.stop.side_effect = lambda **_: released_at_stop.append(archive.released)
 
     if end == "complete":
         _run(executor, tmp_path, container, 1000, copy=True)
@@ -396,7 +403,26 @@ def test_an_output_copy_closes_its_archive_before_the_container_stops(
         with pytest.raises((ExecutionError, TaskCancelledError, OSError)):
             _run(executor, tmp_path, container, 1000, copy=True)
 
-    assert closed_at_stop == [True]
+    assert released_at_stop == [True]
+
+
+def test_a_cancel_during_the_archive_request_releases_its_stream(
+    executor: SSHExecutor, tmp_path: Path
+) -> None:
+    archive = _Archive(_archive_of({"result.bin": 100_000}))
+    container = MagicMock(spec=Container)
+
+    def get_archive(_path: str) -> tuple[_Archive, dict[str, Any]]:
+        executor.cancel(_TASK_ID)
+        return archive, {}
+
+    container.get_archive.side_effect = get_archive
+
+    with executor._signals.running(_TASK_ID):
+        with pytest.raises(TaskCancelledError):
+            executor._copy_output_directory(container, "/out", tmp_path / "copied")
+
+    assert archive.released
 
 
 def test_a_cancel_ends_an_output_copy_within_one_large_file(
@@ -414,7 +440,7 @@ def test_a_cancel_ends_an_output_copy_within_one_large_file(
         with pytest.raises(TaskCancelledError):
             executor._copy_output_directory(container, "/out", tmp_path / "copied")
 
-    assert archive.closed
+    assert archive.released
     assert archive.chunks_read <= 3
 
 

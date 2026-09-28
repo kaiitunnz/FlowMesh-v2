@@ -125,7 +125,7 @@ type DemuxLogStream = Iterator[tuple[bytes | None, bytes | None]]
 
 
 class _ChunkReader(io.RawIOBase):
-    """A readable stream over an iterator of byte chunks that calls ``check`` before
+    """A readable stream over an iterator of byte chunks that calls ``check`` on
     each read."""
 
     def __init__(self, chunks: Iterable[bytes], check: Callable[[], Any]) -> None:
@@ -137,12 +137,13 @@ class _ChunkReader(io.RawIOBase):
         return True
 
     def readinto(self, buffer: Any) -> int:
-        self._check()
         while not self._pending:
             try:
                 self._pending = memoryview(next(self._chunks))
             except StopIteration:
                 return 0
+        # A Docker stream closed before its first read never releases its connection.
+        self._check()
         size = min(len(buffer), len(self._pending))
         buffer[:size] = self._pending[:size]
         self._pending = self._pending[size:]
@@ -1180,8 +1181,8 @@ class SSHExecutor(Executor):
     def _create_container(
         self, client: DockerClient, kwargs: dict[str, Any], *, retryable: bool = False
     ) -> Any:
-        """Create a container, pulling its image again if it went missing after it was
-        ensured."""
+        """Create a container, pulling its image if it went missing after
+        ``_ensure_image`` found it."""
         try:
             return client.containers.create(**kwargs)
         except ImageNotFound:
@@ -1651,8 +1652,9 @@ class SSHExecutor(Executor):
                 f"Failed to collect SSH output from {source_path}: {exc}"
             ) from exc
 
-        # Docker holds the container's lock until its archive is fully read or
-        # closed, so an unclosed one blocks the container's stop and removal.
+        # Docker holds the container's lock until its archive is fully read or its
+        # connection closes, so an unclosed one blocks the container's stop and
+        # removal.
         try:
             self._extract_output(stream, source_path, destination, max_bytes)
         finally:
