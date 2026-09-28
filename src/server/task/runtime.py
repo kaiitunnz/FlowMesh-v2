@@ -1238,6 +1238,9 @@ class TaskRuntime:
             self._reconcile_failures_locked(engine, tasks)
             engine.fail_undeliverable_region_inputs()
             self._reconcile_residual_cancels_locked(engine, tasks)
+        # A crash can beat the settle of a cancelled episode suspended on a boundary,
+        # which no worker terminal settles.
+        self._settle_suspended_cancels_locked(engine)
         # A boundary invocation of a durably settled task is terminal, even when a crash
         # beat the ledger save that recorded it: the save below makes it durable, and
         # the startup reconcile then releases the credit it holds.

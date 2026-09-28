@@ -24,6 +24,7 @@ from server.orchestration.tool_dispatch import (
 )
 from server.registries.worker import Worker
 from server.task.models import EventEffect, TaskStatus
+from server.task.runtime import TaskRuntime
 from shared.harness import (
     BoundaryEventKind,
     HarnessAdapter,
@@ -1005,5 +1006,38 @@ def test_a_give_up_of_a_dispatch_that_ended_at_a_suspension_is_stale() -> None:
         assert runtime.settle_episode_invocation(
             writer, env.call_correlation, "model:draft"
         )
+
+    asyncio.run(run())
+
+
+class _Crash(Exception):
+    pass
+
+
+def test_a_cancel_a_crash_cut_short_settles_a_suspended_agent_at_restart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        registry = FakeRegistry()
+        runtime = _runtime(registry)
+        workflow_id, writer, _, _ = await _held_boundary(runtime)
+
+        def crash(self: TaskRuntime, engine: Any) -> None:
+            raise _Crash()
+
+        with monkeypatch.context() as patch:
+            patch.setattr(TaskRuntime, "_settle_suspended_cancels_locked", crash)
+            with pytest.raises(_Crash):
+                runtime.cancel_workflow(workflow_id)
+        record = runtime.get_record(writer)
+        assert record is not None and record.status is TaskStatus.CANCELLING
+
+        restored = _runtime(registry)
+        restored.set_model_settler(lambda _envelope: None)
+        await restored.rehydrate()
+
+        record = restored.get_record(writer)
+        assert record is not None and record.status is TaskStatus.CANCELLED
+        assert restored.workflow_settlement(workflow_id).settled
 
     asyncio.run(run())
