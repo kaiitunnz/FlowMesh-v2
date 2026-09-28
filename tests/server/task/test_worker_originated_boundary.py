@@ -126,8 +126,12 @@ _MODEL_SCRIPT = [
 
 
 class _WorkerStub:
+    """Records the frames control relays and applies each reap to one worker's egress
+    store, which the dispatched steps capture into."""
+
     def __init__(self) -> None:
         self.frames: list[tuple[str, str, dict[str, Any]]] = []
+        self.egress = PendingEgressRequestStore()
 
     def get_worker(self, worker_id: str) -> Any:
         return SimpleNamespace(id=worker_id, node_id="nde-1", incarnation=7)
@@ -137,6 +141,10 @@ class _WorkerStub:
 
     def publish_mediated_op(self, worker: Any, payload: Any) -> int:
         self.frames.append((worker.id, payload.frame_kind, payload.payload))
+        if payload.frame_kind == "reap":
+            self.egress.delete(
+                payload.payload["agent_task_id"], payload.payload["call_correlation"]
+            )
         return 0
 
 
@@ -205,7 +213,7 @@ def _dispatch_agent(
         task_id, capsule=capsule, outcomes=dispatch.delivered_outcomes
     )
     result = AgentEpisodeExecutor._capture_local_request(
-        PendingEgressRequestStore(), task_id, result, dispatch.model_binding
+        _egress(runtime), task_id, result, dispatch.model_binding
     )
     payload: dict[str, Any] = {"agent_episode": result.model_dump(mode="json")}
     if seal_in is not None and (attachment := dispatch.private_state_attachment):
@@ -217,6 +225,11 @@ def _dispatch_agent(
         ).model_dump(mode="json")
     runtime.mark_succeeded(task_id, worker, payload, _TS)
     return engine
+
+
+def _egress(runtime: TaskRuntime) -> PendingEgressRequestStore:
+    """The egress store of the worker the runtime relays to."""
+    return cast(Any, runtime._worker_registry).egress
 
 
 def _permit_frames(runtime: TaskRuntime) -> list[dict[str, Any]]:
@@ -1155,7 +1168,7 @@ def _frames(runtime: TaskRuntime, kind: str) -> list[tuple[str, dict[str, Any]]]
     return [(target, payload) for target, k, payload in frames if k == kind]
 
 
-_UNDECLARED_SEARCH = [
+_SEARCH_S0 = [
     ScriptedStep(
         op="boundary",
         kind=BoundaryEventKind.INVOCATION,
@@ -1173,7 +1186,7 @@ def test_a_denied_boundary_reaps_the_request_its_worker_captured() -> None:
         _, ids = await _register(runtime, _MODEL_WF)
         writer = ids["writer"]
 
-        _dispatch_agent(runtime, writer, script=_UNDECLARED_SEARCH)
+        _dispatch_agent(runtime, writer, script=_SEARCH_S0)
 
         assert _permit_frames(runtime) == []
         assert _frames(runtime, "reap") == [
@@ -1241,5 +1254,57 @@ def test_a_stale_step_reaps_the_request_its_worker_captured() -> None:
         assert _frames(runtime, "reap") == [
             ("wkr-1", {"agent_task_id": writer, "call_correlation": "m0"})
         ]
+
+    asyncio.run(run())
+
+
+_RESIDENT_SEARCH_WF = """
+apiVersion: flowmesh/v2
+kind: Workflow
+metadata: {name: resident-search-agent}
+spec:
+  graph:
+    nodes:
+      - name: writer
+        spec:
+          taskType: agent
+          v2:
+            authority: {invoke: [model, search/v1], delegate: []}
+            tools: [{name: model}, {name: web_search, interface: "search/v1"}]
+          harness: {backend: scripted, version: v1, params: {script: []}}
+          model_binding: {mode: resident, service_model_ref: Qwen/Qwen3-4B}
+"""
+
+
+@pytest.mark.parametrize("failed", [False, True])
+def test_a_resident_bound_agent_s_search_is_reaped_when_it_settles(
+    failed: bool, tmp_path: Path
+) -> None:
+    async def run() -> None:
+        runtime = _runtime()
+        _, ids = await _register(runtime, _RESIDENT_SEARCH_WF)
+        writer = ids["writer"]
+        engine = _dispatch_agent(runtime, writer, script=_SEARCH_S0, seal_in=tmp_path)
+        assert engine.service_dependency(writer) is not None
+        assert _egress(runtime).occurrences() == [(writer, "s0")]
+        permit = MediatedOperationPermit.model_validate(_permit_frames(runtime)[0])
+
+        runtime.settle_mediated_operation(
+            MediatedOperationOutcome(
+                permit_id=permit.permit_id,
+                agent_task_id=writer,
+                call_correlation="s0",
+                invocation_id=permit.invocation_id,
+                idempotency_key=permit.idempotency_key,
+                error="upstream unavailable" if failed else None,
+                outcome=(
+                    None
+                    if failed
+                    else ToolOutcome(status=ToolOutcomeStatus.SUCCESS, value="sunny")
+                ),
+            )
+        )
+
+        assert _egress(runtime).occurrences() == []
 
     asyncio.run(run())

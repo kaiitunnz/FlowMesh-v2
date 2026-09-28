@@ -2052,7 +2052,10 @@ class TaskRuntime:
                 record.assigned_worker
                 if env is not None
                 and env.request_digest is not None
-                and engine.service_dependency(task_id) is None
+                and not (
+                    env.interface == MODEL_INTERFACE
+                    and engine.service_dependency(task_id) is not None
+                )
                 else None
             )
             if error is not None:
