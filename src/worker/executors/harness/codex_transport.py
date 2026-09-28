@@ -335,7 +335,9 @@ class RealCodexAppServerTransport:
                 )
 
     def cancel(self, thread_id: str | None) -> None:
-        self.close()
+        # Closing waits for the app-server to exit, and the caller may be the thread
+        # that relays the worker's permits and reaps.
+        threading.Thread(target=self.close, name="codex-cancel", daemon=True).start()
 
     def close(self) -> None:
         if self._finalizer is not None:
