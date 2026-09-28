@@ -461,6 +461,7 @@ if IS_ROOT_NODE:
     # the monitor's finalizer when a workflow may have ended; the finalizer decides.
     RUNTIME.set_completion_notifier(EVENT_MONITOR.finalizer.request)
     WATCHDOG.set_failure_fallback(EVENT_MONITOR.handle_task_event)
+    WATCHDOG.set_loss_handler(EVENT_MONITOR.record_worker_losses)
     TASK_EVENTS = TaskEventPublisher(REDIS_CLIENT.sync, logger)
     TASK_EVENTS.set_fallback(EVENT_MONITOR.handle_task_event)
     RUNTIME.set_failure_reporter(TASK_EVENTS.publish)

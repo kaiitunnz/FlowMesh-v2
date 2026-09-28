@@ -3,7 +3,7 @@ import json
 import logging
 import threading
 import time
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import Future
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
@@ -61,6 +61,7 @@ from ..task.metadata import extract_model_dataset_names
 from ..task.models import (
     DispatchEnd,
     EventEffect,
+    LossOutcome,
     TaskRecord,
     TaskStatus,
     TaskUsage,
@@ -78,6 +79,12 @@ if TYPE_CHECKING:
 # Model-serving task types adopted as standing resident allocations: the GPU vLLM serve
 # task and its GPU-free dev_model stand-in, both reached only through the gated route.
 _SERVE_TASK_TYPES = frozenset({TaskType.SERVE, TaskType.DEV_MODEL})
+
+# How a report of a task its worker gave up ended the task's dispatch.
+_GIVEN_UP_ENDS = {
+    EventEffect.RETURNED: DispatchEnd.RETURNED,
+    EventEffect.FAILED: DispatchEnd.FAILED,
+}
 
 TASK_EVENT_HANDLER_MAX_ATTEMPTS = 5
 
@@ -544,6 +551,13 @@ class EventMonitor:
                 cancellation = self._runtime.mark_cancelled(
                     event.task_id, worker_id, payload, event.ts, event.dispatch_id
                 )
+                if (end := _GIVEN_UP_ENDS.get(cancellation.effect)) is not None:
+                    self._record_loss(
+                        worker_id,
+                        LossOutcome(event.task_id, end, cancellation.impacted),
+                        event.dispatch_id,
+                    )
+                    return
                 if self._unapplied(event, cancellation.effect):
                     return
                 self._record_cancellation(event, cancellation.usages)
@@ -601,23 +615,73 @@ class EventMonitor:
             case DispatchEnd.CANCELLED:
                 self._record_cancellation(event, failure.usages)
             case DispatchEnd.FAILED:
-                self._release_task(event.task_id)
-                self._metrics.record_task_event(event)
-                self._schedule_emit_usage(failure.usages)
-                self._metrics.finalize_task_failure(event.task_id)
-                self._close_task_log_stream(event.task_id)
-                for task_id, reason in failure.impacted:
-                    derived = TaskEvent(
+                self._record_failure(event, failure.impacted, failure.usages)
+
+    def _record_failure(
+        self,
+        event: TaskEvent,
+        impacted: Sequence[tuple[str, str]],
+        usages: list[tuple[str, TaskUsage]],
+    ) -> None:
+        """Apply the side effects of a task that settled FAILED, and of each dependent
+        that failed with it."""
+        self._release_task(event.task_id)
+        self._metrics.record_task_event(event)
+        self._schedule_emit_usage(usages)
+        self._metrics.finalize_task_failure(event.task_id)
+        self._close_task_log_stream(event.task_id)
+        for task_id, reason in impacted:
+            derived = TaskEvent(
+                type="TASK_FAILED",
+                task_id=task_id,
+                error=reason,
+                payload={"dependency_failure": event.task_id},
+            )
+            self._metrics.record_task_event(derived)
+            self._metrics.finalize_task_failure(task_id)
+            self._close_task_log_stream(task_id)
+            self._finalizer.close_task_workflow(task_id)
+        self._finalizer.close_task_workflow(event.task_id)
+
+    def record_worker_losses(self, worker_id: str, losses: list[LossOutcome]) -> None:
+        """Apply the side effects of v2 tasks resolved as their worker's loss."""
+        for loss in losses:
+            self._record_loss(worker_id, loss, None)
+
+    def _record_loss(
+        self, worker_id: str, loss: LossOutcome, dispatch_id: str | None
+    ) -> None:
+        """Apply the side effects of a task its worker lost or gave up."""
+        match loss.end:
+            case DispatchEnd.RETURNED:
+                self._logger.info(
+                    "Requeued task %s that worker %s lost or gave up (dispatch %s)",
+                    loss.task_id,
+                    worker_id,
+                    dispatch_id,
+                )
+                self._release_task(loss.task_id)
+            case DispatchEnd.FAILED:
+                record = self._runtime.get_record(loss.task_id)
+                error = record.error if record is not None else None
+                self._logger.warning(
+                    "Task %s failed with worker %s lost or giving it up: %s",
+                    loss.task_id,
+                    worker_id,
+                    error,
+                )
+                self._record_failure(
+                    TaskEvent(
                         type="TASK_FAILED",
-                        task_id=task_id,
-                        error=reason,
-                        payload={"dependency_failure": event.task_id},
-                    )
-                    self._metrics.record_task_event(derived)
-                    self._metrics.finalize_task_failure(task_id)
-                    self._close_task_log_stream(task_id)
-                    self._finalizer.close_task_workflow(task_id)
-                self._finalizer.close_task_workflow(event.task_id)
+                        task_id=loss.task_id,
+                        worker_id=worker_id,
+                        dispatch_id=dispatch_id,
+                        error=error,
+                        payload={"worker": worker_id},
+                    ),
+                    loss.impacted,
+                    [],
+                )
 
     def _record_cancellation(
         self, event: TaskEvent, usages: list[tuple[str, TaskUsage]]
@@ -655,14 +719,6 @@ class EventMonitor:
                 )
             case EventEffect.SETTLED:
                 self._finalizer.close_task_workflow(event.task_id)
-            case EventEffect.RETURNED:
-                self._logger.info(
-                    "Requeued task %s that worker %s gave up (dispatch %s)",
-                    event.task_id,
-                    event.worker_id,
-                    event.dispatch_id,
-                )
-                self._release_task(event.task_id)
         return True
 
     # ------------------------------------------------------------------ # Node event
@@ -859,7 +915,9 @@ class EventMonitor:
         """
         requeued: list[str] = []
         ts = now_iso()
-        for task_id in self._runtime.recover_tasks_for_worker(worker_id):
+        recovery = self._runtime.recover_tasks_for_worker(worker_id)
+        self.record_worker_losses(worker_id, recovery.resolved)
+        for task_id in recovery.lost:
             end = self._dispatcher.requeue_task(
                 task_id,
                 reason="worker_unregistered",

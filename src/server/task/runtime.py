@@ -123,6 +123,7 @@ from .models import (
     DispatchEnd,
     EventEffect,
     FailureOutcome,
+    LossOutcome,
     SettleOutcome,
     TaskInfo,
     TaskInputElement,
@@ -130,6 +131,7 @@ from .models import (
     TaskRecord,
     TaskStatus,
     TaskUsage,
+    WorkerRecovery,
     WorkflowSettlement,
     categorize_task_type,
 )
@@ -416,13 +418,22 @@ def _settle_outcome(
     record: TaskRecord | None,
     merged_children: list[str],
     usages: list[tuple[str, TaskUsage]],
+    impacted: tuple[tuple[str, str], ...] = (),
 ) -> SettleOutcome:
     return SettleOutcome(
         effect,
         record.status if record is not None else None,
         usages if effect is EventEffect.APPLIED else [],
         merged_children,
+        impacted,
     )
+
+
+_LOSS_EFFECTS = {
+    DispatchEnd.RETURNED: EventEffect.RETURNED,
+    DispatchEnd.FAILED: EventEffect.FAILED,
+    DispatchEnd.STALE: EventEffect.STALE,
+}
 
 
 @dataclass
@@ -5709,13 +5720,38 @@ class TaskRuntime:
         retries free and a non-replayable one fails. A v1 task returns free.
         """
         if record.workflow_id in self._engines:
-            self._rehydrated_dispatched.pop(record.task_id, None)
-            advance = self._resolve_uncertain_locked(record.task_id)
-            effect = EventEffect.SETTLED if advance.failed else EventEffect.RETURNED
-            return _settle_outcome(effect, record, [], [])
+            loss = self._resolve_lost_locked(record)
+            return _settle_outcome(
+                _LOSS_EFFECTS[loss.end], record, [], [], loss.impacted
+            )
         if worker_id is None or not self._return_failed_merge_locked(record, worker_id):
             self._return_dispatch_locked(record, increment_retry=False, front=True)
         return _settle_outcome(EventEffect.RETURNED, record, [], [])
+
+    def _resolve_lost_locked(self, record: TaskRecord) -> LossOutcome:
+        """Resolve a v2 task whose worker is lost or gave it up.
+
+        It returns to the queue when it can safely run again; otherwise it fails, and
+        ``impacted`` names each dependent that fails with it. A task nothing resolves
+        ends STALE.
+        """
+        self._rehydrated_dispatched.pop(record.task_id, None)
+        advance = self._resolve_uncertain_locked(record.task_id)
+        if advance.retry:
+            return LossOutcome(record.task_id, DispatchEnd.RETURNED, ())
+        if not advance.failed:
+            return LossOutcome(record.task_id, DispatchEnd.STALE, ())
+        engine = self._engines.get(record.workflow_id)
+        impacted = tuple(
+            (
+                task_id,
+                (engine.failure_reason(task_id) if engine is not None else None)
+                or "declared-failure obligation",
+            )
+            for task_id in dict.fromkeys(advance.failed)
+            if task_id != record.task_id
+        )
+        return LossOutcome(record.task_id, DispatchEnd.FAILED, impacted)
 
     def _settle_cancelled_usage_locked(
         self,
@@ -5821,20 +5857,22 @@ class TaskRuntime:
     def tasks(self) -> dict[str, TaskRecord]:
         return self._tasks
 
-    def recover_tasks_for_worker(self, worker_id: str) -> list[str]:
-        """The tasks a departed worker held, for the caller to return or settle.
+    def recover_tasks_for_worker(self, worker_id: str) -> WorkerRecovery:
+        """Recover the tasks a departed worker held.
 
         A dispatch to the worker published and not yet recorded is lost here: its
         tasks go back to the head of the queue, a merged batch's to run alone, spending
-        no attempt, and the dispatch is never recorded.
+        no attempt, and the dispatch is never recorded. A v2 task resolves as its
+        worker's loss here; a v1 task is left for the caller to return or settle.
         """
         try:
             return self._recover_tasks_for_worker(worker_id)
         finally:
             self._release_pending_terminations()
 
-    def _recover_tasks_for_worker(self, worker_id: str) -> list[str]:
+    def _recover_tasks_for_worker(self, worker_id: str) -> WorkerRecovery:
         recovered: list[str] = []
+        resolved: list[LossOutcome] = []
         with self._cv:
             for task_id, record in list(self._tasks.items()):
                 publish = self._publishing.get(task_id)
@@ -5853,14 +5891,11 @@ class TaskRuntime:
                 if record.status not in (TaskStatus.DISPATCHED, TaskStatus.CANCELLING):
                     continue
                 self._rehydrated_dispatched.pop(task_id, None)
-                # v2 route/worker loss resolves through the uncertainty FSM: a
-                # replayable invocation reissues under its stable id; the caller does
-                # not also fail or requeue it.
                 if (
                     record.status == TaskStatus.DISPATCHED
                     and record.workflow_id in self._engines
                 ):
-                    self._resolve_uncertain_locked(task_id)
+                    resolved.append(self._resolve_lost_locked(record))
                     continue
                 recovered.append(task_id)
             # A pending tool operation on the departed worker lost its private request
@@ -5869,7 +5904,7 @@ class TaskRuntime:
             for permit_id, (_, _, op_worker) in list(self._pending_ops.items()):
                 if op_worker == worker_id:
                     del self._pending_ops[permit_id]
-        return recovered
+        return WorkerRecovery(recovered, resolved)
 
     def has_rehydrated_in_flight(self, worker_id: str, within_sec: float) -> bool:
         """

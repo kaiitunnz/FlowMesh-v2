@@ -1,4 +1,5 @@
-"""A task whose dispatch ends or returns releases what that dispatch exposed."""
+"""A task whose dispatch ends or returns releases what that dispatch exposed, and a
+task that fails with its worker's loss closes like any failed task."""
 
 import logging
 import threading
@@ -7,14 +8,18 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from server.clients.redis import task_log_closed_key
 from server.dispatcher.base import Dispatcher
 from server.services.monitoring import EventMonitor
+from server.services.watchdog import WorkerWatchdog
 from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime
 from shared.schemas.event import TaskEvent, WorkerEvent
 from tests.server.dispatch_helpers import record_dispatch
+from tests.server.task.test_unrequested_cancel import SSH_THEN_ECHO
 from tests.server.task.test_v2_orchestration import (
     _TS,
+    LINEAR,
     FakeRegistry,
     _register,
     _runtime,
@@ -67,6 +72,11 @@ class _Harness:
 
     def released(self, task_id: str) -> bool:
         self.forward.unregister_task.assert_any_call(task_id)
+        return True
+
+    def closed_as_failed(self, task_id: str) -> bool:
+        self.metrics.finalize_task_failure.assert_any_call(task_id)
+        self.redis.set_value.assert_any_call(task_log_closed_key(task_id), "1")
         return True
 
 
@@ -127,3 +137,66 @@ async def test_a_returned_serve_task_drains_its_binding(path: str) -> None:
     assert record is not None and record.status == TaskStatus.PENDING
     harness.serve.drain.assert_called_with(task_id)
     assert harness.released(task_id)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("left_first", [False, True])
+async def test_a_task_failing_as_given_up_closes_with_its_dependents(
+    left_first: bool,
+) -> None:
+    harness = _Harness(_runtime(FakeRegistry()))
+    workflow_id, ids = await _dispatched(harness, SSH_THEN_ECHO, "session")
+    session, after = ids["session"], ids["after"]
+
+    harness.deliver(
+        *((_LEFT, _given_up(session)) if left_first else (_given_up(session), _LEFT))
+    )
+
+    record = harness.runtime.get_record(session)
+    assert record is not None and record.status == TaskStatus.FAILED
+    assert harness.released(session)
+    assert harness.closed_as_failed(session)
+    assert harness.closed_as_failed(after)
+    failed = [
+        call.args[0]
+        for call in harness.metrics.record_task_event.call_args_list
+        if call.args[0].type == "TASK_FAILED"
+    ]
+    assert [event.task_id for event in failed] == [session, after]
+    assert harness.runtime.workflow_settlement(workflow_id).settled
+
+
+@pytest.mark.anyio
+async def test_a_task_failing_with_its_expired_worker_closes_with_its_dependents() -> (
+    None
+):
+    harness = _Harness(_runtime(FakeRegistry()))
+    _, ids = await _dispatched(harness, SSH_THEN_ECHO, "session")
+    watchdog = WorkerWatchdog(
+        MagicMock(),
+        MagicMock(),
+        harness.runtime,
+        logging.getLogger("release-watchdog"),
+        enabled=True,
+        check_interval=1,
+        grace_seconds=0,
+    )
+    watchdog.set_loss_handler(harness.monitor.record_worker_losses)
+
+    watchdog._handle_worker_expired("wkr-1")
+
+    assert harness.released(ids["session"])
+    assert harness.closed_as_failed(ids["session"])
+    assert harness.closed_as_failed(ids["after"])
+
+
+@pytest.mark.anyio
+async def test_a_task_returning_with_its_lost_worker_releases_its_dispatch() -> None:
+    harness = _Harness(_runtime(FakeRegistry()))
+    _, ids = await _dispatched(harness, LINEAR, "a")
+
+    harness.deliver(WorkerEvent(type="UNREGISTER", worker_id="wkr-1"))
+
+    record = harness.runtime.get_record(ids["a"])
+    assert record is not None and record.status == TaskStatus.PENDING
+    assert harness.released(ids["a"])

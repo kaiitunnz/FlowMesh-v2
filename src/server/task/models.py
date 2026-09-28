@@ -90,6 +90,7 @@ class EventEffect(StrEnum):
     SETTLED = "settled"
     APPLIED = "applied"
     RETURNED = "returned"
+    FAILED = "failed"
 
 
 class DispatchEnd(StrEnum):
@@ -111,6 +112,27 @@ class SettleOutcome(NamedTuple):
     status: str | None
     usages: list[tuple[str, TaskUsage]]
     merged_children: list[str]
+    impacted: tuple[tuple[str, str], ...] = ()
+
+
+class LossOutcome(NamedTuple):
+    """What the loss of a v2 task's worker did to the task: it returned to the queue,
+    or failed along with the dependents in ``impacted``."""
+
+    task_id: str
+    end: DispatchEnd
+    impacted: tuple[tuple[str, str], ...]
+
+
+class WorkerRecovery(NamedTuple):
+    """The tasks a departed worker held.
+
+    ``lost`` are the v1 tasks for the caller to return or settle; ``resolved`` are the
+    v2 tasks already resolved as their worker's loss.
+    """
+
+    lost: list[str]
+    resolved: list[LossOutcome]
 
 
 class FailureOutcome(NamedTuple):

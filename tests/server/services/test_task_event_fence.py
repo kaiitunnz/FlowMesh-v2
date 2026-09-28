@@ -12,7 +12,7 @@ from server.orchestration import WorkItemStatus
 from server.registries.worker import Worker
 from server.services.monitoring import EventMonitor
 from server.services.watchdog import WorkerWatchdog
-from server.task.models import DispatchEnd, EventEffect, TaskStatus
+from server.task.models import DispatchEnd, EventEffect, TaskStatus, WorkerRecovery
 from server.task.runtime import TaskRuntime
 from shared.schemas.event import TaskEvent, WorkerEvent, parse_event
 from shared.tasks.worker_message import WorkerStatus, WorkerTaskMessage
@@ -666,7 +666,7 @@ async def test_a_terminal_landing_while_its_worker_unregisters_stays_settled(
     event = event.model_copy(update={"retryable": False})
     listed = runtime.recover_tasks_for_worker
 
-    def listed_then_settled(worker_id: str) -> list[str]:
+    def listed_then_settled(worker_id: str) -> WorkerRecovery:
         tasks = listed(worker_id)
         monitor.handle_task_event(event)
         return tasks

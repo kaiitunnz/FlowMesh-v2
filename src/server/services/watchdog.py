@@ -9,6 +9,7 @@ from shared.schemas.event import TaskEvent, WorkerEvent, serialize_event
 
 from ..clients.redis import WORKER_EVENT_CHANNEL, SyncRedisClient
 from ..registries.worker import WorkerRegistry
+from ..task.models import LossOutcome
 from ..task.runtime import TaskRuntime
 from .task_events import TaskEventPublisher
 
@@ -51,6 +52,14 @@ class WorkerWatchdog:
         self._lock = threading.RLock()
         self._dead_marks: set[str] = set()
         self._thread: threading.Thread | None = None
+        self._record_losses: Callable[[str, list[LossOutcome]], None] | None = None
+
+    def set_loss_handler(
+        self, record_losses: Callable[[str, list[LossOutcome]], None]
+    ) -> None:
+        """Set the handler that applies the side effects of the v2 tasks a dead
+        worker's recovery resolved."""
+        self._record_losses = record_losses
 
     def set_failure_fallback(self, apply_failure: Callable[[TaskEvent], None]) -> None:
         """Set the handler that applies a synthetic failure directly when its publish
@@ -224,11 +233,16 @@ class WorkerWatchdog:
             return False
 
     def _handle_worker_expired(self, worker_id: str) -> None:
-        recovered = self._runtime.recover_tasks_for_worker(worker_id)
+        recovery = self._runtime.recover_tasks_for_worker(worker_id)
+        if recovery.resolved and self._record_losses is not None:
+            self._record_losses(worker_id, recovery.resolved)
+        recovered = recovery.lost
         if not recovered:
-            self._logger.warning(
-                "Worker %s heartbeat expired; no dispatched tasks to recover", worker_id
-            )
+            if not recovery.resolved:
+                self._logger.warning(
+                    "Worker %s heartbeat expired; no dispatched tasks to recover",
+                    worker_id,
+                )
             return
 
         self._logger.warning(
