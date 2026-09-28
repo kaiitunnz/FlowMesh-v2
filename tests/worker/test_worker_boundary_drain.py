@@ -8,6 +8,7 @@ from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 from shared.grpc.supervisor.v1 import supervisor_pb2
+from tests.worker.test_runner_mediated_dispatch import _permit
 from tests.worker.test_runner_shutdown import _Echo, _runner
 from tests.worker.test_supervisor_client_dispatch_id import _client
 from worker import runner as runner_module
@@ -177,3 +178,15 @@ def test_an_unregister_waits_for_the_event_stream_only_until_its_timeout() -> No
     threading.Thread(target=unregister, daemon=True).start()
 
     assert finished.wait(timeout=2.0)
+
+
+def test_a_permit_after_the_boundary_drain_runs_nothing(tmp_path: Path) -> None:
+    runner = _runner(tmp_path, _Echo())
+    runner._shut_down()
+    sidecar = MagicMock()
+    permit = _permit("search/v1")
+
+    with patch.object(runner, "_ensure_mediated_sidecar", return_value=sidecar):
+        runner._route_mediated_op("permit", permit.model_dump(mode="json"))
+
+    sidecar.submit_permit.assert_not_called()

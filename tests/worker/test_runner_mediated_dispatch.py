@@ -8,6 +8,7 @@ with a lightweight stub self, mirroring ``_select_inference_executor_key``.
 """
 
 import logging
+import threading
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -36,6 +37,7 @@ def _self(rv: ModelTurnRendezvous, sidecar: _StubSidecar) -> Any:
     return SimpleNamespace(
         _model_turn_rendezvous=rv,
         _ensure_mediated_sidecar=lambda: sidecar,
+        _boundaries_closed=threading.Event(),
         logger=logging.getLogger("runner-dispatch-test"),
     )
 

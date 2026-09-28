@@ -164,6 +164,7 @@ class Runner:
         self._shutdown_requested = threading.Event()
         self._shutdown_thread: threading.Thread | None = None
         self._stop_deadline: float | None = None
+        self._boundaries_closed = threading.Event()
 
         self._web_search_provider = web_search_provider
         self._web_search_api_key = web_search_api_key
@@ -248,6 +249,7 @@ class Runner:
         self.lifecycle.stop()
         self._cancel_active_executor()
         self._finish_held_boundaries(drain_deadline)
+        self._boundaries_closed.set()
         if self._mediated_sidecar is not None:
             self._mediated_sidecar.stop()
         if self._responses_facade is not None:
@@ -393,6 +395,14 @@ class Runner:
                 )
             )
             if stale_held:
+                return
+            if self._boundaries_closed.is_set():
+                self.logger.warning(
+                    "Dropping a permit for %s:%s that arrived after the shutdown's "
+                    "boundary drain",
+                    permit.agent_task_id,
+                    permit.call_correlation,
+                )
                 return
             if (sidecar := self._ensure_mediated_sidecar()) is not None:
                 sidecar.submit_permit(permit)
