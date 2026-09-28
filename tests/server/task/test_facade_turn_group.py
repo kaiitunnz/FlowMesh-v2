@@ -14,6 +14,8 @@ import tempfile
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
+
 from server.config import OrchestrationConfig, WebSearchConfig
 from server.orchestration.state import (
     BoundaryEvent,
@@ -29,10 +31,13 @@ from server.orchestration.tool_dispatch import (
     ToolOutcome,
     ToolOutcomeStatus,
 )
+from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime
 from shared.harness import HarnessResult, HarnessResultKind
+from shared.schemas.event import WorkerEvent
 from tests.server.dispatch_helpers import record_dispatch
 from tests.server.result_store import make_result_reader
+from tests.server.task.test_task_merge import _monitor
 from tests.server.task.test_v2_agent_harness import (
     _agent,
     _bundle,
@@ -493,3 +498,49 @@ def test_the_codex_sandbox_backs_the_facade_tool_filter() -> None:
     assert 'sandbox_mode="workspace-write"' in overrides  # confined if it runs
     assert "sandbox_workspace_write.network_access=false" in overrides  # no egress
     assert "tools.web_search=false" in overrides  # honored by a version that reads it
+
+
+@pytest.mark.parametrize("how", ["expired", "drained"])
+def test_an_agent_suspended_on_a_search_group_outlives_its_worker(how: str) -> None:
+    async def run() -> None:
+        runtime = _runtime(max_parallel=4)
+        dispatched: list[ToolInvocationEnvelope] = []
+        runtime.set_tool_broker(dispatched.append)
+        workflow_id, ids = await _register(runtime, _SEARCH_WF)
+        task = ids["searcher"]
+        engine = runtime.orchestration_engine(workflow_id)
+        assert engine is not None
+        record_dispatch(runtime, task, "w1")
+        group = FacadeTurnGroup(
+            group_id=f"{task}:0",
+            activation_id=task,
+            turn_id="0",
+            members=tuple(_search_member(i, group_id=f"{task}:0") for i in range(2)),
+        )
+        runtime.originate_facade_turn_group(task, group)
+        completion = HarnessResult(
+            kind=HarnessResultKind.COMPLETION, value=None, capsule=None
+        )
+        runtime.mark_succeeded(
+            task, "w1", {"agent_episode": completion.model_dump(mode="json")}, _TS
+        )
+
+        if how == "expired":
+            runtime.recover_tasks_for_worker("w1")
+        else:
+            _monitor(runtime)._handle_worker_event(
+                WorkerEvent(type="UNREGISTER", worker_id="w1", graceful=True)
+            )
+
+        record = runtime.get_record(task)
+        assert record is not None and record.status is TaskStatus.DISPATCHED
+        for env in dispatched:
+            assert runtime.settle_episode_invocation(
+                task, env.call_correlation, '{"status": "success", "value": "hit"}'
+            )
+        _, outcomes = engine.episode_context(task)
+        assert len(outcomes) == 2
+        record = runtime.get_record(task)
+        assert record is not None and record.status is TaskStatus.PENDING
+
+    asyncio.run(run())

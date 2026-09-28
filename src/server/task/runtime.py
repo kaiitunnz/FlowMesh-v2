@@ -5247,6 +5247,10 @@ class TaskRuntime:
                     if holder is not None:
                         self._heal_returned_locked(task_id, holder, None)
                     return DispatchEnd.STALE
+                if holder is not None and self._dispatch_ended_at_suspension_locked(
+                    record
+                ):
+                    return DispatchEnd.STALE
                 if record.status in TERMINAL_TASK_STATUSES:
                     return DispatchEnd.SETTLED
                 if record.status == TaskStatus.CANCELLING:
@@ -5834,6 +5838,8 @@ class TaskRuntime:
                     record.status,
                 )
                 return _settle_outcome(EventEffect.SETTLED, record, [], [])
+            if self._dispatch_ended_at_suspension_locked(record):
+                return _settle_outcome(EventEffect.STALE, record, [], [])
             if record.status == TaskStatus.DISPATCHED:
                 return self._return_given_up_locked(record, worker_id, payload)
             self._settle_cancelled_locked(
@@ -6004,7 +6010,10 @@ class TaskRuntime:
         A dispatch to the worker published and not yet recorded is lost here: its
         tasks go back to the head of the queue, a merged batch's to run alone, spending
         no attempt, and the dispatch is never recorded. A v2 task resolves as its
-        worker's loss here; a v1 task is left for the caller to return or settle.
+        worker's loss here; a v1 task is left for the caller to return or settle. A
+        task whose dispatch ended at a suspension holds nothing on the worker and waits
+        on its boundary, unless the worker originated that boundary and holds its
+        request.
         """
         try:
             return self._recover_tasks_for_worker(worker_id)
@@ -6031,6 +6040,10 @@ class TaskRuntime:
                     continue
                 if record.status not in (TaskStatus.DISPATCHED, TaskStatus.CANCELLING):
                     continue
+                if self._dispatch_ended_at_suspension_locked(
+                    record
+                ) and not self._originated_pending_boundary_locked(record):
+                    continue
                 self._rehydrated_dispatched.pop(task_id, None)
                 if (
                     record.status == TaskStatus.DISPATCHED
@@ -6046,6 +6059,15 @@ class TaskRuntime:
                 if op_worker == worker_id:
                     del self._pending_ops[permit_id]
         return WorkerRecovery(recovered, resolved)
+
+    def _originated_pending_boundary_locked(self, record: TaskRecord) -> bool:
+        """Whether a task suspended on an unsettled boundary its worker originated,
+        whose raw request that worker holds."""
+        engine = self._engines.get(record.workflow_id)
+        return engine is not None and any(
+            env.task_id == record.task_id and env.request_digest is not None
+            for env in engine.pending_tool_dispatches()
+        )
 
     def resolve_disowned_dispatch(
         self, task_id: str, dispatch_id: str, worker_id: str, bound_sec: float

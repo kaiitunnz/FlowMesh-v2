@@ -8,6 +8,7 @@ ledger and re-readies or suspends the lane.
 """
 
 import asyncio
+import threading
 from typing import Any
 
 import pytest
@@ -33,8 +34,9 @@ from shared.harness import (
     OutcomeKind,
 )
 from shared.private_state import OwnerFence
+from shared.schemas.event import WorkerEvent
 from tests.server.dispatch_helpers import record_dispatch
-from tests.server.task.test_task_merge import _Registry
+from tests.server.task.test_task_merge import _monitor, _Registry
 from tests.server.task.test_v2_orchestration import FakeRegistry, _register, _runtime
 from worker.executors.harness.scripted import ScriptedHarnessAdapter, ScriptedStep
 
@@ -951,5 +953,57 @@ def test_an_agent_suspended_on_a_boundary_resumes_after_a_restart() -> None:
         )
         record = restored.get_record(writer)
         assert record is not None and record.status is TaskStatus.PENDING
+
+    asyncio.run(run())
+
+
+def _leave(runtime, how: str, worker: str = "wkr-1") -> None:
+    if how == "expired":
+        runtime.recover_tasks_for_worker(worker)
+    else:
+        _monitor(runtime)._handle_worker_event(
+            WorkerEvent(type="UNREGISTER", worker_id=worker, graceful=how == "drained")
+        )
+
+
+@pytest.mark.parametrize("how", ["expired", "drained", "unregistered"])
+def test_an_agent_suspended_on_a_boundary_outlives_its_worker(how: str) -> None:
+    async def run() -> None:
+        runtime = _runtime(FakeRegistry())
+        _, writer, engine, env = await _held_boundary(runtime)
+
+        _leave(runtime, how)
+
+        record = runtime.get_record(writer)
+        assert record is not None and record.status is TaskStatus.DISPATCHED
+        assert engine.work_item(writer).status is WorkItemStatus.BLOCKED
+        assert runtime.settle_episode_invocation(
+            writer, env.call_correlation, "model:draft"
+        )
+        assert runtime.next_ready(threading.Event(), timeout=0.01) == writer
+        dispatch = runtime.agent_episode_dispatch(writer, _HOLDER)
+        assert dispatch is not None
+        assert [o.value for o in dispatch.delivered_outcomes] == ["model:draft"]
+        _step(
+            runtime, ScriptedHarnessAdapter(_MODEL_HELD_SCRIPT, "v1"), writer, "wkr-2"
+        )
+        record = runtime.get_record(writer)
+        assert record is not None and record.status is TaskStatus.DONE
+
+    asyncio.run(run())
+
+
+def test_a_give_up_of_a_dispatch_that_ended_at_a_suspension_is_stale() -> None:
+    async def run() -> None:
+        runtime = _runtime(FakeRegistry())
+        _, writer, engine, env = await _held_boundary(runtime)
+
+        outcome = runtime.mark_cancelled(writer, "wkr-1", {}, _TS)
+
+        assert outcome.effect is EventEffect.STALE
+        assert engine.work_item(writer).status is WorkItemStatus.BLOCKED
+        assert runtime.settle_episode_invocation(
+            writer, env.call_correlation, "model:draft"
+        )
 
     asyncio.run(run())
