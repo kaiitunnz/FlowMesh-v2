@@ -6,6 +6,7 @@ import io
 import tarfile
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -187,15 +188,37 @@ def test_a_session_past_its_ttl_stops_before_its_logs_are_joined(
     container.remove.assert_called_once_with(force=True)
 
 
-def _output_archive(size: int) -> list[bytes]:
+class _Archive:
+    """An archive stream as Docker returns it, recording how much of it was read and
+    whether it was closed."""
+
+    def __init__(
+        self,
+        data: bytes,
+        chunk: int = 1024,
+        on_read: Callable[[int], Any] = lambda _: None,
+    ) -> None:
+        self._chunks = iter([data[i : i + chunk] for i in range(0, len(data), chunk)])
+        self._on_read = on_read
+        self.chunks_read = 0
+        self.closed = False
+
+    def __iter__(self) -> "_Archive":
+        return self
+
+    def __next__(self) -> bytes:
+        chunk = next(self._chunks)
+        self.chunks_read += 1
+        self._on_read(self.chunks_read)
+        return chunk
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _output_archive(size: int) -> _Archive:
     """The tar stream Docker returns for an output directory holding one file."""
-    buffer = io.BytesIO()
-    with tarfile.open(fileobj=buffer, mode="w") as archive:
-        info = tarfile.TarInfo("out/result.bin")
-        info.size = size
-        archive.addfile(info, io.BytesIO(b"x" * size))
-    data = buffer.getvalue()
-    return [data[i : i + 1024] for i in range(0, len(data), 1024)]
+    return _Archive(_archive_of({"result.bin": size}))
 
 
 @pytest.mark.parametrize("size", [500, 5000], ids=["within", "past"])
@@ -340,12 +363,37 @@ def test_an_output_copy_reads_its_archive_in_any_chunking(
 ) -> None:
     data = _archive_of({"a.bin": 70_000, "b.bin": 3})
     container = MagicMock(spec=Container)
-    container.get_archive.return_value = (
-        [data[i : i + 777] for i in range(0, len(data), 777)],
-        {},
-    )
+    container.get_archive.return_value = (_Archive(data, chunk=777), {})
 
     executor._copy_output_directory(container, "/out", tmp_path / "copied")
 
     assert (tmp_path / "copied" / "a.bin").read_bytes() == b"x" * 70_000
     assert (tmp_path / "copied" / "b.bin").read_bytes() == b"xxx"
+
+
+@pytest.mark.parametrize("end", ["complete", "breach", "cancel", "failure"])
+def test_an_output_copy_closes_its_archive_before_the_container_stops(
+    executor: SSHExecutor, tmp_path: Path, end: str
+) -> None:
+    def on_read(chunks_read: int) -> None:
+        if chunks_read == 2 and end == "cancel":
+            executor.cancel(_TASK_ID)
+        if chunks_read == 2 and end == "failure":
+            raise OSError("connection reset")
+
+    archive = _Archive(
+        _archive_of({"result.bin": 500 if end == "complete" else 5000}),
+        on_read=on_read,
+    )
+    container = _container(0, output_bytes=0)
+    container.get_archive.return_value = (archive, {})
+    closed_at_stop: list[bool] = []
+    container.stop.side_effect = lambda **_: closed_at_stop.append(archive.closed)
+
+    if end == "complete":
+        _run(executor, tmp_path, container, 1000, copy=True)
+    else:
+        with pytest.raises((ExecutionError, TaskCancelledError, OSError)):
+            _run(executor, tmp_path, container, 1000, copy=True)
+
+    assert closed_at_stop == [True]

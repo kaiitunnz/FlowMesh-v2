@@ -1634,6 +1634,7 @@ class SSHExecutor(Executor):
         """Copy a session's output out of its container, failing once the files it
         holds pass ``max_bytes``, before any more of them is read."""
         self.ensure_dir(destination)
+        self._signals.raise_if_cancelled()
         try:
             stream, _ = container.get_archive(source_path)
         except NotFound:
@@ -1649,6 +1650,20 @@ class SSHExecutor(Executor):
                 f"Failed to collect SSH output from {source_path}: {exc}"
             ) from exc
 
+        # Docker holds the container's lock until its archive is fully read or
+        # closed, so an unclosed one blocks the container's stop and removal.
+        try:
+            self._extract_output(stream, source_path, destination, max_bytes)
+        finally:
+            stream.close()
+
+    def _extract_output(
+        self,
+        stream: Iterable[bytes],
+        source_path: str,
+        destination: Path,
+        max_bytes: int | None,
+    ) -> None:
         source_name = PurePosixPath(source_path).name
         total = 0
         with tarfile.open(fileobj=_ChunkReader(stream), mode="r|") as archive:
