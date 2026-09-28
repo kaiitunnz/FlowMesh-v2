@@ -352,6 +352,7 @@ class ResidentCapacityControl:
         input_resolution_resolver: InputResolutionResolver = lambda _task_id: None,
         content_scope_resolver: Callable[[str], str] = lambda _task_id: "",
         content_scope_authority: Callable[[str, str], None] | None = None,
+        boundary_settleable: Callable[[str, str], bool] = lambda _task, _call: True,
         settle_cb: SettleCallback,
         redispatch_cb: RedispatchCallback,
         endpoint_probe: EndpointProbe,
@@ -372,6 +373,7 @@ class ResidentCapacityControl:
         self._resolve_input_resolution = input_resolution_resolver
         self._resolve_content_scope = content_scope_resolver
         self._content_scope_authority = content_scope_authority
+        self._boundary_settleable = boundary_settleable
         self._settle = settle_cb
         self._redispatch = redispatch_cb
         self._probe_endpoint = endpoint_probe
@@ -777,6 +779,12 @@ class ResidentCapacityControl:
         holds instead of hanging.
         """
         self._originations[env.invocation_id] = (env.task_id, env.call_correlation)
+        if not self._boundary_settleable(env.task_id, env.call_correlation):
+            # A terminal that settled the boundary before this ran found no claim to
+            # release; raising one now would hold its credit for a boundary nothing
+            # settles, so reap the origin's request instead.
+            self._reap_attempt(env.invocation_id)
+            return
         try:
             await self._originate_inner(env)
         except Exception as exc:

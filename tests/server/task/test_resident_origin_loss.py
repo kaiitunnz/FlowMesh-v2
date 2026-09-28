@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -9,11 +10,13 @@ import pytest
 
 from server.config import OrchestrationConfig
 from server.orchestration.state import InvocationState, LedgerSnapshot
+from server.resident import ClaimState
 from server.task.models import TaskStatus
 from server.task.runtime import TaskRuntime
 from shared.harness import HarnessCapsule
 from shared.private_state import PrivateStateSealReport
 from shared.schemas.event import WorkerEvent
+from tests.server.resident.test_service import _build
 from tests.server.result_store import make_result_reader
 from tests.server.task.test_private_state_ledger import _manifest
 from tests.server.task.test_task_merge import _monitor
@@ -255,3 +258,57 @@ def test_a_resident_call_control_cannot_originate_reaps_its_request(
         assert [kind for _, kind, _ in frames] == ["resident_reap"]
 
     asyncio.run(run())
+
+
+def test_a_cancel_that_beats_its_resident_origination_holds_no_credit(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime()
+    svc, stores, _, delivery = _build()
+    svc._settle = runtime.settle_episode_invocation
+    svc._boundary_settleable = runtime.boundary_settleable
+    assert svc._delivery is not None
+    svc._delivery = replace(
+        svc._delivery,
+        origin_worker_of_task=lambda task_id: (
+            record.assigned_worker
+            if (record := runtime.get_record(task_id)) is not None
+            else None
+        ),
+    )
+    runtime.set_resident_terminal_hook(svc.on_invocation_terminal)
+    loop = asyncio.new_event_loop()
+    svc.bind_loop(loop)
+    originated: list[Any] = []
+
+    def originate(env: Any) -> bool:
+        originated.append(env)
+        return svc.originate(env)
+
+    runtime._resident_originate = originate
+    try:
+        workflow_id, ids = loop.run_until_complete(_register(runtime, _RESIDENT_WF))
+        writer = ids["writer"]
+        _capture_resident_boundary(runtime, writer, seal_in=tmp_path)
+        (env,) = originated
+        # The cancel lands before the loop runs the origination it raced.
+        runtime.cancel_workflow(workflow_id)
+        loop.run_until_complete(asyncio.sleep(0.05))
+    finally:
+        loop.close()
+
+    record = runtime.get_record(writer)
+    assert record is not None and record.status is TaskStatus.CANCELLED
+    assert all(
+        claim.state is ClaimState.TERMINAL
+        for claim in stores.claims.by_invocation(env.invocation_id)
+    )
+    assert not any(
+        stores.credit_ledger.held(replica.replica_id)
+        for replica in stores.directory.all()
+    )
+    assert [
+        (worker, payload)
+        for worker, kind, payload in delivery.relays
+        if kind == "resident_reap"
+    ] == [("wkr-1", {"task_id": writer, "call_correlation": env.call_correlation})]

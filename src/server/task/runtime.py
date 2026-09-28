@@ -2741,6 +2741,15 @@ class TaskRuntime:
                 return None
             return engine.resident_admission_binding(record.workflow_id, task_id)
 
+    def boundary_settleable(self, task_id: str, call_correlation: str) -> bool:
+        """Whether a mediated boundary still awaits its outcome."""
+        with self._lock:
+            record = self._tasks.get(task_id)
+            engine = self._engines.get(record.workflow_id) if record else None
+            if record is None or engine is None:
+                return False
+            return engine.boundary_settleable(task_id, call_correlation)
+
     def _apply_private_state_seal_locked(self, task_id: str, sealed: Any) -> None:
         """Record the generation a holder sealed, ignoring a fenced-out report."""
         record = self._tasks.get(task_id)

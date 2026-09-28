@@ -120,6 +120,7 @@ def build_resident_capacity(
         input_resolution_resolver=runtime.input_resolution_binding,
         content_scope_resolver=runtime.content_scope,
         content_scope_authority=content_scope_authority,
+        boundary_settleable=runtime.boundary_settleable,
         settle_cb=runtime.settle_episode_invocation,
         redispatch_cb=runtime.redispatch_episode_invocation,
         endpoint_probe=endpoint,
