@@ -271,13 +271,22 @@ class Runner:
         arriving until the worker unregisters, and an outcome reported after it
         unregisters would find the boundary already failed as this worker's loss.
         """
-        while held := self.lifecycle.held_boundaries():
+        while held := self._drained_boundaries():
             if time.monotonic() >= deadline:
                 self.logger.warning(
                     "Leaving %d unfinished boundaries at shutdown: %s", len(held), held
                 )
                 return
             time.sleep(_BOUNDARY_DRAIN_POLL_SEC)
+
+    def _drained_boundaries(self) -> list[tuple[str, str]]:
+        """The held boundaries a shutdown waits for: a held model turn belongs to the
+        running step, which the shutdown gives up."""
+        return [
+            (task_id, call)
+            for task_id, call in self.lifecycle.held_boundaries()
+            if not self._model_turn_rendezvous.has_waiter(task_id, call)
+        ]
 
     def _ensure_mediated_sidecar(self) -> MediatedEgressSidecar | None:
         """Build the mediated-egress sidecar once the worker id is known."""

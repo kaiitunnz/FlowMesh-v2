@@ -190,3 +190,16 @@ def test_a_permit_after_the_boundary_drain_runs_nothing(tmp_path: Path) -> None:
         runner._route_mediated_op("permit", permit.model_dump(mode="json"))
 
     sidecar.submit_permit.assert_not_called()
+
+
+def test_a_held_model_turn_does_not_hold_the_boundary_drain(tmp_path: Path) -> None:
+    runner = _runner(tmp_path, _Echo())
+    lifecycle = Lifecycle(MagicMock(), 5, 15, tmp_path / "hb", 0.0)
+    runner.lifecycle = lifecycle
+    started = time.monotonic()
+
+    with runner._model_turn_rendezvous.register(*_HELD):
+        lifecycle.pending_egress_requests.put(*_HELD, cast(Any, object()))
+        runner._finish_held_boundaries(started + 5.0)
+
+    assert time.monotonic() - started < 1.0
